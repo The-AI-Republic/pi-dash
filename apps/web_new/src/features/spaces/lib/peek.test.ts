@@ -59,9 +59,9 @@ describe("isSpaceDueOverdue", () => {
 describe("overlay addresses", () => {
   const search: SpaceBoardSearch = {
     board: "kanban",
-    state: [ID_A],
-    priority: ["high"],
-    labels: [ID_B],
+    state: ID_A,
+    priority: "high",
+    labels: ID_B,
   };
 
   it("opens over the current board position keeping view and filters (SPC-030)", () => {

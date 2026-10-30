@@ -35,7 +35,7 @@ describe("useSpaceFilterNav (SPC-035/036)", () => {
   });
 
   it("appends a second value to the same comma-joined key", () => {
-    const { result } = renderNav({ board: "list", priority: ["high"] }, { priority: ["high"] });
+    const { result } = renderNav({ board: "list", priority: "high" }, { priority: "high" });
     act(() => result.current.toggleValue("priority", "urgent"));
     expect(navigation.navigate).toHaveBeenCalledWith({
       href: "/spaces/issues/anchor-1/?board=list&priority=high%2Curgent",
@@ -43,13 +43,16 @@ describe("useSpaceFilterNav (SPC-035/036)", () => {
   });
 
   it("drops a picked value that is already applied", () => {
-    const { result } = renderNav({ board: "kanban", state: [STATE_A] }, { state: [STATE_A] });
+    const { result } = renderNav({ board: "kanban", state: STATE_A }, { state: STATE_A });
     act(() => result.current.toggleValue("state", STATE_A));
     expect(navigation.navigate).toHaveBeenCalledWith({ href: "/spaces/issues/anchor-1/?board=kanban" });
   });
 
   it("keeps surviving state values under the singular state key on pill removal", () => {
-    const { result } = renderNav({ board: "list", state: [STATE_A, STATE_B] }, { state: [STATE_A, STATE_B] });
+    const { result } = renderNav(
+      { board: "list", state: [STATE_A, STATE_B].join(",") },
+      { state: [STATE_A, STATE_B].join(",") }
+    );
     act(() => result.current.removeValue("state", STATE_A));
     const href = navigation.navigate.mock.calls[0]?.[0]?.href as string;
     expect(new URL(href, "https://board.test").searchParams.get("state")).toBe(STATE_B);
@@ -58,8 +61,8 @@ describe("useSpaceFilterNav (SPC-035/036)", () => {
 
   it("removes one priority value and keeps the other facets", () => {
     const { result } = renderNav(
-      { board: "list", priority: ["high", "urgent"], labels: [LABEL] },
-      { priority: ["high", "urgent"], labels: [LABEL] }
+      { board: "list", priority: "high,urgent", labels: LABEL },
+      { priority: "high,urgent", labels: LABEL }
     );
     act(() => result.current.removeValue("priority", "high"));
     expect(navigation.navigate).toHaveBeenCalledWith({
@@ -69,8 +72,8 @@ describe("useSpaceFilterNav (SPC-035/036)", () => {
 
   it("clears one facet and keeps the others", () => {
     const { result } = renderNav(
-      { board: "list", priority: ["high"], state: [STATE_A] },
-      { priority: ["high"], state: [STATE_A] }
+      { board: "list", priority: "high", state: STATE_A },
+      { priority: "high", state: STATE_A }
     );
     act(() => result.current.clearFacet("priority"));
     expect(navigation.navigate).toHaveBeenCalledWith({
@@ -80,8 +83,8 @@ describe("useSpaceFilterNav (SPC-035/036)", () => {
 
   it("clear-all strips every facet key and keeps the view and the open issue", () => {
     const { result } = renderNav(
-      { board: "kanban", peekId: "p1", priority: ["high"], state: [STATE_A], labels: [LABEL] },
-      { priority: ["high"], state: [STATE_A], labels: [LABEL] }
+      { board: "kanban", peekId: "p1", priority: "high", state: STATE_A, labels: LABEL },
+      { priority: "high", state: STATE_A, labels: LABEL }
     );
     act(() => result.current.clearAll());
     expect(navigation.navigate).toHaveBeenCalledWith({ href: "/spaces/issues/anchor-1/?board=kanban&peekId=p1" });

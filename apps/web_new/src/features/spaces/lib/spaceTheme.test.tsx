@@ -190,6 +190,34 @@ describe("useSpaceTheme", () => {
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
   });
 
+  it("re-pins the resolved theme when an external writer overwrites it", async () => {
+    stubColorScheme(false);
+    globalThis.localStorage.setItem(SPACE_THEME_STORAGE_KEY, "light");
+    const { result } = renderHook(() => useSpaceTheme());
+    expect(result.current.theme).toBe("light");
+    // A later passive effect (the app root's workspace-keyed mark) lands second.
+    document.documentElement.setAttribute("data-theme", "dark");
+    await act(async () => {});
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+  });
+
+  it("releases the pin on unmount", async () => {
+    stubColorScheme(false);
+    const { unmount } = renderHook(() => useSpaceTheme());
+    unmount();
+    document.documentElement.setAttribute("data-theme", "dark");
+    await act(async () => {});
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+  });
+
+  it("holds no pin where mutation observers are missing", () => {
+    stubColorScheme(false);
+    vi.stubGlobal("MutationObserver", undefined);
+    const { result } = renderHook(() => useSpaceTheme());
+    expect(result.current.theme).toBe("light");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+  });
+
   it("keeps the document pin and the toggle state in agreement", () => {
     stubColorScheme(false);
     const seen: SpaceTheme[] = [];

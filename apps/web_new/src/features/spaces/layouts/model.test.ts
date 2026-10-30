@@ -108,9 +108,9 @@ describe("layout settlement (SPC-020/022)", () => {
 describe("filter signature", () => {
   it("is stable across facet order and distinguishes every combination", () => {
     expect(spaceFilterSignature({})).toBe("||");
-    expect(spaceFilterSignature({ state: [ID_A, ID_B] })).toBe(`${ID_A},${ID_B}||`);
-    expect(spaceFilterSignature({ priority: ["high"], labels: [ID_A] })).toBe(`|high|${ID_A}`);
-    expect(spaceFilterSignature({ state: [ID_A] })).not.toBe(spaceFilterSignature({ state: [ID_B] }));
+    expect(spaceFilterSignature({ state: [ID_A, ID_B].join(",") })).toBe(`${ID_A},${ID_B}||`);
+    expect(spaceFilterSignature({ priority: "high", labels: ID_A })).toBe(`|high|${ID_A}`);
+    expect(spaceFilterSignature({ state: ID_A })).not.toBe(spaceFilterSignature({ state: ID_B }));
   });
 });
 
@@ -128,7 +128,7 @@ describe("board query (SPC-026/036)", () => {
   });
 
   it("carries every address facet on the first fetch", () => {
-    expect(spaceBoardQuery({ state: [ID_A], priority: ["urgent", "none"], labels: [ID_B] })).toEqual({
+    expect(spaceBoardQuery({ state: ID_A, priority: "urgent,none", labels: ID_B })).toEqual({
       groupBy: "state_id",
       perPage: 50,
       cursor: "50:0:0",
@@ -140,7 +140,7 @@ describe("board query (SPC-026/036)", () => {
   });
 
   it("asks one group for a later page with that group's own cursor", () => {
-    expect(spaceBoardQuery({ state: [ID_A], priority: ["high"] }, "50:1:0", TODO)).toEqual({
+    expect(spaceBoardQuery({ state: ID_A, priority: "high" }, "50:1:0", TODO)).toEqual({
       groupBy: "state_id",
       perPage: 50,
       cursor: "50:1:0",

@@ -34,6 +34,13 @@ describe("Toast", () => {
     expect(screen.getByTestId("toast-stack")).toHaveAttribute("aria-label", "Notifications");
   });
 
+  it("exposes the severity as data-kind when one is given", async () => {
+    const manager = setup();
+    showToast(manager, { title: "Failed", kind: "error", timeout: 0 });
+    await screen.findByText("Failed");
+    expect(screen.getByTestId("toast-notification")).toHaveAttribute("data-kind", "error");
+  });
+
   it("runs the action and dismisses", async () => {
     const user = userEvent.setup();
     const manager = setup();

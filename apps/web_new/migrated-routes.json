@@ -51,7 +51,8 @@
     "/{ws}/projects/{projectId}/views",
     "/{ws}/projects/{projectId}/views/*",
     "/{ws}/workspace-views",
-    "/{ws}/workspace-views/*"
+    "/{ws}/workspace-views/*",
+    "/spaces"
   ],
   "reservedTopLevel": [
     "404",

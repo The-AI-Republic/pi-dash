@@ -16,6 +16,8 @@ interface FakePage {
   url: ReturnType<typeof vi.fn>;
   route: ReturnType<typeof vi.fn>;
   unrouteAll: ReturnType<typeof vi.fn>;
+  getByTestId: ReturnType<typeof vi.fn>;
+  locator: ReturnType<typeof vi.fn>;
 }
 
 function fakePage(url = "http://new.test/spaces/issues/anchor-1/"): {
@@ -28,6 +30,12 @@ function fakePage(url = "http://new.test/spaces/issues/anchor-1/"): {
     url: vi.fn(() => url),
     route: vi.fn(async () => undefined),
     unrouteAll: vi.fn(async () => undefined),
+    // The landing opener waits for a settled card or guidance view; the
+    // stub reports settled immediately.
+    getByTestId: vi.fn(() => ({ isVisible: async () => true })),
+    // The board opener recovers from the error screen only when no rows
+    // render; the stub reports rows so no reload is attempted.
+    locator: vi.fn(() => ({ count: async () => 1 })),
   };
   return { page, driver: new WebNewDriver(page as unknown as Page) };
 }

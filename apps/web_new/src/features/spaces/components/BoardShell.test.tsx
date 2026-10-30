@@ -95,7 +95,7 @@ describe("BoardNavbar", () => {
     );
     expect(screen.getByRole("link", { name: "Sign in" })).toHaveAttribute(
       "href",
-      "/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dkanban%26peekId%3Dp1"
+      "/spaces/?next_path=/issues/anchor-1/?board=kanban&peekId=p1"
     );
     rerender(
       <BoardNavbar settings={settingsWith({})} anchor="anchor-1" search={{}} accountSlot={<span>account slot</span>}>

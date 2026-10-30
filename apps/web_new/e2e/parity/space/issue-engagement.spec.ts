@@ -240,7 +240,13 @@ test(
         const landing = await driver.spaceCommentAuthLanding();
         expect(landing.returnAnchor).toBe(anchor);
         expect(landing.returnIssueId).toBe(issueId);
-        expect(landing.returnView).toBeNull();
+        // Intended on web_new (bug NEWFRONT-465 fixed): the board view
+        // rides along to sign-in instead of being dropped.
+        if (driver.target === "web_new") {
+          expect(landing.returnView).toBe("kanban");
+        } else {
+          expect(landing.returnView).toBeNull();
+        }
       });
 
       await test.step("no vote was stored", async () => {
@@ -494,7 +500,13 @@ test(
         const landing = await driver.spaceCommentAuthLanding();
         expect(landing.returnAnchor).toBe(anchor);
         expect(landing.returnIssueId).toBe(issueId);
-        expect(landing.returnView).toBeNull();
+        // Intended on web_new (bug NEWFRONT-465 fixed): the board view
+        // rides along to sign-in instead of being dropped.
+        if (driver.target === "web_new") {
+          expect(landing.returnView).toBe("kanban");
+        } else {
+          expect(landing.returnView).toBeNull();
+        }
       });
 
       await test.step("no reaction was stored", async () => {

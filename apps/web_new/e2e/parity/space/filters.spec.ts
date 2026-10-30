@@ -219,7 +219,9 @@ test(
         await expectBoardNames(driver, []);
         await driver.page.reload();
         await expectBoardNames(driver, []);
-        expect(await driver.spaceFiltersAppliedFacets()).toEqual([{ facet: "state", values: [extra.name] }]);
+        await expect
+          .poll(() => driver.spaceFiltersAppliedFacets(), BOARD_POLL)
+          .toEqual([{ facet: "state", values: [extra.name] }]);
         return;
       }
       // Removing one pill keeps the store correct but rewrites the survivor

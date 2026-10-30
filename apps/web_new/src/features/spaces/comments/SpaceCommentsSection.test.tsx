@@ -98,7 +98,7 @@ function setup(options: SetupOptions = {}) {
       <SpaceCommentsSection
         anchor={ANCHOR}
         issueId={options.issueId ?? ISSUE_ID}
-        search={{ board: "kanban", peekId: ISSUE_ID, state: [ISSUE_ID] }}
+        search={{ board: "kanban", peekId: ISSUE_ID, state: ISSUE_ID }}
         enabled={options.enabled ?? true}
         viewerId={options.viewerId === undefined ? ADA : options.viewerId}
         embedded={options.embedded}
@@ -141,7 +141,7 @@ describe("SpaceCommentsSection gating", () => {
     const link = await screen.findByTestId("space-comments-signin");
     expect(link).toHaveAttribute(
       "href",
-      "/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dkanban%26peekId%3D11111111-1111-4111-8111-111111111111%26state%3D11111111-1111-4111-8111-111111111111"
+      "/spaces/?next_path=/issues/anchor-1/?board=kanban&peekId=11111111-1111-4111-8111-111111111111&state=11111111-1111-4111-8111-111111111111"
     );
     expect(link).toHaveTextContent("Sign in to join the conversation");
   });
@@ -275,12 +275,12 @@ describe("SpaceCommentsSection thread states", () => {
 
 describe("comment invitation addresses", () => {
   it("keeps board, view and open issue in both helpers", () => {
-    const search = { board: "list" as const, peekId: ISSUE_ID, priority: ["high" as const] };
+    const search = { board: "list" as const, peekId: ISSUE_ID, priority: "high" as const };
     expect(spaceCommentReturnPath(ANCHOR, search)).toBe(
       `/issues/anchor-1/?board=list&peekId=${ISSUE_ID}&priority=high`
     );
     expect(spaceCommentsSignInHref(ANCHOR, search)).toBe(
-      `/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dlist%26peekId%3D${ISSUE_ID}%26priority%3Dhigh`
+      `/spaces/?next_path=/issues/anchor-1/?board=list&peekId=${ISSUE_ID}&priority=high`
     );
   });
 });

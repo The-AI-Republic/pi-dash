@@ -7,7 +7,13 @@
 // filter object. Address spelling (singular comma-joined keys) is settled
 // by lib/address; this module never touches the router.
 
-import { SPACE_PRIORITIES, type SpaceBoardFilters, type SpaceBoardSearch, type SpaceLayout } from "../lib/address.js";
+import {
+  SPACE_PRIORITIES,
+  facetValuesOf,
+  type SpaceBoardFilters,
+  type SpaceBoardSearch,
+  type SpaceLayout,
+} from "../lib/address.js";
 import type { SpaceMessageKey } from "../lib/spaceMessages.js";
 
 /** Facets the filter panel can offer (labels arrive via the address only). */
@@ -56,12 +62,12 @@ export function panelFacetsForLayout(layout: SpaceLayout): readonly SpacePanelFa
 
 /** The values applied under one facet (empty when the facet is clear). */
 export function facetValues(filters: SpaceBoardFilters, facet: SpaceStripFacet): readonly string[] {
-  return filters[facet] ?? [];
+  return facetValuesOf(filters[facet]);
 }
 
 /** Whether any facet carries values (the strip renders only then). */
 export function hasAppliedFilters(filters: SpaceBoardFilters): boolean {
-  return SPACE_STRIP_FACET_ORDER.some((facet) => (filters[facet]?.length ?? 0) > 0);
+  return SPACE_STRIP_FACET_ORDER.some((facet) => facetValuesOf(filters[facet]).length > 0);
 }
 
 function withFacetValues(
@@ -73,7 +79,7 @@ function withFacetValues(
   if (values === undefined || values.length === 0) {
     delete next[facet];
   } else {
-    next[facet] = values;
+    next[facet] = values.join(",");
   }
   return next;
 }
@@ -84,7 +90,7 @@ export function toggleFilterValue(
   facet: SpacePanelFacet,
   value: string
 ): SpaceBoardFilters {
-  const current = filters[facet] ?? [];
+  const current = facetValues(filters, facet);
   const next = current.includes(value) ? current.filter((entry) => entry !== value) : [...current, value];
   return withFacetValues(filters, facet, next);
 }
@@ -98,7 +104,7 @@ export function removeFilterValue(
   facet: SpaceStripFacet,
   value: string
 ): SpaceBoardFilters {
-  const current = filters[facet] ?? [];
+  const current = facetValues(filters, facet);
   if (!current.includes(value)) return filters;
   return withFacetValues(
     filters,

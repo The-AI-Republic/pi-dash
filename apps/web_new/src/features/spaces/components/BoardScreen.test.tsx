@@ -254,7 +254,7 @@ describe("BoardScreen", () => {
     expect(screen.getByTestId("space-group-name")).toHaveTextContent("Todo");
     expect(screen.getByRole("link", { name: "Sign in" })).toHaveAttribute(
       "href",
-      "/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dlist"
+      "/spaces/?next_path=/issues/anchor-1/?board=list"
     );
   });
 
@@ -287,7 +287,7 @@ describe("BoardScreen", () => {
   });
 
   it("switches layout without fetching the issues again, keeping filters and peek", async () => {
-    const requests = renderBoard({}, ANCHOR, { board: "list", peekId: "p1", priority: ["high"] });
+    const requests = renderBoard({}, ANCHOR, { board: "list", peekId: "p1", priority: "high" });
     await screen.findByTestId("space-list-layout");
     const issuesBefore = requests.filter((url) => url.includes("/issues/")).length;
     await userEvent.click(screen.getByRole("button", { name: "Board layout" }));
@@ -305,7 +305,7 @@ describe("BoardScreen", () => {
 
   it("sends the address filters on the board's first fetch", async () => {
     const state = "44444444-4444-4444-8444-444444444444";
-    const requests = renderBoard({}, ANCHOR, { board: "list", state: [state], priority: ["low"] });
+    const requests = renderBoard({}, ANCHOR, { board: "list", state: state, priority: "low" });
     await screen.findByTestId("space-list-layout");
     const issues = requests.filter((url) => url.includes("/issues/"));
     expect(issues).toHaveLength(1);
@@ -405,7 +405,7 @@ describe("BoardScreen", () => {
   });
 
   it("renders applied pills from the address and removes one through its pill (SPC-035)", async () => {
-    renderBoard({}, ANCHOR, { board: "list", priority: ["high", "urgent"] });
+    renderBoard({}, ANCHOR, { board: "list", priority: "high,urgent" });
     await screen.findByTestId("space-list-layout");
     const strip = screen.getByTestId("space-applied-filters");
     expect(within(strip).getAllByTestId("space-applied-pill")).toHaveLength(2);
@@ -420,7 +420,7 @@ describe("BoardScreen", () => {
   });
 
   it("clears every facet through the strip and keeps the view and the open issue (SPC-035/036)", async () => {
-    renderBoard({}, ANCHOR, { board: "kanban", peekId: "p1", priority: ["high"], state: [STATE_ID] });
+    renderBoard({}, ANCHOR, { board: "kanban", peekId: "p1", priority: "high", state: STATE_ID });
     await screen.findByTestId("space-board-layout");
     expect(screen.getByTestId("space-applied-filters")).toBeInTheDocument();
     await userEvent.click(screen.getByTestId("space-applied-clear-all"));
@@ -431,7 +431,7 @@ describe("BoardScreen", () => {
 
   it("sends an address-only label filter on the first fetch and shells it without pills (SPC-037)", async () => {
     const label = "55555555-5555-4555-8555-555555555555";
-    const requests = renderBoard({}, ANCHOR, { board: "list", labels: [label] });
+    const requests = renderBoard({}, ANCHOR, { board: "list", labels: label });
     await screen.findByTestId("space-list-layout");
     const issues = requests.filter((url) => url.includes("/issues/"));
     expect(issues).toHaveLength(1);
@@ -444,7 +444,7 @@ describe("BoardScreen", () => {
   });
 
   it("sends the pasted state and priority on the first issues fetch (SPC-036)", async () => {
-    const requests = renderBoard({}, ANCHOR, { board: "list", state: [STATE_ID], priority: ["high", "urgent"] });
+    const requests = renderBoard({}, ANCHOR, { board: "list", state: STATE_ID, priority: "high,urgent" });
     await screen.findByTestId("space-list-layout");
     const issues = requests.filter((url) => url.includes("/issues/"));
     expect(issues).toHaveLength(1);
@@ -457,7 +457,7 @@ describe("BoardScreen", () => {
 
   it("renders no pill for a state id the states fetch does not know, but still sends it (SPC-035/036)", async () => {
     const unknown = "66666666-6666-4666-8666-666666666666";
-    const requests = renderBoard({}, ANCHOR, { board: "list", state: [unknown] });
+    const requests = renderBoard({}, ANCHOR, { board: "list", state: unknown });
     await screen.findByTestId("space-list-layout");
     const issues = requests.filter((url) => url.includes("/issues/"));
     expect(new URL(issues[0] ?? "", "https://api.test").searchParams.get("state")).toBe(unknown);
@@ -477,24 +477,24 @@ describe("boardFiltersOf", () => {
     expect(boardFiltersOf({ board: "kanban", peekId: "p1" })).toEqual({});
     const state = "22222222-2222-4222-8222-222222222222";
     const label = "33333333-3333-4333-8333-333333333333";
-    expect(boardFiltersOf({ state: [state], priority: ["high"], labels: [label] })).toEqual({
-      state: [state],
-      priority: ["high"],
-      labels: [label],
+    expect(boardFiltersOf({ state: state, priority: "high", labels: label })).toEqual({
+      state: state,
+      priority: "high",
+      labels: label,
     });
   });
 
   it("reads raw address strings and drops malformed values", () => {
     const state = "22222222-2222-4222-8222-222222222222";
     const raw = { state: `${state},nope`, priority: "high,unset" } as unknown as SpaceBoardSearch;
-    expect(boardFiltersOf(raw)).toEqual({ state: [state], priority: ["high"] });
+    expect(boardFiltersOf(raw)).toEqual({ state: state, priority: "high" });
   });
 });
 
 describe("space overlay address round trip (SPC-030/040/042)", () => {
   it("opens an issue from its title link over the current board position", async () => {
     const user = userEvent.setup();
-    renderBoard({}, ANCHOR, { board: "list", priority: ["high"], peekId: ISSUE_ID });
+    renderBoard({}, ANCHOR, { board: "list", priority: "high", peekId: ISSUE_ID });
     const link = await screen.findByRole("link", { name: "Anonymous visitors can read this" });
     await user.click(link);
     expect(navigation.navigate).toHaveBeenCalledWith({
@@ -531,7 +531,7 @@ describe("space overlay address round trip (SPC-030/040/042)", () => {
         },
       },
       ANCHOR,
-      { board: "list", priority: ["high"], peekId: ISSUE_ID }
+      { board: "list", priority: "high", peekId: ISSUE_ID }
     );
     expect(await screen.findByTestId("space-peek-skeleton")).toBeInTheDocument();
     expect(await screen.findByTestId("space-board-loading")).toBeInTheDocument();
@@ -569,7 +569,7 @@ describe("space overlay address round trip (SPC-030/040/042)", () => {
 
   it("closes by dropping peekId while keeping view and filters (SPC-042)", async () => {
     const user = userEvent.setup();
-    renderBoard({}, ANCHOR, { board: "list", priority: ["high"], peekId: ISSUE_ID });
+    renderBoard({}, ANCHOR, { board: "list", priority: "high", peekId: ISSUE_ID });
     await screen.findByTestId("space-peek-key");
     await user.click(screen.getByRole("button", { name: "Close preview" }));
     // The route component here holds a static search; remounting with the
@@ -606,7 +606,7 @@ describe("BoardScreen engagement wiring (SPC-047/048)", () => {
     const requests = renderBoard(engagedBoard(), ANCHOR, { board: "kanban" });
     await userEvent.click(await screen.findByTestId("space-card-vote-up"));
     expect(navigation.navigate).toHaveBeenCalledWith({
-      href: "/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dkanban",
+      href: "/spaces/?next_path=/issues/anchor-1/?board=kanban",
     });
     expect(requests.filter((url) => url.includes("/votes/"))).toHaveLength(0);
   });
@@ -616,7 +616,7 @@ describe("BoardScreen engagement wiring (SPC-047/048)", () => {
     await userEvent.click(await screen.findByTestId("space-card-reaction-add"));
     await userEvent.click(screen.getByRole("button", { name: "🎉" }));
     expect(navigation.navigate).toHaveBeenCalledWith({
-      href: "/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dkanban",
+      href: "/spaces/?next_path=/issues/anchor-1/?board=kanban",
     });
     expect(requests.filter((url) => url.includes("/reactions/"))).toHaveLength(0);
   });

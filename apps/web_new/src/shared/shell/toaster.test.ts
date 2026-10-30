@@ -53,6 +53,7 @@ describe("toaster", () => {
       title: "Updated",
       description: "All good",
       timeout: 5000,
+      type: "success",
     });
     expect(getToastManager().update).not.toHaveBeenCalled();
     expect(pending.id).toBe("toast-2");
@@ -66,12 +67,13 @@ describe("toaster", () => {
       title: "Failed",
       description: "Try again",
       timeout: 8000,
+      type: "error",
     });
   });
 
   it("omits an absent outcome description", () => {
     notifyPending("Updating", "One moment").settle({ title: "Updated" });
-    expect(getToastManager().add).toHaveBeenLastCalledWith({ title: "Updated", timeout: 5000 });
+    expect(getToastManager().add).toHaveBeenLastCalledWith({ title: "Updated", timeout: 5000, type: "success" });
   });
 
   it("swaps a second outcome for the first and closes the one it replaced", () => {
@@ -80,7 +82,7 @@ describe("toaster", () => {
     pending.settle({ title: "Failed", failed: true });
     expect(getToastManager().close).toHaveBeenNthCalledWith(1, "toast-1");
     expect(getToastManager().close).toHaveBeenNthCalledWith(2, "toast-2");
-    expect(getToastManager().add).toHaveBeenLastCalledWith({ title: "Failed", timeout: 8000 });
+    expect(getToastManager().add).toHaveBeenLastCalledWith({ title: "Failed", timeout: 8000, type: "error" });
     expect(pending.id).toBe("toast-3");
   });
 });

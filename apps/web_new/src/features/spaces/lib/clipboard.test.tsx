@@ -6,7 +6,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  clipboardPermissionRefused,
+  clipboardPermissionGranted,
   clipboardWriteAvailable,
   readClipboardWriteAllowed,
   useClipboardWritePermission,
@@ -38,11 +38,11 @@ describe("clipboardWriteAvailable", () => {
   });
 });
 
-describe("clipboardPermissionRefused", () => {
-  it("treats only an explicit denial as refused", () => {
-    expect(clipboardPermissionRefused({ state: "denied" })).toBe(true);
-    expect(clipboardPermissionRefused({ state: "granted" })).toBe(false);
-    expect(clipboardPermissionRefused({ state: "prompt" })).toBe(false);
+describe("clipboardPermissionGranted", () => {
+  it("requires an explicit grant (a prompt answers no copy action)", () => {
+    expect(clipboardPermissionGranted({ state: "granted" })).toBe(true);
+    expect(clipboardPermissionGranted({ state: "denied" })).toBe(false);
+    expect(clipboardPermissionGranted({ state: "prompt" })).toBe(false);
   });
 });
 
@@ -61,6 +61,9 @@ describe("readClipboardWriteAllowed", () => {
     ).resolves.toBe(true);
     await expect(
       readClipboardWriteAllowed(capable({ permissions: { query: () => Promise.resolve({ state: "denied" }) } }))
+    ).resolves.toBe(false);
+    await expect(
+      readClipboardWriteAllowed(capable({ permissions: { query: () => Promise.resolve({ state: "prompt" }) } }))
     ).resolves.toBe(false);
     await expect(
       readClipboardWriteAllowed(capable({ permissions: { query: () => Promise.reject(new Error("unsupported")) } }))

@@ -342,7 +342,8 @@ describe("bundled list", () => {
     // /profile is a migrated literal since the Profile area gate (NEWFRONT-586).
     expect(isMigratedPath("/profile/me")).toBe(true);
     expect(isMigratedPath("/settings/acme")).toBe(false);
-    expect(isMigratedPath("/spaces/acme")).toBe(false);
+    // /spaces is a migrated literal since the space area gate (NEWFRONT-763).
+    expect(isMigratedPath("/spaces/acme")).toBe(true);
   });
 });
 

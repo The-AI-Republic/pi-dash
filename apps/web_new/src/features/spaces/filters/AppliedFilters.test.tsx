@@ -58,12 +58,12 @@ describe("AppliedFilters (SPC-035/037)", () => {
   it("renders nothing when no facet applies", () => {
     renderStrip({});
     expect(screen.queryByTestId("space-applied-filters")).not.toBeInTheDocument();
-    renderStrip({ priority: [], state: [], labels: [] });
+    renderStrip({ priority: "", state: "", labels: "" });
     expect(screen.queryAllByTestId("space-applied-filters")).toEqual([]);
   });
 
   it("renders shells in priority, state, labels order with their labels", () => {
-    renderStrip({ priority: ["high"], state: [TODO], labels: [LABEL] });
+    renderStrip({ priority: "high", state: TODO, labels: LABEL });
     expect(
       within(screen.getByTestId("space-applied-filters"))
         .getAllByTestId("space-applied-facet")
@@ -76,7 +76,7 @@ describe("AppliedFilters (SPC-035/037)", () => {
   });
 
   it("renders one pill per priority value with its marker", () => {
-    renderStrip({ priority: ["high", "urgent"] });
+    renderStrip({ priority: "high,urgent" });
     const pills = within(shell("priority")).getAllByTestId("space-applied-pill");
     expect(pills.map((pill) => pill.getAttribute("data-value"))).toEqual(["high", "urgent"]);
     expect(pills.map((pill) => pill.textContent)).toEqual(["High", "Urgent"]);
@@ -88,7 +88,7 @@ describe("AppliedFilters (SPC-035/037)", () => {
   });
 
   it("renders state pills by name with the state's marker", () => {
-    renderStrip({ state: [TODO, DOING] });
+    renderStrip({ state: [TODO, DOING].join(",") });
     const pills = within(shell("state")).getAllByTestId("space-applied-pill");
     expect(pills.map((pill) => pill.getAttribute("data-value"))).toEqual(["Todo", "Doing"]);
     expect(pills.map((pill) => pill.getAttribute("data-state-id"))).toEqual([TODO, DOING]);
@@ -97,7 +97,7 @@ describe("AppliedFilters (SPC-035/037)", () => {
   });
 
   it("renders the labels shell without pills and state ids it does not know without a pill", () => {
-    renderStrip({ labels: [LABEL], state: [UNKNOWN_STATE] });
+    renderStrip({ labels: LABEL, state: UNKNOWN_STATE });
     expect(within(shell("labels")).queryAllByTestId("space-applied-pill")).toEqual([]);
     expect(within(shell("state")).queryAllByTestId("space-applied-pill")).toEqual([]);
     // Both shells still clear: an invisible filter must stay removable.
@@ -106,7 +106,7 @@ describe("AppliedFilters (SPC-035/037)", () => {
   });
 
   it("removes one pill with its facet and raw value", async () => {
-    const { user, onRemoveValue } = renderStrip({ priority: ["high", "urgent"], state: [TODO] });
+    const { user, onRemoveValue } = renderStrip({ priority: "high,urgent", state: TODO });
     await user.click(removeIn("priority", "high"));
     expect(onRemoveValue).toHaveBeenCalledWith("priority", "high");
     await user.click(removeIn("state", "Todo"));
@@ -115,7 +115,7 @@ describe("AppliedFilters (SPC-035/037)", () => {
   });
 
   it("clears one facet at a time", async () => {
-    const { user, onClearFacet } = renderStrip({ priority: ["high"], labels: [LABEL] });
+    const { user, onClearFacet } = renderStrip({ priority: "high", labels: LABEL });
     await user.click(within(shell("labels")).getByTestId("space-applied-clear"));
     expect(onClearFacet).toHaveBeenCalledWith("labels");
     await user.click(within(shell("priority")).getByTestId("space-applied-clear"));
@@ -123,7 +123,7 @@ describe("AppliedFilters (SPC-035/037)", () => {
   });
 
   it("clears everything through the clear-all control", async () => {
-    const { user, onClearAll } = renderStrip({ priority: ["high"], state: [TODO], labels: [LABEL] });
+    const { user, onClearAll } = renderStrip({ priority: "high", state: TODO, labels: LABEL });
     await user.click(screen.getByTestId("space-applied-clear-all"));
     expect(onClearAll).toHaveBeenCalledTimes(1);
   });

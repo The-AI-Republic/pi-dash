@@ -17,7 +17,7 @@ export function getToastManager(): ToastHostManager {
 }
 
 export function notifySuccess(title: string, description?: string): void {
-  showToast(getToastManager(), { title, ...(description === undefined ? {} : { description }) });
+  showToast(getToastManager(), { title, ...(description === undefined ? {} : { description }), kind: "success" });
 }
 
 /** Success toast with one optional follow-up action. */
@@ -31,11 +31,12 @@ export function notifySuccessWithAction(title: string, description: string | und
     title,
     ...(description === undefined ? {} : { description }),
     actions: [{ label: followUp.actionLabel, run: followUp.onAction }],
+    kind: "success",
   });
 }
 
 export function notifyInfo(title: string, description?: string): void {
-  showToast(getToastManager(), { title, ...(description === undefined ? {} : { description }) });
+  showToast(getToastManager(), { title, ...(description === undefined ? {} : { description }), kind: "info" });
 }
 
 /** How long a settled notice stays up; a failure lingers longer. */
@@ -77,6 +78,7 @@ export function notifyPending(title: string, description?: string): PendingNotic
         title: outcome.title,
         ...(outcome.description === undefined ? {} : { description: outcome.description }),
         timeout: outcome.failed === true ? NOTICE_FAILURE_TIMEOUT_MS : NOTICE_SUCCESS_TIMEOUT_MS,
+        type: outcome.failed === true ? "error" : "success",
       });
     },
   };
@@ -88,5 +90,6 @@ export function notifyError(title: string, description?: string): void {
     title,
     ...(description === undefined ? {} : { description }),
     timeout: 8000,
+    kind: "error",
   });
 }

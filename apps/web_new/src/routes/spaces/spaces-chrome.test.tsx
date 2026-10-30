@@ -201,7 +201,7 @@ describe("spaces chrome", () => {
     expect(screen.getByTestId("space-theme-switch")).toBeInTheDocument();
     expect(screen.getByTestId("space-navbar-signin")).toHaveAttribute(
       "href",
-      `/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dkanban%26peekId%3D${ISSUE_UUID}`
+      `/spaces/?next_path=/issues/anchor-1/?board=kanban&peekId=${ISSUE_UUID}`
     );
     await waitFor(() => expect(screen.getByTestId("space-board-empty")).toBeInTheDocument());
     expect(screen.getByTestId("space-product-badge")).toHaveAttribute("href", "https://airepublic.com");

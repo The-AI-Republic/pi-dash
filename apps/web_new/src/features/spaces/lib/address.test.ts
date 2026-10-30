@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  facetValuesOf,
   isValidAnchor,
   legacyForwardHref,
   normalizeBoardHref,
@@ -41,7 +42,7 @@ describe("space address rules", () => {
     // `state=abc` — is the href builders' work, pinned below (SPC-013).
     expect(
       parseSpaceBoardSearch({ board: "kanban", peekId: "issue-1", state: "abc", priority: "high", labels: "x" })
-    ).toEqual({ board: "kanban", peekId: "issue-1", priority: ["high"] });
+    ).toEqual({ board: "kanban", peekId: "issue-1", priority: "high" });
     expect(parseSpaceBoardSearch({ board: "timeline", peekId: "" })).toEqual({});
     expect(parseSpaceBoardSearch({ board: 42, peekId: null })).toEqual({});
     expect(parseSpaceBoardSearch({ state: "", priority: " ", labels: 7, board: "list" })).toEqual({ board: "list" });
@@ -92,13 +93,25 @@ describe("board filters in the address", () => {
         labels: ID_A,
         priority: "high,low,unset",
       })
-    ).toEqual({ state: [ID_A, ID_B], labels: [ID_A], priority: ["high", "low"] });
+    ).toEqual({ state: [ID_A, ID_B].join(","), labels: ID_A, priority: "high,low" });
     expect(parseSpaceBoardSearch({ state: "nope", labels: " , ", priority: "critical" })).toEqual({});
-    expect(parseSpaceBoardSearch({ state: ["x"], priority: 3 })).toEqual({});
+    expect(parseSpaceBoardSearch({ state: "x", priority: 3 })).toEqual({});
   });
 
   it("keeps a filter that arrives with a valid and an invalid value", () => {
-    expect(parseSpaceBoardSearch({ state: `${ID_A} , not-an-id` })).toEqual({ state: [ID_A] });
+    expect(parseSpaceBoardSearch({ state: `${ID_A} , not-an-id` })).toEqual({ state: ID_A });
+  });
+
+  it("keeps facets as comma-joined strings so the router never JSON-encodes them (SPC-035)", () => {
+    // The router's default search serializer spells arrays as JSON; a
+    // parsed facet must stay a plain string so multi-value facets leave
+    // the address as `?state=a,b`, never `?state=["a","b"]`.
+    const parsed = parseSpaceBoardSearch({ state: [ID_A, ID_B], priority: ["high", "urgent"] });
+    expect(parsed).toEqual({ state: `${ID_A},${ID_B}`, priority: "high,urgent" });
+    expect(typeof parsed.state).toBe("string");
+    expect(typeof parsed.priority).toBe("string");
+    expect(facetValuesOf(parsed.state)).toEqual([ID_A, ID_B]);
+    expect(facetValuesOf(parsed.priority)).toEqual(["high", "urgent"]);
   });
 
   it("writes a settled address with board first, then peek, priority, state and labels", () => {
@@ -106,26 +119,26 @@ describe("board filters in the address", () => {
       normalizeBoardHref("anchor", {
         board: "kanban",
         peekId: "p1",
-        state: [ID_A],
-        priority: ["urgent"],
-        labels: [ID_B],
+        state: ID_A,
+        priority: "urgent",
+        labels: ID_B,
       })
     ).toBe(`/spaces/issues/anchor/?board=kanban&peekId=p1&priority=urgent&state=${ID_A}&labels=${ID_B}`);
   });
 
   it("omits empty facets and leaves an untouched address bare", () => {
-    expect(normalizeBoardHref("anchor", { state: [], priority: [] })).toBe("/spaces/issues/anchor/");
-    expect(normalizeBoardHref("anchor", { labels: [ID_A] })).toBe(`/spaces/issues/anchor/?labels=${ID_A}`);
+    expect(normalizeBoardHref("anchor", { state: "", priority: "" })).toBe("/spaces/issues/anchor/");
+    expect(normalizeBoardHref("anchor", { labels: ID_A })).toBe(`/spaces/issues/anchor/?labels=${ID_A}`);
   });
 
   it("round-trips a canonical address through the parser unchanged", () => {
-    const href = normalizeBoardHref("anchor", { board: "list", state: [ID_A], priority: ["low"] });
+    const href = normalizeBoardHref("anchor", { board: "list", state: ID_A, priority: "low" });
     const query = Object.fromEntries(new URL(href, "https://x.test").searchParams);
     expect(normalizeBoardHref("anchor", parseSpaceBoardSearch(query))).toBe(href);
   });
 
   it("keeps filters in the sign-in return address", () => {
-    expect(spaceReturnPath("anchor", { board: "kanban", state: [ID_A] })).toBe(
+    expect(spaceReturnPath("anchor", { board: "kanban", state: ID_A })).toBe(
       `/issues/anchor/?board=kanban&state=${ID_A}`
     );
   });
@@ -133,7 +146,7 @@ describe("board filters in the address", () => {
 
 describe("space issue address", () => {
   it("adds peekId while keeping the layout and every filter", () => {
-    expect(spaceIssueHref("anchor", { board: "kanban", state: [ID_A], priority: ["high"] }, ID_B)).toBe(
+    expect(spaceIssueHref("anchor", { board: "kanban", state: ID_A, priority: "high" }, ID_B)).toBe(
       `/spaces/issues/anchor/?board=kanban&peekId=${ID_B}&priority=high&state=${ID_A}`
     );
   });
@@ -142,7 +155,7 @@ describe("space issue address", () => {
 describe("space sign-in return address", () => {
   it("spells the landing mount while keeping path slashes literal", async () => {
     const { spaceSignInHref } = await import("./address.js");
-    expect(spaceSignInHref("anchor", { board: "list" })).toBe("/spaces/?next_path=/issues/anchor/%3Fboard%3Dlist");
+    expect(spaceSignInHref("anchor", { board: "list" })).toBe("/spaces/?next_path=/issues/anchor/?board=list");
     expect(spaceSignInHref("anchor", {})).toBe("/spaces/?next_path=/issues/anchor/");
   });
 
@@ -151,10 +164,10 @@ describe("space sign-in return address", () => {
     const raw = { board: "kanban", state: "abc", priority: "high", peekId: "p1" } as unknown as SpaceBoardSearch;
     const href = spaceSignInHref("anchor", raw);
     expect(href).toContain("/issues/anchor");
-    expect(href).toContain("board%3Dkanban");
-    expect(href).toContain("state%3Dabc");
-    expect(href).toContain("priority%3Dhigh");
-    expect(href).toContain("peekId%3Dp1");
+    expect(href).toContain("board=kanban");
+    expect(href).toContain("state=abc");
+    expect(href).toContain("priority=high");
+    expect(href).toContain("peekId=p1");
     expect(href).not.toContain("/spaces/issues");
   });
 });
