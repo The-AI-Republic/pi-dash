@@ -19,9 +19,9 @@ import "./styles/app.css";
 // at it) → edition seams → query client (+ cache restore) → router.
 const apiClient = createAppClient();
 // The cloud edition registers its issues providers (team projects, the
-// transfer-hop note, work-item types, the detail type badge and the
-// provisional workflow rules); the community build registers nothing
-// (NEWFRONT-984).
+// transfer-hop note, work-item types and the detail type badge); the
+// community build registers nothing (NEWFRONT-984). Workflow rules are
+// out of parity scope (NEWFRONT-1038), so no edition supplies any.
 bootstrapIssuesEdition(edition);
 const queryClient = createQueryClient();
 const persistor = createAppCachePersistor(PIDASH_TARGET, queryClient, platform.storage);

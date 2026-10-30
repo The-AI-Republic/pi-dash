@@ -220,7 +220,7 @@ test(
         await driver.detailIdentifierCopy();
         await expect.poll(() => driver.rulesReadClipboard(), { timeout: 10_000 }).toContain(identifier);
       });
-      await test.step("no type switcher, templates or property widgets render", async () => {
+      await test.step("no type switcher or property widgets render", async () => {
         const detailText = await page.locator("body").innerText();
         expect(detailText).not.toMatch(/issue.?type/i);
         expect(detailText).not.toMatch(/work.?item.?type/i);

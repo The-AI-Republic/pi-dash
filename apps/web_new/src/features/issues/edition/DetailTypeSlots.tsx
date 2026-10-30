@@ -4,9 +4,12 @@
 // Work-item-type surfaces on the issue detail (parity/specs/issues.md
 // §20/§23, ISS-235): the badge beside the identifier, the extra
 // property block under the sidebar and the type/property activity rows.
-// All three are cloud-only and edition-supplied; the community build has
-// no flag, no provider and therefore renders nothing, leaving the bare
-// copyable identifier the oracle pins.
+// The badge is cloud-only and edition-supplied. The property block and
+// the type/property activity rows are out of parity scope (owner
+// decision 2026-10-30, NEWFRONT-1038), so no edition registers their
+// providers: both slots stay declared but inert. The community build
+// has no flag, no provider and therefore renders nothing, leaving the
+// bare copyable identifier the oracle pins.
 
 import * as React from "react";
 

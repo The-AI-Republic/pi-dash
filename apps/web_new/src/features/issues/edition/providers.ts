@@ -19,7 +19,13 @@ export interface WorkflowRefusal {
   reason: string;
 }
 
-/** The transition rules a cloud workflow configuration enforces. */
+/**
+ * The transition rules a build's workflow configuration enforces. No
+ * edition registers a provider: configurable transitions are out of
+ * parity scope (owner decision 2026-10-30, NEWFRONT-1038), so the gate
+ * lets every move through. The seam stays inert until a future product
+ * decision needs it.
+ */
 export interface WorkflowRules {
   /**
    * Refusal for moving an item from `fromStateId` (null for a new item)

@@ -2,13 +2,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Cloud issue-type seam for the modal (parity/specs/issues.md §11/§23,
-// ISS-129). The work-item type picker, the template picker and the
-// additional-properties block belong to the cloud edition, which
-// supplies them through this slot; the community build registers
-// nothing, so the modal renders no trace of any of the three.
+// ISS-129). The work-item type picker is the whole cloud modal surface
+// (NEWFRONT-984). The template picker and the additional-properties
+// block are out of parity scope (owner decision 2026-10-30,
+// NEWFRONT-1038): nothing in either app supplies them, so their slots
+// stay declared but unregistered in every edition, inert until a future
+// product decision. The community build registers nothing, so the
+// modal renders no trace of any of them.
 //
 // §23 proof: the OSS leg asserts absence (no "Issue type" or
-// "Template" text in the modal), the cloud leg drives the real pickers.
+// "Template" text in the modal), the cloud leg drives the real type
+// picker.
 
 import type { ComponentType } from "react";
 

@@ -43,12 +43,14 @@ import {
   listWorkItemTypeOptions,
   resetIssuesEditionBootstrap,
 } from "./cloudProviders.js";
-import { ISSUE_TYPES_FLAG } from "./flags.js";
+import { ISSUE_TYPES_FLAG, WORKFLOW_FLAG } from "./flags.js";
 import { getEditionIssuesProviders, resetEditionIssuesProviders } from "./providers.js";
+import { transitionRefusal } from "./workflow.js";
 
 afterEach(() => {
   cleanup();
   delete edition.flags[ISSUE_TYPES_FLAG];
+  delete edition.flags[WORKFLOW_FLAG];
   resetEditionIssuesProviders();
   resetIssuesEditionBootstrap();
   resetIssueTypeExtension();
@@ -111,7 +113,7 @@ describe("bootstrapIssuesEdition", () => {
     expect(getIssueTypeExtension()).toBeNull();
   });
 
-  it("registers the team projects, transfer note, types, type badge, provisional rules and modal picker for a flagged edition", () => {
+  it("registers the team projects, transfer note, types, type badge and modal picker for a flagged edition", () => {
     bootstrapIssuesEdition(editionWith({ "issue-worklog": true }));
     const providers = getEditionIssuesProviders();
     expect(providers.teamProjects).toBe(listTeamProjectOptions);
@@ -123,7 +125,20 @@ describe("bootstrapIssuesEdition", () => {
     expect(getIssueTypeExtension()?.typePicker).toBe(CloudTypePicker);
     expect(getIssueTypeExtension()?.templatePicker).toBeUndefined();
     expect(getIssueTypeExtension()?.additionalProperties).toBeUndefined();
-    expect(providers.workflowRules?.refusal).toBeTypeOf("function");
+  });
+
+  it("registers no workflow rules, so the cloud edition allows every transition (NEWFRONT-1038)", () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    bootstrapIssuesEdition(editionWith({ "issue-workflow": true }));
+    expect(getEditionIssuesProviders().workflowRules).toBeUndefined();
+    expect(
+      transitionRefusal({
+        projectId: "p-1",
+        fromStateId: "s-todo",
+        toStateId: "s-done",
+        purpose: "state-picker",
+      })
+    ).toBeNull();
   });
 
   it("runs only once", () => {

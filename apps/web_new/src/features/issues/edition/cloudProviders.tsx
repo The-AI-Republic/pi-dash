@@ -8,9 +8,11 @@
 // flag on) registers nothing, so every seam stays empty exactly as the
 // OSS oracle pins. A flag turned on without its provider still renders
 // nothing, so each area below lands independently: team projects, the
-// transfer-hop note, work-item types, the modal type picker, the detail
-// type badge and the provisional dev-only workflow rules now; templates
-// and extra properties with their own issues. Registration stays
+// transfer-hop note, work-item types, the modal type picker and the
+// detail type badge. Workflow transition rules, templates and per-type
+// custom properties are out of parity scope (owner decision 2026-10-30,
+// NEWFRONT-1038), so the bootstrap registers no rules provider and the
+// gate answers "nothing refused" in every edition. Registration stays
 // synchronous at startup while every heavy body loads lazily (lazy
 // components, dynamic contract imports), so this module adds only its
 // shells to the initial chunk (NEWFRONT-999).
@@ -33,7 +35,6 @@ import {
 } from "./flags.js";
 import type { DetailBadgeInput, TeamProjectOption, WorkItemTypeOption } from "./providers.js";
 import { registerEditionIssuesProviders } from "./providers.js";
-import { parityWorkflowRulesProvider } from "./workflowParityRules.js";
 
 /** Every issues flag the cloud edition may set (§23). */
 export const ISSUES_EDITION_FLAGS = [
@@ -174,12 +175,10 @@ export function bootstrapIssuesEdition(edition: Edition): void {
     detailBadges: { transferNote: CloudTransferNote },
     workItemTypes: listWorkItemTypeOptions,
     issueTypeDetail: { badge: CloudTypeBadge },
-    // Provisional (ISS-233): dev-only injected rules proving the gate
-    // mechanism; NEWFRONT-994 replaces this provider with the real source.
-    workflowRules: parityWorkflowRulesProvider(),
   });
-  // The modal type picker only (ISS-129 type half): templates and extra
-  // properties register with the Part 5 model. The lazy shell keeps the
+  // The modal type picker is the whole cloud modal extension (ISS-129):
+  // templates and per-type custom properties are out of parity scope
+  // (NEWFRONT-1038), so neither registers here. The lazy shell keeps the
   // picker chunk out of the initial bundle (NEWFRONT-999).
   registerIssueTypeExtension({ typePicker: CloudTypePicker });
 }

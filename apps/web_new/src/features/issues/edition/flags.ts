@@ -11,7 +11,12 @@ import { edition, ISSUE_DEDUPE_FLAG } from "../../../core/edition/index.js";
 
 /** Cloud epic create/edit dialog (ISS-232). */
 export const EPICS_FLAG = "issue-epics";
-/** Cloud workflow transitions and their disabled states (ISS-233). */
+/**
+ * The workflow transition gate (ISS-233). The flag stays declared so a
+ * build can turn the gate on, but no edition does: transition rules are
+ * out of parity scope (NEWFRONT-1038), so every build behaves as having
+ * none. Inert until a future product decision.
+ */
 export const WORKFLOW_FLAG = "issue-workflow";
 /** Team-project scoping filter on the sub-issue dropdown (ISS-234). */
 export const TEAM_PROJECT_FILTER_FLAG = "issue-team-project-filter";
