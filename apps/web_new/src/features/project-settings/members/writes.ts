@@ -186,8 +186,9 @@ export interface MemberTarget {
  * workspace admin sees the editor on their own row and on everyone who is
  * not another workspace admin; a project admin sees it on others who are
  * neither themselves nor a workspace admin; everyone else reads plain text.
- * The write may still be refused by the server — the display rule and the
- * server rule are pinned as different things.
+ * The server enforces the same rule (NEWFRONT-1037), so a shown editor's
+ * write lands except for the equal-or-higher promotion a project admin is
+ * offered and refused.
  */
 export function canEditMemberRole(editor: MemberEditor, target: MemberTarget): boolean {
   const workspaceAdmin = editor.workspaceRole !== null && editor.workspaceRole >= ROLE_ADMIN;

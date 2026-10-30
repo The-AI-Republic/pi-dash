@@ -7,10 +7,11 @@ strings, styles or assets reused. Oracle scenarios are written from
 this spec and proven against the running old app.
 
 Observed behavior the oracle pins as bugs is described as observed
-and named with its issue (role-change display versus write outcome,
-NEWFRONT-401; failed removal closing over the page, NEWFRONT-406).
-The new surface keeps the observed behavior except where a bug issue
-says otherwise.
+and named with its issue (failed removal closing over the page,
+NEWFRONT-406). The new surface keeps the observed behavior except
+where a bug issue says otherwise; the role-change display-versus-write
+split and the target-derived bypass (NEWFRONT-401, NEWFRONT-400) were
+resolved by the decided rule in §Inline role changes (NEWFRONT-1037).
 
 ## Member table (PSET-018)
 
@@ -85,28 +86,31 @@ notice renders. A single-member read is
 ## Inline role changes (PSET-023)
 
 A row's role is editable when the editor is a workspace admin
-editing themselves, or a project admin editing someone who is
-neither themselves nor a workspace admin; everyone else sees plain
-role text, and guest rows offer only the guest option even to
-admins. The change sends
+editing anyone who is not another workspace admin, or a project
+admin editing someone who is neither themselves nor a workspace
+admin; everyone else sees plain role text, and guest rows offer
+only the guest option even to admins. The change sends
 `PATCH .../projects/{pid}/members/{mid}/` with the `role` field
 (note: membership id, not user id), applied optimistically and
 rolled back on failure, with a failed change toasting the server
-message durably while the table keeps the row. The server
-additionally refuses promotions to a role at or above the editor's
-own level. There is no last-admin guard: the sole admin can demote
-themselves and restore standing through the same cell.
+message durably while the table keeps the row. The server lets a
+workspace admin set any project role for a non-admin target,
+including promoting to project Admin; it refuses any write against
+another workspace admin's role, and refuses a project admin's
+promotions to a role at or above their own level. There is no
+last-admin guard: the sole admin can demote themselves and restore
+standing through the same cell.
 
-Pinned mismatch NEWFRONT-401: a workspace admin is shown the editor
-on every row except another workspace admin's, but only their own
-write lands — other rows' writes are refused with a permission-error
-notice. Slices must preserve the observed display-versus-write split
-as the oracle pins it. Server quirk NEWFRONT-400: the role endpoint
-computes its workspace-admin bypass from the target's workspace role
-instead of the requester's, so a write against a workspace-admin
-target currently succeeds regardless of who sends it — while the UI
-correctly shows those cells read-only. Slices must match the
-observed server behavior as pinned, not the stricter rule.
+Decided rule (owner, 2026-10-30; NEWFRONT-1037, resolving
+NEWFRONT-400 and NEWFRONT-401): a workspace admin can change their
+own role, and can set any project role for anyone who is not a
+workspace admin, including promoting to project Admin. Nobody can
+change another person's role if that person is a workspace admin;
+the API answers 403. Everyone else keeps the earlier guards: a
+project Admin who is not a workspace admin still cannot promote to
+Admin. Unchanged: the own-role refusal for anyone else, the cap
+that keeps workspace guests at guest level, no last-admin check,
+and project membership being required to reach the endpoint.
 
 ## Remove and leave-self (PSET-024, PSET-025)
 

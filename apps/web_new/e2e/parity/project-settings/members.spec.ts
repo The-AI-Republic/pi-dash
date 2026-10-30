@@ -18,11 +18,13 @@
 // (workspace guests enter at guest only, workspace admins at admin only,
 // workspace members get the full map); there is no inviter-level cap in
 // the dialog or on the create endpoint (NEWFRONT-399). A workspace admin
-// sees the editor on every row except another workspace admin's but only
-// their own write lands (NEWFRONT-401); a project admin may change
-// anyone's except their own and except a workspace admin's; the server
-// additionally refuses promotions to a role at or above the inviter's own
-// level, and there is no last-admin guard. Removal is a soft deactivation
+// sees the editor on every row except another workspace admin's and those
+// writes land, including promotions to project Admin (NEWFRONT-1037); a
+// project admin may change anyone's except their own and except a
+// workspace admin's, and the server additionally refuses their promotions
+// to a role at or above their own level; nobody may change another
+// workspace admin's role (403). There is no last-admin guard. Removal is
+// a soft deactivation
 // behind a permanent-access-loss warning; leaving uses the leave endpoint
 // and lands on the projects list. A failed role change toasts the server
 // message durably; a failed removal instead kills the page (NEWFRONT-406),
@@ -37,6 +39,7 @@ import {
   PROJECT_ROLE_MEMBER,
   serverAddProjectMembers,
   serverPatchProjectMember,
+  serverPatchProjectMemberStatus,
   serverPatchWorkspaceMember,
   serverProjectMemberByEmail,
   serverProjectMemberProfiles,
@@ -357,14 +360,15 @@ test(
     const mentionWsMembershipId = async () =>
       (await serverWorkspaceMembers(seed.workspaceSlug, session)).find((m) => m.userId === mentionId)?.membershipId ??
       "";
-    // Converge the seeded member's roles from any staging state (project
-    // first: while workspace-admin the project write always lands).
+    // Converge the seeded member's roles from any staging state (workspace
+    // first: a project write against a workspace-admin target is refused,
+    // so the workspace demotion must land before the project one).
     const convergeSeedRoles = async () => {
+      await serverPatchWorkspaceMember(seed.workspaceSlug, await mentionWsMembershipId(), session, PROJECT_ROLE_MEMBER);
       const projMid =
         (await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, mentionEmail, session))?.membershipId ??
         "";
       await serverPatchProjectMember(seed.workspaceSlug, seed.projectId, projMid, session, PROJECT_ROLE_MEMBER);
-      await serverPatchWorkspaceMember(seed.workspaceSlug, await mentionWsMembershipId(), session, PROJECT_ROLE_MEMBER);
     };
 
     await test.step("a project admin edits others, with per-target option caps", async () => {
@@ -385,20 +389,25 @@ test(
       await expect.poll(() => driver.settingsMembersRoleText(guestName), { timeout: 15_000 }).toBe("Guest");
     });
 
-    await test.step("a forbidden promotion toasts the server message", async () => {
-      await driver.settingsMembersRoleEditorOpen(mentionName);
-      await driver.settingsMembersRoleEditorPick("Admin");
-      await expect
-        .poll(
-          async () => {
-            const toast = await driver.rulesLastToast();
-            return toast ? `${toast.title} ${toast.message}` : "";
-          },
-          { timeout: 15_000 }
-        )
-        .toContain("You cannot assign a role equal to or higher than your own");
-      expect(await mentionProjectRole()).toBe(PROJECT_ROLE_MEMBER);
-      await expect.poll(() => driver.settingsMembersRoleText(mentionName), { timeout: 15_000 }).toBe("Member");
+    await test.step("an owner's promotion to Admin persists and restores", async () => {
+      // A workspace admin's promotion of a non-admin now succeeds
+      // (NEWFRONT-1037); the refused-promotion toast is covered below by a
+      // project admin who is not a workspace admin.
+      const projMid =
+        (await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, mentionEmail, session))?.membershipId ??
+        "";
+      try {
+        await driver.settingsMembersRoleEditorOpen(mentionName);
+        await driver.settingsMembersRoleEditorPick("Admin");
+        await expect.poll(() => driver.settingsMembersRoleText(mentionName), { timeout: 15_000 }).toBe("Admin");
+        await expect.poll(mentionProjectRole, { timeout: 15_000 }).toBe(PROJECT_ROLE_ADMIN);
+        await driver.settingsMembersRoleEditorOpen(mentionName);
+        await driver.settingsMembersRoleEditorPick("Member");
+        await expect.poll(() => driver.settingsMembersRoleText(mentionName), { timeout: 15_000 }).toBe("Member");
+        await expect.poll(mentionProjectRole, { timeout: 15_000 }).toBe(PROJECT_ROLE_MEMBER);
+      } finally {
+        await serverPatchProjectMember(seed.workspaceSlug, seed.projectId, projMid, session, PROJECT_ROLE_MEMBER);
+      }
     });
 
     await test.step("an allowed demotion persists and restores", async () => {
@@ -442,57 +451,31 @@ test(
       }
     });
 
-    await test.step("a project admin sees their own and a workspace admin's cell read-only", async () => {
-      // Stage a project admin who is not a workspace admin: the workspace
-      // promotion lets the project promotion land, then is taken back
-      // (member<->admin workspace moves leave project roles untouched).
-      const wsMid = await mentionWsMembershipId();
+    await test.step("a forbidden promotion toasts the server message", async () => {
+      // A project admin who is not a workspace admin still cannot promote
+      // to Admin (NEWFRONT-1037): they attempt it on a fresh member while
+      // staged, and the refusal toasts the server message.
+      const fresh = await serverProvisionWorkspaceMember(seed.workspaceSlug, "nf1037promo", session);
       try {
-        await serverPatchWorkspaceMember(seed.workspaceSlug, wsMid, session, PROJECT_ROLE_ADMIN);
         const projMid =
           (await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, mentionEmail, session))?.membershipId ??
           "";
         await serverPatchProjectMember(seed.workspaceSlug, seed.projectId, projMid, session, PROJECT_ROLE_ADMIN);
-        await serverPatchWorkspaceMember(seed.workspaceSlug, wsMid, session, PROJECT_ROLE_MEMBER);
-        expect(await mentionProjectRole()).toBe(PROJECT_ROLE_ADMIN);
+        await serverAddProjectMembers(
+          seed.workspaceSlug,
+          seed.projectId,
+          [{ memberId: fresh.userId, role: PROJECT_ROLE_MEMBER }],
+          session
+        );
+        const freshDisplay = (await serverWorkspaceMembers(seed.workspaceSlug, session)).find(
+          (m) => m.userId === fresh.userId
+        )?.displayName;
+        expect(freshDisplay).toBeDefined();
         await driver.dropSession();
         await driver.rulesEnsureSignedIn(mentionEmail, mentionPassword, seed.workspaceSlug);
         await driver.settingsMembersOpen(seed.workspaceSlug, seed.projectId);
-        expect(await driver.settingsMembersRoleEditable(mentionName)).toBe(false);
-        expect(await driver.settingsMembersRoleEditable(ownerName)).toBe(false);
-        expect(await driver.settingsMembersRoleEditable(guestName)).toBe(true);
-      } finally {
-        // Sandwich: only a workspace admin target (or holder) lets the
-        // project demotion land, so promote, demote, then take it back.
-        await serverPatchWorkspaceMember(seed.workspaceSlug, wsMid, session, PROJECT_ROLE_ADMIN);
-        const projMid =
-          (await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, mentionEmail, session))?.membershipId ??
-          "";
-        await serverPatchProjectMember(seed.workspaceSlug, seed.projectId, projMid, session, PROJECT_ROLE_MEMBER);
-        await serverPatchWorkspaceMember(seed.workspaceSlug, wsMid, session, PROJECT_ROLE_MEMBER);
-      }
-    });
-
-    await test.step("a workspace admin edits only their own role end to end", async () => {
-      const wsMid = await mentionWsMembershipId();
-      try {
-        await serverPatchWorkspaceMember(seed.workspaceSlug, wsMid, session, PROJECT_ROLE_ADMIN);
-        await driver.dropSession();
-        await driver.rulesEnsureSignedIn(mentionEmail, mentionPassword, seed.workspaceSlug);
-        await driver.settingsMembersOpen(seed.workspaceSlug, seed.projectId);
-        // Display layer: the workspace admin's effective project role is
-        // admin, so the editor shows on every row except a workspace
-        // admin's (NEWFRONT-401); the writes below prove only the
-        // own-role one lands.
-        expect(await driver.settingsMembersRoleEditable(mentionName)).toBe(true);
-        expect(await driver.settingsMembersRoleEditable(ownerName)).toBe(false);
-        expect(await driver.settingsMembersRoleEditable(guestName)).toBe(true);
-        // Another member's write fails: the server governs by the real
-        // project role. (The guest row offers only the guest option, so
-        // even the no-op write is refused.)
-        await driver.settingsMembersRoleEditorOpen(guestName);
-        expect(await driver.settingsMembersRoleEditorOptions()).toEqual(["Guest"]);
-        await driver.settingsMembersRoleEditorPick("Guest");
+        await driver.settingsMembersRoleEditorOpen(freshDisplay ?? "");
+        await driver.settingsMembersRoleEditorPick("Admin");
         await expect
           .poll(
             async () => {
@@ -501,9 +484,93 @@ test(
             },
             { timeout: 15_000 }
           )
-          .toContain("You do not have permission to update roles");
-        // The own-role edit persists (self-target writes bypass the server
-        // checks) and restores through the UI as well.
+          .toContain("You cannot assign a role equal to or higher than your own");
+        expect((await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, fresh.email, session))?.role).toBe(
+          PROJECT_ROLE_MEMBER
+        );
+        await expect.poll(() => driver.settingsMembersRoleText(freshDisplay ?? ""), { timeout: 15_000 }).toBe("Member");
+      } finally {
+        const added = await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, fresh.email, session);
+        if (added !== null) {
+          await serverRemoveProjectMember(seed.workspaceSlug, seed.projectId, added.membershipId, session);
+        }
+        const wsRow = (await serverWorkspaceMembers(seed.workspaceSlug, session)).find(
+          (m) => m.userId === fresh.userId
+        );
+        if (wsRow !== undefined) await serverCleanupWorkspaceMember(seed.workspaceSlug, wsRow.membershipId, session);
+        const projMid =
+          (await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, mentionEmail, session))?.membershipId ??
+          "";
+        await serverPatchProjectMember(seed.workspaceSlug, seed.projectId, projMid, session, PROJECT_ROLE_MEMBER);
+      }
+    });
+
+    await test.step("a project admin sees their own and a workspace admin's cell read-only", async () => {
+      // Stage a project admin who is not a workspace admin with a direct
+      // project promotion: the owner session's write lands for a
+      // non-admin target (NEWFRONT-1037).
+      try {
+        const projMid =
+          (await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, mentionEmail, session))?.membershipId ??
+          "";
+        await serverPatchProjectMember(seed.workspaceSlug, seed.projectId, projMid, session, PROJECT_ROLE_ADMIN);
+        expect(await mentionProjectRole()).toBe(PROJECT_ROLE_ADMIN);
+        await driver.dropSession();
+        await driver.rulesEnsureSignedIn(mentionEmail, mentionPassword, seed.workspaceSlug);
+        await driver.settingsMembersOpen(seed.workspaceSlug, seed.projectId);
+        expect(await driver.settingsMembersRoleEditable(mentionName)).toBe(false);
+        expect(await driver.settingsMembersRoleEditable(ownerName)).toBe(false);
+        expect(await driver.settingsMembersRoleEditable(guestName)).toBe(true);
+      } finally {
+        const projMid =
+          (await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, mentionEmail, session))?.membershipId ??
+          "";
+        await serverPatchProjectMember(seed.workspaceSlug, seed.projectId, projMid, session, PROJECT_ROLE_MEMBER);
+      }
+    });
+
+    await test.step("a workspace admin who is only a project member edits non-admin rows end to end", async () => {
+      const wsMid = await mentionWsMembershipId();
+      const fresh = await serverProvisionWorkspaceMember(seed.workspaceSlug, "nf1037edit", session);
+      try {
+        await serverPatchWorkspaceMember(seed.workspaceSlug, wsMid, session, PROJECT_ROLE_ADMIN);
+        await serverAddProjectMembers(
+          seed.workspaceSlug,
+          seed.projectId,
+          [{ memberId: fresh.userId, role: PROJECT_ROLE_MEMBER }],
+          session
+        );
+        const freshDisplay = (await serverWorkspaceMembers(seed.workspaceSlug, session)).find(
+          (m) => m.userId === fresh.userId
+        )?.displayName;
+        expect(freshDisplay).toBeDefined();
+        const freshProjectRole = async () =>
+          (await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, fresh.email, session))?.role;
+        await driver.dropSession();
+        await driver.rulesEnsureSignedIn(mentionEmail, mentionPassword, seed.workspaceSlug);
+        await driver.settingsMembersOpen(seed.workspaceSlug, seed.projectId);
+        // Display layer: the workspace admin's effective project role is
+        // admin, so the editor shows on every row except a workspace
+        // admin's (NEWFRONT-401); the writes below prove the non-admin
+        // ones land too (NEWFRONT-1037).
+        expect(await driver.settingsMembersRoleEditable(mentionName)).toBe(true);
+        expect(await driver.settingsMembersRoleEditable(ownerName)).toBe(false);
+        expect(await driver.settingsMembersRoleEditable(guestName)).toBe(true);
+        await driver.settingsMembersRoleEditorOpen(guestName);
+        expect(await driver.settingsMembersRoleEditorOptions()).toEqual(["Guest"]);
+        await driver.settingsMembersRoleEditorPick("Guest");
+        await expect.poll(() => driver.settingsMembersRoleText(guestName), { timeout: 15_000 }).toBe("Guest");
+        // Another member's write lands: the fresh member demotes and
+        // restores through the UI, and the server persists both.
+        await driver.settingsMembersRoleEditorOpen(freshDisplay ?? "");
+        await driver.settingsMembersRoleEditorPick("Guest");
+        await expect.poll(() => driver.settingsMembersRoleText(freshDisplay ?? ""), { timeout: 15_000 }).toBe("Guest");
+        await expect.poll(freshProjectRole, { timeout: 15_000 }).toBe(PROJECT_ROLE_GUEST);
+        await driver.settingsMembersRoleEditorOpen(freshDisplay ?? "");
+        await driver.settingsMembersRoleEditorPick("Member");
+        await expect.poll(() => driver.settingsMembersRoleText(freshDisplay ?? ""), { timeout: 15_000 }).toBe("Member");
+        await expect.poll(freshProjectRole, { timeout: 15_000 }).toBe(PROJECT_ROLE_MEMBER);
+        // The own-role edit persists and restores through the UI as well.
         await driver.settingsMembersRoleEditorOpen(mentionName);
         await driver.settingsMembersRoleEditorPick("Admin");
         await expect.poll(() => driver.settingsMembersRoleText(mentionName), { timeout: 15_000 }).toBe("Admin");
@@ -512,6 +579,73 @@ test(
         await driver.settingsMembersRoleEditorPick("Member");
         await expect.poll(() => driver.settingsMembersRoleText(mentionName), { timeout: 15_000 }).toBe("Member");
         await expect.poll(mentionProjectRole, { timeout: 15_000 }).toBe(PROJECT_ROLE_MEMBER);
+      } finally {
+        const added = await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, fresh.email, session);
+        if (added !== null) {
+          await serverRemoveProjectMember(seed.workspaceSlug, seed.projectId, added.membershipId, session);
+        }
+        const wsRow = (await serverWorkspaceMembers(seed.workspaceSlug, session)).find(
+          (m) => m.userId === fresh.userId
+        );
+        if (wsRow !== undefined) await serverCleanupWorkspaceMember(seed.workspaceSlug, wsRow.membershipId, session);
+        await convergeSeedRoles();
+      }
+    });
+
+    await test.step("a write against another workspace admin answers 403 and leaves the role", async () => {
+      // API-level: a plain member, a project admin and another workspace
+      // admin each get 403 writing the owner's project role, and the role
+      // never moves (NEWFRONT-1037).
+      const ownerRole = async () =>
+        (await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, seed.email, session))?.role;
+      const ownerProjMid =
+        (await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, seed.email, session))?.membershipId ?? "";
+      const mentionSession = await signInSession(mentionEmail, mentionPassword);
+      const refusedBody = (body: unknown) =>
+        typeof body === "object" && body !== null ? String((body as Record<string, unknown>).error ?? "") : "";
+      try {
+        const asMember = await serverPatchProjectMemberStatus(
+          seed.workspaceSlug,
+          seed.projectId,
+          ownerProjMid,
+          mentionSession,
+          PROJECT_ROLE_MEMBER
+        );
+        expect(asMember.status).toBe(403);
+        expect(refusedBody(asMember.body)).toContain("workspace admin");
+        expect(await ownerRole()).toBe(PROJECT_ROLE_ADMIN);
+
+        const projMid =
+          (await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, mentionEmail, session))?.membershipId ??
+          "";
+        await serverPatchProjectMember(seed.workspaceSlug, seed.projectId, projMid, session, PROJECT_ROLE_ADMIN);
+        const asProjectAdmin = await serverPatchProjectMemberStatus(
+          seed.workspaceSlug,
+          seed.projectId,
+          ownerProjMid,
+          mentionSession,
+          PROJECT_ROLE_MEMBER
+        );
+        expect(asProjectAdmin.status).toBe(403);
+        expect(refusedBody(asProjectAdmin.body)).toContain("workspace admin");
+        expect(await ownerRole()).toBe(PROJECT_ROLE_ADMIN);
+
+        await serverPatchWorkspaceMember(
+          seed.workspaceSlug,
+          await mentionWsMembershipId(),
+          session,
+          PROJECT_ROLE_ADMIN
+        );
+        const asWorkspaceAdmin = await serverPatchProjectMemberStatus(
+          seed.workspaceSlug,
+          seed.projectId,
+          ownerProjMid,
+          mentionSession,
+          PROJECT_ROLE_MEMBER
+        );
+        expect(asWorkspaceAdmin.status).toBe(403);
+        expect(refusedBody(asWorkspaceAdmin.body)).toContain("workspace admin");
+        expect(await ownerRole()).toBe(PROJECT_ROLE_ADMIN);
       } finally {
         await convergeSeedRoles();
       }
@@ -719,7 +853,6 @@ test(
   { tag: specTags(["PSET-027"]) },
   async ({ driver, seed }) => {
     const session = await signInSession(seed.email, seed.password);
-    const mentionName = seed.mentionMember?.displayName ?? "Parity Mention";
     const mentionEmail = seed.mentionMember?.email ?? "";
 
     await test.step("a skeleton stands in while the roster loads", async () => {
@@ -740,22 +873,59 @@ test(
     });
 
     await test.step("a failed role change toasts the server message and keeps the table", async () => {
-      await driver.settingsMembersOpen(seed.workspaceSlug, seed.projectId);
-      await driver.settingsMembersRoleEditorOpen(mentionName);
-      await driver.settingsMembersRoleEditorPick("Admin");
-      await expect
-        .poll(
-          async () => {
-            const toast = await driver.rulesLastToast();
-            return toast ? `${toast.title} ${toast.message}` : "";
-          },
-          { timeout: 15_000 }
-        )
-        .toContain("You cannot assign a role equal to or higher than your own");
-      expect((await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, mentionEmail, session))?.role).toBe(
-        PROJECT_ROLE_MEMBER
-      );
-      expect((await driver.settingsMembersRows()).map((r) => r.email)).toContain(mentionEmail);
+      // The refused promotion now comes from a project admin who is not a
+      // workspace admin: the owner's own promotion succeeds (NEWFRONT-1037).
+      const mentionPassword = seed.mentionMember?.password ?? "";
+      const fresh = await serverProvisionWorkspaceMember(seed.workspaceSlug, "nf1037toast", session);
+      try {
+        const projMid =
+          (await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, mentionEmail, session))?.membershipId ??
+          "";
+        await serverPatchProjectMember(seed.workspaceSlug, seed.projectId, projMid, session, PROJECT_ROLE_ADMIN);
+        await serverAddProjectMembers(
+          seed.workspaceSlug,
+          seed.projectId,
+          [{ memberId: fresh.userId, role: PROJECT_ROLE_MEMBER }],
+          session
+        );
+        const freshDisplay = (await serverWorkspaceMembers(seed.workspaceSlug, session)).find(
+          (m) => m.userId === fresh.userId
+        )?.displayName;
+        expect(freshDisplay).toBeDefined();
+        await driver.dropSession();
+        await driver.rulesEnsureSignedIn(mentionEmail, mentionPassword, seed.workspaceSlug);
+        await driver.settingsMembersOpen(seed.workspaceSlug, seed.projectId);
+        await driver.settingsMembersRoleEditorOpen(freshDisplay ?? "");
+        await driver.settingsMembersRoleEditorPick("Admin");
+        await expect
+          .poll(
+            async () => {
+              const toast = await driver.rulesLastToast();
+              return toast ? `${toast.title} ${toast.message}` : "";
+            },
+            { timeout: 15_000 }
+          )
+          .toContain("You cannot assign a role equal to or higher than your own");
+        expect((await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, fresh.email, session))?.role).toBe(
+          PROJECT_ROLE_MEMBER
+        );
+        expect((await driver.settingsMembersRows()).map((r) => r.email)).toContain(fresh.email);
+      } finally {
+        const added = await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, fresh.email, session);
+        if (added !== null) {
+          await serverRemoveProjectMember(seed.workspaceSlug, seed.projectId, added.membershipId, session);
+        }
+        const wsRow = (await serverWorkspaceMembers(seed.workspaceSlug, session)).find(
+          (m) => m.userId === fresh.userId
+        );
+        if (wsRow !== undefined) await serverCleanupWorkspaceMember(seed.workspaceSlug, wsRow.membershipId, session);
+        const projMid =
+          (await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, mentionEmail, session))?.membershipId ??
+          "";
+        await serverPatchProjectMember(seed.workspaceSlug, seed.projectId, projMid, session, PROJECT_ROLE_MEMBER);
+        await driver.dropSession();
+        await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+      }
     });
 
     // No doomed-removal step: submitting a removal for an out-of-band
