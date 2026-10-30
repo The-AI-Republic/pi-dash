@@ -126,8 +126,8 @@ fn build_client(timeout_secs: u64) -> Result<reqwest::Client, reqwest::Error> {
         .build()
 }
 
-/// Header bytes to text the way `requests` exposes them: the http layer
-/// decodes latin-1 (`sessions.py:get_redirect_target`), so every byte —
+/// Header bytes to text the way `requests` exposes them: the underlying
+/// http module decodes headers in latin1 (`sessions.py:117`), so every byte —
 /// including non-ASCII obs-text rejected by `HeaderValue::to_str` — maps
 /// to U+0000..=U+00FF. A UTF-8 `Location` thus arrives as the mojibake
 /// `str` the redirect loop follows, never as `""`.

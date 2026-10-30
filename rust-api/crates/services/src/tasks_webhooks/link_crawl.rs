@@ -99,7 +99,7 @@ fn is_scheme_char(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')
 }
 
-/// Scheme detection shared by [`url_scheme`] and [`parse_url`], mirroring
+/// Scheme detection for the [`parse_url`] front end, mirroring
 /// `urlsplit`: a scheme exists only when the text before the first `:`
 /// starts with an ASCII letter and holds only scheme characters.
 /// Returns the raw (un-lower-cased) scheme plus the remainder.
