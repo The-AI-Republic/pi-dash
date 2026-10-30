@@ -24743,11 +24743,13 @@ export class WebNewDriver implements ParityDriver {
    * leaves the caller reading a half-mounted screen.
    */
   async modulesXOpenSettingsModules(workspaceSlug: string, projectId: string): Promise<void> {
-    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/features/modules`, {
+    const path = `/${workspaceSlug}/settings/projects/${projectId}/features/modules`;
+    await this.page.goto(path, {
       waitUntil: "domcontentloaded",
       timeout: 120_000,
     });
     await this.page.waitForLoadState("domcontentloaded");
+    await this.awaitAppBoot(path);
     const settled = await Promise.race([
       this.page
         .getByRole("switch", { name: "Enable modules", exact: true })

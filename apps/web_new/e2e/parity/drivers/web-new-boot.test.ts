@@ -286,7 +286,7 @@ interface ScriptedNavPage {
 function scriptedNavPage(options: { url?: string; bodies?: string[] }): ScriptedNavPage {
   const state = { holds: 0, reloads: 0, gotos: 0, loads: 0 };
   const bodies = options.bodies ?? [CONTENT];
-  const settled = { last: () => ({ waitFor: async () => {} }) };
+  const settled = { last: () => ({ waitFor: async () => {} }), first: () => ({ waitFor: async () => {} }) };
   const page = {
     url: () => options.url ?? "http://localhost:3080/ws",
     goto: async () => {
@@ -303,6 +303,8 @@ function scriptedNavPage(options: { url?: string; bodies?: string[] }): Scripted
       state.loads += 1;
     },
     locator: () => settled,
+    getByRole: () => settled,
+    getByTestId: () => settled,
     context: () => ({ addCookies: async () => {} }),
   };
   return Object.assign(state, { page: page as unknown as Page });
@@ -345,6 +347,14 @@ describe("navigation boot wiring", () => {
     const script = scriptedNavPage({ bodies: [CHUNK_ERROR, CONTENT] });
     const driver = new WebNewDriver(script.page);
     await driver.modulesListOpenList("ws", "p");
+    expect(script.gotos).toBe(1);
+    expect(script.reloads).toBe(1);
+  });
+
+  it("modulesXOpenSettingsModules recovers past a first-load chunk error", async () => {
+    const script = scriptedNavPage({ bodies: [CHUNK_ERROR, CONTENT] });
+    const driver = new WebNewDriver(script.page);
+    await driver.modulesXOpenSettingsModules("ws", "p");
     expect(script.gotos).toBe(1);
     expect(script.reloads).toBe(1);
   });
