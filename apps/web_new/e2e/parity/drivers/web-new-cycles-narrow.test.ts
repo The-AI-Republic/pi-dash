@@ -85,6 +85,7 @@ class Recorder {
   noticePresent = true;
   noticeText: string | null = "This cycle has finished and is not editable.";
   noticeRejects = false;
+  failCloseClickOnce = false;
 
   locator(path: string): Locator {
     const node: Record<string, unknown> = {};
@@ -111,6 +112,10 @@ class Recorder {
     if (method === "allTextContents") return [...this.menuTexts];
     if (method === "isVisible") return this.visible(path);
     if (method === "getAttribute") return this.attribute(path, args[0]);
+    if (method === "click" && path.endsWith('.getByTestId("cycle-sidebar-close")') && this.failCloseClickOnce) {
+      this.failCloseClickOnce = false;
+      throw new Error("intercepts pointer events");
+    }
     if (method === "waitFor" || method === "click" || method === "hover") return undefined;
     throw new Error(`unexpected action ${method} at ${path}`);
   }
@@ -122,6 +127,7 @@ class Recorder {
     if (path === testIdPath("cycle-row-menu-trigger")) return this.desktopTriggerPresent ? 1 : 0;
     if (path === testIdPath("sidebar-toggle")) return this.togglePresent ? 1 : 0;
     if (path === testIdPath("cycle-sidebar-toggle-narrow")) return this.cycleCollapsed === null ? 0 : 1;
+    if (path === `${testIdPath("cycle-sidebar-toggle-narrow")}.first()`) return this.cycleCollapsed === null ? 0 : 1;
     if (path === SIDEBAR_PATH) return 1;
     if (path === NOTICE_PATH) return this.noticePresent ? 1 : 0;
     if (path === ROW_NAMES_PATH) return this.rowLabels.length;
@@ -411,6 +417,52 @@ describe("cyclesHeroDismissSidebar", () => {
     await list.driver().cyclesHeroDismissSidebar();
     expect(list.callsFor(`${testIdPath("cycle-sidebar-toggle-narrow")}.first()`, "waitFor")).toHaveLength(0);
     expect(list.callsFor(`${testIdPath("cycle-sidebar-toggle-narrow")}.first()`, "click")).toHaveLength(0);
+  });
+});
+
+describe("cyclesMobileOpenAnalytics", () => {
+  const toggle = `${testIdPath("cycle-sidebar-toggle-narrow")}.first()`;
+  const entry = `${testIdPath("issues-mobile-header")}.getByTestId("cycle-analytics-entry-narrow")`;
+
+  it("closes an open cycle drawer through the panel before opening analytics", async () => {
+    const script = new Recorder();
+    script.cycleCollapsed = false;
+    await script.driver().cyclesMobileOpenAnalytics();
+    const panel = testIdPath("cycle-sidebar");
+    expect(script.callsFor(`${panel}.getByTestId("cycle-sidebar-close")`, "click")).toHaveLength(1);
+    expect(script.callsFor(`${panel}.first()`, "waitFor")).toHaveLength(1);
+    expect(script.callsFor(entry, "click")).toHaveLength(1);
+    expect(script.callsFor(testIdPath("issues-analytics-body"), "waitFor")).toHaveLength(1);
+  });
+
+  it("force-clicks the close when the emulated hit test misreports cover", async () => {
+    const script = new Recorder();
+    script.cycleCollapsed = false;
+    script.failCloseClickOnce = true;
+    await script.driver().cyclesMobileOpenAnalytics();
+    const close = `${testIdPath("cycle-sidebar")}.getByTestId("cycle-sidebar-close")`;
+    const clicks = script.callsFor(close, "click");
+    expect(clicks).toHaveLength(2);
+    expect(clicks[1]?.args).toEqual([{ force: true }]);
+    expect(script.callsFor(`${testIdPath("cycle-sidebar")}.first()`, "waitFor")).toHaveLength(1);
+    expect(script.callsFor(entry, "click")).toHaveLength(1);
+  });
+
+  it("leaves a collapsed drawer alone and opens analytics straight away", async () => {
+    const script = new Recorder();
+    script.cycleCollapsed = true;
+    await script.driver().cyclesMobileOpenAnalytics();
+    expect(script.callsFor(toggle, "click")).toHaveLength(0);
+    expect(script.callsFor(entry, "click")).toHaveLength(1);
+    expect(script.callsFor(testIdPath("issues-analytics-body"), "waitFor")).toHaveLength(1);
+  });
+
+  it("opens analytics with no toggle mounted", async () => {
+    const script = new Recorder();
+    script.cycleCollapsed = null;
+    await script.driver().cyclesMobileOpenAnalytics();
+    expect(script.callsFor(toggle, "getAttribute")).toHaveLength(0);
+    expect(script.callsFor(entry, "click")).toHaveLength(1);
   });
 });
 

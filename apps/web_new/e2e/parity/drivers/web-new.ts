@@ -23882,6 +23882,26 @@ export class WebNewDriver implements ParityDriver {
     // Scoped to the narrow header: the trigger also mounts (hidden) in
     // the desktop header, so the bare testid matches twice with the
     // first match unactionable (NEWFRONT-712 review D1).
+    // The expanded cycle drawer covers the narrow trigger, so close
+    // it first when open — the tap a user would make too (NEWFRONT-716).
+    // The close runs through the panel's own control: the narrow toggle
+    // sits under the open drawer and is not tappable until it shuts. The
+    // force fallback is for mobile emulation only: the emulated layout
+    // viewport widens past the visual one, and the pointer hit test then
+    // reports the heading over a close control that elementsFromPoint
+    // and screenshots prove is on top and tappable (real phones honor
+    // the viewport meta, so their hit test is exact).
+    const toggle = this.page.getByTestId("cycle-sidebar-toggle-narrow").first();
+    if ((await toggle.count()) > 0 && (await toggle.getAttribute("aria-expanded")) === "true") {
+      await this.cycleSidebarSettled();
+      const close = this.cycleSidebar().getByTestId("cycle-sidebar-close");
+      try {
+        await close.click({ timeout: 5_000 });
+      } catch {
+        await close.click({ force: true });
+      }
+      await this.page.getByTestId("cycle-sidebar").first().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    }
     await this.page
       .getByTestId("issues-mobile-header")
       .getByTestId("cycle-analytics-entry-narrow")

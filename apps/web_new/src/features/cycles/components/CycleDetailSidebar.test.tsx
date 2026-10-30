@@ -176,6 +176,18 @@ describe("CycleDetailSidebar", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the close control unsqueezed under long cycle names", async () => {
+    renderSidebar({ ...fullCycle(), name: "NF253 mobileguest 1793386544749 cycle" });
+    const close = await screen.findByRole("button", { name: CYCLE_SIDEBAR_CLOSE_LABEL });
+    expect(close.className).toContain("shrink-0");
+    // The name column takes the leftover row width from a zero basis, so
+    // the heading truncates instead of pushing the close control out; the
+    // row itself must shrink past its content floor too.
+    const column = screen.getByTestId("cycle-sidebar-name").parentElement;
+    expect(column?.className).toContain("flex-1");
+    expect(column?.parentElement?.className).toContain("min-w-0");
+  });
+
   it("renders the description with paragraph breaks preserved", async () => {
     renderSidebar();
     const description = await screen.findByTestId("cycle-sidebar-description");
