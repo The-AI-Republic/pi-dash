@@ -108,10 +108,25 @@ vi.mock("./actions.js", () => ({
   useCalendarDelete: () => ({ mutate: state.remove, isPending: false }),
 }));
 
-const today = new Date();
-const todayIso = isoDay(today);
-const nextIso = isoDay(shift(today, 1));
-const emptyIso = isoDay(shift(today, 2));
+// Anchor dates, recomputed in beforeEach once the clock is frozen. They
+// must stay inside one month grid: deriving them from the wall clock broke
+// every suite run on the last two days of a month (today + 2 fell outside
+// the rendered grid and tile() returned null).
+let today = new Date();
+let todayIso = isoDay(today);
+let nextIso = isoDay(shift(today, 1));
+let emptyIso = isoDay(shift(today, 2));
+
+/** Freeze the clock only; real timers keep user-event interaction working. */
+function freezeClock(): void {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  // A mid-month Thursday at local noon: today + 2 stays in-month in any zone.
+  vi.setSystemTime(new Date(2026, 9, 15, 12, 0, 0));
+  today = new Date();
+  todayIso = isoDay(today);
+  nextIso = isoDay(shift(today, 1));
+  emptyIso = isoDay(shift(today, 2));
+}
 
 function isoDay(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -294,6 +309,7 @@ function dragBlockTo(block: HTMLElement, iso: string): void {
 }
 
 beforeEach(() => {
+  freezeClock();
   state.narrow = false;
   state.touch = false;
   state.prefs = prefs();
@@ -336,6 +352,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetAppClient();
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
