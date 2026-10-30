@@ -8,6 +8,7 @@
 // the initial bundle never pays for it.
 
 import type { QueryClient } from "@tanstack/react-query";
+import { notFound } from "@tanstack/react-router";
 import type { ApiClient } from "@pidash/api-client";
 
 import { settingsQueryOptions, workspacesQueryOptions } from "../../core/session/index.js";
@@ -15,23 +16,26 @@ import { legacySettingsRedirect } from "./lib/legacyRedirect.js";
 import { enforceProfileSettingsGate } from "./guard.js";
 
 /**
- * The final address a legacy pathname should land on. Returns null when
- * the address belongs to no family (the route then answers not-found).
+ * The final address a legacy pathname should land on. An address in no
+ * legacy family answers the not-found page, so every caller gets an
+ * address to redirect to and none of them repeats that decision.
  */
 export async function loadLegacySettingsForward(args: {
   queryClient: QueryClient;
   apiClient: ApiClient;
   pathname: string;
   search: string;
-}): Promise<string | null> {
+}): Promise<string> {
   await enforceProfileSettingsGate({ queryClient: args.queryClient, apiClient: args.apiClient, href: args.pathname });
   const [settings, workspaces] = await Promise.all([
     args.queryClient.ensureQueryData(settingsQueryOptions(args.apiClient)).catch(() => null),
     args.queryClient.ensureQueryData(workspacesQueryOptions(args.apiClient)).catch(() => undefined),
   ]);
-  return legacySettingsRedirect(args.pathname, args.search, {
+  const href = legacySettingsRedirect(args.pathname, args.search, {
     lastSlug: settings?.workspace.last_workspace_slug ?? null,
     fallbackSlug: settings?.workspace.fallback_workspace_slug ?? null,
     workspaces,
   });
+  if (href === null) throw notFound();
+  return href;
 }

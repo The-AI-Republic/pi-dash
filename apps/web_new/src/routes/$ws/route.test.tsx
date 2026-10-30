@@ -238,10 +238,10 @@ describe("WorkspaceDenialNotice", () => {
     // Account settings live inside a workspace (main#670): the way in from
     // a workspace the reader cannot open names the first one they belong
     // to instead of a workspace-less page.
-    expect(screen.getByRole("link", { name: "Open profile" })).toHaveAttribute(
-      "href",
-      "/acme/settings/account/general/"
-    );
+    // The account subtree is migrated, so the link navigates in-app; the
+    // router normalizes the trailing slash away in its href.
+    const profile = screen.getByRole("link", { name: "Open profile" });
+    expect(profile).toHaveAttribute("href", "/acme/settings/account/general");
   });
 
   it("offers creation when the user belongs nowhere", async () => {

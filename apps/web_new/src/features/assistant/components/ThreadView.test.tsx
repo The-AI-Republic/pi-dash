@@ -648,7 +648,9 @@ describe("ThreadView dictation", () => {
     renderThread({ sttSeed: { ...STT_KEYED, has_api_key: false } });
     const mic = await screen.findByTestId("assistant-mic");
     expect(mic).toHaveAttribute("aria-label", "Set up voice dictation");
-    expect(mic).toHaveAttribute("href", "/acme/settings/account/ai-assistant/#voice-dictation");
+    // The account subtree is migrated, so the router resolves the link in
+    // place; it still lands on the dictation block (main#670).
+    expect(mic).toHaveAttribute("href", "/acme/settings/account/ai-assistant#voice-dictation");
     expect(screen.getByTestId("assistant-dictation-hint")).toHaveTextContent("Voice dictation isn't set up.");
   });
 

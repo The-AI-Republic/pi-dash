@@ -23,7 +23,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RouterContext } from "../../../../__root.js";
 import { createAppClient, resetAppClient } from "../../../../../core/api/client.js";
 import { ROLE_ADMIN, ROLE_MEMBER, useSessionStore } from "../../../../../core/session/index.js";
-import { resetProfileSettingsPages } from "../../../../../features/settings/lib/registry.js";
+import { getProfileSettingsPage, resetProfileSettingsPages } from "../../../../../features/settings/lib/registry.js";
+import { resetAccountSettingsTabsLoader } from "../../../../../features/settings/loadAccountSettingsTabs.js";
 import { Route, accountTabFromPathname } from "./route.js";
 
 const Layout = Route.options.component;
@@ -126,6 +127,7 @@ function renderAt(initialPath: string, selfManaged = true) {
 afterEach(() => {
   cleanup();
   resetProfileSettingsPages();
+  resetAccountSettingsTabsLoader();
   resetAppClient();
   useSessionStore.setState({ status: "unknown", returnUrl: null });
   document.title = "";
@@ -181,6 +183,15 @@ describe("account settings layout", () => {
   it("tolerates a workspace list that has not arrived yet", async () => {
     renderAt("/acme/settings/account/general/");
     expect(await screen.findByTestId("profile-settings-shell")).toBeInTheDocument();
+  });
+
+  it("has the built-in bodies registered by the time the layout mounts", async () => {
+    expect(getProfileSettingsPage("security")).toBeNull();
+    await Route.options.beforeLoad?.({} as never);
+    expect(getProfileSettingsPage("security")).not.toBeNull();
+    renderAt("/acme/settings/account/security/");
+    expect(await screen.findByTestId("profile-settings-shell")).toBeInTheDocument();
+    expect(screen.getByTestId("profile-settings-content")).toBeInTheDocument();
   });
 
   it("navigates in-app when a tab link is followed", async () => {

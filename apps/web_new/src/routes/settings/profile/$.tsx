@@ -6,7 +6,7 @@
 // the same tab inside the current workspace; a deeper address is not a
 // forward and gets the not-found page.
 
-import { createFileRoute, notFound, redirect } from "@tanstack/react-router";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
 export const Route = createFileRoute("/settings/profile/$")({
   beforeLoad: async ({ context, location }) => {
@@ -17,7 +17,6 @@ export const Route = createFileRoute("/settings/profile/$")({
       pathname: location.pathname,
       search: location.searchStr,
     });
-    if (href === null) throw notFound();
     throw redirect({ href });
   },
 });

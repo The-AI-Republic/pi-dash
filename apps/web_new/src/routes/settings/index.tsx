@@ -5,7 +5,7 @@
 // main#670): forward to the general tab of the current workspace,
 // query string kept.
 
-import { createFileRoute, notFound, redirect } from "@tanstack/react-router";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
 export const Route = createFileRoute("/settings/")({
   beforeLoad: async ({ context, location }) => {
@@ -16,7 +16,6 @@ export const Route = createFileRoute("/settings/")({
       pathname: location.pathname,
       search: location.searchStr,
     });
-    if (href === null) throw notFound();
     throw redirect({ href });
   },
 });

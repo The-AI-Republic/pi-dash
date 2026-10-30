@@ -6,7 +6,7 @@
 // absent or unknown id to general. A deeper address is not a profile
 // forward and gets the not-found page.
 
-import { createFileRoute, notFound, redirect } from "@tanstack/react-router";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
 export const Route = createFileRoute("/profile/$")({
   beforeLoad: async ({ context, location }) => {
@@ -17,7 +17,6 @@ export const Route = createFileRoute("/profile/$")({
       pathname: location.pathname,
       search: location.searchStr,
     });
-    if (href === null) throw notFound();
     throw redirect({ href });
   },
 });

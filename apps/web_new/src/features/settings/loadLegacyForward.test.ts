@@ -6,6 +6,7 @@
 // reads. A failed read leaves the page usable: settings fall back to the
 // remembered fallback slug, the workspace list to undefined.
 import type { QueryClient } from "@tanstack/react-query";
+import { isNotFound } from "@tanstack/react-router";
 import { ApiError, createClient } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
 
@@ -86,19 +87,18 @@ describe("loadLegacySettingsForward", () => {
     ).resolves.toBe(CREATE_WORKSPACE_PATH);
   });
 
-  it("answers null outside the forward families", async () => {
-    await expect(
-      loadLegacySettingsForward({
-        queryClient: queryClient({
-          me: ME,
-          settings: { workspace: { last_workspace_slug: "acme", fallback_workspace_slug: null } },
-          workspaces: WORKSPACES,
-        }),
-        apiClient,
-        pathname: "/profile/a/b",
-        search: "",
-      })
-    ).resolves.toBeNull();
+  it("answers the not-found page outside the forward families", async () => {
+    const thrown = await loadLegacySettingsForward({
+      queryClient: queryClient({
+        me: ME,
+        settings: { workspace: { last_workspace_slug: "acme", fallback_workspace_slug: null } },
+        workspaces: WORKSPACES,
+      }),
+      apiClient,
+      pathname: "/profile/a/b",
+      search: "",
+    }).catch((error: unknown) => error);
+    expect(isNotFound(thrown)).toBe(true);
   });
 
   it("gates the forward for a visitor", async () => {

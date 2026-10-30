@@ -3,9 +3,9 @@
 // See the LICENSE file for details.
 // Registration side of the profile-settings seam (parity/specs/profile.md
 // §5). Every tab the product owns outside a sibling feature registers
-// here: the shell imports this module so the general, security, token and
-// notifications bodies are present on a direct visit; sibling slices
-// register their own tabs from their lazy route modules.
+// here; sibling slices register their own tabs from their lazy route
+// modules. Account settings arrive through loadAccountSettingsTabs.ts, so
+// these bodies sit in their own chunk and not in the first paint.
 
 import * as React from "react";
 

@@ -41,7 +41,8 @@ describe("SetupCard", () => {
   it("links the provider settings page with the pinned action label", () => {
     render(<SetupCard workspaceSlug="acme" />);
     const action = screen.getByRole("button", { name: "Configure provider" });
-    expect(action).toHaveAttribute("href", "/acme/settings/account/ai-assistant/");
+    expect(action).toHaveAttribute("data-router-link");
+    expect(action).toHaveAttribute("data-to", "/acme/settings/account/ai-assistant/");
   });
 
   it("forwards layout classes", () => {

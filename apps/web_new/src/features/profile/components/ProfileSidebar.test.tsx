@@ -164,7 +164,11 @@ describe("ProfileSidebarFrame", () => {
     renderFrame({ isOwn: true });
     const pencil = screen.getByTestId("profile-edit-pencil");
     expect(pencil).toHaveAttribute("href", profileSettingsGeneralHref("acme"));
-    expect(pencil).toHaveAttribute("href", "/acme/settings/account/general/");
+    expect(profileSettingsGeneralHref("acme")).toBe("/acme/settings/account/general/");
+    // The account subtree is migrated (NEWFRONT-1030), so the pencil is an
+    // in-app link to the workspace's general tab.
+    expect(pencil).toHaveAttribute("data-router-link");
+    expect(pencil).toHaveAttribute("data-to", "/acme/settings/account/general/");
   });
 
   it("collapses on demand and reopens from the show control", async () => {

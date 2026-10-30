@@ -181,11 +181,31 @@ describe("bundled list", () => {
     // Project settings moved with their own area gate (NEWFRONT-606); the
     // profile legacy forwards plus any unknown section have no web_new page
     // at this address.
-    for (const path of ["/acme/settings/api-tokens", "/acme/settings/account", "/acme/settings/unknown"]) {
+    for (const path of ["/acme/settings/api-tokens", "/acme/settings/unknown"]) {
       expect(isMigratedPath(path), path).toBe(false);
     }
     expect(resolveLinkKind("/acme/settings/members")).toBe("router");
     expect(resolveLinkKind("/acme/settings/unknown")).toBe("anchor");
+  });
+
+  it("serves the account settings inside every workspace (main#670, NEWFRONT-1030)", () => {
+    // Account settings moved into the workspace shell, so the proxy must
+    // hand the subtree to web_new: the old app's own redirect at this
+    // address would otherwise bounce back into web_new's forward.
+    for (const path of [
+      "/acme/settings/account",
+      "/acme/settings/account/",
+      "/acme/settings/account/general",
+      "/acme/settings/account/general/",
+      "/acme/settings/account/security/",
+      "/other-ws/settings/account/api-tokens",
+    ]) {
+      expect(isMigratedPath(path), path).toBe(true);
+    }
+    // The reserved top-level name still belongs to the old app, and an
+    // unreserved top-level segment is not a workspace.
+    expect(isMigratedPath("/settings/account/general/")).toBe(false);
+    expect(resolveLinkKind("/acme/settings/account/security/")).toBe("router");
   });
 
   it("serves the runner area and AI dev machines from web_new", () => {

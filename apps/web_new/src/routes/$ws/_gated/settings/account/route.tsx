@@ -12,10 +12,8 @@ import { createFileRoute, Outlet, useRouterState } from "@tanstack/react-router"
 import * as React from "react";
 
 import { useInstanceConfig, useWorkspaces } from "../../../../../core/session/index.js";
-// Side-effect import: the tab registry fills with the built-in bodies as
-// this layout loads, so a direct visit to any tab paints its page.
-import "../../../../../features/settings/pageEntries.js";
 import { AccountSettingsNavigator } from "../../../../../features/settings/components/account/AccountSettingsNavigator.js";
+import { loadAccountSettingsTabs } from "../../../../../features/settings/loadAccountSettingsTabs.js";
 import { accountSettingsHref } from "../../../../../features/settings/lib/accountHref.js";
 import {
   resolveProfileSettingsTab,
@@ -26,6 +24,12 @@ import { isProfileSettingsTabServed } from "../../../../../features/settings/lib
 import { useDocumentHead } from "../../../../../shared/shell/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/account")({
+  // The built-in bodies arrive in their own chunk (size gate, NEWFRONT-852
+  // precedent), so the first paint of the shell stays lean; resolving here
+  // means a direct visit to any tab already has its page when it mounts.
+  beforeLoad: async () => {
+    await loadAccountSettingsTabs();
+  },
   component: AccountSettingsLayout,
 });
 

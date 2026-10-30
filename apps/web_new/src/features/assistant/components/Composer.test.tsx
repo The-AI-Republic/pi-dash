@@ -377,13 +377,15 @@ describe("Composer dictation", () => {
     expect(mic.tagName).toBe("A");
     expect(mic).toHaveAttribute("aria-label", "Set up voice dictation");
     // Both carry the account-settings address of the workspace on screen
-    // (main#670). Whether they navigate in-app or as a full page follows the
-    // F-09 migrated list, which gains the account subtree at the profile
-    // area gate; this test pins the destination, not that decision.
-    expect(mic).toHaveAttribute("href", "/acme/settings/account/ai-assistant/#voice-dictation");
+    // (main#670), which is now a migrated subtree, so they navigate in-app.
+    expect(mic).toHaveAttribute("data-router-link");
+    expect(mic).toHaveAttribute("data-to", "/acme/settings/account/ai-assistant/");
+    expect(mic).toHaveAttribute("data-hash", "voice-dictation");
     expect(screen.getByTestId("assistant-dictation-hint")).toHaveTextContent("Voice dictation isn't set up.");
     const setup = screen.getByRole("link", { name: "Configure it" });
-    expect(setup).toHaveAttribute("href", "/acme/settings/account/ai-assistant/#voice-dictation");
+    expect(setup).toHaveAttribute("data-router-link");
+    expect(setup).toHaveAttribute("data-to", "/acme/settings/account/ai-assistant/");
+    expect(setup).toHaveAttribute("data-hash", "voice-dictation");
   });
 
   it("keeps a keyless microphone shut while the composer locks", () => {

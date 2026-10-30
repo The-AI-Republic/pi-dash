@@ -64,13 +64,7 @@ function WorkspaceDenialNotice(): React.ReactElement | null {
     // Account settings live inside a workspace, so the profile link hosts
     // itself in one the reader belongs to (main#670); the first listed
     // workspace stands in for the address that turned out not to exist.
-    return (
-      <WorkspaceNotFoundScreen
-        email={me.data?.email ?? ""}
-        workspaceCount={list.length}
-        workspaceSlug={list[0]?.slug ?? null}
-      />
-    );
+    return <WorkspaceNotFoundScreen email={me.data?.email ?? ""} workspaceSlug={list[0]?.slug ?? null} />;
   }
   return <WorkspaceNotMemberScreen />;
 }
