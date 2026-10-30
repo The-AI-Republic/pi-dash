@@ -11259,7 +11259,7 @@ export interface DeskSigninUpdateLink {
   settingsProfileWorkspaceShortcuts(): Promise<string[]>;
   /** Activate one sidebar tab; resolves once the tab address lands. */
   settingsProfileSelectTab(label: string): Promise<void>;
-  /** Open an arbitrary path authenticated; resolves with the final path-plus-query after redirects. */
+  /** Open an arbitrary path authenticated; resolves with the final path, query and fragment after redirects. */
   settingsProfileOpenPath(path: string, cookies: ParityBrowserCookie[]): Promise<string>;
   /**
    * Whether the account-settings page rendered inside the normal app shell

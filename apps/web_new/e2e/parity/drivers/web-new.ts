@@ -42553,7 +42553,7 @@ export class WebNewDriver implements ParityDriver {
   async settingsProfileOpenPath(path: string, cookies: ParityBrowserCookie[]): Promise<string> {
     await this.settingsProfileGoto(path, cookies);
     const url = new URL(this.page.url());
-    return `${url.pathname}${url.search}`;
+    return `${url.pathname}${url.search}${url.hash}`;
   }
   async settingsProfileInsideAppShell(): Promise<boolean> {
     // Account settings are an ordinary workspace page (main#670), so the

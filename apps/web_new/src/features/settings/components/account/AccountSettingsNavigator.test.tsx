@@ -197,4 +197,19 @@ describe("AccountSettingsNavigator", () => {
       within(drawer).getByRole("heading", { name: "Your Profile" })
     );
   });
+
+  it("namespaces the workspace rows' test ids per copy", () => {
+    setup();
+    fireEvent.click(screen.getByTestId("account-settings-menu"));
+    const drawer = screen.getByTestId("account-settings-drawer");
+    // The docked copy keeps the plain ids; the drawer copy must not repeat
+    // them, or a row query would hit whichever copy came first.
+    expect(screen.getAllByTestId("account-settings-workspace-toggle-acme")).toHaveLength(1);
+    expect(within(drawer).getByTestId("account-settings-drawer-workspace-toggle-acme")).toBeInTheDocument();
+    expect(within(drawer).queryByTestId("account-settings-workspace-toggle-acme")).toBeNull();
+    expect(within(drawer).getByTestId("account-settings-drawer-workspace-link-acme-general")).toHaveAttribute(
+      "href",
+      "/acme/settings/"
+    );
+  });
 });

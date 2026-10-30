@@ -9,12 +9,6 @@
 
 import { DEFAULT_PROFILE_SETTINGS_TAB, type ProfileSettingsTabId, queryWithoutMark } from "./tabNavigation.js";
 
-/** The legacy default tab's address; kept for older callers and tests. */
-export { DEFAULT_PROFILE_SETTINGS_TAB } from "./tabNavigation.js";
-
-/** Legacy personal-settings root (outside any workspace). */
-export const LEGACY_SETTINGS_ROOT = "/settings";
-
 /**
  * The tab addressed by `/<ws>/settings/account/<tab>/`. A query is kept
  * verbatim; a fragment (old links pointed at `#voice-dictation`) rides
@@ -36,14 +30,4 @@ export function accountSettingsHref(
 /** The general-tab address in a workspace. */
 export function accountSettingsGeneralHref(workspaceSlug: string): string {
   return accountSettingsHref(workspaceSlug, DEFAULT_PROFILE_SETTINGS_TAB);
-}
-
-/**
- * The tab a `/<ws>/settings/account/...` address names; null when the
- * address is inside no workspace or names no account tab.
- */
-export function accountSettingsWorkspace(pathname: string): string | null {
-  const [head, settings, account] = pathname.split("/").filter(Boolean);
-  if (head === undefined || settings !== "settings" || account !== "account") return null;
-  return head;
 }

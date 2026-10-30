@@ -81,17 +81,3 @@ export function isWorkspaceSettingLinkActive(
   if (link.key === "general") return here === target;
   return here === target || here.startsWith(`${target}/`);
 }
-
-/** The entry that reads current, or null when none does. */
-export function activeWorkspaceSettingLink<T extends WorkspaceSettingLink>(
-  pathname: string,
-  workspaceSlug: string,
-  groups: readonly { links: readonly T[] }[]
-): T | null {
-  for (const group of groups) {
-    for (const link of group.links) {
-      if (isWorkspaceSettingLinkActive(pathname, workspaceSlug, link)) return link;
-    }
-  }
-  return null;
-}

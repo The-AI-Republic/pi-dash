@@ -75,11 +75,7 @@ export {
   workspaceSettingsRoleLabel,
 } from "./lib/sections.js";
 export { WORKSPACE_SETTINGS_ROUTE_ID, isWorkspaceSettingsRouteId } from "./lib/routeId.js";
-export {
-  activeWorkspaceSettingLink,
-  isWorkspaceSettingLinkActive,
-  permittedWorkspaceSettingGroups,
-} from "./lib/perWorkspace.js";
+export { isWorkspaceSettingLinkActive, permittedWorkspaceSettingGroups } from "./lib/perWorkspace.js";
 export type { RolePermissions, WorkspaceSettingGroupLinks, WorkspaceSettingLink } from "./lib/perWorkspace.js";
 export type {
   VisibleWorkspaceSettingsGroup,

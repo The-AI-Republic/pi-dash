@@ -834,6 +834,18 @@ describe("settings shell reads (NEWFRONT-586, PROF-009/010/026)", () => {
     expect(goto).toHaveBeenCalledWith("/settings?keep=2", { waitUntil: "domcontentloaded" });
   });
 
+  it("reports the landed fragment as well as the query", async () => {
+    // The PROF-026 fragment step asserts through this read, so it must keep
+    // the address bar's hash instead of dropping it with the origin.
+    const { page } = settingsPage({
+      url: () => "https://app.test/acme/settings/account/ai-assistant/?keep=2#voice-dictation",
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileOpenPath("/settings/profile/ai-assistant#voice-dictation", [])).toBe(
+      "/acme/settings/account/ai-assistant/?keep=2#voice-dictation"
+    );
+  });
+
   it("refuses a tab switch that never navigates", async () => {
     const { page } = settingsPage({
       waitForFunction: async () => {

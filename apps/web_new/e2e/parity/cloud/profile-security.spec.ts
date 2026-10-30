@@ -107,16 +107,13 @@ test(
     await driver.page.context().clearCookies();
     // Single-arg form: both stacks share the localhost cookie domain.
     await driver.page.context().addCookies(sessionBrowserCookies(cookie));
-    // The legacy address still resolves on both targets; only where it lands
-    // differs (main#670).
+    // This scenario deliberately reads the old app's DOM on both legs (the
+    // OSS oracle keeps the security tab for self-managed builds), so the
+    // address it navigates to and the landing it expects are the old app's
+    // on both targets. Web_new's own security landing is pinned by the
+    // direct-URL test above.
     await driver.page.goto(`${oss.oracle}/settings/profile/security`);
-    await expect
-      .poll(() => driver.currentPath(), { timeout: 60_000 })
-      .toBe(
-        driver.target === "web_new"
-          ? `/${oss.seed.workspaceSlug}/settings/account/security/`
-          : "/settings/profile/security"
-      );
+    await expect.poll(() => driver.currentPath(), { timeout: 60_000 }).toBe("/settings/profile/security");
     await expect.poll(() => driver.cloudProfileSidebarTabs(), { timeout: 60_000 }).toContain("AI Assistant");
     const tabs = await driver.cloudProfileSidebarTabs();
     expect(tabs).toContain("Security");

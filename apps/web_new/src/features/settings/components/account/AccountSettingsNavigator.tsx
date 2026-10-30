@@ -68,6 +68,9 @@ export function AccountSettingsNavigator(props: AccountSettingsNavigatorProps): 
     <AccountSettingsNavigatorContent
       {...props}
       idPrefix="account-settings-panel"
+      // The docked copy keeps the plain test ids the parity driver reads;
+      // only the drawer copy namespaces its own.
+      testIdPrefix="account-settings"
       onFollow={() => {
         setDrawerOpen(false);
       }}
@@ -118,6 +121,7 @@ export function AccountSettingsNavigator(props: AccountSettingsNavigatorProps): 
             <AccountSettingsNavigatorContent
               {...props}
               idPrefix="account-settings-drawer"
+              testIdPrefix="account-settings-drawer"
               onFollow={() => {
                 setDrawerOpen(false);
               }}
@@ -138,8 +142,13 @@ function AccountSettingsNavigatorContent({
   isTabServed,
   tabHref,
   idPrefix,
+  testIdPrefix,
   onFollow,
-}: AccountSettingsNavigatorProps & { idPrefix: string; onFollow: () => void }): React.ReactElement {
+}: AccountSettingsNavigatorProps & {
+  idPrefix: string;
+  testIdPrefix: string;
+  onFollow: () => void;
+}): React.ReactElement {
   const groups = profileSettingsGroups(isTabServed);
 
   const follow = (event: React.MouseEvent<HTMLAnchorElement>, href: string): void => {
@@ -220,6 +229,7 @@ function AccountSettingsNavigatorContent({
             <WorkspaceSettingsRow
               key={`${workspace.id}:${String(workspace.slug === workspaceSlug)}`}
               idPrefix={idPrefix}
+              testIdPrefix={testIdPrefix}
               workspace={workspace}
               initiallyExpanded={workspace.slug === workspaceSlug}
               pathname={pathname}

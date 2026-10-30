@@ -204,6 +204,7 @@ describe("legacy settings forwards as the router lands them", () => {
     expect(await landing("/acme/settings/account/security/?keep=2")).toBe("/acme/settings/account/security/?keep=2");
     // The three addresses that do forward land on the slashed tab the app
     // itself links to, in their own workspace, carrying query and fragment.
+    expect(await landing("/acme/settings/account")).toBe("/acme/settings/account/general/");
     expect(await landing("/acme/settings/account/")).toBe("/acme/settings/account/general/");
     expect(await landing("/acme/settings/account/?keep=1")).toBe("/acme/settings/account/general/?keep=1");
     expect(await landing("/acme/settings/account/?keep=1#section")).toBe(

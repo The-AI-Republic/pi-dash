@@ -7,11 +7,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER, selectPermissions } from "../../../core/session/index.js";
-import {
-  activeWorkspaceSettingLink,
-  isWorkspaceSettingLinkActive,
-  permittedWorkspaceSettingGroups,
-} from "./perWorkspace.js";
+import { isWorkspaceSettingLinkActive, permittedWorkspaceSettingGroups } from "./perWorkspace.js";
 
 const ADMIN = selectPermissions(ROLE_ADMIN);
 const MEMBER = selectPermissions(ROLE_MEMBER);
@@ -65,19 +61,5 @@ describe("isWorkspaceSettingLinkActive", () => {
     expect(isWorkspaceSettingLinkActive("/acme/settings/account/security/", "acme", general)).toBe(false);
     expect(isWorkspaceSettingLinkActive("/acme/settings/account/general/", "acme", webhooks)).toBe(false);
     expect(isWorkspaceSettingLinkActive("/acme/projects", "acme", general)).toBe(false);
-  });
-});
-
-describe("activeWorkspaceSettingLink", () => {
-  const groups = permittedWorkspaceSettingGroups("acme", ADMIN);
-
-  it("names the single entry the address reads as", () => {
-    expect(activeWorkspaceSettingLink("/acme/settings/billing/", "acme", groups)?.key).toBe("billing");
-    expect(activeWorkspaceSettingLink("/acme/settings/webhooks/w-2", "acme", groups)?.key).toBe("webhooks");
-    expect(activeWorkspaceSettingLink("/acme/settings", "acme", groups)?.key).toBe("general");
-  });
-
-  it("answers null while account settings are open", () => {
-    expect(activeWorkspaceSettingLink("/acme/settings/account/security/", "acme", groups)).toBeNull();
   });
 });

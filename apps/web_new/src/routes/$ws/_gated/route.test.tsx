@@ -320,7 +320,13 @@ import { createAppClient } from "../../../core/api/index.js";
 import { edition } from "../../../core/edition/index.js";
 import { selectCreatableProjects } from "../../../features/issues/create/createForm.js";
 import { platform } from "../../../core/platform/index.js";
-import { DOCS_URL, useRailState, useShellChrome, useShortcutsDialog } from "../../../shared/shell/index.js";
+import {
+  DOCS_URL,
+  isNotificationsPath,
+  useRailState,
+  useShellChrome,
+  useShortcutsDialog,
+} from "../../../shared/shell/index.js";
 import { isSettingsPagePath, Route } from "./route.js";
 
 function PageProbe({ page, query }: { page: PalettePage; query: string }) {
@@ -1668,13 +1674,15 @@ describe("gated layout shell wiring", () => {
       expect(harness.topBar?.sidebarMounted).toBe(true);
     });
 
-    it("keeps the sidebar on an account tab whose name appears deeper in other pages", () => {
+    it("does not read the top bar's inbox as current on the account notifications tab", () => {
       // The inbox keeps its own autohide; the account notifications tab is
-      // an account page, not the inbox, so the top bar's inbox link is not
-      // current there.
+      // an account page whose name merely repeats a deeper segment, so the
+      // top bar's inbox link (which keys off the same rule) stays idle.
       harness.routerState.location.pathname = "/acme/settings/account/notifications/";
       renderShell();
-      expect(harness.sidebar).toBeNull();
+      expect(harness.topBar?.currentPath).toBe("/acme/settings/account/notifications/");
+      // The top bar reads its inbox state from the same rule.
+      expect(isNotificationsPath(String(harness.topBar?.currentPath))).toBe(false);
     });
 
     it("opens the shortcut list from the help menu", async () => {

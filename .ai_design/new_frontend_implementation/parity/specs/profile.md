@@ -209,8 +209,10 @@ old app, the old app's own `/<ws>/settings/account/*` redirect bounces the
 reader back to `/settings/profile/*`, which web_new forwards to the account
 address again — a loop. The migrated-route list therefore needs a
 `/{ws}/settings/account/*` entry, regenerated into both Caddyfiles, before
-the area gate can prove the scenarios. The profile area gate owns that
-entry together with the rest of its proxy regeneration.
+the area gate can prove the scenarios. The entry is in the migrated-route
+list and in both generated Caddyfiles already (added with the route in
+NEWFRONT-1030 under a coordinator path grant), so the area gate only has
+to confirm it is present rather than regenerate it.
 
 **In-app links.** Every in-app entry to personal settings names the new
 address, using the workspace the reader is in: the user menu's Settings

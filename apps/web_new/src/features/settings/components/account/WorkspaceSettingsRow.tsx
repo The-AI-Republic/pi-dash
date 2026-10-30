@@ -27,6 +27,8 @@ export interface WorkspaceSettingsRowProps {
   onNavigate: (href: string) => void;
   /** Distinguishes the docked copy's ids from the drawer copy's. */
   idPrefix?: string;
+  /** Test-id namespace, so the drawer copy does not repeat the docked ids. */
+  testIdPrefix?: string;
 }
 
 /** The character shown ahead of a workspace name. */
@@ -52,6 +54,7 @@ export function WorkspaceSettingsRow({
   pathname,
   onNavigate,
   idPrefix = "account-settings",
+  testIdPrefix = "account-settings",
 }: WorkspaceSettingsRowProps): React.ReactElement {
   const groups = permittedWorkspaceSettingGroups(workspace.slug, selectPermissions(workspace.role));
   const [expanded, setExpanded] = React.useState(initiallyExpanded);
@@ -67,10 +70,10 @@ export function WorkspaceSettingsRow({
     // Nothing openable means no expander at all: the row keeps the way
     // home it had before the nesting arrived, minus the chevron.
     return (
-      <li data-testid={`account-settings-workspace-${workspace.slug}`} data-expandable="false">
+      <li data-testid={`${testIdPrefix}-workspace-${workspace.slug}`} data-expandable="false">
         <a
           href={`/${workspace.slug}/`}
-          data-testid={`account-settings-workspace-home-${workspace.slug}`}
+          data-testid={`${testIdPrefix}-workspace-home-${workspace.slug}`}
           onClick={(event) => {
             follow(event, `/${workspace.slug}/`);
           }}
@@ -84,12 +87,12 @@ export function WorkspaceSettingsRow({
   }
 
   return (
-    <li data-testid={`account-settings-workspace-${workspace.slug}`} data-expandable="true">
+    <li data-testid={`${testIdPrefix}-workspace-${workspace.slug}`} data-expandable="true">
       <button
         type="button"
         aria-expanded={expanded}
         aria-controls={groupId}
-        data-testid={`account-settings-workspace-toggle-${workspace.slug}`}
+        data-testid={`${testIdPrefix}-workspace-toggle-${workspace.slug}`}
         onClick={() => {
           setExpanded((current) => !current);
         }}
@@ -105,7 +108,7 @@ export function WorkspaceSettingsRow({
         />
       </button>
       {expanded ? (
-        <div id={groupId} data-testid={`account-settings-workspace-group-${workspace.slug}`} className="pl-(--space-6)">
+        <div id={groupId} data-testid={`${testIdPrefix}-workspace-group-${workspace.slug}`} className="pl-(--space-6)">
           {groups.map((group) => (
             <section key={group.key} aria-label={`${workspace.name} ${group.label}`} className="pb-(--space-1)">
               <h3 className="text-caption px-(--space-2) py-(--space-1) font-medium tracking-wide text-(--text-muted) uppercase">
@@ -118,6 +121,7 @@ export function WorkspaceSettingsRow({
                       workspaceSlug={workspace.slug}
                       link={link}
                       pathname={pathname}
+                      testIdPrefix={testIdPrefix}
                       onFollow={follow}
                     />
                   </li>
@@ -135,11 +139,13 @@ function WorkspaceSettingEntry({
   workspaceSlug,
   link,
   pathname,
+  testIdPrefix,
   onFollow,
 }: {
   workspaceSlug: string;
   link: WorkspaceSettingLink;
   pathname: string;
+  testIdPrefix: string;
   onFollow: (event: React.MouseEvent<HTMLAnchorElement>, href: string) => void;
 }): React.ReactElement {
   const active = isWorkspaceSettingLinkActive(pathname, workspaceSlug, link);
@@ -147,7 +153,7 @@ function WorkspaceSettingEntry({
     <a
       href={link.href}
       aria-current={active ? "page" : undefined}
-      data-testid={`account-settings-workspace-link-${workspaceSlug}-${link.key}`}
+      data-testid={`${testIdPrefix}-workspace-link-${workspaceSlug}-${link.key}`}
       onClick={(event) => {
         onFollow(event, link.href);
       }}
