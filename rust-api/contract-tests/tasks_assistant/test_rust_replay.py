@@ -1819,9 +1819,11 @@ def test_create_issue_prompt_failure_completes_turn(db_conn):
     assert len(runs) == 1, "the failed prompt build still commits its run row"
     run = runs[0]
     assert run["status"] == "failed"
-    assert run["error_code"] == "prompt_build_failed"
+    assert run["error_details"]["code"] == "prompt_build_failed"
     assert run["trigger"] == "state_transition"
-    assert run["error"].startswith("prompt build failed:")
+    assert run["error_details"]["message"].startswith("prompt build failed:")
+    assert set(run["error_details"]) == {"code", "message"}
+    assert run["refusal_category"] == ""
     result = _tool_result(requests)
     assert result["created"] is True
     assert str(result["id"]) == str(issue["id"])
