@@ -32,6 +32,7 @@ import {
   type AuthedSession,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
+import { openArchivesModulesTab } from "./chunkRecovery";
 import { parityNewUrl, parityOracleUrl } from "../helpers/parity-env";
 
 const ROW_013 = ["MOD-013"];
@@ -252,7 +253,7 @@ test(
 
     await test.step("an archived row disables both controls for an editor", async () => {
       await driver.modulesOpenList(world.workspaceSlug, world.projectId, browserSessionCookies(world.owner));
-      await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+      await openArchivesModulesTab(driver, world.workspaceSlug, world.projectId);
       await driver.modulesAwaitRow("Locked Module");
       expect(await driver.modulesRowDateDisabled("Locked Module")).toBe(true);
       expect(await driver.modulesStatusDisabled("Locked Module")).toBe(true);
@@ -455,7 +456,7 @@ test(
 
     await test.step("editors on an archived module see restore instead of edit/archive/delete", async () => {
       await driver.modulesOpenList(world.workspaceSlug, world.projectId, browserSessionCookies(world.owner));
-      await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+      await openArchivesModulesTab(driver, world.workspaceSlug, world.projectId);
       await driver.modulesAwaitRow("Gone Module");
       await driver.modulesOpenRowMenu("Gone Module");
       const entries = await driver.modulesMenuItems();
@@ -523,7 +524,7 @@ test(
 
     await test.step("restore on an archived module restores with a notice", async () => {
       await driver.modulesOpenList(world.workspaceSlug, world.projectId, browserSessionCookies(world.owner));
-      await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+      await openArchivesModulesTab(driver, world.workspaceSlug, world.projectId);
       await driver.modulesAwaitRow("Launch Gone");
       await driver.modulesOpenRowMenu("Launch Gone");
       await driver.modulesMenuChoose("Restore");
@@ -684,7 +685,7 @@ test(
     await archivesArchiveModule(world.workspaceSlug, world.projectId, moduleId, world.owner.cookie);
 
     await driver.modulesOpenList(world.workspaceSlug, world.projectId, browserSessionCookies(world.owner));
-    await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+    await openArchivesModulesTab(driver, world.workspaceSlug, world.projectId);
     await driver.modulesAwaitRow("Archived Peek");
 
     await driver.modulesClickRow("Archived Peek");

@@ -48,6 +48,7 @@ import {
   type AuthedSession,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
+import { openArchivesModulesTab } from "./chunkRecovery";
 
 const ROW_008 = ["MOD-008"];
 const ROW_009 = ["MOD-009"];
@@ -369,7 +370,7 @@ test(
       `/${world.workspaceSlug}/projects/${world.projectId}/modules`,
       browserSessionCookies(world.owner)
     );
-    await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+    await openArchivesModulesTab(driver, world.workspaceSlug, world.projectId);
     await driver.archivesAwaitModuleRow("Row Archived");
     await driver.modulesListArchivedRowClickOpensPeek("Row Archived");
     expect(await driver.currentPath()).toContain("/archives/modules");

@@ -38,6 +38,7 @@ import {
   signInSession,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
+import { openArchivesModulesTab } from "./chunkRecovery";
 import type { ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
 
 test.use({ viewport: { width: 1600, height: 900 } });
@@ -953,7 +954,7 @@ test.describe("module detail on desktop", () => {
             `/${seed.workspaceSlug}/projects/${projectId}/modules`,
             sessionBrowserCookies(session)
           );
-          await driver.archivesOpenModulesTab(seed.workspaceSlug, projectId);
+          await openArchivesModulesTab(driver, seed.workspaceSlug, projectId);
           await driver.archivesAwaitModuleRow(`${tag} archived`);
           await driver.archivesOpenModulePeek(`${tag} archived`);
           // The peek body loads behind its skeleton; the old peek

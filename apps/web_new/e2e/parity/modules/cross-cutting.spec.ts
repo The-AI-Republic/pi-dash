@@ -45,6 +45,7 @@ import {
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 import { entryTrafficViolations } from "./entryTraffic";
+import { openArchivesModulesTab } from "./chunkRecovery";
 
 const ROW_036 = ["MOD-036"];
 const ROW_037 = ["MOD-037"];
@@ -829,7 +830,7 @@ test(
 
     await test.step("the archived-modules screen renders the archived row", async () => {
       await driver.modulesXOpenModulesList(world.workspaceSlug, world.projectId);
-      await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+      await openArchivesModulesTab(driver, world.workspaceSlug, world.projectId);
       await expect.poll(async () => driver.archivesModuleRowNames(), { timeout: 30_000 }).toContain(archivedName);
       const archived = await archivesArchivedModules(world.workspaceSlug, world.projectId, world.owner.cookie);
       expect(archived.map((row) => row.name)).toContain(archivedName);
