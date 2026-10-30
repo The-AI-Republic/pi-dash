@@ -89,20 +89,44 @@ pub const FAVICON_SELECTORS: [&str; 4] = [
 ];
 
 // ---------------------------------------------------------------------------
-// URL helpers (minimal `urlparse`/`urljoin` surface this port needs)
+// URL helpers (`urlparse`/`urljoin` surface this port needs)
 // ---------------------------------------------------------------------------
+
+/// `scheme_chars` (`urllib/parse.py`): ASCII letters, digits, `+`, `-`, `.`.
+fn is_scheme_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')
+}
+
+/// Scheme detection shared by [`url_scheme`] and [`parse_url`], mirroring
+/// `urlsplit`: a scheme exists only when the text before the first `:`
+/// starts with an ASCII letter and holds only scheme characters.
+/// Returns the raw (un-lower-cased) scheme plus the remainder.
+fn split_scheme_name(text: &str) -> Option<(&str, &str)> {
+    let colon = text.find(':')?;
+    if colon == 0 {
+        return None;
+    }
+    let head = &text[..colon];
+    let mut bytes = head.bytes();
+    match bytes.next() {
+        Some(first) if first.is_ascii_alphabetic() => {}
+        _ => return None,
+    }
+    if !bytes.all(is_scheme_char) {
+        return None;
+    }
+    Some((head, &text[colon + 1..]))
+}
 
 /// Lower-cased scheme of `url` (`""` when there is none).
 ///
 /// `file:///etc/passwd` → `"file"`; `https://example.com/x` → `"https"`.
-/// Mirrors `urlparse(url).scheme`, which lower-cases the scheme.
+/// Mirrors `urlparse(url).scheme`, which lower-cases the scheme: only a
+/// valid leading scheme counts, so `://` later in the string (a query, a
+/// path) never forms one (`:45`).
 pub fn url_scheme(url: &str) -> String {
-    let rest = match url.find("://") {
-        Some(i) => return url[..i].to_ascii_lowercase(),
-        None => url,
-    };
-    match rest.find(':') {
-        Some(i) => rest[..i].to_ascii_lowercase(),
+    match split_scheme_name(url) {
+        Some((scheme, _)) => scheme.to_ascii_lowercase(),
         None => String::new(),
     }
 }
@@ -155,29 +179,276 @@ pub fn url_origin(url: &str) -> Option<String> {
     Some(format!("{scheme}://{authority}"))
 }
 
-/// Minimal `urljoin(base, rel)` for this port's cases: absolute URLs pass
-/// through, scheme-relative (`//host/path`) inherits the base scheme,
-/// root-relative (`/path`) resolves against the origin, and anything else
-/// merges onto the base directory.
+/// `uses_relative` (`urllib/parse.py`): schemes whose URLs resolve
+/// relative references against a base.
+const USES_RELATIVE: &[&str] = &[
+    "", "ftp", "http", "gopher", "nntp", "imap", "wais", "file", "https", "shttp", "mms",
+    "prospero", "rtsp", "rtsps", "rtspu", "sftp", "svn", "svn+ssh", "ws", "wss",
+];
+
+/// `uses_netloc` (`urllib/parse.py`).
+const USES_NETLOC: &[&str] = &[
+    "",
+    "ftp",
+    "http",
+    "gopher",
+    "nntp",
+    "telnet",
+    "imap",
+    "wais",
+    "file",
+    "mms",
+    "https",
+    "shttp",
+    "snews",
+    "prospero",
+    "rtsp",
+    "rtsps",
+    "rtspu",
+    "rsync",
+    "svn",
+    "svn+ssh",
+    "sftp",
+    "nfs",
+    "git",
+    "git+ssh",
+    "ws",
+    "wss",
+    "itms-services",
+];
+
+/// `uses_params` (`urllib/parse.py`): schemes whose last path segment
+/// splits `;params`.
+const USES_PARAMS: &[&str] = &[
+    "", "ftp", "hdl", "prospero", "http", "imap", "https", "shttp", "rtsp", "rtsps", "rtspu",
+    "sip", "sips", "mms", "sftp", "tel",
+];
+
+/// The six `urlparse` components (str-only).
+struct ParsedUrl {
+    scheme: String,
+    netloc: String,
+    path: String,
+    params: String,
+    query: String,
+    fragment: String,
+}
+
+/// `urlsplit` + `urlparse` (`urllib/parse.py`, str-only): WHATWG control
+/// stripping, scheme detection, `//netloc`, `#fragment`, `?query`, then
+/// `;params` for `uses_params` schemes. Never raises: the IPv6 and NFKC
+/// `ValueError`s have no fallible caller here, so unusual netlocs parse
+/// opaquely and fail later at validation or fetch — the crawl contains
+/// those as warnings with the same fallback metadata.
+fn parse_url(url: &str, default_scheme: &str) -> ParsedUrl {
+    // `url.lstrip(_WHATWG_C0_CONTROL_OR_SPACE)` (C0 + space, not DEL),
+    // then drop \t \r \n anywhere (`_UNSAFE_URL_BYTES_TO_REMOVE`).
+    let cleaned: String = url
+        .trim_start_matches(|c: char| c == ' ' || (c as u32) < 0x20)
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\r' | '\n'))
+        .collect();
+    let mut rest = cleaned.as_str();
+    let mut scheme = default_scheme.to_owned();
+    if let Some((found, remainder)) = split_scheme_name(rest) {
+        scheme = found.to_ascii_lowercase();
+        rest = remainder;
+    }
+    let mut netloc = "";
+    if rest.starts_with("//") {
+        // `_splitnetloc(url, 2)`: netloc runs to the first `/`, `?` or `#`.
+        let mut delim = rest.len();
+        for byte in *b"/?#" {
+            if let Some(offset) = rest.as_bytes()[2..].iter().position(|b| *b == byte) {
+                delim = delim.min(2 + offset);
+            }
+        }
+        netloc = &rest[2..delim];
+        rest = &rest[delim..];
+    }
+    let mut fragment = "";
+    if let Some(hash) = rest.find('#') {
+        fragment = &rest[hash + 1..];
+        rest = &rest[..hash];
+    }
+    let mut query = "";
+    if let Some(mark) = rest.find('?') {
+        query = &rest[mark + 1..];
+        rest = &rest[..mark];
+    }
+    let (path, params) = split_params(rest, &scheme);
+    ParsedUrl {
+        scheme,
+        netloc: netloc.to_owned(),
+        path: path.to_owned(),
+        params: params.to_owned(),
+        query: query.to_owned(),
+        fragment: fragment.to_owned(),
+    }
+}
+
+/// `_splitparams`: the `;params` split applies only past the last `/`,
+/// and only when the caller parsed a `uses_params` scheme.
+fn split_params<'a>(path: &'a str, scheme: &str) -> (&'a str, &'a str) {
+    if !USES_PARAMS.contains(&scheme) || !path.contains(';') {
+        return (path, "");
+    }
+    match path.rfind('/') {
+        Some(slash) => match path[slash..].find(';') {
+            Some(offset) => {
+                let cut = slash + offset;
+                (&path[..cut], &path[cut + 1..])
+            }
+            None => (path, ""),
+        },
+        None => match path.find(';') {
+            Some(cut) => (&path[..cut], &path[cut + 1..]),
+            None => (path, ""),
+        },
+    }
+}
+
+/// `urlunparse` + `urlunsplit`: rejoin the six components. Empty query
+/// and fragment drop their delimiters; a `uses_netloc` scheme with an
+/// empty netloc still emits the `//` (`file:///etc/x`).
+fn unparse(
+    scheme: &str,
+    netloc: &str,
+    path: &str,
+    params: &str,
+    query: &str,
+    fragment: &str,
+) -> String {
+    let mut url = String::new();
+    url.push_str(path);
+    if !params.is_empty() {
+        url.push(';');
+        url.push_str(params);
+    }
+    if !netloc.is_empty()
+        || (!scheme.is_empty() && USES_NETLOC.contains(&scheme) && !url.starts_with("//"))
+    {
+        if !url.is_empty() && !url.starts_with('/') {
+            url.insert(0, '/');
+        }
+        let mut joined = String::with_capacity(2 + netloc.len() + url.len());
+        joined.push_str("//");
+        joined.push_str(netloc);
+        joined.push_str(&url);
+        url = joined;
+    }
+    if !scheme.is_empty() {
+        let mut prefixed = String::with_capacity(scheme.len() + 1 + url.len());
+        prefixed.push_str(scheme);
+        prefixed.push(':');
+        prefixed.push_str(&url);
+        url = prefixed;
+    }
+    if !query.is_empty() {
+        url.push('?');
+        url.push_str(query);
+    }
+    if !fragment.is_empty() {
+        url.push('#');
+        url.push_str(fragment);
+    }
+    url
+}
+
+/// `urljoin(base, rel)` (`urllib/parse.py:urljoin`): a ref with a
+/// different (or non-relative) scheme passes through unchanged; anything
+/// else resolves against the base per RFC 3986 — the base's query and
+/// fragment are ignored and dot segments removed. Django calls this for
+/// redirect `Location`s (`:108`) and favicon `href`s (`:197`).
 pub fn urljoin(base: &str, rel: &str) -> String {
-    if !url_scheme(rel).is_empty() && rel.contains("://") {
+    if base.is_empty() {
         return rel.to_owned();
     }
-    if let Some(stripped) = rel.strip_prefix("//") {
-        let scheme_end = base.find("://").map(|i| &base[..i]).unwrap_or("https");
-        return format!("{scheme_end}://{stripped}");
+    if rel.is_empty() {
+        return base.to_owned();
     }
-    if let Some(origin) = url_origin(base) {
-        if rel.starts_with('/') {
-            return format!("{origin}{rel}");
+    let parsed_base = parse_url(base, "");
+    let parsed_rel = parse_url(rel, &parsed_base.scheme);
+    if parsed_rel.scheme != parsed_base.scheme
+        || !USES_RELATIVE.contains(&parsed_rel.scheme.as_str())
+    {
+        return rel.to_owned();
+    }
+    let scheme = parsed_rel.scheme;
+    let netloc = if USES_NETLOC.contains(&scheme.as_str()) {
+        if !parsed_rel.netloc.is_empty() {
+            return unparse(
+                &scheme,
+                &parsed_rel.netloc,
+                &parsed_rel.path,
+                &parsed_rel.params,
+                &parsed_rel.query,
+                &parsed_rel.fragment,
+            );
         }
-        let dir = match base.rfind('/') {
-            Some(i) if i >= origin.len() => &base[..=i],
-            _ => &format!("{origin}/"),
+        parsed_base.netloc
+    } else {
+        parsed_rel.netloc
+    };
+    if parsed_rel.path.is_empty() && parsed_rel.params.is_empty() {
+        let query = if parsed_rel.query.is_empty() {
+            parsed_base.query
+        } else {
+            parsed_rel.query
         };
-        return format!("{dir}{rel}");
+        return unparse(
+            &scheme,
+            &netloc,
+            &parsed_base.path,
+            &parsed_base.params,
+            &query,
+            &parsed_rel.fragment,
+        );
     }
-    rel.to_owned()
+    let mut base_parts: Vec<&str> = parsed_base.path.split('/').collect();
+    if base_parts.last() != Some(&"") {
+        base_parts.pop();
+    }
+    let segments: Vec<&str> = if parsed_rel.path.starts_with('/') {
+        parsed_rel.path.split('/').collect()
+    } else {
+        let mut merged = base_parts;
+        merged.extend(parsed_rel.path.split('/'));
+        // `segments[1:-1] = filter(None, segments[1:-1])`: drop empty
+        // interior segments (redundant slashes), keep first and last.
+        let last = merged.len().saturating_sub(1);
+        merged
+            .into_iter()
+            .enumerate()
+            .filter(|(index, segment)| !segment.is_empty() || *index == 0 || *index == last)
+            .map(|(_, segment)| segment)
+            .collect()
+    };
+    let mut resolved: Vec<&str> = Vec::with_capacity(segments.len());
+    for segment in &segments {
+        if *segment == ".." {
+            resolved.pop();
+        } else if *segment != "." {
+            resolved.push(segment);
+        }
+    }
+    if matches!(segments.last(), Some(last) if *last == "." || *last == "..") {
+        resolved.push("");
+    }
+    let joined = resolved.join("/");
+    let path = if joined.is_empty() {
+        "/"
+    } else {
+        joined.as_str()
+    };
+    unparse(
+        &scheme,
+        &netloc,
+        path,
+        &parsed_rel.params,
+        &parsed_rel.query,
+        &parsed_rel.fragment,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -373,6 +644,11 @@ pub fn safe_get(
             Some(location) => location.to_owned(),
             None => break,
         };
+        // `if not redirect_url: break` (`:105-107`): a present-but-empty
+        // Location ends the loop; the redirect response returns as-is.
+        if redirect_url.is_empty() {
+            break;
+        }
         current_url = urljoin(&current_url, &redirect_url);
         validate(&current_url).map_err(SafeGetError::Invalid)?;
         redirect_count += 1;
@@ -2138,9 +2414,13 @@ mod tests {
     #[test]
     fn attr_unescape_spots() {
         // Attribute decoding is `html.unescape`, not the `<title>`
-        // decoder: `&unknown;` keeps its `;`, `&apos` stays literal.
+        // decoder: `&unknown;` keeps its `;` through decoding (pinned by
+        // test_link_crawl_link_attrs.py), `&apos` stays literal. The joined
+        // URL then drops that `;`: Django calls
+        // urljoin("https://example.com/", "&unknown;"), and CPython splits
+        // the empty params, yielding "https://example.com/&unknown".
         for (raw, expected) in [
-            ("&unknown;", "https://example.com/&unknown;"),
+            ("&unknown;", "https://example.com/&unknown"),
             ("&apos", "https://example.com/&apos"),
             ("&#65B", "https://example.com/AB"),
             ("&notin", "https://example.com/\u{00ac}in"),
@@ -3350,6 +3630,297 @@ mod tests {
         assert_eq!(
             CRAWL_TASK_NAME,
             "pi_dash.bgtasks.work_item_link_task.crawl_work_item_link_title"
+        );
+    }
+
+    // -- PIDASHCONV-1668: urljoin/url_scheme parity + empty Location ------
+    // Expected values are CPython 3.12 `urllib.parse` outputs, pinned
+    // hermetically in
+    // `contract-tests/tasks_webhooks/test_link_crawl_urljoin.py`.
+
+    #[test]
+    fn urljoin_issue_rows_match_python() {
+        for (base, rel, expected) in [
+            (
+                "https://x.com/a/b",
+                "/login?next=https://x.com/foo",
+                "https://x.com/login?next=https://x.com/foo",
+            ),
+            (
+                "https://x.com/a/b",
+                "data:image/png;base64,AAAA",
+                "data:image/png;base64,AAAA",
+            ),
+            (
+                "https://x.com/a/b?u=/p/q",
+                "fav.ico",
+                "https://x.com/a/fav.ico",
+            ),
+            ("https://x.com/a/b", "?page=2", "https://x.com/a/b?page=2"),
+            ("https://x.com/a/b/", "../f.ico", "https://x.com/a/f.ico"),
+        ] {
+            assert_eq!(urljoin(base, rel), expected, "base={base:?} rel={rel:?}");
+        }
+    }
+
+    #[test]
+    fn urljoin_port_guards() {
+        for (base, rel, expected) in [
+            ("https://x.com/a/b;p?q#f", "?x=1", "https://x.com/a/b;p?x=1"),
+            (
+                "https://x.com/a/b",
+                "//other.com/p?q",
+                "https://other.com/p?q",
+            ),
+            (
+                "https://x.com/a/b?q#f",
+                "#frag2",
+                "https://x.com/a/b?q#frag2",
+            ),
+            ("https://x.com/a/b#f", "", "https://x.com/a/b#f"),
+            ("", "rel/path", "rel/path"),
+            ("https://x.com/a/b", "../../..", "https://x.com/"),
+            ("https://x.com/a/b/c", "./d/./e", "https://x.com/a/b/d/e"),
+            ("https://x.com/a/b", "HTTP://X.COM/A", "HTTP://X.COM/A"),
+            ("http://x.com/a/b", "HTTP://X.COM/A", "http://X.COM/A"),
+            ("https://x.com/a/b", "mailto:u@x.com", "mailto:u@x.com"),
+            (
+                "https://x.com/a/b",
+                "java\tscript:alert(1)",
+                "java\tscript:alert(1)",
+            ),
+            ("https://x.com/a/b", "\n/path", "https://x.com/path"),
+            ("https://x.com/a/b;p", "g;x", "https://x.com/a/g;x"),
+            ("https://x.com", "?q", "https://x.com?q"),
+            ("https://x.com", "a", "https://x.com/a"),
+            ("file:///etc/passwd", "x", "file:///etc/x"),
+            ("https://x.com/a/b", ".", "https://x.com/a/"),
+            ("https://x.com/a/b", "..", "https://x.com/"),
+            ("http://x.com/a/b", "//Y.COM/p", "http://Y.COM/p"),
+            ("https://x.com/a/b?u=1#2", "p", "https://x.com/a/p"),
+            ("https://x.com/a/b", "p?q#f", "https://x.com/a/p?q#f"),
+            ("https://x.com/a/", ".", "https://x.com/a/"),
+            ("https://x.com/a/b", "a/b/.", "https://x.com/a/a/b/"),
+            ("  https://x.com/a", "b", "https://x.com/b"),
+            ("https://x.com/a/b", "g:h", "g:h"),
+            ("https://x.com/a/b", "?", "https://x.com/a/b"),
+            ("https://x.com/a/b", "#", "https://x.com/a/b"),
+            ("https://x.com/a/b", "/", "https://x.com/"),
+            ("https://x.com/a/b/c/", "../../g", "https://x.com/a/g"),
+        ] {
+            assert_eq!(urljoin(base, rel), expected, "base={base:?} rel={rel:?}");
+        }
+    }
+
+    #[test]
+    fn urljoin_rfc3986_reference_vectors() {
+        let base = "http://x.com/a/b/c/d;p?q";
+        for (rel, expected) in [
+            ("g", "http://x.com/a/b/c/g"),
+            ("./g", "http://x.com/a/b/c/g"),
+            ("g/", "http://x.com/a/b/c/g/"),
+            ("/g", "http://x.com/g"),
+            ("//y.com/g", "http://y.com/g"),
+            ("?y", "http://x.com/a/b/c/d;p?y"),
+            ("g?y", "http://x.com/a/b/c/g?y"),
+            ("#s", "http://x.com/a/b/c/d;p?q#s"),
+            ("g#s", "http://x.com/a/b/c/g#s"),
+            ("g?y#s", "http://x.com/a/b/c/g?y#s"),
+            (";x", "http://x.com/a/b/c/;x"),
+            ("g;x", "http://x.com/a/b/c/g;x"),
+            ("g;x?y#s", "http://x.com/a/b/c/g;x?y#s"),
+            ("", "http://x.com/a/b/c/d;p?q"),
+            (".", "http://x.com/a/b/c/"),
+            ("./", "http://x.com/a/b/c/"),
+            ("..", "http://x.com/a/b/"),
+            ("../", "http://x.com/a/b/"),
+            ("../g", "http://x.com/a/b/g"),
+            ("../..", "http://x.com/a/"),
+            ("../../", "http://x.com/a/"),
+            ("../../g", "http://x.com/a/g"),
+        ] {
+            assert_eq!(urljoin(base, rel), expected, "rel={rel:?}");
+        }
+    }
+
+    #[test]
+    fn url_scheme_only_valid_leading_scheme() {
+        for (url, expected) in [
+            ("/login?next=https://x.com/foo", ""),
+            ("data:image/png;base64,AAAA", "data"),
+            ("HTTP://x.com/a", "http"),
+            ("1http://x.com/", ""),
+            ("a+b.c-d://x.com/", "a+b.c-d"),
+            ("://x.com/", ""),
+            ("https://x.com/a", "https"),
+            ("file:///etc/passwd", "file"),
+            ("mailto:u@x.com", "mailto"),
+            ("tel:+1-816-555-1212", "tel"),
+            ("a:b/c", "a"),
+            ("a/b:c", ""),
+            ("", ""),
+        ] {
+            assert_eq!(url_scheme(url), expected, "url={url:?}");
+        }
+    }
+
+    #[test]
+    fn sso_style_redirect_is_followed_and_title_stored() {
+        // Issue row 1 at crawl level: a 302 to `/login?next=https://…`
+        // must be followed and the landing title stored (pre-fix the
+        // joined ref failed validation, so title stayed None).
+        let seen = std::cell::RefCell::new(Vec::new());
+        let get = |req: &HttpRequest| {
+            seen.borrow_mut().push(req.url.clone());
+            if req.url == "https://example.com/a/b" {
+                Ok(redirect_response("/login?next=https://example.com/foo"))
+            } else {
+                Ok(HttpResponse {
+                    status: 200,
+                    headers: HttpHeaders::new(),
+                    body: b"<html><head><title>Welcome back</title></head></html>".to_vec(),
+                    is_redirect: false,
+                })
+            }
+        };
+        let head = |_: &HttpRequest| {
+            Ok(HttpResponse {
+                status: 404,
+                headers: HttpHeaders::new(),
+                body: Vec::new(),
+                is_redirect: false,
+            })
+        };
+        let report = crawl("https://example.com/a/b", &deny_all(), &get, &head);
+        assert_eq!(
+            report.result.get("title"),
+            Some(&Value::String("Welcome back".to_owned()))
+        );
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                "https://example.com/a/b".to_owned(),
+                "https://example.com/login?next=https://example.com/foo".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_location_returns_redirect_response_as_is() {
+        // `if not redirect_url: break` (`:105-107`): a present-but-empty
+        // Location ends the loop without another fetch.
+        let calls = std::cell::Cell::new(0);
+        let get = |_: &HttpRequest| {
+            calls.set(calls.get() + 1);
+            Ok(HttpResponse {
+                status: 302,
+                headers: HttpHeaders(vec![("Location".to_owned(), String::new())]),
+                body: b"redirect-body".to_vec(),
+                is_redirect: true,
+            })
+        };
+        let (response, final_url) =
+            safe_get("https://example.com/a/b", &[], 1, &deny_all(), &get).unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(response.status, 302);
+        assert_eq!(response.body, b"redirect-body");
+        assert_eq!(final_url, "https://example.com/a/b");
+    }
+
+    #[test]
+    fn data_favicon_href_yields_default_with_null_url() {
+        // Issue row 2 at crawl level: a `data:` href fails validation
+        // on its scheme, so the default favicon is stored with
+        // `favicon_url` null (pre-fix it joined onto the base path,
+        // passed as https, and the page body was base64-stored).
+        let page = r#"<html><head><title>T</title><link rel="icon" href="data:image/png;base64,AAAA"></head></html>"#;
+        let get_calls = std::cell::Cell::new(0);
+        let get = |_: &HttpRequest| {
+            get_calls.set(get_calls.get() + 1);
+            Ok(HttpResponse {
+                status: 200,
+                headers: HttpHeaders::new(),
+                body: page.as_bytes().to_vec(),
+                is_redirect: false,
+            })
+        };
+        let report = crawl("https://example.com/", &deny_all(), &get, &no_head);
+        assert_eq!(report.result.get("favicon_url"), Some(&Value::Null));
+        assert_eq!(
+            report.result.get("favicon"),
+            Some(&Value::String(default_favicon().favicon_base64))
+        );
+        // Discovery validation fails before any favicon GET runs.
+        assert_eq!(get_calls.get(), 1);
+        assert_eq!(report.warnings.len(), 1);
+        assert!(report.warnings[0].starts_with("Failed to fetch favicon: "));
+    }
+
+    #[test]
+    fn favicon_href_ignores_base_query_and_resolves_dots() {
+        for (base, href, expected) in [
+            (
+                "https://example.com/a/b?u=/p/q",
+                "fav.ico",
+                "https://example.com/a/fav.ico",
+            ),
+            (
+                "https://example.com/a/b/",
+                "../f.ico",
+                "https://example.com/a/f.ico",
+            ),
+            (
+                "https://example.com/a/b",
+                "?v=2",
+                "https://example.com/a/b?v=2",
+            ),
+            (
+                "https://example.com/a/b#frag",
+                "i.ico",
+                "https://example.com/a/i.ico",
+            ),
+        ] {
+            let html = format!(r#"<html><head><link rel="icon" href="{href}"></head></html>"#);
+            let found = find_favicon_url(Some(&html), base, &deny_all(), &no_head, &mut Vec::new())
+                .unwrap();
+            assert_eq!(
+                found.as_deref(),
+                Some(expected),
+                "base={base:?} href={href:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_netloc_parses_opaquely_without_panic() {
+        // `urlsplit` raises `ValueError` here ("Invalid IPv6 URL" /
+        // NFKC); this port is infallible, so the netloc parses
+        // opaquely and fails later at validation or fetch (Tier 3 —
+        // same fallback metadata, warning text only).
+        assert_eq!(urljoin("http://h/a", "http://[::1/x"), "http://[::1/x");
+        assert_eq!(urljoin("http://h/a", "http://℀.com/x"), "http://℀.com/x");
+    }
+
+    #[test]
+    fn redirect_location_ignores_base_query_slash() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let get = |req: &HttpRequest| {
+            seen.borrow_mut().push(req.url.clone());
+            if seen.borrow().len() == 1 {
+                Ok(redirect_response("landed"))
+            } else {
+                Ok(plain_response())
+            }
+        };
+        let (_, final_url) =
+            safe_get("https://example.com/a/b?u=/p/q", &[], 1, &deny_all(), &get).unwrap();
+        assert_eq!(final_url, "https://example.com/a/landed");
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                "https://example.com/a/b?u=/p/q".to_owned(),
+                "https://example.com/a/landed".to_owned(),
+            ]
         );
     }
 }
