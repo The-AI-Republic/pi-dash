@@ -30,6 +30,7 @@ import { ModuleAnalyticsSidebar } from "./sidebar/ModuleAnalyticsSidebar.js";
 import { ModuleProgressSection } from "./sidebar/ModuleProgressSection.js";
 import { moduleDetailQueryOptions } from "./sidebar/moduleSidebarQueries.js";
 import { ModuleDetailBadge } from "./ModuleDetailBadge.js";
+import { ModuleDetailPaletteEntries } from "./ModuleDetailPaletteEntries.js";
 import { ModuleDetailActions } from "./dialogs/ModuleDetailActions.js";
 import { moduleDetailMenuEntries } from "./menus/moduleDetailMenuEntries.js";
 import { ModuleDetailCrumbs } from "./ModuleDetailCrumbs.js";
@@ -105,6 +106,13 @@ export function ModuleDetailScreen({
   const headerMenuEntries = moduleDetailMenuEntries(workspaceSlug, projectId, moduleId);
   return (
     <div data-testid="module-detail-screen" className="flex h-full min-h-0 flex-col">
+      <ModuleDetailPaletteEntries
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        module={module}
+        memberRole={project.member_role}
+        projectArchived={project.archived_at !== null}
+      />
       <ModuleDetailCrumbs
         workspaceSlug={workspaceSlug}
         projectId={projectId}

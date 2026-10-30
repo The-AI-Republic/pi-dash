@@ -9097,7 +9097,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async typeInIssueSearchModal(text: string): Promise<void> {
-    const input = this.page.getByPlaceholder("Type to search").first();
+    // DOM contract from AddExistingModal.tsx: the field keeps its
+    // "Search work items" label while hosts may override the hint, so
+    // the label (not the oracle's "Type to search" placeholder) locates it.
+    const input = this.page.getByLabel("Search work items").first();
     await input.waitFor({ timeout: 60_000 });
     await input.pressSequentially(text);
   }
@@ -11822,7 +11825,8 @@ export class WebNewDriver implements ParityDriver {
     const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
     for (;;) {
       if ((await options.count()) > 0) break;
-      if ((await this.page.getByText("No matching work items.").count()) > 0) return [];
+      if ((await this.page.getByText("No results for this search").count()) > 0) return [];
+      if ((await this.page.getByText("No work items to add").count()) > 0) return [];
       if (!(await this.layoutsAddExistingModalVisible())) return [];
       if (Date.now() >= deadline) throw new Error("[parity] add-existing modal never listed issues.");
       await this.page.waitForTimeout(250);

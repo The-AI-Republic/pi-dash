@@ -1,8 +1,8 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { EmptyState, emptyStateImagePath } from "./EmptyState";
 
 const ART = { category: "general", type: "empty" };
@@ -244,5 +244,70 @@ describe("section tier", () => {
     expect(title.className).toContain("text-(--text)");
     const description = screen.getByText("muted copy").parentElement;
     expect(description?.className).toContain("text-(--text-muted)");
+  });
+});
+
+describe("document scheme default", () => {
+  afterEach(() => {
+    document.documentElement.removeAttribute("data-theme");
+  });
+
+  it("resolves dark art when the document mark is dark", () => {
+    document.documentElement.setAttribute("data-theme", "dark");
+    const { container } = render(<EmptyState variant="illustrated" title="Nothing here" art={ART} />);
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("/empty-state/general/empty-dark.svg");
+  });
+
+  it("shares the dark pair with dark-contrast and the light pair with light-contrast", () => {
+    document.documentElement.setAttribute("data-theme", "dark-contrast");
+    const dark = render(<EmptyState variant="illustrated" title="Nothing here" art={ART} />);
+    expect(dark.container.querySelector("img")?.getAttribute("src")).toBe("/empty-state/general/empty-dark.svg");
+    dark.unmount();
+    document.documentElement.setAttribute("data-theme", "light-contrast");
+    const light = render(<EmptyState variant="illustrated" title="Nothing here" art={ART} />);
+    expect(light.container.querySelector("img")?.getAttribute("src")).toBe("/empty-state/general/empty-light.svg");
+  });
+
+  it("falls back to light for custom, missing and unknown marks", () => {
+    for (const mark of ["custom", "sepia"]) {
+      document.documentElement.setAttribute("data-theme", mark);
+      const { container, unmount } = render(<EmptyState variant="illustrated" title="Nothing here" art={ART} />);
+      expect(container.querySelector("img")?.getAttribute("src")).toBe("/empty-state/general/empty-light.svg");
+      unmount();
+    }
+    document.documentElement.removeAttribute("data-theme");
+    const { container } = render(<EmptyState variant="illustrated" title="Nothing here" art={ART} />);
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("/empty-state/general/empty-light.svg");
+  });
+
+  it("lets an explicit scheme win over the document mark", () => {
+    document.documentElement.setAttribute("data-theme", "dark");
+    const { container } = render(<EmptyState variant="illustrated" title="Nothing here" art={ART} scheme="light" />);
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("/empty-state/general/empty-light.svg");
+  });
+
+  it("follows live theme switches without a reload", async () => {
+    document.documentElement.removeAttribute("data-theme");
+    const { container } = render(<EmptyState variant="illustrated" title="Nothing here" art={ART} />);
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("/empty-state/general/empty-light.svg");
+    document.documentElement.setAttribute("data-theme", "dark");
+    await waitFor(() =>
+      expect(container.querySelector("img")?.getAttribute("src")).toBe("/empty-state/general/empty-dark.svg")
+    );
+    document.documentElement.setAttribute("data-theme", "light");
+    await waitFor(() =>
+      expect(container.querySelector("img")?.getAttribute("src")).toBe("/empty-state/general/empty-light.svg")
+    );
+  });
+
+  it("keeps the initial read on hosts without a MutationObserver", () => {
+    vi.stubGlobal("MutationObserver", undefined);
+    try {
+      document.documentElement.setAttribute("data-theme", "dark");
+      const { container } = render(<EmptyState variant="illustrated" title="Nothing here" art={ART} />);
+      expect(container.querySelector("img")?.getAttribute("src")).toBe("/empty-state/general/empty-dark.svg");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

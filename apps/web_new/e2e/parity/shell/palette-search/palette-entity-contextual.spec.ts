@@ -45,14 +45,6 @@ test.describe("palette entity-contextual entries", () => {
     { tag: specTags(["SHELL-091"]) },
     async ({ driver, seed }) => {
       test.setTimeout(300_000);
-      // Gate note (NEWFRONT-295): web_new skips — cycle detail has no
-      // route until the cycles area lands it, so no screen mounts the
-      // contextual entries. TODO(NEWFRONT-526): re-enable once
-      // the cycles area mounts useCyclePaletteContext on its detail.
-      if (driver.target === "web_new") {
-        test.skip(true, "cycle detail route unlanded; contextual entries unmounted");
-        return;
-      }
       const session = await signInSession(seed.email, seed.password);
       const cycleName = `Parity cycle ${Date.now()}`;
       const cycleId = await serverCreateCycle(seed.workspaceSlug, seed.projectId, cycleName, ...cycleDates(), session);
@@ -85,14 +77,6 @@ test.describe("palette entity-contextual entries", () => {
     { tag: specTags(["SHELL-091"]) },
     async ({ driver, seed }) => {
       test.setTimeout(300_000);
-      // Gate note (NEWFRONT-295): web_new skips — module detail has no
-      // route until the modules area lands it, so no screen mounts the
-      // contextual entries. TODO(NEWFRONT-526): re-enable once
-      // the modules area mounts useModulePaletteContext on its detail.
-      if (driver.target === "web_new") {
-        test.skip(true, "module detail route unlanded; contextual entries unmounted");
-        return;
-      }
       const session = await signInSession(seed.email, seed.password);
       const moduleName = `Parity module ${Date.now()}`;
       const moduleId = await serverCreateModule(seed.workspaceSlug, seed.projectId, moduleName, session);
@@ -116,14 +100,6 @@ test.describe("palette entity-contextual entries", () => {
     { tag: specTags(["SHELL-091"]) },
     async ({ driver, seed }) => {
       test.setTimeout(300_000);
-      // Gate note (NEWFRONT-295): web_new skips — page detail has no
-      // route until the pages area lands it, so no screen mounts the
-      // contextual entries. TODO(NEWFRONT-526): re-enable once
-      // the pages area mounts usePagePaletteContext on its detail.
-      if (driver.target === "web_new") {
-        test.skip(true, "page detail route unlanded; contextual entries unmounted");
-        return;
-      }
       const session = await signInSession(seed.email, seed.password);
       const pageName = `Parity page ${Date.now()}`;
       const pageId = await serverCreatePage(seed.workspaceSlug, seed.projectId, session, pageName);

@@ -400,7 +400,7 @@ describe("web_new add-existing modal driver", () => {
     });
     const getByText = (page as unknown as { getByText: (text: string) => Locator }).getByText;
     (page as unknown as { getByText: (text: string) => Locator }).getByText = (text: string) =>
-      text === "No matching work items." ? locator({ count: async () => 1 }) : getByText(text);
+      text === "No results for this search" ? locator({ count: async () => 1 }) : getByText(text);
     await expect(new WebNewDriver(page).layoutsAddExistingModalIssueNames()).resolves.toEqual([]);
   });
 });

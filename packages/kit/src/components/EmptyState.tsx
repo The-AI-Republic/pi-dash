@@ -36,9 +36,47 @@ interface EmptyStateBase {
   title: string;
   /** Supporting copy under the heading. */
   description?: React.ReactNode | undefined;
-  /** Active scheme for art resolution. Defaults to light. */
+  /**
+   * Active scheme for art resolution. Defaults to the resolved document
+   * scheme (the data-theme mark), tracked live across theme switches.
+   */
   scheme?: EmptyStateScheme | undefined;
   className?: string | undefined;
+}
+
+/**
+ * Resolve a document theme mark to art. Dark-contrast shares the dark
+ * pair; light-contrast shares the light pair. Custom palettes fall back
+ * to light: only the app shell knows a custom palette's darkness, so a
+ * surface that must render exact art under one keeps passing `scheme`
+ * explicitly.
+ */
+function documentMarkScheme(marked: string | null): EmptyStateScheme {
+  return marked === "dark" || marked === "dark-contrast" ? "dark" : "light";
+}
+
+/**
+ * The resolved document scheme, tracked live. The data-theme mark is the
+ * single source: a MutationObserver re-resolves on every applied switch
+ * so the art follows without a reload. Hosts without MutationObserver
+ * keep the initial read.
+ */
+function useDocumentScheme(): EmptyStateScheme {
+  const [scheme, setScheme] = React.useState<EmptyStateScheme>(() =>
+    documentMarkScheme(document.documentElement.getAttribute("data-theme"))
+  );
+  React.useEffect(() => {
+    if (typeof MutationObserver === "undefined") return undefined;
+    const root = document.documentElement;
+    const refresh = (): void => {
+      setScheme(documentMarkScheme(root.getAttribute("data-theme")));
+    };
+    refresh();
+    const observer = new MutationObserver(refresh);
+    observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, []);
+  return scheme;
 }
 
 /**
@@ -217,7 +255,8 @@ function SectionBody(props: Extract<EmptyStateProps, { variant: "section" }>): R
 
 /** Shared empty-state presentation. Every area reuses these tiers as-is. */
 export function EmptyState(props: EmptyStateProps): React.ReactElement {
-  const scheme = props.scheme ?? "light";
+  const documentScheme = useDocumentScheme();
+  const scheme = props.scheme ?? documentScheme;
   switch (props.variant) {
     case "illustrated":
       return <IllustratedBody {...props} scheme={scheme} />;
