@@ -22,6 +22,7 @@ import { setSessionClient } from "../../../core/session/queries.js";
 import { edition } from "../../../core/edition/index.js";
 import { FULL_RUN_TEST_TIMEOUT_MS } from "../../../testing/testBudget.js";
 import { pickerKeys } from "../../../shared/pickers/reference.js";
+import { useSessionStore } from "../../../core/session/store.js";
 import { withTimeout } from "../create/createApi.js";
 import { ISSUE_DEDUPE_FLAG } from "../create/dedupe.js";
 import { WORKFLOW_FLAG } from "../edition/flags.js";
@@ -309,6 +310,8 @@ interface StubOptions {
   instanceUnprovisioned?: boolean;
   /** Replace the project workflow states the picker lists. */
   states?: unknown[];
+  /** Answer the joined-project read with this status (200 when unset). */
+  projectsStatus?: number;
 }
 
 interface Call {
@@ -649,6 +652,9 @@ function stubTransport(options: StubOptions = {}) {
       return row === undefined ? json(404, {}) : json(200, row);
     }
     if (url.endsWith("/projects/") && method === "GET") {
+      if (options.projectsStatus !== undefined && options.projectsStatus !== 200) {
+        return json(options.projectsStatus, { detail: "refused" });
+      }
       // A cold picker cache reads the joined list; serve the same rows the
       // dialog filters so choosing a project after an edit still works.
       return json(
@@ -814,6 +820,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetAppClient();
+  useSessionStore.setState({ status: "unknown", returnUrl: null });
   resetEditionIssuesProviders();
   delete edition.flags[WORKFLOW_FLAG];
   globalThis.localStorage.clear();
@@ -825,7 +832,7 @@ describe("WorkItemCreateDialog core form", () => {
     setup();
     await waitFor(() => expect(titleField()).toHaveFocus());
     expect(screen.getByRole("dialog", { name: "Create new work item" })).toBeInTheDocument();
-    for (const field of ["State", "Runs on", "Priority", "Assignees", "Parent"]) {
+    for (const field of ["Project", "State", "Runs on", "Priority", "Assignees", "Parent"]) {
       expect(screen.getByText(field)).toBeInTheDocument();
     }
     // Labels and the dates name themselves on their own controls, as the
@@ -835,6 +842,19 @@ describe("WorkItemCreateDialog core form", () => {
     expect(screen.getByRole("button", { name: "Due date" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add parent" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add parent" })).toBeInTheDocument();
+  });
+
+  it("captions the project field like the neighbouring property fields", () => {
+    // NEWFRONT-1039: the selector was the one field in the strip without a
+    // caption, so the only project label was the trigger's own text.
+    setup();
+    const caption = screen.getByText("Project");
+    const projectSlot = caption.parentElement as HTMLElement;
+    // The caption sits above the picker inside the same slot, exactly like
+    // State/Priority/Assignees, and the picker keeps its own trigger text.
+    expect(within(projectSlot).getAllByRole("button").length).toBeGreaterThan(0);
+    expect((screen.getByText("State").parentElement as HTMLElement).className).toBe(projectSlot.className);
+    expect((screen.getByText("Priority").parentElement as HTMLElement).className).toBe(projectSlot.className);
   });
 
   it("leaves focus in the description while the user types there", async () => {
@@ -1810,6 +1830,21 @@ describe("WorkItemCreateDialog project selector (ISS-123)", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Cycle" })).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "Modules" })).toBeInTheDocument();
     expect(screen.getByText("Estimate")).toBeInTheDocument();
+  });
+
+  it("sends a dead session in the project picker to sign-in wording, not a load failure", async () => {
+    // NEWFRONT-1039: on a killed session the picker said "Couldn't load
+    // projects.", which reads as a broken feature; the popup must name the
+    // session instead, and the expiry layer still moves the store.
+    const user = userEvent.setup();
+    useSessionStore.setState({ status: "authenticated", returnUrl: null });
+    setup({ projectsStatus: 401 }, {}, { seedPicker: false });
+    fireEvent.click(screen.getByRole("button", { name: "Atlas" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Your session has ended. Sign in again to load projects.");
+    expect(alert).not.toHaveTextContent("Couldn't load projects.");
+    expect(useSessionStore.getState().status).toBe("expired");
+    void user;
   });
 
   it("names the picked project before the picker's own read resolves", async () => {

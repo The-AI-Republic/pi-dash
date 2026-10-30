@@ -2,11 +2,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Session-expired redirect (AUTH-020). Any 401 already moves the session
-// store to expired (see core/session/middleware); this effect notices once
-// and sends the user to the sign-in entry (/) with the return path
-// preserved as next_path (/sign-in is a retired bare redirect that drops
-// params, so it cannot carry the return path). The app shell and every
-// authenticated surface outside it (the set-password page) share it.
+// store to expired (see core/session/middleware); this effect sends the
+// user to the sign-in entry (/) with the return path preserved as
+// next_path (/sign-in is a retired bare redirect that drops params, so it
+// cannot carry the return path). The app shell and every authenticated
+// surface outside it (the set-password page) share it. One expiry bounces
+// once — a burst of 401s must not stack navigations — but the notice is
+// re-armed as soon as the session is no longer expired (NEWFRONT-1039: a
+// guard that latched forever left the next expiry of the same tab on the
+// page, with only the failing widgets' own errors saying anything).
 
 import { useRouter } from "@tanstack/react-router";
 import * as React from "react";
@@ -52,7 +56,12 @@ export function useSessionExpiredRedirect(): void {
   const expiredNoticed = React.useRef(false);
 
   React.useEffect(() => {
-    if (status !== "expired" || expiredNoticed.current) return;
+    if (status !== "expired") {
+      // Signing back in (or a fresh session) re-arms the one-shot notice.
+      expiredNoticed.current = false;
+      return;
+    }
+    if (expiredNoticed.current) return;
     const current = router.state.location.href;
     // An exempt page stays put (and stays quiet): the bounce fires on the
     // next expiry past one, once the user is somewhere that needs a session.

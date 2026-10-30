@@ -1274,20 +1274,22 @@ export function WorkItemCreateDialog({
           }}
           className="flex flex-col gap-(--space-4)"
         >
-          <div className="flex flex-wrap items-center gap-(--space-2)">
-            <ProjectPicker
-              workspaceSlug={workspaceSlug}
-              value={form.projectId}
-              onChange={pickProject}
-              includeProjectIds={creatableIds}
-              knownProjects={projectLabels}
-              // A stored row keeps the project it was filed under — a draft
-              // changing where it publishes does so through its own picker
-              // entry, and the move entry reads the stored project (the
-              // promote endpoint files under it, ISS-139).
-              disabled={busy || lockedProject !== undefined || (editing && (edit?.kind !== "draft" || moving))}
-            />
-            {editing || drafting ? null : <DuplicatePanel matches={duplicates.matches} />}
+          <div className="flex flex-wrap items-start gap-(--space-4)">
+            <FieldSlot label="Project">
+              <ProjectPicker
+                workspaceSlug={workspaceSlug}
+                value={form.projectId}
+                onChange={pickProject}
+                includeProjectIds={creatableIds}
+                knownProjects={projectLabels}
+                // A stored row keeps the project it was filed under — a draft
+                // changing where it publishes does so through its own picker
+                // entry, and the move entry reads the stored project (the
+                // promote endpoint files under it, ISS-139).
+                disabled={busy || lockedProject !== undefined || (editing && (edit?.kind !== "draft" || moving))}
+              />
+              {editing || drafting ? null : <DuplicatePanel matches={duplicates.matches} />}
+            </FieldSlot>
           </div>
           {/* The type slots need a stored row to seed from and an endpoint
               that keeps the pick: drafts have neither (no type column),
