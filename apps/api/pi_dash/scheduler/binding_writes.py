@@ -57,7 +57,7 @@ def update_binding(binding: SchedulerBinding, data: Mapping) -> SchedulerBinding
     Raises ``rest_framework.serializers.ValidationError`` on bad input.
     """
     from pi_dash.app.serializers.scheduler import SchedulerBindingSerializer
-    from pi_dash.bgtasks.scheduler import _next_fire_for_binding
+    from pi_dash.bgtasks.scheduler import _next_fire_for_binding_checked
 
     serializer = SchedulerBindingSerializer(binding, data=data, partial=True)
     serializer.is_valid(raise_exception=True)
@@ -66,8 +66,13 @@ def update_binding(binding: SchedulerBinding, data: Mapping) -> SchedulerBinding
     # scanner honours the new schedule on its next tick.
     if any(k in data for k in CADENCE_FIELDS):
         binding.refresh_from_db()
-        nxt = _next_fire_for_binding(binding, now=timezone.now())
-        if nxt is not None:
+        nxt, parse_error = _next_fire_for_binding_checked(binding, now=timezone.now())
+        # A clean parse with no future occurrence must CLEAR next_run_at
+        # (the edit made the series finite and already over) — keeping the
+        # stale time would fire a rule past its end. The serializer has
+        # already validated the bundle, so parse errors shouldn't happen;
+        # leave next_run_at untouched if one does.
+        if parse_error is None and binding.next_run_at != nxt:
             binding.next_run_at = nxt
             binding.save(update_fields=["next_run_at", "updated_at"])
     return binding

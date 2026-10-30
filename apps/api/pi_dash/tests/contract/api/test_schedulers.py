@@ -297,7 +297,7 @@ class TestProjectSchedulerRuns:
             binding,
             create_user,
             status=AgentRunStatus.FAILED,
-            error_code="watchdog_timeout",
+            error_details={"code": "watchdog_timeout"},
         )
         newer = _make_run(binding, create_user)
         with impersonate(create_user):
