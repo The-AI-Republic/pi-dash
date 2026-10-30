@@ -55,7 +55,7 @@ SET error_code = LEFT(COALESCE(error_details ->> 'code', ''), 64),
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("runner", "0031_runner_paused"),
+        ("runner", "0032_drop_worktree_pool_columns"),
     ]
 
     operations = [
