@@ -53,6 +53,11 @@ def guest_user(db):
 
 
 @pytest.fixture
+def outsider_user(db):
+    return User.objects.create_user(email="cycle-outsider@example.com", username="cycle-outsider")
+
+
+@pytest.fixture
 def memberships(workspace, project, member_user, guest_user):
     WorkspaceMember.objects.create(workspace=workspace, member=member_user, role=15)
     ProjectMember.objects.create(project=project, member=member_user, role=15, is_active=True)
@@ -103,6 +108,12 @@ class TestCycleRetrieveGuestRead:
         assert response.status_code == status.HTTP_404_NOT_FOUND
         assert response.json() == {"error": "Cycle not found"}
         recent_visited.delay.assert_not_called()
+
+    def test_outsider_retrieve_refused(self, workspace, project, memberships, cycle, outsider_user):
+        response = _client_for(outsider_user).get(_cycle_url(workspace.slug, project.id, cycle.id))
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN, response.content
+        assert response.json() == PERMISSION_DENIED
 
 
 @pytest.mark.contract
