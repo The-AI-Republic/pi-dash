@@ -211,6 +211,82 @@ class WildcardHttpProbe:
         self._server.server_close()
 
 
+class SlowDripSink:
+    """A page dripped across two timed gaps (PIDASHCONV-1669).
+
+    Every GET waits ``first_gap`` seconds, sends the headers plus the
+    first half of ``body``, waits ``second_gap`` seconds, then sends the
+    rest. A client with a per-read timeout larger than either gap reads
+    the whole page whatever the total; a client with a total deadline
+    shorter than the sum fails. HEAD serves the same headers without a
+    body (favicon-probe shape); ``/favicon.ico`` answers immediately.
+    """
+
+    BODY = (
+        b"<html><head><title>Slow drip oracle</title>"
+        b'<link rel="icon" href="/favicon.ico"></head>'
+        b"<body>hello</body></html>"
+    )
+    FAVICON = b"slow-drip-sink-favicon"
+
+    def __init__(
+        self,
+        first_gap: float = 0.6,
+        second_gap: float = 0.6,
+        body: bytes | None = None,
+    ) -> None:
+        outer = self
+        self.first_gap = first_gap
+        self.second_gap = second_gap
+        self.body = self.BODY if body is None else body
+
+        class Handler(BaseHTTPRequestHandler):
+            def _answer(self, payload: bytes, content_type: str, gaps: bool) -> None:
+                if gaps:
+                    time.sleep(outer.first_gap)
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                if self.command == "HEAD":
+                    return
+                half = len(payload) // 2
+                self.wfile.write(payload[:half])
+                self.wfile.flush()
+                if gaps:
+                    time.sleep(outer.second_gap)
+                self.wfile.write(payload[half:])
+                self.wfile.flush()
+
+            def do_GET(self) -> None:
+                if urlsplit(self.path).path == "/favicon.ico":
+                    self._answer(outer.FAVICON, "image/x-icon", gaps=False)
+                    return
+                self._answer(outer.body, "text/html", gaps=True)
+
+            do_HEAD = do_GET
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address
+        return f"http://{host}:{port}"
+
+    def __enter__(self) -> "SlowDripSink":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._server.shutdown()
+        self._thread.join(timeout=5)
+        self._server.server_close()
+
+
 class RoutingStub:
     """HTTP stub dispatching fixed responses by (method, path).
 

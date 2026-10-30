@@ -5,8 +5,8 @@
 //! (`crawl_work_item_link_title`). The pure crawl pipeline lives in
 //! `pidash-services` (`tasks_webhooks::link_crawl`); this module owns the
 //! Celery wire surface (task name, `(id, url)` payload), the live network
-//! seams (blocking HTTPS with redirects off, std DNS) and the
-//! `issue_links` lookup + full-row save.
+//! seams (async HTTPS with redirects off behind a sync bridge, std DNS)
+//! and the `issue_links` lookup + full-row save.
 //!
 //! Ordering is crawl-FIRST, DB-lookup-SECOND (`:264` before `:267`): a dead
 //! link still pays for the crawl. A missing or soft-deleted `IssueLink` row
@@ -22,7 +22,6 @@ use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use serde_json::Value;
 use uuid::Uuid;
@@ -107,20 +106,33 @@ fn live_validate(url: &str) -> Result<(), ValidateError> {
     link_crawl::validate_url_ip(url, &live_resolve)
 }
 
-/// One live request through the blocking client (`allow_redirects=False`
-/// lives in the client policy; the pure loop owns hop validation).
-fn live_request(
-    client: &Client,
+/// One crawl client: per-operation timeouts mirroring
+/// `requests.get(..., timeout=N)` (connect plus each socket read), with NO
+/// total deadline — Django has none either (PIDASHCONV-1669: the old
+/// per-request `.timeout()` cut slow-but-steady bodies off at N seconds).
+/// The blocking builder has no per-read setting, so this is the async
+/// client; `read_timeout` applies to each read and resets after a
+/// successful one. Redirects stay off (`allow_redirects=False`); the pure
+/// loop owns hop validation.
+fn build_client(timeout_secs: u64) -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .redirect(Policy::none())
+        .connect_timeout(Duration::from_secs(timeout_secs))
+        .read_timeout(Duration::from_secs(timeout_secs))
+        .build()
+}
+
+/// One live request through the async client.
+async fn live_request(
+    client: &reqwest::Client,
     req: &HttpRequest,
     method: reqwest::Method,
 ) -> Result<HttpResponse, String> {
-    let mut builder = client
-        .request(method, req.url.as_str())
-        .timeout(Duration::from_secs(req.timeout_secs));
+    let mut builder = client.request(method, req.url.as_str());
     for (name, value) in &req.headers {
         builder = builder.header(name.as_str(), value.as_str());
     }
-    let response = builder.send().map_err(|err| err.to_string())?;
+    let response = builder.send().await.map_err(|err| err.to_string())?;
     let status = response.status().as_u16();
     let mut headers = Vec::new();
     for (name, value) in response.headers() {
@@ -131,7 +143,11 @@ fn live_request(
         && headers
             .iter()
             .any(|(name, _)| name.eq_ignore_ascii_case("location"));
-    let body = response.bytes().map_err(|err| err.to_string())?.to_vec();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|err| err.to_string())?
+        .to_vec();
     Ok(HttpResponse {
         status,
         headers: link_crawl::HttpHeaders(headers),
@@ -143,21 +159,39 @@ fn live_request(
 /// The crawl with live seams, returning the metadata dict to persist.
 /// Infallible by construction (mirrors the Python guards); warnings go to
 /// the worker log at the matching levels.
+///
+/// The pipeline seam is synchronous, so each hop `block_on`s the async
+/// client on a throwaway current-thread runtime built for the crawl
+/// (link crawls are infrequent; one runtime per crawl is cheaper than one
+/// DNS lookup). GET hops use the 1s client, favicon HEAD the 2s client,
+/// mirroring the Python call sites.
 pub fn live_crawl(url: &str) -> Value {
-    let report = match Client::builder().redirect(Policy::none()).build() {
-        Ok(client) => {
-            let get = |req: &HttpRequest| live_request(&client, req, reqwest::Method::GET);
-            let head = |req: &HttpRequest| live_request(&client, req, reqwest::Method::HEAD);
-            // Per-hop timeouts mirror the Python call sites (GET default
-            // 1s, favicon HEAD 2s); the client carries no response timeout
-            // of its own so each request's own deadline applies.
-            let _ = (GET_TIMEOUT_SECS, FAVICON_HEAD_TIMEOUT_SECS);
-            link_crawl::crawl(url, &live_validate, &get, &head)
+    let failed = |detail: String| CrawlReport {
+        result: link_crawl::default_favicon().to_json(),
+        warnings: vec![format!("Failed to fetch HTML for title: {detail}")],
+    };
+    let report = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => {
+            match (
+                build_client(GET_TIMEOUT_SECS),
+                build_client(FAVICON_HEAD_TIMEOUT_SECS),
+            ) {
+                (Ok(get_client), Ok(head_client)) => {
+                    let get = |req: &HttpRequest| {
+                        runtime.block_on(live_request(&get_client, req, reqwest::Method::GET))
+                    };
+                    let head = |req: &HttpRequest| {
+                        runtime.block_on(live_request(&head_client, req, reqwest::Method::HEAD))
+                    };
+                    link_crawl::crawl(url, &live_validate, &get, &head)
+                }
+                (Err(err), _) | (_, Err(err)) => failed(err.to_string()),
+            }
         }
-        Err(err) => CrawlReport {
-            result: link_crawl::default_favicon().to_json(),
-            warnings: vec![format!("Failed to fetch HTML for title: {err}")],
-        },
+        Err(err) => failed(err.to_string()),
     };
     for warning in &report.warnings {
         tracing::warn!(task = CRAWL_TASK_NAME, "{warning}");
@@ -279,6 +313,113 @@ mod tests {
         assert!(SAVE_LINK_METADATA_SQL.contains("created_by_id = NULL"));
         assert!(SAVE_LINK_METADATA_SQL.contains("updated_by_id = NULL"));
         assert!(SAVE_LINK_METADATA_SQL.contains("WHERE id = $2"));
+    }
+
+    /// One request through the real adapter: real client constructor,
+    /// real request path, throwaway runtime like `live_crawl`.
+    fn fetch(
+        timeout_secs: u64,
+        method: reqwest::Method,
+        url: &str,
+    ) -> Result<HttpResponse, String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = build_client(timeout_secs).unwrap();
+        let req = HttpRequest {
+            url: url.to_owned(),
+            headers: vec![],
+            timeout_secs,
+        };
+        runtime.block_on(live_request(&client, &req, method))
+    }
+
+    /// One-shot HTTP/1.1 server: consumes the request head, waits
+    /// `before_headers_ms`, sends headers plus half the body, waits
+    /// `mid_body_ms`, sends the rest. A failed tail write (client timed
+    /// out and went away) is an expected outcome, not an error.
+    fn drip_server(
+        before_headers_ms: u64,
+        mid_body_ms: u64,
+        body: &'static [u8],
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = conn.read(&mut buf).unwrap();
+                if n == 0 {
+                    return;
+                }
+                seen.extend_from_slice(&buf[..n]);
+                if seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(before_headers_ms));
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            conn.write_all(head.as_bytes()).unwrap();
+            conn.write_all(&body[..body.len() / 2]).unwrap();
+            conn.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(mid_body_ms));
+            let _ = conn.write_all(&body[body.len() / 2..]);
+        });
+        (format!("http://127.0.0.1:{port}/"), handle)
+    }
+
+    /// PIDASHCONV-1669: no single read stalls for 1s, so the 1.2s drip
+    /// reads whole — like `requests.get(..., timeout=1)`. The old
+    /// per-request total `.timeout()` cut this off at 1s.
+    #[test]
+    fn slow_drip_body_reads_past_total_time() {
+        let body: &'static [u8] = b"<html><head><title>Slow drip title</title></head></html>";
+        let (url, server) = drip_server(600, 600, body);
+        let start = std::time::Instant::now();
+        let response = fetch(GET_TIMEOUT_SECS, reqwest::Method::GET, &url).unwrap();
+        let elapsed = start.elapsed();
+        server.join().unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, body);
+        assert!(
+            elapsed >= Duration::from_millis(1150),
+            "drip server did not actually drip: {elapsed:?}"
+        );
+    }
+
+    /// The per-read timeout still fires: headers plus half the body,
+    /// then a 1.5s stall exceeds the 1s read budget — like `requests`
+    /// raising `ReadTimeout`, the fetch fails instead of hanging.
+    #[test]
+    fn stalled_body_read_times_out() {
+        let body: &'static [u8] = b"<html><head><title>Stalled</title></head></html>";
+        let (url, server) = drip_server(0, 1500, body);
+        let outcome = fetch(GET_TIMEOUT_SECS, reqwest::Method::GET, &url);
+        server.join().unwrap();
+        assert!(
+            outcome.is_err(),
+            "stalled read unexpectedly succeeded: {outcome:?}"
+        );
+    }
+
+    /// The favicon HEAD client carries the 2s budget (`:208`): a 1.3s
+    /// stall before the headers still answers. (A 1s client would fail
+    /// this; the drip/stall pair above pins the GET value.)
+    #[test]
+    fn head_client_allows_two_second_reads() {
+        let body: &'static [u8] = b"favicon-bytes";
+        let (url, server) = drip_server(1300, 0, body);
+        let response = fetch(FAVICON_HEAD_TIMEOUT_SECS, reqwest::Method::HEAD, &url).unwrap();
+        server.join().unwrap();
+        assert_eq!(response.status, 200);
     }
 
     #[test]
