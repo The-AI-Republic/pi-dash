@@ -123,62 +123,66 @@ fn split_scheme_name(text: &str) -> Option<(&str, &str)> {
 /// Lower-cased scheme of `url` (`""` when there is none).
 ///
 /// `file:///etc/passwd` → `"file"`; `https://example.com/x` → `"https"`.
-/// Mirrors `urlparse(url).scheme`, which lower-cases the scheme: only a
-/// valid leading scheme counts, so `://` later in the string (a query, a
-/// path) never forms one (`:45`).
+/// Mirrors `urlparse(url).scheme` through the shared [`parse_url`] front
+/// end: the input is WHATWG-normalized first (leading C0/space stripped,
+/// `\t` `\r` `\n` dropped), then only a valid leading scheme counts, so
+/// `://` later in the string (a query, a path) never forms one (`:45`).
 pub fn url_scheme(url: &str) -> String {
-    match split_scheme_name(url) {
-        Some((scheme, _)) => scheme.to_ascii_lowercase(),
-        None => String::new(),
-    }
+    parse_url(url, "").scheme
 }
 
 /// Lower-cased hostname of `url`, or `None` when there is none.
 ///
-/// Strips userinfo (`user@`), ports (`:8080`) and IPv6 brackets, mirroring
-/// `urlparse(url).hostname` (which also lower-cases).
+/// Mirrors `urlparse(url).hostname` off the parsed netloc: the userinfo
+/// splits at the last `@`, a `[` opens brackets (the hostname runs to
+/// the first `]`, even when unclosed), otherwise the hostname runs to
+/// the first `:` — then lower-cased with a scoped `%zone` id untouched
+/// (`urllib/parse.py:165-174`, `_hostinfo`). A `://` that is not the
+/// authority marker (`https:foo://bar`) leaves the netloc empty, so
+/// there is no hostname.
 pub fn url_hostname(url: &str) -> Option<String> {
-    let sep = url.find("://")?;
-    let after = &url[sep + 3..];
-    let authority = after
-        .find(['/', '?', '#'])
-        .map(|i| &after[..i])
-        .unwrap_or(after);
-    if authority.is_empty() {
+    let netloc = parse_url(url, "").netloc;
+    if netloc.is_empty() {
         return None;
     }
-    let host = authority.rsplit('@').next().unwrap_or(authority);
-    let host = if host.starts_with('[') {
-        match host.find(']') {
-            Some(end) => &host[1..end],
-            None => host,
-        }
-    } else {
-        match host.find(':') {
-            Some(i) => &host[..i],
-            None => host,
-        }
+    let hostinfo = match netloc.rsplit_once('@') {
+        Some((_, host)) => host,
+        None => netloc.as_str(),
     };
-    if host.is_empty() {
+    let hostname = match hostinfo.find('[') {
+        Some(open) => {
+            let bracketed = &hostinfo[open + 1..];
+            match bracketed.find(']') {
+                Some(close) => &bracketed[..close],
+                None => bracketed,
+            }
+        }
+        None => match hostinfo.find(':') {
+            Some(colon) => &hostinfo[..colon],
+            None => hostinfo,
+        },
+    };
+    if hostname.is_empty() {
         return None;
     }
-    Some(host.to_ascii_lowercase())
+    match hostname.find('%') {
+        Some(cut) => Some(format!(
+            "{}{}",
+            hostname[..cut].to_lowercase(),
+            &hostname[cut..]
+        )),
+        None => Some(hostname.to_lowercase()),
+    }
 }
 
 /// `scheme://authority` of `url`, or `None` when either half is missing.
 /// Used for the `/favicon.ico` fallback (`:205-206`).
 pub fn url_origin(url: &str) -> Option<String> {
-    let scheme_end = url.find("://")?;
-    let scheme = &url[..scheme_end];
-    let after = &url[scheme_end + 3..];
-    let authority = after
-        .find(['/', '?', '#'])
-        .map(|i| &after[..i])
-        .unwrap_or(after);
-    if scheme.is_empty() || authority.is_empty() {
+    let parsed = parse_url(url, "");
+    if parsed.scheme.is_empty() || parsed.netloc.is_empty() {
         return None;
     }
-    Some(format!("{scheme}://{authority}"))
+    Some(format!("{}://{}", parsed.scheme, parsed.netloc))
 }
 
 /// `uses_relative` (`urllib/parse.py`): schemes whose URLs resolve
@@ -4009,6 +4013,176 @@ mod tests {
             vec![
                 "https://example.com/a/b?u=/p/q".to_owned(),
                 "https://example.com/a/landed".to_owned(),
+            ]
+        );
+    }
+
+    // -- PIDASHCONV-1675: validate-path normalization ----------------------
+    // Expected values below are CPython-3.12-observed (`urlparse`, the
+    // exact call Django makes in `validate_url_ip`, `:38-46`); the same
+    // literals are pinned hermetically in
+    // `contract-tests/tasks_webhooks/test_link_crawl_validate_normalization.py`.
+
+    #[test]
+    fn url_scheme_applies_whatwg_normalization_like_urlparse() {
+        // `urlparse` strips leading C0/space and drops \t \r \n before
+        // scheme detection; the validate path must see the same scheme.
+        for (url, expected) in [
+            ("  https://x.com/a", "https"),
+            ("\0\x01 https://x.com/a", "https"),
+            ("\thttps://x.com/a", "https"),
+            ("a\tb:c", "ab"),
+            ("java\tscript:alert(1)", "javascript"),
+            ("java\nscript:x", "javascript"),
+            ("java\rscript:x", "javascript"),
+            // Controls: unchanged behavior.
+            ("https://x.com/a", "https"),
+            ("HTTP://x.com/a", "http"),
+            ("1http://x.com/", ""),
+            ("", ""),
+        ] {
+            assert_eq!(url_scheme(url), expected, "url={url:?}");
+        }
+    }
+
+    #[test]
+    fn validate_url_ip_normalizes_direct_inputs_like_django() {
+        // Direct inputs that Django strips to http(s) must validate —
+        // resolving the stripped hostname — not fail the scheme check.
+        let seen = std::cell::RefCell::new(Vec::new());
+        let resolve = |host: &str| -> Result<Vec<IpAddr>, DnsFailure> {
+            seen.borrow_mut().push(host.to_owned());
+            Ok(vec!["93.184.216.34".parse().unwrap()])
+        };
+        for url in [
+            "  https://example.com/a",
+            "\0\x01 https://example.com/a",
+            "\thttps://example.com/a",
+            "ht\ttp://example.com/",
+            "  https://user@Example.COM:8443/a",
+        ] {
+            validate_url_ip(url, &resolve)
+                .unwrap_or_else(|err| panic!("{url:?} must validate, got {err:?}"));
+        }
+        assert_eq!(
+            *seen.borrow(),
+            vec!["example.com".to_owned(); 5],
+            "each input must resolve the stripped hostname"
+        );
+    }
+
+    #[test]
+    fn validate_url_ip_reports_no_hostname_when_authority_is_absent() {
+        // `https:foo://bar` parses as scheme=https, netloc="": the `://`
+        // is path text, not an authority marker, so Django reports no
+        // hostname instead of resolving "bar".
+        for url in [
+            "https:foo://bar",
+            "https:foo://bar/baz",
+            "http:foo",
+            "https:/foo",
+        ] {
+            let err = validate_url_ip(url, &public_resolve()).unwrap_err();
+            assert_eq!(err, ValidateError::NoHostname, "url={url:?}");
+        }
+        validate_url_ip("https://example.com/", &public_resolve()).unwrap();
+    }
+
+    #[test]
+    fn url_hostname_mirrors_urlparse_hostname() {
+        for (url, expected) in [
+            ("http://user:pass@Example.COM:8080/x", Some("example.com")),
+            ("http://a@b@c/", Some("c")),
+            ("http://example.com:8080/", Some("example.com")),
+            ("http://[::1]:8080/x", Some("::1")),
+            // Scoped zone ids keep their case (`parse.py:165-174`).
+            ("http://[FE80::1%ETH0]/x", Some("fe80::1%ETH0")),
+            // `.hostname` lower-cases Unicode-wide, like `str.lower()`.
+            ("http://M\u{dc}NCHEN.de/", Some("m\u{fc}nchen.de")),
+            ("https:foo://bar", None),
+            ("http:///no-host", None),
+            ("file:///etc/passwd", None),
+            ("  https://X.com/a", Some("x.com")),
+            ("https://x.com/a", Some("x.com")),
+        ] {
+            assert_eq!(url_hostname(url).as_deref(), expected, "url={url:?}");
+        }
+    }
+
+    #[test]
+    fn url_origin_uses_parsed_scheme_and_netloc() {
+        // Django builds the fallback from `f"{scheme}://{netloc}"`
+        // (`:202-203`): lower-cased scheme, raw netloc, `None` when
+        // either half is missing.
+        for (url, expected) in [
+            ("HTTPS://X.COM/A", Some("https://X.COM")),
+            ("http://h:1/a?b#c", Some("http://h:1")),
+            ("https://x.com/a", Some("https://x.com")),
+            ("https:foo://bar", None),
+            ("file:///etc/x", None),
+            ("https:foo", None),
+        ] {
+            assert_eq!(url_origin(url).as_deref(), expected, "url={url:?}");
+        }
+    }
+
+    #[test]
+    fn crawl_accepts_leading_whitespace_url() {
+        // Fix 2 at crawl level: Django strips and crawls; pre-fix Rust
+        // failed the scheme check and stored no title.
+        let get = |_: &HttpRequest| {
+            Ok(HttpResponse {
+                status: 200,
+                headers: HttpHeaders::new(),
+                body: b"<html><head><title>Spaced</title></head></html>".to_vec(),
+                is_redirect: false,
+            })
+        };
+        let head = |_: &HttpRequest| {
+            Ok(HttpResponse {
+                status: 404,
+                headers: HttpHeaders::new(),
+                body: Vec::new(),
+                is_redirect: false,
+            })
+        };
+        let report = crawl("  https://example.com/", &deny_all(), &get, &head);
+        assert_eq!(
+            report.result.get("title"),
+            Some(&Value::String("Spaced".to_owned()))
+        );
+        assert!(
+            report.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn crawl_rejects_bare_authority_marker_without_fetch() {
+        // Fix 3 at crawl level: `https:foo://bar` has no hostname, so
+        // Django warns and stores no title; pre-fix Rust resolved "bar"
+        // and fetched it.
+        let head = |_: &HttpRequest| {
+            Ok(HttpResponse {
+                status: 404,
+                headers: HttpHeaders::new(),
+                body: Vec::new(),
+                is_redirect: false,
+            })
+        };
+        let report = crawl(
+            "https:foo://bar",
+            &deny_all(),
+            &|_: &HttpRequest| panic!("denied before any GET"),
+            &head,
+        );
+        assert_eq!(report.result.get("title"), Some(&Value::Null));
+        assert_eq!(
+            report.warnings,
+            vec![
+                "URL validation failed: Invalid URL: No hostname found".to_owned(),
+                "Failed to fetch favicon: Invalid URL: No hostname found".to_owned(),
             ]
         );
     }
