@@ -256,15 +256,29 @@ describe("bundled list", () => {
     for (const path of [
       "/acme/projects/00000000-0000-0000-0000-000000000000",
       "/acme/projects/00000000-0000-0000-0000-000000000000/cycles",
-      "/acme/projects/00000000-0000-0000-0000-000000000000/modules",
       // (Project views moved with their own area gate, NEWFRONT-745, and are
       // asserted in the views block below.)
+      // (Project modules moved with their own area gate, NEWFRONT-808, and are
+      // asserted in the modules block below.)
       "/acme/projects/00000000-0000-0000-0000-000000000000/issues-archive",
     ]) {
       expect(isMigratedPath(path), path).toBe(false);
     }
     expect(resolveLinkKind("/acme/projects/00000000-0000-0000-0000-000000000000/issues")).toBe("router");
     expect(resolveLinkKind("/acme/projects/00000000-0000-0000-0000-000000000000/cycles")).toBe("anchor");
+  });
+
+  it("serves project modules and the module detail subtree from web_new", () => {
+    for (const path of [
+      "/acme/projects/00000000-0000-0000-0000-000000000000/modules",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/modules/",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/modules/00000000-0000-0000-0000-000000000000",
+    ]) {
+      expect(isMigratedPath(path), path).toBe(true);
+    }
+    // Near-miss spellings stay on the old app.
+    expect(isMigratedPath("/acme/projects/00000000-0000-0000-0000-000000000000/modulesx"), "modulesx").toBe(false);
+    expect(resolveLinkKind("/acme/projects/00000000-0000-0000-0000-000000000000/modules")).toBe("router");
   });
 
   it("serves project intake and the retired inbox redirect from web_new", () => {

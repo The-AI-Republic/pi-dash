@@ -38,6 +38,7 @@ import {
   signInSession,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
+import { openArchivesModulesTab } from "./chunkRecovery";
 import type { ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
 
 test.use({ viewport: { width: 1600, height: 900 } });
@@ -205,7 +206,10 @@ test.describe("module detail on desktop", () => {
           await expect
             .poll(() => currentPathClean(driver), { timeout: 30_000 })
             .toBe(`/${seed.workspaceSlug}/projects/${projectId}/modules/${idB}`);
-          expect(await driver.modulesDetailSidebarName()).toBe(nameB);
+          // The address lands before the newly picked module's detail
+          // read resolves; the old app answers synchronously and passes
+          // first try.
+          await expect.poll(() => driver.modulesDetailSidebarName(), { timeout: 30_000 }).toBe(nameB);
         });
 
         await test.step("an empty module shows no badge", async () => {
@@ -725,11 +729,21 @@ test.describe("module detail on desktop", () => {
           // Live the rows show avatar initials, never display names: the
           // lead row carries the lead's initial plus the unresolved-name
           // placeholder; identity is proven by server below.
-          expect(await driver.modulesDetailSidebarLead()).toBe(`${owner.displayName.charAt(0)} Lead`);
-          // Member avatars resolve after the module record settles.
-          await expect
-            .poll(() => driver.modulesDetailSidebarMembers(), { timeout: 60_000 })
-            .toEqual([owner.displayName.charAt(0)]);
+          if (driver.target === "web_new") {
+            // The new picker resolves display names where the old row
+            // kept the placeholder.
+            expect(await driver.modulesDetailSidebarLead()).toBe(`${owner.displayName.charAt(0)} ${owner.displayName}`);
+            // Member avatars resolve after the module record settles.
+            await expect
+              .poll(() => driver.modulesDetailSidebarMembers(), { timeout: 60_000 })
+              .toEqual([owner.displayName]);
+          } else {
+            expect(await driver.modulesDetailSidebarLead()).toBe(`${owner.displayName.charAt(0)} Lead`);
+            // Member avatars resolve after the module record settles.
+            await expect
+              .poll(() => driver.modulesDetailSidebarMembers(), { timeout: 60_000 })
+              .toEqual([owner.displayName.charAt(0)]);
+          }
         });
 
         await test.step("counts render without a points row", async () => {
@@ -940,10 +954,12 @@ test.describe("module detail on desktop", () => {
             `/${seed.workspaceSlug}/projects/${projectId}/modules`,
             sessionBrowserCookies(session)
           );
-          await driver.archivesOpenModulesTab(seed.workspaceSlug, projectId);
+          await openArchivesModulesTab(driver, seed.workspaceSlug, projectId);
           await driver.archivesAwaitModuleRow(`${tag} archived`);
           await driver.archivesOpenModulePeek(`${tag} archived`);
-          expect(await driver.modulesDetailSidebarName()).toBe(`${tag} archived`);
+          // The peek body loads behind its skeleton; the old peek
+          // answers synchronously and passes first try.
+          await expect.poll(() => driver.modulesDetailSidebarName(), { timeout: 30_000 }).toBe(`${tag} archived`);
           expect(await driver.modulesDetailSidebarStatusDisabled()).toBe(true);
           expect(await driver.modulesDetailSidebarDateDisabled()).toBe(true);
           expect(await driver.modulesDetailSidebarLeadDisabled()).toBe(true);
@@ -1183,21 +1199,40 @@ test.describe("module detail on desktop", () => {
         });
 
         await test.step("live each tab shows the next dimension's breakdown (NEWFRONT-337)", async () => {
-          await driver.modulesDetailProgressStatsTab("States");
-          let rows = await driver.modulesDetailProgressStatsRows();
-          expect(rows.map((row) => row.title)).toContain("No assignee");
-          await driver.modulesDetailProgressStatsTab("Assignees");
-          rows = await driver.modulesDetailProgressStatsRows();
-          expect(rows.map((row) => row.title)).toContain(labelName);
-          await driver.modulesDetailProgressStatsTab("Labels");
-          rows = await driver.modulesDetailProgressStatsRows();
-          expect(rows.find((row) => row.title === "Backlog")).toEqual({ title: "Backlog", percent: 33, total: 3 });
+          if (driver.target === "web_new") {
+            // Fixed (NEWFRONT-337): each tab shows its own dimension.
+            await driver.modulesDetailProgressStatsTab("States");
+            const fixed = await driver.modulesDetailProgressStatsRows();
+            expect(fixed.find((row) => row.title === "Backlog")).toEqual({ title: "Backlog", percent: 33, total: 3 });
+            await driver.modulesDetailProgressStatsTab("Assignees");
+            const assignees = await driver.modulesDetailProgressStatsRows();
+            expect(assignees.map((row) => row.title)).toContain("No assignee");
+            await driver.modulesDetailProgressStatsTab("Labels");
+            const labels = await driver.modulesDetailProgressStatsRows();
+            expect(labels.map((row) => row.title)).toContain(labelName);
+          } else {
+            await driver.modulesDetailProgressStatsTab("States");
+            let rows = await driver.modulesDetailProgressStatsRows();
+            expect(rows.map((row) => row.title)).toContain("No assignee");
+            await driver.modulesDetailProgressStatsTab("Assignees");
+            rows = await driver.modulesDetailProgressStatsRows();
+            expect(rows.map((row) => row.title)).toContain(labelName);
+            await driver.modulesDetailProgressStatsTab("Labels");
+            rows = await driver.modulesDetailProgressStatsRows();
+            expect(rows.find((row) => row.title === "Backlog")).toEqual({ title: "Backlog", percent: 33, total: 3 });
+          }
         });
 
         await test.step("entries filter the list on detail", async () => {
+          // Fixed (NEWFRONT-337): entries live under their own tabs on
+          // web_new; the oracle keeps the rotated mapping (states under
+          // Labels, assignees under States, labels under Assignees).
+          const statesTab = driver.target === "web_new" ? "States" : "Labels";
+          const assigneesTab = driver.target === "web_new" ? "Assignees" : "States";
+          const labelsTab = driver.target === "web_new" ? "Labels" : "Assignees";
           // Entries wire their handlers once the filter instance loads;
           // settle on the clickable marker instead of racing that window.
-          await driver.modulesDetailProgressStatsTab("Labels");
+          await driver.modulesDetailProgressStatsTab(statesTab);
           await expect
             .poll(() => driver.modulesDetailProgressEntryClickable("Backlog"), { timeout: 30_000 })
             .toBe(true);
@@ -1229,18 +1264,19 @@ test.describe("module detail on desktop", () => {
             await expect.poll(listNames, { timeout: 30_000 }).toEqual(expected);
           };
           // State groups (live under the Labels tab while NEWFRONT-337 stands).
+          await driver.modulesDetailProgressStatsTab(statesTab);
           await clickUntilList("Backlog", [backlogName]);
           await expect.poll(richFiltersText, { timeout: 30_000 }).toContain("backlog");
           await clickUntilList("Backlog", allNames);
           await expect.poll(richFiltersText, { timeout: 30_000 }).not.toContain("state_group");
           // Assignees (live under the States tab while NEWFRONT-337 stands).
-          await driver.modulesDetailProgressStatsTab("States");
+          await driver.modulesDetailProgressStatsTab(assigneesTab);
           await clickUntilList(teammate.displayName, [todoName]);
           await expect.poll(richFiltersText, { timeout: 30_000 }).toContain(teammate.id);
           await clickUntilList(teammate.displayName, allNames);
           await expect.poll(richFiltersText, { timeout: 30_000 }).not.toContain(teammate.id);
           // Labels (live under the Assignees tab while NEWFRONT-337 stands).
-          await driver.modulesDetailProgressStatsTab("Assignees");
+          await driver.modulesDetailProgressStatsTab(labelsTab);
           await clickUntilList(labelName, [backlogName]);
           await expect.poll(richFiltersText, { timeout: 30_000 }).toContain(label.id);
           await clickUntilList(labelName, allNames);
@@ -1257,8 +1293,11 @@ test.describe("module detail on desktop", () => {
           await driver.archivesOpenLiveModules(seed.workspaceSlug, projectId);
           await driver.archivesAwaitModuleRow(nameB);
           await driver.archivesOpenLiveModulePeek(nameB);
-          await driver.modulesDetailProgressStatsTab("Labels");
-          expect(await driver.modulesDetailActiveStatsTab()).toBe("Labels");
+          // The Backlog entry lives under Labels while NEWFRONT-337
+          // stands, under its own States tab once fixed.
+          const entryTab = driver.target === "web_new" ? "States" : "Labels";
+          await driver.modulesDetailProgressStatsTab(entryTab);
+          expect(await driver.modulesDetailActiveStatsTab()).toBe(entryTab);
           expect(await driver.modulesDetailProgressEntryClickable("Backlog")).toBe(false);
           await driver.modulesDetailProgressEntryClick("Backlog");
           await driver.page.waitForTimeout(3_000);
@@ -1324,7 +1363,14 @@ test.describe("module detail on desktop", () => {
         });
 
         await test.step("bug: NEWFRONT-342 the section stays collapsed after reload though links exist", async () => {
-          await driver.layoutsReloadIssues();
+          if (driver.target === "web_new") {
+            // The issues-list settle does not recognize the module empty
+            // list, so reload and settle on the sidebar instead; the step
+            // proves the links section, not the list settle.
+            await driver.page.reload({ waitUntil: "domcontentloaded" });
+          } else {
+            await driver.layoutsReloadIssues();
+          }
           await expect.poll(() => driver.modulesDetailSidebarName(), { timeout: 120_000 }).toBe(moduleName);
           if (driver.target === "web_new") {
             // Fixed (NEWFRONT-342): the section opens by default once
@@ -1356,7 +1402,12 @@ test.describe("module detail on desktop", () => {
           await driver.modulesDetailLinksAddClick();
           await driver.modulesDetailLinkFillUrl("https://refused.example");
           await driver.modulesDetailLinkSubmit();
-          expect(await toastText(driver)).toContain("Error!");
+          // web_new titles the failure notice with the action; the
+          // oracle uses its generic "Error!" title. Either way the
+          // notice shows and the refused write stores nothing.
+          expect(await toastText(driver)).toContain(
+            driver.target === "web_new" ? "Couldn't create the module link" : "Error!"
+          );
           expect(await serverModulesDetailLinks(seed.workspaceSlug, projectId, secondId, session)).toEqual([]);
         });
       } finally {

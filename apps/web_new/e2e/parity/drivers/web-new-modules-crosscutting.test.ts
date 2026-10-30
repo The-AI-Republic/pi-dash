@@ -130,6 +130,7 @@ class FakePage {
         self.pageCalls.push("reload");
       },
       waitForTimeout: async () => undefined,
+      waitForFunction: async () => undefined,
       keyboard: { press: async () => undefined },
       on: (event: string, listener: (request: { url(): string }) => void) => {
         if (event === "request") self.requests.push(listener);
@@ -156,7 +157,7 @@ afterEach(() => {
 });
 
 const SETTLED =
-  'page css([data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"])';
+  'page css([data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"], [data-testid="modules-feature-gate"])';
 
 describe("modulesXOpenModulesList", () => {
   it("navigates to the list address and settles on its body", async () => {
@@ -164,6 +165,21 @@ describe("modulesXOpenModulesList", () => {
     await new WebNewDriver(fake.asPage()).modulesXOpenModulesList("acme", "p1");
     expect(fake.pageCalls).toContain("goto:/acme/projects/p1/modules");
     expect(fake.pageCalls).toContain("waitForLoadState");
+  });
+
+  it("settles on the flag gate when the list body is absent (MOD-036)", async () => {
+    const fake = new FakePage({
+      [SETTLED]: { count: 1 },
+      "page testid(modules-list)": { count: 0 },
+      "page testid(modules-zero-state)": { count: 0 },
+      "page testid(modules-no-match)": { count: 0 },
+      "page testid(modules-feature-gate)": { count: 1, visible: true },
+    });
+    const driver = new WebNewDriver(fake.asPage());
+    await driver.modulesXOpenModulesList("acme", "p1");
+    expect(fake.pageCalls).toContain("goto:/acme/projects/p1/modules");
+    expect(await driver.modulesXListGateVisible()).toBe(true);
+    expect(await driver.modulesXListNames()).toEqual([]);
   });
 });
 
@@ -250,7 +266,7 @@ describe("the module dialog hooks", () => {
       [form]: { count: 1 },
     });
     await new WebNewDriver(fake.asPage()).modulesXOpenEditDialogFromRow("Delivery");
-    expect(fake.clicks.some((click) => click.startsWith('page css([data-testid="modules-row"]'))).toBe(true);
+    expect(fake.clicks.some((click) => click.includes('css(div[data-main-menu="true"]:visible button)'))).toBe(true);
     expect(fake.clicks.some((click) => click.includes("role(menuitem,Edit)"))).toBe(true);
   });
 
@@ -295,6 +311,23 @@ describe("the deep-link hooks (MOD-038)", () => {
     expect(await new WebNewDriver(fake.asPage()).modulesXDetailName()).toBeNull();
   });
 
+  it("reads the peek name from the panel's sidebar field (MOD-038)", async () => {
+    const fake = new FakePage({
+      "page testid(modules-peek)": { count: 1, visible: true },
+      "page testid(modules-peek) testid(modules-sidebar-name)": {
+        count: 1,
+        visible: true,
+        value: " Peeked ",
+      },
+    });
+    expect(await new WebNewDriver(fake.asPage()).modulesXPeekName()).toBe("Peeked");
+  });
+
+  it("reads no peek name when the panel is absent", async () => {
+    const fake = new FakePage({ "page testid(modules-peek)": { count: 0 } });
+    expect(await new WebNewDriver(fake.asPage()).modulesXPeekName()).toBeNull();
+  });
+
   it("reads the missing-module state and its way back", async () => {
     const fake = new FakePage({
       "page testid(modules-gone-away)": { count: 1, visible: true },
@@ -317,7 +350,8 @@ describe("the deep-link hooks (MOD-038)", () => {
       [SETTLED]: { count: 1 },
       'page css([data-testid="modules-sidebar-name"], [data-testid="modules-gone-away"])': { count: 1 },
       "page testid(modules-list-screen)": { count: 1, visible: true },
-      "page testid(modules-list-screen) testid(modules-sidebar-name)": { count: 1, visible: true, value: "Delivery" },
+      "page testid(modules-peek)": { count: 1, visible: true },
+      "page testid(modules-peek) testid(modules-sidebar-name)": { count: 1, visible: true, value: "Delivery" },
     });
     const driver = new WebNewDriver(fake.asPage());
     await driver.modulesXOpenModulesListWithPeek("acme", "p1", "m1");
@@ -326,7 +360,7 @@ describe("the deep-link hooks (MOD-038)", () => {
   });
 
   it("reads no peek name on the detail page", async () => {
-    const fake = new FakePage({ "page testid(modules-list-screen)": { count: 0 } });
+    const fake = new FakePage({ "page testid(modules-peek)": { count: 0 } });
     expect(await new WebNewDriver(fake.asPage()).modulesXPeekName()).toBeNull();
   });
 });

@@ -252,6 +252,17 @@ describe("the archived header controls", () => {
     expect(fake.clicks.some((click) => click.includes("role(button,Clear search)"))).toBe(true);
   });
 
+  it("treats a collapsed box after clearing as the empty query", async () => {
+    // Clearing drops the query, which collapses the box and unmounts
+    // the field; the absent-tolerant read resolves instead of throwing.
+    const fake = new FakePage({
+      "page testid(modules-search-input)": { count: 0 },
+      "page testid(modules-search-field) role(button,Clear search)": {},
+    });
+    await new WebNewDriver(fake.asPage()).archivesClearModuleSearch();
+    expect(fake.clicks.some((click) => click.includes("role(button,Clear search)"))).toBe(true);
+  });
+
   it("opens the filters once and reads the groups", async () => {
     const fake = new FakePage({
       "page testid(modules-filter-panel)": { visible: true },

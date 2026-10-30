@@ -12,6 +12,7 @@ import { seedFactsFromEnv } from "./api.js";
 import {
   isCloudNewEdition,
   parityApiUrl,
+  parityNewUrl,
   parityOracleAdminUrl,
   parityOracleUrl,
   PARITY_DEFAULT_PORTS,
@@ -146,6 +147,11 @@ describe("suite URL helpers", () => {
   it("lets explicit URLs win", () => {
     expect(parityOracleUrl({ PARITY_NS: "257", PARITY_ORACLE_URL: "http://proxy:8080/" })).toBe("http://proxy:8080/");
     expect(parityApiUrl({ PARITY_API_URL: "http://api:9000" })).toBe("http://api:9000");
+  });
+
+  it("resolves the web_new base URL from PARITY_NEW_URL with the dev default", () => {
+    expect(parityNewUrl({})).toBe("http://localhost:3010");
+    expect(parityNewUrl({ PARITY_NEW_URL: "http://localhost:3080" })).toBe("http://localhost:3080");
   });
 
   it("mounts the admin oracle URL on the oracle origin under /god-mode (NEWFRONT-441)", () => {

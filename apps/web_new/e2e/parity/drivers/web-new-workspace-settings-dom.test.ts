@@ -25,6 +25,8 @@ function capturePage(overrides: Record<string, unknown> = {}): Page {
     waitForFunction: vi.fn(async () => undefined),
     waitForTimeout: vi.fn(async () => undefined),
     waitForResponse: vi.fn(async () => undefined),
+    evaluate: vi.fn(async () => ""),
+    reload: vi.fn(async () => undefined),
     // wsSettingsOpen installs the asset bridge before it navigates.
     route: vi.fn(async () => undefined),
     url: () => "http://localhost:3000/acme/settings/",
@@ -133,7 +135,7 @@ describe("workspace-settings surface settle predicate (NEWFRONT-548)", () => {
       context: () => ({ addCookies: vi.fn(async () => undefined) }),
     });
     await new WebNewDriver(page).exportsSettingsOpen("acme", []);
-    const [settled] = predicates(page, "waitForFunction");
+    const settled = predicates(page, "waitForFunction").find((fn) => fn === wsSettingsSurfaceSettled);
     expect(settled).toBe(wsSettingsSurfaceSettled);
   });
 });

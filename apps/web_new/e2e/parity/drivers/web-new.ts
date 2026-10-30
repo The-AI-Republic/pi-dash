@@ -408,6 +408,12 @@ function todo(target: string): never {
 }
 
 /**
+ * Module lifecycle labels as the sidebar status pill renders them (the
+ * driver's copy of MODULE_STATUS_LABELS; drivers never import app UI).
+ */
+const MODULE_DETAIL_STATUS_LABELS = ["Backlog", "Planned", "In Progress", "Paused", "Completed", "Cancelled"] as const;
+
+/**
  * Whether the current address has resolved to a settled surface: the
  * settings shell, a denial, one of the instance screens, or the
  * workspace-not-found screen. Exported so it can be exercised directly in
@@ -1238,11 +1244,12 @@ export class WebNewDriver implements ParityDriver {
   /**
    * Boot retry (NEWFRONT-1031; oracle precedent NEWFRONT-124, same shape
    * as NEWFRONT-808 batches 12/13): on noisy hosts Chromium
-   * intermittently aborts the vite dev server's route-module fetches, so
-   * the error boundary renders "Failed to fetch dynamically imported
-   * module" instead of the page. Reload while that vite signature shows
-   * (up to five loads); every other state — content, app errors, slow
-   * loads — is left for the scenario's own waits, and a deterministically
+   * intermittently aborts the vite dev server's route-module fetches
+   * (trace-proven net::ERR_NETWORK_CHANGED bursts), so the page either
+   * renders "Failed to fetch dynamically imported module" or stays
+   * blank when the burst lands before first paint. Reload while either
+   * shows (up to five loads); painted content, app errors, and slow
+   * loads are left for the scenario's own waits, and a deterministically
    * broken import still fails after five reloads. The hold past first
    * paint matters: the shell can paint before the failed chunk's error
    * commits, so a page counts as booted only when it is still error-free
@@ -1269,9 +1276,14 @@ export class WebNewDriver implements ParityDriver {
           () => true,
           () => false
         );
-      if (!painted) return;
+      if (!painted) {
+        if (attempt === 4) return;
+        await this.page.reload();
+        await this.page.waitForLoadState("domcontentloaded");
+        continue;
+      }
       await this.page.waitForTimeout(WebNewDriver.BOOT_HOLD_MS);
-      const body = await this.page.evaluate(() => document.body?.innerText ?? "").catch(() => "");
+      const body = (await this.page.evaluate(() => document.body?.innerText ?? "").catch(() => "")) ?? "";
       if (!body.includes(WebNewDriver.CHUNK_ERROR_SIGNATURE)) return;
       console.log(`[parity] vite chunk error at ${path} (load ${attempt + 1}/5); reloading.`);
       if (attempt === 4) throw new Error(`[parity] vite chunk error persists at ${path} after 5 loads.`);
@@ -21087,9 +21099,6 @@ export class WebNewDriver implements ParityDriver {
   private archivedModulesSearchInput(): Locator {
     return this.page.getByTestId("modules-search-input").first();
   }
-  private async archivedModulesSearchText(): Promise<string> {
-    return this.archivedModulesSearchInput().inputValue();
-  }
   /**
    * Wait until the archived tab settles: rows, a known empty, or the
    * error state with its retry. The screen's own skeleton must be gone;
@@ -24273,18 +24282,22 @@ export class WebNewDriver implements ParityDriver {
     // click lands on the intended cell even across month boundaries.
     const calendar = this.modulesDatesCalendar().first();
     await calendar.waitFor({ timeout: WebNewDriver.WAIT_MS });
-    const month0 = Number(await calendar.getByLabel("Month").inputValue());
-    const year = Number(await calendar.getByLabel("Year").inputValue());
+    const month0 = Number(await calendar.getByLabel("Month", { exact: true }).inputValue());
+    const year = Number(await calendar.getByLabel("Year", { exact: true }).inputValue());
     const iso = `${year}-${String(month0 + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
     await calendar.locator(`button[data-day="${iso}"]`).click({ timeout: WebNewDriver.WAIT_MS });
   }
   async modulesCalendarGotoMonth(monthLabel: string, yearLabel: string): Promise<void> {
     const calendar = this.modulesDatesCalendar().first();
-    await calendar.getByLabel("Month").selectOption({ label: monthLabel }, { timeout: WebNewDriver.WAIT_MS });
-    await calendar.getByLabel("Year").selectOption({ label: yearLabel }, { timeout: WebNewDriver.WAIT_MS });
+    await calendar
+      .getByLabel("Month", { exact: true })
+      .selectOption({ label: monthLabel }, { timeout: WebNewDriver.WAIT_MS });
+    await calendar
+      .getByLabel("Year", { exact: true })
+      .selectOption({ label: yearLabel }, { timeout: WebNewDriver.WAIT_MS });
     const shown = async (): Promise<[string, string]> => {
-      const month = (await calendar.getByLabel("Month").locator("option:checked").innerText()).trim();
-      const year = (await calendar.getByLabel("Year").locator("option:checked").innerText()).trim();
+      const month = (await calendar.getByLabel("Month", { exact: true }).locator("option:checked").innerText()).trim();
+      const year = (await calendar.getByLabel("Year", { exact: true }).locator("option:checked").innerText()).trim();
       return [month, year];
     };
     await expect.poll(shown, { timeout: WebNewDriver.WAIT_MS }).toEqual([monthLabel, yearLabel]);
@@ -24445,7 +24458,18 @@ export class WebNewDriver implements ParityDriver {
       // The desktop trigger reveals on row hover; hovering first reads
       // the menu the way a viewer opens it.
       await row.hover({ timeout: WebNewDriver.WAIT_MS });
-      await row.locator('div[data-main-menu="true"]:visible button').click({ timeout: WebNewDriver.WAIT_MS });
+      const trigger = row.locator('div[data-main-menu="true"]:visible button');
+      try {
+        await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+      } catch {
+        // An open peek panel overlays the row's trigger (NEWFRONT-329
+        // deletes with the peek open): a keyboard user tabs to the
+        // covered trigger and presses Enter, which needs no click
+        // point. A genuinely missing trigger still fails below, on
+        // the fallback or the menu wait.
+        await trigger.focus({ timeout: WebNewDriver.WAIT_MS });
+        await trigger.press("Enter", { timeout: WebNewDriver.WAIT_MS });
+      }
     }
     await this.page.locator('[role="menuitem"]:visible').first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
@@ -24725,11 +24749,13 @@ export class WebNewDriver implements ParityDriver {
    * leaves the caller reading a half-mounted screen.
    */
   async modulesXOpenSettingsModules(workspaceSlug: string, projectId: string): Promise<void> {
-    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/features/modules`, {
+    const path = `/${workspaceSlug}/settings/projects/${projectId}/features/modules`;
+    await this.page.goto(path, {
       waitUntil: "domcontentloaded",
       timeout: 120_000,
     });
     await this.page.waitForLoadState("domcontentloaded");
+    await this.awaitAppBoot(path);
     const settled = await Promise.race([
       this.page
         .getByRole("switch", { name: "Enable modules", exact: true })
@@ -25029,9 +25055,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesXOpenEditDialogFromRow(name: string): Promise<void> {
+    // The new rows and cards expose no context menu; hover the item and
+    // activate its quick-menu trigger the way a viewer opens it.
     const item = this.modulesXItemForName(name);
     await item.waitFor({ timeout: WebNewDriver.WAIT_MS });
-    await item.click({ button: "right", timeout: WebNewDriver.WAIT_MS });
+    await item.hover({ timeout: WebNewDriver.WAIT_MS });
+    await item.locator('div[data-main-menu="true"]:visible button').click({ timeout: WebNewDriver.WAIT_MS });
     const edit = this.page.getByRole("menuitem", { name: "Edit", exact: true });
     await edit.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
     await edit.first().click({ timeout: WebNewDriver.WAIT_MS });
@@ -25048,13 +25077,16 @@ export class WebNewDriver implements ParityDriver {
     await this.page.waitForLoadState("domcontentloaded");
     await this.awaitAppBoot(path);
     // One of three verdicts settles: the page, the missing-module view, or
-    // the project access wall.
-    await this.page
-      .locator(
-        '[data-testid="module-detail-screen"], [data-testid="modules-gone-away"], [data-testid="project-access-wall"]'
-      )
-      .last()
-      .waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // the project access wall. Late chunk failures recover the same way
+    // the list settle does.
+    await this.waitWithChunkRecovery(() =>
+      this.page
+        .locator(
+          '[data-testid="module-detail-screen"], [data-testid="modules-gone-away"], [data-testid="project-access-wall"]'
+        )
+        .last()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+    );
   }
 
   /** The module name the sidebar (detail or peek) shows, or null. */
@@ -25095,20 +25127,22 @@ export class WebNewDriver implements ParityDriver {
     await this.page.waitForLoadState("domcontentloaded");
     await this.awaitAppBoot(path);
     await this.modulesListWaitSettled();
-    // The panel body lands once its own detail read settles; a panel that
-    // is still loading is not a failure of the open, the read just waits.
+    // The open ends with the panel settled: its sidebar name, or the
+    // gone-away verdict for an unknown id. Tolerant waits here flake the
+    // immediate name reads callers make (MOD-038/039).
     await this.page
       .locator('[data-testid="modules-sidebar-name"], [data-testid="modules-gone-away"]')
       .last()
-      .waitFor({ timeout: WebNewDriver.WAIT_MS })
-      .catch(() => undefined);
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesXPeekName(): Promise<string | null> {
-    // The peek renders the sidebar over the list; the detail page has no
-    // peek, so a peek name only counts while the list screen owns the page.
-    if (!(await this.isShown(this.page.getByTestId("modules-list-screen")))) return null;
-    return this.modulesXSidebarName(this.page.getByTestId("modules-list-screen").last());
+    // The peek panel mounts outside the list screen, so scope to the
+    // panel itself; the detail page has no peek panel, which keeps the
+    // no-peek guard (a peek name never reads the detail sidebar).
+    const panel = this.page.getByTestId("modules-peek").last();
+    if (!(await this.isShown(panel))) return null;
+    return this.modulesXSidebarName(panel);
   }
 
   // --- Keyboard and list search (MOD-040) ---
@@ -31642,16 +31676,49 @@ export class WebNewDriver implements ParityDriver {
   }
 
   /**
-   * Wait until the screen leaves the loading body: rows, a zero state or
-   * a no-match state. The zero and no-match probes arrive with slices F
-   * and B; until then a settled empty list reads as rows with no names,
-   * which is what this slice can prove.
+   * Wait until the screen leaves the loading body: rows, a zero state, a
+   * no-match state, or the flag gate. The gate is a terminal state, not
+   * loading (the oracle's settle accepts it too); without it, opening the
+   * list while the flag is off times out instead of settling (MOD-036).
+   * A late chunk failure (sidebar prefetch, lazy section) can error the
+   * page after the boot check ran, so the wait recovers past the vite
+   * signature once before throwing.
    */
   private async modulesListWaitSettled(): Promise<void> {
-    await this.page
-      .locator('[data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"]')
-      .last()
-      .waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.waitWithChunkRecovery(() =>
+      this.page
+        .locator(
+          '[data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"], [data-testid="modules-feature-gate"]'
+        )
+        .last()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+    );
+  }
+
+  /**
+   * Run a settle wait, reloading once past a vite chunk error. Only the
+   * vite signature triggers the reload; timeouts on any other page —
+   * slow loads, app errors, a dead renderer (whose read throws) —
+   * rethrow untouched, and the retry throws whatever it meets, so a
+   * deterministically broken import still fails. Entry navigations are
+   * restored by the URL; mid-test readers inherit this safely because
+   * a signed page fails their assertions either way.
+   */
+  private async waitWithChunkRecovery(wait: () => Promise<void>): Promise<void> {
+    try {
+      await wait();
+    } catch (error) {
+      if (!(await this.hasViteChunkError())) throw error;
+      await this.page.reload();
+      await this.page.waitForLoadState("domcontentloaded");
+      await wait();
+    }
+  }
+
+  /** Whether the page shows vite's failed-chunk signature (never an app state). */
+  private async hasViteChunkError(): Promise<boolean> {
+    const body = (await this.page.evaluate(() => document.body?.innerText ?? "").catch(() => "")) ?? "";
+    return body.includes("Failed to fetch dynamically imported module");
   }
 
   async modulesListOpenList(workspaceSlug: string, projectId: string): Promise<void> {
@@ -31851,7 +31918,16 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesListSwitchLayout(layout: ModulesListLayout): Promise<void> {
-    await this.modulesLayoutOption(layout).click({ timeout: WebNewDriver.WAIT_MS });
+    const option = this.modulesLayoutOption(layout);
+    try {
+      await option.click({ timeout: WebNewDriver.WAIT_MS });
+    } catch {
+      // An open peek panel overlays the switcher (MOD-019 measures
+      // board density with the peek open): a keyboard user tabs to the
+      // covered option and presses Enter, which needs no click point.
+      await option.focus({ timeout: WebNewDriver.WAIT_MS });
+      await option.press("Enter", { timeout: WebNewDriver.WAIT_MS });
+    }
     await expect.poll(() => this.modulesListActiveLayout(), { timeout: WebNewDriver.WAIT_MS }).toBe(layout);
     await this.modulesListWaitSettled();
   }
@@ -32003,12 +32079,15 @@ export class WebNewDriver implements ParityDriver {
   async modulesListArchivedRowClickOpensPeek(name: string): Promise<void> {
     const row = this.modulesRow(name);
     await row.waitFor({ timeout: WebNewDriver.WAIT_MS });
-    const before = new URL(this.page.url()).pathname;
+    // Slash-tolerant: the router normalizes a trailing slash on client
+    // hops, which is not a navigation away from the archives screen.
+    const path = (): string => new URL(this.page.url()).pathname.replace(/\/$/, "");
+    const before = path();
     // The progress marker is part of the row body, never a control, so a
     // press there is the body press an archived row turns into a peek.
     await row.getByTestId("modules-row-progress").first().click({ timeout: WebNewDriver.WAIT_MS });
     await this.modulesAwaitPeekName(name);
-    const after = new URL(this.page.url()).pathname;
+    const after = path();
     if (after !== before) throw new Error(`[parity] archived row navigated to ${after} instead of peeking.`);
   }
 
@@ -32370,7 +32449,9 @@ export class WebNewDriver implements ParityDriver {
   // --- Module detail/analytics/links (NEWFRONT-310, MOD-029-035). Appended stubs.
 
   async modulesDetailSidebarName(): Promise<string | null> {
-    return todo("modulesDetailSidebarName");
+    // The detail and peek mounts render the same sidebar tree; the
+    // cross-cutting reader already covers its name input.
+    return this.modulesXSidebarName(this.moduleSidebar());
   }
 
   async modulesDetailBadgeText(): Promise<string | null> {
@@ -32687,80 +32768,253 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesDetailSidebarStatus(): Promise<string | null> {
-    return todo("modulesDetailSidebarStatus");
+    for (const status of MODULE_DETAIL_STATUS_LABELS) {
+      const pill = this.moduleSidebar().getByRole("button", { name: status, exact: true });
+      if (
+        (await pill.count()) > 0 &&
+        (await pill
+          .first()
+          .isVisible()
+          .catch(() => false))
+      )
+        return status;
+    }
+    return null;
   }
 
-  async modulesDetailSidebarSetStatus(_status: string): Promise<void> {
-    return todo("modulesDetailSidebarSetStatus");
+  async modulesDetailSidebarSetStatus(status: string): Promise<void> {
+    // No early return when already set: re-picking the same value is a
+    // no-op write, and always activating keeps the method pinnable with
+    // a static fake (the read already proves the end state).
+    const current = await this.modulesDetailSidebarStatus();
+    if (current === null) throw new Error("[parity] module status pill never rendered.");
+    await this.moduleSidebar()
+      .getByRole("button", { name: current, exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option", { name: status }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.modulesDetailSidebarStatus(), { timeout: WebNewDriver.WAIT_MS }).toBe(status);
   }
 
   async modulesDetailSidebarDescription(): Promise<string | null> {
-    return todo("modulesDetailSidebarDescription");
+    const area = this.moduleSidebar().getByTestId("modules-sidebar-description").first();
+    if ((await area.count()) === 0) return null;
+    return area.inputValue({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDetailSidebarDateText(): Promise<string> {
-    return todo("modulesDetailSidebarDateText");
+    const trigger = this.moduleSidebar().getByTestId("modules-sidebar-dates-trigger").first();
+    await trigger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await trigger.innerText()).trim().replace(/\s+/g, " ");
   }
 
   async modulesDetailSidebarDateDisabled(): Promise<boolean> {
-    return todo("modulesDetailSidebarDateDisabled");
+    const trigger = this.moduleSidebar().getByTestId("modules-sidebar-dates-trigger").first();
+    await trigger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return trigger.isDisabled();
   }
 
   async modulesDetailSidebarOpenDatePicker(): Promise<void> {
-    return todo("modulesDetailSidebarOpenDatePicker");
+    // The trigger toggles, so an already-open calendar is left alone:
+    // clicking again would shut it.
+    if (
+      !(await this.moduleSidebarDatesCalendar()
+        .first()
+        .isVisible()
+        .catch(() => false))
+    ) {
+      await this.moduleSidebar()
+        .getByTestId("modules-sidebar-dates-trigger")
+        .first()
+        .click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.moduleSidebarDatesCalendar().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async modulesDetailPickDateDay(_label: string): Promise<void> {
-    return todo("modulesDetailPickDateDay");
+  async modulesDetailPickDateDay(label: string): Promise<void> {
+    // The spec addresses days by the old calendar's ordinal labels
+    // ("October 15th, 2026"); the new calendar renders plain labels
+    // ("October 15, 2026"), so strip ordinals before matching, then walk
+    // forward until the day's month shows (the grid renders one month
+    // plus its outside days).
+    const plain = label.replace(/(\d+)(st|nd|rd|th)/, "$1");
+    const calendar = this.moduleSidebarDatesCalendar().first();
+    await calendar.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    for (let step = 0; step < 24; step++) {
+      const day = calendar.getByRole("button", { name: plain, exact: true }).first();
+      if ((await day.count()) > 0 && (await day.isVisible().catch(() => false))) {
+        await day.click({ timeout: WebNewDriver.WAIT_MS });
+        return;
+      }
+      await calendar.getByRole("button", { name: "Next month" }).click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    throw new Error(`[parity] sidebar calendar never showed ${label}.`);
   }
 
   async modulesDetailDismissDatePicker(): Promise<void> {
-    return todo("modulesDetailDismissDatePicker");
+    await this.page.keyboard.press("Escape");
+    await this.moduleSidebarDatesCalendar()
+      .first()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
   }
 
   async modulesDetailSidebarLead(): Promise<string | null> {
-    return todo("modulesDetailSidebarLead");
+    if ((await this.moduleSidebar().count()) === 0) return null;
+    const row = this.moduleSidebarRow("Lead");
+    // CSS, not the img role: the avatar is a plain labelled span and the
+    // role query misses it in some trees (MOD-033).
+    const avatar = row.locator('span[role="img"]').first();
+    if ((await avatar.count()) === 0) {
+      // Unset: the trigger shows the prompt.
+      const trigger = row.getByRole("button").first();
+      if ((await trigger.count()) === 0) return null;
+      return ((await trigger.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim() || null;
+    }
+    // Set: the initial plus the resolved display name (the new picker
+    // resolves names where the old row kept the placeholder; the spec
+    // forks on that). The label carries the name; the trigger's name
+    // text is the fallback when the label is absent.
+    const labelled = ((await avatar.getAttribute("aria-label").catch(() => "")) ?? "").trim();
+    const fallback = row.locator("button span.truncate").first();
+    const text =
+      labelled === "" ? ((await fallback.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim() : labelled;
+    if (text === "") return null;
+    return `${text.charAt(0)} ${text}`;
   }
 
-  async modulesDetailSidebarSetLead(_name: string): Promise<void> {
-    return todo("modulesDetailSidebarSetLead");
+  async modulesDetailSidebarSetLead(name: string): Promise<void> {
+    const row = this.moduleSidebarRow("Lead");
+    await row.getByRole("button").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option", { name }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    // Equality, not change: the row must land on this lead, and a static
+    // fake can pin that (the oracle polls for mere change).
+    await expect
+      .poll(() => this.modulesDetailSidebarLead(), { timeout: WebNewDriver.WAIT_MS })
+      .toBe(`${name.charAt(0)} ${name}`);
   }
 
   async modulesDetailSidebarMembers(): Promise<string[]> {
-    return todo("modulesDetailSidebarMembers");
+    // Avatar aria-labels carry the resolved display names (CSS, not the
+    // img role — see the lead reader). The stack windows at three
+    // avatars plus a +N badge; the specs stay within.
+    const avatars = this.moduleSidebarRow("Members").locator('span[role="img"]');
+    const total = await avatars.count();
+    const names: string[] = [];
+    for (let index = 0; index < total; index++) {
+      const label = (
+        (await avatars
+          .nth(index)
+          .getAttribute("aria-label")
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (label !== "") names.push(label);
+    }
+    return names;
   }
 
-  async modulesDetailSidebarAddMember(_name: string): Promise<void> {
-    return todo("modulesDetailSidebarAddMember");
+  async modulesDetailSidebarAddMember(name: string): Promise<void> {
+    const row = this.moduleSidebarRow("Members");
+    await row.getByRole("button").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option", { name }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.keyboard.press("Escape");
+    await expect.poll(() => this.modulesDetailSidebarMembers(), { timeout: WebNewDriver.WAIT_MS }).toContain(name);
   }
 
   async modulesDetailSidebarStatusDisabled(): Promise<boolean> {
-    return todo("modulesDetailSidebarStatusDisabled");
+    for (const status of MODULE_DETAIL_STATUS_LABELS) {
+      const pill = this.moduleSidebar().getByRole("button", { name: status, exact: true }).first();
+      if ((await pill.count()) === 0) continue;
+      return pill.isDisabled().catch(() => true);
+    }
+    return true;
   }
 
   async modulesDetailSidebarLeadDisabled(): Promise<boolean> {
-    return todo("modulesDetailSidebarLeadDisabled");
+    return this.moduleSidebarRow("Lead")
+      .getByRole("button")
+      .first()
+      .isDisabled({ timeout: WebNewDriver.WAIT_MS })
+      .catch(() => true);
   }
 
   async modulesDetailSidebarMembersDisabled(): Promise<boolean> {
-    return todo("modulesDetailSidebarMembersDisabled");
+    return this.moduleSidebarRow("Members")
+      .getByRole("button")
+      .first()
+      .isDisabled({ timeout: WebNewDriver.WAIT_MS })
+      .catch(() => true);
   }
 
   async modulesDetailSidebarWorkItemsText(): Promise<string> {
-    return todo("modulesDetailSidebarWorkItemsText");
+    const value = this.moduleSidebarRow("Work items").locator("span.text-body").first();
+    if ((await value.count()) === 0) return "";
+    return ((await value.innerText()) ?? "").replace(/\s+/g, " ").trim();
   }
 
   async modulesDetailSidebarPointsText(): Promise<string | null> {
-    return todo("modulesDetailSidebarPointsText");
+    const row = this.moduleSidebarRow("Points");
+    if ((await row.count()) === 0) return null;
+    const value = row.locator("span.text-body").first();
+    if ((await value.count()) === 0) return null;
+    return ((await value.innerText()) ?? "").replace(/\s+/g, " ").trim();
   }
 
   async modulesDetailSlowFetchShowsLoader(): Promise<boolean> {
-    return todo("modulesDetailSlowFetchShowsLoader");
+    // Same shape as the oracle: delay every modules GET so the skeleton
+    // window is watchable, watch before reloading, and let the route die
+    // with the test's page.
+    const pattern = "**/api/workspaces/**/modules**";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() === "GET") {
+        await new Promise((resolve) => setTimeout(resolve, 4000));
+      }
+      try {
+        await route.continue();
+      } catch {
+        // A delayed handler can outlive the test: teardown disposes the
+        // route while it sleeps. Rethrow when the page is still open.
+        if (!this.page.isClosed()) throw new Error("[parity] loader delay route failed on an open page.");
+      }
+    });
+    // The delayed refetch stalls the route prefetch, so the loader the
+    // user sees is the route's pending skeleton (the shared list
+    // skeleton); the analytics sidebar skeleton covers that panel's own
+    // refetch window when it is open. Either one proves the loading
+    // state, the way the oracle's any-pulse watch does. Reload first,
+    // then poll: a watch armed before the navigation misses the pending
+    // window (the issues gate's ganttLoadingObservedOnReload shape).
+    await this.page.reload();
+    const deadline = Date.now() + 90_000;
+    for (;;) {
+      const loader = this.page
+        .locator('[data-testid="issues-skeleton-list"], [data-testid="modules-analytics-sidebar-skeleton"]')
+        .first();
+      if ((await loader.count()) > 0 && (await loader.isVisible().catch(() => false))) {
+        await this.moduleSidebar().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+        return true;
+      }
+      if (Date.now() > deadline) {
+        await this.moduleSidebar().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+        return false;
+      }
+      await this.page.waitForTimeout(250);
+    }
   }
 
   /** The module analytics sidebar (slice C's tree, both mounts). */
   private moduleSidebar(): Locator {
     return this.page.getByTestId("modules-analytics-sidebar");
+  }
+
+  /** One labeled property group inside the analytics sidebar. */
+  private moduleSidebarRow(label: string): Locator {
+    return this.moduleSidebar().getByRole("group", { name: label });
+  }
+
+  /** The sidebar date picker's portalled range calendar. */
+  private moduleSidebarDatesCalendar(): Locator {
+    return this.page.getByTestId("modules-sidebar-dates-calendar");
   }
 
   /** Breakdown rows of the selected tab, in rendered order. */
@@ -32822,15 +33076,19 @@ export class WebNewDriver implements ParityDriver {
     return (await chart.count()) > 0 && (await chart.isVisible().catch(() => false));
   }
 
+  /** First visible measure trigger; the sidebar mounts twice (detail + closed peek). */
+  private moduleProgressMeasureTrigger(): Locator {
+    return this.moduleSidebar().getByTestId("module-progress-measure").filter({ visible: true });
+  }
+
   async modulesDetailProgressMeasureValue(): Promise<string | null> {
-    const trigger = this.moduleSidebar().getByTestId("module-progress-measure");
+    const trigger = this.moduleProgressMeasureTrigger();
     if ((await trigger.count()) === 0) return null;
-    if (!(await trigger.isVisible().catch(() => false))) return null;
-    return ((await trigger.innerText()) ?? "").replace(/\s+/g, " ").trim();
+    return ((await trigger.first().innerText()) ?? "").replace(/\s+/g, " ").trim();
   }
 
   async modulesDetailProgressMeasureOptions(): Promise<string[]> {
-    const trigger = this.moduleSidebar().getByTestId("module-progress-measure");
+    const trigger = this.moduleProgressMeasureTrigger();
     if ((await trigger.count()) === 0) return [];
     await trigger.first().scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
     await trigger.first().click({ timeout: WebNewDriver.WAIT_MS });
@@ -32852,7 +33110,7 @@ export class WebNewDriver implements ParityDriver {
     };
     this.page.on("response", onResponse);
     try {
-      const trigger = this.moduleSidebar().getByTestId("module-progress-measure");
+      const trigger = this.moduleProgressMeasureTrigger();
       await trigger.first().scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
       await trigger.first().click({ timeout: WebNewDriver.WAIT_MS });
       // If a stale toggle state swallowed the open, the option never

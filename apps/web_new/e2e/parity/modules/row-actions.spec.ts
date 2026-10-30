@@ -32,7 +32,8 @@ import {
   type AuthedSession,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
-import { parityOracleUrl } from "../helpers/parity-env";
+import { openArchivesModulesTab } from "./chunkRecovery";
+import { parityNewUrl, parityOracleUrl } from "../helpers/parity-env";
 
 const ROW_013 = ["MOD-013"];
 const ROW_014 = ["MOD-014"];
@@ -123,6 +124,10 @@ async function pickRange(driver: ParityDriver, reopen: () => Promise<void>, from
   await driver.modulesCalendarGotoMonth(monthCaption(from), String(from.getFullYear()));
   await driver.modulesCalendarPickDay(from.getDate());
   await driver.modulesAwaitToast("Module updated successfully.");
+  // The second save's toast wait matches any visible notice, so drain
+  // the first save's toast before the second pick — otherwise it
+  // matches stale and the caller reads the first save's record.
+  await expect.poll(() => driver.modulesLastToast(), { timeout: 30_000 }).toBe(null);
   await reopen();
   await driver.modulesCalendarGotoMonth(monthCaption(to), String(to.getFullYear()));
   await driver.modulesCalendarPickDay(to.getDate());
@@ -167,10 +172,15 @@ test(
       // Oracle behavior: the row/card calendar has no per-side clear — a
       // click re-anchors both ends to that day, and clicking the single
       // selected day again clears the whole range (both sides empty).
+      // Drain pickRange's leftover toast first (same race as pickRange's
+      // own drain): each awaitToast below must match its own pick's
+      // save, or the server read lands on the previous save's record.
+      await expect.poll(() => driver.modulesLastToast(), { timeout: 30_000 }).toBe(null);
       await driver.modulesRowOpenDates("Dated Module");
       await driver.modulesCalendarGotoMonth(monthCaption(from), String(from.getFullYear()));
       await driver.modulesCalendarPickDay(from.getDate());
       await driver.modulesAwaitToast("Module updated successfully.");
+      await expect.poll(() => driver.modulesLastToast(), { timeout: 30_000 }).toBe(null);
       await driver.modulesRowOpenDates("Dated Module");
       await driver.modulesCalendarGotoMonth(monthCaption(from), String(from.getFullYear()));
       await driver.modulesCalendarPickDay(from.getDate());
@@ -243,7 +253,7 @@ test(
 
     await test.step("an archived row disables both controls for an editor", async () => {
       await driver.modulesOpenList(world.workspaceSlug, world.projectId, browserSessionCookies(world.owner));
-      await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+      await openArchivesModulesTab(driver, world.workspaceSlug, world.projectId);
       await driver.modulesAwaitRow("Locked Module");
       expect(await driver.modulesRowDateDisabled("Locked Module")).toBe(true);
       expect(await driver.modulesStatusDisabled("Locked Module")).toBe(true);
@@ -446,7 +456,7 @@ test(
 
     await test.step("editors on an archived module see restore instead of edit/archive/delete", async () => {
       await driver.modulesOpenList(world.workspaceSlug, world.projectId, browserSessionCookies(world.owner));
-      await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+      await openArchivesModulesTab(driver, world.workspaceSlug, world.projectId);
       await driver.modulesAwaitRow("Gone Module");
       await driver.modulesOpenRowMenu("Gone Module");
       const entries = await driver.modulesMenuItems();
@@ -514,7 +524,7 @@ test(
 
     await test.step("restore on an archived module restores with a notice", async () => {
       await driver.modulesOpenList(world.workspaceSlug, world.projectId, browserSessionCookies(world.owner));
-      await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+      await openArchivesModulesTab(driver, world.workspaceSlug, world.projectId);
       await driver.modulesAwaitRow("Launch Gone");
       await driver.modulesOpenRowMenu("Launch Gone");
       await driver.modulesMenuChoose("Restore");
@@ -535,7 +545,11 @@ test(
       "Linked Module",
       world.owner.cookie
     );
-    const origin = parityOracleUrl(process.env).replace(/\/+$/, "");
+    // The copy carries the serving origin, which differs per target.
+    const origin = (driver.target === "web_new" ? parityNewUrl(process.env) : parityOracleUrl(process.env)).replace(
+      /\/+$/,
+      ""
+    );
     const expectedUrl = `${origin}/${world.workspaceSlug}/projects/${world.projectId}/modules/${moduleId}`;
 
     await enterModulesList(driver, world, world.owner, "Linked Module");
@@ -567,7 +581,11 @@ test(
       "Detail Module",
       world.owner.cookie
     );
-    const origin = parityOracleUrl(process.env).replace(/\/+$/, "");
+    // The copy carries the serving origin, which differs per target.
+    const origin = (driver.target === "web_new" ? parityNewUrl(process.env) : parityOracleUrl(process.env)).replace(
+      /\/+$/,
+      ""
+    );
     const expectedUrl = `${origin}/${world.workspaceSlug}/projects/${world.projectId}/modules/${moduleId}`;
 
     await driver.modulesOpenDetail(world.workspaceSlug, world.projectId, moduleId, browserSessionCookies(world.owner));
@@ -667,7 +685,7 @@ test(
     await archivesArchiveModule(world.workspaceSlug, world.projectId, moduleId, world.owner.cookie);
 
     await driver.modulesOpenList(world.workspaceSlug, world.projectId, browserSessionCookies(world.owner));
-    await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+    await openArchivesModulesTab(driver, world.workspaceSlug, world.projectId);
     await driver.modulesAwaitRow("Archived Peek");
 
     await driver.modulesClickRow("Archived Peek");

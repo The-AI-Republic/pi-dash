@@ -169,9 +169,18 @@ test(
 
     await test.step("the shortcut navigates to the project features settings", async () => {
       await driver.modulesGateToFeatures();
-      expect(await driver.currentUrlPath()).toBe(
-        `/${world.workspaceSlug}/settings/projects/${world.projectId}/features/`
-      );
+      if (driver.target === "web_new") {
+        // NEWFRONT-247: the bare features/ index renders nothing on
+        // either app (only the per-feature leaves exist), so the new
+        // gate links the modules leaf directly.
+        expect(await driver.currentUrlPath()).toBe(
+          `/${world.workspaceSlug}/settings/projects/${world.projectId}/features/modules`
+        );
+      } else {
+        expect(await driver.currentUrlPath()).toBe(
+          `/${world.workspaceSlug}/settings/projects/${world.projectId}/features/`
+        );
+      }
     });
 
     await test.step("a non-admin sees the shortcut disabled", async () => {
@@ -199,10 +208,13 @@ test(
     });
 
     await test.step("the button reads Add on small screens", async () => {
+      // Polled: the new label follows a matchMedia signal through React
+      // state, so the flip lands a frame after the resize (the old
+      // button answers synchronously and passes first try).
       await page.setViewportSize({ width: 500, height: 800 });
-      expect(await driver.modulesAddLabel()).toBe("Add");
+      await expect.poll(() => driver.modulesAddLabel()).toBe("Add");
       await page.setViewportSize({ width: 1280, height: 800 });
-      expect(await driver.modulesAddLabel()).toBe("Add Module");
+      await expect.poll(() => driver.modulesAddLabel()).toBe("Add Module");
     });
 
     await test.step("activating it opens the create dialog", async () => {

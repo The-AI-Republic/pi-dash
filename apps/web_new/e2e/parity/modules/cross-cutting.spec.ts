@@ -45,6 +45,7 @@ import {
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 import { entryTrafficViolations } from "./entryTraffic";
+import { openArchivesModulesTab } from "./chunkRecovery";
 
 const ROW_036 = ["MOD-036"];
 const ROW_037 = ["MOD-037"];
@@ -229,7 +230,12 @@ test(
     });
 
     await test.step("no project context hides the command", async () => {
-      await driver.openAuthenticated(`/${world.workspaceSlug}/settings`, browserSessionCookies(world.owner));
+      // Both pages carry no project context; workspace settings would
+      // do too, but the new settings shell mounts no palette at all (a
+      // shell gap noted on the gate's workpad, not a modules row), so the
+      // workspace home carries the leg on web_new.
+      const path = driver.target === "web_new" ? `/${world.workspaceSlug}` : `/${world.workspaceSlug}/settings`;
+      await driver.openAuthenticated(path, browserSessionCookies(world.owner));
       await driver.pressPaletteOpenChord();
       expect(await driver.isCommandPaletteOpen()).toBe(true);
       expect(await driver.paletteHasCommand("New module")).toBe(false);
@@ -502,7 +508,14 @@ test(
     // Actual: the detail revalidates behind the scenes (SWR defaults) and
     // shows the rename with no navigation and no reload. Intended (row):
     // it stays stale like the list and peek.
-    await expect.poll(async () => driver.modulesXDetailName(), { timeout: 60_000 }).toBe(renamed);
+    if (driver.target === "web_new") {
+      // Fixed (NEWFRONT-332): the detail stays stale, so the rename is
+      // still invisible after the settle window.
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+      expect(await driver.modulesXDetailName()).toBe(firstName);
+    } else {
+      await expect.poll(async () => driver.modulesXDetailName(), { timeout: 60_000 }).toBe(renamed);
+    }
   }
 );
 
@@ -638,13 +651,21 @@ test(
     // handler itself is alive — the project flag half of its context is
     // what breaks.) Intended (row): nm keeps working regardless of prior
     // palette use.
-    await driver.modulesXPressKeySequence("nm");
-    await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
-    expect(await driver.modulesXModuleDialogOpen()).toBe(false);
+    if (driver.target === "web_new") {
+      // Fixed (NEWFRONT-333): nm opens the dialog with no navigation.
+      await driver.modulesXPressKeySequence("nm");
+      await expect.poll(async () => driver.modulesXModuleDialogOpen(), { timeout: 15_000 }).toBe(true);
+      await driver.modulesXPressKey("Escape");
+      await expect.poll(async () => driver.modulesXModuleDialogOpen(), { timeout: 15_000 }).toBe(false);
+    } else {
+      await driver.modulesXPressKeySequence("nm");
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+      expect(await driver.modulesXModuleDialogOpen()).toBe(false);
 
-    await driver.modulesXOpenModulesList(world.workspaceSlug, world.projectId);
-    await driver.modulesXPressKeySequence("nm");
-    await expect.poll(async () => driver.modulesXModuleDialogOpen(), { timeout: 15_000 }).toBe(true);
+      await driver.modulesXOpenModulesList(world.workspaceSlug, world.projectId);
+      await driver.modulesXPressKeySequence("nm");
+      await expect.poll(async () => driver.modulesXModuleDialogOpen(), { timeout: 15_000 }).toBe(true);
+    }
   }
 );
 
@@ -809,7 +830,7 @@ test(
 
     await test.step("the archived-modules screen renders the archived row", async () => {
       await driver.modulesXOpenModulesList(world.workspaceSlug, world.projectId);
-      await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+      await openArchivesModulesTab(driver, world.workspaceSlug, world.projectId);
       await expect.poll(async () => driver.archivesModuleRowNames(), { timeout: 30_000 }).toContain(archivedName);
       const archived = await archivesArchivedModules(world.workspaceSlug, world.projectId, world.owner.cookie);
       expect(archived.map((row) => row.name)).toContain(archivedName);

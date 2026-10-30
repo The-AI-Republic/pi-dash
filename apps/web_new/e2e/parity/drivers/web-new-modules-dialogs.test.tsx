@@ -635,9 +635,10 @@ describe("row facts and list state", () => {
 
   it("settles an empty project as the zero state", async () => {
     const fake = new FakePage({
-      'page css([data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"])': {
-        count: 1,
-      },
+      'page css([data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"], [data-testid="modules-feature-gate"])':
+        {
+          count: 1,
+        },
       "page testid(modules-list)": { count: 0 },
       "page testid(modules-no-match)": { count: 0, visible: false },
       "page testid(modules-zero-state)": { count: 1, visible: true },

@@ -41,6 +41,7 @@ import {
   type AuthedSession,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
+import { openArchivesModulesTab } from "./chunkRecovery";
 
 const ROW_022 = ["MOD-022"];
 const ROW_023 = ["MOD-023"];
@@ -106,7 +107,7 @@ async function enterArchivesModules(driver: ParityDriver, world: ModulesWorld, s
     `/${world.workspaceSlug}/projects/${world.projectId}/modules`,
     browserSessionCookies(session)
   );
-  await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+  await openArchivesModulesTab(driver, world.workspaceSlug, world.projectId);
 }
 
 /** Create a module and move it to `status`; resolves its id. */
@@ -191,11 +192,17 @@ test(
     await enterModulesList(driver, world, world.owner);
     await driver.modulesOpenCreateFromHeader();
 
-    // The row requires a logical tab order; the date-range control
+    // The row requires a logical tab order; the old date-range control
     // renders no tabindex (NEWFRONT-330), so focus reaches it after
     // Submit instead of third. Every other control matches the
     // intended 1..8 sequence.
-    expect(await driver.modulesDialogTabOrder()).toEqual([1, 2, null, 4, 5, 6, 7, 8]);
+    if (driver.target === "web_new") {
+      // Fixed (NEWFRONT-330): the new date control carries its tab
+      // index, so focus reaches it third.
+      expect(await driver.modulesDialogTabOrder()).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    } else {
+      expect(await driver.modulesDialogTabOrder()).toEqual([1, 2, null, 4, 5, 6, 7, 8]);
+    }
     await driver.modulesDialogCancel();
   }
 );
@@ -348,12 +355,19 @@ test(
     await driver.modulesDialogSubmitCreate();
 
     // The dialog stays open with an error notice (the green half of
-    // MOD-023), but the form resets to defaults instead of keeping the
-    // user's input (NEWFRONT-328): the intended behavior is input intact.
+    // MOD-023), but the old form resets to defaults instead of keeping
+    // the user's input (NEWFRONT-328): the intended behavior is input
+    // intact.
     await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Error!" });
     expect(await driver.modulesDialogOpen()).toBe(true);
-    expect(await driver.modulesDialogTitle()).toBe("");
-    expect(await driver.modulesDialogDescription()).toBe("");
+    if (driver.target === "web_new") {
+      // Fixed (NEWFRONT-328): the input stays intact for correction.
+      expect(await driver.modulesDialogTitle()).toBe("Failed Module");
+      expect(await driver.modulesDialogDescription()).toBe("Failed description");
+    } else {
+      expect(await driver.modulesDialogTitle()).toBe("");
+      expect(await driver.modulesDialogDescription()).toBe("");
+    }
     expect(await serverProjectModules(world.workspaceSlug, world.projectId, world.owner.cookie)).toEqual([]);
     await driver.modulesDialogCancel();
   }
@@ -434,11 +448,16 @@ test(
     await driver.modulesDialogSubmitUpdate();
 
     // Same reset bug as creation (NEWFRONT-328 covers both modes): the
-    // dialog stays open with an error notice, but the title clears to
-    // the empty default instead of keeping the user's edit.
+    // old dialog stays open with an error notice, but the title clears
+    // to the empty default instead of keeping the user's edit.
     await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Error!" });
     expect(await driver.modulesDialogOpen()).toBe(true);
-    expect(await driver.modulesDialogTitle()).toBe("");
+    if (driver.target === "web_new") {
+      // Fixed (NEWFRONT-328): the edit stays intact for correction.
+      expect(await driver.modulesDialogTitle()).toBe("Save Fail Edited");
+    } else {
+      expect(await driver.modulesDialogTitle()).toBe("");
+    }
     const detail = await modulesModuleDetail(world.workspaceSlug, world.projectId, moduleId, world.owner.cookie);
     expect(detail.name).toBe("Save Fail");
     await driver.modulesDialogCancel();
@@ -526,12 +545,19 @@ test(
     expect(await driver.currentPath()).toContain("peekModule=");
 
     // The row requires navigating back to the modules list; instead the
-    // app stays on the peek address (NEWFRONT-329) while the module is
-    // gone server-side.
+    // old app stays on the peek address (NEWFRONT-329) while the module
+    // is gone server-side.
     await driver.archivesChooseLiveModuleMenuEntry("Peek Delete", "Delete");
     await driver.modulesDeleteConfirm();
     await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Success!" });
-    expect(await driver.currentPath()).toContain(`peekModule=${moduleId}`);
+    if (driver.target === "web_new") {
+      // Fixed (NEWFRONT-329): deleting the peeked module removes the
+      // key, closes the panel and lands on the plain list.
+      expect(await driver.currentPath()).not.toContain("peekModule=");
+      await expect.poll(() => driver.modulesPeekVisible(), { timeout: 30_000 }).toBe(false);
+    } else {
+      expect(await driver.currentPath()).toContain(`peekModule=${moduleId}`);
+    }
     expect(await modulesModuleGone(world.workspaceSlug, world.projectId, moduleId, world.owner.cookie)).toBe(true);
   }
 );
@@ -586,13 +612,20 @@ test(
       expect(dialog?.title).toContain("Archive Yes");
       expect(dialog?.body).toContain("restored");
       await driver.archivesConfirmArchiveDialog();
+      // The new notice words the landing differently ("this project's
+      // archives"); the old copy says "project archives". The row pins
+      // the notice pointing at the project archives, not the prose.
+      const archiveLandingMention = driver.target === "web_new" ? "archives" : "project archives";
       await expect
         .poll(() => driver.rulesLastToast(), { timeout: 30_000 })
         .toMatchObject({
           title: "Archive success",
-          message: expect.stringContaining("project archives"),
+          message: expect.stringContaining(archiveLandingMention),
         });
-      expect(await driver.currentUrlPath()).toBe(`/${world.workspaceSlug}/projects/${world.projectId}/modules/`);
+      // The new landing keeps the bare path (no client-side hop runs);
+      // the old hop adds its trailing slash (slash-tolerant row).
+      const archiveLandingPath = (await driver.currentUrlPath()).replace(/\/$/, "");
+      expect(archiveLandingPath).toBe(`/${world.workspaceSlug}/projects/${world.projectId}/modules`);
       expect(await archivesModuleIsArchived(world.workspaceSlug, world.projectId, confirmed, world.owner.cookie)).toBe(
         true
       );
@@ -621,15 +654,31 @@ test(
     await enterModulesList(driver, world, world.owner);
     await driver.archivesAwaitModuleRow("Archive Fail");
 
-    // The store swallows the write error (NEWFRONT-233, filed by
+    // The old store swallows the write error (NEWFRONT-233, filed by
     // NEWFRONT-225), so the dialog runs its success path: success
     // notice, close, navigate — the module stays live.
     await driver.archivesFailNextModuleWrite();
     await driver.archivesChooseLiveModuleMenuEntry("Archive Fail", "Archive");
     await driver.archivesConfirmArchiveDialog();
-    await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Archive success" });
-    expect(await driver.archivesArchiveDialog()).toBeNull();
-    expect(await driver.currentUrlPath()).toBe(`/${world.workspaceSlug}/projects/${world.projectId}/modules/`);
+    if (driver.target === "web_new") {
+      // Fixed (NEWFRONT-233): the failed write reports its error, the
+      // dialog closes so the viewer can retry, and nothing navigates
+      // because the module is still live (slash-tolerant: no hop runs,
+      // so the address keeps its direct-entry shape).
+      await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Error!" });
+      // Toasts carry role=dialog (cycles-driver precedent), so the
+      // error notice must drain before the dialog read proves the
+      // archive confirmation closed.
+      await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toBe(null);
+      expect(await driver.archivesArchiveDialog()).toBeNull();
+      expect((await driver.currentUrlPath()).replace(/\/$/, "")).toBe(
+        `/${world.workspaceSlug}/projects/${world.projectId}/modules`
+      );
+    } else {
+      await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Archive success" });
+      expect(await driver.archivesArchiveDialog()).toBeNull();
+      expect(await driver.currentUrlPath()).toBe(`/${world.workspaceSlug}/projects/${world.projectId}/modules/`);
+    }
     expect(await archivesModuleIsArchived(world.workspaceSlug, world.projectId, failing, world.owner.cookie)).toBe(
       false
     );
@@ -662,8 +711,11 @@ test(
     await test.step("the screen sits on the archives tab strip", async () => {
       expect(await driver.archivesTabNames()).toContain("Modules");
       expect(await driver.archivesActiveTab()).toBe("Modules");
-      expect(await driver.currentUrlPath()).toBe(
-        `/${world.workspaceSlug}/projects/${world.projectId}/archives/modules/`
+      // Trailing-slash tolerant: the old client's hops add one, the new
+      // app serves the bare path on direct entry; the row pins the
+      // address, not the slash.
+      expect((await driver.currentUrlPath()).replace(/\/$/, "")).toBe(
+        `/${world.workspaceSlug}/projects/${world.projectId}/archives/modules`
       );
     });
 
@@ -705,7 +757,7 @@ test(
     });
 
     await test.step("an archived row opens the archived peek panel", async () => {
-      await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+      await openArchivesModulesTab(driver, world.workspaceSlug, world.projectId);
       await driver.archivesAwaitModuleRow("Archived Owned");
       await driver.archivesOpenModulePeek("Archived Owned");
       expect(await driver.archivesModulePeekName()).toBe("Archived Owned");
@@ -736,7 +788,7 @@ test(
       world.owner.cookie
     );
     await archivesArchiveModule(world.workspaceSlug, world.projectId, archived, world.owner.cookie);
-    await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+    await openArchivesModulesTab(driver, world.workspaceSlug, world.projectId);
     await driver.archivesAwaitModuleRow("Empty Alpha");
 
     await test.step("search hiding everything shows the search guidance", async () => {
@@ -784,8 +836,10 @@ test(
         message: expect.stringContaining("project modules"),
       });
     // The row's "archives overview" is the archives modules screen the
-    // restore lands on.
-    expect(await driver.currentUrlPath()).toBe(`/${world.workspaceSlug}/projects/${world.projectId}/archives/modules/`);
+    // restore lands on (slash-tolerant: see the tab-strip step above).
+    expect((await driver.currentUrlPath()).replace(/\/$/, "")).toBe(
+      `/${world.workspaceSlug}/projects/${world.projectId}/archives/modules`
+    );
     expect(await archivesModuleIsArchived(world.workspaceSlug, world.projectId, restored, world.owner.cookie)).toBe(
       false
     );
@@ -817,8 +871,16 @@ test(
     // success notice, same-tab stay — the module stays archived.
     await driver.archivesFailNextModuleWrite();
     await driver.archivesChooseArchivedModuleMenuEntry("Restore Fail", "Restore");
-    await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Restore success" });
-    expect(await driver.currentUrlPath()).toBe(`/${world.workspaceSlug}/projects/${world.projectId}/archives/modules/`);
+    if (driver.target === "web_new") {
+      // Fixed (NEWFRONT-233): the failed write reports its error and
+      // the row stays; the tab never leaves the archived screen.
+      await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Error!" });
+    } else {
+      await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Restore success" });
+    }
+    expect((await driver.currentUrlPath()).replace(/\/$/, "")).toBe(
+      `/${world.workspaceSlug}/projects/${world.projectId}/archives/modules`
+    );
     expect(await archivesModuleIsArchived(world.workspaceSlug, world.projectId, failing, world.owner.cookie)).toBe(
       true
     );
