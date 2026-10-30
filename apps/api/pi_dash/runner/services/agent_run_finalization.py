@@ -9,6 +9,7 @@ from django.utils import timezone
 
 from pi_dash.core.agent_execution import AgentExecutorKind
 from pi_dash.runner.models import AgentRun, AgentRunEvent, AgentRunStatus
+from pi_dash.runner.services.error_details import merge_error_details, split_folded_updates
 
 logger = logging.getLogger(__name__)
 TERMINAL_STATUSES = {
@@ -68,6 +69,15 @@ def finalize_agent_run(run_id, new_status, *, updates=None, expected_runner_id=N
             return False
         if "done_payload" in values:
             values["done_payload"] = merge_done_payload(run.done_payload, values["done_payload"])
+        # ``error_code`` / ``error`` / ``refusal_category`` are one JSON column
+        # now (PDASHOSS01-187). Callers keep naming them flat; fold them here,
+        # under the row lock we already hold, so the read-modify-write of
+        # ``error_details`` cannot interleave with another writer.
+        folded = split_folded_updates(values)
+        error_code = ""
+        if folded is not None:
+            error_code = folded.get("error_code") or ""
+            values["error_details"] = merge_error_details(run.error_details, **folded)
         AgentRun.objects.filter(pk=run.pk).update(**values)
         if (
             run.executor_kind == AgentExecutorKind.CLOUD_AGENT
@@ -80,7 +90,7 @@ def finalize_agent_run(run_id, new_status, *, updates=None, expected_runner_id=N
                 agent_run=run,
                 seq=seq,
                 kind="terminal",
-                payload={"status": new_status, "error_code": values.get("error_code", "")},
+                payload={"status": new_status, "error_code": error_code},
             )
         transaction.on_commit(lambda: _publish_effects(run.pk))
     return True
