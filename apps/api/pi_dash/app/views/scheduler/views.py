@@ -13,10 +13,8 @@ See ``.ai_design/project_scheduler/design.md`` §7.
 from __future__ import annotations
 
 from django.conf import settings
-from django.db import transaction
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404
-from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 
@@ -28,8 +26,12 @@ from pi_dash.app.serializers.scheduler import (
 )
 from pi_dash.app.views.base import BaseAPIView
 from pi_dash.db.models import Project, Scheduler, SchedulerBinding, Workspace
-from pi_dash.scheduler.binding_writes import update_binding
-from pi_dash.scheduler.definition_writes import update_definition
+from pi_dash.scheduler.binding_writes import install_binding, update_binding
+from pi_dash.scheduler.definition_writes import (
+    create_definition,
+    delete_definition,
+    update_definition,
+)
 
 
 def _feature_enabled() -> bool:
@@ -79,14 +81,7 @@ class WorkspaceSchedulerListEndpoint(BaseAPIView):
         if not _feature_enabled():
             return _disabled_response()
         workspace = get_object_or_404(Workspace, slug=slug)
-        # Workspace in context so validate_slug can enforce the per-workspace
-        # slug uniqueness constraint at validation time (save() pins it too
-        # late for a field error).
-        serializer = SchedulerSerializer(
-            data=request.data, context={"workspace": workspace}
-        )
-        serializer.is_valid(raise_exception=True)
-        scheduler = serializer.save(workspace=workspace)
+        scheduler = create_definition(workspace, request.data)
         return Response(
             SchedulerSerializer(scheduler).data,
             status=status.HTTP_201_CREATED,
@@ -145,21 +140,7 @@ class WorkspaceSchedulerDetailEndpoint(BaseAPIView):
         scheduler = get_object_or_404(
             Scheduler, pk=scheduler_id, workspace__slug=slug
         )
-        # The SoftDeleteModel cascade is async (see db/mixins.py
-        # ``soft_delete_related_objects``), which leaves a window where
-        # active bindings still point at a soft-deleted parent. The
-        # scanner already filters those out, but they remain addressable
-        # via the bindings list endpoint and would survive a
-        # same-slug recreate as orphans. Soft-delete bindings inline so
-        # the API view of the world is consistent the moment this
-        # response returns.
-        now = timezone.now()
-        with transaction.atomic():
-            SchedulerBinding.objects.filter(
-                scheduler=scheduler,
-                deleted_at__isnull=True,
-            ).update(deleted_at=now)
-            scheduler.delete()  # SoftDeleteModel: sets deleted_at
+        delete_definition(scheduler)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -203,27 +184,12 @@ class ProjectSchedulerBindingListEndpoint(BaseAPIView):
             workspace=project.workspace,
             is_enabled=True,
         )
-        # Pass `project` in context so the serializer can validate that a
-        # chosen `pod` belongs to this project (project is injected at save(),
-        # so it isn't in validated_data at validation time).
-        serializer = SchedulerBindingSerializer(
-            data=request.data, context={"project": project}
-        )
-        serializer.is_valid(raise_exception=True)
-        binding = serializer.save(
-            scheduler=scheduler,
-            project=project,
-            workspace=project.workspace,
+        binding = install_binding(
+            project,
+            scheduler,
+            request.data,
             actor=request.user if request.user.is_authenticated else None,
         )
-        # Populate next_run_at on first save so the scanner picks it up on
-        # the next minute tick. The Beat fire path also handles NULL, but
-        # writing the next-fire time here surfaces it in the API response.
-        from pi_dash.bgtasks.scheduler import _next_fire_for_binding
-        nxt = _next_fire_for_binding(binding, now=timezone.now())
-        if nxt is not None and binding.next_run_at != nxt:
-            binding.next_run_at = nxt
-            binding.save(update_fields=["next_run_at", "updated_at"])
         return Response(
             SchedulerBindingSerializer(binding).data,
             status=status.HTTP_201_CREATED,
