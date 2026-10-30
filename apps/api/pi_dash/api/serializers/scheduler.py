@@ -2,15 +2,16 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Read-only serializers for the external (`/api/v1/`) scheduler surface.
+"""Serializers for the external (`/api/v1/`) scheduler surface.
 
 The `pidash` CLI and the Pi Dash MCP connector consume these — see
-``docs/mcp-connector.md`` ("Schedulers (read-only)"). Every field is an
-explicit whitelist: nothing secret lives on the models today, and keeping
-the list explicit means a future credential column cannot leak by default.
+``docs/mcp-connector.md`` ("Schedulers"). Every field is an explicit
+whitelist: nothing secret lives on the models today, and keeping the list
+explicit means a future credential column cannot leak by default.
 
-Write access is intentionally absent (PDASHOSS01-225 is read-only; write
-is a follow-up with its own permission model).
+These are output shapes only. Binding writes (PDASHOSS01-278) validate
+through the web app's ``SchedulerBindingSerializer`` and answer with the
+shapes here.
 """
 
 from rest_framework import serializers
