@@ -1699,6 +1699,38 @@ mod tests {
     /// table's rust names. Residual: a registration outside these
     /// consts is invisible here (`Registry` has no iterator) — review
     /// catches it, and the parity diff flags the behavior change.
+    /// The mirror's `ToolCtx` needs a transition hook; handlers never run
+    /// here, so it is never called.
+    struct NoopTransitionHook;
+
+    impl pidash_services::domain::transition::IssueTransitionHook for NoopTransitionHook {
+        fn enqueue_completion_comment(
+            &self,
+            _issue_id: uuid::Uuid,
+            _prev_state_id: Option<uuid::Uuid>,
+            _current_state_id: Option<uuid::Uuid>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {})
+        }
+
+        fn fire(
+            &self,
+            _actor_id: uuid::Uuid,
+            _request: pidash_services::orchestration::entries::FireRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<pidash_services::orchestration::entries::FireOutcome, ()>,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async move {
+                Ok(pidash_services::orchestration::entries::FireOutcome::NoTransition)
+            })
+        }
+    }
+
     #[tokio::test]
     async fn mirror_registry_matches_tasks_table() {
         use pidash_jobs::tasks_cleanup;
@@ -1899,6 +1931,7 @@ mod tests {
             tools: crate::model_runtime::tools_exec::ToolCtx {
                 toolsets: std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
                 pool: pool.clone(),
+                orm: pidash_db::pool::sea_orm_connection(&pool),
                 cloud: execute_settings.cloud_agent.clone(),
                 managed: execute_settings.managed_runner.clone(),
                 http: reqwest::Client::new(),
@@ -1912,6 +1945,7 @@ mod tests {
                 // above; the worker builder builds this from REDIS_URL.
                 redis: None,
                 runner: execute_settings.runner.clone(),
+                transition_hook: std::sync::Arc::new(NoopTransitionHook),
             },
             keys: crate::model_runtime::keys::KeyResolver::from_env(
                 execute_settings.assistant.key_cache_ttl_secs,

@@ -397,7 +397,8 @@ def test_complete_move_handoff_failure_comment_stamped_with_requester(
     _complete(machine_client, handoff_failure_world["run_id"], {"summary": "done"})
 
     replacement = seeder.db.fetchone(
-        "SELECT id, status, error_code FROM agent_run WHERE parent_run_id = %s",
+        "SELECT id, status, COALESCE(error_details->>'code', '') AS error_code"
+        " FROM agent_run WHERE parent_run_id = %s",
         (handoff_failure_world["run_id"],),
     )
     assert replacement is not None, "no replacement run created by the handoff"

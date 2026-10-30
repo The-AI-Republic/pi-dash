@@ -13,17 +13,13 @@ import type { TProfileSettingsTabs } from "@pi-dash/types";
 import { LogoSpinner } from "@/components/common/logo-spinner";
 import { PageHead } from "@/components/core/page-title";
 import { ProfileSettingsContent } from "@/components/settings/profile/content";
-import { ProfileSettingsSidebarRoot } from "@/components/settings/profile/sidebar";
 // hooks
 import { useUser } from "@/hooks/store/user";
-import { useAppRouter } from "@/hooks/use-app-router";
 // local imports
-import type { Route } from "../+types/layout";
+import type { Route } from "./+types/page";
 
-function ProfileSettingsPage(props: Route.ComponentProps) {
+function AccountSettingsPage(props: Route.ComponentProps) {
   const { profileTabId } = props.params;
-  // router
-  const router = useAppRouter();
   // store hooks
   const { data: currentUser } = useUser();
   // translation
@@ -41,21 +37,12 @@ function ProfileSettingsPage(props: Route.ComponentProps) {
   return (
     <>
       <PageHead title={`${t("Profile")} - ${t("General settings")}`} />
-      <div className="relative size-full">
-        <div className="flex size-full">
-          <ProfileSettingsSidebarRoot
-            activeTab={profileTabId as TProfileSettingsTabs}
-            className="w-[250px]"
-            updateActiveTab={(tab) => router.push(`/settings/profile/${tab}`)}
-          />
-          <ProfileSettingsContent
-            activeTab={profileTabId as TProfileSettingsTabs}
-            className="mx-auto w-fit max-w-225 grow px-page-x py-20"
-          />
-        </div>
-      </div>
+      <ProfileSettingsContent
+        activeTab={profileTabId as TProfileSettingsTabs}
+        className="mx-auto w-fit max-w-225 grow px-page-x py-20"
+      />
     </>
   );
 }
 
-export default observer(ProfileSettingsPage);
+export default observer(AccountSettingsPage);

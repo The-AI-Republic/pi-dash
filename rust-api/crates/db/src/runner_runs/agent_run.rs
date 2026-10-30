@@ -3,11 +3,13 @@
 //! Agent run model (D-15, stage 5).
 //!
 //! Ports `AgentRun` (`apps/api/pi_dash/runner/models.py:872-1161`):
-//! all 41 columns/defaults/constraints/indexes (`Meta`,
+//! all 39 columns/defaults/constraints/indexes (`Meta`,
 //! `:1037-1102`), the `save` pod-resolution order + owner→created_by
-//! mirror (`:1104-1134`), and the token pseudo-fields as
+//! mirror (`:1104-1134`), the token pseudo-fields as
 //! `(usage->>key)::bigint` reads (`:1024-1026`,
-//! `fields.py:56-58`). `is_terminal` / `is_active` (`:1136-1159`)
+//! `fields.py:56-58`), and the folded failure trio (PDASHOSS01-187):
+//! `error_details` jsonb with the `error_code` / `error` read-only
+//! properties and the generated `refusal_category` column. `is_terminal` / `is_active` (`:1136-1159`)
 //! live on the L1 [`pidash_types::runner_runs::AgentRunStatus`] and
 //! are reused, not re-ported.
 //!
@@ -41,7 +43,8 @@ pub const ORDERING: &[&str] = &["-created_at"];
 /// Columns in declaration order (`models.py:873-1035`), FK entries
 /// as the Django attnames. The three `*_tokens` entries are real
 /// generated columns Postgres derives from `usage`
-/// (`JSONKeyBigIntegerField`, `fields.py:21-61`).
+/// (`JSONKeyBigIntegerField`, `fields.py:21-61`); `refusal_category`
+/// is one derived from `error_details` (`JSONKeyTextField`).
 pub const COLUMNS: &[&str] = &[
     "id",
     "workspace_id",
@@ -58,7 +61,6 @@ pub const COLUMNS: &[&str] = &[
     "dispatch_attempts",
     "cancel_requested_at",
     "cancel_reason",
-    "error_code",
     "tool_plan",
     "terminal_hooks_applied_at",
     "terminal_capacity_released_at",
@@ -72,7 +74,7 @@ pub const COLUMNS: &[&str] = &[
     "agent_metadata",
     "lease_expires_at",
     "done_payload",
-    "error",
+    "error_details",
     "refusal_category",
     "llm_model",
     "usage",
@@ -81,7 +83,6 @@ pub const COLUMNS: &[&str] = &[
     "total_tokens",
     "created_at",
     "assigned_at",
-    "queue_position",
     "started_at",
     "ended_at",
 ];
@@ -92,17 +93,12 @@ pub const STATUS_MAX_LENGTH: usize = 24;
 pub const EXECUTOR_KIND_MAX_LENGTH: usize = 24;
 /// `cancel_reason` bound (`models.py:961`, `max_length=512`).
 pub const CANCEL_REASON_MAX_LENGTH: usize = 512;
-/// `error_code` bound (`models.py:962`, `max_length=64`).
-pub const ERROR_CODE_MAX_LENGTH: usize = 64;
 /// `trigger` bound (`models.py:972-977`, `max_length=24`).
 pub const TRIGGER_MAX_LENGTH: usize = 24;
 /// `phase_kind` bound (`models.py:989`, `max_length=32`).
 pub const PHASE_KIND_MAX_LENGTH: usize = 32;
 /// `thread_id` bound (`models.py:992`, `max_length=128`).
 pub const THREAD_ID_MAX_LENGTH: usize = 128;
-/// `refusal_category` bound (`models.py:1009-1014`,
-/// `max_length=32`).
-pub const REFUSAL_CATEGORY_MAX_LENGTH: usize = 32;
 /// `llm_model` bound (`models.py:1015`, `max_length=128`).
 pub const LLM_MODEL_MAX_LENGTH: usize = 128;
 
@@ -121,10 +117,10 @@ pub const DEFAULT_DISPATCH_ATTEMPTS: i32 = 0;
 /// silently automatic.
 pub const DEFAULT_TRIGGER: AgentRunTrigger = AgentRunTrigger::Direct;
 /// Shared `default=""` for `cancel_reason` (`models.py:961`),
-/// `error_code` (`models.py:962`), `prompt` (`models.py:966`),
-/// `phase_kind` (`models.py:989`), `thread_id` (`models.py:992`),
-/// `error` (`models.py:1005`), `refusal_category`
-/// (`models.py:1009-1014`) and `llm_model` (`models.py:1015`).
+/// `prompt` (`models.py:966`), `phase_kind` (`models.py:989`),
+/// `thread_id` (`models.py:992`) and `llm_model`; also what the
+/// `error_code` / `error` / `refusal_category` reads return for an
+/// absent `error_details` key.
 pub const EMPTY_TEXT: &str = "";
 
 /// Fresh `tool_plan` default (`models.py:963`, `default=dict`).
@@ -153,6 +149,103 @@ pub fn default_usage() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
 }
 
+/// Fresh `error_details` default (`default=dict`): a clean run
+/// carries `{}` (PDASHOSS01-187).
+pub fn default_error_details() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+/// `error_details` key behind the `error_code` property.
+pub const ERROR_DETAILS_CODE: &str = "code";
+/// `error_details` key behind the `error` property.
+pub const ERROR_DETAILS_MESSAGE: &str = "message";
+/// `error_details` key behind the generated `refusal_category`.
+pub const ERROR_DETAILS_REFUSAL_CATEGORY: &str = "refusal_category";
+
+/// Text under `key` in an `error_details` bag, `""` when the key is
+/// absent, falsy or the bag is not an object — the
+/// `(self.error_details or {}).get(key) or ""` of the model
+/// properties. A non-string truthy value (never written) reads `""`
+/// rather than its JSON text.
+pub fn error_details_text<'a>(details: &'a serde_json::Value, key: &str) -> &'a str {
+    details
+        .as_object()
+        .and_then(|map| map.get(key))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(EMPTY_TEXT)
+}
+
+/// Flat update names the three folded columns used to accept, mapped
+/// to their `error_details` key (`runner/services/error_details.py`
+/// `FOLDED_KEYS`). Writers keep naming the flat columns.
+pub const FOLDED_KEYS: [(&str, &str); 3] = [
+    ("error_code", ERROR_DETAILS_CODE),
+    ("error", ERROR_DETAILS_MESSAGE),
+    ("refusal_category", ERROR_DETAILS_REFUSAL_CATEGORY),
+];
+
+/// `error_details` key for a flat folded name, `None` for any other
+/// column.
+pub fn folded_key(flat: &str) -> Option<&'static str> {
+    FOLDED_KEYS
+        .iter()
+        .find(|(name, _)| *name == flat)
+        .map(|(_, key)| *key)
+}
+
+/// `merge_error_details` (`error_details.py`): `existing` (reset to
+/// `{}` when not an object) with each `(flat_name, value)` applied in
+/// order — a truthy value sets its key, a falsy one (`null`, `""`,
+/// `false`, `0`, `[]`, `{}`) removes it rather than storing an empty
+/// string. Names outside [`FOLDED_KEYS`] are ignored; keys not named
+/// are left alone.
+pub fn merge_error_details(
+    existing: &serde_json::Value,
+    fields: &[(&str, serde_json::Value)],
+) -> serde_json::Value {
+    let mut merged = existing.as_object().cloned().unwrap_or_default();
+    for (flat, value) in fields {
+        let Some(key) = folded_key(flat) else {
+            continue;
+        };
+        if json_truthy(value) {
+            merged.insert(key.to_owned(), value.clone());
+        } else {
+            merged.remove(key);
+        }
+    }
+    serde_json::Value::Object(merged)
+}
+
+/// Python truthiness of a JSON value.
+fn json_truthy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(flag) => *flag,
+        serde_json::Value::Number(number) => number.as_f64().is_some_and(|n| n != 0.0),
+        serde_json::Value::String(text) => !text.is_empty(),
+        serde_json::Value::Array(items) => !items.is_empty(),
+        serde_json::Value::Object(map) => !map.is_empty(),
+    }
+}
+
+/// `refusal_category` generated-column definition
+/// (`fields.py:JSONKeyTextField.db_type`). The `COALESCE` keeps a
+/// non-refusal reading `""`, never `NULL`. Byte-identical to the
+/// recorded `db_type`.
+pub const REFUSAL_CATEGORY_DDL: &str =
+    "text GENERATED ALWAYS AS (COALESCE(\"error_details\" ->> 'refusal_category', '')) STORED";
+
+/// Read expression for the `error_code` property, aliased to the old
+/// column name, for hand-written projections that used to select
+/// the column.
+pub const ERROR_CODE_READ_EXPR: &str =
+    "COALESCE(\"agent_run\".\"error_details\" ->> 'code', '') AS \"error_code\"";
+/// Read expression for the `error` property (see
+/// [`ERROR_CODE_READ_EXPR`]).
+pub const ERROR_READ_EXPR: &str =
+    "COALESCE(\"agent_run\".\"error_details\" ->> 'message', '') AS \"error\"";
+
 /// `workspace` FK: `CASCADE` (`models.py:874-878`).
 pub const WORKSPACE_ON_DELETE: OnDelete = OnDelete::Cascade;
 /// `owner` FK: `SET_NULL`, nullable (`models.py:882-888`).
@@ -174,22 +267,20 @@ pub const SCHEDULER_BINDING_ON_DELETE: OnDelete = OnDelete::SetNull;
 pub const PARENT_RUN_ON_DELETE: OnDelete = OnDelete::SetNull;
 
 /// Cloud runs carry no local assignment (`models.py:1065-1078`):
-/// either a machine executor, or `cloud_agent` with the five
+/// either a machine executor, or `cloud_agent` with the four
 /// local-assignment columns all `NULL`.
 pub const CLOUD_CHECK: &str = "agent_run_cloud_has_no_local_assignment";
 
 /// Evaluate [`CLOUD_CHECK`] over a candidate row. Machine executors
 /// (`MACHINE_EXECUTORS`: local + managed) always satisfy it; a
 /// cloud-agent run satisfies it only with `runner`,
-/// `pinned_runner`, `owner`, `assigned_at` and `queue_position` all
-/// unset. Any other executor value fails the check, as in Django.
+/// `pinned_runner`, `owner` and `assigned_at` all unset. Any other executor value fails the check, as in Django.
 pub fn cloud_assignment_valid(
     executor_kind: AgentExecutorKind,
     runner_id: Option<uuid::Uuid>,
     pinned_runner_id: Option<uuid::Uuid>,
     owner_id: Option<uuid::Uuid>,
     assigned_at: Option<chrono::DateTime<chrono::Utc>>,
-    queue_position: Option<i16>,
 ) -> bool {
     if executor_kind.is_machine_executor() {
         return true;
@@ -199,7 +290,6 @@ pub fn cloud_assignment_valid(
         && pinned_runner_id.is_none()
         && owner_id.is_none()
         && assigned_at.is_none()
-        && queue_position.is_none()
 }
 
 /// One active run per work item (`models.py:1079-1101`): `work_item`
@@ -326,13 +416,11 @@ pub const TOTAL_TOKENS_READ_EXPR: &str = "(\"agent_run\".\"usage\" ->> 'total'):
 
 /// One agent-run row, declaration order. `dispatch_attempts` is a
 /// `PositiveIntegerField` (`models.py:959`), hence `i32` like the
-/// D-02 `repository_count` port; `queue_position` is a
-/// `PositiveSmallIntegerField` (`models.py:1033`), hence `i16` like
-/// the D-22 `visibility` port; the `*_tokens` columns are
+/// D-02 `repository_count` port; the `*_tokens` columns are
 /// nullable generated bigints (`fields.py:43` forces
-/// `null=True`). `refusal_category` stays a `String`: its default
-/// is `""` (`models.py:1013`), which is not a `RefusalCategory`
-/// value. `trigger` is a `String`: Django never parses it —
+/// `null=True`). `refusal_category` stays a `String`: the generated
+/// column `COALESCE`s to `""`, which is not a `RefusalCategory`
+/// value, so it is never `NULL` despite the field's `null=True`. `trigger` is a `String`: Django never parses it —
 /// `TextChoices` are choices-only (no DB check), so legacy or
 /// hand-written rows can carry values outside [`AgentRunTrigger`]
 /// (runner migration 0029) and every read path carries them
@@ -357,7 +445,6 @@ pub struct AgentRun {
     pub dispatch_attempts: i32,
     pub cancel_requested_at: Option<chrono::DateTime<chrono::Utc>>,
     pub cancel_reason: String,
-    pub error_code: String,
     pub tool_plan: serde_json::Value,
     pub terminal_hooks_applied_at: Option<chrono::DateTime<chrono::Utc>>,
     pub terminal_capacity_released_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -371,7 +458,7 @@ pub struct AgentRun {
     pub agent_metadata: serde_json::Value,
     pub lease_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub done_payload: Option<serde_json::Value>,
-    pub error: String,
+    pub error_details: serde_json::Value,
     pub refusal_category: String,
     pub llm_model: String,
     pub usage: serde_json::Value,
@@ -380,9 +467,20 @@ pub struct AgentRun {
     pub total_tokens: Option<i64>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub assigned_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub queue_position: Option<i16>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl AgentRun {
+    /// `AgentRun.error_code`: the `code` key of `error_details`.
+    pub fn error_code(&self) -> &str {
+        error_details_text(&self.error_details, ERROR_DETAILS_CODE)
+    }
+
+    /// `AgentRun.error`: the `message` key of `error_details`.
+    pub fn error(&self) -> &str {
+        error_details_text(&self.error_details, ERROR_DETAILS_MESSAGE)
+    }
 }
 
 #[cfg(test)]
@@ -398,7 +496,7 @@ mod tests {
     #[test]
     fn columns_match_fixture_in_order() {
         assert_eq!(ts::owned(COLUMNS), ts::columns(&run_fixture()));
-        assert_eq!(COLUMNS.len(), 41);
+        assert_eq!(COLUMNS.len(), 39);
     }
 
     #[test]
@@ -422,10 +520,13 @@ mod tests {
             "pinned_runner__isnull",
             "owner__isnull",
             "assigned_at__isnull",
-            "queue_position__isnull",
         ] {
             assert!(rendered.contains(term), "check mentions {term}");
         }
+        assert!(
+            !rendered.contains("queue_position"),
+            "check no longer mentions the dropped queue_position column"
+        );
         assert_eq!(
             MACHINE_EXECUTORS,
             [
@@ -438,14 +539,13 @@ mod tests {
         // Machine executors satisfy the check whatever else is set.
         for kind in MACHINE_EXECUTORS {
             assert!(
-                cloud_assignment_valid(kind, some_id, some_id, some_id, some_ts, Some(3)),
+                cloud_assignment_valid(kind, some_id, some_id, some_id, some_ts),
                 "{kind:?} with local assignment is valid"
             );
         }
         // Cloud agent with no local assignment is valid.
         assert!(cloud_assignment_valid(
             AgentExecutorKind::CloudAgent,
-            None,
             None,
             None,
             None,
@@ -457,14 +557,12 @@ mod tests {
             some_id,
             None,
             None,
-            None,
             None
         ));
         assert!(!cloud_assignment_valid(
             AgentExecutorKind::CloudAgent,
             None,
             some_id,
-            None,
             None,
             None
         ));
@@ -473,7 +571,6 @@ mod tests {
             None,
             None,
             some_id,
-            None,
             None
         ));
         assert!(!cloud_assignment_valid(
@@ -481,16 +578,7 @@ mod tests {
             None,
             None,
             None,
-            some_ts,
-            None
-        ));
-        assert!(!cloud_assignment_valid(
-            AgentExecutorKind::CloudAgent,
-            None,
-            None,
-            None,
-            None,
-            Some(0)
+            some_ts
         ));
     }
 
@@ -591,12 +679,9 @@ mod tests {
         );
         for field in [
             "cancel_reason",
-            "error_code",
             "prompt",
             "phase_kind",
             "thread_id",
-            "error",
-            "refusal_category",
             "llm_model",
         ] {
             assert_eq!(
@@ -609,11 +694,9 @@ mod tests {
             ("status", STATUS_MAX_LENGTH),
             ("executor_kind", EXECUTOR_KIND_MAX_LENGTH),
             ("cancel_reason", CANCEL_REASON_MAX_LENGTH),
-            ("error_code", ERROR_CODE_MAX_LENGTH),
             ("trigger", TRIGGER_MAX_LENGTH),
             ("phase_kind", PHASE_KIND_MAX_LENGTH),
             ("thread_id", THREAD_ID_MAX_LENGTH),
-            ("refusal_category", REFUSAL_CATEGORY_MAX_LENGTH),
             ("llm_model", LLM_MODEL_MAX_LENGTH),
         ] {
             assert_eq!(
@@ -622,7 +705,13 @@ mod tests {
                 "{field}"
             );
         }
-        for field in ["tool_plan", "run_config", "agent_metadata", "usage"] {
+        for field in [
+            "tool_plan",
+            "run_config",
+            "agent_metadata",
+            "usage",
+            "error_details",
+        ] {
             assert_eq!(
                 ts::field(&m, field)["default"].as_str(),
                 Some("callable:<dict>"),
@@ -642,6 +731,7 @@ mod tests {
         assert!(default_run_config().is_object());
         assert!(default_agent_metadata().is_object());
         assert!(default_usage().is_object());
+        assert!(default_error_details().is_object());
         assert!(default_required_capabilities().is_array());
         for field in ["prompt_manifest", "done_payload"] {
             assert_eq!(
@@ -651,15 +741,6 @@ mod tests {
             );
         }
         assert_eq!(ts::field(&m, "prompt")["db_type"].as_str(), Some("text"));
-        assert_eq!(ts::field(&m, "error")["db_type"].as_str(), Some("text"));
-        assert_eq!(
-            ts::field(&m, "queue_position")["db_type"].as_str(),
-            Some("smallint")
-        );
-        assert_eq!(
-            ts::field(&m, "queue_position")["null"].as_bool(),
-            Some(true)
-        );
         assert_eq!(
             ts::field(&m, "created_at")["auto_now_add"].as_bool(),
             Some(true)
@@ -769,6 +850,88 @@ mod tests {
         let sum = token["sum_total_tokens"].as_str().expect("sql");
         assert!(sum.contains("SUM(\"agent_run\".\"total_tokens\")"));
         assert!(sum.contains("GROUP BY \"agent_run\".\"workspace_id\""));
+    }
+
+    #[test]
+    fn error_details_match_fixture() {
+        let m = run_fixture();
+        for gone in ["error_code", "error"] {
+            assert!(
+                !ts::columns(&m).iter().any(|column| column == gone),
+                "{gone} is folded into error_details"
+            );
+        }
+        let sql = &ts::fx02()["error_details_sql"];
+        assert_eq!(
+            REFUSAL_CATEGORY_DDL,
+            sql["generated_db_type_refusal_category"]
+                .as_str()
+                .expect("ddl")
+        );
+        let f = ts::field(&m, "refusal_category");
+        assert_eq!(f["db_type"].as_str(), Some(REFUSAL_CATEGORY_DDL));
+        assert_eq!(f["editable"].as_bool(), Some(false));
+        assert_eq!(f["db_index"].as_bool(), Some(false));
+        assert_eq!(f["extra"]["source"].as_str(), Some("error_details"));
+        assert_eq!(
+            f["extra"]["key"].as_str(),
+            Some(ERROR_DETAILS_REFUSAL_CATEGORY)
+        );
+        // Grouping declines by category stays a plain-column query.
+        let by_category = sql["refusals_by_category"].as_str().expect("sql");
+        assert!(by_category.contains("GROUP BY \"agent_run\".\"refusal_category\""));
+        assert!(!by_category.contains("->>"));
+        for (expr, key, alias) in [
+            (ERROR_CODE_READ_EXPR, ERROR_DETAILS_CODE, "error_code"),
+            (ERROR_READ_EXPR, ERROR_DETAILS_MESSAGE, "error"),
+        ] {
+            assert_eq!(
+                expr,
+                format!("COALESCE(\"agent_run\".\"error_details\" ->> '{key}', '') AS \"{alias}\"")
+            );
+        }
+    }
+
+    #[test]
+    fn error_properties_read_the_bag() {
+        let bag = serde_json::json!({"code": "run_timeout", "message": "lost"});
+        assert_eq!(error_details_text(&bag, ERROR_DETAILS_CODE), "run_timeout");
+        assert_eq!(error_details_text(&bag, ERROR_DETAILS_MESSAGE), "lost");
+        assert_eq!(error_details_text(&bag, ERROR_DETAILS_REFUSAL_CATEGORY), "");
+        assert_eq!(error_details_text(&default_error_details(), "code"), "");
+        assert_eq!(error_details_text(&serde_json::Value::Null, "code"), "");
+        assert_eq!(
+            error_details_text(&serde_json::json!({"code": null}), "code"),
+            ""
+        );
+    }
+
+    #[test]
+    fn merge_drops_a_key_rather_than_storing_an_empty_string() {
+        use serde_json::json;
+        let bag = merge_error_details(
+            &json!({}),
+            &[("error_code", json!("boom")), ("error", json!("detail"))],
+        );
+        assert_eq!(bag, json!({"code": "boom", "message": "detail"}));
+        assert_eq!(
+            merge_error_details(&bag, &[("error", json!(""))]),
+            json!({"code": "boom"})
+        );
+        assert_eq!(
+            merge_error_details(&bag, &[("error", json!("x"))])["code"],
+            json!("boom")
+        );
+        assert_eq!(
+            merge_error_details(&json!(null), &[("refusal_category", json!("bio"))]),
+            json!({"refusal_category": "bio"})
+        );
+        assert_eq!(
+            merge_error_details(&bag, &[("status", json!("failed"))]),
+            bag
+        );
+        assert_eq!(folded_key("error_code"), Some("code"));
+        assert_eq!(folded_key("status"), None);
     }
 
     #[test]

@@ -35,7 +35,7 @@ RUN_KEYS = {
     "cancel_reason", "prompt", "thread_id", "agent_metadata", "runner",
     "work_item", "scheduler_binding", "scheduler_binding_detail",
     "pod", "pod_detail", "created_by", "owner", "created_at",
-    "assigned_at", "queue_position", "started_at", "ended_at", "done_payload",
+    "assigned_at", "started_at", "ended_at", "done_payload",
     "error", "error_code", "error_diagnostic", "refusal_category", "llm_model",
     "input_tokens", "output_tokens", "total_tokens", "usage", "tool_plan",
     "tool_calls",
@@ -143,6 +143,46 @@ def test_web_run_detail_shape(user_client, daemon_run):
     assert "events" not in body
     assert body["scheduler_binding"] is None
     assert body["scheduler_binding_detail"] is None
+
+
+@pytest.mark.parametrize(
+    ("bag", "flat"),
+    [
+        # A clean run: the bag is empty and every key reads "" (never null).
+        ({}, {"error": "", "error_code": "", "refusal_category": ""}),
+        # A failed run as the backfill writes it (no category key).
+        (
+            {"code": "agent_error", "message": "RuntimeError: boom\nline 2"},
+            {"error": "RuntimeError: boom\nline 2", "error_code": "agent_error",
+             "refusal_category": ""},
+        ),
+        # A refusal: the category comes off the generated column.
+        (
+            {"code": "provider_refusal", "message": "declined", "refusal_category": "cyber"},
+            {"error": "declined", "error_code": "provider_refusal", "refusal_category": "cyber"},
+        ),
+    ],
+    ids=["clean", "failed", "refused"],
+)
+def test_web_run_detail_flattens_error_details(user_client, daemon_run, seeder, bag, flat):
+    """``error_details`` is storage only: run detail keeps the three flat
+    keys, plus the diagnostic derived from ``error`` (PDASHOSS01-187)."""
+    import json
+
+    seeder.db.execute(
+        "UPDATE agent_run SET error_details = %s::jsonb WHERE id = %s",
+        (json.dumps(bag), daemon_run["id"]),
+    )
+    assert seeder.db.fetchval(
+        "SELECT refusal_category FROM agent_run WHERE id = %s", (daemon_run["id"],)
+    ) == flat["refusal_category"]
+    body = user_client.get(f"{WEB}/runs/{daemon_run['id']}/").json()
+    assert {key: body[key] for key in flat} == flat
+    assert "error_details" not in body
+    if flat["error"]:
+        assert body["error_diagnostic"]["summary"]
+    else:
+        assert body["error_diagnostic"] is None
 
 
 def test_web_run_detail_include_events(user_client, machine_client, daemon_run, seeder):
@@ -1046,13 +1086,13 @@ def _seed_scheduler_run(seeder, daemon_world, binding_id, *, status="completed")
            (id, workspace_id, created_by_id, pod_id, scheduler_binding_id,
             status, prompt, trigger, executor_kind, run_config,
             required_capabilities, thread_id, agent_metadata, tool_plan,
-            usage, dispatch_attempts, error, refusal_category, llm_model,
-            cancel_reason, error_code, phase_kind, created_at)
+            usage, dispatch_attempts, error_details, llm_model,
+            cancel_reason, phase_kind, created_at)
            VALUES (%s,%s,%s,%s,%s,
                    %s,'','scheduler','local_runner','{}',
                    '[]','{}','{}','{}',
-                   '{}',0,'','','',
-                   '','','',now())""",
+                   '{}',0,'{}','',
+                   '','',now())""",
         (
             run_id, daemon_world["workspace"]["id"], daemon_world["owner"]["id"],
             daemon_world["pod"]["id"], binding_id, status,

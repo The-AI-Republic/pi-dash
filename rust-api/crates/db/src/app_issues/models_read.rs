@@ -696,7 +696,6 @@ pub mod foreign {
         "status",
         "runner_id",
         "executor_kind",
-        "queue_position",
         "created_at",
         "assigned_at",
         "started_at",
@@ -1281,7 +1280,7 @@ mod tests {
             owned(foreign::AGENT_RUN_COLUMNS_READ),
             foreign_columns_read(&v, "agent_run")
         );
-        assert_eq!(foreign::AGENT_RUN_COLUMNS_READ.len(), 19);
+        assert_eq!(foreign::AGENT_RUN_COLUMNS_READ.len(), 18);
         let agent_run_table: &str = foreign::AGENT_RUN_TABLE;
         assert_eq!(agent_run_table, "agent_run");
         let merged_table: &str = agent_run::TABLE;

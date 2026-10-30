@@ -39,7 +39,7 @@ use serde_json::Value;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-use super::rrule::next_fire_from_rrule;
+use super::rrule::next_fire_with_error;
 use super::scan::{scheduler_enabled, FIRE_SCHEDULER_BINDING_TASK};
 use crate::py_repr;
 use crate::queue::JobRow;
@@ -375,6 +375,16 @@ pub fn bad_rrule_update_sql() -> &'static str {
      next_run_at = NULL, updated_at = $2 WHERE id = $3"
 }
 
+/// Quiet-completion write (`scheduler.py`, the `series_completed and
+/// binding.next_run_at is None` branch,
+/// `update_fields=["last_error", "enabled", "updated_at"]`): the series is
+/// exhausted with no occurrence claimed, so the binding is disabled with an
+/// empty `last_error` — finished, not broken.
+pub fn complete_quietly_update_sql() -> &'static str {
+    "UPDATE scheduler_bindings SET last_error = $1, enabled = FALSE, \
+     updated_at = $2 WHERE id = $3"
+}
+
 /// Advance write (`scheduler.py:205`,
 /// `update_fields=["next_run_at", "last_error", "updated_at"]`).
 pub fn advance_update_sql() -> &'static str {
@@ -408,6 +418,15 @@ pub fn reacquire_select_sql() -> &'static str {
 pub fn pointer_update_sql() -> &'static str {
     "UPDATE scheduler_bindings SET last_run_id = $1, last_error = $2, \
      updated_at = $3 WHERE id = $4"
+}
+
+/// Phase 3a pointer write for a series' final occurrence
+/// (`update_fields=["last_run", "last_error", "updated_at", "enabled"]`):
+/// the pointer write plus the quiet disable, so the scanner stops
+/// considering the finished binding without flagging it as broken.
+pub fn pointer_complete_update_sql() -> &'static str {
+    "UPDATE scheduler_bindings SET last_run_id = $1, last_error = $2, \
+     enabled = FALSE, updated_at = $3 WHERE id = $4"
 }
 
 /// Phase 3b rollback write (`scheduler.py:275-277`,
@@ -515,24 +534,65 @@ pub type SchedulerDispatch = Arc<
 // Phases
 // ---------------------------------------------------------------------------
 
+/// What the claim does with the expanded RRULE bundle
+/// (`scheduler.py`, the `next_fire_with_error` branches of phase 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimDecision {
+    /// Parse error: the bad-RRULE disable row.
+    BadRrule,
+    /// Clean parse, no occurrence after now, and none claimed either
+    /// (`next_run_at` is NULL — e.g. a bundle created entirely in the past):
+    /// disable quietly with an empty `last_error`.
+    CompleteQuietly,
+    /// Advance `next_run_at` to `next` and dispatch the claimed occurrence.
+    /// `series_completed` (`next` is `None`) marks that occurrence as the
+    /// FINAL one of a finite series (or a single-shot's `dtstart`): phase 3a
+    /// disables the binding after a successful dispatch.
+    Advance {
+        next: Option<DateTime<Utc>>,
+        series_completed: bool,
+    },
+}
+
+/// Decide the claim from the expansion result and the stored cursor.
+/// Only reached once the `next_run_at > now` race guard has passed, so a
+/// non-NULL `next_run_at` here is a claimed, due occurrence.
+pub fn claim_decision(
+    expanded: &Result<Option<DateTime<Utc>>, String>,
+    next_run_at: Option<DateTime<Utc>>,
+) -> ClaimDecision {
+    match expanded {
+        Err(_) => ClaimDecision::BadRrule,
+        Ok(None) if next_run_at.is_none() => ClaimDecision::CompleteQuietly,
+        Ok(next) => ClaimDecision::Advance {
+            next: *next,
+            series_completed: next.is_none(),
+        },
+    }
+}
+
 /// What phase 1 decided inside its commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase1 {
     /// Missing, disabled, scheduler-disabled, future `next_run_at`,
-    /// in-flight, or bad-RRULE row: nothing to dispatch. (The bad-RRULE
-    /// branch commits its disable row first.)
+    /// in-flight, bad-RRULE or quietly-completed row: nothing to dispatch.
+    /// (The bad-RRULE and completion branches commit their row first.)
     Skipped,
     /// Claimed and advanced: the pre-claim cursor travels to phase 3b so a
     /// dispatch failure can restore it.
+    /// `series_completed` travels to phase 3a, which disables the binding
+    /// after dispatching the series' final occurrence.
     Claimed {
         binding: Uuid,
         prev_next_run_at: Option<DateTime<Utc>>,
+        series_completed: bool,
     },
 }
 
 /// Phase 1: claim under SFU and advance `next_run_at` (`scheduler.py:152-205`).
 ///
-/// Commits before returning whenever it wrote (bad-RRULE disable, advance);
+/// Commits before returning whenever it wrote (bad-RRULE disable, quiet
+/// completion, advance);
 /// pure skips return with nothing pending so the dropped transaction rolls
 /// back an empty write set — observably identical to Python's early `False`
 /// returns inside `transaction.atomic()`.
@@ -583,7 +643,7 @@ pub async fn phase1_claim(
     } else {
         row.tzid.as_str()
     };
-    let next = next_fire_from_rrule(
+    let expanded = next_fire_with_error(
         row.dtstart,
         row.rrule.as_str(),
         tzid,
@@ -591,8 +651,8 @@ pub async fn phase1_claim(
         &coerce_iso_datetimes(&row.exdates),
         *now,
     );
-    match next {
-        None => {
+    match claim_decision(&expanded, row.next_run_at) {
+        ClaimDecision::BadRrule => {
             // Bad RRULE bundle: record the error and disable the binding so
             // the scanner stops re-attempting every minute; recovery is the
             // API edit endpoint, which validates the RRULE on PATCH
@@ -607,7 +667,27 @@ pub async fn phase1_claim(
             tx.commit().await?;
             Ok(Phase1::Skipped)
         }
-        Some(advanced) => {
+        ClaimDecision::CompleteQuietly => {
+            // A clean parse with nothing left is a finished series, not an
+            // error: disable without a `last_error` so the UI can badge
+            // "Completed" rather than implying a misconfiguration.
+            sqlx::query(complete_quietly_update_sql())
+                .bind("")
+                .bind(Utc::now())
+                .bind(row.id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            tracing::info!(
+                binding = %row.id,
+                "scheduler.fire: series completed (nothing due); disabled quietly"
+            );
+            Ok(Phase1::Skipped)
+        }
+        ClaimDecision::Advance {
+            next: advanced,
+            series_completed,
+        } => {
             let cleared = advanced_last_error(&row.last_error);
             sqlx::query(advance_update_sql())
                 .bind(advanced)
@@ -620,6 +700,7 @@ pub async fn phase1_claim(
             Ok(Phase1::Claimed {
                 binding: row.id,
                 prev_next_run_at: row.next_run_at,
+                series_completed,
             })
         }
     }
@@ -632,11 +713,13 @@ pub async fn phase1_claim(
 /// cleared for healthy runs. Returns `True` regardless of the run's terminal
 /// status — the tick is recorded and `next_run_at` stays advanced. A binding
 /// deleted between phases keeps its advance (nothing to point at), still
-/// returning `True`.
+/// returning `True`. When `series_completed`, that dispatch was the series'
+/// final occurrence and the same write disables the binding quietly.
 pub async fn phase3a_record_run(
     pool: &PgPool,
     binding_id: &Uuid,
     run: &DispatchRun,
+    series_completed: bool,
 ) -> Result<(), FireError> {
     let failed = run.status == FAILED_RUN_STATUS;
     let mut tx = pool.begin().await?;
@@ -650,7 +733,12 @@ pub async fn phase3a_record_run(
         } else {
             String::new()
         };
-        sqlx::query(pointer_update_sql())
+        let sql = if series_completed {
+            pointer_complete_update_sql()
+        } else {
+            pointer_update_sql()
+        };
+        sqlx::query(sql)
             .bind(run.id)
             .bind(&message)
             .bind(Utc::now())
@@ -663,6 +751,7 @@ pub async fn phase3a_record_run(
         run = %run.id,
         binding = %binding_id,
         failed = failed,
+        completed = series_completed,
         "scheduler.fire: dispatched"
     );
     Ok(())
@@ -718,6 +807,7 @@ pub async fn fire_scheduler_binding(
     let Phase1::Claimed {
         binding,
         prev_next_run_at,
+        series_completed,
     } = phase1_claim(pool, binding_id, now).await?
     else {
         return Ok(false);
@@ -741,7 +831,7 @@ pub async fn fire_scheduler_binding(
 
     match outcome.run {
         Some(run) => {
-            phase3a_record_run(pool, &binding, &run).await?;
+            phase3a_record_run(pool, &binding, &run, series_completed).await?;
             Ok(true)
         }
         None => {
@@ -1174,6 +1264,122 @@ mod tests {
                 "missing {fragment} in:\n{dispatch}"
             );
         }
+    }
+
+    // Parse error vs exhausted series (PDASHOSS01-240): only a parse error
+    // is the bad-RRULE row; a clean parse with nothing left either
+    // completes quietly (no occurrence claimed) or dispatches the claimed
+    // final occurrence and completes after it.
+    #[test]
+    fn claim_decision_tells_exhausted_from_invalid() {
+        let due = Utc.with_ymd_and_hms(2026, 9, 28, 11, 59, 55).unwrap();
+        let next = Utc.with_ymd_and_hms(2026, 9, 29, 12, 0, 0).unwrap();
+        assert_eq!(
+            claim_decision(&Err("bad".to_owned()), Some(due)),
+            ClaimDecision::BadRrule
+        );
+        assert_eq!(
+            claim_decision(&Err("bad".to_owned()), None),
+            ClaimDecision::BadRrule
+        );
+        assert_eq!(
+            claim_decision(&Ok(None), None),
+            ClaimDecision::CompleteQuietly
+        );
+        assert_eq!(
+            claim_decision(&Ok(None), Some(due)),
+            ClaimDecision::Advance {
+                next: None,
+                series_completed: true
+            }
+        );
+        assert_eq!(
+            claim_decision(&Ok(Some(next)), Some(due)),
+            ClaimDecision::Advance {
+                next: Some(next),
+                series_completed: false
+            }
+        );
+        assert_eq!(
+            claim_decision(&Ok(Some(next)), None),
+            ClaimDecision::Advance {
+                next: Some(next),
+                series_completed: false
+            }
+        );
+    }
+
+    // End to end through the real expansion: a `COUNT=2` minutely series
+    // whose final occurrence is claimed dispatches it and completes; one
+    // tick later (cursor cleared) it completes quietly; a single-shot fires
+    // once at `dtstart`; garbage is still the bad-RRULE row.
+    #[test]
+    fn claim_decision_over_finite_series_and_single_shot() {
+        let dtstart = Utc.with_ymd_and_hms(2026, 9, 28, 11, 58, 0).unwrap();
+        let last = Utc.with_ymd_and_hms(2026, 9, 28, 11, 59, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 9, 28, 11, 59, 5).unwrap();
+        let expand = |rrule: &str| next_fire_with_error(dtstart, rrule, "UTC", &[], &[], now);
+        assert_eq!(
+            claim_decision(&expand("FREQ=MINUTELY;COUNT=2"), Some(last)),
+            ClaimDecision::Advance {
+                next: None,
+                series_completed: true
+            }
+        );
+        assert_eq!(
+            claim_decision(&expand("FREQ=MINUTELY;COUNT=2"), None),
+            ClaimDecision::CompleteQuietly
+        );
+        assert_eq!(
+            claim_decision(&expand("FREQ=MINUTELY;UNTIL=20260928T115900Z"), Some(last)),
+            ClaimDecision::Advance {
+                next: None,
+                series_completed: true
+            }
+        );
+        assert_eq!(
+            claim_decision(&expand(""), Some(dtstart)),
+            ClaimDecision::Advance {
+                next: None,
+                series_completed: true
+            }
+        );
+        assert_eq!(
+            claim_decision(&expand("this is not a real rrule"), Some(last)),
+            ClaimDecision::BadRrule
+        );
+        assert_eq!(
+            claim_decision(&expand("FREQ=MINUTELY;COUNT=5"), Some(last)),
+            ClaimDecision::Advance {
+                next: Some(Utc.with_ymd_and_hms(2026, 9, 28, 12, 0, 0).unwrap()),
+                series_completed: false
+            }
+        );
+    }
+
+    // The completion writes: quiet completion leaves `next_run_at` alone
+    // and empties `last_error`; the final-occurrence pointer write adds the
+    // disable to the plain pointer write's column set.
+    #[test]
+    fn completion_sqls_pin_column_sets() {
+        let quiet = complete_quietly_update_sql().to_ascii_lowercase();
+        for fragment in ["last_error = $1", "enabled = false", "updated_at = $2"] {
+            assert!(quiet.contains(fragment), "missing {fragment} in:\n{quiet}");
+        }
+        assert!(!quiet.contains("next_run_at"));
+        let pointer = pointer_complete_update_sql().to_ascii_lowercase();
+        for fragment in [
+            "last_run_id = $1",
+            "last_error = $2",
+            "enabled = false",
+            "updated_at = $3",
+        ] {
+            assert!(
+                pointer.contains(fragment),
+                "missing {fragment} in:\n{pointer}"
+            );
+        }
+        assert!(!pointer.contains("next_run_at"));
     }
 
     // The registered task name is the exact Python task name, carried by the

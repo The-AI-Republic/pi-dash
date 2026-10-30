@@ -32,6 +32,9 @@ class PageSerializer(BaseSerializer):
     # Many to many
     label_ids = serializers.ListField(child=serializers.UUIDField(), required=False)
     project_ids = serializers.ListField(child=serializers.UUIDField(), required=False)
+    parent_id = serializers.UUIDField(read_only=True)
+    # Annotated by the page list / detail queryset; omitted elsewhere.
+    sub_pages_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Page
@@ -43,6 +46,8 @@ class PageSerializer(BaseSerializer):
             "color",
             "labels",
             "parent",
+            "parent_id",
+            "sub_pages_count",
             "is_favorite",
             "is_locked",
             "archived_at",

@@ -844,7 +844,7 @@ async fn run_now_write(
     // stamps `updated_at` with its own `now()`.
     let due = Utc::now();
     let stamp = Utc::now();
-    app_bind::write_next_run_at(&mut *tx, &binding.id, &due, &stamp)
+    app_bind::write_next_run_at(&mut *tx, &binding.id, Some(&due), &stamp)
         .await
         .map_err(from_app)?;
     tx.commit()

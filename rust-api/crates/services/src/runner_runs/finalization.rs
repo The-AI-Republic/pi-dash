@@ -28,6 +28,14 @@
 //!
 //! Fixture: FX-RUN-05 (`merge_done_payload`, `finalize_agent_run`,
 //! `apply_terminal_effects` sections).
+//!
+//! PDASHOSS01-187: callers keep naming the flat `error_code` /
+//! `error` / `refusal_category` columns, which are one `error_details`
+//! JSON column now. [`plan_finalize_values`] folds them into a single
+//! `error_details` clause (`split_folded_updates` +
+//! `merge_error_details`), and [`finalize_update_sql`] merges that
+//! patch into the locked row's bag in SQL — the same read-modify-write
+//! Django runs in Python under the same `FOR UPDATE` lock.
 
 use chrono::{DateTime, Utc};
 use pidash_db::runner_runs::{agent_run, event, pod};
@@ -81,7 +89,6 @@ const RUNNER_COLUMNS: &[&str] = &[
     "dev_metadata",
     "protocol_version",
     "last_heartbeat_at",
-    "free_worktrees",
     "created_at",
     "updated_at",
     "revoked_at",
@@ -127,14 +134,56 @@ pub fn merge_done_payload(existing: &Value, incoming: &Value) -> Value {
 }
 
 /// Assembled finalize `SET` values (`finalize_agent_run:52-59`):
-/// `status`, `ended_at`, `queue_position`, both markers cleared, then
+/// `status`, `ended_at`, both markers cleared, then
 /// the caller extras in order (overwriting same-name base keys in
-/// place). `done_payload` still holds the *incoming* value here; the
+/// place), then — when the caller named any of the folded columns —
+/// one trailing `error_details` clause carrying the patch (see
+/// [`ERROR_DETAILS_COLUMN`]). `done_payload` still holds the *incoming* value here; the
 /// executing layer runs [`apply_done_payload_merge`] against the
 /// locked row before rendering the `UPDATE`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FinalizeValues {
     pub clauses: Vec<SetClause>,
+}
+
+/// The single column the folded flat names write
+/// (`AgentRun.error_details`). Its clause value is a
+/// [`SetValue::Json`] patch `{bag_key: value | null}`: a string sets
+/// the key, `null` removes it (`merge_error_details` drops falsy
+/// values rather than storing `""`).
+pub const ERROR_DETAILS_COLUMN: &str = "error_details";
+
+/// Python truthiness of a folded clause value, as the patch value it
+/// becomes: truthy text / JSON is kept, everything falsy is `null`.
+fn folded_patch_value(value: &SetValue) -> Value {
+    match value {
+        SetValue::Text(text) if !text.is_empty() => Value::String(text.clone()),
+        SetValue::Json(json) if super::py_truthy(json) => json.clone(),
+        _ => Value::Null,
+    }
+}
+
+/// `split_folded_updates` + the patch half of `merge_error_details`:
+/// pull the flat folded clauses out (dict order kept for a repeated
+/// name: the last write wins) and append one `error_details` patch
+/// clause, as Django assigns `values["error_details"]` after the pop.
+fn fold_error_details(clauses: &mut Vec<SetClause>) {
+    let mut patch = serde_json::Map::new();
+    let mut folded = false;
+    clauses.retain(|clause| match agent_run::folded_key(clause.column) {
+        Some(key) => {
+            patch.insert(key.to_owned(), folded_patch_value(&clause.value));
+            folded = true;
+            false
+        }
+        None => true,
+    });
+    if folded {
+        clauses.push(SetClause {
+            column: ERROR_DETAILS_COLUMN,
+            value: SetValue::Json(Value::Object(patch)),
+        });
+    }
 }
 
 /// Assemble the finalize values. `extras` are the caller `updates` in
@@ -157,10 +206,6 @@ pub fn plan_finalize_values(
             value: SetValue::Now,
         },
         SetClause {
-            column: "queue_position",
-            value: SetValue::Null,
-        },
-        SetClause {
             column: "terminal_hooks_applied_at",
             value: SetValue::Null,
         },
@@ -178,6 +223,7 @@ pub fn plan_finalize_values(
             }),
         }
     }
+    fold_error_details(&mut clauses);
     Ok(FinalizeValues { clauses })
 }
 
@@ -198,20 +244,38 @@ pub fn apply_done_payload_merge(values: &mut FinalizeValues, stored_done_payload
     }
 }
 
-/// The terminal event's `error_code` (`finalize_agent_run:83`):
-/// `values.get("error_code", "")`. Both real callers pass a string
-/// or nothing; a non-string value (unreachable from them) reads as
-/// `""`, matching the default arm.
+/// The terminal event's `error_code` (`finalize_agent_run:80-83`):
+/// `folded.get("error_code") or ""` — the `code` the caller passed,
+/// read back off the `error_details` patch. Every real caller passes
+/// a string or nothing; a non-string value (unreachable from them)
+/// reads as `""`.
 pub fn finalize_error_code(values: &FinalizeValues) -> String {
     values
         .clauses
         .iter()
-        .find(|clause| clause.column == "error_code")
+        .find(|clause| clause.column == ERROR_DETAILS_COLUMN)
         .and_then(|clause| match &clause.value {
-            SetValue::Text(code) => Some(code.clone()),
+            SetValue::Json(patch) => patch
+                .get(agent_run::ERROR_DETAILS_CODE)
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             _ => None,
         })
         .unwrap_or_default()
+}
+
+/// The folded `error_details` patch of a finalize plan (`None` when
+/// the caller named none of the folded columns), for executors that
+/// bind the plan positionally.
+pub fn error_details_patch(values: &FinalizeValues) -> Option<&Value> {
+    values
+        .clauses
+        .iter()
+        .find(|clause| clause.column == ERROR_DETAILS_COLUMN)
+        .and_then(|clause| match &clause.value {
+            SetValue::Json(patch) => Some(patch),
+            _ => None,
+        })
 }
 
 /// Finalize-lock predicate (`finalize_agent_run:61-68`): the row must
@@ -272,18 +336,43 @@ pub fn lock_run_for_finalize_sql(with_runner: bool, with_status: bool) -> String
 
 /// Finalize `UPDATE` (`finalize_agent_run:71`): `SET` in values order,
 /// `WHERE` on the locked primary key. Params follow the clause order;
-/// the id binds last.
+/// the id binds last. The `error_details` clause merges its patch
+/// into the stored bag ([`error_details_merge_sql`]).
 pub fn finalize_update_sql(values: &FinalizeValues) -> String {
     let set = values
         .clauses
         .iter()
         .enumerate()
-        .map(|(index, clause)| format!("\"{}\" = ${}", clause.column, index + 1))
+        .map(|(index, clause)| {
+            let param = format!("${}", index + 1);
+            if clause.column == ERROR_DETAILS_COLUMN {
+                format!(
+                    "\"{}\" = {}",
+                    clause.column,
+                    error_details_merge_sql(&param)
+                )
+            } else {
+                format!("\"{}\" = {param}", clause.column)
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
     format!(
         "UPDATE \"agent_run\" SET {set} WHERE \"agent_run\".\"id\" = ${}",
         values.clauses.len() + 1
+    )
+}
+
+/// `merge_error_details(run.error_details, **folded)` as SQL over the
+/// row being updated: the stored bag (reset to `{}` when not an
+/// object), minus every key the patch names, plus the patch's
+/// non-`null` keys. `param` is the patch placeholder (`$n`), bound as
+/// `jsonb`.
+pub fn error_details_merge_sql(param: &str) -> String {
+    format!(
+        "((CASE WHEN jsonb_typeof(\"agent_run\".\"error_details\") = 'object' \
+         THEN \"agent_run\".\"error_details\" ELSE '{{}}'::jsonb END) \
+         - ARRAY(SELECT jsonb_object_keys({param}::jsonb))) || jsonb_strip_nulls({param}::jsonb)"
     )
 }
 
@@ -441,7 +530,7 @@ pub fn update_hooks_marker_sql() -> &'static str {
 }
 
 /// Capacity re-read (`apply_terminal_effects:183`):
-/// `select_related("runner", "pod").get(pk)` — 41 + 10 + 32 columns,
+/// `select_related("runner", "pod").get(pk)` — 40 + 10 + 31 columns,
 /// `.get()` so no `LIMIT`. A missing row raises `DoesNotExist` (no
 /// guard in the source); the executing layer propagates it. Param:
 /// `$1` run id.
@@ -748,7 +837,6 @@ mod tests {
             [
                 "status",
                 "ended_at",
-                "queue_position",
                 "terminal_hooks_applied_at",
                 "terminal_capacity_released_at",
             ]
@@ -781,16 +869,53 @@ mod tests {
             [
                 "status",
                 "ended_at",
-                "queue_position",
                 "terminal_hooks_applied_at",
                 "terminal_capacity_released_at",
-                "error_code",
-                "error",
                 "cancel_reason",
+                "error_details",
             ]
+        );
+        // The folded trio lands as one patch, in the bag's key names.
+        assert_eq!(
+            values.clauses.last().map(|clause| &clause.value),
+            Some(&SetValue::Json(json!({
+                "code": "approval_timeout",
+                "message": "approval request expired"
+            })))
         );
         // The approval-timeout caller shape (tasks.py:73-81).
         assert_eq!(finalize_error_code(&values), "approval_timeout".to_owned());
+    }
+
+    #[test]
+    fn folded_falsy_values_remove_their_key() {
+        let values = plan_finalize_values(
+            AgentRunStatus::Completed,
+            &[
+                ("error", SetValue::Text(String::new())),
+                ("refusal_category", SetValue::Null),
+            ],
+        )
+        .expect("terminal plans");
+        assert_eq!(
+            values.clauses.last().map(|clause| &clause.value),
+            Some(&SetValue::Json(
+                json!({"message": null, "refusal_category": null})
+            ))
+        );
+        assert_eq!(finalize_error_code(&values), "");
+        let sql = finalize_update_sql(&values);
+        assert!(
+            sql.contains(&format!(
+                "\"error_details\" = {}",
+                error_details_merge_sql("$5")
+            )),
+            "{sql}"
+        );
+        assert!(sql.ends_with("WHERE \"agent_run\".\"id\" = $6"), "{sql}");
+        // A finalize that names none of them leaves the bag alone.
+        let untouched = plan_finalize_values(AgentRunStatus::Completed, &[]).expect("plans");
+        assert!(!finalize_update_sql(&untouched).contains("error_details"));
     }
 
     #[test]
@@ -1387,7 +1512,7 @@ mod tests {
     #[test]
     fn finalize_lock_sql_variants() {
         let bare = lock_run_for_finalize_sql(false, false);
-        assert_eq!(select_runs(&bare), vec![("\"agent_run\"".to_owned(), 41)]);
+        assert_eq!(select_runs(&bare), vec![("\"agent_run\"".to_owned(), 39)]);
         assert!(
             bare.ends_with(
                 " FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND NOT \
@@ -1430,12 +1555,17 @@ mod tests {
             ],
         )
         .expect("plans");
+        // The folded trio drops out of the SET list and lands last as one
+        // `error_details` merge (Django's dict order after the pop).
         assert_eq!(
             finalize_update_sql(&values),
-            "UPDATE \"agent_run\" SET \"status\" = $1, \"ended_at\" = $2, \
-             \"queue_position\" = $3, \"terminal_hooks_applied_at\" = $4, \
-             \"terminal_capacity_released_at\" = $5, \"error_code\" = $6, \"error\" = $7, \
-             \"cancel_reason\" = $8 WHERE \"agent_run\".\"id\" = $9"
+            format!(
+                "UPDATE \"agent_run\" SET \"status\" = $1, \"ended_at\" = $2, \
+                 \"terminal_hooks_applied_at\" = $3, \
+                 \"terminal_capacity_released_at\" = $4, \"cancel_reason\" = $5, \
+                 \"error_details\" = {} WHERE \"agent_run\".\"id\" = $7",
+                error_details_merge_sql("$6")
+            )
         );
     }
 
@@ -1479,7 +1609,7 @@ mod tests {
         assert_eq!(
             select_runs(&fetch),
             vec![
-                ("\"agent_run\"".to_owned(), 41),
+                ("\"agent_run\"".to_owned(), 39),
                 ("\"issues\"".to_owned(), 34),
                 ("\"projects\"".to_owned(), 46),
                 ("\"states\"".to_owned(), 18),
@@ -1500,9 +1630,9 @@ mod tests {
         assert_eq!(
             select_runs(&capacity),
             vec![
-                ("\"agent_run\"".to_owned(), 41),
+                ("\"agent_run\"".to_owned(), 39),
                 ("\"pod\"".to_owned(), 10),
-                ("\"runner\"".to_owned(), 32),
+                ("\"runner\"".to_owned(), 31),
             ]
         );
         assert!(
@@ -1554,7 +1684,6 @@ mod tests {
                 "dev_metadata",
                 "protocol_version",
                 "last_heartbeat_at",
-                "free_worktrees",
                 "created_at",
                 "updated_at",
                 "revoked_at",

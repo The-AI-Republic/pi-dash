@@ -263,10 +263,11 @@ where
 /// [`finalize_update_sql`] from the planned `values` and bind the
 /// revoke extras in clause order.
 ///
-/// `values` is the revoke plan (`status`, `ended_at`, `queue_position`,
-/// both markers, then `error`, `error_code`, `cancel_reason`); the
-/// caller pins that column order before the finalize lock, and the
-/// binds below follow it. `ended_at` binds the caller's own clock
+/// `values` is the revoke plan (`status`, `ended_at`, both markers,
+/// `cancel_reason`, then the folded `error_details` patch carrying
+/// `error` / `error_code`); the caller pins that column order before
+/// the finalize lock, and the binds below follow it. `ended_at` binds
+/// the caller's own clock
 /// (each driver stamps its own `now`, never hoisted across legs).
 /// `run_id` binds last (the locked primary key).
 pub async fn execute_revoke_finalize_update<'e, E>(
@@ -282,12 +283,12 @@ where
     sqlx::query(&finalize_update_sql(values))
         .bind(FINALIZE_TO_STATUS)
         .bind(ended_at)
-        .bind(None::<i16>)
         .bind(None::<DateTime<Utc>>)
         .bind(None::<DateTime<Utc>>)
-        .bind(FINALIZE_ERROR)
-        .bind(FINALIZE_ERROR_CODE)
         .bind(stored_reason)
+        .bind(crate::runner_runs::finalization::error_details_patch(
+            values,
+        ))
         .bind(run_id)
         .execute(ex)
         .await

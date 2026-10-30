@@ -60,8 +60,9 @@
 //! * BUG-poll-single-trigger-drain (`:441-445`): one trigger —
 //!   stale-heartbeat recovery, became-available, or first poll — so a
 //!   first poll with no prior heartbeat does not double-dispatch.
-//! * BUG-poll-free-worktrees-ignored (`:391-395`): the reported
-//!   `free_worktrees` hint is never persisted (retired pool).
+//! * BUG-poll-free-worktrees-ignored (`:391-395`): the
+//!   `free_worktrees` wire key a pre-retirement daemon still reports
+//!   is never persisted (retired pool; the column is dropped).
 //! * BUG-poll-live-state-swallow (`:420-426`): the live-state upsert
 //!   swallows every failure (log only) so a malformed snapshot never
 //!   breaks the poll.
@@ -406,8 +407,7 @@ fn heartbeat_error(error: sqlx::Error) -> Response {
 
 /// Bind one finalize `SET` clause, in values order. `Now` is the
 /// statement's single timestamp; `Null` binds the column's typed
-/// null (the reap path nulls the queue position and the two
-/// markers); `Text`/`Json` carry the bound value (the
+/// null (the reap path nulls the two markers); `Text`/`Json` carry the bound value (the
 /// `run_endpoints::bind_finalize_value` twin).
 fn bind_finalize_value<'q>(
     query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
@@ -419,7 +419,6 @@ fn bind_finalize_value<'q>(
         (_, SetValue::Now) => query.bind(*now),
         (_, SetValue::Text(text)) => query.bind(text.clone()),
         (_, SetValue::Json(payload)) => query.bind(payload.clone()),
-        ("queue_position", SetValue::Null) => query.bind(None::<i16>),
         (_, SetValue::Null) => query.bind(None::<DateTime<Utc>>),
     }
 }
@@ -548,13 +547,18 @@ async fn reap_stale_busy_runs(
     // `run_already_<status>` when the offline sweep finalized it.
     let mut retry_cancel = None;
     if let Some(in_flight) = in_flight_id {
-        let claimed: Option<(String, String)> = sqlx::query_as(session_kernel::IN_FLIGHT_CLAIM_SQL)
-            .bind(in_flight)
-            .bind(runner_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(heartbeat_error)?;
-        if let Some((status, error_code)) = claimed.as_ref() {
+        let claimed: Option<(String, serde_json::Value)> =
+            sqlx::query_as(session_kernel::IN_FLIGHT_CLAIM_SQL)
+                .bind(in_flight)
+                .bind(runner_id)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(heartbeat_error)?;
+        if let Some((status, error_details)) = claimed.as_ref() {
+            let error_code = pidash_db::runner_runs::agent_run::error_details_text(
+                error_details,
+                pidash_db::runner_runs::agent_run::ERROR_DETAILS_CODE,
+            );
             if let Some(reason) = session_kernel::cancel_reason_for_claim(status, error_code) {
                 retry_cancel = Some(SessionEffect::RetryCancelDelivery {
                     runner_id,

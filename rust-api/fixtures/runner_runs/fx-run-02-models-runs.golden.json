@@ -1,5 +1,5 @@
 {
- "_note": "FX-RUN-02 models-runs. Sources: runner/models.py PodManager :42-49, Pod :52-177 (clean :127-143, save :145-159, default_for_project :161-171, default_for_project_id :173-176, Meta :98-122), AgentRun :872-1160 (save :1104-1134, is_terminal :1136-1144, is_active :1146-1159, Meta :1037-1102, token pseudo-fields :1024-1026), AgentRunEvent :1162-1175, AgentRunToolCall :1187-1216, ApprovalRequest :1219-1246, RunMessageDedupe :788-808; runner/fields.py:1-61 (JSONKeyBigIntegerField db_type :56-58, pre_save :60-61). Method: _meta introspection + compiled QuerySet SQL (str(qs.query)) + live rows in scratch PG pidash_549_fixtures inside one rolled-back transaction (probe /tmp/probe549_02.py; venv py3.12 / Django 4.2.30 / DRF 3.15.2, pi_dash.settings.test).",
+ "_note": "FX-RUN-02 models-runs. Sources: runner/models.py PodManager :42-49, Pod :52-177 (clean :127-143, save :145-159, default_for_project :161-171, default_for_project_id :173-176, Meta :98-122), AgentRun :872-1160 (save :1104-1134, is_terminal :1136-1144, is_active :1146-1159, Meta :1037-1102, token pseudo-fields :1024-1026), AgentRunEvent :1162-1175, AgentRunToolCall :1187-1216, ApprovalRequest :1219-1246, RunMessageDedupe :788-808; runner/fields.py:1-61 (JSONKeyBigIntegerField db_type :56-58, pre_save :60-61). Method: _meta introspection + compiled QuerySet SQL (str(qs.query)) + live rows in scratch PG pidash_549_fixtures inside one rolled-back transaction (probe /tmp/probe549_02.py; venv py3.12 / Django 4.2.30 / DRF 3.15.2, pi_dash.settings.test). PDASHOSS01-187 (re-recorded from the Python PR #447 model, runner migration 0032): error_code/error/refusal_category folded into error_details jsonb (default=dict); refusal_category is a JSONKeyTextField generated column (`error_details_sql`), the error_code btree index is gone.",
  "models": [
   {
    "model": "Pod",
@@ -575,24 +575,6 @@
      "rel": null
     },
     {
-     "name": "error_code",
-     "column": "error_code",
-     "type": "CharField",
-     "db_type": "varchar(64)",
-     "null": false,
-     "blank": true,
-     "default": "",
-     "db_default": "NOT_PROVIDED",
-     "db_index": true,
-     "unique": false,
-     "max_length": 64,
-     "choices": null,
-     "editable": true,
-     "auto_now": false,
-     "auto_now_add": false,
-     "rel": null
-    },
-    {
      "name": "tool_plan",
      "column": "tool_plan",
      "type": "JSONField",
@@ -834,13 +816,13 @@
      "rel": null
     },
     {
-     "name": "error",
-     "column": "error",
-     "type": "TextField",
-     "db_type": "text",
+     "name": "error_details",
+     "column": "error_details",
+     "type": "JSONField",
+     "db_type": "jsonb",
      "null": false,
      "blank": true,
-     "default": "",
+     "default": "callable:<dict>",
      "db_default": "NOT_PROVIDED",
      "db_index": false,
      "unique": false,
@@ -854,25 +836,24 @@
     {
      "name": "refusal_category",
      "column": "refusal_category",
-     "type": "CharField",
-     "db_type": "varchar(32)",
-     "null": false,
+     "type": "TextField",
+     "db_type": "text GENERATED ALWAYS AS (COALESCE(\"error_details\" ->> 'refusal_category', '')) STORED",
+     "null": true,
      "blank": true,
-     "default": "",
+     "default": "NOT_PROVIDED",
      "db_default": "NOT_PROVIDED",
      "db_index": false,
      "unique": false,
-     "max_length": 32,
-     "choices": [
-      "cyber",
-      "bio",
-      "reasoning_extraction",
-      "unknown"
-     ],
-     "editable": true,
+     "max_length": null,
+     "choices": null,
+     "editable": false,
      "auto_now": false,
      "auto_now_add": false,
-     "rel": null
+     "rel": null,
+     "extra": {
+      "source": "error_details",
+      "key": "refusal_category"
+     }
     },
     {
      "name": "llm_model",
@@ -1013,24 +994,6 @@
      "rel": null
     },
     {
-     "name": "queue_position",
-     "column": "queue_position",
-     "type": "PositiveSmallIntegerField",
-     "db_type": "smallint",
-     "null": true,
-     "blank": true,
-     "default": "NOT_PROVIDED",
-     "db_default": "NOT_PROVIDED",
-     "db_index": false,
-     "unique": false,
-     "max_length": null,
-     "choices": null,
-     "editable": true,
-     "auto_now": false,
-     "auto_now_add": false,
-     "rel": null
-    },
-    {
      "name": "started_at",
      "column": "started_at",
      "type": "DateTimeField",
@@ -1073,7 +1036,7 @@
      "type": "CheckConstraint",
      "fields": [],
      "condition": "None",
-     "check": "(OR: ('executor_kind__in', [AgentExecutorKind.LOCAL_RUNNER, AgentExecutorKind.MANAGED_RUNNER]), (AND: ('assigned_at__isnull', True), ('executor_kind', AgentExecutorKind.CLOUD_AGENT), ('owner__isnull', True), ('pinned_runner__isnull', True), ('queue_position__isnull', True), ('runner__isnull', True)))"
+     "check": "(OR: ('executor_kind__in', [AgentExecutorKind.LOCAL_RUNNER, AgentExecutorKind.MANAGED_RUNNER]), (AND: ('assigned_at__isnull', True), ('executor_kind', AgentExecutorKind.CLOUD_AGENT), ('owner__isnull', True), ('pinned_runner__isnull', True), ('runner__isnull', True)))"
     },
     {
      "name": "agent_run_one_active_per_work_item",
@@ -2070,5 +2033,10 @@
   "values_input_tokens": "SELECT \"agent_run\".\"input_tokens\" FROM \"agent_run\" ORDER BY \"agent_run\".\"created_at\" DESC",
   "sum_total_tokens": "SELECT \"agent_run\".\"workspace_id\", SUM(\"agent_run\".\"total_tokens\") AS \"s\" FROM \"agent_run\" GROUP BY \"agent_run\".\"workspace_id\"",
   "generated_db_type_input": "bigint GENERATED ALWAYS AS ((\"usage\" ->> 'input')::bigint) STORED"
+ },
+ "error_details_sql": {
+  "generated_db_type_refusal_category": "text GENERATED ALWAYS AS (COALESCE(\"error_details\" ->> 'refusal_category', '')) STORED",
+  "refusals_by_category": "SELECT \"agent_run\".\"refusal_category\", COUNT(\"agent_run\".\"id\") AS \"n\" FROM \"agent_run\" WHERE \"agent_run\".\"status\" = refused GROUP BY \"agent_run\".\"refusal_category\"",
+  "values_status_error_details": "SELECT \"agent_run\".\"status\", \"agent_run\".\"error_details\" FROM \"agent_run\" WHERE \"agent_run\".\"id\" = 00000000-0000-0000-0000-000000000000 ORDER BY \"agent_run\".\"created_at\" DESC"
  }
 }
