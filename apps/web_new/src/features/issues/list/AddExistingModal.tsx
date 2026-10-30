@@ -9,7 +9,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { searchIssues, type IssueSearchHit } from "@pidash/api-client";
-import { Button, Dialog, Input } from "@pidash/kit";
+import { Button, Dialog, EmptyState, Input } from "@pidash/kit";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
@@ -136,7 +136,11 @@ export function AddExistingModal({
         {hits.isPending ? <p className="text-body text-(--text-muted)">Searching…</p> : null}
         {hits.isError ? <p className="text-body text-(--danger)">Couldn't search work items.</p> : null}
         {!hits.isPending && rows.length === 0 ? (
-          <p className="text-body text-(--text-muted)">No matching work items.</p>
+          <EmptyState
+            variant="illustrated"
+            art={{ category: "general", type: "no-results" }}
+            title={query.trim() === "" ? "No matching work items found" : "No work items found"}
+          />
         ) : null}
         <ul className="flex max-h-72 flex-col overflow-y-auto">
           {rows.map((row) => {

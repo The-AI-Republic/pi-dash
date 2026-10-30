@@ -66,6 +66,7 @@ import { usePageSyncStatus } from "../lib/pageSync.js";
 import { usePageLiveSession, usePageReadOnlySyncReport } from "../lib/pageLiveSession.js";
 import { PageBodySkeleton, PageDetailSpinner } from "./PageDetailLoading.js";
 import { PageDeleteDialog } from "./PageDeleteDialog.js";
+import { PageDetailPaletteEntries } from "./PageDetailPaletteEntries.js";
 import { PageDetailPanel } from "./PageDetailPanel.js";
 import { PageDetailHeader } from "./PageDetailHeader.js";
 import { PageFloatingPaneToggle } from "./PageFloatingPaneToggle.js";
@@ -456,6 +457,13 @@ export function PageDetailScreen({
     // content area (PAGE-045). The canvas column below is the page's
     // vertical scroller.
     <div data-testid="page-detail-screen" className="flex h-full min-h-0 flex-col overflow-x-clip">
+      <PageDetailPaletteEntries
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        page={page}
+        isOwner={viewerId !== null && page.owned_by === viewerId}
+        highestProjectRole={role}
+      />
       <PageDetailHeader
         workspaceSlug={workspaceSlug}
         projectId={projectId}

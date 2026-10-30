@@ -46,14 +46,6 @@ test.describe("shared empty-state kit", () => {
     { tag: specTags(["SHELL-104"]) },
     async ({ driver, seed }) => {
       test.setTimeout(300_000);
-      // Gate note (NEWFRONT-295): web_new skips — the cycles list has no
-      // route until the cycles area lands it. Kit tiers are unit-proven
-      // in @pidash/kit; TODO(NEWFRONT-526): re-enable once cycles routes
-      // land and prove the live-surface legs there.
-      if (driver.target === "web_new") {
-        test.skip(true, "cycles list route unlanded; empty-state surface 404s");
-        return;
-      }
       await test.step("the disabled-feature list renders the detailed tier with an action", async () => {
         await driver.goToPath(`/${seed.workspaceSlug}/projects/${seed.projectId}/cycles`);
         await expect.poll(() => driver.titledEmptyState(CYCLES_OFF_TITLE), { timeout: 120_000 }).not.toBeNull();
@@ -82,12 +74,6 @@ test.describe("shared empty-state kit", () => {
     { tag: specTags(["SHELL-104"]) },
     async ({ driver, seed }) => {
       test.setTimeout(300_000);
-      // Gate note (NEWFRONT-295): web_new skips — the cycle detail has no
-      // route until the cycles area lands it. TODO(NEWFRONT-526).
-      if (driver.target === "web_new") {
-        test.skip(true, "cycle detail route unlanded; empty-state surface 404s");
-        return;
-      }
       await test.step("the fresh cycle detail renders the detailed tier with two actions", async () => {
         const session = await signInSession(seed.email, seed.password);
         const cycleId = await serverCreateCycle(
@@ -118,12 +104,6 @@ test.describe("shared empty-state kit", () => {
     { tag: specTags(["SHELL-104"]) },
     async ({ driver, seed }) => {
       test.setTimeout(300_000);
-      // Gate note (NEWFRONT-295): web_new skips — the add-existing modal
-      // lives on the unlanded cycle detail route. TODO(NEWFRONT-526).
-      if (driver.target === "web_new") {
-        test.skip(true, "cycle detail route unlanded; modal surface 404s");
-        return;
-      }
       await test.step("a no-match issue search renders the simple tier with no buttons", async () => {
         const session = await signInSession(seed.email, seed.password);
         const cycleId = await serverCreateCycle(
