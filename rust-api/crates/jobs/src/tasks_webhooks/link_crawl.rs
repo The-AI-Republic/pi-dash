@@ -126,6 +126,15 @@ fn build_client(timeout_secs: u64) -> Result<reqwest::Client, reqwest::Error> {
         .build()
 }
 
+/// Header bytes to text the way `requests` exposes them: the underlying
+/// http module decodes headers in latin1 (`sessions.py:117`), so every byte —
+/// including non-ASCII obs-text rejected by `HeaderValue::to_str` — maps
+/// to U+0000..=U+00FF. A UTF-8 `Location` thus arrives as the mojibake
+/// `str` the redirect loop follows, never as `""`.
+fn decode_header_value(value: &reqwest::header::HeaderValue) -> String {
+    value.as_bytes().iter().map(|byte| *byte as char).collect()
+}
+
 /// One live request through the async client.
 async fn live_request(
     client: &reqwest::Client,
@@ -140,13 +149,28 @@ async fn live_request(
     let status = response.status().as_u16();
     let mut headers = Vec::new();
     for (name, value) in response.headers() {
-        headers.push((name.to_string(), value.to_str().unwrap_or("").to_owned()));
+        headers.push((name.to_string(), decode_header_value(value)));
     }
     // `requests.Response.is_redirect`: redirect status WITH a location.
     let is_redirect = matches!(status, 301 | 302 | 303 | 307 | 308)
         && headers
             .iter()
             .any(|(name, _)| name.eq_ignore_ascii_case("location"));
+    // `requests.get(allow_redirects=False)` still resolves the redirect
+    // target eagerly (`sessions.py:739` → `get_redirect_target`, which
+    // re-decodes the latin-1 header as UTF-8): non-UTF-8 `Location`
+    // bytes raise there (`UnicodeDecodeError`, a `ValueError`), so Django
+    // never follows them. Fail the fetch the same way instead of
+    // following mojibake. (The warning branch/text stay library-specific:
+    // CPython codec messages are Tier 3.)
+    if is_redirect
+        && response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .is_some_and(|location| std::str::from_utf8(location.as_bytes()).is_err())
+    {
+        return Err("Response Location header is not valid UTF-8".to_owned());
+    }
     let body = response
         .bytes()
         .await
@@ -380,6 +404,36 @@ mod tests {
         (format!("http://127.0.0.1:{port}/"), handle)
     }
 
+    /// One-shot redirect server: consumes the request head, then answers
+    /// `302` with the given raw `Location` bytes (no re-encoding, so the
+    /// wire bytes this pins are exact).
+    fn redirect_server(location: &'static [u8]) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = conn.read(&mut buf).unwrap();
+                if n == 0 {
+                    return;
+                }
+                seen.extend_from_slice(&buf[..n]);
+                if seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            conn.write_all(b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\nLocation: ")
+                .unwrap();
+            conn.write_all(location).unwrap();
+            conn.write_all(b"\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        (format!("http://127.0.0.1:{port}/"), handle)
+    }
+
     /// PIDASHCONV-1669: no single read stalls for 1s, so the 1.2s drip
     /// reads whole — like `requests.get(..., timeout=1)`. The old
     /// per-request total `.timeout()` cut this off at 1s.
@@ -424,6 +478,34 @@ mod tests {
         let response = fetch(FAVICON_HEAD_TIMEOUT_SECS, reqwest::Method::HEAD, &url).unwrap();
         server.join().unwrap();
         assert_eq!(response.status, 200);
+    }
+
+    /// PIDASHCONV-1675 fix 1: `requests` exposes headers latin-1-decoded
+    /// (`sessions.py:get_redirect_target`), so a UTF-8 `Location` arrives
+    /// as the mojibake the redirect loop follows — never `""`.
+    #[test]
+    fn non_ascii_location_decodes_as_latin1_like_requests() {
+        let (url, server) = redirect_server(b"/caf\xc3\xa9");
+        let response = fetch(GET_TIMEOUT_SECS, reqwest::Method::GET, &url).unwrap();
+        server.join().unwrap();
+        assert_eq!(response.status, 302);
+        assert!(response.is_redirect);
+        assert_eq!(response.headers.location(), Some("/caf\u{c3}\u{a9}"));
+    }
+
+    /// `requests.get(allow_redirects=False)` still resolves the redirect
+    /// target eagerly (`sessions.py:739`), and non-UTF-8 `Location` bytes
+    /// raise there — so Django never follows them. The adapter fails the
+    /// fetch the same way instead of following mojibake.
+    #[test]
+    fn non_utf8_location_fails_like_requests_redirect_target() {
+        let (url, server) = redirect_server(b"/caf\xe9");
+        let outcome = fetch(GET_TIMEOUT_SECS, reqwest::Method::GET, &url);
+        server.join().unwrap();
+        assert!(
+            outcome.is_err(),
+            "non-UTF-8 Location unexpectedly decoded: {outcome:?}"
+        );
     }
 
     #[test]
