@@ -33,12 +33,21 @@ interface ScriptedBootPage {
 }
 
 /** A stub page with scripted paint and per-load body text. */
-function scriptedBootPage(options: { painted?: boolean; bodies?: string[]; unreadable?: boolean }): ScriptedBootPage {
-  const state = { holds: 0, reloads: 0, loads: 0 };
+function scriptedBootPage(options: {
+  painted?: boolean;
+  paints?: boolean[];
+  bodies?: string[];
+  unreadable?: boolean;
+}): ScriptedBootPage {
+  const state = { holds: 0, reloads: 0, loads: 0, checks: 0 };
   const bodies = options.bodies ?? [CONTENT];
   const page = {
     waitForFunction: async () => {
-      if (options.painted === false) throw new Error("timeout");
+      const paints = options.paints;
+      const painted =
+        paints !== undefined ? (paints[Math.min(state.checks, paints.length - 1)] ?? true) : options.painted !== false;
+      state.checks += 1;
+      if (!painted) throw new Error("timeout");
     },
     waitForTimeout: async () => {
       state.holds += 1;
@@ -95,13 +104,20 @@ describe("awaitAppBoot", () => {
     expect(console.log).toHaveBeenCalledTimes(5);
   });
 
-  it("leaves a blank stall for the scenario's own waits", async () => {
-    silenceLogs();
+  it("reloads a blank stall, then boots when the reload paints", async () => {
+    const script = scriptedBootPage({ paints: [false, true], bodies: [CONTENT] });
+    const driver = new WebNewDriver(script.page);
+    await bootOf(driver)("/ws/projects/p/modules");
+    expect(script.reloads).toBe(1);
+    expect(script.holds).toBe(1);
+  });
+
+  it("gives up quietly after five blank loads", async () => {
     const script = scriptedBootPage({ painted: false });
     const driver = new WebNewDriver(script.page);
     await bootOf(driver)("/ws/projects/p/modules");
+    expect(script.reloads).toBe(4);
     expect(script.holds).toBe(0);
-    expect(script.reloads).toBe(0);
   });
 
   it("never reloads an app error without the vite signature", async () => {

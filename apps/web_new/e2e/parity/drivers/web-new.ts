@@ -1244,11 +1244,12 @@ export class WebNewDriver implements ParityDriver {
   /**
    * Boot retry (NEWFRONT-1031; oracle precedent NEWFRONT-124, same shape
    * as NEWFRONT-808 batches 12/13): on noisy hosts Chromium
-   * intermittently aborts the vite dev server's route-module fetches, so
-   * the error boundary renders "Failed to fetch dynamically imported
-   * module" instead of the page. Reload while that vite signature shows
-   * (up to five loads); every other state — content, app errors, slow
-   * loads — is left for the scenario's own waits, and a deterministically
+   * intermittently aborts the vite dev server's route-module fetches
+   * (trace-proven net::ERR_NETWORK_CHANGED bursts), so the page either
+   * renders "Failed to fetch dynamically imported module" or stays
+   * blank when the burst lands before first paint. Reload while either
+   * shows (up to five loads); painted content, app errors, and slow
+   * loads are left for the scenario's own waits, and a deterministically
    * broken import still fails after five reloads. The hold past first
    * paint matters: the shell can paint before the failed chunk's error
    * commits, so a page counts as booted only when it is still error-free
@@ -1275,7 +1276,12 @@ export class WebNewDriver implements ParityDriver {
           () => true,
           () => false
         );
-      if (!painted) return;
+      if (!painted) {
+        if (attempt === 4) return;
+        await this.page.reload();
+        await this.page.waitForLoadState("domcontentloaded");
+        continue;
+      }
       await this.page.waitForTimeout(WebNewDriver.BOOT_HOLD_MS);
       const body = await this.page.evaluate(() => document.body?.innerText ?? "").catch(() => "");
       if (!body.includes(WebNewDriver.CHUNK_ERROR_SIGNATURE)) return;
