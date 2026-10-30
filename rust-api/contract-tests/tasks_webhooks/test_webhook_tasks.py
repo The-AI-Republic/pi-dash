@@ -252,6 +252,70 @@ def test_webhook_send_chunked_keepalive_returns_at_terminal_chunk(
     assert len(_log_diff_rows(db_conn, before)) == 1
 
 
+#: PIDASHCONV-1673: end-to-end bound for a streamed 64 MiB chunked body.
+#: Calibration on the shared runner (debug worker): the old client, which
+#: re-decoded the whole buffered body after every socket read, took
+#: 142 s here; the incremental decoder finishes the delivery in ~9 s
+#: (~2 s of sink pacing + worker/DB overhead), as does Django's
+#: ``requests`` (~6 s). Either side slower than this bound is a
+#: quadratic-decode regression.
+STREAM_DELIVERY_BOUND_SECONDS = 60.0
+
+
+def test_webhook_send_chunked_streaming_completes_within_bound(
+    db_conn, broker_url, chunked_stream_sink
+):
+    """Streamed chunked body: linear decode, log 200 with the full body.
+
+    The sink answers ``Transfer-Encoding: chunked`` and streams 8k
+    paced 8 KiB chunks before the terminal chunk, so socket reads stay
+    small. ``requests`` decodes incrementally (Django source:
+    ``webhook_task.py:329``), so the real 200 is logged with the whole
+    64 MiB body and the task is not requeued.
+    """
+    hook = _seed_workspace_with_hook(
+        db_conn, chunked_stream_sink, base_url=chunked_stream_sink.url
+    )
+    chunked_stream_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    baseline = broker_probe.queue_depth()
+    started = time.monotonic()
+    celery_wire.publish(
+        f"{M}.webhook_task.webhook_send_task",
+        kwargs={
+            "webhook_id": str(hook["id"]),
+            "slug": hook["workspace_slug"],
+            "event": "issue",
+            "event_data": {"id": "contract-chunked-stream"},
+            "action": "POST",
+            "current_site": "example.com",
+            "activity": None,
+        },
+    )
+    deliveries = chunked_stream_sink.wait_for_count(1, what="streamed webhook POST")
+    assert len(deliveries) == 1
+    rows = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="streamed webhook_logs row",
+        timeout=STREAM_DELIVERY_BOUND_SECONDS,
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < STREAM_DELIVERY_BOUND_SECONDS, (
+        f"streamed delivery took {elapsed:.1f}s "
+        f"(bound {STREAM_DELIVERY_BOUND_SECONDS:.0f}s)"
+    )
+    assert len(rows) == 1
+    assert str(rows[0]["response_status"]) == "200"
+    assert rows[0]["retry_count"] == 0
+    body = rows[0]["response_body"]
+    assert len(body) == chunked_stream_sink.total_bytes
+    assert set(body) == {"x"}
+    broker_probe.wait_for_queue_drain(baseline=baseline, what="streamed send acked")
+    time.sleep(1)
+    assert len(chunked_stream_sink.snapshot()) == 1, "event was redelivered"
+    assert len(_log_diff_rows(db_conn, before)) == 1
+
+
 def test_webhook_send_failure_logs_retry_count(db_conn, broker_url, webhook_sink):
     """First-attempt failure: 500 from the sink → log row with retry_count 0."""
     hook = _seed_workspace_with_hook(db_conn, webhook_sink)
