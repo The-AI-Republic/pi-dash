@@ -391,13 +391,23 @@ pub fn safe_get(
 // HTML extraction (BeautifulSoup surface this port needs)
 // ---------------------------------------------------------------------------
 
-/// Lower-case ASCII tag scan: finds `<name` (word-boundary) case-insensitively.
+/// Lower-case ASCII tag scan: finds `<name` (word-boundary)
+/// case-insensitively, skipping matches inside `<!--...-->` comments and
+/// `<script>` / `<style>` elements (PIDASHCONV-1670). `html.parser`
+/// treats comments as declarations and script/style contents as CDATA, so
+/// tags there are never elements. Span ends are ASCII-derived, hence
+/// always char boundaries.
 fn find_open_tag(html: &str, name: &str) -> Option<usize> {
     let lower = html.to_ascii_lowercase();
     let needle = format!("<{name}");
+    let spans = skip_spans(&lower);
     let mut start = 0;
     while let Some(i) = lower[start..].find(&needle) {
         let pos = start + i;
+        if let Some(end) = span_end_at(&spans, pos) {
+            start = end;
+            continue;
+        }
         let after = lower.as_bytes().get(pos + needle.len());
         match after {
             Some(b) if b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_' => {
@@ -407,6 +417,169 @@ fn find_open_tag(html: &str, name: &str) -> Option<usize> {
         }
     }
     None
+}
+
+/// End of the skip span containing `pos`, if any. Spans are sorted and
+/// disjoint (single left-to-right pass), and every span end lies past
+/// its start, so resuming there always makes progress.
+fn span_end_at(spans: &[(usize, usize)], pos: usize) -> Option<usize> {
+    spans
+        .iter()
+        .find(|&&(from, end)| from <= pos && pos < end)
+        .map(|&(_, end)| end)
+}
+
+/// Byte spans of `lower` (an ASCII-lowercased page) that are not markup:
+/// `<!--...-->` comments and `<script>` / `<style>` elements with their
+/// contents (`html/parser.py`: `commentclose`, `set_cdata_mode`). A
+/// `<script>` inside a comment never opens (the comment wins the
+/// left-to-right race), and comment markers inside an element are
+/// content — both Django-probed.
+fn skip_spans(lower: &str) -> Vec<(usize, usize)> {
+    let bytes = lower.as_bytes();
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"<!--") {
+            let end = comment_end(lower, i);
+            spans.push((i, end));
+            i = end;
+        } else if let Some(end) =
+            element_end(lower, i, "script").or_else(|| element_end(lower, i, "style"))
+        {
+            spans.push((i, end));
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    spans
+}
+
+/// End of the `<!--` comment opened at `open`: past the first `-->` or
+/// `--!>` (`commentclose`, `parser.py:30`), else the abrupt `<!-->` /
+/// `<!--->` close, else EOF — an unclosed comment swallows the rest.
+/// All Django-probed.
+fn comment_end(lower: &str, open: usize) -> usize {
+    let bytes = lower.as_bytes();
+    let mut i = open + "<!--".len();
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"-->") {
+            return i + "-->".len();
+        }
+        if bytes[i..].starts_with(b"--!>") {
+            return i + "--!>".len();
+        }
+        i += 1;
+    }
+    let rest = &bytes[open + "<!--".len()..];
+    if rest.starts_with(b">") {
+        return open + "<!-->".len();
+    }
+    if rest.starts_with(b"->") {
+        return open + "<!--->".len();
+    }
+    bytes.len()
+}
+
+/// End of the `<script>` / `<style>` element whose open tag may start at
+/// `open`, or `None` when no element opens here. The span runs past the
+/// close tag, or to EOF when the open never closes or no close follows.
+/// A self-closed open (`<script/>`) opens no span, and the element name
+/// keeps `html.parser`'s boundary (`tagfind_tolerant`, `parser.py:41`):
+/// the byte after the name must be `[\t\n\r\f />]`, so `<script:foo>`
+/// is a foreign element, not CDATA. The open tag ends at [`tag_end`]:
+/// quote tracking there can only end the tag later than `locatetagend`,
+/// and the gap is content either way. All Django-probed.
+fn element_end(lower: &str, open: usize, name: &str) -> Option<usize> {
+    let bytes = lower.as_bytes();
+    if !bytes.get(open + 1..)?.starts_with(name.as_bytes()) || bytes[open] != b'<' {
+        return None;
+    }
+    match bytes.get(open + 1 + name.len()) {
+        None => return Some(bytes.len()),
+        Some(b'\t' | b'\n' | b'\r' | b'\x0c' | b' ' | b'/' | b'>') => {}
+        _ => return None,
+    }
+    let tag_close = match tag_end(lower, open) {
+        Some(end) => end,
+        None => return Some(bytes.len()),
+    };
+    if bytes[..tag_close].last() == Some(&b'/') {
+        return None;
+    }
+    let close = match find_cdata_close(lower, tag_close + 1, name) {
+        Some(close) => close,
+        None => return Some(bytes.len()),
+    };
+    match close_tag_end(lower, close) {
+        Some(end) => Some(end + 1),
+        None => Some(bytes.len()),
+    }
+}
+
+/// Start of the first `</name` whose next byte is `[\t\n\r\f />]`
+/// (case-insensitive via the folded `lower`), or `None` — the
+/// `interesting` pattern `set_cdata_mode` installs (`parser.py:196-199`).
+/// The `>` itself is found later: without one the element reads as
+/// unclosed. A stray close with no open never matches (only opens call
+/// here). Django-probed.
+fn find_cdata_close(lower: &str, from: usize, name: &str) -> Option<usize> {
+    let bytes = lower.as_bytes();
+    let needle = format!("</{name}");
+    let mut start = from;
+    while let Some(rel) = lower[start..].find(needle.as_str()) {
+        let pos = start + rel;
+        match bytes.get(pos + needle.len()) {
+            Some(b'\t' | b'\n' | b'\r' | b'\x0c' | b' ' | b'/' | b'>') => {
+                return Some(pos);
+            }
+            _ => start = pos + 1,
+        }
+    }
+    None
+}
+
+/// End of the `</script` / `</style` close tag at `open` (the `>`
+/// closing it), or `None` when it never closes. Quotes open a value
+/// only after `=` (`attrfind_tolerant`, `parser.py:42`); elsewhere `"`
+/// and `'` are bare name characters, so `</script "><title>` still ends
+/// at its first `>` — Django-probed.
+fn close_tag_end(lower: &str, open: usize) -> Option<usize> {
+    let bytes = lower.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut i = open;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        match quote {
+            Some(q) => {
+                if byte == q {
+                    quote = None;
+                }
+            }
+            None => {
+                if byte == b'"' || byte == b'\'' {
+                    if value_quote(bytes, open, i) {
+                        quote = Some(byte);
+                    }
+                } else if byte == b'>' {
+                    return Some(i);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether the quote at `i` opens an attribute value: the previous
+/// non-whitespace byte back to `open` is `=`.
+fn value_quote(bytes: &[u8], open: usize, i: usize) -> bool {
+    let mut j = i;
+    while j > open && bytes[j - 1].is_ascii_whitespace() {
+        j -= 1;
+    }
+    j > open && bytes[j - 1] == b'='
 }
 
 /// End of the tag opened at `open` (the `>` closing it), respecting single
@@ -2462,6 +2635,161 @@ mod tests {
             Some(Value::String(title)) => Some(title.clone()),
             _ => None,
         }
+    }
+
+    // -- PIDASHCONV-1670: tags inside comments / scripts are not elements --
+    // Expected values below are Django-observed (bs4 4.12.3, CPython 3.12):
+    // `BeautifulSoup(content, "html.parser")` treats `<!--...-->` as a
+    // declaration and `<script>` / `<style>` contents as CDATA, so the
+    // first real `<title>` and matching `<link>` win. Same literals are
+    // pinned hermetically in
+    // `contract-tests/tasks_webhooks/test_link_crawl_comments_scripts.py`.
+
+    #[test]
+    fn crawl_title_skips_commented_script_and_style_titles() {
+        for (body, expected) in [
+            (
+                b"<!-- <title>old</title> --><title>real</title>".as_slice(),
+                "real",
+            ),
+            (
+                b"<script>var a=\"<title>js</title>\";</script><title>real</title>".as_slice(),
+                "real",
+            ),
+            (
+                b"<style>.x{content:'<title>css</title>'}</style><title>real</title>".as_slice(),
+                "real",
+            ),
+            (
+                b"<SCRIPT>var a=1;</SCRIPT><title>real</title>".as_slice(),
+                "real",
+            ),
+            (b"<!-- <script> --><title>real</title>".as_slice(), "real"),
+            (b"<script/><title>real</title>".as_slice(), "real"),
+            (
+                b"<script>x</script foo=bar><title>real</title>".as_slice(),
+                "real",
+            ),
+            (
+                b"<script>var a=\"</script>\";</script><title>real</title>".as_slice(),
+                "real",
+            ),
+            (
+                b"<script:foo>x</script:foo><title>real</title>".as_slice(),
+                "real",
+            ),
+            (b"<script>x</script/><title>real</title>".as_slice(), "real"),
+            (b"<title>real</title><script>".as_slice(), "real"),
+            (
+                b"<script>x</script data-x=\"a>b\"><title>real</title>".as_slice(),
+                "real",
+            ),
+            (
+                b"<script>x</script \"><title>X</title>\"c><title>real</title>".as_slice(),
+                "X",
+            ),
+            (
+                b"<!-- --!> <title>mid</title> --><title>real</title>".as_slice(),
+                "mid",
+            ),
+            (b"<!--><title>real</title>".as_slice(), "real"),
+        ] {
+            assert_eq!(
+                crawl_title_of(body, HttpHeaders::new()),
+                Some(expected.to_owned()),
+                "body: {:?}",
+                String::from_utf8_lossy(body),
+            );
+        }
+    }
+
+    #[test]
+    fn crawl_title_unclosed_regions_swallow_the_title() {
+        for body in [
+            b"<!-- foo <title>real</title>".as_slice(),
+            b"<script>var a=1;<title>real</title>".as_slice(),
+            b"<style>.x{}<title>real</title>".as_slice(),
+            b"<script>x</script foo<title>real</title>".as_slice(),
+            b"<script>x</script!><title>real</title>".as_slice(),
+            b"<script>x</ script><title>real</title>".as_slice(),
+            b"<script>x</script<title>real</title>".as_slice(),
+        ] {
+            assert_eq!(
+                crawl_title_of(body, HttpHeaders::new()),
+                None,
+                "body: {:?}",
+                String::from_utf8_lossy(body),
+            );
+        }
+    }
+
+    #[test]
+    fn favicon_discovery_skips_commented_script_and_style_links() {
+        for (html, expected) in [
+            (
+                "<!-- <link rel=\"icon\" href=\"/old.ico\"> -->\
+                 <link rel=\"icon\" href=\"/new.ico\">",
+                "https://example.com/new.ico",
+            ),
+            (
+                "<script>var a='<link rel=\"icon\" href=\"/js.ico\">';</script>\
+                 <link rel=\"icon\" href=\"/new.ico\">",
+                "https://example.com/new.ico",
+            ),
+            (
+                "<style>.x{}</style>\
+                 <!-- <link rel=\"icon\" href=\"/old.ico\"> -->\
+                 <link rel=\"icon\" href=\"/new.ico\">",
+                "https://example.com/new.ico",
+            ),
+            (
+                "<STYLE>.x{}</STYLE><link rel=\"icon\" href=\"/new.ico\">",
+                "https://example.com/new.ico",
+            ),
+        ] {
+            let found = find_favicon_url(
+                Some(html),
+                "https://example.com/",
+                &deny_all(),
+                &no_head,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(found, Some(expected.to_owned()), "html: {html:?}");
+        }
+    }
+
+    #[test]
+    fn crawl_favicon_url_skips_hidden_links() {
+        let page = concat!(
+            "<html><head>",
+            "<!-- <link rel=\"icon\" href=\"https://example.com/old.ico\"> -->",
+            "<script>var a='<link rel=\"icon\" href=\"https://example.com/js.ico\">';</script>",
+            "<link rel=\"icon\" href=\"https://example.com/new.ico\">",
+            "<title>t</title></head></html>",
+        );
+        let body = page.as_bytes().to_vec();
+        let get = move |_: &HttpRequest| {
+            Ok(HttpResponse {
+                status: 200,
+                headers: HttpHeaders::new(),
+                body: body.clone(),
+                is_redirect: false,
+            })
+        };
+        let head = |_: &HttpRequest| {
+            Ok(HttpResponse {
+                status: 404,
+                headers: HttpHeaders::new(),
+                body: Vec::new(),
+                is_redirect: false,
+            })
+        };
+        let report = crawl("https://example.com/", &deny_all(), &get, &head);
+        assert_eq!(
+            report.result.get("favicon_url"),
+            Some(&Value::String("https://example.com/new.ico".to_owned()))
+        );
     }
 
     #[test]
