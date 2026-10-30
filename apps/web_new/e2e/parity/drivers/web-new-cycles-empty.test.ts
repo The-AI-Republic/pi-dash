@@ -18,7 +18,7 @@ import { WebNewDriver } from "./web-new.js";
 
 type Call = { path: string; method: string; args: unknown[] };
 
-const CHAIN = ["first", "nth", "getByRole", "getByTestId", "locator", "filter"];
+const CHAIN = ["first", "nth", "getByRole", "getByTestId", "locator", "filter", "or"];
 const ACTIONS = ["count", "click", "fill", "innerText", "getAttribute", "waitFor", "isVisible", "isDisabled"];
 
 function render(args: unknown[]): string {
@@ -396,7 +396,11 @@ describe("cyclesEmptyFilterPick", () => {
     const script = new Recorder();
     await script.driver().cyclesEmptyFilterPick("Status of the cycle", "Completed");
     const block = `${FILTER_PANEL_PATH}.locator("[data-section-title*=\\"Status of the cycle\\"]")`;
-    expect(script.callsFor(`${block}.getByRole("checkbox",{"name":"Completed"})`, "click")).toHaveLength(1);
+    const checked = `${block}.getByRole("checkbox",{"name":"Completed"})`;
+    // The checkbox attempt is widened with the radio fallback, and the
+    // click lands on that combined locator rather than either alone.
+    expect(script.calls.filter((call) => call.path === checked && call.method === "or")).toHaveLength(1);
+    expect(script.callsFor(`${checked}.or({})`, "click")).toHaveLength(1);
   });
 });
 

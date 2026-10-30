@@ -24,16 +24,16 @@ import { CrossAppLink } from "./CrossAppLink.js";
 describe("CrossAppLink", () => {
   it("renders an unmigrated screen as a plain anchor, with no router required", () => {
     // No RouterProvider here on purpose: old-app links must work anywhere.
-    // Cycles stand in for the unmigrated screen: project issues moved with
-    // the Issues area gate (NEWFRONT-658).
+    // The runner detail stands in for the unmigrated screen: project cycles
+    // moved with the Cycles area gate (NEWFRONT-716).
     render(
-      <CrossAppLink to="/acme/projects/1/cycles" className="nav" target="_self">
-        Cycles
+      <CrossAppLink to="/acme/runner" className="nav" target="_self">
+        Runner
       </CrossAppLink>
     );
-    const link = screen.getByRole("link", { name: "Cycles" });
+    const link = screen.getByRole("link", { name: "Runner" });
     expect(link.tagName).toBe("A");
-    expect(link).toHaveAttribute("href", "/acme/projects/1/cycles");
+    expect(link).toHaveAttribute("href", "/acme/runner");
     expect(link).toHaveAttribute("class", "nav");
     expect(link).not.toHaveAttribute("data-router-link");
   });
@@ -62,14 +62,17 @@ describe("CrossAppLink", () => {
   });
 
   it("flips a link when its prefix joins the list", () => {
-    const { rerender } = render(<CrossAppLink to="/acme/active-cycles">Cycles</CrossAppLink>);
-    expect(screen.getByRole("link", { name: "Cycles" })).not.toHaveAttribute("data-router-link");
+    // Active-cycles rides the default list since the Cycles area gate
+    // (NEWFRONT-716); the runner detail is still unlisted, so it demos
+    // the flip instead.
+    const { rerender } = render(<CrossAppLink to="/acme/runner">Runner</CrossAppLink>);
+    expect(screen.getByRole("link", { name: "Runner" })).not.toHaveAttribute("data-router-link");
     rerender(
-      <CrossAppLink to="/acme/active-cycles" prefixes={["/{ws}/active-cycles"]}>
-        Cycles
+      <CrossAppLink to="/acme/runner" prefixes={["/{ws}/runner"]}>
+        Runner
       </CrossAppLink>
     );
-    expect(screen.getByRole("link", { name: "Cycles" })).toHaveAttribute("data-router-link");
+    expect(screen.getByRole("link", { name: "Runner" })).toHaveAttribute("data-router-link");
   });
 
   it("appends a deep-link anchor on a plain anchor", () => {
@@ -101,16 +104,16 @@ describe("CrossAppLink", () => {
     const seen: Array<HTMLAnchorElement | null> = [];
     render(
       <CrossAppLink
-        to="/acme/projects/1/cycles"
+        to="/acme/runner"
         ref={(element) => {
           seen.push(element);
         }}
       >
-        Cycles
+        Runner
       </CrossAppLink>
     );
     expect(seen).toHaveLength(1);
     expect(seen[0]?.tagName).toBe("A");
-    expect(seen[0]).toHaveAttribute("href", "/acme/projects/1/cycles");
+    expect(seen[0]).toHaveAttribute("href", "/acme/runner");
   });
 });
