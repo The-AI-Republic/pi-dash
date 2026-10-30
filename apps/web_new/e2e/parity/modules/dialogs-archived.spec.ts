@@ -106,7 +106,23 @@ async function enterArchivesModules(driver: ParityDriver, world: ModulesWorld, s
     `/${world.workspaceSlug}/projects/${world.projectId}/modules`,
     browserSessionCookies(session)
   );
-  await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+  await openArchivesModulesTab(driver, world);
+}
+
+/**
+ * Open the archived-modules tab, retrying once past a vite chunk
+ * error. The archives chunk loads on client-side navigation, after
+ * every boot check ran; only the vite signature retries, and the
+ * retry is a full clean re-entry, so a real failure still throws.
+ */
+async function openArchivesModulesTab(driver: ParityDriver, world: ModulesWorld): Promise<void> {
+  try {
+    await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+  } catch (error) {
+    const body = await driver.page.evaluate(() => document.body?.innerText ?? "").catch(() => "");
+    if (!body.includes("Failed to fetch dynamically imported module")) throw error;
+    await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+  }
 }
 
 /** Create a module and move it to `status`; resolves its id. */
@@ -756,7 +772,7 @@ test(
     });
 
     await test.step("an archived row opens the archived peek panel", async () => {
-      await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+      await openArchivesModulesTab(driver, world);
       await driver.archivesAwaitModuleRow("Archived Owned");
       await driver.archivesOpenModulePeek("Archived Owned");
       expect(await driver.archivesModulePeekName()).toBe("Archived Owned");
@@ -787,7 +803,7 @@ test(
       world.owner.cookie
     );
     await archivesArchiveModule(world.workspaceSlug, world.projectId, archived, world.owner.cookie);
-    await driver.archivesOpenModulesTab(world.workspaceSlug, world.projectId);
+    await openArchivesModulesTab(driver, world);
     await driver.archivesAwaitModuleRow("Empty Alpha");
 
     await test.step("search hiding everything shows the search guidance", async () => {
