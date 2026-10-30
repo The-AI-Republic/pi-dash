@@ -139,7 +139,7 @@ export function AddExistingModal({
           <EmptyState
             variant="illustrated"
             art={{ category: "general", type: "no-results" }}
-            title={query.trim() === "" ? "No matching work items found" : "No work items found"}
+            title={query.trim() === "" ? "No work items to add" : "No results for this search"}
           />
         ) : null}
         <ul className="flex max-h-72 flex-col overflow-y-auto">

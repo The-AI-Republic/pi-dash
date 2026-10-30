@@ -93,7 +93,7 @@ describe("AddExistingModal", () => {
     loading.view.unmount();
     mocks.search.mockResolvedValue([]);
     const empty = setup();
-    expect(await screen.findByText("No matching work items found")).toBeInTheDocument();
+    expect(await screen.findByText("No work items to add")).toBeInTheDocument();
     empty.view.unmount();
     mocks.search.mockRejectedValue(new Error("boom"));
     setup();
@@ -104,9 +104,9 @@ describe("AddExistingModal", () => {
     const user = userEvent.setup();
     mocks.search.mockResolvedValue([]);
     setup();
-    expect(await screen.findByText("No matching work items found")).toBeInTheDocument();
+    expect(await screen.findByText("No work items to add")).toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "Search work items" }), "zzz-no-such-issue");
-    expect(await screen.findByText("No work items found")).toBeInTheDocument();
+    expect(await screen.findByText("No results for this search")).toBeInTheDocument();
   });
 
   it("asks for undated issues and hides ones that start after the day", async () => {

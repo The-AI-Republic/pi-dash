@@ -21,8 +21,8 @@ export function CyclesFeatureGate({ isAdmin, onManageFeatures }: CyclesFeatureGa
       <EmptyState
         variant="detailed"
         art={{ category: "general", type: "disabled" }}
-        title="Cycles is not enabled for this project."
-        description="Break work down by timeboxed chunks, work backwards from your project deadline to set dates, and make tangible progress as a team. Enable the cycles feature for your project to start using them."
+        title="Cycles are turned off for this project."
+        description="Cycles group work items into dated windows. A project admin can switch them on from project settings."
         primaryAction={{ label: "Manage features", onSelect: () => onManageFeatures(), disabled: !isAdmin }}
       />
     </div>

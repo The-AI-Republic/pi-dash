@@ -11825,8 +11825,8 @@ export class WebNewDriver implements ParityDriver {
     const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
     for (;;) {
       if ((await options.count()) > 0) break;
-      if ((await this.page.getByText("No work items found").count()) > 0) return [];
-      if ((await this.page.getByText("No matching work items found").count()) > 0) return [];
+      if ((await this.page.getByText("No results for this search").count()) > 0) return [];
+      if ((await this.page.getByText("No work items to add").count()) > 0) return [];
       if (!(await this.layoutsAddExistingModalVisible())) return [];
       if (Date.now() >= deadline) throw new Error("[parity] add-existing modal never listed issues.");
       await this.page.waitForTimeout(250);

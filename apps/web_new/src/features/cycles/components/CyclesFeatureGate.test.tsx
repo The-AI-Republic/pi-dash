@@ -15,7 +15,7 @@ describe("CyclesFeatureGate", () => {
   it("enables the shortcut for admins and routes on select", () => {
     const onManageFeatures = vi.fn();
     render(<CyclesFeatureGate isAdmin onManageFeatures={onManageFeatures} />);
-    expect(screen.getByTestId("cycles-feature-gate")).toHaveTextContent(/not enabled for this project/);
+    expect(screen.getByTestId("cycles-feature-gate")).toHaveTextContent(/turned off for this project/);
     const action = screen.getByRole("button", { name: "Manage features" });
     expect(action).toBeEnabled();
     fireEvent.click(action);
@@ -24,7 +24,7 @@ describe("CyclesFeatureGate", () => {
 
   it("keeps the shortcut rendered but disabled for non-admins", () => {
     render(<CyclesFeatureGate isAdmin={false} onManageFeatures={vi.fn()} />);
-    expect(screen.getByTestId("cycles-feature-gate")).toHaveTextContent(/not enabled for this project/);
+    expect(screen.getByTestId("cycles-feature-gate")).toHaveTextContent(/turned off for this project/);
     expect(screen.getByRole("button", { name: "Manage features" })).toBeDisabled();
   });
 });
