@@ -245,6 +245,56 @@ def test_rust_webhook_send_chunked_keepalive_returns_at_terminal_chunk(
     assert len(_log_diff_rows(db_conn, before)) == 1
 
 
+#: PIDASHCONV-1673: same bound as the oracle
+#: ``test_webhook_send_chunked_streaming_completes_within_bound`` — the
+#: sink streams 64 MiB in 8k paced 8 KiB chunks (~2 s of pacing).
+#: The old client, which re-decoded the whole buffered body after every
+#: socket read, took 142 s here (debug worker); the incremental
+#: decoder finishes in ~9 s end to end.
+STREAM_DELIVERY_BOUND_SECONDS = 60.0
+
+
+def test_rust_webhook_send_chunked_streaming_completes_within_bound(
+    db_conn, chunked_stream_sink
+):
+    """Rust side: streamed chunked body decodes in linear time.
+
+    Replays ``test_webhook_send_chunked_streaming_completes_within_bound``:
+    the delivery must complete inside the bound with the full 64 MiB body
+    logged, no retry, no requeue.
+    """
+    hook = _seed_hook_at(db_conn, chunked_stream_sink.url)
+    chunked_stream_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    baseline = rust_queue.queue_depth()
+    started = time.monotonic()
+    celery_id = rust_queue.publish(
+        WEBHOOK_SEND, kwargs=_send_kwargs(hook, "rust-replay-chunked-stream")
+    )
+    deliveries = chunked_stream_sink.wait_for_count(1, what="streamed webhook POST")
+    assert len(deliveries) == 1
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="streamed webhook_logs row",
+        timeout=STREAM_DELIVERY_BOUND_SECONDS,
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < STREAM_DELIVERY_BOUND_SECONDS, (
+        f"streamed delivery took {elapsed:.1f}s "
+        f"(bound {STREAM_DELIVERY_BOUND_SECONDS:.0f}s)"
+    )
+    assert str(row["response_status"]) == "200"
+    assert row["retry_count"] == 0
+    assert len(row["response_body"]) == chunked_stream_sink.total_bytes
+    assert set(row["response_body"]) == {"x"}
+    rust_queue.wait_for_settled(celery_id, what="streamed send acked")
+    rust_queue.wait_for_queue_drain(baseline=baseline, what="streamed queue drained")
+    time.sleep(1)
+    assert len(chunked_stream_sink.snapshot()) == 1, "event was redelivered"
+    assert not rust_queue.row_present(celery_id), "streamed send was requeued"
+    assert len(_log_diff_rows(db_conn, before)) == 1
+
+
 def test_rust_webhook_failure_executes_locally(db_conn, webhook_sink):
     """First-attempt failure, Rust side: same 500 row, no retry (PIDASHCONV-1105).
 
