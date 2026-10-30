@@ -21,7 +21,7 @@ export { PeekPanel } from "./PeekPanel.js";
 export type { PeekPanelProps } from "./PeekPanel.js";
 export { REPOSITORY_URL, RepoStar, starIconSrc } from "./RepoStar.js";
 export { Sidebar } from "./Sidebar.js";
-export type { SidebarEditionEntry, SidebarPersonalEntry, SidebarProps, SidebarWorkspace } from "./Sidebar.js";
+export type { SidebarEditionEntry, SidebarPersonalEntry, SidebarProps } from "./Sidebar.js";
 export { SIDEBAR_PEEK_DISMISS_MS, SidebarShell } from "./SidebarShell.js";
 export type { SidebarShellProps } from "./SidebarShell.js";
 export { NARROW_VIEWPORT_BREAKPOINT_PX, useNarrowViewport } from "./narrowViewport.js";

@@ -7874,13 +7874,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async openWorkspaceSwitcher(): Promise<void> {
-    // Sidebar chrome menus (NEWFRONT-287): the sidebar trigger when the
-    // sidebar is open, else the top-bar trigger.
-    const sidebar = this.page.locator('[data-testid="sidebar-workspace-switcher"]');
-    if ((await sidebar.count()) > 0 && (await sidebar.first().isVisible())) {
-      await sidebar.first().click({ timeout: 30_000 });
-      return;
-    }
+    // The switcher lives in the top bar only (NEWFRONT-1040).
     await this.page.locator('[data-testid="topbar-workspace-switcher"]').first().click({ timeout: 30_000 });
   }
 

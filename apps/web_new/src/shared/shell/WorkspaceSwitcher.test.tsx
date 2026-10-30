@@ -31,7 +31,6 @@ function setup(workspaces: SwitcherWorkspace[] = WORKSPACES, overrides: Record<s
       workspaces={workspaces}
       activeSlug="acme"
       creationDisabled={false}
-      mount="sidebar"
       {...handlers}
       {...overrides}
     />
@@ -40,7 +39,7 @@ function setup(workspaces: SwitcherWorkspace[] = WORKSPACES, overrides: Record<s
 }
 
 function openMenu(): void {
-  fireEvent.click(screen.getByTestId("sidebar-workspace-switcher"));
+  fireEvent.click(screen.getByTestId("topbar-workspace-switcher"));
 }
 
 describe("orderSwitcherWorkspaces", () => {
@@ -68,24 +67,18 @@ describe("formatMemberCount", () => {
 });
 
 describe("WorkspaceSwitcher", () => {
-  it("triggers on the active workspace mark with the mount test id", () => {
+  it("triggers on the active workspace mark", () => {
     setup();
-    const trigger = screen.getByTestId("sidebar-workspace-switcher");
+    const trigger = screen.getByTestId("topbar-workspace-switcher");
     expect(trigger).toHaveAttribute("aria-label", "Open workspace switcher");
     expect(trigger).toHaveAttribute("data-keep-open", "true");
     expect(within(trigger).getByText("Acme")).toBeInTheDocument();
     expect(trigger.querySelector("img")?.getAttribute("src")).toBe("https://cdn.example/acme.png");
   });
 
-  it("keys the trigger test id off the top-bar mount", () => {
-    setup(WORKSPACES, { mount: "topbar" });
-    expect(screen.getByTestId("topbar-workspace-switcher")).toBeInTheDocument();
-    expect(screen.queryByTestId("sidebar-workspace-switcher")).not.toBeInTheDocument();
-  });
-
   it("falls back to the slug when the active workspace is unknown", () => {
     setup(WORKSPACES, { activeSlug: "missing" });
-    expect(within(screen.getByTestId("sidebar-workspace-switcher")).getByText("missing")).toBeInTheDocument();
+    expect(within(screen.getByTestId("topbar-workspace-switcher")).getByText("missing")).toBeInTheDocument();
     openMenu();
     expect(screen.queryByTestId("workspace-row-extras")).not.toBeInTheDocument();
   });
@@ -131,7 +124,6 @@ describe("WorkspaceSwitcher", () => {
         workspaces={member}
         activeSlug="acme"
         creationDisabled={false}
-        mount="sidebar"
         onSelectWorkspace={vi.fn()}
         onOpenSettings={vi.fn()}
         onInviteMembers={vi.fn()}

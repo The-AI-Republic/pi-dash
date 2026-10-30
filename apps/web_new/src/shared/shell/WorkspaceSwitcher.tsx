@@ -7,7 +7,7 @@
 // with its role, member count and check mark plus the settings and
 // invite shortcuts it unlocks; the footer offers creation (unless the
 // instance disables it), the invites inbox and sign-out. Mounted in
-// both the sidebar and the top bar.
+// the top bar only (NEWFRONT-1040).
 import { Button, Menu, type MenuEntry } from "@pidash/kit";
 import { Check, ChevronsUpDown, CirclePlus, LogOut, Mails, Settings, UserPlus } from "lucide-react";
 import * as React from "react";
@@ -35,8 +35,6 @@ export interface WorkspaceSwitcherProps {
   onCreateWorkspace: () => void;
   onWorkspaceInvites: () => void;
   onSignOut: () => void;
-  /** Which chrome hosts this instance; keys the trigger test id. */
-  mount: "sidebar" | "topbar";
 }
 
 /** The active workspace first; every other row keeps list order. */
@@ -88,7 +86,6 @@ export function WorkspaceSwitcher({
   onCreateWorkspace,
   onWorkspaceInvites,
   onSignOut,
-  mount,
 }: WorkspaceSwitcherProps): React.ReactElement {
   const [open, setOpen] = React.useState(false);
   const active = workspaces.find((workspace) => workspace.slug === activeSlug) ?? null;
@@ -177,7 +174,7 @@ export function WorkspaceSwitcher({
         <Button
           variant="ghost"
           aria-label="Open workspace switcher"
-          data-testid={`${mount}-workspace-switcher`}
+          data-testid="topbar-workspace-switcher"
           data-keep-open="true"
         >
           <span className="flex min-w-0 flex-1 items-center gap-(--space-2)">
