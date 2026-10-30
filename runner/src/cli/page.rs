@@ -20,7 +20,7 @@ use serde_json::{Map, Value};
 
 use crate::api_client::{ApiClient, CliEnv, CliError, EXIT_INVALID, EXIT_SERVER, EXIT_UNKNOWN, report_error};
 
-use super::issue::build_query_string;
+use super::issue::{build_query_string, pagination_note};
 use super::resolve::looks_like_uuid;
 
 #[derive(Debug, Args)]
@@ -32,8 +32,14 @@ pub struct PageArgs {
 #[derive(Debug, Subcommand)]
 pub enum PageCommand {
     /// List the pages of a project. Returns the server's paginated envelope
-    /// (`{count, next_cursor, prev_cursor, results: [...]}`) carrying page
-    /// metadata only — read a single page to get its body.
+    /// (`{grouped_by, sub_grouped_by, total_count, next_cursor, prev_cursor,
+    /// next_page_results, prev_page_results, count, total_pages,
+    /// total_results, extra_stats, results: [...]}`) carrying page metadata
+    /// only — read a single page to get its body. One invocation fetches one
+    /// page of at most `per_page` items (server default and max: 1000): when
+    /// `next_page_results` is `true` the list is truncated, and passing
+    /// `next_cursor` back via `--cursor` fetches the rest. A note on stderr
+    /// flags the truncation; stdout stays the bare envelope.
     List(ListArgs),
     /// Fetch one page, including `description_markdown`.
     Get(GetArgs),
@@ -157,7 +163,8 @@ pub struct ListArgs {
     #[arg(long)]
     pub cursor: Option<String>,
 
-    /// Items per page. Server-side default applies if omitted.
+    /// Items per page. The server default (1000) is also the maximum, so a
+    /// project with more pages can only be read by walking `--cursor` pages.
     #[arg(long)]
     pub per_page: Option<u32>,
 
@@ -220,6 +227,9 @@ pub async fn cmd_list(client: &ApiClient, args: ListArgs) -> Result<(), CliError
         "{}",
         serde_json::to_string(&resp).expect("serialize JSON value")
     );
+    if let Some(note) = pagination_note(&resp) {
+        eprintln!("{note}");
+    }
     Ok(())
 }
 
