@@ -80,9 +80,9 @@ export const buttonStyling: IButtonStyling = {
     disabled: `cursor-not-allowed bg-layer-disabled! text-disabled!`,
   },
   "accent-danger": {
-    default: `text-danger-primary bg-red-50`,
-    hover: `hover:text-danger-primary hover:bg-red-100`,
-    pressed: `focus:text-danger-primary focus:bg-red-100`,
+    default: `text-danger-primary bg-danger-subtle`,
+    hover: `hover:text-danger-primary hover:bg-danger-subtle-hover`,
+    pressed: `focus:text-danger-primary focus:bg-danger-subtle-hover`,
     disabled: `cursor-not-allowed !bg-layer-1 !text-placeholder`,
   },
   "outline-danger": {
@@ -99,7 +99,7 @@ export const buttonStyling: IButtonStyling = {
   },
   "tertiary-danger": {
     default: `text-danger-primary bg-surface-1 border border-danger-subtle`,
-    hover: `hover:bg-red-50 hover:border-danger-subtle`,
+    hover: `hover:bg-danger-subtle hover:border-danger-subtle`,
     pressed: `focus:text-danger-primary`,
     disabled: `cursor-not-allowed !bg-layer-1 !text-placeholder`,
   },

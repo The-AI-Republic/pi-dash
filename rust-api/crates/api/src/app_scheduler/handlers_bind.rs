@@ -332,7 +332,7 @@ pub async fn binding_install(
         queries::install_next_run_at(&bundle, saved.row.next_run_at, now, next_fire_for_binding);
     if let Some(computed) = write {
         let stamp = Utc::now();
-        if let Err(denial) = write_next_run_at(pool, &saved.row.id, &computed, &stamp).await {
+        if let Err(denial) = write_next_run_at(pool, &saved.row.id, Some(&computed), &stamp).await {
             return denial.into_response();
         }
         saved.row.next_run_at = Some(computed);
@@ -497,12 +497,14 @@ pub async fn binding_patch(
             exdates: &row.exdates,
         };
         let now = Utc::now();
-        if let Some(computed) = queries::patch_next_run_at(&bundle, now, next_fire_for_binding) {
+        if let Some(computed) =
+            queries::patch_next_run_at(&bundle, row.next_run_at, now, next_fire_for_binding_checked)
+        {
             let stamp = Utc::now();
-            if let Err(denial) = write_next_run_at(pool, &row.id, &computed, &stamp).await {
+            if let Err(denial) = write_next_run_at(pool, &row.id, computed.as_ref(), &stamp).await {
                 return denial.into_response();
             }
-            row.next_run_at = Some(computed);
+            row.next_run_at = computed;
             row.updated_at = stamp;
         }
     }
@@ -2707,7 +2709,7 @@ fn patched_row(
 async fn write_next_run_at(
     pool: &PgPool,
     binding_id: &Uuid,
-    computed: &DateTime<Utc>,
+    computed: Option<&DateTime<Utc>>,
     stamp: &DateTime<Utc>,
 ) -> Result<(), Denial> {
     let sql = translate_placeholders(
@@ -2890,7 +2892,7 @@ struct BindingDetailExtra<'a> {
 /// against [`shape::BINDING_SERIALIZER_FIELDS`] in tests). `detail` is
 /// `Some` on the detail GET / PATCH response only, appending the 4
 /// detail keys in [`shape::BINDING_DETAIL_FIELDS`] order (list/install
-/// pass `None` — their 25-key bodies are unchanged).
+/// pass `None` — their 26-key bodies are unchanged).
 #[allow(clippy::too_many_arguments)]
 fn render_binding_object(
     id: &Uuid,
@@ -2978,6 +2980,17 @@ fn render_binding_object(
     row.insert(
         "last_error".to_owned(),
         Value::String(last_error.to_owned()),
+    );
+    let bundle = queries::RruleBundle {
+        dtstart: *dtstart,
+        rrule,
+        tzid,
+        rdates,
+        exdates,
+    };
+    row.insert(
+        "series_exhausted".to_owned(),
+        Value::Bool(series_exhausted(next_run_at, &bundle, Utc::now())),
     );
     row.insert("actor".to_owned(), render_uuid_opt(actor_id));
     row.insert(
@@ -3221,12 +3234,22 @@ fn next_fire_for_binding(
     bundle: &queries::RruleBundle<'_>,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
+    next_fire_for_binding_checked(bundle, now).ok().flatten()
+}
+
+/// `_next_fire_for_binding_checked` (`bgtasks/scheduler.py`): the same
+/// call shape over `next_fire_with_error`, so a parse error (`Err`) is
+/// told apart from an exhausted series (`Ok(None)`).
+fn next_fire_for_binding_checked(
+    bundle: &queries::RruleBundle<'_>,
+    now: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>, String> {
     let tzid = if bundle.tzid.is_empty() {
         "UTC"
     } else {
         bundle.tzid
     };
-    pidash_jobs::tasks_ticker::rrule::next_fire_from_rrule(
+    pidash_jobs::tasks_ticker::rrule::next_fire_with_error(
         bundle.dtstart,
         bundle.rrule,
         tzid,
@@ -3234,6 +3257,23 @@ fn next_fire_for_binding(
         &pidash_jobs::tasks_ticker::fire_binding::coerce_iso_datetimes(bundle.exdates),
         now,
     )
+}
+
+/// `get_series_exhausted` (`app/serializers/scheduler.py`): true when the
+/// RRULE bundle is valid but has no occurrence left after now — a finite
+/// COUNT/UNTIL series that finished, or a single-shot whose `dtstart`
+/// passed. A binding with a scheduled next fire is trivially not
+/// exhausted, which also keeps list rendering from expanding every
+/// healthy row.
+fn series_exhausted(
+    next_run_at: &Option<DateTime<Utc>>,
+    bundle: &queries::RruleBundle<'_>,
+    now: DateTime<Utc>,
+) -> bool {
+    if next_run_at.is_some() {
+        return false;
+    }
+    matches!(next_fire_for_binding_checked(bundle, now), Ok(None))
 }
 
 #[cfg(test)]
@@ -3473,6 +3513,40 @@ mod tests {
         assert_eq!(parsed["enabled"], true);
         assert_eq!(parsed["last_run"], Value::Null);
         assert_eq!(parsed["pod_name"], Value::Null);
+        // A single-shot whose dtstart passed with no cursor is finished.
+        assert_eq!(parsed["series_exhausted"], true);
+    }
+
+    // `get_series_exhausted`: a scheduled cursor short-circuits to false;
+    // with no cursor, only a valid bundle with nothing left is exhausted —
+    // a parse error is NOT (that is the misconfiguration case).
+    #[test]
+    fn series_exhausted_tells_finished_from_broken() {
+        let empty = Value::Array(vec![]);
+        let dtstart = utc(2026, 9, 28, 11, 58, 0);
+        let now = utc(2026, 9, 28, 12, 0, 0);
+        let bundle = |rrule: &'static str| queries::RruleBundle {
+            dtstart,
+            rrule,
+            tzid: "UTC",
+            rdates: &empty,
+            exdates: &empty,
+        };
+        let finished = bundle("FREQ=MINUTELY;COUNT=2");
+        assert!(series_exhausted(&None, &finished, now));
+        assert!(!series_exhausted(&Some(now), &finished, now));
+        assert!(series_exhausted(&None, &bundle(""), now));
+        assert!(!series_exhausted(&None, &bundle("FREQ=MINUTELY"), now));
+        assert!(!series_exhausted(
+            &None,
+            &bundle("this is not a real rrule"),
+            now
+        ));
+        let future_single = queries::RruleBundle {
+            dtstart: utc(2026, 9, 29, 0, 0, 0),
+            ..bundle("")
+        };
+        assert!(!series_exhausted(&None, &future_single, now));
     }
 
     #[test]
