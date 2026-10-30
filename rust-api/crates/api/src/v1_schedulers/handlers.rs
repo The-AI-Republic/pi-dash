@@ -858,7 +858,7 @@ async fn project_scheduler_runs_inner(
 /// `UUIDConverter` routes it: lowercase hex, hyphenated, 36 characters
 /// (`django/urls/converters.py:25`; the `v1_cli_auth` PIDASHCONV-1095 and
 /// `license` PIDASHCONV-1132 precedents).
-fn is_canonical_uuid(raw: &str) -> bool {
+pub(crate) fn is_canonical_uuid(raw: &str) -> bool {
     if raw.len() != 36 {
         return false;
     }
