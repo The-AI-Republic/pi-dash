@@ -35396,8 +35396,8 @@ export class WebDriver implements ParityDriver {
     return options;
   }
 
-  async estimatesSelectFamily(family: "points" | "categories"): Promise<void> {
-    const label = family === "points" ? "Points" : "Categories";
+  async estimatesSelectFamily(family: "points" | "categories" | "time"): Promise<void> {
+    const label = family === "points" ? "Points" : family === "categories" ? "Categories" : "Time";
     await this.estimatesDialog().getByText(label, { exact: true }).click();
     await expect(this.estimatesDialog().locator(`input[type="radio"][value="${family}"]`)).toBeChecked({
       timeout: WebDriver.WAIT_MS,
@@ -35815,6 +35815,60 @@ export class WebDriver implements ParityDriver {
     const box = this.estimatesEditDeleteActiveBox();
     if ((await box.count()) === 0) return false;
     return (await box.getByRole("button", { name: /edit/i }).count()) > 0;
+  }
+
+  private estimatesCloudTodo(target: string): never {
+    throw new Error(
+      `[parity] oracle driver has no ${target}: the cloud-only estimates surface is proven on web_new only.`
+    );
+  }
+
+  async estimatesActiveRowEditClick(): Promise<void> {
+    this.estimatesCloudTodo("estimatesActiveRowEditClick");
+  }
+
+  async estimatesUpdateDialogOpen(): Promise<boolean> {
+    this.estimatesCloudTodo("estimatesUpdateDialogOpen");
+  }
+
+  async estimatesUpdateDialogValues(): Promise<string[]> {
+    this.estimatesCloudTodo("estimatesUpdateDialogValues");
+  }
+
+  async estimatesUpdateDialogSetName(_name: string): Promise<void> {
+    this.estimatesCloudTodo("estimatesUpdateDialogSetName");
+  }
+
+  async estimatesUpdateDialogEditValue(_index: number, _value: string): Promise<void> {
+    this.estimatesCloudTodo("estimatesUpdateDialogEditValue");
+  }
+
+  async estimatesUpdateDialogSave(): Promise<void> {
+    this.estimatesCloudTodo("estimatesUpdateDialogSave");
+  }
+
+  async estimatesUpdateDialogCancel(): Promise<void> {
+    this.estimatesCloudTodo("estimatesUpdateDialogCancel");
+  }
+
+  async estimatesUpdateDialogRemoveValue(_index: number): Promise<void> {
+    this.estimatesCloudTodo("estimatesUpdateDialogRemoveValue");
+  }
+
+  async estimatesUpdateDialogRemovalTitle(): Promise<string> {
+    this.estimatesCloudTodo("estimatesUpdateDialogRemovalTitle");
+  }
+
+  async estimatesUpdateDialogChooseMove(_replacementLabel: string): Promise<void> {
+    this.estimatesCloudTodo("estimatesUpdateDialogChooseMove");
+  }
+
+  async estimatesUpdateDialogChooseClear(): Promise<void> {
+    this.estimatesCloudTodo("estimatesUpdateDialogChooseClear");
+  }
+
+  async estimatesUpdateDialogConfirmRemoval(): Promise<void> {
+    this.estimatesCloudTodo("estimatesUpdateDialogConfirmRemoval");
   }
 
   async estimatesActiveRowDeleteClick(): Promise<void> {

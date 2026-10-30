@@ -27384,28 +27384,57 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async estimatesOpenAnalytics(): Promise<void> {
-    return todo("estimatesOpenAnalytics");
+    await this.openAnalytics();
   }
   async estimatesAnalyticsYAxisValue(): Promise<string> {
-    return todo("estimatesAnalyticsYAxisValue");
+    // The labels read evaluates immediately; the pickers render after
+    // the dialog mounts, so settle on the trigger first (EST-020 read
+    // "" on a fresh open).
+    await this.page.getByTestId("analytics-custom-trigger-0").waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await this.analyticsCustomPickerLabels()).metric;
   }
   async estimatesAnalyticsYAxisOptions(): Promise<string[]> {
-    return todo("estimatesAnalyticsYAxisOptions");
+    return this.analyticsCustomPickerOptions(0);
   }
   async estimatesAnalyticsPickYAxis(_label: string): Promise<void> {
     return todo("estimatesAnalyticsPickYAxis");
   }
   async estimatesAnalyticsXAxisValue(): Promise<string> {
-    return todo("estimatesAnalyticsXAxisValue");
+    // Settle first: see estimatesAnalyticsYAxisValue (EST-020).
+    await this.page.getByTestId("analytics-custom-trigger-1").waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await this.analyticsCustomPickerLabels()).xAxis;
   }
   async estimatesAnalyticsXAxisOptions(): Promise<string[]> {
-    return todo("estimatesAnalyticsXAxisOptions");
+    return this.analyticsCustomPickerOptions(1);
   }
-  async estimatesAnalyticsPickXAxis(_label: string): Promise<void> {
-    return todo("estimatesAnalyticsPickXAxis");
+  async estimatesAnalyticsPickXAxis(label: string): Promise<void> {
+    await this.analyticsCustomPickerSelect(1, label);
   }
   async estimatesAnalyticsTableRows(): Promise<string[][]> {
-    return todo("estimatesAnalyticsTableRows");
+    const table = this.page.getByTestId("analytics-custom-table").getByRole("table").first();
+    await table.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const rows = table.getByRole("row");
+    const total = await rows.count();
+    const out: string[][] = [];
+    for (let at = 0; at < total; at += 1) {
+      const cells = rows.nth(at).locator("th, td");
+      const width = await cells.count();
+      const row: string[] = [];
+      for (let col = 0; col < width; col += 1) {
+        row.push(
+          (
+            (await cells
+              .nth(col)
+              .innerText()
+              .catch(() => "")) ?? ""
+          )
+            .replace(/\s+/g, " ")
+            .trim()
+        );
+      }
+      out.push(row);
+    }
+    return out;
   }
   // --- Workspace drafts oracle (NEWFRONT-32). Throwing stubs per the
   // --- shared driver contract; the Drafts area fills these in. NEWFRONT-782
@@ -28921,6 +28950,13 @@ export class WebNewDriver implements ParityDriver {
       .first();
   }
 
+  private estimatesUpdateDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ hasText: /edit estimate system/i })
+      .first();
+  }
+
   async estimatesEnableSwitchVisible(): Promise<boolean> {
     return this.isShown(this.page.getByRole("switch", { name: "Enable estimates for this project" }));
   }
@@ -28946,10 +28982,14 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async estimatesOpenCreateDialog(): Promise<void> {
+    // The add control lives in the empty state only: a project with a
+    // system has no such button. Bound the click so calling this on a
+    // non-empty project fails loudly instead of burning the test
+    // budget (EST-029 cloud).
     await this.page
       .getByRole("button", { name: /add estimate system/i })
       .first()
-      .click();
+      .click({ timeout: WebNewDriver.WAIT_MS });
     await this.estimatesCreateDialog().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
@@ -28958,11 +28998,28 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async estimatesFamilyOptions(): Promise<EstimatesFamilyOption[]> {
-    return todo("estimatesFamilyOptions");
+    const dialog = this.estimatesCreateDialog();
+    const labels = dialog.locator("fieldset label");
+    const count = await labels.count();
+    const options: EstimatesFamilyOption[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const item = labels.nth(index);
+      const radio = item.locator('input[type="radio"]');
+      const value = (await radio.getAttribute("value").catch(() => null)) ?? "";
+      const label = ((await item.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+      const checked = await radio.isChecked().catch(() => false);
+      const disabled = await radio.isDisabled().catch(() => false);
+      options.push({ value, label, disabled, checked });
+    }
+    return options;
   }
 
-  async estimatesSelectFamily(_family: "points" | "categories"): Promise<void> {
-    return todo("estimatesSelectFamily");
+  async estimatesSelectFamily(family: "points" | "categories" | "time"): Promise<void> {
+    const dialog = this.estimatesCreateDialog();
+    await dialog.locator(`input[name="estimate-family"][value="${family}"]`).click();
+    await expect
+      .poll(async () => (await this.estimatesStarterCards()).length, { timeout: WebNewDriver.WAIT_MS })
+      .toBeGreaterThan(0);
   }
 
   async estimatesPickStarter(title: string): Promise<void> {
@@ -28984,18 +29041,59 @@ export class WebNewDriver implements ParityDriver {
       .toContain("Step 2 of 2");
   }
 
+  /**
+   * Drain toasts left by earlier steps before a dialog submit, so only
+   * this submit's own outcome can settle the post-click wait. Runs
+   * before the click: after it, a fresh toast is indistinguishable from
+   * a stale one. Resolves at once when no toast is up.
+   */
+  private async estimatesDrainToasts(): Promise<void> {
+    await this.page
+      .locator('[data-testid="toast-stack"] [data-testid="toast-notification"]')
+      .first()
+      .waitFor({ state: "detached", timeout: 10_000 })
+      .catch(() => undefined);
+  }
+
+  /**
+   * Settle a dialog submit that either closes the dialog (success) or
+   * leaves it open with an error toast (refusal, EST-013/EST-016). A
+   * close wins immediately; the toast only settles once continuously
+   * visible with the dialog still open for 1.5s — the success toast can
+   * appear before the close lands, so settling on its first flash
+   * returns while the dialog is open. Error toasts live 8s, so a
+   * refusal settles with most of its life left for the scenario's poll.
+   */
+  private async estimatesSettleDialogSubmit(dialog: Locator): Promise<void> {
+    const toast = this.page.locator('[data-testid="toast-stack"] [data-testid="toast-notification"]').first();
+    let toastedSince: number | null = null;
+    await expect
+      .poll(
+        async () => {
+          if ((await dialog.count()) === 0) return true;
+          const toasted = await toast.isVisible().catch(() => false);
+          const now = Date.now();
+          if (!toasted) {
+            toastedSince = null;
+            return false;
+          }
+          if (toastedSince === null) toastedSince = now;
+          return now - toastedSince >= 1500;
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toBe(true)
+      .catch(() => undefined);
+  }
+
   async estimatesSubmit(): Promise<void> {
     const dialog = this.estimatesCreateDialog();
+    await this.estimatesDrainToasts();
     await dialog
       .getByRole("button", { name: /create estimate/i })
       .first()
       .click();
-    // Success closes the dialog (a toast may linger); a refused or
-    // blocked submit leaves it open.
-    await expect
-      .poll(async () => (await dialog.count()) === 0, { timeout: WebNewDriver.WAIT_MS })
-      .toBe(true)
-      .catch(() => undefined);
+    await this.estimatesSettleDialogSubmit(dialog);
   }
 
   async estimatesActiveRowDeleteClick(): Promise<void> {
@@ -29028,15 +29126,134 @@ export class WebNewDriver implements ParityDriver {
 
   async estimatesEditDeleteConfirmDialogConfirm(): Promise<void> {
     const dialog = this.appDialogs().first();
+    await this.estimatesDrainToasts();
     await dialog.getByRole("button", { name: "Delete", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
-    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+    await this.estimatesSettleDialogSubmit(dialog);
   }
 
   async estimatesEditDeleteActiveRowEditControlVisible(): Promise<boolean> {
-    // OSS rows offer deletion only (EST-014): no control names an edit.
+    // OSS rows offer deletion only (EST-014): the row's edit control is
+    // the button web_new labels `Edit <name>`. A bare /edit/i substring
+    // match false-positives on the delete control's label, which carries
+    // the system name (EST-029's "noedit" tag tripped it), so anchor on
+    // the leading verb instead.
     const row = this.estimatesActiveRowLocator();
     if ((await row.count()) === 0) return false;
-    return (await row.getByRole("button", { name: /edit/i }).count()) > 0;
+    return (await row.getByRole("button", { name: /^edit\s/i }).count()) > 0;
+  }
+
+  async estimatesActiveRowEditClick(): Promise<void> {
+    // Same leading-verb anchor as the visibility check above: the
+    // delete control's label carries the system name.
+    await this.estimatesActiveRowLocator()
+      .getByRole("button", { name: /^edit\s/i })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.estimatesUpdateDialog().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async estimatesUpdateDialogOpen(): Promise<boolean> {
+    return this.isShown(this.estimatesUpdateDialog());
+  }
+
+  async estimatesUpdateDialogValues(): Promise<string[]> {
+    const rows = this.estimatesUpdateDialog().getByTestId("estimate-edit-value");
+    const count = await rows.count();
+    const values: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      values.push(
+        (
+          (await rows
+            .nth(index)
+            .innerText()
+            .catch(() => "")) ?? ""
+        )
+          .replace(/\s+/g, " ")
+          .trim()
+      );
+    }
+    return values;
+  }
+
+  async estimatesUpdateDialogSetName(name: string): Promise<void> {
+    const dialog = this.estimatesUpdateDialog();
+    await dialog.getByLabel(/system name/i).fill(name);
+    await expect
+      .poll(
+        async () =>
+          (await dialog
+            .getByLabel(/system name/i)
+            .inputValue()
+            .catch(() => "")) ?? "",
+        {
+          timeout: WebNewDriver.WAIT_MS,
+        }
+      )
+      .toBe(name);
+  }
+
+  async estimatesUpdateDialogEditValue(index: number, value: string): Promise<void> {
+    const dialog = this.estimatesUpdateDialog();
+    await dialog.getByRole("button", { name: `Edit value ${index + 1}`, exact: true }).click();
+    const input = dialog.locator("form input").first();
+    await input.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await input.fill(value);
+    await dialog.locator("form").first().locator('button[type="submit"]').first().click();
+    // The commit folds the draft into the row list; settle on the
+    // rewritten label so the edit is atomic (EST-014).
+    await expect
+      .poll(async () => (await this.estimatesUpdateDialogValues().catch(() => [] as string[])).join("|"), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .toContain(value);
+  }
+
+  async estimatesUpdateDialogSave(): Promise<void> {
+    const dialog = this.estimatesUpdateDialog();
+    await this.estimatesDrainToasts();
+    await dialog.getByRole("button", { name: "Save changes", exact: true }).click();
+    await this.estimatesSettleDialogSubmit(dialog);
+  }
+
+  async estimatesUpdateDialogCancel(): Promise<void> {
+    const dialog = this.estimatesUpdateDialog();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  async estimatesUpdateDialogRemoveValue(index: number): Promise<void> {
+    const dialog = this.estimatesUpdateDialog();
+    await dialog.getByRole("button", { name: `Remove value ${index + 1}`, exact: true }).click();
+    await expect
+      .poll(async () => this.estimatesUpdateDialogRemovalTitle(), { timeout: WebNewDriver.WAIT_MS })
+      .toMatch(/^remove .+\?$/i);
+  }
+
+  async estimatesUpdateDialogRemovalTitle(): Promise<string> {
+    const dialog = this.estimatesUpdateDialog();
+    if ((await dialog.count()) === 0) return "";
+    const title = dialog.getByText(/^remove .+\?$/i).first();
+    if ((await title.count()) === 0) return "";
+    return ((await title.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async estimatesUpdateDialogChooseMove(replacementLabel: string): Promise<void> {
+    const dialog = this.estimatesUpdateDialog();
+    await dialog.getByRole("radio", { name: /move affected work items/i }).check();
+    await dialog.getByLabel(/replacement value/i).selectOption({ label: replacementLabel });
+  }
+
+  async estimatesUpdateDialogChooseClear(): Promise<void> {
+    const dialog = this.estimatesUpdateDialog();
+    await dialog.getByRole("radio", { name: /clear the estimate/i }).check();
+  }
+
+  async estimatesUpdateDialogConfirmRemoval(): Promise<void> {
+    const dialog = this.estimatesUpdateDialog();
+    await dialog.getByRole("button", { name: "Remove value", exact: true }).click();
+    // The confirmation stages the choice and returns to the value
+    // list; settle on the list rather than the dialog close (EST-015).
+    await expect.poll(async () => this.estimatesUpdateDialogRemovalTitle(), { timeout: WebNewDriver.WAIT_MS }).toBe("");
   }
   // --- Pages gating, list states, URLs, detail shell (NEWFRONT-314,
   // --- PAGE-018-025,079-080). Written against the shipped web_new UI: every
@@ -31824,77 +32041,229 @@ export class WebNewDriver implements ParityDriver {
   // --- reused as-is; only the dialog-specific stubs below are new.
 
   async estimatesDialogStep(): Promise<"1" | "2" | null> {
-    return todo("estimatesDialogStep");
+    if (!(await this.estimatesDialogOpen())) return null;
+    const text =
+      (await this.estimatesCreateDialog()
+        .getByTestId("estimate-dialog-step")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? "";
+    return /step 2 of 2/i.test(text) ? "2" : "1";
   }
   async estimatesDialogBack(): Promise<void> {
-    return todo("estimatesDialogBack");
+    const dialog = this.estimatesCreateDialog();
+    await dialog.getByRole("button", { name: "Back", exact: true }).click();
+    await expect
+      .poll(
+        async () =>
+          (await dialog
+            .getByTestId("estimate-dialog-step")
+            .first()
+            .innerText()
+            .catch(() => "")) ?? "",
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toContain("Step 1 of 2");
   }
   async estimatesBackVisible(): Promise<boolean> {
-    return todo("estimatesBackVisible");
+    return this.isShown(this.estimatesCreateDialog().getByRole("button", { name: "Back", exact: true }));
   }
   async estimatesDialogCancel(): Promise<void> {
-    return todo("estimatesDialogCancel");
+    const dialog = this.estimatesCreateDialog();
+    // The footer renders after the body, so its Cancel is last even
+    // when a value form is open with its own Cancel above it.
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).last().click();
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
   async estimatesStarterCards(): Promise<EstimatesStarterCard[]> {
-    return todo("estimatesStarterCards");
+    const dialog = this.estimatesCreateDialog();
+    const buttons = dialog.getByRole("button");
+    const count = await buttons.count();
+    const cards: EstimatesStarterCard[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const text =
+        (await buttons
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? "";
+      const lines = text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      if (lines.length === 0 || /^cancel$/i.test(lines[0] ?? "")) continue;
+      cards.push({ title: lines[0] ?? "", detail: lines.slice(1).join(" ") });
+    }
+    return cards;
   }
   async estimatesStepTwoValues(): Promise<string[]> {
-    return todo("estimatesStepTwoValues");
+    const rows = this.estimatesCreateDialog().getByTestId("estimate-value");
+    const count = await rows.count();
+    const values: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      values.push(
+        (
+          (await rows
+            .nth(index)
+            .innerText()
+            .catch(() => "")) ?? ""
+        )
+          .replace(/\s+/g, " ")
+          .trim()
+      );
+    }
+    return values;
   }
   async estimatesStepTwoFamily(): Promise<string> {
     return todo("estimatesStepTwoFamily");
   }
-  async estimatesDragValueBefore(_sourceIndex: number, _targetIndex: number): Promise<void> {
-    return todo("estimatesDragValueBefore");
+  async estimatesDragValueBefore(sourceIndex: number, targetIndex: number): Promise<void> {
+    const dialog = this.estimatesCreateDialog();
+    const grip = dialog.getByRole("button", { name: `Reorder value ${sourceIndex + 1}`, exact: true });
+    const target = dialog.getByTestId("estimate-value").nth(targetIndex);
+    const gripBox = await grip.boundingBox();
+    const targetBox = await target.boundingBox();
+    if (!gripBox || !targetBox) throw new Error("[parity] value row has no box.");
+    const before = await this.estimatesStepTwoValues();
+    await this.page.mouse.move(gripBox.x + gripBox.width / 2, gripBox.y + gripBox.height / 2);
+    await this.page.mouse.down();
+    await this.page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + 4, { steps: 12 });
+    await this.page.mouse.up();
+    await expect
+      .poll(async () => (await this.estimatesStepTwoValues().catch(() => before)).join("|"), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .not.toBe(before.join("|"));
   }
-  async estimatesEditValueStart(_index: number, _via: "double-click" | "control"): Promise<void> {
-    return todo("estimatesEditValueStart");
+  async estimatesEditValueStart(index: number, via: "double-click" | "control"): Promise<void> {
+    const dialog = this.estimatesCreateDialog();
+    if (via === "double-click") {
+      await dialog.getByTestId("estimate-value").nth(index).dblclick();
+    } else {
+      await dialog.getByRole("button", { name: `Edit value ${index + 1}`, exact: true }).click();
+    }
+    const input = dialog.locator("form input").first();
+    await input.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // The edit form opens pre-populated, but the value lands a tick
+    // after the input mounts; settle on a non-empty value so the open
+    // is atomic (edited rows always carry values).
+    await expect
+      .poll(async () => ((await input.inputValue().catch(() => "")) ?? "").length, {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .toBeGreaterThan(0);
   }
   async estimatesOpenFormValue(): Promise<string | null> {
-    return todo("estimatesOpenFormValue");
+    const inputs = this.estimatesCreateDialog().locator("form input");
+    if ((await inputs.count()) === 0) return null;
+    return inputs.first().inputValue({ timeout: WebNewDriver.WAIT_MS });
   }
-  async estimatesOpenFormSave(_value: string): Promise<void> {
-    return todo("estimatesOpenFormSave");
+  async estimatesOpenFormSave(value: string): Promise<void> {
+    await this.estimatesOpenFormFill(value);
+    await this.estimatesOpenFormSubmit();
+    await expect
+      .poll(async () => (await this.estimatesStepTwoValues().catch(() => [] as string[])).includes(value), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .toBe(true);
+    if ((await this.estimatesOpenFormCount()) > 0) await this.estimatesOpenFormCancel();
   }
-  async estimatesOpenFormFill(_value: string): Promise<void> {
-    return todo("estimatesOpenFormFill");
+  async estimatesOpenFormFill(value: string): Promise<void> {
+    await this.estimatesCreateDialog().locator("form input").first().fill(value);
   }
   async estimatesOpenFormSubmit(): Promise<void> {
-    return todo("estimatesOpenFormSubmit");
+    await this.estimatesCreateDialog().locator("form").first().locator('button[type="submit"]').first().click();
   }
   async estimatesOpenFormCancel(): Promise<void> {
-    return todo("estimatesOpenFormCancel");
+    await this.estimatesCreateDialog().locator("form").first().locator('button[type="button"]').first().click();
   }
   async estimatesOpenFormCount(): Promise<number> {
-    return todo("estimatesOpenFormCount");
+    return this.estimatesCreateDialog().locator("form input").count();
   }
-  async estimatesRemoveValue(_index: number): Promise<void> {
-    return todo("estimatesRemoveValue");
+  async estimatesRemoveValue(index: number): Promise<void> {
+    const before = await this.estimatesStepTwoValues();
+    await this.estimatesCreateDialog()
+      .getByRole("button", { name: `Remove value ${index + 1}`, exact: true })
+      .click();
+    await expect
+      .poll(async () => (await this.estimatesStepTwoValues().catch(() => before)).length, {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .toBe(before.length - 1);
   }
-  async estimatesRemoveVisible(_index: number): Promise<boolean> {
-    return todo("estimatesRemoveVisible");
+  async estimatesRemoveVisible(index: number): Promise<boolean> {
+    return this.isShown(
+      this.estimatesCreateDialog().getByRole("button", { name: `Remove value ${index + 1}`, exact: true })
+    );
   }
   async estimatesAddOpen(): Promise<void> {
-    return todo("estimatesAddOpen");
+    const dialog = this.estimatesCreateDialog();
+    await dialog.getByRole("button", { name: "Add a value", exact: true }).click();
+    await dialog.locator("form input").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async estimatesAddVisible(): Promise<boolean> {
-    return todo("estimatesAddVisible");
+    return (await this.estimatesCreateDialog().getByRole("button", { name: "Add a value", exact: true }).count()) > 0;
   }
-  async estimatesAddType(_value: string): Promise<void> {
-    return todo("estimatesAddType");
+  async estimatesAddType(value: string): Promise<void> {
+    await this.estimatesCreateDialog().locator("form input").first().pressSequentially(value, { delay: 20 });
   }
   async estimatesValueErrors(): Promise<string[]> {
-    return todo("estimatesValueErrors");
+    const markers = this.estimatesCreateDialog().locator('[id^="estimate-value-"][id$="-problem"]');
+    const count = await markers.count();
+    const messages: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const text = (
+        (await markers
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text !== "") messages.push(text);
+    }
+    return messages;
   }
   async estimatesValueErrorCount(): Promise<number> {
-    return todo("estimatesValueErrorCount");
+    return this.estimatesCreateDialog().locator('[id^="estimate-value-"][id$="-problem"]').count();
   }
   async estimatesActiveRow(): Promise<EstimatesActiveRow | null> {
-    return todo("estimatesActiveRow");
+    const row = this.estimatesActiveRowLocator();
+    if ((await row.count()) === 0) return null;
+    const name = (
+      (await row
+        .locator("h4")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    if (name === "") return null;
+    const values = (
+      (await row
+        .locator("p")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return { name, values };
   }
 
   async estimatesEditDeleteFailEstimateDelete(): Promise<void> {
-    return todo("estimatesEditDeleteFailEstimateDelete");
+    // Refuse whole-system deletes with a server error so the EST-016
+    // failure path shows; every other request passes through
+    // untouched. Context-scoped; the test's end drops it. The glob's
+    // `*` never crosses `/`, so only the bare estimate URL matches —
+    // nested point writes and the estimates list are unaffected. A 500
+    // keeps the round-trip answered, so the confirm settles on the
+    // response and the dialog's error notice follows.
+    await this.page.route("**/api/workspaces/*/projects/*/estimates/*/", async (route: Route) => {
+      if (route.request().method() === "DELETE") {
+        await route.fulfill({ status: 500, body: JSON.stringify({ error: "parity refuses this delete" }) });
+        return;
+      }
+      await route.continue();
+    });
   }
 
   // --- Module detail/analytics/links (NEWFRONT-310, MOD-029-035). Appended stubs.

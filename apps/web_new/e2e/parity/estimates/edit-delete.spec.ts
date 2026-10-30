@@ -610,9 +610,15 @@ test(
       // The old client unlinks whenever the project has any linked
       // system, so the unrelated link is cleared too (NEWFRONT-809).
       // Intended (new app, spec §4.3 narrow rule): the reference still
-      // points at the kept system. If the old app is fixed this fails —
-      // unmark the scenario and assert the preserved link instead.
-      await expect.poll(() => serverProjectEstimateId(seed.workspaceSlug, projectId, session)).toBeNull();
+      // points at the kept system. The fix shipped in the new app while
+      // the oracle still pins the bug, so each leg asserts its own
+      // behavior (NEWFRONT-349 precedent). If the old app is fixed this
+      // fails — unmark the scenario and assert the preserved link.
+      if (driver.target === "web_new") {
+        await expect.poll(() => serverProjectEstimateId(seed.workspaceSlug, projectId, session)).toBe(kept.id);
+      } else {
+        await expect.poll(() => serverProjectEstimateId(seed.workspaceSlug, projectId, session)).toBeNull();
+      }
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
     }

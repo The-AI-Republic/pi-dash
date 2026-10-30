@@ -1603,4 +1603,4 @@ is part of the contract; elsewhere write copy in the product's voice.
 | EST-026 | 2.6           | `screen-shell.spec.ts` (single URL, project title, no system link)                                     |
 | EST-027 | 2.7, 7.4      | `screen-shell.spec.ts` (stale until fresh fetch)                                                       |
 | EST-028 | 2.8           | `screen-shell.spec.ts` (absences and word scan)                                                        |
-| EST-029 | 4.5, 10       | `permissions-edition.spec.ts` (OSS families/creates/deletes; no edit/value delete; no desktop runtime) |
+| EST-029 | 4.5, 10       | `permissions-edition.spec.ts` (OSS families/creates/deletes; no edit/value delete; no desktop runtime); `cloud.spec.ts` (cloud time/edit/value-delete/matrix, green on the cloud build); desktop leg (full 58-scenario suite on the desktop target, every scenario green) |

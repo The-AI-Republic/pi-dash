@@ -6380,8 +6380,8 @@ export interface ParityDriver {
   estimatesDialogOpen(): Promise<boolean>;
   /** Measurement-family radio options in display order. */
   estimatesFamilyOptions(): Promise<EstimatesFamilyOption[]>;
-  /** Select a measurement family; resolves once its starters show. */
-  estimatesSelectFamily(family: "points" | "categories"): Promise<void>;
+  /** Select a measurement family; resolves once its starters show. Time is cloud-only. */
+  estimatesSelectFamily(family: "points" | "categories" | "time"): Promise<void>;
   /** Pick a starter card by title; resolves once step two shows. */
   estimatesPickStarter(title: string): Promise<void>;
   /** Submit the dialog; resolves once the write settles (close or error notice). */
@@ -6400,6 +6400,30 @@ export interface ParityDriver {
   estimatesEditDeleteConfirmDialogConfirm(): Promise<void>;
   /** Whether the active row exposes any edit control (cloud-only; false in OSS). */
   estimatesEditDeleteActiveRowEditControlVisible(): Promise<boolean>;
+  /** Click the active row's edit control, opening the saved-system update dialog (cloud). */
+  estimatesActiveRowEditClick(): Promise<void>;
+  /** Whether the saved-system update dialog is currently open. */
+  estimatesUpdateDialogOpen(): Promise<boolean>;
+  /** Rendered value labels in the update dialog, in row order. */
+  estimatesUpdateDialogValues(): Promise<string[]>;
+  /** Rename the system in the update dialog; resolves once the draft lands. Does not save. */
+  estimatesUpdateDialogSetName(name: string): Promise<void>;
+  /** Rewrite one update-dialog value through its edit control; resolves once committed. Does not save. */
+  estimatesUpdateDialogEditValue(index: number, value: string): Promise<void>;
+  /** Save the update dialog; resolves once the write settles (close or error notice). */
+  estimatesUpdateDialogSave(): Promise<void>;
+  /** Dismiss the update dialog through its cancel action. */
+  estimatesUpdateDialogCancel(): Promise<void>;
+  /** Start removing one saved value; resolves once the reassignment confirmation shows. */
+  estimatesUpdateDialogRemoveValue(index: number): Promise<void>;
+  /** The reassignment confirmation title ("Remove <label>?"), or "" when absent. */
+  estimatesUpdateDialogRemovalTitle(): Promise<string>;
+  /** Choose moving affected work items to another value for the pending removal. */
+  estimatesUpdateDialogChooseMove(replacementLabel: string): Promise<void>;
+  /** Choose clearing affected work items for the pending removal. */
+  estimatesUpdateDialogChooseClear(): Promise<void>;
+  /** Confirm the pending removal; resolves once the dialog returns to the value list. */
+  estimatesUpdateDialogConfirmRemoval(): Promise<void>;
 
   // -------------------------------------------------------------------------
   // Estimates creation dialog (NEWFRONT-323, EST-008..013). Appended;
