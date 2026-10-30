@@ -1283,7 +1283,7 @@ export class WebNewDriver implements ParityDriver {
         continue;
       }
       await this.page.waitForTimeout(WebNewDriver.BOOT_HOLD_MS);
-      const body = await this.page.evaluate(() => document.body?.innerText ?? "").catch(() => "");
+      const body = (await this.page.evaluate(() => document.body?.innerText ?? "").catch(() => "")) ?? "";
       if (!body.includes(WebNewDriver.CHUNK_ERROR_SIGNATURE)) return;
       console.log(`[parity] vite chunk error at ${path} (load ${attempt + 1}/5); reloading.`);
       if (attempt === 4) throw new Error(`[parity] vite chunk error persists at ${path} after 5 loads.`);
