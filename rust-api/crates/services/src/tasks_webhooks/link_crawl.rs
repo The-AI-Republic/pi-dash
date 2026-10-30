@@ -56,7 +56,7 @@ use encoding_rs::Encoding;
 use serde_json::{Map, Value};
 
 use crate::assistant::ssrf::address_is_private_or_reserved;
-use pidash_types::html_entities::lookup_bare_entity;
+use pidash_types::html_entities::{html_unescape, lookup_bare_entity};
 
 /// Celery task name (`work_item_link_task.py:262`, `@shared_task`).
 pub const CRAWL_TASK_NAME: &str = "pi_dash.bgtasks.work_item_link_task.crawl_work_item_link_title";
@@ -436,8 +436,12 @@ fn tag_end(html: &str, open: usize) -> Option<usize> {
     None
 }
 
-/// Attributes of the tag `html[open..=end]` (names lower-cased, first
-/// occurrence wins, mirroring BeautifulSoup duplicate-attribute behavior).
+/// Attributes of the tag `html[open..=end]` (names lower-cased, values
+/// `html.unescape`d, last occurrence wins).
+///
+/// `html.parser` unescapes every non-empty value (`parser.py:462-463`)
+/// and bs4's builder replaces duplicates (`builder/_htmlparser.py`,
+/// default `REPLACE` mode), so the last duplicate wins.
 fn tag_attrs(html: &str, open: usize, end: usize) -> Vec<(String, String)> {
     let tag = &html[open..=end];
     let bytes = tag.as_bytes();
@@ -493,8 +497,10 @@ fn tag_attrs(html: &str, open: usize, end: usize) -> Vec<(String, String)> {
                 value = tag[value_start..i].to_owned();
             }
         }
-        if !attrs.iter().any(|(existing, _)| *existing == name) {
-            attrs.push((name, value));
+        let value = html_unescape(&value);
+        match attrs.iter_mut().find(|(existing, _)| *existing == name) {
+            Some(slot) => slot.1 = value,
+            None => attrs.push((name, value)),
         }
     }
     attrs
@@ -1115,8 +1121,23 @@ fn match_entityref(out: &mut String, text: &str, index: usize) -> Option<usize> 
     Some(end)
 }
 
-/// `href` of the first `<link>` tag whose `rel` is exactly `rel_value`
-/// (`soup.select_one('link[rel="…"]')` + `["href"]`, `:187-190`), or `None`.
+/// `rel` prepared for selector comparison: bs4 splits CDATA-list
+/// attributes into non-whitespace runs (`nonwhitespace_re.findall`,
+/// `builder/__init__.py`) and soupsieve compares the space-joined
+/// string, so this joins those runs with one space. The split set is
+/// Python-`re`-`\s`: Rust `is_whitespace` plus `\x1C-\x1F`, which the
+/// Unicode `White_Space` property omits.
+fn collapse_rel(value: &str) -> String {
+    value
+        .split(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
+        .filter(|piece| !piece.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `href` of the first `<link>` tag whose whitespace-collapsed `rel` is
+/// exactly `rel_value` (`soup.select_one('link[rel="…"]')` + `["href"]`,
+/// `:187-190`), or `None`.
 pub fn find_link_href(html: &str, rel_value: &str) -> Option<String> {
     let mut start = 0;
     while start < html.len() {
@@ -1127,8 +1148,8 @@ pub fn find_link_href(html: &str, rel_value: &str) -> Option<String> {
         let rel = attrs
             .iter()
             .find(|(name, _)| name == "rel")
-            .map(|(_, value)| value.as_str());
-        if rel == Some(rel_value) {
+            .map(|(_, value)| collapse_rel(value));
+        if rel.as_deref() == Some(rel_value) {
             if let Some(href) = attrs
                 .iter()
                 .find(|(name, _)| name == "href")
@@ -1804,6 +1825,168 @@ mod tests {
         )
         .unwrap();
         assert_eq!(found, Some("https://example.com/b.ico".to_owned()));
+    }
+
+    // -- link attribute decoding (PIDASHCONV-1671) -----------------------
+    // Oracle: contract-tests/tasks_webhooks/test_link_crawl_link_attrs.py
+    // (`work_item_link_task.py:194-199` via bs4 + html.parser).
+
+    #[test]
+    fn link_href_entity_is_unescaped() {
+        let html = r#"<html><head><link rel="icon" href="/f.ico?a=1&amp;b=2"></head></html>"#;
+        let found = find_favicon_url(
+            Some(html),
+            "https://example.com/",
+            &deny_all(),
+            &no_head,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(found, Some("https://example.com/f.ico?a=1&b=2".to_owned()));
+    }
+
+    #[test]
+    fn rel_surrounding_whitespace_matches() {
+        let html = r#"<html><head><link rel=" icon " href="a.ico"></head></html>"#;
+        let found = find_favicon_url(
+            Some(html),
+            "https://example.com/",
+            &deny_all(),
+            &no_head,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(found, Some("https://example.com/a.ico".to_owned()));
+    }
+
+    #[test]
+    fn rel_inner_whitespace_collapses() {
+        let html = r#"<html><head><link rel="shortcut  icon" href="b.ico"></head></html>"#;
+        let found = find_favicon_url(
+            Some(html),
+            "https://example.com/",
+            &deny_all(),
+            &no_head,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(found, Some("https://example.com/b.ico".to_owned()));
+    }
+
+    #[test]
+    fn last_duplicate_href_wins() {
+        let html = r#"<html><head><link rel="icon" href="1.ico" href="2.ico"></head></html>"#;
+        let found = find_favicon_url(
+            Some(html),
+            "https://example.com/",
+            &deny_all(),
+            &no_head,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(found, Some("https://example.com/2.ico".to_owned()));
+    }
+
+    #[test]
+    fn rel_tab_and_newline_split() {
+        for (html, expected) in [
+            (
+                "<html><head><link rel=\"shortcut\ticon\" href=\"h.ico\"></head></html>",
+                "https://example.com/h.ico",
+            ),
+            (
+                "<html><head><link rel=\"shortcut\nicon\" href=\"i.ico\"></head></html>",
+                "https://example.com/i.ico",
+            ),
+        ] {
+            let found = find_favicon_url(
+                Some(html),
+                "https://example.com/",
+                &deny_all(),
+                &no_head,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(found, Some(expected.to_owned()), "{html:?}");
+        }
+    }
+
+    #[test]
+    fn rel_extra_token_order_and_case_miss() {
+        // Not token containment: extras, reorder and case all miss, so
+        // `find_link_href` finds nothing for any selector.
+        for html in [
+            r#"<link rel="icon x" href="c.ico">"#,
+            r#"<link rel="x icon" href="d.ico">"#,
+            r#"<link rel="ICON" href="e.ico">"#,
+            r#"<link rel="shortcut icon extra" href="f.ico">"#,
+            r#"<link rel="icon shortcut" href="g.ico">"#,
+            r#"<link rel="" href="j.ico">"#,
+            r#"<link>"#,
+        ] {
+            for selector in FAVICON_SELECTORS {
+                assert_eq!(find_link_href(html, selector), None, "{html:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn rel_entity_decodes_before_match() {
+        let html = r#"<html><head><link rel="&#105;con" href="e1.ico"></head></html>"#;
+        let found = find_favicon_url(
+            Some(html),
+            "https://example.com/",
+            &deny_all(),
+            &no_head,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(found, Some("https://example.com/e1.ico".to_owned()));
+    }
+
+    #[test]
+    fn last_duplicate_rel_wins() {
+        let html = r#"<html><head><link rel="other" rel="icon" href="n.ico"></head></html>"#;
+        let found = find_favicon_url(
+            Some(html),
+            "https://example.com/",
+            &deny_all(),
+            &no_head,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(found, Some("https://example.com/n.ico".to_owned()));
+        let html = r#"<link rel="icon" rel="other" href="o.ico">"#;
+        for selector in FAVICON_SELECTORS {
+            assert_eq!(find_link_href(html, selector), None, "{selector}");
+        }
+    }
+
+    #[test]
+    fn attr_unescape_spots() {
+        // Attribute decoding is `html.unescape`, not the `<title>`
+        // decoder: `&unknown;` keeps its `;`, `&apos` stays literal.
+        for (raw, expected) in [
+            ("&unknown;", "https://example.com/&unknown;"),
+            ("&apos", "https://example.com/&apos"),
+            ("&#65B", "https://example.com/AB"),
+            ("&notin", "https://example.com/\u{00ac}in"),
+            ("&notin;", "https://example.com/\u{2209}"),
+            ("&#147;", "https://example.com/\u{201c}"),
+            ("&AMP", "https://example.com/&"),
+            ("&lt;tag&gt;", "https://example.com/<tag>"),
+        ] {
+            let html = format!("<html><head><link rel=\"icon\" href=\"{raw}\"></head></html>");
+            let found = find_favicon_url(
+                Some(&html),
+                "https://example.com/",
+                &deny_all(),
+                &no_head,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(found, Some(expected.to_owned()), "{raw}");
+        }
     }
 
     #[test]
