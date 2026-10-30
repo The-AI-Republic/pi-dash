@@ -2414,9 +2414,13 @@ mod tests {
     #[test]
     fn attr_unescape_spots() {
         // Attribute decoding is `html.unescape`, not the `<title>`
-        // decoder: `&unknown;` keeps its `;`, `&apos` stays literal.
+        // decoder: `&unknown;` keeps its `;` through decoding (pinned by
+        // test_link_crawl_link_attrs.py), `&apos` stays literal. The joined
+        // URL then drops that `;`: Django calls
+        // urljoin("https://example.com/", "&unknown;"), and CPython splits
+        // the empty params, yielding "https://example.com/&unknown".
         for (raw, expected) in [
-            ("&unknown;", "https://example.com/&unknown;"),
+            ("&unknown;", "https://example.com/&unknown"),
             ("&apos", "https://example.com/&apos"),
             ("&#65B", "https://example.com/AB"),
             ("&notin", "https://example.com/\u{00ac}in"),
