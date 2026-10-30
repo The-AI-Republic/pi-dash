@@ -141,7 +141,7 @@ pub const BUSY_STATUSES: [AgentRunStatus; 6] = [
 /// of [`SELECT_RUNNER_FOR_RUN_SQL`], pinned against FX-RSES-01 by the
 /// tests below. The `09738d222` operator-pause pair trails the list
 /// (migration `0031_runner_paused`).
-pub const RUNNER_COLUMNS: [&str; 32] = [
+pub const RUNNER_COLUMNS: [&str; 31] = [
     "id",
     "owner_id",
     "workspace_id",
@@ -167,7 +167,6 @@ pub const RUNNER_COLUMNS: [&str; 32] = [
     "dev_metadata",
     "protocol_version",
     "last_heartbeat_at",
-    "free_worktrees",
     "created_at",
     "updated_at",
     "revoked_at",
@@ -195,7 +194,7 @@ pub const RUNNER_COLUMNS: [&str; 32] = [
 ///
 /// There is deliberately no `provisioning` term — see the
 /// ported-bugs note.
-pub const SELECT_RUNNER_FOR_RUN_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"free_worktrees\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE (\"runner\".\"last_heartbeat_at\" >= $1 AND \"runner\".\"paused_at\" IS NULL AND \"runner\".\"owner_id\" = $2 AND \"runner\".\"status\" = 'online' AND \"runner\".\"workspace_id\" = $3 AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1))) ORDER BY \"runner\".\"last_heartbeat_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED";
+pub const SELECT_RUNNER_FOR_RUN_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE (\"runner\".\"last_heartbeat_at\" >= $1 AND \"runner\".\"paused_at\" IS NULL AND \"runner\".\"owner_id\" = $2 AND \"runner\".\"status\" = 'online' AND \"runner\".\"workspace_id\" = $3 AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1))) ORDER BY \"runner\".\"last_heartbeat_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED";
 
 // ---------------------------------------------------------------------------
 // Cap pair (`matcher.py:363-372`, `:451-460`)
@@ -397,7 +396,7 @@ mod tests {
             .map(|f| f["column"].as_str().expect("column"))
             .collect();
         assert_eq!(RUNNER_COLUMNS.to_vec(), expected);
-        assert_eq!(RUNNER_COLUMNS.len(), 32);
+        assert_eq!(RUNNER_COLUMNS.len(), 31);
     }
 
     #[test]

@@ -521,7 +521,7 @@ fn decode_machine_list_row(row: &sqlx::postgres::PgRow) -> Result<DevMachineOwne
 }
 
 /// Owned `runner` row: the serialized subset of `COLUMNS` (token
-/// internals and `free_worktrees` skipped — never serialized here).
+/// internals skipped — never serialized here).
 struct RunnerOwned {
     id: Uuid,
     owner_id: Uuid,
@@ -571,12 +571,12 @@ fn decode_runner(row: &sqlx::postgres::PgRow, base: usize) -> Result<RunnerOwned
         dev_metadata: row.try_get(base + 22).map_err(|_| server_error())?,
         protocol_version: row.try_get(base + 23).map_err(|_| server_error())?,
         last_heartbeat_at: row.try_get(base + 24).map_err(|_| server_error())?,
-        created_at: row.try_get(base + 26).map_err(|_| server_error())?,
-        updated_at: row.try_get(base + 27).map_err(|_| server_error())?,
-        revoked_at: row.try_get(base + 28).map_err(|_| server_error())?,
-        revoked_reason: row.try_get(base + 29).map_err(|_| server_error())?,
-        paused_at: row.try_get(base + 30).map_err(|_| server_error())?,
-        paused_by_id: row.try_get(base + 31).map_err(|_| server_error())?,
+        created_at: row.try_get(base + 25).map_err(|_| server_error())?,
+        updated_at: row.try_get(base + 26).map_err(|_| server_error())?,
+        revoked_at: row.try_get(base + 27).map_err(|_| server_error())?,
+        revoked_reason: row.try_get(base + 28).map_err(|_| server_error())?,
+        paused_at: row.try_get(base + 29).map_err(|_| server_error())?,
+        paused_by_id: row.try_get(base + 30).map_err(|_| server_error())?,
     })
 }
 
@@ -2493,12 +2493,12 @@ mod tests {
     #[test]
     fn join_block_widths() {
         // Positional decode offsets — fail loudly if the column consts move.
-        assert_eq!(RUNNER_BLOCK_COLS, 32);
+        assert_eq!(RUNNER_BLOCK_COLS, 31);
         assert_eq!(MACHINE_BLOCK_COLS, 10);
         assert_eq!(pod_cols::COLUMNS.len(), 10);
-        assert_eq!(r_cols::COLUMNS[29], "revoked_reason");
-        assert_eq!(r_cols::COLUMNS[30], "paused_at");
-        assert_eq!(r_cols::COLUMNS[31], "paused_by_id");
+        assert_eq!(r_cols::COLUMNS[28], "revoked_reason");
+        assert_eq!(r_cols::COLUMNS[29], "paused_at");
+        assert_eq!(r_cols::COLUMNS[30], "paused_by_id");
         assert_eq!(dm_cols::COLUMNS[2], "host_label");
         assert_eq!(pod_cols::COLUMNS[5], "created_by_id");
     }

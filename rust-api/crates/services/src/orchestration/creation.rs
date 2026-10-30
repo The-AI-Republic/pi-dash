@@ -189,7 +189,7 @@ pub const PROJECT_SELECT_SQL: &str = "SELECT id, workspace_id, identifier, name,
 pub const STATE_SELECT_SQL: &str = "SELECT id, name, \"group\" FROM states WHERE id = $1";
 
 /// The consumed `agent_run` projection for creation reads. Django
-/// selects the full 40-column row; the L2 `READ_COLUMNS` projection
+/// selects the full 39-column row; the L2 `READ_COLUMNS` projection
 /// lacks `parent_run_id` / `run_config` / `phase_kind` /
 /// `prompt_manifest` / `ended_at`, so creation projects its own.
 pub const RUN_VIEW_COLUMNS: &[&str] = &[
@@ -315,10 +315,10 @@ pub const RUN_INSERT_SQL: &str =
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
     prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
     lease_expires_at, done_payload, error_details, llm_model, usage, created_at, \
-    assigned_at, queue_position, started_at, ended_at) \
+    assigned_at, started_at, ended_at) \
     VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, NULL, $7, 'queued', $8, 0, NULL, '', $10, \
     NULL, NULL, '', $11, NULL, $12, $13, '[]', '', '{}', NULL, NULL, $9, '', '{}', $14, \
-    NULL, NULL, NULL, NULL)";
+    NULL, NULL, NULL)";
 
 /// `run.save(update_fields=["prompt", "prompt_manifest"])`
 /// (`service.py:522,639,824`). `$1`/`$2` are prompt/manifest, `$3` the
@@ -352,14 +352,14 @@ pub fn finalize_lock_sql() -> String {
 }
 
 /// The finalize write (`agent_run_finalization.py:52-71`):
-/// status/ended_at/queue NULL/terminal NULLs + the updates
+/// status/ended_at/terminal NULLs + the updates
 /// (`error_code`, `error`), folded into `error_details` under the
 /// finalize lock (PDASHOSS01-187). `$1` ended_at, `$2` the
 /// [`finalize_error_details_patch`], `$3` the run id.
 pub fn finalize_update_sql() -> String {
     format!(
         "UPDATE agent_run SET status = 'failed', ended_at = $1, \
-         queue_position = NULL, terminal_hooks_applied_at = NULL, \
+         terminal_hooks_applied_at = NULL, \
          terminal_capacity_released_at = NULL, error_details = {} WHERE id = $3",
         crate::runner_runs::finalization::error_details_merge_sql("$2")
     )
@@ -3983,7 +3983,6 @@ mod tests {
             "usage",
             "created_at",
             "assigned_at",
-            "queue_position",
             "started_at",
             "ended_at",
         ] {
@@ -4005,7 +4004,8 @@ mod tests {
         assert!(RUN_INSERT_SQL.contains("$14"));
         assert!(!RUN_INSERT_SQL.contains("$15"));
         assert!(PROMPT_UPDATE_SQL.contains("prompt_manifest"));
-        assert!(finalize_update_sql().contains("queue_position = NULL"));
+        assert!(!finalize_update_sql().contains("queue_position"));
+        assert!(!RUN_INSERT_SQL.contains("queue_position"));
         assert_eq!(initial_error_details(""), json!({}));
         assert_eq!(
             initial_error_details("not_connected"),

@@ -252,7 +252,7 @@ pub fn sweep_stale_pairs_sql(excluded_ids: usize) -> String {
 
 /// Stopped-cancel barrier write with the offline stamp
 /// (`stamp_cancelled=True`): `.update()` call order (`status`,
-/// `ended_at`, `queue_position`, `error_details`). The code is merged
+/// `ended_at`, `error_details`). The code is merged
 /// into the bag in SQL (`merge_error_details_expression`:
 /// `error_details || '{"code": …}'`, PDASHOSS01-187) — a bulk update
 /// has no locked row to merge in Rust. `$1` is `now` (`ended_at`),
@@ -264,7 +264,7 @@ pub fn sweep_cancel_barrier_stamped_sql(id_count: usize) -> String {
     let params: Vec<String> = (0..id_count).map(|i| format!("${}", i + 3)).collect();
     format!(
         "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $1, \
-         \"queue_position\" = NULL, \
+         \
          \"error_details\" = (\"agent_run\".\"error_details\" || $2::jsonb) \
          WHERE \"agent_run\".\"id\" IN ({})",
         params.join(", ")
@@ -440,7 +440,7 @@ mod tests {
         assert_eq!(
             sweep_cancel_barrier_stamped_sql(2),
             "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $1, \
-             \"queue_position\" = NULL, \
+             \
              \"error_details\" = (\"agent_run\".\"error_details\" || $2::jsonb) \
              WHERE \"agent_run\".\"id\" IN ($3, $4)",
         );

@@ -45,6 +45,13 @@ pub struct StateHandle {
     shutdown: Arc<tokio::sync::Notify>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct RetryStatus {
+    next_retry_at: Option<DateTime<Utc>>,
+    reason: Option<String>,
+    cloud_deleted_confirmations: u32,
+}
+
 struct Inner {
     cfg: Mutex<Config>,
     /// Cached from the first runner at construction time so
@@ -72,6 +79,11 @@ struct Inner {
     /// to 0 on a successful open. A non-zero value on a disconnected runner
     /// is the difference between "briefly reconnecting" and "wedged".
     consecutive_bootstrap_failures: Mutex<u32>,
+    /// While disconnected: when the next session-open attempt is due, why
+    /// the last one failed, and how many consecutive `runner_gone` answers
+    /// have been counted toward the local purge (PDASHOSS01-306). All
+    /// cleared on a successful open.
+    retry: Mutex<RetryStatus>,
     current_run: Mutex<Option<CurrentRunSummary>>,
     /// Reported `RunnerStatus` is **derived** from two independent lanes so the
     /// assign (issue) lane and the chat lane can be active concurrently without
@@ -173,6 +185,7 @@ impl StateHandle {
                 last_heartbeat: Mutex::new(None),
                 last_session_open: Mutex::new(None),
                 consecutive_bootstrap_failures: Mutex::new(0),
+                retry: Mutex::new(RetryStatus::default()),
                 current_run: Mutex::new(None),
                 run_status: Mutex::new(RunnerStatus::Idle),
                 chat_active: Mutex::new(false),
@@ -221,8 +234,11 @@ impl StateHandle {
         self.inner.agent_health.lock().await.clone()
     }
 
+    /// Cut this runner's current reconnect wait short and retry with a
+    /// fresh backoff. `notify_one` stores a permit when nothing is waiting,
+    /// so a kick that lands mid-request still applies to the next wait.
     pub fn force_reconnect(&self) {
-        self.reconnect.notify_waiters();
+        self.reconnect.notify_one();
     }
 
     pub fn reconnect_notified(&self) -> Arc<tokio::sync::Notify> {
@@ -259,6 +275,44 @@ impl StateHandle {
     pub async fn note_session_open(&self) {
         *self.inner.last_session_open.lock().await = Some(Utc::now());
         *self.inner.consecutive_bootstrap_failures.lock().await = 0;
+        *self.inner.retry.lock().await = RetryStatus::default();
+        self.tick();
+    }
+
+    /// Record when the next session-open attempt is due and why the last
+    /// one failed, for `pidash status`.
+    pub async fn note_retry_scheduled(
+        &self,
+        next_retry_at: DateTime<Utc>,
+        reason: String,
+        cloud_deleted_confirmations: u32,
+    ) {
+        *self.inner.retry.lock().await = RetryStatus {
+            next_retry_at: Some(next_retry_at),
+            reason: Some(reason),
+            cloud_deleted_confirmations,
+        };
+        self.tick();
+    }
+
+    /// A long-poll on an established session failed transiently (cloud
+    /// outage, proxy error page, timeout). The session may still be valid,
+    /// but until a poll gets through the runner is not reachable, so show
+    /// it DISCONNECTED with when the next poll is due.
+    pub async fn note_poll_failure(&self, next_retry_at: DateTime<Utc>, reason: String) {
+        *self.inner.connected.lock().await = false;
+        *self.inner.retry.lock().await = RetryStatus {
+            next_retry_at: Some(next_retry_at),
+            reason: Some(reason),
+            cloud_deleted_confirmations: 0,
+        };
+        self.tick();
+    }
+
+    /// A long-poll got through again after [`Self::note_poll_failure`].
+    pub async fn note_poll_recovered(&self) {
+        *self.inner.connected.lock().await = true;
+        *self.inner.retry.lock().await = RetryStatus::default();
         self.tick();
     }
 
@@ -497,6 +551,7 @@ impl StateHandle {
         let last_session_open = *self.inner.last_session_open.lock().await;
         let consecutive_bootstrap_failures =
             *self.inner.consecutive_bootstrap_failures.lock().await;
+        let retry = self.inner.retry.lock().await.clone();
         let current_run = self.inner.current_run.lock().await.clone();
         let approvals_pending = self.approvals_pending_value().await;
         let observability = if self.inner.agent_observability_v1 {
@@ -516,6 +571,9 @@ impl StateHandle {
             last_heartbeat,
             last_session_open,
             consecutive_bootstrap_failures,
+            next_retry_at: if connected { None } else { retry.next_retry_at },
+            disconnect_reason: if connected { None } else { retry.reason },
+            cloud_deleted_confirmations: retry.cloud_deleted_confirmations,
             observability,
         }
     }
@@ -649,6 +707,29 @@ mod tests {
 
         // Failures after a successful open count from zero again.
         assert_eq!(state.note_bootstrap_failure().await, 1);
+    }
+
+    #[tokio::test]
+    async fn retry_status_shows_while_disconnected_and_clears_on_open() {
+        let state = empty_state();
+        let at = Utc::now() + chrono::Duration::hours(2);
+        state
+            .note_retry_scheduled(at, "server unreachable".into(), 0)
+            .await;
+        let snap = state.runner_snapshot().await;
+        assert_eq!(snap.next_retry_at, Some(at));
+        assert_eq!(snap.disconnect_reason.as_deref(), Some("server unreachable"));
+
+        state
+            .note_retry_scheduled(at, "deleted in cloud; confirming 4/10".into(), 4)
+            .await;
+        assert_eq!(state.runner_snapshot().await.cloud_deleted_confirmations, 4);
+
+        state.note_session_open().await;
+        let snap = state.runner_snapshot().await;
+        assert_eq!(snap.next_retry_at, None);
+        assert_eq!(snap.disconnect_reason, None);
+        assert_eq!(snap.cloud_deleted_confirmations, 0);
     }
 
     #[tokio::test]

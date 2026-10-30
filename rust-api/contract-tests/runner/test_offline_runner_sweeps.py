@@ -81,7 +81,7 @@ def _run_row(seeder, run_id):
         "SELECT status, runner_id, pinned_runner_id, "
         "COALESCE(error_details ->> 'message', '') AS error, "
         "COALESCE(error_details ->> 'code', '') AS error_code, "
-        "ended_at, queue_position, thread_id FROM agent_run WHERE id = %s",
+        "ended_at, thread_id FROM agent_run WHERE id = %s",
         (run_id,),
     )
 
@@ -293,7 +293,6 @@ def test_fail_finishes_stale_busy_runs(seeder, daemon_world, machine_flow, broke
     assert row["error_code"] == RUNNER_OFFLINE
     assert row["error"].startswith("runner offline: no heartbeat")
     assert row["ended_at"] is not None
-    assert row["queue_position"] is None
 
     stopped = _run_row(seeder, stopping["id"])
     assert stopped["status"] == "cancelled"

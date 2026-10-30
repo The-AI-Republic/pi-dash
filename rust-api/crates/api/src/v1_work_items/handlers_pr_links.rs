@@ -84,6 +84,7 @@ use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{WriteActor, WriteCtx, WriteScope};
 use pidash_services::operations;
+use pidash_services::read;
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -429,24 +430,16 @@ fn parse_json_body(raw: &[u8]) -> Result<Map<String, Value>, Denial> {
 // ---------------------------------------------------------------------------
 // List / detail SQL (Q2 semantics, executable `$n` binds)
 // ---------------------------------------------------------------------------
-
-/// PR-link list rows in fixture order (`github_pr.py:37-49`, fixture
-/// `github_pr_list_queryset`): the join-span form verbatim — soft-delete
-/// scope on the link table only, `DISTINCT`, `-created_at`. `$1` slug,
-/// `$2` project id, `$3` issue id, `$4` member id.
-const PR_LIST_SQL: &str = r#"SELECT DISTINCT "github_pull_request_links"."created_at", "github_pull_request_links"."updated_at", "github_pull_request_links"."created_by_id", "github_pull_request_links"."updated_by_id", "github_pull_request_links"."deleted_at", "github_pull_request_links"."id", "github_pull_request_links"."project_id", "github_pull_request_links"."workspace_id", "github_pull_request_links"."issue_id", "github_pull_request_links"."repo_owner", "github_pull_request_links"."repo_name", "github_pull_request_links"."pr_number", "github_pull_request_links"."url", "github_pull_request_links"."title", "github_pull_request_links"."state", "github_pull_request_links"."merged", "github_pull_request_links"."draft", "github_pull_request_links"."pr_updated_at" FROM "github_pull_request_links" INNER JOIN "workspaces" ON ("github_pull_request_links"."workspace_id" = "workspaces"."id") INNER JOIN "projects" ON ("github_pull_request_links"."project_id" = "projects"."id") INNER JOIN "project_members" ON ("projects"."id" = "project_members"."project_id") WHERE ("github_pull_request_links"."deleted_at" IS NULL AND "workspaces"."slug" = $1 AND "github_pull_request_links"."project_id" = $2 AND "github_pull_request_links"."issue_id" = $3 AND "project_members"."is_active" AND "project_members"."member_id" = $4 AND "projects"."archived_at" IS NULL) ORDER BY "github_pull_request_links"."created_at" DESC"#;
-
-/// PR-link detail scope + pk (`github_pr.py:86-98`, fixture
-/// `github_pr_detail_queryset`): no archived guard, no `DISTINCT`,
-/// `Meta.ordering` (`-created_at`). `$5` pk.
-const PR_DETAIL_SQL: &str = r#"SELECT "github_pull_request_links"."created_at", "github_pull_request_links"."updated_at", "github_pull_request_links"."created_by_id", "github_pull_request_links"."updated_by_id", "github_pull_request_links"."deleted_at", "github_pull_request_links"."id", "github_pull_request_links"."project_id", "github_pull_request_links"."workspace_id", "github_pull_request_links"."issue_id", "github_pull_request_links"."repo_owner", "github_pull_request_links"."repo_name", "github_pull_request_links"."pr_number", "github_pull_request_links"."url", "github_pull_request_links"."title", "github_pull_request_links"."state", "github_pull_request_links"."merged", "github_pull_request_links"."draft", "github_pull_request_links"."pr_updated_at" FROM "github_pull_request_links" INNER JOIN "workspaces" ON ("github_pull_request_links"."workspace_id" = "workspaces"."id") INNER JOIN "projects" ON ("github_pull_request_links"."project_id" = "projects"."id") INNER JOIN "project_members" ON ("projects"."id" = "project_members"."project_id") WHERE ("github_pull_request_links"."deleted_at" IS NULL AND "workspaces"."slug" = $1 AND "github_pull_request_links"."project_id" = $2 AND "github_pull_request_links"."issue_id" = $3 AND "project_members"."is_active" AND "project_members"."member_id" = $4 AND "github_pull_request_links"."id" = $5) ORDER BY "github_pull_request_links"."created_at" DESC LIMIT 1"#;
+// (The PR-link list/detail SQL moved to `pidash_services::read::pr_links`
+// with their fetchers, PIDASHCONV-1661; the review-link SQL stays here.)
 
 /// Review-link list rows (`git_code_review.py:32-44`, fixture
-/// `code_review_list_queryset`): same join-span shape as [`PR_LIST_SQL`].
+/// `code_review_list_queryset`): same join-span shape as
+/// `read::PR_LIST_SQL`.
 const REVIEW_LIST_SQL: &str = r#"SELECT DISTINCT "git_code_review_links"."created_at", "git_code_review_links"."updated_at", "git_code_review_links"."created_by_id", "git_code_review_links"."updated_by_id", "git_code_review_links"."deleted_at", "git_code_review_links"."id", "git_code_review_links"."project_id", "git_code_review_links"."workspace_id", "git_code_review_links"."issue_id", "git_code_review_links"."provider", "git_code_review_links"."host_url", "git_code_review_links"."namespace", "git_code_review_links"."repo_name", "git_code_review_links"."repo_external_id", "git_code_review_links"."external_id", "git_code_review_links"."external_iid", "git_code_review_links"."url", "git_code_review_links"."title", "git_code_review_links"."state", "git_code_review_links"."merged", "git_code_review_links"."draft", "git_code_review_links"."remote_updated_at", "git_code_review_links"."metadata" FROM "git_code_review_links" INNER JOIN "workspaces" ON ("git_code_review_links"."workspace_id" = "workspaces"."id") INNER JOIN "projects" ON ("git_code_review_links"."project_id" = "projects"."id") INNER JOIN "project_members" ON ("projects"."id" = "project_members"."project_id") WHERE ("git_code_review_links"."deleted_at" IS NULL AND "workspaces"."slug" = $1 AND "git_code_review_links"."project_id" = $2 AND "git_code_review_links"."issue_id" = $3 AND "project_members"."is_active" AND "project_members"."member_id" = $4 AND "projects"."archived_at" IS NULL) ORDER BY "git_code_review_links"."created_at" DESC"#;
 
 /// Review-link detail scope + pk (`git_code_review.py:86-98`, fixture
-/// `code_review_detail_queryset`): same shape as [`PR_DETAIL_SQL`].
+/// `code_review_detail_queryset`): same shape as `read::PR_DETAIL_SQL`.
 const REVIEW_DETAIL_SQL: &str = r#"SELECT "git_code_review_links"."created_at", "git_code_review_links"."updated_at", "git_code_review_links"."created_by_id", "git_code_review_links"."updated_by_id", "git_code_review_links"."deleted_at", "git_code_review_links"."id", "git_code_review_links"."project_id", "git_code_review_links"."workspace_id", "git_code_review_links"."issue_id", "git_code_review_links"."provider", "git_code_review_links"."host_url", "git_code_review_links"."namespace", "git_code_review_links"."repo_name", "git_code_review_links"."repo_external_id", "git_code_review_links"."external_id", "git_code_review_links"."external_iid", "git_code_review_links"."url", "git_code_review_links"."title", "git_code_review_links"."state", "git_code_review_links"."merged", "git_code_review_links"."draft", "git_code_review_links"."remote_updated_at", "git_code_review_links"."metadata" FROM "git_code_review_links" INNER JOIN "workspaces" ON ("git_code_review_links"."workspace_id" = "workspaces"."id") INNER JOIN "projects" ON ("git_code_review_links"."project_id" = "projects"."id") INNER JOIN "project_members" ON ("projects"."id" = "project_members"."project_id") WHERE ("git_code_review_links"."deleted_at" IS NULL AND "workspaces"."slug" = $1 AND "git_code_review_links"."project_id" = $2 AND "git_code_review_links"."issue_id" = $3 AND "project_members"."is_active" AND "project_members"."member_id" = $4 AND "git_code_review_links"."id" = $5) ORDER BY "git_code_review_links"."created_at" DESC LIMIT 1"#;
 
 // ---------------------------------------------------------------------------
@@ -2126,7 +2119,7 @@ pub async fn pr_list_inner(
         actor_id: &pre.actor.id,
         tz: &timezone,
         query,
-        sql: PR_LIST_SQL,
+        sql: read::PR_LIST_SQL,
         render: |row, tz| operations::pull_requests::render_pr_row(row, tz).map_err(Denial::from),
     })
     .await
@@ -2255,15 +2248,16 @@ pub async fn pr_destroy_inner(
     // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
     // runs after permissions; an unknown zone 400s only for survivors).
     activate_timezone(pre.actor.timezone.as_deref())?;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(PR_DETAIL_SQL)
-        .bind(slug)
-        .bind(project_id)
-        .bind(issue_id)
-        .bind(pre.actor.id)
-        .bind(pk)
-        .fetch_optional(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "pr detail fetch"))?;
+    let row: Option<sqlx::postgres::PgRow> =
+        read::fetch_pr_detail_row(&pre.pool, slug, &project_id, &issue_id, &pre.actor.id, &pk)
+            .await
+            .map_err(|error| match error {
+                read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+                read::Error::Db(err) => {
+                    let (site, source) = err.split();
+                    db_error(source, site)
+                }
+            })?;
     let Some(row) = row else {
         return Err(Denial::NotFound);
     };

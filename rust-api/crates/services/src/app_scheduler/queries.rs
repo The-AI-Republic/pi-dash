@@ -250,7 +250,7 @@ pub const SCHEDULER_SOFT_DELETE_PARAMS: &[&str] = &["now", "now2", "user_id", "s
 /// (`schedulers` INNER — non-null FK; `agent_run`/`pod` LEFT — nullable
 /// FKs), `ORDER BY -created_at`. Ported quirk 3: the `pod` JOIN carries
 /// no `deleted_at` filter.
-pub const BINDING_LIST_SQL: &str = "SELECT \"scheduler_bindings\".\"created_at\", \"scheduler_bindings\".\"updated_at\", \"scheduler_bindings\".\"created_by_id\", \"scheduler_bindings\".\"updated_by_id\", \"scheduler_bindings\".\"deleted_at\", \"scheduler_bindings\".\"id\", \"scheduler_bindings\".\"workspace_id\", \"scheduler_bindings\".\"project_id\", \"scheduler_bindings\".\"scheduler_id\", \"scheduler_bindings\".\"dtstart\", \"scheduler_bindings\".\"tzid\", \"scheduler_bindings\".\"rrule\", \"scheduler_bindings\".\"rdates\", \"scheduler_bindings\".\"exdates\", \"scheduler_bindings\".\"extra_context\", \"scheduler_bindings\".\"enabled\", \"scheduler_bindings\".\"outcome_mode\", \"scheduler_bindings\".\"next_run_at\", \"scheduler_bindings\".\"last_run_id\", \"scheduler_bindings\".\"last_error\", \"scheduler_bindings\".\"actor_id\", \"scheduler_bindings\".\"pod_id\", \"schedulers\".\"created_at\", \"schedulers\".\"updated_at\", \"schedulers\".\"created_by_id\", \"schedulers\".\"updated_by_id\", \"schedulers\".\"deleted_at\", \"schedulers\".\"id\", \"schedulers\".\"workspace_id\", \"schedulers\".\"slug\", \"schedulers\".\"name\", \"schedulers\".\"description\", \"schedulers\".\"prompt\", \"schedulers\".\"source\", \"schedulers\".\"is_enabled\", \"schedulers\".\"color\", \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error_details\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\", \"pod\".\"id\", \"pod\".\"workspace_id\", \"pod\".\"project_id\", \"pod\".\"name\", \"pod\".\"description\", \"pod\".\"created_by_id\", \"pod\".\"is_default\", \"pod\".\"deleted_at\", \"pod\".\"created_at\", \"pod\".\"updated_at\" FROM \"scheduler_bindings\" INNER JOIN \"workspaces\" ON (\"scheduler_bindings\".\"workspace_id\" = \"workspaces\".\"id\") INNER JOIN \"schedulers\" ON (\"scheduler_bindings\".\"scheduler_id\" = \"schedulers\".\"id\") LEFT OUTER JOIN \"agent_run\" ON (\"scheduler_bindings\".\"last_run_id\" = \"agent_run\".\"id\") LEFT OUTER JOIN \"pod\" ON (\"scheduler_bindings\".\"pod_id\" = \"pod\".\"id\") WHERE (\"scheduler_bindings\".\"deleted_at\" IS NULL AND \"scheduler_bindings\".\"project_id\" = :project_id AND \"workspaces\".\"slug\" = :slug) ORDER BY \"scheduler_bindings\".\"created_at\" DESC;";
+pub const BINDING_LIST_SQL: &str = "SELECT \"scheduler_bindings\".\"created_at\", \"scheduler_bindings\".\"updated_at\", \"scheduler_bindings\".\"created_by_id\", \"scheduler_bindings\".\"updated_by_id\", \"scheduler_bindings\".\"deleted_at\", \"scheduler_bindings\".\"id\", \"scheduler_bindings\".\"workspace_id\", \"scheduler_bindings\".\"project_id\", \"scheduler_bindings\".\"scheduler_id\", \"scheduler_bindings\".\"dtstart\", \"scheduler_bindings\".\"tzid\", \"scheduler_bindings\".\"rrule\", \"scheduler_bindings\".\"rdates\", \"scheduler_bindings\".\"exdates\", \"scheduler_bindings\".\"extra_context\", \"scheduler_bindings\".\"enabled\", \"scheduler_bindings\".\"outcome_mode\", \"scheduler_bindings\".\"next_run_at\", \"scheduler_bindings\".\"last_run_id\", \"scheduler_bindings\".\"last_error\", \"scheduler_bindings\".\"actor_id\", \"scheduler_bindings\".\"pod_id\", \"schedulers\".\"created_at\", \"schedulers\".\"updated_at\", \"schedulers\".\"created_by_id\", \"schedulers\".\"updated_by_id\", \"schedulers\".\"deleted_at\", \"schedulers\".\"id\", \"schedulers\".\"workspace_id\", \"schedulers\".\"slug\", \"schedulers\".\"name\", \"schedulers\".\"description\", \"schedulers\".\"prompt\", \"schedulers\".\"source\", \"schedulers\".\"is_enabled\", \"schedulers\".\"color\", \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error_details\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\", \"pod\".\"id\", \"pod\".\"workspace_id\", \"pod\".\"project_id\", \"pod\".\"name\", \"pod\".\"description\", \"pod\".\"created_by_id\", \"pod\".\"is_default\", \"pod\".\"deleted_at\", \"pod\".\"created_at\", \"pod\".\"updated_at\" FROM \"scheduler_bindings\" INNER JOIN \"workspaces\" ON (\"scheduler_bindings\".\"workspace_id\" = \"workspaces\".\"id\") INNER JOIN \"schedulers\" ON (\"scheduler_bindings\".\"scheduler_id\" = \"schedulers\".\"id\") LEFT OUTER JOIN \"agent_run\" ON (\"scheduler_bindings\".\"last_run_id\" = \"agent_run\".\"id\") LEFT OUTER JOIN \"pod\" ON (\"scheduler_bindings\".\"pod_id\" = \"pod\".\"id\") WHERE (\"scheduler_bindings\".\"deleted_at\" IS NULL AND \"scheduler_bindings\".\"project_id\" = :project_id AND \"workspaces\".\"slug\" = :slug) ORDER BY \"scheduler_bindings\".\"created_at\" DESC;";
 
 /// Bind order for [`BINDING_LIST_SQL`].
 pub const BINDING_LIST_PARAMS: &[&str] = &["project_id", "slug"];
@@ -333,7 +333,6 @@ pub const AGENT_RUN_COLUMNS: &[&str] = &[
     "total_tokens",
     "created_at",
     "assigned_at",
-    "queue_position",
     "started_at",
     "ended_at",
 ];
@@ -375,7 +374,6 @@ pub struct AgentRunRow {
     pub dispatch_attempts: i32,
     pub cancel_requested_at: Option<DateTime<Utc>>,
     pub cancel_reason: String,
-    pub error_code: String,
     pub tool_plan: serde_json::Value,
     pub terminal_hooks_applied_at: Option<DateTime<Utc>>,
     pub terminal_capacity_released_at: Option<DateTime<Utc>>,
@@ -389,7 +387,7 @@ pub struct AgentRunRow {
     pub agent_metadata: serde_json::Value,
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub done_payload: Option<serde_json::Value>,
-    pub error: String,
+    pub error_details: serde_json::Value,
     pub refusal_category: String,
     pub llm_model: String,
     pub usage: serde_json::Value,
@@ -398,7 +396,6 @@ pub struct AgentRunRow {
     pub total_tokens: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub assigned_at: Option<DateTime<Utc>>,
-    pub queue_position: Option<i16>,
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
 }
@@ -593,11 +590,22 @@ pub fn install_next_run_at_decision(
     computed.filter(|next| Some(*next) != stored)
 }
 
-/// Patch write decision (`:272`): write the computed value back via BR6
-/// whenever it is non-null — WITHOUT comparing to stored (ported quirk
-/// 6: the install/patch asymmetry is intentional).
-pub fn patch_next_run_at_decision(computed: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
-    computed
+/// Patch write decision (`:272-283`, `_next_fire_for_binding_checked`):
+/// `Some(value)` means write `value` (possibly NULL) via BR6, `None`
+/// means no write. A clean parse writes whenever the computed value
+/// differs from the refreshed stored one — INCLUDING a NULL: an edit that
+/// made the series finite and already over must clear the stale cursor,
+/// or the scanner would fire a rule past its end. A parse error (the
+/// serializer validated the bundle, so unreachable in practice) leaves
+/// `next_run_at` untouched.
+pub fn patch_next_run_at_decision(
+    computed: Result<Option<DateTime<Utc>>, String>,
+    stored: Option<DateTime<Utc>>,
+) -> Option<Option<DateTime<Utc>>> {
+    match computed {
+        Ok(next) if next != stored => Some(next),
+        _ => None,
+    }
 }
 
 /// Install recompute (`:216-220`): expand `bundle` through the injected
@@ -622,18 +630,24 @@ pub fn install_next_run_at(
     install_next_run_at_decision(computed, stored)
 }
 
-/// Patch recompute (`:269-274`): expand `bundle` through the injected
-/// closure, then apply [`patch_next_run_at_decision`]. The handler
-/// calls this only after [`patch_triggers_recompute`] passed AND the
-/// row was refreshed from the DB (`:270`), and writes the result via
-/// BR6 (also updating its in-memory row, which the 200 re-renders).
+/// Patch recompute (`:269-283`): expand `bundle` through the injected
+/// checked closure (`_next_fire_for_binding_checked`: parse error vs
+/// exhausted series), then apply [`patch_next_run_at_decision`] against
+/// the refreshed `stored` cursor. The handler calls this only after
+/// [`patch_triggers_recompute`] passed AND the row was refreshed from the
+/// DB (`:270`), and writes the result via BR6 (also updating its
+/// in-memory row, which the 200 re-renders).
 pub fn patch_next_run_at(
     bundle: &RruleBundle<'_>,
+    stored: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
-    next_fire_for_binding: impl Fn(&RruleBundle<'_>, DateTime<Utc>) -> Option<DateTime<Utc>>,
-) -> Option<DateTime<Utc>> {
-    let computed = next_fire_for_binding(bundle, now);
-    patch_next_run_at_decision(computed)
+    next_fire_for_binding_checked: impl Fn(
+        &RruleBundle<'_>,
+        DateTime<Utc>,
+    ) -> Result<Option<DateTime<Utc>>, String>,
+) -> Option<Option<DateTime<Utc>>> {
+    let computed = next_fire_for_binding_checked(bundle, now);
+    patch_next_run_at_decision(computed, stored)
 }
 
 #[cfg(test)]
@@ -1203,9 +1217,28 @@ mod tests {
         assert_eq!(install_next_run_at_decision(Some(t1), Some(t1)), None);
         assert_eq!(install_next_run_at_decision(None, None), None);
         assert_eq!(install_next_run_at_decision(None, Some(t1)), None);
-        // Patch (:272): non-null, no comparison — even when identical.
-        assert_eq!(patch_next_run_at_decision(Some(t1)), Some(t1));
-        assert_eq!(patch_next_run_at_decision(None), None);
+        // Patch (:272-283): a clean parse writes whatever differs from
+        // stored — including NULL (a finished series clears the stale
+        // cursor); identical values and parse errors write nothing.
+        assert_eq!(
+            patch_next_run_at_decision(Ok(Some(t2)), Some(t1)),
+            Some(Some(t2))
+        );
+        assert_eq!(
+            patch_next_run_at_decision(Ok(Some(t1)), None),
+            Some(Some(t1))
+        );
+        assert_eq!(patch_next_run_at_decision(Ok(Some(t1)), Some(t1)), None);
+        assert_eq!(patch_next_run_at_decision(Ok(None), Some(t1)), Some(None));
+        assert_eq!(patch_next_run_at_decision(Ok(None), None), None);
+        assert_eq!(
+            patch_next_run_at_decision(Err("bad".to_owned()), Some(t1)),
+            None
+        );
+        assert_eq!(
+            patch_next_run_at_decision(Err("bad".to_owned()), None),
+            None
+        );
     }
 
     #[test]
@@ -1232,10 +1265,17 @@ mod tests {
         // Install applies the differs-from-stored rule.
         let out = install_next_run_at(&bundle, Some(fire), now, |_, _| Some(fire));
         assert_eq!(out, None);
-        // Patch applies the non-null rule (no comparison).
-        let out = patch_next_run_at(&bundle, now, |_, _| Some(fire));
-        assert_eq!(out, Some(fire));
-        let out = patch_next_run_at(&bundle, now, |_, _| None);
+        // Patch applies the differs-from-stored rule over the checked
+        // closure (NULL included).
+        let out = patch_next_run_at(&bundle, None, now, |got, got_now| {
+            assert_eq!(*got, bundle);
+            assert_eq!(got_now, now);
+            Ok(Some(fire))
+        });
+        assert_eq!(out, Some(Some(fire)));
+        let out = patch_next_run_at(&bundle, Some(fire), now, |_, _| Ok(None));
+        assert_eq!(out, Some(None));
+        let out = patch_next_run_at(&bundle, Some(fire), now, |_, _| Err("bad".to_owned()));
         assert_eq!(out, None);
     }
 

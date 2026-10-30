@@ -164,7 +164,6 @@
    "row": {
     "status": "completed",
     "ended_at_set": true,
-    "queue_position": null,
     "hooks": null,
     "capacity": null,
     "done_payload": {
@@ -454,8 +453,7 @@
    "status": "queued",
    "runner": null,
    "pinned": null,
-   "assigned_at": null,
-   "queue_position": null
+   "assigned_at": null
   },
   "parent_thread_id": "''",
   "on_commit": [
@@ -475,7 +473,7 @@
   "run_runner": null,
   "runner_status": "busy"
  },
- "requeue_rule": "status=QUEUED + runner/pinned/assigned_at/queue_position cleared + parent thread_id='' (when set) + on_commit drain pod; busy variant flips runner to BUSY first (run_lifecycle.py:321-322)",
+ "requeue_rule": "status=QUEUED + runner/pinned/assigned_at cleared + parent thread_id='' (when set) + on_commit drain pod; busy variant flips runner to BUSY first (run_lifecycle.py:321-322)",
  "finalize_run_terminal": {
   "completed": {
    "status": "completed",

@@ -31,6 +31,7 @@ use uuid::Uuid;
 use crate::cloud::protocol::{
     ClientMsg, Envelope, RunnerStatus as WireStatus, ServerMsg, WIRE_VERSION,
 };
+use crate::cloud::reconnect::{Backoff, ReconnectPolicy, RetryDecision, failure_reason, jittered};
 use crate::config::schema::AgentKind;
 
 // ---------------------------------------------------------------------------
@@ -65,6 +66,17 @@ pub enum TransportError {
     DevMachineRevoked,
     #[error("auth: runner_revoked")]
     RunnerRevoked,
+    /// The server verified this machine's token and says the runner id no
+    /// longer exists: it was deleted in the cloud. One answer is not enough
+    /// to act on — `HttpLoop` counts consecutive answers (see
+    /// `cloud::reconnect`) and only then purges. Neither recoverable nor
+    /// fatal on its own.
+    #[error("auth: runner_gone")]
+    RunnerGone,
+    /// Enough consecutive `runner_gone` answers arrived: the runner must be
+    /// removed locally. Fatal; the supervisor turns it into a local purge.
+    #[error("runner deleted in cloud (confirmed {confirmations} times)")]
+    RunnerDeletedInCloud { confirmations: u32 },
     #[error("auth: runner_id_mismatch")]
     RunnerIdMismatch,
     #[error("auth: invalid_refresh_token")]
@@ -73,8 +85,10 @@ pub enum TransportError {
     SessionEvicted { reason: String },
     #[error("concurrent_poll")]
     ConcurrentPoll,
+    /// HTTP 429. `retry_after` carries the server's `Retry-After` when the
+    /// response had one.
     #[error("rate_limited")]
-    RateLimited,
+    RateLimited { retry_after: Option<Duration> },
     #[error("server: HTTP {status}: {body}")]
     Server { status: u16, body: String },
     #[error("protocol: {0}")]
@@ -95,7 +109,7 @@ impl TransportError {
                 | TransportError::Connect(_)
                 | TransportError::Server { .. }
                 | TransportError::AccessTokenExpired
-                | TransportError::RateLimited
+                | TransportError::RateLimited { .. }
         )
     }
 
@@ -114,6 +128,7 @@ impl TransportError {
                 | TransportError::RunnerRevoked
                 | TransportError::RunnerIdMismatch
                 | TransportError::InvalidRefreshToken
+                | TransportError::RunnerDeletedInCloud { .. }
                 | TransportError::Local(_)
                 | TransportError::LocalTeardown(_)
         )
@@ -380,6 +395,7 @@ impl TransportErrorCode {
             "auth: machine_token_revoked" => TransportError::MachineTokenRevoked,
             "auth: dev_machine_revoked" => TransportError::DevMachineRevoked,
             "auth: runner_revoked" => TransportError::RunnerRevoked,
+            "auth: runner_gone" => TransportError::RunnerGone,
             "auth: runner_id_mismatch" => TransportError::RunnerIdMismatch,
             "auth: invalid_refresh_token" => TransportError::InvalidRefreshToken,
             other => TransportError::Network(other.to_string()),
@@ -566,8 +582,9 @@ impl RunnerCloudClient {
             .map_err(classify_send_error)?;
         let status = resp.status();
         if !status.is_success() {
+            let headers = resp.headers().clone();
             let body = resp.text().await.unwrap_or_default();
-            return Err(map_session_error(status, &body));
+            return Err(with_retry_after(map_session_error(status, &body), &headers));
         }
         let parsed: OpenSessionResponse = resp
             .json()
@@ -668,8 +685,9 @@ impl RunnerCloudClient {
             return Err(TransportError::SessionEvicted { reason: body });
         }
         if !status.is_success() {
+            let headers = resp.headers().clone();
             let body = resp.text().await.unwrap_or_default();
-            return Err(map_auth_error(status, &body));
+            return Err(with_retry_after(map_auth_error(status, &body), &headers));
         }
         resp.json::<PollResponse>()
             .await
@@ -1093,23 +1111,39 @@ fn should_retry_post_error(err: &TransportError, attempt: u8) -> bool {
         TransportError::Network(_)
         | TransportError::Timeout(_)
         | TransportError::Connect(_)
-        | TransportError::RateLimited => true,
+        | TransportError::RateLimited { .. } => true,
         TransportError::Server { status, .. } => *status >= 500,
         _ => false,
     }
 }
 
 fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
+    retry_after_capped(headers, POST_RETRY_MAX_DELAY)
+}
+
+/// Parse `Retry-After` (delta-seconds or HTTP date), capped at `cap`.
+fn retry_after_capped(headers: &HeaderMap, cap: Duration) -> Option<Duration> {
     let raw = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
     if let Ok(seconds) = raw.parse::<u64>() {
-        return Some(Duration::from_secs(seconds).min(POST_RETRY_MAX_DELAY));
+        return Some(Duration::from_secs(seconds).min(cap));
     }
     let retry_at = DateTime::parse_from_rfc2822(raw).ok()?.with_timezone(&Utc);
     let delay = retry_at
         .signed_duration_since(Utc::now())
         .to_std()
         .unwrap_or_default();
-    Some(delay.min(POST_RETRY_MAX_DELAY))
+    Some(delay.min(cap))
+}
+
+/// Attach the response's `Retry-After` to a `RateLimited` error so the
+/// reconnect policy can honor it.
+fn with_retry_after(err: TransportError, headers: &HeaderMap) -> TransportError {
+    match err {
+        TransportError::RateLimited { retry_after: None } => TransportError::RateLimited {
+            retry_after: retry_after_capped(headers, crate::cloud::reconnect::MAX_BACKOFF),
+        },
+        other => other,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1368,6 +1402,12 @@ pub struct HttpLoop {
     /// caller that doesn't want to thread state through.
     pub state: Option<crate::daemon::state::StateHandle>,
     teardown_rx: Option<watch::Receiver<bool>>,
+    /// Wake, network change and `pidash reconnect` notify this to cut a
+    /// backoff wait short (PDASHOSS01-306). `notify_one` semantics, so a
+    /// kick that lands mid-request still shortens the next wait.
+    reconnect_kick: Option<Arc<tokio::sync::Notify>>,
+    /// Session-open backoff + `runner_gone` confirmation.
+    policy: ReconnectPolicy,
     inline_acks: VecDeque<String>,
     /// Bounded mid-dedupe (design.md §8 / Decision 21). At-least-once
     /// delivery + the PEL-replay path (`use_zero=True` on the first
@@ -1454,6 +1494,38 @@ pub struct InboundEnvelope {
     pub env: Envelope<ServerMsg>,
 }
 
+/// How a [`HttpLoop::wait_retry`] wait ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryWait {
+    /// The full delay elapsed.
+    Elapsed,
+    /// A reconnect kick arrived: retry now with a fresh backoff.
+    Kicked,
+    /// The runner was removed locally.
+    Teardown,
+    /// The daemon is shutting down.
+    Shutdown,
+}
+
+/// Resolve once the teardown latch reads `true`. Never resolves without a
+/// latch, or when its sender is dropped while still `false`.
+async fn teardown_signalled(rx: Option<watch::Receiver<bool>>) {
+    if let Some(mut rx) = rx
+        && rx.wait_for(|removed| *removed).await.is_ok()
+    {
+        return;
+    }
+    std::future::pending::<()>().await
+}
+
+const SHUTDOWN_DURING_BOOTSTRAP: &str = "shutdown during bootstrap";
+
+/// Bootstrap reports a daemon shutdown as an error; inside the poll loop
+/// that is a clean exit, not a failure.
+fn is_bootstrap_shutdown(err: &TransportError) -> bool {
+    matches!(err, TransportError::Network(msg) if msg == SHUTDOWN_DURING_BOOTSTRAP)
+}
+
 /// Pure helper used by `HttpLoop::current_attach_body` so the refresh
 /// logic is testable without standing up a full `RunnerCloudClient`.
 fn refresh_attach_body(
@@ -1487,6 +1559,8 @@ impl HttpLoop {
             attach_body,
             state: None,
             teardown_rx: None,
+            reconnect_kick: None,
+            policy: ReconnectPolicy::bootstrap(),
             inline_acks: VecDeque::new(),
             mid_dedupe: MidDedupe::with_capacity(MID_DEDUPE_CAPACITY),
             long_poll_interval_secs: DEFAULT_LONG_POLL_INTERVAL_SECS,
@@ -1507,6 +1581,40 @@ impl HttpLoop {
     pub fn with_teardown_rx(mut self, teardown_rx: watch::Receiver<bool>) -> Self {
         self.teardown_rx = Some(teardown_rx);
         self
+    }
+
+    /// Replace the reconnect policy (tests shrink its timings).
+    pub fn with_policy(mut self, policy: ReconnectPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// Attach the reconnect kick (see the `reconnect_kick` field).
+    pub fn with_reconnect_kick(mut self, kick: Arc<tokio::sync::Notify>) -> Self {
+        self.reconnect_kick = Some(kick);
+        self
+    }
+
+    fn teardown_error() -> TransportError {
+        TransportError::LocalTeardown("runner removed locally".into())
+    }
+
+    /// Wait `delay` unless something more important happens first.
+    async fn wait_retry(&self, delay: Duration) -> RetryWait {
+        let shutdown = self.shutdown.clone();
+        let kick = self.reconnect_kick.clone();
+        tokio::select! {
+            biased;
+            _ = teardown_signalled(self.teardown_rx.clone()) => RetryWait::Teardown,
+            _ = shutdown.notified() => RetryWait::Shutdown,
+            _ = async {
+                match &kick {
+                    Some(kick) => kick.notified().await,
+                    None => std::future::pending().await,
+                }
+            } => RetryWait::Kicked,
+            _ = sleep(delay) => RetryWait::Elapsed,
+        }
     }
 
     fn mailbox_closed_error(&self, err: impl std::fmt::Display) -> TransportError {
@@ -1536,26 +1644,33 @@ impl HttpLoop {
         )
     }
 
-    /// Run `ensure_access_token` then `open_session`, retrying transient
-    /// failures with exponential backoff (1s → 30s capped). Returns when
-    /// the session is open OR the loop is shutdown. Only fatal-for-runner
-    /// errors propagate — recoverable / SessionEvicted errors loop until
-    /// success.
-    async fn bootstrap_with_retry(&self) -> Result<OpenSessionResponse, TransportError> {
-        let mut backoff_secs = 1u64;
+    /// Run `ensure_access_token` then `open_session` until a session is
+    /// open. Fatal-for-runner errors propagate. Everything else retries on
+    /// [`ReconnectPolicy`]: transient failures back off 30 s → 6 h with
+    /// jitter, and `runner_gone` answers retry every ~30 s until enough of
+    /// them confirm the deletion, which returns
+    /// [`TransportError::RunnerDeletedInCloud`]. A local teardown
+    /// (`pidash runner remove`) stops the loop at once — mid-request or
+    /// mid-wait — so a removed runner makes no further requests.
+    async fn bootstrap_with_retry(&mut self) -> Result<OpenSessionResponse, TransportError> {
         loop {
+            let shutdown = self.shutdown.clone();
+            let teardown = self.teardown_rx.clone();
             let attempt = async {
                 self.client.ensure_access_token().await?;
                 self.client.open_session(self.current_attach_body()).await
             };
-            let shutdown = self.shutdown.clone();
-            match tokio::select! {
+            let result = tokio::select! {
+                biased;
+                _ = teardown_signalled(teardown) => return Err(Self::teardown_error()),
                 _ = shutdown.notified() => {
-                    return Err(TransportError::Network("shutdown during bootstrap".into()));
+                    return Err(TransportError::Network(SHUTDOWN_DURING_BOOTSTRAP.into()));
                 }
                 result = attempt => result,
-            } {
+            };
+            let err = match result {
                 Ok(session) => {
+                    self.policy.on_success();
                     if let Some(state) = &self.state {
                         state.note_session_open().await;
                     }
@@ -1568,24 +1683,58 @@ impl HttpLoop {
                     );
                     return Err(err);
                 }
-                Err(err) => {
-                    // Record the failure on the runner's state so a wedged
-                    // runner surfaces in `pidash status` / `doctor` as
-                    // DISCONNECTED-with-a-count instead of looking Idle.
-                    let consecutive = match &self.state {
-                        Some(state) => state.note_bootstrap_failure().await,
-                        None => 0,
-                    };
-                    tracing::warn!(
-                        runner = %self.client.runner_id(),
-                        backoff_secs,
-                        consecutive_failures = consecutive,
-                        "bootstrap failed; retrying: {err}",
-                    );
-                    sleep(Duration::from_secs(backoff_secs)).await;
-                    backoff_secs = (backoff_secs * 2).min(30);
-                }
+                Err(err) => err,
+            };
+            // Record the failure on the runner's state so a wedged runner
+            // surfaces in `pidash status` / `doctor` as DISCONNECTED-with-a-
+            // count instead of looking Idle.
+            let consecutive = match &self.state {
+                Some(state) => state.note_bootstrap_failure().await,
+                None => 0,
+            };
+            self.wait_after_failure(&err, consecutive).await?;
+        }
+    }
+
+    /// Feed one failed attempt to the policy and wait out its delay.
+    /// `Ok(())` means "try again now"; `Err` ends the loop (purge,
+    /// teardown, shutdown).
+    async fn wait_after_failure(
+        &mut self,
+        err: &TransportError,
+        consecutive: u32,
+    ) -> Result<(), TransportError> {
+        let runner = self.client.runner_id();
+        let (delay, reason) = match self.policy.on_failure(err, std::time::Instant::now()) {
+            RetryDecision::Purge { confirmations } => {
+                return Err(TransportError::RunnerDeletedInCloud { confirmations });
             }
+            RetryDecision::Retry { delay, reason } => (delay, reason),
+        };
+        let gone = self.policy.gone_count();
+        if let Some(state) = &self.state {
+            let next_retry_at = Utc::now()
+                + chrono::Duration::from_std(delay).unwrap_or_else(|_| chrono::Duration::zero());
+            state
+                .note_retry_scheduled(next_retry_at, reason.clone(), gone)
+                .await;
+        }
+        tracing::warn!(
+            runner = %runner,
+            backoff_secs = delay.as_secs(),
+            consecutive_failures = consecutive,
+            cloud_deleted_confirmations = gone,
+            "bootstrap failed ({reason}); retrying: {err}",
+        );
+        match self.wait_retry(delay).await {
+            RetryWait::Elapsed => Ok(()),
+            RetryWait::Kicked => {
+                tracing::info!(runner = %runner, "reconnect requested; retrying now");
+                self.policy.on_kick();
+                Ok(())
+            }
+            RetryWait::Teardown => Err(Self::teardown_error()),
+            RetryWait::Shutdown => Err(TransportError::Network(SHUTDOWN_DURING_BOOTSTRAP.into())),
         }
     }
 
@@ -1662,17 +1811,36 @@ impl HttpLoop {
             }
         }
 
-        let mut backoff_secs = 1u64;
+        let mut poll_backoff = Backoff::poll();
         let mut consecutive_evictions = 0u32;
+        // Consecutive transient poll failures on the established session;
+        // non-zero means status currently shows the runner DISCONNECTED.
+        let mut consecutive_poll_failures = 0u32;
         loop {
             let shutdown = self.shutdown.clone();
-            match tokio::select! {
+            let teardown = self.teardown_rx.clone();
+            let result = tokio::select! {
+                biased;
+                _ = teardown_signalled(teardown) => return Err(Self::teardown_error()),
                 _ = shutdown.notified() => break,
                 result = self.poll_once() => result,
-            } {
+            };
+            let wait = match result {
                 Ok(()) => {
-                    backoff_secs = 1;
+                    poll_backoff.reset();
                     consecutive_evictions = 0;
+                    if consecutive_poll_failures > 0 {
+                        tracing::info!(
+                            runner = %self.client.runner_id(),
+                            failures = consecutive_poll_failures,
+                            "cloud reachable again; poll recovered",
+                        );
+                        consecutive_poll_failures = 0;
+                        if let Some(state) = &self.state {
+                            state.note_poll_recovered().await;
+                        }
+                    }
+                    continue;
                 }
                 Err(err) if err.is_fatal_for_runner() => {
                     tracing::warn!(runner = %self.client.runner_id(), "fatal transport error: {err}");
@@ -1692,30 +1860,101 @@ impl HttpLoop {
                         backoff_secs = backoff.as_secs(),
                         "session evicted ({reason}); reopening",
                     );
-                    sleep(backoff).await;
+                    match self.wait_retry(backoff).await {
+                        RetryWait::Teardown => return Err(Self::teardown_error()),
+                        RetryWait::Shutdown => break,
+                        RetryWait::Elapsed | RetryWait::Kicked => {}
+                    }
                     if let Err(e) = self.client.open_session(self.current_attach_body()).await {
                         tracing::warn!(
                             runner = %self.client.runner_id(),
                             "reopen after eviction failed: {e}",
                         );
                     }
+                    continue;
                 }
-                Err(err) if err.is_recoverable() => {
+                Err(TransportError::RunnerGone) => {
+                    // Deleted in the cloud while our session was live and
+                    // the RemoveRunner frame never reached us. Confirm it
+                    // the same way bootstrap does: count this answer, then
+                    // keep re-opening until the policy purges or a session
+                    // opens again.
+                    tracing::warn!(
+                        runner = %self.client.runner_id(),
+                        "cloud says this runner is gone; confirming before removing it locally",
+                    );
+                    // Not connected while confirming, so status shows
+                    // `DELETED in cloud (removing: n/10)`.
+                    consecutive_poll_failures = 0;
+                    if let Some(state) = &self.state {
+                        state.set_connected(false).await;
+                    }
+                    match self.wait_after_failure(&TransportError::RunnerGone, 0).await {
+                        Ok(()) => {}
+                        Err(err) if is_bootstrap_shutdown(&err) => break,
+                        Err(err) => return Err(err),
+                    }
+                    match self.bootstrap_with_retry().await {
+                        Ok(_) => {
+                            if let Some(state) = &self.state {
+                                state.set_connected(true).await;
+                            }
+                        }
+                        Err(err) if is_bootstrap_shutdown(&err) => break,
+                        Err(err) => return Err(err),
+                    }
+                    poll_backoff.reset();
+                    continue;
+                }
+                Err(err) => {
                     // Transient: long-poll timeout, transient 5xx, token
                     // refresh window, etc. Back off and retry on the
                     // EXISTING session — do NOT reopen, because each
                     // reopen evicts our own prior session and a long-poll
                     // already in flight against it would surface as
                     // SessionEvicted on the next loop iteration.
-                    tracing::debug!(runner = %self.client.runner_id(), "recoverable transport error: {err}");
-                    sleep(Duration::from_secs(backoff_secs)).await;
-                    backoff_secs = (backoff_secs * 2).min(30);
+                    let delay = match &err {
+                        TransportError::RateLimited {
+                            retry_after: Some(after),
+                        } => (*after).max(jittered(poll_backoff.next_base())),
+                        _ => jittered(poll_backoff.next_base()),
+                    };
+                    consecutive_poll_failures = consecutive_poll_failures.saturating_add(1);
+                    if let Some(state) = &self.state {
+                        let next_retry_at = Utc::now()
+                            + chrono::Duration::from_std(delay)
+                                .unwrap_or_else(|_| chrono::Duration::zero());
+                        state
+                            .note_poll_failure(next_retry_at, failure_reason(&err))
+                            .await;
+                    }
+                    if consecutive_poll_failures == 1 {
+                        tracing::warn!(
+                            runner = %self.client.runner_id(),
+                            backoff_secs = delay.as_secs(),
+                            "poll failed; runner disconnected until the cloud answers: {err}",
+                        );
+                    } else if err.is_recoverable() {
+                        tracing::debug!(
+                            runner = %self.client.runner_id(),
+                            backoff_secs = delay.as_secs(),
+                            "recoverable transport error: {err}",
+                        );
+                    } else {
+                        tracing::error!(
+                            runner = %self.client.runner_id(),
+                            backoff_secs = delay.as_secs(),
+                            "transport error: {err}",
+                        );
+                    }
+                    self.wait_retry(delay).await
                 }
-                Err(err) => {
-                    tracing::error!(runner = %self.client.runner_id(), "transport error: {err}");
-                    sleep(Duration::from_secs(backoff_secs)).await;
-                    backoff_secs = (backoff_secs * 2).min(30);
-                }
+            };
+            match wait {
+                RetryWait::Elapsed => {}
+                RetryWait::Kicked => poll_backoff.reset(),
+                RetryWait::Teardown => return Err(Self::teardown_error()),
+                RetryWait::Shutdown => break,
             }
         }
         let _ = self.client.close_session().await;
@@ -1844,7 +2083,26 @@ fn classify_send_error(e: reqwest::Error) -> TransportError {
     }
 }
 
+/// The machine-readable code in a DRF-style JSON error body
+/// (`{"detail": "..."}`, or `error` / `code`). `None` for non-JSON bodies
+/// such as a proxy's HTML error page.
+fn json_error_code(body: &str) -> Option<String> {
+    let value: Json = serde_json::from_str(body.trim()).ok()?;
+    let obj = value.as_object()?;
+    ["detail", "error", "code"]
+        .iter()
+        .find_map(|key| obj.get(*key).and_then(Json::as_str))
+        .map(str::to_string)
+}
+
 fn map_auth_error(status: StatusCode, body: &str) -> TransportError {
+    // `runner_gone` counts toward deleting the runner locally, so only an
+    // exact 401 whose JSON body carries that code qualifies — never a
+    // substring match, a proxy page, or any other status.
+    if status == StatusCode::UNAUTHORIZED && json_error_code(body).as_deref() == Some("runner_gone")
+    {
+        return TransportError::RunnerGone;
+    }
     if status == StatusCode::UNAUTHORIZED {
         if body.contains("access_token_expired") {
             return TransportError::AccessTokenExpired;
@@ -1872,7 +2130,7 @@ fn map_auth_error(status: StatusCode, body: &str) -> TransportError {
         return TransportError::RunnerIdMismatch;
     }
     if status == StatusCode::TOO_MANY_REQUESTS {
-        return TransportError::RateLimited;
+        return TransportError::RateLimited { retry_after: None };
     }
     TransportError::Server {
         status: status.as_u16(),
@@ -2083,8 +2341,9 @@ impl MachineClient {
             return Err(TransportError::SessionEvicted { reason: body });
         }
         if !status.is_success() {
+            let headers = resp.headers().clone();
             let body = resp.text().await.unwrap_or_default();
-            return Err(map_auth_error(status, &body));
+            return Err(with_retry_after(map_auth_error(status, &body), &headers));
         }
         resp.json::<PollResponse>()
             .await
@@ -2426,6 +2685,79 @@ mod tests {
     }
 
     #[test]
+    fn runner_gone_requires_exact_401_with_json_code() {
+        let err = map_auth_error(StatusCode::UNAUTHORIZED, "{\"detail\":\"runner_gone\"}");
+        assert!(matches!(err, TransportError::RunnerGone));
+        let err = map_auth_error(StatusCode::UNAUTHORIZED, "{\"error\":\"runner_gone\"}");
+        assert!(matches!(err, TransportError::RunnerGone));
+        let err = map_session_error(StatusCode::UNAUTHORIZED, " {\"detail\": \"runner_gone\"}\n");
+        assert!(matches!(err, TransportError::RunnerGone));
+
+        // Anything else is not a deletion confirmation.
+        let not_gone = [
+            (StatusCode::FORBIDDEN, "{\"detail\":\"runner_gone\"}"),
+            (StatusCode::NOT_FOUND, "{\"detail\":\"runner_gone\"}"),
+            (StatusCode::BAD_GATEWAY, "{\"detail\":\"runner_gone\"}"),
+            (StatusCode::UNAUTHORIZED, "<html>runner_gone</html>"),
+            (StatusCode::UNAUTHORIZED, "runner_gone"),
+            (StatusCode::UNAUTHORIZED, "{\"detail\":\"runner_gone_soon\"}"),
+            (StatusCode::UNAUTHORIZED, "{\"detail\":\"runner_not_found\"}"),
+            (StatusCode::UNAUTHORIZED, "{\"detail\":\"machine_token_invalid\"}"),
+            (StatusCode::UNAUTHORIZED, ""),
+        ];
+        for (status, body) in not_gone {
+            let err = map_auth_error(status, body);
+            assert!(
+                !matches!(err, TransportError::RunnerGone),
+                "{status} {body:?} must not map to RunnerGone"
+            );
+        }
+
+        // Existing codes keep their mapping.
+        let err = map_auth_error(StatusCode::UNAUTHORIZED, "{\"detail\":\"runner_revoked\"}");
+        assert!(matches!(err, TransportError::RunnerRevoked));
+        let err = map_auth_error(
+            StatusCode::UNAUTHORIZED,
+            "{\"detail\":\"membership_revoked\"}",
+        );
+        assert!(matches!(err, TransportError::MembershipRevoked));
+    }
+
+    #[test]
+    fn runner_gone_is_neither_fatal_nor_recoverable_until_confirmed() {
+        assert!(!TransportError::RunnerGone.is_fatal_for_runner());
+        assert!(!TransportError::RunnerGone.is_recoverable());
+        assert!(
+            TransportError::RunnerDeletedInCloud { confirmations: 10 }.is_fatal_for_runner()
+        );
+        let code = TransportErrorCode::from(&TransportError::RunnerGone);
+        assert!(matches!(code.into_err(), TransportError::RunnerGone));
+    }
+
+    #[test]
+    fn transient_server_failures_map_to_non_gone_errors() {
+        let err = map_session_error(StatusCode::SERVICE_UNAVAILABLE, "");
+        assert!(matches!(err, TransportError::Server { status: 503, .. }));
+        let err = map_session_error(
+            StatusCode::BAD_GATEWAY,
+            "<html><body><h1>502 Bad Gateway</h1></body></html>",
+        );
+        assert!(matches!(err, TransportError::Server { status: 502, .. }));
+        let err = map_session_error(StatusCode::TOO_MANY_REQUESTS, "{}");
+        assert!(matches!(
+            err,
+            TransportError::RateLimited { retry_after: None }
+        ));
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, "120".parse().unwrap());
+        let err = with_retry_after(err, &headers);
+        assert!(matches!(
+            err,
+            TransportError::RateLimited { retry_after: Some(d) } if d == Duration::from_secs(120)
+        ));
+    }
+
+    #[test]
     fn fatal_classification() {
         assert!(TransportError::RunnerRevoked.is_fatal_for_runner());
         assert!(TransportError::RefreshTokenReplayed.is_fatal_for_runner());
@@ -2457,7 +2789,10 @@ mod tests {
             &TransportError::Network("timeout".into()),
             0
         ));
-        assert!(should_retry_post_error(&TransportError::RateLimited, 0));
+        assert!(should_retry_post_error(
+            &TransportError::RateLimited { retry_after: None },
+            0
+        ));
         // Timeout/Connect are transient send failures (split out of Network by
         // classify_send_error) and must remain retryable.
         assert!(should_retry_post_error(
@@ -2711,5 +3046,407 @@ mod tests {
         assert_eq!(obj.get("observed_run_id"), Some(&serde_json::Value::Null));
         assert!(!obj.contains_key("agent_health"));
         assert!(!obj.contains_key("agent_last_activity_at"));
+    }
+}
+
+/// End-to-end tests for `HttpLoop`'s reconnect behaviour (PDASHOSS01-306)
+/// against a tiny raw-TCP HTTP stub.
+#[cfg(test)]
+mod reconnect_loop_tests {
+    use super::*;
+    use crate::cloud::reconnect::{Backoff, GoneTiming, ReconnectPolicy};
+    use crate::daemon::state::StateHandle;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// What the stub answers to the n-th request (0-based); `None` holds
+    /// the connection open without answering.
+    type Script = Arc<dyn Fn(usize, &str) -> Option<(u16, &'static str, String)> + Send + Sync>;
+
+    async fn stub_server(script: Script) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let script = script.clone();
+                let counter = counter.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    // Read headers, then the body by Content-Length.
+                    let request = loop {
+                        let Ok(n) = sock.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&buf).to_string();
+                        if let Some(end) = text.find("\r\n\r\n") {
+                            let len = text[..end]
+                                .lines()
+                                .find_map(|l| {
+                                    let (k, v) = l.split_once(':')?;
+                                    k.eq_ignore_ascii_case("content-length")
+                                        .then(|| v.trim().parse::<usize>().ok())?
+                                })
+                                .unwrap_or(0);
+                            if buf.len() >= end + 4 + len {
+                                break text;
+                            }
+                        }
+                    };
+                    let n = counter.fetch_add(1, Ordering::SeqCst);
+                    let first_line = request.lines().next().unwrap_or_default().to_string();
+                    match script(n, &first_line) {
+                        Some((status, content_type, body)) => {
+                            let resp = format!(
+                                "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\n\
+                                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ = sock.write_all(resp.as_bytes()).await;
+                            let _ = sock.shutdown().await;
+                        }
+                        None => {
+                            tokio::time::sleep(Duration::from_secs(3600)).await;
+                        }
+                    }
+                });
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    fn fixed(status: u16, content_type: &'static str, body: &'static str) -> Script {
+        Arc::new(move |_, _| Some((status, content_type, body.to_string())))
+    }
+
+    fn gone() -> Script {
+        fixed(401, "application/json", "{\"detail\":\"runner_gone\"}")
+    }
+
+    fn empty_state() -> StateHandle {
+        StateHandle::new(crate::config::schema::Config {
+            version: 2,
+            daemon: Default::default(),
+            runners: vec![],
+            cli: None,
+        })
+    }
+
+    struct Harness {
+        http_loop: HttpLoop,
+        state: StateHandle,
+        remove_tx: watch::Sender<bool>,
+        kick: Arc<tokio::sync::Notify>,
+        _mailbox_rx: mpsc::Receiver<InboundEnvelope>,
+        _status_tx: watch::Sender<WireStatus>,
+        _in_flight_tx: watch::Sender<Option<Uuid>>,
+        _ack_tx: mpsc::UnboundedSender<AckEntry>,
+        _tmp: tempfile::TempDir,
+    }
+
+    fn harness(cloud_url: String, request_timeout: Duration, policy: ReconnectPolicy) -> Harness {
+        let runner_id = Uuid::new_v4();
+        let tmp = tempfile::tempdir().unwrap();
+        // A machine token never hits the network for "refresh".
+        let creds = CredentialsHandle::new(
+            tmp.path().join("credentials.toml"),
+            RunnerCredentials {
+                runner_id,
+                name: "runner".into(),
+                refresh_token: "mt_test".into(),
+                refresh_token_generation: 1,
+            },
+        );
+        let transport = SharedHttpTransport::new_with_timeout(cloud_url, request_timeout).unwrap();
+        let client = RunnerCloudClient::new(runner_id, creds, transport);
+        let (mailbox_tx, mailbox_rx) = mpsc::channel(64);
+        let (ack_tx, ack_rx) = mpsc::unbounded_channel();
+        let (status_tx, status_rx) = watch::channel(WireStatus::Idle);
+        let (in_flight_tx, in_flight_rx) = watch::channel(None);
+        let (remove_tx, remove_rx) = watch::channel(false);
+        let kick = Arc::new(tokio::sync::Notify::new());
+        let state = empty_state();
+        let http_loop = HttpLoop::new(
+            client,
+            mailbox_tx,
+            ack_rx,
+            status_rx,
+            in_flight_rx,
+            Arc::new(tokio::sync::Notify::new()),
+            AttachBody {
+                version: "0.0.0".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                status: PollStatus::idle().status,
+                in_flight_run: None,
+                project_slug: Some("p".into()),
+                host_label: "h".into(),
+                working_dir: "/tmp/wd".into(),
+                agent_versions: HashMap::new(),
+                agent_kind: AgentKind::default(),
+            },
+        )
+        .with_state(state.clone())
+        .with_teardown_rx(remove_rx)
+        .with_reconnect_kick(kick.clone())
+        .with_policy(policy);
+        Harness {
+            http_loop,
+            state,
+            remove_tx,
+            kick,
+            _mailbox_rx: mailbox_rx,
+            _status_tx: status_tx,
+            _in_flight_tx: in_flight_tx,
+            _ack_tx: ack_tx,
+            _tmp: tmp,
+        }
+    }
+
+    fn fast_policy() -> ReconnectPolicy {
+        ReconnectPolicy::new(Backoff::new(Duration::from_millis(1), Duration::from_millis(2)))
+            .with_gone_timing(GoneTiming {
+                confirmations: 10,
+                min_span: Duration::from_millis(100),
+                retry_interval: Duration::from_millis(2),
+            })
+    }
+
+    async fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !cond() {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_purges_after_confirmed_runner_gone() {
+        let (url, hits) = stub_server(gone()).await;
+        let h = harness(url, Duration::from_secs(5), fast_policy());
+        let state = h.state.clone();
+        let err = tokio::time::timeout(Duration::from_secs(10), h.http_loop.run())
+            .await
+            .expect("loop should purge")
+            .expect_err("loop must not succeed");
+        match err {
+            TransportError::RunnerDeletedInCloud { confirmations } => {
+                assert!(confirmations >= 10, "{confirmations}");
+            }
+            other => panic!("expected RunnerDeletedInCloud, got {other}"),
+        }
+        assert!(hits.load(Ordering::SeqCst) >= 10);
+        // While confirming, status reported the count.
+        assert!(state.runner_snapshot().await.cloud_deleted_confirmations >= 9);
+        drop(h.remove_tx);
+    }
+
+    #[tokio::test]
+    async fn fifty_transient_failures_of_each_kind_never_purge() {
+        // Connection refused: bind, note the port, close it.
+        let refused_url = {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            format!("http://{}", l.local_addr().unwrap())
+        };
+        let (timeout_url, _) = stub_server(Arc::new(|_, _| None)).await;
+        let (unavailable_url, _) =
+            stub_server(fixed(503, "application/json", "{\"detail\":\"unavailable\"}")).await;
+        let (proxy_url, _) = stub_server(fixed(
+            502,
+            "text/html",
+            "<html><body><h1>502 Bad Gateway</h1>runner_gone</body></html>",
+        ))
+        .await;
+        let (limited_url, _) = stub_server(fixed(429, "application/json", "{}")).await;
+        for (kind, url) in [
+            ("connection refused", refused_url),
+            ("timeout", timeout_url),
+            ("503", unavailable_url),
+            ("html 502", proxy_url),
+            ("429", limited_url),
+        ] {
+            let h = harness(url, Duration::from_millis(20), fast_policy());
+            let state = h.state.clone();
+            let task = tokio::spawn(h.http_loop.run());
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                let snap = state.runner_snapshot().await;
+                assert_eq!(snap.cloud_deleted_confirmations, 0, "{kind}");
+                if snap.consecutive_bootstrap_failures >= 50 {
+                    break;
+                }
+                assert!(!task.is_finished(), "{kind}: loop exited early");
+                assert!(std::time::Instant::now() < deadline, "{kind}: too slow");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            h.remove_tx.send(true).unwrap();
+            let err = task.await.unwrap().expect_err("teardown ends the loop");
+            assert!(err.is_expected_teardown(), "{kind}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn removal_stops_bootstrap_during_backoff_wait() {
+        let (url, hits) =
+            stub_server(fixed(503, "application/json", "{\"detail\":\"down\"}")).await;
+        // Real schedule: the first wait is ~30 s.
+        let h = harness(url, Duration::from_secs(5), ReconnectPolicy::bootstrap());
+        let task = tokio::spawn(h.http_loop.run());
+        wait_until("first attempt", || hits.load(Ordering::SeqCst) == 1).await;
+        let snap = h.state.runner_snapshot().await;
+        assert_eq!(snap.disconnect_reason.as_deref(), Some("server unreachable: HTTP 503"));
+        let wait = snap.next_retry_at.expect("next retry recorded") - Utc::now();
+        assert!(wait.num_seconds() >= 20 && wait.num_seconds() <= 36, "{wait}");
+
+        h.remove_tx.send(true).unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("teardown must stop the loop at once")
+            .unwrap()
+            .expect_err("teardown ends the loop");
+        assert!(err.is_expected_teardown(), "{err}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "no requests after removal");
+    }
+
+    #[tokio::test]
+    async fn removal_stops_bootstrap_mid_request() {
+        let (url, hits) = stub_server(Arc::new(|_, _| None)).await;
+        let h = harness(url, Duration::from_secs(60), ReconnectPolicy::bootstrap());
+        let task = tokio::spawn(h.http_loop.run());
+        wait_until("request in flight", || hits.load(Ordering::SeqCst) == 1).await;
+        h.remove_tx.send(true).unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("teardown must abort the in-flight request")
+            .unwrap()
+            .expect_err("teardown ends the loop");
+        assert!(err.is_expected_teardown(), "{err}");
+    }
+
+    #[tokio::test]
+    async fn reconnect_kick_retries_immediately_with_fresh_backoff() {
+        let (url, hits) =
+            stub_server(fixed(503, "application/json", "{\"detail\":\"down\"}")).await;
+        let h = harness(url, Duration::from_secs(5), ReconnectPolicy::bootstrap());
+        let task = tokio::spawn(h.http_loop.run());
+        wait_until("first attempt", || hits.load(Ordering::SeqCst) == 1).await;
+        // Without the kick the next attempt is ~30 s away.
+        h.kick.notify_one();
+        wait_until("kicked retry", || hits.load(Ordering::SeqCst) == 2).await;
+        // The backoff started over: the next wait is the first step again.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let wait = h.state.runner_snapshot().await.next_retry_at.unwrap() - Utc::now();
+        assert!(wait.num_seconds() <= 36, "{wait}");
+        h.remove_tx.send(true).unwrap();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn runner_gone_mid_session_is_confirmed_then_purged() {
+        let session = serde_json::json!({
+            "session_id": Uuid::new_v4(),
+            "welcome": {"long_poll_interval_secs": 1},
+        })
+        .to_string();
+        let (url, hits) = stub_server(Arc::new(move |n, _| {
+            if n == 0 {
+                Some((201, "application/json", session.clone()))
+            } else {
+                Some((401, "application/json", "{\"detail\":\"runner_gone\"}".into()))
+            }
+        }))
+        .await;
+        let h = harness(url, Duration::from_secs(5), fast_policy());
+        let err = tokio::time::timeout(Duration::from_secs(10), h.http_loop.run())
+            .await
+            .expect("loop should purge")
+            .expect_err("loop must not succeed");
+        assert!(
+            matches!(err, TransportError::RunnerDeletedInCloud { .. }),
+            "{err}"
+        );
+        assert!(hits.load(Ordering::SeqCst) >= 11);
+    }
+
+    #[tokio::test]
+    async fn outage_on_established_session_shows_disconnected_then_recovers() {
+        // Session opens, the next poll hits a proxy 503, then polls succeed.
+        let session = serde_json::json!({
+            "session_id": Uuid::new_v4(),
+            "welcome": {"long_poll_interval_secs": 1},
+        })
+        .to_string();
+        let (url, hits) = stub_server(Arc::new(move |n, _| match n {
+            0 => Some((201, "application/json", session.clone())),
+            1 => Some((503, "text/html", "<html>503 Service Unavailable</html>".into())),
+            _ => Some((200, "application/json", "{\"messages\":[]}".into())),
+        }))
+        .await;
+        let h = harness(url, Duration::from_secs(5), fast_policy());
+        h.state.set_connected(true).await;
+        let state = h.state.clone();
+        let task = tokio::spawn(h.http_loop.run());
+        wait_until("failed poll", || hits.load(Ordering::SeqCst) == 2).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let snap = loop {
+            let snap = state.runner_snapshot().await;
+            if !snap.connected || std::time::Instant::now() > deadline {
+                break snap;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        assert!(!snap.connected, "a failed poll must mark the runner disconnected");
+        assert_eq!(snap.disconnect_reason.as_deref(), Some("server unreachable: HTTP 503"));
+        assert!(snap.next_retry_at.is_some(), "next retry recorded");
+        assert_eq!(snap.cloud_deleted_confirmations, 0);
+
+        wait_until("recovered poll", || hits.load(Ordering::SeqCst) >= 3).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let snap = loop {
+            let snap = state.runner_snapshot().await;
+            if snap.connected || std::time::Instant::now() > deadline {
+                break snap;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        assert!(snap.connected, "a successful poll reconnects the runner");
+        assert_eq!(snap.disconnect_reason, None);
+        assert_eq!(snap.next_retry_at, None);
+        h.remove_tx.send(true).unwrap();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn interrupted_confirmation_starts_over() {
+        // 9 gone answers, one 503, then gone forever: needs 10 more.
+        let (url, hits) = stub_server(Arc::new(|n, _| {
+            if n == 9 {
+                Some((503, "text/html", "<html>down</html>".into()))
+            } else {
+                Some((401, "application/json", "{\"detail\":\"runner_gone\"}".into()))
+            }
+        }))
+        .await;
+        let h = harness(url, Duration::from_secs(5), fast_policy());
+        let err = tokio::time::timeout(Duration::from_secs(10), h.http_loop.run())
+            .await
+            .expect("loop should purge")
+            .expect_err("loop must not succeed");
+        assert!(
+            matches!(err, TransportError::RunnerDeletedInCloud { confirmations } if confirmations >= 10),
+            "{err}"
+        );
+        assert!(hits.load(Ordering::SeqCst) >= 20, "the streak restarted");
     }
 }

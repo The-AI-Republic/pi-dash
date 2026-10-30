@@ -3,7 +3,7 @@
 //! Agent run model (D-15, stage 5).
 //!
 //! Ports `AgentRun` (`apps/api/pi_dash/runner/models.py:872-1161`):
-//! all 40 columns/defaults/constraints/indexes (`Meta`,
+//! all 39 columns/defaults/constraints/indexes (`Meta`,
 //! `:1037-1102`), the `save` pod-resolution order + owner→created_by
 //! mirror (`:1104-1134`), the token pseudo-fields as
 //! `(usage->>key)::bigint` reads (`:1024-1026`,
@@ -83,7 +83,6 @@ pub const COLUMNS: &[&str] = &[
     "total_tokens",
     "created_at",
     "assigned_at",
-    "queue_position",
     "started_at",
     "ended_at",
 ];
@@ -268,22 +267,20 @@ pub const SCHEDULER_BINDING_ON_DELETE: OnDelete = OnDelete::SetNull;
 pub const PARENT_RUN_ON_DELETE: OnDelete = OnDelete::SetNull;
 
 /// Cloud runs carry no local assignment (`models.py:1065-1078`):
-/// either a machine executor, or `cloud_agent` with the five
+/// either a machine executor, or `cloud_agent` with the four
 /// local-assignment columns all `NULL`.
 pub const CLOUD_CHECK: &str = "agent_run_cloud_has_no_local_assignment";
 
 /// Evaluate [`CLOUD_CHECK`] over a candidate row. Machine executors
 /// (`MACHINE_EXECUTORS`: local + managed) always satisfy it; a
 /// cloud-agent run satisfies it only with `runner`,
-/// `pinned_runner`, `owner`, `assigned_at` and `queue_position` all
-/// unset. Any other executor value fails the check, as in Django.
+/// `pinned_runner`, `owner` and `assigned_at` all unset. Any other executor value fails the check, as in Django.
 pub fn cloud_assignment_valid(
     executor_kind: AgentExecutorKind,
     runner_id: Option<uuid::Uuid>,
     pinned_runner_id: Option<uuid::Uuid>,
     owner_id: Option<uuid::Uuid>,
     assigned_at: Option<chrono::DateTime<chrono::Utc>>,
-    queue_position: Option<i16>,
 ) -> bool {
     if executor_kind.is_machine_executor() {
         return true;
@@ -293,7 +290,6 @@ pub fn cloud_assignment_valid(
         && pinned_runner_id.is_none()
         && owner_id.is_none()
         && assigned_at.is_none()
-        && queue_position.is_none()
 }
 
 /// One active run per work item (`models.py:1079-1101`): `work_item`
@@ -420,9 +416,7 @@ pub const TOTAL_TOKENS_READ_EXPR: &str = "(\"agent_run\".\"usage\" ->> 'total'):
 
 /// One agent-run row, declaration order. `dispatch_attempts` is a
 /// `PositiveIntegerField` (`models.py:959`), hence `i32` like the
-/// D-02 `repository_count` port; `queue_position` is a
-/// `PositiveSmallIntegerField` (`models.py:1033`), hence `i16` like
-/// the D-22 `visibility` port; the `*_tokens` columns are
+/// D-02 `repository_count` port; the `*_tokens` columns are
 /// nullable generated bigints (`fields.py:43` forces
 /// `null=True`). `refusal_category` stays a `String`: the generated
 /// column `COALESCE`s to `""`, which is not a `RefusalCategory`
@@ -473,7 +467,6 @@ pub struct AgentRun {
     pub total_tokens: Option<i64>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub assigned_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub queue_position: Option<i16>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -503,7 +496,7 @@ mod tests {
     #[test]
     fn columns_match_fixture_in_order() {
         assert_eq!(ts::owned(COLUMNS), ts::columns(&run_fixture()));
-        assert_eq!(COLUMNS.len(), 40);
+        assert_eq!(COLUMNS.len(), 39);
     }
 
     #[test]
@@ -527,10 +520,13 @@ mod tests {
             "pinned_runner__isnull",
             "owner__isnull",
             "assigned_at__isnull",
-            "queue_position__isnull",
         ] {
             assert!(rendered.contains(term), "check mentions {term}");
         }
+        assert!(
+            !rendered.contains("queue_position"),
+            "check no longer mentions the dropped queue_position column"
+        );
         assert_eq!(
             MACHINE_EXECUTORS,
             [
@@ -543,14 +539,13 @@ mod tests {
         // Machine executors satisfy the check whatever else is set.
         for kind in MACHINE_EXECUTORS {
             assert!(
-                cloud_assignment_valid(kind, some_id, some_id, some_id, some_ts, Some(3)),
+                cloud_assignment_valid(kind, some_id, some_id, some_id, some_ts),
                 "{kind:?} with local assignment is valid"
             );
         }
         // Cloud agent with no local assignment is valid.
         assert!(cloud_assignment_valid(
             AgentExecutorKind::CloudAgent,
-            None,
             None,
             None,
             None,
@@ -562,14 +557,12 @@ mod tests {
             some_id,
             None,
             None,
-            None,
             None
         ));
         assert!(!cloud_assignment_valid(
             AgentExecutorKind::CloudAgent,
             None,
             some_id,
-            None,
             None,
             None
         ));
@@ -578,7 +571,6 @@ mod tests {
             None,
             None,
             some_id,
-            None,
             None
         ));
         assert!(!cloud_assignment_valid(
@@ -586,16 +578,7 @@ mod tests {
             None,
             None,
             None,
-            some_ts,
-            None
-        ));
-        assert!(!cloud_assignment_valid(
-            AgentExecutorKind::CloudAgent,
-            None,
-            None,
-            None,
-            None,
-            Some(0)
+            some_ts
         ));
     }
 
@@ -758,14 +741,6 @@ mod tests {
             );
         }
         assert_eq!(ts::field(&m, "prompt")["db_type"].as_str(), Some("text"));
-        assert_eq!(
-            ts::field(&m, "queue_position")["db_type"].as_str(),
-            Some("smallint")
-        );
-        assert_eq!(
-            ts::field(&m, "queue_position")["null"].as_bool(),
-            Some(true)
-        );
         assert_eq!(
             ts::field(&m, "created_at")["auto_now_add"].as_bool(),
             Some(true)

@@ -1052,8 +1052,32 @@ fn expansion_set(
 
 /// Return the next datetime the RRULE bundle is due strictly after `now`.
 ///
-/// Returns `None` on parse error (caller treats as a configuration error
-/// and disables the binding).
+/// Returns `None` both on parse error and when the series is legitimately
+/// exhausted (a finite COUNT/UNTIL series with nothing left, or a
+/// single-shot whose `dtstart` has passed). Callers that need to tell those
+/// two cases apart use [`next_fire_with_error`].
+pub fn next_fire_from_rrule(
+    dtstart: DateTime<Utc>,
+    rrule_str: &str,
+    tzid: &str,
+    rdates: &[DateTime<Utc>],
+    exdates: &[DateTime<Utc>],
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    next_fire_with_error(dtstart, rrule_str, tzid, rdates, exdates, now)
+        .ok()
+        .flatten()
+}
+
+/// `next_fire_with_error` (`_rrule.py`): the next fire for the RRULE
+/// bundle, telling a parse error apart from an exhausted series.
+///
+/// - `Ok(Some(next))` — the bundle is valid and fires again after `now`.
+/// - `Ok(None)` — the bundle is valid but the series has no occurrence
+///   after `now` (finite series exhausted / single-shot already past).
+/// - `Err(text)` — the bundle failed to parse. Python returns `str(e)`;
+///   every caller only branches on its presence, so the text is the
+///   engine's, not dateutil's.
 ///
 /// Semantics:
 /// - `dtstart` is the series anchor. If `rrule_str` is empty, the rule
@@ -1065,34 +1089,37 @@ fn expansion_set(
 /// The `tzid` is informational at this layer — `dateutil` expands `dtstart`
 /// as it is (tz-aware UTC). Wall-clock-aware DST semantics are deferred;
 /// `tzid` is stored and surfaced in the API but doesn't drive expansion.
-pub fn next_fire_from_rrule(
+pub fn next_fire_with_error(
     dtstart: DateTime<Utc>,
     rrule_str: &str,
     tzid: &str,
     rdates: &[DateTime<Utc>],
     exdates: &[DateTime<Utc>],
     now: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
+) -> Result<Option<DateTime<Utc>>, String> {
     let _ = tzid;
     if rrule_str.is_empty() {
         // Single-shot: fire at dtstart if it's still ahead.
         if dtstart > now && !exdates.contains(&dtstart) {
-            return Some(dtstart);
+            return Ok(Some(dtstart));
         }
         // Otherwise check rdates for an explicit one-off after now.
         // (Single-shot rdates are not exdate-filtered, like Python.)
-        return rdates.iter().copied().filter(|d| *d > now).min();
+        return Ok(rdates.iter().copied().filter(|d| *d > now).min());
     }
     let Some(set) = expansion_set(dtstart, rrule_str, rdates, exdates) else {
         // The crate refuses rules dateutil expands (PIDASHCONV-1300); the
         // dateutil-faithful fallback expands those, and agrees with the
-        // crate (`None`) on rules dateutil rejects.
-        return fallback::next_fire(dtstart, rrule_str, rdates, exdates, now);
+        // crate on rules dateutil rejects — reported as the parse error.
+        return fallback::next_fire_with_error(dtstart, rrule_str, rdates, exdates, now)
+            .inspect_err(|error| {
+                tracing::warn!(rrule = rrule_str, err = %error, "scheduler.rrule_parse: bad rrule");
+            });
     };
     // Strictly after `now`: the engine's `after` filter is
     // boundary-inclusive, so the bound is applied on the lazy iterator.
     let base = to_engine(now);
-    set.into_iter().find(|occ| *occ > base).map(from_engine)
+    Ok(set.into_iter().find(|occ| *occ > base).map(from_engine))
 }
 
 /// Expand the RRULE bundle into all occurrences in
@@ -3099,34 +3126,42 @@ mod fallback {
         }
     }
 
-    /// Fallback `next_fire_from_rrule`: the next bundle instant strictly
-    /// after `now`, or `None` on any parse/expansion failure. A naive
-    /// item against the aware `now` fails (dateutil's `TypeError` in
-    /// `after`).
-    pub fn next_fire(
+    /// Fallback `next_fire_with_error`: the next bundle instant strictly
+    /// after `now` (`Ok(Some)`), nothing left after `now` (`Ok(None)`), or
+    /// any parse/expansion failure (`Err`, dateutil's `except` path). A
+    /// naive item against the aware `now` fails (dateutil's `TypeError` in
+    /// `after`), and so does a failure mid-iteration — never read as an
+    /// exhausted series.
+    pub fn next_fire_with_error(
         dtstart: DateTime<Utc>,
         rrule_str: &str,
         rdates: &[DateTime<Utc>],
         exdates: &[DateTime<Utc>],
         now: DateTime<Utc>,
-    ) -> Option<DateTime<Utc>> {
+    ) -> std::result::Result<Option<DateTime<Utc>>, String> {
+        const FAILED: &str = "rrule expansion failed";
         // Python datetimes stop at year 9999; anything outside has no
-        // dateutil oracle and already yields `None` on the crate path.
+        // dateutil oracle and is a parse error on the crate path too.
         if !(1..=MAXYEAR).contains(&dtstart.year()) {
-            return None;
+            return Err(FAILED.to_owned());
         }
-        let bundle = parse_bundle(dtstart.naive_utc(), rrule_str, rdates, exdates).ok()?;
-        let mut iter = SetIter::new(bundle).ok()?;
+        let bundle = parse_bundle(dtstart.naive_utc(), rrule_str, rdates, exdates)
+            .map_err(|_| FAILED.to_owned())?;
+        let mut iter = SetIter::new(bundle).map_err(|_| FAILED.to_owned())?;
         let base = now.naive_utc();
         while let Some(item) = iter.next() {
             if !item.aware {
-                return None;
+                return Err(FAILED.to_owned());
             }
             if item.dt > base {
-                return Some(item.dt.and_utc());
+                return Ok(Some(item.dt.and_utc()));
             }
         }
-        None
+        if iter.failed() {
+            Err(FAILED.to_owned())
+        } else {
+            Ok(None)
+        }
     }
 
     /// Fallback `occurrences_between`: bundle instants in
@@ -3841,5 +3876,40 @@ mod tests {
             5000,
         );
         assert!(out.is_empty() && !has_more);
+    }
+
+    // `next_fire_with_error` tells an exhausted series (`Ok(None)`) from a
+    // parse error (`Err`); `next_fire_from_rrule` folds both into `None`.
+    #[test]
+    fn next_fire_with_error_splits_exhausted_from_invalid() {
+        let dtstart = Utc.with_ymd_and_hms(2026, 9, 28, 11, 58, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 9, 28, 12, 0, 0).unwrap();
+        let next = |rrule: &str| next_fire_with_error(dtstart, rrule, "UTC", &[], &[], now);
+        assert_eq!(next("FREQ=MINUTELY;COUNT=2"), Ok(None));
+        assert_eq!(next("FREQ=MINUTELY;UNTIL=20260928T115900Z"), Ok(None));
+        assert_eq!(next(""), Ok(None));
+        assert_eq!(
+            next("FREQ=MINUTELY;COUNT=5"),
+            Ok(Some(Utc.with_ymd_and_hms(2026, 9, 28, 12, 1, 0).unwrap()))
+        );
+        assert!(next("garbage").is_err());
+        assert!(next("FREQ=DAILY;BYHOUR").is_err());
+        // Rules the crate refuses go through the dateutil-faithful fallback
+        // (PIDASHCONV-1300); it must make the same split.
+        let jan1 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let fallback = |rrule: &str| next_fire_with_error(jan1, rrule, "UTC", &[], &[], now);
+        assert_eq!(fallback("FREQ=DAILY;BYYEARDAY=1;COUNT=1"), Ok(None));
+        assert_eq!(
+            fallback("FREQ=DAILY;BYYEARDAY=1;COUNT=2"),
+            Ok(Some(Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap()))
+        );
+        assert_eq!(
+            fallback("FREQ=WEEKLY;BYMONTHDAY=1;UNTIL=20260601T000000Z"),
+            Ok(None)
+        );
+        assert_eq!(
+            next_fire_from_rrule(dtstart, "FREQ=MINUTELY;COUNT=2", "UTC", &[], &[], now),
+            None
+        );
     }
 }

@@ -340,12 +340,6 @@
       "blank": true
     },
     {
-      "name": "queue_position",
-      "type": "PositiveSmallIntegerField",
-      "null": true,
-      "blank": true
-    },
-    {
       "name": "started_at",
       "type": "DateTimeField",
       "null": true,
