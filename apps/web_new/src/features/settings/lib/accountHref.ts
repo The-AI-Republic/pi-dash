@@ -27,6 +27,27 @@ export function accountSettingsHref(
   }`;
 }
 
+/** The router location fields a forward must carry unchanged. */
+export interface ForwardLocation {
+  searchStr: string;
+  hash: string;
+}
+
+/**
+ * The address a forward lands on. Every forwarding route passes its whole
+ * router location here rather than picking fields itself, so a new
+ * forward cannot silently drop the query or the fragment (the recurrence
+ * main#670 guards against: `/settings/profile/ai-assistant#voice-dictation`
+ * must still open the dictation block).
+ */
+export function accountTabForwardHref(
+  workspaceSlug: string,
+  tab: ProfileSettingsTabId,
+  location: ForwardLocation
+): string {
+  return accountSettingsHref(workspaceSlug, tab, location.searchStr, location.hash);
+}
+
 /** The general-tab address in a workspace. */
 export function accountSettingsGeneralHref(workspaceSlug: string): string {
   return accountSettingsHref(workspaceSlug, DEFAULT_PROFILE_SETTINGS_TAB);

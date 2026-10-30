@@ -5,7 +5,7 @@
 // one tab per address, query kept verbatim, trailing slash on every link.
 import { describe, expect, it } from "vitest";
 
-import { accountSettingsGeneralHref, accountSettingsHref } from "./accountHref.js";
+import { accountSettingsGeneralHref, accountSettingsHref, accountTabForwardHref } from "./accountHref.js";
 
 describe("accountSettingsHref", () => {
   it("names the tab inside the workspace with a trailing slash", () => {
@@ -28,5 +28,22 @@ describe("accountSettingsHref", () => {
     expect(accountSettingsHref("acme", "general", "keep=1")).toBe("/acme/settings/account/general/?keep=1");
     expect(accountSettingsHref("acme", "general", "?")).toBe("/acme/settings/account/general/");
     expect(accountSettingsHref("acme", "general", "")).toBe("/acme/settings/account/general/");
+  });
+});
+
+describe("accountTabForwardHref", () => {
+  it("lands on the tab with the router location's query and fragment", () => {
+    expect(accountTabForwardHref("acme", "general", { searchStr: "", hash: "" })).toBe(
+      "/acme/settings/account/general/"
+    );
+    expect(accountTabForwardHref("acme", "security", { searchStr: "?keep=2", hash: "" })).toBe(
+      "/acme/settings/account/security/?keep=2"
+    );
+    expect(accountTabForwardHref("acme", "ai-assistant", { searchStr: "", hash: "#voice-dictation" })).toBe(
+      "/acme/settings/account/ai-assistant/#voice-dictation"
+    );
+    expect(accountTabForwardHref("acme", "api-tokens", { searchStr: "?keep=3", hash: "#tokens" })).toBe(
+      "/acme/settings/account/api-tokens/?keep=3#tokens"
+    );
   });
 });

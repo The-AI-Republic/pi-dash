@@ -49288,6 +49288,33 @@ export class WebDriver implements ParityDriver {
     return null;
   }
 
+  async settingsProfileSetViewport(width: number, height: number): Promise<void> {
+    await this.page.setViewportSize({ width, height });
+  }
+
+  async settingsProfileDockedPanelVisible(): Promise<boolean> {
+    // The old settings frame always shows its own sidebar; the frame has no
+    // separate narrow-screen variant (its hamburger toggles the sidebar,
+    // there is no drawer copy).
+    return this.isShown(this.page.getByText("Profile settings", { exact: true }));
+  }
+
+  async settingsProfileOpenMobileMenu(): Promise<void> {
+    throw new Error("[parity] the old settings frame offers no narrow-screen settings drawer.");
+  }
+
+  async settingsProfileMobileDrawerVisible(): Promise<boolean> {
+    return false;
+  }
+
+  async settingsProfileMobileDrawerEntries(): Promise<string[]> {
+    return [];
+  }
+
+  async settingsProfileMobileCrumb(): Promise<string> {
+    return "";
+  }
+
   /** Workspace rows read as the flat list the old app shows: work rows plus the two actions. */
   private async settingsProfileWorkspaceRowLabels(): Promise<string[]> {
     const shortcuts = await this.settingsProfileWorkspaceShortcuts();

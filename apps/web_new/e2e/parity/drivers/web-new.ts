@@ -8093,8 +8093,12 @@ export class WebNewDriver implements ParityDriver {
 
   async profileSettingsActiveTab(): Promise<string | null> {
     // The settings shell marks its live tab by accessible state, so the
-    // read follows the route rather than comparing paint tones.
-    const active = this.page.getByTestId("profile-settings-sidebar").locator('a[aria-current="page"]').first();
+    // read follows the route rather than comparing paint tones. Read from
+    // whichever copy the reader sees: the docked panel on wide screens,
+    // the drawer's twin on narrow ones.
+    const navigator = await this.settingsProfileNavigator();
+    if (navigator === null) return null;
+    const active = navigator.locator('a[aria-current="page"]').first();
     if (!(await this.isShown(active))) return null;
     return (await active.innerText()).trim();
   }
@@ -42482,20 +42486,44 @@ export class WebNewDriver implements ParityDriver {
     await surface.waitFor({ state: "visible", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
   }
 
-  /** Link labels under one sidebar section heading (tabs or shortcuts). */
-  private async settingsProfileSectionLinks(heading: string): Promise<string[]> {
+  /**
+   * The settings navigator as the reader currently sees it. The docked
+   * panel mounts at every width but hides below the breakpoint, where the
+   * same content renders inside the drawer instead. Reads go through this
+   * so a narrow viewport sees the drawer's copy and never the hidden one
+   * (both copies share the tab test ids).
+   */
+  private async settingsProfileNavigator(): Promise<Locator | null> {
+    const docked = this.page.getByTestId("profile-settings-sidebar");
+    if ((await this.isShown(docked)) === true) return docked.first();
+    const drawer = this.page.getByTestId("account-settings-drawer");
+    if ((await this.isShown(drawer)) === true) return drawer.first();
+    return null;
+  }
+
+  /** One group's `<section>` under the given heading, from the visible copy. */
+  private async settingsProfileSection(heading: string): Promise<Locator | null> {
+    const navigator = await this.settingsProfileNavigator();
+    if (navigator === null) return null;
     // Headings render under a CSS uppercase transform, which innerText
     // reflects; textContent reads the sourced label the specs name.
-    const sections = this.page.getByTestId("profile-settings-sidebar").locator("section");
+    const sections = navigator.locator("section");
     const total = await sections.count();
     for (let index = 0; index < total; index += 1) {
       const section = sections.nth(index);
       const title = section.locator("h2");
       if ((await title.count()) === 0) continue;
       if (((await title.first().textContent()) ?? "").trim() !== heading) continue;
-      return (await section.locator("a").allInnerTexts()).map((text) => text.trim().replace(/\s+/g, " "));
+      return section;
     }
-    return [];
+    return null;
+  }
+
+  /** Link labels under one sidebar section heading (tabs). */
+  private async settingsProfileSectionLinks(heading: string): Promise<string[]> {
+    const section = await this.settingsProfileSection(heading);
+    if (section === null) return [];
+    return (await section.locator("a").allInnerTexts()).map((text) => text.trim().replace(/\s+/g, " "));
   }
 
   async settingsProfileOpen(tabId: string, cookies: ParityBrowserCookie[]): Promise<void> {
@@ -42509,7 +42537,9 @@ export class WebNewDriver implements ParityDriver {
     return (await this.page.locator(".animate-pulse").count()) > 0;
   }
   async settingsProfileGroupLabels(): Promise<string[]> {
-    const headings = this.page.getByTestId("profile-settings-sidebar").locator("h2");
+    const navigator = await this.settingsProfileNavigator();
+    if (navigator === null) return [];
+    const headings = navigator.locator("h2");
     return (await headings.allTextContents()).map((text) => text.trim());
   }
   async settingsProfileGroupTabs(group: string): Promise<string[]> {
@@ -42519,30 +42549,53 @@ export class WebNewDriver implements ParityDriver {
     return this.profileSettingsActiveTab();
   }
   async settingsProfileBackLabel(): Promise<string | null> {
-    const back = this.page.getByTestId("profile-settings-sidebar").getByRole("link", { name: "Back to home" });
+    const navigator = await this.settingsProfileNavigator();
+    if (navigator === null) return null;
+    const back = navigator.getByRole("link", { name: "Back to home" });
     if ((await back.count()) === 0) return null;
     return (await back.first().getAttribute("aria-label")) ?? "Back to home";
   }
   async settingsProfileBackHref(): Promise<string | null> {
-    const back = this.page.getByTestId("profile-settings-back");
+    const navigator = await this.settingsProfileNavigator();
+    if (navigator === null) return null;
+    const back = navigator.getByTestId("profile-settings-back");
     if ((await back.count()) === 0) return null;
     return (await back.first().getAttribute("href")) ?? null;
   }
   async settingsProfileSidebarTitle(): Promise<string | null> {
-    const title = this.page.getByTestId("profile-settings-sidebar").getByText("Profile settings", { exact: true });
+    const navigator = await this.settingsProfileNavigator();
+    if (navigator === null) return null;
+    const title = navigator.getByText("Profile settings", { exact: true });
     if ((await title.count()) === 0) return null;
     return (await title.first().innerText()).trim() || null;
   }
   async settingsProfileWorkspaceShortcuts(): Promise<string[]> {
-    return this.settingsProfileSectionLinks("Workspace");
+    // The Workspace list top to bottom: each workspace row's own header
+    // text (a button when the row expands, a link when it has no
+    // expander) followed by the create and invite actions. An expanded
+    // row's settings entries are nested inside its `<li>`, so the
+    // direct-children read picks up the header only; the entries have
+    // their own read.
+    const section = await this.settingsProfileSection("Workspace");
+    if (section === null) return [];
+    const rows = section.locator(":scope > ul > li");
+    const total = await rows.count();
+    const out: string[] = [];
+    for (let index = 0; index < total; index += 1) {
+      // The row's own control: the expander toggle, the plain row's home
+      // link, or the create/invite action. Nested entries live deeper and
+      // are read separately.
+      const header = rows.nth(index).locator(":scope > a, :scope > button").first();
+      if ((await header.count()) === 0) continue;
+      out.push((await header.innerText()).trim().replace(/\s+/g, " "));
+    }
+    return out;
   }
   async settingsProfileSelectTab(label: string): Promise<void> {
+    const navigator = await this.settingsProfileNavigator();
+    if (navigator === null) throw new Error(`[parity] the settings navigator is not shown for tab ${label}.`);
     const before = this.page.url();
-    await this.page
-      .getByTestId("profile-settings-sidebar")
-      .getByRole("link", { name: label, exact: true })
-      .first()
-      .click();
+    await navigator.getByRole("link", { name: label, exact: true }).first().click();
     await this.page
       .waitForFunction((prior) => window.location.href !== prior, before, { timeout: WebNewDriver.WAIT_MS })
       .catch(() => {
@@ -42568,14 +42621,45 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async settingsProfileMobileMenuPresent(): Promise<boolean | null> {
-    return (await this.page.getByTestId("account-settings-menu").count()) > 0;
+    // Presence alone would answer true on a wide viewport too: the
+    // hamburger bar mounts at every width and only hides above the
+    // breakpoint, so the read follows visibility (main#670).
+    return this.isShown(this.page.getByTestId("account-settings-menu"));
   }
 
-  /** The workspace rows of the open settings navigator (each carries data-expandable). */
-  private settingsProfileWorkspaceRowList() {
-    return this.page
-      .getByTestId("profile-settings-sidebar")
-      .locator('[data-testid^="account-settings-workspace-"][data-expandable]');
+  async settingsProfileSetViewport(width: number, height: number): Promise<void> {
+    await this.page.setViewportSize({ width, height });
+  }
+
+  async settingsProfileDockedPanelVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByTestId("profile-settings-sidebar"));
+  }
+
+  async settingsProfileOpenMobileMenu(): Promise<void> {
+    const trigger = this.page.getByTestId("account-settings-menu").first();
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("account-settings-drawer").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async settingsProfileMobileDrawerVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByTestId("account-settings-drawer"));
+  }
+
+  async settingsProfileMobileDrawerEntries(): Promise<string[]> {
+    return this.settingsProfileSectionLinks("Your Profile");
+  }
+
+  async settingsProfileMobileCrumb(): Promise<string> {
+    const crumb = this.page.getByTestId("account-settings-mobile-crumb").first();
+    if ((await crumb.count()) === 0) return "";
+    return ((await crumb.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  /** The workspace rows of the settings navigator the reader sees (each carries data-expandable). */
+  private async settingsProfileWorkspaceRowList(): Promise<Locator> {
+    const navigator = await this.settingsProfileNavigator();
+    const root = navigator ?? this.page.getByTestId("profile-settings-sidebar");
+    return root.locator('[data-testid^="account-settings-workspace-"][data-expandable]');
   }
 
   /** A row's name text: the second span of its header link or toggle, past the initial mark. */
@@ -42590,7 +42674,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   private async settingsProfileRow(label: string): Promise<Locator> {
-    const rows = this.settingsProfileWorkspaceRowList();
+    const rows = await this.settingsProfileWorkspaceRowList();
     const total = await rows.count();
     for (let index = 0; index < total; index += 1) {
       const row = rows.nth(index);
@@ -42600,7 +42684,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async settingsProfileWorkspaceRows(): Promise<Array<{ label: string; expandable: boolean; expanded: boolean }>> {
-    const rows = this.settingsProfileWorkspaceRowList();
+    const rows = await this.settingsProfileWorkspaceRowList();
     const total = await rows.count();
     const out: Array<{ label: string; expandable: boolean; expanded: boolean }> = [];
     for (let index = 0; index < total; index += 1) {
@@ -42650,9 +42734,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async settingsProfileCurrentWorkspaceEntries(): Promise<string[]> {
-    const links = this.page
-      .getByTestId("profile-settings-sidebar")
-      .locator('[data-testid^="account-settings-workspace-link-"][aria-current="page"]');
+    const navigator = await this.settingsProfileNavigator();
+    if (navigator === null) return [];
+    const links = navigator.locator('[data-testid^="account-settings-workspace-link-"][aria-current="page"]');
     return (await links.allInnerTexts()).map((text) => text.trim().replace(/\s+/g, " "));
   }
 
@@ -50374,16 +50458,19 @@ export class WebNewDriver implements ParityDriver {
   }
   async wsSettingsApiTokenOpenViaSidebar(cookies: ParityBrowserCookie[]): Promise<void> {
     await this.openAuthenticated("/settings/profile/general", cookies);
-    const entry = this.page
-      .getByTestId("profile-settings-sidebar")
-      .getByRole("link", { name: "Personal Access Tokens", exact: true });
+    const navigator = await this.settingsProfileNavigator();
+    if (navigator === null) throw new Error("[parity] the settings navigator is not shown.");
+    const entry = navigator.getByRole("link", { name: "Personal Access Tokens", exact: true });
     await entry.waitFor({ timeout: WebNewDriver.WAIT_MS });
     await entry.click({ timeout: WebNewDriver.WAIT_MS });
     // Poll, not waitForURL: the tab switch is a same-document push that
     // usually lands before a navigation wait attaches.
+    // The navigator's own entry lands on the account tokens address of
+    // whichever workspace hosts the page (main#670), not the old
+    // standalone one.
     await expect
-      .poll(() => this.page.url(), { timeout: WebNewDriver.WAIT_MS })
-      .toMatch(/\/settings\/profile\/api-tokens\/?$/);
+      .poll(() => new URL(this.page.url()).pathname, { timeout: WebNewDriver.WAIT_MS })
+      .toMatch(/^\/[^/]+\/settings\/account\/api-tokens\/$/);
     await this.wsSettingsApiTokenWaitForContent();
   }
 

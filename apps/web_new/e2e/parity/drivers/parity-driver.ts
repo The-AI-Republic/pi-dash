@@ -11271,9 +11271,23 @@ export interface DeskSigninUpdateLink {
   settingsProfileInsideAppShell(): Promise<boolean>;
   /**
    * The account settings' own narrow-screen hamburger, when it has one
-   * (main#670); null when the page offers no such control.
+   * (main#670); null when the page offers no such control. Answers for the
+   * current viewport: the trigger is only present where the docked panel is
+   * hidden.
    */
   settingsProfileMobileMenuPresent(): Promise<boolean | null>;
+  /** Resize the page viewport (width, height) for a narrow/wide check. */
+  settingsProfileSetViewport(width: number, height: number): Promise<void>;
+  /** Whether the navigator's docked middle panel is currently shown. */
+  settingsProfileDockedPanelVisible(): Promise<boolean>;
+  /** Open the narrow-screen hamburger and wait for its drawer to appear. */
+  settingsProfileOpenMobileMenu(): Promise<void>;
+  /** Whether the narrow-screen drawer is currently shown. */
+  settingsProfileMobileDrawerVisible(): Promise<boolean>;
+  /** The personal tab labels the drawer currently offers, in display order. */
+  settingsProfileMobileDrawerEntries(): Promise<string[]>;
+  /** The page's narrow-screen crumb text (the active tab's label), or "". */
+  settingsProfileMobileCrumb(): Promise<string>;
   /**
    * Workspace rows of the settings navigator's workspace section, in display
    * order (main#675): the row's name text, whether it carries an expander,

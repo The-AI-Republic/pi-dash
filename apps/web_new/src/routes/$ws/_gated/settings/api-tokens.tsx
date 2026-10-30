@@ -7,10 +7,10 @@
 
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
-import { accountSettingsHref } from "../../../../features/settings/lib/accountHref.js";
+import { accountTabForwardHref } from "../../../../features/settings/lib/accountHref.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/api-tokens")({
   beforeLoad: ({ params, location }) => {
-    throw redirect({ href: accountSettingsHref(params.ws, "api-tokens", location.searchStr, location.hash) });
+    throw redirect({ href: accountTabForwardHref(params.ws, "api-tokens", location) });
   },
 });

@@ -12,7 +12,7 @@ import { createFileRoute, redirect } from "@tanstack/react-router";
 import * as React from "react";
 
 import { SettingsTabOutlet } from "../../../../../features/settings/components/SettingsTabOutlet.js";
-import { accountSettingsHref } from "../../../../../features/settings/lib/accountHref.js";
+import { accountTabForwardHref } from "../../../../../features/settings/lib/accountHref.js";
 import {
   DEFAULT_PROFILE_SETTINGS_TAB,
   resolveProfileSettingsTab,
@@ -23,7 +23,7 @@ export const Route = createFileRoute("/$ws/_gated/settings/account/$tab")({
     const tab = resolveProfileSettingsTab(params.tab);
     if (tab === null) {
       throw redirect({
-        href: accountSettingsHref(params.ws, DEFAULT_PROFILE_SETTINGS_TAB, location.searchStr, location.hash),
+        href: accountTabForwardHref(params.ws, DEFAULT_PROFILE_SETTINGS_TAB, location),
       });
     }
     // The instance-gate read stays behind a dynamic import so it never
@@ -32,7 +32,7 @@ export const Route = createFileRoute("/$ws/_gated/settings/account/$tab")({
     const served = await isTabAddressServed({ queryClient: context.queryClient, apiClient: context.apiClient, tab });
     if (!served) {
       throw redirect({
-        href: accountSettingsHref(params.ws, DEFAULT_PROFILE_SETTINGS_TAB, location.searchStr, location.hash),
+        href: accountTabForwardHref(params.ws, DEFAULT_PROFILE_SETTINGS_TAB, location),
       });
     }
   },

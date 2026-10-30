@@ -779,28 +779,136 @@ describe("settings shell reads (NEWFRONT-586, PROF-009/010/026)", () => {
     expect(await withPulse.settingsProfileLoaderOnly()).toBe(true);
   });
 
-  it("reads group labels, group tabs and shortcuts from their sections", async () => {
-    const section = (heading: string, links: string[]): StubLocator => ({
-      locator: (selector: string) =>
-        selector === "h2"
-          ? locator({ textContent: async () => heading })
-          : locator({ allInnerTexts: async () => links }),
+  /**
+   * One navigator section as the component renders it: an h2 heading, tab
+   * links at the top, and (for the Workspace section) list rows whose own
+   * header is a link or a toggle button, followed by create/invite links.
+   */
+  function navigatorSection(
+    heading: string,
+    links: string[],
+    rows: Array<{ text: string; control: "a" | "button" }> = []
+  ): StubLocator {
+    const all = [...rows.map((row) => row.text), ...links];
+    const headingNode = locator({ textContent: async () => heading });
+    return locator({
+      locator: (selector: string) => {
+        if (selector === "h2") return headingNode;
+        if (selector === ":scope > ul > li") {
+          const nodes = rows.map((row) =>
+            locator({
+              innerText: async () => row.text,
+              locator: (inner: string) =>
+                inner === ":scope > a, :scope > button" || inner === `:scope > ${row.control}`
+                  ? locator({ count: async () => 1, innerText: async () => row.text })
+                  : locator({ count: async () => 0 }),
+            })
+          );
+          return locator({ count: async () => nodes.length, nth: (index: number) => nodes[index]! });
+        }
+        return locator({ allInnerTexts: async () => all });
+      },
     });
+  }
+
+  function settingsNavigator(sections: StubLocator[]): Locator {
+    return locator({
+      locator: (selector: string) =>
+        selector === "section"
+          ? locator({ count: async () => sections.length, nth: (index: number) => sections[index]! })
+          : locator({ allTextContents: async () => ["Your Profile", "Workspace"] }),
+    });
+  }
+
+  it("reads group labels, group tabs and workspace rows from their sections", async () => {
     const sections = [
-      section("Your Profile", ["Profile", "Security"]),
-      section("Workspace", ["Acme", "Create workspace"]),
+      navigatorSection("Your Profile", ["Profile", "Security"]),
+      navigatorSection(
+        "Workspace",
+        [],
+        [
+          { text: "PParity Workspace", control: "button" },
+          { text: "GGlobex", control: "a" },
+          { text: "Create workspace", control: "a" },
+        ]
+      ),
     ];
-    const sidebar = locator({
-      locator: (selector: string) =>
-        selector === "h2"
-          ? locator({ allTextContents: async () => ["Your Profile", "Workspace"] })
-          : locator({ count: async () => sections.length, nth: (index: number) => sections[index]! }),
-    });
+    const sidebar = settingsNavigator(sections);
     const driver = new WebNewDriver(settingsPage({ getByTestId: () => sidebar }).page);
     expect(await driver.settingsProfileGroupLabels()).toEqual(["Your Profile", "Workspace"]);
     expect(await driver.settingsProfileGroupTabs("Your Profile")).toEqual(["Profile", "Security"]);
     expect(await driver.settingsProfileGroupTabs("Missing")).toEqual([]);
-    expect(await driver.settingsProfileWorkspaceShortcuts()).toEqual(["Acme", "Create workspace"]);
+    // A row's name sits in its own control (toggle or home link), so the
+    // read picks it up on both shapes; nested entries are left out.
+    expect(await driver.settingsProfileWorkspaceShortcuts()).toEqual([
+      "PParity Workspace",
+      "GGlobex",
+      "Create workspace",
+    ]);
+  });
+
+  it("reads the drawer copy on a narrow viewport and nothing when neither copy shows", async () => {
+    const drawer = settingsNavigator([navigatorSection("Your Profile", ["Profile", "Preferences"])]);
+    const hiddenDocked = locator({ count: async () => 1, isVisible: async () => false });
+    // The drawer hosts the same section tree under a different test id.
+    const visibleDrawer = locator({
+      count: async () => 1,
+      isVisible: async () => true,
+      locator: (selector: string) => drawer.locator?.(selector) ?? locator({ count: async () => 0 }),
+    });
+    const { page } = settingsPage({
+      getByTestId: (id: string) =>
+        id === "profile-settings-sidebar"
+          ? hiddenDocked
+          : id === "account-settings-drawer"
+            ? visibleDrawer
+            : locator({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileDockedPanelVisible()).toBe(false);
+    expect(await driver.settingsProfileMobileDrawerVisible()).toBe(true);
+    expect(await driver.settingsProfileMobileDrawerEntries()).toEqual(["Profile", "Preferences"]);
+
+    const neither = settingsPage({ getByTestId: () => locator({ count: async () => 0 }) });
+    const bare = new WebNewDriver(neither.page);
+    expect(await bare.settingsProfileDockedPanelVisible()).toBe(false);
+    expect(await bare.settingsProfileMobileDrawerVisible()).toBe(false);
+    expect(await bare.settingsProfileMobileDrawerEntries()).toEqual([]);
+    expect(await bare.settingsProfileGroupLabels()).toEqual([]);
+    expect(await bare.settingsProfileWorkspaceShortcuts()).toEqual([]);
+    await expect(bare.settingsProfileSelectTab("Profile")).rejects.toThrow("not shown");
+  });
+
+  it("answers the hamburger by visibility, not presence", async () => {
+    const hiddenMenu = new WebNewDriver(
+      settingsPage({ getByTestId: () => locator({ count: async () => 1, isVisible: async () => false }) }).page
+    );
+    expect(await hiddenMenu.settingsProfileMobileMenuPresent()).toBe(false);
+    const shownMenu = new WebNewDriver(
+      settingsPage({ getByTestId: () => locator({ count: async () => 1, isVisible: async () => true }) }).page
+    );
+    expect(await shownMenu.settingsProfileMobileMenuPresent()).toBe(true);
+  });
+
+  it("resizes for a narrow check and opens the drawer from the hamburger", async () => {
+    const setViewportSize = vi.fn(async () => undefined);
+    const click = vi.fn(async () => undefined);
+    const waitFor = vi.fn(async () => undefined);
+    const { page } = settingsPage({
+      setViewportSize,
+      getByTestId: (id: string) =>
+        id === "account-settings-menu"
+          ? locator({ click })
+          : id === "account-settings-drawer"
+            ? locator({ waitFor })
+            : locator({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileSetViewport(390, 844);
+    expect(setViewportSize).toHaveBeenCalledWith({ width: 390, height: 844 });
+    await driver.settingsProfileOpenMobileMenu();
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(waitFor).toHaveBeenCalledWith({ timeout: 30_000 });
   });
 
   it("reads the back label and sidebar title with absent twins", async () => {
@@ -2122,7 +2230,7 @@ describe("workspace settings api tokens (NEWFRONT-586, PROF-020)", () => {
       context: () => ({ addCookies: async () => undefined }),
       goto,
       waitForLoadState: async () => undefined,
-      url: () => "https://app.test/settings/profile/api-tokens",
+      url: () => "https://app.test/acme/settings/account/api-tokens/",
       ...overrides,
     });
     return { page, goto };
@@ -2140,6 +2248,20 @@ describe("workspace settings api tokens (NEWFRONT-586, PROF-020)", () => {
     await driver.wsSettingsApiTokenOpenViaSidebar(COOKIES);
     expect(goto).toHaveBeenCalledWith("/settings/profile/general", { waitUntil: "domcontentloaded" });
     expect(click).toHaveBeenCalled();
+  });
+
+  it("follows the navigator entry into the account tokens address of the page's workspace", async () => {
+    // The page starts on the bare settings address; its first segment is
+    // the workspace the navigator's entry opens.
+    // The page starts on the bare settings address; its first segment is
+    // the workspace the navigator's entry opens.
+    const urls = ["https://app.test/settings/profile/general", "https://app.test/acme/settings/account/api-tokens/"];
+    let reads = 0;
+    const url = vi.fn(() => urls[Math.min(reads++, urls.length - 1)]!);
+    const { page } = authedPage({ url });
+    const driver = new WebNewDriver(page);
+    await driver.wsSettingsApiTokenOpenViaSidebar(COOKIES);
+    expect(url.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
   it("reads the heading and add control with absent twins", async () => {

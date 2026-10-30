@@ -12,6 +12,8 @@ import { createClient } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
 
 import { Route as AccountCatchAll } from "../$ws/_gated/settings/account/$.js";
+import { Route as AccountIndex } from "../$ws/_gated/settings/account/index.js";
+import { Route as AccountTab } from "../$ws/_gated/settings/account/$tab.js";
 import { Route as ApiTokens } from "../$ws/_gated/settings/api-tokens.js";
 import { Route as Profile } from "../profile/$.js";
 import { Route as SettingsIndex } from "./index.js";
@@ -92,6 +94,109 @@ async function forwardOf(run: () => unknown): Promise<string> {
 function context(fixtures: { last?: string | null; fallback?: string | null; workspaces?: unknown } = {}) {
   return { queryClient: queryClient(fixtures), apiClient: apiClient() } as never;
 }
+
+/**
+ * Every forwarding route in one table, each entry carrying both a query and
+ * a fragment. The cases below prove individual decisions; this table is the
+ * whole set, so a route that starts dropping the query or the fragment (the
+ * defect that came back three review rounds running) fails here once.
+ */
+const FORWARD_TABLE: Array<{
+  name: string;
+  route: { options: { beforeLoad?: unknown } };
+  extra: Record<string, unknown>;
+  pathname: string;
+  searchStr: string;
+  hash: string;
+  expected: string;
+}> = [
+  {
+    name: "/settings",
+    route: SettingsIndex,
+    extra: { context: context({ last: "acme" }) },
+    pathname: "/settings",
+    searchStr: "?keep=1",
+    hash: "#top",
+    expected: "/acme/settings/account/general/?keep=1#top",
+  },
+  {
+    name: "/settings/<leftover>",
+    route: SettingsCatchAll,
+    extra: { context: context({ last: "acme" }) },
+    pathname: "/settings/account/security",
+    searchStr: "?keep=1",
+    hash: "#top",
+    expected: "/acme/settings/account/general/?keep=1#top",
+  },
+  {
+    name: "/settings/profile/<tab>",
+    route: SettingsProfile,
+    extra: { context: context({ last: "acme" }) },
+    pathname: "/settings/profile/ai-assistant",
+    searchStr: "?keep=1",
+    hash: "#voice-dictation",
+    expected: "/acme/settings/account/ai-assistant/?keep=1#voice-dictation",
+  },
+  {
+    name: "/profile/<tab>",
+    route: Profile,
+    extra: { context: context({ last: "acme" }) },
+    pathname: "/profile/preferences",
+    searchStr: "?keep=1",
+    hash: "#theme",
+    expected: "/acme/settings/account/preferences/?keep=1#theme",
+  },
+  {
+    name: "/<ws>/settings/account (bare)",
+    route: AccountIndex,
+    extra: { params: { ws: "acme" } },
+    pathname: "/acme/settings/account",
+    searchStr: "?keep=1",
+    hash: "#top",
+    expected: "/acme/settings/account/general/?keep=1#top",
+  },
+  {
+    name: "/<ws>/settings/account/<deep>",
+    route: AccountCatchAll,
+    extra: { params: { ws: "acme" } },
+    pathname: "/acme/settings/account/security/extra",
+    searchStr: "?keep=1",
+    hash: "#top",
+    expected: "/acme/settings/account/general/?keep=1#top",
+  },
+  {
+    name: "/<ws>/settings/account/<unknown tab>",
+    route: AccountTab,
+    extra: { params: { ws: "acme", tab: "bogus" }, context: { queryClient: queryClient({}), apiClient: apiClient() } },
+    pathname: "/acme/settings/account/bogus/",
+    searchStr: "?keep=1",
+    hash: "#top",
+    expected: "/acme/settings/account/general/?keep=1#top",
+  },
+  {
+    name: "/<ws>/settings/api-tokens",
+    route: ApiTokens,
+    extra: { params: { ws: "acme" } },
+    pathname: "/acme/settings/api-tokens",
+    searchStr: "?keep=1",
+    hash: "#tokens",
+    expected: "/acme/settings/account/api-tokens/?keep=1#tokens",
+  },
+];
+
+describe("every forward carries the query and the fragment", () => {
+  for (const entry of FORWARD_TABLE) {
+    it(`lands ${entry.name} with both`, async () => {
+      const href = await forwardOf(() =>
+        (entry.route.options.beforeLoad as (args: unknown) => unknown)({
+          ...entry.extra,
+          location: { pathname: entry.pathname, searchStr: entry.searchStr, hash: entry.hash },
+        })
+      );
+      expect(href).toBe(entry.expected);
+    });
+  }
+});
 
 describe("legacy settings forwards", () => {
   it("sends the bare settings address into the current workspace's general tab", async () => {

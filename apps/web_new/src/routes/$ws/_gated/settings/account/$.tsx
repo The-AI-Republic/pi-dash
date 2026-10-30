@@ -8,13 +8,13 @@
 
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
-import { accountSettingsHref } from "../../../../../features/settings/lib/accountHref.js";
+import { accountTabForwardHref } from "../../../../../features/settings/lib/accountHref.js";
 import { DEFAULT_PROFILE_SETTINGS_TAB } from "../../../../../features/settings/lib/tabNavigation.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/account/$")({
   beforeLoad: ({ params, location }) => {
     throw redirect({
-      href: accountSettingsHref(params.ws, DEFAULT_PROFILE_SETTINGS_TAB, location.searchStr, location.hash),
+      href: accountTabForwardHref(params.ws, DEFAULT_PROFILE_SETTINGS_TAB, location),
     });
   },
 });

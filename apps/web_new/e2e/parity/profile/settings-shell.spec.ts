@@ -86,12 +86,56 @@ test(
     await test.step("the settings page rides inside the normal app shell", async () => {
       if (driver.target === "web_new") {
         expect(await driver.settingsProfileInsideAppShell()).toBe(true);
-        expect(await driver.settingsProfileMobileMenuPresent()).toBe(true);
+        // The hamburger lives in the page's own bar and only shows where
+        // the docked panel is hidden.
+        expect(await driver.settingsProfileDockedPanelVisible()).toBe(true);
+        expect(await driver.settingsProfileMobileMenuPresent()).toBe(false);
       } else {
         // Current behavior: the old settings page is its own full-window frame.
         expect(await driver.settingsProfileInsideAppShell()).toBe(false);
       }
     });
+
+    if (driver.target === "web_new") {
+      await test.step("a narrow viewport swaps the docked panel for a hamburger drawer", async () => {
+        await driver.settingsProfileSetViewport(390, 844);
+        try {
+          expect(await driver.settingsProfileDockedPanelVisible()).toBe(false);
+          expect(await driver.settingsProfileMobileMenuPresent()).toBe(true);
+          expect(await driver.settingsProfileMobileDrawerVisible()).toBe(false);
+          expect(await driver.settingsProfileMobileCrumb()).toBe("Profile");
+          await driver.settingsProfileOpenMobileMenu();
+          expect(await driver.settingsProfileMobileDrawerVisible()).toBe(true);
+          expect(await driver.settingsProfileMobileDrawerEntries()).toEqual([
+            "Profile",
+            "Preferences",
+            "AI Assistant",
+            "Auto Project Management",
+            "Notifications",
+            "Security",
+            "Activity",
+          ]);
+          expect(await driver.settingsProfileActiveTab()).toBe("Profile");
+          // The drawer's tabs navigate like the docked ones, and following
+          // one closes the drawer.
+          await driver.settingsProfileSelectTab("Preferences");
+          expect(await driver.currentPath()).toBe(tabPath(seed.workspaceSlug, "preferences"));
+          expect(await driver.settingsProfileMobileDrawerVisible()).toBe(false);
+          expect(await driver.settingsProfileMobileCrumb()).toBe("Preferences");
+          // Following an entry closes the drawer; the next switch opens it
+          // again from the hamburger.
+          await driver.settingsProfileOpenMobileMenu();
+          expect(await driver.settingsProfileActiveTab()).toBe("Preferences");
+          await driver.settingsProfileSelectTab("Profile");
+          expect(await driver.currentPath()).toBe(tabPath(seed.workspaceSlug, "general"));
+        } finally {
+          await driver.settingsProfileSetViewport(1280, 800);
+        }
+        expect(await driver.settingsProfileDockedPanelVisible()).toBe(true);
+        expect(await driver.settingsProfileMobileMenuPresent()).toBe(false);
+        expect(await driver.settingsProfileActiveTab()).toBe("Profile");
+      });
+    }
 
     await test.step("the navigator shows grouped tabs, the title with back control, and shortcuts", async () => {
       await driver.settingsProfileOpen("general", []);
@@ -110,8 +154,10 @@ test(
       ]);
       expect(await driver.settingsProfileGroupTabs("Developer")).toEqual(["Integrations", "Personal Access Tokens"]);
       const shortcuts = await driver.settingsProfileWorkspaceShortcuts();
-      // The workspace entry carries its logo initial ahead of the name.
-      expect(shortcuts.join("\n")).toContain(seed.workspaceName);
+      // Each workspace row reads as its own header: the mark's initial
+      // followed by the workspace name, from a toggle on web_new and a
+      // link on the old app.
+      expect(shortcuts.some((entry) => entry.endsWith(seed.workspaceName))).toBe(true);
       expect(shortcuts).toContain("Create workspace");
       expect(shortcuts).toContain("Workspace invites");
       expect(await driver.settingsProfileActiveTab()).toBe("Profile");
