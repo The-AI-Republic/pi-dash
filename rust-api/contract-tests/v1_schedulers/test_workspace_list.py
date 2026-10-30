@@ -23,7 +23,7 @@ PAGE_KEYS = [
 
 SCHEDULER_KEYS = [
     "id", "workspace", "slug", "name", "description", "prompt", "color",
-    "source", "is_enabled", "bindings", "created_at", "updated_at",
+    "source", "is_builtin", "is_enabled", "bindings", "created_at", "updated_at",
 ]
 
 FORBIDDEN_BODY = {"detail": "You do not have permission to perform this action."}
@@ -63,8 +63,11 @@ def test_outsider_denied(seed):
 
 
 def test_write_methods_rejected(seed):
-    r = http.post(seed["keys"][KEY], base(seed), json={}, expect=405)
-    assert r.json() == {"detail": 'Method "POST" not allowed.'}
+    # POST is the create (PDASHOSS01-318, `test_writes.py`).
+    with http.client(seed["keys"][KEY]) as c:
+        r = c.request("PUT", base(seed), json={})
+    assert r.status_code == 405
+    assert r.json() == {"detail": 'Method "PUT" not allowed.'}
 
 
 def test_anonymous_401(seed):
