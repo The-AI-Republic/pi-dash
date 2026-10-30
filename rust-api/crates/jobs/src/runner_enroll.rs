@@ -341,14 +341,13 @@ fn now_micros() -> DateTime<Utc> {
 /// The revoke-finalize SET order (planned `status`, `ended_at`, the two
 /// markers, then the updates in dict order):
 /// pinned so a kernel drift fails loudly instead of mis-binding.
-const REVOKE_FINALIZE_COLUMNS: [&str; 7] = [
+const REVOKE_FINALIZE_COLUMNS: [&str; 6] = [
     "status",
     "ended_at",
     "terminal_hooks_applied_at",
     "terminal_capacity_released_at",
-    "error",
-    "error_code",
     "cancel_reason",
+    "error_details",
 ];
 
 #[allow(async_fn_in_trait)]

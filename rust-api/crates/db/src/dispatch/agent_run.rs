@@ -4,8 +4,8 @@
 //!
 //! Ports exactly the `AgentRun` columns dispatch touches
 //! (`apps/api/pi_dash/runner/models.py:872-1035`), as recorded in the
-//! fixture's `dispatch_touched_subset.agent_run`: 22 physical columns
-//! in fixture order. The full model carries 40 columns; the rest
+//! fixture's `dispatch_touched_subset.agent_run`: 21 physical columns
+//! in fixture order. The full model carries 39 columns; the rest
 //! (`owner`, `runner`, `parent_run`, `terminal_*`, `prompt_manifest`,
 //! `phase_kind`, `run_config`, `required_capabilities`, `thread_id`,
 //! `agent_metadata`, `refusal_category`, the `*_tokens` generated
@@ -44,7 +44,7 @@ pub const ORDERING: &str = "-created_at";
 
 /// Dispatch-touched columns in fixture subset order, FK entries as
 /// Django attnames. Reads select this list; the runner-owned
-/// remainder of the 40-column table is out of scope.
+/// remainder of the 39-column table is out of scope.
 pub const READ_COLUMNS: &[&str] = &[
     "id",
     "workspace_id",
@@ -58,7 +58,6 @@ pub const READ_COLUMNS: &[&str] = &[
     "dispatch_attempts",
     "cancel_requested_at",
     "cancel_reason",
-    "error_code",
     "tool_plan",
     "prompt",
     "trigger",
@@ -67,7 +66,7 @@ pub const READ_COLUMNS: &[&str] = &[
     "llm_model",
     "usage",
     "done_payload",
-    "error",
+    "error_details",
 ];
 
 /// `status` bound (`models.py:947-952`, `max_length=24`).
@@ -76,8 +75,6 @@ pub const STATUS_MAX_LENGTH: usize = 24;
 pub const EXECUTOR_KIND_MAX_LENGTH: usize = 24;
 /// `cancel_reason` bound (`models.py:961`, `max_length=512`).
 pub const CANCEL_REASON_MAX_LENGTH: usize = 512;
-/// `error_code` bound (`models.py:962`, `max_length=64`).
-pub const ERROR_CODE_MAX_LENGTH: usize = 64;
 /// `trigger` bound (`models.py:972-977`, `max_length=24`).
 pub const TRIGGER_MAX_LENGTH: usize = 24;
 /// `llm_model` bound (`models.py:1015`, `max_length=128`).
@@ -98,8 +95,7 @@ pub const DEFAULT_DISPATCH_ATTEMPTS: i32 = 0;
 /// silently automatic.
 pub const DEFAULT_TRIGGER: AgentRunTrigger = AgentRunTrigger::Direct;
 /// Shared `default=""` for `cancel_reason` (`models.py:961`),
-/// `error_code` (`models.py:962`), `prompt` (`models.py:966`),
-/// `llm_model` (`models.py:1015`) and `error` (`models.py:1005`).
+/// `prompt` (`models.py:966`) and `llm_model` (`models.py:1015`).
 pub const EMPTY_TEXT: &str = "";
 
 /// Fresh `tool_plan` default (`models.py:963`, `default=dict`).
@@ -109,6 +105,11 @@ pub fn default_tool_plan() -> serde_json::Value {
 
 /// Fresh `usage` default (`models.py:1020`, `default=dict`).
 pub fn default_usage() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+/// Fresh `error_details` default (`default=dict`, PDASHOSS01-187).
+pub fn default_error_details() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
 }
 
@@ -144,7 +145,6 @@ pub struct AgentRun {
     pub dispatch_attempts: i32,
     pub cancel_requested_at: Option<chrono::DateTime<chrono::Utc>>,
     pub cancel_reason: String,
-    pub error_code: String,
     pub tool_plan: serde_json::Value,
     pub prompt: String,
     /// The raw stored trigger, never parsed: Django's `TextChoices`
@@ -157,7 +157,28 @@ pub struct AgentRun {
     pub llm_model: String,
     pub usage: serde_json::Value,
     pub done_payload: Option<serde_json::Value>,
-    pub error: String,
+    /// `{"code", "message", "refusal_category"}`, keys present only
+    /// when set (PDASHOSS01-187); read through [`AgentRun::error_code`]
+    /// / [`AgentRun::error`].
+    pub error_details: serde_json::Value,
+}
+
+impl AgentRun {
+    /// `AgentRun.error_code`: the `code` key of `error_details`.
+    pub fn error_code(&self) -> &str {
+        crate::runner_runs::agent_run::error_details_text(
+            &self.error_details,
+            crate::runner_runs::agent_run::ERROR_DETAILS_CODE,
+        )
+    }
+
+    /// `AgentRun.error`: the `message` key of `error_details`.
+    pub fn error(&self) -> &str {
+        crate::runner_runs::agent_run::error_details_text(
+            &self.error_details,
+            crate::runner_runs::agent_run::ERROR_DETAILS_MESSAGE,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -258,13 +279,7 @@ mod tests {
             entry("dispatch_attempts")["default"],
             serde_json::json!(DEFAULT_DISPATCH_ATTEMPTS)
         );
-        for name in [
-            "cancel_reason",
-            "error_code",
-            "prompt",
-            "llm_model",
-            "error",
-        ] {
+        for name in ["cancel_reason", "prompt", "llm_model"] {
             assert_eq!(
                 entry(name)["default"],
                 serde_json::json!(EMPTY_TEXT),
@@ -276,6 +291,7 @@ mod tests {
         for (name, default) in [
             ("tool_plan", default_tool_plan()),
             ("usage", default_usage()),
+            ("error_details", default_error_details()),
         ] {
             assert!(entry(name)["default"]
                 .as_str()
@@ -321,7 +337,6 @@ mod tests {
         assert_eq!(STATUS_MAX_LENGTH, max_length("status"));
         assert_eq!(EXECUTOR_KIND_MAX_LENGTH, max_length("executor_kind"));
         assert_eq!(CANCEL_REASON_MAX_LENGTH, max_length("cancel_reason"));
-        assert_eq!(ERROR_CODE_MAX_LENGTH, max_length("error_code"));
         assert_eq!(TRIGGER_MAX_LENGTH, max_length("trigger"));
         assert_eq!(LLM_MODEL_MAX_LENGTH, max_length("llm_model"));
         // `on_delete` is recorded as an AST dump; assert the dump

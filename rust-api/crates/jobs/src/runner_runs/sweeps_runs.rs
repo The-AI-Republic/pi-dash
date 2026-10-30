@@ -91,9 +91,9 @@ use uuid::Uuid;
 use pidash_db::runner_enroll::columns::enums::{RUNNER_STATUS_OFFLINE, RUNNER_STATUS_ONLINE};
 use pidash_db::runner_runs::{agent_run, approval};
 use pidash_services::runner_runs::finalization::{
-    finalize_error_code, finalize_update_sql, lock_run_for_finalize_sql, plan_finalize_values,
-    plan_terminal_event, terminal_event_exists_sql, terminal_event_insert_sql,
-    terminal_event_max_seq_sql, TERMINAL_EFFECTS_TASK,
+    error_details_patch, finalize_error_code, finalize_update_sql, lock_run_for_finalize_sql,
+    plan_finalize_values, plan_terminal_event, terminal_event_exists_sql,
+    terminal_event_insert_sql, terminal_event_max_seq_sql, TERMINAL_EFFECTS_TASK,
 };
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::{AgentRunStatus, ApprovalStatus, TERMINAL_RUN_STATUSES};
@@ -796,14 +796,13 @@ impl LiveSweepsRunsStore {
 /// clauses plus the three extras in `tasks.py:76-80` order. The live
 /// bind below is positional; a mismatch fails loudly instead of binding
 /// wrong. No `done_payload` clause, so the merge step is a no-op here.
-const EXPIRY_FINALIZE_COLUMNS: [&str; 7] = [
+const EXPIRY_FINALIZE_COLUMNS: [&str; 6] = [
     "status",
     "ended_at",
     "terminal_hooks_applied_at",
     "terminal_capacity_released_at",
-    "error_code",
-    "error",
     "cancel_reason",
+    "error_details",
 ];
 
 impl SweepsRunsStore for LiveSweepsRunsStore {
@@ -921,8 +920,7 @@ impl SweepsRunsStore for LiveSweepsRunsStore {
             .bind(None::<DateTime<Utc>>)
             .bind(None::<DateTime<Utc>>)
             .bind(CANCEL_REASON_APPROVAL_TIMEOUT)
-            .bind(APPROVAL_TIMEOUT_ERROR)
-            .bind(CANCEL_REASON_APPROVAL_TIMEOUT)
+            .bind(error_details_patch(&values))
             .bind(run_id)
             .execute(&mut *tx)
             .await?;
@@ -1525,7 +1523,7 @@ mod tests {
     #[test]
     fn approval_lock_sql_byte_exact() {
         // All 52 columns spelled out: the 11 approval columns in L2
-        // order, then the 41 agent_run columns in L2 order.
+        // order, then the 40 agent_run columns in L2 order.
         let expected = "SELECT \"agent_run_approval\".\"id\", \"agent_run_approval\".\"agent_run_id\", \
              \"agent_run_approval\".\"kind\", \"agent_run_approval\".\"payload\", \
              \"agent_run_approval\".\"reason\", \"agent_run_approval\".\"status\", \
@@ -1537,13 +1535,13 @@ mod tests {
              \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \
              \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \
              \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \
-             \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \
+             \"agent_run\".\"cancel_reason\", \"agent_run\".\"tool_plan\", \
              \"agent_run\".\"terminal_hooks_applied_at\", \
              \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \
              \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \
              \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \
              \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \
-             \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \
+             \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error_details\", \
              \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \
              \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \
              \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \

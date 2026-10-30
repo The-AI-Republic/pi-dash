@@ -1,6 +1,6 @@
 {
   "_trace": "orchestration/done_signal.py:141-181 (ingest_into_run: parse-ok 164-180 incl. paused no-ended_at 175-179; parse-error 153-162 incl. keep-terminal-status 158-159)",
-  "_method": "live ingest_into_run on pidash_524_scratch with django.utils.timezone.now frozen at T0",
+  "_method": "live ingest_into_run on pidash_524_scratch with django.utils.timezone.now frozen at T0; PDASHOSS01-187: the `error` column became `error_details` (`{\"message\": …}`, `{}` when cleared) via merge_error_details, translated from the recorded values",
   "now": "2026-10-03T12:00:00+00:00",
   "cases": [
     {
@@ -10,7 +10,9 @@
       "before": {
         "status": "running",
         "done_payload": null,
-        "error": "prior error",
+        "error_details": {
+          "message": "prior error"
+        },
         "ended_at": null
       },
       "returned": {
@@ -80,11 +82,11 @@
             "requested_group": null
           }
         },
-        "error": "",
+        "error_details": {},
         "ended_at": "2026-10-03T12:00:00+00:00"
       },
       "executed_sql": [
-        "UPDATE \"agent_run\" SET \"status\" = 'completed', \"done_payload\" = '{\"status\": \"completed\", \"summary\": \"did the thing\", \"state_transition\": {\"requested_group\": null, \"reason\": null}, \"changes\": {\"branch\": null, \"commits\": [], \"files_touched\": [], \"pr_url\": null}, \"validation\": {\"acceptance_all_met\": null, \"ran\": [], \"notes\": null}, \"progress\": {\"phase\": null, \"checkpoints\": {}}, \"autonomy\": {\"score\": 0, \"type\": \"none\", \"reason\": \"\", \"question_for_human\": null, \"safe_to_continue\": true}, \"blockers\": []}'::jsonb, \"error\" = '', \"ended_at\" = '2026-10-03 12:00:00+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '11111111222233334444000000004101'::uuid"
+        "UPDATE \"agent_run\" SET \"status\" = 'completed', \"done_payload\" = '{\"status\": \"completed\", \"summary\": \"did the thing\", \"state_transition\": {\"requested_group\": null, \"reason\": null}, \"changes\": {\"branch\": null, \"commits\": [], \"files_touched\": [], \"pr_url\": null}, \"validation\": {\"acceptance_all_met\": null, \"ran\": [], \"notes\": null}, \"progress\": {\"phase\": null, \"checkpoints\": {}}, \"autonomy\": {\"score\": 0, \"type\": \"none\", \"reason\": \"\", \"question_for_human\": null, \"safe_to_continue\": true}, \"blockers\": []}'::jsonb, \"error_details\" = '{}'::jsonb, \"ended_at\" = '2026-10-03 12:00:00+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '11111111222233334444000000004101'::uuid"
       ]
     },
     {
@@ -94,7 +96,7 @@
       "before": {
         "status": "running",
         "done_payload": null,
-        "error": "",
+        "error_details": {},
         "ended_at": null
       },
       "returned": {
@@ -164,11 +166,11 @@
             "requested_group": null
           }
         },
-        "error": "",
+        "error_details": {},
         "ended_at": "2026-10-03T12:00:00+00:00"
       },
       "executed_sql": [
-        "UPDATE \"agent_run\" SET \"status\" = 'blocked', \"done_payload\" = '{\"status\": \"blocked\", \"summary\": \"stuck on creds\", \"state_transition\": {\"requested_group\": null, \"reason\": null}, \"changes\": {\"branch\": null, \"commits\": [], \"files_touched\": [], \"pr_url\": null}, \"validation\": {\"acceptance_all_met\": null, \"ran\": [], \"notes\": null}, \"progress\": {\"phase\": null, \"checkpoints\": {}}, \"autonomy\": {\"score\": 0, \"type\": \"none\", \"reason\": \"\", \"question_for_human\": null, \"safe_to_continue\": true}, \"blockers\": []}'::jsonb, \"error\" = '', \"ended_at\" = '2026-10-03 12:00:00+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '11111111222233334444000000004102'::uuid"
+        "UPDATE \"agent_run\" SET \"status\" = 'blocked', \"done_payload\" = '{\"status\": \"blocked\", \"summary\": \"stuck on creds\", \"state_transition\": {\"requested_group\": null, \"reason\": null}, \"changes\": {\"branch\": null, \"commits\": [], \"files_touched\": [], \"pr_url\": null}, \"validation\": {\"acceptance_all_met\": null, \"ran\": [], \"notes\": null}, \"progress\": {\"phase\": null, \"checkpoints\": {}}, \"autonomy\": {\"score\": 0, \"type\": \"none\", \"reason\": \"\", \"question_for_human\": null, \"safe_to_continue\": true}, \"blockers\": []}'::jsonb, \"error_details\" = '{}'::jsonb, \"ended_at\" = '2026-10-03 12:00:00+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '11111111222233334444000000004102'::uuid"
       ]
     },
     {
@@ -178,7 +180,7 @@
       "before": {
         "status": "running",
         "done_payload": null,
-        "error": "",
+        "error_details": {},
         "ended_at": null
       },
       "returned": {
@@ -248,11 +250,11 @@
             "requested_group": null
           }
         },
-        "error": "",
+        "error_details": {},
         "ended_at": "2026-10-03T12:00:00+00:00"
       },
       "executed_sql": [
-        "UPDATE \"agent_run\" SET \"status\" = 'completed', \"done_payload\" = '{\"status\": \"noop\", \"summary\": \"\", \"state_transition\": {\"requested_group\": null, \"reason\": null}, \"changes\": {\"branch\": null, \"commits\": [], \"files_touched\": [], \"pr_url\": null}, \"validation\": {\"acceptance_all_met\": null, \"ran\": [], \"notes\": null}, \"progress\": {\"phase\": null, \"checkpoints\": {}}, \"autonomy\": {\"score\": 0, \"type\": \"none\", \"reason\": \"\", \"question_for_human\": null, \"safe_to_continue\": true}, \"blockers\": []}'::jsonb, \"error\" = '', \"ended_at\" = '2026-10-03 12:00:00+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '11111111222233334444000000004103'::uuid"
+        "UPDATE \"agent_run\" SET \"status\" = 'completed', \"done_payload\" = '{\"status\": \"noop\", \"summary\": \"\", \"state_transition\": {\"requested_group\": null, \"reason\": null}, \"changes\": {\"branch\": null, \"commits\": [], \"files_touched\": [], \"pr_url\": null}, \"validation\": {\"acceptance_all_met\": null, \"ran\": [], \"notes\": null}, \"progress\": {\"phase\": null, \"checkpoints\": {}}, \"autonomy\": {\"score\": 0, \"type\": \"none\", \"reason\": \"\", \"question_for_human\": null, \"safe_to_continue\": true}, \"blockers\": []}'::jsonb, \"error_details\" = '{}'::jsonb, \"ended_at\" = '2026-10-03 12:00:00+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '11111111222233334444000000004103'::uuid"
       ]
     },
     {
@@ -262,7 +264,7 @@
       "before": {
         "status": "running",
         "done_payload": null,
-        "error": "",
+        "error_details": {},
         "ended_at": null
       },
       "returned": {
@@ -332,11 +334,11 @@
             "requested_group": null
           }
         },
-        "error": "",
+        "error_details": {},
         "ended_at": null
       },
       "executed_sql": [
-        "UPDATE \"agent_run\" SET \"status\" = 'paused_awaiting_input', \"done_payload\" = '{\"status\": \"paused\", \"summary\": \"\", \"state_transition\": {\"requested_group\": null, \"reason\": null}, \"changes\": {\"branch\": null, \"commits\": [], \"files_touched\": [], \"pr_url\": null}, \"validation\": {\"acceptance_all_met\": null, \"ran\": [], \"notes\": null}, \"progress\": {\"phase\": null, \"checkpoints\": {}}, \"autonomy\": {\"score\": 0, \"type\": \"none\", \"reason\": \"\", \"question_for_human\": \"which approach?\", \"safe_to_continue\": true}, \"blockers\": []}'::jsonb, \"error\" = '', \"ended_at\" = NULL WHERE \"agent_run\".\"id\" = '11111111222233334444000000004104'::uuid"
+        "UPDATE \"agent_run\" SET \"status\" = 'paused_awaiting_input', \"done_payload\" = '{\"status\": \"paused\", \"summary\": \"\", \"state_transition\": {\"requested_group\": null, \"reason\": null}, \"changes\": {\"branch\": null, \"commits\": [], \"files_touched\": [], \"pr_url\": null}, \"validation\": {\"acceptance_all_met\": null, \"ran\": [], \"notes\": null}, \"progress\": {\"phase\": null, \"checkpoints\": {}}, \"autonomy\": {\"score\": 0, \"type\": \"none\", \"reason\": \"\", \"question_for_human\": \"which approach?\", \"safe_to_continue\": true}, \"blockers\": []}'::jsonb, \"error_details\" = '{}'::jsonb, \"ended_at\" = NULL WHERE \"agent_run\".\"id\" = '11111111222233334444000000004104'::uuid"
       ]
     },
     {
@@ -346,18 +348,20 @@
       "before": {
         "status": "running",
         "done_payload": null,
-        "error": "",
+        "error_details": {},
         "ended_at": null
       },
       "returned": null,
       "after": {
         "status": "failed",
         "done_payload": null,
-        "error": "done-signal parse error: no pi-dash-done fenced block found",
+        "error_details": {
+          "message": "done-signal parse error: no pi-dash-done fenced block found"
+        },
         "ended_at": "2026-10-03T12:00:00+00:00"
       },
       "executed_sql": [
-        "UPDATE \"agent_run\" SET \"status\" = 'failed', \"done_payload\" = NULL, \"error\" = 'done-signal parse error: no pi-dash-done fenced block found', \"ended_at\" = '2026-10-03 12:00:00+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '11111111222233334444000000004105'::uuid"
+        "UPDATE \"agent_run\" SET \"status\" = 'failed', \"done_payload\" = NULL, \"error_details\" = '{\"message\": \"done-signal parse error: no pi-dash-done fenced block found\"}'::jsonb, \"ended_at\" = '2026-10-03 12:00:00+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '11111111222233334444000000004105'::uuid"
       ]
     },
     {
@@ -367,18 +371,20 @@
       "before": {
         "status": "completed",
         "done_payload": null,
-        "error": "",
+        "error_details": {},
         "ended_at": null
       },
       "returned": null,
       "after": {
         "status": "completed",
         "done_payload": null,
-        "error": "done-signal parse error: no pi-dash-done fenced block found",
+        "error_details": {
+          "message": "done-signal parse error: no pi-dash-done fenced block found"
+        },
         "ended_at": "2026-10-03T12:00:00+00:00"
       },
       "executed_sql": [
-        "UPDATE \"agent_run\" SET \"status\" = 'completed', \"done_payload\" = NULL, \"error\" = 'done-signal parse error: no pi-dash-done fenced block found', \"ended_at\" = '2026-10-03 12:00:00+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '11111111222233334444000000004106'::uuid"
+        "UPDATE \"agent_run\" SET \"status\" = 'completed', \"done_payload\" = NULL, \"error_details\" = '{\"message\": \"done-signal parse error: no pi-dash-done fenced block found\"}'::jsonb, \"ended_at\" = '2026-10-03 12:00:00+00:00'::timestamptz WHERE \"agent_run\".\"id\" = '11111111222233334444000000004106'::uuid"
       ]
     }
   ]

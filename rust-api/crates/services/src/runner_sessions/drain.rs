@@ -94,8 +94,8 @@
 //!   binds `pod_id` from the already-fetched runner row, so no pod
 //!   fetch runs on the drain path. `SAVEPOINT` / `RELEASE` /
 //!   `BEGIN` / `COMMIT` lines are harness artifacts, not ported.
-//! * `ORDER BY 43 ASC` is Django's positional rendering of the
-//!   `_is_mine` annotation (40 run columns + 2 `EXISTS` annotations +
+//! * `ORDER BY 42 ASC` is Django's positional rendering of the
+//!   `_is_mine` annotation (39 run columns + 2 `EXISTS` annotations +
 //!   the `CASE`); kept verbatim, with the rank position const pinned
 //!   against the column count so it cannot drift silently.
 //! * A non-private runner makes `filter_runs_usable_by_runner`
@@ -201,14 +201,14 @@ pub const DRAIN_FOR_RUNNER_LOCK_SQL: &str = "SELECT \"runner\".\"id\", \"runner\
 /// pod id. Pinned runs are excluded (`IS NULL`); the `IN` list is
 /// `MACHINE_EXECUTORS` in tuple order. `FOR UPDATE SKIP LOCKED`:
 /// call inside a transaction.
-pub const NEXT_QUEUED_RUN_FOR_POD_SQL: &str = "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run\" WHERE (\"agent_run\".\"executor_kind\" IN ('local_runner', 'managed_runner') AND \"agent_run\".\"pinned_runner_id\" IS NULL AND \"agent_run\".\"pod_id\" = $1 AND \"agent_run\".\"status\" = 'queued') ORDER BY \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED";
+pub const NEXT_QUEUED_RUN_FOR_POD_SQL: &str = "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error_details\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run\" WHERE (\"agent_run\".\"executor_kind\" IN ('local_runner', 'managed_runner') AND \"agent_run\".\"pinned_runner_id\" IS NULL AND \"agent_run\".\"pod_id\" = $1 AND \"agent_run\".\"status\" = 'queued') ORDER BY \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED";
 
 /// Positional `ORDER BY` of the `_is_mine` annotation in
-/// [`next_for_runner_sql`]: 40 run columns plus 2 `EXISTS`
+/// [`next_for_runner_sql`]: 39 run columns plus 2 `EXISTS`
 /// annotations plus the `CASE`, i.e.
 /// `AGENT_RUN_COLUMNS.len() + 3`. Pinned by the tests below so a
 /// column-count change fails loudly instead of re-sorting the tiers.
-pub const NEXT_FOR_RUNNER_RANK_POSITION: usize = 43;
+pub const NEXT_FOR_RUNNER_RANK_POSITION: usize = 42;
 
 /// The `:173` provisioning split: `DESKTOP_BUNDLED` runners take the
 /// managed arm, every other provisioning the manual arm.
@@ -225,7 +225,7 @@ pub fn is_desktop_provisioning(provisioning: &str) -> bool {
 /// issuing a query. The executor runs no SQL in that case.
 ///
 /// Otherwise the full `SELECT … FOR UPDATE SKIP LOCKED` text: the
-/// 40-column run projection plus the two `EXISTS` annotations the
+/// 39-column run projection plus the two `EXISTS` annotations the
 /// usability filter contributes, the pin-rank `CASE`
 /// (`pinned_runner_id = $2 THEN 0 ELSE 1`), and the provisioning
 /// split (`executor_kind = 'local_runner'` for manual runners;
@@ -595,7 +595,7 @@ mod tests {
             "CASE WHEN \"agent_run\".\"pinned_runner_id\" = $2 THEN 0 ELSE 1 END AS \"_is_mine\""
         ));
         assert!(ours.ends_with(
-            "ORDER BY 43 ASC, \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
+            "ORDER BY 42 ASC, \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
         ));
         assert!(ours.contains(&format!(
             "\"agent_run\".\"executor_kind\" = '{}'",
@@ -643,7 +643,7 @@ mod tests {
         let projected = run_projection(&ours);
         assert_eq!(&projected[..AGENT_RUN_COLUMNS.len()], AGENT_RUN_COLUMNS);
         assert_eq!(projected.len(), AGENT_RUN_COLUMNS.len() + 3);
-        assert_eq!(AGENT_RUN_COLUMNS.len(), 40);
+        assert_eq!(AGENT_RUN_COLUMNS.len(), 39);
         assert_eq!(NEXT_FOR_RUNNER_RANK_POSITION, AGENT_RUN_COLUMNS.len() + 3);
         assert_eq!(AgentRunStatus::Queued.value(), "queued", "status literal");
     }

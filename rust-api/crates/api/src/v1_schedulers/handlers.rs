@@ -208,7 +208,7 @@ const RUNS_GUARD_SQL: &str = r#"SELECT EXISTS(SELECT 1 FROM "scheduler_bindings"
 /// .select_related("scheduler_binding").order_by("-created_at")`. The
 /// binding span is an INNER JOIN (a NULL `scheduler_binding_id` row is
 /// excluded in Django too); `agent_run` has no soft-delete column.
-const RUNS_LIST_SQL: &str = r#"SELECT "r"."id", "r"."scheduler_binding_id", "r"."status", "r"."trigger", "r"."phase_kind", "r"."error_code", "r"."created_at", "r"."started_at", "r"."ended_at", "b"."scheduler_id", "b"."project_id" FROM "agent_run" "r" JOIN "scheduler_bindings" "b" ON "b"."id" = "r"."scheduler_binding_id" JOIN "workspaces" "w" ON "w"."id" = "r"."workspace_id" WHERE "w"."slug" = $1 AND "b"."scheduler_id" = $2 AND "b"."project_id" = $3 ORDER BY "r"."created_at" DESC"#;
+const RUNS_LIST_SQL: &str = r#"SELECT "r"."id", "r"."scheduler_binding_id", "r"."status", "r"."trigger", "r"."phase_kind", COALESCE("r"."error_details" ->> 'code', '') AS "error_code", "r"."created_at", "r"."started_at", "r"."ended_at", "b"."scheduler_id", "b"."project_id" FROM "agent_run" "r" JOIN "scheduler_bindings" "b" ON "b"."id" = "r"."scheduler_binding_id" JOIN "workspaces" "w" ON "w"."id" = "r"."workspace_id" WHERE "w"."slug" = $1 AND "b"."scheduler_id" = $2 AND "b"."project_id" = $3 ORDER BY "r"."created_at" DESC"#;
 
 /// `_issues_by_run`: the comments the runs posted
 /// (`speaker_agent_run_id`), scoped to projects the caller is an active

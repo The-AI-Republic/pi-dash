@@ -732,11 +732,12 @@ pub const CANCEL_REQUESTED_EXISTS_SQL: &str = "SELECT 1 AS \"a\" FROM \"agent_ru
 pub const RUNNER_OFFLINE_ERROR_CODE: &str = "runner_offline";
 
 /// In-flight claim probe (`70d684af`): the reported run's `status`
-/// and `error_code` (`filter(id, runner).values("status",
-/// "error_code").first()`). `$1` in-flight id, `$2` runner id.
+/// and `error_details` (`filter(id, runner).values("status",
+/// "error_details").first()`; the caller reads its `code` key —
+/// PDASHOSS01-187). `$1` in-flight id, `$2` runner id.
 /// Replaces [`CANCEL_REQUESTED_EXISTS_SQL`] on the poll path so a
 /// daemon that returns to a sweep-finalized run is told to stop.
-pub const IN_FLIGHT_CLAIM_SQL: &str = "SELECT \"agent_run\".\"status\", \"agent_run\".\"error_code\" FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"runner_id\" = $2) ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1";
+pub const IN_FLIGHT_CLAIM_SQL: &str = "SELECT \"agent_run\".\"status\", \"agent_run\".\"error_details\" FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"runner_id\" = $2) ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1";
 
 /// The cancel reason for a claimed in-flight run (`70d684af`):
 /// `cancellation_pending` while the run is still
@@ -2288,18 +2289,20 @@ mod tests {
                 "ended_at",
                 "terminal_hooks_applied_at",
                 "terminal_capacity_released_at",
-                "error",
-                "error_code"
+                "error_details"
             ]
         );
         assert_eq!(
             values.clauses[0].value,
             SetValue::Text("failed".to_string())
         );
-        assert_eq!(values.clauses[4].value, SetValue::Text(detail.clone()));
+        // `error` / `error_code` fold into one bag patch (PDASHOSS01-187).
         assert_eq!(
-            values.clauses[5].value,
-            SetValue::Text("heartbeat_reaped".to_string())
+            values.clauses[4].value,
+            SetValue::Json(serde_json::json!({
+                "message": detail.clone(),
+                "code": "heartbeat_reaped"
+            }))
         );
         // Lock text pins (the terminal IN-list binds $2..$6; Django
         // inlines the same five values in set-hash order — order-free
@@ -2325,16 +2328,19 @@ mod tests {
             .split(" WHERE ")
             .next()
             .unwrap();
-        let set_columns: Vec<&str> = set_part
-            .split(", ")
-            .map(|assign| assign.split(" = ").next().unwrap().trim_matches('"'))
+        // Each assignment's column is the quoted identifier right before
+        // its ` = ` (the jsonb literal carries `, ` of its own).
+        let segments: Vec<&str> = set_part.split(" = ").collect();
+        let set_columns: Vec<&str> = segments[..segments.len() - 1]
+            .iter()
+            .map(|segment| segment.trim_end_matches('"').rsplit('"').next().unwrap())
             .collect();
         assert_eq!(set_columns, columns);
         assert!(update.contains(&detail));
-        assert!(update.contains("'heartbeat_reaped'"));
+        assert!(update.contains("\"code\": \"heartbeat_reaped\""));
         // The rendered D-15 UPDATE binds one param per clause, id last.
         let rendered = finalize_update_sql(&values);
-        assert!(rendered.ends_with("WHERE \"agent_run\".\"id\" = $7"));
+        assert!(rendered.ends_with("WHERE \"agent_run\".\"id\" = $6"));
         // Lock predicate for the reaper call: expected runner, no status.
         assert!(finalize_lock_passes(
             AgentRunStatus::Running,
@@ -2390,7 +2396,7 @@ mod tests {
         assert_eq!(RUNNER_OFFLINE_ERROR_CODE, "runner_offline");
         assert_eq!(
             IN_FLIGHT_CLAIM_SQL,
-            "SELECT \"agent_run\".\"status\", \"agent_run\".\"error_code\" FROM \"agent_run\" \
+            "SELECT \"agent_run\".\"status\", \"agent_run\".\"error_details\" FROM \"agent_run\" \
              WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"runner_id\" = $2) \
              ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1",
         );

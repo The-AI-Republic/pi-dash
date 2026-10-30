@@ -1474,8 +1474,8 @@ def test_create_issue_dispatches_entry_run(db_conn):
     assert run["runner_id"] is None
     assert run["pinned_runner_id"] is None
     assert run["scheduler_binding_id"] is None
-    assert run["error"] == ""
-    assert run["error_code"] == ""
+    assert run["error_details"] == {}
+    assert run["refusal_category"] == ""
     assert run["dispatch_attempts"] == 0
     assert run["run_config"] == {"repo_ref": None, "repo_url": None, "git_work_branch": None}
     assert run["required_capabilities"] == []

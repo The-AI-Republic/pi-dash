@@ -293,7 +293,8 @@ impl RunCreationStore for PoolRunCreationStore<'_> {
 
 /// The direct-create INSERT: Django's `AgentRun.objects.create` at
 /// `runs.py:281-292` inserts every concrete column (model order, the
-/// three generated `usage` columns excluded), so this lists them all
+/// three generated `usage` columns and the generated `refusal_category`
+/// excluded), so this lists them all
 /// with model defaults as literals. `$1..$12` carry the caller-supplied
 /// fields; `trigger` is the `'direct'` model default and `phase_kind`
 /// stays `''` (the view passes neither — the `phase_kind` stamp is an
@@ -301,13 +302,13 @@ impl RunCreationStore for PoolRunCreationStore<'_> {
 const DIRECT_RUN_INSERT_SQL: &str =
     "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, \
     pod_id, runner_id, pinned_runner_id, work_item_id, scheduler_binding_id, parent_run_id, \
-    status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, error_code, \
+    status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, \
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
     prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-    lease_expires_at, done_payload, error, refusal_category, llm_model, usage, created_at, \
+    lease_expires_at, done_payload, error_details, llm_model, usage, created_at, \
     assigned_at, started_at, ended_at) \
-    VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, NULL, NULL, 'queued', $7, 0, NULL, '', $8, $9, \
-    NULL, NULL, '', 'direct', NULL, '', $10, $11, '', '{}', NULL, NULL, '', '', '', '{}', $12, \
+    VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, NULL, NULL, 'queued', $7, 0, NULL, '', $9, \
+    NULL, NULL, '', 'direct', NULL, '', $10, $11, '', '{}', NULL, NULL, $8, '', '{}', $12, \
     NULL, NULL, NULL)";
 
 /// The `requested` override read (`runs.py:273-279`):
@@ -1347,7 +1348,11 @@ pub async fn post_direct(
     };
     let run_id = Uuid::new_v4();
     let executor_kind = fields.executor_kind.value().to_owned();
-    let error_code = fields.error_code.clone().unwrap_or_default();
+    // The managed waiting path stamps its code into the bag at creation
+    // (`cloud_agent/creation.py`, `fields["error_details"]`).
+    let error_details = pidash_services::orchestration::initial_error_details(
+        fields.error_code.as_deref().unwrap_or_default(),
+    );
     let insert = sqlx::query(DIRECT_RUN_INSERT_SQL)
         .bind(run_id)
         .bind(ctx.workspace_id)
@@ -1356,7 +1361,7 @@ pub async fn post_direct(
         .bind(fields.pinned_runner_id)
         .bind(ctx.work_item_id)
         .bind(executor_kind.as_str())
-        .bind(error_code.as_str())
+        .bind(&error_details)
         .bind(&fields.tool_plan)
         .bind(&run_config)
         .bind(&required_raw)

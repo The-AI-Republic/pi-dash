@@ -898,7 +898,7 @@ mod tests {
         .await
         .expect("seed issue");
         sqlx::query(
-            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "refusal_category", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "error_code", "tool_plan", "phase_kind", "agent_metadata", "usage") VALUES ($1, 'completed', '', '{}', '{}', '', '', $2, $3, $4, $5, $6, '', '', 'tick', 'local_runner', 0, '', '', '{}', 'coding-task', '{}', '{}')"#,
+            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}')"#,
         )
         .bind(run)
         .bind(now)

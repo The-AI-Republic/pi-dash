@@ -252,8 +252,11 @@ pub fn sweep_stale_pairs_sql(excluded_ids: usize) -> String {
 
 /// Stopped-cancel barrier write with the offline stamp
 /// (`stamp_cancelled=True`): `.update()` call order (`status`,
-/// `ended_at`, `error_code`). `$1` is `now`
-/// (`ended_at`), `$2` the error code, `$3…` the stopped-cancel ids.
+/// `ended_at`, `error_details`). The code is merged
+/// into the bag in SQL (`merge_error_details_expression`:
+/// `error_details || '{"code": …}'`, PDASHOSS01-187) — a bulk update
+/// has no locked row to merge in Rust. `$1` is `now` (`ended_at`),
+/// `$2` the [`offline_stamp_patch`], `$3…` the stopped-cancel ids.
 /// Call only with a non-empty id list — the source guards the write
 /// with `if stopped_cancel_ids:`.
 pub fn sweep_cancel_barrier_stamped_sql(id_count: usize) -> String {
@@ -261,10 +264,17 @@ pub fn sweep_cancel_barrier_stamped_sql(id_count: usize) -> String {
     let params: Vec<String> = (0..id_count).map(|i| format!("${}", i + 3)).collect();
     format!(
         "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $1, \
-         \"error_code\" = $2 \
+         \
+         \"error_details\" = (\"agent_run\".\"error_details\" || $2::jsonb) \
          WHERE \"agent_run\".\"id\" IN ({})",
         params.join(", ")
     )
+}
+
+/// The `$2` patch [`sweep_cancel_barrier_stamped_sql`] merges: the
+/// stamp's `code` key alone.
+pub fn offline_stamp_patch(error_code: &str) -> serde_json::Value {
+    serde_json::json!({ pidash_db::runner_runs::agent_run::ERROR_DETAILS_CODE: error_code })
 }
 
 /// The `error` detail every sweep-failed run finalizes with.
@@ -430,8 +440,13 @@ mod tests {
         assert_eq!(
             sweep_cancel_barrier_stamped_sql(2),
             "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $1, \
-             \"error_code\" = $2 \
+             \
+             \"error_details\" = (\"agent_run\".\"error_details\" || $2::jsonb) \
              WHERE \"agent_run\".\"id\" IN ($3, $4)",
+        );
+        assert_eq!(
+            offline_stamp_patch("runner_offline"),
+            serde_json::json!({"code": "runner_offline"})
         );
     }
 

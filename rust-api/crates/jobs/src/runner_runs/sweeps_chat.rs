@@ -567,6 +567,7 @@ fn map_effects_locked(row: &sqlx::postgres::PgRow) -> Result<EffectsLocked, Swee
     let hooks_at: Option<DateTime<Utc>> = row
         .try_get(at("terminal_hooks_applied_at")?)
         .map_err(SweepError::Db)?;
+    let error_details: Value = row.try_get(at("error_details")?).map_err(SweepError::Db)?;
     let binding_base = row
         .len()
         .checked_sub(scheduler_binding::COLUMNS.len())
@@ -589,7 +590,8 @@ fn map_effects_locked(row: &sqlx::postgres::PgRow) -> Result<EffectsLocked, Swee
     Ok(EffectsLocked {
         status: AgentRunStatus::from_value(&status_text).ok_or(SweepError::BadRow("status"))?,
         run_config: row.try_get(at("run_config")?).map_err(SweepError::Db)?,
-        error: row.try_get(at("error")?).map_err(SweepError::Db)?,
+        error: agent_run::error_details_text(&error_details, agent_run::ERROR_DETAILS_MESSAGE)
+            .to_owned(),
         refusal_category: row
             .try_get(at("refusal_category")?)
             .map_err(SweepError::Db)?,
@@ -1954,7 +1956,7 @@ mod tests {
                 .map(|column| format!("\"runner\".\"{column}\"")),
         );
         assert_eq!(entries, expected);
-        assert_eq!(agent_run::COLUMNS.len(), 40);
+        assert_eq!(agent_run::COLUMNS.len(), 39);
         assert_eq!(runner_cols::COLUMNS.len(), 31);
     }
 

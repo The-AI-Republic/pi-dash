@@ -8,7 +8,7 @@
     "apps/api/pi_dash/runner/models.py:1162-1185 (AgentRunEvent)",
     "apps/api/pi_dash/runner/models.py:1187-1230 (AgentRunToolCall)"
   ],
-  "method": "Column lists + Meta extracted by executing Python ast over the real runner/models.py (no app registry needed); enum values verbatim from the TextChoices assignments. runner/models.py is READ-ONLY for this domain (owned by D-13...D-15); dispatch only reads the subset listed under dispatch_touched_subset.",
+  "method": "Column lists + Meta extracted by executing Python ast over the real runner/models.py (no app registry needed); enum values verbatim from the TextChoices assignments. runner/models.py is READ-ONLY for this domain (owned by D-13...D-15); dispatch only reads the subset listed under dispatch_touched_subset. PDASHOSS01-187: error_code/error/refusal_category entries re-extracted from the Python PR #447 models.py (error_details JSONField; refusal_category JSONKeyTextField); the subset reads error_details in place of error_code + error.",
   "agent_run_status_values": [
     "queued",
     "assigned",
@@ -54,7 +54,6 @@
       "dispatch_attempts",
       "cancel_requested_at",
       "cancel_reason",
-      "error_code",
       "tool_plan",
       "prompt",
       "trigger",
@@ -63,7 +62,7 @@
       "llm_model",
       "usage",
       "done_payload",
-      "error",
+      "error_details",
       "tool_calls (reverse)",
       "events (reverse)"
     ],
@@ -205,14 +204,6 @@
       "default": ""
     },
     {
-      "name": "error_code",
-      "type": "CharField",
-      "max_length": 64,
-      "blank": true,
-      "default": "",
-      "db_index": true
-    },
-    {
       "name": "tool_plan",
       "type": "JSONField",
       "default": "Name(id='dict', ctx=Load())",
@@ -296,18 +287,16 @@
       "blank": true
     },
     {
-      "name": "error",
-      "type": "TextField",
-      "blank": true,
-      "default": ""
+      "name": "error_details",
+      "type": "JSONField",
+      "default": "Name(id='dict', ctx=Load())",
+      "blank": true
     },
     {
       "name": "refusal_category",
-      "type": "CharField",
-      "max_length": 32,
-      "choices": "Attribute(value=Name(id='RefusalCategory', ctx=Load()), attr='choices', ctx=Load())",
-      "blank": true,
-      "default": ""
+      "type": "JSONKeyTextField",
+      "source": "error_details",
+      "key": "refusal_category"
     },
     {
       "name": "llm_model",

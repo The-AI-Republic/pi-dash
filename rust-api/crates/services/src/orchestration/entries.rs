@@ -237,7 +237,7 @@ pub const CLOCK_POLICY_SQL: &str = "SELECT agent_ticking_enabled, agent_default_
     agent_test_default_interval_seconds FROM projects WHERE id = $1";
 
 /// The scheduler full-row INSERT (`AgentRun.objects.create`,
-/// `service.py:953-965`): the same 38 non-generated columns in model
+/// `service.py:953-965`): the same 36 non-generated columns in model
 /// order as L6's `RUN_INSERT_SQL`, with the scheduler VALUES shape —
 /// `work_item` NULL, `scheduler_binding` bound, `parent_run` NULL, the
 /// `'scheduler'` trigger and `'{}'` run config as literals (fixed by the
@@ -247,13 +247,13 @@ pub const CLOCK_POLICY_SQL: &str = "SELECT agent_ticking_enabled, agent_default_
 pub const SCHEDULER_RUN_INSERT_SQL: &str =
     "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, \
     pod_id, runner_id, pinned_runner_id, work_item_id, scheduler_binding_id, parent_run_id, \
-    status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, error_code, \
+    status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, \
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
     prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-    lease_expires_at, done_payload, error, refusal_category, llm_model, usage, created_at, \
+    lease_expires_at, done_payload, error_details, llm_model, usage, created_at, \
     assigned_at, started_at, ended_at) \
-    VALUES ($1, $2, NULL, $3, $4, NULL, $5, NULL, $6, NULL, 'queued', $7, 0, NULL, '', $8, $9, \
-    NULL, NULL, '', 'scheduler', NULL, '', '{}', '[]', '', '{}', NULL, NULL, '', '', '', '{}', $10, \
+    VALUES ($1, $2, NULL, $3, $4, NULL, $5, NULL, $6, NULL, 'queued', $7, 0, NULL, '', $9, \
+    NULL, NULL, '', 'scheduler', NULL, '', '{}', '[]', '', '{}', NULL, NULL, $8, '', '{}', $10, \
     NULL, NULL, NULL)";
 
 /// The scheduler INSERT as executed: [`SCHEDULER_RUN_INSERT_SQL`] plus
@@ -326,8 +326,9 @@ pub struct NewSchedulerRun {
     pub pinned_runner_id: Option<Uuid>,
     pub binding_id: Uuid,
     pub executor_kind: AgentExecutorKind,
-    /// The `error_code` splat (`""` except the managed waiting path).
-    pub error_code: String,
+    /// The `error_details` splat (`{}` except the managed waiting
+    /// path's `{"code": …}`).
+    pub error_details: Value,
     pub tool_plan: Value,
     /// `created_at` (`auto_now_add`, supplied explicitly).
     pub now: DateTime<Utc>,
@@ -1133,7 +1134,9 @@ pub async fn dispatch_scheduler_run<S: EntriesSeam>(
             pinned_runner_id: execution.merge_pin(None),
             binding_id: binding.id,
             executor_kind: execution.executor_kind,
-            error_code: execution.error_code.clone().unwrap_or_default(),
+            error_details: super::creation::initial_error_details(
+                execution.error_code.as_deref().unwrap_or_default(),
+            ),
             tool_plan: execution.tool_plan.clone(),
             now: req.now,
         })
@@ -1498,8 +1501,7 @@ mod tests {
             phase_kind: "coding-task".to_owned(),
             run_config: json!({}),
             tool_plan: json!({}),
-            error_code: String::new(),
-            error: String::new(),
+            error_details: json!({}),
             prompt: String::new(),
             prompt_manifest: None,
             ended_at: None,
@@ -1853,8 +1855,7 @@ mod tests {
                 phase_kind: row.phase_kind.clone(),
                 run_config: row.run_config.clone(),
                 tool_plan: row.tool_plan.clone(),
-                error_code: row.error_code.clone(),
-                error: String::new(),
+                error_details: row.error_details.clone(),
                 prompt: String::new(),
                 prompt_manifest: None,
                 ended_at: None,
@@ -1940,8 +1941,13 @@ mod tests {
                 .push((run_id, error_code.to_owned(), error.to_owned()));
             let run = self.runs.get_mut(&run_id).expect("run exists");
             run.status = AgentRunStatus::Failed;
-            run.error_code = error_code.to_owned();
-            run.error = error.to_owned();
+            run.error_details = pidash_db::runner_runs::agent_run::merge_error_details(
+                &run.error_details,
+                &[
+                    ("error_code", Value::String(error_code.to_owned())),
+                    ("error", Value::String(error.to_owned())),
+                ],
+            );
             run.ended_at = Some(now);
             Ok(run.clone())
         }
@@ -2106,8 +2112,7 @@ mod tests {
                 phase_kind: String::new(),
                 run_config: json!({}),
                 tool_plan,
-                error_code: row.error_code.clone(),
-                error: String::new(),
+                error_details: row.error_details.clone(),
                 prompt: String::new(),
                 prompt_manifest: None,
                 ended_at: None,
@@ -2614,8 +2619,8 @@ mod tests {
             golden["executor_kind"].as_str().unwrap()
         );
         assert_eq!(run.tool_plan, golden["tool_plan"]);
-        assert_eq!(run.error_code, golden["error_code"].as_str().unwrap());
-        assert_eq!(run.error, golden["error"].as_str().unwrap());
+        assert_eq!(run.error_code(), golden["error_code"].as_str().unwrap());
+        assert_eq!(run.error(), golden["error"].as_str().unwrap());
         assert_eq!(run.ended_at, None);
         assert!(golden["ended_at"].is_null());
         assert_eq!(run.run_config, golden["run_config"]);
@@ -3052,8 +3057,8 @@ mod tests {
             golden["executor_kind"].as_str().unwrap()
         );
         assert_eq!(run.tool_plan, golden["tool_plan"]);
-        assert_eq!(run.error_code, golden["error_code"].as_str().unwrap());
-        assert_eq!(run.error, golden["error"].as_str().unwrap());
+        assert_eq!(run.error_code(), golden["error_code"].as_str().unwrap());
+        assert_eq!(run.error(), golden["error"].as_str().unwrap());
         assert_eq!(run.ended_at, None);
         assert!(golden["ended_at"].is_null());
         assert_eq!(seam.scheduler_runs.len(), 1);
@@ -3530,8 +3535,8 @@ mod tests {
             golden["executor_kind"].as_str().unwrap()
         );
         assert_eq!(run.tool_plan, golden["tool_plan"]);
-        assert_eq!(run.error_code, golden["error_code"].as_str().unwrap());
-        assert_eq!(run.error, golden["error"].as_str().unwrap());
+        assert_eq!(run.error_code(), golden["error_code"].as_str().unwrap());
+        assert_eq!(run.error(), golden["error"].as_str().unwrap());
         assert_eq!(run.ended_at, Some(now));
         assert_eq!(
             seam.finalized,
@@ -3565,9 +3570,9 @@ mod tests {
         let run = seam.runs.get(&run_id).expect("run stored").clone();
         let golden = &case["after"];
         assert_eq!(run.status.value(), golden["status"].as_str().unwrap());
-        assert_eq!(run.error_code, golden["error_code"].as_str().unwrap());
-        assert_eq!(run.error_code, "prompt_build_failed");
-        assert_eq!(run.error, golden["error"].as_str().unwrap());
+        assert_eq!(run.error_code(), golden["error_code"].as_str().unwrap());
+        assert_eq!(run.error_code(), "prompt_build_failed");
+        assert_eq!(run.error(), golden["error"].as_str().unwrap());
         assert_eq!(run.ended_at, Some(now));
         assert_eq!(run.prompt, golden["prompt"].as_str().unwrap());
         assert!(run.prompt_manifest.is_none());

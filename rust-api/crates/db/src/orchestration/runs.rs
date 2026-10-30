@@ -15,8 +15,8 @@
 //! Rows reuse the D-11 [`AgentRun`] read shape and [`AgentRunStatus`]
 //! (`pidash_db::dispatch`, never re-ported): the lookup `SELECT`s
 //! project [`READ_COLUMNS`] (22 columns) where Django selects the full
-//! 40-column row — same row-selection semantics, narrower projection.
-//! The fixture (`active_run.sql`) pins the 40-column Django text; the
+//! 39-column row — same row-selection semantics, narrower projection.
+//! The fixture (`active_run.sql`) pins the 39-column Django text; the
 //! tests pin our projection against [`READ_COLUMNS`] and the
 //! `WHERE`/`ORDER BY`/`LIMIT` tails against the fixture.
 //!
@@ -36,6 +36,7 @@ use sqlx::Row;
 
 use crate::dispatch::agent_run::{AgentRun, READ_COLUMNS};
 use crate::dispatch::status::AgentRunStatus;
+use crate::runner_runs::agent_run::merge_error_details;
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::orchestration::{parse, DoneSignal};
 
@@ -122,7 +123,6 @@ pub fn map_agent_run(row: &PgRow) -> Result<AgentRun, sqlx::Error> {
         dispatch_attempts: row.try_get("dispatch_attempts")?,
         cancel_requested_at: row.try_get("cancel_requested_at")?,
         cancel_reason: row.try_get("cancel_reason")?,
-        error_code: row.try_get("error_code")?,
         tool_plan: row.try_get("tool_plan")?,
         prompt: row.try_get("prompt")?,
         trigger,
@@ -131,7 +131,7 @@ pub fn map_agent_run(row: &PgRow) -> Result<AgentRun, sqlx::Error> {
         llm_model: row.try_get("llm_model")?,
         usage: row.try_get("usage")?,
         done_payload: row.try_get("done_payload")?,
-        error: row.try_get("error")?,
+        error_details: row.try_get("error_details")?,
     })
 }
 
@@ -169,15 +169,17 @@ where
 
 /// State [`ingest_into_run`] re-reads: Python holds the run instance
 /// in memory (`done_signal.py:141`), so it issues only the `UPDATE`;
-/// the stateless port re-reads the two columns the decision needs.
-pub const INGEST_SELECT_SQL: &str = "SELECT status, ended_at FROM agent_run WHERE id = $1";
+/// the stateless port re-reads the three columns the decision needs
+/// (`error_details` is merged, not overwritten — PDASHOSS01-187).
+pub const INGEST_SELECT_SQL: &str =
+    "SELECT status, ended_at, error_details FROM agent_run WHERE id = $1";
 
 /// The single ingest `UPDATE` (`done_signal.py:162+180`). `SET` order
 /// follows Django's `_meta` field order per the fixture
-/// (`status, done_payload, error, ended_at`); `$1..$4` are the new
-/// values, `$5` the run id.
-pub const INGEST_UPDATE_SQL: &str =
-    "UPDATE agent_run SET status = $1, done_payload = $2, error = $3, ended_at = $4 WHERE id = $5";
+/// (`status, done_payload, error_details, ended_at`); `$1..$4` are the
+/// new values, `$5` the run id.
+pub const INGEST_UPDATE_SQL: &str = "UPDATE agent_run SET status = $1, done_payload = $2, \
+     error_details = $3, ended_at = $4 WHERE id = $5";
 
 /// The pure half of [`ingest_into_run`]: the parsed signal (if any)
 /// plus the four columns the `UPDATE` writes.
@@ -186,14 +188,15 @@ pub struct IngestPlan {
     pub signal: Option<DoneSignal>,
     pub status: AgentRunStatus,
     pub done_payload: Option<Value>,
-    pub error: String,
+    pub error_details: Value,
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Decide the ingest outcome without touching the database
 /// (`done_signal.py:153-181`).
 ///
-/// * Parse error: `error` records `done-signal parse error: {exc}`,
+/// * Parse error: `error` (the `message` key of `error_details`)
+///   records `done-signal parse error: {exc}`,
 ///   `done_payload` is cleared, `ended_at` is stamped, and the status
 ///   becomes `FAILED` unless the run is already terminal (kept).
 /// * `completed`/`blocked`/`noop`: payload stored, `error` cleared,
@@ -204,6 +207,7 @@ pub struct IngestPlan {
 pub fn plan_ingest(
     current_status: AgentRunStatus,
     current_ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    current_error_details: &Value,
     text: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> IngestPlan {
@@ -217,7 +221,13 @@ pub fn plan_ingest(
                     AgentRunStatus::Failed
                 },
                 done_payload: None,
-                error: format!("done-signal parse error: {err}"),
+                error_details: merge_error_details(
+                    current_error_details,
+                    &[(
+                        "error",
+                        Value::String(format!("done-signal parse error: {err}")),
+                    )],
+                ),
                 ended_at: Some(now),
             }
         }
@@ -236,7 +246,10 @@ pub fn plan_ingest(
     IngestPlan {
         status,
         done_payload: Some(signal.payload.clone()),
-        error: String::new(),
+        error_details: merge_error_details(
+            current_error_details,
+            &[("error", Value::String(String::new()))],
+        ),
         ended_at,
         signal: Some(signal),
     }
@@ -270,11 +283,12 @@ pub async fn ingest_into_run(
     let current =
         AgentRunStatus::from_value(&status).ok_or_else(|| decode_error("status", &status))?;
     let ended_at: Option<chrono::DateTime<chrono::Utc>> = row.try_get("ended_at")?;
-    let plan = plan_ingest(current, ended_at, text, now);
+    let error_details: Value = row.try_get("error_details")?;
+    let plan = plan_ingest(current, ended_at, &error_details, text, now);
     sqlx::query(INGEST_UPDATE_SQL)
         .bind(plan.status.value())
         .bind(&plan.done_payload)
-        .bind(&plan.error)
+        .bind(&plan.error_details)
         .bind(plan.ended_at)
         .bind(run_id)
         .execute(&mut *conn)
@@ -285,6 +299,7 @@ pub async fn ingest_into_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner_runs::agent_run::{error_details_text, ERROR_DETAILS_MESSAGE};
 
     static ACTIVE_RUN_SQL_FIXTURE: &str =
         include_str!("../../../../fixtures/orchestration/fx02_reads/active_run.sql");
@@ -354,7 +369,7 @@ mod tests {
     fn active_run_sql_projects_dispatch_columns_with_fixture_tail() {
         let sql = active_run_sql();
         let columns: Vec<String> = READ_COLUMNS.iter().map(|name| name.to_string()).collect();
-        assert_eq!(columns.len(), 22);
+        assert_eq!(columns.len(), 21);
         assert!(sql.starts_with(&format!(
             "SELECT {} FROM agent_run WHERE ",
             columns.join(", ")
@@ -423,12 +438,13 @@ mod tests {
         let plan = plan_ingest(
             AgentRunStatus::Running,
             Some(prior),
+            &serde_json::json!({}),
             "x\n```pi-dash-done\n{\"status\": \"paused\", \"autonomy\": {\"question_for_human\": \"q?\"}}\n```\n",
             now,
         );
         assert_eq!(plan.status, AgentRunStatus::PausedAwaitingInput);
         assert_eq!(plan.ended_at, Some(prior));
-        assert_eq!(plan.error, "");
+        assert_eq!(plan.error_details, serde_json::json!({}));
     }
 
     fn ingest_cases() -> Value {
@@ -457,6 +473,7 @@ mod tests {
             let plan = plan_ingest(
                 before_status,
                 fixture_time(&case["before"]["ended_at"]),
+                &case["before"]["error_details"],
                 case["input_text"].as_str().expect("input_text"),
                 now,
             );
@@ -480,9 +497,8 @@ mod tests {
             };
             assert_eq!(plan.done_payload, expected_payload, "{name}: done_payload");
             assert_eq!(
-                plan.error,
-                case["after"]["error"].as_str().expect("after.error"),
-                "{name}: error"
+                plan.error_details, case["after"]["error_details"],
+                "{name}: error_details"
             );
             assert_eq!(
                 plan.ended_at,
@@ -513,17 +529,17 @@ mod tests {
         }
     }
 
-    /// Temp `agent_run`: the 22 dispatch columns plus `ended_at` (the
+    /// Temp `agent_run`: the 21 dispatch columns plus `ended_at` (the
     /// ingest re-read) and `created_at` (the ordering key).
     const LIVE_DDL: &str = "CREATE TEMPORARY TABLE agent_run (
         id UUID PRIMARY KEY, workspace_id UUID NOT NULL, created_by_id UUID NOT NULL,
         pod_id UUID NOT NULL, pinned_runner_id UUID, work_item_id UUID,
         scheduler_binding_id UUID, status TEXT NOT NULL, executor_kind TEXT NOT NULL,
         dispatch_attempts INTEGER NOT NULL, cancel_requested_at TIMESTAMPTZ,
-        cancel_reason TEXT NOT NULL, error_code TEXT NOT NULL, tool_plan JSONB NOT NULL,
+        cancel_reason TEXT NOT NULL, tool_plan JSONB NOT NULL,
         prompt TEXT NOT NULL, trigger TEXT NOT NULL, lease_expires_at TIMESTAMPTZ,
         started_at TIMESTAMPTZ, llm_model TEXT NOT NULL, usage JSONB NOT NULL,
-        done_payload JSONB, error TEXT NOT NULL, ended_at TIMESTAMPTZ,
+        done_payload JSONB, error_details JSONB NOT NULL, ended_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL)";
 
     async fn live_tx(pool: &sqlx::PgPool) -> sqlx::Transaction<'_, sqlx::Postgres> {
@@ -556,10 +572,10 @@ mod tests {
         let id = live_uuid(tag);
         sqlx::query(
             "INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id, work_item_id,
-             status, executor_kind, dispatch_attempts, cancel_reason, error_code, tool_plan,
-             prompt, trigger, llm_model, usage, error, created_at)
-             VALUES ($1, $2, $2, $2, $3, $4, 'local_runner', 0, '', '', '{}', '', 'direct',
-             '', '{}', '', $5)",
+             status, executor_kind, dispatch_attempts, cancel_reason, tool_plan,
+             prompt, trigger, llm_model, usage, error_details, created_at)
+             VALUES ($1, $2, $2, $2, $3, $4, 'local_runner', 0, '', '{}', '', 'direct',
+             '', '{}', '{}', $5)",
         )
         .bind(id)
         .bind(live_uuid(9000 + tag))
@@ -745,7 +761,9 @@ mod tests {
         // Completed path.
         let issue = live_uuid(3300);
         let run = seed_run(&mut tx, 4030, issue, "running", live_time(30)).await;
-        sqlx::query("UPDATE agent_run SET error = 'prior error' WHERE id = $1")
+        sqlx::query(
+            "UPDATE agent_run SET error_details = '{\"code\": \"kept\", \"message\": \"prior error\"}' WHERE id = $1",
+        )
             .bind(run)
             .execute(&mut *tx)
             .await
@@ -758,19 +776,21 @@ mod tests {
             Some("completed".to_string())
         );
         let row: PgRow = sqlx::query(
-            "SELECT status, done_payload, error, ended_at FROM agent_run WHERE id = $1",
+            "SELECT status, done_payload, error_details, ended_at FROM agent_run WHERE id = $1",
         )
         .bind(run)
         .fetch_one(&mut *tx)
         .await
         .expect("read back");
         let status: String = row.try_get("status").expect("status");
-        let error: String = row.try_get("error").expect("error");
+        let error_details: Value = row.try_get("error_details").expect("error_details");
         let ended_at: Option<chrono::DateTime<chrono::Utc>> =
             row.try_get("ended_at").expect("ended_at");
         let payload: Value = row.try_get("done_payload").expect("payload");
         assert_eq!(status, "completed");
-        assert_eq!(error, "");
+        // The cleared message drops its key; the unrelated code survives
+        // the merge.
+        assert_eq!(error_details, serde_json::json!({"code": "kept"}));
         assert_eq!(ended_at, Some(now));
         assert_eq!(payload["status"], Value::String("completed".to_string()));
         assert_eq!(
@@ -806,20 +826,20 @@ mod tests {
             .expect("ingest parse error");
         assert_eq!(signal, None);
         let row: PgRow = sqlx::query(
-            "SELECT status, done_payload, error, ended_at FROM agent_run WHERE id = $1",
+            "SELECT status, done_payload, error_details, ended_at FROM agent_run WHERE id = $1",
         )
         .bind(failing)
         .fetch_one(&mut *tx)
         .await
         .expect("read back");
         let status: String = row.try_get("status").expect("status");
-        let error: String = row.try_get("error").expect("error");
+        let error_details: Value = row.try_get("error_details").expect("error_details");
         let ended_at: Option<chrono::DateTime<chrono::Utc>> =
             row.try_get("ended_at").expect("ended_at");
         let payload: Option<Value> = row.try_get("done_payload").expect("payload");
         assert_eq!(status, "failed");
         assert_eq!(
-            error,
+            error_details_text(&error_details, ERROR_DETAILS_MESSAGE),
             "done-signal parse error: no pi-dash-done fenced block found"
         );
         assert_eq!(ended_at, Some(now));
@@ -831,11 +851,12 @@ mod tests {
             .await
             .expect("ingest parse error");
         assert_eq!(signal, None);
-        let row: PgRow = sqlx::query("SELECT status, error, ended_at FROM agent_run WHERE id = $1")
-            .bind(kept)
-            .fetch_one(&mut *tx)
-            .await
-            .expect("read back");
+        let row: PgRow =
+            sqlx::query("SELECT status, error_details, ended_at FROM agent_run WHERE id = $1")
+                .bind(kept)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("read back");
         let status: String = row.try_get("status").expect("status");
         assert_eq!(status, "completed");
         let ended_at: Option<chrono::DateTime<chrono::Utc>> =
