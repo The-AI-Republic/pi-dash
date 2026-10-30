@@ -5,8 +5,9 @@
 // workspace route loads workspaces and personal entries and passes
 // them in, so this component never reaches past shared/ for data.
 // The shell owns collapse, resize, peek and float; this component owns
-// the content: brand, home, switcher, personal entries, the projects
-// group slot and the account row. Sidebar-content slices
+// the content: brand, home, personal entries, the projects group slot
+// and the account row. The workspace switcher lives in the top bar
+// only (NEWFRONT-1040), never in the sidebar. Sidebar-content slices
 // (NEWFRONT-285/286/287) extend this content without touching the
 // shell contract.
 
@@ -18,17 +19,6 @@ import { CrossAppLink } from "../coexistence/CrossAppLink.js";
 import { SidebarShell } from "./SidebarShell.js";
 import { isClientSideClick, isHomeRowActive } from "./sidebarLink.js";
 import { UserMenu } from "./UserMenu.js";
-import { WorkspaceSwitcher } from "./WorkspaceSwitcher.js";
-
-export interface SidebarWorkspace {
-  id: string;
-  slug: string;
-  name: string;
-  role: number;
-  totalMembers: number;
-  /** Resolved logo URL; null renders the workspace initial. */
-  logoSrc: string | null;
-}
 
 /**
  * One personal navigation entry (SHELL-070). The route derives the
@@ -52,9 +42,7 @@ export interface SidebarEditionEntry {
 }
 
 export interface SidebarProps {
-  workspaces: SidebarWorkspace[];
   activeSlug: string;
-  onSelectWorkspace: (slug: string) => void;
   userLabel: string;
   /** Signed-in identity details for the user menu. */
   userEmail: string;
@@ -66,16 +54,6 @@ export interface SidebarProps {
   onYourWork: () => void;
   /** Opens the settings page. */
   onUserSettings: () => void;
-  /** True while the instance disables workspace creation: hides its row. */
-  creationDisabled: boolean;
-  /** Opens one workspace's settings page. */
-  onOpenSettings: (slug: string) => void;
-  /** Opens one workspace's member invites. */
-  onInviteMembers: (slug: string) => void;
-  /** Opens workspace creation. */
-  onCreateWorkspace: () => void;
-  /** Opens the workspace invites inbox. */
-  onWorkspaceInvites: () => void;
   onSignOut: () => void;
   /**
    * Opens the deactivate-account dialog. Interim placement (AUTH-019): the
@@ -123,20 +101,13 @@ export interface SidebarProps {
 }
 
 export function Sidebar({
-  workspaces,
   activeSlug,
-  onSelectWorkspace,
   userLabel,
   userEmail,
   userAvatarSrc,
   userRole,
   onYourWork,
   onUserSettings,
-  creationDisabled,
-  onOpenSettings,
-  onInviteMembers,
-  onCreateWorkspace,
-  onWorkspaceInvites,
   onSignOut,
   onDeactivateAccount,
   updateControl,
@@ -222,18 +193,6 @@ export function Sidebar({
           );
         })}
       </nav>
-      <WorkspaceSwitcher
-        workspaces={workspaces}
-        activeSlug={activeSlug}
-        creationDisabled={creationDisabled}
-        onSelectWorkspace={onSelectWorkspace}
-        onOpenSettings={onOpenSettings}
-        onInviteMembers={onInviteMembers}
-        onCreateWorkspace={onCreateWorkspace}
-        onWorkspaceInvites={onWorkspaceInvites}
-        onSignOut={onSignOut}
-        mount="sidebar"
-      />
       {personalEntries.length === 0 ? null : (
         <nav aria-label="Personal" className="flex flex-col gap-(--space-1)">
           <ul className="flex flex-col gap-px">

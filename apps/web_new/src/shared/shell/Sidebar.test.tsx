@@ -17,27 +17,15 @@ import { describe, expect, it, vi } from "vitest";
 
 import { Sidebar, type SidebarProps } from "./Sidebar.js";
 
-const WORKSPACES = [
-  { id: "ws-1", slug: "acme", name: "Acme", role: 20, totalMembers: 3, logoSrc: null },
-  { id: "ws-2", slug: "globex", name: "Globex", role: 15, totalMembers: 1, logoSrc: null },
-];
-
 function sidebar(overrides: Partial<SidebarProps> = {}) {
   const props: SidebarProps = {
-    workspaces: WORKSPACES,
     activeSlug: "acme",
-    onSelectWorkspace: () => undefined,
     userLabel: "Ada Lovelace",
     userEmail: "ada@example.com",
     userAvatarSrc: null,
     userRole: 20,
     onYourWork: () => undefined,
     onUserSettings: () => undefined,
-    creationDisabled: false,
-    onOpenSettings: () => undefined,
-    onInviteMembers: () => undefined,
-    onCreateWorkspace: () => undefined,
-    onWorkspaceInvites: () => undefined,
     onSignOut: () => undefined,
     onNavigateHref: () => undefined,
     ...overrides,
@@ -85,9 +73,20 @@ describe("Sidebar", () => {
   it("renders the brand and the account row", () => {
     render(sidebar());
     expect(screen.getByTestId("sidebar-brand")).toHaveTextContent("Pi Dash");
-    expect(screen.getByText("Acme")).toBeInTheDocument();
     expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
     expect(screen.getByText("ada@example.com")).toBeInTheDocument();
+  });
+
+  it("mounts no workspace switcher (NEWFRONT-1040)", () => {
+    render(
+      sidebar({
+        editionEntries: [{ key: "apps", label: "Apps", href: "/acme/apps/" }],
+        currentPath: "/acme/apps/",
+      })
+    );
+    expect(screen.getByRole("link", { name: "Apps" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open workspace switcher" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("sidebar-workspace-switcher")).not.toBeInTheDocument();
   });
 
   it("renders the home row and marks it current on home", () => {
@@ -111,21 +110,6 @@ describe("Sidebar", () => {
     render(sidebar({ onNavigateHref }));
     fireEvent.click(screen.getByRole("link", { name: "Home" }), { metaKey: true, button: 0 });
     expect(onNavigateHref).not.toHaveBeenCalled();
-  });
-
-  it("switches workspaces from the switcher", () => {
-    const onSelectWorkspace = vi.fn();
-    render(sidebar({ onSelectWorkspace }));
-    fireEvent.click(screen.getByRole("button", { name: "Open workspace switcher" }));
-    expect(screen.getByRole("menuitem", { name: /Acme/ })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /Globex/ })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("menuitem", { name: /Globex/ }));
-    expect(onSelectWorkspace).toHaveBeenCalledWith("globex");
-  });
-
-  it("falls back to the slug when the workspace row is missing", () => {
-    render(sidebar({ activeSlug: "unknown" }));
-    expect(screen.getByRole("button", { name: "Open workspace switcher" })).toHaveTextContent("unknown");
   });
 
   it("renders the projects group slot", () => {
@@ -195,23 +179,13 @@ describe("Sidebar", () => {
     expect(badge.compareDocumentPosition(account) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("routes the switcher and user-menu callbacks through", async () => {
+  it("routes the user-menu callbacks through", async () => {
     const user = userEvent.setup();
     const handlers = {
       onYourWork: vi.fn(),
       onUserSettings: vi.fn(),
-      onOpenSettings: vi.fn(),
-      onInviteMembers: vi.fn(),
-      onCreateWorkspace: vi.fn(),
-      onWorkspaceInvites: vi.fn(),
     };
     render(sidebar(handlers));
-    await user.click(screen.getByRole("button", { name: "Open workspace switcher" }));
-    await user.click(await screen.findByRole("menuitem", { name: "Create workspace" }));
-    expect(handlers.onCreateWorkspace).toHaveBeenCalledTimes(1);
-    await user.click(screen.getByRole("button", { name: "Open workspace switcher" }));
-    await user.click(await screen.findByRole("button", { name: /Invite members/ }));
-    expect(handlers.onInviteMembers).toHaveBeenCalledWith("acme");
     await user.click(screen.getByTestId("sidebar-user-menu"));
     await user.click(await screen.findByRole("menuitem", { name: "Your work" }));
     expect(handlers.onYourWork).toHaveBeenCalledTimes(1);

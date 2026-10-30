@@ -1000,7 +1000,7 @@ export interface ParityDriver {
   openUserMenu(): Promise<void>;
   /** Follow a workspace-relative path (deep link); requires an authenticated session. */
   openWorkspacePath(path: string): Promise<void>;
-  /** Open the workspace switcher from the sidebar. */
+  /** Open the workspace switcher from the top bar. */
   openWorkspaceSwitcher(): Promise<void>;
   /** Project names listed in the overflow slide-over. */
   overflowProjectNames(): Promise<string[]>;

@@ -60,14 +60,7 @@ const harness = vi.hoisted(() => ({
     moreGroup: unknown;
     favoritesGroup: unknown;
     onNavigateHref: (href: string) => void;
-    workspaces: unknown;
-    creationDisabled: unknown;
     userRole: unknown;
-    onSelectWorkspace: (slug: string) => void;
-    onOpenSettings: (slug: string) => void;
-    onInviteMembers: (slug: string) => void;
-    onCreateWorkspace: () => void;
-    onWorkspaceInvites: () => void;
     onYourWork: () => void;
     onUserSettings: () => void;
   },
@@ -257,14 +250,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
       moreGroup: unknown;
       favoritesGroup: unknown;
       onNavigateHref: (href: string) => void;
-      workspaces: unknown;
-      creationDisabled: unknown;
       userRole: unknown;
-      onSelectWorkspace: (slug: string) => void;
-      onOpenSettings: (slug: string) => void;
-      onInviteMembers: (slug: string) => void;
-      onCreateWorkspace: () => void;
-      onWorkspaceInvites: () => void;
       onYourWork: () => void;
       onUserSettings: () => void;
       updateControl: React.ReactNode;
@@ -280,14 +266,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
         moreGroup: props.moreGroup,
         favoritesGroup: props.favoritesGroup,
         onNavigateHref: props.onNavigateHref,
-        workspaces: props.workspaces,
-        creationDisabled: props.creationDisabled,
         userRole: props.userRole,
-        onSelectWorkspace: props.onSelectWorkspace,
-        onOpenSettings: props.onOpenSettings,
-        onInviteMembers: props.onInviteMembers,
-        onCreateWorkspace: props.onCreateWorkspace,
-        onWorkspaceInvites: props.onWorkspaceInvites,
         onYourWork: props.onYourWork,
         onUserSettings: props.onUserSettings,
       };
@@ -1541,25 +1520,53 @@ describe("gated layout shell wiring", () => {
       return render(<Suspense fallback={null}>{node as React.ReactElement}</Suspense>);
     }
 
+    // The top-bar workspace menu node the layout hands the TopBar
+    // (NEWFRONT-1040 moved the only switcher instance there); its props
+    // carry the rows, the creation flag and the shortcut callbacks.
+    function switcherProps(): {
+      workspaces: unknown;
+      creationDisabled: unknown;
+      onSelectWorkspace: (slug: string) => void;
+      onOpenSettings: (slug: string) => void;
+      onInviteMembers: (slug: string) => void;
+      onCreateWorkspace: () => void;
+      onWorkspaceInvites: () => void;
+    } {
+      const node = harness.topBar?.workspaceMenu as React.ReactElement<{
+        workspaces: unknown;
+        creationDisabled: unknown;
+        onSelectWorkspace: (slug: string) => void;
+        onOpenSettings: (slug: string) => void;
+        onInviteMembers: (slug: string) => void;
+        onCreateWorkspace: () => void;
+        onWorkspaceInvites: () => void;
+      }>;
+      return node.props;
+    }
+
     afterEach(() => {
       vi.unstubAllGlobals();
       useShortcutsDialog.getState().closeShortcuts();
     });
 
-    it("passes switcher rows, the creation flag and the role to the sidebar", () => {
+    it("passes switcher rows and the creation flag to the top-bar menu", () => {
       renderShell();
-      expect(harness.sidebar?.workspaces).toEqual([
+      expect(switcherProps().workspaces).toEqual([
         { id: "w1", slug: "acme", name: "Acme", role: 15, totalMembers: 3, logoSrc: null },
       ]);
-      expect(harness.sidebar?.creationDisabled).toBe(false);
-      expect(harness.sidebar?.userRole).toBe(15);
+      expect(switcherProps().creationDisabled).toBe(false);
       expect(harness.topBar?.sidebarMounted).toBe(true);
+    });
+
+    it("passes the role to the sidebar", () => {
+      renderShell();
+      expect(harness.sidebar?.userRole).toBe(15);
     });
 
     it("hides creation while the instance disables it", () => {
       harness.creationDisabled = true;
       renderShell();
-      expect(harness.sidebar?.creationDisabled).toBe(true);
+      expect(switcherProps().creationDisabled).toBe(true);
     });
 
     it("stamps the last workspace, then navigates", async () => {
@@ -1591,20 +1598,20 @@ describe("gated layout shell wiring", () => {
 
     it("navigates directly for unknown slugs without stamping", () => {
       renderShell();
-      harness.sidebar?.onSelectWorkspace("ghost");
+      switcherProps().onSelectWorkspace("ghost");
       expect(navigate).toHaveBeenCalledWith({ to: "/$ws", params: { ws: "ghost" } });
       expect(harness.stamped).toEqual([]);
     });
 
     it("routes the switcher shortcuts to their addresses", () => {
       renderShell();
-      harness.sidebar?.onOpenSettings("acme");
+      switcherProps().onOpenSettings("acme");
       expect(navigate).toHaveBeenLastCalledWith({ href: "/acme/settings" });
-      harness.sidebar?.onInviteMembers("acme");
+      switcherProps().onInviteMembers("acme");
       expect(navigate).toHaveBeenLastCalledWith({ href: "/acme/settings/members" });
-      harness.sidebar?.onCreateWorkspace();
+      switcherProps().onCreateWorkspace();
       expect(navigate).toHaveBeenLastCalledWith({ href: "/create-workspace" });
-      harness.sidebar?.onWorkspaceInvites();
+      switcherProps().onWorkspaceInvites();
       expect(navigate).toHaveBeenLastCalledWith({ href: "/invitations" });
     });
 
@@ -1720,7 +1727,7 @@ describe("gated layout shell wiring", () => {
     it("falls back to safe chrome defaults without instance config", async () => {
       harness.instanceDown = true;
       renderShell();
-      expect(harness.sidebar?.creationDisabled).toBe(false);
+      expect(switcherProps().creationDisabled).toBe(false);
       const menu = renderNode(harness.topBar?.helpMenu);
       try {
         fireEvent.click(screen.getByTestId("topbar-help-menu"));

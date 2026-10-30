@@ -457,12 +457,7 @@ function WorkspaceShell({
           unreadMentions={unread?.mention_unread_notifications_count ?? 0}
           searchBox={<TopBarSearch scope={searchScope} onSelectSearchResult={handleSelectSearchResult} />}
           workspaceMenu={
-            <WorkspaceSwitcher
-              workspaces={switcherWorkspaces}
-              activeSlug={workspaceSlug}
-              mount="topbar"
-              {...switcherShortcuts}
-            />
+            <WorkspaceSwitcher workspaces={switcherWorkspaces} activeSlug={workspaceSlug} {...switcherShortcuts} />
           }
           helpMenu={
             <React.Suspense fallback={null}>
@@ -490,7 +485,6 @@ function WorkspaceShell({
       sidebar={
         sidebarHidden ? null : (
           <Sidebar
-            workspaces={switcherWorkspaces}
             activeSlug={workspaceSlug}
             userLabel={userLabel}
             userEmail={me.email}
@@ -547,7 +541,7 @@ function WorkspaceShell({
               </React.Suspense>
             }
             onNavigateHref={handleNavigateHref}
-            {...switcherShortcuts}
+            onSignOut={onSignOut}
           />
         )
       }
