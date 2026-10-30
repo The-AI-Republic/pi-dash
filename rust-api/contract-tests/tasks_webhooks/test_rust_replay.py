@@ -1932,3 +1932,62 @@ def test_rust_crawl_link_skips_soft_deleted_link(db_conn):
     after = snapshot(db_conn, ["issue_links"])["issue_links"][str(link["id"])]
     assert after == before
 
+
+def test_rust_crawl_link_resolves_idna_hostname(db_conn):
+    """Crawl, Rust side: a non-ASCII hostname resolves via IDNA (PIDASHCONV-1672).
+
+    Mirrors ``test_crawl_link_resolves_idna_hostname`` (same payload):
+    the unicode URL and its punycode twin must crawl the same page —
+    both titles non-empty and equal. Pre-fix Rust fails DNS for the
+    unicode host ("Hostname could not be resolved") and stores a null
+    title, so this fails on pre-fix rust-dev. Settlement plus the
+    metadata diff is the proof: with the Django worker stopped, a
+    forward could never produce a local row change.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "rustreplaycrawlidna")
+    issue, project, workspace = chain["issue"], chain["project"], chain["workspace"]
+    urls = ["https://münchen.de/", "https://xn--mnchen-3ya.de/"]
+    links = [
+        insert_row(
+            db_conn,
+            "issue_links",
+            {
+                "title": f"IDNA probe {i}",
+                "url": url,
+                "issue_id": str(issue["id"]),
+                "project_id": str(project["id"]),
+                "workspace_id": str(workspace["id"]),
+                "created_by_id": str(chain["owner"]["id"]),
+                "updated_by_id": str(chain["owner"]["id"]),
+                "metadata": {},
+            },
+        )
+        for i, url in enumerate(urls)
+    ]
+    celery_ids = [
+        rust_queue.publish(
+            CRAWL_LINK_TITLE,
+            args=[str(link["id"]), url],
+        )
+        for link, url in zip(links, urls)
+    ]
+    for celery_id in celery_ids:
+        rust_queue.wait_for_settled(celery_id, what=f"{CRAWL_LINK_TITLE} executed")
+
+    def _crawled(link_id):
+        row = snapshot(db_conn, ["issue_links"])["issue_links"].get(str(link_id))
+        return row if row and row["metadata"] != {} else None
+
+    crawled = [
+        wait_for(
+            lambda lid=str(link["id"]): _crawled(lid),
+            what=f"IDNA issue_links metadata for {url}",
+        )
+        for link, url in zip(links, urls)
+    ]
+    for row, url in zip(crawled, urls):
+        assert row["metadata"]["url"] == url
+    titles = [row["metadata"]["title"] for row in crawled]
+    assert all(titles), f"expected both IDNA titles non-empty: {titles!r}"
+    assert titles[0] == titles[1], f"unicode/punycode titles differ: {titles!r}"
+

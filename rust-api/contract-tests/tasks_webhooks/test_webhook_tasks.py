@@ -1426,6 +1426,69 @@ def test_crawl_link_skips_soft_deleted_link(db_conn, broker_url):
     assert after == before
 
 
+def test_crawl_link_resolves_idna_hostname(db_conn, broker_url):
+    """Crawl, Django side: a non-ASCII hostname resolves via IDNA (PIDASHCONV-1672).
+
+    ``socket.getaddrinfo`` IDNA-encodes a ``str`` host, so the unicode
+    URL and its punycode twin crawl the same page: both titles are
+    non-empty and equal. The replay twin
+    (``test_rust_crawl_link_resolves_idna_hostname``) pins the Rust
+    guard; pre-fix Rust fails DNS ("Hostname could not be resolved")
+    and stores a null title for the unicode URL.
+
+    This is the suite's only external-network test: distinguishing
+    "resolved" from "denied" needs a successful fetch (every guard or
+    transport failure collapses to the same fallback metadata), and
+    every locally servable address is guard-denied. Target is the
+    official Munich city portal (stable 2-hop chain to www.muenchen.de,
+    verified 2026-10-30).
+    """
+    from _harness.db import insert_row
+
+    chain = seed_helpers.issue_chain(db_conn, "contractcrawlidna")
+    issue, project, workspace = chain["issue"], chain["project"], chain["workspace"]
+    urls = ["https://münchen.de/", "https://xn--mnchen-3ya.de/"]
+    links = [
+        insert_row(
+            db_conn,
+            "issue_links",
+            {
+                "title": f"IDNA probe {i}",
+                "url": url,
+                "issue_id": str(issue["id"]),
+                "project_id": str(project["id"]),
+                "workspace_id": str(workspace["id"]),
+                "created_by_id": str(chain["owner"]["id"]),
+                "updated_by_id": str(chain["owner"]["id"]),
+                "metadata": {},
+            },
+        )
+        for i, url in enumerate(urls)
+    ]
+    for link, url in zip(links, urls):
+        celery_wire.publish(
+            f"{M}.work_item_link_task.crawl_work_item_link_title",
+            args=[str(link["id"]), url],
+        )
+
+    def _crawled(link_id):
+        row = snapshot(db_conn, ["issue_links"])["issue_links"].get(str(link_id))
+        return row if row and row["metadata"] != {} else None
+
+    crawled = [
+        wait_for(
+            lambda lid=str(link["id"]): _crawled(lid),
+            what=f"IDNA issue_links metadata for {url}",
+        )
+        for link, url in zip(links, urls)
+    ]
+    for row, url in zip(crawled, urls):
+        assert row["metadata"]["url"] == url
+    titles = [row["metadata"]["title"] for row in crawled]
+    assert all(titles), f"expected both IDNA titles non-empty: {titles!r}"
+    assert titles[0] == titles[1], f"unicode/punycode titles differ: {titles!r}"
+
+
 def _expected_payload(hook, probe_id):
     """The delivery envelope the send task signs and POSTs (PIDASHCONV-1105).
 
