@@ -2165,7 +2165,7 @@ async fn apply_cycle_update(
     Ok(())
 }
 
-/// `GET .../cycles/<pk>/` (`base.py:410-475`): MEMBER retrieve with the
+/// `GET .../cycles/<pk>/` (`base.py:410-475`): GUEST retrieve with the
 /// `sub_issues` annotation; a miss is `{"error": "Cycle not found"}`.
 async fn cycle_retrieve(
     State(state): State<AppState>,
