@@ -31,8 +31,7 @@
     "ok": true
    },
    "row": {
-    "status": "running",
-    "queue_position": null
+    "status": "running"
    }
   },
   "accept_dup": {

@@ -792,14 +792,13 @@ impl LiveSweepsRunsStore {
     }
 }
 
-/// Expected `SET` column order for the expiry finalize: the five L4 base
+/// Expected `SET` column order for the expiry finalize: the four L4 base
 /// clauses plus the three extras in `tasks.py:76-80` order. The live
 /// bind below is positional; a mismatch fails loudly instead of binding
 /// wrong. No `done_payload` clause, so the merge step is a no-op here.
-const EXPIRY_FINALIZE_COLUMNS: [&str; 8] = [
+const EXPIRY_FINALIZE_COLUMNS: [&str; 7] = [
     "status",
     "ended_at",
-    "queue_position",
     "terminal_hooks_applied_at",
     "terminal_capacity_released_at",
     "error_code",
@@ -919,7 +918,6 @@ impl SweepsRunsStore for LiveSweepsRunsStore {
         sqlx::query(&finalize_update_sql(&values))
             .bind(AgentRunStatus::Cancelled.value())
             .bind(now)
-            .bind(None::<i16>)
             .bind(None::<DateTime<Utc>>)
             .bind(None::<DateTime<Utc>>)
             .bind(CANCEL_REASON_APPROVAL_TIMEOUT)
@@ -1549,7 +1547,7 @@ mod tests {
              \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \
              \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \
              \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \
-             \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \
+             \"agent_run\".\"assigned_at\", \
              \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run_approval\" INNER JOIN \
              \"agent_run\" ON (\"agent_run_approval\".\"agent_run_id\" = \"agent_run\".\"id\") WHERE \
              (\"agent_run_approval\".\"id\" = $1 AND \"agent_run_approval\".\"status\" = $2) ORDER BY \

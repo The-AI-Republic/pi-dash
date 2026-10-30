@@ -605,7 +605,7 @@ fn decode_enroll_row(row: &PgRow) -> Result<EnrollRow, Response> {
         name: get(5)?,
         host_label: get(6)?,
         enrolled_at: row.try_get(16).map_err(|_| server_error())?,
-        revoked_at: row.try_get(28).map_err(|_| server_error())?,
+        revoked_at: row.try_get(27).map_err(|_| server_error())?,
         workspace_slug: get(ws_base + col_index(enroll_sql::WORKSPACES_SELECT_COLUMNS, "slug"))?,
         pod_name: get(pod_base + col_index(pod_cols::COLUMNS, "name"))?,
         project_identifier: get(proj_base
@@ -1296,7 +1296,6 @@ pub async fn insert_runner(
         .bind(serde_json::json!({}))
         .bind(1i32)
         .bind(None::<DateTime<Utc>>)
-        .bind(None::<i32>)
         .bind(now)
         .bind(now)
         .bind(None::<DateTime<Utc>>)
@@ -2867,7 +2866,7 @@ mod tests {
             (6, "host_label"),
             (11, "refresh_token_generation"),
             (16, "enrolled_at"),
-            (28, "revoked_at"),
+            (27, "revoked_at"),
         ] {
             assert_eq!(r_cols::COLUMNS[idx], name);
         }

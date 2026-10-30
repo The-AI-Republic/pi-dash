@@ -80,7 +80,7 @@ use pidash_types::runner_runs::{error_diagnostic, RunErrorDiagnostic};
 // ---------------------------------------------------------------------------
 
 /// `AgentRunSerializer.Meta.fields` (`serializers.py:294-329`).
-pub const RUN_WIRE_FIELDS: [&str; 34] = [
+pub const RUN_WIRE_FIELDS: [&str; 33] = [
     "id",
     "status",
     "executor_kind",
@@ -100,7 +100,6 @@ pub const RUN_WIRE_FIELDS: [&str; 34] = [
     "owner",
     "created_at",
     "assigned_at",
-    "queue_position",
     "started_at",
     "ended_at",
     "done_payload",
@@ -339,7 +338,6 @@ pub struct AgentRunView<'a> {
     pub owner: Option<String>,
     pub created_at: String,
     pub assigned_at: Option<String>,
-    pub queue_position: Option<i16>,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
     pub done_payload: Option<&'a Value>,
@@ -413,7 +411,6 @@ fn run_to_representation<'a>(
         owner: uuid_opt_string(&run.owner_id),
         created_at: drf_datetime(&run.created_at),
         assigned_at: drf_datetime_opt(&run.assigned_at),
-        queue_position: run.queue_position,
         started_at: drf_datetime_opt(&run.started_at),
         ended_at: drf_datetime_opt(&run.ended_at),
         done_payload: run.done_payload.as_ref(),
@@ -913,7 +910,6 @@ mod tests {
             total_tokens: body["total_tokens"].as_i64(),
             created_at: dt(body["created_at"].as_str().expect("created_at")),
             assigned_at: dt_opt(&body["assigned_at"]),
-            queue_position: body["queue_position"].as_i64().map(|n| n as i16),
             started_at: dt_opt(&body["started_at"]),
             ended_at: dt_opt(&body["ended_at"]),
         }

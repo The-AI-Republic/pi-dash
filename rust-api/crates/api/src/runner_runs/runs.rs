@@ -549,13 +549,12 @@ pub fn cloud_dup_stamp_sql() -> String {
 }
 
 /// Expected `SET` order for the cancel finalize (`finalize_agent_run`
-/// base five plus `runs.py:617-623` extras in dict order). The live
+/// base four plus `runs.py:617-623` extras in dict order). The live
 /// bind below is positional; a mismatch fails loudly instead of
 /// binding wrong (the L6a sweeps precedent).
-pub const CANCEL_FINALIZE_COLUMNS: [&str; 9] = [
+pub const CANCEL_FINALIZE_COLUMNS: [&str; 8] = [
     "status",
     "ended_at",
-    "queue_position",
     "terminal_hooks_applied_at",
     "terminal_capacity_released_at",
     "cancel_requested_at",
@@ -644,9 +643,8 @@ pub fn decode_run(row: &sqlx::postgres::PgRow, base: usize) -> Result<AgentRun, 
         total_tokens: row.try_get(base + 35)?,
         created_at: row.try_get(base + 36)?,
         assigned_at: row.try_get(base + 37)?,
-        queue_position: row.try_get(base + 38)?,
-        started_at: row.try_get(base + 39)?,
-        ended_at: row.try_get(base + 40)?,
+        started_at: row.try_get(base + 38)?,
+        ended_at: row.try_get(base + 39)?,
     })
 }
 
@@ -1847,7 +1845,6 @@ async fn finalize_cancelled(
     sqlx::query(&finalization::finalize_update_sql(&values))
         .bind(AgentRunStatus::Cancelled.value())
         .bind(Utc::now())
-        .bind(None::<i16>)
         .bind(None::<DateTime<Utc>>)
         .bind(None::<DateTime<Utc>>)
         .bind(requested_at)
@@ -2282,7 +2279,7 @@ mod tests {
     fn run_select_list_covers_all_columns_once() {
         let list = run_select_list();
         assert_eq!(list.split(", ").count(), agent_run::COLUMNS.len());
-        assert_eq!(agent_run::COLUMNS.len(), 41);
+        assert_eq!(agent_run::COLUMNS.len(), 40);
         assert!(list.starts_with(r#""agent_run"."id""#));
         assert!(list.ends_with(r#""agent_run"."ended_at""#));
     }
@@ -2302,7 +2299,7 @@ mod tests {
         let columns: Vec<&str> = values.clauses.iter().map(|clause| clause.column).collect();
         assert_eq!(columns.as_slice(), CANCEL_FINALIZE_COLUMNS);
         let sql = finalization::finalize_update_sql(&values);
-        assert!(sql.ends_with(r#"WHERE "agent_run"."id" = $10"#), "{sql}");
+        assert!(sql.ends_with(r#"WHERE "agent_run"."id" = $9"#), "{sql}");
     }
 
     #[test]
@@ -2388,7 +2385,7 @@ mod tests {
         done_payload JSONB, error TEXT, refusal_category TEXT,
         llm_model TEXT, usage JSONB, input_tokens BIGINT,
         output_tokens BIGINT, total_tokens BIGINT, created_at TIMESTAMPTZ,
-        assigned_at TIMESTAMPTZ, queue_position SMALLINT,
+        assigned_at TIMESTAMPTZ,
         started_at TIMESTAMPTZ, ended_at TIMESTAMPTZ)";
 
     /// Unknown stored trigger values decode verbatim instead of

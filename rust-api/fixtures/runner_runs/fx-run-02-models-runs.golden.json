@@ -1013,24 +1013,6 @@
      "rel": null
     },
     {
-     "name": "queue_position",
-     "column": "queue_position",
-     "type": "PositiveSmallIntegerField",
-     "db_type": "smallint",
-     "null": true,
-     "blank": true,
-     "default": "NOT_PROVIDED",
-     "db_default": "NOT_PROVIDED",
-     "db_index": false,
-     "unique": false,
-     "max_length": null,
-     "choices": null,
-     "editable": true,
-     "auto_now": false,
-     "auto_now_add": false,
-     "rel": null
-    },
-    {
      "name": "started_at",
      "column": "started_at",
      "type": "DateTimeField",
@@ -1073,7 +1055,7 @@
      "type": "CheckConstraint",
      "fields": [],
      "condition": "None",
-     "check": "(OR: ('executor_kind__in', [AgentExecutorKind.LOCAL_RUNNER, AgentExecutorKind.MANAGED_RUNNER]), (AND: ('assigned_at__isnull', True), ('executor_kind', AgentExecutorKind.CLOUD_AGENT), ('owner__isnull', True), ('pinned_runner__isnull', True), ('queue_position__isnull', True), ('runner__isnull', True)))"
+     "check": "(OR: ('executor_kind__in', [AgentExecutorKind.LOCAL_RUNNER, AgentExecutorKind.MANAGED_RUNNER]), (AND: ('assigned_at__isnull', True), ('executor_kind', AgentExecutorKind.CLOUD_AGENT), ('owner__isnull', True), ('pinned_runner__isnull', True), ('runner__isnull', True)))"
     },
     {
      "name": "agent_run_one_active_per_work_item",

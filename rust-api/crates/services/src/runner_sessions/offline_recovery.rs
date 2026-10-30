@@ -252,7 +252,7 @@ pub fn sweep_stale_pairs_sql(excluded_ids: usize) -> String {
 
 /// Stopped-cancel barrier write with the offline stamp
 /// (`stamp_cancelled=True`): `.update()` call order (`status`,
-/// `ended_at`, `queue_position`, `error_code`). `$1` is `now`
+/// `ended_at`, `error_code`). `$1` is `now`
 /// (`ended_at`), `$2` the error code, `$3…` the stopped-cancel ids.
 /// Call only with a non-empty id list — the source guards the write
 /// with `if stopped_cancel_ids:`.
@@ -261,7 +261,7 @@ pub fn sweep_cancel_barrier_stamped_sql(id_count: usize) -> String {
     let params: Vec<String> = (0..id_count).map(|i| format!("${}", i + 3)).collect();
     format!(
         "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $1, \
-         \"queue_position\" = NULL, \"error_code\" = $2 \
+         \"error_code\" = $2 \
          WHERE \"agent_run\".\"id\" IN ({})",
         params.join(", ")
     )
@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(
             sweep_cancel_barrier_stamped_sql(2),
             "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $1, \
-             \"queue_position\" = NULL, \"error_code\" = $2 \
+             \"error_code\" = $2 \
              WHERE \"agent_run\".\"id\" IN ($3, $4)",
         );
     }

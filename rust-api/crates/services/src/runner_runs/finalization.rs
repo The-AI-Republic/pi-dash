@@ -81,7 +81,6 @@ const RUNNER_COLUMNS: &[&str] = &[
     "dev_metadata",
     "protocol_version",
     "last_heartbeat_at",
-    "free_worktrees",
     "created_at",
     "updated_at",
     "revoked_at",
@@ -127,7 +126,7 @@ pub fn merge_done_payload(existing: &Value, incoming: &Value) -> Value {
 }
 
 /// Assembled finalize `SET` values (`finalize_agent_run:52-59`):
-/// `status`, `ended_at`, `queue_position`, both markers cleared, then
+/// `status`, `ended_at`, both markers cleared, then
 /// the caller extras in order (overwriting same-name base keys in
 /// place). `done_payload` still holds the *incoming* value here; the
 /// executing layer runs [`apply_done_payload_merge`] against the
@@ -155,10 +154,6 @@ pub fn plan_finalize_values(
         SetClause {
             column: "ended_at",
             value: SetValue::Now,
-        },
-        SetClause {
-            column: "queue_position",
-            value: SetValue::Null,
         },
         SetClause {
             column: "terminal_hooks_applied_at",
@@ -441,7 +436,7 @@ pub fn update_hooks_marker_sql() -> &'static str {
 }
 
 /// Capacity re-read (`apply_terminal_effects:183`):
-/// `select_related("runner", "pod").get(pk)` — 41 + 10 + 32 columns,
+/// `select_related("runner", "pod").get(pk)` — 40 + 10 + 31 columns,
 /// `.get()` so no `LIMIT`. A missing row raises `DoesNotExist` (no
 /// guard in the source); the executing layer propagates it. Param:
 /// `$1` run id.
@@ -748,7 +743,6 @@ mod tests {
             [
                 "status",
                 "ended_at",
-                "queue_position",
                 "terminal_hooks_applied_at",
                 "terminal_capacity_released_at",
             ]
@@ -781,7 +775,6 @@ mod tests {
             [
                 "status",
                 "ended_at",
-                "queue_position",
                 "terminal_hooks_applied_at",
                 "terminal_capacity_released_at",
                 "error_code",
@@ -1387,7 +1380,7 @@ mod tests {
     #[test]
     fn finalize_lock_sql_variants() {
         let bare = lock_run_for_finalize_sql(false, false);
-        assert_eq!(select_runs(&bare), vec![("\"agent_run\"".to_owned(), 41)]);
+        assert_eq!(select_runs(&bare), vec![("\"agent_run\"".to_owned(), 40)]);
         assert!(
             bare.ends_with(
                 " FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND NOT \
@@ -1433,9 +1426,9 @@ mod tests {
         assert_eq!(
             finalize_update_sql(&values),
             "UPDATE \"agent_run\" SET \"status\" = $1, \"ended_at\" = $2, \
-             \"queue_position\" = $3, \"terminal_hooks_applied_at\" = $4, \
-             \"terminal_capacity_released_at\" = $5, \"error_code\" = $6, \"error\" = $7, \
-             \"cancel_reason\" = $8 WHERE \"agent_run\".\"id\" = $9"
+             \"terminal_hooks_applied_at\" = $3, \
+             \"terminal_capacity_released_at\" = $4, \"error_code\" = $5, \"error\" = $6, \
+             \"cancel_reason\" = $7 WHERE \"agent_run\".\"id\" = $8"
         );
     }
 
@@ -1479,7 +1472,7 @@ mod tests {
         assert_eq!(
             select_runs(&fetch),
             vec![
-                ("\"agent_run\"".to_owned(), 41),
+                ("\"agent_run\"".to_owned(), 40),
                 ("\"issues\"".to_owned(), 34),
                 ("\"projects\"".to_owned(), 46),
                 ("\"states\"".to_owned(), 18),
@@ -1500,9 +1493,9 @@ mod tests {
         assert_eq!(
             select_runs(&capacity),
             vec![
-                ("\"agent_run\"".to_owned(), 41),
+                ("\"agent_run\"".to_owned(), 40),
                 ("\"pod\"".to_owned(), 10),
-                ("\"runner\"".to_owned(), 32),
+                ("\"runner\"".to_owned(), 31),
             ]
         );
         assert!(
@@ -1554,7 +1547,6 @@ mod tests {
                 "dev_metadata",
                 "protocol_version",
                 "last_heartbeat_at",
-                "free_worktrees",
                 "created_at",
                 "updated_at",
                 "revoked_at",

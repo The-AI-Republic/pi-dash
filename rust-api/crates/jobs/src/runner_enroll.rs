@@ -338,13 +338,12 @@ fn now_micros() -> DateTime<Utc> {
     DateTime::from_timestamp_micros(now.timestamp_micros()).expect("micros in range")
 }
 
-/// The revoke-finalize SET order (planned `status`, `ended_at`,
-/// `queue_position`, the two markers, then the updates in dict order):
+/// The revoke-finalize SET order (planned `status`, `ended_at`, the two
+/// markers, then the updates in dict order):
 /// pinned so a kernel drift fails loudly instead of mis-binding.
-const REVOKE_FINALIZE_COLUMNS: [&str; 8] = [
+const REVOKE_FINALIZE_COLUMNS: [&str; 7] = [
     "status",
     "ended_at",
-    "queue_position",
     "terminal_hooks_applied_at",
     "terminal_capacity_released_at",
     "error",
@@ -698,7 +697,7 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
             .map(|row| {
                 Ok(delete_svc::LockedRunner {
                     id: row.try_get(0).map_err(store_err)?,
-                    revoked_at: row.try_get(28).map_err(store_err)?,
+                    revoked_at: row.try_get(27).map_err(store_err)?,
                 })
             })
             .collect()

@@ -90,7 +90,7 @@
 //!   `capabilities` first (`:130-141`), and the live-state
 //!   `sorted(set(update_fields))` (`:448`) is cosmetic —
 //!   `observed_run_id` still leads. `.update()` instead preserves
-//!   call order (barrier: `status, ended_at, queue_position`).
+//!   call order (barrier: `status, ended_at`).
 //! * `pod_ids` is a `set`, so multi-pod drain order is arbitrary in
 //!   Python; Rust drains in first-seen order (reaped runs, then
 //!   stopped cancels), which is deterministic for the same rows.
@@ -803,14 +803,14 @@ pub fn cancel_retry_error_line(run_id: &str, error: &str) -> String {
 
 /// Stopped-cancel barrier write (`:249-253`,
 /// `reap_cancel_barrier.sql[2]`): `.update()` preserves call order
-/// (`status, ended_at, queue_position`). `$1` is `now` (`ended_at`),
+/// (`status, ended_at`). `$1` is `now` (`ended_at`),
 /// `$2…` the stopped-cancel ids. Call only with a non-empty id
 /// list — the source guards the write with `if stopped_cancel_ids:`.
 pub fn cancel_barrier_update_sql(id_count: usize) -> String {
     debug_assert_ne!(id_count, 0, "barrier write needs stopped-cancel ids");
     let params: Vec<String> = (0..id_count).map(|i| format!("${}", i + 2)).collect();
     format!(
-        "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $1, \"queue_position\" = NULL WHERE \"agent_run\".\"id\" IN ({})",
+        "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $1 WHERE \"agent_run\".\"id\" IN ({})",
         params.join(", ")
     )
 }
@@ -2190,7 +2190,6 @@ mod tests {
         let barrier = fx()["reap_cancel_barrier"].clone();
         assert_eq!(barrier["status_after"], "cancelled");
         assert_eq!(barrier["ended_at_set"], true);
-        assert_eq!(barrier["queue_position"], Value::Null);
     }
 
     #[test]
@@ -2287,7 +2286,6 @@ mod tests {
             [
                 "status",
                 "ended_at",
-                "queue_position",
                 "terminal_hooks_applied_at",
                 "terminal_capacity_released_at",
                 "error",
@@ -2298,9 +2296,9 @@ mod tests {
             values.clauses[0].value,
             SetValue::Text("failed".to_string())
         );
-        assert_eq!(values.clauses[5].value, SetValue::Text(detail.clone()));
+        assert_eq!(values.clauses[4].value, SetValue::Text(detail.clone()));
         assert_eq!(
-            values.clauses[6].value,
+            values.clauses[5].value,
             SetValue::Text("heartbeat_reaped".to_string())
         );
         // Lock text pins (the terminal IN-list binds $2..$6; Django
@@ -2336,7 +2334,7 @@ mod tests {
         assert!(update.contains("'heartbeat_reaped'"));
         // The rendered D-15 UPDATE binds one param per clause, id last.
         let rendered = finalize_update_sql(&values);
-        assert!(rendered.ends_with("WHERE \"agent_run\".\"id\" = $8"));
+        assert!(rendered.ends_with("WHERE \"agent_run\".\"id\" = $7"));
         // Lock predicate for the reaper call: expected runner, no status.
         assert!(finalize_lock_passes(
             AgentRunStatus::Running,

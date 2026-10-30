@@ -451,12 +451,11 @@ pub fn agent_live_state_to_representation<'a>(
 }
 
 /// `_serialize_agent_run` wire keys (`issue.py:1352-1371`), in dict order:
-/// 19.
-pub const AGENT_RUN_FIELDS: [&str; 19] = [
+/// 18.
+pub const AGENT_RUN_FIELDS: [&str; 18] = [
     "id",
     "status",
     "executor_kind",
-    "queue_position",
     "runner",
     "runner_name",
     "created_at",
@@ -477,7 +476,7 @@ pub const AGENT_RUN_FIELDS: [&str; 19] = [
 /// One agent-run row with its runner facts for the status render: the
 /// `agent_run` columns the serializer reads (`runner/models.py:872-1036`) —
 /// `id` / `status` / `executor_kind` (non-null, defaulted),
-/// `queue_position` (nullable smallint), `runner_id` + the joined
+/// `runner_id` + the joined
 /// `runner.name`, `created_at` (non-null) + the three nullable stamps,
 /// `done_payload` (nullable JSON), `error` / `error_code` / `llm_model`
 /// (non-null, default `""`), the three generated nullable token bigints —
@@ -488,7 +487,6 @@ pub struct AgentRunDetailRow<'a> {
     pub id: &'a str,
     pub status: &'a str,
     pub executor_kind: &'a str,
-    pub queue_position: Option<i16>,
     pub runner_id: Option<&'a str>,
     pub runner_name: Option<&'a str>,
     pub created_at: &'a str,
@@ -512,7 +510,6 @@ pub struct AgentRunView<'a> {
     pub id: &'a str,
     pub status: &'a str,
     pub executor_kind: &'a str,
-    pub queue_position: Option<i16>,
     pub runner: Option<&'a str>,
     pub runner_name: Option<&'a str>,
     pub created_at: &'a str,
@@ -558,7 +555,6 @@ pub fn agent_run_to_representation<'a>(
         id: run.id,
         status: run.status,
         executor_kind: run.executor_kind,
-        queue_position: run.queue_position,
         runner: run.runner_id,
         runner_name: run.runner_id.and(run.runner_name),
         created_at: run.created_at,
@@ -1088,15 +1084,15 @@ pub const ACTIVE_RUN_STATUSES: [&str; 8] = [
 /// (`issue.py:1385`): newest run for the issue, whatever its status. `$1`
 /// is the issue id. No tiebreak — Django emits none either. No
 /// soft-delete guard — `AgentRun` is a plain `Model`. The projection is
-/// the 16 `agent_run` columns the serializer reads, the joined
+/// the 15 `agent_run` columns the serializer reads, the joined
 /// `runner.name`, and the 13 `runner_live_state` columns (Django would
 /// select whole rows; this is the serializer-read subset, same rows).
-pub const LATEST_AGENT_RUN_SQL: &str = "SELECT agent_run.id, agent_run.status, agent_run.executor_kind, agent_run.queue_position, agent_run.runner_id, agent_run.created_at, agent_run.assigned_at, agent_run.started_at, agent_run.ended_at, agent_run.done_payload, agent_run.error, agent_run.error_code, agent_run.llm_model, agent_run.input_tokens, agent_run.output_tokens, agent_run.total_tokens, runner.name, runner_live_state.observed_run_id, runner_live_state.last_event_at, runner_live_state.last_event_kind, runner_live_state.last_event_summary, runner_live_state.agent_pid, runner_live_state.agent_subprocess_alive, runner_live_state.approvals_pending, runner_live_state.usage, runner_live_state.llm_model, runner_live_state.turn_count, runner_live_state.agent_health, runner_live_state.agent_last_activity_at, runner_live_state.updated_at FROM agent_run LEFT JOIN runner ON runner.id = agent_run.runner_id LEFT JOIN runner_live_state ON runner_live_state.runner_id = runner.id WHERE agent_run.work_item_id = $1 ORDER BY agent_run.created_at DESC LIMIT 1";
+pub const LATEST_AGENT_RUN_SQL: &str = "SELECT agent_run.id, agent_run.status, agent_run.executor_kind, agent_run.runner_id, agent_run.created_at, agent_run.assigned_at, agent_run.started_at, agent_run.ended_at, agent_run.done_payload, agent_run.error, agent_run.error_code, agent_run.llm_model, agent_run.input_tokens, agent_run.output_tokens, agent_run.total_tokens, runner.name, runner_live_state.observed_run_id, runner_live_state.last_event_at, runner_live_state.last_event_kind, runner_live_state.last_event_summary, runner_live_state.agent_pid, runner_live_state.agent_subprocess_alive, runner_live_state.approvals_pending, runner_live_state.usage, runner_live_state.llm_model, runner_live_state.turn_count, runner_live_state.agent_health, runner_live_state.agent_last_activity_at, runner_live_state.updated_at FROM agent_run LEFT JOIN runner ON runner.id = agent_run.runner_id LEFT JOIN runner_live_state ON runner_live_state.runner_id = runner.id WHERE agent_run.work_item_id = $1 ORDER BY agent_run.created_at DESC LIMIT 1";
 
 /// The active run (`issue.py:1386-1402`): the newest run in one of the
 /// [`ACTIVE_RUN_STATUSES`]. Same projection and joins as
 /// [`LATEST_AGENT_RUN_SQL`]; the `IN` list carries the verbatim values.
-pub const ACTIVE_AGENT_RUN_SQL: &str = "SELECT agent_run.id, agent_run.status, agent_run.executor_kind, agent_run.queue_position, agent_run.runner_id, agent_run.created_at, agent_run.assigned_at, agent_run.started_at, agent_run.ended_at, agent_run.done_payload, agent_run.error, agent_run.error_code, agent_run.llm_model, agent_run.input_tokens, agent_run.output_tokens, agent_run.total_tokens, runner.name, runner_live_state.observed_run_id, runner_live_state.last_event_at, runner_live_state.last_event_kind, runner_live_state.last_event_summary, runner_live_state.agent_pid, runner_live_state.agent_subprocess_alive, runner_live_state.approvals_pending, runner_live_state.usage, runner_live_state.llm_model, runner_live_state.turn_count, runner_live_state.agent_health, runner_live_state.agent_last_activity_at, runner_live_state.updated_at FROM agent_run LEFT JOIN runner ON runner.id = agent_run.runner_id LEFT JOIN runner_live_state ON runner_live_state.runner_id = runner.id WHERE agent_run.work_item_id = $1 AND agent_run.status IN ('queued', 'assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth', 'paused_awaiting_input') ORDER BY agent_run.created_at DESC LIMIT 1";
+pub const ACTIVE_AGENT_RUN_SQL: &str = "SELECT agent_run.id, agent_run.status, agent_run.executor_kind, agent_run.runner_id, agent_run.created_at, agent_run.assigned_at, agent_run.started_at, agent_run.ended_at, agent_run.done_payload, agent_run.error, agent_run.error_code, agent_run.llm_model, agent_run.input_tokens, agent_run.output_tokens, agent_run.total_tokens, runner.name, runner_live_state.observed_run_id, runner_live_state.last_event_at, runner_live_state.last_event_kind, runner_live_state.last_event_summary, runner_live_state.agent_pid, runner_live_state.agent_subprocess_alive, runner_live_state.approvals_pending, runner_live_state.usage, runner_live_state.llm_model, runner_live_state.turn_count, runner_live_state.agent_health, runner_live_state.agent_last_activity_at, runner_live_state.updated_at FROM agent_run LEFT JOIN runner ON runner.id = agent_run.runner_id LEFT JOIN runner_live_state ON runner_live_state.runner_id = runner.id WHERE agent_run.work_item_id = $1 AND agent_run.status IN ('queued', 'assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth', 'paused_awaiting_input') ORDER BY agent_run.created_at DESC LIMIT 1";
 
 /// `runs.count()` (`issue.py:1412`): every run for the issue, all statuses,
 /// no join. `$1` is the issue id.
@@ -1252,7 +1248,6 @@ mod tests {
             id,
             status,
             executor_kind: "local_runner",
-            queue_position: None,
             runner_id: Some(RUNNER),
             runner_name: Some("r1"),
             created_at: "2026-10-03T10:00:00+00:00",
@@ -1488,7 +1483,7 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&view).expect("serializes"),
             "{\"id\":\"55555555-5555-5555-5555-555555555555\",\"status\":\"failed\",\
-             \"executor_kind\":\"local_runner\",\"queue_position\":null,\
+             \"executor_kind\":\"local_runner\",\
              \"runner\":\"66666666-6666-6666-6666-666666666666\",\"runner_name\":\"r1\",\
              \"created_at\":\"2026-10-03T10:00:00+00:00\",\
              \"assigned_at\":\"2026-10-03T10:00:01+00:00\",\
