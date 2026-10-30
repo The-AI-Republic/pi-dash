@@ -26,10 +26,12 @@
 //!   redirect raises `Too many redirects for URL: <original url>`.
 //! * A redirect with no `Location` header breaks out and returns the
 //!   redirect response as-is (transcribed; no Python test covers it).
-//! * `find_favicon_url` tries the four `link[rel=…]` selectors in order and
-//!   the first tag *with* an `href` wins; its `href` is resolved with
-//!   `urljoin` against the post-redirect URL and a *private* href raises
-//!   out of the function (no guard on that branch).
+//! * `find_favicon_url` tries the four `link[rel=…]` selectors in order;
+//!   the first matching tag wins its selector, and a missing/empty
+//!   `href` on it disqualifies that selector (next selector, never the
+//!   next tag); the winning `href` is resolved with `urljoin` against
+//!   the post-redirect URL and a *private* href raises out of the
+//!   function (no guard on that branch).
 //! * The `/favicon.ico` fallback is returned only on HEAD 200; a HEAD
 //!   transport failure returns `None`, while a `validate_url_ip` failure
 //!   on the fallback propagates to `fetch_and_encode_favicon`, whose broad
@@ -1586,7 +1588,10 @@ fn collapse_rel(value: &str) -> String {
 
 /// `href` of the first `<link>` tag whose whitespace-collapsed `rel` is
 /// exactly `rel_value` (`soup.select_one('link[rel="…"]')` + `["href"]`,
-/// `:187-190`), or `None`.
+/// `:187-190`), or `None`. Positional like `select_one`: the first rel
+/// match ends the scan for this selector, and its `href` wins only
+/// when present and non-empty — otherwise the selector misses and
+/// `find_favicon_url` advances to the next one.
 pub fn find_link_href(html: &str, rel_value: &str) -> Option<String> {
     let mut start = 0;
     while start < html.len() {
@@ -1599,15 +1604,12 @@ pub fn find_link_href(html: &str, rel_value: &str) -> Option<String> {
             .find(|(name, _)| name == "rel")
             .map(|(_, value)| collapse_rel(value));
         if rel.as_deref() == Some(rel_value) {
-            if let Some(href) = attrs
+            return attrs
                 .iter()
                 .find(|(name, _)| name == "href")
                 .map(|(_, value)| value.as_str())
-            {
-                if !href.is_empty() {
-                    return Some(href.to_owned());
-                }
-            }
+                .filter(|href| !href.is_empty())
+                .map(str::to_owned);
         }
         start = end + 1;
     }
@@ -2232,6 +2234,15 @@ mod tests {
         panic!("HEAD must not run when a link tag wins")
     }
 
+    fn head_404(_: &HttpRequest) -> Result<HttpResponse, String> {
+        Ok(HttpResponse {
+            status: 404,
+            headers: HttpHeaders::new(),
+            body: Vec::new(),
+            is_redirect: false,
+        })
+    }
+
     #[test]
     fn link_tag_href_resolved_with_urljoin() {
         let html = r#"<html><head><link rel="icon" href="/fav.ico"></head></html>"#;
@@ -2262,9 +2273,51 @@ mod tests {
         assert_eq!(found, Some("https://example.com/icon.ico".to_owned()));
     }
 
+    // -- hrefless/empty-href first tag disqualifies the selector (PIDASHCONV-1674)
+    // Oracle: contract-tests/tasks_webhooks/test_link_crawl_hrefless.py
+    // (`work_item_link_task.py:187-199` via bs4 + html.parser).
+
     #[test]
-    fn first_tag_with_href_wins_and_hrefless_tags_skipped() {
+    fn hrefless_first_tag_disqualifies_selector() {
+        // `select_one('link[rel="icon"]')` takes the FIRST matching tag;
+        // its missing href fails the truthiness check, so Django moves
+        // to the next selector — the later href'd tag never wins
+        // (`:194-199`). Discovery misses every selector and the 404
+        // `/favicon.ico` fallback yields None.
         let html = r#"<html><head><link rel="icon"><link rel="icon" href="/b.ico"></head></html>"#;
+        let found = find_favicon_url(
+            Some(html),
+            "https://example.com/",
+            &deny_all(),
+            &head_404,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn empty_href_first_tag_disqualifies_selector() {
+        // Same class as the hrefless row: `tag.get("href")` is `""`,
+        // falsy, so the selector is disqualified (`:194-199`).
+        let html =
+            r#"<html><head><link rel="icon" href=""><link rel="icon" href="/b.ico"></head></html>"#;
+        let found = find_favicon_url(
+            Some(html),
+            "https://example.com/",
+            &deny_all(),
+            &head_404,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn first_href_wins_over_later_same_selector_tag() {
+        // Control: with hrefs on both, the FIRST matching tag wins —
+        // positional, not "any tag with an href".
+        let html = r#"<html><head><link rel="icon" href="/a.ico"><link rel="icon" href="/b.ico"></head></html>"#;
         let found = find_favicon_url(
             Some(html),
             "https://example.com/",
@@ -2273,7 +2326,43 @@ mod tests {
             &mut Vec::new(),
         )
         .unwrap();
-        assert_eq!(found, Some("https://example.com/b.ico".to_owned()));
+        assert_eq!(found, Some("https://example.com/a.ico".to_owned()));
+    }
+
+    #[test]
+    fn disqualified_icon_falls_through_to_shortcut_icon() {
+        // Control: a disqualified `icon` selector falls through to the
+        // next selector, which still wins (`:194-199`).
+        for html in [
+            r#"<html><head><link rel="icon"><link rel="shortcut icon" href="/c.ico"></head></html>"#,
+            r#"<html><head><link rel="icon" href=""><link rel="shortcut icon" href="/c.ico"></head></html>"#,
+        ] {
+            let found = find_favicon_url(
+                Some(html),
+                "https://example.com/",
+                &deny_all(),
+                &no_head,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                found,
+                Some("https://example.com/c.ico".to_owned()),
+                "{html:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn find_link_href_stops_at_first_rel_match() {
+        // Positional pin: the first rel match ends the scan for that
+        // selector, with or without a usable href.
+        let html = r#"<link rel="icon"><link rel="icon" href="/b.ico">"#;
+        assert_eq!(find_link_href(html, "icon"), None);
+        let html = r#"<link rel="icon" href=""><link rel="icon" href="/b.ico">"#;
+        assert_eq!(find_link_href(html, "icon"), None);
+        let html = r#"<link rel="icon" href="/a.ico"><link rel="icon" href="/b.ico">"#;
+        assert_eq!(find_link_href(html, "icon"), Some("/a.ico".to_owned()));
     }
 
     // -- link attribute decoding (PIDASHCONV-1671) -----------------------
