@@ -13,22 +13,13 @@ import {
   PROFILE_SETTINGS_CATEGORY_I18N_LABELS,
 } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
-import type { TProfileSettingsTabs } from "@pi-dash/types";
 // local imports
 import { SettingsSidebarItem } from "../../sidebar/item";
 import { ProfileSettingsSidebarWorkspaceOptions } from "./workspace-options";
 
-type Props = {
-  activeTab: TProfileSettingsTabs;
-  updateActiveTab: (tab: TProfileSettingsTabs) => void;
-};
-
-export const ProfileSettingsSidebarItemCategories = observer(function ProfileSettingsSidebarItemCategories(
-  props: Props
-) {
-  const { activeTab, updateActiveTab } = props;
-  // params
-  const { profileTabId } = useParams();
+export const ProfileSettingsSidebarItemCategories = observer(function ProfileSettingsSidebarItemCategories() {
+  // params — the active tab is the route, not component state
+  const { workspaceSlug, profileTabId } = useParams();
   // translation
   const { t } = useTranslation();
 
@@ -48,9 +39,9 @@ export const ProfileSettingsSidebarItemCategories = observer(function ProfileSet
               {categoryItems.map((item) => (
                 <SettingsSidebarItem
                   key={item.key}
-                  as="button"
-                  onClick={() => updateActiveTab(item.key)}
-                  isActive={activeTab === item.key}
+                  as="link"
+                  href={`/${workspaceSlug}/settings/account/${item.key}`}
+                  isActive={profileTabId === item.key}
                   icon={item.icon}
                   label={t(item.i18n_label)}
                 />
@@ -59,7 +50,7 @@ export const ProfileSettingsSidebarItemCategories = observer(function ProfileSet
           </div>
         );
       })}
-      {profileTabId && <ProfileSettingsSidebarWorkspaceOptions />}
+      <ProfileSettingsSidebarWorkspaceOptions />
     </div>
   );
 });

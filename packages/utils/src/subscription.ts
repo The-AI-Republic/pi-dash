@@ -4,9 +4,6 @@
  * See the LICENSE file for details.
  */
 
-import { orderBy } from "lodash-es";
-// pi dash imports
-import type { IPaymentProduct, TProductSubscriptionType, TSubscriptionPrice } from "@pi-dash/types";
 import { EProductSubscriptionEnum } from "@pi-dash/types";
 
 /**
@@ -43,63 +40,4 @@ export const getSubscriptionName = (planVariant: EProductSubscriptionEnum): stri
     default:
       return "--";
   }
-};
-
-/**
- * Gets the base subscription name for upgrade/downgrade paths
- * @param planVariant - The current subscription plan variant
- * @returns The name of the base subscription plan
- */
-export const getBaseSubscriptionName = (planVariant: TProductSubscriptionType): string => {
-  switch (planVariant) {
-    case EProductSubscriptionEnum.ONE:
-      return getSubscriptionName(EProductSubscriptionEnum.FREE);
-    case EProductSubscriptionEnum.PRO:
-      return getSubscriptionName(EProductSubscriptionEnum.FREE);
-    case EProductSubscriptionEnum.BUSINESS:
-      return getSubscriptionName(EProductSubscriptionEnum.PRO);
-    case EProductSubscriptionEnum.ENTERPRISE:
-      return getSubscriptionName(EProductSubscriptionEnum.BUSINESS);
-    default:
-      return "--";
-  }
-};
-
-export type TSubscriptionPriceDetail = {
-  monthlyPriceDetails: TSubscriptionPrice;
-  yearlyPriceDetails: TSubscriptionPrice;
-};
-
-/**
- * Gets the price details for a subscription product
- * @param product - The payment product to get price details for
- * @returns Array of price details for monthly and yearly plans
- */
-export const getSubscriptionPriceDetails = (product: IPaymentProduct | undefined): TSubscriptionPriceDetail => {
-  const productPrices = product?.prices || [];
-  const monthlyPriceDetails = orderBy(productPrices, ["recurring"], ["desc"])?.find(
-    (price) => price.recurring === "month"
-  );
-  const monthlyPriceAmount = Number(((monthlyPriceDetails?.unit_amount || 0) / 100).toFixed(2));
-  const yearlyPriceDetails = orderBy(productPrices, ["recurring"], ["desc"])?.find(
-    (price) => price.recurring === "year"
-  );
-  const yearlyPriceAmount = Number(((yearlyPriceDetails?.unit_amount || 0) / 1200).toFixed(2));
-
-  return {
-    monthlyPriceDetails: {
-      key: "monthly",
-      id: monthlyPriceDetails?.id,
-      currency: "$",
-      price: monthlyPriceAmount,
-      recurring: "month",
-    },
-    yearlyPriceDetails: {
-      key: "yearly",
-      id: yearlyPriceDetails?.id,
-      currency: "$",
-      price: yearlyPriceAmount,
-      recurring: "year",
-    },
-  };
 };

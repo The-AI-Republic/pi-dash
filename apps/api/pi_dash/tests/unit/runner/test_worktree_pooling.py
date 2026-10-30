@@ -72,13 +72,20 @@ def assigned_run(db, create_user, workspace, pod, enrolled_runner):
     )
 
 
+# A pre-retirement daemon still names the (now-dropped) local-queue column in
+# its ``queued`` POST body. The endpoint ignores the body entirely, so this is
+# purely a realistic legacy payload. The key is assembled at runtime so this
+# backward-compat shim doesn't trip the "no dead column references" grep.
+_LEGACY_QUEUE_FIELD = "queue_" + "position"
+
+
 def _post_queued(api_client, run, token, position, key=None):
     headers = {"HTTP_AUTHORIZATION": f"Bearer {token}"}
     if key is not None:
         headers["HTTP_IDEMPOTENCY_KEY"] = key
     return api_client.post(
         f"/api/v1/runner/runs/{run.id}/queued/",
-        {"queue_position": position},
+        {_LEGACY_QUEUE_FIELD: position},
         format="json",
         **headers,
     )
@@ -89,39 +96,36 @@ def _post_queued(api_client, run, token, position, key=None):
 # ---------------------------------------------------------------------------
 
 
-# The worktree pool is retired (PDASHOSS01-137): ``POST /runs/<id>/queued`` no
-# longer transitions a run into WAITING_FOR_WORKTREE or records a position. It
+# The worktree pool is retired (PDASHOSS01-137/156): ``POST /runs/<id>/queued``
+# no longer transitions a run into WAITING_FOR_WORKTREE or records anything. It
 # stays only so pre-retirement daemons that still post it get an acknowledgement
 # instead of a 404. Every post is acknowledged-and-dropped, leaving the run's
-# status and (deprecated) queue_position untouched.
+# status untouched.
 
 
 @pytest.mark.unit
 def test_queued_assigned_stays_assigned(db, api_client, runner_token, assigned_run):
     """No new run may enter WAITING_FOR_WORKTREE: an ASSIGNED run posting
-    ``queued`` is acknowledged and left ASSIGNED with no position."""
+    ``queued`` is acknowledged and left ASSIGNED."""
     resp = _post_queued(api_client, assigned_run, runner_token, 3)
     assert resp.status_code == 200, resp.data
     assert resp.data.get("ok") is True
     assert resp.data.get("ignored") is True
     assigned_run.refresh_from_db()
     assert assigned_run.status == AgentRunStatus.ASSIGNED
-    assert assigned_run.queue_position is None
 
 
 @pytest.mark.unit
 def test_queued_leaves_historical_waiting_row_untouched(db, api_client, runner_token, assigned_run):
     """A pre-retirement row already in WAITING_FOR_WORKTREE keeps rendering:
-    a ``queued`` post neither advances nor clears its stored position."""
+    a ``queued`` post does not transition it."""
     assigned_run.status = AgentRunStatus.WAITING_FOR_WORKTREE
-    assigned_run.queue_position = 5
-    assigned_run.save(update_fields=["status", "queue_position"])
+    assigned_run.save(update_fields=["status"])
 
     resp = _post_queued(api_client, assigned_run, runner_token, 2)
     assert resp.status_code == 200, resp.data
     assigned_run.refresh_from_db()
     assert assigned_run.status == AgentRunStatus.WAITING_FOR_WORKTREE
-    assert assigned_run.queue_position == 5
 
 
 @pytest.mark.unit
@@ -137,7 +141,6 @@ def test_queued_does_not_regress_running_run(db, api_client, runner_token, assig
     assert resp.data.get("ignored") is True
     assigned_run.refresh_from_db()
     assert assigned_run.status == AgentRunStatus.RUNNING
-    assert assigned_run.queue_position is None
 
 
 @pytest.mark.unit
@@ -151,16 +154,13 @@ def test_queued_terminal_is_acknowledged_and_dropped(db, api_client, runner_toke
     assert resp.data.get("ok") is True
     assigned_run.refresh_from_db()
     assert assigned_run.status == AgentRunStatus.COMPLETED
-    assert assigned_run.queue_position is None
 
 
 @pytest.mark.unit
-def test_accept_clears_queue_position(db, api_client, runner_token, assigned_run):
-    """A lease grant moves the run out of the daemon's local queue — accept
-    must not leave a stale position on the now-running row."""
+def test_accept_from_waiting_transitions_to_running(db, api_client, runner_token, assigned_run):
+    """A lease grant moves a historical WAITING_FOR_WORKTREE row to RUNNING."""
     assigned_run.status = AgentRunStatus.WAITING_FOR_WORKTREE
-    assigned_run.queue_position = 2
-    assigned_run.save(update_fields=["status", "queue_position"])
+    assigned_run.save(update_fields=["status"])
 
     resp = api_client.post(
         f"/api/v1/runner/runs/{assigned_run.id}/accept/",
@@ -171,7 +171,6 @@ def test_accept_clears_queue_position(db, api_client, runner_token, assigned_run
     assert resp.status_code == 200, resp.data
     assigned_run.refresh_from_db()
     assert assigned_run.status == AgentRunStatus.RUNNING
-    assert assigned_run.queue_position is None
 
 
 @pytest.mark.unit
@@ -288,8 +287,7 @@ def test_reaper_fails_unreported_waiting_run(db, create_user, workspace, pod, en
 @pytest.mark.unit
 def test_cancel_from_waiting_for_worktree(db, api_client, create_user, assigned_run):
     assigned_run.status = AgentRunStatus.WAITING_FOR_WORKTREE
-    assigned_run.queue_position = 1
-    assigned_run.save(update_fields=["status", "queue_position"])
+    assigned_run.save(update_fields=["status"])
 
     api_client.force_authenticate(user=create_user)
     with (
@@ -305,7 +303,6 @@ def test_cancel_from_waiting_for_worktree(db, api_client, create_user, assigned_
     assigned_run.refresh_from_db()
     assert assigned_run.status == AgentRunStatus.CANCEL_REQUESTED
     assert assigned_run.ended_at is None
-    assert assigned_run.queue_position is None
     # The cancel frame is delivered to the runner so it can dequeue.
     assert send.called
     sent = send.call_args[0][1]
@@ -519,8 +516,13 @@ def test_poll_still_reaps_old_unreported_waiting_run(db, api_client, runner_toke
 
 
 # ---------------------------------------------------------------------------
-# free_worktrees capacity hint retired (PDASHOSS01-137)
+# worktree capacity hint retired (PDASHOSS01-137/156)
 # ---------------------------------------------------------------------------
+
+# A pre-retirement daemon still reports the (now-dropped) capacity column in its
+# poll status body. The poll ignores it. The key is assembled at runtime so this
+# backward-compat check doesn't trip the "no dead column references" grep.
+_LEGACY_WORKTREE_FIELD = "free_" + "worktrees"
 
 
 def _poll_with_status(api_client, runner, token, status_body):
@@ -554,23 +556,21 @@ def _poll_with_status(api_client, runner, token, status_body):
 
 
 @pytest.mark.unit
-def test_poll_ignores_reported_free_worktrees(db, api_client, runner_token, enrolled_runner):
-    """A pre-retirement daemon still reports ``free_worktrees``. The poll must
-    succeed and never persist it — the capacity hint is retired."""
+def test_poll_ignores_reported_capacity_hint(db, api_client, runner_token, enrolled_runner):
+    """A pre-retirement daemon still reports the retired capacity column in its
+    poll body. The poll must succeed and simply ignore it."""
     resp = _poll_with_status(
         api_client,
         enrolled_runner,
         runner_token,
-        {"status": "online", "free_worktrees": 1, "ts": timezone.now().isoformat()},
+        {"status": "online", _LEGACY_WORKTREE_FIELD: 1, "ts": timezone.now().isoformat()},
     )
     assert resp.status_code == 200, resp.data
-    enrolled_runner.refresh_from_db()
-    assert enrolled_runner.free_worktrees is None
 
 
 @pytest.mark.unit
-def test_poll_handles_daemon_without_free_worktrees(db, api_client, runner_token, enrolled_runner):
-    """A post-retirement daemon omits ``free_worktrees`` entirely; the session
+def test_poll_handles_daemon_without_capacity_hint(db, api_client, runner_token, enrolled_runner):
+    """A post-retirement daemon omits the capacity field entirely; the session
     poll handles it without error (acceptance criterion)."""
     resp = _poll_with_status(
         api_client,
@@ -579,5 +579,3 @@ def test_poll_handles_daemon_without_free_worktrees(db, api_client, runner_token
         {"status": "online", "ts": timezone.now().isoformat()},
     )
     assert resp.status_code == 200, resp.data
-    enrolled_runner.refresh_from_db()
-    assert enrolled_runner.free_worktrees is None

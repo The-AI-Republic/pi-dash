@@ -301,7 +301,6 @@ def _finish_unclaimed_runs(
         AgentRun.objects.filter(id__in=stopped_cancel_ids).update(
             status=AgentRunStatus.CANCELLED,
             ended_at=timezone.now(),
-            queue_position=None,
             **cancelled_updates,
         )
         stale = stale.exclude(id__in=stopped_cancel_ids)
