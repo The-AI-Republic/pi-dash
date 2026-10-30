@@ -116,7 +116,7 @@ async function toastText(driver: ParityDriver): Promise<string> {
 test(
   specTitle(["CYC-040"], "detail sidebar shows a skeleton until the cycle data arrives"),
   { tag: specTags(["CYC-040"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed }, testInfo) => {
     const tag = `NF254s40a ${Date.now().toString(36)}`;
     const ownerSession = await signInSession(seed.email, seed.password);
     await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
@@ -131,9 +131,21 @@ test(
         CURRENT_END,
         ownerSession
       );
-      await driver.cyclesHeroDelayDetailReads(10000);
+      // NEWFRONT-716: web_new's detail route awaits the cycle read in
+      // beforeLoad, so delaying it only pushes the whole page (and its
+      // skeleton window) out; the sidebar's own reads are held instead.
+      // The oracle keeps the full shaping it was proven with.
+      if (testInfo.project.name === "new") {
+        await driver.cyclesHeroDelaySidebarReads(10000);
+      } else {
+        await driver.cyclesHeroDelayDetailReads(10000);
+      }
       await driver.cyclesHeroOpenDetail(seed.workspaceSlug, projectId, cycleId);
-      await expect.poll(() => driver.cyclesHeroSidebarSkeletonVisible(), { timeout: 30_000 }).toBe(true);
+      // The intentional 10s read delay stacks on the dev-server boot, so
+      // the skeleton can first show past 30s on web_new; the oracle
+      // still resolves it in ~10s. The asserted behavior
+      // (skeleton-then-content) is unchanged.
+      await expect.poll(() => driver.cyclesHeroSidebarSkeletonVisible(), { timeout: 60_000 }).toBe(true);
       expect(await driver.cyclesHeroSidebarName()).toBe(null);
       await expect.poll(() => driver.cyclesHeroSidebarName(), { timeout: 90_000 }).toBe(name);
       expect(await driver.cyclesHeroSidebarSkeletonVisible()).toBe(false);
@@ -168,7 +180,8 @@ test(
       await driver.cyclesHeroDelayDetailReads(10000);
       await driver.cyclesHeroHideCycleFromListReads(cycleId);
       await driver.cyclesHeroOpenPeekRaw(seed.workspaceSlug, projectId, cycleId);
-      await expect.poll(() => driver.cyclesHeroPeekSkeletonVisible(), { timeout: 30_000 }).toBe(true);
+      // NEWFRONT-716: 60s (see the sidebar test above for why).
+      await expect.poll(() => driver.cyclesHeroPeekSkeletonVisible(), { timeout: 60_000 }).toBe(true);
       expect(await driver.cyclesHeroPeekName()).toBe(null);
       await expect.poll(() => driver.cyclesHeroPeekName(), { timeout: 90_000 }).toBe(name);
       expect(await driver.cyclesHeroPeekSkeletonVisible()).toBe(false);
@@ -244,9 +257,15 @@ test(
 
       await test.step("progress card breaks the cycle down by state", async () => {
         expect(await driver.cyclesHeroGroupHeading()).toMatch(/active cycle/i);
-        expect(await driver.cyclesHeroActiveName()).toBe(hero.cycleName);
+        // The list-body settle lands before the hero content paints, so
+        // the first hero read polls (NEWFRONT-716).
+        await expect.poll(() => driver.cyclesHeroActiveName(), { timeout: 60_000 }).toBe(hero.cycleName);
+        // Each hero card loads on its own query, so each card's first
+        // read polls (NEWFRONT-716).
+        await expect
+          .poll(async () => (await driver.cyclesHeroProgressGroups()).closed, { timeout: 60_000 })
+          .toMatch(/closed/i);
         const progress = await driver.cyclesHeroProgressGroups();
-        expect(progress.closed).toMatch(/closed/i);
         const names = progress.groups.map((group) => group.name.toLowerCase());
         expect(names).toContain("started");
         expect(names).toContain("backlog");
@@ -256,6 +275,9 @@ test(
       });
 
       await test.step("burn-down card shows the pending line and the chart", async () => {
+        await expect
+          .poll(async () => (await driver.cyclesHeroBurndown()).pending, { timeout: 60_000 })
+          .toMatch(/pending/i);
         const burndown = await driver.cyclesHeroBurndown();
         expect(burndown.heading).toMatch(/burndown/i);
         expect(burndown.pending).toMatch(/pending/i);
@@ -264,7 +286,9 @@ test(
       });
 
       await test.step("breakdown card tabs split by priority, assignee, and label", async () => {
-        expect(await driver.cyclesHeroBreakdownTabs()).toEqual(["Priority work items", "Assignees", "Labels"]);
+        await expect
+          .poll(() => driver.cyclesHeroBreakdownTabs(), { timeout: 60_000 })
+          .toEqual(["Priority work items", "Assignees", "Labels"]);
         await driver.cyclesHeroBreakdownSelectTab("Priority work items");
         expect(await driver.cyclesHeroBreakdownEntries()).toContain(hero.startedIssue);
         await driver.cyclesHeroBreakdownSelectTab("Assignees");
@@ -336,22 +360,39 @@ test(
 test(
   specTitle(["CYC-041"], "bug: NEWFRONT-266 fresh breakdown clicks die before the properties row exists"),
   { tag: specTags(["CYC-041"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed }, testInfo) => {
     const tag = Date.now().toString(36);
     const ownerSession = await signInSession(seed.email, seed.password);
     await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
     const projectId = await createCyclesProject(seed, `NF254 S41d ${tag} project`, ownerSession);
     try {
       const hero = await setupHeroCycle(seed, projectId, tag, ownerSession);
-      // No detail visit: the properties row does not exist yet, so the
-      // click's PATCH 404s and the handler dies before navigating.
+      // No detail visit: the properties row does not exist yet.
+      // Bug NEWFRONT-266: the oracle pins the old PATCH-404 death (no
+      // navigation, nothing stored); the new app implements the intended
+      // fix instead (Parity wiki "Old bugs": web_new may implement the
+      // fix) — the click navigates with the filter applied and persists
+      // rich_filters. Proven live on web_new 3/3 (NEWFRONT-716).
       await driver.cyclesHeroOpenList(seed.workspaceSlug, projectId);
       await driver.cyclesHeroTapProgressGroup("backlog");
-      await driver.page.waitForTimeout(5000);
-      expect(await driver.currentPath()).not.toContain(`/cycles/${hero.cycleId}`);
-      expect(
-        (await serverCycleUserProperties(seed.workspaceSlug, projectId, hero.cycleId, ownerSession)).richFilters
-      ).toEqual({});
+      if (testInfo.project.name === "new") {
+        await expect.poll(() => driver.currentPath(), { timeout: 30_000 }).toContain(`/cycles/${hero.cycleId}`);
+        await expect
+          .poll(
+            async () =>
+              JSON.stringify(
+                (await serverCycleUserProperties(seed.workspaceSlug, projectId, hero.cycleId, ownerSession)).richFilters
+              ),
+            { timeout: 30_000 }
+          )
+          .toContain("backlog");
+      } else {
+        await driver.page.waitForTimeout(5000);
+        expect(await driver.currentPath()).not.toContain(`/cycles/${hero.cycleId}`);
+        expect(
+          (await serverCycleUserProperties(seed.workspaceSlug, projectId, hero.cycleId, ownerSession)).richFilters
+        ).toEqual({});
+      }
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, ownerSession);
     }
@@ -377,10 +418,16 @@ test(
         ownerSession
       );
       await driver.cyclesHeroOpenList(seed.workspaceSlug, projectId);
-      expect(await driver.cyclesHeroActiveName()).toBe(name);
-      expect(await driver.cyclesHeroProgressEmptyVisible()).toBe(true);
-      expect(await driver.cyclesHeroBurndownEmptyVisible()).toBe(true);
-      expect(await driver.cyclesHeroBreakdownTabs()).toEqual(["Priority work items", "Assignees", "Labels"]);
+      // The list-body settle lands before the hero content paints, so
+      // the first hero read polls (NEWFRONT-716).
+      await expect.poll(() => driver.cyclesHeroActiveName(), { timeout: 60_000 }).toBe(name);
+      // Each hero card loads on its own query, so each card's first
+      // read polls (NEWFRONT-716).
+      await expect.poll(() => driver.cyclesHeroProgressEmptyVisible(), { timeout: 60_000 }).toBe(true);
+      await expect.poll(() => driver.cyclesHeroBurndownEmptyVisible(), { timeout: 60_000 }).toBe(true);
+      await expect
+        .poll(() => driver.cyclesHeroBreakdownTabs(), { timeout: 60_000 })
+        .toEqual(["Priority work items", "Assignees", "Labels"]);
       for (const tab of ["Priority work items", "Assignees", "Labels"]) {
         await driver.cyclesHeroBreakdownSelectTab(tab);
         expect(await driver.cyclesHeroBreakdownEmptyVisible()).toBe(true);
@@ -413,6 +460,9 @@ test(
       await driver.cyclesHeroOpenList(seed.workspaceSlug, projectId);
       expect(await driver.cyclesHeroGroupHeading()).toMatch(/active cycle/i);
       expect(await driver.cyclesHeroActiveName()).toBe(null);
+      // The empty panel arrives on its own query, so its first read
+      // polls (NEWFRONT-716).
+      await expect.poll(() => driver.cyclesHeroEmptyCopy(), { timeout: 60_000 }).not.toBe(null);
       const empty = await driver.cyclesHeroEmptyCopy();
       expect(empty).not.toBe(null);
       expect(empty?.title ?? "").toMatch(/active cycle/i);
@@ -482,7 +532,9 @@ test(
 
       await test.step("active row shows the offset chip and hover equivalents", async () => {
         await driver.cyclesHeroOpenList(seed.workspaceSlug, projectId);
-        expect(await driver.cyclesHeroActiveRowOffset()).toMatch(/^UTC -0[45]:00$/);
+        // The list-body settle lands before the hero content paints, so
+        // the first hero read polls (NEWFRONT-716).
+        await expect.poll(() => driver.cyclesHeroActiveRowOffset(), { timeout: 60_000 }).toMatch(/^UTC -0[45]:00$/);
         await driver.cyclesHeroHoverActiveRowDates();
         const tip = await driver.cyclesHeroTooltipText();
         expect(tip ?? "").toMatch(/your timezone/i);
@@ -563,7 +615,7 @@ test(
 test(
   specTitle(["CYC-045"], "bug: NEWFRONT-267 transfer refreshes the target hero but the source banner stays stale"),
   { tag: specTags(["CYC-045"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed }, testInfo) => {
     const tag = Date.now().toString(36);
     const ownerSession = await signInSession(seed.email, seed.password);
     await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
@@ -585,9 +637,16 @@ test(
       await driver.cyclesHeroOpenList(seed.workspaceSlug, projectId);
       expect(await driver.cyclesHeroTransferBanner(doneName)).toMatch(/transfer/i);
       await driver.cyclesHeroOpenTransfer(doneName);
+      // The picker loads its options asynchronously; CYC-031 polls the
+      // same dialog the same way (NEWFRONT-716).
+      await expect
+        .poll(async () => (await driver.cyclesHeroTransferOptions()).some((text) => text.includes(target)), {
+          timeout: 30_000,
+        })
+        .toBe(true);
       expect(await driver.cyclesHeroTransferOptions()).toContain(target);
       await driver.cyclesHeroTransferSearch(target.slice(0, 12));
-      expect(await driver.cyclesHeroTransferOptions()).toEqual([target]);
+      await expect.poll(() => driver.cyclesHeroTransferOptions(), { timeout: 30_000 }).toEqual([target]);
       await driver.cyclesHeroTransferPick(target);
       expect(await toastText(driver)).toMatch(/transferred successfully/i);
       // No reload: the target hero picks up the transferred work item.
@@ -599,10 +658,18 @@ test(
       expect(await serverCycleIssueIds(seed.workspaceSlug, projectId, targetId, ownerSession)).toContain(leftoverId);
       expect(await serverCycleIssueIds(seed.workspaceSlug, projectId, doneId, ownerSession)).not.toContain(leftoverId);
       expect((await serverCycleProgress(seed.workspaceSlug, projectId, targetId, ownerSession)).total).toBe(1);
-      // The bug: the source banner reads the stale snapshot, so it claims
-      // leftovers that no longer exist until a reload repopulates it.
-      await driver.page.waitForTimeout(5000);
-      expect(await driver.cyclesHeroTransferBanner(doneName)).toMatch(/transfer/i);
+      // Bug NEWFRONT-267: the oracle pins the stale source banner (it
+      // claims leftovers that no longer exist until a reload
+      // repopulates it); the new app implements the intended refresh
+      // instead (Parity wiki "Old bugs": web_new may implement the
+      // fix) — the banner clears as soon as the transfer lands. Proven
+      // live on web_new (NEWFRONT-716).
+      if (testInfo.project.name === "new") {
+        await expect.poll(() => driver.cyclesHeroTransferBanner(doneName), { timeout: 30_000 }).toBe(null);
+      } else {
+        await driver.page.waitForTimeout(5000);
+        expect(await driver.cyclesHeroTransferBanner(doneName)).toMatch(/transfer/i);
+      }
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, ownerSession);
     }
@@ -694,7 +761,9 @@ test(
       await driver.cyclesHeroOpenList(seed.workspaceSlug, project.projectId);
 
       await test.step("browse the hero and the groups", async () => {
-        expect(await driver.cyclesHeroActiveName()).toBe(project.activeName);
+        // The list-body settle lands before the hero content paints, so
+        // the first hero read polls (NEWFRONT-716).
+        await expect.poll(() => driver.cyclesHeroActiveName(), { timeout: 60_000 }).toBe(project.activeName);
         expect(await driver.cyclesHeroVisibleNames()).toContain(project.upcomingName);
       });
 
@@ -720,7 +789,7 @@ test(
 test(
   specTitle(["CYC-047"], "bug: NEWFRONT-268 guests lose list search and filter to the create gate"),
   { tag: specTags(["CYC-047"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed }, testInfo) => {
     const tag = Date.now().toString(36);
     const guestCreds = requireGuest(seed);
     const ownerSession = await signInSession(seed.email, seed.password);
@@ -746,19 +815,45 @@ test(
         await driver.cyclesHeroCloseMenus();
       });
 
-      await test.step("both controls are absent for guests", async () => {
-        // Sign-in is a no-op while a session lives, so sign the member
-        // out first — otherwise this step still runs as the member.
-        await driver.signOutViaAccountMenu();
-        await driver.rulesEnsureSignedIn(guestCreds.email, guestCreds.password, seed.workspaceSlug);
-        await driver.cyclesHeroOpenList(seed.workspaceSlug, project.projectId);
-        expect(await driver.cyclesHeroSearchVisible()).toBe(false);
-        expect(await driver.cyclesHeroFilterVisible()).toBe(false);
-        // Read-only reach still works: the rows render and peek opens.
-        expect(await driver.cyclesHeroVisibleNames()).toContain(project.upcomingName);
-        await driver.cyclesHeroOpenPeek(project.upcomingName);
-        expect(await driver.cyclesHeroPeekName()).toBe(project.upcomingName);
-      });
+      // Bug NEWFRONT-268: the oracle pins the over-broad create gate
+      // (guests get no search and no Filters menu); the new app
+      // implements the intended read-only controls instead (Parity wiki
+      // "Old bugs": web_new may implement the fix) — guests keep search
+      // and filter, only creation stays member+.
+      await test.step(
+        testInfo.project.name === "new" ? "guests keep search and filter" : "both controls are absent for guests",
+        async () => {
+          // Sign-in is a no-op while a session lives, so sign the member
+          // out first — otherwise this step still runs as the member.
+          await driver.signOutViaAccountMenu();
+          await driver.rulesEnsureSignedIn(guestCreds.email, guestCreds.password, seed.workspaceSlug);
+          await driver.cyclesHeroOpenList(seed.workspaceSlug, project.projectId);
+          if (testInfo.project.name === "new") {
+            expect(await driver.cyclesHeroSearchVisible()).toBe(true);
+            await driver.cyclesHeroSearchOpen();
+            const noMatch = `zzz-no-cycle-${tag}`;
+            await driver.cyclesHeroSearchType(noMatch);
+            expect(await driver.cyclesHeroSearchText()).toBe(noMatch);
+            await expect
+              .poll(() => driver.cyclesHeroVisibleNames(), { timeout: 30_000 })
+              .not.toContain(project.upcomingName);
+            await driver.cyclesHeroSearchType("");
+            await expect
+              .poll(() => driver.cyclesHeroVisibleNames(), { timeout: 30_000 })
+              .toContain(project.upcomingName);
+            expect(await driver.cyclesHeroFilterVisible()).toBe(true);
+            expect((await driver.cyclesHeroFilterMenuTexts()).length).toBeGreaterThan(0);
+            await driver.cyclesHeroCloseMenus();
+          } else {
+            expect(await driver.cyclesHeroSearchVisible()).toBe(false);
+            expect(await driver.cyclesHeroFilterVisible()).toBe(false);
+          }
+          // Read-only reach still works: the rows render and peek opens.
+          expect(await driver.cyclesHeroVisibleNames()).toContain(project.upcomingName);
+          await driver.cyclesHeroOpenPeek(project.upcomingName);
+          expect(await driver.cyclesHeroPeekName()).toBe(project.upcomingName);
+        }
+      );
     } finally {
       await serverCleanupProject(seed.workspaceSlug, project.projectId, ownerSession);
     }

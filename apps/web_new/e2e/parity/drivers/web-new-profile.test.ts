@@ -550,6 +550,24 @@ describe("shared layout methods on the profile tab", () => {
     expect(reload).toHaveBeenCalledWith({ waitUntil: "domcontentloaded" });
   });
 
+  it("settles on the shared empty card when the surface holds no rows (NEWFRONT-716)", async () => {
+    const reload = vi.fn(async () => undefined);
+    const seen: string[] = [];
+    const page = pageOf({
+      reload,
+      locator: (selector: string) => {
+        seen.push(selector);
+        return locator({ waitFor: async () => undefined });
+      },
+      getByTestId: () => locator({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.layoutsReloadIssues();
+    expect(reload).toHaveBeenCalledWith({ waitUntil: "domcontentloaded" });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain('[data-testid="issues-empty-state"]');
+  });
+
   it("reads the list and board surfaces", async () => {
     const page = pageOf({ getByTestId: () => locator({ count: async () => 1, isVisible: async () => true }) });
     const driver = new WebNewDriver(page);

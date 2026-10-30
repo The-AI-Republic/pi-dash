@@ -103,8 +103,8 @@ export function CycleDetailSidebar({
       aria-label="Cycle details"
       className="max-md:shadow-lg flex w-80 max-w-full shrink-0 flex-col gap-(--space-4) border-l border-(--border) pl-(--space-4) max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:z-40 max-md:overflow-y-auto max-md:bg-(--bg) max-md:p-(--space-4)"
     >
-      <div className="flex items-start justify-between gap-(--space-2)">
-        <div className="flex min-w-0 flex-col gap-(--space-1)">
+      <div className="flex min-w-0 items-start justify-between gap-(--space-2)">
+        <div className="flex min-w-0 flex-1 flex-col gap-(--space-1)">
           <h2 data-testid="cycle-sidebar-name" className="text-h2 truncate text-(--text)">
             {cycle.name}
           </h2>
@@ -112,7 +112,13 @@ export function CycleDetailSidebar({
             {lifecycleLabel(cycle.status)}
           </Badge>
         </div>
-        <IconButton label={CYCLE_SIDEBAR_CLOSE_LABEL} data-testid="cycle-sidebar-close" size="small" onClick={onClose}>
+        <IconButton
+          label={CYCLE_SIDEBAR_CLOSE_LABEL}
+          data-testid="cycle-sidebar-close"
+          size="small"
+          className="shrink-0"
+          onClick={onClose}
+        >
           <X size={16} strokeWidth={1.5} aria-hidden="true" />
         </IconButton>
       </div>
@@ -153,7 +159,7 @@ export function CycleDetailSidebar({
           )}
         </SidebarRow>
       </div>
-      {progress.data === undefined || issues.data === undefined ? null : (
+      {progress.data === undefined || issues.isPending ? null : (
         <CycleSidebarProgress
           workspaceSlug={workspaceSlug}
           projectId={projectId}
@@ -162,7 +168,7 @@ export function CycleDetailSidebar({
           estimatesEnabled={estimatesEnabled}
           estimateType={estimateType}
           progress={progress.data}
-          issuesAnalytics={issues.data}
+          issuesAnalytics={issues.data ?? null}
           pointsAnalytics={points.data ?? null}
           tab={tab}
           onTabChange={setTab}

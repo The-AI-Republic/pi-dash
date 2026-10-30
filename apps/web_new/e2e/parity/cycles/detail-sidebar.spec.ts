@@ -8,10 +8,11 @@
 // progress breakdowns with chart and measure, and progress-click
 // filtering of the cycle's work items.
 //
-// Guests are refused the cycle-issues reads server-side (bug
-// NEWFRONT-261: the list renders empty with no badge while the sidebar
-// counts the items), so the guest scenario pins that refusal; layout
-// switching itself stays guest-usable and is pinned alongside.
+// Guests browse cycle items read-only like members (NEWFRONT-261's
+// intended behavior, served by the guest cycle-issues + cycle retrieve
+// reads): the guest scenario pins the browsable list, the badge, and
+// the member-only gating; layout switching itself stays guest-usable
+// and is pinned alongside.
 // Rows: CYC-032–CYC-039.
 import { test, expect } from "../fixtures";
 import {
@@ -33,6 +34,7 @@ import {
   serverMe,
   serverPatchCycle,
   serverPatchIssue,
+  serverPatchProject,
   serverProjectCycles,
   serverRequestStatus,
   serverSetProjectEstimate,
@@ -183,6 +185,10 @@ async function openDetail(
     `/${seed.workspaceSlug}/projects/${projectId}/cycles/${cycleId}`,
     sessionBrowserCookies(session)
   );
+  // Narrow viewports start the cycle sidebar collapsed on web_new (the
+  // oracle loads it open); expand to the same settled state first. The
+  // oracle dismiss only collapses its own drawer (NEWFRONT-716).
+  if ((driver.page.viewportSize()?.width ?? 1280) < 768) await driver.cyclesHeroDismissSidebar();
   await expect.poll(() => driver.cyclesDetailSidebarName(), { timeout: 120_000 }).toBe(cycleName);
   await driver.layoutsActiveLayout();
 }
@@ -500,10 +506,7 @@ test.describe("cycle detail on desktop", () => {
   );
 
   test(
-    specTitle(
-      ["CYC-032", "CYC-033", "CYC-036"],
-      "bug: NEWFRONT-261 guests see an empty list with no badge though items exist"
-    ),
+    specTitle(["CYC-032", "CYC-033", "CYC-036"], "guests browse cycle items read-only like members"),
     { tag: specTags(["CYC-032", "CYC-033", "CYC-036"]) },
     async ({ driver, seed }) => {
       const tag = `NF253 guest ${Date.now()}`;
@@ -511,6 +514,10 @@ test.describe("cycle detail on desktop", () => {
       const session = await signInSession(seed.email, seed.password);
       const guestSession = await signInSession(guest.email, guest.password);
       const projectId = await createCycleProject(seed, `${tag} project`, session);
+      // Guests see only their own items unless the project opens every
+      // feature to them; the admin authors both items here, so the flag
+      // carries the intended browse-everything read.
+      await serverPatchProject(seed.workspaceSlug, projectId, session, { guest_view_all_features: true });
       const cycleName = `${tag} cycle`;
       const cycleId = await serverCreateCycle(
         seed.workspaceSlug,
@@ -529,22 +536,27 @@ test.describe("cycle detail on desktop", () => {
       try {
         await openDetail(driver, seed, projectId, cycleId, cycleName, guestSession);
 
-        await test.step("the list stays empty with no badge while items exist", async () => {
-          expect(await driver.layoutsListVisible()).toBe(false);
-          expect(await driver.layoutsListGroups()).toEqual([]);
-          expect(await driver.cyclesHeaderBadgeText()).toBe(null);
+        await test.step("the guest browses both items with the badge", async () => {
+          await expect.poll(() => driver.layoutsListVisible(), { timeout: 60_000 }).toBe(true);
+          await expect.poll(() => driver.cyclesHeaderBadgeText(), { timeout: 60_000 }).toBe("2");
+          const groups = await driver.layoutsListGroups();
+          expect(groups.length).toBeGreaterThan(0);
+          const names: string[] = [];
+          for (const group of groups) names.push(...(await driver.layoutsListGroupIssueNames(group)));
+          expect(names).toEqual(expect.arrayContaining([`${tag} issue A`, `${tag} issue B`]));
           const progress = await serverCycleProgress(seed.workspaceSlug, projectId, cycleId, session);
           expect(progress.total).toBe(2);
           expect(await driver.cyclesProgressWorkItemsText()).toBe("0/2");
         });
 
-        await test.step("the server refuses the guest's item reads", async () => {
+        await test.step("the server serves the guest's item reads", async () => {
           const res = await serverRequestStatus(
             "GET",
             `${parityApiBase()}/api/workspaces/${seed.workspaceSlug}/projects/${projectId}/cycles/${cycleId}/cycle-issues/`,
             guestSession
           );
-          expect(res.status).toBe(403);
+          expect(res.status).toBe(200);
+          expect(await serverCycleIssueIds(seed.workspaceSlug, projectId, cycleId, guestSession)).toHaveLength(2);
         });
 
         await test.step("creation, analytics, and date edits stay gated (intended)", async () => {

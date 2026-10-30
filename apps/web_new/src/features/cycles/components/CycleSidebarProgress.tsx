@@ -52,8 +52,8 @@ export interface CycleSidebarProgressProps {
   estimateType: string | null | undefined;
   /** Resolved snapshot counts behind the rows and state entries. */
   progress: CycleProgress;
-  /** Resolved Work-items breakdowns and burndown series. */
-  issuesAnalytics: CycleDistribution;
+  /** Resolved Work-items breakdowns and burndown series; null when the read fails (undated cycles 400). */
+  issuesAnalytics: CycleDistribution | null;
   /** Resolved Estimates breakdowns, while the measure read is pending. */
   pointsAnalytics: CycleDistribution | null;
   /** Active breakdown tab, persisted per cycle by the shell. */
@@ -218,11 +218,16 @@ export function CycleSidebarProgress({
     });
   }
 
+  // A missing issues distribution means the read failed (undated
+  // cycles 400), so distribution tabs stay empty instead of spinning;
+  // only a pending points read keeps the pending marker (NEWFRONT-716).
   const entries =
     tab === "States"
       ? stateEntries()
       : analytics === null
-        ? null
+        ? activeMeasure === "points" && issuesAnalytics !== null
+          ? null
+          : []
         : distributionEntries(
             tab === "Labels"
               ? selectLabelRows(analytics, activeMeasure, grandTotal)

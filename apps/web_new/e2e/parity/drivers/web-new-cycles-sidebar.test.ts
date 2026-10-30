@@ -63,6 +63,7 @@ const OPTIONS = `page.getByRole("option")`;
 const ENTRIES = `${SIDEBAR}.getByTestId("cycle-progress-entries")`;
 const ENTRY_ROWS = `${ENTRIES}.locator("[data-testid^=\\"cycle-progress-entry-\\"]")`;
 const EMPTY_NOTICE = `${SIDEBAR}.getByText("No Data yet",{"exact":true})`;
+const SWITCHER_TRIGGER = `page.getByTestId("cycle-switcher-trigger")`;
 const SIDEBAR_SKELETON = `page.getByTestId("cycle-sidebar-skeleton")`;
 const PEEK_SKELETON = `page.getByTestId("cycle-peek-skeleton")`;
 const PEEK_HEADING = `page.getByTestId("cycle-preview").locator("h4").first()`;
@@ -212,6 +213,16 @@ describe("cyclesDetailSidebarName", () => {
     const blank = new Recorder();
     blank.texts.set(SIDEBAR_NAME, "   ");
     expect(await blank.driver().cyclesDetailSidebarName()).toBeNull();
+  });
+});
+
+describe("cyclesSwitcherPick", () => {
+  it("clicks the option and settles on the trigger showing the pick", async () => {
+    const script = new Recorder();
+    script.texts.set(SWITCHER_TRIGGER, "Cycle B");
+    await script.driver().cyclesSwitcherPick("Cycle B");
+    expect(script.callsFor(`page.getByRole("option",{"name":"Cycle B"}).first()`, "click")).toHaveLength(1);
+    expect(script.callsFor(SWITCHER_TRIGGER, "innerText").length).toBeGreaterThan(0);
   });
 });
 
@@ -574,7 +585,7 @@ describe("cyclesHeroOpenPeekRaw", () => {
   it("opens the list with the peek query", async () => {
     const script = new Recorder();
     await script.driver().cyclesHeroOpenPeekRaw("acme", "pid", "cid");
-    expect(script.navigations).toEqual(["/acme/projects/pid/cycles?peek=cid"]);
+    expect(script.navigations).toEqual(["/acme/projects/pid/cycles?peekCycle=cid"]);
   });
 });
 

@@ -176,6 +176,18 @@ describe("CycleDetailSidebar", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the close control unsqueezed under long cycle names", async () => {
+    renderSidebar({ ...fullCycle(), name: "NF253 mobileguest 1793386544749 cycle" });
+    const close = await screen.findByRole("button", { name: CYCLE_SIDEBAR_CLOSE_LABEL });
+    expect(close.className).toContain("shrink-0");
+    // The name column takes the leftover row width from a zero basis, so
+    // the heading truncates instead of pushing the close control out; the
+    // row itself must shrink past its content floor too.
+    const column = screen.getByTestId("cycle-sidebar-name").parentElement;
+    expect(column?.className).toContain("flex-1");
+    expect(column?.parentElement?.className).toContain("min-w-0");
+  });
+
   it("renders the description with paragraph breaks preserved", async () => {
     renderSidebar();
     const description = await screen.findByTestId("cycle-sidebar-description");
@@ -299,12 +311,16 @@ describe("CycleDetailSidebar", () => {
     expect(screen.getByTestId("cycle-sidebar-dates-trigger")).not.toBeNull();
   });
 
-  it("omits the progress section when the breakdown read fails", async () => {
+  it("shows counts with empty breakdowns when the breakdown read fails", async () => {
     harness.issuesStatus = 500;
     renderSidebar();
     expect(await screen.findByTestId("cycle-sidebar-name")).not.toBeNull();
     await waitFor(() => expect(screen.queryByTestId("cycle-sidebar-skeleton")).toBeNull());
-    expect(screen.queryByTestId("cycle-progress-work-items")).toBeNull();
+    // Undated cycles 400 the analytics read; the section still mounts
+    // with counts and an empty distribution panel (NEWFRONT-716).
+    expect(await screen.findByTestId("cycle-progress-work-items")).not.toBeNull();
+    expect(screen.queryByTestId("cycle-progress-entries-pending")).toBeNull();
+    expect(screen.getByTestId("cycle-progress-entries").childElementCount).toBe(0);
   });
 
   it("remembers the breakdown tab per cycle", async () => {
