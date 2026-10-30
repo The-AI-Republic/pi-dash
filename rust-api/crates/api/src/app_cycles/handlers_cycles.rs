@@ -364,23 +364,36 @@ async fn resolve_project_id(
 struct ProjectRow {
     workspace_id: uuid::Uuid,
     archived_at: Option<chrono::DateTime<chrono::Utc>>,
+    timezone: String,
+}
+
+impl ProjectRow {
+    /// `pytz.timezone(project.timezone)`: the zone `user_timezone_converter`
+    /// renders response dates in. `UnknownTimeZoneError` is a `KeyError`, so
+    /// a stored name pytz refuses answers the `KeyError` 400 (`base.py`).
+    fn zone(&self) -> Result<Tz, Denial> {
+        self.timezone
+            .parse::<Tz>()
+            .map_err(|_| Denial::BadError("The required key does not exist.".to_owned()))
+    }
 }
 
 async fn project_row(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Result<ProjectRow, Denial> {
-    let row: Option<(uuid::Uuid, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
-        r#"SELECT workspace_id, archived_at FROM projects
+    let row: Option<(uuid::Uuid, Option<chrono::DateTime<chrono::Utc>>, String)> = sqlx::query_as(
+        r#"SELECT workspace_id, archived_at, timezone FROM projects
            WHERE id = $1 AND deleted_at IS NULL"#,
     )
     .bind(project_id)
     .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id, archived_at)) = row else {
+    let Some((workspace_id, archived_at, timezone)) = row else {
         return Err(Denial::NotFound);
     };
     Ok(ProjectRow {
         workspace_id,
         archived_at,
+        timezone,
     })
 }
 
@@ -675,11 +688,12 @@ fn json_text_to_map(text: &str) -> Result<Map<String, Value>, Denial> {
 // Shaping: row maps to DRF key order + bytes
 // ---------------------------------------------------------------------------
 
-/// Render one `row_to_json` timestamptz in the actor zone: DRF renders
-/// `DateTimeField` in the activated actor zone (`TimezoneMixin`), and the
-/// `user_timezone_converter` project-tz detour is a pure zone round-trip
-/// (`x.astimezone(A).astimezone(B) == x.astimezone(B)`), so the wire form
-/// is the stored instant in the actor zone. `null` stays `null`.
+/// Render one `row_to_json` timestamptz in `timezone`. Response bodies pass
+/// the project zone: the view returns raw `.values()` dicts converted by
+/// `user_timezone_converter(.., project_timezone)` and no serializer field
+/// re-zones them, so the actor zone `TimezoneMixin` activates never applies.
+/// The activity before-image passes the actor zone ([`snapshot_value`]).
+/// `null` stays `null`.
 fn shape_datetime(value: Option<&Value>, timezone: &Tz) -> String {
     let text = match value {
         Some(Value::String(text)) => text,
@@ -917,7 +931,7 @@ fn snapshot_cycle_instance(before: &Map<String, Value>, timezone: &Tz) -> String
 /// One before-image value: DRF field rendering over the fetched value.
 /// Datetimes enforce the activated (user) zone exactly like
 /// `DateTimeField.to_representation` (djangorestframework 3.15.2
-/// `fields.py`), so the response-body [`shape_datetime`] applies; the
+/// `fields.py`), unlike the project-zone response body; the
 /// Postgres `row_to_json` int rendering of `sort_order` goes through
 /// the float kernel. JSON props go through the domain
 /// `super::handlers_misc::python_dumps`: `json.dumps` separators apply
@@ -1718,7 +1732,6 @@ async fn cycle_list(
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();
     let user_id = resolved.id;
-    let timezone = resolved.timezone;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
     check_gate(
         &pool,
@@ -1732,7 +1745,7 @@ async fn cycle_list(
     .await?;
     // `Project.objects.get` inside `get_queryset` runs before any row is
     // read: a missing project is the `ObjectDoesNotExist` 404.
-    project_row(&pool, &project_id).await?;
+    let timezone = project_row(&pool, &project_id).await?.zone()?;
     let now = chrono::Utc::now();
     let cycle_view = crate::app_issues::query_last(&query, "cycle_view");
     if cycle_view.as_deref() == Some("current") {
@@ -1906,6 +1919,7 @@ async fn cycle_create(
     let row = fetch_cycle_by_pk(&pool, &slug, &project_id, &user_id, &now, &id, false, false)
         .await?
         .ok_or(Denial::ServerError)?;
+    let project_zone = project.zone()?;
     if let Some(origin) = super::activity_origin(&state) {
         enqueue_message(
             &pool,
@@ -1915,7 +1929,7 @@ async fn cycle_create(
     }
     Ok(json_response(
         StatusCode::CREATED,
-        shape_write_row(&row, &timezone),
+        shape_write_row(&row, &project_zone),
     ))
 }
 
@@ -2006,6 +2020,7 @@ async fn cycle_partial_update(
     let row = fetch_cycle_by_pk(&pool, &slug, &project_id, &user_id, &now, &pk, false, false)
         .await?
         .ok_or(Denial::ServerError)?;
+    let project_zone = project.zone()?;
     if let Some(origin) = super::activity_origin(&state) {
         enqueue_message(
             &pool,
@@ -2022,7 +2037,7 @@ async fn cycle_partial_update(
     }
     Ok(json_response(
         StatusCode::OK,
-        shape_write_row(&row, &timezone),
+        shape_write_row(&row, &project_zone),
     ))
 }
 
@@ -2179,7 +2194,6 @@ async fn cycle_retrieve(
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();
     let user_id = resolved.id;
-    let timezone = resolved.timezone;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
     check_gate(
         &pool,
@@ -2191,7 +2205,7 @@ async fn cycle_retrieve(
         false,
     )
     .await?;
-    project_row(&pool, &project_id).await?;
+    let project = project_row(&pool, &project_id).await?;
     let now = chrono::Utc::now();
     let pk = parse_pk(&pk).ok_or(Denial::BadDetail)?;
     let row =
@@ -2199,6 +2213,7 @@ async fn cycle_retrieve(
     let Some(row) = row else {
         return Err(Denial::CycleNotFound);
     };
+    let timezone = project.zone()?;
     enqueue_message(
         &pool,
         recent_visited_message(&pk, &user_id, &project_id, &slug),
@@ -2495,6 +2510,25 @@ mod tests {
             snapshot.contains(r#""view_props": {"a": 1, "b": [true, null]}"#),
             "{snapshot}"
         );
+    }
+
+    #[test]
+    fn project_zone_renders_response_dates_and_refuses_unknown_names() {
+        let row = |timezone: &str| ProjectRow {
+            workspace_id: uuid::Uuid::nil(),
+            archived_at: None,
+            timezone: timezone.to_owned(),
+        };
+        let zone = row("America/New_York").zone().expect("zone");
+        assert!(
+            shape_head(&row_map(), &zone).contains("\"start_date\":\"2026-02-28T19:00:01-05:00\""),
+            "{}",
+            shape_head(&row_map(), &zone)
+        );
+        assert!(matches!(
+            row("Not/AZone").zone(),
+            Err(Denial::BadError(message)) if message == "The required key does not exist."
+        ));
     }
 
     #[test]
