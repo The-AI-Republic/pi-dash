@@ -660,34 +660,47 @@ describe("InboxView card actions", () => {
   });
 
   it("snoozes to the moment picked in the custom dialog", async () => {
-    const user = userEvent.setup();
-    const { writes } = renderWritable({ rows: [storyRow("Ship it")] });
-    await screen.findByText("Ship it");
+    // Pinned to local noon on a day whose "+2" lands in the next month.
+    // The grid always renders 42 cells, so a day matched by its month-name
+    // accessible label ("November 1, 2026") is also matched by the spillover
+    // cell of the same number in the visible month ("October 1, 2026"). That
+    // ambiguity used to make this test red only on the last two days of a
+    // month; a fixed date exercises it on every run.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(2026, 9, 30, 12, 0, 0));
+    try {
+      const user = userEvent.setup();
+      const { writes } = renderWritable({ rows: [storyRow("Ship it")] });
+      await screen.findByText("Ship it");
 
-    await user.click(within(firstCard()).getByTestId("snooze-trigger"));
-    await user.click(await screen.findByTestId("snooze-option-custom"));
-    await screen.findByTestId("snooze-custom-dialog");
-    await user.click(screen.getByRole("button", { name: "Pick a date" }));
-    const target = new Date();
-    target.setDate(target.getDate() + 2);
-    const targetDay = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, "0")}-${String(
-      target.getDate()
-    ).padStart(2, "0")}`;
-    const dayGrid = await screen.findByTestId("snooze-date-calendar-grid");
-    await user.click(dayGrid.querySelector(`[data-day="${targetDay}"]`) as HTMLElement);
-    await user.click(screen.getByRole("button", { name: "Pick a time" }));
-    const panel = await screen.findByRole("listbox", { name: "Pick a time" });
-    await user.click(within(panel).getByRole("button", { name: /^AM$/ }));
-    await user.click(within(panel).getByRole("option", { name: "10:30" }));
-    await user.click(screen.getByRole("button", { name: "Submit" }));
+      await user.click(within(firstCard()).getByTestId("snooze-trigger"));
+      await user.click(await screen.findByTestId("snooze-option-custom"));
+      await screen.findByTestId("snooze-custom-dialog");
+      await user.click(screen.getByRole("button", { name: "Pick a date" }));
+      const target = new Date();
+      target.setDate(target.getDate() + 2);
+      const targetDay = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, "0")}-${String(
+        target.getDate()
+      ).padStart(2, "0")}`;
+      expect(targetDay).toBe("2026-11-01");
+      const dayGrid = await screen.findByTestId("snooze-date-calendar-grid");
+      await user.click(dayGrid.querySelector<HTMLElement>(`[data-day="${targetDay}"]`) as HTMLElement);
+      await user.click(screen.getByRole("button", { name: "Pick a time" }));
+      const panel = await screen.findByRole("listbox", { name: "Pick a time" });
+      await user.click(within(panel).getByRole("button", { name: /^AM$/ }));
+      await user.click(within(panel).getByRole("option", { name: "10:30" }));
+      await user.click(screen.getByRole("button", { name: "Submit" }));
 
-    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(SNOOZED_TITLE));
-    expect(writes[0]?.method).toBe("PATCH");
-    const sent = JSON.parse(writes[0]?.body ?? "{}") as { snoozed_till: string };
-    const expected = new Date(target.getFullYear(), target.getMonth(), target.getDate(), 10, 30);
-    expect(sent.snoozed_till).toBe(expected.toISOString());
-    await waitFor(() => expect(screen.queryByTestId("snooze-custom-dialog")).not.toBeInTheDocument());
-    await waitFor(() => expect(cardTitles()).toEqual([]));
+      await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(SNOOZED_TITLE));
+      expect(writes[0]?.method).toBe("PATCH");
+      const sent = JSON.parse(writes[0]?.body ?? "{}") as { snoozed_till: string };
+      const expected = new Date(target.getFullYear(), target.getMonth(), target.getDate(), 10, 30);
+      expect(sent.snoozed_till).toBe(expected.toISOString());
+      await waitFor(() => expect(screen.queryByTestId("snooze-custom-dialog")).not.toBeInTheDocument());
+      await waitFor(() => expect(cardTitles()).toEqual([]));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("unarchives a card from archived mode and toasts", async () => {
