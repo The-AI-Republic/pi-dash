@@ -34,6 +34,9 @@ function shellPage(state: ShellState) {
       reloaded = true;
     }),
     waitForLoadState: vi.fn(async (_state: unknown) => undefined),
+    waitForFunction: vi.fn(async () => undefined),
+    waitForTimeout: vi.fn(async () => undefined),
+    evaluate: vi.fn(async () => ""),
     url: () => "http://new.test/acme/projects/p1/issues",
     waitForResponse: vi.fn(async () => ({ ok: () => true })),
     locator: vi.fn((selector: string) => {

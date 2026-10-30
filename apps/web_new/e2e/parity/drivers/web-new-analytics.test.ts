@@ -107,6 +107,8 @@ class Recorder {
       this.calls.push({ path: "page.goto", method: "goto", args });
     };
     node.waitForLoadState = async () => undefined;
+    node.waitForTimeout = async () => undefined;
+    node.reload = async () => undefined;
     node.url = () => this.urlValue;
     node.title = async () => this.titleValue;
     node.waitForURL = async (url: string) => {

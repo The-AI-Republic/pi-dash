@@ -31717,7 +31717,7 @@ export class WebNewDriver implements ParityDriver {
 
   /** Whether the page shows vite's failed-chunk signature (never an app state). */
   private async hasViteChunkError(): Promise<boolean> {
-    const body = await this.page.evaluate(() => document.body?.innerText ?? "").catch(() => "");
+    const body = (await this.page.evaluate(() => document.body?.innerText ?? "").catch(() => "")) ?? "";
     return body.includes("Failed to fetch dynamically imported module");
   }
 

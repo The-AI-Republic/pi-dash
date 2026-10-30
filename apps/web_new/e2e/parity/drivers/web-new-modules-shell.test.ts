@@ -129,6 +129,7 @@ class FakePage {
         self.pageCalls.push(`waitForURL:${String(pattern)}`);
       },
       waitForTimeout: async () => undefined,
+      waitForFunction: async () => undefined,
       keyboard: { press: async () => undefined },
       route: async (matcher: unknown) => {
         self.routes.push(matcher);

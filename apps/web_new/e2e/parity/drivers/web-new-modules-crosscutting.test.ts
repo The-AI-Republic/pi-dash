@@ -130,6 +130,7 @@ class FakePage {
         self.pageCalls.push("reload");
       },
       waitForTimeout: async () => undefined,
+      waitForFunction: async () => undefined,
       keyboard: { press: async () => undefined },
       on: (event: string, listener: (request: { url(): string }) => void) => {
         if (event === "request") self.requests.push(listener);

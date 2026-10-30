@@ -156,6 +156,8 @@ function pageOf(options: PageOptions = {}): Harness {
     getByTestId: (id: string) => options.byTestId?.(id) ?? gone(),
     getByLabel: (label: string) => options.byLabel?.(label) ?? gone(),
     waitForTimeout: options.waitForTimeout ?? (async () => undefined),
+    waitForFunction: async () => undefined,
+    reload: async () => undefined,
     locator: (selector: string, query?: { has?: Locator }) =>
       options.bySelector?.(selector, query) ??
       fake({
