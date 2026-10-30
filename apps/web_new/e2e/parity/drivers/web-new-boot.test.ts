@@ -368,3 +368,86 @@ describe("navigation boot wiring", () => {
     expect(script.reloads).toBe(0);
   });
 });
+
+/** The private settle recovery exposed for focused tests. */
+function recoveryOf(driver: WebNewDriver): (wait: () => Promise<void>) => Promise<void> {
+  return (
+    driver as unknown as { waitWithChunkRecovery: (wait: () => Promise<void>) => Promise<void> }
+  ).waitWithChunkRecovery.bind(driver);
+}
+
+describe("waitWithChunkRecovery", () => {
+  function scriptedRecoveryPage(options: { bodies?: (string | null)[] }): {
+    reloads: number;
+    page: Page;
+  } {
+    const state = { reloads: 0, reads: 0 };
+    const bodies = options.bodies ?? [CONTENT];
+    const page = {
+      evaluate: async () => {
+        const body = bodies[Math.min(state.reads, bodies.length - 1)];
+        state.reads += 1;
+        if (body === null) throw new Error("dead renderer");
+        return body;
+      },
+      reload: async () => {
+        state.reloads += 1;
+      },
+      waitForLoadState: async () => {},
+    };
+    return Object.assign(state, { page: page as unknown as Page });
+  }
+
+  function scriptedWait(failTimes: number, calls: { count: number }): () => Promise<void> {
+    return async () => {
+      calls.count += 1;
+      if (calls.count <= failTimes) throw new Error("Timeout 30000ms exceeded");
+    };
+  }
+
+  it("passes a healthy wait through untouched", async () => {
+    const script = scriptedRecoveryPage({});
+    const calls = { count: 0 };
+    await recoveryOf(new WebNewDriver(script.page))(scriptedWait(0, calls));
+    expect(calls.count).toBe(1);
+    expect(script.reloads).toBe(0);
+  });
+
+  it("reloads once past a signed wait, then passes the retry", async () => {
+    const script = scriptedRecoveryPage({ bodies: [CHUNK_ERROR] });
+    const calls = { count: 0 };
+    await recoveryOf(new WebNewDriver(script.page))(scriptedWait(1, calls));
+    expect(calls.count).toBe(2);
+    expect(script.reloads).toBe(1);
+  });
+
+  it("rethrows the original error when the page shows no signature", async () => {
+    const script = scriptedRecoveryPage({ bodies: [CONTENT] });
+    const calls = { count: 0 };
+    await expect(recoveryOf(new WebNewDriver(script.page))(scriptedWait(1, calls))).rejects.toThrow(
+      "Timeout 30000ms exceeded"
+    );
+    expect(calls.count).toBe(1);
+    expect(script.reloads).toBe(0);
+  });
+
+  it("rethrows when the retry fails too", async () => {
+    const script = scriptedRecoveryPage({ bodies: [CHUNK_ERROR] });
+    const calls = { count: 0 };
+    await expect(recoveryOf(new WebNewDriver(script.page))(scriptedWait(2, calls))).rejects.toThrow(
+      "Timeout 30000ms exceeded"
+    );
+    expect(calls.count).toBe(2);
+    expect(script.reloads).toBe(1);
+  });
+
+  it("rethrows when the signature read itself fails", async () => {
+    const script = scriptedRecoveryPage({ bodies: [null] });
+    const calls = { count: 0 };
+    await expect(recoveryOf(new WebNewDriver(script.page))(scriptedWait(1, calls))).rejects.toThrow(
+      "Timeout 30000ms exceeded"
+    );
+    expect(calls.count).toBe(1);
+    expect(script.reloads).toBe(0);
+  });
+});

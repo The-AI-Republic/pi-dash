@@ -171,10 +171,15 @@ test(
       // Oracle behavior: the row/card calendar has no per-side clear — a
       // click re-anchors both ends to that day, and clicking the single
       // selected day again clears the whole range (both sides empty).
+      // Drain pickRange's leftover toast first (same race as pickRange's
+      // own drain): each awaitToast below must match its own pick's
+      // save, or the server read lands on the previous save's record.
+      await expect.poll(() => driver.modulesLastToast(), { timeout: 30_000 }).toBe(null);
       await driver.modulesRowOpenDates("Dated Module");
       await driver.modulesCalendarGotoMonth(monthCaption(from), String(from.getFullYear()));
       await driver.modulesCalendarPickDay(from.getDate());
       await driver.modulesAwaitToast("Module updated successfully.");
+      await expect.poll(() => driver.modulesLastToast(), { timeout: 30_000 }).toBe(null);
       await driver.modulesRowOpenDates("Dated Module");
       await driver.modulesCalendarGotoMonth(monthCaption(from), String(from.getFullYear()));
       await driver.modulesCalendarPickDay(from.getDate());

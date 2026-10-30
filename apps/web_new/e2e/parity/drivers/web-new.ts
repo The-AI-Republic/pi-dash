@@ -25071,13 +25071,16 @@ export class WebNewDriver implements ParityDriver {
     await this.page.waitForLoadState("domcontentloaded");
     await this.awaitAppBoot(path);
     // One of three verdicts settles: the page, the missing-module view, or
-    // the project access wall.
-    await this.page
-      .locator(
-        '[data-testid="module-detail-screen"], [data-testid="modules-gone-away"], [data-testid="project-access-wall"]'
-      )
-      .last()
-      .waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // the project access wall. Late chunk failures recover the same way
+    // the list settle does.
+    await this.waitWithChunkRecovery(() =>
+      this.page
+        .locator(
+          '[data-testid="module-detail-screen"], [data-testid="modules-gone-away"], [data-testid="project-access-wall"]'
+        )
+        .last()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+    );
   }
 
   /** The module name the sidebar (detail or peek) shows, or null. */
@@ -31671,14 +31674,45 @@ export class WebNewDriver implements ParityDriver {
    * no-match state, or the flag gate. The gate is a terminal state, not
    * loading (the oracle's settle accepts it too); without it, opening the
    * list while the flag is off times out instead of settling (MOD-036).
+   * A late chunk failure (sidebar prefetch, lazy section) can error the
+   * page after the boot check ran, so the wait recovers past the vite
+   * signature once before throwing.
    */
   private async modulesListWaitSettled(): Promise<void> {
-    await this.page
-      .locator(
-        '[data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"], [data-testid="modules-feature-gate"]'
-      )
-      .last()
-      .waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.waitWithChunkRecovery(() =>
+      this.page
+        .locator(
+          '[data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"], [data-testid="modules-feature-gate"]'
+        )
+        .last()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+    );
+  }
+
+  /**
+   * Run a settle wait, reloading once past a vite chunk error. Only the
+   * vite signature triggers the reload; timeouts on any other page —
+   * slow loads, app errors, a dead renderer (whose read throws) —
+   * rethrow untouched, and the retry throws whatever it meets, so a
+   * deterministically broken import still fails. Entry navigations are
+   * restored by the URL; mid-test readers inherit this safely because
+   * a signed page fails their assertions either way.
+   */
+  private async waitWithChunkRecovery(wait: () => Promise<void>): Promise<void> {
+    try {
+      await wait();
+    } catch (error) {
+      if (!(await this.hasViteChunkError())) throw error;
+      await this.page.reload();
+      await this.page.waitForLoadState("domcontentloaded");
+      await wait();
+    }
+  }
+
+  /** Whether the page shows vite's failed-chunk signature (never an app state). */
+  private async hasViteChunkError(): Promise<boolean> {
+    const body = await this.page.evaluate(() => document.body?.innerText ?? "").catch(() => "");
+    return body.includes("Failed to fetch dynamically imported module");
   }
 
   async modulesListOpenList(workspaceSlug: string, projectId: string): Promise<void> {
