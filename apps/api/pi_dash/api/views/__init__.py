@@ -89,8 +89,11 @@ from .page import PageListAPIEndpoint, PageDetailAPIEndpoint, PageArchiveAPIEndp
 from .runner import RunnerDeleteEndpoint
 
 from .scheduler import (
+    WorkspaceSchedulerDetailAPIEndpoint,
     WorkspaceSchedulerListAPIEndpoint,
     ProjectSchedulerListAPIEndpoint,
+    ProjectSchedulerBindingAPIEndpoint,
     ProjectSchedulerDetailAPIEndpoint,
+    ProjectSchedulerRunNowAPIEndpoint,
     ProjectSchedulerRunsAPIEndpoint,
 )

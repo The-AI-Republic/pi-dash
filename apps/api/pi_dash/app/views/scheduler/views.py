@@ -28,6 +28,8 @@ from pi_dash.app.serializers.scheduler import (
 )
 from pi_dash.app.views.base import BaseAPIView
 from pi_dash.db.models import Project, Scheduler, SchedulerBinding, Workspace
+from pi_dash.scheduler.binding_writes import update_binding
+from pi_dash.scheduler.definition_writes import update_definition
 
 
 def _feature_enabled() -> bool:
@@ -130,9 +132,7 @@ class WorkspaceSchedulerDetailEndpoint(BaseAPIView):
             pk=scheduler_id,
             workspace__slug=slug,
         )
-        serializer = SchedulerSerializer(scheduler, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
+        update_definition(scheduler, request.data)
         return Response(
             SchedulerSerializer(scheduler).data,
             status=status.HTTP_200_OK,
@@ -264,25 +264,7 @@ class ProjectSchedulerBindingDetailEndpoint(BaseAPIView):
             project_id=project_id,
             workspace__slug=slug,
         )
-        serializer = SchedulerBindingSerializer(binding, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
-        # If any RRULE-bundle field was touched, recompute next_run_at so the
-        # scanner honours the new schedule on its next tick.
-        if any(
-            k in request.data for k in ("dtstart", "rrule", "rdates", "exdates", "tzid")
-        ):
-            from pi_dash.bgtasks.scheduler import _next_fire_for_binding_checked
-            binding.refresh_from_db()
-            nxt, parse_error = _next_fire_for_binding_checked(binding, now=timezone.now())
-            # A clean parse with no future occurrence must CLEAR next_run_at
-            # (the edit made the series finite and already over) — keeping the
-            # stale time would fire a rule past its end. The serializer has
-            # already validated the bundle, so parse errors shouldn't happen;
-            # leave next_run_at untouched if one does.
-            if parse_error is None and binding.next_run_at != nxt:
-                binding.next_run_at = nxt
-                binding.save(update_fields=["next_run_at", "updated_at"])
+        update_binding(binding, request.data)
         # Detail shape, not the list shape: the detail page PATCHes (enabled
         # toggle, edits) and reuses the response, so a list-shaped body would
         # drop resolved_prompt / run_count from its cache.
