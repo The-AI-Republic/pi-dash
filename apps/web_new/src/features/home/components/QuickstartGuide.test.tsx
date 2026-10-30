@@ -147,7 +147,10 @@ describe("QuickstartGuide", () => {
     expect(screen.getByRole("link", { name: "Get started" })).toHaveAttribute("href", "/acme/projects");
     expect(screen.getByRole("link", { name: "Get them in" })).toHaveAttribute("href", "/acme/settings/members");
     expect(screen.getByRole("link", { name: "Configure this workspace" })).toHaveAttribute("href", "/acme/settings");
-    expect(screen.getByRole("link", { name: "Personalize now" })).toHaveAttribute("href", "/settings/profile/general");
+    expect(screen.getByRole("link", { name: "Personalize now" })).toHaveAttribute(
+      "href",
+      "/acme/settings/account/general/"
+    );
   });
 
   it("marks the project card done once joined while the panel stays", () => {

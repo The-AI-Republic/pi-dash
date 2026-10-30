@@ -11251,14 +11251,67 @@ export interface DeskSigninUpdateLink {
   settingsProfileActiveTab(): Promise<string | null>;
   /** Accessible name of the sidebar back control, or null when it renders none. */
   settingsProfileBackLabel(): Promise<string | null>;
+  /** Where the sidebar back control points, or null when it renders none. */
+  settingsProfileBackHref(): Promise<string | null>;
   /** Sidebar title text ("Profile settings"), or null when the shell is absent. */
   settingsProfileSidebarTitle(): Promise<string | null>;
   /** Workspace shortcut entries (workspaces plus create/invites actions) in display order. */
   settingsProfileWorkspaceShortcuts(): Promise<string[]>;
   /** Activate one sidebar tab; resolves once the tab address lands. */
   settingsProfileSelectTab(label: string): Promise<void>;
-  /** Open an arbitrary path authenticated; resolves with the final path-plus-query after redirects. */
+  /** Open an arbitrary path authenticated; resolves with the final path, query and fragment after redirects. */
   settingsProfileOpenPath(path: string, cookies: ParityBrowserCookie[]): Promise<string>;
+  /**
+   * Whether the account-settings page rendered inside the normal app shell
+   * (main#670): the shell's top bar and content landmark are mounted beside
+   * it, and no ordinary workspace sidebar is. False on the old app, whose
+   * settings page is a standalone full-window frame. The app rail is an
+   * edition flag and is not probed here (OSS turns it off).
+   */
+  settingsProfileInsideAppShell(): Promise<boolean>;
+  /**
+   * The account settings' own narrow-screen hamburger, when it has one
+   * (main#670); null when the page offers no such control. Answers for the
+   * current viewport: the trigger is only present where the docked panel is
+   * hidden.
+   */
+  settingsProfileMobileMenuPresent(): Promise<boolean | null>;
+  /** Resize the page viewport (width, height) for a narrow/wide check. */
+  settingsProfileSetViewport(width: number, height: number): Promise<void>;
+  /** Whether the navigator's docked middle panel is currently shown. */
+  settingsProfileDockedPanelVisible(): Promise<boolean>;
+  /** Open the narrow-screen hamburger and wait for its drawer to appear. */
+  settingsProfileOpenMobileMenu(): Promise<void>;
+  /** Whether the narrow-screen drawer is currently shown. */
+  settingsProfileMobileDrawerVisible(): Promise<boolean>;
+  /** The personal tab labels the drawer currently offers, in display order. */
+  settingsProfileMobileDrawerEntries(): Promise<string[]>;
+  /** The page's narrow-screen crumb text (the active tab's label), or "". */
+  settingsProfileMobileCrumb(): Promise<string>;
+  /**
+   * Workspace rows of the settings navigator's workspace section, in display
+   * order (main#675): the row's name text, whether it carries an expander,
+   * and whether its groups start open.
+   */
+  settingsProfileWorkspaceRows(): Promise<Array<{ label: string; expandable: boolean; expanded: boolean }>>;
+  /** Open or close one workspace row's group; a no-op when it has no expander. */
+  settingsProfileToggleWorkspaceRow(label: string): Promise<void>;
+  /** Entry labels inside one workspace row's open group, in display order. */
+  settingsProfileWorkspaceEntries(label: string): Promise<string[]>;
+  /** Activate one entry inside a workspace row's group; resolves once its address lands. */
+  settingsProfileOpenWorkspaceEntry(rowLabel: string, entryLabel: string): Promise<void>;
+  /**
+   * Downloadable/plain href of one workspace row: for a row with no
+   * expander (no settings the viewer may open) its workspace-home link,
+   * otherwise null — the row navigates nowhere by itself.
+   */
+  settingsProfileWorkspaceRowHref(label: string): Promise<string | null>;
+  /**
+   * Labels of the workspace-section entries that read current, in display
+   * order (main#675: only the viewed workspace's entries can be lit, and
+   * none are while an account tab is open).
+   */
+  settingsProfileCurrentWorkspaceEntries(): Promise<string[]>;
   /** Current value of one general-tab field. */
   settingsProfileGeneralFieldValue(field: SettingsProfileGeneralField): Promise<string>;
   /** Fill one general-tab field without submitting. */

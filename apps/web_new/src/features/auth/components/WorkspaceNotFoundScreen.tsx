@@ -12,6 +12,7 @@ import { IconButton } from "@pidash/kit";
 import { LogOut } from "lucide-react";
 import * as React from "react";
 
+import { accountSettingsGeneralHref } from "../../settings/index.js";
 import { CrossAppLink } from "../../../shared/coexistence/index.js";
 import { useSignOut } from "../signOut.js";
 import { runSignOutAction } from "../commands.js";
@@ -20,15 +21,18 @@ import { useFocusOnMount } from "../focus.js";
 export interface WorkspaceNotFoundScreenProps {
   /** The signed-in address shown in the header. */
   email: string;
-  /** How many workspaces the user belongs to (picks the actions). */
-  workspaceCount: number;
+  /**
+   * A workspace the reader belongs to (main#670): it hosts the profile
+   * link, because account settings live inside a workspace. Null when the
+   * reader belongs to none, and then creation replaces both actions.
+   */
+  workspaceSlug: string | null;
 }
 
-export function WorkspaceNotFoundScreen({ email, workspaceCount }: WorkspaceNotFoundScreenProps): React.ReactElement {
+export function WorkspaceNotFoundScreen({ email, workspaceSlug }: WorkspaceNotFoundScreenProps): React.ReactElement {
   const navigate = useNavigate();
   const signOut = useSignOut();
   const focusPrimary = useFocusOnMount<HTMLAnchorElement>();
-  const belongsSomewhere = workspaceCount > 0;
 
   function handleSignOut(): void {
     void runSignOutAction(
@@ -57,7 +61,7 @@ export function WorkspaceNotFoundScreen({ email, workspaceCount }: WorkspaceNotF
           This address may not exist, or it may be out of your reach.
         </p>
         <div className="flex items-center justify-center gap-(--space-2) pt-(--space-4)">
-          {belongsSomewhere ? (
+          {workspaceSlug !== null ? (
             <>
               <Link
                 to="/"
@@ -67,7 +71,7 @@ export function WorkspaceNotFoundScreen({ email, workspaceCount }: WorkspaceNotF
                 Go Home
               </Link>
               <CrossAppLink
-                to="/settings/profile/general/"
+                to={accountSettingsGeneralHref(workspaceSlug)}
                 className="text-body rounded-(--radius-control) border border-(--border) px-(--space-4) py-(--space-2) text-(--text)"
               >
                 Open profile

@@ -47,7 +47,11 @@ test(
       await driver.assistantClickMic();
       await expect
         .poll(() => driver.assistantCurrentPath(), { timeout: 30_000 })
-        .toBe("/settings/profile/ai-assistant");
+        .toBe(
+          driver.target === "web_new"
+            ? `/${harness.workspaceSlug}/settings/account/ai-assistant/`
+            : "/settings/profile/ai-assistant"
+        );
       expect(await driver.assistantCurrentHash()).toBe("#voice-dictation");
       expect((await serverAssistantSttGet(harness.ownerSession)).has_api_key).toBe(false);
     });

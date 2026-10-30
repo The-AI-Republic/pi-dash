@@ -7,7 +7,6 @@ import { PROFILE_SETTINGS_TABS, findProfileSettingsTab, profileSettingsGroups, p
 import {
   DEFAULT_PROFILE_SETTINGS_TAB,
   isProfileSettingsTab,
-  profileSettingsHref,
   PROFILE_SETTINGS_TAB_IDS,
   queryWithoutMark,
   resolveProfileSettingsTab,
@@ -42,11 +41,7 @@ describe("profile settings addresses", () => {
     expect(resolveProfileSettingsTab(undefined)).toBeNull();
   });
 
-  it("builds tab links with a trailing slash and keeps a query verbatim", () => {
-    expect(profileSettingsHref("general")).toBe("/settings/profile/general/");
-    expect(profileSettingsHref("security", "?keep=2")).toBe("/settings/profile/security/?keep=2");
-    expect(profileSettingsHref("security", "keep=2")).toBe("/settings/profile/security/?keep=2");
-    expect(profileSettingsHref("security", "?")).toBe("/settings/profile/security/");
+  it("strips the query mark and tolerates an absent query", () => {
     expect(queryWithoutMark("?a=1")).toBe("a=1");
     expect(queryWithoutMark("a=1")).toBe("a=1");
   });

@@ -106,7 +106,12 @@ export { resolveFileUrl } from "./fileUrls.js";
 export { APP_VERSION } from "./version.js";
 export { WorkspaceLogo } from "./WorkspaceLogo.js";
 export type { WorkspaceLogoProps } from "./WorkspaceLogo.js";
-export { NOTIFICATIONS_PATH_SEGMENT, isNotificationsPath } from "./sidebarAutohide.js";
+export {
+  ACCOUNT_SETTINGS_SEGMENT,
+  isAccountSettingsPathname,
+  isNotificationsPath,
+  NOTIFICATIONS_PATH_SEGMENT,
+} from "./sidebarAutohide.js";
 export {
   formatMemberCount,
   orderSwitcherWorkspaces,

@@ -320,7 +320,13 @@ import { createAppClient } from "../../../core/api/index.js";
 import { edition } from "../../../core/edition/index.js";
 import { selectCreatableProjects } from "../../../features/issues/create/createForm.js";
 import { platform } from "../../../core/platform/index.js";
-import { DOCS_URL, useRailState, useShellChrome, useShortcutsDialog } from "../../../shared/shell/index.js";
+import {
+  DOCS_URL,
+  isNotificationsPath,
+  useRailState,
+  useShellChrome,
+  useShortcutsDialog,
+} from "../../../shared/shell/index.js";
 import { isSettingsPagePath, Route } from "./route.js";
 
 function PageProbe({ page, query }: { page: PalettePage; query: string }) {
@@ -345,7 +351,7 @@ describe("isSettingsPagePath", () => {
     expect(isSettingsPagePath("/acme/settings/projects/")).toBe(true);
     expect(isSettingsPagePath("/acme/settings/projects/p1")).toBe(true);
     expect(isSettingsPagePath("/acme/settings/projects/p1/features/cycles/")).toBe(true);
-    expect(isSettingsPagePath("/acme/settings/profile")).toBe(false);
+    expect(isSettingsPagePath("/acme/settings/account/security")).toBe(false);
     expect(isSettingsPagePath("/acme/projects/p1/issues")).toBe(false);
     expect(isSettingsPagePath("/acme/projects/p1/settings")).toBe(false);
     expect(isSettingsPagePath("/")).toBe(false);
@@ -1607,7 +1613,7 @@ describe("gated layout shell wiring", () => {
       harness.sidebar?.onYourWork();
       expect(navigate).toHaveBeenLastCalledWith({ href: "/acme/profile/u1" });
       harness.sidebar?.onUserSettings();
-      expect(navigate).toHaveBeenLastCalledWith({ href: "/settings/profile/general" });
+      expect(navigate).toHaveBeenLastCalledWith({ href: "/acme/settings/account/general/" });
     });
 
     it("falls back to guest without an active membership", () => {
@@ -1643,6 +1649,40 @@ describe("gated layout shell wiring", () => {
       } finally {
         menu.unmount();
       }
+    });
+
+    it("unmounts the ordinary workspace sidebar on every account-settings page", () => {
+      // The account pages stand the settings navigator where the sidebar
+      // was (main#670), so the two panels never sit side by side; the top
+      // bar still mounts with its toggle and compact account fallback.
+      for (const pathname of [
+        "/acme/settings/account/general/",
+        "/acme/settings/account/notifications/",
+        "/acme/settings/account",
+      ]) {
+        harness.routerState.location.pathname = pathname;
+        renderShell();
+        expect(harness.sidebar).toBeNull();
+        expect(harness.topBar?.sidebarMounted).toBe(false);
+      }
+    });
+
+    it("keeps the sidebar on the workspace's own settings pages", () => {
+      harness.routerState.location.pathname = "/acme/settings/members/";
+      renderShell();
+      expect(harness.sidebar).not.toBeNull();
+      expect(harness.topBar?.sidebarMounted).toBe(true);
+    });
+
+    it("does not read the top bar's inbox as current on the account notifications tab", () => {
+      // The inbox keeps its own autohide; the account notifications tab is
+      // an account page whose name merely repeats a deeper segment, so the
+      // top bar's inbox link (which keys off the same rule) stays idle.
+      harness.routerState.location.pathname = "/acme/settings/account/notifications/";
+      renderShell();
+      expect(harness.topBar?.currentPath).toBe("/acme/settings/account/notifications/");
+      // The top bar reads its inbox state from the same rule.
+      expect(isNotificationsPath(String(harness.topBar?.currentPath))).toBe(false);
     });
 
     it("opens the shortcut list from the help menu", async () => {

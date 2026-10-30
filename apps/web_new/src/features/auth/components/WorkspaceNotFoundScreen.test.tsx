@@ -53,7 +53,7 @@ function stubTransport(handler: (url: string) => { status: number; body: string;
   };
 }
 
-function renderScreen(email: string, workspaceCount: number, signOutStatus = 200): { posts: string[] } {
+function renderScreen(email: string, workspaceSlug: string | null, signOutStatus = 200): { posts: string[] } {
   const posts: string[] = [];
   createAppClient(
     "https://api.test",
@@ -71,7 +71,7 @@ function renderScreen(email: string, workspaceCount: number, signOutStatus = 200
   render(
     <QueryClientProvider client={queryClient}>
       <RuntimeSignOutLifecycle />
-      <WorkspaceNotFoundScreen email={email} workspaceCount={workspaceCount} />
+      <WorkspaceNotFoundScreen email={email} workspaceSlug={workspaceSlug} />
     </QueryClientProvider>
   );
   return { posts };
@@ -85,17 +85,22 @@ afterEach(() => {
 
 describe("WorkspaceNotFoundScreen", () => {
   it("names the account and offers home plus profile when the user belongs somewhere", () => {
-    renderScreen("ada@example.com", 2);
+    renderScreen("ada@example.com", "acme");
     expect(screen.getByRole("heading", { name: "Workspace not found" })).toBeVisible();
     expect(screen.getByText("ada@example.com")).toBeVisible();
     const home = screen.getByRole("link", { name: "Go Home" });
     expect(home).toHaveAttribute("href", "/");
     expect(home).toHaveFocus();
-    expect(screen.getByRole("link", { name: "Open profile" })).toHaveAttribute("href", "/settings/profile/general/");
+    // Account settings live inside a workspace (main#670): the profile
+    // link hosts itself in the first workspace the reader belongs to.
+    expect(screen.getByRole("link", { name: "Open profile" })).toHaveAttribute(
+      "href",
+      "/acme/settings/account/general/"
+    );
   });
 
   it("offers creation when the user belongs nowhere", () => {
-    renderScreen("ada@example.com", 0);
+    renderScreen("ada@example.com", null);
     const create = screen.getByRole("link", { name: "Create a workspace" });
     expect(create).toHaveAttribute("href", "/create-workspace");
     expect(create).toHaveFocus();
@@ -103,7 +108,7 @@ describe("WorkspaceNotFoundScreen", () => {
   });
 
   it("confirms and disposes the desktop runtime before signing out from the non-gated header", async () => {
-    const seen = renderScreen("ada@example.com", 1);
+    const seen = renderScreen("ada@example.com", "acme");
     await userEvent.setup().click(screen.getByRole("button", { name: "Sign out" }));
     const dialog = await screen.findByRole("dialog", { name: "Sign out?" });
     expect(seen.posts).toHaveLength(0);

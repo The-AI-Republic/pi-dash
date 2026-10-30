@@ -10,10 +10,10 @@ import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
 // Stand-in for the router Link (SetupCard.test.tsx precedent): the
-// keyless dictation links target the migrated /settings/profile prefix
-// (NEWFRONT-586), so they render as router links whose navigation is
-// TanStack's own tested behavior. Full prop passthrough keeps the
-// testids and labels the suite asserts.
+// keyless dictation links target a migrated workspace settings address, so
+// they render as router links whose navigation is TanStack's own tested
+// behavior. Full prop passthrough keeps the testids and labels the suite
+// asserts.
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tanstack/react-router")>();
   return {
@@ -42,7 +42,7 @@ import { Composer } from "./Composer.js";
 function renderComposer(props: Partial<React.ComponentProps<typeof Composer>> = {}) {
   const onSubmit = vi.fn();
   const onDraftChange = vi.fn();
-  render(<Composer draft="" onDraftChange={onDraftChange} onSubmit={onSubmit} {...props} />);
+  render(<Composer workspaceSlug="acme" draft="" onDraftChange={onDraftChange} onSubmit={onSubmit} {...props} />);
   return { onSubmit, onDraftChange };
 }
 
@@ -144,7 +144,16 @@ describe("Composer", () => {
   });
 
   it("applies the bordered variant only when docked", () => {
-    render(<Composer draft="" onDraftChange={() => {}} onSubmit={() => {}} bordered={false} className="probe" />);
+    render(
+      <Composer
+        workspaceSlug="acme"
+        draft=""
+        onDraftChange={() => {}}
+        onSubmit={() => {}}
+        bordered={false}
+        className="probe"
+      />
+    );
     const form = screen.getByTestId("assistant-composer");
     expect(form).toHaveClass("probe");
     expect(form).not.toHaveClass("border-t");
@@ -192,7 +201,13 @@ describe("Composer dictation", () => {
     ];
     for (const speech of hidden) {
       const { unmount } = render(
-        <Composer draft="" onDraftChange={() => {}} onSubmit={() => {}} dictation={{ speech, handle }} />
+        <Composer
+          workspaceSlug="acme"
+          draft=""
+          onDraftChange={() => {}}
+          onSubmit={() => {}}
+          dictation={{ speech, handle }}
+        />
       );
       expect(screen.queryByTestId("assistant-mic")).not.toBeInTheDocument();
       expect(screen.queryByTestId("assistant-dictation-hint")).not.toBeInTheDocument();
@@ -206,6 +221,7 @@ describe("Composer dictation", () => {
     // route to setup instead of vanishing (AGT-050/AGT-051/AGT-057).
     const { unmount } = render(
       <Composer
+        workspaceSlug="acme"
         draft=""
         onDraftChange={() => {}}
         onSubmit={() => {}}
@@ -231,6 +247,7 @@ describe("Composer dictation", () => {
     const recording = fakeHandle({ status: "recording" });
     render(
       <Composer
+        workspaceSlug="acme"
         draft=""
         onDraftChange={() => {}}
         onSubmit={() => {}}
@@ -244,6 +261,7 @@ describe("Composer dictation", () => {
     const requesting = fakeHandle({ status: "requesting" });
     render(
       <Composer
+        workspaceSlug="acme"
         draft=""
         onDraftChange={() => {}}
         onSubmit={() => {}}
@@ -256,7 +274,13 @@ describe("Composer dictation", () => {
   it("leaves a settled capture alone when the cell hides", () => {
     const idle = fakeHandle({ status: "idle" });
     render(
-      <Composer draft="" onDraftChange={() => {}} onSubmit={() => {}} dictation={{ speech: undefined, handle: idle }} />
+      <Composer
+        workspaceSlug="acme"
+        draft=""
+        onDraftChange={() => {}}
+        onSubmit={() => {}}
+        dictation={{ speech: undefined, handle: idle }}
+      />
     );
     expect(idle.cancel).not.toHaveBeenCalled();
   });
@@ -312,6 +336,7 @@ describe("Composer dictation", () => {
   it("names missing hardware and failed capture distinctly", () => {
     const { unmount } = render(
       <Composer
+        workspaceSlug="acme"
         draft=""
         onDraftChange={() => {}}
         onSubmit={() => {}}
@@ -322,6 +347,7 @@ describe("Composer dictation", () => {
     unmount();
     render(
       <Composer
+        workspaceSlug="acme"
         draft=""
         onDraftChange={() => {}}
         onSubmit={() => {}}
@@ -350,13 +376,15 @@ describe("Composer dictation", () => {
     const mic = screen.getByTestId("assistant-mic");
     expect(mic.tagName).toBe("A");
     expect(mic).toHaveAttribute("aria-label", "Set up voice dictation");
+    // Both carry the account-settings address of the workspace on screen
+    // (main#670), which is now a migrated subtree, so they navigate in-app.
     expect(mic).toHaveAttribute("data-router-link");
-    expect(mic).toHaveAttribute("data-to", "/settings/profile/ai-assistant");
+    expect(mic).toHaveAttribute("data-to", "/acme/settings/account/ai-assistant/");
     expect(mic).toHaveAttribute("data-hash", "voice-dictation");
     expect(screen.getByTestId("assistant-dictation-hint")).toHaveTextContent("Voice dictation isn't set up.");
     const setup = screen.getByRole("link", { name: "Configure it" });
     expect(setup).toHaveAttribute("data-router-link");
-    expect(setup).toHaveAttribute("data-to", "/settings/profile/ai-assistant");
+    expect(setup).toHaveAttribute("data-to", "/acme/settings/account/ai-assistant/");
     expect(setup).toHaveAttribute("data-hash", "voice-dictation");
   });
 
@@ -388,13 +416,27 @@ describe("Composer dictation", () => {
   it("stops when the pointer slides off mid-recording only", () => {
     const recording = fakeHandle({ status: "recording" });
     const { unmount } = render(
-      <Composer draft="" onDraftChange={() => {}} onSubmit={() => {}} dictation={keyedDictation(recording)} />
+      <Composer
+        workspaceSlug="acme"
+        draft=""
+        onDraftChange={() => {}}
+        onSubmit={() => {}}
+        dictation={keyedDictation(recording)}
+      />
     );
     fireEvent.pointerLeave(screen.getByTestId("assistant-mic"));
     expect(recording.stop).toHaveBeenCalledTimes(1);
     unmount();
     const idle = fakeHandle({ status: "idle" });
-    render(<Composer draft="" onDraftChange={() => {}} onSubmit={() => {}} dictation={keyedDictation(idle)} />);
+    render(
+      <Composer
+        workspaceSlug="acme"
+        draft=""
+        onDraftChange={() => {}}
+        onSubmit={() => {}}
+        dictation={keyedDictation(idle)}
+      />
+    );
     fireEvent.pointerLeave(screen.getByTestId("assistant-mic"));
     expect(idle.stop).not.toHaveBeenCalled();
   });

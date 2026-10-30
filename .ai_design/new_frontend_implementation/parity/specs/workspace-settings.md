@@ -68,6 +68,22 @@ hamburger control that opens the same entries as a dropdown panel
 (closing on an outside click) beside a crumb naming the current
 section. The hamburger hides on wide viewports.
 
+**One catalog, two surfaces (main#675, NEWFRONT-1030).** The filtered,
+ordered, addressed entry list this sidebar renders is a shared catalog
+module, not a list built here: for one workspace slug and one role it
+returns the groups and entries that role may open, without the withheld
+ones, in the order above, each already carrying its
+`/<that-ws>/settings...` address. This navigator feeds it the workspace in
+the address and the reader's role there. The account-settings navigator
+(profile spec §5b) feeds it each workspace the reader belongs to with that
+workspace's own role, and draws the same groups, labels, order and
+addresses inside each expanded workspace row. Neither surface adds,
+renames, reorders or re-addresses an entry of its own, and a role rule
+changes in one place for both. The per-workspace slice also answers the
+highlight question the same way for both surfaces: an entry is current
+only inside its own workspace, General only at that workspace's settings
+root, and every other entry for its own address and anything beneath it.
+
 Gates: general, members and exports admit admins and members; billing,
 webhooks and integrations are admin-only; guests are refused every
 section. The gate key derives from the first two path segments after

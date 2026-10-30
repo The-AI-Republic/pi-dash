@@ -70,7 +70,9 @@ test(
       await driver.activateUserMenuItem("Settings");
       await expect
         .poll(() => Promise.resolve(new URL(driver.page.url()).pathname), { timeout: 30_000 })
-        .toBe("/settings/profile/general");
+        .toBe(
+          driver.target === "web_new" ? `/${seed.workspaceSlug}/settings/account/general/` : "/settings/profile/general"
+        );
       expect(await driver.isDialogWithTextVisible("Your profile")).toBe(false);
     });
 

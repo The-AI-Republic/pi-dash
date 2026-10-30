@@ -165,7 +165,7 @@ describe("quickstartLinkHref", () => {
     expect(quickstartLinkHref("invite-team", "acme")).toBe("/acme/settings/members");
     expect(quickstartLinkHref("invite-team", "acme")).toContain("members");
     expect(quickstartLinkHref("configure-workspace", "acme")).toBe("/acme/settings");
-    expect(quickstartLinkHref("personalize-account", "acme")).toBe("/settings/profile/general");
+    expect(quickstartLinkHref("personalize-account", "acme")).toBe("/acme/settings/account/general/");
   });
 });
 

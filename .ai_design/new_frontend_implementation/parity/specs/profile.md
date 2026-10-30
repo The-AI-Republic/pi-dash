@@ -131,52 +131,149 @@ expanding a row shows its created, assigned, due and completed counts from
 the segregation read. On your own profile an edit pencil navigates to the
 settings page general tab at `/settings/profile/general` (per main#573,
 still open — the live pencil still opens the settings dialog with the
-address unchanged, pinned as a row Gap). The panel collapses on demand; on
+address unchanged, pinned as a row Gap). Web_new names the account
+general tab inside the workspace instead, `/<ws>/settings/account/general/`
+(main#670, NEWFRONT-1030). The panel collapses on demand; on
 narrow screens it starts collapsed and toggles as an overlay above the
 content. Reads: the segregation read from §1 plus project lookups for row
 names. Oracle: `view.spec.ts`.
 
-## 5. Settings tabs, shell, legacy forwards (PROF-009, PROF-010, PROF-026, slice NEWFRONT-565)
+## 5. Settings tabs, shell, legacy forwards (PROF-009, PROF-010, PROF-026, slice NEWFRONT-565, reworked by NEWFRONT-1030 for main#670/#675)
 
-Every settings tab lives at its own address, `/settings/profile/<tab>`,
-with nine registered tab ids: general, preferences, ai-assistant,
-auto-project-management, notifications, security, activity, integrations
-and api-tokens. Opening an unknown tab id shows only the loading indicator
-with no recovery (bug NEWFRONT-430, recorded in §14); the target falls
-back to the default tab instead of stranding the page. No client data read
-backs the tab registry itself. Oracle: `settings-shell.spec.ts`.
+**Where the pages live (main#670).** Personal settings are not a
+standalone full-window page any more. Every tab lives inside the workspace
+the reader is in: `/<workspaceSlug>/settings/account/<tab>`, rendered by
+an ordinary child of the signed-in workspace tree. So the normal app
+chrome stays around it — the app rail, the top bar (workspace switcher,
+search, inbox, help, account menu), the palette and the toast host are the
+same ones every other workspace page gets. Nothing about the settings
+pages is mounted outside the shell, so nothing needs to re-create the
+chrome or re-run the signed-in gate: the gated workspace layout already
+ran above this route. Nine registered tab ids keep their meaning:
+general, preferences, ai-assistant, auto-project-management,
+notifications, security, activity, integrations and api-tokens.
 
-The settings shell groups the tabs under a personal section (profile,
-preferences, AI assistant, upkeep, notifications, security, activity in
-that order) and a developer section (integrations, personal access
-tokens), with a workspace shortcut list beneath (workspace entries plus
-workspace creation and invites). The sidebar always shows the back control
-returning home plus the profile-settings title. Target behavior (per
-main#573, still open): tab switches are link navigations to the tab
-addresses, and no settings dialog variant exists anywhere — the user-menu
-Settings entry and the profile pencil from §4 both navigate to the
-settings page, and no store action opens a dialog. The live app still
-switches through buttons and still mounts the dialog (pinned as row Gaps);
-the slice builds only the target: full page, no dialog. The shell slice
-owns the tab-registration seam every sibling settings tab renders through,
-and keeps it stable. As built, the seam is a synchronous registry keyed by
-the nine tab ids: a sibling slice registers its body for its own id from
-its route module (unregistering on unmount), and the shell renders
-whatever is registered, with a quiet loading frame until a body arrives.
-The general, security and notifications bodies ship with the shell; the
-remaining six ids are reserved for their slices and need no change to the
-shell or the route files. Oracle: `settings-shell.spec.ts`.
+**Layout.** Inside that shell the settings navigator is the middle panel:
+a fixed-width column on the left of the content area holding, top to
+bottom, the back control with the settings title, the grouped tab list,
+and the workspace section (§5b). The tab body fills the space beside it
+and scrolls on its own. On narrow screens the column is replaced by a bar
+with a hamburger, the current tab's label, and a floating panel opened
+from the hamburger. The panel closes on Escape (returning focus to the
+hamburger), on a press outside it, and after a pick. The panel and the
+wide column show the same entries; each copy carries its own element ids so
+the document never holds duplicates. The back control returns to the
+current workspace home, `/<workspaceSlug>`, not to the site root.
 
-Legacy addresses forward to their matching tabs with query parameters
-carried over: the bare settings address lands on the general tab, the old
-workspace account addresses forward per tab defaulting to general, the old
-profile addresses forward per tab defaulting to general, and the old
-workspace api-tokens address lands on the tokens tab. The api-tokens
-forward currently drops the query string (bug NEWFRONT-431, recorded in
-§14); the target carries parameters like its siblings. An unknown
-forwarded tab behaves like an unknown direct tab (§14, NEWFRONT-430).
-These are client redirects with no API calls. Oracle:
-`settings-shell.spec.ts`.
+**The address names the tab (PROF-009).** The active tab comes from the
+path segment after `/settings/account/`. Every tab therefore survives a
+reload, a deep link and back/forward, and switching tabs is an ordinary
+link navigation to the tab's address (with a trailing slash, the form the
+app's own links use; a direct visit without the slash resolves to the same
+tab). The bare collection `/<ws>/settings/account` forwards to the general
+tab with the query string kept. An unregistered id forwards to the general
+tab the same way. A tab this instance withholds — security on a
+cloud-managed instance (CLOUD-035) — also forwards to general, so a stale
+bookmark lands on a real page rather than a loader or an empty frame. An
+address deeper than a tab lands on that workspace's general tab.
+
+**Legacy addresses (PROF-026).** Four families of older addresses keep
+working; each is a client redirect that keeps the query string (an empty
+query adds nothing):
+
+- `/settings` and `/settings/profile` land on the general tab; `/settings/profile/<tab>` lands on that tab. Anything else below `/settings` is treated as the general tab, not as a 404.
+- `/profile` and `/profile/<tab>` land on that tab, defaulting to general.
+- `/<ws>/settings/account` and `/<ws>/settings/account/<tab>` land on that workspace's tab, defaulting to general.
+- `/<ws>/settings/api-tokens` lands on that workspace's tokens tab, query kept (the target recorded for NEWFRONT-431).
+
+Only a registered tab id is forwarded as a tab: an unknown or misspelled
+segment becomes general, so a stale link never strands the page. The
+workspace-less families resolve their workspace from the reader's last
+workspace while they still belong to it, else the remembered fallback
+workspace; a reader who belongs to no workspace continues to workspace
+creation. Each forward carries the fragment explicitly, not by luck of the
+router: the chat composer's dictation link used to read
+`/settings/profile/ai-assistant#voice-dictation`, and a bookmarked copy must
+land on that block rather than at the top of the AI Assistant tab, so the
+resolver appends `location.hash` to the target address. Only `/profile` and
+`/profile/<tab>` forward; two segments below `/profile` (a member address,
+not a settings one) falls through to the not-found page. Oracle:
+`settings-shell.spec.ts`; the landing addresses (slashed form, query and
+fragment) are pinned by
+`apps/web_new/src/routes/settings/forwardLanding.test.tsx`.
+
+**Serving the new address (coexistence routing).** `/<ws>/settings/account`
+must reach web_new through the proxy from the moment web_new forwards
+`/settings/profile` there: while the proxy still hands that subtree to the
+old app, the old app's own `/<ws>/settings/account/*` redirect bounces the
+reader back to `/settings/profile/*`, which web_new forwards to the account
+address again — a loop. The migrated-route list therefore needs a
+`/{ws}/settings/account/*` entry, regenerated into both Caddyfiles, before
+the area gate can prove the scenarios. The entry is in the migrated-route
+list and in both generated Caddyfiles already (added with the route in
+NEWFRONT-1030 under a coordinator path grant), so the area gate only has
+to confirm it is present rather than regenerate it.
+
+**In-app links.** Every in-app entry to personal settings names the new
+address, using the workspace the reader is in: the user menu's Settings
+entry and the profile sidebar's edit pencil go to
+`/<ws>/settings/account/general/`; the assistant setup card, the composer's
+keyless dictation redirect and the thread's "manage servers" link go to
+`/<ws>/settings/account/ai-assistant/` (with `#voice-dictation` where the
+dictation block is meant); the home quickstart "Personalize now" goes to
+`/<ws>/settings/account/general/`; and the workspace-not-found screen's
+"Open profile" goes to the first workspace the reader belongs to. No
+in-app link points at the legacy addresses any more; they exist only so
+old bookmarks and external links keep working. Oracle: `view.spec.ts`,
+`shell-059-user-menu.spec.ts`, `setup-card.spec.ts`,
+`setup-redirect.spec.ts`.
+
+## 5b. The navigator's workspace section (PROF-010, main#675)
+
+Below the tab list the navigator keeps a Workspace section listing every
+workspace the reader belongs to, in the order the workspace list returns,
+each with its initial mark and name. Each workspace expands in place to
+that workspace's settings pages instead of linking straight to its home:
+pressing the row's chevron opens and closes the group, the workspace the
+reader is currently in starts expanded, and every other workspace starts
+collapsed. Pressing a row does not navigate; pressing an entry inside an
+open group goes to `/<that-ws>/settings...`, so a reader can jump into
+another workspace's settings without first opening that workspace.
+
+A workspace whose role lets the reader open nothing (a guest there) shows
+as a plain row with no expander: pressing it goes to that workspace's
+home, exactly as the row behaved before the nesting arrived. Entries are
+filtered by the reader's role **in that workspace**, taken from the
+workspace list, never by the role in the workspace on screen: an admin in
+one workspace sees the admin-only entries under that workspace and not
+under a workspace where they are only a member. The catalog behind those
+entries is the one the standalone workspace-settings navigator at
+`/<ws>/settings*` renders (§1 of the workspace-settings spec): the same
+section keys, labels, order, minimum roles and addresses come from one
+module, so the two lists cannot drift; this section adds no entries of
+its own. The create-workspace and workspace-invites shortcuts stay beneath
+the workspace rows.
+
+Highlighting follows the address the reader is on. Only entries of the
+workspace being viewed can read current; entries of another workspace
+never do, and no entry reads current while an account tab is open (the
+account pages are not workspace settings), including the general entry.
+Within the viewed workspace, General matches only the settings root
+itself, while every other entry matches its own address and anything
+below it, so a nested page such as a webhook detail keeps its Webhooks
+entry lit. The wide column and the narrow panel apply the same rules.
+
+## 5c. Edges and failure states (PROF-009, PROF-010, PROF-026)
+
+A visitor who is not signed in is bounced to the entry page with the
+address they asked for as the return path, and a member who has not
+finished onboarding continues into onboarding — both checked before any
+forward resolves a workspace. Reads that fail do not take the page down:
+a failed settings or workspace-list read leaves the forward to resolve
+what it can and, when no workspace is known, sends the reader to workspace
+creation. While the workspace list is still loading the navigator renders
+its tabs and shortcuts with the workspace section simply empty, and fills
+it in when the list arrives.
 
 ## 6. Account: names, avatar, email, deactivation, password (PROF-011, PROF-012, PROF-013, PROF-014, PROF-015, slice NEWFRONT-565)
 

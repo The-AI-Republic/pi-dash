@@ -51,7 +51,11 @@ test(
       await driver.assistantSetupCardClick();
       await expect
         .poll(() => driver.assistantCurrentPath(), { timeout: 60_000 })
-        .toBe("/settings/profile/ai-assistant");
+        .toBe(
+          driver.target === "web_new"
+            ? `/${workspaceSlug}/settings/account/ai-assistant/`
+            : "/settings/profile/ai-assistant"
+        );
     });
 
     await test.step("a thread empty state swaps in the same card", async () => {

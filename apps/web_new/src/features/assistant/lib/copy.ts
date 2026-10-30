@@ -26,8 +26,14 @@ export const SETUP_CARD_BODY =
   "Bring your own LLM provider key. The assistant then works across this workspace with exactly your permissions — never more.";
 /** Setup card action, matched exactly by the AGT-039 scenario. */
 export const SETUP_CARD_ACTION = "Configure provider";
-/** Where the setup card sends the user; the profile area owns that page. */
-export const PROVIDER_SETTINGS_HREF = "/settings/profile/ai-assistant";
+/**
+ * Where the setup card and the voice cell send the user (main#670): the
+ * account settings page's assistant tab, inside the workspace they are
+ * already in. The profile area owns the page; the caller supplies the slug.
+ */
+export function providerSettingsHref(workspaceSlug: string): string {
+  return `/${workspaceSlug}/settings/account/ai-assistant/`;
+}
 /** Deep-link anchor of the voice section inside the assistant settings page (AGT-051). */
 export const VOICE_DICTATION_HASH = "voice-dictation";
 /** Mic label when dictation is ready, matched exactly by the AGT-050/051/052/057 scenarios. */

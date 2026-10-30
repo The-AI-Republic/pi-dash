@@ -653,7 +653,12 @@ test(
       if (driver.target === "web_new") {
         // Target per main#573 (PROF-008): the pencil navigates to the
         // settings general tab instead of opening a dialog.
-        await expect.poll(() => driver.layoutsCurrentUrl(), { timeout: 30_000 }).toContain("/settings/profile/general");
+        // The account general tab lives inside the current workspace
+        // (main#670, NEWFRONT-1030); the old app still answers on its
+        // standalone address.
+        await expect
+          .poll(() => driver.layoutsCurrentUrl(), { timeout: 30_000 })
+          .toContain(`/${world.workspaceSlug}/settings/account/general/`);
         // The shell paints after the navigation lands; poll like the shell spec does.
         await expect.poll(() => driver.profileSettingsActiveTab(), { timeout: 30_000 }).toBe("Profile");
       } else {

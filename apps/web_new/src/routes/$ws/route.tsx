@@ -61,7 +61,10 @@ function WorkspaceDenialNotice(): React.ReactElement | null {
   if (me.isPending || workspaces.isPending) return null;
   const list = workspaces.data ?? [];
   if (selectWorkspace(list, params.ws) === undefined) {
-    return <WorkspaceNotFoundScreen email={me.data?.email ?? ""} workspaceCount={list.length} />;
+    // Account settings live inside a workspace, so the profile link hosts
+    // itself in one the reader belongs to (main#670); the first listed
+    // workspace stands in for the address that turned out not to exist.
+    return <WorkspaceNotFoundScreen email={me.data?.email ?? ""} workspaceSlug={list[0]?.slug ?? null} />;
   }
   return <WorkspaceNotMemberScreen />;
 }

@@ -23,6 +23,7 @@
     "/{ws}/projects",
     "/{ws}/browse/{workItem}",
     "/{ws}/settings",
+    "/{ws}/settings/account/*",
     "/{ws}/settings/members",
     "/{ws}/settings/billing",
     "/{ws}/settings/exports",

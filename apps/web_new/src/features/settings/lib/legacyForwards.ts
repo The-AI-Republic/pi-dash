@@ -1,70 +1,48 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Legacy profile-settings addresses (parity/specs/profile.md §5,
-// PROF-026). Four families forward to the new tab addresses, keeping the
-// query string and defaulting an absent or unknown tab to the general
-// tab. The workspace api-tokens forward keeps its parameters like the
-// others (the target for NEWFRONT-431).
+// Legacy personal-settings addresses (parity/specs/profile.md §5,
+// PROF-026; main#670). Account settings now live inside a workspace, so a
+// legacy address only names a tab; its route resolves the workspace and
+// redirects to `/<ws>/settings/account/<tab>`. The families are:
+//
+//   /settings, /settings/*             the signed-in user's workspace
+//   /profile, /profile/<tab>           the signed-in user's workspace
+//   /<ws>/settings/account[/<tab>]     that workspace
+//   /<ws>/settings/api-tokens          that workspace, tokens tab
+//
+// Only a registered tab id is forwarded as a tab; an absent, unknown or
+// mistyped segment lands on the general tab with the query string kept,
+// so a stale link never strands the page on a loader.
 
-import { DEFAULT_PROFILE_SETTINGS_TAB, isProfileSettingsTab, queryWithoutMark } from "./tabNavigation.js";
+import { DEFAULT_PROFILE_SETTINGS_TAB, isProfileSettingsTab, type ProfileSettingsTabId } from "./tabNavigation.js";
 
-/** The forward target, split so routes can hand it to the router. */
-export interface LegacyForward {
-  /** The query string without its leading `?` (empty when absent). */
-  query: string;
-  /**
-   * Address the browser ends on. Forwards land without a trailing slash
-   * except the tokens forward, whose old target kept one (the oracle pins
-   * both forms); in-app tab links always carry it.
-   */
-  href: string;
-}
-
-function forward(rawTab: string | undefined, search: string): LegacyForward {
-  const tab = rawTab !== undefined && isProfileSettingsTab(rawTab) ? rawTab : DEFAULT_PROFILE_SETTINGS_TAB;
-  const query = queryWithoutMark(search);
-  const suffix = tab === "api-tokens" ? "/" : "";
-  return {
-    query,
-    href: `/settings/profile/${tab}${suffix}${query === "" ? "" : `?${query}`}`,
-  };
+/** The tab a legacy segment names, or the default for anything else. */
+export function legacyTabOf(raw: string | undefined): ProfileSettingsTabId {
+  return raw !== undefined && isProfileSettingsTab(raw) ? raw : DEFAULT_PROFILE_SETTINGS_TAB;
 }
 
 /**
- * Map a pathname plus query to the settings address it forwards to, or
- * null when the address belongs to no legacy family. The workspace slug is
- * any single leading segment.
+ * The tab a retained address names, or null when it belongs to no legacy
+ * family. Only the workspace-less families reach this resolver: the
+ * `/<ws>/settings/...` addresses are real routes of the workspace tree
+ * that forward through `accountSettingsHref` themselves.
  */
-export function legacySettingsForward(pathname: string, search: string): LegacyForward | null {
+export function legacySettingsTarget(pathname: string): ProfileSettingsTabId | null {
   const segments = pathname.split("/").filter(Boolean);
   if (segments.length === 0) return null;
+  const [head, second, third] = segments;
 
-  if (segments[0] === "settings") {
-    // /settings and /settings/profile/<tab>; longer addresses are not
-    // settings forwards (the workspace settings area owns them).
-    if (segments.length === 1) return forward(undefined, search);
-    if (segments.length === 3 && segments[1] === "profile") return forward(segments[2], search);
-    return null;
+  if (head === "settings") {
+    // `/settings/profile/<tab>` and the bare root; anything else beneath
+    // `/settings` is an old leftover and lands on the general tab.
+    if (segments.length === 3 && second === "profile") return legacyTabOf(third);
+    return DEFAULT_PROFILE_SETTINGS_TAB;
   }
 
-  if (segments[0] === "profile") {
-    // /profile and /profile/<tab>.
-    if (segments.length === 1) return forward(undefined, search);
-    if (segments.length === 2) return forward(segments[1], search);
-    return null;
-  }
-
-  // /<workspace>/settings/account[/<tab>] and /<workspace>/settings/api-tokens.
-  if (segments.length >= 3 && segments[1] === "settings") {
-    if (segments[2] === "account") {
-      if (segments.length === 3) return forward(undefined, search);
-      if (segments.length === 4) return forward(segments[3], search);
-      return null;
-    }
-    if (segments[2] === "api-tokens" && segments.length === 3) {
-      return forward("api-tokens", search);
-    }
+  if (head === "profile") {
+    if (segments.length === 1) return DEFAULT_PROFILE_SETTINGS_TAB;
+    if (segments.length === 2) return legacyTabOf(second);
   }
   return null;
 }

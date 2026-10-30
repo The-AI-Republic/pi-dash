@@ -49259,6 +49259,11 @@ export class WebDriver implements ParityDriver {
     if ((await back.count()) === 0) return null;
     return (await back.first().getAttribute("aria-label")) ?? "Back to home";
   }
+  async settingsProfileBackHref(): Promise<string | null> {
+    // The old back control is a button that closes the page; it carries no
+    // destination to read.
+    return null;
+  }
 
   async settingsProfileSidebarTitle(): Promise<string | null> {
     const title = this.page.getByText("Profile settings", { exact: true });
@@ -49271,6 +49276,83 @@ export class WebDriver implements ParityDriver {
           .catch(() => "")) ?? ""
       ).trim() || null
     );
+  }
+
+  async settingsProfileInsideAppShell(): Promise<boolean> {
+    // The old app renders settings in its own full-window frame: no app rail
+    // and no workspace top bar around the page.
+    return false;
+  }
+
+  async settingsProfileMobileMenuPresent(): Promise<boolean | null> {
+    return null;
+  }
+
+  async settingsProfileSetViewport(width: number, height: number): Promise<void> {
+    await this.page.setViewportSize({ width, height });
+  }
+
+  async settingsProfileDockedPanelVisible(): Promise<boolean> {
+    // The old settings frame always shows its own sidebar; the frame has no
+    // separate narrow-screen variant (its hamburger toggles the sidebar,
+    // there is no drawer copy).
+    return this.isShown(this.page.getByText("Profile settings", { exact: true }));
+  }
+
+  async settingsProfileOpenMobileMenu(): Promise<void> {
+    throw new Error("[parity] the old settings frame offers no narrow-screen settings drawer.");
+  }
+
+  async settingsProfileMobileDrawerVisible(): Promise<boolean> {
+    return false;
+  }
+
+  async settingsProfileMobileDrawerEntries(): Promise<string[]> {
+    return [];
+  }
+
+  async settingsProfileMobileCrumb(): Promise<string> {
+    return "";
+  }
+
+  /** Workspace rows read as the flat list the old app shows: work rows plus the two actions. */
+  private async settingsProfileWorkspaceRowLabels(): Promise<string[]> {
+    const shortcuts = await this.settingsProfileWorkspaceShortcuts();
+    return shortcuts.filter((label) => label !== "Create workspace" && label !== "Workspace invites");
+  }
+
+  async settingsProfileWorkspaceRows(): Promise<Array<{ label: string; expandable: boolean; expanded: boolean }>> {
+    // The old rows link straight to each workspace's home: nothing expands.
+    return (await this.settingsProfileWorkspaceRowLabels()).map((label) => ({
+      label,
+      expandable: false,
+      expanded: false,
+    }));
+  }
+
+  async settingsProfileToggleWorkspaceRow(_label: string): Promise<void> {
+    // No expander exists on this side; the scenario asserts that separately.
+  }
+
+  async settingsProfileWorkspaceEntries(_label: string): Promise<string[]> {
+    return [];
+  }
+
+  async settingsProfileOpenWorkspaceEntry(_rowLabel: string, _entryLabel: string): Promise<void> {
+    throw new Error("[parity] the old app has no workspace settings entries inside the account navigator.");
+  }
+
+  async settingsProfileWorkspaceRowHref(label: string): Promise<string | null> {
+    const link = this.page
+      .getByRole("link", { name: new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) })
+      .first();
+    if ((await link.count()) === 0) return null;
+    return (await link.getAttribute("href")) ?? null;
+  }
+
+  async settingsProfileCurrentWorkspaceEntries(): Promise<string[]> {
+    // The old rows are plain workspace links with no current marker.
+    return [];
   }
 
   async settingsProfileWorkspaceShortcuts(): Promise<string[]> {

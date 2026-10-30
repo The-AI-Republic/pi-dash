@@ -23,7 +23,7 @@ import {
   ASSISTANT_STOP_LABEL,
   MIC_SETUP_ACTION,
   MIC_SETUP_HINT,
-  PROVIDER_SETTINGS_HREF,
+  providerSettingsHref,
   VOICE_DICTATION_HASH,
 } from "../lib/copy.js";
 import {
@@ -35,6 +35,11 @@ import {
 } from "../lib/dictation.js";
 
 export interface ComposerProps {
+  /**
+   * Workspace whose account settings hold the provider key (main#670);
+   * the dictation and keyless-setup links land inside it.
+   */
+  workspaceSlug: string;
   draft: string;
   onDraftChange: (value: string) => void;
   onSubmit: (draft: string) => void;
@@ -57,6 +62,7 @@ export interface ComposerProps {
 }
 
 export function Composer({
+  workspaceSlug,
   draft,
   onDraftChange,
   onSubmit,
@@ -87,6 +93,7 @@ export function Composer({
     if (handle.status === "requesting" || handle.status === "recording") handle.cancel();
   }, [handle, micShown]);
 
+  const settingsHref = providerSettingsHref(workspaceSlug);
   const hasSpeechKey = dictation?.speech?.has_api_key === true;
   const recording = handle?.status === "recording";
   const transcribing = handle?.status === "transcribing";
@@ -128,11 +135,7 @@ export function Composer({
       {hint === null ? null : hint.kind === "setup" ? (
         <p data-testid="assistant-dictation-hint" className="text-meta text-(--text-muted)">
           {MIC_SETUP_HINT}{" "}
-          <CrossAppLink
-            to={PROVIDER_SETTINGS_HREF}
-            hash={VOICE_DICTATION_HASH}
-            className="underline underline-offset-2"
-          >
+          <CrossAppLink to={settingsHref} hash={VOICE_DICTATION_HASH} className="underline underline-offset-2">
             {MIC_SETUP_ACTION}
           </CrossAppLink>
           .
@@ -216,7 +219,7 @@ export function Composer({
             // No speech key: the press routes to dictation settings
             // instead of recording (AGT-051).
             <CrossAppLink
-              to={PROVIDER_SETTINGS_HREF}
+              to={settingsHref}
               hash={VOICE_DICTATION_HASH}
               data-testid="assistant-mic"
               aria-label={micLabel}

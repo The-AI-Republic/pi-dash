@@ -32,7 +32,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 
 import {
   PROFILE_CLOCK_TICK_MS,
-  PROFILE_SETTINGS_GENERAL_HREF,
+  profileSettingsGeneralHref,
   ProfileSidebarFrame,
   useProfileClock,
 } from "./ProfileSidebar.js";
@@ -163,9 +163,12 @@ describe("ProfileSidebarFrame", () => {
     unmount();
     renderFrame({ isOwn: true });
     const pencil = screen.getByTestId("profile-edit-pencil");
-    expect(pencil).toHaveAttribute("href", PROFILE_SETTINGS_GENERAL_HREF);
-    expect(pencil).toHaveAttribute("href", "/settings/profile/general");
+    expect(pencil).toHaveAttribute("href", profileSettingsGeneralHref("acme"));
+    expect(profileSettingsGeneralHref("acme")).toBe("/acme/settings/account/general/");
+    // The account subtree is migrated (NEWFRONT-1030), so the pencil is an
+    // in-app link to the workspace's general tab.
     expect(pencil).toHaveAttribute("data-router-link");
+    expect(pencil).toHaveAttribute("data-to", "/acme/settings/account/general/");
   });
 
   it("collapses on demand and reopens from the show control", async () => {
