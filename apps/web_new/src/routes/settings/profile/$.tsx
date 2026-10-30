@@ -3,8 +3,9 @@
 // See the LICENSE file for details.
 // Legacy `/settings/profile` and `/settings/profile/<tab>` addresses
 // (parity/specs/profile.md §5, PROF-026; main#670). Both forms land on
-// the same tab inside the current workspace; a deeper address is not a
-// forward and gets the not-found page.
+// the same tab inside the current workspace; the old app's splat sent any
+// deeper leftover (`/settings/profile/a/b`) to general rather than the
+// not-found page, so it does here too.
 
 import { createFileRoute, redirect } from "@tanstack/react-router";
 

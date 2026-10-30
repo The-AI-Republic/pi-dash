@@ -39,11 +39,20 @@ const apiClient = createClient({
   },
 });
 
-async function guard(args: { tab: string; selfManaged?: boolean; searchStr?: string }): Promise<unknown> {
+async function guard(args: {
+  tab: string;
+  selfManaged?: boolean;
+  searchStr?: string;
+  hash?: string;
+}): Promise<unknown> {
   return Route.options.beforeLoad?.({
     context: { queryClient: queryClient(args.selfManaged ?? true), apiClient },
     params: { ws: "acme", tab: args.tab },
-    location: { pathname: `/acme/settings/account/${args.tab}/`, searchStr: args.searchStr ?? "" },
+    location: {
+      pathname: `/acme/settings/account/${args.tab}/`,
+      searchStr: args.searchStr ?? "",
+      hash: args.hash ?? "",
+    },
   } as never);
 }
 
@@ -64,6 +73,22 @@ describe("account tab guard", () => {
     const thrown = await guard({ tab: "not-a-tab", searchStr: "?keep=1" }).catch((error: unknown) => error);
     expect(isRedirect(thrown)).toBe(true);
     expect((thrown as { options: { href: string } }).options.href).toBe("/acme/settings/account/general/?keep=1");
+  });
+
+  it("carries the fragment when it forwards an unknown id", async () => {
+    const thrown = await guard({ tab: "not-a-tab", searchStr: "?keep=1", hash: "#section" }).catch(
+      (error: unknown) => error
+    );
+    expect((thrown as { options: { href: string } }).options.href).toBe(
+      "/acme/settings/account/general/?keep=1#section"
+    );
+  });
+
+  it("carries the fragment when it withholds a tab", async () => {
+    const thrown = await guard({ tab: "security", selfManaged: false, hash: "#password" }).catch(
+      (error: unknown) => error
+    );
+    expect((thrown as { options: { href: string } }).options.href).toBe("/acme/settings/account/general/#password");
   });
 
   it("forwards a withheld tab on a cloud-managed instance", async () => {

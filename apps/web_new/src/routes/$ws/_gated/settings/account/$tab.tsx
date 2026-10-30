@@ -22,14 +22,18 @@ export const Route = createFileRoute("/$ws/_gated/settings/account/$tab")({
   beforeLoad: async ({ context, params, location }) => {
     const tab = resolveProfileSettingsTab(params.tab);
     if (tab === null) {
-      throw redirect({ href: accountSettingsHref(params.ws, DEFAULT_PROFILE_SETTINGS_TAB, location.searchStr) });
+      throw redirect({
+        href: accountSettingsHref(params.ws, DEFAULT_PROFILE_SETTINGS_TAB, location.searchStr, location.hash),
+      });
     }
     // The instance-gate read stays behind a dynamic import so it never
     // joins the initial bundle (NEWFRONT-852, size gate).
     const { isTabAddressServed } = await import("../../../../../features/settings/lib/tabAvailability.js");
     const served = await isTabAddressServed({ queryClient: context.queryClient, apiClient: context.apiClient, tab });
     if (!served) {
-      throw redirect({ href: accountSettingsHref(params.ws, DEFAULT_PROFILE_SETTINGS_TAB, location.searchStr) });
+      throw redirect({
+        href: accountSettingsHref(params.ws, DEFAULT_PROFILE_SETTINGS_TAB, location.searchStr, location.hash),
+      });
     }
   },
   component: AccountSettingsTab,

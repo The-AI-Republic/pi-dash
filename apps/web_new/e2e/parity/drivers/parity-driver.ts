@@ -11263,8 +11263,10 @@ export interface DeskSigninUpdateLink {
   settingsProfileOpenPath(path: string, cookies: ParityBrowserCookie[]): Promise<string>;
   /**
    * Whether the account-settings page rendered inside the normal app shell
-   * (main#670): the app rail and the top bar are mounted beside it. False on
-   * the old app, whose settings page is a standalone full-window frame.
+   * (main#670): the shell's top bar and content landmark are mounted beside
+   * it, and no ordinary workspace sidebar is. False on the old app, whose
+   * settings page is a standalone full-window frame. The app rail is an
+   * edition flag and is not probed here (OSS turns it off).
    */
   settingsProfileInsideAppShell(): Promise<boolean>;
   /**
@@ -11284,7 +11286,11 @@ export interface DeskSigninUpdateLink {
   settingsProfileWorkspaceEntries(label: string): Promise<string[]>;
   /** Activate one entry inside a workspace row's group; resolves once its address lands. */
   settingsProfileOpenWorkspaceEntry(rowLabel: string, entryLabel: string): Promise<void>;
-  /** Downloadable/plain href of one workspace row, or null when the row has no expander. */
+  /**
+   * Downloadable/plain href of one workspace row: for a row with no
+   * expander (no settings the viewer may open) its workspace-home link,
+   * otherwise null — the row navigates nowhere by itself.
+   */
   settingsProfileWorkspaceRowHref(label: string): Promise<string | null>;
   /**
    * Labels of the workspace-section entries that read current, in display

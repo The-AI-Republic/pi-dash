@@ -160,6 +160,27 @@ describe("AccountSettingsNavigator", () => {
     expect(screen.getByTestId("account-settings-mobile-crumb")).toHaveTextContent(ACCOUNT_SETTINGS_TITLE);
   });
 
+  it("moves the open row to the newly viewed workspace when the address changes in place", () => {
+    // A param change keeps component state, so the row keys carry the
+    // viewed flag: the destination row must arrive already open.
+    const onNavigate = vi.fn();
+    const props = {
+      activeTab: "general" as const,
+      activeLabel: "Profile",
+      workspaces: WORKSPACES,
+      pathname: "/acme/settings/account/general/",
+      onNavigate,
+      isTabServed: () => true,
+      tabHref: (tab: ProfileSettingsTabId) => `/acme/settings/account/${tab}/`,
+    };
+    const { rerender } = render(<AccountSettingsNavigator workspaceSlug="acme" {...props} />);
+    fireEvent.click(screen.getByTestId("account-settings-workspace-toggle-globex"));
+    expect(screen.getByTestId("account-settings-workspace-toggle-globex")).toHaveAttribute("aria-expanded", "true");
+    rerender(<AccountSettingsNavigator workspaceSlug="globex" {...props} />);
+    expect(screen.getByTestId("account-settings-workspace-toggle-globex")).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("account-settings-workspace-toggle-acme")).toHaveAttribute("aria-expanded", "false");
+  });
+
   it("names the wide panel for assistive technology", () => {
     setup();
     expect(screen.getByRole("complementary", { name: ACCOUNT_SETTINGS_NAV_LABEL })).toBeInTheDocument();

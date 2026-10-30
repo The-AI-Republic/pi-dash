@@ -22,43 +22,27 @@ export function legacyTabOf(raw: string | undefined): ProfileSettingsTabId {
   return raw !== undefined && isProfileSettingsTab(raw) ? raw : DEFAULT_PROFILE_SETTINGS_TAB;
 }
 
-/** Where a legacy address points: a tab, plus the workspace it belongs in. */
-export type LegacySettingsTarget =
-  | { scope: "current"; tab: ProfileSettingsTabId }
-  | { scope: "workspace"; workspaceSlug: string; tab: ProfileSettingsTabId };
-
 /**
- * The target a pathname names, or null when it belongs to no legacy
- * family. Pure: the caller resolves the current workspace.
+ * The tab a retained address names, or null when it belongs to no legacy
+ * family. Only the workspace-less families reach this resolver: the
+ * `/<ws>/settings/...` addresses are real routes of the workspace tree
+ * that forward through `accountSettingsHref` themselves.
  */
-export function legacySettingsTarget(pathname: string): LegacySettingsTarget | null {
+export function legacySettingsTarget(pathname: string): ProfileSettingsTabId | null {
   const segments = pathname.split("/").filter(Boolean);
   if (segments.length === 0) return null;
-  const [head, second, third, fourth] = segments;
+  const [head, second, third] = segments;
 
   if (head === "settings") {
     // `/settings/profile/<tab>` and the bare root; anything else beneath
     // `/settings` is an old leftover and lands on the general tab.
-    if (segments.length === 1) return { scope: "current", tab: DEFAULT_PROFILE_SETTINGS_TAB };
-    if (segments.length === 3 && second === "profile") return { scope: "current", tab: legacyTabOf(third) };
-    if (second === "profile") return { scope: "current", tab: DEFAULT_PROFILE_SETTINGS_TAB };
-    return { scope: "current", tab: DEFAULT_PROFILE_SETTINGS_TAB };
+    if (segments.length === 3 && second === "profile") return legacyTabOf(third);
+    return DEFAULT_PROFILE_SETTINGS_TAB;
   }
 
   if (head === "profile") {
-    if (segments.length === 1) return { scope: "current", tab: DEFAULT_PROFILE_SETTINGS_TAB };
-    if (segments.length === 2) return { scope: "current", tab: legacyTabOf(second) };
-    return null;
-  }
-
-  if (segments.length >= 3 && second === "settings" && head !== undefined) {
-    // `/api/...` and other literal top-level areas never reach this route,
-    // but never treat one as a workspace either.
-    if (head === "api") return null;
-    if (third === "account") return { scope: "workspace", workspaceSlug: head, tab: legacyTabOf(fourth) };
-    if (third === "api-tokens" && segments.length === 3) {
-      return { scope: "workspace", workspaceSlug: head, tab: "api-tokens" };
-    }
+    if (segments.length === 1) return DEFAULT_PROFILE_SETTINGS_TAB;
+    if (segments.length === 2) return legacyTabOf(second);
   }
   return null;
 }

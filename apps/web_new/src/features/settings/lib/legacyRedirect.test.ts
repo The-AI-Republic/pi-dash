@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Legacy forwards land inside a workspace (parity/specs/profile.md §5,
-// PROF-026; main#670): the current workspace for the workspace-less
-// families, the named one for the workspace families, the query string
-// kept in both, and the creation flow when the reader belongs nowhere.
+// PROF-026; main#670): the reader's current workspace for the
+// workspace-less families, the query string and fragment kept, and the
+// creation flow when the reader belongs nowhere.
 import type { WorkspaceList } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
 
@@ -67,30 +67,12 @@ describe("legacySettingsRedirect", () => {
     expect(legacySettingsRedirect("/profile", "", current)).toBe("/acme/settings/account/general/");
   });
 
-  it("forwards a workspace account address inside that same workspace", () => {
-    expect(legacySettingsRedirect("/globex/settings/account/security", "?keep=2", current)).toBe(
-      "/globex/settings/account/security/?keep=2"
-    );
-    // The bare address lands on that workspace's general tab even when it
-    // is not the current one, and unknown ids default there too.
-    expect(legacySettingsRedirect("/globex/settings/account", "", current)).toBe("/globex/settings/account/general/");
-    expect(legacySettingsRedirect("/globex/settings/account/bogus", "", current)).toBe(
-      "/globex/settings/account/general/"
-    );
-  });
-
-  it("forwards the workspace tokens address with its parameters (NEWFRONT-431 target)", () => {
-    expect(legacySettingsRedirect("/globex/settings/api-tokens", "?keep=3", current)).toBe(
-      "/globex/settings/account/api-tokens/?keep=3"
-    );
-  });
-
   it("carries the fragment onto the tab (main#670)", () => {
     expect(legacySettingsRedirect("/settings/profile/ai-assistant", "?x=1", current, "voice-dictation")).toBe(
       "/acme/settings/account/ai-assistant/?x=1#voice-dictation"
     );
-    expect(legacySettingsRedirect("/globex/settings/api-tokens", "", current, "tokens")).toBe(
-      "/globex/settings/account/api-tokens/#tokens"
+    expect(legacySettingsRedirect("/profile/security", "", current, "#password")).toBe(
+      "/acme/settings/account/security/#password"
     );
     // The creation landing takes no fragment: there is no tab to anchor.
     expect(
@@ -108,5 +90,9 @@ describe("legacySettingsRedirect", () => {
     expect(legacySettingsRedirect("/acme/projects/p1", "", current)).toBeNull();
     expect(legacySettingsRedirect("/profile/a/b", "", current)).toBeNull();
     expect(legacySettingsRedirect("/acme/settings/members", "", current)).toBeNull();
+    // The workspace families are real routes that forward themselves; this
+    // resolver only answers for the workspace-less families.
+    expect(legacySettingsRedirect("/globex/settings/account/security", "", current)).toBeNull();
+    expect(legacySettingsRedirect("/globex/settings/api-tokens", "", current)).toBeNull();
   });
 });

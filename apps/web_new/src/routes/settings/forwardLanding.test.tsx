@@ -173,7 +173,10 @@ describe("legacy settings forwards as the router lands them", () => {
   it("lands the bare settings addresses on the general tab with the query kept", async () => {
     expect(await landing("/settings")).toBe("/acme/settings/account/general/");
     expect(await landing("/settings?x=1")).toBe("/acme/settings/account/general/?x=1");
+    expect(await landing("/settings/profile")).toBe("/acme/settings/account/general/");
     expect(await landing("/settings/profile/")).toBe("/acme/settings/account/general/");
+    expect(await landing("/profile")).toBe("/acme/settings/account/general/");
+    expect(await landing("/profile?x=1")).toBe("/acme/settings/account/general/?x=1");
   });
 
   it("lands every other old /settings address on the general tab, not the not-found page", async () => {
@@ -199,10 +202,19 @@ describe("legacy settings forwards as the router lands them", () => {
     // with (`trailingSlash: "preserve"`), and keeps its query.
     expect(await landing("/acme/settings/account/security?keep=2")).toBe("/acme/settings/account/security?keep=2");
     expect(await landing("/acme/settings/account/security/?keep=2")).toBe("/acme/settings/account/security/?keep=2");
-    // The two addresses that do forward land on the slashed tab the app
-    // itself links to, in their own workspace.
+    // The three addresses that do forward land on the slashed tab the app
+    // itself links to, in their own workspace, carrying query and fragment.
     expect(await landing("/acme/settings/account/")).toBe("/acme/settings/account/general/");
+    expect(await landing("/acme/settings/account/?keep=1")).toBe("/acme/settings/account/general/?keep=1");
+    expect(await landing("/acme/settings/account/?keep=1#section")).toBe(
+      "/acme/settings/account/general/?keep=1#section"
+    );
+    expect(await landing("/acme/settings/account/security/extra#x")).toBe("/acme/settings/account/general/#x");
+    expect(await landing("/acme/settings/account/bogus?keep=1")).toBe("/acme/settings/account/general/?keep=1");
     expect(await landing("/acme/settings/api-tokens")).toBe("/acme/settings/account/api-tokens/");
+    expect(await landing("/acme/settings/api-tokens?keep=3#tokens")).toBe(
+      "/acme/settings/account/api-tokens/?keep=3#tokens"
+    );
   });
 
   it("answers the not-found page for a deeper member address", async () => {

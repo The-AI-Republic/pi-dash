@@ -213,8 +213,12 @@ function AccountSettingsNavigatorContent({
         </h2>
         <ul className="flex flex-col gap-px">
           {workspaces.map((workspace) => (
+            // The key carries the viewed flag too: a hop to another
+            // workspace's settings remounts the row, so which one starts
+            // open always follows the address (a param change alone keeps
+            // component state).
             <WorkspaceSettingsRow
-              key={workspace.id}
+              key={`${workspace.id}:${String(workspace.slug === workspaceSlug)}`}
               idPrefix={idPrefix}
               workspace={workspace}
               initiallyExpanded={workspace.slug === workspaceSlug}

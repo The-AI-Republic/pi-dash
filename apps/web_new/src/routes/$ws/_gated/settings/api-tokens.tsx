@@ -11,6 +11,6 @@ import { accountSettingsHref } from "../../../../features/settings/lib/accountHr
 
 export const Route = createFileRoute("/$ws/_gated/settings/api-tokens")({
   beforeLoad: ({ params, location }) => {
-    throw redirect({ href: accountSettingsHref(params.ws, "api-tokens", location.searchStr) });
+    throw redirect({ href: accountSettingsHref(params.ws, "api-tokens", location.searchStr, location.hash) });
   },
 });

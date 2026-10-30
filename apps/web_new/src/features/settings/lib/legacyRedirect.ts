@@ -36,8 +36,8 @@ export function legacyCurrentWorkspaceSlug(inputs: LegacyWorkspaceInputs): strin
 
 /**
  * The address a legacy pathname forwards to, or null outside the
- * families. A workspace-less target resolves through the inputs; an
- * explicit workspace target uses its own slug.
+ * families. The tab lands in the reader's current workspace, which the
+ * inputs resolve.
  */
 export function legacySettingsRedirect(
   pathname: string,
@@ -45,10 +45,9 @@ export function legacySettingsRedirect(
   current: LegacyWorkspaceInputs,
   hash = ""
 ): string | null {
-  const target = legacySettingsTarget(pathname);
-  if (target === null) return null;
-  if (target.scope === "workspace") return accountSettingsHref(target.workspaceSlug, target.tab, search, hash);
+  const tab = legacySettingsTarget(pathname);
+  if (tab === null) return null;
   const workspaceSlug = legacyCurrentWorkspaceSlug(current);
   if (workspaceSlug === null) return CREATE_WORKSPACE_PATH;
-  return accountSettingsHref(workspaceSlug, target.tab, search, hash);
+  return accountSettingsHref(workspaceSlug, tab, search, hash);
 }

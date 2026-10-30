@@ -11,6 +11,8 @@ import { DEFAULT_PROFILE_SETTINGS_TAB } from "../../../../../features/settings/l
 
 export const Route = createFileRoute("/$ws/_gated/settings/account/")({
   beforeLoad: ({ params, location }) => {
-    throw redirect({ href: accountSettingsHref(params.ws, DEFAULT_PROFILE_SETTINGS_TAB, location.searchStr) });
+    throw redirect({
+      href: accountSettingsHref(params.ws, DEFAULT_PROFILE_SETTINGS_TAB, location.searchStr, location.hash),
+    });
   },
 });

@@ -39,18 +39,6 @@ export function accountSettingsGeneralHref(workspaceSlug: string): string {
 }
 
 /**
- * Whether `pathname` is inside one workspace's account-settings area.
- * Used by the navigator to keep the workspace section unlit while account
- * settings are open, and by the shell to name the panel.
- */
-export function isAccountSettingsPath(pathname: string, workspaceSlug?: string): boolean {
-  const segments = pathname.split("/").filter(Boolean);
-  const [head, settings, account] = segments;
-  if (head === undefined || settings !== "settings" || account !== "account") return false;
-  return workspaceSlug === undefined || head === workspaceSlug;
-}
-
-/**
  * The tab a `/<ws>/settings/account/...` address names; null when the
  * address is inside no workspace or names no account tab.
  */

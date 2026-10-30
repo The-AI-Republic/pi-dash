@@ -334,6 +334,25 @@ test(
       expect(await driver.settingsProfileActiveTab()).toBe("Personal Access Tokens");
     });
 
+    if (driver.target === "web_new") {
+      await test.step("every forward carries the fragment too (main#670)", async () => {
+        // Web_new only: the oracle build predates the fragment-carrying
+        // redirect, so its leg pins the older behavior in the rows above.
+        expect(await driver.settingsProfileOpenPath("/settings/profile/ai-assistant#voice-dictation", cookies)).toBe(
+          `${account("ai-assistant")}#voice-dictation`
+        );
+        expect(await driver.settingsProfileOpenPath(`/${ws}/settings/account/?keep=1#section`, cookies)).toBe(
+          `${account("general")}?keep=1#section`
+        );
+        expect(await driver.settingsProfileOpenPath(`/${ws}/settings/account/bogus-tab-id#section`, cookies)).toBe(
+          `${account("general")}#section`
+        );
+        expect(await driver.settingsProfileOpenPath(`/${ws}/settings/api-tokens#tokens`, cookies)).toBe(
+          `${account("api-tokens")}#tokens`
+        );
+      });
+    }
+
     await test.step("an unknown forwarded tab lands on the loader like a direct visit", async () => {
       const landed = await driver.settingsProfileOpenPath(`/${ws}/settings/account/bogus-tab-id`, cookies);
       if (driver.target === "web_new") {
