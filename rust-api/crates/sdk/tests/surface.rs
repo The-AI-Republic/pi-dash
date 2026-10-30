@@ -384,6 +384,7 @@ surface_snapshot! {
     domain::create_account,
     domain::deactivate_by_workspace,
     domain::deactivate_without_updated_by,
+    domain::deactivate_workspace_members_by_workspace,
     domain::delete_llm_config,
     domain::get_or_create_profile,
     domain::insert,

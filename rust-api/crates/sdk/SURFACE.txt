@@ -326,6 +326,7 @@ pidash_sdk::domain::add_with_active
 pidash_sdk::domain::create_account
 pidash_sdk::domain::deactivate_by_workspace
 pidash_sdk::domain::deactivate_without_updated_by
+pidash_sdk::domain::deactivate_workspace_members_by_workspace
 pidash_sdk::domain::delete_llm_config
 pidash_sdk::domain::get_or_create_profile
 pidash_sdk::domain::insert

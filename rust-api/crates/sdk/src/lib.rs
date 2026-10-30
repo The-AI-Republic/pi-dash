@@ -105,6 +105,9 @@ pub mod domain {
     pub use pidash_services::domain::tokens::NewApiToken;
     pub use pidash_services::domain::workspaces::insert;
     pub use pidash_services::domain::workspaces::members::add_with_active;
+    // Renamed: the flat `deactivate_by_workspace` is the projects twin
+    // (UPDATE project_members); this one writes workspace_members.
+    pub use pidash_services::domain::workspaces::members::deactivate_by_workspace as deactivate_workspace_members_by_workspace;
     pub use pidash_services::domain::workspaces::members::deactivate_without_updated_by;
     pub use pidash_services::domain::workspaces::members::overwrite;
     pub use pidash_services::domain::workspaces::members::sync;
