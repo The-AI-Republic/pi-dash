@@ -83,7 +83,11 @@ describe("WorkspaceSettingsRow", () => {
     const row = screen.getByTestId("account-settings-workspace-ledger");
     expect(row).toHaveAttribute("data-expandable", "false");
     expect(screen.queryByTestId("account-settings-workspace-toggle-ledger")).not.toBeInTheDocument();
-    expect(screen.getByTestId("account-settings-workspace-link-ledger")).toHaveAttribute("href", "/ledger/");
+    expect(screen.getByTestId("account-settings-workspace-home-ledger")).toHaveAttribute("href", "/ledger/");
+    // The plain row links home instead of listing entries, so an entry
+    // selector scoped to the row finds nothing (the parity driver relies
+    // on this: the guest row must read as an empty list of pages).
+    expect(row.querySelectorAll('[data-testid^="account-settings-workspace-link-"]')).toHaveLength(0);
   });
 
   it("highlights only the entry of the workspace being viewed", () => {
@@ -123,7 +127,7 @@ describe("WorkspaceSettingsRow", () => {
 
   it("navigates home from a row with no expander, in-app and through the browser", () => {
     const { onNavigate } = setup({ workspace: LEDGER });
-    const link = screen.getByTestId("account-settings-workspace-link-ledger");
+    const link = screen.getByTestId("account-settings-workspace-home-ledger");
     fireEvent.click(link);
     expect(onNavigate).toHaveBeenCalledWith("/ledger/");
     onNavigate.mockClear();

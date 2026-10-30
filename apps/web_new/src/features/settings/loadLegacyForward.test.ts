@@ -55,6 +55,22 @@ describe("loadLegacySettingsForward", () => {
     ).resolves.toBe("/globex/settings/account/security/?tab=all");
   });
 
+  it("carries the fragment onto the tab (main#670)", async () => {
+    await expect(
+      loadLegacySettingsForward({
+        queryClient: queryClient({
+          me: ME,
+          settings: { workspace: { last_workspace_slug: "acme", fallback_workspace_slug: null } },
+          workspaces: WORKSPACES,
+        }),
+        apiClient,
+        pathname: "/settings/profile/ai-assistant",
+        search: "",
+        hash: "voice-dictation",
+      })
+    ).resolves.toBe("/acme/settings/account/ai-assistant/#voice-dictation");
+  });
+
   it("keeps the page usable when the settings read fails", async () => {
     // No settings row means no remembered workspace, so the reader lands on
     // workspace creation rather than a blank settings page.

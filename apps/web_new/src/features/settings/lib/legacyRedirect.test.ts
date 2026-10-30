@@ -85,6 +85,19 @@ describe("legacySettingsRedirect", () => {
     );
   });
 
+  it("carries the fragment onto the tab (main#670)", () => {
+    expect(legacySettingsRedirect("/settings/profile/ai-assistant", "?x=1", current, "voice-dictation")).toBe(
+      "/acme/settings/account/ai-assistant/?x=1#voice-dictation"
+    );
+    expect(legacySettingsRedirect("/globex/settings/api-tokens", "", current, "tokens")).toBe(
+      "/globex/settings/account/api-tokens/#tokens"
+    );
+    // The creation landing takes no fragment: there is no tab to anchor.
+    expect(
+      legacySettingsRedirect("/settings", "?x=1", { lastSlug: null, fallbackSlug: null, workspaces: [] }, "a")
+    ).toBe(CREATE_WORKSPACE_PATH);
+  });
+
   it("sends a reader who belongs nowhere to workspace creation", () => {
     expect(legacySettingsRedirect("/settings", "", { lastSlug: null, fallbackSlug: null, workspaces: [] })).toBe(
       CREATE_WORKSPACE_PATH

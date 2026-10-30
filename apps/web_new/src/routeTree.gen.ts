@@ -40,6 +40,7 @@ import { Route as GodModeSplatRouteImport } from './routes/god-mode/$'
 import { Route as GodModeDashboardRouteRouteImport } from './routes/god-mode/_dashboard/route'
 import { Route as ProfileSplatRouteImport } from './routes/profile/$'
 import { Route as SettingsIndexRouteImport } from './routes/settings/index'
+import { Route as SettingsSplatRouteImport } from './routes/settings/$'
 import { Route as SpacesIndexRouteImport } from './routes/spaces/index'
 import { Route as SpacesSplatRouteImport } from './routes/spaces/$'
 import { Route as WsGatedIndexRouteImport } from './routes/$ws/_gated/index'
@@ -303,6 +304,11 @@ const ProfileSplatRoute = ProfileSplatRouteImport.update({
 const SettingsIndexRoute = SettingsIndexRouteImport.update({
   id: '/settings/',
   path: '/settings/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SettingsSplatRoute = SettingsSplatRouteImport.update({
+  id: '/settings/$',
+  path: '/settings/$',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SpacesIndexRoute = SpacesIndexRouteImport.update({
@@ -980,6 +986,7 @@ export interface FileRoutesByFullPath {
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
   '/profile/$': typeof ProfileSplatRoute
+  '/settings/$': typeof SettingsSplatRoute
   '/spaces/$': typeof SpacesSplatRoute
   '/god-mode/': typeof GodModeIndexRoute
   '/settings/': typeof SettingsIndexRoute
@@ -1121,6 +1128,7 @@ export interface FileRoutesByTo {
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
   '/profile/$': typeof ProfileSplatRoute
+  '/settings/$': typeof SettingsSplatRoute
   '/spaces/$': typeof SpacesSplatRoute
   '/settings': typeof SettingsIndexRoute
   '/spaces': typeof SpacesIndexRoute
@@ -1254,6 +1262,7 @@ export interface FileRoutesById {
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
   '/profile/$': typeof ProfileSplatRoute
+  '/settings/$': typeof SettingsSplatRoute
   '/spaces/$': typeof SpacesSplatRoute
   '/god-mode/': typeof GodModeIndexRoute
   '/settings/': typeof SettingsIndexRoute
@@ -1398,6 +1407,7 @@ export interface FileRouteTypes {
     | '/auth/device'
     | '/god-mode/$'
     | '/profile/$'
+    | '/settings/$'
     | '/spaces/$'
     | '/god-mode/'
     | '/settings/'
@@ -1539,6 +1549,7 @@ export interface FileRouteTypes {
     | '/auth/device'
     | '/god-mode/$'
     | '/profile/$'
+    | '/settings/$'
     | '/spaces/$'
     | '/settings'
     | '/spaces'
@@ -1671,6 +1682,7 @@ export interface FileRouteTypes {
     | '/auth/device'
     | '/god-mode/$'
     | '/profile/$'
+    | '/settings/$'
     | '/spaces/$'
     | '/god-mode/'
     | '/settings/'
@@ -1809,6 +1821,7 @@ export interface RootRouteChildren {
   AccountsSignUpRoute: typeof AccountsSignUpRoute
   AuthDeviceRoute: typeof AuthDeviceRoute
   ProfileSplatRoute: typeof ProfileSplatRoute
+  SettingsSplatRoute: typeof SettingsSplatRoute
   SettingsIndexRoute: typeof SettingsIndexRoute
   SettingsProfileSplatRoute: typeof SettingsProfileSplatRoute
 }
@@ -2030,6 +2043,13 @@ declare module '@tanstack/react-router' {
       path: '/settings'
       fullPath: '/settings/'
       preLoaderRoute: typeof SettingsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/settings/$': {
+      id: '/settings/$'
+      path: '/settings/$'
+      fullPath: '/settings/$'
+      preLoaderRoute: typeof SettingsSplatRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/spaces/': {
@@ -3328,6 +3348,7 @@ const rootRouteChildren: RootRouteChildren = {
   AccountsSignUpRoute: AccountsSignUpRoute,
   AuthDeviceRoute: AuthDeviceRoute,
   ProfileSplatRoute: ProfileSplatRoute,
+  SettingsSplatRoute: SettingsSplatRoute,
   SettingsIndexRoute: SettingsIndexRoute,
   SettingsProfileSplatRoute: SettingsProfileSplatRoute,
 }

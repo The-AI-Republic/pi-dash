@@ -64,6 +64,7 @@ import {
   APP_VERSION,
   AppShell,
   getToastManager,
+  isAccountSettingsPathname,
   isNotificationsPath,
   isRailUndocked,
   resolveFileUrl,
@@ -334,7 +335,11 @@ function WorkspaceShell({
   const activeProject = projects.find((project) => project.id === childProjectId) ?? null;
   const userLabel = me.display_name || me.email;
   const userRole = selectWorkspaceRole(workspaces, workspaceSlug) ?? ROLE_GUEST;
-  const sidebarHidden = isNotificationsPath(currentPath);
+  // The inbox page and the account-settings pages drop the ordinary
+  // workspace sidebar: the former renders full-width (SHELL-062), the
+  // latter stand the settings navigator in its place (main#670). The top
+  // bar keeps its compact account fallback on both.
+  const sidebarHidden = isNotificationsPath(currentPath) || isAccountSettingsPathname(currentPath);
   const apiBaseUrl = context.apiClient.baseUrl;
   const switcherWorkspaces: SwitcherWorkspace[] = workspaces.map((entry) => ({
     id: entry.id,

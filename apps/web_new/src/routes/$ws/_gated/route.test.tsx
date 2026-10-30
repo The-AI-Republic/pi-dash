@@ -1645,6 +1645,38 @@ describe("gated layout shell wiring", () => {
       }
     });
 
+    it("unmounts the ordinary workspace sidebar on every account-settings page", () => {
+      // The account pages stand the settings navigator where the sidebar
+      // was (main#670), so the two panels never sit side by side; the top
+      // bar still mounts with its toggle and compact account fallback.
+      for (const pathname of [
+        "/acme/settings/account/general/",
+        "/acme/settings/account/notifications/",
+        "/acme/settings/account",
+      ]) {
+        harness.routerState.location.pathname = pathname;
+        renderShell();
+        expect(harness.sidebar).toBeNull();
+        expect(harness.topBar?.sidebarMounted).toBe(false);
+      }
+    });
+
+    it("keeps the sidebar on the workspace's own settings pages", () => {
+      harness.routerState.location.pathname = "/acme/settings/members/";
+      renderShell();
+      expect(harness.sidebar).not.toBeNull();
+      expect(harness.topBar?.sidebarMounted).toBe(true);
+    });
+
+    it("keeps the sidebar on an account tab whose name appears deeper in other pages", () => {
+      // The inbox keeps its own autohide; the account notifications tab is
+      // an account page, not the inbox, so the top bar's inbox link is not
+      // current there.
+      harness.routerState.location.pathname = "/acme/settings/account/notifications/";
+      renderShell();
+      expect(harness.sidebar).toBeNull();
+    });
+
     it("opens the shortcut list from the help menu", async () => {
       renderShell();
       const menu = renderNode(harness.topBar?.helpMenu);

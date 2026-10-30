@@ -25,17 +25,23 @@ export async function loadLegacySettingsForward(args: {
   apiClient: ApiClient;
   pathname: string;
   search: string;
+  hash?: string;
 }): Promise<string> {
   await enforceProfileSettingsGate({ queryClient: args.queryClient, apiClient: args.apiClient, href: args.pathname });
   const [settings, workspaces] = await Promise.all([
     args.queryClient.ensureQueryData(settingsQueryOptions(args.apiClient)).catch(() => null),
     args.queryClient.ensureQueryData(workspacesQueryOptions(args.apiClient)).catch(() => undefined),
   ]);
-  const href = legacySettingsRedirect(args.pathname, args.search, {
-    lastSlug: settings?.workspace.last_workspace_slug ?? null,
-    fallbackSlug: settings?.workspace.fallback_workspace_slug ?? null,
-    workspaces,
-  });
+  const href = legacySettingsRedirect(
+    args.pathname,
+    args.search,
+    {
+      lastSlug: settings?.workspace.last_workspace_slug ?? null,
+      fallbackSlug: settings?.workspace.fallback_workspace_slug ?? null,
+      workspaces,
+    },
+    args.hash ?? ""
+  );
   if (href === null) throw notFound();
   return href;
 }

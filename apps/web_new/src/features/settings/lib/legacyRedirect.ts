@@ -2,8 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Router glue for the legacy forwards (PROF-026; main#670): the final
-// address for a legacy pathname, with the query string kept, or null when
-// the address belongs to no legacy family. The current workspace is the
+// address for a legacy pathname, with the query string and the fragment
+// kept, or null when the address belongs to no legacy family. The old
+// app carried `location.hash` too, so a bookmarked assistant link such as
+// `/settings/profile/ai-assistant#voice-dictation` still opens the
+// dictation block. The current workspace is the
 // user's last one when they still belong to it, else the remembered
 // fallback, matching where the app lands after sign-in. A user who belongs
 // to no workspace has nowhere to host account settings and continues to
@@ -39,12 +42,13 @@ export function legacyCurrentWorkspaceSlug(inputs: LegacyWorkspaceInputs): strin
 export function legacySettingsRedirect(
   pathname: string,
   search: string,
-  current: LegacyWorkspaceInputs
+  current: LegacyWorkspaceInputs,
+  hash = ""
 ): string | null {
   const target = legacySettingsTarget(pathname);
   if (target === null) return null;
-  if (target.scope === "workspace") return accountSettingsHref(target.workspaceSlug, target.tab, search);
+  if (target.scope === "workspace") return accountSettingsHref(target.workspaceSlug, target.tab, search, hash);
   const workspaceSlug = legacyCurrentWorkspaceSlug(current);
   if (workspaceSlug === null) return CREATE_WORKSPACE_PATH;
-  return accountSettingsHref(workspaceSlug, target.tab, search);
+  return accountSettingsHref(workspaceSlug, target.tab, search, hash);
 }

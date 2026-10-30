@@ -42557,12 +42557,14 @@ export class WebNewDriver implements ParityDriver {
   }
   async settingsProfileInsideAppShell(): Promise<boolean> {
     // Account settings are an ordinary workspace page (main#670), so the
-    // rail and the top bar mount around them exactly as on any other page.
-    const rail = await this.page.getByTestId("workspace-rail").count();
-    const topBar = await this.page
-      .locator('[data-testid="topbar-user-menu"], [aria-label="Open workspace switcher"]')
-      .count();
-    return rail > 0 && topBar > 0;
+    // top bar and the content landmark mount around them exactly as on any
+    // other page. The app rail is edition-gated (SHELL-063) and the seeded
+    // OSS build suppresses it, so the rail is not the probe: the settings
+    // navigator docks inside the same content area as every workspace page.
+    const topBar = await this.page.getByTestId("topbar-user-menu").count();
+    const content = await this.page.getByRole("main", { name: "Content" }).count();
+    const sidebar = await this.page.locator("#main-sidebar").count();
+    return topBar > 0 && content > 0 && sidebar === 0;
   }
 
   async settingsProfileMobileMenuPresent(): Promise<boolean | null> {
@@ -42579,7 +42581,9 @@ export class WebNewDriver implements ParityDriver {
   /** A row's name text: the second span of its header link or toggle, past the initial mark. */
   private async settingsProfileRowLabel(row: Locator): Promise<string> {
     const header = row
-      .locator('[data-testid^="account-settings-workspace-toggle-"], [data-testid^="account-settings-workspace-link-"]')
+      .locator(
+        '[data-testid^="account-settings-workspace-toggle-"], [data-testid^="account-settings-workspace-home-"], [data-testid^="account-settings-workspace-link-"]'
+      )
       .first();
     const name = header.locator("span").nth(1);
     return ((await name.textContent().catch(() => "")) ?? "").trim();
@@ -42619,9 +42623,13 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async settingsProfileWorkspaceEntries(label: string): Promise<string[]> {
+    // Only entries inside an open group count: the plain no-permission row
+    // carries a way home instead, and a closed group shows none.
     const row = await this.settingsProfileRow(label);
-    return (await row.locator('[data-testid^="account-settings-workspace-link-"]').allInnerTexts()).map((text) =>
-      text.trim().replace(/\s+/g, " ")
+    const group = row.locator('[data-testid^="account-settings-workspace-group-"]');
+    if ((await group.count()) === 0) return [];
+    return (await group.first().locator('[data-testid^="account-settings-workspace-link-"]').allInnerTexts()).map(
+      (text) => text.trim().replace(/\s+/g, " ")
     );
   }
 
@@ -42649,8 +42657,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async settingsProfileWorkspaceRowHref(label: string): Promise<string | null> {
+    // Only a plain row (no expander) links anywhere; an expandable row
+    // toggles in place instead.
     const link = (await this.settingsProfileRow(label))
-      .locator('[data-testid^="account-settings-workspace-link-"]')
+      .locator('[data-testid^="account-settings-workspace-home-"]')
       .first();
     if ((await link.count()) === 0) return null;
     return (await link.getAttribute("href")) ?? null;

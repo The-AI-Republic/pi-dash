@@ -191,10 +191,16 @@ segment becomes general, so a stale link never strands the page. The
 workspace-less families resolve their workspace from the reader's last
 workspace while they still belong to it, else the remembered fallback
 workspace; a reader who belongs to no workspace continues to workspace
-creation. The token hash on the assistant link (`#voice-dictation`) rides
-along because the hash is never part of the redirect target. Two segments
-below `/profile` (a member address, not a settings one) falls through to
-the not-found page. Oracle: `settings-shell.spec.ts`.
+creation. Each forward carries the fragment explicitly, not by luck of the
+router: the chat composer's dictation link used to read
+`/settings/profile/ai-assistant#voice-dictation`, and a bookmarked copy must
+land on that block rather than at the top of the AI Assistant tab, so the
+resolver appends `location.hash` to the target address. Only `/profile` and
+`/profile/<tab>` forward; two segments below `/profile` (a member address,
+not a settings one) falls through to the not-found page. Oracle:
+`settings-shell.spec.ts`; the landing addresses (slashed form, query and
+fragment) are pinned by
+`apps/web_new/src/routes/settings/forwardLanding.test.tsx`.
 
 **Serving the new address (coexistence routing).** `/<ws>/settings/account`
 must reach web_new through the proxy from the moment web_new forwards

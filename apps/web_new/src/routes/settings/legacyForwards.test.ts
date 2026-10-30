@@ -15,6 +15,7 @@ import { Route as AccountCatchAll } from "../$ws/_gated/settings/account/$.js";
 import { Route as ApiTokens } from "../$ws/_gated/settings/api-tokens.js";
 import { Route as Profile } from "../profile/$.js";
 import { Route as SettingsIndex } from "./index.js";
+import { Route as SettingsCatchAll } from "./$.js";
 import { Route as SettingsProfile } from "./profile/$.js";
 
 const ME = {
@@ -153,6 +154,33 @@ describe("legacy settings forwards", () => {
         } as never)
       )
     ).toBe("/acme/settings/account/general/?a=1");
+  });
+
+  it("forwards every other old /settings address through the catch-all to the general tab", async () => {
+    // The old app's `settings/*` splat kept these working; only a deeper
+    // `/settings/profile/...` is a family of its own, and it lands on
+    // general too.
+    for (const pathname of ["/settings/account/security", "/settings/bogus", "/settings/profile/a/b"]) {
+      expect(
+        await forwardOf(() =>
+          SettingsCatchAll.options.beforeLoad?.({
+            context: context({ last: "globex" }),
+            location: { pathname, searchStr: "?x=1", hash: "" },
+          } as never)
+        )
+      ).toBe("/globex/settings/account/general/?x=1");
+    }
+  });
+
+  it("carries the fragment of a bookmarked staff page address", async () => {
+    expect(
+      await forwardOf(() =>
+        SettingsProfile.options.beforeLoad?.({
+          context: context({ last: "acme" }),
+          location: { pathname: "/settings/profile/ai-assistant", searchStr: "", hash: "voice-dictation" },
+        } as never)
+      )
+    ).toBe("/acme/settings/account/ai-assistant/#voice-dictation");
   });
 
   it("sends a reader who belongs nowhere to workspace creation", async () => {

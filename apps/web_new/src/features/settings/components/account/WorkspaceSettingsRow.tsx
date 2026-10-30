@@ -70,7 +70,7 @@ export function WorkspaceSettingsRow({
       <li data-testid={`account-settings-workspace-${workspace.slug}`} data-expandable="false">
         <a
           href={`/${workspace.slug}/`}
-          data-testid={`account-settings-workspace-link-${workspace.slug}`}
+          data-testid={`account-settings-workspace-home-${workspace.slug}`}
           onClick={(event) => {
             follow(event, `/${workspace.slug}/`);
           }}

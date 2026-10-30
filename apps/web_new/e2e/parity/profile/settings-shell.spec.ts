@@ -49,11 +49,15 @@ async function seedAuthed(email: string, password: string): Promise<AuthedSessio
   return { email, password, userId: "", cookie, csrfToken, apiBase: parityApiUrl(process.env) };
 }
 
-/** Where the settings page of a tab lives on each target. */
+/**
+ * The address a tab's page settles on for each target. Web_new authors the
+ * slashed form and the router preserves it (main#670); the old app's own
+ * links are slashless.
+ */
 function accountTabPath(target: "web_new" | "web"): (slug: string, tab: string) => string {
   return target === "web_new"
     ? (slug, tab) => `/${slug}/settings/account/${tab}/`
-    : (_slug, tab) => `/settings/profile/${tab}/`;
+    : (_slug, tab) => `/settings/profile/${tab}`;
 }
 
 test(
@@ -74,7 +78,7 @@ test(
       await driver.activateUserMenuItem("Settings");
       await expect
         .poll(() => driver.currentPath(), { timeout: 30_000 })
-        .toContain(tabPath(seed.workspaceSlug, "general").replace(/\/$/, ""));
+        .toContain(tabPath(seed.workspaceSlug, "general"));
       expect(await driver.isDialogWithTextVisible("Your profile")).toBe(false);
       await expect.poll(() => driver.profileSettingsActiveTab(), { timeout: 30_000 }).toBe("Profile");
     });
@@ -237,7 +241,7 @@ test(
 
     await test.step("a known tab renders the navigator at its own address", async () => {
       await driver.settingsProfileOpen("security", browserSessionCookies(admin));
-      expect(await driver.currentPath()).toBe(tabPath(seed.workspaceSlug, "security").replace(/\/$/, ""));
+      expect(await driver.currentPath()).toBe(tabPath(seed.workspaceSlug, "security"));
       expect(await driver.settingsProfileShellVisible()).toBe(true);
       expect(await driver.settingsProfileLoaderOnly()).toBe(false);
     });
@@ -276,28 +280,30 @@ test(
     const account = (tab: string) => accountTabPath(driver.target)(ws, tab);
 
     await test.step("bare settings lands on the general tab, keeping parameters", async () => {
-      expect(await driver.settingsProfileOpenPath("/settings", cookies)).toBe(account("general").replace(/\/$/, ""));
+      expect(await driver.settingsProfileOpenPath("/settings", cookies)).toBe(account("general"));
       expect(await driver.settingsProfileActiveTab()).toBe("Profile");
       expect(await driver.settingsProfileOpenPath("/settings?keep=1&other=2", cookies)).toBe(
-        `${account("general").replace(/\/$/, "")}?keep=1&other=2`
+        `${account("general")}?keep=1&other=2`
       );
     });
 
     await test.step("the legacy profile family forwards per tab, defaulting to general", async () => {
       expect(await driver.settingsProfileOpenPath("/settings/profile/security?keep=2", cookies)).toBe(
-        `${account("security").replace(/\/$/, "")}?keep=2`
+        `${account("security")}?keep=2`
       );
       expect(await driver.settingsProfileActiveTab()).toBe("Security");
-      expect(await driver.settingsProfileOpenPath("/settings/profile/", cookies)).toBe(
-        account("general").replace(/\/$/, "")
-      );
+      expect(await driver.settingsProfileOpenPath("/settings/profile/", cookies)).toBe(account("general"));
     });
 
     await test.step("workspace account addresses forward per tab, defaulting to general", async () => {
       if (driver.target === "web_new") {
-        // Target (main#670): the workspace address is the real one, so the
-        // tab survives with the trailing slash the app's own links use.
+        // Target (main#670): the workspace address is the real one and needs
+        // no forward, so the router keeps the typed form (slashless) and the
+        // query; the bare collection forwards to the slashed general tab.
         expect(await driver.settingsProfileOpenPath(`/${ws}/settings/account/security?keep=2`, cookies)).toBe(
+          `/${ws}/settings/account/security?keep=2`
+        );
+        expect(await driver.settingsProfileOpenPath(`/${ws}/settings/account/security/?keep=2`, cookies)).toBe(
           `${account("security")}?keep=2`
         );
         expect(await driver.settingsProfileActiveTab()).toBe("Security");
@@ -315,10 +321,10 @@ test(
 
     await test.step("older profile addresses forward per tab, defaulting to general", async () => {
       expect(await driver.settingsProfileOpenPath("/profile/preferences?keep=4", cookies)).toBe(
-        `${account("preferences").replace(/\/$/, "")}?keep=4`
+        `${account("preferences")}?keep=4`
       );
       expect(await driver.settingsProfileActiveTab()).toBe("Preferences");
-      expect(await driver.settingsProfileOpenPath("/profile/", cookies)).toBe(account("general").replace(/\/$/, ""));
+      expect(await driver.settingsProfileOpenPath("/profile/", cookies)).toBe(account("general"));
     });
 
     await test.step("workspace api-tokens lands on the tokens tab", async () => {
@@ -333,7 +339,7 @@ test(
       if (driver.target === "web_new") {
         // Target for NEWFRONT-430 (PROF-026): unknown forwarded tabs
         // default to the general tab with the page rendered.
-        expect(landed).toBe(account("general").replace(/\/$/, ""));
+        expect(landed).toBe(account("general"));
         expect(await driver.settingsProfileShellVisible()).toBe(true);
         expect(await driver.settingsProfileLoaderOnly()).toBe(false);
         expect(await driver.settingsProfileActiveTab()).toBe("Profile");

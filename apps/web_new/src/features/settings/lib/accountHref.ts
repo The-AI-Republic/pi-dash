@@ -15,10 +15,22 @@ export { DEFAULT_PROFILE_SETTINGS_TAB } from "./tabNavigation.js";
 /** Legacy personal-settings root (outside any workspace). */
 export const LEGACY_SETTINGS_ROOT = "/settings";
 
-/** The tab addressed by `/<ws>/settings/account/<tab>/`. */
-export function accountSettingsHref(workspaceSlug: string, tab: ProfileSettingsTabId, search?: string): string {
+/**
+ * The tab addressed by `/<ws>/settings/account/<tab>/`. A query is kept
+ * verbatim; a fragment (old links pointed at `#voice-dictation`) rides
+ * along so the landing page opens the same section.
+ */
+export function accountSettingsHref(
+  workspaceSlug: string,
+  tab: ProfileSettingsTabId,
+  search?: string,
+  hash?: string
+): string {
   const query = queryWithoutMark(search ?? "");
-  return `/${workspaceSlug}/settings/account/${tab}/${query === "" ? "" : `?${query}`}`;
+  const fragment = (hash ?? "").replace(/^#/, "");
+  return `/${workspaceSlug}/settings/account/${tab}/${query === "" ? "" : `?${query}`}${
+    fragment === "" ? "" : `#${fragment}`
+  }`;
 }
 
 /** The general-tab address in a workspace. */

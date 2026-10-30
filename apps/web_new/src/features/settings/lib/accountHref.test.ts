@@ -18,6 +18,16 @@ describe("accountSettingsHref", () => {
     expect(accountSettingsGeneralHref("acme")).toBe("/acme/settings/account/general/");
   });
 
+  it("appends a fragment after the query when one is given", () => {
+    expect(accountSettingsHref("acme", "ai-assistant", "", "voice-dictation")).toBe(
+      "/acme/settings/account/ai-assistant/#voice-dictation"
+    );
+    expect(accountSettingsHref("acme", "ai-assistant", "?x=1", "#voice-dictation")).toBe(
+      "/acme/settings/account/ai-assistant/?x=1#voice-dictation"
+    );
+    expect(accountSettingsHref("acme", "general", "", "")).toBe("/acme/settings/account/general/");
+  });
+
   it("keeps a query verbatim whether or not it carries its mark", () => {
     expect(accountSettingsHref("acme", "general", "?keep=1")).toBe("/acme/settings/account/general/?keep=1");
     expect(accountSettingsHref("acme", "general", "keep=1")).toBe("/acme/settings/account/general/?keep=1");

@@ -15,6 +15,7 @@ export const Route = createFileRoute("/settings/")({
       apiClient: context.apiClient,
       pathname: location.pathname,
       search: location.searchStr,
+      hash: location.hash,
     });
     throw redirect({ href });
   },
