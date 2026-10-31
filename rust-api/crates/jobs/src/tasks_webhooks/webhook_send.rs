@@ -1140,11 +1140,14 @@ pub async fn run_deactivation_email(pool: &sqlx::PgPool, call: &DeactivationEmai
     };
     // `f"{current_site}/..."`: `None` formats as `"None"`.
     let current_site = py_json_str(&call.current_site);
-    let context = std::collections::HashMap::from([
-        ("email".to_owned(), receiver_email.clone()),
-        ("message".to_owned(), deactivation_message(&url)),
+    // Pre-escaped: `render_template` runs with autoescape off, so raw
+    // values would inject HTML (PIDASHCONV-1690); every other mail task
+    // builds its context with `escape_context`.
+    let context = crate::tasks_mail::mail_send::escape_context(&[
+        ("email", receiver_email.clone()),
+        ("message", deactivation_message(&url)),
         (
-            "webhook_url".to_owned(),
+            "webhook_url",
             deactivation_webhook_url(&current_site, &slug, &webhook_id.to_string()),
         ),
     ]);
