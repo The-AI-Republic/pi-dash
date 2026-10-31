@@ -9,6 +9,8 @@
 // sign-in link); copy is ours.
 import * as React from "react";
 
+import { MarketingColumn } from "./MarketingFrame.js";
+
 import {
   CLI_MSI_URL,
   CLI_SIGNIN_HINT,
@@ -28,12 +30,12 @@ const TEXT_LINK =
 
 export function MarketingDownloads(): React.ReactElement {
   return (
-    <>
+    <MarketingColumn className="py-(--space-8)">
       <DownloadsHero />
       <OsCardsSection />
       <CliSection />
       <ClosingSection />
-    </>
+    </MarketingColumn>
   );
 }
 

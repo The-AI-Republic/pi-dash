@@ -25,10 +25,25 @@ export function MarketingFrame({ children }: MarketingFrameProps): React.ReactEl
     <div className="relative isolate flex min-h-screen flex-col bg-(--bg) text-(--text)">
       <MarketingBackdrop />
       <MarketingHeader />
-      <main className="relative z-10 mx-auto w-full max-w-7xl flex-1 px-5 py-(--space-8) sm:px-8">{children}</main>
+      <main className="relative z-10 flex-1">{children}</main>
       <MarketingFooter />
     </div>
   );
+}
+
+/**
+ * The shared content column: one centred gutter on every page, so a page
+ * can let a banded section run edge to edge and still align its text to
+ * the header and footer.
+ */
+export function MarketingColumn({
+  children,
+  className = "",
+}: {
+  children: React.ReactNode;
+  className?: string;
+}): React.ReactElement {
+  return <div className={["mx-auto w-full max-w-7xl px-5 sm:px-8", className].join(" ")}>{children}</div>;
 }
 
 export function MarketingHeader(): React.ReactElement {
@@ -60,21 +75,26 @@ const RESPONSIVE_CLASS: Readonly<Record<string, string | undefined>> = {
 /** Which fill each header action takes; plain links are quiet until hover. */
 const HEADER_TONE: Readonly<Record<string, string>> = {
   "Start free":
-    "rounded-(--radius-card) bg-(--accent) px-(--space-4) py-(--space-2) font-semibold text-(--on-accent) hover:bg-(--accent-hover)",
+    "rounded-(--radius-card) bg-(--accent) px-(--space-8) py-(--space-4) font-semibold text-(--on-accent) hover:bg-(--accent-hover)",
   "Sign in":
-    "rounded-(--radius-card) border border-(--border) bg-(--surface) px-(--space-4) py-(--space-2) font-semibold text-(--text) hover:bg-(--subtle)",
+    "rounded-(--radius-card) border border-(--border) bg-(--surface) px-(--space-8) py-(--space-4) font-semibold text-(--text) hover:bg-(--subtle)",
 };
 
 function HeaderLink({ link }: { link: MarketingLink }): React.ReactElement {
   const responsive = RESPONSIVE_CLASS[link.label] ?? "inline-flex";
   const tone =
     HEADER_TONE[link.label] ??
-    "rounded-(--radius-card) px-(--space-2) py-(--space-2) text-(--text-muted) hover:bg-(--surface) hover:text-(--text) sm:px-(--space-3)";
+    "rounded-(--radius-card) px-(--space-3) py-(--space-4) text-(--text-muted) hover:bg-(--surface) hover:text-(--text) sm:px-(--space-6)";
   return (
     <a
       href={link.href}
       {...(link.external ? { target: "_blank", rel: "noreferrer noopener" } : {})}
-      className={["items-center text-meta transition-colors", tone, responsive, FOCUS_RING].join(" ")}
+      className={[
+        "items-center text-[0.875rem] leading-[1.4] font-medium transition-colors",
+        tone,
+        responsive,
+        FOCUS_RING,
+      ].join(" ")}
     >
       {link.label}
     </a>
@@ -95,7 +115,7 @@ function BrandMark(): React.ReactElement {
         <span className="block h-3 w-7 rounded-full bg-current" />
         <span className="block size-3 rounded-full bg-current" />
       </span>
-      <span className="text-meta hidden font-semibold min-[400px]:inline">Pi Dash</span>
+      <span className="hidden text-[1rem] leading-[1.4] font-semibold min-[400px]:inline">Pi Dash</span>
     </a>
   );
 }
@@ -105,7 +125,7 @@ export function MarketingFooter(): React.ReactElement {
     <footer className="relative z-10 border-t border-(--border) bg-(--bg)">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-(--space-6) px-5 py-10 sm:flex-row sm:items-center sm:justify-between sm:px-8">
         <div className="flex flex-col gap-(--space-2)">
-          <span className="text-meta flex items-center gap-(--space-2) font-semibold text-(--text)">
+          <span className="flex items-center gap-(--space-2) text-[1rem] leading-[1.4] font-semibold text-(--text)">
             <span aria-hidden="true" className="flex items-center gap-(--space-1) text-(--accent)">
               <span className="block size-3 rounded-full bg-current" />
               <span className="block h-3 w-7 rounded-full bg-current" />
@@ -114,7 +134,7 @@ export function MarketingFooter(): React.ReactElement {
             </span>
             Pi Dash
           </span>
-          <p className="text-caption max-w-sm text-(--text-muted)">{POSITIONING_LINE}</p>
+          <p className="max-w-sm text-[0.875rem] leading-[1.4] text-(--text-muted)">{POSITIONING_LINE}</p>
         </div>
         <nav aria-label="Footer" className="flex flex-wrap gap-(--space-4)">
           {FOOTER_LINKS.map((link) => (
@@ -122,7 +142,7 @@ export function MarketingFooter(): React.ReactElement {
               key={link.label}
               href={link.href}
               {...(link.external ? { target: "_blank", rel: "noreferrer noopener" } : {})}
-              className={`text-caption text-(--text-muted) hover:text-(--text) ${FOCUS_RING}`}
+              className={`text-[0.875rem] leading-[1.4] font-medium text-(--text-muted) hover:text-(--text) ${FOCUS_RING}`}
             >
               {link.label}
             </a>

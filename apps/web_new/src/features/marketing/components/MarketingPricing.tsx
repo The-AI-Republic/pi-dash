@@ -7,6 +7,8 @@
 // the copy is ours.
 import * as React from "react";
 
+import { MarketingColumn } from "./MarketingFrame.js";
+
 import { ENTERPRISE_CONTACT_URL, metaFor, PRICING_FAQ, PRICING_TIERS, type PricingTier } from "../content.js";
 
 const PRIMARY_ACTION =
@@ -16,12 +18,12 @@ const SECONDARY_ACTION =
 
 export function MarketingPricing(): React.ReactElement {
   return (
-    <>
+    <MarketingColumn className="py-(--space-8)">
       <PricingHero />
       <TiersSection />
       <EnterpriseSection />
       <FaqSection />
-    </>
+    </MarketingColumn>
   );
 }
 

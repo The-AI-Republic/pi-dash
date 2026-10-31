@@ -55,24 +55,42 @@ visitors onward. Since NEWFRONT-1041 the page deliberately tracks the old
 cloud landing page's shape, because the owner reviewed both side by side and
 asked for them to stay nearly the same rather than for a redesign:
 
-- Hero, two columns on wide screens and stacked on narrow ones. The copy
-  column opens with a small status pill naming the product and what it is,
-  then a very large two-line headline, a short paragraph on what Pi Dash
-  does, three actions in this order — start free (sign-in, filled), download
-  the app, read the docs — and a muted line naming the free start and the
-  agent choices. The second column is an illustration of one agent run: an
-  issue header with a running badge, a work-plan list of four labelled steps
-  with done/active/queued marks, a runner status card, a live-activity
-  message, a checks list with passed/running values, and a review card. The
-  illustration is presentation only: no links, no buttons, no data.
+- Hero, two columns on wide screens and stacked on narrow ones. It opens
+  64px below the header on phones and 112px on desktop, the copy column
+  aligned to the top of the illustration. The copy column opens with a small
+  status pill naming the product and what it is (13px tracked capitals in a
+  bordered capsule), 28px under it a very large two-line headline (up to
+  92.8px with tight leading), then a 16px paragraph on what Pi Dash does, 28px
+  later three actions in this order — start free (sign-in, filled), download
+  the app, read the docs — each a 44px rounded button with 20px side padding
+  and 16px semibold label, and 16px under them a 14px muted line naming the
+  free start and the agent choices. The second column is an illustration of
+  one agent run: an issue header with a running badge, a work-plan list of
+  four labelled steps with done/active/queued marks, a runner status card, a
+  live-activity message, a checks list with passed/running values, and a
+  review card. It stacks its two panels on phones and sits side by side only
+  from the medium breakpoint, and it never pushes its own content wider than
+  the card. The illustration is presentation only: no links, no buttons, no
+  data.
 - Value strip: a banded row of four short highlights (durable workpads,
   enrolled runners, structured escalation, review-ready changes), two per
-  row on narrow screens and four on wide ones.
+  row on narrow screens and four on wide ones. The band fills the viewport
+  and its translucent surface lets the world map read through it; inside,
+  32px of vertical padding, 14px semibold titles and 13px notes.
 - Delivery narrative: an eyebrow, a headline and an intro line, then four
   numbered cards "01"–"04" (state the outcome, hand it to a runner, build
-  and verify, review to done), four across on wide screens.
+  and verify, review to done), four across on wide screens. Cards take 24px
+  padding, and their titles and body copy are 24px and 16px on a 28px
+  leading, with the same 16px gap between them.
 - Capability grid: an eyebrow and headline beside four cards with icons
   (issues-to-pull-requests, agent choice, your machines, human control).
+  Same 24px card padding and 24px/16px type as the delivery cards, and the
+  banded surface is translucent like the strip.
+- Section headlines asked for 36px, or 48px from the small breakpoint; the
+  closing headline 36px, or 60px. (The old page asked for these same sizes,
+  but its built stylesheet never emitted them and its headings rendered at
+  16px. That is a defect on the old page, so the sizes it asked for are the
+  target here and are listed as an intentional difference.)
 - Open-source panel: eyebrow, headline, paragraph, and a bordered action to
   the public repository that opens in a new tab.
 - Closing panel: a centred eyebrow, headline, paragraph and filled action to
@@ -82,8 +100,8 @@ Every action on the page reaches a working destination; the page takes no
 parameters and calls no API. The hero owns the page's only top-level heading.
 Wording is ours and may evolve; the oracle pins section order, counts and
 action destinations, and the layout assertions in the unit tests pin the
-hero's two-column shape and the illustration. Oracle:
-`marketing-home.spec.ts`.
+hero's two-column shape, the illustration, and the type and padding steps the
+page shares with the old page. Oracle: `marketing-home.spec.ts`.
 
 CLOUD-004 — One shared frame (header, footer, page shell) wraps every public
 page (`/home`, `/docs`, `/downloads`, `/pricing`). The header sticks to the
@@ -99,17 +117,21 @@ company site, beside the brand mark and a one-line positioning note. On
 cramped widths the frame degrades by hiding secondary header links rather
 than breaking layout: docs, pricing and the start action drop out first,
 then the repository link, while downloads and sign-in stay reachable.
-Keyboard focus is visibly indicated on every header and footer link. A
-decorative full-page backdrop sits behind the content, is hidden from
-assistive technology, and carries no behavior: since NEWFRONT-1041 it is the
-old landing page's ASCII world map, kept as one SVG file under the app's
-public assets and painted as a fixed, centred, contained mask over the page
-text colour at very low opacity, so it reads the same in light and dark
-themes. The document carries only the asset URL, never the drawing itself,
-so the map stays out of the JS and HTML payloads. Content columns sit on a
-wide centred gutter that matches the old page at both desktop and mobile
-widths. No API. Oracle: `marketing-frame.spec.ts` (frame repetition,
-cramped-width hiding, visible focus).
+Keyboard focus is visibly indicated on every header and footer link. The
+header links are 14px medium in 36px rows, and the wordmark beside the
+monogram is 16px. A decorative full-page backdrop sits behind the content, is
+hidden from assistive technology, and carries no behavior: since NEWFRONT-1041
+it is the old landing page's ASCII world map, kept as one SVG file under the
+app's public assets and painted as a fixed, centred, contained mask over the
+page text colour at very low opacity, so it reads the same in light and dark
+themes. The document carries only the asset URL, never the drawing itself, so
+the map stays out of the JS and HTML payloads. The main landmark spans the
+viewport and each page supplies its own content column: one centred gutter,
+the same as the header and footer, so banded sections like the home page's
+value strip can paint edge to edge while their text stays aligned with the
+chrome at both desktop and mobile widths. No API. Oracle:
+`marketing-frame.spec.ts` (frame repetition, cramped-width hiding, visible
+focus).
 
 CLOUD-005 — Public pages are crawlable with stable metadata. The marketing
 pages and the signed-out root carry index/follow crawler directives,
