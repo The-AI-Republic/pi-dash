@@ -211,6 +211,8 @@ pub const RUN_VIEW_COLUMNS: &[&str] = &[
     "prompt",
     "prompt_manifest",
     "ended_at",
+    // PDASHOSS01-272: `_parent_failed_on_its_runner` reads it.
+    "started_at",
 ];
 
 /// `_latest_prior_run` (`service.py:106-107`) over [`RUN_VIEW_COLUMNS`].
@@ -624,6 +626,9 @@ pub struct RunView {
     pub prompt: String,
     pub prompt_manifest: Option<Value>,
     pub ended_at: Option<DateTime<Utc>>,
+    /// Written only by `RunStartedEndpoint`: `None` on a FAILED run means
+    /// the agent never came up on its runner (PDASHOSS01-272).
+    pub started_at: Option<DateTime<Utc>>,
 }
 
 impl RunView {
@@ -694,6 +699,7 @@ pub fn map_run_view(row: &PgRow) -> Result<RunView, sqlx::Error> {
         prompt: row.try_get("prompt")?,
         prompt_manifest: row.try_get("prompt_manifest")?,
         ended_at: row.try_get("ended_at")?,
+        started_at: row.try_get("started_at")?,
     })
 }
 
@@ -1014,6 +1020,62 @@ pub fn pinned_runner_for(
         return None;
     }
     Some(runner.id)
+}
+
+/// Terminal `error_code` values that blame the machine rather than the
+/// work (`RUNNER_INFRA_ERROR_CODES`, `service.py`, PDASHOSS01-272): the
+/// run died because its runner stopped answering or never got the
+/// Assign, not because the agent hit a problem in the repo.
+pub const RUNNER_INFRA_ERROR_CODES: [&str; 3] =
+    ["heartbeat_reaped", "dispatch_timeout", "runner_revoked"];
+
+/// `_parent_failed_on_its_runner` (`service.py`, PDASHOSS01-272): did
+/// `parent` fail in a way that implicates the runner it ran on?
+///
+/// Terminal-FAILED only — a COMPLETED, CANCELLED or REFUSED parent says
+/// nothing bad about the machine. Two signals: an infra `error_code`
+/// ([`RUNNER_INFRA_ERROR_CODES`]), or `started_at` unset — the Assign
+/// reached the runner but the agent never started there (PIDASHCONV-491's
+/// `timed out waiting for … run.lifecycle.started`). A run that started
+/// and *then* failed keeps its pin: the failure is about the work, and
+/// re-pinning keeps the repo-locality win.
+pub fn parent_failed_on_its_runner(parent: &RunView) -> bool {
+    if parent.status != AgentRunStatus::Failed {
+        return false;
+    }
+    if RUNNER_INFRA_ERROR_CODES.contains(&parent.error_code.as_str()) {
+        return true;
+    }
+    parent.started_at.is_none()
+}
+
+/// `_pinned_runner_for(parent, target_pod)`: [`pinned_runner_for`] over
+/// the parent's runner, minus a runner the parent just failed on
+/// ([`parent_failed_on_its_runner`]) — a retry is not pinned straight
+/// back to the machine that could not run it.
+pub fn pinned_runner_for_parent(
+    parent: &RunView,
+    runner: Option<&RunnerView>,
+    target_pod_id: Option<Uuid>,
+    now: DateTime<Utc>,
+) -> Option<Uuid> {
+    let pinned = pinned_runner_for(runner, target_pod_id, now)?;
+    if parent_failed_on_its_runner(parent) {
+        tracing::info!(
+            "orchestration: not pinning follow-up to runner={} — parent run={} failed there \
+             (error_code={:?}, started={})",
+            pinned,
+            parent.id,
+            parent.error_code,
+            if parent.started_at.is_some() {
+                "True"
+            } else {
+                "False"
+            },
+        );
+        return None;
+    }
+    Some(pinned)
 }
 
 /// The latest-run input to [`select_parent_for_next_run`].
@@ -1600,7 +1662,8 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
         if let Some(parent) = effective_parent.as_ref() {
             if let Some(runner_id) = parent.runner_id {
                 let runner = seam.runner(runner_id).await?;
-                computed_pin = pinned_runner_for(runner.as_ref(), Some(req.pod_id), req.now);
+                computed_pin =
+                    pinned_runner_for_parent(parent, runner.as_ref(), Some(req.pod_id), req.now);
             }
         }
     }
@@ -1699,7 +1762,8 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
     let mut computed_pin = None;
     if let Some(runner_id) = req.parent.runner_id {
         let runner = seam.runner(runner_id).await?;
-        computed_pin = pinned_runner_for(runner.as_ref(), Some(req.pod_id), req.now);
+        computed_pin =
+            pinned_runner_for_parent(&req.parent, runner.as_ref(), Some(req.pod_id), req.now);
     }
     let automatic = is_automatic_issue_trigger(&req.trigger);
     let flags = seam.user_flags(req.creator_id).await?;
@@ -2266,6 +2330,7 @@ mod tests {
             prompt: String::new(),
             prompt_manifest: None,
             ended_at: None,
+            started_at: None,
         }
     }
 
@@ -2581,6 +2646,7 @@ mod tests {
                 prompt: String::new(),
                 prompt_manifest: None,
                 ended_at: None,
+                started_at: None,
             };
             self.runs.borrow_mut().insert(row.id, run.clone());
             Ok(run)
@@ -2751,6 +2817,57 @@ mod tests {
         assert_eq!(
             run_config_for_issue(Some(""), Some(""), Some(""), None),
             json!({"repo_url": null, "repo_ref": null, "git_work_branch": null})
+        );
+    }
+
+    #[test]
+    fn retry_is_not_pinned_back_to_the_runner_it_failed_on() {
+        let clock = now();
+        let runner = RunnerView {
+            id: uid(0x60),
+            pod_id: uid(0x50),
+            status: "online".to_owned(),
+            last_heartbeat_at: Some(clock),
+            paused_at: None,
+        };
+        let parent = |status: AgentRunStatus, error_code: &str, started: bool| RunView {
+            runner_id: Some(uid(0x60)),
+            status,
+            error_code: error_code.to_owned(),
+            started_at: started.then_some(clock),
+            ..run_view(uid(0x70))
+        };
+        let pin = |parent: &RunView| {
+            pinned_runner_for_parent(parent, Some(&runner), Some(uid(0x50)), clock)
+        };
+        // PIDASHCONV-491: FAILED without the agent ever starting.
+        let never_started = parent(AgentRunStatus::Failed, "", false);
+        assert!(parent_failed_on_its_runner(&never_started));
+        assert_eq!(pin(&never_started), None);
+        // Infra error codes blame the machine even after a start.
+        for code in RUNNER_INFRA_ERROR_CODES {
+            let infra = parent(AgentRunStatus::Failed, code, true);
+            assert!(parent_failed_on_its_runner(&infra), "{code}");
+            assert_eq!(pin(&infra), None, "{code}");
+        }
+        // Started, then failed on the work: the pin survives.
+        let work_failure = parent(AgentRunStatus::Failed, "agent_error", true);
+        assert!(!parent_failed_on_its_runner(&work_failure));
+        assert_eq!(pin(&work_failure), Some(uid(0x60)));
+        // Non-FAILED terminals never implicate the runner, started or not.
+        for status in [
+            AgentRunStatus::Completed,
+            AgentRunStatus::Cancelled,
+            AgentRunStatus::Refused,
+        ] {
+            let ok = parent(status, "", false);
+            assert!(!parent_failed_on_its_runner(&ok), "{status:?}");
+            assert_eq!(pin(&ok), Some(uid(0x60)), "{status:?}");
+        }
+        // The guard never resurrects an ineligible pin.
+        assert_eq!(
+            pinned_runner_for_parent(&work_failure, None, Some(uid(0x50)), clock),
+            None
         );
     }
 

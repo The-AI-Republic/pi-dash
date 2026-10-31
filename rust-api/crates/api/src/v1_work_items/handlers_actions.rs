@@ -13,6 +13,10 @@
 //! * `AgentRunYieldAPIEndpoint.post` (`:1255-1327`, `3869a226`) — record the run outcome
 //!   plus the optional `stop_ticking` flag
 //!   (`RUN_OUTCOMES` / `normalize_outcome` + `done_payload` write).
+//! * `AgentRunReleasePinAPIEndpoint.post` (`:1330-1427`, PDASHOSS01-272) —
+//!   clear a QUEUED run's runner pin (plus the parent's stale `thread_id`)
+//!   through the web hatch's guard, lock and writes
+//!   ([`crate::runner_runs::runs::clear_run_pin`]), then drain the pod.
 //!
 //! Registered by [`super::routes`] at the four
 //! `apps/api/pi_dash/api/urls/work_item.py:133-151` paths.
@@ -122,6 +126,14 @@ pub const WORK_ITEM_NOT_FOUND_BODY: &str = r#"{"error":"Work item not found"}"#;
 pub const RUN_NOT_FOUND_BODY: &str = r#"{"error":"run not found"}"#;
 /// The yield endpoint's inactive-run refusal (`views/issue.py:1305-1306`).
 pub const RUN_NOT_ACTIVE_BODY: &str = r#"{"error":"run is not active"}"#;
+/// The release-pin endpoint's Cloud Agent refusal (`views/issue.py:1390-1394`,
+/// PDASHOSS01-272).
+pub const RELEASE_PIN_EXECUTOR_NOT_LOCAL_BODY: &str =
+    r#"{"error":"Cloud Agent runs cannot be pinned","code":"executor_not_local"}"#;
+/// The release-pin endpoint's non-QUEUED refusal (`views/issue.py:1404-1408`).
+pub const RELEASE_PIN_NOT_QUEUED_BODY: &str = r#"{"error":"run not queued","code":"not_queued"}"#;
+/// The release-pin endpoint's unpinned refusal (`views/issue.py:1409-1413`).
+pub const RELEASE_PIN_NOT_PINNED_BODY: &str = r#"{"error":"run not pinned","code":"not_pinned"}"#;
 /// The yield endpoint's missing/invalid outcome (`views/issue.py:1275-1280`);
 /// the `allowed` list renders `sorted(RUN_OUTCOMES)`.
 pub const OUTCOME_REQUIRED_ERROR: &str = "outcome is required";
@@ -1370,6 +1382,29 @@ pub fn yield_response(
     (StatusCode::OK, body)
 }
 
+/// The release-pin success body (`views/issue.py:1419-1427`): 200
+/// `{ok, run_id, work_item_id, previous_pinned_runner_id}` in that order,
+/// `work_item_id` null for an issue-less run.
+pub fn release_pin_response(
+    run_id: Uuid,
+    work_item_id: Option<Uuid>,
+    previous_pinned_runner_id: Uuid,
+) -> (StatusCode, String) {
+    let mut map = serde_json::Map::with_capacity(4);
+    map.insert("ok".to_owned(), Value::Bool(true));
+    map.insert("run_id".to_owned(), Value::String(run_id.to_string()));
+    map.insert(
+        "work_item_id".to_owned(),
+        work_item_id.map_or(Value::Null, |id| Value::String(id.to_string())),
+    );
+    map.insert(
+        "previous_pinned_runner_id".to_owned(),
+        Value::String(previous_pinned_runner_id.to_string()),
+    );
+    let body = serde_json::to_string(&Value::Object(map)).expect("release-pin body");
+    (StatusCode::OK, body)
+}
+
 /// The yield outcome refusal (`:1275-1280`): 400
 /// `{"error":"outcome is required","allowed":sorted(RUN_OUTCOMES)}`.
 pub fn outcome_required_response() -> (StatusCode, String) {
@@ -1867,6 +1902,129 @@ async fn yield_inner(
     Ok(json_response(status, body))
 }
 
+/// `POST .../agent-runs/<run_id>/release-pin/` (`views/issue.py:1330-1427`,
+/// PDASHOSS01-272): the API-token twin of the web release-pin hatch
+/// ([`crate::runner_runs::runs::release_pin`]). Same guard
+/// (`_can_cancel_run`), same lock and same writes
+/// ([`crate::runner_runs::runs::clear_run_pin`]), then the post-commit pod
+/// drain. Fully owned.
+pub async fn post_release_pin(
+    State(state): State<AppState>,
+    Path((slug, run_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    req: Request,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&run_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
+    let run_id = run_id.parse::<Uuid>().expect("checked segment");
+    match release_pin_inner(&state, &headers, &slug, &run_id).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn release_pin_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    run_id: &Uuid,
+) -> Result<Response, Denial> {
+    use crate::runner_runs::runs as web;
+    let not_found = || Denial::NotFoundError("run not found".to_owned());
+    let pre = preamble(state, headers, slug).await?;
+    // `AuthOnly`: the base `IsAuthenticated` already passed.
+    let _ = pre.workspace_id;
+    // `TimezoneMixin.initial` (see `yield_inner`). The view never reads
+    // the body (`request=None`), so nothing is parsed.
+    activate_timezone(pre.actor.timezone.as_deref())?;
+    // `AgentRun.objects.select_related("workspace", ...)
+    //  .filter(pk=run_id, workspace__slug=slug).first()` (`:1381-1385`).
+    let workspace_id: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT r."workspace_id" FROM "agent_run" r
+           INNER JOIN "workspaces" w ON w."id" = r."workspace_id"
+           WHERE r."id" = $1 AND w."slug" = $2 LIMIT 1"#,
+    )
+    .bind(run_id)
+    .bind(slug)
+    .fetch_optional(&pre.pool)
+    .await
+    .map_err(|error| db_error(error, "release-pin-run"))?;
+    let workspace_id = workspace_id.ok_or_else(not_found)?;
+    if !is_workspace_member(&pre.pool, &pre.actor.id, &workspace_id).await? {
+        return Err(not_found());
+    }
+    // `_can_cancel_run(request.user, run)` (`:1388-1389`): the web
+    // hatch's guard facts, unchanged.
+    let guarded = web::fetch_guarded_run(&pre.pool, *run_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or_else(not_found)?;
+    let facts = web::view_facts_for(&pre.pool, pre.actor.id, &guarded)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    if !pidash_services::runner_runs::guards::can_cancel_run(&facts) {
+        return Err(not_found());
+    }
+    if guarded.run.executor_kind == pidash_types::dispatch::AgentExecutorKind::CloudAgent {
+        return Ok(json_response(
+            StatusCode::CONFLICT,
+            RELEASE_PIN_EXECUTOR_NOT_LOCAL_BODY.to_owned(),
+        ));
+    }
+    // `transaction.atomic()` + `select_for_update().filter(pk=run_id)`
+    // (`:1396-1401`, no join).
+    let mut tx = pre
+        .pool
+        .begin()
+        .await
+        .map_err(|error| db_error(error, "release-pin-begin"))?;
+    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&web::lock_run_sql())
+        .bind(run_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| db_error(error, "release-pin-lock"))?;
+    let Some(row) = row else {
+        let _ = tx.rollback().await;
+        return Err(not_found());
+    };
+    let locked = match web::decode_run(&row, 0) {
+        Ok(run) => run,
+        Err(_) => {
+            let _ = tx.rollback().await;
+            return Err(Denial::ServerError);
+        }
+    };
+    if locked.status != AgentRunStatus::Queued {
+        let _ = tx.rollback().await;
+        return Ok(json_response(
+            StatusCode::CONFLICT,
+            RELEASE_PIN_NOT_QUEUED_BODY.to_owned(),
+        ));
+    }
+    if locked.pinned_runner_id.is_none() {
+        let _ = tx.rollback().await;
+        return Ok(json_response(
+            StatusCode::CONFLICT,
+            RELEASE_PIN_NOT_PINNED_BODY.to_owned(),
+        ));
+    }
+    let previous = web::clear_run_pin(&mut tx, &locked)
+        .await
+        .map_err(|error| db_error(error, "release-pin-clear"))?
+        .ok_or(Denial::ServerError)?;
+    tx.commit()
+        .await
+        .map_err(|error| db_error(error, "release-pin-commit"))?;
+    // `transaction.on_commit(drain_pod_by_id)` outside the atomic block
+    // fires immediately (`:1417-1418`); a raising drain is the base 500.
+    crate::runner_sessions::runner_poll::drain_pod_by_id(&pre.pool, state, locked.pod_id)
+        .await
+        .map_err(|()| db_error("drain failed", "release-pin-drain"))?;
+    let (status, body) = release_pin_response(*run_id, guarded.run.work_item_id, previous);
+    Ok(json_response(status, body))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1957,6 +2115,52 @@ mod tests {
         let (fx_status, fx_body) = call_body("run_ai");
         assert_eq!(status.as_u16(), fx_status);
         assert_eq!(body, fx_body);
+    }
+
+    /// PDASHOSS01-272: the release-pin bodies, byte for byte as DRF's
+    /// `JSONRenderer` renders the view's dicts (`views/issue.py:1386-1427`).
+    #[test]
+    fn release_pin_bodies() {
+        let run_id: Uuid = "640d8cdf-08fb-4772-82d3-2c693d0e105f"
+            .parse()
+            .expect("uuid");
+        let work_item_id: Uuid = "a9b6c9f9-2817-4967-a501-1e26caf4abea"
+            .parse()
+            .expect("uuid");
+        let runner_id: Uuid = "0f1e2d3c-4b5a-4968-8776-655443322110"
+            .parse()
+            .expect("uuid");
+        let (status, body) = release_pin_response(run_id, Some(work_item_id), runner_id);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            r#"{"ok":true,"run_id":"640d8cdf-08fb-4772-82d3-2c693d0e105f","work_item_id":"a9b6c9f9-2817-4967-a501-1e26caf4abea","previous_pinned_runner_id":"0f1e2d3c-4b5a-4968-8776-655443322110"}"#
+        );
+        let (status, body) = release_pin_response(run_id, None, runner_id);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            r#"{"ok":true,"run_id":"640d8cdf-08fb-4772-82d3-2c693d0e105f","work_item_id":null,"previous_pinned_runner_id":"0f1e2d3c-4b5a-4968-8776-655443322110"}"#
+        );
+        let parsed: Value =
+            serde_json::from_str(RELEASE_PIN_EXECUTOR_NOT_LOCAL_BODY).expect("json");
+        assert_eq!(
+            parsed,
+            serde_json::json!({"error": "Cloud Agent runs cannot be pinned", "code": "executor_not_local"})
+        );
+        let parsed: Value = serde_json::from_str(RELEASE_PIN_NOT_QUEUED_BODY).expect("json");
+        assert_eq!(
+            parsed,
+            serde_json::json!({"error": "run not queued", "code": "not_queued"})
+        );
+        let parsed: Value = serde_json::from_str(RELEASE_PIN_NOT_PINNED_BODY).expect("json");
+        assert_eq!(
+            parsed,
+            serde_json::json!({"error": "run not pinned", "code": "not_pinned"})
+        );
+        let (status, body) = Denial::NotFoundError("run not found".to_owned()).status_and_body();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, RUN_NOT_FOUND_BODY);
     }
 
     #[test]

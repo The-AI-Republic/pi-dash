@@ -815,6 +815,8 @@ pub const ROUTES: &[RouteRow] = &[
     // detail suffixes via the dotted-pk proxy in the detail handlers).
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/",
         owned: &[], proxied: &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/agent-runs/{run_id}/release-pin/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/agent-runs/{run_id}/yield/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/assets/",

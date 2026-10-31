@@ -71,7 +71,9 @@ pub use drain::{
     DRAIN_POD_IDLE_RUNNERS_SQL, NEXT_FOR_RUNNER_RANK_POSITION, NEXT_QUEUED_RUN_FOR_POD_SQL,
     POD_COLUMNS, SELECT_RUNNER_IN_POD_SQL,
 };
-pub use live_drains::{drain_for_runner_by_id, drain_pod_by_id, DrainError, PoolPubsubStore};
+pub use live_drains::{
+    claim_next_assignable, drain_for_runner_by_id, drain_pod_by_id, DrainError, PoolPubsubStore,
+};
 pub use offline_recovery::{
     clear_parent_thread_sql, clear_pin_sql, offline_fail_detail, offline_stamp_patch,
     paused_runner_pin_ids_select, paused_runner_pin_lock_select, release_pin_lock_select,
