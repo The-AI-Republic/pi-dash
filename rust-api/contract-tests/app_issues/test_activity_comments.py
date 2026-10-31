@@ -47,16 +47,23 @@ def _issue(ws, pid, iid):
     return f"{_base(ws, pid)}/issues/{iid}"
 
 
-def test_history_default_500s(clients, seed):
-    # Ported bug: the unfiltered history branch sorts raw model
-    # instances with ``instance["created_at"]`` (``activity.py``), which
-    # raises ``TypeError`` on every issue that has any activity or
-    # comment. The filtered branches below work.
+def test_history_default_merges(clients, seed):
+    # PB-0260 retired (PIDASHCONV-1680): the unfiltered history branch
+    # merges both sides sorted by the rendered ``created_at``. The seed
+    # activity and C1 share one timestamp, so this also pins the tie
+    # order — chain order, activities first.
     admin = clients["admin"]
-    ws, pid, i1 = seed["ws_slug"], seed["project"], seed["issue1"]
+    ws, pid, i1, c1 = (
+        seed["ws_slug"], seed["project"], seed["issue1"], seed["comment1"])
     resp = admin.get(f"{_issue(ws, pid, i1)}/history/")
-    assert resp.status_code == 500
-    assert resp.json() == {"error": "Something went wrong please try again later"}
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert len(rows) == 2
+    assert rows[0]["created_at"] == rows[1]["created_at"]
+    assert set(rows[0]) == ACTIVITY_KEYS
+    assert set(rows[1]) == COMMENT_WRITE_KEYS
+    assert rows[0]["field"] == "priority"
+    assert rows[1]["id"] == c1
 
 
 def test_history_issue_property_shape(clients, seed):
