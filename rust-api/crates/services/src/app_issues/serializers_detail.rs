@@ -3,7 +3,7 @@
 //! App issue-detail read shapes for app:issues (D-26).
 //!
 //! Port of `apps/api/pi_dash/app/serializers/issue.py:1039-1113` (the
-//! 29-key `IssueSerializer` read shape), `:1219-1225`
+//! 31-key `IssueSerializer` read shape), `:1219-1225`
 //! (`IssueLiteSerializer`), `:1226-1414` (`IssueDetailSerializer`) and
 //! `:1415-1440` (`IssuePublicSerializer`). Consumers: the retrieve /
 //! identifier / archive-retrieve handlers (PIDASHCONV-651/652/656).
@@ -44,7 +44,7 @@
 //!
 //! Deliberately NOT reused: space `issue_to_representation`
 //! (`space::serializers::issue_graph`) emits the nested space shape (14
-//! nests + all columns), not this flat 29-key app shape — the two share no
+//! nests + all columns), not this flat 31-key app shape — the two share no
 //! logic, only a model, so the base lives here (same call pattern as
 //! PIDASHCONV-642's sync guards, which the fixture blesses as "not a dup").
 //! The app reaction (`__all__` + `actor_detail`) and vote (6 keys +
@@ -75,8 +75,8 @@
 //!   one serializer, two key sets. Reproduced via `Option<bool>` +
 //!   `skip_serializing_if` ([`IssueDetailRow::is_intake`]).
 //! * Archive retrieve annotates only `is_subscribed`, so the seven
-//!   annotation-driven base fields skip too — a 28-key shape, not the
-//!   35-key retrieve set (FX-ISS-02 repeats the 35-key error; the
+//!   annotation-driven base fields skip too — a 30-key shape, not the
+//!   37-key retrieve set (FX-ISS-02 repeats the 37-key error; the
 //!   fixture-correction follow-up rides with PIDASHCONV-656, which owns
 //!   the archive handler). Reproduced via the tri-state base fields.
 //! * Retrieve renders the three counts `null` (bare `Subquery`, no
@@ -124,10 +124,10 @@ pub fn serialize_drf_datetime(value: DateTime<Utc>) -> String {
     }
 }
 
-/// App `IssueSerializer` wire keys (`issue.py:1063-1093`), in
-/// `Meta.fields` order: the 29-key base every detail response starts with.
-/// Count the list: 29.
-pub const ISSUE_DETAIL_BASE_FIELDS: [&str; 29] = [
+/// App `IssueSerializer` wire keys (`issue.py:1071-1103`), in
+/// `Meta.fields` order: the 31-key base every detail response starts with.
+/// Count the list: 31.
+pub const ISSUE_DETAIL_BASE_FIELDS: [&str; 31] = [
     "id",
     "name",
     "state_id",
@@ -142,6 +142,8 @@ pub const ISSUE_DETAIL_BASE_FIELDS: [&str; 29] = [
     "project_id",
     "parent_id",
     "cycle_id",
+    "type_id",
+    "is_epic",
     "assigned_pod_id",
     "agent_executor",
     "module_ids",
@@ -159,14 +161,17 @@ pub const ISSUE_DETAIL_BASE_FIELDS: [&str; 29] = [
     "is_synced",
 ];
 
-/// An `Issue` row for the 29-key base shape (`db/models/issue.py:115-229`):
-/// `state_id` / `estimate_point` / `parent_id` / `assigned_pod_id` /
-/// `created_by` / `updated_by` render FK ids or `None`; the `*_id` attnames
-/// are DRF property-fallback `ReadOnlyField`s (same rule as the label port);
-/// datetimes are pre-rendered DRF strings; `archived_at` is a `DateField`;
-/// `is_synced` is the merged `issue_is_actively_synced` verdict, computed
-/// caller-side. The seven queryset-annotation fields (`cycle_id`, the three
-/// id lists, the three counts) are tri-state, exactly DRF's three states:
+/// An `Issue` row for the 31-key base shape (`db/models/issue.py:115-229`):
+/// `state_id` / `estimate_point` / `parent_id` / `type_id` /
+/// `assigned_pod_id` / `created_by` / `updated_by` render FK ids or `None`;
+/// the `*_id` attnames are DRF property-fallback `ReadOnlyField`s (same
+/// rule as the label port); datetimes are pre-rendered DRF strings;
+/// `archived_at` is a `DateField`; `is_synced` is the merged
+/// `issue_is_actively_synced` verdict, computed caller-side;
+/// `is_epic` is `get_is_epic` (false when untyped, else the type flag),
+/// computed caller-side. The seven queryset-annotation fields (`cycle_id`,
+/// the three id lists, the three counts) are tri-state, exactly DRF's
+/// three states:
 /// `None` = unannotated → key omitted (`SkipField`, archive retrieve);
 /// `Some(None)` / `Some(list)` = annotated → key present, `null` or the
 /// value (retrieve renders the bare-`Subquery` counts `null`, the
@@ -187,6 +192,8 @@ pub struct IssueDetailBaseRow<'a> {
     pub project_id: &'a str,
     pub parent_id: Option<&'a str>,
     pub cycle_id: Option<Option<&'a str>>,
+    pub type_id: Option<&'a str>,
+    pub is_epic: bool,
     pub assigned_pod_id: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
     pub module_ids: Option<Vec<&'a str>>,
@@ -210,7 +217,7 @@ pub struct IssueDetailBaseRow<'a> {
 /// annotation-driven fields skip when the row lacks the annotation
 /// (`None`), reproducing DRF's `SkipField` omission on archive retrieve.
 /// (Skip inside the flattened base serializes through the inner impl, so
-/// the outer key set shrinks — pinned by the 28-key test.)
+/// the outer key set shrinks — pinned by the 30-key test.)
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IssueDetailBaseView<'a> {
     pub id: &'a str,
@@ -228,6 +235,8 @@ pub struct IssueDetailBaseView<'a> {
     pub parent_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cycle_id: Option<Option<&'a str>>,
+    pub type_id: Option<&'a str>,
+    pub is_epic: bool,
     pub assigned_pod_id: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -271,6 +280,8 @@ pub fn issue_detail_base_to_representation<'a>(
         project_id: row.project_id,
         parent_id: row.parent_id,
         cycle_id: row.cycle_id,
+        type_id: row.type_id,
+        is_epic: row.is_epic,
         assigned_pod_id: row.assigned_pod_id,
         agent_executor: row.agent_executor,
         module_ids: row.module_ids.clone(),
@@ -626,8 +637,8 @@ pub fn has_open_blockers_field(summary: &RelationsSummary) -> bool {
 }
 
 /// `IssueDetailSerializer` wire keys (`issue.py:1237-1245`), in
-/// `Meta.fields` order: the 29 base keys plus the 7 added keys. 36.
-pub const ISSUE_DETAIL_FIELDS: [&str; 36] = [
+/// `Meta.fields` order: the 31 base keys plus the 7 added keys. 38.
+pub const ISSUE_DETAIL_FIELDS: [&str; 38] = [
     "id",
     "name",
     "state_id",
@@ -642,6 +653,8 @@ pub const ISSUE_DETAIL_FIELDS: [&str; 36] = [
     "project_id",
     "parent_id",
     "cycle_id",
+    "type_id",
+    "is_epic",
     "assigned_pod_id",
     "agent_executor",
     "module_ids",
@@ -668,9 +681,9 @@ pub const ISSUE_DETAIL_FIELDS: [&str; 36] = [
 
 /// The retrieve key set: [`ISSUE_DETAIL_FIELDS`] minus `is_intake`, which
 /// that view does not annotate, so DRF's `SkipField` omits the key
-/// (`base.py:486-618`). 35. (Archive retrieve is a different, 28-key shape
+/// (`base.py:486-618`). 37. (Archive retrieve is a different, 30-key shape
 /// — see [`ISSUE_DETAIL_ARCHIVE_FIELDS`].)
-pub const ISSUE_DETAIL_RETRIEVE_FIELDS: [&str; 35] = [
+pub const ISSUE_DETAIL_RETRIEVE_FIELDS: [&str; 37] = [
     "id",
     "name",
     "state_id",
@@ -685,6 +698,8 @@ pub const ISSUE_DETAIL_RETRIEVE_FIELDS: [&str; 35] = [
     "project_id",
     "parent_id",
     "cycle_id",
+    "type_id",
+    "is_epic",
     "assigned_pod_id",
     "agent_executor",
     "module_ids",
@@ -711,8 +726,8 @@ pub const ISSUE_DETAIL_RETRIEVE_FIELDS: [&str; 35] = [
 /// The archive-retrieve key set: [`ISSUE_DETAIL_FIELDS`] minus the eight
 /// unannotated keys — the seven annotation-driven base fields plus
 /// `is_intake` — which DRF's `SkipField` omits (`archive.py:222-255`
-/// annotates only `is_subscribed`). 28.
-pub const ISSUE_DETAIL_ARCHIVE_FIELDS: [&str; 28] = [
+/// annotates only `is_subscribed`). 30.
+pub const ISSUE_DETAIL_ARCHIVE_FIELDS: [&str; 30] = [
     "id",
     "name",
     "state_id",
@@ -726,6 +741,8 @@ pub const ISSUE_DETAIL_ARCHIVE_FIELDS: [&str; 28] = [
     "sequence_id",
     "project_id",
     "parent_id",
+    "type_id",
+    "is_epic",
     "assigned_pod_id",
     "agent_executor",
     "created_at",
@@ -753,7 +770,7 @@ pub struct AgentTickerInput<'a> {
     pub state: Option<StateRef<'a>>,
 }
 
-/// An issue-detail row: the 29-key base, the two existence annotations
+/// An issue-detail row: the 31-key base, the two existence annotations
 /// (`is_intake` is `None` when the queryset lacks the annotation —
 /// retrieve / archive-retrieve — reproducing the `SkipField` omission),
 /// the ticker input (or `None` without a ticker row), the latest + active
@@ -773,7 +790,7 @@ pub struct IssueDetailRow<'a> {
 }
 
 /// `IssueDetailSerializer.to_representation` output (`issue.py:1226-1414`),
-/// in `Meta.fields` order. The flattened base keeps its 29 keys first;
+/// in `Meta.fields` order. The flattened base keeps its 31 keys first;
 /// `is_intake` is skipped when the row lacks the annotation.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IssueDetailView<'a> {
@@ -1146,6 +1163,7 @@ mod tests {
     const USER: &str = "44444444-4444-4444-4444-444444444444";
     const RUN: &str = "55555555-5555-5555-5555-555555555555";
     const RUNNER: &str = "66666666-6666-6666-6666-666666666666";
+    const TYPE: &str = "77777777-7777-7777-7777-777777777777";
 
     fn base_row() -> IssueDetailBaseRow<'static> {
         IssueDetailBaseRow {
@@ -1163,6 +1181,8 @@ mod tests {
             project_id: PROJ,
             parent_id: None,
             cycle_id: Some(None),
+            type_id: Some(TYPE),
+            is_epic: true,
             assigned_pod_id: None,
             agent_executor: None,
             module_ids: Some(vec![]),
@@ -1271,7 +1291,7 @@ mod tests {
 
     #[test]
     fn base_fields_match_wire_order() {
-        // TRACE: issue.py:1063-1093 (29 keys).
+        // TRACE: issue.py:1071-1103 (31 keys).
         assert_eq!(
             serialized_keys(&issue_detail_base_to_representation(&base_row())),
             const_keys(&ISSUE_DETAIL_BASE_FIELDS)
@@ -1289,7 +1309,7 @@ mod tests {
              \"completed_at\":null,\"estimate_point\":null,\"priority\":\"high\",\
              \"complexity_score\":4,\"start_date\":\"2026-10-01\",\"target_date\":null,\
              \"sequence_id\":639,\"project_id\":\"22222222-2222-2222-2222-222222222222\",\
-             \"parent_id\":null,\"cycle_id\":null,\"assigned_pod_id\":null,\
+             \"parent_id\":null,\"cycle_id\":null,\"type_id\":\"77777777-7777-7777-7777-777777777777\",\"is_epic\":true,\"assigned_pod_id\":null,\
              \"agent_executor\":null,\"module_ids\":[],\"label_ids\":[],\
              \"assignee_ids\":[\"44444444-4444-4444-4444-444444444444\"],\
              \"sub_issues_count\":2,\"created_at\":\"2026-10-02T21:42:34.824827Z\",\
@@ -1301,7 +1321,7 @@ mod tests {
     }
 
     #[test]
-    fn detail_identifier_has_36_keys() {
+    fn detail_identifier_has_38_keys() {
         // TRACE: issue.py:1237-1245; base.py:1436-1445 (is_intake annotated).
         let summary = empty_summary();
         let row = IssueDetailRow {
@@ -1324,9 +1344,9 @@ mod tests {
     #[test]
     fn detail_retrieve_omits_is_intake() {
         // TRACE: the ported SkipField bug — retrieve (base.py:486-618) does
-        // not annotate is_intake, so the key is absent (35 keys), while
+        // not annotate is_intake, so the key is absent (37 keys), while
         // identifier renders it (even false). Archive retrieve omits eight
-        // keys, not one — see detail_archive_has_28_keys.
+        // keys, not one — see detail_archive_has_30_keys.
         let summary = empty_summary();
         let row = IssueDetailRow {
             base: base_row(),
@@ -1370,10 +1390,10 @@ mod tests {
     }
 
     #[test]
-    fn detail_archive_has_28_keys() {
+    fn detail_archive_has_30_keys() {
         // TRACE: archive.py:222-255 — archive retrieve annotates only
         // is_subscribed, so the seven annotation-driven base fields plus
-        // is_intake skip (28 keys). Proves skip-inside-flatten shrinks the
+        // is_intake skip (30 keys). Proves skip-inside-flatten shrinks the
         // outer key set.
         let summary = empty_summary();
         let mut base = base_row();

@@ -134,6 +134,30 @@ pub fn routes() -> Router<AppState> {
                 .fallback(proxy),
         )
         .route(
+            handlers_core::EPIC_COLLECTION_PATH,
+            get(epic_list_issues)
+                .post(handlers_core::epic_create)
+                .put(proxy)
+                .patch(proxy)
+                .delete(proxy)
+                .head(proxy)
+                .options(proxy)
+                .trace(proxy)
+                .fallback(proxy),
+        )
+        .route(
+            handlers_core::EPIC_DETAIL_PATH,
+            get(handlers_core::epic_retrieve)
+                .patch(handlers_core::epic_partial_update)
+                .delete(handlers_core::epic_destroy)
+                .put(proxy)
+                .head(proxy)
+                .post(proxy)
+                .options(proxy)
+                .trace(proxy)
+                .fallback(proxy),
+        )
+        .route(
             "/api/workspaces/{slug}/projects/{project_id}/issues/list/",
             owned(get(flat_list)),
         )
@@ -2067,20 +2091,62 @@ pub async fn list_issues(
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
-    let context = list_context(state, slug, project_id, &query, extension, ListMode::Main).await?;
+    list_issues_inner(state, slug, project_id, &query, extension, false).await
+}
+
+/// `GET .../epics/` (`epics.py:20-33` + the inherited list): the issues
+/// list pipeline over the epic-filtered queryset — `IssueViewSet.list`
+/// with `type__is_epic=True`, so grouping, pagination, rich filters, and
+/// the guest rule all behave identically.
+pub async fn epic_list_issues(
+    State(state): State<AppState>,
+    Path((slug, project_id)): Path<(String, String)>,
+    Query(query): Query<QueryMap>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+) -> HandlerResult {
+    list_issues_inner(state, slug, project_id, &query, extension, true).await
+}
+
+/// The epic boundary as a WHERE fragment (`epics.py:32-33`): Django's
+/// `filter(type__is_epic=True)` inner-joins `issue_types` with no
+/// related-manager guard — the EXISTS below is that join (the
+/// single-letter alias keeps the relation-join marker scan quiet).
+const EPIC_ONLY_FRAGMENT: &str =
+    "EXISTS(SELECT 1 FROM issue_types AS t WHERE t.id = issue.type_id AND t.is_epic)";
+
+/// The `IssueViewSet.list` pipeline after extraction: `epic_only`
+/// adds the epic boundary to the filtered set (`epics.py:32-33`).
+async fn list_issues_inner(
+    state: AppState,
+    slug: String,
+    project_id: String,
+    query: &QueryMap,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    epic_only: bool,
+) -> HandlerResult {
+    let context = list_context(state, slug, project_id, query, extension, ListMode::Main).await?;
     record_recent_visit(&context).await;
     let order_spec = order_sql(&context.params.order_by, "state.\"group\"", |name| {
         format!("min_{}", name.replace("__", "_"))
     });
-    let updated_gt = updated_at_gt(&query)?;
-    let extra = match updated_gt {
-        (Some(fragment), binds) => Some((fragment, binds)),
-        (None, _) => None,
+    let updated_gt = updated_at_gt(query)?;
+    // The epics collection filters `type__is_epic=True`
+    // (`epics.py:32-33`): Django inner-joins with no related-manager
+    // guard, so untyped rows fall outside while rows under inactive or
+    // soft-deleted epic types still match — the EXISTS below is that
+    // join as a WHERE fragment (no binds of its own).
+    let extra = match (updated_gt, epic_only) {
+        ((Some(fragment), binds), true) => {
+            Some((format!("{fragment} AND {EPIC_ONLY_FRAGMENT}"), binds))
+        }
+        ((Some(fragment), binds), false) => Some((fragment, binds)),
+        ((None, _), true) => Some((EPIC_ONLY_FRAGMENT.to_owned(), Vec::new())),
+        ((None, _), false) => None,
     };
     let filtered = filtered_set(
         &context.gate,
         &context.slug,
-        &query,
+        query,
         context.params.group_by.as_deref(),
         context.params.sub_group_by.as_deref(),
         extra,
@@ -2604,7 +2670,8 @@ pub async fn flat_list(
 /// `module_ids`, `label_ids`, `assignee_ids`, `sub_issues_count`,
 /// `attachment_count`, `link_count`) are absent: the view serializes the
 /// un-annotated `queryset`, so DRF's missing-attribute rule (`SkipField`
-/// on non-required fields) omits them.
+/// on non-required fields) omits them. `type_id` (a model column) and
+/// `is_epic` (a `SerializerMethodField`) always render.
 const SERIALIZER_FIELDS: &[&str] = &[
     "id",
     "name",
@@ -2619,6 +2686,8 @@ const SERIALIZER_FIELDS: &[&str] = &[
     "sequence_id",
     "project_id",
     "parent_id",
+    "type_id",
+    "is_epic",
     "assigned_pod_id",
     "agent_executor",
     "created_at",
@@ -2629,6 +2698,25 @@ const SERIALIZER_FIELDS: &[&str] = &[
     "archived_at",
     "is_synced",
 ];
+
+/// `get_is_epic` (`issue.py:1109-1112`): false when the row is untyped,
+/// without a query; otherwise the type row's flag. A missing row is
+/// Django's `DoesNotExist` → the generic 500 (unreachable — the FK
+/// holds). No soft-delete guard: `IssueType` rides the plain manager.
+async fn serializer_is_epic(pool: &sqlx::PgPool, raw: Option<&Value>) -> Result<bool, Denial> {
+    let Some(Value::String(text)) = raw else {
+        return Ok(false);
+    };
+    let id = text
+        .parse::<uuid::Uuid>()
+        .map_err(|_| Denial::ServerError)?;
+    let row: Option<(bool,)> = sqlx::query_as("SELECT is_epic FROM issue_types WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.map(|flag| flag.0).ok_or(Denial::ServerError)
+}
 
 /// The flat `fields=`/`expand=` branch: `IssueSerializer(queryset, ...)`
 /// rows, where `queryset` is the rich-filtered base — the legacy
@@ -2667,9 +2755,10 @@ async fn serializer_list(
     let selects = r#"issue.id, issue.workspace_id, issue.name, issue.state_id, issue.sort_order,
         issue.completed_at, issue.estimate_point_id AS estimate_point, issue.priority,
         issue.complexity_score, issue.start_date, issue.target_date, issue.sequence_id,
-        issue.project_id, issue.parent_id, issue.assigned_pod_id, issue.agent_executor,
-        issue.created_at, issue.updated_at, issue.created_by_id AS created_by,
-        issue.updated_by_id AS updated_by, issue.is_draft, issue.archived_at,
+        issue.project_id, issue.parent_id, issue.type_id, issue.assigned_pod_id,
+        issue.agent_executor, issue.created_at, issue.updated_at,
+        issue.created_by_id AS created_by, issue.updated_by_id AS updated_by,
+        issue.is_draft, issue.archived_at,
         (CASE WHEN issue.external_source IS NULL OR issue.external_source = '' THEN FALSE
          ELSE (EXISTS (SELECT 1 FROM git_issue_syncs g
                        WHERE g.issue_id = issue.id AND g.deleted_at IS NULL)
@@ -2680,14 +2769,18 @@ async fn serializer_list(
         "SELECT {selects} {} ORDER BY issue.created_at DESC",
         filtered.from_where
     );
-    let rows = fetch_json_rows(&context.pool, &inner, filtered.values.clone()).await?;
+    let mut rows = fetch_json_rows(&context.pool, &inner, filtered.values.clone()).await?;
     let fields: Vec<String> = SERIALIZER_FIELDS
         .iter()
         .map(|name| (*name).to_owned())
         .collect();
     let expands = context.params.expand.clone();
     let mut shaped = Vec::with_capacity(rows.len());
-    for row in &rows {
+    for row in &mut rows {
+        // `is_epic` rides the row map ahead of the field loop (the loop
+        // iterates `SERIALIZER_FIELDS`, so the map's own order is moot).
+        let epic = serializer_is_epic(&context.pool, row.get("type_id")).await?;
+        row.insert("is_epic".to_owned(), Value::Bool(epic));
         let mut body = serializer_row_map(row, &fields, &context.gate.timezone)?;
         if let Some(names) = expands.as_deref() {
             let anchor = expand::ExpandAnchor {
