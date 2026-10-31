@@ -35,22 +35,10 @@ export function MarketingFrame({ children }: MarketingFrameProps): React.ReactEl
 
 export function MarketingHeader(): React.ReactElement {
   return (
-    <header className="relative z-10 border-b border-(--border) bg-(--bg)/80 backdrop-blur">
-      <div className="mx-auto flex w-full max-w-7xl items-center gap-(--space-6) px-(--space-10) py-(--space-4) sm:px-(--space-16)">
-        <a
-          href="/home"
-          aria-label="Pi Dash home"
-          className={`text-body flex shrink-0 items-center gap-(--space-2) font-semibold text-(--text) ${FOCUS_RING}`}
-        >
-          <span
-            aria-hidden="true"
-            className="text-caption flex size-7 items-center justify-center rounded-full bg-(--accent) font-bold text-(--on-accent)"
-          >
-            π
-          </span>
-          Pi Dash
-        </a>
-        <nav aria-label="Primary" className="ml-auto flex min-w-0 items-center gap-(--space-6)">
+    <header className="sticky top-0 z-30 border-b border-(--border) bg-(--bg)/90 backdrop-blur-xl">
+      <div className="mx-auto flex h-16 w-full max-w-7xl items-center gap-(--space-6) px-(--space-10) sm:px-(--space-16)">
+        <BrandMark />
+        <nav aria-label="Primary" className="ml-auto flex min-w-0 items-center gap-(--space-1) sm:gap-(--space-2)">
           {HEADER_LINKS.map((link) => (
             <HeaderLink key={link.label} link={link} />
           ))}
@@ -71,21 +59,45 @@ const RESPONSIVE_CLASS: Readonly<Record<string, string | undefined>> = {
   GitHub: HIDDEN_BELOW_MD,
 };
 
+/** Which fill each header action takes; plain links are quiet until hover. */
+const HEADER_TONE: Readonly<Record<string, string>> = {
+  "Start free":
+    "rounded-(--radius-card) bg-(--accent) px-(--space-4) py-(--space-2) font-semibold text-(--on-accent) hover:bg-(--accent-hover)",
+  "Sign in":
+    "rounded-(--radius-card) border border-(--border) bg-(--surface) px-(--space-4) py-(--space-2) font-semibold text-(--text) hover:bg-(--subtle)",
+};
+
 function HeaderLink({ link }: { link: MarketingLink }): React.ReactElement {
   const responsive = RESPONSIVE_CLASS[link.label] ?? "inline-flex";
-  const emphasis = link.label === "Start free" || link.label === "Sign in";
+  const tone =
+    HEADER_TONE[link.label] ??
+    "rounded-(--radius-card) px-(--space-2) py-(--space-2) text-(--text-muted) hover:bg-(--surface) hover:text-(--text) sm:px-(--space-3)";
   return (
     <a
       href={link.href}
       {...(link.external ? { target: "_blank", rel: "noreferrer noopener" } : {})}
-      className={[
-        "items-center text-body",
-        emphasis ? "font-medium text-(--text)" : "text-(--text-muted) hover:text-(--text)",
-        responsive,
-        FOCUS_RING,
-      ].join(" ")}
+      className={["items-center text-meta transition-colors", tone, responsive, FOCUS_RING].join(" ")}
     >
       {link.label}
+    </a>
+  );
+}
+
+/** Four rounded bars: a dot, a pair of pills and a dot, spelling the mark. */
+function BrandMark(): React.ReactElement {
+  return (
+    <a
+      href="/home"
+      aria-label="Pi Dash home"
+      className={`flex shrink-0 items-center gap-(--space-2) rounded-(--radius-card) text-(--text) ${FOCUS_RING}`}
+    >
+      <span aria-hidden="true" className="flex items-center gap-(--space-1) text-(--accent)">
+        <span className="block size-3 rounded-full bg-current" />
+        <span className="block h-3 w-7 rounded-full bg-current" />
+        <span className="block h-3 w-7 rounded-full bg-current" />
+        <span className="block size-3 rounded-full bg-current" />
+      </span>
+      <span className="text-meta hidden font-semibold min-[400px]:inline">Pi Dash</span>
     </a>
   );
 }
@@ -95,12 +107,12 @@ export function MarketingFooter(): React.ReactElement {
     <footer className="relative z-10 border-t border-(--border) bg-(--bg)">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-(--space-6) px-(--space-10) py-(--space-8) sm:flex-row sm:items-start sm:justify-between sm:px-(--space-16)">
         <div className="flex flex-col gap-(--space-2)">
-          <span className="text-body flex items-center gap-(--space-2) font-semibold text-(--text)">
-            <span
-              aria-hidden="true"
-              className="text-caption flex size-6 items-center justify-center rounded-full bg-(--accent) font-bold text-(--on-accent)"
-            >
-              π
+          <span className="text-meta flex items-center gap-(--space-2) font-semibold text-(--text)">
+            <span aria-hidden="true" className="flex items-center gap-(--space-1) text-(--accent)">
+              <span className="block size-3 rounded-full bg-current" />
+              <span className="block h-3 w-7 rounded-full bg-current" />
+              <span className="block h-3 w-7 rounded-full bg-current" />
+              <span className="block size-3 rounded-full bg-current" />
             </span>
             Pi Dash
           </span>

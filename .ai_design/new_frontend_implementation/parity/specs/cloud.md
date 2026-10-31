@@ -86,10 +86,14 @@ hero's two-column shape and the illustration. Oracle:
 `marketing-home.spec.ts`.
 
 CLOUD-004 — One shared frame (header, footer, page shell) wraps every public
-page (`/home`, `/docs`, `/downloads`, `/pricing`). The header links the
-marketing home (via the brand mark), downloads, docs, pricing, the public
-repository on an external site, sign-in, and a start action that also leads
-to sign-in. The footer repeats the product links (downloads, docs, pricing,
+page (`/home`, `/docs`, `/downloads`, `/pricing`). The header sticks to the
+top of the viewport over a blurred page background and carries a 64px
+content row. The brand mark is a four-piece monogram beside the product name
+(the name stays hidden on the narrowest phones while the monogram keeps the
+supporting link); both link to the marketing home. The actions follow it:
+downloads, docs, pricing, the public repository on an external site, sign-in
+as a bordered action and a start action as a filled accent action that also
+leads to sign-in. The footer repeats the product links (downloads, docs, pricing,
 repository) and adds the terms and privacy destinations on the external
 company site, beside the brand mark and a one-line positioning note. On
 cramped widths the frame degrades by hiding secondary header links rather

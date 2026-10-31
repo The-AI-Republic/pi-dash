@@ -144,7 +144,10 @@ describe("MarketingFrame", () => {
     // Fixed, like the old page: the map stays put while the content scrolls.
     expect(backdropClass).toContain("fixed");
     expect(backdropClass).not.toContain("-z-");
-    for (const layer of [screen.getByRole("banner"), screen.getByRole("main"), screen.getByRole("contentinfo")]) {
+    // The header sticks above the content at a higher layer; the content
+    // and footer sit at z-10, still above the map.
+    expect(screen.getByRole("banner").className).toContain("sticky");
+    for (const layer of [screen.getByRole("main"), screen.getByRole("contentinfo")]) {
       expect(layer.className).toContain("z-10");
     }
     // The tint is the page's text colour behind the map mask, so it reads
