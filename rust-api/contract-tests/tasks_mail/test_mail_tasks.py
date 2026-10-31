@@ -788,3 +788,45 @@ def test_notifications_no_subscriber_description_mention(
     _assert_1285_write_set(
         db_conn, chain, activity, mentioned, removed, "oracle"
     )
+
+
+# PIDASHCONV-1690: a webhook URL carrying HTML metacharacters must render
+# as inert text in the deactivation mail (Django autoescape), in both the
+# HTML part and the text part (strip_tags keeps `&...;` references
+# verbatim). Mirrored case-for-case by
+# test_rust_replay.py::test_rust_deactivation_mail_escapes_url.
+DEACTIVATION_ESCAPE_URL = "https://x.example/?a=<img/src=https://t.example/p.png>&x=1"
+DEACTIVATION_ESCAPE_SENTENCE = (
+    "Webhook https://x.example/?a=&lt;img/src=https://t.example/p.png&gt;&amp;x=1"
+    " has been deactivated due to failed requests."
+)
+
+
+def test_webhook_deactivation_mail_escapes_url(db_conn, broker_url, smtp_sink):
+    """Django: hostile webhook URL arrives escaped in both MIME parts."""
+    owner = seed_helpers.user(db_conn, "contract-deact-esc-owner")
+    receiver = seed_helpers.user(db_conn, "contract-deact-esc-receiver")
+    workspace = seed_helpers.workspace(db_conn, "contractdeactesc", owner["id"])
+    hook = seed_helpers.webhook(
+        db_conn,
+        workspace["id"],
+        DEACTIVATION_ESCAPE_URL,
+        created_by_id=str(owner["id"]),
+    )
+    smtp_sink.clear()
+    celery_wire.publish(
+        f"{M}.webhook_task.send_webhook_deactivation_email",
+        args=[str(hook["id"]), str(receiver["id"]), "example.com", "contract reason"],
+    )
+    delivered = smtp_sink.wait_for_count(1, what="deactivation mail")
+    matches = [m for m in delivered if receiver["email"] in m["rcpt_tos"]]
+    assert matches, "deactivation mail delivered nothing to the receiver"
+    assert matches[0]["subject"] == "Webhook Deactivated"
+    html_part, text_part = _mail_parts(matches[0])
+    assert DEACTIVATION_ESCAPE_SENTENCE in html_part, (
+        f"HTML part misses the escaped sentence; head: {html_part[:400]!r}"
+    )
+    assert "<img/src" not in html_part, "HTML part carries the raw injection"
+    assert DEACTIVATION_ESCAPE_SENTENCE in text_part, (
+        f"text part misses the escaped sentence; head: {text_part[:400]!r}"
+    )
