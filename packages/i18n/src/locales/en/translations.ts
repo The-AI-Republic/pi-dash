@@ -1942,6 +1942,9 @@ export default {
   "Use Pi Dash Cloud Agent by default": "Use Pi Dash Cloud Agent by default",
   "New work items run on the Cloud Agent — no machine required. Turn this off to default to this project's pod instead. Either way both remain selectable per work item.":
     "New work items run on the Cloud Agent — no machine required. Turn this off to default to this project's pod instead. Either way both remain selectable per work item.",
+  Tokens: "Tokens",
+  "Tokens reported across this issue's runs, including one still in progress. A run that ended before reporting usage counts as nothing, so treat this as a floor rather than a billing figure.":
+    "Tokens reported across this issue's runs, including one still in progress. A run that ended before reporting usage counts as nothing, so treat this as a floor rather than a billing figure.",
   "AI agent ticking": "AI agent ticking",
   "When off, no work item in this project is re-run on a timer. Human-started runs (Run AI, Comment & Run) still work.":
     "When off, no work item in this project is re-run on a timer. Human-started runs (Run AI, Comment & Run) still work.",
