@@ -357,6 +357,18 @@ describe("SidebarProjectsGroup loading and empty states", () => {
     expect(h.onCreateProject).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the header affordance's layout space while hidden", () => {
+    // NEWFRONT-1043: the hover-only create button must reserve its box
+    // (visibility) rather than leave layout (display), or the header
+    // row grows on hover and the title text shifts. jsdom has no
+    // layout, so the class contract is the assertion: never `hidden`,
+    // always in flow, revealed by group hover.
+    setup();
+    const button = screen.getByTestId("sidebar-create-project");
+    expect(button).not.toHaveClass("hidden");
+    expect(button).toHaveClass("invisible", "group-hover:visible");
+  });
+
   it("shows guests no creation affordance", () => {
     setup({ projects: [], projectsStatus: "success", canCreateProject: false });
     expect(screen.queryByTestId("sidebar-create-project")).not.toBeInTheDocument();

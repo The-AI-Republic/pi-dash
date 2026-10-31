@@ -147,7 +147,7 @@ export function SidebarProjectsGroup({
             aria-label="Create new project"
             data-testid="sidebar-create-project"
             onClick={onCreateProject}
-            className="hidden cursor-pointer rounded-(--radius-control) p-(--space-1) text-(--text-muted) group-hover:flex hover:bg-(--subtle)"
+            className="invisible flex cursor-pointer rounded-(--radius-control) p-(--space-1) text-(--text-muted) group-hover:visible hover:bg-(--subtle)"
           >
             <Plus size={14} strokeWidth={2} aria-hidden="true" />
           </button>
