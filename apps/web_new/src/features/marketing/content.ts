@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Marketing copy and destinations (CLOUD-003/004/006–009,
-// parity/specs/cloud.md §1–§2). The home strings track the old cloud
-// landing page under the owner's explicit match order (NEWFRONT-1041);
-// that page is AI Republic's own overlay work, not Plane code (process
-// note on NEWFRONT-1). Only the destinations, counts and pinned names
-// are fixed by the oracle (hero actions /login, /downloads, /docs;
-// closing action /login; the repository, terms and privacy leave the
-// app; the stable release URLs; the pricing tier names and prices).
+// parity/specs/cloud.md §1–§2). Copy is ours throughout: the home page
+// follows the old cloud landing page's layout, order and styling under
+// the owner's match order (NEWFRONT-1041), but every string below is
+// written independently — the owner's reuse exception covers only
+// world-map.svg. Only the destinations, counts and pinned names are
+// fixed by the oracle (hero actions /login, /downloads, /docs; closing
+// action /login; the repository, terms and privacy leave the app; the
+// stable release URLs; the pricing tier names and prices).
 
 /** Public repository the open-source panel and frame link to. */
 export const REPOSITORY_URL = "https://github.com/The-AI-Republic/pi-dash";
@@ -67,31 +68,31 @@ export const HERO_HEADLINES = ["Run your own AI", "like a team lead"] as const;
 export const HERO_INTRO =
   "Pi Dash is an orchestration platform for asynchronous software work. You decide what should be done; Pi Dash hands it to an agent, follows the run, and keeps the issue moving until it is finished.";
 
-export const HERO_NOTE = "Free to start · Codex, Claude Code or your preferred agent";
+export const HERO_NOTE = "Start free · Works with Codex, Claude Code, or your own agent";
 
 /** The hero illustration: a representative run, no data and no behavior. */
 export const RUN_PREVIEW = {
   issue: "NEWFRONT-645",
   title: "Cloud marketing surface",
   status: "Running",
-  heading: "Work plan",
+  heading: "Execution plan",
   steps: [
     { label: "Read the issue", state: "done" },
     { label: "Build the sections", state: "done" },
     { label: "Run the checks", state: "active" },
-    { label: "Open code review", state: "queued" },
+    { label: "Request a review", state: "queued" },
   ],
-  runner: { name: "Codex runner · online", note: "Working on an isolated branch of your repository." },
+  runner: { name: "Codex worker · connected", note: "Working on an isolated branch of your repository." },
   activity: {
-    heading: "Live activity",
+    heading: "Latest activity",
     headline: "Sections are in place.",
     body: "Validating the public pages against the built site now.",
   },
   checks: {
-    heading: "Checks",
+    heading: "Verification",
     rows: [
-      { label: "Type check", value: "Passed", state: "done" },
-      { label: "Production build", value: "Running", state: "active" },
+      { label: "Type safety", value: "Passed", state: "done" },
+      { label: "Release build", value: "Running", state: "active" },
     ],
   },
   review: {
@@ -104,7 +105,7 @@ export const RUN_PREVIEW = {
 export const PRODUCT_LOOP: readonly { title: string; body: string }[] = [
   { title: "Durable workpads", body: "Context survives every agent run." },
   { title: "Enrolled runners", body: "Agents work on machines you own." },
-  { title: "Structured escalation", body: "People decide only where it counts." },
+  { title: "Escalation by exception", body: "People decide only where it counts." },
   { title: "Review-ready changes", body: "Code, proof and issue stay linked." },
 ];
 
@@ -151,26 +152,26 @@ export const CAPABILITIES: readonly { title: string; body: string }[] = [
 /** Section headings and supporting lines for the marketing home. */
 export const HOME_SECTIONS = {
   steps: {
-    eyebrow: "From issue to outcome",
-    title: "Stop babysitting terminals. Start finishing work.",
+    eyebrow: "From brief to done",
+    title: "Stop hovering over consoles. Start receiving finished work.",
     intro:
       "Pi Dash gives each agent enough structure to move on its own, and your team a clear record of what happened.",
   },
   capabilities: {
-    eyebrow: "Built for agentic delivery",
-    title: "The control plane between your backlog and your agents.",
+    eyebrow: "Designed for delegated delivery",
+    title: "Mission control for backlogs and the agents working them.",
   },
   openSource: {
-    eyebrow: "Open source",
-    title: "Built in the open. Yours to run.",
-    body: "The Pi Dash core is available under the AGPL-3.0 license. Inspect the code, contribute, or self-host the platform and connect your own machines and agents.",
-    action: "View Pi Dash on GitHub",
+    eyebrow: "Open and self-hostable",
+    title: "Developed in public. Run it yourself.",
+    body: "Pi Dash core ships under AGPL-3.0. Read the source, send improvements, or run the platform yourself with your own hardware and agents.",
+    action: "Explore the Pi Dash repository",
   },
   closing: {
-    eyebrow: "Put an agent on it",
-    title: "Give every good issue a path to done.",
-    body: "Start with a free workspace, connect a development machine, and let Pi Dash coordinate the rest.",
-    action: "Start using Pi Dash",
+    eyebrow: "Start delegating now",
+    title: "Every solid issue deserves a finish line.",
+    body: "Open a no-cost workspace, link a dev machine, and Pi Dash takes it from there.",
+    action: "Get started with Pi Dash",
   },
 } as const;
 

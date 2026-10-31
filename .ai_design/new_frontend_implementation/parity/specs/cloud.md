@@ -65,15 +65,15 @@ asked for them to stay nearly the same rather than for a redesign:
   the app, read the docs — each a 44px rounded button with 20px side padding
   and 16px semibold label, and 16px under them a 14px muted line naming the
   free start and the agent choices. The second column is an illustration of
-  one agent run: an issue header with a running badge, a work-plan list of
-  four labelled steps with done/active/queued marks, a runner status card, a
-  live-activity message, a checks list with passed/running values, and a
-  review card. It stacks its two panels on phones and sits side by side only
+  one agent run: an issue header with a running badge, an execution-plan
+  list of four labelled steps with done/active/queued marks, a runner status
+  card, a latest-activity message, a verification list with passed/running
+  values, and a review card. It stacks its two panels on phones and sits side by side only
   from the medium breakpoint, and it never pushes its own content wider than
   the card. The illustration is presentation only: no links, no buttons, no
   data.
 - Value strip: a banded row of four short highlights (durable workpads,
-  enrolled runners, structured escalation, review-ready changes), two per
+  enrolled runners, exception-based escalation, review-ready changes), two per
   row on narrow screens and four on wide ones. The band fills the viewport
   and its translucent surface lets the world map read through it; inside,
   32px of vertical padding, 14px semibold titles and 13px notes.

@@ -117,6 +117,15 @@ describe("MarketingHome", () => {
     expect(container.querySelector("h1")?.textContent?.length).toBeGreaterThan(0);
   });
 
+  it("stacks the run illustration in one column so phones never scroll sideways", () => {
+    const { container } = render(<MarketingHome />);
+    const hero = sections(container)[0]!;
+    const illustration = within(hero).getByRole("img");
+    const panels = illustration.children[1]!;
+    expect(panels.className).toContain("grid-cols-1");
+    for (const panel of [...panels.children]) expect(panel.className).toContain("min-w-0");
+  });
+
   it("illustrates a representative agent run without data or behavior", () => {
     render(<MarketingHome />);
     const illustration = screen.getByRole("img");
