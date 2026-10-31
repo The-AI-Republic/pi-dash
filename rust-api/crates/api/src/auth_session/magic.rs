@@ -46,9 +46,8 @@
 //!   `X-Forwarded-For` entry is taken unstripped, else `REMOTE_ADDR` (which
 //!   may be absent → NULL stamp columns → 500 on NOT NULL, same as Django's
 //!   `IntegrityError`).
-//! * QUIRK-no-transaction: no `transaction.atomic` anywhere, so the
-//!   project-invite `IntegrityError` (missing `project_id`, kept) still
-//!   500s *after* the workspace-member writes commit.
+//! * QUIRK-no-transaction: no `transaction.atomic` anywhere, so a later
+//!   statement failure still leaves the earlier writes committed.
 //! * QUIRK-csrf-rotate: `login()` rotates the CSRF secret, so success sets
 //!   a fresh 32-char `csrftoken` cookie (`rotate_token` stores the raw
 //!   secret; Django defaults: 1-year age, `/`, `Lax`;
@@ -1016,6 +1015,7 @@ struct WorkspaceInvite {
 /// Invite row for the project arm.
 struct ProjectInvite {
     workspace_id: uuid::Uuid,
+    project_id: uuid::Uuid,
     role: i16,
     created_by_id: Option<uuid::Uuid>,
 }
@@ -1024,10 +1024,10 @@ struct ProjectInvite {
 /// (`utils/workspace_project_join.py:20-91`): workspace joins +
 /// per-workspace cache invalidation and `track_event`, then the project
 /// arm (workspace membership with the mapped role, then the `ProjectMember`
-/// write *as written* — without `project_id`, so an accepted project
-/// invite raises `IntegrityError`, kept), then both invite sets are
-/// soft-deleted. No transaction anywhere: earlier writes stand when a
-/// later one raises (QUIRK-no-transaction).
+/// write *as written* — with each invite's `project_id`, Django main;
+/// PB-1008 retired), then both invite sets are soft-deleted. No
+/// transaction anywhere: earlier writes stand when a later one raises
+/// (QUIRK-no-transaction).
 async fn process_workspace_project_invitations(
     pool: &sqlx::PgPool,
     cache: &Cache,
@@ -1112,9 +1112,10 @@ async fn process_workspace_project_invitations(
         }
     }
 
-    let project_invites: Vec<(uuid::Uuid, i16, Option<uuid::Uuid>)> = sqlx::query_as(
-        "SELECT \"workspace_id\", \"role\", \"created_by_id\" FROM \"project_member_invites\" \
-         WHERE \"email\" = $1 AND \"accepted\" = TRUE AND \"deleted_at\" IS NULL",
+    let project_invites: Vec<(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)> = sqlx::query_as(
+        "SELECT \"workspace_id\", \"project_id\", \"role\", \"created_by_id\" \
+             FROM \"project_member_invites\" \
+             WHERE \"email\" = $1 AND \"accepted\" = TRUE AND \"deleted_at\" IS NULL",
     )
     .bind(&user.email)
     .fetch_all(pool)
@@ -1122,11 +1123,14 @@ async fn process_workspace_project_invitations(
     .map_err(map_err)?;
     let project_invites: Vec<ProjectInvite> = project_invites
         .into_iter()
-        .map(|(workspace_id, role, created_by_id)| ProjectInvite {
-            workspace_id,
-            role,
-            created_by_id,
-        })
+        .map(
+            |(workspace_id, project_id, role, created_by_id)| ProjectInvite {
+                workspace_id,
+                project_id,
+                role,
+                created_by_id,
+            },
+        )
         .collect();
 
     if !project_invites.is_empty() {
@@ -1147,23 +1151,19 @@ async fn process_workspace_project_invitations(
             .await
             .map_err(map_err)?;
 
-        // Ported bug kept (`workspace_project_join.py:76-87`): the
-        // `ProjectMember` write omits `project_id` although the column is
-        // NOT NULL — Postgres raises `IntegrityError` despite
-        // `ignore_conflicts=True`.
+        // `workspace_project_join.py:76-87` sets `project_id` on every
+        // `ProjectMember` row (Django main; PB-1008 retired), so the
+        // join succeeds and the invites are consumed.
         let props: serde_json::Value =
             serde_json::from_str(project_default_props()).map_err(|_| server_error())?;
         let prefs: serde_json::Value =
             serde_json::from_str(project_default_preferences()).map_err(|_| server_error())?;
         let bulk: Vec<pidash_services::domain::projects::members::BulkRow> = project_invites
             .iter()
-            .map(|invite| {
-                pidash_services::domain::projects::members::BulkRow {
+            .map(
+                |invite| pidash_services::domain::projects::members::BulkRow {
                     workspace_id: invite.workspace_id,
-                    // PB-1008: the explicit `NULL` raises the same 23502
-                    // the omitted column raises (identical message,
-                    // identical effect).
-                    project_id: None,
+                    project_id: Some(invite.project_id),
                     user_id: user.id,
                     role: pidash_services::domain::projects::members::RoleBind::Int(i64::from(
                         map_invite_role(invite.role),
@@ -1171,11 +1171,11 @@ async fn process_workspace_project_invitations(
                     created_by: invite.created_by_id,
                     created_at: now,
                     updated_at: now,
-                }
-            })
+                },
+            )
             .collect();
-        // The missing `project_id` raises here when the arm fires — the
-        // earlier writes above already committed (no transaction).
+        // The project bulk runs after every workspace row committed above
+        // (no transaction).
         pidash_services::domain::projects::members::bulk_add(pool, &bulk, &props, &prefs, false)
             .await
             .map_err(map_err)?;
