@@ -10,11 +10,11 @@ import os
 from .conftest import session_headers
 
 PROJECT_VIEW_KEYS = {
-    "access", "archived_at", "created_at", "created_by", "deleted_at",
-    "description", "display_filters", "display_properties", "filters", "id",
-    "is_favorite", "is_locked", "logo_props", "name", "owned_by", "project",
-    "query", "rich_filters", "sort_order", "updated_at", "updated_by",
-    "workspace",
+    "access", "anchor", "archived_at", "created_at", "created_by",
+    "deleted_at", "description", "display_filters", "display_properties",
+    "filters", "id", "is_favorite", "is_locked", "logo_props", "name",
+    "owned_by", "project", "query", "rich_filters", "sort_order",
+    "updated_at", "updated_by", "workspace",
 }
 
 # POST / PATCH serialize the bare instance (no is_favorite annotation);
