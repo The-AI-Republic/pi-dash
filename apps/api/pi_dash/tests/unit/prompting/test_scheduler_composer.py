@@ -94,14 +94,17 @@ def test_cloud_scheduler_turn_renders_project_and_scheduler_identity(binding, cl
     the local scheduler-intro renders — the agent cannot weigh findings or
     de-duplicate sensibly without knowing which project it is running in."""
     project = binding.project
-    project.description = "Internal admin tool for billing operators."
-    project.save(update_fields=["description"])
+    project.description = "Human-facing summary of the billing tool."
+    project.context = "Internal admin tool for billing operators."
+    project.save(update_fields=["description", "context"])
 
     prompt = build_scheduler_turn(binding, cloud_run)
     assert "{%" not in prompt and "{{" not in prompt
     assert project.identifier in prompt
     assert project.name in prompt
-    assert "Internal admin tool for billing operators." in prompt
+    assert "- Project context: Internal admin tool for billing operators." in prompt
+    # the plain description is for humans — it never reaches the prompt
+    assert "Human-facing summary of the billing tool." not in prompt
     assert "Nightly Audit" in prompt
     assert "`nightly-audit`" in prompt
     assert "Scan the repo for issues." in prompt
@@ -112,12 +115,15 @@ def test_cloud_scheduler_turn_renders_project_and_scheduler_identity(binding, cl
 
 
 @pytest.mark.unit
-def test_cloud_scheduler_turn_omits_empty_project_description(binding, cloud_run):
+def test_cloud_scheduler_turn_omits_empty_project_context(binding, cloud_run):
     project = binding.project
-    project.description = ""
-    project.save(update_fields=["description"])
+    project.description = "Only a description, no agent context."
+    project.context = ""
+    project.save(update_fields=["description", "context"])
     prompt = build_scheduler_turn(binding, cloud_run)
+    assert "Project context:" not in prompt
     assert "Project description:" not in prompt
+    assert "Only a description, no agent context." not in prompt
     assert f"Project: {project.name} ({project.identifier})" in prompt
 
 
