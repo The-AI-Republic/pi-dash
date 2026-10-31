@@ -1635,9 +1635,136 @@ mod tests {
             read _
             printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_appr"}}'
             read _
-            printf '%s\n' '{"jsonrpc":"2.0","method":"item/commandExecution/requestApproval","params":{"approval_id":"appr1","command":"danger-cmd","cwd":"/tmp","item_id":"i1","reason":"needs approval"}}'
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"method":"item/commandExecution/requestApproval","params":{"approvalId":"appr1","command":"danger-cmd","cwd":"/tmp","itemId":"i1","reason":"needs approval"}}'
             sleep 5
         "#
+    }
+
+    /// A fake app-server that requests a command approval the way the engine
+    /// does — as a JSON-RPC request — and ends the turn only once that request
+    /// id is answered; the answer picks how the turn ends.
+    fn approval_answer_script() -> &'static str {
+        r#"
+            set -e
+            read _
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+            read _
+            read _
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_appr"}}'
+            read _
+            printf '%s\n' '{"jsonrpc":"2.0","method":"thread/status/changed","params":{"status":{"type":"active","activeFlags":["waitingOnApproval"]}}}'
+            printf '%s\n' '{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"i1","type":"commandExecution","status":"inProgress","command":"danger-cmd","cwd":"/tmp"}}}'
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"method":"item/commandExecution/requestApproval","params":{"command":"danger-cmd","cwd":"/tmp","itemId":"i1","reason":null}}'
+            read answer
+            case "$answer" in
+              '{"jsonrpc":"2.0","id":0,"result":{"decision":"accept"}}') text=ran ;;
+              '{"jsonrpc":"2.0","id":0,"result":{"decision":"acceptForSession"}}') text=ran-session ;;
+              '{"jsonrpc":"2.0","id":0,"result":{"decision":"decline"}}') text=declined ;;
+              *) sleep 5 ;;
+            esac
+            printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"'"$text"'"}}'
+            printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"conclusion":"success"}}'
+            sleep 0.3
+        "#
+    }
+
+    /// Drive one Ask-mode turn against [`approval_answer_script`], deciding
+    /// the approval as soon as it is raised. Returns what the engine said
+    /// after the answer, and how many prompts the UI was sent.
+    async fn decide_approval(decision: ApprovalDecision) -> (String, usize) {
+        let cfg = config();
+        let approvals = ApprovalRouter::new();
+        let cancel = Arc::new(Notify::new());
+        let mut bridge = fake_bridge(approval_answer_script()).await;
+        bridge.warm(&cfg.workspace.working_dir).await.expect("warm");
+
+        let router = approvals.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Some(rec) = router.list_pending().await.first() {
+                    router
+                        .decide(&rec.approval_id, decision, DecisionSource::Local)
+                        .await;
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let mut sink = VecSink::default();
+        let (mut seq, mut started) = (0u64, false);
+        let terminal = tokio::time::timeout(
+            Duration::from_secs(3),
+            drive_turn(
+                DriveCtx {
+                    chat_session_id: Uuid::new_v4(),
+                    message_id: Uuid::new_v4(),
+                    content: "run it".into(),
+                    model: None,
+                    mode: ApprovalMode::Ask,
+                    runner_id: cfg.runner_id,
+                    config: &cfg,
+                    approvals: &approvals,
+                    workspace: &cfg.workspace.working_dir,
+                    cancel: &cancel,
+                },
+                &mut bridge,
+                &mut seq,
+                &mut started,
+                &mut sink,
+            ),
+        )
+        .await
+        .expect("the turn must resume once the approval is decided")
+        .expect("drive turn");
+        match terminal {
+            Response::ChatMessageCompleted { status, .. } => assert_eq!(status, "completed"),
+            other => panic!("expected completed ChatMessageCompleted, got {other:?}"),
+        }
+
+        let prompts = sink
+            .frames
+            .iter()
+            .filter(|f| matches!(f, Response::ChatApprovalRequest { .. }))
+            .count();
+        let said = sink
+            .frames
+            .iter()
+            .filter_map(|f| match f {
+                Response::ChatEvent { kind, payload, .. } if kind == "assistant_delta" => {
+                    payload["params"]["text"].as_str()
+                }
+                _ => None,
+            })
+            .collect();
+        (said, prompts)
+    }
+
+    #[tokio::test]
+    async fn approved_command_resumes_the_turn() {
+        // The engine waits on the response to its request id; before this fix
+        // the answer went out as a notification it never read, so the turn
+        // stayed parked on "waiting for approval".
+        assert_eq!(
+            decide_approval(ApprovalDecision::Accept).await,
+            ("ran".to_string(), 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn approving_for_the_session_resumes_the_turn() {
+        assert_eq!(
+            decide_approval(ApprovalDecision::AcceptForSession).await,
+            ("ran-session".to_string(), 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn denied_command_resumes_the_turn() {
+        assert_eq!(
+            decide_approval(ApprovalDecision::Decline).await,
+            ("declined".to_string(), 1)
+        );
     }
 
     #[tokio::test]
