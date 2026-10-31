@@ -15,7 +15,7 @@
 //! errors. Every probe case is pinned in the unit tests below and in
 //! `contract-tests/app_issues/test_issue_bulk.py`.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -1048,7 +1048,6 @@ async fn missing_ids_error(
         return Ok(());
     }
     missing.sort();
-    missing.dedup();
     Err(Denial::BadError(format!(
         "{label} do not exist: {}",
         missing.join(", ")
@@ -1120,10 +1119,9 @@ async fn apply_bulk_operation(
             .map_err(write_denial)?;
         }
     }
-    let mut live_labels: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
     if let Some(label_ids) = &properties.label_ids {
         if !label_ids.is_empty() {
-            live_labels = union_bridges(
+            union_bridges(
                 &mut txn,
                 "issue_labels",
                 "label_id",
@@ -1137,10 +1135,9 @@ async fn apply_bulk_operation(
             .await?;
         }
     }
-    let mut live_assignees: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
     if let Some(assignee_ids) = &properties.assignee_ids {
         if !assignee_ids.is_empty() {
-            live_assignees = union_bridges(
+            union_bridges(
                 &mut txn,
                 "issue_assignees",
                 "assignee_id",
@@ -1154,10 +1151,9 @@ async fn apply_bulk_operation(
             .await?;
         }
     }
-    let mut live_modules: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
     if let Some(module_ids) = &properties.module_ids {
         if !module_ids.is_empty() {
-            let added = union_module_bridges(
+            let pairs = union_module_bridges(
                 &mut txn,
                 &base.project_id,
                 &project.workspace_id,
@@ -1167,9 +1163,8 @@ async fn apply_bulk_operation(
                 module_ids,
             )
             .await?;
-            live_modules = added.live;
             if let Some(origin) = &origin {
-                for (issue_id, module_id) in &added.pairs {
+                for (issue_id, module_id) in &pairs {
                     let mut requested = Map::new();
                     requested.insert("module_id".to_owned(), Value::String(module_id.to_string()));
                     enqueue_task(
@@ -1252,13 +1247,7 @@ async fn apply_bulk_operation(
     if let Some(origin) = &origin {
         for issue in issues {
             let applied = applied_json(properties, cycle_set);
-            let previous = previous_json(
-                properties,
-                issue,
-                &live_labels,
-                &live_assignees,
-                &live_modules,
-            );
+            let previous = previous_json(properties, issue);
             enqueue_task(
                 &base.pool,
                 ISSUE_ACTIVITY_TASK,
@@ -1284,9 +1273,8 @@ async fn apply_bulk_operation(
     )))
 }
 
-/// Union `label`/`assignee` bridge rows onto the selection, returning the
-/// pre-write live rows per issue (model `-created_at` order, for the
-/// `previous` payloads).
+/// Union `label`/`assignee` bridge rows onto the selection (the view's
+/// `live` set, membership only).
 #[allow(clippy::too_many_arguments)]
 async fn union_bridges(
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -1298,20 +1286,17 @@ async fn union_bridges(
     now: DateTime<Utc>,
     issues: &[IssueRow],
     ids: &[Uuid],
-) -> Result<HashMap<Uuid, Vec<Uuid>>, Denial> {
+) -> Result<(), Denial> {
     let issue_ids: Vec<Uuid> = issues.iter().map(|issue| issue.id).collect();
     let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(&format!(
-        "SELECT issue_id, {column} FROM {table} \
-         WHERE issue_id = ANY($1) AND deleted_at IS NULL ORDER BY created_at DESC"
+        "SELECT issue_id, {column} FROM {table} WHERE issue_id = ANY($1) AND deleted_at IS NULL"
     ))
     .bind(issue_ids.as_slice())
     .fetch_all(&mut **txn)
     .await
     .map_err(|_| Denial::ServerError)?;
-    let mut live: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
     let mut seen: HashSet<(Uuid, Uuid)> = HashSet::new();
     for (issue_id, other_id) in rows {
-        live.entry(issue_id).or_default().push(other_id);
         seen.insert((issue_id, other_id));
     }
     let mut added_issues: Vec<Uuid> = Vec::new();
@@ -1344,16 +1329,11 @@ async fn union_bridges(
         .await
         .map_err(write_denial)?;
     }
-    Ok(live)
+    Ok(())
 }
 
-/// A module-union run: the pre-write live rows plus the added pairs in
-/// enqueue order (issues outer, modules inner).
-struct ModuleUnion {
-    live: HashMap<Uuid, Vec<Uuid>>,
-    pairs: Vec<(Uuid, Uuid)>,
-}
-
+/// A module-union run: the added pairs in enqueue order (issues outer,
+/// modules inner).
 #[allow(clippy::too_many_arguments)]
 async fn union_module_bridges(
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -1363,20 +1343,18 @@ async fn union_module_bridges(
     now: DateTime<Utc>,
     issues: &[IssueRow],
     module_ids: &[Uuid],
-) -> Result<ModuleUnion, Denial> {
+) -> Result<Vec<(Uuid, Uuid)>, Denial> {
     let issue_ids: Vec<Uuid> = issues.iter().map(|issue| issue.id).collect();
     let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
         r#"SELECT issue_id, module_id FROM module_issues
-           WHERE issue_id = ANY($1) AND deleted_at IS NULL ORDER BY created_at DESC"#,
+           WHERE issue_id = ANY($1) AND deleted_at IS NULL"#,
     )
     .bind(issue_ids.as_slice())
     .fetch_all(&mut **txn)
     .await
     .map_err(|_| Denial::ServerError)?;
-    let mut live: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
     let mut seen: HashSet<(Uuid, Uuid)> = HashSet::new();
     for (issue_id, module_id) in rows {
-        live.entry(issue_id).or_default().push(module_id);
         seen.insert((issue_id, module_id));
     }
     let mut pairs: Vec<(Uuid, Uuid)> = Vec::new();
@@ -1409,7 +1387,7 @@ async fn union_module_bridges(
         .await
         .map_err(write_denial)?;
     }
-    Ok(ModuleUnion { live, pairs })
+    Ok(pairs)
 }
 
 /// The cycle-set leg: live rows pointing elsewhere move (a `cycle_id`-only
@@ -1671,14 +1649,10 @@ fn applied_json(properties: &BulkProperties, cycle: Option<Uuid>) -> Map<String,
 }
 
 /// The per-issue `previous` payload: pre-update values for the requested
-/// keys (`str()`, so stored nulls render `"None"`).
-fn previous_json(
-    properties: &BulkProperties,
-    issue: &IssueRow,
-    live_labels: &HashMap<Uuid, Vec<Uuid>>,
-    live_assignees: &HashMap<Uuid, Vec<Uuid>>,
-    live_modules: &HashMap<Uuid, Vec<Uuid>>,
-) -> Map<String, Value> {
+/// scalar keys only (`str()`, so stored nulls render `"None"`). Array
+/// properties never land here — the view builds `_bulk_previous` before
+/// the unions run, so a label-only op carries `{}`.
+fn previous_json(properties: &BulkProperties, issue: &IssueRow) -> Map<String, Value> {
     let mut map = Map::new();
     if properties.state_id.is_some() {
         map.insert("state_id".to_owned(), opt_uuid_json(&issue.state_id));
@@ -1696,36 +1670,6 @@ fn previous_json(
         map.insert(
             "estimate_point".to_owned(),
             opt_uuid_json(&issue.estimate_point_id),
-        );
-    }
-    if properties
-        .label_ids
-        .as_ref()
-        .is_some_and(|ids| !ids.is_empty())
-    {
-        map.insert(
-            "label_ids".to_owned(),
-            uuid_list_json(live_labels.get(&issue.id).map_or(&[], Vec::as_slice)),
-        );
-    }
-    if properties
-        .assignee_ids
-        .as_ref()
-        .is_some_and(|ids| !ids.is_empty())
-    {
-        map.insert(
-            "assignee_ids".to_owned(),
-            uuid_list_json(live_assignees.get(&issue.id).map_or(&[], Vec::as_slice)),
-        );
-    }
-    if properties
-        .module_ids
-        .as_ref()
-        .is_some_and(|ids| !ids.is_empty())
-    {
-        map.insert(
-            "module_ids".to_owned(),
-            uuid_list_json(live_modules.get(&issue.id).map_or(&[], Vec::as_slice)),
         );
     }
     map
@@ -1782,12 +1726,15 @@ fn activity_kwargs(
 }
 
 /// `base_host(request, is_app=True)`: `APP_BASE_URL` when set, else
-/// `WEB_URL` — unset everywhere is a 500 (`ImproperlyConfigured`).
+/// `WEB_URL` — unset everywhere is a 500 (`ImproperlyConfigured`). Empty
+/// strings count as unset (Django truthiness).
 fn activity_origin(state: &AppState) -> Result<String, Denial> {
     let urls = &state.settings().urls;
     urls.app_base_url
-        .clone()
-        .or_else(|| urls.web_url.clone())
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.web_url.as_deref().filter(|s| !s.is_empty()))
+        .map(str::to_owned)
         .ok_or(Denial::ServerError)
 }
 
@@ -2220,16 +2167,22 @@ mod tests {
     #[test]
     fn applied_and_previous_keep_view_order_and_none_strings() {
         let state = Uuid::parse_str("aaaaaaaa-0000-4000-8000-000000000010").unwrap();
+        let other = Uuid::parse_str("aaaaaaaa-0000-4000-8000-000000000011").unwrap();
         let properties = BulkProperties {
             state_id: Some(None),
             priority: Some("high".to_owned()),
             label_ids: Some(vec![]),
+            assignee_ids: Some(vec![other]),
+            module_ids: Some(vec![other]),
             ..BulkProperties::default()
         };
         let applied = applied_json(&properties, None);
         assert_eq!(
             to_spaced_json(&applied).unwrap(),
-            r#"{"state_id": "None", "priority": "high"}"#
+            format!(
+                "{{\"state_id\": \"None\", \"priority\": \"high\", \
+                 \"assignee_ids\": [\"{other}\"], \"module_ids\": [\"{other}\"]}}"
+            )
         );
         let issue = IssueRow {
             id: Uuid::parse_str(IID).unwrap(),
@@ -2239,17 +2192,39 @@ mod tests {
             target_date: None,
             estimate_point_id: None,
         };
-        let previous = previous_json(
-            &properties,
-            &issue,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
-        // The empty input array is falsy: neither payload carries it.
+        let previous = previous_json(&properties, &issue);
+        // The empty input array is falsy (neither payload carries it) and
+        // non-empty arrays land in `applied` only, never `previous`.
         assert_eq!(
             to_spaced_json(&previous).unwrap(),
             format!("{{\"state_id\": \"{state}\", \"priority\": \"none\"}}")
         );
+    }
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    #[test]
+    fn activity_origin_falls_through_empty_strings() {
+        let app = "https://app.example.invalid";
+        let web = "https://web.example.invalid";
+        assert_eq!(
+            activity_origin(&origin_state(Some(app), Some(web))).unwrap(),
+            app
+        );
+        assert_eq!(
+            activity_origin(&origin_state(None, Some(web))).unwrap(),
+            web
+        );
+        assert_eq!(
+            activity_origin(&origin_state(Some(""), Some(web))).unwrap(),
+            web
+        );
+        assert!(activity_origin(&origin_state(Some(""), Some(""))).is_err());
+        assert!(activity_origin(&origin_state(None, None)).is_err());
     }
 }

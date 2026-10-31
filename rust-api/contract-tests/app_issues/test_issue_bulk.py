@@ -350,6 +350,9 @@ def test_arrays_union_onto_existing_rows(clients, seed, db_conn):
             "assignee_ids": [seed["member"], seed["admin"]],
             "module_ids": [mid],
         }
+        # The view builds `_bulk_previous` before the unions run: array
+        # properties never land in the previous payload (no scalars here).
+        assert json.loads(by_type["issue.activity.updated"][0]["current_instance"]) == {}
     finally:
         _delete_issue(member, ws, pid, iid)
         _wipe_test_rows(db_conn, seed["ws"], issue_ids=[iid],
@@ -598,6 +601,12 @@ def test_unknown_reference_fails_batch_untouched(clients, seed, db_conn):
         assert resp.status_code == 400, resp.text
         assert resp.json() == {
             "error": f"Labels do not exist: {', '.join(sorted([missing, other]))}"}
+        # `_missing` sorts but keeps duplicates.
+        resp = member.post(
+            _op_url(ws, pid),
+            json={"issue_ids": [iid], "properties": {"label_ids": [missing, missing]}})
+        assert resp.status_code == 400, resp.text
+        assert resp.json() == {"error": f"Labels do not exist: {missing}, {missing}"}
     finally:
         _delete_issue(member, ws, pid, iid)
         _wipe_test_rows(db_conn, seed["ws"], issue_ids=[iid])
