@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Marketing copy and destinations (CLOUD-003/004/006–009,
-// parity/specs/cloud.md §1–§2). Copy is ours; only the destinations,
-// counts and pinned names are fixed by the oracle (hero actions /login,
-// /downloads, /docs; closing action /login; the repository, terms and
-// privacy leave the app; the stable release URLs; the pricing tier names
-// and prices).
+// parity/specs/cloud.md §1–§2). Copy is ours throughout: the home page
+// follows the old cloud landing page's layout, order and styling under
+// the owner's match order (NEWFRONT-1041), but every string below is
+// written independently — the owner's reuse exception covers only
+// world-map.svg. Only the destinations, counts and pinned names are
+// fixed by the oracle (hero actions /login, /downloads, /docs; closing
+// action /login; the repository, terms and privacy leave the app; the
+// stable release URLs; the pricing tier names and prices).
 
 /** Public repository the open-source panel and frame link to. */
 export const REPOSITORY_URL = "https://github.com/The-AI-Republic/pi-dash";
@@ -51,70 +54,126 @@ export interface HeroAction extends MarketingLink {
 
 /** The three onward actions the hero offers (order is asserted). */
 export const HERO_ACTIONS: readonly HeroAction[] = [
-  { label: "Sign in", href: SIGN_IN_PATH, emphasis: "primary" },
+  { label: "Start free", href: SIGN_IN_PATH, emphasis: "primary" },
   { label: "Download the app", href: "/downloads", emphasis: "secondary" },
   { label: "Read the docs", href: "/docs", emphasis: "secondary" },
 ];
 
+/** Small pill above the hero headline. */
+export const HERO_BADGE = "Pi Dash · AI worker management";
+
+/** Hero headline, one entry per rendered line. */
+export const HERO_HEADLINES = ["Run your own AI", "like a team lead"] as const;
+
+export const HERO_INTRO =
+  "Pi Dash is an orchestration platform for asynchronous software work. You decide what should be done; Pi Dash hands it to an agent, follows the run, and keeps the issue moving until it is finished.";
+
+export const HERO_NOTE = "Start free · Works with Codex, Claude Code, or your own agent";
+
+/** The hero illustration: a representative run, no data and no behavior. */
+export const RUN_PREVIEW = {
+  issue: "NEWFRONT-645",
+  title: "Cloud marketing surface",
+  status: "Running",
+  heading: "Execution plan",
+  steps: [
+    { label: "Read the issue", state: "done" },
+    { label: "Build the sections", state: "done" },
+    { label: "Run the checks", state: "active" },
+    { label: "Request a review", state: "queued" },
+  ],
+  runner: { name: "Codex worker · connected", note: "Working on an isolated branch of your repository." },
+  activity: {
+    heading: "Latest activity",
+    headline: "Sections are in place.",
+    body: "Validating the public pages against the built site now.",
+  },
+  checks: {
+    heading: "Verification",
+    rows: [
+      { label: "Type safety", value: "Passed", state: "done" },
+      { label: "Release build", value: "Running", state: "active" },
+    ],
+  },
+  review: {
+    title: "Ready for review",
+    body: "Branch, commits, tests and issue context stay linked.",
+  },
+} as const;
+
 /** The four highlights under the hero. */
 export const PRODUCT_LOOP: readonly { title: string; body: string }[] = [
-  {
-    title: "Issues in",
-    body: "Every ticket, project and board in one workspace.",
-  },
-  {
-    title: "Agents working",
-    body: "Runners pick up delegated issues and keep going.",
-  },
-  {
-    title: "Checks running",
-    body: "Types, lint and tests gate every change.",
-  },
-  {
-    title: "Reviewed to done",
-    body: "Humans step in only where judgment is needed.",
-  },
+  { title: "Durable workpads", body: "Context survives every agent run." },
+  { title: "Enrolled runners", body: "Agents work on machines you own." },
+  { title: "Escalation by exception", body: "People decide only where it counts." },
+  { title: "Review-ready changes", body: "Code, proof and issue stay linked." },
 ];
 
 /** The four delivery steps, in order. */
 export const DELIVERY_STEPS: readonly { title: string; body: string }[] = [
   {
-    title: "Scope the outcome",
-    body: "Describe the result and the checks that prove it. Acceptance criteria travel with the issue.",
+    title: "State the outcome",
+    body: "One issue carries the goal, the acceptance criteria and the project context.",
   },
   {
     title: "Hand it to a runner",
-    body: "Work is delegated to an agent on a machine you control, with the repository and context it needs.",
+    body: "Pi Dash gives the issue to an agent on a development machine you have connected.",
   },
   {
-    title: "Implement and validate",
-    body: "The agent edits, runs the project's own checks and reports what it changed.",
+    title: "Build and verify",
+    body: "The agent changes the code, runs the project's checks and records its progress as it goes.",
   },
   {
     title: "Review to done",
-    body: "A second pass checks the result against the issue and the specification before it merges.",
+    body: "A review pass checks the result, findings are addressed, and the issue reaches done.",
   },
 ];
 
 /** The four capability entries. */
 export const CAPABILITIES: readonly { title: string; body: string }[] = [
   {
-    title: "Orchestration across the loop",
-    body: "Plan, build, review and test hand off to each other without losing the issue's context.",
+    title: "Issues to pull requests",
+    body: "Planning, execution, validation and review share one workflow and one issue state.",
   },
   {
-    title: "Choose the agent",
-    body: "Different models and coding agents can take different issues; the workflow stays the same.",
+    title: "Your agent, your choice",
+    body: "Pick Codex, Claude Code or another CLI agent per issue without changing how work is scoped.",
   },
   {
-    title: "Runs on your machines",
-    body: "Execution happens on runners you enroll, against repositories you already own.",
+    title: "Your machines, your setup",
+    body: "Runners execute where the repositories, tools and credentials already live.",
   },
   {
-    title: "Human control at the edges",
-    body: "Decisions, escalations and approvals stay with people, on the issues that need them.",
+    title: "Humans where it counts",
+    body: "Agents keep the context and move on their own, escalating only the decisions that need a person.",
   },
 ];
+
+/** Section headings and supporting lines for the marketing home. */
+export const HOME_SECTIONS = {
+  steps: {
+    eyebrow: "From brief to done",
+    title: "Stop hovering over consoles. Start receiving finished work.",
+    intro:
+      "Pi Dash gives each agent enough structure to move on its own, and your team a clear record of what happened.",
+  },
+  capabilities: {
+    eyebrow: "Designed for delegated delivery",
+    title: "Mission control for backlogs and the agents working them.",
+  },
+  openSource: {
+    eyebrow: "Open and self-hostable",
+    title: "Developed in public. Run it yourself.",
+    body: "Pi Dash core ships under AGPL-3.0. Read the source, send improvements, or run the platform yourself with your own hardware and agents.",
+    action: "Explore the Pi Dash repository",
+  },
+  closing: {
+    eyebrow: "Start delegating now",
+    title: "Every solid issue deserves a finish line.",
+    body: "Open a no-cost workspace, link a dev machine, and Pi Dash takes it from there.",
+    action: "Get started with Pi Dash",
+  },
+} as const;
 
 /** Positioning line shared by the hero and the footer. */
 export const POSITIONING_LINE = "Project management that keeps agents working until the work is done.";

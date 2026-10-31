@@ -9,6 +9,8 @@
 // transcribed from the runner install guide.
 import * as React from "react";
 
+import { MarketingColumn } from "./MarketingFrame.js";
+
 import {
   CLI_MSI_URL,
   DOCS_CONCEPTS,
@@ -35,14 +37,14 @@ const FOCUS_RING =
 
 export function MarketingDocs(): React.ReactElement {
   return (
-    <>
+    <MarketingColumn className="py-(--space-8)">
       <DocsHero />
       <ConceptsSection />
       <StepsSection />
       <SkillSection />
       <LoopSection />
       <TrustSection />
-    </>
+    </MarketingColumn>
   );
 }
 

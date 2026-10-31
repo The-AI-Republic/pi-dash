@@ -9,7 +9,7 @@ import * as React from "react";
 import { describe, expect, it } from "vitest";
 
 import { FOOTER_LINKS, HEADER_LINKS, REPOSITORY_URL, TERMS_URL, PRIVACY_URL } from "../content.js";
-import { MarketingFrame } from "./MarketingFrame.js";
+import { MarketingColumn, MarketingFrame } from "./MarketingFrame.js";
 
 function header(): HTMLElement {
   return screen.getByRole("banner");
@@ -135,21 +135,49 @@ describe("MarketingFrame", () => {
       </MarketingFrame>
     );
     const frame = container.firstElementChild as HTMLElement;
-    const backdrop = container.querySelector("[data-marketing-backdrop]") as SVGElement;
-    // SVG elements expose className as an object, so read the attribute.
+    const backdrop = container.querySelector("[data-marketing-backdrop]") as HTMLElement;
     const backdropClass = backdrop.getAttribute("class") ?? "";
     // Isolation keeps the backdrop's z-index scoped to this frame, and the
     // content layer above it (z-10) leaves the illustration visible.
     expect(frame.className).toContain("isolate");
     expect(backdropClass).toContain("z-0");
-    expect(backdropClass).toContain("absolute");
+    // Fixed, like the old page: the map stays put while the content scrolls.
+    expect(backdropClass).toContain("fixed");
     expect(backdropClass).not.toContain("-z-");
-    for (const layer of [screen.getByRole("banner"), screen.getByRole("main"), screen.getByRole("contentinfo")]) {
+    // The header sticks above the content at a higher layer; the content
+    // and footer sit at z-10, still above the map.
+    expect(screen.getByRole("banner").className).toContain("sticky");
+    for (const layer of [screen.getByRole("main"), screen.getByRole("contentinfo")]) {
       expect(layer.className).toContain("z-10");
     }
-    // The backdrop carries no color of its own, so the illustration inherits
-    // the page's text colour instead of painting black on black.
-    expect(backdropClass).toContain("text-(--text)");
+    // The tint is the page's text colour behind the map mask, so it reads
+    // in both light and dark themes instead of painting black on black.
+    expect(backdropClass).toContain("bg-(--text)");
+  });
+
+  it("gives every page one shared content column the bands can run past", () => {
+    const { container } = render(
+      <MarketingColumn>
+        <p>page</p>
+      </MarketingColumn>
+    );
+    const column = container.firstElementChild as HTMLElement;
+    // Same gutter as the header and footer, so a banded section can fill
+    // the viewport while its text still lines up with the chrome.
+    expect(column.className).toContain("mx-auto w-full max-w-7xl px-5 sm:px-8");
+    expect(column.querySelector("p")?.textContent).toBe("page");
+  });
+
+  it("leaves the main landmark full width so a section can paint a band", () => {
+    render(
+      <MarketingFrame>
+        <p>page</p>
+      </MarketingFrame>
+    );
+    const main = screen.getByRole("main");
+    expect(main.className.split(" ")).toContain("relative");
+    expect(main.className).not.toContain("max-w-7xl");
+    expect(main.className).not.toContain("px-5");
   });
 
   it("keeps the exported link sets in the order the frame renders", () => {
