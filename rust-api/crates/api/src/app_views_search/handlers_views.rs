@@ -2508,10 +2508,9 @@ async fn fetch_project_view(
     }
 }
 
-/// `GET .../views/<pk>/` (`:308-341`): PROJECT ADMIN/MEMBER/GUEST plus
-/// the in-body guest recheck (`:317-331`, error string verbatim). Unknown
-/// pk answers the `get_initial()` 200 for members; a guest without
-/// view-all crashes on the `owned_by` deref first (B1b → generic 500).
+/// `GET .../views/<pk>/` (`:308-344` on main): PROJECT ADMIN/MEMBER/GUEST
+/// plus the in-body guest recheck (`:320-334`, error string verbatim).
+/// Unknown pk 404s before the project fetch and the recheck (VIEW-022).
 async fn project_retrieve(
     State(state): State<AppState>,
     Path((slug, project_raw, pk)): Path<(String, String, String)>,
@@ -2539,34 +2538,26 @@ async fn project_retrieve(
         &parse_pk(&pk).unwrap_or(uuid::Uuid::nil()),
     )
     .await?;
-    let project = project_row(&pool, &project_id).await?;
-    // The guest recheck order is load-bearing (B1b): the `owned_by`
-    // deref runs before any missing-row branch — a missing row under a
-    // guest without view-all answers the `AttributeError` 500, which the
-    // gate already encodes as its `Missing` arm.
-    let lookup = match &row {
-        Some(map) => {
-            // `owned_by` is non-nullable; a parse miss can only be a
-            // corrupt row, which reads as not-owned (the 403 arm), never
-            // as the B1b missing-row crash.
-            let owned_by = map
-                .get("owned_by_id")
-                .and_then(|value| value.as_str())
-                .and_then(|raw| raw.parse::<uuid::Uuid>().ok())
-                .unwrap_or(uuid::Uuid::nil());
-            permissions::ProjectViewLookup::Found {
-                is_owner: owned_by == user_id,
-            }
-        }
-        None => permissions::ProjectViewLookup::Missing,
-    };
-    permissions::project_view_retrieve_guest_gate(&member, project.guest_view_all_features, lookup)
-        .map_err(gate_denial)?;
+    // VIEW-022: the row miss 404s before anything else — ahead of the
+    // project fetch, the guest recheck, and the recent-visit enqueue.
     let Some(map) = row else {
-        // Same `get_initial()` 200 as the workspace retrieve (B1's body);
-        // only the guest-without-view-all branch crashes first (B1b).
-        return Ok(json_response(StatusCode::OK, MISSING_VIEW_BODY.to_owned()));
+        return Err(gate_denial(permissions::project_view_not_found()));
     };
+    let project = project_row(&pool, &project_id).await?;
+    // `owned_by` is non-nullable; a parse miss can only be a corrupt row,
+    // which reads as not-owned (the 403 arm).
+    let is_owner = map
+        .get("owned_by_id")
+        .and_then(|value| value.as_str())
+        .and_then(|raw| raw.parse::<uuid::Uuid>().ok())
+        .unwrap_or(uuid::Uuid::nil())
+        == user_id;
+    permissions::project_view_retrieve_guest_gate(
+        &member,
+        project.guest_view_all_features,
+        is_owner,
+    )
+    .map_err(gate_denial)?;
     let is_favorite = map.get("is_favorite").and_then(Value::as_bool);
     let rendered = shape_view(&map, is_favorite, &timezone);
     let emit = pidash_services::app_views_search::tasks::issue_view_retrieve_emit(
