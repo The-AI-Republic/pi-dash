@@ -1327,6 +1327,106 @@ class AgentRunYieldAPIEndpoint(BaseAPIView):
         )
 
 
+class AgentRunReleasePinAPIEndpoint(BaseAPIView):
+    """``POST /workspaces/<slug>/agent-runs/<run_id>/release-pin/`` — unstick a pin.
+
+    The token-facing twin of the web
+    :class:`~pi_dash.runner.views.runs.AgentRunReleasePinEndpoint`, reached
+    from the CLI as ``pidash run release-pin <run>``. It exists because a bad
+    pin used to be unrecoverable without DB access: the ticker skips the issue
+    (a QUEUED run counts as active), ``run-ai`` answers 409
+    ``active_run_exists``, and the web hatch needs a browser session. An agent
+    coordinator can now clear the pin from a terminal (PDASHOSS01-272).
+
+    The automatic over-budget release in ``matcher.next_assignable_for_runner``
+    handles the common case, but only when some runner in the pod is idle. On
+    a fully-busy pod this is the recovery path.
+
+    Responses:
+    - 200 with ``{ok, run_id, previous_pinned_runner_id}`` when the pin was cleared.
+    - 404 when the run is not in this workspace, or the caller may not act on it.
+    - 409 when the run is not QUEUED, is not pinned, or is a Cloud Agent run.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        operation_id="release_agent_run_pin",
+        summary="Release a queued run's runner pin",
+        description=(
+            "Clear ``pinned_runner`` on a QUEUED agent run so any eligible runner in "
+            "its pod can take it, and drop the parent run's stale resume handle. Use "
+            "when a run is stuck behind a runner that will not free up."
+        ),
+        tags=["Work Items"],
+        request=None,
+        parameters=[WORKSPACE_SLUG_PARAMETER],
+        responses={
+            200: OpenApiResponse(description="Pin released"),
+            404: OpenApiResponse(description="Run not found"),
+            409: OpenApiResponse(description="Run is not a pinned, queued local run"),
+        },
+    )
+    def post(self, request, slug, run_id):
+        from pi_dash.core.permissions import is_workspace_member
+
+        # ``_can_view_run`` is the one definition of "may this user act on
+        # this run" (creator, runner owner, issue creator/assignee, workspace
+        # admin, with the private-runner gate). The web release-pin hatch
+        # gates on exactly this, and the two surfaces must not diverge.
+        from pi_dash.runner.models import AgentRun, AgentRunStatus
+        from pi_dash.runner.services import matcher
+        from pi_dash.runner.views.runs import _can_cancel_run
+
+        run = (
+            AgentRun.objects.select_related("workspace", "runner", "pinned_runner", "parent_run")
+            .filter(pk=run_id, workspace__slug=slug)
+            .first()
+        )
+        if run is None or not is_workspace_member(request.user, run.workspace_id):
+            return Response({"error": "run not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not _can_cancel_run(request.user, run):
+            return Response({"error": "run not found"}, status=status.HTTP_404_NOT_FOUND)
+        if run.executor_kind == "cloud_agent":
+            return Response(
+                {"error": "Cloud Agent runs cannot be pinned", "code": "executor_not_local"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        with transaction.atomic():
+            # No ``select_related("parent_run")`` here: it is a nullable FK,
+            # so Django plans a LEFT JOIN and Postgres refuses ``FOR UPDATE``
+            # over the nullable side of an outer join. ``clear_run_pin``
+            # loads the parent lazily instead.
+            locked = AgentRun.objects.select_for_update().filter(pk=run_id).first()
+            if locked is None:
+                return Response({"error": "run not found"}, status=status.HTTP_404_NOT_FOUND)
+            if locked.status != AgentRunStatus.QUEUED:
+                return Response(
+                    {"error": "run not queued", "code": "not_queued"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if locked.pinned_runner_id is None:
+                return Response(
+                    {"error": "run not pinned", "code": "not_pinned"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            previous_runner_id = matcher.clear_run_pin(locked)
+            pod_id = locked.pod_id
+
+        if pod_id is not None:
+            transaction.on_commit(lambda pid=pod_id: matcher.drain_pod_by_id(pid))
+        return Response(
+            {
+                "ok": True,
+                "run_id": str(run_id),
+                "work_item_id": str(run.work_item_id) if run.work_item_id else None,
+                "previous_pinned_runner_id": str(previous_runner_id),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class LabelListCreateAPIEndpoint(BaseAPIView):
     """Label List and Create Endpoint"""
 

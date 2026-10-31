@@ -15,6 +15,7 @@ from pi_dash.api.views import (
     IssueReTickAPIEndpoint,
     IssueRunAiAPIEndpoint,
     IssueWaitAPIEndpoint,
+    AgentRunReleasePinAPIEndpoint,
     AgentRunYieldAPIEndpoint,
     IssueLinkListCreateAPIEndpoint,
     IssueLinkDetailAPIEndpoint,
@@ -149,6 +150,11 @@ new_url_patterns = [
         "workspaces/<str:slug>/agent-runs/<uuid:run_id>/yield/",
         AgentRunYieldAPIEndpoint.as_view(http_method_names=["post"]),
         name="agent-run-yield",
+    ),
+    path(
+        "workspaces/<str:slug>/agent-runs/<uuid:run_id>/release-pin/",
+        AgentRunReleasePinAPIEndpoint.as_view(http_method_names=["post"]),
+        name="agent-run-release-pin",
     ),
     path(
         "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/links/",

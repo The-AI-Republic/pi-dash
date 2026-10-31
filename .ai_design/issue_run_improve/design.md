@@ -445,6 +445,50 @@ Drain is invoked at three moments:
     that sets `pinned_runner_id = NULL`. The MVP-correct answer is operator-
     driven, not a TTL — TTLs silently lose the resume benefit and are easy
     to misconfigure.
+- **Pinned runner online but busy for hours** (added by PDASHOSS01-272,
+  superseding the "no TTL" call above). The pin is now bounded by a **pin
+  wait budget**: `Pod.pin_wait_budget_secs`, defaulting to the instance-wide
+  `RUNNER_PIN_WAIT_BUDGET_SECS` (600s); `0` restores the unbounded strict
+  pin. The release is _opportunity-driven_ rather than a timer, which is what
+  answers the original objection — `matcher.releasable_overbudget_pin_ids`
+  only nominates candidates, and `matcher.next_assignable_for_runner` only
+  takes one when a specific idle runner is picking work, so the pin is never
+  broken unless there is somewhere better for the run to go, and a pin whose
+  runner is idle-and-assignable is honoured regardless of the budget. Prod
+  incident: 13 runs queued 30 min – 9.5 h behind 10 busy runners while 6 sat
+  idle. Managed (desktop-bundled) pins are exempt — an unpinned managed run
+  is unservable by construction.
+
+  An over-budget candidate competes with the pod queue on `created_at`
+  rather than trailing behind it. The candidate ids are folded into
+  `next_for_runner`'s rank (0 = pinned to this runner, 1 = the unpinned pod
+  queue _and_ any over-budget pin, then FIFO by age). Releasing only after
+  `next_for_runner` came up empty — the first shape — made a released pin the
+  lowest-priority work in the pod, so on a congested pod the ticker's steady
+  supply of newer unpinned runs took every idle slot ahead of it and the
+  starvation had no bound.
+
+- **Pinned runner just failed the work** (PDASHOSS01-272, from the
+  PIDASHCONV-491 post-mortem). A retry is not pinned back to a runner the
+  parent run died on for an infra or startup reason:
+  `orchestration.service._parent_failed_on_its_runner` is true for a FAILED
+  parent that either never reported `started_at` (the Assign landed but the
+  agent never came up — the PIDASHCONV-491 run died on a `muse exec`
+  startup timeout) or carries an infra `error_code`
+  (`heartbeat_reaped`, `dispatch_timeout`, `runner_revoked`). A parent that
+  started and _then_ failed keeps the pin: the failure is about the work, so
+  repo locality still wins. The budget above bounds a bad pin, but only while
+  some runner in the pod is idle, so not choosing the bad pin is the real fix.
+- **Recovering a stuck pin without DB access.** The release-pin action is
+  exposed to tokens as well as browsers:
+  `POST /api/v1/workspaces/<slug>/agent-runs/<run_id>/release-pin/`, reached
+  from the CLI as `pidash run release-pin <run>`. It exists because the other
+  routes are all closed: the ticker skips the issue (a QUEUED run counts as
+  active), `run-ai` answers 409 `active_run_exists`, and the web hatch needs a
+  session cookie. All three release paths — web hatch, API/CLI hatch and the
+  automatic over-budget release — go through `matcher.clear_run_pin`, so
+  "pin cleared plus the parent's stale `thread_id` dropped" has one
+  definition.
 - **Multiple paused conversations on the same agent.** issue001, issue003 both
   paused on agentA, both get human comments. R001b and R003b both pin to
   agentA. When agentA finishes issue002, FIFO by `created_at` of the new run
@@ -704,7 +748,9 @@ becomes a fallback rather than the primary mechanism.
   R_next normally. No separate pending-comment storage.
 - Transcript-replay fallback (§6.5).
 - `IssueConversation` entity (one-thread-per-issue is sufficient for v1).
-- TTL-based pin release (§5.7) — operator-driven is enough for v1.
+- ~~TTL-based pin release (§5.7) — operator-driven is enough for v1.~~
+  Reversed by PDASHOSS01-272: the pin now carries a per-pod wait budget and
+  is released to an idle runner past it. See §5.7.
 - Cross-issue / cross-conversation memory.
 - Smarter prompt for fresh-context-from-issue beyond "read the issue + the
   prior handoff comment."
