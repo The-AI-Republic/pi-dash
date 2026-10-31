@@ -17,6 +17,8 @@
 //!   [`LIVE_STATE_SELECT_SQL`], [`LIVE_STATE_INSERT_SQL`],
 //!   [`live_state_update_sql`]. (`normalize_usage` is
 //!   [`super::usage::normalize_usage`], re-exported from D-15 L1.)
+//! * `apply_hello` stale-busy reconcile (`:149-164`, PDASHOSS01-231)
+//!   → [`should_release_on_open`], [`release_on_open_log`].
 //! * `mark_runner_online` / `mark_runner_offline`
 //!   (`:454-459`) → [`MARK_RUNNER_ONLINE_SQL`],
 //!   [`MARK_RUNNER_OFFLINE_SQL`].
@@ -626,6 +628,25 @@ pub fn parse_in_flight_id(in_flight: Option<&Value>) -> Option<String> {
         other => py_str(other),
     };
     parse_uuid_arg(&text).map(|id| id.to_string())
+}
+
+/// The `apply_hello` stale-busy reconcile gate (`:149-164`,
+/// PDASHOSS01-231): `if not body.get("in_flight_run")` — Python
+/// truthiness of the raw value, so any truthy value (even an
+/// unparseable id) skips the release. When it passes, the open
+/// transaction runs
+/// [`RELEASE_RUNNER_IF_IDLE_SQL`](super::drain::RELEASE_RUNNER_IF_IDLE_SQL)
+/// after the reaper and logs [`release_on_open_log`] when a row
+/// flipped. No drain is scheduled: dispatch still waits for the
+/// session's first poll.
+pub fn should_release_on_open(in_flight: Option<&Value>) -> bool {
+    !in_flight.is_some_and(py_truthy)
+}
+
+/// The info line `apply_hello` logs when the reconcile flipped a
+/// stale `busy` runner back to `online`.
+pub fn release_on_open_log(runner_id: &uuid::Uuid) -> String {
+    format!("session open released stale busy runner {runner_id} back to online")
 }
 
 /// The statuses the reaper may reap (`:197-204`): [`BUSY_STATUSES`]
@@ -1861,6 +1882,37 @@ mod tests {
         );
         assert_eq!(OFFLINE_GRACE_SECS, 60);
         assert_eq!(ASSIGN_DELIVERY_GRACE_SECS, 60);
+    }
+
+    #[test]
+    fn release_on_open_follows_python_truthiness() {
+        // Absent / falsy: release.
+        assert!(should_release_on_open(None));
+        for falsy in [
+            serde_json::json!(null),
+            serde_json::json!(""),
+            serde_json::json!(0),
+            serde_json::json!(false),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            assert!(should_release_on_open(Some(&falsy)), "{falsy}");
+        }
+        // Truthy, parseable or not: keep busy.
+        for truthy in [
+            serde_json::json!("7f0a8e4c-2f0e-4a51-9c1e-3a3b2f1b9d10"),
+            serde_json::json!("bogus"),
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!(["x"]),
+        ] {
+            assert!(!should_release_on_open(Some(&truthy)), "{truthy}");
+        }
+        let runner = uuid::Uuid::nil();
+        assert_eq!(
+            release_on_open_log(&runner),
+            "session open released stale busy runner 00000000-0000-0000-0000-000000000000 back to online"
+        );
     }
 
     #[test]
