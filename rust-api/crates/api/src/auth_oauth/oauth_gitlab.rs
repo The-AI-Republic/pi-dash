@@ -51,9 +51,9 @@
 //!   kept verbatim, including the `check_sync_enabled() and not
 //!   is_signup` gate that therefore syncs newly created users only,
 //!   never existing ones.
-//! - B5 (`workspace_project_join.py:76-87`, also in `PORTED_BUGS`):
-//!   `ProjectMember` bulk_create omits the non-nullable `project_id`, so
-//!   any accepted project invite turns the callback into a 500.
+//! - B5 retired (PIDASHCONV-1686):
+//!   `workspace_project_join.py:76-87` sets `project_id` on every
+//!   `ProjectMember` row (Django main), so the join succeeds.
 //! - B6 (`adapter/oauth.py:134-140`): `create_update_account` swallows
 //!   `DatabaseError`/`IntegrityError` (logs only); ported as
 //!   `UpsertOutcome::ErrorSwallowed`.
@@ -1407,6 +1407,7 @@ async fn enqueue_track_event(
 /// Accepted project invites (`workspace_project_join.py:59`).
 struct ProjectInvite {
     workspace_id: uuid::Uuid,
+    project_id: uuid::Uuid,
     role: i16,
     created_by_id: Option<uuid::Uuid>,
 }
@@ -1415,8 +1416,8 @@ async fn accepted_project_invites(
     pool: &PgPool,
     email: &str,
 ) -> Result<Vec<ProjectInvite>, Denial> {
-    let rows: Vec<(uuid::Uuid, i16, Option<uuid::Uuid>)> = sqlx::query_as(
-        r#"SELECT "workspace_id", "role", "created_by_id"
+    let rows: Vec<(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)> = sqlx::query_as(
+        r#"SELECT "workspace_id", "project_id", "role", "created_by_id"
            FROM "project_member_invites"
            WHERE "email" = $1 AND "accepted" = TRUE AND "deleted_at" IS NULL"#,
     )
@@ -1426,11 +1427,14 @@ async fn accepted_project_invites(
     .map_err(|_| Denial::ServerError)?;
     Ok(rows
         .into_iter()
-        .map(|(workspace_id, role, created_by_id)| ProjectInvite {
-            workspace_id,
-            role,
-            created_by_id,
-        })
+        .map(
+            |(workspace_id, project_id, role, created_by_id)| ProjectInvite {
+                workspace_id,
+                project_id,
+                role,
+                created_by_id,
+            },
+        )
         .collect())
 }
 
@@ -1458,6 +1462,7 @@ async fn process_invitations(
             .iter()
             .map(|invite| MemberRow {
                 workspace_id: invite.workspace_id,
+                project_id: None,
                 member_id: user_id,
                 role: invite.role,
                 created_by_id: None,
@@ -1485,6 +1490,7 @@ async fn process_invitations(
             .iter()
             .map(|invite| MemberRow {
                 workspace_id: invite.workspace_id,
+                project_id: None,
                 member_id: user_id,
                 role: pidash_services::auth_session::queries::map_invite_role(i32::from(
                     invite.role,
@@ -1495,15 +1501,16 @@ async fn process_invitations(
         now,
     )
     .await?;
-    // B5: `project_id` is missing (non-nullable) — this raises
-    // `IntegrityError` whenever project invites exist, and the
-    // callback answers 500.
+    // `workspace_project_join.py:76-87` sets `project_id` on every
+    // `ProjectMember` row (Django main; PB-1008 retired), so the join
+    // succeeds and the invites are consumed.
     bulk_insert_project_members(
         pool,
         &proj_invites
             .iter()
             .map(|invite| MemberRow {
                 workspace_id: invite.workspace_id,
+                project_id: Some(invite.project_id),
                 member_id: user_id,
                 role: pidash_services::auth_session::queries::map_invite_role(i32::from(
                     invite.role,
@@ -1574,6 +1581,9 @@ async fn accepted_workspace_invites(
 /// One workspace-membership row for the bulk creates below.
 struct MemberRow {
     workspace_id: uuid::Uuid,
+    /// The invite's project, `Some` on the project arm only (the
+    /// workspace bulk ignores it).
+    project_id: Option<uuid::Uuid>,
     member_id: uuid::Uuid,
     role: i16,
     created_by_id: Option<uuid::Uuid>,
@@ -1612,10 +1622,8 @@ async fn bulk_insert_workspace_members(
 }
 
 /// `ProjectMember.objects.bulk_create(..., ignore_conflicts=True)`
-/// (`workspace_project_join.py:76-87`): the same full column set
-/// MINUS `project_id` (B5 — the constructor never sets `project`, so
-/// the non-nullable column raises `IntegrityError` on Postgres
-/// despite `ignore_conflicts=True`, and the callback answers 500).
+/// (`workspace_project_join.py:76-87`): the same full column set with
+/// each invite's `project_id` (Django main; PB-1008 retired).
 async fn bulk_insert_project_members(
     pool: &PgPool,
     rows: &[MemberRow],
@@ -1631,7 +1639,7 @@ async fn bulk_insert_project_members(
         .map(
             |member| pidash_services::domain::projects::members::BulkRow {
                 workspace_id: member.workspace_id,
-                project_id: None,
+                project_id: member.project_id,
                 user_id: member.member_id,
                 role: pidash_services::domain::projects::members::RoleBind::Int(i64::from(
                     member.role,
