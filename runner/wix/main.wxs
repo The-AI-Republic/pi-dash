@@ -94,6 +94,8 @@
               relying on cmd.exe being found via PATH.
             -->
             <Directory Id='System64Folder'/>
+            <!-- For [SystemFolder] in the 32-bit WixQuietExec command line. -->
+            <Directory Id='SystemFolder'/>
 
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
                 <Directory Id='APPLICATIONFOLDER' Name='pidash'>
@@ -276,6 +278,138 @@
             Execute='immediate'
             Impersonate='yes'
             Return='asyncNoWait'/>
+
+        <!--
+          The runner (`pidash.exe __run`, started by the PiDash logon task)
+          keeps pidash.exe in use, so an upgrade or uninstall would end in
+          "Files in Use" and a reboot. pidash-msi-lifecycle.ps1 stops it before
+          InstallValidate checks for files in use and starts it again
+          afterwards; see that script for the details. It is embedded as the
+          PidashLifecycleRun property (pidash-msi-lifecycle.wxi, regenerated
+          by runner/tests/pidash_msi_lifecycle_test.ps1 -Update) because Stop
+          runs before the new files exist and rollback runs after they are
+          gone.
+
+          Every action goes through WixQuietExec64 where possible so the
+          helper's output lands in the verbose MSI log. All are best-effort:
+          if one fails, Windows falls back to its usual files-in-use handling.
+        -->
+        <?include pidash-msi-lifecycle.wxi ?>
+
+        <!--
+          Stop is immediate so it runs before InstallValidate, which means it
+          runs as the installing user. That is enough: the user can end their
+          own runner even when the logon task itself is read-only for them
+          (it was created from an elevated prompt). WixQuietExec formats this
+          property itself, so it is a plain Property rather than SetProperty,
+          which would format it a second time.
+        -->
+        <Property
+            Id='WixQuietExec64CmdLine'
+            Value='"[System64Folder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "[PidashLifecycleRun] -Mode Stop -BinDir &apos;[Bin]&apos;"'/>
+        <CustomAction
+            Id='PidashStopRunner'
+            BinaryKey='WixCA'
+            DllEntry='WixQuietExec64'
+            Execute='immediate'
+            Return='ignore'/>
+
+        <!--
+          Restart runs as SYSTEM because only SYSTEM (or an administrator) can
+          start a logon task created from an elevated prompt. As a commit
+          action it runs only once the upgrade has succeeded; the rollback copy
+          starts the old runner again if the upgrade or uninstall fails.
+        -->
+        <SetProperty
+            Id='PidashRestartRunner'
+            Value='"[System64Folder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "[PidashLifecycleRun] -Mode Restart -BinDir &apos;[Bin]&apos;"'
+            Before='PidashRestartRunner'
+            Sequence='execute'/>
+        <CustomAction
+            Id='PidashRestartRunner'
+            BinaryKey='WixCA'
+            DllEntry='WixQuietExec64'
+            Execute='commit'
+            Impersonate='no'
+            Return='ignore'/>
+        <SetProperty
+            Id='PidashRestartRunnerOnRollback'
+            Value='"[System64Folder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "[PidashLifecycleRun] -Mode Restart -BinDir &apos;[Bin]&apos;"'
+            Before='PidashRestartRunnerOnRollback'
+            Sequence='execute'/>
+        <CustomAction
+            Id='PidashRestartRunnerOnRollback'
+            BinaryKey='WixCA'
+            DllEntry='WixQuietExec64'
+            Execute='rollback'
+            Impersonate='no'
+            Return='ignore'/>
+
+        <!--
+          A cancel or error ends the install before (or instead of) the
+          rollback restart, for example cancelling the Files in Use dialog for
+          an open `pidash tui`, or an install-time error. These run as the
+          installing user, so an admin-owned logon task may refuse to start;
+          the helper then logs how to start Pi Dash by hand.
+
+          WixQuietExec consumes its command-line property, and Stop already
+          used WixQuietExec64CmdLine, so these use the 32-bit entry point and
+          its own property. Only one of cancel and error happens per install,
+          so they share it. A plain EXE action is not an option: msiexec ends
+          its console with Ctrl+C (0xC000013A) before the helper finishes.
+        -->
+        <Property
+            Id='WixQuietExecCmdLine'
+            Value='"[SystemFolder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "[PidashLifecycleRun] -Mode Restart -BinDir &apos;[Bin]&apos;"'/>
+        <CustomAction
+            Id='PidashRestartRunnerOnCancel'
+            BinaryKey='WixCA'
+            DllEntry='WixQuietExec'
+            Execute='immediate'
+            Return='ignore'/>
+        <CustomAction
+            Id='PidashRestartRunnerOnError'
+            BinaryKey='WixCA'
+            DllEntry='WixQuietExec'
+            Execute='immediate'
+            Return='ignore'/>
+
+        <!--
+          A real uninstall removes the logon task that starts this MSI's
+          pidash.exe, as SYSTEM just before RemoveFiles. The helper checks the
+          task's executable so another Pi Dash installation's task survives.
+        -->
+        <SetProperty
+            Id='RemovePidashTaskOnUninstall'
+            Value='"[System64Folder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "[PidashLifecycleRun] -Mode Uninstall -BinDir &apos;[Bin]&apos;"'
+            Before='RemovePidashTaskOnUninstall'
+            Sequence='execute'/>
+        <CustomAction
+            Id='RemovePidashTaskOnUninstall'
+            BinaryKey='WixCA'
+            DllEntry='WixQuietExec64'
+            Execute='deferred'
+            Impersonate='no'
+            Return='ignore'/>
+
+        <!--
+          Stop and its recovery run on upgrades and real uninstalls, but not in
+          the nested uninstall of the old product during an upgrade
+          (UPGRADINGPRODUCTCODE): the new product's own actions cover that.
+          The rollback restart has to follow RemoveExistingProducts: Windows
+          Installer rejects the package (error 2613) when anything sits between
+          InstallInitialize and RemoveExistingProducts. A failure inside the
+          old version's removal is rolled back by that nested uninstall, and
+          the error recovery below then starts the runner again.
+        -->
+        <InstallExecuteSequence>
+            <Custom Action='PidashStopRunner' Before='InstallValidate'>(WIX_UPGRADE_DETECTED AND NOT (REMOVE~="ALL")) OR (REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE)</Custom>
+            <Custom Action='PidashRestartRunnerOnRollback' After='RemoveExistingProducts'>(WIX_UPGRADE_DETECTED AND NOT (REMOVE~="ALL")) OR (REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE)</Custom>
+            <Custom Action='RemovePidashTaskOnUninstall' Before='RemoveFiles'>REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+            <Custom Action='PidashRestartRunner' Before='InstallFinalize'>WIX_UPGRADE_DETECTED AND NOT (REMOVE~="ALL")</Custom>
+            <Custom Action='PidashRestartRunnerOnCancel' OnExit='cancel'>(WIX_UPGRADE_DETECTED AND NOT (REMOVE~="ALL")) OR (REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE)</Custom>
+            <Custom Action='PidashRestartRunnerOnError' OnExit='error'>(WIX_UPGRADE_DETECTED AND NOT (REMOVE~="ALL")) OR (REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE)</Custom>
+        </InstallExecuteSequence>
 
         <UI>
             <UIRef Id='WixUI_FeatureTree'/>
