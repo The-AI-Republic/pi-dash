@@ -25,9 +25,7 @@ export function MarketingFrame({ children }: MarketingFrameProps): React.ReactEl
     <div className="relative isolate flex min-h-screen flex-col bg-(--bg) text-(--text)">
       <MarketingBackdrop />
       <MarketingHeader />
-      <main className="relative z-10 mx-auto w-full max-w-7xl flex-1 px-(--space-10) py-(--space-10) sm:px-(--space-16)">
-        {children}
-      </main>
+      <main className="relative z-10 mx-auto w-full max-w-7xl flex-1 px-5 py-(--space-8) sm:px-8">{children}</main>
       <MarketingFooter />
     </div>
   );
@@ -36,7 +34,7 @@ export function MarketingFrame({ children }: MarketingFrameProps): React.ReactEl
 export function MarketingHeader(): React.ReactElement {
   return (
     <header className="sticky top-0 z-30 border-b border-(--border) bg-(--bg)/90 backdrop-blur-xl">
-      <div className="mx-auto flex h-16 w-full max-w-7xl items-center gap-(--space-6) px-(--space-10) sm:px-(--space-16)">
+      <div className="mx-auto flex h-16 w-full max-w-7xl items-center justify-between gap-(--space-3) px-5 sm:px-8">
         <BrandMark />
         <nav aria-label="Primary" className="ml-auto flex min-w-0 items-center gap-(--space-1) sm:gap-(--space-2)">
           {HEADER_LINKS.map((link) => (
@@ -105,7 +103,7 @@ function BrandMark(): React.ReactElement {
 export function MarketingFooter(): React.ReactElement {
   return (
     <footer className="relative z-10 border-t border-(--border) bg-(--bg)">
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-(--space-6) px-(--space-10) py-(--space-8) sm:flex-row sm:items-start sm:justify-between sm:px-(--space-16)">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-(--space-6) px-5 py-10 sm:flex-row sm:items-center sm:justify-between sm:px-8">
         <div className="flex flex-col gap-(--space-2)">
           <span className="text-meta flex items-center gap-(--space-2) font-semibold text-(--text)">
             <span aria-hidden="true" className="flex items-center gap-(--space-1) text-(--accent)">

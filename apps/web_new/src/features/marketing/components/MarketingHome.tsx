@@ -41,12 +41,12 @@ const FOCUS_RING =
   "focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-2 focus-visible:outline-none";
 
 const PRIMARY_ACTION =
-  `inline-flex min-h-11 items-center justify-center gap-(--space-2) rounded-(--radius-control) ` +
+  `inline-flex min-h-11 items-center justify-center gap-(--space-2) rounded-xl ` +
   `bg-(--accent) px-(--space-6) py-(--space-3) text-body font-medium text-(--on-accent) ` +
   `hover:bg-(--accent-hover) ${FOCUS_RING}`;
 
 const SECONDARY_ACTION =
-  `inline-flex min-h-11 items-center justify-center gap-(--space-2) rounded-(--radius-control) ` +
+  `inline-flex min-h-11 items-center justify-center gap-(--space-2) rounded-xl ` +
   `border border-(--border) bg-(--surface) px-(--space-6) py-(--space-3) text-body font-medium ` +
   `text-(--text) hover:bg-(--subtle) ${FOCUS_RING}`;
 
@@ -77,7 +77,7 @@ function ActionLink({ link }: { link: MarketingLink }): React.ReactElement {
 
 function Hero(): React.ReactElement {
   return (
-    <section className="grid w-full gap-(--space-12) pb-(--space-20) lg:grid-cols-[1.02fr_0.98fr] lg:items-center lg:gap-(--space-16)">
+    <section className="grid w-full gap-(--space-12) pt-6 pb-20 lg:grid-cols-[1.02fr_0.98fr] lg:items-center lg:gap-(--space-16) lg:pt-10 lg:pb-28">
       <div className="min-w-0">
         <p className="text-caption mb-(--space-7) inline-flex items-center gap-(--space-2) rounded-(--radius-full) border border-(--border) bg-(--surface) px-(--space-3) py-(--space-2) font-semibold tracking-[0.16em] text-(--text-muted) uppercase">
           <span aria-hidden="true" className="size-2 rounded-full bg-(--success)" />
@@ -244,7 +244,7 @@ function SectionIntro({
 
 function DeliverySection(): React.ReactElement {
   return (
-    <section aria-labelledby="delivery-heading" className="w-full py-(--space-20)">
+    <section aria-labelledby="delivery-heading" className="w-full py-20 sm:py-28">
       <div className="mb-(--space-12)">
         <SectionIntro
           eyebrow={HOME_SECTIONS.steps.eyebrow}
@@ -276,7 +276,7 @@ function DeliverySection(): React.ReactElement {
 function CapabilitySection(): React.ReactElement {
   return (
     <section aria-labelledby="capabilities-heading" className="w-full border-y border-(--border) bg-(--surface)">
-      <div className="grid gap-(--space-12) py-(--space-20) lg:grid-cols-[0.8fr_1.2fr]">
+      <div className="grid gap-(--space-12) py-20 sm:py-28 lg:grid-cols-[0.8fr_1.2fr]">
         <div className="max-w-xl">
           <p className="text-caption mb-(--space-4) font-semibold tracking-[0.18em] text-(--accent) uppercase">
             {HOME_SECTIONS.capabilities.eyebrow}
@@ -309,7 +309,7 @@ function CapabilitySection(): React.ReactElement {
 
 function OpenSourceSection(): React.ReactElement {
   return (
-    <section aria-labelledby="open-source-heading" className="w-full py-(--space-20)">
+    <section aria-labelledby="open-source-heading" className="w-full py-20 sm:py-28">
       <div className="grid gap-(--space-10) rounded-3xl border border-(--border) bg-(--surface) p-(--space-8) sm:p-(--space-12) lg:grid-cols-[1.15fr_0.85fr] lg:items-center">
         <div className="max-w-3xl">
           <p className="text-caption mb-(--space-4) font-semibold tracking-[0.18em] text-(--accent) uppercase">
@@ -343,7 +343,7 @@ function OpenSourceSection(): React.ReactElement {
 
 function ClosingSection(): React.ReactElement {
   return (
-    <section aria-labelledby="closing-heading" className="w-full pb-(--space-20)">
+    <section aria-labelledby="closing-heading" className="w-full pb-20 sm:pb-28">
       <div className="relative overflow-hidden rounded-3xl border border-(--border) bg-(--surface) px-(--space-6) py-(--space-12) text-center sm:px-(--space-12) sm:py-(--space-20)">
         <div
           aria-hidden="true"
