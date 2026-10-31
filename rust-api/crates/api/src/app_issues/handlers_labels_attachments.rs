@@ -373,12 +373,12 @@ pub fn app_attachment_to_representation(row: &AppAttachmentRow) -> AppAttachment
 /// key per failing field, in `Meta.fields` order (probed), each a list of
 /// messages. `non_field_errors` collects the top-level shape failures.
 #[derive(Debug, Default)]
-struct FieldErrors {
+pub(crate) struct FieldErrors {
     entries: Vec<(String, Vec<String>)>,
 }
 
 impl FieldErrors {
-    fn push(&mut self, field: &str, message: String) {
+    pub(crate) fn push(&mut self, field: &str, message: String) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.0 == field) {
             entry.1.push(message);
         } else {
@@ -386,12 +386,12 @@ impl FieldErrors {
         }
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Exact `{"field": ["msg", ...], ...}` bytes in accumulation order.
-    fn body(&self) -> String {
+    pub(crate) fn body(&self) -> String {
         let mut out = String::from("{");
         for (index, (field, messages)) in self.entries.iter().enumerate() {
             if index > 0 {
@@ -679,7 +679,7 @@ fn parse_py_float(text: &str) -> Option<f64> {
 /// DRF `FloatField.to_internal_value` (`fields.py`): booleans become
 /// `1.0`/`0.0` (probed), ints/floats convert, strings go through
 /// [`parse_py_float`], containers fail.
-fn drf_float_of_value(value: &Value) -> Option<f64> {
+pub(crate) fn drf_float_of_value(value: &Value) -> Option<f64> {
     match value {
         Value::Bool(true) => Some(1.0),
         Value::Bool(false) => Some(0.0),
@@ -693,7 +693,7 @@ fn drf_float_of_value(value: &Value) -> Option<f64> {
 /// `TRUE_VALUES` / `FALSE_VALUES` sets over case-folded strings, `1`/`True`
 /// and `0`/`0.0`/`False` (`1.0` counts via `==`); unhashables and the rest
 /// fail. `None` never reaches here (`validate_empty_values` owns it).
-fn drf_bool_of_value(value: &Value) -> Option<bool> {
+pub(crate) fn drf_bool_of_value(value: &Value) -> Option<bool> {
     match value {
         Value::Bool(flag) => Some(*flag),
         Value::Number(number) => {
@@ -721,7 +721,7 @@ fn drf_bool_of_value(value: &Value) -> Option<bool> {
 /// DRF `CharField.to_internal_value` for the label/attachment text fields
 /// (`fields.py`): booleans and containers fail, ints/floats stringify via
 /// [`py_str_of_number`], strings pass through for the blank/max checks.
-fn drf_str_of_value(value: &Value) -> Option<String> {
+pub(crate) fn drf_str_of_value(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
         Value::Number(number) => Some(py_str_of_number(number)),
@@ -759,10 +759,10 @@ const RAW_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
 /// A negotiated body: the JSON/form value plus uploads per key. HTML values
 /// are lone strings (spec blank-skips applied); JSON values went through the
 /// CPython-error parser.
-struct RequestData {
-    value: Value,
-    files: shared_body::FilesMap,
-    is_html: bool,
+pub(crate) struct RequestData {
+    pub(crate) value: Value,
+    pub(crate) files: shared_body::FilesMap,
+    pub(crate) is_html: bool,
 }
 
 /// The v1 attachment endpoint's `parser_classes =
@@ -832,7 +832,7 @@ fn unsupported_media_type(message: String) -> Response {
 /// `request.data.get(key)` for merged form data: a key carrying any upload
 /// reads the LAST file (`QueryDict` last-wins over texts-then-files);
 /// otherwise the map member. `str(UploadedFile)` is its filename.
-fn data_has_file(files: &shared_body::FilesMap, key: &str) -> bool {
+pub(crate) fn data_has_file(files: &shared_body::FilesMap, key: &str) -> bool {
     files.get(key).is_some_and(|parts| !parts.is_empty())
 }
 
@@ -957,7 +957,7 @@ fn validate_label_fields(
 /// Top-level `request.data` shape check (`serializers.py:340`,
 /// `to_internal_value`): `null` is `No data provided`, anything else
 /// non-dict names its Python type (probed).
-fn object_or_errors(value: &Value) -> Result<&Map<String, Value>, FieldErrors> {
+pub(crate) fn object_or_errors(value: &Value) -> Result<&Map<String, Value>, FieldErrors> {
     match value {
         Value::Object(map) => Ok(map),
         Value::Null => {
@@ -1265,7 +1265,7 @@ async fn gate_class_unsafe(
 /// `creator_pk`, the creator arm runs first: workspace membership is
 /// required, then a `created_by = user` row bypasses the role gate
 /// entirely (no workspace/project scoping on that check, as coded).
-async fn gate_decorator(
+pub(crate) async fn gate_decorator(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &Uuid,
@@ -2077,7 +2077,7 @@ fn render_asset(row: &AssetRow, slug: &str, timezone: &Tz) -> Result<String, Den
 /// Whether a `sqlx` failure is an integrity-constraint violation (SQLSTATE
 /// class 23: unique / not-null / FK — what Django surfaces as
 /// `IntegrityError`).
-fn is_integrity_violation(error: &sqlx::Error) -> bool {
+pub(crate) fn is_integrity_violation(error: &sqlx::Error) -> bool {
     match error {
         sqlx::Error::Database(db) => db.code().is_some_and(|code| code.starts_with("23")),
         _ => false,
@@ -2086,7 +2086,7 @@ fn is_integrity_violation(error: &sqlx::Error) -> bool {
 
 // ---- responses -----------------------------------------------------------------
 
-fn json_bad_request(body: &str) -> Response {
+pub(crate) fn json_bad_request(body: &str) -> Response {
     Response::builder()
         .status(StatusCode::BAD_REQUEST)
         .header(header::CONTENT_TYPE, "application/json")
@@ -2094,7 +2094,7 @@ fn json_bad_request(body: &str) -> Response {
         .expect("bad-request response")
 }
 
-fn json_not_found(body: &str) -> Response {
+pub(crate) fn json_not_found(body: &str) -> Response {
     Response::builder()
         .status(StatusCode::NOT_FOUND)
         .header(header::CONTENT_TYPE, "application/json")
