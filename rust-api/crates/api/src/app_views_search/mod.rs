@@ -43,10 +43,11 @@
 //! - B1 (`base.py:102-112`): workspace retrieve serializes `.first()`
 //!   unconditionally — unknown pk answers 200 with the serializer's
 //!   `get_initial()` body (not 404, and not JSON `null`).
-//! - B1b (`base.py:317-327`): project retrieve dereferences
-//!   `issue_view.owned_by` after `.first()`; unknown pk plus a guest
-//!   without `guest_view_all_features` raises (500), not 404 — other
-//!   callers get the same `get_initial()` 200 as B1.
+//! - B1b (retired by VIEW-022, `base.py:309-312` on main): project
+//!   retrieve used to dereference `issue_view.owned_by` after `.first()`;
+//!   unknown pk plus a guest without `guest_view_all_features` raised
+//!   (500), not 404 — other callers got the same `get_initial()` 200 as
+//!   B1. Unknown pk now 404s before the guest recheck.
 //! - B2 (`serializers/base.py:12-18`): `?fields=` is silently ignored on
 //!   both list views — full objects always render.
 //! - B4 (`base.py:404-411`): the favorite list queryset raises `FieldError`
