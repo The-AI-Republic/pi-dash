@@ -89,7 +89,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
@@ -3603,8 +3603,24 @@ async fn fetch_blocker_summary(
         .map_err(|_| Denial::ServerError)
 }
 
+/// `get_is_epic` (`issue.py:1109-1112`): false when the row is untyped,
+/// without a query; otherwise the type row's flag. A missing row is
+/// Django's `DoesNotExist` → the generic 500 (unreachable — the FK
+/// holds). No soft-delete guard: `IssueType` rides the plain manager.
+async fn fetch_is_epic(pool: &sqlx::PgPool, type_id: Option<Uuid>) -> Result<bool, Denial> {
+    let Some(id) = type_id else {
+        return Ok(false);
+    };
+    let row: Option<(bool,)> = sqlx::query_as("SELECT is_epic FROM issue_types WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.map(|flag| flag.0).ok_or(Denial::ServerError)
+}
+
 /// Render one `IssueDetailSerializer(...).data` body as an insertion-ordered
-/// map: the 35-key retrieve form, or the 34-key `current_instance` form
+/// map: the 37-key retrieve form, or the 36-key `current_instance` form
 /// without `is_subscribed` (the PATCH queryset never annotates it, so DRF
 /// `SkipField`s the key). `is_intake` is absent on both (neither queryset
 /// annotates it). The map form lets a caller append `?expand=` keys in the
@@ -3653,6 +3669,8 @@ async fn render_detail_map(
     let project_id = save.project_id.to_string();
     let parent_id = save.parent_id.map(|value| value.to_string());
     let cycle_id = row.cycle_id.map(|value| value.to_string());
+    let type_id = save.type_id.map(|value| value.to_string());
+    let is_epic = fetch_is_epic(pool, save.type_id).await?;
     let assigned_pod_id = save.assigned_pod_id.map(|value| value.to_string());
     let module_ids: Vec<String> = row.module_ids.iter().map(ToString::to_string).collect();
     let label_ids: Vec<String> = row.label_ids.iter().map(ToString::to_string).collect();
@@ -3689,6 +3707,8 @@ async fn render_detail_map(
         project_id: project_id.as_str(),
         parent_id: parent_id.as_deref(),
         cycle_id: Some(cycle_id.as_deref()),
+        type_id: type_id.as_deref(),
+        is_epic,
         assigned_pod_id: assigned_pod_id.as_deref(),
         agent_executor: save.agent_executor.as_deref(),
         module_ids: Some(module_refs),
@@ -4443,15 +4463,47 @@ pub async fn create_issue(
         ProjectCheck::AnyWorkspace,
     )
     .await?;
+    create_issue_inner(state, pool, tenant, user_id, slug, req, None).await
+}
+
+/// The `POST` pipeline after the gate: body split, validation, the atomic
+/// sequence/sort INSERT, m2m + default-assignee legs, transition fire,
+/// `issue_activity`, the post-query render, `model_activity` + the
+/// creating version task. `forced_type` carries the epic create's resolved
+/// type (`epics.py:95-96`); `None` is the plain issues create.
+async fn create_issue_inner(
+    state: AppState,
+    pool: sqlx::PgPool,
+    tenant: CoreTenant,
+    user_id: Uuid,
+    slug: String,
+    req: axum::extract::Request,
+    forced_type: Option<Uuid>,
+) -> HandlerResult {
     let (parts, bytes) = split_core_parts(req).await?;
-    let data = match negotiate_input(&parts.headers, &bytes) {
+    let mut data = match negotiate_input(&parts.headers, &bytes) {
         Ok(data) => data,
         Err(response) => return Ok(response),
     };
+    // Epic creates copy the payload with `dict(request.data)` before
+    // forcing the type (`epics.py:94-96`): the copy raises on non-dict
+    // bodies, so epic non-dict input 500s where the plain create answers
+    // `non_dict_response`.
+    if forced_type.is_some() && data.value.as_object().is_none() {
+        return Err(Denial::ServerError);
+    }
     // A non-dict body fails the whole serializer (`non_field_errors`) —
     // the field loop never runs, so no `required` error joins it.
     if data.value.as_object().is_none() {
         return Ok(non_dict_response(&data.value));
+    }
+    // Epic creates force the resolved type onto the payload before
+    // validation; it then rides validation, the activity dumps, and the
+    // save like any client-supplied `type`.
+    if let Some(type_id) = forced_type {
+        if let Some(map) = data.value.as_object_mut() {
+            map.insert("type".to_owned(), Value::String(type_id.to_string()));
+        }
     }
     let validated =
         match validate_issue_body(&pool, &data, RequestShape::Create, &tenant.timezone).await {
@@ -4593,7 +4645,7 @@ pub async fn partial_update_issue(
     };
     let pool = pool_of(&state)?;
     let user_id = core_session(extension)?;
-    let mut tenant = core_gate(
+    let tenant = core_gate(
         &pool,
         &slug,
         &project_raw,
@@ -4603,6 +4655,26 @@ pub async fn partial_update_issue(
         ProjectCheck::None,
     )
     .await?;
+    partial_update_inner(state, pool, tenant, user_id, slug, pk, req, false).await
+}
+
+/// The `PATCH` pipeline after the gate: body split, `skip_activity` /
+/// `is_description_update` pops, the annotated lookup, the pre-update
+/// `current_instance` dump, validation, capture + save + fire, the three
+/// task enqueues, 204. `epic` selects the epics-collection behavior
+/// (`epics.py:185-198`): a `type` member 400s before the lookup, and the
+/// lookup only sees epic-typed rows.
+#[allow(clippy::too_many_arguments)]
+async fn partial_update_inner(
+    state: AppState,
+    pool: sqlx::PgPool,
+    mut tenant: CoreTenant,
+    user_id: Uuid,
+    slug: String,
+    pk: Uuid,
+    req: axum::extract::Request,
+    epic: bool,
+) -> HandlerResult {
     let (parts, bytes) = split_core_parts(req).await?;
     let mut data = match negotiate_input(&parts.headers, &bytes) {
         Ok(data) => data,
@@ -4611,6 +4683,13 @@ pub async fn partial_update_issue(
     // `request.data.pop(...)` runs before the lookup: on a non-dict body
     // the pop itself raises (`TypeError`/`AttributeError`) → Django's 500,
     // regardless of whether the issue exists.
+    // The epics collection locks the type (`epics.py:193-197`): the
+    // membership test runs on the parsed body before the lookup, exactly
+    // Python's `in` (key for dicts, element for lists, substring for
+    // strings; scalars raise → 500).
+    if epic && epic_type_member(&data)? {
+        return Ok(type_locked_response());
+    }
     if data.value.as_object().is_none() {
         return Err(Denial::ServerError);
     }
@@ -4618,6 +4697,14 @@ pub async fn partial_update_issue(
     // both dumps below exclude the key.
     let skip_activity = data.pop_skip_activity();
     let is_description_update = data.get_is_set("description_html");
+    // The epics collection only sees epic-typed rows: a live row
+    // outside the boundary 404s exactly Django's `get_object` miss.
+    if epic && !epic_exists(&pool, &slug, &tenant.project_id, &pk).await? {
+        return Ok(not_found_detail(
+            ISSUE_NOT_FOUND_BODY,
+            StatusCode::NOT_FOUND,
+        ));
+    }
     let Some(looked_up) =
         fetch_annotated_issue(&pool, &slug, &tenant.project_id, &pk, &user_id, true).await?
     else {
@@ -4890,6 +4977,20 @@ pub async fn destroy_issue(
         ProjectCheck::None,
     )
     .await?;
+    destroy_issue_inner(state, pool, tenant, user_id, slug, pk).await
+}
+
+/// The `DELETE` pipeline after the gate: the destroy-scoped lookup, the
+/// synced guard, soft-delete + m2m clears + member pruning + subscribers,
+/// and the deleting `model_activity`.
+async fn destroy_issue_inner(
+    state: AppState,
+    pool: sqlx::PgPool,
+    tenant: CoreTenant,
+    user_id: Uuid,
+    slug: String,
+    pk: Uuid,
+) -> HandlerResult {
     let Some(mut row) = fetch_destroy_issue(&pool, &slug, &tenant.project_id, &pk).await? else {
         return Ok(not_found_detail(NOT_FOUND_BODY, StatusCode::NOT_FOUND));
     };
@@ -4973,7 +5074,7 @@ pub async fn destroy_issue(
 /// `GET .../issues/<pk>/` (`base.py:486-620`): ADMIN/MEMBER/GUEST/creator
 /// gate, the slug-scoped project fetch, the live-only annotated lookup,
 /// the guest-view rule, the visit enqueue (which fires even when the
-/// `sub_issues` expansion 500s below it), and the 35-key detail body.
+/// `sub_issues` expansion 500s below it), and the 37-key detail body.
 /// Unknown expansions are ignored; every other expansion is a known gap.
 pub async fn retrieve_issue(
     State(state): State<AppState>,
@@ -5215,6 +5316,229 @@ async fn count_bulk_issues(
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(rows.len() as i64)
+}
+
+// ---------------------------------------------------------------------------
+// Epics (`app/views/issue/epics.py`, NEWFRONT-984)
+// ---------------------------------------------------------------------------
+
+/// Collection path in `app/urls/issue.py:130` form.
+pub const EPIC_COLLECTION_PATH: &str = "/api/workspaces/{slug}/projects/{project_id}/epics/";
+/// Detail path in `app/urls/issue.py:135-139` form.
+pub const EPIC_DETAIL_PATH: &str = "/api/workspaces/{slug}/projects/{project_id}/epics/{pk}/";
+
+/// The no-epic-type refusal (`epics.py:64-68`).
+const NO_EPIC_TYPE_BODY: &str =
+    r#"{"error":"This project has no epic type, so no epic can be created."}"#;
+/// The locked-type refusal (`epics.py:195-197`).
+const TYPE_LOCKED_BODY: &str =
+    r#"{"error":"An epic's type cannot change through the epics collection."}"#;
+
+/// `resolve_epic_type` (`epics.py:47-61`): the project's epic type id —
+/// lowest link level — or `None`. The link must be live and the type live,
+/// epic, and active; no workspace or default filter.
+async fn resolve_epic_type(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<Option<Uuid>, Denial> {
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT t.id FROM project_issue_types AS l \
+         JOIN issue_types AS t ON t.id = l.issue_type_id \
+         WHERE l.project_id = $1 AND l.deleted_at IS NULL \
+         AND t.is_epic AND t.is_active AND t.deleted_at IS NULL \
+         ORDER BY l.level LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(|found| found.0))
+}
+
+/// The epic boundary (`epics.py:20-33`, `:152-160`, `:222-225`): the row
+/// exists in the `issue_objects` scope for this project/slug AND is
+/// epic-typed. Django's `filter(type__is_epic=True)` inner-joins with no
+/// related-manager guard, so untyped rows fall outside while rows under
+/// inactive or soft-deleted epic types still match.
+async fn epic_exists(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &Uuid,
+    pk: &Uuid,
+) -> Result<bool, Denial> {
+    let row: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM issues AS issue \
+         JOIN projects AS project ON project.id = issue.project_id \
+         JOIN workspaces ON workspaces.id = issue.workspace_id \
+         LEFT JOIN states AS state ON state.id = issue.state_id \
+         JOIN issue_types ON issue_types.id = issue.type_id \
+         WHERE issue.deleted_at IS NULL AND issue.id = $1 \
+         AND issue.project_id = $2 AND workspaces.slug = $3 \
+         AND NOT (state.\"group\" = 'triage' AND state.\"group\" IS NOT NULL) \
+         AND issue.archived_at IS NULL AND project.archived_at IS NULL \
+         AND issue.is_draft = FALSE AND issue_types.is_epic",
+    )
+    .bind(pk)
+    .bind(project_id)
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(row.is_some())
+}
+
+/// Python's `"type" in request.data` (`epics.py:193`): key for dicts
+/// (uploads merged, like DRF), element for lists, substring for strings,
+/// false for null; scalars raise → the generic 500.
+fn epic_type_member(data: &RequestData) -> Result<bool, Denial> {
+    match &data.value {
+        Value::Object(_) => Ok(data.contains("type")),
+        Value::Array(items) => Ok(items.iter().any(|item| item.as_str() == Some("type"))),
+        Value::String(text) => Ok(text.contains("type")),
+        Value::Null => Ok(false),
+        Value::Number(_) | Value::Bool(_) => Err(Denial::ServerError),
+    }
+}
+
+fn type_locked_response() -> Response {
+    json_bad_request(TYPE_LOCKED_BODY)
+}
+
+/// `POST .../epics/` (`epics.py:70-118`): the issues gate, the
+/// resolve-then-force type leg, then the shared create pipeline. The
+/// response is the same 27-key `.values()` body as the plain create.
+pub async fn epic_create(
+    State(state): State<AppState>,
+    Path((slug, project_raw)): Path<(String, String)>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    req: axum::extract::Request,
+) -> HandlerResult {
+    let pool = pool_of(&state)?;
+    let user_id = core_session(extension)?;
+    let tenant = core_gate(
+        &pool,
+        &slug,
+        &project_raw,
+        &user_id,
+        &GATE_CREATE,
+        None,
+        ProjectCheck::AnyWorkspace,
+    )
+    .await?;
+    let Some(epic_type) = resolve_epic_type(&pool, &tenant.project_id).await? else {
+        return Ok(json_bad_request(NO_EPIC_TYPE_BODY));
+    };
+    create_issue_inner(state, pool, tenant, user_id, slug, req, Some(epic_type)).await
+}
+
+/// `GET .../epics/<pk>/` (`epics.py:149-175`): the issues gate, the epic
+/// boundary, then the shared retrieve pipeline. `is_epic` stamps `True`
+/// on 200s (a no-op for in-boundary rows — the renderer already reads
+/// the type flag — but exact when it matters).
+pub async fn epic_retrieve(
+    State(state): State<AppState>,
+    Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    req: axum::extract::Request,
+) -> HandlerResult {
+    // Non-UUID tails never match Django's `<uuid:pk>` converter: proxy.
+    let Ok(pk) = pk_raw.parse::<Uuid>() else {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    };
+    let pool = pool_of(&state)?;
+    let user_id = core_session(extension.clone())?;
+    let tenant = core_gate(
+        &pool,
+        &slug,
+        &project_raw,
+        &user_id,
+        &GATE_RETRIEVE,
+        Some(pk),
+        ProjectCheck::InSlug,
+    )
+    .await?;
+    if !epic_exists(&pool, &slug, &tenant.project_id, &pk).await? {
+        return Ok(not_found_detail(NOT_FOUND_BODY, StatusCode::NOT_FOUND));
+    }
+    let response = retrieve_issue(
+        State(state),
+        Path((slug, project_raw, pk_raw)),
+        extension,
+        req,
+    )
+    .await?;
+    if response.status() != StatusCode::OK {
+        return Ok(response);
+    }
+    let (mut parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let mut rendered: Value = serde_json::from_slice(&bytes).map_err(|_| Denial::ServerError)?;
+    if let Some(map) = rendered.as_object_mut() {
+        map.insert("is_epic".to_owned(), Value::Bool(true));
+    }
+    let stamped = serde_json::to_string(&rendered).map_err(|_| Denial::ServerError)?;
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    Ok(Response::from_parts(parts, axum::body::Body::from(stamped)))
+}
+
+/// `PATCH .../epics/<pk>/` (`epics.py:185-198`): the issues gate, then the
+/// shared patch pipeline in epic mode (locked `type`, epic-scoped
+/// lookup).
+pub async fn epic_partial_update(
+    State(state): State<AppState>,
+    Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    req: axum::extract::Request,
+) -> HandlerResult {
+    // Non-UUID tails never match Django's `<uuid:pk>` converter: proxy.
+    let Ok(pk) = pk_raw.parse::<Uuid>() else {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    };
+    let pool = pool_of(&state)?;
+    let user_id = core_session(extension)?;
+    let tenant = core_gate(
+        &pool,
+        &slug,
+        &project_raw,
+        &user_id,
+        &GATE_PATCH,
+        Some(pk),
+        ProjectCheck::None,
+    )
+    .await?;
+    partial_update_inner(state, pool, tenant, user_id, slug, pk, req, true).await
+}
+
+/// `DELETE .../epics/<pk>/` (`epics.py:200-212`): the issues gate, the
+/// epic boundary, then the shared destroy pipeline.
+pub async fn epic_destroy(
+    State(state): State<AppState>,
+    Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    req: axum::extract::Request,
+) -> HandlerResult {
+    // Non-UUID tails never match Django's `<uuid:pk>` converter: proxy.
+    let Ok(pk) = pk_raw.parse::<Uuid>() else {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    };
+    let pool = pool_of(&state)?;
+    let user_id = core_session(extension)?;
+    let tenant = core_gate(
+        &pool,
+        &slug,
+        &project_raw,
+        &user_id,
+        &GATE_DESTROY,
+        Some(pk),
+        ProjectCheck::None,
+    )
+    .await?;
+    if !epic_exists(&pool, &slug, &tenant.project_id, &pk).await? {
+        return Ok(not_found_detail(NOT_FOUND_BODY, StatusCode::NOT_FOUND));
+    }
+    destroy_issue_inner(state, pool, tenant, user_id, slug, pk).await
 }
 
 #[cfg(test)]
