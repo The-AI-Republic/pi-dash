@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Marketing copy and destinations (CLOUD-003/004/006–009,
-// parity/specs/cloud.md §1–§2). Copy is ours; only the destinations,
-// counts and pinned names are fixed by the oracle (hero actions /login,
-// /downloads, /docs; closing action /login; the repository, terms and
-// privacy leave the app; the stable release URLs; the pricing tier names
-// and prices).
+// parity/specs/cloud.md §1–§2). The home strings track the old cloud
+// landing page under the owner's explicit match order (NEWFRONT-1041);
+// that page is AI Republic's own overlay work, not Plane code (process
+// note on NEWFRONT-1). Only the destinations, counts and pinned names
+// are fixed by the oracle (hero actions /login, /downloads, /docs;
+// closing action /login; the repository, terms and privacy leave the
+// app; the stable release URLs; the pricing tier names and prices).
 
 /** Public repository the open-source panel and frame link to. */
 export const REPOSITORY_URL = "https://github.com/The-AI-Republic/pi-dash";
