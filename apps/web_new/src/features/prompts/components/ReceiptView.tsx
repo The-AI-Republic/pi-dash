@@ -48,8 +48,11 @@ export function ReceiptView({ workspaceSlug, isAdmin }: ReceiptViewProps): React
   return (
     <div className="flex flex-col gap-(--space-4)">
       <p className="text-body text-(--text-muted)">{RECEIPTS_INTRO}</p>
-      <div className="grid grid-cols-1 gap-(--space-8) lg:grid-cols-[12rem_1fr]">
-        <nav aria-label="Prompt receipt" className="flex flex-col gap-(--space-1)">
+      <div className="grid grid-cols-1 gap-(--space-8) lg:grid-cols-[12rem_minmax(0,1fr)]">
+        <nav
+          aria-label="Prompt receipt"
+          className="flex flex-col gap-(--space-1) lg:sticky lg:top-(--space-8) lg:max-h-[calc(100vh_-_var(--space-16))] lg:self-start lg:overflow-auto"
+        >
           {receipts.entries.map((entry) => (
             <a
               key={entry.kind}

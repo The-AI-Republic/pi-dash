@@ -300,4 +300,32 @@ describe("PromptsView", () => {
     expect(screen.getByLabelText("Prompt section text")).toHaveValue("effective body");
     expect(screen.getByText("second body")).toBeInTheDocument();
   });
+
+  it("pins the cards track inside the viewport so anchor jumps keep the side nav visible", async () => {
+    // Regression (NEWFRONT-1042): a bare `1fr` minimums on content, so one
+    // long registry line widened the track past the viewport and the side
+    // nav's own anchor jump scrolled the nav out of sight.
+    mockKinds(
+      () => [row({ body: `word ${"x".repeat(2000)}` })],
+      () => [row()]
+    );
+    renderView(ROLE_ADMIN);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Autonomy" })).toBeInTheDocument());
+    const nav = screen.getByRole("navigation", { name: "Prompt sections" });
+    expect(nav.parentElement?.className).toContain("lg:grid-cols-[12rem_minmax(0,1fr)]");
+  });
+
+  it("keeps the side nav stuck while the cards scroll beneath it", async () => {
+    // Regression (NEWFRONT-1042): without a stuck nav, jumping to a
+    // section below the fold scrolled the nav itself out of view.
+    mockKinds(
+      () => [row()],
+      () => [row()]
+    );
+    renderView(ROLE_ADMIN);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Autonomy" })).toBeInTheDocument());
+    const nav = screen.getByRole("navigation", { name: "Prompt sections" });
+    expect(nav.className).toContain("lg:self-start");
+    expect(nav.className).toContain("lg:sticky");
+  });
 });

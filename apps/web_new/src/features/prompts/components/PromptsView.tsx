@@ -100,8 +100,11 @@ export function PromptsView({ workspaceSlug }: PromptsViewProps): React.ReactEle
           {PROMPTS_BASELINE_WARNING_TEXT}
         </p>
       ) : null}
-      <div className="grid grid-cols-1 gap-(--space-8) lg:grid-cols-[12rem_1fr]">
-        <nav aria-label="Prompt sections">
+      <div className="grid grid-cols-1 gap-(--space-8) lg:grid-cols-[12rem_minmax(0,1fr)]">
+        <nav
+          aria-label="Prompt sections"
+          className="lg:sticky lg:top-(--space-8) lg:max-h-[calc(100vh_-_var(--space-16))] lg:self-start lg:overflow-auto"
+        >
           <ul className="flex flex-col gap-(--space-1)">
             {lists.sections.map((section) => (
               <li key={section.key}>
