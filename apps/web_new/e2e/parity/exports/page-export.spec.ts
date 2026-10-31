@@ -977,13 +977,13 @@ test(
       const paths = traffic.stop();
       expect(paths).toContain(`/api/workspaces/${world.workspaceSlug}/export-issues`);
       expect(paths.filter((path) => /export-issues/.test(path)).length).toBeGreaterThan(0);
-      // Cloud chrome phones home around every page, on both apps: the old
-      // app refreshes the auth scope, the new app reads the plan snapshot
-      // for the sidebar badge (CLOUD-038). Both are ambient shell reads,
-      // not export entry — observed as the only denylisted paths on each
-      // target's cloud run — so the cloud leg sets exactly those two aside
-      // before the sweep. Every other billing/license/upgrade-shaped call
-      // still fails, on both editions.
+      // Cloud chrome phones home around every page: the old app refreshes
+      // the auth scope, and the plan snapshot read below belonged to the
+      // sidebar badge (CLOUD-038) — the new frontend no longer makes it
+      // since NEWFRONT-1045 removed the badge. Both are ambient shell
+      // reads, not export entry, so the cloud leg sets exactly those two
+      // aside before the sweep. Every other billing/license/upgrade-shaped
+      // call still fails, on both editions.
       const ambient = isCloudEdition() ? ["/api/auth/scope-upgrade/", "/api/billing/me/plan/"] : [];
       const swept = paths.filter((path) => !ambient.includes(path));
       expect(swept.filter((path) => /desktop|license|billing|premium|upgrade|\bee\b/i.test(path))).toEqual([]);

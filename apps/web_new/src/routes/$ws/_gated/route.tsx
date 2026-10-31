@@ -140,11 +140,6 @@ const LazyUpdateControl = React.lazy(() =>
 // the button is ready by the time anyone opens it (SHELL-060, size gate).
 const loadHelpMenu = () => import("../../../shared/shell/HelpMenu.js");
 const LazyHelpMenu = React.lazy(() => loadHelpMenu().then((module) => ({ default: module.HelpMenu })));
-// The plan badge only renders on plan-badge editions (CLOUD-038), so it
-// rides a lazy chunk; the shell passes the version in.
-const LazyPlanBadge = React.lazy(() =>
-  import("../../../features/cloud-billing/components/PlanBadge.js").then((module) => ({ default: module.PlanBadge }))
-);
 
 export const Route = createFileRoute("/$ws/_gated")({
   beforeLoad: async ({ context, location }) => {
@@ -533,11 +528,6 @@ function WorkspaceShell({
             updateControl={
               <React.Suspense fallback={null}>
                 <LazyUpdateControl />
-              </React.Suspense>
-            }
-            planBadge={
-              <React.Suspense fallback={null}>
-                <LazyPlanBadge version={APP_VERSION} />
               </React.Suspense>
             }
             onNavigateHref={handleNavigateHref}

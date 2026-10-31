@@ -254,6 +254,8 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
       onYourWork: () => void;
       onUserSettings: () => void;
       updateControl: React.ReactNode;
+      // The real sidebar no longer takes a badge (NEWFRONT-1045); the
+      // mock keeps the slot so the removal test can observe it is empty.
       planBadge?: React.ReactNode;
     }) => {
       harness.sidebar = {
@@ -558,11 +560,6 @@ describe("gated layout shell wiring", () => {
       mockImplementation: (run: (options: { queryKey: readonly unknown[] }) => unknown) => void;
     };
     plainQuery.mockImplementation((options) => {
-      // The plan badge rides the lazy chunk below the shell; serve it a
-      // free plan so the test can see the resolved label.
-      if (options.queryKey[0] === "cloud-billing") {
-        return { data: { is_paid: false, migration_required: false, user_center_url: "https://home.test/account" } };
-      }
       if (options.queryKey[0] === "ws" && options.queryKey[2] === "projects" && options.queryKey[3] === "list") {
         if (projectsResult !== null) return projectsResult;
         return {
@@ -689,7 +686,6 @@ describe("gated layout shell wiring", () => {
     globalThis.localStorage.clear();
     delete edition.flags["app-rail"];
     delete edition.flags["sidebar-toggle"];
-    delete edition.flags["plan-badge"];
     delete edition.rail;
     delete edition.sidebar;
     harness.topBar = null;
@@ -1236,39 +1232,9 @@ describe("gated layout shell wiring", () => {
     expect(harness.sidebar?.editionEntries).toEqual([]);
   });
 
-  it("mounts the plan badge lazily (CLOUD-038)", () => {
+  it("passes no plan badge to the sidebar (NEWFRONT-1045)", () => {
     renderShell();
-    const badge = harness.planBadge;
-    expect(React.isValidElement(badge)).toBe(true);
-    // The slot only suspends around the split badge; the feature's own
-    // suites prove the plan read, labels and focus refresh.
-    expect((badge as React.ReactElement).type).toBe(Suspense);
-  });
-
-  it("loads the plan badge from its own chunk inside the sidebar slot (CLOUD-038, size gate)", async () => {
-    edition.flags["plan-badge"] = true;
-    // Installed first: the badge opens through the platform.
-    const openExternal = vi.spyOn(platform, "openExternal").mockResolvedValue(undefined);
-    renderShell();
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const slot = render(
-      <QueryClientProvider client={queryClient}>
-        <Suspense fallback={<span>loading plan</span>}>{harness.planBadge}</Suspense>
-      </QueryClientProvider>
-    );
-    try {
-      // Resolving the boundary imports the split chunk and renders the
-      // label from the plan the query mock serves.
-      const badge = await screen.findByRole("button", { name: "Plan: Upgrade" });
-      expect(screen.queryByText("loading plan")).not.toBeInTheDocument();
-      // The badge opens through the platform, so the desktop build uses
-      // its own window rather than the web page.
-      await userEvent.setup().click(badge);
-      expect(openExternal).toHaveBeenCalledWith("https://home.test/account");
-      openExternal.mockRestore();
-    } finally {
-      slot.unmount();
-    }
+    expect(harness.planBadge).toBeUndefined();
   });
 
   it("fills the shell's sidebar slot with the desktop update control (SHELL-102)", () => {

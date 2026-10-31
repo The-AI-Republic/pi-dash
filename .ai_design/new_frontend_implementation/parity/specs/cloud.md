@@ -23,10 +23,12 @@ implement.
 
 Intended-behavior rule: where the running old app contradicts the evident
 intent, the oracle pinned the observed behavior as a `bug:` scenario and
-filed an issue. Two rows do that here — CLOUD-030 (`bug:` NEWFRONT-473) and
-CLOUD-038 (`bug:` NEWFRONT-474). Each section below states the intended
-target; slices implement the target and the gate proves the target. The two
-deviations are collected in §10.
+filed an issue. One row still does that here — CLOUD-030 (`bug:`
+NEWFRONT-473). CLOUD-038 used to (`bug:` NEWFRONT-474, intended: a plan
+badge), but the owner removed the badge (NEWFRONT-1045), so both apps now
+pin its absence and §8 states that target. Each section below states the
+intended target; slices implement the target and the gate proves the
+target. The remaining deviation is collected in §10.
 
 ## 1. Public redirects, marketing home and shared frame (CLOUD-001–005, slice NEWFRONT-645)
 
@@ -549,20 +551,17 @@ belongs to the profile area — this row covers only the cloud suppression.
 No API. Oracle: `profile-security.spec.ts` (omitted entry; direct-address
 forward; self-managed retention).
 
-CLOUD-038 — The workspace badge shows the cloud plan and links out for
-billing. Intended behavior (`bug:` NEWFRONT-474): the sidebar carries a
-plan badge fed by `GET /api/billing/me/plan/` — the paid plan name for
-paying accounts, a migrate prompt for legacy pre-cutover plans, an upgrade
-label otherwise — opening the answer's external account-center address in a
-new tab (inert without one), with the app version revealed on hover. The
-plan loads on mount and refreshes on window focus; refreshes that return
-identical visible data skip the state update (no redundant re-render
-cascade), and fetch failures keep the last known label with the next focus
-retrying. The old app never mounts the badge (a sidebar restructure left
-the override dead and the open-source menu entry renders instead); the new
-frontend implements the badge described here, not the absence. Oracle:
-`billing-badge.spec.ts` (both absence scenarios pinned as the bug, with
-the intended badge as target).
+CLOUD-038 — No plan badge renders in the sidebar footer. Owner decision
+(NEWFRONT-1045, superseding the `bug:` NEWFRONT-474 intended badge): the
+sidebar footer holds only the user menu, which spans the full width, in
+every plan state — no paid plan name, no migrate prompt, no upgrade label,
+no version hover. The running version still surfaces in the help menu and
+the product-updates dialog. The old app never mounts the badge either (a
+sidebar restructure left the override dead and the open-source menu entry
+renders instead); the new frontend likewise renders no badge, and its user
+menu carries no Community entry. `GET /api/billing/me/plan/` still serves
+its snapshot — the backend is untouched. Oracle: `billing-badge.spec.ts`
+(absence pinned on both targets, plus the surviving plan API).
 
 CLOUD-039 — No custom keyboard shortcuts in this area; native behavior
 everywhere. Every action is a reachable control (radios, pickers, buttons),
@@ -646,6 +645,6 @@ Catalog and assistant (contracts issue NEWFRONT-641):
 - CLOUD-030 / NEWFRONT-473 — transport-failed catalog-status reads: the
   old app renders connected chrome with the no-apps empty state; the new
   frontend renders the status-error panel with its retry (§5).
-- CLOUD-038 / NEWFRONT-474 — workspace plan badge: the old app renders no
-  badge (open-source menu entry instead); the new frontend renders the plan
-  badge with its account-center link (§8).
+- CLOUD-038 / NEWFRONT-1045 (retired NEWFRONT-474) — workspace plan badge:
+  both apps render no badge; the new frontend's footer holds only the
+  user menu, with no Community entry either (§8).
