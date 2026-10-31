@@ -166,17 +166,13 @@ describe("Sidebar", () => {
     expect(account).not.toContainElement(update);
   });
 
-  it("mounts no plan badge unless the edition slot is filled (CLOUD-038)", () => {
+  it("renders the user menu with no plan badge in the footer (NEWFRONT-1045)", () => {
     render(sidebar());
-    expect(screen.queryByRole("button", { name: "Upgrade" })).not.toBeInTheDocument();
-  });
-
-  it("mounts the plan badge above the account row (CLOUD-038)", () => {
-    render(sidebar({ planBadge: <button type="button">Upgrade</button> }));
-    const badge = screen.getByRole("button", { name: "Upgrade" });
-    expect(badge).toBeInTheDocument();
-    const account = screen.getByTestId("sidebar-user-menu");
-    expect(badge.compareDocumentPosition(account) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const menu = screen.getByTestId("sidebar-user-menu");
+    expect(menu).toBeInTheDocument();
+    expect(screen.queryByTestId("cloud-plan-badge")).not.toBeInTheDocument();
+    // The account row holds only the user menu, so it spans the full width.
+    expect(menu.parentElement?.parentElement?.childElementCount).toBe(1);
   });
 
   it("routes the user-menu callbacks through", async () => {
