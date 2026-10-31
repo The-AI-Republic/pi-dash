@@ -403,3 +403,47 @@ def test_delete_soft_deletes_and_frees_slug(org):
     assert r.status_code == 201, r.text
     assert r.json()["id"] != job["id"]
     assert org.adm("DELETE", detail(job["id"]), "admin").status_code == 404
+
+
+def test_delete_cascades_synchronously_to_targets_and_prefs(org):
+    # Port of Django's ``test_delete_cascades_to_targets_and_prefs``
+    # (``apps/api/pi_dash/tests/contract/loop/test_admin_api.py``): since
+    # NEWFRONT-957 the view stamps the job, its targets and its user
+    # preferences with one timestamp inside the request
+    # (``admin_views.py`` delete) instead of enqueueing
+    # ``soft_delete_related_objects``. No worker runs during contract
+    # tests, so anything still live after the 204 proves a deferred
+    # cascade (PIDASHCONV-1688).
+    job = seed_l.create_loop_job(org.conn, slug=f"dc-{org.tag}", public_name="DC")
+    seed_l.create_target(
+        org.conn, job_id=job["id"], workspace_id=org.workspace["id"],
+        user_id=org.member["id"],
+    )
+    seed_l.set_pref(
+        org.conn, user_id=org.member["id"], job_id=job["id"], enabled=False
+    )
+    assert org.adm("DELETE", detail(job["id"]), "admin").status_code == 204
+    stamped = org.conn.execute(
+        "SELECT deleted_at FROM loop_jobs WHERE id=%s", (job["id"],)
+    ).fetchone()[0]
+    assert stamped is not None
+    live_targets = org.conn.execute(
+        "SELECT count(*) FROM loop_targets WHERE job_id=%s AND deleted_at IS NULL",
+        (job["id"],),
+    ).fetchone()[0]
+    live_prefs = org.conn.execute(
+        "SELECT count(*) FROM loop_user_preferences WHERE job_id=%s AND deleted_at IS NULL",
+        (job["id"],),
+    ).fetchone()[0]
+    assert live_targets == 0
+    assert live_prefs == 0
+    # One timestamp across all three tables: the cascade shares the job's.
+    target_marks = org.conn.execute(
+        "SELECT DISTINCT deleted_at FROM loop_targets WHERE job_id=%s", (job["id"],)
+    ).fetchall()
+    pref_marks = org.conn.execute(
+        "SELECT DISTINCT deleted_at FROM loop_user_preferences WHERE job_id=%s",
+        (job["id"],),
+    ).fetchall()
+    assert target_marks == [(stamped,)]
+    assert pref_marks == [(stamped,)]
