@@ -124,6 +124,8 @@ describe("tokens.css", () => {
 
   it("defines type, spacing, shape, elevation, and motion tokens", () => {
     expect(light.get("--font-ui")).toContain("Inter");
+    expect(light.get("--text-fine-size")).toBe("10px");
+    expect(light.get("--text-fine-height")).toBe("14px");
     expect(light.get("--text-base-size")).toBe("13px");
     expect(light.get("--text-base-height")).toBe("20px");
     expect(light.get("--text-h1-size")).toBe("24px");
@@ -152,6 +154,17 @@ describe("tokens.css", () => {
     expect(light.get("--layer-popover")).toBe("70");
     expect(light.get("--icon-size")).toBe("16px");
     expect(light.get("--icon-stroke")).toBe("1.5");
+  });
+
+  it("wires the fine utility to its tokens", () => {
+    // Same cwd contract as the palette pins above: the shipped kit.css is
+    // read directly, so the utility a screen names must exist and read the
+    // tokens this suite pins.
+    const utilities = readFileSync(join(process.cwd(), "src", "kit.css"), "utf8");
+    expect(utilities).toContain("@utility text-fine");
+    expect(utilities).toMatch(
+      /@utility text-fine\s*\{[^}]*font-size:\s*var\(--text-fine-size\)[^}]*line-height:\s*var\(--text-fine-height\)[^}]*\}/
+    );
   });
 
   it("defaults to compact density with a comfortable stop", () => {

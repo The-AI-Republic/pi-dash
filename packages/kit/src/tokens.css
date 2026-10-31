@@ -67,6 +67,9 @@
   /* Type */
   --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+  /* Fine: one step below caption for section banners and micro-labels. */
+  --text-fine-size: 10px;
+  --text-fine-height: 14px;
   --text-caption-size: 11px;
   --text-caption-height: 16px;
   --text-meta-size: 12px;
