@@ -375,7 +375,7 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
     dispatch gate it shadows (``filter_runs_usable_by_runner``) applies the
     same ``deleted_at`` condition, so preflight and dispatch stay consistent.
 
-    Transient status is **deliberately ignored** — OFFLINE / BUSY / paused
+    Transient status is **deliberately ignored** — OFFLINE / BUSY / PAUSED
     runners still count as "registered" because the owner can flip them back
     on and ``drain_pod`` re-fires on heartbeat or resume. REVOKED runners,
     however, are **permanent** — a revoked runner can never be un-revoked and
@@ -445,4 +445,4 @@ def count_active(user_id, workspace_id) -> int:
 
 def eligible_for_assignment(runner: Runner) -> Q:
     """Convenience predicate for assertions/tests."""
-    return Q(pk=runner.pk, status=RunnerStatus.ONLINE, paused_at__isnull=True)
+    return Q(pk=runner.pk, status=RunnerStatus.ONLINE)

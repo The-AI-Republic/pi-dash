@@ -315,14 +315,16 @@ def test_poll_endpoint_is_csrf_exempt(db, enrolled_runner, runner_token, runner_
 
 @pytest.mark.unit
 def test_poll_keeps_operator_pause(db, api_client, enrolled_runner, runner_token, runner_session):
-    """A paused runner keeps heartbeating; its polls rewrite connectivity
-    ``status`` but must never clear the operator pause."""
+    """A paused runner keeps heartbeating, but its polls must not flip the
+    ``PAUSED`` status back to ONLINE or drain work to it."""
     paused_at = timezone.now() - timedelta(minutes=5)
-    Runner.objects.filter(pk=enrolled_runner.id).update(status=RunnerStatus.BUSY, paused_at=paused_at)
+    Runner.objects.filter(pk=enrolled_runner.id).update(
+        status=RunnerStatus.PAUSED, paused_at=paused_at, last_heartbeat_at=None
+    )
 
     with (
         patch("pi_dash.runner.views.sessions.session_service.reap_stale_busy_runs"),
-        _patched_poll_dependencies(),
+        _patched_poll_dependencies() as drain,
     ):
         resp = _poll(
             api_client,
@@ -334,5 +336,7 @@ def test_poll_keeps_operator_pause(db, api_client, enrolled_runner, runner_token
 
     assert resp.status_code == 200, resp.data
     enrolled_runner.refresh_from_db()
-    assert enrolled_runner.status == RunnerStatus.ONLINE
+    assert enrolled_runner.status == RunnerStatus.PAUSED
     assert enrolled_runner.paused_at == paused_at
+    assert enrolled_runner.last_heartbeat_at is not None
+    drain.assert_not_called()

@@ -181,6 +181,13 @@ class RunnerStatus(models.TextChoices):
     OFFLINE = "offline", "Offline"
     BUSY = "busy", "Busy"
     REVOKED = "revoked", "Revoked"
+    PAUSED = "paused", "Paused"
+
+
+# Statuses an operator sets. Connectivity writers (poll, session open/close,
+# offline sweeps) only move a runner between ONLINE / BUSY / OFFLINE and must
+# leave these alone: resume and revoke are the only ways out.
+OPERATOR_HELD_STATUSES = (RunnerStatus.PAUSED, RunnerStatus.REVOKED)
 
 
 class Visibility(models.IntegerChoices):
@@ -385,7 +392,8 @@ class RunnerQuerySet(models.QuerySet):
     def assignable(self):
         """Runners that may take new work right now.
 
-        Online, heartbeat-fresh, and not operator-paused. Every path that
+        Online and heartbeat-fresh (a paused runner is ``PAUSED``, not
+        ``ONLINE``, so it is excluded by status). Every path that
         picks a runner for new work (matcher drains, follow-up pinning,
         availability checks) must go through this so a new eligibility
         rule only has to be added once.
@@ -395,7 +403,6 @@ class RunnerQuerySet(models.QuerySet):
         return self.filter(
             status=RunnerStatus.ONLINE,
             last_heartbeat_at__gte=timezone.now() - HEARTBEAT_GRACE,
-            paused_at__isnull=True,
         )
 
 
@@ -490,10 +497,8 @@ class Runner(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
     revoked_reason = models.CharField(max_length=32, blank=True, default="")
-    # Operator pause. Orthogonal to ``status``: ``status`` is connectivity
-    # (rewritten by every poll), while a paused runner keeps heartbeating,
-    # finishes its in-flight run, and is skipped by every matcher path until
-    # resumed. NULL means not paused.
+    # Who paused the runner and when, for display. ``status == PAUSED`` is
+    # the source of truth; these are set and cleared alongside it.
     paused_at = models.DateTimeField(null=True, blank=True)
     paused_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,

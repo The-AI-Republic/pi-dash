@@ -26,6 +26,7 @@ from pi_dash.runner.models import (
 from pi_dash.runner.serializers import DevMachineSerializer, RunnerSerializer
 from pi_dash.runner.services.matcher import (
     BUSY_STATUSES,
+    HEARTBEAT_GRACE,
     NON_TERMINAL_STATUSES,
     drain_for_runner_by_id,
 )
@@ -525,8 +526,9 @@ def _serialize_toggled_runner(runner_pk, **extra):
 class RunnerPauseEndpoint(APIView):
     """``POST /api/runners/<runner_id>/pause/`` — stop dispatching new work.
 
-    Pausing is cloud-side only: the daemon keeps heartbeating, but every
-    matcher path skips the runner and chat to it is refused. QUEUED local
+    Pausing is cloud-side only: the status becomes ``PAUSED``, which the poll
+    and session writers leave alone, so the daemon keeps heartbeating but
+    every matcher path skips the runner and chat to it is refused. QUEUED local
     runs pinned to it go back to the pod queue so another runner can take
     them. Work the runner already holds is left alone and returned as
     ``in_flight_runs`` — including an ASSIGNED run it has not started yet,
@@ -545,10 +547,11 @@ class RunnerPauseEndpoint(APIView):
             runner, error = _lock_manageable_runner(request, runner_id)
             if error is not None:
                 return error
-            if runner.paused_at is None:
+            if runner.status != RunnerStatus.PAUSED:
+                runner.status = RunnerStatus.PAUSED
                 runner.paused_at = timezone.now()
                 runner.paused_by = request.user
-                runner.save(update_fields=["paused_at", "paused_by", "updated_at"])
+                runner.save(update_fields=["status", "paused_at", "paused_by", "updated_at"])
                 transaction.on_commit(lambda rid=runner.pk: release_pins_for_paused_runner(rid))
             in_flight = [
                 {"id": str(run_id), "status": run_status}
@@ -566,6 +569,10 @@ class RunnerResumeEndpoint(APIView):
     The poll loop only drains on availability transitions, so without the
     explicit drain here a resumed idle runner would sit unused until some
     other trigger fired. Idempotent on a runner that is not paused.
+
+    The status goes back to what the runner would otherwise be: OFFLINE when
+    the heartbeat is stale, BUSY when it still holds a run, else ONLINE. The
+    next poll corrects any drift.
     """
 
     authentication_classes = [BaseSessionAuthentication]
@@ -576,9 +583,19 @@ class RunnerResumeEndpoint(APIView):
             runner, error = _lock_manageable_runner(request, runner_id)
             if error is not None:
                 return error
-            if runner.paused_at is not None:
+            if runner.status == RunnerStatus.PAUSED:
+                fresh = (
+                    runner.last_heartbeat_at is not None
+                    and runner.last_heartbeat_at >= timezone.now() - HEARTBEAT_GRACE
+                )
+                if not fresh:
+                    runner.status = RunnerStatus.OFFLINE
+                elif AgentRun.objects.filter(runner=runner, status__in=BUSY_STATUSES).exists():
+                    runner.status = RunnerStatus.BUSY
+                else:
+                    runner.status = RunnerStatus.ONLINE
                 runner.paused_at = None
                 runner.paused_by = None
-                runner.save(update_fields=["paused_at", "paused_by", "updated_at"])
+                runner.save(update_fields=["status", "paused_at", "paused_by", "updated_at"])
                 transaction.on_commit(lambda rid=runner.pk: drain_for_runner_by_id(rid))
         return _serialize_toggled_runner(runner.pk)

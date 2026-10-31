@@ -1192,8 +1192,9 @@ export default {
   "Paste the code sent to your email": "Paste the code sent to your email",
   Pause: "Pause",
   Paused: "Paused",
-  "Paused: this runner stays connected but takes no new work. Any in-flight run finishes.":
-    "Paused: this runner stays connected but takes no new work. Any in-flight run finishes.",
+  "Paused: this runner takes no new work. Any in-flight run finishes.":
+    "Paused: this runner takes no new work. Any in-flight run finishes.",
+  paused: "paused",
   "paused awaiting input": "paused awaiting input",
   "Payload URL": "Payload URL",
   Pending: "Pending",

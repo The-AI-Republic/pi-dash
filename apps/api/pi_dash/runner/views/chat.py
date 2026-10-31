@@ -124,7 +124,7 @@ def _runner_unavailable_error(runner: Optional[Runner]) -> Optional[str]:
     """
     if runner is None or runner.status in {RunnerStatus.OFFLINE, RunnerStatus.REVOKED}:
         return "runner_unavailable"
-    if runner.paused_at is not None:
+    if runner.status == RunnerStatus.PAUSED:
         return "runner_paused"
     return None
 
