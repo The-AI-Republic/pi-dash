@@ -81,7 +81,8 @@ use crate::state::AppState;
 use super::queries_core;
 use super::queries_engage;
 use super::{
-    fetch_count, fetch_json_rows, order_key, query_last, shape_row, Binder, Denial, QueryMap,
+    fetch_count, fetch_json_rows, order_key, page_denial, query_last, shape_row, Binder, Denial,
+    QueryMap,
 };
 use pidash_compat::response::json_response;
 use pidash_db::tasks_ticker::IssueAgentTicker;
@@ -89,10 +90,10 @@ use pidash_services::app_issues::serializers_assoc::{
     project_user_property_to_representation, ProjectUserPropertyRow,
 };
 use pidash_services::app_issues::{
-    issue_detail_base_to_representation, issue_detail_to_representation, issue_is_actively_synced,
-    order_sql, AgentLiveStateRow, AgentRunDetailRow, AgentTickerInput, IssueDetailBaseRow,
-    IssueDetailRow, ACTIVE_AGENT_RUN_SQL, AGENT_RUN_COUNT_SQL, GITHUB_ISSUE_SYNC_PROBE_SQL,
-    GIT_ISSUE_SYNC_PROBE_SQL, LATEST_AGENT_RUN_SQL,
+    envelope_head, issue_detail_base_to_representation, issue_detail_to_representation,
+    issue_is_actively_synced, order_sql, AgentLiveStateRow, AgentRunDetailRow, AgentTickerInput,
+    IssueDetailBaseRow, IssueDetailRow, ACTIVE_AGENT_RUN_SQL, AGENT_RUN_COUNT_SQL,
+    GITHUB_ISSUE_SYNC_PROBE_SQL, GIT_ISSUE_SYNC_PROBE_SQL, LATEST_AGENT_RUN_SQL,
 };
 use pidash_services::orchestration::blockers::{
     blockers_sql, dependents_sql, has_open_blockers_sql, relations_summary, BlockerRow,
@@ -2114,11 +2115,14 @@ async fn probe_synced(
 // Sub-issues (`sub_issue.py:33-248`)
 // ---------------------------------------------------------------------------
 
-/// `GET .../issues/<id>/sub-issues/`: the issue's children over the
-/// queries-A sub-issue querysets, with `order_by`, `group_by` and the
-/// `state_distribution`. `ProjectEntityPermission` read: any active project
-/// membership. The parent itself is never checked — an unknown parent id
-/// simply lists nothing.
+/// `GET .../issues/<id>/sub-issues/`: one `OffsetPaginator` page of the
+/// issue's children (`per_page` default 50, max 100), with `order_by`,
+/// `group_by` over the page, and the `state_distribution` rollup over the
+/// whole child set. The body is the `paginate()` envelope with `results`
+/// renamed to `sub_issues` and `state_distribution` appended.
+/// `ProjectEntityPermission` read: any active project membership. The
+/// parent itself is never checked — an unknown parent id simply lists
+/// nothing.
 async fn sub_issues_get(
     State(state): State<AppState>,
     Path((slug, project_raw, issue_raw)): Path<(String, String, String)>,
@@ -2126,28 +2130,30 @@ async fn sub_issues_get(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Response> {
+    use crate::paginator::{
+        apply_offset_window, max_hits, next_cursor, offset_window, parse_per_page, prev_cursor,
+        Cursor,
+    };
     let Ok(parent_id) = issue_raw.parse::<uuid::Uuid>() else {
         return Ok(crate::edge::proxy(State(state), req).await);
     };
     let (pool, gate) = resolve_entity_gate(&state, &slug, &project_raw, extension, false).await?;
     let order_param = query_last(&query, "order_by").unwrap_or_else(|| "-created_at".to_owned());
-    let (order, order_joins) =
-        sub_issues_order(&order_param).map_err(IntoResponse::into_response)?;
+    // The distribution is its own query over the full set in the model
+    // ordering (`-created_at`), so it never changes with paging; a
+    // stateless child keys as JSON `null` → `"null"`.
     let mut binder = Binder::new();
-    let selects = queries_core::sub_issues_selects();
     let from_where = queries_core::sub_issues_from_where(&mut binder, &slug, parent_id);
-    // The cycle-name traversal joins ride on the row query, so a
-    // multi-linked child fans out into one row per link like Django (the
-    // distribution below counts the fanned rows too).
-    let row_where = super::with_order_joins(&from_where, &order_joins);
-    let inner = format!("SELECT {selects} {row_where} {order}");
-    let rows = fetch_json_rows(&pool, &inner, binder.values())
+    let binds = binder.values();
+    let distribution_sql = format!(
+        "SELECT issue.id, state.\"group\" AS state_group {from_where} {}",
+        queries_core::SUB_ISSUES_DEFAULT_ORDER
+    );
+    let distribution_rows = fetch_json_rows(&pool, &distribution_sql, binds.clone())
         .await
         .map_err(IntoResponse::into_response)?;
-    // The distribution reads the RAW rows (`:171-174`), before the timezone
-    // conversion; a stateless child keys as JSON `null` → `"null"`.
     let mut distribution: Buckets = Vec::new();
-    for row in &rows {
+    for row in &distribution_rows {
         let key = match row.get("state_group") {
             Some(Value::String(group)) => group.clone(),
             Some(Value::Null) | None => "null".to_owned(),
@@ -2156,6 +2162,39 @@ async fn sub_issues_get(
         let id = get_str(row, "id").unwrap_or_default().to_owned();
         bucket_push(&mut distribution, key, id);
     }
+    // `self.paginate(default_per_page=50, max_per_page=100)`.
+    let per_page = parse_per_page(query_last(&query, "per_page").as_deref(), 50, 100)
+        .map_err(|error| page_denial(error).into_response())?;
+    let cursor = match query_last(&query, "cursor") {
+        Some(raw) => {
+            Cursor::from_string(&raw).map_err(|error| page_denial(error).into_response())?
+        }
+        None => Cursor::default_for(per_page),
+    };
+    let limit = per_page.min(1000);
+    let window = offset_window(limit, cursor.offset, cursor.value, cursor.is_prev, None)
+        .map_err(|error| page_denial(error).into_response())?;
+    let (order, order_joins) =
+        sub_issues_order(&order_param).map_err(IntoResponse::into_response)?;
+    // The cycle-name traversal joins ride on the page query only, so a
+    // multi-linked child fans out into one row per link like Django's
+    // ordered queryset; the count and the distribution never join.
+    let row_where = super::with_order_joins(&from_where, &order_joins);
+    let page_sql = format!(
+        "SELECT {} {row_where} {order} LIMIT {} OFFSET {}",
+        queries_core::sub_issues_selects(),
+        window.stop - window.offset,
+        window.offset
+    );
+    let fetched = fetch_json_rows(&pool, &page_sql, binds.clone())
+        .await
+        .map_err(IntoResponse::into_response)?;
+    let has_more = fetched.len() as i64 > limit;
+    let rows =
+        apply_offset_window(&fetched, limit).map_err(|error| page_denial(error).into_response())?;
+    let total_count = fetch_count(&pool, &format!("SELECT COUNT(*) {from_where}"), binds)
+        .await
+        .map_err(IntoResponse::into_response)?;
     let fields: Vec<String> = queries_core::SUB_ISSUES_KEYS
         .iter()
         .map(|key| (*key).to_owned())
@@ -2164,82 +2203,70 @@ async fn sub_issues_get(
         .iter()
         .map(|row| shape_row(row, &fields, &gate.timezone, true))
         .collect();
-    match query_last(&query, "group_by") {
-        None => Ok(render_sub_list(&shaped, &distribution)),
-        Some(param) if param.is_empty() => Ok(render_sub_list(&shaped, &distribution)),
-        Some(param) if param == "assignees__ids" => {
-            Ok(render_sub_grouped_assignees(&rows, &shaped, &distribution))
-        }
+    let sub_issues = match query_last(&query, "group_by") {
+        None => render_sub_list(&shaped),
+        Some(param) if param.is_empty() => render_sub_list(&shaped),
+        Some(param) if param == "assignees__ids" => render_sub_grouped_assignees(&rows, &shaped),
         Some(param) => {
-            if !queries_core::SUB_ISSUES_KEYS.contains(&param.as_str()) {
+            // `issue[group_by]` only raises (`KeyError` → 400) when the page
+            // has a row to index.
+            if !rows.is_empty() && !queries_core::SUB_ISSUES_KEYS.contains(&param.as_str()) {
                 return Err(
                     Denial::BadError("The required key does not exist.".to_owned()).into_response(),
                 );
             }
-            Ok(render_sub_grouped(
-                &rows,
-                &shaped,
-                &param,
-                &gate.timezone,
-                &distribution,
-            ))
+            render_sub_grouped(&rows, &shaped, &param, &gate.timezone)
         }
-    }
+    };
+    let next = next_cursor(limit, window.page, has_more);
+    let prev = prev_cursor(limit, window.page);
+    let head = envelope_head(
+        None,
+        None,
+        total_count,
+        &next.to_string(),
+        &prev.to_string(),
+        next.has_results_or_false(),
+        prev.has_results_or_false(),
+        rows.len(),
+        max_hits(total_count, limit).map_err(|error| page_denial(error).into_response())?,
+        total_count,
+    );
+    Ok(json_response(
+        StatusCode::OK,
+        format!(
+            "{head},\"sub_issues\":{sub_issues},\"state_distribution\":{}}}",
+            render_string_list_map(&distribution)
+        ),
+    ))
 }
 
-/// `ORDER BY` for the sub-issue list: `order_issue_queryset` through the
-/// merged `order_sql`, resolved like pilot-2's flat path. An empty param
-/// skips the port explicitly and falls back to the model ordering
-/// (`-created_at` — the same statement); an unknown field is Django's
-/// `FieldError` → generic 500.
+/// `ORDER BY` for the sub-issue page: `order_issue_queryset` maps the param
+/// to the paginator key, and `OffsetPaginator` then replaces the ordering
+/// with `key NULLS LAST, -created_at`. An empty param skips the port and
+/// hands the paginator `F("")` — Django's `FieldError` → generic 500, like
+/// an unknown field. The key resolves through the shared [`order_key`]
+/// (count keys `0`-style: the sub-issue list annotates `Coalesce(..., 0)`);
+/// its traversal joins (e.g. `issue_cycle__cycle__name`) ride on the page
+/// query, returned as the second element.
 fn sub_issues_order(order_by_param: &str) -> Result<(String, String), Denial> {
-    if order_by_param.is_empty() {
-        return Ok((
-            queries_core::SUB_ISSUES_DEFAULT_ORDER.to_owned(),
-            String::new(),
-        ));
-    }
-    let spec = order_sql(order_by_param, "state.\"group\"", |name| {
-        format!("min_{}", name.replace("__", "_"))
-    });
-    let out = spec.out_param.as_str();
-    if out == "priority_order"
-        || out == "-priority_order"
-        || out == "state_order"
-        || out == "-state_order"
-    {
-        // The CASE fragments are already issue-qualified; only the bare
-        // `created_at` tiebreak needs the table (Django orders the issue
-        // queryset — an unqualified `created_at` would be ambiguous over
-        // the joined tables).
-        let sql = spec
-            .order_by_sql
-            .replace("created_at DESC", "issue.created_at DESC");
-        return Ok((format!("ORDER BY {sql}"), String::new()));
-    }
-    // The sub-issue list annotates `Coalesce(..., 0)` counts, so its count
-    // keys order `0`-style.
-    if out == "min_values" || out == "-min_values" {
-        let key = order_key(out, order_by_param, None, false)?;
-        return Ok((
-            format!(
-                "ORDER BY {expr} {}, issue.created_at DESC",
-                if key.descending { "DESC" } else { "ASC" },
-                expr = key.expr,
-            ),
-            key.joins,
-        ));
-    }
-    let key = order_key(out, order_by_param, None, false)?;
-    let mut sql = format!(
-        "ORDER BY {expr} {}",
-        if key.descending { "DESC" } else { "ASC" },
-        expr = key.expr,
-    );
-    if !order_by_param.contains("created_at") {
-        sql.push_str(", issue.created_at DESC");
-    }
-    Ok((sql, key.joins))
+    let out = if order_by_param.is_empty() {
+        String::new()
+    } else {
+        order_sql(order_by_param, "state.\"group\"", |name| {
+            format!("min_{}", name.replace("__", "_"))
+        })
+        .out_param
+    };
+    let key = order_key(&out, order_by_param, None, false)?;
+    Ok((
+        format!(
+            "ORDER BY {expr} {} NULLS LAST, issue.created_at DESC",
+            if key.descending { "DESC" } else { "ASC" },
+            expr = key.expr,
+        ),
+        key.joins,
+    ))
 }
 
 /// Insertion-ordered string→list buckets (what `defaultdict(list)` renders).
@@ -2263,25 +2290,14 @@ fn render_string_list_map(map: &Buckets) -> String {
     format!("{{{}}}", pairs.join(","))
 }
 
-fn render_sub_list(shaped: &[String], distribution: &Buckets) -> Response {
-    json_response(
-        StatusCode::OK,
-        format!(
-            "{{\"sub_issues\":[{}],\"state_distribution\":{}}}",
-            shaped.join(","),
-            render_string_list_map(distribution)
-        ),
-    )
+fn render_sub_list(shaped: &[String]) -> String {
+    format!("[{}]", shaped.join(","))
 }
 
 /// `group_by=assignees__ids` (`:183-189`): one bucket per assignee id,
 /// `None` for the unassigned. A null list falls through both branches, so
 /// the row is dropped (unreachable — the column is `COALESCE`d).
-fn render_sub_grouped_assignees(
-    rows: &[Map<String, Value>],
-    shaped: &[String],
-    distribution: &Buckets,
-) -> Response {
+fn render_sub_grouped_assignees(rows: &[Map<String, Value>], shaped: &[String]) -> String {
     let mut groups: Buckets = Vec::new();
     for (row, rendered) in rows.iter().zip(shaped.iter()) {
         match row.get("assignee_ids").and_then(Value::as_array) {
@@ -2297,22 +2313,15 @@ fn render_sub_grouped_assignees(
             None => {}
         }
     }
-    render_sub_buckets(&groups, distribution)
+    render_sub_buckets(&groups)
 }
 
-fn render_sub_buckets(groups: &Buckets, distribution: &Buckets) -> Response {
+fn render_sub_buckets(groups: &Buckets) -> String {
     let buckets: Vec<String> = groups
         .iter()
         .map(|(bucket, items)| format!("{}:[{}]", json_string(bucket), items.join(",")))
         .collect();
-    json_response(
-        StatusCode::OK,
-        format!(
-            "{{\"sub_issues\":{{{}}},\"state_distribution\":{}}}",
-            buckets.join(","),
-            render_string_list_map(distribution)
-        ),
-    )
+    format!("{{{}}}", buckets.join(","))
 }
 
 /// Generic `group_by=<values key>` (`:191-192`): `str()` of the CONVERTED
@@ -2322,8 +2331,7 @@ fn render_sub_grouped(
     shaped: &[String],
     key: &str,
     timezone: &Tz,
-    distribution: &Buckets,
-) -> Response {
+) -> String {
     let mut groups: Buckets = Vec::new();
     for (row, rendered) in rows.iter().zip(shaped.iter()) {
         let bucket = match key {
@@ -2334,7 +2342,7 @@ fn render_sub_grouped(
         };
         bucket_push(&mut groups, bucket, rendered.clone());
     }
-    render_sub_buckets(&groups, distribution)
+    render_sub_buckets(&groups)
 }
 
 /// Python `str()` for JSON scalars (the `group_by` / assignee-bucket keys).
@@ -2890,31 +2898,35 @@ mod tests {
 
     #[test]
     fn sub_issues_order_branches() {
-        assert_eq!(
-            sub_issues_order("").unwrap(),
-            (
-                queries_core::SUB_ISSUES_DEFAULT_ORDER.to_owned(),
-                String::new()
-            )
-        );
+        // An empty param is `F("")` in the paginator: FieldError → 500.
+        assert!(sub_issues_order("").is_err());
         assert_eq!(
             sub_issues_order("-created_at").unwrap(),
             (
-                "ORDER BY issue.\"created_at\" DESC".to_owned(),
+                "ORDER BY issue.\"created_at\" DESC NULLS LAST, issue.created_at DESC".to_owned(),
                 String::new()
             )
         );
+        assert_eq!(
+            sub_issues_order("sort_order").unwrap(),
+            (
+                "ORDER BY issue.\"sort_order\" ASC NULLS LAST, issue.created_at DESC".to_owned(),
+                String::new()
+            )
+        );
+        // `priority` maps to `-priority_order` (the ported inversion).
         let priority = sub_issues_order("priority").unwrap();
         assert!(priority.0.contains("WHEN issue.priority = 'urgent'"));
-        assert!(priority.0.contains("issue.created_at DESC"));
-        assert!(!priority.0.contains(" created_at DESC"));
+        assert!(priority
+            .0
+            .ends_with("END DESC NULLS LAST, issue.created_at DESC"));
         assert!(priority.1.is_empty());
         let min = sub_issues_order("-labels__name").unwrap();
         assert!(min.0.contains("MIN(l.name)"));
-        assert!(min.0.contains("issue.created_at DESC"));
+        assert!(min.0.ends_with(") DESC NULLS LAST, issue.created_at DESC"));
         assert!(min.1.is_empty());
         let crossed = sub_issues_order("issue_cycle__cycle__name").unwrap();
-        assert!(crossed.0.contains("__order_c.name ASC"));
+        assert!(crossed.0.contains("__order_c.name ASC NULLS LAST"));
         assert!(crossed.1.contains("LEFT JOIN cycle_issues AS __order_ci"));
         assert!(sub_issues_order("nope").is_err());
     }

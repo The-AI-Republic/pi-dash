@@ -148,10 +148,10 @@ pub use serializers_refs::{
     PROJECT_LITE_FIELDS, STATE_LITE_FIELDS,
 };
 pub use shape::{
-    deleted_ids_body, envelope, group_mismatch_body, issues_required_body, on_results_fields,
-    v2_fields, DETAIL_FIELDS, FLAT_LIST_FIELDS, LIST_VALUES_FIELDS, ON_RESULTS_ARRAY_FIELDS,
-    ON_RESULTS_BASE_FIELDS, ON_RESULTS_STATE_GROUP_FIELD, PRIORITY_VALUES, STATE_GROUP_VALUES,
-    V2_REQUIRED_FIELDS,
+    deleted_ids_body, envelope, envelope_head, group_mismatch_body, issues_required_body,
+    on_results_fields, v2_fields, DETAIL_FIELDS, FLAT_LIST_FIELDS, LIST_VALUES_FIELDS,
+    ON_RESULTS_ARRAY_FIELDS, ON_RESULTS_BASE_FIELDS, ON_RESULTS_STATE_GROUP_FIELD, PRIORITY_VALUES,
+    STATE_GROUP_VALUES, V2_REQUIRED_FIELDS,
 };
 
 /// What the Rust handlers do about the `recent_visited_task.delay` call
