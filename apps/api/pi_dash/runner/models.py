@@ -352,14 +352,36 @@ class DevMachine(models.Model):
         default=Visibility.PRIVATE,
         db_index=True,
     )
-    # Set once at enrollment from the endpoint that created it; never from a
-    # request body. Runners created on this machine inherit it.
+    # Informational: which client first created this record (set once at
+    # creation, never updated). One computer's record is shared by the CLI
+    # and the desktop app, so runners do NOT inherit it; each runner's own
+    # ``Runner.provisioning`` comes from whoever enrolled that runner.
     provisioning = models.CharField(
         max_length=24,
         choices=RunnerProvisioning.choices,
         default=RunnerProvisioning.MANUAL,
         db_index=True,
     )
+    # Lowercase hex SHA-256 of the client's hardware/OS machine id (see
+    # ``runner/services/dev_machines.py``). Empty for clients that predate
+    # it or cannot read one. At most one active record per (owner,
+    # fingerprint); duplicates are merged into a survivor.
+    fingerprint = models.CharField(max_length=64, blank=True, default="")
+    # Set (together with ``revoked_at``) when this record was folded into
+    # another one for the same computer. Clients still holding this id are
+    # pointed at the survivor.
+    merged_into = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="merged_from",
+    )
+    # What keeps the daemon running: ``service`` (OS service manager),
+    # ``desktop`` (child of the desktop app) or empty (unknown/older daemon).
+    # Reported by the daemon on machine session open; display only, it never
+    # decides a runner's provisioning.
+    supervisor = models.CharField(max_length=16, blank=True, default="")
     last_seen_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -368,6 +390,13 @@ class DevMachine(models.Model):
     class Meta:
         db_table = "dev_machine"
         ordering = ("-last_seen_at", "-created_at")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "fingerprint"],
+                condition=models.Q(revoked_at__isnull=True, merged_into__isnull=True) & ~models.Q(fingerprint=""),
+                name="dev_machine_one_active_per_owner_fingerprint",
+            ),
+        ]
         indexes = [
             models.Index(
                 fields=["owner", "visibility"],
@@ -842,11 +871,26 @@ class RunMessageDedupe(models.Model):
         indexes = [models.Index(fields=["created_at"])]
 
 
+# ``MachineToken.label`` prefix of tokens minted by the desktop enroll
+# endpoint (``runner/views/desktop.py``). Desktop-issued and CLI-issued
+# (``machine: ...``) tokens are separate kinds: one computer's shared
+# ``DevMachine`` may hold one active token of each kind per workspace, and
+# rotating one kind never revokes the other.
+DESKTOP_MACHINE_TOKEN_LABEL_PREFIX = "desktop: "
+
+
+def desktop_machine_token_q() -> models.Q:
+    """Filter for desktop-issued machine tokens (negate for CLI-issued)."""
+    return models.Q(label__startswith=DESKTOP_MACHINE_TOKEN_LABEL_PREFIX)
+
+
 class MachineToken(models.Model):
     """Machine-scoped credential shared by CLI and runner runtime.
 
     A machine has at most one active MachineToken per workspace/dev-machine
-    regardless of how many runners it hosts.
+    and token kind (CLI-issued vs desktop-issued, see
+    ``DESKTOP_MACHINE_TOKEN_LABEL_PREFIX``) regardless of how many runners
+    it hosts.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -887,8 +931,15 @@ class MachineToken(models.Model):
             ),
             models.UniqueConstraint(
                 fields=["workspace", "dev_machine"],
-                condition=models.Q(revoked_at__isnull=True, dev_machine__isnull=False),
+                condition=models.Q(revoked_at__isnull=True, dev_machine__isnull=False)
+                & ~models.Q(label__startswith=DESKTOP_MACHINE_TOKEN_LABEL_PREFIX),
                 name="machine_token_one_active_per_ws_dev_machine",
+            ),
+            models.UniqueConstraint(
+                fields=["workspace", "dev_machine"],
+                condition=models.Q(revoked_at__isnull=True, dev_machine__isnull=False)
+                & models.Q(label__startswith=DESKTOP_MACHINE_TOKEN_LABEL_PREFIX),
+                name="machine_token_one_desktop_per_ws_dev_machine",
             ),
         ]
         indexes = [
@@ -901,6 +952,62 @@ class MachineToken(models.Model):
             return
         self.revoked_at = timezone.now()
         self.save(update_fields=["revoked_at"])
+
+
+class DesktopHandoffKey(models.Model):
+    """Long-lived secret that lets the desktop app borrow the CLI's sign-in.
+
+    Minted alongside the machine token when a human signs the CLI in
+    interactively (``pidash auth login``) and stored by the CLI as
+    ``[cli].handoff_key``. Presenting it (plus the machine fingerprint)
+    yields a short-lived :class:`DesktopHandoffCode` that the desktop
+    webview redeems for a browser session. Only the hash is stored.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="desktop_handoff_keys",
+    )
+    dev_machine = models.ForeignKey(
+        DevMachine,
+        on_delete=models.CASCADE,
+        related_name="handoff_keys",
+    )
+    key_hash = models.CharField(max_length=128, db_index=True)
+    key_fingerprint = models.CharField(max_length=16, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "desktop_handoff_key"
+        ordering = ("-created_at",)
+        indexes = [
+            models.Index(fields=["user", "dev_machine", "revoked_at"], name="desktop_handoff_key_um_idx"),
+        ]
+
+
+class DesktopHandoffCode(models.Model):
+    """Single-use, short-lived code exchanged for a browser session."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    key = models.ForeignKey(DesktopHandoffKey, on_delete=models.CASCADE, related_name="codes")
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="desktop_handoff_codes",
+    )
+    code_hash = models.CharField(max_length=128, unique=True)
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "desktop_handoff_code"
+        ordering = ("-created_at",)
+        indexes = [models.Index(fields=["expires_at"], name="desktop_handoff_code_exp_idx")]
 
 
 class AgentRun(models.Model):

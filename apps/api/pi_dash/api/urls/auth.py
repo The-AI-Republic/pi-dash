@@ -5,6 +5,8 @@
 from django.urls import path
 
 from pi_dash.authentication.views.cli import (
+    DesktopHandoffCodeEndpoint,
+    DesktopHandoffRedeemEndpoint,
     DeviceCodeApproveEndpoint,
     DeviceCodeRevokeEndpoint,
     DeviceCodeStartEndpoint,
@@ -38,6 +40,18 @@ urlpatterns = [
         "auth/machine-token/",
         DeviceMachineTokenEndpoint.as_view(),
         name="auth-machine-token",
+    ),
+    path(
+        "auth/desktop-handoff/",
+        DesktopHandoffCodeEndpoint.as_view(),
+        name="auth-desktop-handoff",
+    ),
+    # OSS default for ``settings.DESKTOP_HANDOFF_REDEEM_PATH``. Deployments
+    # that override the setting serve their own redeem route.
+    path(
+        "auth/desktop-handoff/redeem/",
+        DesktopHandoffRedeemEndpoint.as_view(),
+        name="auth-desktop-handoff-redeem",
     ),
     path(
         "auth/workspaces/",

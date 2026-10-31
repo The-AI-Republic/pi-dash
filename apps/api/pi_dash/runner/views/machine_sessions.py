@@ -14,7 +14,9 @@ channel exists even when the machine hosts zero runners, which is the
 
 Three verbs, mirroring the per-runner session:
 
-- ``POST   /api/v1/runner/dev-machines/<mid>/sessions/`` — open.
+- ``POST   /api/v1/runner/dev-machines/<mid>/sessions/`` — open. The
+  body may carry ``machine_fingerprint`` (stamped on the machine, merging
+  same-computer duplicates into it) and ``supervisor``.
 - ``DELETE /api/v1/runner/dev-machines/<mid>/sessions/<sid>/`` — clean
   shutdown.
 - ``POST   /api/v1/runner/dev-machines/<mid>/sessions/<sid>/poll`` —
@@ -42,6 +44,13 @@ from pi_dash.utils.db_async import db_sync_to_async
 from pi_dash.runner.authentication import MachineTokenAuthentication
 from pi_dash.runner.models import DevMachine, MachineSession
 from pi_dash.runner.services import machine_outbox
+from pi_dash.runner.services.dev_machines import (
+    SUPERVISORS,
+    InvalidMachineFingerprint,
+    claim_fingerprint,
+    merged_survivor_id,
+    parse_machine_fingerprint,
+)
 
 logger = logging.getLogger(__name__)
 _POLL_SLICE_MS = 1000
@@ -66,6 +75,37 @@ def _auth_dev_machine(request, dev_machine_id) -> DevMachine | None:
     return token.dev_machine
 
 
+def _merged_survivor_for_token(token, dev_machine_id):
+    """Survivor id when ``dev_machine_id`` was merged into the token's machine."""
+    if token is None or token.dev_machine_id is None:
+        return None
+    survivor_id = merged_survivor_id(dev_machine_id)
+    if survivor_id is None or survivor_id != token.dev_machine_id:
+        return None
+    return survivor_id
+
+
+def _mismatch_payload(request, dev_machine_id):
+    """``(payload, status)`` for a token not bound to ``dev_machine_id``.
+
+    A daemon still addressing a record that was merged into its token's
+    machine gets 409 ``dev_machine_merged`` with the survivor id, persists
+    it and retries; anything else is the plain 403 mismatch.
+    """
+    survivor_id = _merged_survivor_for_token(getattr(request, "auth_machine_token", None), dev_machine_id)
+    if survivor_id is not None:
+        return (
+            {"error": "dev_machine_merged", "dev_machine_id": str(survivor_id)},
+            status.HTTP_409_CONFLICT,
+        )
+    return {"error": "dev_machine_mismatch"}, status.HTTP_403_FORBIDDEN
+
+
+def dev_machine_mismatch_response(request, dev_machine_id) -> Response:
+    payload, code = _mismatch_payload(request, dev_machine_id)
+    return Response(payload, status=code)
+
+
 class MachineSessionOpenEndpoint(APIView):
     """``POST /dev-machines/<mid>/sessions/`` — open a machine session."""
 
@@ -76,10 +116,24 @@ class MachineSessionOpenEndpoint(APIView):
     def post(self, request, dev_machine_id):
         machine = _auth_dev_machine(request, dev_machine_id)
         if machine is None:
+            return dev_machine_mismatch_response(request, dev_machine_id)
+        try:
+            fingerprint = parse_machine_fingerprint(request.data.get("machine_fingerprint"))
+        except InvalidMachineFingerprint:
             return Response(
-                {"error": "dev_machine_mismatch"},
-                status=status.HTTP_403_FORBIDDEN,
+                {"error": "invalid_machine_fingerprint"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
+        supervisor = request.data.get("supervisor")
+        if not isinstance(supervisor, str) or supervisor not in SUPERVISORS:
+            # Older daemons send nothing; unknown values are not an error.
+            supervisor = None
+
+        if fingerprint:
+            # Stamp + merge in its own transaction so duplicates collapse
+            # before the session row (and its eviction side effects) exist.
+            with transaction.atomic():
+                machine = claim_fingerprint(machine, fingerprint=fingerprint)
 
         machine_outbox.ensure_stream_group(machine.id)
 
@@ -103,9 +157,10 @@ class MachineSessionOpenEndpoint(APIView):
                 protocol_version=settings.RUNNER_PROTOCOL_VERSION,
                 last_seen_at=timezone.now(),
             )
-            DevMachine.objects.filter(pk=machine.id).update(
-                last_seen_at=timezone.now()
-            )
+            machine_updates = {"last_seen_at": timezone.now()}
+            if supervisor is not None:
+                machine_updates["supervisor"] = supervisor
+            DevMachine.objects.filter(pk=machine.id).update(**machine_updates)
 
         # Post-tx Redis side effects — the session row is committed and the
         # row lock released, so a slow Redis call can no longer wedge the DB.
@@ -141,10 +196,7 @@ class MachineSessionDeleteEndpoint(APIView):
     def delete(self, request, dev_machine_id, sid):
         machine = _auth_dev_machine(request, dev_machine_id)
         if machine is None:
-            return Response(
-                {"error": "dev_machine_mismatch"},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+            return dev_machine_mismatch_response(request, dev_machine_id)
         try:
             session = MachineSession.objects.get(
                 id=sid, dev_machine=machine, revoked_at__isnull=True
@@ -302,6 +354,12 @@ async def machine_session_poll(request, dev_machine_id, sid):
         or token.dev_machine_id is None
         or str(token.dev_machine_id) != str(dev_machine_id)
     ):
+        survivor_id = await db_sync_to_async(_merged_survivor_for_token)(token, dev_machine_id)
+        if survivor_id is not None:
+            return JsonResponse(
+                {"error": "dev_machine_merged", "dev_machine_id": str(survivor_id)},
+                status=status.HTTP_409_CONFLICT,
+            )
         return JsonResponse(
             {"error": "dev_machine_mismatch"}, status=status.HTTP_403_FORBIDDEN
         )

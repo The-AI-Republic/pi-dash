@@ -117,6 +117,9 @@ class DevMachineListEndpoint(APIView):
                 Q(id__in=runner_machine_ids) | Q(id__in=token_machine_ids),
                 owner=request.user,
                 visibility=Visibility.PRIVATE,
+                # Merged records are tombstones of a duplicate; the survivor
+                # carries their runners and tokens.
+                merged_into__isnull=True,
             )
             .annotate(
                 runner_count=Count("runners", filter=workspace_runner_filter, distinct=True),

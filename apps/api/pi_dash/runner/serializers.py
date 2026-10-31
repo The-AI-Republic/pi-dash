@@ -123,6 +123,9 @@ class DevMachineSerializer(serializers.ModelSerializer):
             "runner_count",
             "online_runner_count",
             "control_online",
+            # ``service`` / ``desktop`` / "" — what keeps the daemon running,
+            # as reported on the machine session open.
+            "supervisor",
             "last_seen_at",
             "last_heartbeat_at",
             "revoked_at",

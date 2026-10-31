@@ -42,11 +42,19 @@ from pi_dash.authentication.session import BaseSessionAuthentication
 from pi_dash.authentication.services.cli_tokens import (
     CLI_DEVICE_API_TOKEN_DESCRIPTION,
     deactivate_api_token,
+    is_cli_device_api_token,
 )
+from pi_dash.authentication.services.desktop_handoff import mint_handoff_key, revoke_handoff_keys
 from pi_dash.db.models import APIToken, CLIDeviceCode, WorkspaceMember
 from pi_dash.authentication.utils.host import base_host
-from pi_dash.runner.models import DevMachine, MachineToken
+from pi_dash.runner.models import DevMachine, MachineToken, desktop_machine_token_q
 from pi_dash.runner.services import tokens as runner_tokens
+from pi_dash.runner.services.dev_machines import (
+    DevMachineOwnershipError,
+    InvalidMachineFingerprint,
+    parse_machine_fingerprint,
+    resolve_dev_machine,
+)
 from pi_dash.runner.services.permissions import is_workspace_member
 
 logger = logging.getLogger("pi_dash.auth.cli")
@@ -66,55 +74,15 @@ DEVICE_CODE_MIN_POLL_GAP = timedelta(seconds=3)
 DEVICE_CODE_START_MAX_RETRIES = 5
 
 
-class DevMachineOwnershipError(Exception):
-    pass
-
-
-def _touch_dev_machine(machine: DevMachine, *, host_label: str) -> DevMachine:
-    host_label = (host_label or "").strip()[:255]
-    now = timezone.now()
-    update_fields = ["last_seen_at", "updated_at"]
-    machine.last_seen_at = now
-    if host_label and machine.host_label != host_label:
-        machine.host_label = host_label
-        update_fields.append("host_label")
-    if host_label and not machine.label:
-        machine.label = host_label[:128]
-        update_fields.append("label")
-    machine.save(update_fields=update_fields)
-    return machine
-
-
-def _get_or_create_dev_machine(*, user, dev_machine_id: _uuid.UUID, host_label: str) -> DevMachine:
-    host_label = (host_label or "").strip()[:255]
-    now = timezone.now()
-    locked = DevMachine.objects.select_for_update().filter(pk=dev_machine_id).first()
-    if locked is not None:
-        if locked.owner_id != user.id:
-            raise DevMachineOwnershipError
-        return _touch_dev_machine(locked, host_label=host_label)
-    try:
-        with transaction.atomic():
-            return DevMachine.objects.create(
-                id=dev_machine_id,
-                owner=user,
-                host_label=host_label,
-                label=host_label[:128],
-                last_seen_at=now,
-            )
-    except IntegrityError:
-        locked = DevMachine.objects.select_for_update().filter(pk=dev_machine_id).first()
-        if locked is None or locked.owner_id != user.id:
-            raise DevMachineOwnershipError
-        return _touch_dev_machine(locked, host_label=host_label)
-
-
 def _rotate_machine_token(*, user, workspace, dev_machine: DevMachine, host_label: str) -> runner_tokens.MintedToken:
+    # Only CLI-issued tokens rotate: the computer's record may also carry a
+    # desktop-issued token (``desktop:`` label) for an older desktop build,
+    # which a CLI sign-in must not revoke.
     MachineToken.objects.select_for_update().filter(
         workspace=workspace,
         dev_machine=dev_machine,
         revoked_at__isnull=True,
-    ).update(revoked_at=timezone.now())
+    ).exclude(desktop_machine_token_q()).update(revoked_at=timezone.now())
     minted = runner_tokens.mint_machine_token()
     MachineToken.objects.create(
         user=user,
@@ -420,6 +388,13 @@ class DeviceMachineTokenEndpoint(APIView):
         workspace_slug = (request.data.get("workspace_slug") or "").strip()
         dev_machine_id_raw = (request.data.get("dev_machine_id") or "").strip()
         host_label = (request.data.get("host_label") or "").strip()[:255]
+        try:
+            fingerprint = parse_machine_fingerprint(request.data.get("machine_fingerprint"))
+        except InvalidMachineFingerprint:
+            return Response(
+                {"error": "invalid_machine_fingerprint"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if not workspace_slug:
             return Response(
                 {"error": "workspace_slug is required"},
@@ -450,12 +425,19 @@ class DeviceMachineTokenEndpoint(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        # Interactive sign-in (device-flow APIToken) also gets a desktop
+        # handoff key; a machine-token caller (re-binding a workspace) never
+        # does, so a leaked machine token can't be escalated to a browser
+        # session.
+        interactive = getattr(request, "auth_machine_token", None) is None and is_cli_device_api_token(request.auth)
+        handoff_key = None
         try:
             with transaction.atomic():
-                dev_machine = _get_or_create_dev_machine(
+                dev_machine = resolve_dev_machine(
                     user=request.user,
                     dev_machine_id=dev_machine_id,
                     host_label=host_label,
+                    fingerprint=fingerprint,
                 )
                 minted = _rotate_machine_token(
                     user=request.user,
@@ -463,6 +445,8 @@ class DeviceMachineTokenEndpoint(APIView):
                     dev_machine=dev_machine,
                     host_label=host_label,
                 )
+                if interactive:
+                    handoff_key = mint_handoff_key(user=request.user, dev_machine=dev_machine)
                 if getattr(request, "auth_machine_token", None) is None:
                     deactivate_api_token(request.auth, only_cli_device_tokens=True)
         except DevMachineOwnershipError:
@@ -471,15 +455,20 @@ class DeviceMachineTokenEndpoint(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        return Response(
-            {
-                "machine_token": minted.raw,
-                "workspace_slug": workspace.slug,
-                "dev_machine_id": str(dev_machine.id),
-                "host_label": dev_machine.host_label,
+        body = {
+            "machine_token": minted.raw,
+            "workspace_slug": workspace.slug,
+            "dev_machine_id": str(dev_machine.id),
+            "host_label": dev_machine.host_label,
+            "user": {
+                "id": str(request.user.id),
+                "email": request.user.email,
+                "display_name": request.user.display_name,
             },
-            status=status.HTTP_201_CREATED,
-        )
+        }
+        if handoff_key is not None:
+            body["handoff_key"] = handoff_key
+        return Response(body, status=status.HTTP_201_CREATED)
 
 
 class DeviceCodeRevokeEndpoint(APIView):
@@ -496,7 +485,12 @@ class DeviceCodeRevokeEndpoint(APIView):
     def post(self, request):
         machine_token = getattr(request, "auth_machine_token", None)
         if machine_token is not None:
-            machine_token.revoke()
+            with transaction.atomic():
+                machine_token.revoke()
+                # Signing the CLI out also ends the desktop's ability to
+                # borrow that sign-in on this machine.
+                if machine_token.dev_machine_id is not None:
+                    revoke_handoff_keys(user=machine_token.user, dev_machine=machine_token.dev_machine)
             return Response({"ok": True}, status=status.HTTP_200_OK)
         # request.auth is the raw token string (see APIKeyAuthentication).
         raw_token = request.auth
