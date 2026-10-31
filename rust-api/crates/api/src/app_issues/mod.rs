@@ -44,6 +44,7 @@
 
 pub mod expand;
 pub mod handlers_archive;
+pub mod handlers_bulk;
 pub mod handlers_core;
 pub mod handlers_engage;
 pub mod handlers_issue_types;
@@ -289,6 +290,26 @@ pub fn routes() -> Router<AppState> {
         .route(
             handlers_archive::BULK_ARCHIVE_PATH,
             post(handlers_archive::bulk_archive)
+                .get(crate::edge::proxy)
+                .put(crate::edge::proxy)
+                .patch(crate::edge::proxy)
+                .delete(crate::edge::proxy)
+                .head(crate::edge::proxy)
+                .options(crate::edge::proxy),
+        )
+        .route(
+            handlers_bulk::BULK_OPERATION_PATH,
+            post(handlers_bulk::bulk_operation)
+                .get(crate::edge::proxy)
+                .put(crate::edge::proxy)
+                .patch(crate::edge::proxy)
+                .delete(crate::edge::proxy)
+                .head(crate::edge::proxy)
+                .options(crate::edge::proxy),
+        )
+        .route(
+            handlers_bulk::BULK_SUBSCRIBE_PATH,
+            post(handlers_bulk::bulk_subscribe)
                 .get(crate::edge::proxy)
                 .put(crate::edge::proxy)
                 .patch(crate::edge::proxy)
@@ -3276,6 +3297,14 @@ mod tests {
             (
                 "DELETE",
                 "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/bulk-delete-issues/",
+            ),
+            (
+                "POST",
+                "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/bulk-operation-issues/",
+            ),
+            (
+                "POST",
+                "/api/workspaces/w/projects/00000000-0000-0000-0000-000000000000/bulk-subscribe-issues/",
             ),
         ] {
             assert_eq!(

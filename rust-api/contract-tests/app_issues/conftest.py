@@ -116,7 +116,9 @@ WORLD_TABLES = (
     "issue_versions",
     "issue_description_versions", "file_assets",
     "github_pull_request_links", "git_code_review_links",
-    "issue_assignees", "issues", "states", "project_members",
+    "issue_assignees", "cycle_issues", "module_issues", "issues",
+    "cycles", "modules", "estimate_points", "estimates",
+    "states", "project_members",
     "project_issue_types", "issue_types",
     "projects", "workspace_members",
 )
