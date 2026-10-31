@@ -1174,7 +1174,7 @@ fn py_repr_string(text: &str) -> String {
 
 /// Django `parse_date`: `date.fromisoformat` (extended, basic, week —
 /// NOT ordinal, verified live) or the 1-2-digit `date_re` fallback.
-fn parse_drf_date(text: &str) -> Option<NaiveDate> {
+pub(crate) fn parse_drf_date(text: &str) -> Option<NaiveDate> {
     if let Some(date) = parse_iso_date_part(text) {
         return Some(date);
     }
