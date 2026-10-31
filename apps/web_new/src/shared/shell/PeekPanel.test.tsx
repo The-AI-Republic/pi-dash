@@ -254,6 +254,26 @@ describe("PeekPanel", () => {
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   });
 
+  it("docks the side layout at half the viewport with a usable floor", () => {
+    setup({ layout: "side" });
+    const panel = screen.getByTestId("issue-preview");
+    expect(panel).toHaveAttribute("data-peek-layout", "side");
+    const classes = panel.className.split(/\s+/);
+    expect(classes).toContain("w-1/2");
+    expect(classes).toContain("min-w-[min(30rem,100vw)]");
+    expect(panel.className).not.toContain("w-[min(30rem,92vw)]");
+  });
+
+  it("leaves the modal and full layouts off the half-width dock", () => {
+    for (const layout of ["modal", "full"] as const) {
+      const view = setup({ layout });
+      const classes = screen.getByTestId("issue-preview").className.split(/\s+/);
+      expect(classes).not.toContain("w-1/2");
+      expect(classes).not.toContain("min-w-[min(30rem,100vw)]");
+      view.unmount();
+    }
+  });
+
   it("centers the modal layout behind a backdrop", () => {
     setup({ layout: "modal" });
     const panel = screen.getByTestId("issue-preview");

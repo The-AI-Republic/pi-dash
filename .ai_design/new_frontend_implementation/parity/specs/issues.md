@@ -1041,9 +1041,17 @@ Oracle: `issue-detail-peek.spec.ts`.
 
 The header layout toggle offers three display modes (ISS-166):
 side-peek docked right (default), centered modal, and full-screen
-portal. Side and modal modes use a single-column layout; full-screen
-uses two columns. The mode is component-local state — never persisted
-across reopen or reload and never in the URL. URL sync (ISS-167)
+portal. The side peek takes half the viewport width (`w-1/2`) and
+follows window resizes, with a 30rem floor clamped to the viewport
+(`min-w-[min(30rem,100vw)]`) so it stays usable on narrow screens and
+never overflows a phone-width viewport; the owner asked for this on
+NEWFRONT-1046, replacing the earlier fixed 30rem dock. The shell's
+shared side layout serves it, so every other side peek (work-item
+peeks anywhere, modules, cycles, archives, profile, public spaces,
+recents) gets the same width; their content already stacks to one
+column at that width. Side and modal modes use a single-column
+layout; full-screen uses two columns. The mode is component-local
+state — never persisted across reopen or reload and never in the URL. URL sync (ISS-167)
 two-way binds the peeked issue id, the peeked project id (omitted
 when it equals the route project), and the nesting level; a URL
 carrying a peeked issue id auto-opens the peek. Store-to-URL writes
