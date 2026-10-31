@@ -2080,7 +2080,7 @@ pub async fn list_issues(
     list_issues_inner(state, slug, project_id, &query, extension, false).await
 }
 
-/// `GET .../epics/` (`epics.py:20-33` + the inherited list): the issues
+/// `GET .../epics/` (`epics.py:65-66` + the inherited list): the issues
 /// list pipeline over the epic-filtered queryset — `IssueViewSet.list`
 /// with `type__is_epic=True`, so grouping, pagination, rich filters, and
 /// the guest rule all behave identically.
@@ -2093,7 +2093,7 @@ pub async fn epic_list_issues(
     list_issues_inner(state, slug, project_id, &query, extension, true).await
 }
 
-/// The epic boundary as a WHERE fragment (`epics.py:32-33`): Django's
+/// The epic boundary as a WHERE fragment (`epics.py:65-66`): Django's
 /// `filter(type__is_epic=True)` inner-joins `issue_types` with no
 /// related-manager guard — the EXISTS below is that join (the
 /// single-letter alias keeps the relation-join marker scan quiet).
@@ -2101,7 +2101,7 @@ const EPIC_ONLY_FRAGMENT: &str =
     "EXISTS(SELECT 1 FROM issue_types AS t WHERE t.id = issue.type_id AND t.is_epic)";
 
 /// The `IssueViewSet.list` pipeline after extraction: `epic_only`
-/// adds the epic boundary to the filtered set (`epics.py:32-33`).
+/// adds the epic boundary to the filtered set (`epics.py:65-66`).
 async fn list_issues_inner(
     state: AppState,
     slug: String,
@@ -2117,7 +2117,7 @@ async fn list_issues_inner(
     });
     let updated_gt = updated_at_gt(query)?;
     // The epics collection filters `type__is_epic=True`
-    // (`epics.py:32-33`): Django inner-joins with no related-manager
+    // (`epics.py:65-66`): Django inner-joins with no related-manager
     // guard, so untyped rows fall outside while rows under inactive or
     // soft-deleted epic types still match — the EXISTS below is that
     // join as a WHERE fragment (no binds of its own).
