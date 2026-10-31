@@ -655,7 +655,8 @@ pub const LIST_ROW_ORDER: &[&str] = &[
 ];
 
 /// `PageDetailSerializer` output order: list order plus `description_html`
-/// (`app/serializers/page.py:129-133`).
+/// plus the read-only `description_json` snapshot (NEWFRONT-932, main
+/// `app/serializers/page.py:138,141`).
 pub const DETAIL_ROW_ORDER: &[&str] = &[
     "id",
     "name",
@@ -678,6 +679,7 @@ pub const DETAIL_ROW_ORDER: &[&str] = &[
     "label_ids",
     "project_ids",
     "description_html",
+    "description_json",
 ];
 
 /// Retrieve appends `issue_ids` after the detail keys (`base.py:234-235`:
@@ -831,7 +833,7 @@ const READ_BASE_COLUMNS: &str =
     pages.color, pages.parent_id AS parent, pages.is_locked, pages.archived_at, \
     pages.workspace_id AS workspace, pages.created_at, pages.updated_at, \
     pages.created_by_id AS created_by, pages.updated_by_id AS updated_by, \
-    pages.view_props, pages.logo_props, pages.description_html";
+    pages.view_props, pages.logo_props, pages.description_html, pages.description_json";
 
 /// Exact DRF `ValidationError` body for a NUL in `?search=`: the raw value
 /// runs through `CharField(trim_whitespace=False, allow_blank=True)` whose
@@ -3498,6 +3500,7 @@ struct ScopedPage {
     view_props: Value,
     logo_props: Value,
     description_html: String,
+    description_json: Value,
 }
 
 /// The `PageViewSet.get_queryset` re-read row for create (`base.py:81-127`
@@ -3518,7 +3521,7 @@ struct DetailRow {
 
 const SCOPED_PAGE_COLUMNS: &str = "p.id, p.name, p.owned_by_id, p.access, p.color, p.parent_id, \
     p.is_locked, p.archived_at, p.workspace_id, p.created_at, p.updated_at, p.created_by_id, \
-    p.updated_by_id, p.view_props, p.logo_props, p.description_html";
+    p.updated_by_id, p.view_props, p.logo_props, p.description_html, p.description_json";
 
 /// The scoped page fetch (`partial_update` `:156-161`, `destroy` `:369-374`):
 /// `pk` + workspace slug + URL-project bridge (live rows only). A miss is
@@ -3640,7 +3643,8 @@ fn render_json(value: &Value) -> String {
 
 /// The create 201 shape: `PageDetailSerializer` over the re-read row —
 /// `Meta.fields` order minus write-only `labels` plus `description_html`
-/// (`page.py:129-133`), 21 keys. `sub_pages_count` is the annotation over
+/// plus the read-only `description_json` snapshot (main `page.py:138,141`),
+/// 22 keys. `sub_pages_count` is the annotation over
 /// a page created a moment ago, which has no children yet: always 0.
 fn render_create_row(row: &DetailRow, tz: &chrono_tz::Tz) -> String {
     let page = &row.page;
@@ -3713,8 +3717,12 @@ fn render_create_row(row: &DetailRow, tz: &chrono_tz::Tz) -> String {
             .join(",")
     ));
     out.push_str(&format!(
-        "\"description_html\":{}}}",
+        "\"description_html\":{},",
         quoted(&page.description_html)
+    ));
+    out.push_str(&format!(
+        "\"description_json\":{}}}",
+        render_json(&page.description_json)
     ));
     out
 }
@@ -3724,7 +3732,7 @@ fn render_create_row(row: &DetailRow, tz: &chrono_tz::Tz) -> String {
 /// `label_ids`, `project_ids`) have no attribute and DRF drops them
 /// (`SkipField`), as does the `sub_pages_count` annotation, except
 /// `label_ids` / `project_ids` render when the request body set them as
-/// ad-hoc attributes (17 base keys; `parent_id` is a model attribute).
+/// ad-hoc attributes (18 base keys; `parent_id` is a model attribute).
 #[derive(Debug, Clone, Default)]
 pub struct PatchRender {
     pub page: RenderPage,
@@ -3751,6 +3759,7 @@ pub struct RenderPage {
     pub view_props: Value,
     pub logo_props: Value,
     pub description_html: String,
+    pub description_json: Value,
 }
 
 fn render_patch_row(render: &PatchRender, tz: &chrono_tz::Tz) -> String {
@@ -3821,8 +3830,12 @@ fn render_patch_row(render: &PatchRender, tz: &chrono_tz::Tz) -> String {
         ));
     }
     out.push_str(&format!(
-        "\"description_html\":{}}}",
+        "\"description_html\":{},",
         quoted(&page.description_html)
+    ));
+    out.push_str(&format!(
+        "\"description_json\":{}}}",
+        render_json(&page.description_json)
     ));
     out
 }
@@ -4459,6 +4472,10 @@ pub async fn page_partial_update(
             view_props: valid.view_props.unwrap_or(page.view_props),
             logo_props: valid.logo_props.unwrap_or(page.logo_props),
             description_html: final_html,
+            // Read-only on the serializer (main `page.py:138`): the record
+            // PATCH never writes it, so the response carries the stored
+            // snapshot untouched.
+            description_json: page.description_json,
         },
         label_ids: valid.label_ids,
         project_ids: valid.project_ids,
@@ -5305,7 +5322,7 @@ mod tests {
     }
 
     /// Page writes: the create 201 shape is the detail field list
-    /// (F30-01 `field_list` + `description_html`), in order.
+    /// (F30-01 `field_list` + `description_html` + `description_json`), in order.
     #[test]
     fn write_create_shape_matches_f30_01() {
         let parsed = golden(F30_01);
@@ -5317,6 +5334,7 @@ mod tests {
             .collect();
         expected.retain(|field| field.as_str() != "labels");
         expected.push("description_html".to_owned());
+        expected.push("description_json".to_owned());
         let row = sample_detail_row();
         let rendered = render_create_row(&row, &chrono_tz::UTC);
         let body: Value = serde_json::from_str(&rendered).expect("renders JSON");
@@ -5329,13 +5347,14 @@ mod tests {
         // `serde_json` keeps insertion order (`preserve_order`), so the
         // parsed key order is the render order.
         assert_eq!(keys, expected);
-        assert_eq!(keys.len(), 21);
+        assert_eq!(keys.len(), 22);
         assert_eq!(body["parent_id"], body["parent"]);
         assert_eq!(body["sub_pages_count"], serde_json::json!(0));
         // Spot values: FKs render as PK strings, annotations render, the
         // default HTML survives.
         assert_eq!(body["name"], serde_json::json!("Created page"));
         assert_eq!(body["description_html"], serde_json::json!("<p></p>"));
+        assert_eq!(body["description_json"], serde_json::json!({"type": "doc"}));
         assert_eq!(body["is_favorite"], serde_json::json!(false));
         assert_eq!(body["label_ids"], serde_json::json!([]));
         assert_eq!(
@@ -5361,14 +5380,15 @@ mod tests {
             project_ids: None,
         };
         let keys = rendered_keys(&render_patch_row(&base, &chrono_tz::UTC));
-        assert_eq!(keys.len(), 17);
+        assert_eq!(keys.len(), 18);
         let parent = keys.iter().position(|key| key == "parent").unwrap();
         assert_eq!(keys[parent + 1], "parent_id");
         assert!(!keys.contains(&"sub_pages_count".to_owned()));
         assert!(!keys.contains(&"is_favorite".to_owned()));
         assert!(!keys.contains(&"label_ids".to_owned()));
         assert!(!keys.contains(&"project_ids".to_owned()));
-        assert_eq!(keys.last().unwrap(), "description_html");
+        assert_eq!(keys[keys.len() - 2], "description_html");
+        assert_eq!(keys.last().unwrap(), "description_json");
         // Ad-hoc attributes render in field position when present.
         let with_ids = PatchRender {
             label_ids: Some(vec![]),
@@ -5379,11 +5399,12 @@ mod tests {
             ..base
         };
         let keys = rendered_keys(&render_patch_row(&with_ids, &chrono_tz::UTC));
-        assert_eq!(keys.len(), 19);
+        assert_eq!(keys.len(), 20);
         let logo = keys.iter().position(|key| key == "logo_props").unwrap();
         assert_eq!(keys[logo + 1], "label_ids");
         assert_eq!(keys[logo + 2], "project_ids");
-        assert_eq!(keys.last().unwrap(), "description_html");
+        assert_eq!(keys[keys.len() - 2], "description_html");
+        assert_eq!(keys.last().unwrap(), "description_json");
     }
 
     /// Page writes: every probed validation vector through the pure field
@@ -5698,6 +5719,7 @@ mod tests {
                 view_props: serde_json::json!({"full_width": false}),
                 logo_props: serde_json::json!({}),
                 description_html: "<p></p>".to_owned(),
+                description_json: serde_json::json!({"type": "doc"}),
             },
             is_favorite: false,
             label_ids: vec![],
@@ -5723,6 +5745,7 @@ mod tests {
             view_props: row.page.view_props.clone(),
             logo_props: row.page.logo_props.clone(),
             description_html: row.page.description_html.clone(),
+            description_json: row.page.description_json.clone(),
         }
     }
 
@@ -5789,14 +5812,15 @@ mod read_tests {
         assert_eq!(LIST_ROW_ORDER, expected.as_slice());
     }
 
-    /// Detail order is list order plus `description_html`
-    /// (`serializers/page.py:129-133`).
+    /// Detail order is list order plus `description_html` plus the
+    /// read-only `description_json` snapshot (main `page.py:138,141`).
     #[test]
     fn detail_row_order_extends_list() {
         use pidash_services::app_pages::shape::page_detail_fields;
         use pidash_services::app_pages::shape::PAGE_SERIALIZER_FIELDS;
         let mut expected = LIST_ROW_ORDER.to_vec();
         expected.push("description_html");
+        expected.push("description_json");
         assert_eq!(DETAIL_ROW_ORDER, expected.as_slice());
         // The shape layer keeps the write-only `labels` in `Meta.fields`;
         // the rendered detail order is that list minus `labels`.

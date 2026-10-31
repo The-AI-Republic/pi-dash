@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import random
 import secrets
 import uuid
@@ -1424,6 +1425,7 @@ class Seeder:
         parent_id: str | None = None,
         description_html: str = "<p></p>",
         description_binary: bytes | None = None,
+        description_json: dict | None = None,
         archived: bool = False,
         locked: bool = False,
     ) -> dict[str, Any]:
@@ -1438,11 +1440,12 @@ class Seeder:
                 owned_by_id, access, workspace_id, color, parent_id, archived_at,
                 is_locked, view_props, logo_props, is_global, sort_order,
                 created_by_id, created_at, updated_at)
-               VALUES (%s,%s,'{}',%s,%s,%s,%s,%s,'',%s,
+               VALUES (%s,%s,CAST(%s AS jsonb),%s,%s,%s,%s,%s,'',%s,
                        CASE WHEN %s THEN CURRENT_DATE ELSE NULL END,
                        %s,'{"full_width": false}','{}',false,65535,%s,now(),now())""",
             (
-                page_id, name, description_binary, description_html,
+                page_id, name, json.dumps({} if description_json is None else description_json),
+                description_binary, description_html,
                 owner_id, access, workspace_id, parent_id,
                 archived, locked, owner_id,
             ),
