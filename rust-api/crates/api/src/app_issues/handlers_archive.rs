@@ -216,7 +216,7 @@ struct ArchiveContext {
 /// `@allow_permission([ADMIN, MEMBER])` at `PROJECT` level: an active
 /// project membership with role 20/15, or any active project membership
 /// plus an active workspace ADMIN membership — else the allow-style 403.
-async fn archive_allow(
+pub(crate) async fn archive_allow(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
@@ -272,7 +272,7 @@ async fn archive_allow(
 /// `ProjectEntityPermission` for the bulk POST (non-safe method): an
 /// active project membership with role 20/15 — no workspace-admin
 /// fallback.
-async fn entity_allowed(
+pub(crate) async fn entity_allowed(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
