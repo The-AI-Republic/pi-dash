@@ -1055,6 +1055,7 @@ fn day_comparison(
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
         "created_at__date" => zoned_date_column(binder, "created_at", timezone),
+        "updated_at__date" => zoned_date_column(binder, "updated_at", timezone),
         "completed_at__date" => zoned_date_column(binder, "completed_at", timezone),
         "start_date" => "issue.start_date".to_owned(),
         "target_date" => "issue.target_date".to_owned(),
@@ -1099,6 +1100,7 @@ fn legacy_text_sql(
         };
         let column = match term {
             "created_at__date" => zoned_date_column(binder, "created_at", timezone),
+            "updated_at__date" => zoned_date_column(binder, "updated_at", timezone),
             "completed_at__date" => zoned_date_column(binder, "completed_at", timezone),
             "start_date" => "issue.start_date".to_owned(),
             "target_date" => "issue.target_date".to_owned(),
@@ -3461,6 +3463,26 @@ mod tests {
         )
         .expect("sql");
         assert!(sql.starts_with("issue.state_id IN ($"));
+    }
+
+    #[test]
+    fn legacy_updated_at_predicates_hit_the_updated_column() {
+        let mut binder = Binder::new();
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).expect("day");
+        let sql = legacy_sql(
+            &mut binder,
+            "updated_at__date__gte",
+            &FilterValue::Day(day),
+            &chrono_tz::UTC,
+        )
+        .expect("sql");
+        assert!(sql.starts_with("(issue.updated_at AT TIME ZONE $"), "{sql}");
+        assert!(sql.contains(")::date >= "), "{sql}");
+        let text = FilterValue::Text("2026-01-12".to_owned());
+        let sql =
+            legacy_sql(&mut binder, "updated_at__date__lte", &text, &chrono_tz::UTC).expect("sql");
+        assert!(sql.contains("issue.updated_at"), "{sql}");
+        assert!(!sql.contains("created_at"), "{sql}");
     }
 
     #[test]
