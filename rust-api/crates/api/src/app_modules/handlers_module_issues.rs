@@ -5,7 +5,7 @@
 //! Ports `ModuleIssueViewSet` from
 //! `apps/api/pi_dash/app/views/module/issue.py:46-353`:
 //!
-//! - `list` (`:95-222`): the issue-list pipeline scoped to one module —
+//! - `list` (`:95-223`): the issue-list pipeline scoped to one module —
 //!   legacy `issue_filters(params, 'GET')` (`:98`),
 //!   `ComplexFilterBackend` + `IssueFilterSet` (`:51-52, :102`), the
 //!   `apply_annotations` columns (`:54-83`), `order_issue_queryset`
@@ -18,7 +18,7 @@
 //! - `create_issue_modules` (`:264-331`): `modules` adds (`:271-301`) +
 //!   `removed_modules` removals with per-removal `activity.deleted`
 //!   publish then delete (`:303-329`), 201 `{"message": "success"}`
-//!   (`:347`).
+//!   (`:331`).
 //! - `destroy` (`:333-353`): the `activity.deleted` publish fires before
 //!   the delete and unconditionally (`:341-351`); the bridge
 //!   `filter().delete()` is a soft delete (`:352`); 204 (`:353`).
@@ -145,9 +145,9 @@ pub const ISSUE_MODULES_PATH: &str =
 pub const MODULE_ISSUE_PATH: &str =
     "/api/workspaces/{slug}/projects/{project_id}/modules/{module_id}/issues/{issue_id}/";
 
-/// 400 `{"error": "Issues are required"}` (`issue.py:213-214`).
+/// 400 `{"error": "Issues are required"}` (`issue.py:229-230`).
 pub const ISSUES_REQUIRED_BODY: &str = r#"{"error":"Issues are required"}"#;
-/// 201 success envelope (`issue.py:262,315`).
+/// 201 success envelope (`issue.py:262,331`).
 pub const MODULE_ISSUE_CREATE_BODY: &str = r#"{"message":"success"}"#;
 /// Group-clash message (`issue.py:145-149`).
 pub const GROUP_CLASH_MESSAGE: &str = "Group by and sub group by cannot have same parameters";
@@ -311,15 +311,6 @@ fn request_origin(state: &AppState) -> Result<String, Denial> {
         .ok_or(Denial::ServerError)
 }
 
-/// Roles the calling gate allows, for the membership-facts flags
-/// (`handlers_modules::gate_roles`, same shape).
-fn gate_roles(gate: &gates::Gate) -> &[i32] {
-    match gate {
-        gates::Gate::Project { roles } | gates::Gate::ProjectCreator { roles } => roles,
-        gates::Gate::Open | gates::Gate::Entity | gates::Gate::Lite => &[],
-    }
-}
-
 /// Common preamble for the module-issue actions: session auth, project
 /// rewrite, the route's role gate. Returns `(pool, user_id,
 /// project_id)`.
@@ -333,7 +324,14 @@ async fn module_issue_context(
     let pool = pool_of(state)?;
     let user_id = actor_user_id(extension)?;
     let project_id = resolve_project_id(&pool, slug, project_raw).await?;
-    let facts = fetch_allow_facts(&pool, slug, &project_id, &user_id, gate_roles(gate)).await?;
+    let facts = fetch_allow_facts(
+        &pool,
+        slug,
+        &project_id,
+        &user_id,
+        super::handlers_modules::gate_roles(gate),
+    )
+    .await?;
     check_gate(gate, slug, &facts)?;
     Ok((pool, user_id, project_id))
 }
@@ -787,7 +785,7 @@ fn module_filtered_set(
     })
 }
 
-/// `ModuleIssueViewSet.list` (`issue.py:95-222`).
+/// `ModuleIssueViewSet.list` (`issue.py:95-223`).
 async fn module_issue_list(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
@@ -1098,7 +1096,7 @@ fn module_shape_json_value(field: &str, value: &Value, timezone: &chrono_tz::Tz)
     }
 }
 
-/// Grouped / sub-grouped branch (`issue.py:126-198`): window-function
+/// Grouped / sub-grouped branch (`issue.py:142-214`): window-function
 /// pagination over the group partition, totals with the intake /
 /// archived / draft `count_filter`, buckets from `issue_group_values`.
 #[allow(clippy::too_many_arguments)]
@@ -1267,7 +1265,7 @@ async fn module_grouped_response(
 // ---------------------------------------------------------------------------
 
 /// Python truthiness over a decoded JSON value for `if not issues:` /
-/// `if modules:` (`issue.py:228,271`): `null`, `false`, `0`/`0.0`, `""`,
+/// `if modules:` (`issue.py:229,271`): `null`, `false`, `0`/`0.0`, `""`,
 /// `[]` and `{}` are falsy; every other value — non-empty strings/arrays/
 /// objects, non-zero numbers, `true` — is truthy.
 fn is_falsy_json(value: &Value) -> bool {
@@ -1282,7 +1280,7 @@ fn is_falsy_json(value: &Value) -> bool {
 }
 
 /// `str(item)` over one decoded JSON item (`issue_id=str(issue)` at
-/// `issue.py:219`, `str(module_id)` at `:312`): strings pass through,
+/// `issue.py:235`, `str(module_id)` at `:312`): strings pass through,
 /// `true`/`false` render `True`/`False`, `null` renders `None`, numbers
 /// render in shortest form. The text feeds the UUID prep (`prep_coerced_str`
 /// / `prep_raw_item`), which decides 400-payload vs 400-detail vs proceed.
@@ -1298,7 +1296,7 @@ fn py_str_item(item: &Value) -> String {
 }
 
 /// Classify the decoded `issues` member for `create_module_issues`
-/// (`issue.py:227-219`).
+/// (`issue.py:227-235`).
 ///
 /// Falsy values answer 400 `{"error": "Issues are required"}`. Of the
 /// truthy values, arrays yield their `str()` items and non-empty strings
@@ -1333,7 +1331,7 @@ async fn project_workspace_id(
 }
 
 /// One `issue_activity.delay(...)` kwargs map for a module membership
-/// change: `type="module.activity.created"` (`issue.py:248-261,272-285`).
+/// change: `type="module.activity.created"` (`issue.py:248-261,288-301`).
 /// `requested_data` carries the module side verbatim — `str(module_id)`
 /// on the `create_module_issues` path (`:250`), the *raw* item on the
 /// `create_issue_modules` path (`json.dumps({"module_id": module})`,
@@ -1386,8 +1384,8 @@ enum Prep {
 }
 
 /// Coerce one *raw* JSON item through the UUID prep (`create_issue_modules`
-/// adds with `save=true`, removals with `save=false`; `issue.py:257-259`
-/// vs `:320-312`):
+/// adds with `save=true`, removals with `save=false`; `issue.py:273-275`
+/// vs `:304-312`):
 ///
 /// - `null` → `None`: on the save path the `NOT NULL` column dies with
 ///   `IntegrityError` (400 payload); on the lookup path it queries
@@ -1444,7 +1442,7 @@ fn prep_raw_item(item: &Value, save: bool) -> Prep {
 }
 
 /// Coerce one `str()`-coerced item (`create_module_issues`,
-/// `issue_id=str(issue)`, `issue.py:219`): `""` inserts `NULL` (400
+/// `issue_id=str(issue)`, `issue.py:235`): `""` inserts `NULL` (400
 /// payload); a parseable spelling proceeds; anything else is
 /// `ValidationError` (400 detail).
 fn prep_coerced_str(raw: &str) -> Prep {
@@ -1664,7 +1662,7 @@ async fn finish_issue_modules(
         _ => return Err(Denial::ServerError),
     };
     for item in &removed_items {
-        // `ModuleIssue.objects.filter(...)` (`:320-309`): the UUID lookup
+        // `ModuleIssue.objects.filter(...)` (`:304-309`): the UUID lookup
         // prep renders `ValidationError` → 400 for unparseable spellings
         // (`""`, bad strings, floats, containers, out-of-range ints);
         // `null`/in-range ints coerce and match nothing (201 with a null
@@ -1737,7 +1735,7 @@ async fn insert_module_bridges(
 }
 
 /// The live bridge's module name for a detachment, if the bridge exists.
-/// `module_issue.first().module.name` (`:302-307, :347`): the forward-FK
+/// `module_issue.first().module.name` (`:318-323, :347`): the forward-FK
 /// fetch sees soft-deleted modules too (verified live: detaching from a
 /// soft-deleted module still publishes its name with 204/201). A missing
 /// module row is unreachable (the FK), surfaced as 404.
