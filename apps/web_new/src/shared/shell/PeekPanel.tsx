@@ -9,6 +9,8 @@
 // this layer never reaches into feature data. Escape and outside-click both
 // listen in capture so an open overlay still guards the peek while it
 // dismisses itself; typing focus and open overlays always block the close.
+// The side layout spans half the viewport (NEWFRONT-1046) with a 30rem
+// floor clamped to the viewport, so narrow screens never overflow.
 
 import * as React from "react";
 import { X } from "lucide-react";
@@ -159,7 +161,7 @@ function panelClasses(layout: PeekLayout, stacked: boolean, scrollBody: boolean)
   if (layout === "modal") {
     return `fixed top-1/2 left-1/2 ${stacked ? "z-[60]" : "z-50"} flex max-h-[92vh] w-[min(48rem,94vw)] -translate-x-1/2 -translate-y-1/2 flex-col gap-(--space-4) ${scroll} rounded-(--radius-dialog) border border-(--border) bg-(--surface) p-(--space-6) shadow-dialog`;
   }
-  return `fixed top-0 right-0 bottom-0 ${stacked ? "z-50" : "z-40"} flex w-[min(30rem,92vw)] flex-col gap-(--space-4) ${scroll} border-l border-(--border) bg-(--surface) p-(--space-6)`;
+  return `fixed top-0 right-0 bottom-0 ${stacked ? "z-50" : "z-40"} flex w-1/2 min-w-[min(30rem,100vw)] flex-col gap-(--space-4) ${scroll} border-l border-(--border) bg-(--surface) p-(--space-6)`;
 }
 
 export function PeekPanel({
