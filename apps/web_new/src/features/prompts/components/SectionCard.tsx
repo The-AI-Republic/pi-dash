@@ -64,7 +64,7 @@ export function SectionCard({
       </div>
       {stale ? <p className="text-body text-(--warning)">{STALE_OVERRIDE_WARNING}</p> : null}
       {editorScope === null ? (
-        <pre className="text-body overflow-auto rounded-(--radius-control) border border-(--border) bg-(--bg) p-(--space-4) text-(--text)">
+        <pre className="text-body overflow-auto rounded-(--radius-control) border border-(--border) bg-(--bg) p-(--space-4) whitespace-pre-wrap text-(--text)">
           {section.user?.body ?? ""}
         </pre>
       ) : (

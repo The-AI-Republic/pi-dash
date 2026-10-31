@@ -148,4 +148,26 @@ describe("ReceiptView", () => {
       });
     }
   });
+
+  it("pins the cards track inside the viewport so receipt anchors keep the side nav visible", async () => {
+    // Regression (NEWFRONT-1042): the receipts grid shared the sections
+    // grid's bare `1fr`, whose content minimum let wide cards push the
+    // page past the viewport and scroll the nav out of sight on jump.
+    mockReads();
+    renderView();
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(3));
+    const nav = screen.getByRole("navigation", { name: "Prompt receipt" });
+    expect(nav.parentElement?.className).toContain("lg:grid-cols-[12rem_minmax(0,1fr)]");
+  });
+
+  it("keeps the receipt nav stuck while the cards scroll beneath it", async () => {
+    // Regression (NEWFRONT-1042): same stuck-nav guarantee as the
+    // sections browser, for the receipts tab's own middle panel.
+    mockReads();
+    renderView();
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(3));
+    const nav = screen.getByRole("navigation", { name: "Prompt receipt" });
+    expect(nav.className).toContain("lg:self-start");
+    expect(nav.className).toContain("lg:sticky");
+  });
 });

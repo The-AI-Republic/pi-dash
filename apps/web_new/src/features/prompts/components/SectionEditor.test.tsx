@@ -286,4 +286,14 @@ describe("SectionEditor", () => {
     await user.click(screen.getByRole("button", { name: "Show default" }));
     expect(screen.getByText("Default")).toBeInTheDocument();
   });
+
+  it("wraps the compared default so long registry lines cannot widen the editor", () => {
+    // Regression (NEWFRONT-1042): the compare pane shows the same long
+    // registry lines as the card body, which wraps since the same fix.
+    renderEditor({ scope: "user", section: section({ user: row({ default_body: `word ${"y".repeat(2000)}` }) }) });
+    fireEvent.click(screen.getByRole("button", { name: "Show default" }));
+    const pre = document.querySelector("pre");
+    expect(pre).not.toBeNull();
+    expect(pre?.className).toContain("whitespace-pre-wrap");
+  });
 });

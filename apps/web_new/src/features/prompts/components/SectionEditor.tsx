@@ -103,7 +103,7 @@ export function SectionEditor({ workspaceSlug, section, scope, onClose }: Sectio
         {compareOpen ? (
           <div className="flex flex-col gap-(--space-2)">
             <p className="text-meta text-(--text-muted)">Default</p>
-            <pre className="text-body overflow-auto rounded-(--radius-control) border border-(--border) bg-(--subtle) p-(--space-4) text-(--text)">
+            <pre className="text-body overflow-auto rounded-(--radius-control) border border-(--border) bg-(--subtle) p-(--space-4) whitespace-pre-wrap text-(--text)">
               {defaultBody}
             </pre>
           </div>

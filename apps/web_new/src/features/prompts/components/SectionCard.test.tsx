@@ -210,4 +210,14 @@ describe("SectionCard", () => {
     expect(screen.queryByText(STALE_OVERRIDE_WARNING)).not.toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
+
+  it("wraps long body lines so wide sections cannot shove the side nav out of view", () => {
+    // Regression (NEWFRONT-1042): registry bodies carry very long lines;
+    // an unwrapped pre widened the cards track past the viewport, and the
+    // side nav's anchor jump then scrolled the nav itself out of sight.
+    renderCard({ section: section({ user: row({ body: `word ${"x".repeat(2000)}` }) }) });
+    const pre = document.querySelector("article pre");
+    expect(pre).not.toBeNull();
+    expect(pre?.className).toContain("whitespace-pre-wrap");
+  });
 });
