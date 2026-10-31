@@ -95,6 +95,25 @@ describe("ProjectSettingsSidebar", () => {
     expect(screen.getByTestId("project-settings-tab-ai_workers")).toHaveAttribute("href", `${ROOT}/ai-workers/`);
   });
 
+  it("banners every group title smaller than the tab links", () => {
+    renderSidebar(ROLE_ADMIN, `${ROOT}/`);
+    for (const key of ["general", "features", "work-structure", "execution"] as const) {
+      const label = screen.getByTestId(`project-settings-group-label-${key}`);
+      expect(label).toHaveClass("text-fine");
+      expect(label).toHaveClass("bg-(--subtle)");
+      expect(label).toHaveClass("rounded-(--radius-control)");
+      expect(label).not.toHaveClass("text-caption");
+      expect(label).not.toHaveClass("text-body");
+      expect(label.className).not.toContain("hover:");
+      expect(label.className).not.toContain("cursor-pointer");
+    }
+    const tabs = document.querySelectorAll('[data-testid^="project-settings-tab-"]');
+    expect(tabs.length).toBeGreaterThan(0);
+    for (const tab of tabs) expect(tab).toHaveClass("text-body");
+    expect(screen.getByTestId("project-settings-tab-members")).toHaveClass("hover:bg-(--subtle)");
+    expect(screen.getByTestId("project-settings-tab-members")).toHaveClass("hover:text-(--text)");
+  });
+
   it("filters groups for members and guests", () => {
     const member = renderSidebar(ROLE_MEMBER, `${ROOT}/states/`);
     expect(screen.getByTestId("project-settings-tab-states")).toBeInTheDocument();

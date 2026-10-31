@@ -122,7 +122,7 @@ export function ProjectSettingsSidebar({
           <div key={group.key} data-testid={`project-settings-group-${group.key}`}>
             <div
               data-testid={`project-settings-group-label-${group.key}`}
-              className="text-caption px-(--space-3) pb-(--space-1) font-medium text-(--text-muted)"
+              className="text-fine rounded-(--radius-control) bg-(--subtle) px-(--space-3) py-(--space-1) font-medium text-(--text-muted)"
             >
               {group.label}
             </div>

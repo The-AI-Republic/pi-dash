@@ -8,6 +8,11 @@
 @import "tailwindcss";
 
 /* Type scale from the H-visual decision. */
+@utility text-fine {
+  font-size: var(--text-fine-size);
+  line-height: var(--text-fine-height);
+}
+
 @utility text-caption {
   font-size: var(--text-caption-size);
   line-height: var(--text-caption-height);
