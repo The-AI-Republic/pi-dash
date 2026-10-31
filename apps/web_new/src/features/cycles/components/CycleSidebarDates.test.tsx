@@ -145,9 +145,24 @@ async function openCalendar(): Promise<HTMLElement> {
 }
 
 async function pickDay(calendar: HTMLElement, iso: string): Promise<void> {
+  const user = userEvent.setup();
+  // The grid shows one visible month plus filler days, so a target past
+  // the grid edge needs month turns first, exactly as a user would.
+  for (let turn = 0; turn < 24; turn++) {
+    const cell = calendar.querySelector(`button[data-day="${iso}"]`);
+    if (cell !== null) {
+      await user.click(cell);
+      return;
+    }
+    const month = within(calendar).getByRole("combobox", { name: "Month" }) as HTMLSelectElement;
+    const year = within(calendar).getByRole("combobox", { name: "Year" }) as HTMLSelectElement;
+    const visible = `${year.value}-${String(Number(month.value) + 1).padStart(2, "0")}`;
+    const ahead = iso.slice(0, 7) > visible;
+    await user.click(within(calendar).getByRole("button", { name: ahead ? "Next month" : "Previous month" }));
+  }
   const cell = calendar.querySelector(`button[data-day="${iso}"]`);
-  if (cell === null) throw new Error(`no cell for ${iso}`);
-  await userEvent.click(cell as HTMLElement);
+  expect(cell).not.toBeNull();
+  await user.click(cell as Element);
 }
 
 describe("CycleSidebarDates", () => {
@@ -422,6 +437,37 @@ describe("CycleSidebarDates minimum day (ISS-215)", () => {
       const calendar = await openCalendar();
       await showMonth(calendar, "October", "2026");
       expect(calendar.querySelector('button[data-day="2026-10-28"]')).toHaveAttribute("data-today");
+    })
+  );
+});
+
+describe("CycleSidebarDates grid edge (NEWFRONT-1047)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it(
+    "holds the first pick when the closing pick sits past the grid edge",
+    inViewerZone("UTC", async () => {
+      // Oct 31, 2026: the October grid ends Nov 7, so the Nov 8 closing
+      // pick has no cell until the month turns, exactly as a user would.
+      freezeClock("2026-10-31T12:00:00Z");
+      const today = todayUtc();
+      const first = shiftDay(today, 5);
+      const second = shiftDay(today, 8);
+      renderDates(storedCycle(null, null));
+      expect(screen.getByTestId("cycle-sidebar-dates-trigger").textContent).toBe("Start date");
+      const calendar = await openCalendar();
+      expect(calendar.querySelector(`button[data-day="${second}"]`)).toBeNull();
+      await pickDay(calendar, first);
+      await settleNoSave();
+      expect(patchCalls).toHaveLength(0);
+      expect(checkCalls).toHaveLength(0);
+      await pickDay(calendar, second);
+      await waitFor(() => expect(patchCalls).toHaveLength(1));
+      expect(checkCalls).toHaveLength(1);
+      expect(patchCalls[0]!.body).toEqual({ start_date: first, end_date: second });
+      expect(vi.mocked(notifySuccess)).toHaveBeenCalledWith(CYCLE_DATES_UPDATED_TITLE);
     })
   );
 });
