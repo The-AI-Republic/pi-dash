@@ -4470,7 +4470,7 @@ pub async fn create_issue(
 /// sequence/sort INSERT, m2m + default-assignee legs, transition fire,
 /// `issue_activity`, the post-query render, `model_activity` + the
 /// creating version task. `forced_type` carries the epic create's resolved
-/// type (`epics.py:95-96`); `None` is the plain issues create.
+/// type (`epics.py:82-85`); `None` is the plain issues create.
 async fn create_issue_inner(
     state: AppState,
     pool: sqlx::PgPool,
@@ -4486,7 +4486,7 @@ async fn create_issue_inner(
         Err(response) => return Ok(response),
     };
     // Epic creates copy the payload with `dict(request.data)` before
-    // forcing the type (`epics.py:94-96`): the copy raises on non-dict
+    // forcing the type (`epics.py:82`): the copy raises on non-dict
     // bodies, so epic non-dict input 500s where the plain create answers
     // `non_dict_response`.
     if forced_type.is_some() && data.value.as_object().is_none() {
@@ -4662,7 +4662,7 @@ pub async fn partial_update_issue(
 /// `is_description_update` pops, the annotated lookup, the pre-update
 /// `current_instance` dump, validation, capture + save + fire, the three
 /// task enqueues, 204. `epic` selects the epics-collection behavior
-/// (`epics.py:185-198`): a `type` member 400s before the lookup, and the
+/// (`epics.py:186-193`): a `type` member 400s before the lookup, and the
 /// lookup only sees epic-typed rows.
 #[allow(clippy::too_many_arguments)]
 async fn partial_update_inner(
@@ -4683,7 +4683,7 @@ async fn partial_update_inner(
     // `request.data.pop(...)` runs before the lookup: on a non-dict body
     // the pop itself raises (`TypeError`/`AttributeError`) → Django's 500,
     // regardless of whether the issue exists.
-    // The epics collection locks the type (`epics.py:193-197`): the
+    // The epics collection locks the type (`epics.py:188-192`): the
     // membership test runs on the parsed body before the lookup, exactly
     // Python's `in` (key for dicts, element for lists, substring for
     // strings; scalars raise → 500).
@@ -5324,13 +5324,13 @@ async fn count_bulk_issues(
 
 /// Collection path in `app/urls/issue.py:130` form.
 pub const EPIC_COLLECTION_PATH: &str = "/api/workspaces/{slug}/projects/{project_id}/epics/";
-/// Detail path in `app/urls/issue.py:135-139` form.
+/// Detail path in `app/urls/issue.py:134-138` form.
 pub const EPIC_DETAIL_PATH: &str = "/api/workspaces/{slug}/projects/{project_id}/epics/{pk}/";
 
-/// The no-epic-type refusal (`epics.py:64-68`).
+/// The no-epic-type refusal (`epics.py:76-80`).
 const NO_EPIC_TYPE_BODY: &str =
     r#"{"error":"This project has no epic type, so no epic can be created."}"#;
-/// The locked-type refusal (`epics.py:195-197`).
+/// The locked-type refusal (`epics.py:189-192`).
 const TYPE_LOCKED_BODY: &str =
     r#"{"error":"An epic's type cannot change through the epics collection."}"#;
 
@@ -5352,7 +5352,7 @@ async fn resolve_epic_type(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<Opt
     Ok(row.map(|found| found.0))
 }
 
-/// The epic boundary (`epics.py:20-33`, `:152-160`, `:222-225`): the row
+/// The epic boundary (`epics.py:65-66`): the row
 /// exists in the `issue_objects` scope for this project/slug AND is
 /// epic-typed. Django's `filter(type__is_epic=True)` inner-joins with no
 /// related-manager guard, so untyped rows fall outside while rows under
@@ -5384,7 +5384,7 @@ async fn epic_exists(
     Ok(row.is_some())
 }
 
-/// Python's `"type" in request.data` (`epics.py:193`): key for dicts
+/// Python's `"type" in request.data` (`epics.py:188`): key for dicts
 /// (uploads merged, like DRF), element for lists, substring for strings,
 /// false for null; scalars raise → the generic 500.
 fn epic_type_member(data: &RequestData) -> Result<bool, Denial> {
@@ -5401,7 +5401,7 @@ fn type_locked_response() -> Response {
     json_bad_request(TYPE_LOCKED_BODY)
 }
 
-/// `POST .../epics/` (`epics.py:70-118`): the issues gate, the
+/// `POST .../epics/` (`epics.py:73-95`): the issues gate, the
 /// resolve-then-force type leg, then the shared create pipeline. The
 /// response is the same 27-key `.values()` body as the plain create.
 pub async fn epic_create(
@@ -5428,7 +5428,7 @@ pub async fn epic_create(
     create_issue_inner(state, pool, tenant, user_id, slug, req, Some(epic_type)).await
 }
 
-/// `GET .../epics/<pk>/` (`epics.py:149-175`): the issues gate, the epic
+/// `GET .../epics/<pk>/` (`epics.py:172-184`): the issues gate, the epic
 /// boundary, then the shared retrieve pipeline. `is_epic` stamps `True`
 /// on 200s (a no-op for in-boundary rows — the renderer already reads
 /// the type flag — but exact when it matters).
@@ -5483,7 +5483,7 @@ pub async fn epic_retrieve(
     Ok(Response::from_parts(parts, axum::body::Body::from(stamped)))
 }
 
-/// `PATCH .../epics/<pk>/` (`epics.py:185-198`): the issues gate, then the
+/// `PATCH .../epics/<pk>/` (`epics.py:186-193`): the issues gate, then the
 /// shared patch pipeline in epic mode (locked `type`, epic-scoped
 /// lookup).
 pub async fn epic_partial_update(
@@ -5511,7 +5511,7 @@ pub async fn epic_partial_update(
     partial_update_inner(state, pool, tenant, user_id, slug, pk, req, true).await
 }
 
-/// `DELETE .../epics/<pk>/` (`epics.py:200-212`): the issues gate, the
+/// `DELETE .../epics/<pk>/` (`epics.py:195-202`): the issues gate, the
 /// epic boundary, then the shared destroy pipeline.
 pub async fn epic_destroy(
     State(state): State<AppState>,

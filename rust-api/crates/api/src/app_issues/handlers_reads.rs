@@ -2766,14 +2766,14 @@ async fn render_post_row(
 }
 
 // ---------------------------------------------------------------------------
-// Epic work items (`app/views/issue/epics.py:214-232`, NEWFRONT-984)
+// Epic work items (`app/views/issue/epics.py:205-231`, NEWFRONT-984)
 // ---------------------------------------------------------------------------
 
-/// Work-items path in `app/urls/issue.py:141-143` form.
+/// Work-items path in `app/urls/issue.py:139-143` form.
 pub const EPIC_WORK_ITEMS_PATH: &str =
     "/api/workspaces/{slug}/projects/{project_id}/epics/{epic_id}/issues/";
 
-/// The epic boundary (`epics.py:222-225`): the row exists in the
+/// The epic boundary (`epics.py:208-214`): the row exists in the
 /// `issue_objects` scope for this project/slug AND is epic-typed.
 /// Django's `filter(type__is_epic=True)` inner-joins with no
 /// related-manager guard, so untyped rows fall outside while rows under
@@ -2805,7 +2805,7 @@ async fn epic_exists(
     Ok(row.is_some())
 }
 
-/// `GET .../epics/<epic_id>/issues/` (`epics.py:229-232`): the sub-issues
+/// `GET .../epics/<epic_id>/issues/` (`epics.py:216-223`): the sub-issues
 /// read gate, the epic boundary, then the shared sub-issue list pipeline
 /// with the epic as the parent.
 pub async fn epic_work_items_get(
@@ -2831,7 +2831,7 @@ pub async fn epic_work_items_get(
     sub_issues_get_inner(&pool, &gate, &slug, epic_id, &query).await
 }
 
-/// `POST .../epics/<epic_id>/issues/` (`epics.py:229-232`): the sub-issues
+/// `POST .../epics/<epic_id>/issues/` (`epics.py:225-231`): the sub-issues
 /// write gate, the epic boundary, then the shared sub-issue link pipeline
 /// with the epic as the parent.
 pub async fn epic_work_items_post(
