@@ -46,6 +46,7 @@ pub mod expand;
 pub mod handlers_archive;
 pub mod handlers_core;
 pub mod handlers_engage;
+pub mod handlers_issue_types;
 pub mod handlers_labels_attachments;
 pub mod handlers_reads;
 pub mod handlers_relations;
@@ -83,6 +84,7 @@ use render::v2_page;
 /// engage-handler routes, the misc-reads/sub-issue routes, the D-26 core
 /// write/read set (`POST issues/`, the detail GET/PUT/PATCH/DELETE,
 /// `DELETE bulk-delete-issues/`), the labels/attachments splits' routes,
+/// the issue-types pair (PIDASHCONV-1679),
 /// and the three archive paths (PIDASHCONV-656). Sibling paths stay
 /// unmatched and proxy to Django.
 ///
@@ -225,6 +227,18 @@ pub fn routes() -> Router<AppState> {
                 .head(proxy)
                 .post(proxy)
                 .put(proxy)
+                .options(proxy)
+                .trace(proxy)
+                .fallback(proxy),
+        )
+        .route(
+            handlers_issue_types::ISSUE_TYPES_PATH,
+            get(handlers_issue_types::issue_type_list)
+                .post(handlers_issue_types::issue_type_create)
+                .put(proxy)
+                .patch(proxy)
+                .delete(proxy)
+                .head(proxy)
                 .options(proxy)
                 .trace(proxy)
                 .fallback(proxy),
