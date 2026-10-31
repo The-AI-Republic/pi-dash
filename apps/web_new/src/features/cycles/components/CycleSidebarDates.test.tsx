@@ -109,6 +109,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   resetAppClient();
   vi.restoreAllMocks();
   vi.mocked(notifyError).mockClear();
@@ -214,6 +215,8 @@ describe("CycleSidebarDates", () => {
   });
 
   it("holds the first pick on an undated cycle until the range completes", async () => {
+    // Mid-month, so both picks sit in the month the calendar opens on.
+    freezeClock("2026-06-10T12:00:00Z");
     const today = todayUtc();
     renderDates(storedCycle(null, null));
     expect(screen.getByTestId("cycle-sidebar-dates-trigger").textContent).toBe("Start date");
