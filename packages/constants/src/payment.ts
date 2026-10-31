@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import type { IPaymentProduct, TBillingFrequency, TProductBillingFrequency } from "@pi-dash/types";
+import type { TBillingFrequency, TProductBillingFrequency } from "@pi-dash/types";
 import { EProductSubscriptionEnum } from "@pi-dash/types";
 
 /**
@@ -26,93 +26,6 @@ export const SUBSCRIPTION_WITH_BILLING_FREQUENCY = [
   EProductSubscriptionEnum.BUSINESS,
   EProductSubscriptionEnum.ENTERPRISE,
 ];
-
-/**
- * Mapping of product subscription types to their respective payment product details
- * Used to provide information about each product's pricing and features
- */
-export const PI_DASH_COMMUNITY_PRODUCTS: Record<string, IPaymentProduct> = {
-  [EProductSubscriptionEnum.PRO]: {
-    id: EProductSubscriptionEnum.PRO,
-    name: "Pi Dash Pro",
-    description:
-      "More views, more cycles powers, more pages features, new reports, and better dashboards are waiting to be unlocked.",
-    type: "PRO",
-    prices: [
-      {
-        id: `price_monthly_${EProductSubscriptionEnum.PRO}`,
-        unit_amount: 800,
-        recurring: "month",
-        currency: "usd",
-        workspace_amount: 800,
-        product: EProductSubscriptionEnum.PRO,
-      },
-      {
-        id: `price_yearly_${EProductSubscriptionEnum.PRO}`,
-        unit_amount: 7200,
-        recurring: "year",
-        currency: "usd",
-        workspace_amount: 7200,
-        product: EProductSubscriptionEnum.PRO,
-      },
-    ],
-    payment_quantity: 1,
-    is_active: true,
-  },
-  [EProductSubscriptionEnum.BUSINESS]: {
-    id: EProductSubscriptionEnum.BUSINESS,
-    name: "Pi Dash Business",
-    description:
-      "The earliest packaging of Business at $10 a seat a month billed annually, $12 a seat a month billed monthly for Pi Dash Cloud",
-    type: "BUSINESS",
-    prices: [
-      {
-        id: `price_yearly_${EProductSubscriptionEnum.BUSINESS}`,
-        unit_amount: 15600,
-        recurring: "year",
-        currency: "usd",
-        workspace_amount: 15600,
-        product: EProductSubscriptionEnum.BUSINESS,
-      },
-      {
-        id: `price_monthly_${EProductSubscriptionEnum.BUSINESS}`,
-        unit_amount: 1500,
-        recurring: "month",
-        currency: "usd",
-        workspace_amount: 1500,
-        product: EProductSubscriptionEnum.BUSINESS,
-      },
-    ],
-    payment_quantity: 1,
-    is_active: true,
-  },
-  [EProductSubscriptionEnum.ENTERPRISE]: {
-    id: EProductSubscriptionEnum.ENTERPRISE,
-    name: "Pi Dash Enterprise",
-    description: "",
-    type: "ENTERPRISE",
-    prices: [
-      {
-        id: `price_yearly_${EProductSubscriptionEnum.ENTERPRISE}`,
-        unit_amount: 0,
-        recurring: "year",
-        currency: "usd",
-        workspace_amount: 0,
-        product: EProductSubscriptionEnum.ENTERPRISE,
-      },
-      {
-        id: `price_monthly_${EProductSubscriptionEnum.ENTERPRISE}`,
-        unit_amount: 0,
-        recurring: "month",
-        currency: "usd",
-        workspace_amount: 0,
-        product: EProductSubscriptionEnum.ENTERPRISE,
-      },
-    ],
-    payment_quantity: 1,
-    is_active: false,
-  },
-};
 
 /**
  * URL for the "Talk to Sales" page where users can contact sales team
@@ -144,16 +57,4 @@ export const SUBSCRIPTION_REDIRECTION_URLS: Record<EProductSubscriptionEnum, Rec
     month: TALK_TO_SALES_URL,
     year: TALK_TO_SALES_URL,
   },
-};
-
-/**
- * Mapping of subscription types to their respective marketing webpage URLs
- * Used to direct users to learn more about each plan's features and pricing
- */
-export const SUBSCRIPTION_WEBPAGE_URLS: Record<EProductSubscriptionEnum, string> = {
-  [EProductSubscriptionEnum.FREE]: TALK_TO_SALES_URL,
-  [EProductSubscriptionEnum.ONE]: TALK_TO_SALES_URL,
-  [EProductSubscriptionEnum.PRO]: "https://airepublic.com/pricing/pro",
-  [EProductSubscriptionEnum.BUSINESS]: "https://airepublic.com/pricing/business",
-  [EProductSubscriptionEnum.ENTERPRISE]: "https://airepublic.com/pricing/business",
 };

@@ -20,6 +20,7 @@ from uuid import UUID
 from django.utils import timezone
 
 from pi_dash.runner.models import (
+    AgentHealth,
     AgentRun,
     AgentRunStatus,
     Runner,
@@ -212,13 +213,15 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
         stale = stale.exclude(id=in_flight_id)
         cancel_reason = None
         if not exclude_redeliverable:
-            claimed = AgentRun.objects.filter(id=in_flight_id, runner=runner).values("status", "error_code").first()
+            # ``error_code`` is the ``code`` key of ``error_details``
+            # (PDASHOSS01-187), a model property and not a column.
+            claimed = AgentRun.objects.filter(id=in_flight_id, runner=runner).values("status", "error_details").first()
             if claimed is not None and claimed["status"] == AgentRunStatus.CANCEL_REQUESTED:
                 cancel_reason = "cancellation_pending"
             elif (
                 claimed is not None
                 and claimed["status"] in (AgentRunStatus.FAILED, AgentRunStatus.CANCELLED)
-                and claimed["error_code"] == RUNNER_OFFLINE_ERROR_CODE
+                and (claimed["error_details"] or {}).get("code") == RUNNER_OFFLINE_ERROR_CODE
             ):
                 # The offline sweep finalized this run while the daemon was
                 # silent (asleep, partitioned) and the daemon is still working
@@ -281,6 +284,7 @@ def _finish_unclaimed_runs(
     from django.db import transaction
 
     from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+    from pi_dash.runner.services.error_details import merge_error_details_expression
     from pi_dash.runner.services.matcher import drain_for_runner_by_id, drain_pod_by_id
 
     # A cancellation request disappears from the daemon's in-flight report
@@ -289,11 +293,14 @@ def _finish_unclaimed_runs(
     stopped_cancel_ids = list(stale.filter(status=AgentRunStatus.CANCEL_REQUESTED).values_list("id", flat=True))
     stopped_cancel_pod_ids = set(stale.filter(status=AgentRunStatus.CANCEL_REQUESTED).values_list("pod_id", flat=True))
     if stopped_cancel_ids:
-        cancelled_updates = {"error_code": error_code} if stamp_cancelled else {}
+        # ``error_code`` is a key of ``error_details`` (PDASHOSS01-187), so a
+        # bulk update merges it in SQL rather than naming a column.
+        cancelled_updates = (
+            {"error_details": merge_error_details_expression(error_code=error_code)} if stamp_cancelled else {}
+        )
         AgentRun.objects.filter(id__in=stopped_cancel_ids).update(
             status=AgentRunStatus.CANCELLED,
             ended_at=timezone.now(),
-            queue_position=None,
             **cancelled_updates,
         )
         stale = stale.exclude(id__in=stopped_cancel_ids)
@@ -360,6 +367,10 @@ SNAPSHOT_FIELDS = (
     "approvals_pending",
     "llm_model",
     "turn_count",
+    # Activity-watchdog health. Sent on every busy poll, not gated by the
+    # runner's observability flag, alongside ``observed_run_id``.
+    "agent_health",
+    "agent_last_activity_at",
 )
 
 
@@ -424,7 +435,11 @@ def upsert_runner_live_state(runner: Runner, status_entry: Dict[str, Any]) -> No
 
     for f in SNAPSHOT_FIELDS:
         if f in status_entry:
-            setattr(state, f, status_entry[f])
+            value = status_entry[f]
+            if f == "agent_health" and value not in AgentHealth.values:
+                # Unknown label from a newer runner: keep the known-good value.
+                continue
+            setattr(state, f, value)
             update_fields.append(f)
 
     if "tokens" in status_entry:

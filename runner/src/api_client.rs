@@ -243,6 +243,19 @@ impl ApiClient {
         self.request(Method::DELETE, path, None::<&()>).await
     }
 
+    /// Bodiless DELETE with an `If-Match` precondition: the server answers
+    /// 412 instead of deleting when the row's `updated_at` is not
+    /// `expected`.
+    pub async fn delete_if_match(&self, path: &str, expected: &str) -> Result<Value, CliError> {
+        self.request_with(
+            Method::DELETE,
+            path,
+            None::<&()>,
+            Some(("If-Match", expected)),
+        )
+        .await
+    }
+
     /// POST a multipart/form-data upload to an **absolute** URL (not under
     /// `/api/v1/`), sending no Pi Dash credentials.
     ///
@@ -298,12 +311,25 @@ impl ApiClient {
         path: &str,
         body: Option<&B>,
     ) -> Result<Value, CliError> {
+        self.request_with(method, path, body, None).await
+    }
+
+    async fn request_with<B: Serialize + ?Sized>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&B>,
+        extra_header: Option<(&str, &str)>,
+    ) -> Result<Value, CliError> {
         let url = self.env.v1(path);
         let mut req = self
             .http
             .request(method.clone(), &url)
             .header("X-Api-Key", &self.env.token)
             .header("Accept", "application/json");
+        if let Some((name, value)) = extra_header {
+            req = req.header(name, value);
+        }
         // Reads are attributed to nobody; every write carries the run id so
         // the cloud knows it came from inside this agent run.
         if method != Method::GET
@@ -347,15 +373,44 @@ fn map_error_status(status: StatusCode, body: String) -> CliError {
         500..=599 => EXIT_SERVER,
         _ => EXIT_UNKNOWN,
     };
+    // 401 and 403 share EXIT_AUTH (a scripting contract) but must not share
+    // a message: an expired token and a permission denial have different
+    // fixes, and agent process reports quote this string as evidence.
     let msg = match status.as_u16() {
         400 | 409 | 422 => "invalid request",
-        401 | 403 => "auth failed",
+        401 => "authentication failed",
+        403 => "permission denied",
         404 => "not found",
         429 => "throttled",
         500..=599 => "server error",
         _ => "request failed",
     };
-    CliError::new(exit_code, format!("HTTP {status}: {msg}")).with_detail(body)
+    let message = match server_reason(&body) {
+        Some(reason) => format!("HTTP {status}: {msg}: {reason}"),
+        None => format!("HTTP {status}: {msg}"),
+    };
+    CliError::new(exit_code, message).with_detail(body)
+}
+
+/// Pull the human-readable reason out of a Pi Dash error body so it lands in
+/// the message an operator actually reads, not just the stderr `detail` blob.
+///
+/// The cloud answers with two shapes: DRF's `{"detail": "..."}` (e.g. the
+/// project-role check in `ProjectEntityPermission`) and the hand-rolled
+/// `{"error": "..."}` used by the issue views. Anything else — non-JSON,
+/// other keys, non-string values — yields `None`; the raw body still rides
+/// along as `detail`.
+fn server_reason(body: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    let reason = value
+        .get("detail")
+        .or_else(|| value.get("error"))?
+        .as_str()?
+        .trim();
+    if reason.is_empty() {
+        return None;
+    }
+    Some(reason.to_string())
 }
 
 /// Emit a JSON error payload to stderr and return the recommended exit code.
@@ -387,6 +442,7 @@ mod resolve_tests {
             config_dir: root.join("config"),
             data_dir: root.join("data"),
             runtime_dir: root.join("runtime"),
+            machine_context_dir: root.join("config"),
         }
     }
 
@@ -399,6 +455,7 @@ mod resolve_tests {
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                agent_watchdog: Default::default(),
                 auto_update: true,
             },
             runners: vec![RunnerConfig {

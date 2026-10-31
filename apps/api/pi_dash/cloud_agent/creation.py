@@ -123,11 +123,12 @@ def _managed_execution_fields(*, project, actor, automatic: bool):
     transient = reason == ManagedRunnerReason.NOT_CONNECTED and enrolled_managed_runners(project, actor).exists()
     if automatic and transient:
         fields["pinned_runner"] = enrolled_managed_runners(project, actor).order_by("-last_heartbeat_at").first()
-        # ``error_code`` is a real AgentRun field and every creation site
+        # ``error_details`` is a real AgentRun field and every creation site
         # splats these fields into ``objects.create``, so the waiting reason
         # lands on the row itself and renders as "Waiting for your desktop"
-        # without a bespoke channel. The sweep reads it back.
-        fields["error_code"] = ManagedRunnerReason.NOT_CONNECTED
+        # without a bespoke channel. The sweep reads it back off
+        # ``run.error_code``, which is the ``code`` key of this bag.
+        fields["error_details"] = {"code": ManagedRunnerReason.NOT_CONNECTED}
         return fields
     raise ManagedRunnerUnavailable(reason, _MANAGED_REFUSAL_DETAIL.get(reason, "Pi Dash Agent is not available"))
 
@@ -142,6 +143,7 @@ _MANAGED_REFUSAL_DETAIL = {
         "Pi Dash AI and the Cloud Agent keep using your own key."
     ),
     "no_managed_runner_for_project": "This project has no Pi Dash Agent on your desktop yet.",
+    "managed_runner_paused": "Your Pi Dash Agent for this project is paused. Resume it to run here.",
 }
 
 

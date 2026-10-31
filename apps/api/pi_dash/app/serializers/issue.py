@@ -1348,6 +1348,8 @@ class IssueDetailSerializer(IssueSerializer):
             "total_tokens": state.total_tokens,
             "llm_model": state.llm_model,
             "turn_count": state.turn_count,
+            "agent_health": state.agent_health,
+            "agent_last_activity_at": self._serialize_datetime(state.agent_last_activity_at),
             "updated_at": self._serialize_datetime(state.updated_at),
         }
 
@@ -1367,7 +1369,6 @@ class IssueDetailSerializer(IssueSerializer):
             "id": str(run.id),
             "status": run.status,
             "executor_kind": run.executor_kind,
-            "queue_position": run.queue_position,
             "runner": str(run.runner_id) if run.runner_id else None,
             "runner_name": run.runner.name if run.runner_id and run.runner else None,
             "created_at": self._serialize_datetime(run.created_at),

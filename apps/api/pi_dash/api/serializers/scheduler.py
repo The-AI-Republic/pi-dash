@@ -2,15 +2,16 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Read-only serializers for the external (`/api/v1/`) scheduler surface.
+"""Serializers for the external (`/api/v1/`) scheduler surface.
 
 The `pidash` CLI and the Pi Dash MCP connector consume these — see
-``docs/mcp-connector.md`` ("Schedulers (read-only)"). Every field is an
-explicit whitelist: nothing secret lives on the models today, and keeping
-the list explicit means a future credential column cannot leak by default.
+``docs/mcp-connector.md`` ("Schedulers"). Every field is an explicit
+whitelist: nothing secret lives on the models today, and keeping the list
+explicit means a future credential column cannot leak by default.
 
-Write access is intentionally absent (PDASHOSS01-225 is read-only; write
-is a follow-up with its own permission model).
+These are output shapes only. Writes (PDASHOSS01-278, -318) validate
+through the web app's ``SchedulerSerializer`` / ``SchedulerBindingSerializer``
+and answer with the shapes here.
 """
 
 from rest_framework import serializers
@@ -79,6 +80,7 @@ class SchedulerAPISerializer(BaseSerializer):
     """
 
     bindings = serializers.SerializerMethodField()
+    is_builtin = serializers.SerializerMethodField()
 
     class Meta:
         model = Scheduler
@@ -91,12 +93,21 @@ class SchedulerAPISerializer(BaseSerializer):
             "prompt",
             "color",
             "source",
+            "is_builtin",
             "is_enabled",
             "bindings",
             "created_at",
             "updated_at",
         ]
         read_only_fields = fields
+
+    def get_is_builtin(self, obj: Scheduler) -> bool:
+        # The reliable built-in marker: ``source`` reads ``builtin`` for
+        # user-created rows too (PDASHOSS01-290). Built-ins can be installed
+        # and uninstalled but not edited or deleted through this API.
+        from pi_dash.scheduler.definition_writes import is_builtin
+
+        return is_builtin(obj)
 
     def get_bindings(self, obj: Scheduler):
         bindings = getattr(obj, "visible_bindings", [])

@@ -17,6 +17,7 @@ pub mod label;
 // `pub` so the CLI contract tests can drive the page subcommands directly.
 pub mod page;
 mod project;
+mod reconnect;
 mod remove;
 pub mod resolve;
 mod restart;
@@ -107,6 +108,10 @@ pub enum Command {
     /// Restart the installed service.
     Restart(restart::Args),
 
+    /// Retry the cloud connection now instead of waiting out the backoff
+    /// (all runners, or just `<runner>`).
+    Reconnect(reconnect::Args),
+
     /// Print service + daemon status.
     Status(status::Args),
 
@@ -144,8 +149,10 @@ pub enum Command {
     /// Inspect workflow states on a project.
     State(state::StateArgs),
 
-    /// Read project schedulers (read-only): `scheduler list` /
-    /// `scheduler get <id>` / `scheduler runs <id>`.
+    /// Project schedulers: `scheduler list` / `scheduler get <id>` /
+    /// `scheduler runs <id>`; for project admins `scheduler install` /
+    /// `update` / `run-now` / `uninstall`; for workspace admins
+    /// `scheduler create` / `edit` / `delete`.
     Scheduler(scheduler::SchedulerArgs),
 
     /// Read or overwrite the coding agent's per-issue workpad.
@@ -193,6 +200,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Start(args) => start::run(args, &paths).await,
         Command::Stop(args) => stop::run(args, &paths).await,
         Command::Restart(args) => restart::run(args, &paths).await,
+        Command::Reconnect(args) => reconnect::run(args, &paths).await,
         Command::Status(args) => status::run(args, &paths).await,
         Command::Tui(args) => tui::run(args, &paths).await,
         Command::Doctor(args) => doctor::run(args, &paths).await,
@@ -225,6 +233,7 @@ async fn run_default(paths: &crate::util::paths::Paths) -> Result<()> {
                 url: None,
                 no_browser: false,
                 workspace: None,
+                force: false,
                 device_code_stdin: false,
             }),
         };
