@@ -260,6 +260,117 @@ jobs:
           # Actually do builds and make zips and whatnot
           cargo dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "cargo dist ran successfully"
+      - name: Sign and notarize macOS binaries
+        # Hand-patched (cargo-dist generates this file; "ci" is in allow-dirty).
+        #
+        # Left alone, the macOS binary carries only the linker's ad-hoc
+        # signature, whose identifier is `pidash-<build hash>`. macOS keys
+        # privacy grants (Files & Folders, Keychain) on that identity, so every
+        # release looks like a new program and the daemon loses its grants on
+        # each update. A Developer ID signature with a fixed identifier keeps
+        # one identity across releases. The desktop release re-signs its
+        # bundled copy with the same identifier (release-desktop.yml in
+        # private-pi-dash), so a bundled, installed or self-updated daemon is
+        # the same program to macOS.
+        #
+        # cargo-dist's own `macos-sign` cannot set the identifier, the hardened
+        # runtime or a secure timestamp, and notarization needs the last two.
+        # So this signs after `cargo dist build`: unpack each macOS archive,
+        # sign and notarize the binary, repack, and rewrite the archive's
+        # .sha256 and its checksum in the manifest.
+        if: ${{ runner.os == 'macOS' && needs.plan.outputs.publishing == 'true' }}
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CODESIGN_IDENTIFIER: com.airepublic.pidash.daemon
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing required secret $name"
+              exit 1
+            fi
+          done
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/pidash-signing.keychain-db"
+          CERT_PATH="$RUNNER_TEMP/pidash-signing.p12"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 32)
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+          trap 'rm -f "$CERT_PATH"; security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true' EXIT
+          (
+            umask 077
+            printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_PATH"
+          )
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "$HOME/Library/Keychains/login.keychain-db"
+          # Install Apple's intermediate without overriding the system trust policy.
+          curl --fail --silent --show-error --location https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$KEYCHAIN_PATH"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -F -- "$APPLE_SIGNING_IDENTITY" >/dev/null
+
+          shopt -s nullglob
+          archives=(target/distrib/pidash-*-apple-darwin.tar.xz)
+          if [ "${#archives[@]}" -eq 0 ]; then
+            echo "::error::no macOS archives in target/distrib to sign"
+            exit 1
+          fi
+
+          for archive in "${archives[@]}"; do
+            name="$(basename "$archive")"
+            dir="${name%.tar.xz}"
+            work="$(mktemp -d)"
+            tar -xf "$archive" -C "$work"
+            binary="$work/$dir/pidash"
+            if [ ! -f "$binary" ]; then
+              echo "::error::$name does not contain $dir/pidash"
+              exit 1
+            fi
+
+            codesign --force --timestamp --options runtime \
+              --identifier "$CODESIGN_IDENTIFIER" \
+              --keychain "$KEYCHAIN_PATH" --sign "$APPLE_SIGNING_IDENTITY" "$binary"
+            codesign --verify --strict --verbose=2 "$binary"
+            codesign -d --verbose=4 "$binary" 2>&1 | grep -Fx "Identifier=$CODESIGN_IDENTIFIER"
+            codesign -d --verbose=4 "$binary" 2>&1 | grep -Fx "TeamIdentifier=$APPLE_TEAM_ID"
+
+            # A bare executable cannot be stapled; Gatekeeper fetches the
+            # ticket online the first time it checks the binary.
+            ditto -c -k --keepParent "$binary" "$work/notarize.zip"
+            result="$(xcrun notarytool submit "$work/notarize.zip" \
+              --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+              --wait --output-format json)"
+            status="$(jq -r '.status' <<<"$result")"
+            if [ "$status" != "Accepted" ]; then
+              echo "::error::notarization of $name returned status $status"
+              xcrun notarytool log "$(jq -r '.id' <<<"$result")" \
+                --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" || true
+              exit 1
+            fi
+            rm "$work/notarize.zip"
+
+            # Same layout cargo-dist packs: one <dir>/ holding the binary,
+            # README.md and LICENSE.txt. COPYFILE_DISABLE and
+            # --no-mac-metadata keep bsdtar from adding AppleDouble entries.
+            COPYFILE_DISABLE=1 tar --no-mac-metadata -cJf "$archive" -C "$work" "$dir"
+            rm -rf "$work"
+
+            digest="$(shasum -a 256 "$archive" | cut -d' ' -f1)"
+            printf '%s *%s\n' "$digest" "$name" > "$archive.sha256"
+            jq -e --arg n "$name" '.artifacts[$n].checksums.sha256' dist-manifest.json >/dev/null
+            jq --arg n "$name" --arg d "$digest" '.artifacts[$n].checksums.sha256 = $d' \
+              dist-manifest.json > dist-manifest.json.tmp
+            mv dist-manifest.json.tmp dist-manifest.json
+            echo "signed and notarized $name ($digest)"
+          done
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
