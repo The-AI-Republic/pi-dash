@@ -5,7 +5,7 @@
 //! the app twin at `app/serializers/issue.py:326-332`, same body):
 //!
 //! * [`sanitize_html`] — `validate_html_content`
-//!   (`utils/content_validator.py:211-247`): `nh3.clean` with the module's
+//!   (`utils/content_validator.py:232-264`): `nh3.clean` with the module's
 //!   tags/attributes/schemes. `nh3` is Python bindings for the [`ammonia`]
 //!   crate, so the same configuration renders the same bytes.
 //! * [`strip_tags`] — Django's `django.utils.html.strip_tags`, which
@@ -22,7 +22,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-/// 10MB input cap (`content_validator.py:16,220`).
+/// 10MB input cap (`content_validator.py:16,240-242`).
 pub const MAX_HTML_BYTES: usize = 10 * 1024 * 1024;
 
 /// `description_html` fallback on intake create
@@ -45,18 +45,18 @@ pub enum Sanitize {
     Invalid,
 }
 
-/// `validate_html_content` (`content_validator.py:211-247`).
+/// `validate_html_content` (`content_validator.py:232-264`).
 ///
 /// Empty input never reaches here (the serializer only validates truthy
 /// `description_html`); the `None` third-tuple arm is therefore unneeded.
-/// The removals-diff log (`:231-239`, Sentry-only) has no wire effect.
+/// The removals-diff log (`:252-260`, Sentry-only) has no wire effect.
 pub fn sanitize_html(html: &str) -> Sanitize {
     if html.len() > MAX_HTML_BYTES {
         return Sanitize::Invalid;
     }
     let builder = ammonia_builder();
     // `nh3.clean` raises only on pathological input; map any failure to
-    // the invalid arm exactly like the `except` at `:242-247`.
+    // the invalid arm exactly like the `except` at `:262-264`.
     let clean = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         builder.clean(html).to_string()
     }));
@@ -68,10 +68,10 @@ pub fn sanitize_html(html: &str) -> Sanitize {
 
 /// The `nh3.clean(html, tags=ALLOWED_TAGS, attributes=ATTRIBUTES,
 /// url_schemes=SAFE_PROTOCOLS)` configuration
-/// (`content_validator.py:72-159,223-229`):
+/// (`content_validator.py:72-180,245-250`):
 ///
 /// * tags — `nh3.ALLOWED_TAGS` (ammonia's default set, dumped from nh3
-///   0.2.18) plus the four editor components.
+///   0.2.18) plus the six editor components.
 /// * attributes — the module dict verbatim (`*` = generic attributes,
 ///   plus the per-tag sets).
 /// * schemes — `{"http", "https", "mailto", "tel"}`.
@@ -166,18 +166,20 @@ fn tag_set() -> HashSet<&'static str> {
         "ul",
         "var",
         "wbr",
-        // CUSTOM_TAGS (content_validator.py:72-78).
+        // CUSTOM_TAGS (content_validator.py:72-81).
         "mention-component",
         "label",
         "input",
         "image-component",
+        "issue-embed-component",
+        "entity-reference-component",
     ]
     .into_iter()
     .collect()
 }
 
 fn generic_attributes() -> HashSet<&'static str> {
-    // ATTRIBUTES["*"] (content_validator.py:83-107).
+    // ATTRIBUTES["*"] (content_validator.py:86-116).
     [
         "class",
         "id",
@@ -244,6 +246,29 @@ fn tag_attributes() -> HashMap<&'static str, HashSet<&'static str>> {
     add(
         "mention-component",
         &["id", "entity_identifier", "entity_name"],
+    );
+    // content_validator.py:143-149.
+    add(
+        "issue-embed-component",
+        &[
+            "id",
+            "entity_identifier",
+            "project_identifier",
+            "workspace_identifier",
+            "entity_name",
+        ],
+    );
+    // content_validator.py:150-157.
+    add(
+        "entity-reference-component",
+        &[
+            "entity_name",
+            "entity_identifier",
+            "project_identifier",
+            "workspace_identifier",
+            "project_id",
+            "data-label",
+        ],
     );
     add(
         "th",
@@ -375,6 +400,52 @@ mod tests {
             (
                 "<ol start=\"5\"><li>a</li></ol>",
                 "<ol start=\"5\"><li>a</li></ol>",
+            ),
+        ];
+        for (input, expected) in vectors {
+            assert_eq!(
+                sanitize_html(input),
+                Sanitize::Clean(expected.to_owned()),
+                "input {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_keeps_embed_and_entity_reference() {
+        // Each pair is `(input, clean_html)` captured by executing
+        // `validate_html_content` on Django main (nh3 0.2.18); the vectors
+        // mirror `test_content_validator.py` (PIDASHCONV-1689).
+        let vectors = [
+            // The issue vector.
+            (
+                "<p><issue-embed-component entity_identifier=\"i1\" project_identifier=\"P\"></issue-embed-component></p>",
+                "<p><issue-embed-component entity_identifier=\"i1\" project_identifier=\"P\"></issue-embed-component></p>",
+            ),
+            // All embed identifiers survive.
+            (
+                "<p><issue-embed-component id=\"emb-1\" entity_identifier=\"ISS-2\" project_identifier=\"P\" workspace_identifier=\"acme\" entity_name=\"issue\"></issue-embed-component></p>",
+                "<p><issue-embed-component id=\"emb-1\" entity_identifier=\"ISS-2\" project_identifier=\"P\" workspace_identifier=\"acme\" entity_name=\"issue\"></issue-embed-component></p>",
+            ),
+            // All entity-reference attributes survive, including `data-label`.
+            (
+                "<p>see <entity-reference-component entity_name=\"issue\" entity_identifier=\"ISS-2\" project_identifier=\"P\" workspace_identifier=\"acme\" project_id=\"p-1\" data-label=\"Fix login\"></entity-reference-component></p>",
+                "<p>see <entity-reference-component entity_name=\"issue\" entity_identifier=\"ISS-2\" project_identifier=\"P\" workspace_identifier=\"acme\" project_id=\"p-1\" data-label=\"Fix login\"></entity-reference-component></p>",
+            ),
+            // Optional `project_id` may be absent.
+            (
+                "<p><entity-reference-component entity_name=\"issue\" entity_identifier=\"ISS-2\" project_identifier=\"P\" workspace_identifier=\"acme\" data-label=\"Fix login\"></entity-reference-component></p>",
+                "<p><entity-reference-component entity_name=\"issue\" entity_identifier=\"ISS-2\" project_identifier=\"P\" workspace_identifier=\"acme\" data-label=\"Fix login\"></entity-reference-component></p>",
+            ),
+            // A bare node round-trips rather than vanishing.
+            (
+                "<p><entity-reference-component></entity-reference-component></p>",
+                "<p><entity-reference-component></entity-reference-component></p>",
+            ),
+            // Event handlers are stripped from the custom tags; the tags stay.
+            (
+                "<p><issue-embed-component id=\"e\" entity_identifier=\"ISS-2\" onclick=\"alert(1)\">x</issue-embed-component><entity-reference-component entity_name=\"issue\" onerror=\"alert(1)\">y</entity-reference-component></p>",
+                "<p><issue-embed-component id=\"e\" entity_identifier=\"ISS-2\">x</issue-embed-component><entity-reference-component entity_name=\"issue\">y</entity-reference-component></p>",
             ),
         ];
         for (input, expected) in vectors {
