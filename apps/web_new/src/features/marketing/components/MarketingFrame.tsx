@@ -25,7 +25,9 @@ export function MarketingFrame({ children }: MarketingFrameProps): React.ReactEl
     <div className="relative isolate flex min-h-screen flex-col bg-(--bg) text-(--text)">
       <MarketingBackdrop />
       <MarketingHeader />
-      <main className="relative z-10 mx-auto w-full max-w-6xl flex-1 px-(--space-6) py-(--space-10)">{children}</main>
+      <main className="relative z-10 mx-auto w-full max-w-7xl flex-1 px-(--space-10) py-(--space-10) sm:px-(--space-16)">
+        {children}
+      </main>
       <MarketingFooter />
     </div>
   );
@@ -34,7 +36,7 @@ export function MarketingFrame({ children }: MarketingFrameProps): React.ReactEl
 export function MarketingHeader(): React.ReactElement {
   return (
     <header className="relative z-10 border-b border-(--border) bg-(--bg)/80 backdrop-blur">
-      <div className="mx-auto flex w-full max-w-6xl items-center gap-(--space-6) px-(--space-6) py-(--space-4)">
+      <div className="mx-auto flex w-full max-w-7xl items-center gap-(--space-6) px-(--space-10) py-(--space-4) sm:px-(--space-16)">
         <a
           href="/home"
           aria-label="Pi Dash home"
@@ -91,7 +93,7 @@ function HeaderLink({ link }: { link: MarketingLink }): React.ReactElement {
 export function MarketingFooter(): React.ReactElement {
   return (
     <footer className="relative z-10 border-t border-(--border) bg-(--bg)">
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-(--space-6) px-(--space-6) py-(--space-8) sm:flex-row sm:items-start sm:justify-between">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-(--space-6) px-(--space-10) py-(--space-8) sm:flex-row sm:items-start sm:justify-between sm:px-(--space-16)">
         <div className="flex flex-col gap-(--space-2)">
           <span className="text-body flex items-center gap-(--space-2) font-semibold text-(--text)">
             <span

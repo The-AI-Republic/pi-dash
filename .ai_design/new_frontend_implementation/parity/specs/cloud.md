@@ -51,19 +51,39 @@ via `/`, which for a signed-out visitor means the marketing home (with any
 `public-redirects.spec.ts` (in-place login vs alias bounce).
 
 CLOUD-003 — The marketing home at `/home` presents the product and routes
-visitors onward. A hero block carries three onward actions — toward sign-in,
-toward downloads, and toward docs — accompanied by a short positioning line
-and a product illustration panel showing a representative agent run. Below
-the hero the sections follow in fixed order: a product-loop strip of four
-short highlights, a four-step delivery narrative (scope the outcome, hand to
-a runner, implement and validate, review to done), a capability grid of four
-entries (orchestration across the delivery loop, agent choice, execution on
-the visitor's own machines, human control at escalation points), an
-open-source panel linking out to the public repository, and a closing call
-to action returning to sign-in. Every action on the page reaches a working
-destination; the page takes no parameters and calls no API. Visible wording
-and artwork may be redesigned — the oracle pins section order and action
-destinations, not copy. Oracle: `marketing-home.spec.ts`.
+visitors onward. Since NEWFRONT-1041 the page deliberately tracks the old
+cloud landing page's shape, because the owner reviewed both side by side and
+asked for them to stay nearly the same rather than for a redesign:
+
+- Hero, two columns on wide screens and stacked on narrow ones. The copy
+  column opens with a small status pill naming the product and what it is,
+  then a very large two-line headline, a short paragraph on what Pi Dash
+  does, three actions in this order — start free (sign-in, filled), download
+  the app, read the docs — and a muted line naming the free start and the
+  agent choices. The second column is an illustration of one agent run: an
+  issue header with a running badge, a work-plan list of four labelled steps
+  with done/active/queued marks, a runner status card, a live-activity
+  message, a checks list with passed/running values, and a review card. The
+  illustration is presentation only: no links, no buttons, no data.
+- Value strip: a banded row of four short highlights (durable workpads,
+  enrolled runners, structured escalation, review-ready changes), two per
+  row on narrow screens and four on wide ones.
+- Delivery narrative: an eyebrow, a headline and an intro line, then four
+  numbered cards "01"–"04" (state the outcome, hand it to a runner, build
+  and verify, review to done), four across on wide screens.
+- Capability grid: an eyebrow and headline beside four cards with icons
+  (issues-to-pull-requests, agent choice, your machines, human control).
+- Open-source panel: eyebrow, headline, paragraph, and a bordered action to
+  the public repository that opens in a new tab.
+- Closing panel: a centred eyebrow, headline, paragraph and filled action to
+  sign-in, on a tinted card.
+
+Every action on the page reaches a working destination; the page takes no
+parameters and calls no API. The hero owns the page's only top-level heading.
+Wording is ours and may evolve; the oracle pins section order, counts and
+action destinations, and the layout assertions in the unit tests pin the
+hero's two-column shape and the illustration. Oracle:
+`marketing-home.spec.ts`.
 
 CLOUD-004 — One shared frame (header, footer, page shell) wraps every public
 page (`/home`, `/docs`, `/downloads`, `/pricing`). The header links the
@@ -76,10 +96,16 @@ cramped widths the frame degrades by hiding secondary header links rather
 than breaking layout: docs, pricing and the start action drop out first,
 then the repository link, while downloads and sign-in stay reachable.
 Keyboard focus is visibly indicated on every header and footer link. A
-decorative full-page backdrop (a faint world illustration) sits behind the
-content, is hidden from assistive technology, and carries no behavior. No
-API. Oracle: `marketing-frame.spec.ts` (frame repetition, cramped-width
-hiding, visible focus).
+decorative full-page backdrop sits behind the content, is hidden from
+assistive technology, and carries no behavior: since NEWFRONT-1041 it is the
+old landing page's ASCII world map, kept as one SVG file under the app's
+public assets and painted as a fixed, centred, contained mask over the page
+text colour at very low opacity, so it reads the same in light and dark
+themes. The document carries only the asset URL, never the drawing itself,
+so the map stays out of the JS and HTML payloads. Content columns sit on a
+wide centred gutter that matches the old page at both desktop and mobile
+widths. No API. Oracle: `marketing-frame.spec.ts` (frame repetition,
+cramped-width hiding, visible focus).
 
 CLOUD-005 — Public pages are crawlable with stable metadata. The marketing
 pages and the signed-out root carry index/follow crawler directives,

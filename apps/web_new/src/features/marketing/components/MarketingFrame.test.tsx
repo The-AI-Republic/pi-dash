@@ -135,21 +135,21 @@ describe("MarketingFrame", () => {
       </MarketingFrame>
     );
     const frame = container.firstElementChild as HTMLElement;
-    const backdrop = container.querySelector("[data-marketing-backdrop]") as SVGElement;
-    // SVG elements expose className as an object, so read the attribute.
+    const backdrop = container.querySelector("[data-marketing-backdrop]") as HTMLElement;
     const backdropClass = backdrop.getAttribute("class") ?? "";
     // Isolation keeps the backdrop's z-index scoped to this frame, and the
     // content layer above it (z-10) leaves the illustration visible.
     expect(frame.className).toContain("isolate");
     expect(backdropClass).toContain("z-0");
-    expect(backdropClass).toContain("absolute");
+    // Fixed, like the old page: the map stays put while the content scrolls.
+    expect(backdropClass).toContain("fixed");
     expect(backdropClass).not.toContain("-z-");
     for (const layer of [screen.getByRole("banner"), screen.getByRole("main"), screen.getByRole("contentinfo")]) {
       expect(layer.className).toContain("z-10");
     }
-    // The backdrop carries no color of its own, so the illustration inherits
-    // the page's text colour instead of painting black on black.
-    expect(backdropClass).toContain("text-(--text)");
+    // The tint is the page's text colour behind the map mask, so it reads
+    // in both light and dark themes instead of painting black on black.
+    expect(backdropClass).toContain("bg-(--text)");
   });
 
   it("keeps the exported link sets in the order the frame renders", () => {

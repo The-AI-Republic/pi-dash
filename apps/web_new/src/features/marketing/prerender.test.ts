@@ -50,6 +50,15 @@ describe("prerender", () => {
     expect(home.markup).toContain("https://github.com/The-AI-Republic/pi-dash");
   });
 
+  it("paints the home backdrop from the world-map asset instead of inlining it", () => {
+    const home = renderMarketingPage("/home");
+    expect(home.markup).toContain('data-marketing-backdrop=""');
+    expect(home.markup).toContain("/world-map.svg");
+    // The map is an asset: its monospace drawing never lands in the document.
+    expect(home.markup).not.toContain("***************************");
+    expect(home.markup.length).toBeLessThan(60_000);
+  });
+
   it("renders the content bodies with their pinned destinations", () => {
     const docs = renderMarketingPage("/docs");
     expect(docs.markup).toContain("pidash auth login");
