@@ -459,6 +459,8 @@ pub fn routes() -> Router<AppState> {
     handlers_instance::routes()
         .merge(config_workspace_routes())
         .merge(handlers_admin::routes())
+        // `runner/admin_urls.py`, mounted at `runners/` by `license/urls.py`.
+        .merge(crate::runner_admin::routes())
 }
 
 #[cfg(test)]
