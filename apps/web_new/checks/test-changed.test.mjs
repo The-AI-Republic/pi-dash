@@ -222,7 +222,7 @@ describe("main", () => {
       loadavg: quietLoadavg,
     });
     expect(status).toBe(1);
-    expect(calls[0]).toBe("merge-base HEAD origin/web-new-dev");
+    expect(calls[0]).toBe("merge-base HEAD origin/main");
     expect(baseReads).toEqual([["/repo", "mb123", ["packages/kit/src/Button.tsx"]]]);
     expect(runs).toEqual([["run", "--passWithNoTests", "--coverage", "/repo/apps/web_new/src/uses-button.test.tsx"]]);
     expect(logs).toEqual(["test:changed: 1 file(s) changed since mb123 reach 1 test file(s)"]);
@@ -243,7 +243,7 @@ describe("main", () => {
       loadavg: quietLoadavg,
     });
     expect(status).toBe(0);
-    expect(calls).not.toContain("merge-base HEAD origin/web-new-dev");
+    expect(calls).not.toContain("merge-base HEAD origin/main");
     expect(runs).toEqual([]);
     expect(logs).toEqual([
       "test:changed: 1 file(s) changed since HEAD^1 reach 0 test file(s)",

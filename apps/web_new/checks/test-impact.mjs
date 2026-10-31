@@ -23,7 +23,7 @@
 //   importers.
 // - Imports it cannot resolve (npm packages) are not edges.
 // What it can miss is a dependency no import shows; the 12-hour full-suite
-// run on web-new-dev catches that after merge.
+// run on main catches that after merge.
 import ts from "typescript";
 
 const WEB_NEW = "apps/web_new/";

@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 # Parity report CI (NEWFRONT-19). Publishes the per-area inventory report
-# (rows x oracle/new green) on every PR into web-new-dev. Node only: no
+# (rows x oracle/new green) on every frontend PR into main. Node only: no
 # stack, no browsers. Scenario runs stay local per the stack runbook.
 name: web-new-parity
 
 on:
   pull_request:
-    branches: [web-new-dev]
+    branches: [main]
     paths:
       - "apps/web_new/**"
       - "packages/kit/**"
@@ -17,7 +17,7 @@ on:
       - ".github/workflows/web-new*.yml"
       - "pnpm-lock.yaml"
   push:
-    branches: [web-new-dev]
+    branches: [main]
     paths:
       - "apps/web_new/**"
       - "packages/kit/**"

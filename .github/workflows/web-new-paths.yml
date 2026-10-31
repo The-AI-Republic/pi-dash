@@ -1,15 +1,16 @@
-# NEWFRONT paths gate: runs on every PR into web-new-dev, whatever it touches.
+# NEWFRONT paths gate: runs on every NEWFRONT PR into main, whatever it touches.
 # The checker and its rules are read from the base branch, not from the PR.
 name: web-new-paths
 
 on:
   pull_request:
-    branches: [web-new-dev]
+    branches: [main]
 
 jobs:
   paths-gate:
     name: paths allowlist gate
     runs-on: ubuntu-latest
+    if: startsWith(github.head_ref, 'pi-dash/newfront-')
     steps:
       - uses: actions/checkout@v4
         with:

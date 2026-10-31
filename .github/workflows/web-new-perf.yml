@@ -9,7 +9,7 @@ name: web-new-perf
 
 on:
   pull_request:
-    branches: [web-new-dev]
+    branches: [main]
     paths:
       - "apps/web_new/**"
       - "packages/kit/**"
@@ -18,7 +18,7 @@ on:
       - ".github/workflows/web-new*.yml"
       - "pnpm-lock.yaml"
   push:
-    branches: [web-new-dev]
+    branches: [main]
     paths:
       - "apps/web_new/**"
       - "packages/kit/**"

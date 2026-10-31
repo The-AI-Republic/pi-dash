@@ -8,12 +8,12 @@
 // test that touches it; vitest then runs exactly those files. Configs, package
 // manifests and the test setup file reach tests without an import, so they
 // select nothing (the output says so). The NEWFRONT full-suite scheduler runs
-// the whole suite on web-new-dev every 12 hours and covers them. Agents run
+// the whole suite on main every 12 hours and covers them. Agents run
 // this locally (`pnpm --filter web_new test:changed`) and CI runs it on PRs.
 //
 // Usage: node checks/test-changed.mjs [--base <ref>] [--full] [vitest args...]
 //   --base <ref>  diff against this ref (default: merge base of HEAD and
-//                 origin/web-new-dev)
+//                 origin/main)
 //   --full        run the whole suite regardless of what changed
 // Any other option (e.g. --coverage) is passed through to vitest. Path
 // filters are refused: the selection is the filter. Past MAX_TEST_FILES
@@ -32,7 +32,7 @@ import { workerArgs, workerCount } from "./full-suite.mjs";
 import { SOURCE_ROOTS, affectedTests, aliasesFor } from "./test-impact.mjs";
 
 const webNewDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const DEFAULT_BASE_BRANCH = "origin/web-new-dev";
+const DEFAULT_BASE_BRANCH = "origin/main";
 const MAX_TEST_FILES = 1000;
 
 // Repo-relative paths that reach tests without an import edge. They select

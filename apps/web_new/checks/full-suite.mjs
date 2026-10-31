@@ -3,8 +3,8 @@
 // See the LICENSE file for details.
 // Runs the whole web_new, @pidash/kit and @pidash/api-client unit suites on the
 // current checkout and writes one JSON summary of the result. The NEWFRONT
-// full-suite scheduler runs it on a fresh worktree of web-new-dev every 12
-// hours (pushes to web-new-dev no longer run the web_new suite), then files
+// full-suite scheduler runs it on a fresh worktree of main every 12
+// hours (pushes to main do not run the web_new suite), then files
 // fix issues from the summary. Failing test files are re-run once: a test that
 // fails twice is "real", one that passes on the re-run is "flaky".
 //
