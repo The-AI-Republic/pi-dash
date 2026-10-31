@@ -1,10 +1,12 @@
 {
   "_fixture": "F-SEND",
-  "_method": "executed: .venv-1248 python .scratch1287-gen_bs4.py (bs4 bs4 4.12.3, CPython 3.12.3); cases = probe rounds 1-13 + full html5 table sweep (text + attr contexts, semicolon + nosemi) + numeric sweep; mail slice identical on origin/main and rust-dev at gen time; fixrun1287: +50 review-class cases recorded live (bs4 4.12.3, CPython 3.12.3); fixrun1287b: +31 R1/R1b/R2 cases recorded live (bs4 4.12.3, CPython 3.12.3)",
+  "_method": "executed: .venv-1248 python .scratch1287-gen_bs4.py (bs4 bs4 4.12.3, CPython 3.12.3); cases = probe rounds 1-13 + full html5 table sweep (text + attr contexts, semicolon + nosemi) + numeric sweep; mail slice identical on origin/main and rust-dev at gen time; fixrun1287: +50 review-class cases recorded live (bs4 4.12.3, CPython 3.12.3); fixrun1287b: +31 R1/R1b/R2 cases recorded live (bs4 4.12.3, CPython 3.12.3); rerecord1693: outputs re-recorded live (bs4 4.12.3, CPython 3.12.10 official image); 11 text-path surrogate outs sanitized to U+FFFD (Rust String cannot hold surrogates; see module docs)",
   "_ported_from": "c494eddb2c652f47a6ed67617990d71637e0ff1a",
   "_sources": [
     "apps/api/pi_dash/bgtasks/email_notification_task.py:130-140"
   ],
+  "_python": "3.12.10",
+  "_bs4": "4.12.3",
   "cases": [
     {
       "name": "_scratch1287_bs4probe::issue-repro",
@@ -344,8 +346,7 @@
     {
       "name": "_scratch1287_bs4probe2::numeric-surrogate",
       "in": "<p>&#xD800;</p>",
-      "out": "<p>\ufffd</p>",
-      "note": "bs4 emits a lone surrogate here; Rust expects U+FFFD (unavoidable, one char class)"
+      "out": "<p>\ufffd</p>"
     },
     {
       "name": "_scratch1287_bs4probe2::numeric-range",
@@ -440,7 +441,7 @@
     {
       "name": "_scratch1287_bs4probe2::comment-unclosed",
       "in": "<p>a<!--oops",
-      "out": "<p>a<!--oops--></p>"
+      "out": "<p>a&lt;!--oops</p>"
     },
     {
       "name": "_scratch1287_bs4probe2::doctype-lower",
@@ -855,12 +856,12 @@
     {
       "name": "_scratch1287_bs4probe3::script-close-nosuffix",
       "in": "<script>a</scriptx>",
-      "out": "<script>a</scriptx></script>"
+      "out": "<script></script>"
     },
     {
       "name": "_scratch1287_bs4probe3::script-unclosed",
       "in": "<script>a",
-      "out": "<script>a</script>"
+      "out": "<script></script>"
     },
     {
       "name": "_scratch1287_bs4probe3::script-comment",
@@ -870,7 +871,7 @@
     {
       "name": "_scratch1287_bs4probe3::style-unclosed",
       "in": "<style>a",
-      "out": "<style>a</style>"
+      "out": "<style></style>"
     },
     {
       "name": "_scratch1287_bs4probe3::attr-gt-only",
@@ -1175,17 +1176,17 @@
     {
       "name": "_scratch1287_bs4probe4::script-close-slash",
       "in": "<script>a</script/>",
-      "out": "<script>a</script>"
+      "out": "<script></script>"
     },
     {
       "name": "_scratch1287_bs4probe4::style-close-slash",
       "in": "<style>a</style/>",
-      "out": "<style>a</style>"
+      "out": "<style></style>"
     },
     {
       "name": "_scratch1287_bs4probe4::script-close-slash-ws",
       "in": "<script>a</script/ >",
-      "out": "<script>a</script>"
+      "out": "<script></script>"
     },
     {
       "name": "_scratch1287_bs4probe4::script-selfclose",
@@ -1220,7 +1221,7 @@
     {
       "name": "_scratch1287_bs4probe4::script-endtag-attr",
       "in": "<script>a</script x=\"1\">",
-      "out": "<script>a</script>"
+      "out": "<script></script>"
     },
     {
       "name": "_scratch1287_bs4probe4::p-endtag-attr",
@@ -1230,7 +1231,7 @@
     {
       "name": "_scratch1287_bs4probe4::close-sp-name",
       "in": "<p>a</ p>y</p>",
-      "out": "<p>a<!-- p-->y</p>"
+      "out": "<p>a</p>y"
     },
     {
       "name": "_scratch1287_bs4probe4::close-empty",
@@ -1260,7 +1261,7 @@
     {
       "name": "_scratch1287_bs4probe4::eq-val",
       "in": "<p a==b>x</p>",
-      "out": "<p a=\"=b\">x</p>"
+      "out": "<p a=\"b\">x</p>"
     },
     {
       "name": "_scratch1287_bs4probe4::eq-only",
@@ -1320,7 +1321,7 @@
     {
       "name": "_scratch1287_bs4probe4::p-nl-close",
       "in": "<p>a</\np>tail",
-      "out": "<p>a<!--\np-->tail</p>"
+      "out": "<p>a</p>tail"
     },
     {
       "name": "_scratch1287_bs4probe4::b-close-ws",
@@ -1615,8 +1616,7 @@
     {
       "name": "_scratch1287_bs4probe5::num-dfff",
       "in": "<p>&#xDFFF;</p>",
-      "out": "<p>\ufffd</p>",
-      "note": "bs4 emits a lone surrogate here; Rust expects U+FFFD (unavoidable, one char class)"
+      "out": "<p>\ufffd</p>"
     },
     {
       "name": "_scratch1287_bs4probe5::num-fdd0",
@@ -1646,7 +1646,7 @@
     {
       "name": "_scratch1287_bs4probe5::cdata-unclosed",
       "in": "<![CDATA[x",
-      "out": "<![CDATA[x]]>"
+      "out": "&lt;![CDATA[x"
     },
     {
       "name": "_scratch1287_bs4probe5::cdata-empty",
@@ -1656,17 +1656,17 @@
     {
       "name": "_scratch1287_bs4probe5::eof-bogus",
       "in": "<p>a<!foo",
-      "out": "<p>a<!--foo--></p>"
+      "out": "<p>a&lt;!foo</p>"
     },
     {
       "name": "_scratch1287_bs4probe5::eof-endtag",
       "in": "<p>a</p",
-      "out": "<p>a</p>"
+      "out": "<p>a&lt;/p</p>"
     },
     {
       "name": "_scratch1287_bs4probe5::eof-pi",
       "in": "<p>a<?pi",
-      "out": "<p>a<?pi></p>"
+      "out": "<p>a&lt;?pi</p>"
     },
     {
       "name": "_scratch1287_bs4probe5::eof-lt",
@@ -1681,17 +1681,17 @@
     {
       "name": "_scratch1287_bs4probe5::eof-comment",
       "in": "<p>a<!--",
-      "out": "<p>a<!-- --></p>"
+      "out": "<p>a&lt;!--</p>"
     },
     {
       "name": "_scratch1287_bs4probe5::eof-comment1",
       "in": "<p>a<!-",
-      "out": "<p>a<!-----></p>"
+      "out": "<p>a&lt;!-</p>"
     },
     {
       "name": "_scratch1287_bs4probe5::eof-bang",
       "in": "<p>a<!",
-      "out": "<p>a<!-- --></p>"
+      "out": "<p>a&lt;!</p>"
     },
     {
       "name": "_scratch1287_bs4probe5::eof-opentag",
@@ -1701,7 +1701,7 @@
     {
       "name": "_scratch1287_bs4probe5::bare-p",
       "in": "<p",
-      "out": ""
+      "out": "&lt;p"
     },
     {
       "name": "_scratch1287_bs4probe5::bare-lt",
@@ -1716,47 +1716,47 @@
     {
       "name": "_scratch1287_bs4probe5::bare-pi",
       "in": "<?",
-      "out": "<? >"
+      "out": "&lt;?"
     },
     {
       "name": "_scratch1287_bs4probe5::bare-bang",
       "in": "<!",
-      "out": "<!-- -->"
+      "out": "&lt;!"
     },
     {
       "name": "_scratch1287_bs4probe5::eof-attr-dq",
       "in": "<p a=\"1",
-      "out": ""
+      "out": "&lt;p a=\"1"
     },
     {
       "name": "_scratch1287_bs4probe5::eof-attr-sq",
       "in": "<p a='1",
-      "out": ""
+      "out": "&lt;p a='1"
     },
     {
       "name": "_scratch1287_bs4probe5::eof-attr-bare",
       "in": "<p a=1",
-      "out": ""
+      "out": "&lt;p a=1"
     },
     {
       "name": "_scratch1287_bs4probe5::bare-endtag",
       "in": "</p",
-      "out": ""
+      "out": "&lt;/p"
     },
     {
       "name": "_scratch1287_bs4probe5::bare-comment",
       "in": "<!--x",
-      "out": "<!--x-->"
+      "out": "&lt;!--x"
     },
     {
       "name": "_scratch1287_bs4probe5::bare-pix",
       "in": "<?x",
-      "out": "<?x>"
+      "out": "&lt;?x"
     },
     {
       "name": "_scratch1287_bs4probe5::bare-bangx",
       "in": "<!x",
-      "out": "<!--x-->"
+      "out": "&lt;!x"
     },
     {
       "name": "_scratch1287_bs4probe5::endtag-longer",
@@ -1801,7 +1801,7 @@
     {
       "name": "_scratch1287_bs4probe5::attr-sq-gt",
       "in": "<p a='1>b\"x</p>",
-      "out": ""
+      "out": "&lt;p a='1&gt;b\"x"
     },
     {
       "name": "_scratch1287_bs4probe5::attr-dq-sq",
@@ -1906,17 +1906,17 @@
     {
       "name": "_scratch1287_bs4probe5::xmp-tag",
       "in": "<xmp><b></xmp>",
-      "out": "<xmp>&lt;b&gt;</xmp>"
+      "out": "<xmp><b></b></xmp>"
     },
     {
       "name": "_scratch1287_bs4probe5::textarea-tag",
       "in": "<textarea><b>x</b></textarea>",
-      "out": "<textarea>&lt;b&gt;x&lt;/b&gt;</textarea>"
+      "out": "<textarea><b>x</b></textarea>"
     },
     {
       "name": "_scratch1287_bs4probe5::title-tag",
       "in": "<title><b>x</b></title>",
-      "out": "<title>&lt;b&gt;x&lt;/b&gt;</title>"
+      "out": "<title><b>x</b></title>"
     },
     {
       "name": "_scratch1287_bs4probe5::a-href-bare",
@@ -1951,12 +1951,12 @@
     {
       "name": "_scratch1287_bs4probe5::comment-gt",
       "in": "<!-->text",
-      "out": "<!-- -->text"
+      "out": "&lt;!--&gt;text"
     },
     {
       "name": "_scratch1287_bs4probe5::comment-dash-gt",
       "in": "<!--->text",
-      "out": "<!-- -->text"
+      "out": "&lt;!---&gt;text"
     },
     {
       "name": "_scratch1287_bs4probe5::pi-empty",
@@ -2161,7 +2161,7 @@
     {
       "name": "_scratch1287_bs4probe6::textarea-b",
       "in": "<textarea>  <b>x</b>  </textarea>",
-      "out": "<textarea>  &lt;b&gt;x&lt;/b&gt;  </textarea>"
+      "out": "<textarea>  <b>x</b>  </textarea>"
     },
     {
       "name": "_scratch1287_bs4probe6::pre-script",
@@ -2186,22 +2186,22 @@
     {
       "name": "_scratch1287_bs4probe6::raw-plaintext",
       "in": "<plaintext><b>&amp;",
-      "out": "<plaintext>&lt;b&gt;&amp;amp;</plaintext>"
+      "out": "<plaintext><b>&amp;</b></plaintext>"
     },
     {
       "name": "_scratch1287_bs4probe6::raw-iframe",
       "in": "<iframe><b>&amp;</b></iframe>",
-      "out": "<iframe>&lt;b&gt;&amp;amp;&lt;/b&gt;</iframe>"
+      "out": "<iframe><b>&amp;</b></iframe>"
     },
     {
       "name": "_scratch1287_bs4probe6::raw-noembed",
       "in": "<noembed><b>&amp;</b></noembed>",
-      "out": "<noembed>&lt;b&gt;&amp;amp;&lt;/b&gt;</noembed>"
+      "out": "<noembed><b>&amp;</b></noembed>"
     },
     {
       "name": "_scratch1287_bs4probe6::raw-noframes",
       "in": "<noframes><b>&amp;</b></noframes>",
-      "out": "<noframes>&lt;b&gt;&amp;amp;&lt;/b&gt;</noframes>"
+      "out": "<noframes><b>&amp;</b></noframes>"
     },
     {
       "name": "_scratch1287_bs4probe6::raw-noscript",
@@ -2226,7 +2226,7 @@
     {
       "name": "_scratch1287_bs4probe6::raw-xmp-ent",
       "in": "<xmp>&amp;</xmp>",
-      "out": "<xmp>&amp;amp;</xmp>"
+      "out": "<xmp>&amp;</xmp>"
     },
     {
       "name": "_scratch1287_bs4probe6::raw-pre-b",
@@ -2246,7 +2246,7 @@
     {
       "name": "_scratch1287_bs4probe6::title-endx",
       "in": "<title>a</titlex>",
-      "out": "<title>a&lt;/titlex&gt;</title>"
+      "out": "<title>a</title>"
     },
     {
       "name": "_scratch1287_bs4probe6::title-endupper",
@@ -2261,17 +2261,17 @@
     {
       "name": "_scratch1287_bs4probe6::title-nested",
       "in": "<title><title></title>",
-      "out": "<title>&lt;title&gt;</title>"
+      "out": "<title><title></title></title>"
     },
     {
       "name": "_scratch1287_bs4probe6::textarea-endx",
       "in": "<textarea>a</textareax>",
-      "out": "<textarea>a&lt;/textareax&gt;</textarea>"
+      "out": "<textarea>a</textarea>"
     },
     {
       "name": "_scratch1287_bs4probe6::xmp-endx",
       "in": "<xmp>a</xmpx>",
-      "out": "<xmp>a&lt;/xmpx&gt;</xmp>"
+      "out": "<xmp>a</xmp>"
     },
     {
       "name": "_scratch1287_bs4probe6::title-unclosed",
@@ -2296,22 +2296,22 @@
     {
       "name": "_scratch1287_bs4probe6::eof-endtag-ws",
       "in": "<p>a</p ",
-      "out": "<p>a</p>"
+      "out": "<p>a&lt;/p </p>"
     },
     {
       "name": "_scratch1287_bs4probe6::eof-endtag-slash",
       "in": "<p>a</p/",
-      "out": "<p>a</p>"
+      "out": "<p>a&lt;/p/</p>"
     },
     {
       "name": "_scratch1287_bs4probe6::eof-endtag-attr",
       "in": "<p>a</p foo",
-      "out": "<p>a</p>"
+      "out": "<p>a&lt;/p foo</p>"
     },
     {
       "name": "_scratch1287_bs4probe6::eof-endtag-void",
       "in": "<p>a</br",
-      "out": "<p>a</p>"
+      "out": "<p>a&lt;/br</p>"
     },
     {
       "name": "_scratch1287_bs4probe6::slash-ab-x",
@@ -2356,17 +2356,17 @@
     {
       "name": "_scratch1287_bs4probe6::unclosed-sq-tail",
       "in": "<p a='1>x</p> Tail",
-      "out": ""
+      "out": "&lt;p a='1&gt;x Tail"
     },
     {
       "name": "_scratch1287_bs4probe6::unclosed-dq-tail",
       "in": "<p a=\"1>x</p> Tail",
-      "out": ""
+      "out": "&lt;p a=\"1&gt;x Tail"
     },
     {
       "name": "_scratch1287_bs4probe6::unclosed-sq-tail2",
       "in": "<p a='1 Tail",
-      "out": ""
+      "out": "&lt;p a='1 Tail"
     },
     {
       "name": "_scratch1287_bs4probe6::quoted-then-text",
@@ -2401,7 +2401,7 @@
     {
       "name": "_scratch1287_bs4probe6::eq-quoted",
       "in": "<p a==\"b\">x</p>",
-      "out": "<p a='=\"b\"'>x</p>"
+      "out": "<p a=\"b\">x</p>"
     },
     {
       "name": "_scratch1287_bs4probe6::lt-gt-text",
@@ -2421,12 +2421,12 @@
     {
       "name": "_scratch1287_bs4probe6::mention-eof",
       "in": "<mention-component entity_identifier=\"u1\"",
-      "out": ""
+      "out": "&lt;mention-component entity_identifier=\"u1\""
     },
     {
       "name": "_scratch1287_bs4probe6::mention-unclosed-q",
       "in": "<mention-component entity_identifier=\"u1>x</p>",
-      "out": ""
+      "out": "&lt;mention-component entity_identifier=\"u1&gt;x"
     },
     {
       "name": "_scratch1287_bs4probe6::xml-decl",
@@ -2561,7 +2561,7 @@
     {
       "name": "_scratch1287_bs4probe7::plaintext-close",
       "in": "<plaintext>a</plaintext>",
-      "out": "<plaintext>a&lt;/plaintext&gt;</plaintext>"
+      "out": "<plaintext>a</plaintext>"
     },
     {
       "name": "_scratch1287_bs4probe7::plaintext-ws",
@@ -2571,22 +2571,22 @@
     {
       "name": "_scratch1287_bs4probe7::plaintext-closex",
       "in": "<plaintext>a</plaintextx>",
-      "out": "<plaintext>a&lt;/plaintextx&gt;</plaintext>"
+      "out": "<plaintext>a</plaintext>"
     },
     {
       "name": "_scratch1287_bs4probe7::raw-close-mismatch1",
       "in": "<title>a</textarea>",
-      "out": "<title>a&lt;/textarea&gt;</title>"
+      "out": "<title>a</title>"
     },
     {
       "name": "_scratch1287_bs4probe7::raw-close-mismatch2",
       "in": "<script>a</style>",
-      "out": "<script>a</style></script>"
+      "out": "<script></script>"
     },
     {
       "name": "_scratch1287_bs4probe7::raw-close-mismatch3",
       "in": "<style>a</script>",
-      "out": "<style>a</script></style>"
+      "out": "<style></style>"
     },
     {
       "name": "_scratch1287_bs4probe7::rcdata-copy",
@@ -2636,12 +2636,12 @@
     {
       "name": "_scratch1287_bs4probe7::abrupt-gt-nolater",
       "in": "<!-->foo",
-      "out": "<!-- -->foo"
+      "out": "&lt;!--&gt;foo"
     },
     {
       "name": "_scratch1287_bs4probe7::abrupt-dash-nolater",
       "in": "<!--->foo",
-      "out": "<!-- -->foo"
+      "out": "&lt;!---&gt;foo"
     },
     {
       "name": "_scratch1287_bs4probe7::comment-ws-mid",
@@ -2656,7 +2656,7 @@
     {
       "name": "_scratch1287_bs4probe7::quote-close-later1",
       "in": "<p a=\"1>x</p> \" Tail\"",
-      "out": ""
+      "out": "&lt;p a=\"1&gt;x \" Tail\""
     },
     {
       "name": "_scratch1287_bs4probe7::quote-close-later2",
@@ -2666,12 +2666,12 @@
     {
       "name": "_scratch1287_bs4probe7::doctype-eof1",
       "in": "<!DOCTYPE html",
-      "out": "<!DOCTYPE html>\n"
+      "out": "&lt;!DOCTYPE html"
     },
     {
       "name": "_scratch1287_bs4probe7::doctype-eof2",
       "in": "<!DOCTYPE",
-      "out": "<!DOCTYPE  >\n"
+      "out": "&lt;!DOCTYPE"
     },
     {
       "name": "_scratch1287_bs4probe7::doct-short",
@@ -2711,12 +2711,12 @@
     {
       "name": "_scratch1287_bs4probe7::eof-attr-qx",
       "in": "<p a=\"1\"x",
-      "out": ""
+      "out": "&lt;p a=\"1\"x"
     },
     {
       "name": "_scratch1287_bs4probe7::eof-attr-qsp",
       "in": "<p a=\"1\" ",
-      "out": ""
+      "out": "&lt;p a=\"1\" "
     },
     {
       "name": "_scratch1287_bs4probe7::apos",
@@ -2871,7 +2871,7 @@
     {
       "name": "_scratch1287_bs4probe8::endtag-quote",
       "in": "<p>a</p a=\">\">y</p>",
-      "out": "<p>a</p>y"
+      "out": "<p>a</p>\"&gt;y"
     },
     {
       "name": "_scratch1287_bs4probe8::startag-eq",
@@ -2956,7 +2956,7 @@
     {
       "name": "_scratch1287_bs4probe8::script-eof",
       "in": "<script>a</script",
-      "out": "<script>a</script</script>"
+      "out": "<script></script>"
     },
     {
       "name": "_scratch1287_bs4probe8::pre-trail",
@@ -2971,7 +2971,7 @@
     {
       "name": "_scratch1287_bs4probe8::textarea-pre",
       "in": "<textarea>  <pre>  </pre>  </textarea>",
-      "out": "<textarea>  &lt;pre&gt;  &lt;/pre&gt;  </textarea>"
+      "out": "<textarea>  <pre>  </pre>  </textarea>"
     },
     {
       "name": "_scratch1287_bs4probe8::pre-textarea",
@@ -57386,8 +57386,7 @@
     {
       "name": "num::text::#55296;",
       "in": "<p>&#55296;</p>",
-      "out": "<p>\ufffd</p>",
-      "note": "bs4 emits a lone surrogate here; Rust expects U+FFFD (unavoidable, one char class)"
+      "out": "<p>\ufffd</p>"
     },
     {
       "name": "num::attr::#55296;",
@@ -57397,8 +57396,7 @@
     {
       "name": "num::text::#xd800;",
       "in": "<p>&#xd800;</p>",
-      "out": "<p>\ufffd</p>",
-      "note": "bs4 emits a lone surrogate here; Rust expects U+FFFD (unavoidable, one char class)"
+      "out": "<p>\ufffd</p>"
     },
     {
       "name": "num::attr::#xd800;",
@@ -57408,8 +57406,7 @@
     {
       "name": "num::text::#XD800;",
       "in": "<p>&#XD800;</p>",
-      "out": "<p>\ufffd</p>",
-      "note": "bs4 emits a lone surrogate here; Rust expects U+FFFD (unavoidable, one char class)"
+      "out": "<p>\ufffd</p>"
     },
     {
       "name": "num::attr::#XD800;",
@@ -57419,8 +57416,7 @@
     {
       "name": "num::text::#57343;",
       "in": "<p>&#57343;</p>",
-      "out": "<p>\ufffd</p>",
-      "note": "bs4 emits a lone surrogate here; Rust expects U+FFFD (unavoidable, one char class)"
+      "out": "<p>\ufffd</p>"
     },
     {
       "name": "num::attr::#57343;",
@@ -57430,8 +57426,7 @@
     {
       "name": "num::text::#xdfff;",
       "in": "<p>&#xdfff;</p>",
-      "out": "<p>\ufffd</p>",
-      "note": "bs4 emits a lone surrogate here; Rust expects U+FFFD (unavoidable, one char class)"
+      "out": "<p>\ufffd</p>"
     },
     {
       "name": "num::attr::#xdfff;",
@@ -57441,8 +57436,7 @@
     {
       "name": "num::text::#XDFFF;",
       "in": "<p>&#XDFFF;</p>",
-      "out": "<p>\ufffd</p>",
-      "note": "bs4 emits a lone surrogate here; Rust expects U+FFFD (unavoidable, one char class)"
+      "out": "<p>\ufffd</p>"
     },
     {
       "name": "num::attr::#XDFFF;",
@@ -57962,8 +57956,7 @@
     {
       "name": "num::text-nosemi::#55296",
       "in": "<p>&#55296 y</p>",
-      "out": "<p>\ufffd y</p>",
-      "note": "bs4 emits a lone surrogate here; Rust expects U+FFFD (unavoidable, one char class)"
+      "out": "<p>\ufffd y</p>"
     },
     {
       "name": "num::attr-nosemi::#55296",
@@ -57973,8 +57966,7 @@
     {
       "name": "num::text-nosemi::#xd800",
       "in": "<p>&#xd800 y</p>",
-      "out": "<p>\ufffd y</p>",
-      "note": "bs4 emits a lone surrogate here; Rust expects U+FFFD (unavoidable, one char class)"
+      "out": "<p>\ufffd y</p>"
     },
     {
       "name": "num::attr-nosemi::#xd800",
@@ -57984,8 +57976,7 @@
     {
       "name": "num::text-nosemi::#XD800",
       "in": "<p>&#XD800 y</p>",
-      "out": "<p>\ufffd y</p>",
-      "note": "bs4 emits a lone surrogate here; Rust expects U+FFFD (unavoidable, one char class)"
+      "out": "<p>\ufffd y</p>"
     },
     {
       "name": "num::attr-nosemi::#XD800",
@@ -58140,7 +58131,7 @@
     {
       "name": "fixrun1287::d3.quotedvalue",
       "in": "<p>x</p a=\">\">tail",
-      "out": "<p>x</p>tail"
+      "out": "<p>x</p>\"&gt;tail"
     },
     {
       "name": "fixrun1287::d3.squote",
@@ -58150,7 +58141,7 @@
     {
       "name": "fixrun1287::d3.raw",
       "in": "<script>x</script \"a>b\">tail",
-      "out": "<script>x</script>b\"&gt;tail"
+      "out": "<script></script>"
     },
     {
       "name": "fixrun1287::d3.rcdata",
@@ -58160,7 +58151,7 @@
     {
       "name": "fixrun1287::d3.rewind_nospace",
       "in": "<p>x</p a=\"y>TAIL",
-      "out": "<p>x</p>"
+      "out": "<p>x</p>TAIL"
     },
     {
       "name": "fixrun1287::d3.rewind_space",
@@ -58180,32 +58171,32 @@
     {
       "name": "fixrun1287::d4.script",
       "in": "<script>x</script <b",
-      "out": "<script>x</script>"
+      "out": "<script></script>"
     },
     {
       "name": "fixrun1287::d4.style",
       "in": "<style>x</style <b",
-      "out": "<style>x</style>"
+      "out": "<style></style>"
     },
     {
       "name": "fixrun1287::d4.title",
       "in": "<title>x</title <b",
-      "out": "<title>x</title>"
+      "out": "<title>x&lt;/title &lt;b</title>"
     },
     {
       "name": "fixrun1287::d4.textarea",
       "in": "<textarea>x</textarea <b",
-      "out": "<textarea>x</textarea>"
+      "out": "<textarea>x&lt;/textarea &lt;b</textarea>"
     },
     {
       "name": "fixrun1287::d4.iframe",
       "in": "<iframe>x</iframe <b",
-      "out": "<iframe>x</iframe>"
+      "out": "<iframe>x&lt;/iframe &lt;b</iframe>"
     },
     {
       "name": "fixrun1287::d4.eofname",
       "in": "<script>x</script",
-      "out": "<script>x</script</script>"
+      "out": "<script></script>"
     },
     {
       "name": "fixrun1287::d4.eofnametitle",
@@ -58215,12 +58206,12 @@
     {
       "name": "fixrun1287::d4.eofws",
       "in": "<script>x</script ",
-      "out": "<script>x</script>"
+      "out": "<script></script>"
     },
     {
       "name": "fixrun1287::d4.laterclose",
       "in": "<script>x</script <b>y</script>TAIL",
-      "out": "<script>x</script>yTAIL"
+      "out": "<script>x</script <b>y</script>TAIL"
     },
     {
       "name": "fixrun1287::d5.review",
@@ -58255,32 +58246,32 @@
     {
       "name": "fixrun1287::d6.open",
       "in": "<p\u0000>x</p>",
-      "out": "<p\u0000>x</p\u0000>"
+      "out": "&lt;p\u0000&gt;x"
     },
     {
       "name": "fixrun1287::d6.end",
       "in": "<p>x</p\u0000>tail",
-      "out": "<p>xtail</p>"
+      "out": "<p>x</p>tail"
     },
     {
       "name": "fixrun1287::d6.both",
       "in": "<p\u0000>x</p\u0000>tail",
-      "out": "<p\u0000>x</p\u0000>tail"
+      "out": "&lt;p\u0000&gt;xtail"
     },
     {
       "name": "fixrun1287::d7.review",
       "in": "<!--x--!>",
-      "out": "<!--x-->"
+      "out": "&lt;!--x--!&gt;"
     },
     {
       "name": "fixrun1287::d7.both",
       "in": "<!--a--!>b-->",
-      "out": "<!--a-->b--&gt;"
+      "out": "<!--a--!>b-->"
     },
     {
       "name": "fixrun1287::d7.dashbang",
       "in": "<!--a--!>TAIL",
-      "out": "<!--a-->TAIL"
+      "out": "&lt;!--a--!&gt;TAIL"
     },
     {
       "name": "fixrun1287::d7.plain",
@@ -58325,7 +58316,7 @@
     {
       "name": "fixrun1287b::r1.endtag.raw",
       "in": "<script>x</script a= \"y>TAIL</script>END",
-      "out": "<script>x</script>TAILEND"
+      "out": "<script>x</script a= \"y>TAIL</script>END"
     },
     {
       "name": "fixrun1287b::r1.endtag.rcdata",
@@ -58335,7 +58326,7 @@
     {
       "name": "fixrun1287b::r1.endtag.eof",
       "in": "<p>x</p a= \"y",
-      "out": "<p>x</p>"
+      "out": "<p>x&lt;/p a= \"y</p>"
     },
     {
       "name": "fixrun1287b::r1.endtag.terminated",
@@ -58365,12 +58356,12 @@
     {
       "name": "fixrun1287b::r1.open.nows",
       "in": "<p a=\"y>z</p>",
-      "out": ""
+      "out": "&lt;p a=\"y&gt;z"
     },
     {
       "name": "fixrun1287b::r1.open.eof",
       "in": "<p a= \"y",
-      "out": ""
+      "out": "&lt;p a= \"y"
     },
     {
       "name": "fixrun1287b::r1b.open.prews",
@@ -58390,7 +58381,7 @@
     {
       "name": "fixrun1287b::r1b.open.multi-nows",
       "in": "<p ab=\"y>z</p>",
-      "out": ""
+      "out": "&lt;p ab=\"y&gt;z"
     },
     {
       "name": "fixrun1287b::r1b.open.tabprews",
@@ -58410,52 +58401,52 @@
     {
       "name": "fixrun1287b::r2.suffix.dd",
       "in": "<!--a--",
-      "out": "<!--a-->"
+      "out": "&lt;!--a--"
     },
     {
       "name": "fixrun1287b::r2.suffix.d",
       "in": "<!--a-",
-      "out": "<!--a-->"
+      "out": "&lt;!--a-"
     },
     {
       "name": "fixrun1287b::r2.suffix.ddbang",
       "in": "<!--a--!",
-      "out": "<!--a-->"
+      "out": "&lt;!--a--!"
     },
     {
       "name": "fixrun1287b::r2.suffix.ddd",
       "in": "<!--a---",
-      "out": "<!--a--->"
+      "out": "&lt;!--a---"
     },
     {
       "name": "fixrun1287b::r2.suffix.bare5",
       "in": "<!-----",
-      "out": "<!----->"
+      "out": "&lt;!-----"
     },
     {
       "name": "fixrun1287b::r2.suffix.bare3",
       "in": "<!---",
-      "out": "<!-- -->"
+      "out": "&lt;!---"
     },
     {
       "name": "fixrun1287b::r2.nostrip.x",
       "in": "<!--a--x",
-      "out": "<!--a--x-->"
+      "out": "&lt;!--a--x"
     },
     {
       "name": "fixrun1287b::r2.nostrip.sp",
       "in": "<!--a-- ",
-      "out": "<!--a-- -->"
+      "out": "&lt;!--a-- "
     },
     {
       "name": "fixrun1287b::r2.nostrip.bang",
       "in": "<!--!",
-      "out": "<!--!-->"
+      "out": "&lt;!--!"
     },
     {
       "name": "fixrun1287b::r2.nostrip.bare",
       "in": "<!--",
-      "out": "<!-- -->"
+      "out": "&lt;!--"
     }
   ]
 }
