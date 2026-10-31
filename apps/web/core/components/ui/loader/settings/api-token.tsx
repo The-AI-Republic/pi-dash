@@ -9,7 +9,7 @@ import { useTranslation } from "@pi-dash/i18n";
 export function APITokenSettingsLoader() {
   const { t } = useTranslation();
   return (
-    <section className="w-full overflow-y-auto">
+    <section className="w-full overflow-y-auto" data-testid="api-tokens-loader">
       <div className="mb-2 flex items-center justify-between border-b border-subtle pb-3.5">
         <h3 className="text-18 font-medium">{t("Personal Access Tokens")}</h3>
         <span className="h-8 w-28 rounded-sm bg-layer-1" />

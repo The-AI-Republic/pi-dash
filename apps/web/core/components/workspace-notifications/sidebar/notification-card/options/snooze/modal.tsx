@@ -114,7 +114,7 @@ export function NotificationSnoozeModal(props: TNotificationSnoozeModal) {
 
   return (
     <ModalCore isOpen={isOpen} handleClose={handleClose} position={EModalPosition.CENTER} width={EModalWidth.XXL}>
-      <form onSubmit={handleSubmit(onSubmit)} className="p-5">
+      <form data-testid="snooze-custom-dialog" onSubmit={handleSubmit(onSubmit)} className="p-5">
         <div className="flex items-center justify-between">
           <h3 className="text-h5-medium leading-6 text-primary">Customize Snooze Time</h3>
 

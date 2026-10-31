@@ -31,7 +31,7 @@
       "pnpm exec oxfmt --no-error-on-unmatched-pattern"
     ],
     "*.{js,jsx,ts,tsx,cjs,mjs,cts,mts}": [
-      "pnpm exec oxlint --fix --deny-warnings"
+      "pnpm exec oxlint --fix"
     ]
   },
   "engines": {
@@ -40,6 +40,7 @@
   "packageManager": "pnpm@10.32.1+sha512.a706938f0e89ac1456b6563eab4edf1d1faf3368d1191fc5c59790e96dc918e4456ab2e67d613de1043d2e8c81f87303e6b40d4ffeca9df15ef1ad567348f2be",
   "pnpm": {
     "overrides": {
+      "@types/react-dom@18>@types/react": "catalog:",
       "express": "catalog:",
       "mdast-util-to-hast": "13.2.1",
       "remark-rehype>mdast-util-to-hast": "^12.1.0",

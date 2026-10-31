@@ -1,0 +1,284 @@
+/* Copyright (c) Pi Dash contributors */
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* See the LICENSE file for details. */
+/* Design tokens for @pidash/kit (NEWFRONT-16), from the H-visual decision */
+/* (NEWFRONT-5, D12; full spec on the "UI kit and editor" wiki page). */
+/* Dense and neutral, desktop-first: neutral grays, one indigo accent. */
+/* Light theme is the default; the dark theme follows the OS setting unless */
+/* an explicit data-theme override is set on the root element. */
+
+:root {
+  color-scheme: light;
+
+  /* Color */
+  --bg: #ffffff;
+  --surface: #fafafa;
+  --subtle: #f4f4f5;
+  --border: #e4e4e7;
+  --text: #18181b;
+  --text-muted: #71717a;
+  --accent: #5e6ad2;
+  --accent-hover: #4f5bc4;
+  --accent-subtle: #eef0fb;
+  --on-accent: #ffffff;
+  --success: #2f9e5b;
+  --warning: #d9912b;
+  --danger: #e5484d;
+
+  /* Charts: ten categorical slots (parity/specs/analytics.md §10,
+     NEWFRONT-732). Light values are oracle-pinned; dark slots are
+     brighter twins for dark surfaces. The contrast and custom themes
+     inherit these: segment hues encode data and always pair with a
+     text label, so they do not follow the text-contrast remap. The
+     charts.ts module mirrors these values for SVG/JS use; its test
+     pins the mirror. */
+  --chart-1: #6172e8;
+  --chart-2: #8b6edb;
+  --chart-3: #e05f99;
+  --chart-4: #29a383;
+  --chart-5: #cb8a37;
+  --chart-6: #3aa7c1;
+  --chart-7: #f1b24a;
+  --chart-8: #e84855;
+  --chart-9: #50c799;
+  --chart-10: #b35f9e;
+
+  /* Page body letter and wash palette (parity/specs/pages.md §5.3,
+     PAGE-036). Eight named choices; the letter value paints text and the
+     wash value paints a highlight. Both are tuned for the light theme and
+     remapped for dark below. */
+  --page-color-gray-text: #6b6b74;
+  --page-color-gray-wash: #ececef;
+  --page-color-peach-text: #9a5b3a;
+  --page-color-peach-wash: #fbe6d8;
+  --page-color-pink-text: #a8426f;
+  --page-color-pink-wash: #fbdde9;
+  --page-color-orange-text: #9a5a13;
+  --page-color-orange-wash: #fcecd2;
+  --page-color-green-text: #2a6b45;
+  --page-color-green-wash: #ddf0e4;
+  --page-color-light-blue-text: #27678c;
+  --page-color-light-blue-wash: #dcecf5;
+  --page-color-dark-blue-text: #2f4a9a;
+  --page-color-dark-blue-wash: #dfe4f7;
+  --page-color-purple-text: #6a3f96;
+  --page-color-purple-wash: #eae0f5;
+
+  /* Type */
+  --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+  /* Fine: one step below caption for section banners and micro-labels. */
+  --text-fine-size: 10px;
+  --text-fine-height: 14px;
+  --text-caption-size: 11px;
+  --text-caption-height: 16px;
+  --text-meta-size: 12px;
+  --text-meta-height: 16px;
+  --text-base-size: 13px;
+  --text-base-height: 20px;
+  --text-emphasis-size: 14px;
+  --text-emphasis-height: 20px;
+  --text-h3-size: 16px;
+  --text-h3-height: 24px;
+  --text-h2-size: 20px;
+  --text-h2-height: 28px;
+  --text-h1-size: 24px;
+  --text-h1-height: 32px;
+
+  /* Spacing: 4px grid */
+  --space-0: 0;
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 10px;
+  --space-6: 12px;
+  --space-7: 14px;
+  --space-8: 16px;
+  --space-10: 20px;
+  --space-12: 24px;
+  --space-16: 32px;
+  --space-20: 40px;
+  --space-24: 48px;
+
+  /* Density: compact is the desktop-first default */
+  --density: compact;
+  --control-height: 28px;
+  --control-height-large: 32px;
+  --row-height: 28px;
+
+  /* Shape */
+  --radius-control: 4px;
+  --radius-popover: 6px;
+  --radius-card: 6px;
+  --radius-dialog: 8px;
+  --radius-full: 9999px;
+
+  /* Elevation: lists are flat; overlays and dialogs lift */
+  --shadow-popover: 0 4px 16px rgb(0 0 0 / 0.1);
+  --shadow-dialog: 0 12px 48px rgb(0 0 0 / 0.18);
+  --shadow-none: none;
+
+  /* Stacking: portalled popups sit above every in-page stack level so
+     sticky chrome (a header row, a sheet column) never swallows their
+     clicks. Screens use 10..60 for their own sticky/panel layers; a popup
+     also opens inside the peek panel, so its tier clears those too. */
+  --layer-popover: 70;
+
+  /* Focus: always visible, 2px accent ring with 1px offset */
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 1px;
+  --focus-ring-color: var(--accent);
+
+  /* Motion */
+  --motion-duration: 120ms;
+  --motion-easing: ease-out;
+
+  /* Icons */
+  --icon-size: 16px;
+  --icon-stroke: 1.5;
+}
+
+[data-density="comfortable"] {
+  --density: comfortable;
+  --control-height: 32px;
+  --control-height-large: 36px;
+  --row-height: 32px;
+}
+
+/* Explicit theme pins win over the OS preference. */
+[data-theme="light"] {
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b0b0d;
+  --surface: #121214;
+  --subtle: #1a1a1d;
+  --border: #26262a;
+  --text: #ededef;
+  --text-muted: #8b8b93;
+  --accent: #7c85e0;
+  --accent-hover: #8e96e6;
+  --accent-subtle: #1e2140;
+  --on-accent: #101223;
+  --success: #3db86c;
+  --warning: #e5a84a;
+  --danger: #f2555a;
+  --chart-1: #93a0f2;
+  --chart-2: #b094e8;
+  --chart-3: #ec8ab8;
+  --chart-4: #4fc3a2;
+  --chart-5: #dfa761;
+  --chart-6: #66bfd4;
+  --chart-7: #f6c573;
+  --chart-8: #f0707a;
+  --chart-9: #76d8b0;
+  --chart-10: #c984b8;
+  /* Palette twins for dark surfaces: lighter letters, deeper washes. */
+  --page-color-gray-text: #a9a9b2;
+  --page-color-gray-wash: #2b2b30;
+  --page-color-peach-text: #e0a985;
+  --page-color-peach-wash: #3b2a20;
+  --page-color-pink-text: #e79abc;
+  --page-color-pink-wash: #3b2230;
+  --page-color-orange-text: #e5b072;
+  --page-color-orange-wash: #3a2d1a;
+  --page-color-green-text: #7fc99c;
+  --page-color-green-wash: #1e3327;
+  --page-color-light-blue-text: #86c3e0;
+  --page-color-light-blue-wash: #1c2e3a;
+  --page-color-dark-blue-text: #9fb0ea;
+  --page-color-dark-blue-wash: #212a42;
+  --page-color-purple-text: #c1a0e2;
+  --page-color-purple-wash: #2e2339;
+  --shadow-popover: 0 4px 16px rgb(0 0 0 / 0.5);
+  --shadow-dialog: 0 12px 48px rgb(0 0 0 / 0.6);
+}
+
+/* High-contrast pair (SHELL-095): extreme text/background distance with
+   stronger borders and accents, so every text pair clears WCAG AA. */
+[data-theme="light-contrast"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --subtle: #f4f4f5;
+  --border: #52525b;
+  --text: #000000;
+  --text-muted: #3f3f46;
+  --accent: #3f46a8;
+  --accent-hover: #333a8f;
+  --accent-subtle: #e0e4f7;
+  --on-accent: #ffffff;
+  --success: #1e6e3e;
+  --warning: #8a5a00;
+  --danger: #b3261e;
+}
+
+[data-theme="dark-contrast"] {
+  color-scheme: dark;
+  --bg: #000000;
+  --surface: #0a0a0a;
+  --subtle: #17171a;
+  --border: #a1a1aa;
+  --text: #ffffff;
+  --text-muted: #c9c9ce;
+  --accent: #a5abf5;
+  --accent-hover: #b9bef7;
+  --accent-subtle: #23264d;
+  --on-accent: #000000;
+  --success: #6fdd9a;
+  --warning: #f0b95a;
+  --danger: #ff7a7f;
+  --shadow-popover: 0 4px 16px rgb(0 0 0 / 0.5);
+  --shadow-dialog: 0 12px 48px rgb(0 0 0 / 0.6);
+}
+
+/* Custom palettes (SHELL-095): the engine writes the custom variables
+   beside the mark; unset variables fall back to the light accents. */
+[data-theme="custom"] {
+  --bg: var(--theme-custom-background, #ffffff);
+  --accent: var(--theme-custom-primary, #5e6ad2);
+  --accent-hover: var(--theme-custom-primary, #5e6ad2);
+  --on-accent: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="light-contrast"]):not([data-theme="dark-contrast"]):not(
+      [data-theme="custom"]
+    ) {
+    color-scheme: dark;
+    --bg: #0b0b0d;
+    --surface: #121214;
+    --subtle: #1a1a1d;
+    --border: #26262a;
+    --text: #ededef;
+    --text-muted: #8b8b93;
+    --accent: #7c85e0;
+    --accent-hover: #8e96e6;
+    --accent-subtle: #1e2140;
+    --on-accent: #101223;
+    --success: #3db86c;
+    --warning: #e5a84a;
+    --danger: #f2555a;
+    --chart-1: #93a0f2;
+    --chart-2: #b094e8;
+    --chart-3: #ec8ab8;
+    --chart-4: #4fc3a2;
+    --chart-5: #dfa761;
+    --chart-6: #66bfd4;
+    --chart-7: #f6c573;
+    --chart-8: #f0707a;
+    --chart-9: #76d8b0;
+    --chart-10: #c984b8;
+    --shadow-popover: 0 4px 16px rgb(0 0 0 / 0.5);
+    --shadow-dialog: 0 12px 48px rgb(0 0 0 / 0.6);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-duration: 0ms;
+  }
+}

@@ -1,0 +1,97 @@
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+import { Avatar } from "./Avatar";
+import { Badge } from "./Badge";
+import { Kbd } from "./Kbd";
+import { Skeleton } from "./Skeleton";
+import { Spinner } from "./Spinner";
+
+describe("Spinner", () => {
+  it("announces itself as a live region", () => {
+    render(<Spinner label="Saving" />);
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Saving");
+  });
+
+  it("renders sizes without dropping the announcement", () => {
+    const { rerender } = render(<Spinner size="small" />);
+    for (const size of ["small", "medium", "large"] as const) {
+      rerender(<Spinner size={size} />);
+      expect(screen.getByRole("status")).toBeInTheDocument();
+    }
+  });
+});
+
+describe("Skeleton", () => {
+  it("is hidden from assistive technology", () => {
+    const { container } = render(<Skeleton width="120px" height="16px" />);
+    const node = container.firstElementChild!;
+    expect(node).toHaveAttribute("aria-hidden", "true");
+    expect(node).toHaveStyle({ width: "120px", height: "16px" });
+  });
+});
+
+describe("Kbd", () => {
+  it("names the full shortcut and shows each key", () => {
+    render(<Kbd keys={["mod", "K"]} />);
+    expect(screen.getByLabelText("mod+K", { selector: "span" })).toBeInTheDocument();
+    expect(screen.getByText("mod", { selector: "kbd" })).toBeInTheDocument();
+    expect(screen.getByText("K", { selector: "kbd" })).toBeInTheDocument();
+  });
+});
+
+describe("Badge", () => {
+  it("renders the label with a status dot", () => {
+    render(
+      <Badge tone="success" dot>
+        Active
+      </Badge>
+    );
+    expect(screen.getByText("Active")).toBeInTheDocument();
+  });
+
+  it("renders counts without a dot", () => {
+    const { container } = render(<Badge>3</Badge>);
+    expect(screen.getByText("3")).toBeInTheDocument();
+    expect(container.querySelectorAll("span").length).toBe(1);
+  });
+});
+
+describe("Avatar", () => {
+  it("falls back to initials with the name", () => {
+    render(<Avatar name="Ada Lovelace" />);
+    const avatar = screen.getByRole("img", { name: "Ada Lovelace" });
+    expect(avatar).toHaveTextContent("AL");
+  });
+
+  it("shows the image when one loads", () => {
+    render(<Avatar name="Ada Lovelace" src="https://example.test/ada.png" />);
+    expect(screen.getByRole("img", { name: "Ada Lovelace" }).querySelector("img")).not.toBeNull();
+  });
+
+  it("draws the caller's single initial when one is given", () => {
+    render(<Avatar name="Ada Lovelace" initial="a" />);
+    expect(screen.getByRole("img", { name: "Ada Lovelace" })).toHaveTextContent(/^A$/);
+  });
+
+  it("keeps derived initials for a blank single initial", () => {
+    render(<Avatar name="Ada Lovelace" initial="  " />);
+    expect(screen.getByRole("img", { name: "Ada Lovelace" })).toHaveTextContent("AL");
+  });
+
+  it("falls back to its initial when the image fails to load", () => {
+    render(<Avatar name="Ada Lovelace" initial="a" src="https://example.test/missing.png" />);
+    const avatar = screen.getByRole("img", { name: "Ada Lovelace" });
+    fireEvent.error(avatar.querySelector("img")!);
+    expect(avatar.querySelector("img")).toBeNull();
+    expect(avatar).toHaveTextContent(/^A$/);
+  });
+
+  it("derives two letters from a single-word name", () => {
+    render(<Avatar name="ada" />);
+    expect(screen.getByRole("img", { name: "ada" })).toHaveTextContent("AD");
+  });
+});

@@ -3,10 +3,6 @@
 		max_size {$FILE_SIZE_LIMIT}
 	}
 
-    handle /spaces/* {
-        reverse_proxy localhost:3002
-    }
-	
     handle /live/* {
         reverse_proxy localhost:3005
     }
@@ -17,14 +13,459 @@
         reverse_proxy localhost:3004
     }
 
-	handle /auth/* {
-        reverse_proxy localhost:3004
-    }
-
-	handle_path /god-mode* {
-        root * /app/admin
+    # BEGIN MIGRATED ROUTES (generated from apps/web_new/migrated-routes.json — do not edit; run `pnpm --filter web_new coexistence:generate`)
+    handle /sign-in* {
+        root * /app/web_new
         try_files {path} {path}/ /index.html
         file_server
+    }
+    handle /sign-up* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle /accounts* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle /auth/device* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle /invitations* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle /workspace-invitations* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle /onboarding* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle /create-workspace* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle /signin* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle /login* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle /register* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle /home* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle /docs* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle /downloads* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle /pricing* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle /god-mode* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle /settings/profile* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle /profile* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_18 {
+        path_regexp ^/[^/.]+/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_18 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_19 {
+        path_regexp ^/[^/.]+/projects/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_19 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_20 {
+        path_regexp ^/[^/.]+/browse/[^/.]+/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_20 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_21 {
+        path_regexp ^/[^/.]+/settings/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_21 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_22 {
+        path_regexp ^/[^/.]+/settings/account(?:/.*)?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_22 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_23 {
+        path_regexp ^/[^/.]+/settings/members/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_23 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_24 {
+        path_regexp ^/[^/.]+/settings/billing/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_24 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_25 {
+        path_regexp ^/[^/.]+/settings/exports/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_25 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_26 {
+        path_regexp ^/[^/.]+/settings/integrations/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_26 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_27 {
+        path_regexp ^/[^/.]+/settings/webhooks/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_27 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_28 {
+        path_regexp ^/[^/.]+/settings/webhooks(?:/.*)?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_28 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_29 {
+        path_regexp ^/[^/.]+/settings/projects/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_29 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_30 {
+        path_regexp ^/[^/.]+/settings/projects(?:/.*)?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_30 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_31 {
+        path_regexp ^/[^/.]+/runners(?:/.*)?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_31 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_32 {
+        path_regexp ^/[^/.]+/ai-dev-machines(?:/.*)?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_32 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_33 {
+        path_regexp ^/[^/.]+/projects/[^/.]+/runners(?:/.*)?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_33 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_34 {
+        path_regexp ^/[^/.]+/schedulers/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_34 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_35 {
+        path_regexp ^/[^/.]+/prompts/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_35 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_36 {
+        path_regexp ^/[^/.]+/assistant(?:/.*)?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_36 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_37 {
+        path_regexp ^/[^/.]+/projects/[^/.]+/schedulers(?:/.*)?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_37 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_38 {
+        path_regexp ^/[^/.]+/projects/[^/.]+/pages/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_38 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_39 {
+        path_regexp ^/[^/.]+/projects/[^/.]+/pages(?:/.*)?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_39 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_40 {
+        path_regexp ^/[^/.]+/projects/[^/.]+/issues/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_40 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_41 {
+        path_regexp ^/[^/.]+/projects/[^/.]+/issues(?:/.*)?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_41 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_42 {
+        path_regexp ^/[^/.]+/projects/[^/.]+/intake/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_42 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_43 {
+        path_regexp ^/[^/.]+/projects/[^/.]+/inbox/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_43 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_44 {
+        path_regexp ^/[^/.]+/projects/[^/.]+/archives/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_44 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_45 {
+        path_regexp ^/[^/.]+/projects/[^/.]+/archives(?:/.*)?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_45 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_46 {
+        path_regexp ^/[^/.]+/analytics(?:/.*)?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_46 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_47 {
+        path_regexp ^/[^/.]+/drafts/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_47 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_48 {
+        path_regexp ^/[^/.]+/projects/[^/.]+/views/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_48 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_49 {
+        path_regexp ^/[^/.]+/projects/[^/.]+/views(?:/.*)?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_49 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_50 {
+        path_regexp ^/[^/.]+/workspace-views/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_50 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_51 {
+        path_regexp ^/[^/.]+/workspace-views(?:/.*)?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_51 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle /spaces* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_53 {
+        path_regexp ^/[^/.]+/projects/[^/.]+/modules/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_53 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_54 {
+        path_regexp ^/[^/.]+/projects/[^/.]+/modules(?:/.*)?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_54 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_55 {
+        path_regexp ^/[^/.]+/projects/[^/.]+/cycles/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_55 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_56 {
+        path_regexp ^/[^/.]+/projects/[^/.]+/cycles(?:/.*)?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_56 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    @web_new_57 {
+        path_regexp ^/[^/.]+/active-cycles/?$
+        not path /404 /404/* /accounts /accounts/* /admin /admin/* /api /api/* /assets /assets/* /auth /auth/* /billing /billing/* /business /business/* /calendar /calendar/* /channels /channels/* /chat /chat/* /config /config/* /configuration /configuration/* /create-workspace /create-workspace/* /dashboard /dashboard/* /desktop /desktop/* /disco /disco/* /docs /docs/* /downloads /downloads/* /drive /drive/* /enterprise /enterprise/* /epic /epic/* /epics /epics/* /flags /flags/* /god-mode /god-mode/* /home /home/* /import /import/* /importers /importers/* /ingest /ingest/* /initiative /initiative/* /initiatives /initiatives/* /installations /installations/* /instance /instance/* /instances /instances/* /integration /integration/* /integrations /integrations/* /invitations /invitations/* /license /license/* /licenses /licenses/* /live /live/* /login /login/* /m /m/* /mobile /mobile/* /monitor /monitor/* /monitoring /monitoring/* /onboarding /onboarding/* /one /one/* /onload /onload/* /pages /pages/* /password /password/* /pi-dash-enterprise /pi-dash-enterprise/* /pi-dash-pro /pi-dash-pro/* /pi-dash-ultimate /pi-dash-ultimate/* /pricing /pricing/* /pro /pro/* /profile /profile/* /real-time /real-time/* /register /register/* /settings /settings/* /sign-in /sign-in/* /sign-up /sign-up/* /signin /signin/* /signup /signup/* /silo /silo/* /spaces /spaces/* /static /static/* /story /story/* /upgrade /upgrade/* /workflow /workflow/* /workflows /workflows/* /workspace-invitations /workspace-invitations/* /ws /ws/*
+    }
+    handle @web_new_57 {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    # END MIGRATED ROUTES
+    # Legacy /auth/* fallback. It stays below the generated block on purpose:
+    # a migrated /auth/* subpath (today /auth/device) must win, and Caddy
+    # handles the first matching block. (NEWFRONT-953)
+    handle /auth/* {
+        reverse_proxy localhost:3004
     }
     handle_path /* {
         root * /app/web

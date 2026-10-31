@@ -1039,6 +1039,9 @@ class IssueIntakeSerializer(DynamicBaseSerializer):
 class IssueSerializer(DynamicBaseSerializer):
     # ids
     cycle_id = serializers.PrimaryKeyRelatedField(read_only=True)
+    # FK id only (PK-only optimization — no extra query). Lets the cloud
+    # edition show the issue's work-item type and route epics (NEWFRONT-984).
+    type_id = serializers.PrimaryKeyRelatedField(read_only=True)
     # FK id only (PK-only optimization — no extra query). Lets the UI show and
     # round-trip the issue's current pod. Reassignment while a run is active is
     # rejected server-side in IssueCreateSerializer.validate.
@@ -1058,6 +1061,11 @@ class IssueSerializer(DynamicBaseSerializer):
     # actively-synced Git provider issues.
     is_synced = serializers.SerializerMethodField()
 
+    # True when the issue's type is an epic type (NEWFRONT-984). The cloud
+    # edition branches on this for the epic dialog and the epics
+    # collection writes; untyped rows answer False without a query.
+    is_epic = serializers.SerializerMethodField()
+
     class Meta:
         model = Issue
         fields = [
@@ -1075,6 +1083,8 @@ class IssueSerializer(DynamicBaseSerializer):
             "project_id",
             "parent_id",
             "cycle_id",
+            "type_id",
+            "is_epic",
             "assigned_pod_id",
             "agent_executor",
             "module_ids",
@@ -1095,6 +1105,11 @@ class IssueSerializer(DynamicBaseSerializer):
 
     def get_is_synced(self, obj) -> bool:
         return _issue_is_actively_synced(obj)
+
+    def get_is_epic(self, obj) -> bool:
+        if obj.type_id is None:
+            return False
+        return bool(obj.type.is_epic)
 
     def validate(self, data):
         if (

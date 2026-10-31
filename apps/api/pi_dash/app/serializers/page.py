@@ -133,9 +133,12 @@ class PageSerializer(BaseSerializer):
 
 class PageDetailSerializer(PageSerializer):
     description_html = serializers.CharField()
+    # Read-only: the record PATCH reuses this serializer, and snapshots are
+    # written only through the description endpoint (NEWFRONT-932).
+    description_json = serializers.JSONField(read_only=True)
 
     class Meta(PageSerializer.Meta):
-        fields = PageSerializer.Meta.fields + ["description_html"]
+        fields = PageSerializer.Meta.fields + ["description_html", "description_json"]
 
 
 class PageVersionSerializer(BaseSerializer):

@@ -1,0 +1,500 @@
+# Seeded parity stack (NEWFRONT-19).
+#
+# Own scratch backend for parity runs: Django API, Postgres, Redis,
+# RabbitMQ, MinIO object storage, and the realtime apps/live service. Every name, port, and
+# volume carries the parity19 prefix so runs never share a database with
+# dev work or with each other. Ports are overridable through the
+# PARITY_* environment variables; the defaults below are the contract
+# the Playwright config and the runbook assume.
+# Isolation for parallel runs (NEWFRONT-132): export PARITY_NS once (e.g.
+# PARITY_NS=257) and the stack scripts resolve a fully private stack on
+# the same daemon — compose project (parity257), container names, the six
+# published ports, and, through the project prefix, the pgdata/miniodata
+# volumes and the network. Unset keeps the stock parity19 names, so CI
+# and the runbook are unchanged. Explicit PARITY_PROJECT,
+# PARITY_CONTAINER_PREFIX and PARITY_*_PORT settings always win over the
+# namespace derivation. The container prefix defaults to the resolved
+# project, so a namespace can never reuse another stack's container
+# names or mount its postgres datadir. Locally-built image tags carry
+# the same prefix (NEWFRONT-435): without it concurrent namespaces
+# shared one tag and a build in one retagged the image another's next
+# recreate pulled, serving the wrong branch's bundle.
+# Every service carries a mem_limit: a stack that runs away is killed inside
+# its own containers instead of taking the runner host down with it.
+name: ${PARITY_PROJECT:-parity19}
+
+services:
+  pg:
+    image: postgres:15.7-alpine
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-pg
+    mem_limit: 768m
+    command: postgres -c 'max_connections=1000'
+    environment:
+      POSTGRES_USER: parity19
+      POSTGRES_PASSWORD: parity19
+      POSTGRES_DB: pidash
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - parity19_pgdata:/var/lib/postgresql/data
+    ports:
+      - "${PARITY_PG_PORT:-15419}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U parity19 -d pidash"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-redis
+    mem_limit: 256m
+    ports:
+      - "${PARITY_REDIS_PORT:-16319}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mq:
+    image: rabbitmq:3-management-alpine
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-mq
+    # RabbitMQ throttles publishers at 40% of this, so keep it roomy.
+    mem_limit: 1g
+    environment:
+      RABBITMQ_DEFAULT_USER: parity19
+      RABBITMQ_DEFAULT_PASS: parity19
+      RABBITMQ_DEFAULT_VHOST: pidash
+
+  minio:
+    # Pinned Bitnami-legacy MinIO (NEWFRONT-238): minio/minio vanished from
+    # Docker Hub and the quay mirror needs auth, which broke every fresh
+    # parity-up at the pull. The tag names the revision for humans; the
+    # digest pins it immutably (multi-arch manifest: amd64+arm64).
+    # bitnamilegacy is Bitnami's frozen legacy org — fine for a scratch
+    # stack. Re-pin deliberately, never float.
+    image: bitnamilegacy/minio:2025.5.24-debian-12-r5@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-minio
+    mem_limit: 384m
+    # Bitnami runs as UID 1001, which cannot create /export; root matches
+    # the old minio/minio behavior on this scratch-only volume.
+    user: root
+    # Object storage for asset uploads (NEWFRONT-143): without it every
+    # presigned upload 500s (no bucket configured). Mirrors the dev minio
+    # setup; the bucket is created idempotently at boot (this image ships
+    # mc, unlike stock minio/minio, so the bootstrap below actually runs).
+    # No healthcheck: the API only signs URLs (never contacts minio), and
+    # browsers upload minutes after boot, so start ordering is enough.
+    entrypoint: >
+      /bin/sh -c "
+      mkdir -p /export/parity19-assets &&
+      minio server /export --console-address ':9091' &
+      sleep 5 &&
+      mc alias set myminio http://localhost:9000 parity19minio parity19minio-scratch-secret &&
+      mc mb myminio/parity19-assets -p || true
+      && tail -f /dev/null
+      "
+    environment:
+      MINIO_ROOT_USER: parity19minio
+      MINIO_ROOT_PASSWORD: parity19minio-scratch-secret
+    volumes:
+      - parity19_miniodata:/export
+    ports:
+      - "${PARITY_MINIO_PORT:-19019}:9000"
+
+  api:
+    build:
+      context: ../../../../../apps/api
+      dockerfile: Dockerfile.dev
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-api:local
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-api
+    mem_limit: 1g
+    # The stock dev entrypoint registers instances and buckets; parity runs
+    # need only migrations plus the server, so the command replaces it.
+    command:
+      [
+        "bash",
+        "-c",
+        "python manage.py migrate --no-input && exec uvicorn pi_dash.asgi:application --host 0.0.0.0 --port 8000",
+      ]
+    depends_on:
+      pg:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    volumes:
+      - ./parity_scratch_settings.py:/code/parity_scratch_settings.py:ro
+    environment:
+      DJANGO_SETTINGS_MODULE: parity_scratch_settings
+      # Object storage (NEWFRONT-143): the asset endpoints sign presigned
+      # URLs against this bucket; unset means every upload 500s.
+      USE_MINIO: "1"
+      AWS_ACCESS_KEY_ID: parity19minio
+      AWS_SECRET_ACCESS_KEY: parity19minio-scratch-secret
+      AWS_S3_BUCKET_NAME: parity19-assets
+      AWS_REGION: us-east-1
+      AWS_S3_ENDPOINT_URL: http://minio:9000
+      MINIO_ENDPOINT_URL: http://minio:9000
+      SECRET_KEY: parity19-fixed-local-secret-not-used-outside-scratch
+      ALLOWED_HOSTS: "*"
+      DATABASE_URL: postgresql://parity19:parity19@pg:5432/pidash
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_HOST: mq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: parity19
+      RABBITMQ_PASSWORD: parity19
+      RABBITMQ_VHOST: pidash
+      API_KEY_RATE_LIMIT: 100000/minute
+      ENABLE_MAGIC_LINK_LOGIN: "1"
+      EMAIL_BACKEND: django.core.mail.backends.console.EmailBackend
+      WEB_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
+      APP_BASE_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
+      SPACE_BASE_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
+      # BYOK key storage (NEWFRONT-187): Fernet with a fixed scratch-only
+      # key, like SECRET_KEY above. Without it the default KMS backend is
+      # unconfigured and every provider/speech-key save 503s, so assistant
+      # oracles could never configure the key the chat needs.
+      ASSISTANT_CRYPTO_BACKEND: fernet
+      ASSISTANT_ENCRYPTION_KEY: aBpRyG1sxQfr1J0PQpxBXUgw79E4lXDzKu_bA1ZTmGM=
+    ports:
+      - "${PARITY_API_PORT:-18019}:8000"
+    healthcheck:
+      test:
+        ["CMD-SHELL", 'python -c "import socket; socket.create_connection((''localhost'', 8000), timeout=5).close()"']
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  oracle:
+    build:
+      context: ../../../../..
+      dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.oracle
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle:local
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle
+    mem_limit: 2g
+    # Empty base keeps API calls same-origin; the proxy routes them to Django.
+    environment:
+      VITE_API_BASE_URL: ""
+      # Live collaboration endpoint for the document editor (NEWFRONT-188):
+      # derived from the slot's live port when set, empty otherwise — so
+      # slots without `live` keep the window-origin fallback exactly as
+      # before, while a slot that sets PARITY_LIVE_PORT lights the editor
+      # up with no other change.
+      VITE_LIVE_BASE_URL: "${PARITY_LIVE_PORT:+http://localhost:$PARITY_LIVE_PORT}"
+    # Listen on all interfaces so the proxy container can reach the server.
+    command: ["pnpm", "--filter=web", "dev", "--host", "0.0.0.0", "--port", "3000"]
+    depends_on:
+      - api
+
+  # The old app as a production build (the default oracle; select the dev
+  # server with PARITY_ORACLE_MODE=dev). Same code as `oracle`, built by
+  # Dockerfile.oracle-prod and served as static files by nginx on :3000. It
+  # needs a fraction of the dev server's CPU and memory, and its image layers
+  # are reused until the old app's own sources change. Behind a profile so a
+  # bare `docker compose up` never starts both oracles at once.
+  oracle-prod:
+    build:
+      context: ../../../../..
+      dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.oracle-prod
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-prod:local
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-prod
+    mem_limit: 256m
+    profiles: ["oracle-prod"]
+
+  # Cloud-edition API (NEWFRONT-436). The OSS api image with the private
+  # overlay layered on (Dockerfile.api-cloud), running under the cloud
+  # scratch settings (the cloud settings plus the 600/minute anon
+  # widening, mirroring `api`'s parity_scratch_settings.py). Same ports,
+  # volumes shape and healthcheck as `api`: one stack serves one
+  # edition, and parity-up.sh starts exactly one of them. The `api`
+  # network alias keeps the proxy, the Caddyfile and the live service
+  # untouched — `api:8000` resolves to whichever api runs. Behind the
+  # `cloud` profile so a bare `docker compose up` stays OSS exactly.
+  api-cloud:
+    build:
+      context: ../../../../..
+      dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.api-cloud
+      args:
+        BASE_API_IMAGE: ${PARITY_CONTAINER_PREFIX:-parity19}-api:local
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-api-cloud:local
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-api-cloud
+    mem_limit: 1g
+    command:
+      [
+        "bash",
+        "-c",
+        "python manage.py migrate --no-input && exec uvicorn pi_dash.asgi:application --host 0.0.0.0 --port 8000",
+      ]
+    depends_on:
+      pg:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    networks:
+      default:
+        aliases:
+          - api
+    volumes:
+      - ./parity_cloud_scratch_settings.py:/code/parity_cloud_scratch_settings.py:ro
+    environment:
+      DJANGO_SETTINGS_MODULE: parity_cloud_scratch_settings
+      USE_MINIO: "1"
+      AWS_ACCESS_KEY_ID: parity19minio
+      AWS_SECRET_ACCESS_KEY: parity19minio-scratch-secret
+      AWS_S3_BUCKET_NAME: parity19-assets
+      AWS_REGION: us-east-1
+      AWS_S3_ENDPOINT_URL: http://minio:9000
+      MINIO_ENDPOINT_URL: http://minio:9000
+      SECRET_KEY: parity19-fixed-local-secret-not-used-outside-scratch
+      ALLOWED_HOSTS: "*"
+      DATABASE_URL: postgresql://parity19:parity19@pg:5432/pidash
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_HOST: mq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: parity19
+      RABBITMQ_PASSWORD: parity19
+      RABBITMQ_VHOST: pidash
+      API_KEY_RATE_LIMIT: 100000/minute
+      ENABLE_MAGIC_LINK_LOGIN: "1"
+      EMAIL_BACKEND: django.core.mail.backends.console.EmailBackend
+      WEB_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
+      APP_BASE_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
+      SPACE_BASE_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
+      ASSISTANT_CRYPTO_BACKEND: fernet
+      ASSISTANT_ENCRYPTION_KEY: aBpRyG1sxQfr1J0PQpxBXUgw79E4lXDzKu_bA1ZTmGM=
+      # OpenHub app lane, server side. The catalog endpoints (and only they)
+      # register when this is on; its browser-side twin bakes into the
+      # cloud oracle image, and the two flip together.
+      OPENHUB_APPS_ENABLED: "1"
+      # Fixed scratch-only session secret, like SECRET_KEY above. The cloud
+      # settings default mints a random one per process, which would
+      # invalidate every session on each api restart.
+      AIREPUBLIC_SESSION_JWT_SECRET: parity19-fixed-cloud-jwt-secret-not-used-outside-scratch
+    ports:
+      - "${PARITY_API_PORT:-18019}:8000"
+    healthcheck:
+      test:
+        ["CMD-SHELL", 'python -c "import socket; socket.create_connection((''localhost'', 8000), timeout=5).close()"']
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    profiles: ["cloud"]
+
+  # Cloud-edition oracle (NEWFRONT-436). The old app as a production build
+  # with the private overlay copied on top (Dockerfile.oracle-cloud-prod),
+  # served as static files by nginx on :3000 like `oracle-prod`. Selected
+  # with PARITY_ORACLE_EDITION=cloud; parity-up.sh points ORACLE_UPSTREAM
+  # here. Behind the `cloud` profile like `api-cloud`.
+  oracle-cloud-prod:
+    build:
+      context: ../../../../..
+      dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.oracle-cloud-prod
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-cloud-prod:local
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-cloud-prod
+    mem_limit: 256m
+    profiles: ["cloud"]
+  # The old admin console as an oracle (NEWFRONT-441). Same shape as
+  # `oracle`, but for apps/admin: the dev server, served through the
+  # proxy under /god-mode (see the Caddyfile), which mirrors the
+  # production topology (apps/proxy/Caddyfile.ce). The admin base path
+  # env bakes the same basename the app uses in production, so its
+  # router and asset URLs agree with the proxied path. Shares the
+  # PARITY_ORACLE_MODE switch with the web oracle (see parity-up.sh).
+  oracle-admin:
+    build:
+      context: ../../../../..
+      dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.oracle-admin
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-admin:local
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-admin
+    mem_limit: 2g
+    # Empty API base keeps API calls same-origin; the proxy routes them
+    # to Django. The admin base path must match the proxy's /god-mode
+    # mount, exactly like the production admin service.
+    environment:
+      VITE_API_BASE_URL: ""
+      VITE_ADMIN_BASE_PATH: "/god-mode"
+    # Listen on all interfaces so the proxy container can reach the
+    # server. Runs the router CLI directly instead of the app's dev
+    # script, whose baked-in port would otherwise collide with this one.
+    command: ["pnpm", "--filter=admin", "exec", "react-router", "dev", "--host", "0.0.0.0", "--port", "3000"]
+    depends_on:
+      - api
+    # Shared upstream name (see below): whichever admin oracle runs
+    # answers it, so the proxy needs no per-mode upstream variable —
+    # new variables do not cross hosts where docker runs behind an
+    # env-scrubbing sudo shim with a fixed allowlist, while the alias
+    # resolves on every host and in CI alike. parity-up.sh stops the
+    # non-selected admin oracle so the alias never splits traffic.
+    networks:
+      default:
+        aliases:
+          - oracle-admin-upstream
+
+  # The old admin console as a production build (the default admin
+  # oracle; select the dev server with PARITY_ORACLE_MODE=dev). Same
+  # code as `oracle-admin`, built by Dockerfile.oracle-admin-prod and
+  # served as static files by nginx on :3000. Behind a profile so a bare
+  # `docker compose up` never starts both admin oracles at once.
+  oracle-admin-prod:
+    build:
+      context: ../../../../..
+      dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.oracle-admin-prod
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-admin-prod:local
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-admin-prod
+    mem_limit: 512m
+    profiles: ["oracle-prod"]
+    networks:
+      default:
+        aliases:
+          - oracle-admin-upstream
+
+  # Cloud-edition admin oracle (NEWFRONT-446). The old admin console as
+  # a production build with the private overlay's single admin file
+  # swapped on top (Dockerfile.oracle-admin-cloud-prod), served as
+  # static files by nginx on :3000 like `oracle-admin-prod`. Selected
+  # with PARITY_ORACLE_EDITION=cloud; parity-up.sh points
+  # ORACLE_ADMIN_SERVICE here. Behind the `cloud` profile like
+  # `oracle-cloud-prod`, and on the shared `oracle-admin-upstream`
+  # alias so the proxy needs no per-edition admin upstream.
+  oracle-admin-cloud-prod:
+    build:
+      context: ../../../../..
+      dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.oracle-admin-cloud-prod
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-admin-cloud-prod:local
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-admin-cloud-prod
+    mem_limit: 512m
+    profiles: ["cloud"]
+    networks:
+      default:
+        aliases:
+          - oracle-admin-upstream
+
+  # Background task worker (NEWFRONT-115). The API queues mention
+  # extraction, mention links and notifications as celery tasks; without a
+  # consumer those rows never materialize, so mention/notification oracle
+  # scenarios cannot observe the fan-out. Same image and environment as the
+  # API, default queue only — no beat, no extra surface.
+  # Migrate runs in the api only (NEWFRONT-152): on a fresh volume a
+  # worker-side migrate raced api's and the loser died with DuplicateTable.
+  # The worker waits read-only (migrate --check writes nothing) until the
+  # schema is current, then starts celery; api-healthy ordering below is the
+  # belt to those braces (api binds its port only after migrate succeeds).
+  worker:
+    build:
+      context: ../../../../../apps/api
+      dockerfile: Dockerfile.dev
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-api:local
+    # Slotted like every other service (NEWFRONT-187): the hardcoded name
+    # collided across PARITY_PROJECT stacks, so only the first stack ever
+    # got a worker and assistant turns in every other slot never ran.
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-worker
+    mem_limit: 768m
+    command:
+      [
+        "bash",
+        "-c",
+        "echo waiting for api migrations; until python manage.py migrate --check > /dev/null 2>&1; do sleep 2; done; exec celery -A pi_dash worker --loglevel=warning --concurrency=1",
+      ]
+    depends_on:
+      pg:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mq:
+        condition: service_started
+      api:
+        condition: service_healthy
+    environment:
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.local
+      # Object storage (NEWFRONT-385): same minio block as api. Without it
+      # the export task takes the non-minio boto3 path with an empty region
+      # and every real export dies with Invalid endpoint, so exports could
+      # never reach completed on scratch.
+      USE_MINIO: "1"
+      AWS_ACCESS_KEY_ID: parity19minio
+      AWS_SECRET_ACCESS_KEY: parity19minio-scratch-secret
+      AWS_S3_BUCKET_NAME: parity19-assets
+      AWS_REGION: us-east-1
+      AWS_S3_ENDPOINT_URL: http://minio:9000
+      MINIO_ENDPOINT_URL: http://minio:9000
+      SECRET_KEY: parity19-fixed-local-secret-not-used-outside-scratch
+      ALLOWED_HOSTS: "*"
+      DATABASE_URL: postgresql://parity19:parity19@pg:5432/pidash
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_HOST: mq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: parity19
+      RABBITMQ_PASSWORD: parity19
+      RABBITMQ_VHOST: pidash
+      API_KEY_RATE_LIMIT: 100000/minute
+      ENABLE_MAGIC_LINK_LOGIN: "1"
+      EMAIL_BACKEND: django.core.mail.backends.console.EmailBackend
+      WEB_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
+      APP_BASE_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
+      SPACE_BASE_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
+      # Same Fernet key as api (NEWFRONT-187): the turn worker decrypts
+      # stored provider keys at run time.
+      ASSISTANT_CRYPTO_BACKEND: fernet
+      ASSISTANT_ENCRYPTION_KEY: aBpRyG1sxQfr1J0PQpxBXUgw79E4lXDzKu_bA1ZTmGM=
+
+  proxy:
+    image: caddy:2-alpine
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-proxy
+    mem_limit: 128m
+    # No depends_on for the frontend: parity-up.sh starts whichever oracle
+    # service is selected (oracle, or oracle-prod), and the proxy resolves
+    # its upstream per request.
+    depends_on:
+      - api
+      - minio
+    # Forwarded so the Caddyfile's {$ORACLE_UPSTREAM} override (native
+    # frontend, or oracle-prod) reaches the server; unset keeps oracle:3000.
+    # LIVE_UPSTREAM likewise for the Caddyfile's /live/* route (NEWFRONT-319):
+    # unset keeps the compose `live` service; a natively run live server
+    # overrides with host.docker.internal:<port> (extra_hosts below resolves
+    # it on Linux).
+    # ORACLE_ADMIN_UPSTREAM likewise for the /god-mode/* admin route
+    # (NEWFRONT-441): unset keeps the shared `oracle-admin-upstream`
+    # alias, which whichever admin oracle runs answers.
+    environment:
+      ORACLE_UPSTREAM: ${ORACLE_UPSTREAM:-oracle:3000}
+      ORACLE_ADMIN_UPSTREAM: ${ORACLE_ADMIN_UPSTREAM:-oracle-admin-upstream:3000}
+      LIVE_UPSTREAM: ${LIVE_UPSTREAM:-live:3001}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "${PARITY_ORACLE_PORT:-13000}:80"
+
+  live:
+    build:
+      context: ../../../../..
+      dockerfile: apps/live/Dockerfile.live
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-live:local
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-live
+    mem_limit: 512m
+    depends_on:
+      redis:
+        condition: service_healthy
+    # Full required env (NEWFRONT-319): the server refuses to boot without
+    # API_BASE_URL and LIVE_SERVER_SECRET_KEY, and browsers reach it through
+    # the slot proxy, so CORS names the slot's oracle origin. The secret is
+    # scratch-only, like the minio one above.
+    environment:
+      PORT: "3001"
+      REDIS_URL: redis://redis:6379/0
+      API_BASE_URL: http://api:8000
+      LIVE_SERVER_SECRET_KEY: parity19-scratch-live-secret
+      CORS_ALLOWED_ORIGINS: "http://localhost:${PARITY_ORACLE_PORT:-13000}"
+    ports:
+      - "${PARITY_LIVE_PORT:-13001}:3001"
+    profiles: ["full"]
+
+volumes:
+  parity19_pgdata:
+  parity19_miniodata:

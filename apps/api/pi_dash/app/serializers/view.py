@@ -59,12 +59,15 @@ class IssueViewSerializer(DynamicBaseSerializer):
     class Meta:
         model = IssueView
         fields = "__all__"
+        # `access` is writable for the view owner (VIEW-019): both
+        # partial_update handlers refuse non-owners before the serializer
+        # runs, and the model default of 1 keeps clients that never send it
+        # on the historical value.
         read_only_fields = [
             "workspace",
             "project",
             "query",
             "owned_by",
-            "access",
             "is_locked",
         ]
 

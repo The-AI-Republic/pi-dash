@@ -1,0 +1,155 @@
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// Scenarios for the sidebar personalization dialog (NEWFRONT-126).
+// The dialog toggles personal entries with an immediate visible effect,
+// switches the project list between accordion and tabbed rendering, and
+// caps the listed project count with a digit-stripping, minimum-one input.
+// Rows: SHELL-070, SHELL-071.
+// Target alignment (NEWFRONT-295 gate, main#672): the personal group
+// lists Drafts only — Your work is no longer offered or pinnable
+// (target per main#672). Toggle assertions stay UI-only while
+// NEWFRONT-137 is open: the bulk PATCH updates the newest row across
+// members, so per-member persist is unprovable until the backend fix
+// lands. No oracle: the old app still lists Your work.
+// Reorder is degenerate with the single entry (nothing to reorder).
+import { test, expect } from "../../fixtures";
+import {
+  getWorkspaceUserProperties,
+  patchWorkspaceUserProperties,
+  serverSetTourCompleted,
+  signInSession,
+} from "../../helpers/api";
+import { specTags, specTitle } from "../../helpers/tags";
+
+const ROWS_070 = ["SHELL-070"];
+const ROWS_071 = ["SHELL-071"];
+
+test(
+  specTitle(ROWS_070, "personal toggles flip with immediate effect; the group lists Drafts only"),
+  { tag: specTags(ROWS_070) },
+  async ({ driver, seed }) => {
+    await test.step("sign in through the UI", async () => {
+      await driver.signInWithPassword(seed.email, seed.password);
+    });
+
+    // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+    const session = await signInSession(seed.email, seed.password);
+    await serverSetTourCompleted(session, true);
+
+    await test.step("the personal group lists Drafts only", async () => {
+      await driver.openWorkspaceHome(seed.workspaceSlug);
+      await driver.openPersonalizeDialog();
+      expect(await driver.personalizeDialogOpen()).toBe(true);
+      await expect.poll(() => driver.personalItemNames(), { timeout: 15_000 }).toEqual(["Drafts"]);
+    });
+
+    await test.step("personal toggles flip with an immediate sidebar effect", async () => {
+      // UI-only while NEWFRONT-137 is open: the bulk PATCH is
+      // unscoped (newest row across members wins), so per-member
+      // persist cannot be proven until the backend fix lands. The
+      // toggle round-trips inside the session instead.
+      const draftsBefore = await driver.personalItemChecked("Drafts");
+      expect(draftsBefore).not.toBeNull();
+
+      await driver.setPersonalItemEnabled("Drafts", false);
+      await expect.poll(() => driver.personalItemChecked("Drafts"), { timeout: 15_000 }).toBe(false);
+      await expect.poll(() => driver.sidebarEntryVisible("Drafts"), { timeout: 15_000 }).toBe(false);
+
+      await driver.setPersonalItemEnabled("Drafts", true);
+      await expect.poll(() => driver.personalItemChecked("Drafts"), { timeout: 15_000 }).toBe(true);
+      await expect.poll(() => driver.sidebarEntryVisible("Drafts"), { timeout: 15_000 }).toBe(true);
+      await driver.page.keyboard.press("Escape");
+    });
+  }
+);
+
+test(
+  specTitle(ROWS_071, "project list rendering mode and cap persist per member"),
+  { tag: specTags(ROWS_071) },
+  async ({ driver, seed }) => {
+    await test.step("sign in through the UI", async () => {
+      await driver.signInWithPassword(seed.email, seed.password);
+    });
+    const session = await signInSession(seed.email, seed.password);
+    // The first-run tour overlay covers the dashboard for fresh users, so clear it.
+    await serverSetTourCompleted(session, true);
+    const originalProps = await getWorkspaceUserProperties(seed.workspaceSlug, session);
+    const originalMode = (originalProps["navigation_control_preference"] as string | undefined) ?? "ACCORDION";
+    const originalLimit = originalProps["navigation_project_limit"] as number | null | undefined;
+
+    await test.step("rendering mode switches and persists with a visible effect", async () => {
+      await driver.openWorkspaceHome(seed.workspaceSlug);
+      await driver.openPersonalizeDialog();
+      expect(await driver.projectNavMode()).toBe(originalMode);
+      const nextMode = originalMode === "TABBED" ? "ACCORDION" : "TABBED";
+      await driver.setProjectNavMode(nextMode);
+      await expect
+        .poll(
+          async () => (await getWorkspaceUserProperties(seed.workspaceSlug, session))["navigation_control_preference"],
+          {
+            timeout: 15_000,
+          }
+        )
+        .toBe(nextMode);
+
+      await driver.page.keyboard.press("Escape");
+      await driver.openProjectTab(seed.workspaceSlug, seed.projectId, "issues");
+      const stripInTabbed = nextMode === "TABBED";
+      expect((await driver.projectHeaderText()) !== null).toBe(stripInTabbed);
+
+      await driver.openWorkspaceHome(seed.workspaceSlug);
+      await driver.openPersonalizeDialog();
+      await driver.setProjectNavMode(originalMode as "ACCORDION" | "TABBED");
+      await expect
+        .poll(
+          async () => (await getWorkspaceUserProperties(seed.workspaceSlug, session))["navigation_control_preference"],
+          {
+            timeout: 15_000,
+          }
+        )
+        .toBe(originalMode);
+    });
+
+    await test.step("the project cap stores a count and sanitizes its input", async () => {
+      const capBefore = await driver.projectCapEnabled();
+      await driver.setProjectCap(true, 2);
+      await expect
+        .poll(async () => (await getWorkspaceUserProperties(seed.workspaceSlug, session))["navigation_project_limit"], {
+          timeout: 15_000,
+        })
+        .toBe(2);
+      expect(await driver.projectCapInput()).toBe("2");
+
+      // The input blocks exponent characters the number field would
+      // otherwise accept, while plain digits flow through to the server.
+      await driver.projectCapTypeText("e");
+      expect(await driver.projectCapInput()).toBe("2");
+      await driver.projectCapTypeText("5");
+      expect(await driver.projectCapInput()).toBe("25");
+      await expect
+        .poll(async () => (await getWorkspaceUserProperties(seed.workspaceSlug, session))["navigation_project_limit"], {
+          timeout: 15_000,
+        })
+        .toBe(25);
+
+      // Below-minimum values are clamped on the server and flagged inline.
+      await driver.projectCapFill("0");
+      await expect.poll(() => driver.projectCapMinErrorVisible(), { timeout: 10_000 }).toBe(true);
+      await expect
+        .poll(async () => (await getWorkspaceUserProperties(seed.workspaceSlug, session))["navigation_project_limit"], {
+          timeout: 15_000,
+        })
+        .toBe(1);
+
+      await driver.setProjectCap(capBefore ?? false, typeof originalLimit === "number" ? originalLimit : 1);
+      if (capBefore === false) {
+        await patchWorkspaceUserProperties(seed.workspaceSlug, session, {
+          navigation_project_limit: originalLimit ?? null,
+        });
+      }
+      await expect.poll(async () => driver.projectCapEnabled(), { timeout: 15_000 }).toBe(capBefore);
+      await driver.page.keyboard.press("Escape");
+    });
+  }
+);

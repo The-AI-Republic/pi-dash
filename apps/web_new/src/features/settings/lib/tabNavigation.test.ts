@@ -1,0 +1,84 @@
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+import { describe, expect, it } from "vitest";
+
+import { PROFILE_SETTINGS_TABS, findProfileSettingsTab, profileSettingsGroups, profileSettingsTitle } from "./tabs.js";
+import {
+  DEFAULT_PROFILE_SETTINGS_TAB,
+  isProfileSettingsTab,
+  PROFILE_SETTINGS_TAB_IDS,
+  queryWithoutMark,
+  resolveProfileSettingsTab,
+} from "./tabNavigation.js";
+import { isProfileSettingsTabServed } from "./visibility.js";
+
+describe("profile settings addresses", () => {
+  it("lists the nine tab ids in display order", () => {
+    expect(PROFILE_SETTINGS_TAB_IDS).toEqual([
+      "general",
+      "preferences",
+      "ai-assistant",
+      "auto-project-management",
+      "notifications",
+      "security",
+      "activity",
+      "integrations",
+      "api-tokens",
+    ]);
+    expect(DEFAULT_PROFILE_SETTINGS_TAB).toBe("general");
+  });
+
+  it("recognizes only registered ids", () => {
+    expect(isProfileSettingsTab("security")).toBe(true);
+    expect(isProfileSettingsTab("bogus-tab-id")).toBe(false);
+  });
+
+  it("resolves an address segment, tolerating a trailing slash", () => {
+    expect(resolveProfileSettingsTab("api-tokens")).toBe("api-tokens");
+    expect(resolveProfileSettingsTab("api-tokens/")).toBe("api-tokens");
+    expect(resolveProfileSettingsTab("bogus")).toBeNull();
+    expect(resolveProfileSettingsTab(undefined)).toBeNull();
+  });
+
+  it("strips the query mark and tolerates an absent query", () => {
+    expect(queryWithoutMark("?a=1")).toBe("a=1");
+    expect(queryWithoutMark("a=1")).toBe("a=1");
+  });
+});
+
+describe("profile settings sidebar model", () => {
+  it("groups every id under its label", () => {
+    expect(PROFILE_SETTINGS_TABS.map((tab) => tab.id)).toEqual([...PROFILE_SETTINGS_TAB_IDS]);
+    expect(profileSettingsGroups().map((group) => group.label)).toEqual(["Your Profile", "Developer"]);
+    expect(profileSettingsGroups().map((group) => group.tabs.map((tab) => tab.label))).toEqual([
+      ["Profile", "Preferences", "AI Assistant", "Auto Project Management", "Notifications", "Security", "Activity"],
+      ["Integrations", "Personal Access Tokens"],
+    ]);
+  });
+
+  it("drops a withheld tab and any group it leaves empty", () => {
+    expect(profileSettingsGroups((tab) => tab !== "security").map((group) => group.tabs.map((tab) => tab.id))).toEqual([
+      ["general", "preferences", "ai-assistant", "auto-project-management", "notifications", "activity"],
+      ["integrations", "api-tokens"],
+    ]);
+    expect(
+      profileSettingsGroups((tab) => tab === "integrations" || tab === "api-tokens").map((group) => group.id)
+    ).toEqual(["developer"]);
+  });
+
+  it("lists the tabs the instance serves from its marker", () => {
+    const ids = (selfManaged: boolean | undefined): string[] =>
+      profileSettingsGroups((tab) => isProfileSettingsTabServed(tab, selfManaged))
+        .flatMap((group) => group.tabs)
+        .map((tab) => tab.id);
+    expect(ids(false)).not.toContain("security");
+    expect(ids(true)).toContain("security");
+    expect(ids(undefined)).toContain("security");
+  });
+
+  it("finds a tab by id and titles the document", () => {
+    expect(findProfileSettingsTab("notifications").label).toBe("Notifications");
+    expect(profileSettingsTitle("api-tokens")).toBe("Personal Access Tokens · Profile settings");
+  });
+});

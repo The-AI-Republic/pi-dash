@@ -1,0 +1,83 @@
+# Parity edge proxy (NEWFRONT-19). Mirrors the production topology from
+# apps/proxy: one origin serves the frontend while /auth, /api and /static
+# go to Django. Same-origin serving is what makes the native credential
+# POST and the session cookie work for parity scenarios.
+{
+	auto_https off
+	admin off
+}
+
+:80 {
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+	# The device-approval page is a frontend route, but it lives under
+	# /auth/device, which the /auth/* rule below would send to Django
+	# (Django 404s it — it has no page there). The backend itself
+	# advertises this URL as the CLI verification_uri, so the page must
+	# reach the frontend. First match wins: this exception stays ahead.
+	# (NEWFRONT-109: exact /auth/device and anything beneath it.)
+	# Honors the same ORACLE_UPSTREAM override as the catch-all below, so
+	# natively run frontends serve this page too (review: hardcoded
+	# oracle:3000 502d device routes whenever the override was set).
+	handle /auth/device* {
+		reverse_proxy {$ORACLE_UPSTREAM:oracle:3000}
+	}
+	handle /auth/* {
+		reverse_proxy api:8000
+	}
+	handle /static/* {
+		reverse_proxy api:8000
+	}
+	# Object storage (NEWFRONT-143): presigned asset URLs are path-style on
+	# the request host, so browsers PUT/GET bucket paths through this same
+	# origin; route them to minio. Must precede the frontend catch-all.
+	handle /parity19-assets {
+		reverse_proxy minio:9000
+	}
+	handle /parity19-assets/* {
+		reverse_proxy minio:9000
+	}
+	# Live collaboration server (NEWFRONT-319): the oracle builds with an
+	# empty live base URL, so the editor falls back to this same origin at
+	# /live/*; route it to the slot's live server. Unset means the compose
+	# `live` service, so slots without live are unchanged; point
+	# LIVE_UPSTREAM at `host.docker.internal:<port>` for a natively run
+	# live server, like ORACLE_UPSTREAM below. Must precede the frontend
+	# catch-all.
+	handle /live/* {
+		reverse_proxy {$LIVE_UPSTREAM:live:3001}
+	}
+	# Realtime collaboration (NEWFRONT-317): oracles built with an empty
+	# VITE_LIVE_BASE_URL fall back to <origin>[/live]/collaboration in the
+	# browser (the /live prefix depends on the baked VITE_LIVE_BASE_PATH).
+	# Point LIVE_UPSTREAM at the slot's natively run live server to serve
+	# it; unset keeps the frontend catch-all below (offline fallback
+	# intact), so the runbook is unchanged.
+	handle /collaboration* {
+		reverse_proxy {$LIVE_UPSTREAM:oracle:3000}
+	}
+	# Admin console (NEWFRONT-441): the old admin app serves under
+	# /god-mode, mirroring the production topology
+	# (apps/proxy/Caddyfile.ce). The upstream keeps the full path — the
+	# admin app's basename is /god-mode, so it routes on it. The bare
+	# path redirects to the slashed form, exactly like production. Must
+	# precede the frontend catch-all. The default upstream is the shared
+	# `oracle-admin-upstream` alias (see docker-compose.yml), answered
+	# by whichever admin oracle runs. Point ORACLE_ADMIN_UPSTREAM at
+	# `host.docker.internal:<port>` for a natively run admin frontend
+	# (needs a docker that forwards the variable to compose).
+	handle /god-mode {
+		redir * /god-mode/ 301
+	}
+	handle /god-mode/* {
+		reverse_proxy {$ORACLE_ADMIN_UPSTREAM:oracle-admin-upstream:3000}
+	}
+	# The oracle normally runs in Docker as `oracle:3000`. Point
+	# ORACLE_UPSTREAM at `host.docker.internal:<port>` to serve a natively
+	# run frontend through the same one-origin proxy instead; unset means
+	# the stock container, so CI and the runbook are unchanged.
+	handle /* {
+		reverse_proxy {$ORACLE_UPSTREAM:oracle:3000}
+	}
+}

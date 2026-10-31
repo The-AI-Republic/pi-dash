@@ -10,9 +10,9 @@ import pytest
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from pi_dash.db.models import LoopJob
+from pi_dash.db.models import LoopJob, LoopTarget, LoopUserPreference
 from pi_dash.license.models import Instance, InstanceAdmin
-from pi_dash.tests.contract.loop.conftest import make_job
+from pi_dash.tests.contract.loop.conftest import make_job, make_target, set_pref
 
 pytestmark = pytest.mark.django_db
 
@@ -116,6 +116,25 @@ def test_delete_soft_deletes(world, instance_admin):
     c = _client(instance_admin)
     assert c.delete(f"{JOBS_URL}{job.id}/").status_code == 204
     assert not LoopJob.objects.filter(slug="del", deleted_at__isnull=True).exists()
+
+
+def test_delete_cascades_to_targets_and_prefs(world, instance_admin):
+    job = make_job(slug="del-cascade")
+    make_target(job, world.ws, world.member)
+    set_pref(world.member, job, False)
+    c = _client(instance_admin)
+    assert c.delete(f"{JOBS_URL}{job.id}/").status_code == 204
+    assert not LoopTarget.objects.filter(job=job).exists()
+    assert not LoopUserPreference.objects.filter(job=job).exists()
+
+
+def test_delete_missing_returns_404(world, instance_admin):
+    job = make_job(slug="del-missing")
+    c = _client(instance_admin)
+    assert c.delete(f"{JOBS_URL}{job.id}/").status_code == 204
+    res = c.delete(f"{JOBS_URL}{job.id}/")
+    assert res.status_code == 404
+    assert res.data["error"] == "not_found"
 
 
 def test_targets_listing(world, instance_admin, kms_crypto):
