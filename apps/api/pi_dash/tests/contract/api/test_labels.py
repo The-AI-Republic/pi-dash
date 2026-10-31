@@ -6,7 +6,7 @@ import pytest
 from rest_framework import status
 from uuid import uuid4
 
-from pi_dash.db.models import Label, Project, ProjectMember
+from pi_dash.db.models import Label, Project, ProjectMember, WorkspaceMember
 
 
 @pytest.fixture
@@ -215,3 +215,70 @@ class TestLabelDetailAPIEndpoint:
 
         assert response.status_code == status.HTTP_204_NO_CONTENT
         assert not Label.objects.filter(id=create_label.id).exists()
+
+
+@pytest.mark.contract
+class TestLabelPermissionScope:
+    """Label create, update, and delete must all check the caller's *project*
+    role, not the workspace role (PDASHOSS01-239). A workspace Guest who is a
+    project Member manages that project's labels; a project Guest cannot,
+    regardless of workspace role.
+    """
+
+    def get_label_url(self, workspace_slug, project_id):
+        return f"/api/v1/workspaces/{workspace_slug}/projects/{project_id}/labels/"
+
+    def get_label_detail_url(self, workspace_slug, project_id, label_id):
+        return f"/api/v1/workspaces/{workspace_slug}/projects/{project_id}/labels/{label_id}/"
+
+    def set_roles(self, workspace, project, user, workspace_role, project_role):
+        WorkspaceMember.objects.filter(workspace=workspace, member=user).update(role=workspace_role)
+        ProjectMember.objects.filter(project=project, member=user).update(role=project_role)
+
+    @pytest.mark.django_db
+    def test_workspace_guest_project_member_can_manage_labels(
+        self, api_key_client, workspace, project, create_user, create_label
+    ):
+        """A project Member who is only a Guest at the workspace level can
+        create, update, and delete labels on that project."""
+        self.set_roles(workspace, project, create_user, workspace_role=5, project_role=15)
+
+        response = api_key_client.post(
+            self.get_label_url(workspace.slug, project.id),
+            {"name": "Guest-Created Label", "color": "#123456"},
+            format="json",
+        )
+        assert response.status_code == status.HTTP_201_CREATED
+
+        detail_url = self.get_label_detail_url(workspace.slug, project.id, create_label.id)
+
+        response = api_key_client.patch(detail_url, {"name": "Renamed Label"}, format="json")
+        assert response.status_code == status.HTTP_200_OK
+
+        response = api_key_client.delete(detail_url)
+        assert response.status_code == status.HTTP_204_NO_CONTENT
+
+    @pytest.mark.django_db
+    def test_project_guest_cannot_manage_labels(
+        self, api_key_client, workspace, project, create_user, create_label
+    ):
+        """A workspace Member who is only a Guest on the project is refused
+        all three write verbs, consistently."""
+        self.set_roles(workspace, project, create_user, workspace_role=15, project_role=5)
+
+        response = api_key_client.post(
+            self.get_label_url(workspace.slug, project.id),
+            {"name": "Should Not Exist", "color": "#123456"},
+            format="json",
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert not Label.objects.filter(name="Should Not Exist").exists()
+
+        detail_url = self.get_label_detail_url(workspace.slug, project.id, create_label.id)
+
+        response = api_key_client.patch(detail_url, {"name": "Renamed Label"}, format="json")
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+        response = api_key_client.delete(detail_url)
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert Label.objects.filter(id=create_label.id).exists()
