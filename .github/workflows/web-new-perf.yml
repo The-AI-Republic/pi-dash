@@ -29,7 +29,7 @@ on:
 
 concurrency:
   group: web-new-perf-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
