@@ -348,6 +348,229 @@ impl LiveS3ObjectStore {
         sign_copy_request(&storage, src_key, dst_key, amz_date, date_stamp)
             .map_err(|error| format!("s3 copy {src_key}: {error}"))
     }
+
+    /// One HEAD attempt: sign fresh (timestamps must be current) and send.
+    /// A transport send failure is retryable; a sign or client failure is
+    /// config (fail fast, like the raising boto3 constructor).
+    async fn head_once(&self, key: &str) -> HeadAttempt {
+        let now = Utc::now();
+        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let date_stamp = now.format("%Y%m%d").to_string();
+        let signed = match self.signed_head_for(key, &amz_date, &date_stamp) {
+            Ok(signed) => signed,
+            Err(error) => return HeadAttempt::Config(error),
+        };
+        let client = match self.client.as_ref() {
+            Some(client) => client,
+            None => {
+                return HeadAttempt::Config(format!("s3 head {key}: transport failure: no client"))
+            }
+        };
+        let response = match client
+            .head(&signed.url)
+            .header("Authorization", signed.authorization)
+            .header("x-amz-date", signed.amz_date)
+            .header("x-amz-content-sha256", signed.content_sha256)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                return HeadAttempt::Transport(format!("s3 head {key}: transport failure: {error}"))
+            }
+        };
+        if response.status().is_success() {
+            return HeadAttempt::Found(head_meta_from_headers(response.headers()));
+        }
+        // HEAD answers carry no body, so there is no code to parse (a
+        // codeless 400 is final after one attempt, exactly like boto3).
+        HeadAttempt::Refused {
+            status: response.status().as_u16(),
+            code: None,
+        }
+    }
+
+    /// One PUT-copy attempt. A 200 whose body is an `<Error>` document
+    /// retries as a 500 (botocore `check_for_200_error`); only status 200
+    /// exactly is body-checked, other 2xx succeed unchecked like boto3.
+    async fn copy_once(&self, src_key: &str, dst_key: &str) -> CopyAttempt {
+        let now = Utc::now();
+        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let date_stamp = now.format("%Y%m%d").to_string();
+        let signed = match self.signed_copy_for(src_key, dst_key, &amz_date, &date_stamp) {
+            Ok(signed) => signed,
+            Err(error) => return CopyAttempt::Config(error),
+        };
+        let client = match self.client.as_ref() {
+            Some(client) => client,
+            None => {
+                return CopyAttempt::Config(format!(
+                    "s3 copy {src_key}: transport failure: no client"
+                ))
+            }
+        };
+        let mut request = client.put(&signed.url).body(Vec::new());
+        for (name, value) in &signed.headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                return CopyAttempt::Transport(format!(
+                    "s3 copy {src_key}: transport failure: {error}"
+                ))
+            }
+        };
+        let status = response.status().as_u16();
+        if status == 200 {
+            let body = match response.bytes().await {
+                Ok(body) => body,
+                Err(error) => {
+                    return CopyAttempt::Transport(format!(
+                        "s3 copy {src_key}: transport failure: {error}"
+                    ))
+                }
+            };
+            if copy_body_is_error(&body) {
+                tracing::debug!(
+                    src = src_key,
+                    dst = dst_key,
+                    "s3 copy 200 carried <Error>: treating as 500"
+                );
+                let code = std::str::from_utf8(&body)
+                    .ok()
+                    .and_then(s3_error_code)
+                    .map(str::to_owned);
+                return CopyAttempt::Refused { status: 500, code };
+            }
+            return CopyAttempt::Copied;
+        }
+        if response.status().is_success() {
+            return CopyAttempt::Copied;
+        }
+        // Error status: parse the `<Code>` for the retry decision. A body
+        // that will not read is a transport failure (retryable); an empty
+        // or codeless body decides on the status alone.
+        match response.bytes().await {
+            Ok(body) => {
+                let code = std::str::from_utf8(&body)
+                    .ok()
+                    .and_then(s3_error_code)
+                    .map(str::to_owned);
+                CopyAttempt::Refused { status, code }
+            }
+            Err(error) => {
+                CopyAttempt::Transport(format!("s3 copy {src_key}: transport failure: {error}"))
+            }
+        }
+    }
+}
+
+/// Botocore legacy retry mode for S3, exactly as Django's `S3Storage`
+/// client runs it (`Config` sets only the signature version):
+/// `max_attempts = 5` total with `rand * 2**(n-1)` backoff after failed
+/// attempt `n` (botocore 1.34 `data/_retry.json`, `__default__` delay
+/// `exponential`/`rand`/`growth_factor 2`). Measured against boto3
+/// 1.34.96 / botocore 1.34.162; the stub contract suite
+/// (`tasks_cleanup/test_s3_retry.py`) pins the attempt counts.
+const S3_MAX_ATTEMPTS: u32 = 5;
+
+/// One HEAD attempt's outcome. `Refused` is the swallowed `ClientError`
+/// (stored as NULL); `Transport` escapes to the task's broad `except`
+/// (the save is skipped); `Config` fails fast without retrying.
+enum HeadAttempt {
+    Found(HeadMeta),
+    Refused { status: u16, code: Option<String> },
+    Transport(String),
+    Config(String),
+}
+
+/// One PUT-copy attempt's outcome. `Refused` is the swallowed
+/// `ClientError` (the pair still counts); `Transport` escapes (the `[]`
+/// path); `Config` fails fast without retrying.
+enum CopyAttempt {
+    Copied,
+    Refused { status: u16, code: Option<String> },
+    Transport(String),
+    Config(String),
+}
+
+/// Statuses retried regardless of code: the legacy `__default__`
+/// policies (500/502/503/504/509) plus 429 (`too_many_requests`).
+fn s3_retryable_status(status: u16) -> bool {
+    matches!(status, 500 | 502 | 503 | 504 | 509 | 429)
+}
+
+/// Error codes retried regardless of status: the legacy throttling
+/// policies plus S3's 400 policies (`RequestTimeout`, `BadDigest`).
+/// `SlowDown` is deliberately absent: S3 sends it with a 503 (covered
+/// by the status rule), and legacy mode does not code-retry it on a
+/// 400 — verified against boto3 1.34.96.
+fn s3_retryable_code(code: &str) -> bool {
+    matches!(
+        code,
+        "Throttling"
+            | "ThrottlingException"
+            | "ThrottledException"
+            | "RequestThrottledException"
+            | "ProvisionedThroughputExceededException"
+            | "RequestTimeout"
+            | "BadDigest"
+    )
+}
+
+/// The legacy retry decision for one service answer.
+fn s3_retryable_answer(status: u16, code: Option<&str>) -> bool {
+    if s3_retryable_status(status) {
+        return true;
+    }
+    code.is_some_and(s3_retryable_code)
+}
+
+/// Extract the `<Code>` from an S3 error body, if any.
+fn s3_error_code(body: &str) -> Option<&str> {
+    let (_, after) = body.split_once("<Code>")?;
+    let (code, _) = after.split_once("</Code>")?;
+    let code = code.trim();
+    (!code.is_empty()).then_some(code)
+}
+
+/// True when a CopyObject 200 body is an `<Error>` document: the root
+/// tag after an optional XML prolog is `<Error>` (botocore parses the
+/// body and compares `root.tag == 'Error'`). Only `<Error>` counts:
+/// botocore additionally treats an unparseable 200 body as a 500, which
+/// real S3/MinIO never send (success always carries
+/// `<CopyObjectResult>`) and is not ported.
+fn copy_body_is_error(body: &[u8]) -> bool {
+    let text = match std::str::from_utf8(body) {
+        Ok(text) => text,
+        Err(_) => return false,
+    };
+    let mut rest = text.trim_start();
+    if let Some(after) = rest.strip_prefix("<?") {
+        match after.find("?>") {
+            Some(end) => rest = after[end + 2..].trim_start(),
+            None => return false,
+        }
+    }
+    matches!(
+        rest.strip_prefix("<Error")
+            .and_then(|tail| tail.chars().next()),
+        Some('>' | '/' | ' ' | '\t' | '\r' | '\n')
+    )
+}
+
+/// The legacy delay after failed attempt `n` (1-based) given a `[0, 1)`
+/// draw: `rand * 2**(n-1)` seconds, uncapped like botocore.
+fn retry_backoff(failed_attempt: u32, rand01: f64) -> std::time::Duration {
+    let shifted = failed_attempt.saturating_sub(1);
+    std::time::Duration::from_secs_f64(rand01 * 2f64.powi(shifted as i32))
+}
+
+/// Sleep the legacy backoff after failed attempt `n` (1-based).
+async fn sleep_backoff(failed_attempt: u32) {
+    let rand01 = rand::random_range(0.0..1.0);
+    tokio::time::sleep(retry_backoff(failed_attempt, rand01)).await;
 }
 
 impl ObjectStore for LiveS3ObjectStore {
@@ -377,64 +600,85 @@ impl ObjectStore for LiveS3ObjectStore {
     }
 
     async fn head_object(&self, key: &str) -> Result<Option<HeadMeta>, String> {
-        let now = Utc::now();
-        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
-        let date_stamp = now.format("%Y%m%d").to_string();
-        let signed = self.signed_head_for(key, &amz_date, &date_stamp)?;
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| format!("s3 head {key}: transport failure: no client"))?;
-        let response = client
-            .head(&signed.url)
-            .header("Authorization", signed.authorization)
-            .header("x-amz-date", signed.amz_date)
-            .header("x-amz-content-sha256", signed.content_sha256)
-            .send()
-            .await
-            .map_err(|error| format!("s3 head {key}: transport failure: {error}"))?;
-        if response.status().is_success() {
-            return Ok(Some(head_meta_from_headers(response.headers())));
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            match self.head_once(key).await {
+                HeadAttempt::Found(meta) => return Ok(Some(meta)),
+                HeadAttempt::Refused { status, code } => {
+                    // boto3 raises `ClientError` on any error status
+                    // (including a missing key); Django logs it and stores
+                    // `None`. Retryable answers get the legacy attempts
+                    // first; anything else (and anything exhausted) lands
+                    // here exactly once.
+                    if !s3_retryable_answer(status, code.as_deref()) || attempt >= S3_MAX_ATTEMPTS {
+                        tracing::warn!(object = key, status, "s3 head refused: storing NULL");
+                        return Ok(None);
+                    }
+                    tracing::debug!(object = key, status, attempt, "s3 head refused: retrying");
+                    sleep_backoff(attempt).await;
+                }
+                HeadAttempt::Transport(error) => {
+                    if attempt >= S3_MAX_ATTEMPTS {
+                        return Err(error);
+                    }
+                    tracing::debug!(
+                        object = key,
+                        error = error.as_str(),
+                        attempt,
+                        "s3 head transport failure: retrying"
+                    );
+                    sleep_backoff(attempt).await;
+                }
+                HeadAttempt::Config(error) => return Err(error),
+            }
         }
-        // boto3 raises `ClientError` on any error status (including a
-        // missing key); Django logs it and stores `None`.
-        tracing::warn!(
-            object = key,
-            status = response.status().as_u16(),
-            "s3 head refused: storing NULL"
-        );
-        Ok(None)
     }
 
     async fn copy_object(&self, src_key: &str, dst_key: &str) -> Result<(), String> {
-        let now = Utc::now();
-        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
-        let date_stamp = now.format("%Y%m%d").to_string();
-        let signed = self.signed_copy_for(src_key, dst_key, &amz_date, &date_stamp)?;
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| format!("s3 copy {src_key}: transport failure: no client"))?;
-        let mut request = client.put(&signed.url).body(Vec::new());
-        for (name, value) in &signed.headers {
-            request = request.header(name.as_str(), value.as_str());
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            match self.copy_once(src_key, dst_key).await {
+                CopyAttempt::Copied => return Ok(()),
+                CopyAttempt::Refused { status, code } => {
+                    // boto3 raises `ClientError` on any error status;
+                    // Django logs it and the pair still counts.
+                    // Retryable answers get the legacy attempts first.
+                    if !s3_retryable_answer(status, code.as_deref()) || attempt >= S3_MAX_ATTEMPTS {
+                        tracing::warn!(
+                            src = src_key,
+                            dst = dst_key,
+                            status,
+                            "s3 copy refused: pair still counts"
+                        );
+                        return Ok(());
+                    }
+                    tracing::debug!(
+                        src = src_key,
+                        dst = dst_key,
+                        status,
+                        attempt,
+                        "s3 copy refused: retrying"
+                    );
+                    sleep_backoff(attempt).await;
+                }
+                CopyAttempt::Transport(error) => {
+                    if attempt >= S3_MAX_ATTEMPTS {
+                        return Err(error);
+                    }
+                    tracing::debug!(
+                        src = src_key,
+                        dst = dst_key,
+                        error = error.as_str(),
+                        attempt,
+                        "s3 copy transport failure: retrying"
+                    );
+                    sleep_backoff(attempt).await;
+                }
+                CopyAttempt::Config(error) => return Err(error),
+            }
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|error| format!("s3 copy {src_key}: transport failure: {error}"))?;
-        if response.status().is_success() {
-            return Ok(());
-        }
-        // boto3 raises `ClientError` on any error status; Django logs it
-        // and the pair still counts.
-        tracing::warn!(
-            src = src_key,
-            dst = dst_key,
-            status = response.status().as_u16(),
-            "s3 copy refused: pair still counts"
-        );
-        Ok(())
     }
 }
 
@@ -2492,5 +2736,116 @@ mod tests {
         assert!(registry.owns(TASK_DELETE_UNUPLOADED));
         assert!(registry.owns(TASK_GET_METADATA));
         assert!(registry.owns(TASK_COPY_S3_OBJECTS));
+    }
+
+    #[test]
+    fn legacy_retryable_statuses() {
+        for status in [500, 502, 503, 504, 509, 429] {
+            assert!(s3_retryable_status(status), "{status}");
+        }
+        for status in [200, 201, 204, 301, 400, 403, 404, 411] {
+            assert!(!s3_retryable_status(status), "{status}");
+        }
+    }
+
+    #[test]
+    fn legacy_retryable_codes() {
+        for code in [
+            "Throttling",
+            "ThrottlingException",
+            "ThrottledException",
+            "RequestThrottledException",
+            "ProvisionedThroughputExceededException",
+            "RequestTimeout",
+            "BadDigest",
+        ] {
+            assert!(s3_retryable_code(code), "{code}");
+        }
+        // `SlowDown` rides a 503 in reality and is not code-retried on a
+        // 400 (legacy mode); anything else finalizes after one attempt.
+        for code in [
+            "SlowDown",
+            "NoSuchKey",
+            "AccessDenied",
+            "InternalError",
+            "InvalidRequest",
+            "",
+        ] {
+            assert!(!s3_retryable_code(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn legacy_retry_decision_combos() {
+        assert!(s3_retryable_answer(503, None));
+        assert!(s3_retryable_answer(500, Some("InternalError")));
+        assert!(s3_retryable_answer(400, Some("RequestTimeout")));
+        assert!(s3_retryable_answer(400, Some("Throttling")));
+        assert!(!s3_retryable_answer(404, None));
+        assert!(!s3_retryable_answer(404, Some("NoSuchKey")));
+        assert!(!s3_retryable_answer(400, None));
+        assert!(!s3_retryable_answer(400, Some("SlowDown")));
+        assert!(!s3_retryable_answer(403, Some("AccessDenied")));
+    }
+
+    #[test]
+    fn error_code_extraction() {
+        assert_eq!(
+            s3_error_code("<Error><Code>RequestTimeout</Code><Message>m</Message></Error>"),
+            Some("RequestTimeout")
+        );
+        assert_eq!(
+            s3_error_code(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>SlowDown</Code></Error>"
+            ),
+            Some("SlowDown")
+        );
+        assert_eq!(
+            s3_error_code("<CopyObjectResult><ETag>x</ETag></CopyObjectResult>"),
+            None
+        );
+        assert_eq!(s3_error_code(""), None);
+        assert_eq!(s3_error_code("<Error><Code></Code></Error>"), None);
+        assert_eq!(s3_error_code("<Error><Code>oops"), None);
+    }
+
+    #[test]
+    fn copy_200_body_error_detection() {
+        // Bare and prologued `<Error>` roots, with and without attributes.
+        for body in [
+            "<Error><Code>InternalError</Code></Error>",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>InternalError</Code></Error>",
+            "  <Error><Code>x</Code></Error>",
+            "<Error xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Code>x</Code></Error>",
+            "<Error/>",
+        ] {
+            assert!(copy_body_is_error(body.as_bytes()), "{body}");
+        }
+        // Success bodies and near-misses are not errors.
+        for body in [
+            "<CopyObjectResult><ETag>\"x\"</ETag></CopyObjectResult>",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><CopyObjectResult><ETag>\"x\"</ETag></CopyObjectResult>",
+            "",
+            "   ",
+            "<html>proxy error</html>",
+            "<ErrorResponse><Code>x</Code></ErrorResponse>",
+            "<Errors><Error><Code>x</Code></Error></Errors>",
+        ] {
+            assert!(!copy_body_is_error(body.as_bytes()), "{body}");
+        }
+        assert!(!copy_body_is_error(&[0xff, 0xfe, 0x00]));
+    }
+
+    #[test]
+    fn legacy_backoff_is_rand_times_power_of_two() {
+        // `rand * 2**(n-1)` after failed attempt `n`, uncapped.
+        for (attempt, base) in [(1, 1.0), (2, 2.0), (3, 4.0), (4, 8.0)] {
+            assert_eq!(retry_backoff(attempt, 0.0), std::time::Duration::ZERO);
+            assert_eq!(
+                retry_backoff(attempt, 1.0),
+                std::time::Duration::from_secs_f64(base)
+            );
+        }
+        assert_eq!(S3_MAX_ATTEMPTS, 5);
     }
 }
