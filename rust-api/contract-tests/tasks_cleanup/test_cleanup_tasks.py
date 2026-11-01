@@ -1321,9 +1321,20 @@ def _page_html(conn, page_id) -> str:
 def _asset_row(conn, asset_id):
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            'SELECT id, asset, is_uploaded, storage_metadata FROM "file_assets"'
+            'SELECT id, asset, is_uploaded, storage_metadata,'
+            ' created_by_id, updated_by_id FROM "file_assets"'
             " WHERE id = %s::uuid AND deleted_at IS NULL",
             (str(asset_id),),
+        )
+        return cur.fetchone()
+
+
+def _page_row(conn, page_id):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            'SELECT id, created_by_id, updated_by_id FROM "pages"'
+            " WHERE id = %s::uuid AND deleted_at IS NULL",
+            (str(page_id),),
         )
         return cur.fetchone()
 
@@ -1367,6 +1378,8 @@ def _seed_copy_world(db_conn, tag: str) -> dict:
         {
             "workspace_id": ws_id,
             "owned_by_id": str(chain["owner"]["id"]),
+            "created_by_id": str(chain["owner"]["id"]),
+            "updated_by_id": str(chain["owner"]["id"]),
             "name": f"copy1292-{tag}",
             "description_json": {},
             "description_html": seed_html,
@@ -1431,6 +1444,59 @@ def test_copy_task_copies_s3_objects_and_rewrites_page(db_conn, broker_url):
         )
     # Copy, not move: the source object still exists.
     assert s3_helpers.s3_key_exists(world["bucket"], world["src_key"])
+
+
+def test_copy_task_nulls_audit_columns(db_conn, broker_url):
+    """Copy task: worker saves NULL both audit columns on duplicate rows (PIDASHCONV-1698).
+
+    ``FileAsset.objects.create(created_by_id=user_id, ...)`` passes the
+    requester to the model constructor, not as the ``save()`` keyword, so
+    ``BaseModel.save`` (``db/models/base.py:23-33``) sees
+    ``created_by_id=None``; with no crum user in a worker it blanks
+    ``created_by`` and ``updated_by`` before the INSERT. The page's
+    ``entity.save()`` (``copy_s3_object.py:58``, full save, twice) does
+    the same. Seed page + source asset with both audit columns set;
+    after the task the duplicate asset and the page both read NULL/NULL.
+    Same worker semantics already ported as PB-2008/PB-2009/PB-2032.
+    """
+    tag = uuid.uuid4().hex[:8]
+    world = _seed_copy_world(db_conn, tag)
+    before = _page_row(db_conn, world["page_id"])
+    assert before["created_by_id"] is not None, "seed must set page created_by"
+    assert before["updated_by_id"] is not None, "seed must set page updated_by"
+    celery_wire.publish(
+        COPY_TASK,
+        kwargs={
+            "entity_name": "PAGE",
+            "entity_identifier": world["page_id"],
+            "project_id": world["project_id"],
+            "slug": world["slug"],
+            "user_id": world["owner_id"],
+        },
+    )
+    assert wait_for(
+        lambda: _page_html(db_conn, world["page_id"]) != world["seed_html"],
+        what="copy task rewrote the page description",
+    )
+    srcs = _image_srcs(_page_html(db_conn, world["page_id"]))
+    assert srcs, "rewrite removed every image-component"
+    assert world["asset_id"] not in srcs, "srcs still point at the source asset"
+    for src in srcs:
+        row = _asset_row(db_conn, src)
+        assert row is not None, f"src {src} resolves to no file_assets row"
+        assert row["created_by_id"] is None, (
+            f"duplicate {src} keeps created_by {row['created_by_id']}"
+        )
+        assert row["updated_by_id"] is None, (
+            f"duplicate {src} keeps updated_by {row['updated_by_id']}"
+        )
+    page = _page_row(db_conn, world["page_id"])
+    assert page["created_by_id"] is None, (
+        f"duplicate page keeps created_by {page['created_by_id']}"
+    )
+    assert page["updated_by_id"] is None, (
+        f"duplicate page keeps updated_by {page['updated_by_id']}"
+    )
 
 
 def test_metadata_task_stores_head_dict(db_conn, broker_url):
