@@ -172,16 +172,21 @@ pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Not found."}"#;
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 /// `handle_exception`'s `IntegrityError` branch.
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
+/// DRF `UniqueValidator` failure for `anchor` (probed verbatim on live
+/// Django): the message carries the model's verbose name.
+pub const DUPLICATE_ANCHOR_BODY: &str =
+    r#"{"anchor":["Issue View with this anchor already exists."]}"#;
 /// DRF `get_object()` miss through a viewset queryset: the `Http404`
 /// message carries the model name (`rest_framework/generics.py`).
 pub const VIEW_PUT_MISSING_BODY: &str = r#"{"detail":"No IssueView matches the given query."}"#;
 /// Serializing a missing view (`IssueViewSerializer(None).data`): DRF
 /// answers the serializer's `get_initial()` — every writable field with
 /// its initial (strings `""`, everything else `null`), read-only fields
-/// (`id`, `is_favorite`, timestamps, FKs, `query`, `access`, `is_locked`)
-/// absent — with a 200. Ported verbatim (this is B1's actual body, not
-/// JSON `null`).
-pub const MISSING_VIEW_BODY: &str = r#"{"deleted_at":null,"name":"","description":"","filters":null,"display_filters":null,"display_properties":null,"rich_filters":null,"sort_order":null,"logo_props":null,"archived_at":null,"created_by":null,"updated_by":null}"#;
+/// (`id`, `is_favorite`, timestamps, FKs, `query`, `is_locked`) absent —
+/// with a 200. Ported verbatim (this is B1's actual body, not JSON
+/// `null`; `access` is writable since NEWFRONT-972 and initialises to
+/// `null`, `anchor` to `""`, both probed on live Django).
+pub const MISSING_VIEW_BODY: &str = r#"{"deleted_at":null,"name":"","description":"","filters":null,"display_filters":null,"display_properties":null,"rich_filters":null,"access":null,"anchor":"","sort_order":null,"logo_props":null,"archived_at":null,"created_by":null,"updated_by":null}"#;
 
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
@@ -661,6 +666,11 @@ fn shape_view(row: &Map<String, Value>, is_favorite: Option<bool>, timezone: &Tz
     }
     let access = raw("access").as_i64().unwrap_or(0);
     let _ = write!(out, ",\"access\":{access}");
+    let _ = write!(
+        out,
+        ",\"anchor\":{}",
+        serde_json::to_string(raw("anchor")).unwrap_or("null".to_owned())
+    );
     let sort_order = raw("sort_order").as_f64().unwrap_or(0.0);
     let _ = write!(
         out,
@@ -1419,7 +1429,10 @@ fn parse_django_datetime(text: &str, tz: &Tz) -> Result<DateTime<Utc>, ParseDate
 // Write kernels (create / update shared by both scopes)
 // ---------------------------------------------------------------------------
 
-/// Validated write fields for a view create/update body.
+/// Validated write fields for a view create/update body. `access` is the
+/// validated choice (`None` when absent); `anchor` is `None` when absent,
+/// `Some(None)` for an explicit `null` (clear), and `Some(Some(_))` for a
+/// validated token.
 struct ViewWrite {
     name: Option<String>,
     description: Option<Value>,
@@ -1429,6 +1442,8 @@ struct ViewWrite {
     rich_filters: Option<Value>,
     logo_props: Option<Value>,
     archived_at: Option<Value>,
+    access: Option<i16>,
+    anchor: Option<Option<String>>,
 }
 
 /// DRF field errors for `name`: required, non-blank, max 255. DRF renders
@@ -1499,10 +1514,122 @@ fn coerce_description(value: &Value) -> Result<String, Denial> {
     }
 }
 
+/// Render a rejected `access` input the way DRF's `invalid_choice` message
+/// does: Python `str()` of the JSON value, quoted. Strings pass through,
+/// integers render as digits (exact at any width), plain floats keep
+/// their fraction (`1.0`), bools are `True`/`False`. Exotic float
+/// spellings render as written (`1.00`, not Python's `1.0`), and arrays
+/// and objects render as compact JSON, which matches Python for plain
+/// scalars (`[0]`) but not for mappings or quoted strings (Tier 3: no Pi
+/// Dash client sends those).
+fn choice_input_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                int.to_string()
+            } else if let Some(uint) = number.as_u64() {
+                uint.to_string()
+            } else {
+                match number.as_f64() {
+                    Some(float) if float.is_finite() => number.to_string(),
+                    Some(float) if float.is_sign_negative() => "-inf".to_owned(),
+                    Some(_) => "inf".to_owned(),
+                    None => "null".to_owned(),
+                }
+            }
+        }
+        Value::Bool(true) => "True".to_owned(),
+        Value::Bool(false) => "False".to_owned(),
+        Value::Null => "None".to_owned(),
+        Value::Array(_) | Value::Object(_) => value.to_string(),
+    }
+}
+
+/// DRF field errors for `access` (`PositiveSmallIntegerField` with
+/// `choices=((0, "Private"), (1, "Public"))`, `db/models/view.py:66`,
+/// writable since NEWFRONT-972): `ChoiceField` accepts the `0`/`1`
+/// integers and their `"0"`/`"1"` string spellings (probed), rejects an
+/// explicit `null`, and fails anything else with `invalid_choice`.
+fn validate_access(body: &Map<String, Value>) -> Result<Option<i16>, Denial> {
+    let Some(value) = body.get("access") else {
+        return Ok(None);
+    };
+    if matches!(value, Value::Null) {
+        return Err(Denial::Raw(
+            StatusCode::BAD_REQUEST,
+            r#"{"access":["This field may not be null."]}"#.to_owned(),
+        ));
+    }
+    let accepted = match value {
+        Value::Number(number) => match number.as_i64() {
+            Some(0) => Some(0),
+            Some(1) => Some(1),
+            _ => None,
+        },
+        Value::String(text) => match text.as_str() {
+            "0" => Some(0),
+            "1" => Some(1),
+            _ => None,
+        },
+        _ => None,
+    };
+    match accepted {
+        Some(choice) => Ok(Some(choice)),
+        None => {
+            let message = format!("\"{}\" is not a valid choice.", choice_input_text(value));
+            let body = serde_json::to_string(&serde_json::json!({"access": [message]}))
+                .map_err(|_| Denial::ServerError)?;
+            Err(Denial::Raw(StatusCode::BAD_REQUEST, body))
+        }
+    }
+}
+
+/// DRF field errors for `anchor` (`CharField(max_length=255, null=True,
+/// unique=True)`, `db/models/view.py:70`, NEWFRONT-972): like `name`, a
+/// `CharField` with the default `trim_whitespace=True` — numbers coerce
+/// via `str()`, the value strips with Python `str.strip`, a blank
+/// remainder is `blank`, and `max_length` applies to the stripped value.
+/// Unlike `name`, an explicit `null` clears the token (`allow_null` from
+/// `null=True`). Uniqueness is checked at write time (see
+/// [`anchor_taken`]).
+fn validate_anchor(body: &Map<String, Value>) -> Result<Option<Option<String>>, Denial> {
+    let Some(value) = body.get("anchor") else {
+        return Ok(None);
+    };
+    let raw = match value {
+        Value::Null => return Ok(Some(None)),
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
+        _ => {
+            return Err(Denial::Raw(
+                StatusCode::BAD_REQUEST,
+                r#"{"anchor":["Not a valid string."]}"#.to_owned(),
+            ));
+        }
+    };
+    let stripped = raw.trim_matches(is_py_strip_ws);
+    if stripped.is_empty() {
+        return Err(Denial::Raw(
+            StatusCode::BAD_REQUEST,
+            r#"{"anchor":["This field may not be blank."]}"#.to_owned(),
+        ));
+    }
+    if stripped.chars().count() > pidash_db::app_views_search::models::issue_view::ANCHOR_MAX_LENGTH
+    {
+        return Err(Denial::Raw(
+            StatusCode::BAD_REQUEST,
+            r#"{"anchor":["Ensure this field has no more than 255 characters."]}"#.to_owned(),
+        ));
+    }
+    Ok(Some(Some(stripped.to_owned())))
+}
+
 /// Split a create/update body into validated fields. Read-only serializer
-/// fields (`workspace`, `project`, `query`, `owned_by`, `access`,
-/// `is_locked`, `is_favorite`) and unknown keys are accepted and ignored,
-/// exactly like DRF's `to_internal_value`.
+/// fields (`workspace`, `project`, `query`, `owned_by`, `is_locked`,
+/// `is_favorite`) and unknown keys are accepted and ignored, exactly like
+/// DRF's `to_internal_value`. `access` and `anchor` validate here, in
+/// wire order; anchor uniqueness is checked at write time.
 fn split_write(body: &Map<String, Value>, partial: bool) -> Result<ViewWrite, Denial> {
     Ok(ViewWrite {
         name: validate_name(body, partial)?,
@@ -1513,6 +1640,8 @@ fn split_write(body: &Map<String, Value>, partial: bool) -> Result<ViewWrite, De
         rich_filters: body.get("rich_filters").cloned(),
         logo_props: body.get("logo_props").cloned(),
         archived_at: body.get("archived_at").cloned(),
+        access: validate_access(body)?,
+        anchor: validate_anchor(body)?,
     })
 }
 
@@ -1712,13 +1841,39 @@ async fn next_sort_order(
     Ok(issue_view::next_sort_order(largest).unwrap_or(issue_view::DEFAULT_SORT_ORDER))
 }
 
+/// DRF `UniqueValidator` for `anchor`: the token must be unique across
+/// every live view row (the validator's queryset is the soft-delete-scoped
+/// default manager, unfiltered by scope). Updates exclude their own row;
+/// `None` clears are never checked (Postgres unique constraints admit any
+/// number of nulls). A token held only by a soft-deleted row passes here
+/// and fails at the write with the `IntegrityError` body, exactly like
+/// Django (probed).
+async fn anchor_taken(
+    pool: &sqlx::PgPool,
+    anchor: &str,
+    exclude: Option<&uuid::Uuid>,
+) -> Result<bool, Denial> {
+    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
+        r#"SELECT id FROM issue_views
+           WHERE anchor = $1 AND deleted_at IS NULL AND ($2 IS NULL OR id != $2)
+           LIMIT 1"#,
+    )
+    .bind(anchor)
+    .bind(exclude)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(row.is_some())
+}
+
 /// Insert a view row and return its id. Mirrors `IssueView.objects.create`
 /// through `WorkspaceBaseModel.save` + `BaseModel.save` + `IssueView.save`:
 /// workspace falls back from the project, `created_by` is the request
 /// user, `updated_by` stays null, `query` recomputes from filters, and the
 /// sibling-maximum `sort_order` applies on add. `archived_at` parses
-/// through the DRF `DateTimeField` grammar (PIDASHCONV-783). Read-only
-/// body keys never reach the row.
+/// through the DRF `DateTimeField` grammar (PIDASHCONV-783). `access`
+/// stores the validated choice (defaulting to public) and `anchor` the
+/// validated token (or NULL); read-only body keys never reach the row.
 #[allow(clippy::too_many_arguments)]
 async fn insert_view(
     pool: &sqlx::PgPool,
@@ -1741,6 +1896,16 @@ async fn insert_view(
         None => String::new(),
         Some(value) => coerce_description(value)?,
     };
+    // `anchor` uniqueness (`UniqueValidator`) runs after the field's own
+    // validation and before the write; on create every live row counts.
+    if let Some(Some(anchor)) = &write.anchor {
+        if anchor_taken(pool, anchor, None).await? {
+            return Err(Denial::Raw(
+                StatusCode::BAD_REQUEST,
+                DUPLICATE_ANCHOR_BODY.to_owned(),
+            ));
+        }
+    }
     // `archived_at`: writable DRF `DateTimeField` (`null=True`), so a
     // missing or explicit-null value stores NULL; strings parse through
     // the serializer grammar (after `description`, preserving the
@@ -1785,15 +1950,17 @@ async fn insert_view(
     let rich_filters_text =
         serde_json::to_string(&rich_filters).map_err(|_| Denial::ServerError)?;
     let logo_props_text = serde_json::to_string(&logo_props).map_err(|_| Denial::ServerError)?;
+    let access = write.access.unwrap_or(issue_view::DEFAULT_ACCESS);
+    let anchor: Option<&str> = write.anchor.as_ref().and_then(|opt| opt.as_deref());
     let result = sqlx::query(
         r#"INSERT INTO issue_views
            (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
             workspace_id, project_id, name, description, query, filters,
-            display_filters, display_properties, rich_filters, access, sort_order,
-            logo_props, owned_by_id, is_locked, archived_at)
+            display_filters, display_properties, rich_filters, access, anchor,
+            sort_order, logo_props, owned_by_id, is_locked, archived_at)
            VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8,
                    $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb,
-                   $14, $15, $16::jsonb, $17, FALSE, $18)"#,
+                   $14, $15, $16, $17::jsonb, $18, FALSE, $19)"#,
     )
     .bind(id)
     .bind(now)
@@ -1808,7 +1975,8 @@ async fn insert_view(
     .bind(&display_filters_text)
     .bind(&display_properties_text)
     .bind(&rich_filters_text)
-    .bind(issue_view::DEFAULT_ACCESS)
+    .bind(access)
+    .bind(anchor)
     .bind(sort_order)
     .bind(&logo_props_text)
     .bind(user_id)
@@ -1836,7 +2004,10 @@ async fn insert_view(
 /// Apply a full (PUT) or partial (PATCH) update to a locked row, then
 /// return the re-read body. `query` always recomputes through the PATCH
 /// mapping (B3); `updated_by` stamps the request user (`BaseModel.save` on
-/// an existing row). Read-only keys never reach the row.
+/// an existing row). `access` and `anchor` write when present (an explicit
+/// anchor `null` clears); read-only keys never reach the row. An anchor
+/// held only by a soft-deleted row fails at the write with the
+/// `IntegrityError` body, like Django (probed).
 async fn apply_view_update(
     pool: &sqlx::PgPool,
     id: &uuid::Uuid,
@@ -1886,6 +2057,30 @@ async fn apply_view_update(
         binds.push(text);
         sets.push(format!("description = ${}", binds.len() + 4));
     }
+    if let Some(access) = write.access {
+        // String bind like the rest, cast in SQL (Postgres assigns no
+        // `text` value to a `smallint` column uncast); the validated
+        // choice always casts.
+        binds.push(access.to_string());
+        sets.push(format!("access = ${}::smallint", binds.len() + 4));
+    }
+    // `anchor` uniqueness (`UniqueValidator`) runs after the field's own
+    // validation and before the write; the row's own token is excluded.
+    if let Some(anchor) = &write.anchor {
+        match anchor {
+            None => sets.push("anchor = NULL".to_owned()),
+            Some(text) => {
+                if anchor_taken(pool, text, Some(id)).await? {
+                    return Err(Denial::Raw(
+                        StatusCode::BAD_REQUEST,
+                        DUPLICATE_ANCHOR_BODY.to_owned(),
+                    ));
+                }
+                binds.push(text.clone());
+                sets.push(format!("anchor = ${}", binds.len() + 4));
+            }
+        }
+    }
     maybe_set!(write.filters, "filters");
     maybe_set!(write.display_filters, "display_filters");
     maybe_set!(write.display_properties, "display_properties");
@@ -1919,12 +2114,24 @@ async fn apply_view_update(
         query_builder = query_builder.bind(parsed);
     }
     // `select_for_update().get()` misses raise `DoesNotExist` before any
-    // write; the row is locked by this statement's own write lock.
-    let result = query_builder
-        .execute(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    if result.rows_affected() == 0 {
+    // write; the row is locked by this statement's own write lock. A
+    // unique violation here is an anchor held only by a soft-deleted row
+    // (live clashes fail at the pre-check): the `IntegrityError` 400.
+    let outcome = match query_builder.execute(pool).await {
+        Ok(done) => done,
+        Err(error) => {
+            if let sqlx::Error::Database(db_error) = &error {
+                if db_error.code().as_deref() == Some("23505") {
+                    return Err(Denial::Raw(
+                        StatusCode::BAD_REQUEST,
+                        INVALID_PAYLOAD_BODY.to_owned(),
+                    ));
+                }
+            }
+            return Err(Denial::ServerError);
+        }
+    };
+    if outcome.rows_affected() == 0 {
         return Err(Denial::NotFound);
     }
     let body = fetch_view_by_id(pool, id, timezone)
@@ -3758,5 +3965,190 @@ mod pidashconv_1447_tests {
             coerce_description(&Value::Null),
             Err(Denial::Raw(_, _))
         ));
+    }
+}
+
+#[cfg(test)]
+mod pidashconv_1682_tests {
+    use super::{split_write, validate_access, validate_anchor, Denial};
+    use serde_json::{Map, Value};
+
+    fn field(key: &str, value: Value) -> Map<String, Value> {
+        let mut body = Map::new();
+        body.insert(key.to_owned(), value);
+        body
+    }
+
+    fn access_body(result: Result<Option<i16>, Denial>) -> String {
+        match result {
+            Err(Denial::Raw(_, body)) => body,
+            other => panic!("expected a raw 400, got {other:?}"),
+        }
+    }
+
+    fn anchor_body(result: Result<Option<Option<String>>, Denial>) -> String {
+        match result {
+            Err(Denial::Raw(_, body)) => body,
+            other => panic!("expected a raw 400, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn access_accepts_choices_and_string_spellings() {
+        // Probed on live Django: the `0`/`1` integers and their string
+        // spellings store; an absent key stays absent.
+        assert_eq!(validate_access(&Map::new()).unwrap(), None);
+        assert_eq!(
+            validate_access(&field("access", Value::from(0))).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            validate_access(&field("access", Value::from(1))).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            validate_access(&field("access", Value::from("0"))).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            validate_access(&field("access", Value::from("1"))).unwrap(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn access_rejects_with_drf_bytes() {
+        // Every message below is the live-Django probe output, byte for
+        // byte: the input renders with Python `str()` inside quotes.
+        assert_eq!(
+            access_body(validate_access(&field("access", Value::from(7)))),
+            r#"{"access":["\"7\" is not a valid choice."]}"#
+        );
+        assert_eq!(
+            access_body(validate_access(&field("access", Value::Null))),
+            r#"{"access":["This field may not be null."]}"#
+        );
+        assert_eq!(
+            access_body(validate_access(&field("access", Value::Bool(true)))),
+            r#"{"access":["\"True\" is not a valid choice."]}"#
+        );
+        assert_eq!(
+            access_body(validate_access(&field("access", Value::from("abc")))),
+            r#"{"access":["\"abc\" is not a valid choice."]}"#
+        );
+        assert_eq!(
+            access_body(validate_access(&field("access", serde_json::json!(1.0)))),
+            r#"{"access":["\"1.0\" is not a valid choice."]}"#
+        );
+        assert_eq!(
+            access_body(validate_access(&field("access", serde_json::json!([0])))),
+            r#"{"access":["\"[0]\" is not a valid choice."]}"#
+        );
+        // Mappings render as compact JSON, not Python `repr` (Tier 3: no
+        // Pi Dash client sends a mapping here).
+        assert_eq!(
+            access_body(validate_access(&field(
+                "access",
+                serde_json::json!({"a": 1})
+            ))),
+            r#"{"access":["\"{\"a\":1}\" is not a valid choice."]}"#
+        );
+        // Integers past the u64 range keep their exact digits
+        // (`arbitrary_precision`), matching Python's unbounded `int`.
+        let huge: Value = serde_json::from_str("18446744073709551616").unwrap();
+        assert_eq!(
+            access_body(validate_access(&field("access", huge))),
+            r#"{"access":["\"18446744073709551616\" is not a valid choice."]}"#
+        );
+        // Exotic float spellings render as written, not as Python `str()`
+        // of the parsed value (`1.00` vs `1.0` — Tier 3: no Pi Dash
+        // client sends a float here).
+        let padded: Value = serde_json::from_str("1.00").unwrap();
+        assert_eq!(
+            access_body(validate_access(&field("access", padded))),
+            r#"{"access":["\"1.00\" is not a valid choice."]}"#
+        );
+    }
+
+    #[test]
+    fn anchor_trims_coerces_clears_and_rejects() {
+        // Same `CharField` pipeline as `name` (strip, blank, 255 chars on
+        // the stripped value, numbers via `str()`), plus an explicit
+        // `null` clear from `null=True` (all probed on live Django).
+        assert_eq!(validate_anchor(&Map::new()).unwrap(), None);
+        assert_eq!(
+            validate_anchor(&field("anchor", Value::Null)).unwrap(),
+            Some(None)
+        );
+        assert_eq!(
+            validate_anchor(&field("anchor", Value::from("view-anchor-1"))).unwrap(),
+            Some(Some("view-anchor-1".to_owned()))
+        );
+        assert_eq!(
+            validate_anchor(&field("anchor", Value::from("  padded  "))).unwrap(),
+            Some(Some("padded".to_owned()))
+        );
+        assert_eq!(
+            validate_anchor(&field("anchor", Value::from(123))).unwrap(),
+            Some(Some("123".to_owned()))
+        );
+        assert_eq!(
+            anchor_body(validate_anchor(&field("anchor", Value::from("")))),
+            r#"{"anchor":["This field may not be blank."]}"#
+        );
+        assert_eq!(
+            anchor_body(validate_anchor(&field("anchor", Value::from("   ")))),
+            r#"{"anchor":["This field may not be blank."]}"#
+        );
+        assert_eq!(
+            anchor_body(validate_anchor(&field(
+                "anchor",
+                Value::from("a".repeat(256))
+            ))),
+            r#"{"anchor":["Ensure this field has no more than 255 characters."]}"#
+        );
+        // `max_length` counts code points, like Python `len()`: 255
+        // two-byte chars are 510 bytes but valid.
+        assert_eq!(
+            validate_anchor(&field("anchor", Value::from("é".repeat(255)))).unwrap(),
+            Some(Some("é".repeat(255)))
+        );
+        assert_eq!(
+            anchor_body(validate_anchor(&field("anchor", Value::Bool(true)))),
+            r#"{"anchor":["Not a valid string."]}"#
+        );
+        assert_eq!(
+            anchor_body(validate_anchor(&field(
+                "anchor",
+                serde_json::json!({"a": 1})
+            ))),
+            r#"{"anchor":["Not a valid string."]}"#
+        );
+    }
+
+    #[test]
+    fn split_write_carries_access_and_anchor() {
+        // `access`/`anchor` land in the write; the remaining read-only
+        // keys are still accepted and ignored.
+        let mut body = Map::new();
+        body.insert("access".to_owned(), Value::from(0));
+        body.insert("anchor".to_owned(), Value::from("tok"));
+        body.insert("workspace".to_owned(), Value::from("ignored"));
+        body.insert("is_locked".to_owned(), Value::Bool(true));
+        let write = split_write(&body, true).unwrap();
+        assert_eq!(write.access, Some(0));
+        assert_eq!(write.anchor, Some(Some("tok".to_owned())));
+        // Validation errors surface from the split, `access` before
+        // `anchor` (wire order).
+        let mut bad = Map::new();
+        bad.insert("access".to_owned(), Value::from(7));
+        bad.insert("anchor".to_owned(), Value::from(""));
+        match split_write(&bad, true) {
+            Err(Denial::Raw(_, text)) => assert!(
+                text.contains("is not a valid choice"),
+                "unexpected body {text}"
+            ),
+            _ => panic!("expected the access 400"),
+        }
     }
 }

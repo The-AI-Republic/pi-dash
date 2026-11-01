@@ -17,10 +17,11 @@ from _harness.seed import issue_subscriber
 from .conftest import session_headers
 
 GLOBAL_VIEW_KEYS = {
-    "access", "archived_at", "created_at", "created_by", "deleted_at",
-    "description", "display_filters", "display_properties", "filters", "id",
-    "is_locked", "logo_props", "name", "owned_by", "project", "query",
-    "rich_filters", "sort_order", "updated_at", "updated_by", "workspace",
+    "access", "anchor", "archived_at", "created_at", "created_by",
+    "deleted_at", "description", "display_filters", "display_properties",
+    "filters", "id", "is_locked", "logo_props", "name", "owned_by",
+    "project", "query", "rich_filters", "sort_order", "updated_at",
+    "updated_by", "workspace",
 }
 
 VIEW_ISSUE_KEYS = {
