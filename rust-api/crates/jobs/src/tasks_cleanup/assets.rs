@@ -50,6 +50,7 @@ use pidash_services::tasks_cleanup::assets::{AssetIdPair, CopyEntity, HeadMeta};
 type HmacSha256 = Hmac<Sha256>;
 
 use crate::task_message::TaskMessage;
+use crate::tasks_mail::bs_normalize::normalize_bs;
 use crate::worker::{Handler, Registry, Verdict};
 
 /// `pi_dash.bgtasks.file_asset_task.delete_unuploaded_file_asset`
@@ -1046,7 +1047,16 @@ async fn run_copy_inner<S: AssetStore, O: ObjectStore, L: LiveConvert>(
         store.mark_uploaded(new_ids).await.ok()?;
     }
     // Unconditional: re-serialize, save, convert — even with zero pairs.
-    let updated_html = logic::replace_asset_ids(&row.description_html, DESCRIPTION_TAG, &pairs);
+    let rewritten = logic::replace_asset_ids(&row.description_html, DESCRIPTION_TAG, &pairs);
+    // The splice rewrites `src` values only, while Django returns
+    // `str(soup)` — the full re-serialization — so normalize here before
+    // the save and the convert (PIDASHCONV-1699). A rejected parse keeps
+    // the original HTML, mirroring the `except ...: return html` path
+    // (`copy_s3_object.py:50-52`).
+    let updated_html = match normalize_bs(&rewritten) {
+        Ok(normalized) => normalized.html,
+        Err(_) => row.description_html.clone(),
+    };
     store
         .save_description_html(entity, entity_id, &updated_html, now)
         .await
