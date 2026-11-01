@@ -1272,7 +1272,10 @@ pub fn orchestration_error_count() -> u64 {
 }
 
 /// Bump the counter; answers the new total for the log line.
-fn bump_orchestration_error_count() -> u64 {
+/// Cross-crate swallow sites that mirror the `Failed` arm (the seed
+/// drive's probe/re-run swallows) bump through this so every
+/// swallowed handler error counts once.
+pub fn bump_orchestration_error_count() -> u64 {
     ORCHESTRATION_ERROR_COUNT.fetch_add(1, Ordering::Relaxed) + 1
 }
 
