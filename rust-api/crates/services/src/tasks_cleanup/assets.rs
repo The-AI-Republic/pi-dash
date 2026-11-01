@@ -339,15 +339,17 @@ pub fn extract_asset_ids(html: &str, tag: &str) -> Vec<String> {
         .collect()
 }
 
-/// Port of `replace_asset_ids` (`copy_s3_object.py:42-52`): rewrite `src`
-/// wherever it equals a pair's old id, in pair order per tag (so chained
-/// pairs rewrite twice, exactly like the nested loop). Only the matched
-/// value bytes change, so on canonical editor HTML the result equals
-/// `str(soup)` byte for byte.
+/// Port of the `src` rewrite inside `replace_asset_ids`
+/// (`copy_s3_object.py:42-52`): rewrite `src` wherever it equals a pair's
+/// old id, in pair order per tag (so chained pairs rewrite twice, exactly
+/// like the nested loop). Only the matched value bytes change: unlike
+/// Django's `str(soup)` return, the rest of the document is NOT
+/// re-serialized here. The copy task applies the `str(soup)`
+/// normalization in the jobs layer before saving (PIDASHCONV-1699).
 pub fn replace_asset_ids(html: &str, tag: &str, pairs: &[AssetIdPair]) -> String {
     if pairs.is_empty() {
-        // No pair can match; still parse so behavior on broken input stays
-        // total. The output equals the input (nothing to rewrite).
+        // No pair can match: return the input unchanged. (Django still
+        // re-serializes here; the jobs layer normalizes after this call.)
         return html.to_string();
     }
     let hits = find_open_tags(html, tag);

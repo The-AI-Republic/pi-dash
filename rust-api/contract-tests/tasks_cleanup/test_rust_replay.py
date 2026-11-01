@@ -2807,3 +2807,185 @@ def test_rust_workspace_seed_agent_collision(db_conn):
             assert cur.fetchone()["n"] == 0, "no bounce comment may land"
     finally:
         restore()
+# --- PIDASHCONV-1699 replay: the copy task stores str(soup) ---
+#
+# Same seeds and byte-exact expectations as the oracle
+# (test_copy_task_reserializes_description_*), through ``rust_queue``.
+# Red while run_copy_inner saves the spliced input without normalizing.
+
+_RUST_COPY_RESERIALIZE_CASES = [
+    ("entities", "<p>a&nbsp;b &#39;q&#39;</p>", "<p>a\xa0b 'q'</p>"),
+    ("voids", "<p>x<br>y</p><hr>", "<p>x<br/>y</p><hr/>"),
+    (
+        "boolattr",
+        '<input type="checkbox" checked>',
+        '<input checked="" type="checkbox"/>',
+    ),
+]
+
+_RUST_COPY_RESERIALIZE_PAIRED_CASES = [
+    (
+        "entities",
+        '<p>a&nbsp;b &#39;q&#39;</p><image-component src="{src}"></image-component>',
+        '<p>a\xa0b \'q\'</p><image-component src="{src}"></image-component>',
+    ),
+    (
+        "voids",
+        '<p>x<br>y</p><hr><image-component src="{src}"></image-component>',
+        '<p>x<br/>y</p><hr/><image-component src="{src}"></image-component>',
+    ),
+    (
+        "boolattr",
+        '<input type="checkbox" checked><image-component src="{src}"></image-component>',
+        '<input checked="" type="checkbox"/><image-component src="{src}"></image-component>',
+    ),
+]
+
+
+def _rust_seed_copy_page(db_conn, tag: str, html: str) -> dict:
+    """Page with caller-chosen description_html for the copy task (no asset)."""
+    # Short prefix: the workspace slug is varchar(48) and the seeder wraps
+    # it as "contract" + slug + "-" + uuid8.
+    chain = seed_helpers.issue_chain(db_conn, f"r1699-{tag}")
+    page = insert_row(
+        db_conn,
+        "pages",
+        {
+            "workspace_id": str(chain["workspace"]["id"]),
+            "owned_by_id": str(chain["owner"]["id"]),
+            "name": f"r1699-{tag}",
+            "description_json": {},
+            "description_html": html,
+            "access": 0,
+            "color": "",
+            "is_locked": False,
+            "view_props": {},
+            "logo_props": {},
+            "is_global": False,
+            "sort_order": 65535,
+        },
+    )
+    return {
+        "page_id": str(page["id"]),
+        "project_id": str(chain["project"]["id"]),
+        "owner_id": str(chain["owner"]["id"]),
+        "slug": chain["workspace"]["slug"],
+        "seed_html": html,
+    }
+
+
+@pytest.mark.parametrize(
+    "name,seed,expected",
+    _RUST_COPY_RESERIALIZE_CASES,
+    ids=[c[0] for c in _RUST_COPY_RESERIALIZE_CASES],
+)
+def test_rust_copy_task_reserializes_description_without_pairs(
+    db_conn, name, seed, expected
+):
+    """Rust replay of test_copy_task_reserializes_description_without_pairs."""
+    tag = uuid.uuid4().hex[:8]
+    world = _rust_seed_copy_page(db_conn, f"zero-{name}-{tag}", seed)
+    rust_queue.publish(
+        _RUST_COPY_TASK,
+        kwargs={
+            "entity_name": "PAGE",
+            "entity_identifier": world["page_id"],
+            "project_id": world["project_id"],
+            "slug": world["slug"],
+            "user_id": world["owner_id"],
+        },
+    )
+    assert wait_for(
+        lambda: _rust_page_html(db_conn, world["page_id"]) != world["seed_html"],
+        what=f"rust copy task reserialized the {name} description",
+    )
+    assert _rust_page_html(db_conn, world["page_id"]) == expected
+
+
+@pytest.mark.parametrize(
+    "name,template,expected_template",
+    _RUST_COPY_RESERIALIZE_PAIRED_CASES,
+    ids=[c[0] for c in _RUST_COPY_RESERIALIZE_PAIRED_CASES],
+)
+def test_rust_copy_task_reserializes_description_with_pairs(
+    db_conn, name, template, expected_template
+):
+    """Rust replay of test_copy_task_reserializes_description_with_pairs."""
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"r1699-{name}-{tag}")
+    ws_id = str(chain["workspace"]["id"])
+    proj_id = str(chain["project"]["id"])
+    bucket = s3_helpers.contract_bucket()
+    s3_helpers.s3_setup_bucket(bucket)
+    body = b"1699-copy-probe-image"
+    src_key = f"{ws_id}/r1699-{name}-{tag}.png"
+    s3_helpers.s3_put_key(bucket, src_key, body)
+    assert s3_helpers.s3_key_exists(bucket, src_key)
+    asset = insert_row(
+        db_conn,
+        "file_assets",
+        {
+            "asset": src_key,
+            "attributes": {
+                "name": f"r1699-{name}-{tag}.png",
+                "type": "png",
+                "size": len(body),
+            },
+            "size": float(len(body)),
+            "workspace_id": ws_id,
+            "project_id": proj_id,
+            "created_by_id": str(chain["owner"]["id"]),
+            "entity_type": "PAGE_DESCRIPTION",
+            "is_uploaded": True,
+            "is_deleted": False,
+            "is_archived": False,
+            "storage_metadata": {},
+        },
+    )
+    source_id = str(asset["id"])
+    seed_html = template.format(src=source_id)
+    page = insert_row(
+        db_conn,
+        "pages",
+        {
+            "workspace_id": ws_id,
+            "owned_by_id": str(chain["owner"]["id"]),
+            "name": f"r1699-{name}-{tag}",
+            "description_json": {},
+            "description_html": seed_html,
+            "access": 0,
+            "color": "",
+            "is_locked": False,
+            "view_props": {},
+            "logo_props": {},
+            "is_global": False,
+            "sort_order": 65535,
+        },
+    )
+    page_id = str(page["id"])
+    rust_queue.publish(
+        _RUST_COPY_TASK,
+        kwargs={
+            "entity_name": "PAGE",
+            "entity_identifier": page_id,
+            "project_id": proj_id,
+            "slug": chain["workspace"]["slug"],
+            "user_id": str(chain["owner"]["id"]),
+        },
+    )
+    assert wait_for(
+        lambda: _rust_page_html(db_conn, page_id) != seed_html,
+        what=f"rust copy task rewrote the {name} page description",
+    )
+    stored = _rust_page_html(db_conn, page_id)
+    srcs = _rust_image_srcs(stored)
+    assert len(srcs) == 1, f"expected one image-component, got {srcs!r} in {stored!r}"
+    assert srcs[0] != source_id, "src still points at the source asset"
+    assert stored == expected_template.format(src=srcs[0])
+    row = _rust_asset_row(db_conn, srcs[0])
+    assert row is not None, f"src {srcs[0]} resolves to no file_assets row"
+    assert row["is_uploaded"] is True, f"duplicate {srcs[0]} never marked uploaded"
+    assert s3_helpers.s3_key_exists(bucket, row["asset"]), (
+        f"duplicate {srcs[0]} points at S3 key {row['asset']} with no object behind it"
+    )
+    assert s3_helpers.s3_key_exists(bucket, src_key)
