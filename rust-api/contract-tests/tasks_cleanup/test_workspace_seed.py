@@ -371,3 +371,44 @@ def test_workspace_seed_before_after(db_conn, broker_url):
             and "Agent run skipped" in (c["comment_html"] or "")
             for c in comments
         ), f"issue {issue['id']} must carry the bounce comment"
+
+
+# PIDASHCONV-1702: workspace names whose combining marks (Mn/Mc) and
+# symbols (So) `str.isalnum` drops. Goldens from the interpreter
+# (Python 3.12 / Unicode 15.0), proven by the Django leg of this suite;
+# the Rust replay pins the same stored identifiers.
+IDENTIFIER_UNICODE_CASES = [
+    ("สวัสดี", "สวสด"),
+    ("हिन्दी", "हनद"),
+    ("தமிழ்", "தமழ"),
+    ("ⒶBC", "BC"),
+]
+
+
+@pytest.mark.parametrize(
+    "ws_name,expected", IDENTIFIER_UNICODE_CASES, ids=[c[0] for c in IDENTIFIER_UNICODE_CASES]
+)
+def test_workspace_seed_identifier_unicode(db_conn, broker_url, ws_name, expected):
+    """Seed identifier keeps L*/N* only, then cuts to 5 (PIDASHCONV-1702)."""
+    tag = uuid.uuid4().hex[:8]
+    owner = seed_helpers.user(db_conn, f"contract-seed-ident-owner-{tag}")
+    workspace = seed_helpers.workspace(
+        db_conn,
+        f"contractseedident{tag}",
+        owner["id"],
+        name=ws_name,
+    )
+    seed_helpers.workspace_member(db_conn, workspace["id"], owner["id"], role=5)
+
+    celery_wire.publish(TASK, args=[str(workspace["id"])])
+
+    project = wait_for(
+        lambda: _one(
+            db_conn,
+            "projects",
+            "WHERE workspace_id = %s::uuid AND deleted_at IS NULL",
+            (str(workspace["id"]),),
+        ),
+        what="seed project created",
+    )
+    assert project["identifier"] == expected

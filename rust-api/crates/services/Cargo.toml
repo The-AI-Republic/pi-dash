@@ -111,6 +111,11 @@ ammonia = "4"
 # work-items handlers. Identical spec to pidash-api (locked
 # pulldown-cmark 0.13.4 — no lock churn).
 pulldown-cmark = "0.13.4"
+# PIDASHCONV-1702 seed identifier: `str.isalnum` as general categories
+# L*/N* (char::is_alphanumeric follows Alphabetic and admits Mn/Mc/So).
+# Same spec as pidash-api (locked unicode-general-category 1.1.0,
+# Unicode 16.0 data — no lock churn).
+unicode-general-category = "1"
 
 [dev-dependencies]
 # PIDASHCONV-1599 probe CA-bundle tests: the custom-CA TLS fake needs

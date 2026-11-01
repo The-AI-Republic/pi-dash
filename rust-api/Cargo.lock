@@ -3234,6 +3234,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "unicode-general-category",
  "uuid",
  "zxcvbn",
 ]

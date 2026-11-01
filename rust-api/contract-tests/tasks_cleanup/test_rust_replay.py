@@ -1893,6 +1893,48 @@ def test_rust_workspace_seed_before_after(db_conn):
         ), f"issue {issue['id']} must carry the bounce comment"
 
 
+# PIDASHCONV-1702: Rust replay of the oracle's IDENTIFIER_UNICODE_CASES —
+# same workspace names, same stored identifiers. Fails on the pre-fix
+# worker (marks/symbols kept) and passes once `project_identifier`
+# filters by general category L*/N*.
+@pytest.mark.parametrize(
+    "ws_name,expected",
+    [
+        ("สวัสดี", "สวสด"),
+        ("हिन्दी", "हनद"),
+        ("தமிழ்", "தமழ"),
+        ("ⒶBC", "BC"),
+    ],
+    ids=["สวัสดี", "हिन्दी", "தமிழ்", "ⒶBC"],
+)
+def test_rust_workspace_seed_identifier_unicode(db_conn, ws_name, expected):
+    """Seed identifier keeps L*/N* only, then cuts to 5 (PIDASHCONV-1702)."""
+    tag = uuid.uuid4().hex[:8]
+    owner = seed_helpers.user(db_conn, f"rust-replay-seed-ident-owner-{tag}")
+    workspace = seed_helpers.workspace(
+        db_conn,
+        f"rustreplayseedident{tag}",
+        owner["id"],
+        name=ws_name,
+    )
+    seed_helpers.workspace_member(db_conn, workspace["id"], owner["id"], role=5)
+
+    rust_queue.publish(
+        f"{M}.workspace_seed_task.workspace_seed", args=[str(workspace["id"])]
+    )
+
+    project = wait_for(
+        lambda: _seed_one(
+            db_conn,
+            "projects",
+            "WHERE workspace_id = %s::uuid AND deleted_at IS NULL",
+            (str(workspace["id"]),),
+        ),
+        what="seed project created",
+    )
+    assert project["identifier"] == expected
+
+
 
 def test_rust_dummy_data_before_after(db_conn):
     """PIDASHCONV-816: dummy-data task inserts full NOT NULL columns.
