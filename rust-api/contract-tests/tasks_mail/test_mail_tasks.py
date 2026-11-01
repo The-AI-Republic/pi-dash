@@ -830,3 +830,150 @@ def test_webhook_deactivation_mail_escapes_url(db_conn, broker_url, smtp_sink):
     assert DEACTIVATION_ESCAPE_SENTENCE in text_part, (
         f"text part misses the escaped sentence; head: {text_part[:400]!r}"
     )
+
+
+# PIDASHCONV-1692: one save renames the issue to a value with a stray `<`
+# and adds a comment mentioning B. Django (notification_task.py
+# comment_mentions loop) copies EVERY activity's new_value into the
+# mention EmailNotificationLog rows, so the plain-text rename value
+# reaches process_mention, which must normalize it — not truncate it
+# (3.12.10 html.parser keeps unterminated-`<` text; the 3.12.3 oracle
+# dropped it, PIDASHCONV-1693). The mail renders each mention new_value
+# through {{ actor_comment|safe }}. The replay mirror lives in
+# test_rust_replay.py. The DB issue row is deliberately NOT renamed: the
+# mail's issue-name block would otherwise also carry the value and the
+# pin below could pass on a truncated mention value.
+STRAY_LT_RENAME = "Fix x<y handling"
+STRAY_LT_RENDERED = "Fix x&lt;y handling"
+
+
+def _comment_1692_html(mentioned_id) -> str:
+    """Comment HTML mentioning one user (extract_comment_mentions shape)."""
+    return (
+        '<p>please review <mention-component entity_name="user_mention" '
+        f'entity_identifier="{mentioned_id}"></mention-component></p>'
+    )
+
+
+def _seed_1692_world(conn, slug):
+    """Issue chain + mentioned B (active member, mention pref on).
+
+    Zero IssueSubscriber rows: the subscriber loop is skipped and only
+    the comment_mentions branch writes.
+    """
+    chain = seed_helpers.issue_chain(conn, slug)
+    project, ws, issue = chain["project"], chain["workspace"], chain["issue"]
+    mentioned = seed_helpers.user(conn, "contract-notif1692-b")
+    seed_helpers.project_member(conn, project["id"], ws["id"], mentioned["id"])
+    seed_helpers.notification_preference(conn, mentioned["id"], mention=True)
+    return chain, mentioned
+
+
+def _rename_1692_activity(issue_id, actor_id):
+    """Rename activity (track_name shape: verb/field/comment/values)."""
+    return {
+        "id": str(uuid.uuid4()),
+        "verb": "updated",
+        "field": "name",
+        "actor_id": str(actor_id),
+        "new_value": STRAY_LT_RENAME,
+        "old_value": "Old name",
+        "comment": "updated the name to",
+        "created_at": seed_helpers.now_iso(),
+        "old_identifier": None,
+        "new_identifier": None,
+        "issue_detail": {"id": str(issue_id)},
+    }
+
+
+def _comment_1692_activity(issue_id, actor_id, mentioned_id):
+    """Created-comment activity (create_comment_activity shape).
+
+    Real created comments carry no old_value (None) and the comment id
+    as new_identifier/issue_comment.
+    """
+    comment_id = str(uuid.uuid4())
+    return {
+        "id": str(uuid.uuid4()),
+        "verb": "created",
+        "field": "comment",
+        "actor_id": str(actor_id),
+        "new_value": _comment_1692_html(mentioned_id),
+        "old_value": None,
+        "comment": "created a comment",
+        "created_at": seed_helpers.now_iso(),
+        "old_identifier": None,
+        "new_identifier": comment_id,
+        "issue_detail": {"id": str(issue_id)},
+        "issue_comment": comment_id,
+    }
+
+
+def _notifications_1692_args(chain, activities):
+    issue, project, owner = chain["issue"], chain["project"], chain["owner"]
+    plain = json.dumps({"description_html": "<p>plain</p>"})
+    return [
+        "issue.activity.created",
+        str(issue["id"]),
+        str(project["id"]),
+        str(owner["id"]),
+        [],
+        json.dumps(activities),
+        plain,
+        plain,
+    ]
+
+
+def _fetch_1692_mention_logs(conn, receiver_id, issue_id):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT data FROM email_notification_logs "
+            "WHERE receiver_id = %s AND entity_identifier = %s "
+            "ORDER BY created_at",
+            (str(receiver_id), str(issue_id)),
+        )
+        return [row["data"] for row in cur.fetchall()]
+
+
+def test_notifications_mention_mail_renders_stray_lt(
+    db_conn, broker_url, smtp_sink
+):
+    """Django: rename value with a stray `<` survives into the mention mail."""
+    chain, mentioned = _seed_1692_world(db_conn, "notif1692o")
+    issue = chain["issue"]
+    activities = [
+        _rename_1692_activity(issue["id"], chain["owner"]["id"]),
+        _comment_1692_activity(issue["id"], chain["owner"]["id"], mentioned["id"]),
+    ]
+    celery_wire.publish(
+        f"{M}.notification_task.notifications",
+        args=_notifications_1692_args(chain, activities),
+    )
+    def _both_rows():
+        rows = _fetch_1692_mention_logs(db_conn, mentioned["id"], issue["id"])
+        return rows if len(rows) == 2 else None
+
+    rows = wait_for(_both_rows, what="oracle mention email logs for notif1692o")
+    # The :503 copy: one mention row per activity in the save, each
+    # carrying that activity's own new_value under field="mention".
+    # Order-agnostic: the two bulk-created rows can tie on created_at.
+    assert [r["issue_activity"]["field"] for r in rows] == ["mention"] * 2
+    assert sorted(r["issue_activity"]["new_value"] for r in rows) == sorted(
+        [STRAY_LT_RENAME, activities[1]["new_value"]]
+    )
+
+    redis_cache.setex(str(issue["id"]), "http://localhost")
+    smtp_sink.clear()
+    celery_wire.publish(f"{M}.email_notification_task.stack_email_notification")
+    delivered = smtp_sink.wait_for_count(1, what="stray-lt mention mail")
+    matches = [m for m in delivered if mentioned["email"] in m["rcpt_tos"]]
+    assert matches, "stack sent no mail to the mentioned user"
+    html_part, text_part = _mail_parts(matches[0])
+    assert STRAY_LT_RENDERED in html_part, (
+        f"HTML part misses the escaped rename value; head: {html_part[:600]!r}"
+    )
+    assert f"@{mentioned['display_name']}" in html_part, (
+        "HTML part misses the rewritten mention; "
+        f"head: {html_part[:600]!r}"
+    )
+    assert f"@{mentioned['display_name']}" in text_part

@@ -883,3 +883,162 @@ def test_rust_deactivation_mail_escapes_url(smtp_sink, db_conn):
     assert DEACTIVATION_ESCAPE_SENTENCE in text_part, (
         f"text part misses the escaped sentence; head: {text_part[:400]!r}"
     )
+
+
+# PIDASHCONV-1692 replay: case-for-case mirror of the Django oracle's
+# test_notifications_mention_mail_renders_stray_lt (test_mail_tasks.py)
+# — same rename+comment-mention save, same :503 new_value copy into the
+# mention log rows, same escaped rename value in the delivered mail —
+# plus the local-execution pins (settle, no broker message,
+# processed_at/sent_at). The two suites together are the Django-vs-Rust
+# equivalence proof for the stray-`<` mention-mail fix.
+STRAY_LT_RENAME = "Fix x<y handling"
+STRAY_LT_RENDERED = "Fix x&lt;y handling"
+
+
+def _comment_1692_html(mentioned_id) -> str:
+    """Comment HTML mentioning one user (extract_comment_mentions shape)."""
+    return (
+        '<p>please review <mention-component entity_name="user_mention" '
+        f'entity_identifier="{mentioned_id}"></mention-component></p>'
+    )
+
+
+def _seed_1692_world(conn, slug, tag):
+    """Issue chain + mentioned B (active member, mention pref on).
+
+    Zero IssueSubscriber rows: the subscriber loop is skipped and only
+    the comment_mentions branch writes.
+    """
+    chain = seed_helpers.issue_chain(conn, slug)
+    project, ws = chain["project"], chain["workspace"]
+    mentioned = seed_helpers.user(conn, f"contract-notif1692-{tag}-b")
+    seed_helpers.project_member(conn, project["id"], ws["id"], mentioned["id"])
+    insert_row(
+        conn,
+        "user_notification_preferences",
+        {
+            "user_id": str(mentioned["id"]),
+            "property_change": True,
+            "state_change": True,
+            "comment": True,
+            "mention": True,
+            "issue_completed": True,
+        },
+    )
+    return chain, mentioned
+
+
+def _rename_1692_activity(issue_id, actor_id):
+    """Rename activity (track_name shape: verb/field/comment/values)."""
+    return {
+        "id": str(uuid.uuid4()),
+        "verb": "updated",
+        "field": "name",
+        "actor_id": str(actor_id),
+        "new_value": STRAY_LT_RENAME,
+        "old_value": "Old name",
+        "comment": "updated the name to",
+        "created_at": seed_helpers.now_iso(),
+        "old_identifier": None,
+        "new_identifier": None,
+        "issue_detail": {"id": str(issue_id)},
+    }
+
+
+def _comment_1692_activity(issue_id, actor_id, mentioned_id):
+    """Created-comment activity (create_comment_activity shape)."""
+    comment_id = str(uuid.uuid4())
+    return {
+        "id": str(uuid.uuid4()),
+        "verb": "created",
+        "field": "comment",
+        "actor_id": str(actor_id),
+        "new_value": _comment_1692_html(mentioned_id),
+        "old_value": None,
+        "comment": "created a comment",
+        "created_at": seed_helpers.now_iso(),
+        "old_identifier": None,
+        "new_identifier": comment_id,
+        "issue_detail": {"id": str(issue_id)},
+        "issue_comment": comment_id,
+    }
+
+
+def _notifications_1692_args(chain, activities):
+    issue, project, owner = chain["issue"], chain["project"], chain["owner"]
+    plain = json.dumps({"description_html": "<p>plain</p>"})
+    return [
+        "issue.activity.created",
+        str(issue["id"]),
+        str(project["id"]),
+        str(owner["id"]),
+        [],
+        json.dumps(activities),
+        plain,
+        plain,
+    ]
+
+
+def _fetch_1692_mention_logs(conn, receiver_id, issue_id):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id, data FROM email_notification_logs "
+            "WHERE receiver_id = %s AND entity_identifier = %s "
+            "ORDER BY created_at",
+            (str(receiver_id), str(issue_id)),
+        )
+        return cur.fetchall()
+
+
+def test_rust_notifications_mention_mail_renders_stray_lt(smtp_sink, db_conn):
+    """Rust: same save, same escaped rename value in the mention mail."""
+    tag = uuid.uuid4().hex[:8]
+    chain, mentioned = _seed_1692_world(db_conn, f"mail1692r{tag}", tag)
+    issue = chain["issue"]
+    activities = [
+        _rename_1692_activity(issue["id"], chain["owner"]["id"]),
+        _comment_1692_activity(
+            issue["id"], chain["owner"]["id"], mentioned["id"]
+        ),
+    ]
+    celery_id = rust_queue.publish(
+        NOTIFICATIONS,
+        args=_notifications_1692_args(chain, activities),
+        kwargs={},
+    )
+    rust_queue.wait_for_settled(
+        celery_id, what="1692 notifications executed"
+    )
+    rows = _fetch_1692_mention_logs(db_conn, mentioned["id"], issue["id"])
+    assert len(rows) == 2, f"expected 2 mention log rows, got {len(rows)}"
+    assert [r["data"]["issue_activity"]["field"] for r in rows] == [
+        "mention"
+    ] * 2
+    assert sorted(
+        r["data"]["issue_activity"]["new_value"] for r in rows
+    ) == sorted([STRAY_LT_RENAME, activities[1]["new_value"]])
+
+    _seed_base_api(str(issue["id"]))
+    smtp_sink.clear()
+    _publish_and_observe_local(STACK, {})
+    for row in rows:
+        assert _processed_at(db_conn, row["id"]) is not None, (
+            f"stack did not mark processed_at on {row['id']}"
+        )
+    delivered = smtp_sink.wait_for_count(1, what="rust stray-lt mention mail")
+    matches = [m for m in delivered if mentioned["email"] in m["rcpt_tos"]]
+    assert matches, "rust stack sent no mail to the mentioned user"
+    html_part, text_part = _mail_parts(matches[0])
+    assert STRAY_LT_RENDERED in html_part, (
+        f"HTML part misses the escaped rename value: {html_part[:600]!r}"
+    )
+    assert f"@{mentioned['display_name']}" in html_part, (
+        f"HTML part misses the rewritten mention: {html_part[:600]!r}"
+    )
+    assert f"@{mentioned['display_name']}" in text_part
+    rust_queue.wait_for_queue_drain(what="fanned-out mention send settled")
+    for row in rows:
+        assert _sent_at(db_conn, row["id"]) is not None, (
+            f"fanned-out send did not mark sent_at on {row['id']}"
+        )
