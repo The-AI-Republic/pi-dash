@@ -2698,12 +2698,29 @@ pub fn render_issue_intake(
     serde_json::Value::Object(map)
 }
 
+/// `get_is_epic` (`issue.py:1109-1112`): false when the row is untyped,
+/// without a query; otherwise the type row's flag. A missing row is
+/// Django's `DoesNotExist` → the generic 500 (unreachable — the FK
+/// holds). No soft-delete guard: `IssueType` rides the plain manager.
+async fn fetch_is_epic(pool: &PgPool, type_id: Option<Uuid>) -> Result<bool, Denial> {
+    let Some(id) = type_id else {
+        return Ok(false);
+    };
+    let row: Option<(bool,)> = sqlx::query_as("SELECT is_epic FROM issue_types WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.map(|flag| flag.0).ok_or(Denial::ServerError)
+}
+
 /// `IssueDetailSerializer` (`serializers/issue.py:1034-1070,1226+`):
-/// the 29 wire keys in declaration order. The seven annotation/
+/// the 31 wire keys in declaration order. The seven annotation/
 /// relation-backed keys the detail fetches never carry (`cycle_id`,
 /// `module_ids`, `sub_issues_count`, `attachment_count`, `link_count`,
 /// `is_subscribed`, `is_intake`) are absent, exactly like the live
-/// backend renders them.
+/// backend renders them. `type_id` (a model column) and `is_epic` (a
+/// `SerializerMethodField`) always render (NEWFRONT-984).
 #[allow(clippy::too_many_arguments)]
 pub async fn render_issue_detail(
     pool: &PgPool,
@@ -2736,7 +2753,8 @@ pub async fn render_issue_detail(
     };
     let status = render_agent_status(pool, issue, ticker_view).await?;
     let summary = blocker_summary(pool, &issue.id, &issue.workspace_id).await?;
-    let mut map = serde_json::Map::with_capacity(29);
+    let is_epic = fetch_is_epic(pool, issue.type_id).await?;
+    let mut map = serde_json::Map::with_capacity(31);
     map.insert(
         "id".to_owned(),
         serde_json::Value::String(issue.id.to_string()),
@@ -2777,6 +2795,8 @@ pub async fn render_issue_detail(
         serde_json::Value::String(issue.project_id.to_string()),
     );
     map.insert("parent_id".to_owned(), opt_uuid(&issue.parent_id));
+    map.insert("type_id".to_owned(), opt_uuid(&issue.type_id));
+    map.insert("is_epic".to_owned(), serde_json::Value::Bool(is_epic));
     map.insert(
         "assigned_pod_id".to_owned(),
         opt_uuid(&issue.assigned_pod_id),
