@@ -108,10 +108,12 @@ pub struct OriginalAsset {
 
 /// A duplicate row to insert. `entity_*` FKs start empty;
 /// [`NewAsset::with_entity_field`] applies the mapped one.
+/// `created_by_id` is always `None` at the call site: the worker `save()`
+/// blanks the constructor-passed requester (`db/models/base.py:23-33`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewAsset {
     pub id: Uuid,
-    pub created_by_id: Uuid,
+    pub created_by_id: Option<Uuid>,
     pub attributes: Value,
     pub asset_key: String,
     pub workspace_id: Uuid,
@@ -728,7 +730,9 @@ async fn run_copy_inner<S: AssetStore, O: ObjectStore, L: LiveConvert>(
 ) -> Option<()> {
     let entity = CopyEntity::for_name(&request.entity_name)?;
     let entity_id = Uuid::parse_str(&request.entity_identifier).ok()?;
-    let user_id = Uuid::parse_str(&request.user_id).ok()?;
+    // Still parsed: a bad `user_id` fails the task. It binds nowhere —
+    // the worker `save()` blanks `created_by` (PIDASHCONV-1698).
+    Uuid::parse_str(&request.user_id).ok()?;
     let project_id = request
         .project_id
         .as_deref()
@@ -759,7 +763,10 @@ async fn run_copy_inner<S: AssetStore, O: ObjectStore, L: LiveConvert>(
             logic::destination_key(&workspace_id_text, &new_uuid().simple().to_string(), &name);
         let duplicate = NewAsset {
             id: new_uuid(),
-            created_by_id: user_id,
+            // `create(created_by_id=user_id)` passes the requester to the
+            // constructor, but the worker `save()` blanks it before the
+            // INSERT (`db/models/base.py:23-33`), so the row stores NULL.
+            created_by_id: None,
             attributes: Value::Object(logic::duplicate_attributes(attributes)),
             asset_key: dst_key.clone(),
             workspace_id,
@@ -1269,6 +1276,8 @@ mod tests {
         html: String,
         json: Value,
         binary: Option<Vec<u8>>,
+        created_by: Option<Uuid>,
+        updated_by: Option<Uuid>,
     }
 
     #[derive(Debug, Default)]
@@ -1399,7 +1408,7 @@ mod tests {
                     deleted_at: None,
                     created_at: now,
                     updated_at: now,
-                    created_by: Some(asset.created_by_id),
+                    created_by: asset.created_by_id,
                     workspace_id: asset.workspace_id,
                     user_id: asset.user_id,
                     project_id: asset.project_id,
@@ -1437,6 +1446,10 @@ mod tests {
                 .get_mut(&(entity.table().to_string(), id))
                 .ok_or("missing entity")?;
             row.html = html.to_string();
+            // Mirrors `description_save_sql`: the full worker save NULLs
+            // both audit columns (PIDASHCONV-1698).
+            row.created_by = None;
+            row.updated_by = None;
             let _ = now;
             state.saves.push(format!("html:{id}"));
             Ok(())
@@ -1459,6 +1472,10 @@ mod tests {
             if description_binary.is_some() {
                 row.binary = description_binary;
             }
+            // Mirrors `description_docs_save_sql`: the full worker save
+            // NULLs both audit columns (PIDASHCONV-1698).
+            row.created_by = None;
+            row.updated_by = None;
             let _ = now;
             state.saves.push(format!("docs:{id}"));
             Ok(())
@@ -1765,6 +1782,8 @@ mod tests {
                 html: format!("<p>t</p><image-component src=\"{asset}\"></image-component>"),
                 json: json!({}),
                 binary: None,
+                created_by: Some(user),
+                updated_by: Some(user),
             },
         );
         store.state.lock().unwrap().assets.insert(
@@ -1855,7 +1874,10 @@ mod tests {
         assert_eq!(dup.1.entity_type.as_deref(), Some("ISSUE_ATTACHMENT"));
         assert_eq!(dup.1.size, 9.0);
         assert_eq!(dup.1.storage, Some(json!({"ETag": "e"})));
-        assert_eq!(dup.1.created_by, Some(user));
+        // The worker `save()` blanks the constructor-passed requester
+        // (`db/models/base.py:23-33`): the duplicate inserts NULL
+        // (PIDASHCONV-1698).
+        assert_eq!(dup.1.created_by, None);
         assert_eq!(dup.1.issue_id, Some(entity));
         // The copy scope pins workspace + project; every other FK stays null.
         assert_eq!(dup.1.workspace_id, ws);
@@ -1873,6 +1895,9 @@ mod tests {
         assert!(!ent.html.contains(&asset.to_string()));
         assert_eq!(ent.json, json!({"doc": true}));
         assert_eq!(ent.binary, Some(vec![1, 2, 3]));
+        // Both full saves NULL the audit columns (PIDASHCONV-1698).
+        assert_eq!(ent.created_by, None);
+        assert_eq!(ent.updated_by, None);
         assert!(state.saves.iter().any(|s| s.starts_with("html:")));
         assert!(state.saves.iter().any(|s| s.starts_with("docs:")));
         drop(state);
@@ -1999,6 +2024,11 @@ mod tests {
         let state = store.state.lock().unwrap();
         assert!(state.saves.iter().any(|s| s.starts_with("html:")));
         assert!(!state.saves.iter().any(|s| s.starts_with("docs:")));
+        // The first save alone already NULLs the audit columns
+        // (PIDASHCONV-1698).
+        let ent = &state.entities[&("issues".to_string(), entity)];
+        assert_eq!(ent.created_by, None);
+        assert_eq!(ent.updated_by, None);
     }
 
     #[tokio::test]
@@ -2181,7 +2211,7 @@ mod tests {
     fn new_asset_applies_every_mapped_column() {
         let base = NewAsset {
             id: Uuid::new_v4(),
-            created_by_id: Uuid::new_v4(),
+            created_by_id: None,
             attributes: json!({}),
             asset_key: "k".to_string(),
             workspace_id: Uuid::from_u128(1),
