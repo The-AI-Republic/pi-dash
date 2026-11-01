@@ -71,9 +71,10 @@ use sha2::{Digest, Sha256};
 use pidash_db::context::RequestContext;
 use pidash_db::runner_runs::pod::NewProject;
 use pidash_services::app_project::ser_project::next_work_item_sequence;
-use pidash_services::orchestration::creation::CreationError;
+use pidash_services::orchestration::creation::{CreationError, STATE_SELECT_SQL};
 use pidash_services::orchestration::entries::PreflightSeam;
 use pidash_services::tasks_cleanup::workspace_seed as logic;
+use pidash_types::orchestration::{is_ticking_state, StateRef};
 
 use crate::task_message::TaskMessage;
 use crate::worker::{Handler, Registry, Verdict};
@@ -411,10 +412,11 @@ pub trait SeedStore {
     /// (`fire_state_transition`, `orchestration/signals.py:74-107`)
     /// for one freshly seeded issue: the transition from `None` to
     /// the seeded state (ticker reconcile, then dispatch or a
-    /// preflight bounce). A handler failure is swallowed and logged
-    /// — the save stands; only a state-lookup storage failure
-    /// propagates (Django's `try` placement: `_lookup_state`
-    /// outside, the handler call inside).
+    /// preflight bounce). A handler failure — including a probe,
+    /// re-run or `resolve_*` failure — is swallowed and logged — the
+    /// save stands; only a state-lookup storage failure propagates
+    /// (Django's `try` placement: `_lookup_state` outside, the
+    /// handler call inside).
     fn drive_seed_transition(
         &self,
         issue_id: uuid::Uuid,
@@ -1870,55 +1872,114 @@ impl SeedStore for PgSeedStore {
         // the real bounce lands post-reconcile, exactly as in Python.
         let matcher = JobsMatcher::new(self.pool.clone());
         let triggered_by = AgentRunTrigger::StateTransition.value();
+        // The `service.py:226` gate: a seeded non-ticking state never
+        // reaches preflight in Python (`not-a-trigger-state` returns
+        // before it), so the probe is skipped for it — probing would
+        // bounce, and could raise (e.g. the reserved-username
+        // collision), where Django never looks. The read mirrors the
+        // seam's state lookup (no soft-delete scope, like
+        // `all_state_objects`); a lookup failure propagates like the
+        // driver's own state reads below.
+        let seeded_state: Option<(uuid::Uuid, String, String)> = sqlx::query_as(STATE_SELECT_SQL)
+            .bind(state_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Self::db_err)?;
+        let Some((_, seeded_name, seeded_group)) = seeded_state else {
+            return Err(format!(
+                "workspace_seed: seeded state {state_id} has no states row"
+            ));
+        };
+        let seeded_ref = StateRef {
+            group: &seeded_group,
+            name: &seeded_name,
+        };
+        let seed_ticking = is_ticking_state(Some(&seeded_ref));
         let mut tx = pidash_db::tx::Transaction::begin(&self.pool)
             .await
             .map_err(Self::db_err)?;
-        sqlx::query("SAVEPOINT seed_preflight_probe")
-            .execute(&mut **tx.inner())
-            .await
-            .map_err(Self::db_err)?;
-        let mut probe_store = LiveCreationStore::new(tx, &self.pool, make_deps());
-        // `resolve_pod_for_issue` reads issue + pods only (no
-        // ticker), and the fallback creator reads issue + project
-        // only, so probing pre-reconcile decides identically to
-        // Python's post-reconcile preflight. A missing creator or pod
-        // stubs false: the drive re-resolves both itself, and only
-        // consults the stub when it finds them (the appear-race) —
-        // the re-run then derives the true decision.
-        let probed_creator = resolve_fallback_creator(&mut probe_store, issue_id)
-            .await
-            .map_err(|error| error.to_string())?;
-        let probed_pod = resolve_pod_for_issue(&mut probe_store, issue_id)
-            .await
-            .map_err(|error| error.to_string())?;
-        let proceed = match (probed_creator, probed_pod) {
-            (Some(creator), Some(pod_id)) => {
-                let probe = preflight_eligibility_or_bounce(
-                    &mut probe_store,
-                    issue_id,
-                    Some(creator),
-                    pod_id,
-                    triggered_by,
-                    &matcher,
-                    now,
-                    0.0,
-                )
+        let (probed_creator, probed_pod, proceed) = if !seed_ticking {
+            // Non-ticking: no probe (see the gate above). The drive
+            // below still runs and answers `not-a-trigger-state`
+            // without consulting preflight, exactly as in Python.
+            (None, None, false)
+        } else {
+            sqlx::query("SAVEPOINT seed_preflight_probe")
+                .execute(&mut **tx.inner())
                 .await
-                .map_err(|error| error.to_string())?;
-                probe.proceed
+                .map_err(Self::db_err)?;
+            let mut probe_store = LiveCreationStore::new(tx, &self.pool, make_deps());
+            // `resolve_pod_for_issue` reads issue + pods only (no
+            // ticker), and the fallback creator reads issue + project
+            // only, so probing pre-reconcile decides identically to
+            // Python's post-reconcile preflight. A missing creator or pod
+            // stubs false: the drive re-resolves both itself, and only
+            // consults the stub when it finds them (the appear-race) —
+            // the re-run then derives the true decision.
+            //
+            // The probe and its reads are handler work (preflight), so a
+            // failure is swallowed like `Failed` (`signals.py:98`): the
+            // save stands and the seed continues — it must never abort
+            // the seed (PIDASHCONV-1701).
+            let probed: Result<(Option<uuid::Uuid>, Option<uuid::Uuid>, bool), String> = async {
+                let probed_creator = resolve_fallback_creator(&mut probe_store, issue_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let probed_pod = resolve_pod_for_issue(&mut probe_store, issue_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let proceed = match (probed_creator, probed_pod) {
+                    (Some(creator), Some(pod_id)) => {
+                        let probe = preflight_eligibility_or_bounce(
+                            &mut probe_store,
+                            issue_id,
+                            Some(creator),
+                            pod_id,
+                            triggered_by,
+                            &matcher,
+                            now,
+                            0.0,
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
+                        probe.proceed
+                    }
+                    _ => false,
+                };
+                Ok((probed_creator, probed_pod, proceed))
             }
-            _ => false,
+            .await;
+            // The probe's outboxes stay empty (the bounce dispatches,
+            // defers, and finalizes nothing), so only the tx is
+            // recovered; the savepoint rollback erases the probe's
+            // writes, and its log lines are dropped (the re-run emits
+            // the real bounce's lines once).
+            let (tx_back, _, _, _, _, _) = probe_store.into_parts();
+            tx = tx_back;
+            match probed {
+                Ok(triple) => {
+                    sqlx::query("ROLLBACK TO SAVEPOINT seed_preflight_probe")
+                        .execute(&mut **tx.inner())
+                        .await
+                        .map_err(Self::db_err)?;
+                    triple
+                }
+                Err(error) => {
+                    // The drive never ran, so there is nothing to keep:
+                    // roll the tx back (subsuming the savepoint), log,
+                    // and let the seed continue. The orchestration
+                    // error counter is not bumped — its bump is private
+                    // to services (PIDASHCONV-1704 will wire it).
+                    let _ = tx.rollback().await;
+                    tracing::error!(
+                        issue_id = %issue_id,
+                        %error,
+                        "workspace_seed: preflight probe failed; the save stands",
+                    );
+                    return Ok(());
+                }
+            }
         };
-        // The probe's outboxes stay empty (the bounce dispatches,
-        // defers, and finalizes nothing), so only the tx is
-        // recovered; the savepoint rollback erases the probe's
-        // writes, and its log lines are dropped (the re-run emits
-        // the real bounce's lines once).
-        let (mut tx, _, _, _, _, _) = probe_store.into_parts();
-        sqlx::query("ROLLBACK TO SAVEPOINT seed_preflight_probe")
-            .execute(&mut **tx.inner())
-            .await
-            .map_err(Self::db_err)?;
         let mut drive_store = LiveCreationStore::new(tx, &self.pool, make_deps());
         let mut stub = FixedPreflight {
             proceed,
@@ -1928,8 +1989,11 @@ impl SeedStore for PgSeedStore {
         let (tx, pool, cache, mut dispatches, mut deferred, mut terminal_effects) =
             drive_store.into_parts();
         // Only a state-*lookup* storage failure propagates (Python's
-        // `try` wraps the handler call alone, `signals.py:89-98`); a
-        // handler failure arrives as `Failed` and is swallowed below.
+        // `try` wraps the handler call alone, `signals.py:89-98`): the
+        // probe, the re-run and their `resolve_*` reads are handler
+        // work and swallowed like `Failed`, while a handler failure
+        // inside the drive arrives as `Failed` and is swallowed in
+        // the match below.
         let outcome = outcome.map_err(|error| error.to_string())?;
         // Only a consulted stub owes the re-run: early returns
         // (parked, queued, no creator/pod, race lost) consult
@@ -1942,46 +2006,71 @@ impl SeedStore for PgSeedStore {
             // Fresh reads first (closest to Python's read position),
             // the probed ids when the rows vanished mid-drive (as
             // Python's single read would have seen them).
+            //
+            // Like the probe, the re-run and its reads are handler
+            // work: a failure is swallowed like `Failed` (the save
+            // stands, the seed continues), never propagated
+            // (PIDASHCONV-1701).
             let mut bounce_store = LiveCreationStore::new(tx, &self.pool, make_deps());
-            let fresh_creator = resolve_fallback_creator(&mut bounce_store, issue_id)
-                .await
-                .map_err(|error| error.to_string())?;
-            let fresh_pod = resolve_pod_for_issue(&mut bounce_store, issue_id)
-                .await
-                .map_err(|error| error.to_string())?;
-            if let (Some(creator), Some(pod_id)) =
-                (fresh_creator.or(probed_creator), fresh_pod.or(probed_pod))
-            {
-                let rerun = preflight_eligibility_or_bounce(
-                    &mut bounce_store,
-                    issue_id,
-                    Some(creator),
-                    pod_id,
-                    triggered_by,
-                    &matcher,
-                    now,
-                    0.0,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-                for log in &rerun.logs {
-                    if log.level == "WARNING" {
-                        tracing::warn!(target: "pidash.preflight", "{}", log.message);
-                    } else {
-                        tracing::info!(target: "pidash.preflight", "{}", log.message);
+            let rerun_outcome: Result<(), String> = async {
+                let fresh_creator = resolve_fallback_creator(&mut bounce_store, issue_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let fresh_pod = resolve_pod_for_issue(&mut bounce_store, issue_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if let (Some(creator), Some(pod_id)) =
+                    (fresh_creator.or(probed_creator), fresh_pod.or(probed_pod))
+                {
+                    let rerun = preflight_eligibility_or_bounce(
+                        &mut bounce_store,
+                        issue_id,
+                        Some(creator),
+                        pod_id,
+                        triggered_by,
+                        &matcher,
+                        now,
+                        0.0,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                    for log in &rerun.logs {
+                        if log.level == "WARNING" {
+                            tracing::warn!(target: "pidash.preflight", "{}", log.message);
+                        } else {
+                            tracing::info!(target: "pidash.preflight", "{}", log.message);
+                        }
                     }
+                } else {
+                    tracing::warn!(
+                        target: "pidash.preflight",
+                        "seed drive: creator or pod vanished mid-drive for issue {issue_id}, skipping bounce",
+                    );
                 }
-            } else {
-                tracing::warn!(
-                    target: "pidash.preflight",
-                    "seed drive: creator or pod vanished mid-drive for issue {issue_id}, skipping bounce",
-                );
+                Ok(())
             }
+            .await;
             let (tx, _, _, redispatches, redeferred, reterminal) = bounce_store.into_parts();
-            dispatches.extend(redispatches);
-            deferred.extend(redeferred);
-            terminal_effects.extend(reterminal);
-            (tx, dispatches, deferred, terminal_effects)
+            match rerun_outcome {
+                Ok(()) => {
+                    dispatches.extend(redispatches);
+                    deferred.extend(redeferred);
+                    terminal_effects.extend(reterminal);
+                    (tx, dispatches, deferred, terminal_effects)
+                }
+                Err(error) => {
+                    // The drive's writes go with the bounce's: roll the
+                    // tx back, log, and let the seed continue. (Counter
+                    // note as at the probe swallow: PIDASHCONV-1704.)
+                    let _ = tx.rollback().await;
+                    tracing::error!(
+                        issue_id = %issue_id,
+                        %error,
+                        "workspace_seed: preflight re-run failed; the save stands",
+                    );
+                    return Ok(());
+                }
+            }
         } else {
             (tx, dispatches, deferred, terminal_effects)
         };
