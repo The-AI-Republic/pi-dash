@@ -529,7 +529,8 @@ fn disposition_filename(filename: &str) -> String {
 /// 4.2): outer `multipart/mixed`, the `text/plain` body first, then one
 /// part per attachment (`{mimetype}; charset="utf-8"`,
 /// `Content-Disposition: attachment`). Each part carries its own
-/// `MIME-Version: 1.0`; CTE is `7bit` for ASCII payloads, `8bit`
+/// `MIME-Version: 1.0`; CTE is `quoted-printable` when any line of the
+/// part exceeds 998 bytes, else `7bit` for ASCII payloads and `8bit`
 /// otherwise (raw UTF-8 either way — Django never base64s `str`
 /// attachments). Header order is Django's (`Content-Type`,
 /// `MIME-Version`, `Subject`, `From`, `To`, `Date`, `Message-ID`).
@@ -544,7 +545,18 @@ pub fn message_bytes_mixed(
     date: &str,
     msg_id: &str,
 ) -> Result<Vec<u8>, String> {
-    let cte = |body: &str| if body.is_ascii() { "7bit" } else { "8bit" };
+    // Same selection as `message_bytes`: `SafeMIMEText.set_payload`
+    // (`django/core/mail/message.py:168-175`) QP-encodes the body and
+    // every `str` attachment whose lines exceed 998 bytes alike.
+    let part = |body: &str| {
+        if body_needs_qp(body) {
+            ("quoted-printable", quoted_printable_encode(body))
+        } else if body.is_ascii() {
+            ("7bit", body.to_owned())
+        } else {
+            ("8bit", body.to_owned())
+        }
+    };
     let subject = subject_header(subject)?;
     let from = address_header("From", from)?;
     let to = address_header("To", to)?;
@@ -558,17 +570,18 @@ pub fn message_bytes_mixed(
          Message-ID: {msg_id}\r\n\
          \r\n"
     );
+    let (body_cte, encoded_body) = part(text_body);
     out.push_str(&format!(
         "--{boundary}\r\n\
          Content-Type: text/plain; charset=\"utf-8\"\r\n\
          MIME-Version: 1.0\r\n\
          Content-Transfer-Encoding: {body_cte}\r\n\
          \r\n\
-         {text_body}\r\n",
-        body_cte = cte(text_body),
+         {encoded_body}\r\n",
     ));
     for attachment in attachments {
         let mimetype = attachment_mimetype(&attachment.filename)?;
+        let (part_cte, encoded) = part(attachment.content);
         out.push_str(&format!(
             "--{boundary}\r\n\
              Content-Type: {mimetype}; charset=\"utf-8\"\r\n\
@@ -576,10 +589,8 @@ pub fn message_bytes_mixed(
              Content-Transfer-Encoding: {part_cte}\r\n\
              Content-Disposition: attachment; {disposition}\r\n\
              \r\n\
-             {content}\r\n",
-            part_cte = cte(attachment.content),
+             {encoded}\r\n",
             disposition = disposition_filename(&attachment.filename),
-            content = attachment.content,
         ));
     }
     out.push_str(&format!("--{boundary}--\r\n"));
@@ -2625,6 +2636,125 @@ mod tests {
             text.contains("Content-Transfer-Encoding: 8bit\r\nContent-Disposition: attachment;")
         );
         assert!(text.contains("\"café\"\r\n\r\n--b--\r\n"));
+    }
+
+    #[test]
+    fn mixed_long_attachment_line_is_quoted_printable() {
+        // PIDASHCONV-1691: Django's `SafeMIMEText.set_payload`
+        // (`django/core/mail/message.py:168-175`, Django 4.2.30) switches
+        // any part with a line over 998 bytes to quoted-printable — the
+        // body and every `str` attachment alike (`_create_mime_attachment`
+        // builds attachments as `SafeMIMEText`). The analytic CSV export
+        // (`send_export_email`, `analytic_plot_export.py:52-88`) attaches
+        // its CSV this way, so a segmented header over 998 bytes must go
+        // QP with no wire line over 76, exactly like `message_bytes`.
+        let labels: Vec<String> = (0..60).map(|i| format!("seg-label-{i:05}")).collect();
+        let mut header = String::from("\"X-Axis\",\"Issue Count\"");
+        for name in &labels {
+            header.push_str(&format!(",\"{name}\""));
+        }
+        assert_eq!(header.len(), 1102);
+        let mut row = String::from("\"Todo\",\"60\"");
+        for _ in 0..60 {
+            row.push_str(",\"1\"");
+        }
+        let csv = format!("{header}\r\n{row}\r\n");
+        let bytes = message_bytes_mixed(
+            "Team Pi Dash <team@airepublic.com>",
+            "contract@example.com",
+            "Your Export is ready",
+            "plain ascii body",
+            &[MailAttachment {
+                filename: "acme-analytics.csv".to_owned(),
+                content: &csv,
+            }],
+            "b",
+            "date",
+            "<id>",
+        )
+        .expect("builds");
+        let text = String::from_utf8(bytes).expect("utf-8");
+        assert!(text.contains(
+            "--b\r\nContent-Type: text/csv; charset=\"utf-8\"\r\nMIME-Version: 1.0\r\n\
+             Content-Transfer-Encoding: quoted-printable\r\n\
+             Content-Disposition: attachment; filename=\"acme-analytics.csv\"\r\n"
+        ));
+        // Short ASCII body still goes raw.
+        assert!(text.contains("Content-Transfer-Encoding: 7bit\r\n\r\nplain ascii body\r\n"));
+        // No wire line survives overlong (QP wraps payload at 76).
+        assert!(
+            text.split("\r\n").all(|line| line.len() <= 78),
+            "longest: {}",
+            text.split("\r\n").map(str::len).max().unwrap_or(0)
+        );
+        // First wrapped line, byte-exact against the Django 4.2.30 probe.
+        let payload = attachment_payload(&text, "b");
+        let first = payload.split("\r\n").next().expect("payload");
+        assert_eq!(
+            first,
+            "\"X-Axis\",\"Issue Count\",\"seg-label-00000\",\"seg-label-00001\",\"seg-label-00002="
+        );
+        // Round-trip: soft breaks unfold back to the original CSV
+        // (the part's terminating CRLF is framing, not content).
+        let payload = payload.strip_suffix("\r\n").unwrap_or(payload);
+        let mut unfolded = String::new();
+        for line in payload.split("\r\n") {
+            match line.strip_suffix('=') {
+                Some(chunk) => unfolded.push_str(chunk),
+                None => {
+                    unfolded.push_str(line);
+                    unfolded.push('\n');
+                }
+            }
+        }
+        assert_eq!(unfolded, csv.replace("\r\n", "\n"));
+    }
+
+    /// Payload bytes of the attachment part (between its blank line and
+    /// the closing boundary), CRLF-joined.
+    fn attachment_payload<'a>(text: &'a str, boundary: &str) -> &'a str {
+        let marker = "Content-Disposition: attachment;";
+        let start = text.find(marker).expect("attachment part");
+        let after_headers = text[start..]
+            .find("\r\n\r\n")
+            .map(|i| start + i + 4)
+            .expect("blank line");
+        let end_marker = format!("\r\n--{boundary}--");
+        let end = text[after_headers..]
+            .find(&end_marker)
+            .map(|i| after_headers + i)
+            .expect("closing boundary");
+        &text[after_headers..end]
+    }
+
+    #[test]
+    fn mixed_long_body_line_is_quoted_printable() {
+        // Same `SafeMIMEText` selection for the mixed text body: a
+        // 999-byte line flips to QP, 998 stays `7bit` (the probed
+        // `message_bytes` boundary, PIDASHCONV-1104).
+        for (len, cte) in [(998, "7bit"), (999, "quoted-printable")] {
+            let body = "q".repeat(len);
+            let bytes = message_bytes_mixed(
+                "f@x.io",
+                "t@x.io",
+                "s",
+                &body,
+                &[MailAttachment {
+                    filename: "s-analytics.csv".to_owned(),
+                    content: "\"a\"\r\n",
+                }],
+                "b",
+                "date",
+                "<id>",
+            )
+            .expect("builds");
+            let text = String::from_utf8(bytes).expect("utf-8");
+            let marker = format!(
+                "--b\r\nContent-Type: text/plain; charset=\"utf-8\"\r\nMIME-Version: 1.0\r\n\
+                 Content-Transfer-Encoding: {cte}\r\n"
+            );
+            assert!(text.contains(&marker), "len {len} -> {cte}");
+        }
     }
 
     #[test]
