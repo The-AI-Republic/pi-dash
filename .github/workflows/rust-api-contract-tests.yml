@@ -302,12 +302,16 @@ jobs:
         # (tasks_cleanup/test_mongo_write_error.py) needs a worker booted
         # with MONGO_DB_URL/MONGO_DB_DATABASE; this job's worker has no
         # Mongo, so it has its own mongo job (PIDASHCONV-1290).
+        # The S3 retry oracle (tasks_cleanup/test_s3_retry.py) needs a
+        # worker whose S3 endpoint is the test's scripted stub; this job's
+        # worker points at live S3, so it has its own s3retry job
+        # (PIDASHCONV-1697).
         # PIDASHCONV-1566 (stage-8 drift hold): assistant/test_turn_errors_drift.py
         # asserts behavior that exists only on origin/main (52df56b9e); this
         # job serves Django from the frozen checkout, so the file stays out
         # of the selection until the next main-sync merges main into
         # rust-dev, then is added next to assistant/test_turn_errors.py.
-        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' --ignore-glob='*/test_s3_stall.py' --ignore-glob='*/test_mongo_write_error.py' tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py assistant/test_update_issue_completion.py assistant/test_create_issue_transition.py assistant/test_dispatch_coding_run.py
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' --ignore-glob='*/test_s3_stall.py' --ignore-glob='*/test_mongo_write_error.py' --ignore-glob='*/test_s3_retry.py' tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py assistant/test_update_issue_completion.py assistant/test_create_issue_transition.py assistant/test_dispatch_coding_run.py
 
       - name: Upload service logs on failure
         if: failure()
