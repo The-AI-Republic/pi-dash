@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 use crate::task_message::TaskMessage;
 use crate::worker::{Handler, Registry, Verdict};
 
-use super::bs_normalize::{normalize_bs, NormalizedMention};
+use super::bs_normalize::{normalize_bs, NormalizedMention, RejectedMarkup};
 
 /// Value stored under every mail lock (`acquire_lock` passes the literal
 /// `"true"`; `email_notification_task.py:38`).
@@ -325,11 +325,13 @@ pub enum MentionLookupError {
     Db(String),
 }
 
-/// Every way `process_mention` can fail. Both variants propagate to the
-/// send task's outer `except`: `UserNotFound` is a `DoesNotExist` (silent
-/// release + return), `MissingEntityIdentifier` is a `KeyError`
-/// (`mention["entity_identifier"]`, `:135`) and takes the generic
-/// `log_exception` + release + return path.
+/// Every way `process_mention` can fail. All variants propagate to the
+/// send task's outer `except`: `UserNotFound` is a `DoesNotExist`
+/// (silent release + return); the rest take the generic path
+/// (`log_exception` + release + return). `MissingEntityIdentifier` is
+/// a `KeyError` (`mention["entity_identifier"]`, `:135`);
+/// `RejectedMarkup` is bs4's `ParserRejectedMarkup` from the
+/// `BeautifulSoup(…)` constructor (`:131`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MentionError {
     /// `<mention-component>` without an `entity_identifier` attribute
@@ -339,12 +341,24 @@ pub enum MentionError {
     /// `User.objects.get(pk)` raised `DoesNotExist` (`:136`).
     #[error("user {0} does not exist")]
     UserNotFound(String),
+    /// The markup makes `html.parser` raise `AssertionError` (bs4's
+    /// `ParserRejectedMarkup`, `:131`): `<![` + a non-letter or an
+    /// unknown marked-section name (PIDASHCONV-1696, probed).
+    #[error("html.parser rejected the mention markup")]
+    RejectedMarkup,
     /// A `new_value`/`old_value` slot is neither null, a string nor a
     /// string array. Python would iterate a dict's keys (or fail on a
     /// scalar); at the Celery JSON boundary only null/array-of-string
     /// occur, so anything else is rejected here instead of guessed.
     #[error("bad mention content shape")]
     BadShape,
+}
+
+/// Map a bs4-constructor rejection to the generic-path error.
+impl From<RejectedMarkup> for MentionError {
+    fn from(_: RejectedMarkup) -> Self {
+        MentionError::RejectedMarkup
+    }
 }
 
 /// Escape `&`, `<`, `>` exactly as BeautifulSoup serializes an inserted
@@ -365,7 +379,9 @@ fn escape_bs_text(name: &str) -> String {
 /// double-quoted — and `find_all` collects elements in document order.
 /// [`normalize_bs`](super::bs_normalize::normalize_bs) does both in one
 /// pass, so mention-lookalikes inside raw text, comments, PIs, CDATA
-/// sections or attribute values are never elements. Then, per element
+/// sections or attribute values are never elements. Rejected markup
+/// fails here exactly like the constructor raising
+/// ([`MentionError::RejectedMarkup`]). Then, per element
 /// in order (the Python loop, `:133-138`): a missing
 /// `entity_identifier` is `KeyError`
 /// ([`MentionError::MissingEntityIdentifier`]), each lookup is one
@@ -379,7 +395,7 @@ pub fn process_mention(
     html: &str,
     lookup: &dyn Fn(&str) -> Result<String, MentionLookupError>,
 ) -> Result<String, MentionError> {
-    let normalized = normalize_bs(html);
+    let normalized = normalize_bs(html)?;
     let mut names = Vec::with_capacity(normalized.mentions.len());
     for mention in &normalized.mentions {
         let entity_id = mention
@@ -1102,7 +1118,8 @@ pub enum SendError {
     #[error("user {0} does not exist")]
     UserNotFound(String),
     /// A non-`DoesNotExist` mention failure: missing
-    /// `entity_identifier` (`KeyError`, `:135`) or a bad content shape.
+    /// `entity_identifier` (`KeyError`, `:135`), rejected markup
+    /// (`ParserRejectedMarkup`, `:131`) or a bad content shape.
     #[error("mention error: {0}")]
     Mention(#[from] MentionError),
     /// A per-mention display-name lookup failed with a non-`DoesNotExist`
@@ -1185,7 +1202,7 @@ async fn rewrite_mention_slots(
 /// display name with a fresh call (no dedup — the N-query shape,
 /// repeats and nested inners included), splice.
 async fn rewrite_html(html: &str, mentions: &impl MentionSource) -> Result<String, SendError> {
-    let normalized = normalize_bs(html);
+    let normalized = normalize_bs(html).map_err(MentionError::from)?;
     let mut names = Vec::with_capacity(normalized.mentions.len());
     for span in &normalized.mentions {
         let entity_id = span
@@ -2176,6 +2193,42 @@ mod part2_tests {
     }
 
     #[test]
+    fn mention_rejected_markup_errors_before_lookup() {
+        // PIDASHCONV-1696 gap 1: bs4's ParserRejectedMarkup surfaces as
+        // the generic-path error (Django: the send task's `except
+        // Exception`), like the constructor raising before `find_all` —
+        // no lookup runs, even with a valid mention beside it.
+        let map = names(&[("u1", "Ada")]);
+        let calls = AtomicUsize::new(0);
+        let lookup = |id: &str| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            map.get(id)
+                .cloned()
+                .ok_or_else(|| MentionLookupError::NotFound(id.to_owned()))
+        };
+        assert_eq!(
+            process_mention("<p><![5]></p>", &lookup),
+            Err(MentionError::RejectedMarkup)
+        );
+        assert_eq!(
+            process_mention(
+                "<mention-component entity_identifier=\"u1\">x</mention-component><![foo bar]]>",
+                &lookup
+            ),
+            Err(MentionError::RejectedMarkup)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        // `process_html_content` propagates it too.
+        assert_eq!(
+            process_html_content(
+                Some(&serde_json::json!(["<p>ok</p>", "<![5]>"])),
+                &lookup_of(&map)
+            ),
+            Err(MentionError::RejectedMarkup)
+        );
+    }
+
+    #[test]
     fn mention_escapes_name_like_bs_serialization() {
         let map = names(&[("u1", "A&B<C>")]);
         assert_eq!(
@@ -2819,6 +2872,36 @@ mod part2_tests {
             plan_send_actors(data, &actors, &issue(), "http://b", &DbMentions).await,
             Err(SendError::MentionDb("store down".to_owned()))
         );
+    }
+
+    #[tokio::test]
+    async fn plan_maps_rejected_markup_to_logged_release() {
+        // PIDASHCONV-1696 gap 1: rejected markup in a mention slot
+        // reports `Mention(RejectedMarkup)` — the generic `except`
+        // (`run_send` takes `log_exception` + release + return), never
+        // the silent `UserNotFound`.
+        let mut data = Map::new();
+        data.insert(
+            "act-1".to_owned(),
+            serde_json::json!({
+                "mention": {
+                    "old_value": ["<p><![5]></p>"],
+                    "new_value": []
+                },
+                "activity_time": "2026-09-01 11:00:00"
+            }),
+        );
+        let mut actors = HashMap::new();
+        actors.insert("act-1".to_owned(), actor());
+        let mentions = MapMentions {
+            names: names(&[]),
+            calls: AtomicUsize::new(0),
+        };
+        assert_eq!(
+            plan_send_actors(data, &actors, &issue(), "http://b", &mentions).await,
+            Err(SendError::Mention(MentionError::RejectedMarkup))
+        );
+        assert_eq!(mentions.calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
