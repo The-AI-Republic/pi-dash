@@ -1,22 +1,40 @@
-//! `str(BeautifulSoup(html, "html.parser"))`, ported from CPython 3.12 /
+//! `str(BeautifulSoup(html, "html.parser"))`, ported from CPython 3.12.10 /
 //! bs4 4.12.3 (`email_notification_task.py:130-140` runs every mention
 //! content string through it, even with no `mention-component` in it).
 //!
-//! [`normalize_bs`] parses `html` exactly like `html.parser` (greedy
+//! 3.12.10 carries the classic `html.parser` (`commentclose` is
+//! `--\s*>`, `CDATA_CONTENT_ELEMENTS` is script/style only, incomplete
+//! markup at EOF becomes text). Later 3.12.x and current distro builds
+//! carry the HTML5 rewrite, which parses differently (PIDASHCONV-1693).
+//! The golden fixture records the recording interpreter in `_python` /
+//! `_bs4`, checked by the golden test below.
+//!
+//! [`normalize_bs`] parses `html` exactly like that parser (greedy
 //! no-backtrack entity refs in text, `html.unescape` in attributes, void
-//! elements, script/style/title/textarea/xmp/iframe/noembed/noframes/
-//! plaintext raw text, bogus comments, abrupt comment closes,
-//! whitespace-only collapsing outside `<pre>`/`<textarea>`) and
-//! serializes exactly like bs4 (entities decoded then minimally
-//! re-escaped, void elements as `<x/>`, attributes lowercased, sorted,
-//! double-quoted). Every rule is probe-verified; the full probe corpus
-//! plus a whole-table sweep pins the behavior in
+//! elements, script/style raw text, bogus comments, the EOF
+//! to-next-`>`/`<`/one-char data rule, whitespace-only collapsing
+//! outside `<pre>`/`<textarea>`) and serializes exactly like bs4
+//! (entities decoded then minimally re-escaped, void elements as `<x/>`,
+//! attributes lowercased, sorted, double-quoted). Every rule is
+//! probe-verified; the full probe corpus plus a whole-table sweep pins
+//! the behavior in
 //! `fixtures/tasks_mail/send/F-SEND.bs4_normalize.golden.json`.
 //!
 //! Mention spans are collected during the same pass (output coordinates),
 //! so `<mention-component>`-lookalikes inside raw text, comments, PIs,
 //! CDATA sections or attribute values are never elements — exactly like
 //! `soup.find_all("mention-component")`.
+//!
+//! Known unavoidable divergence: lone surrogates (`&#xD800;`-`&#xDFFF;`
+//! in text) stay surrogates in CPython's output but map to U+FFFD here —
+//! a Rust `String` cannot hold a surrogate. The golden records U+FFFD for
+//! those cases with this note as the justification.
+//!
+//! Known minor divergence: CPython's `re.I` close scan finds non-ASCII
+//! case variants (`</ſcript>`, U+017F) and keeps them as content, while
+//! this ASCII-only scan misses them and drops the tail instead
+//! (`<script>x</ſcript>TAIL` keeps `x</ſcript>` there, drops all here).
+//! Corpus-absent; ASCII closes and all recorded behavior are unaffected.
 
 use pidash_types::html_entities::{c1_remap, html_unescape, lookup_bare_entity};
 
@@ -99,34 +117,173 @@ fn is_void(name: &str) -> bool {
     )
 }
 
-/// Raw-text elements: no tags are parsed inside; closed only by the
-/// matching end tag (`plaintext` never closes — probed).
+/// Raw-text elements (`CDATA_CONTENT_ELEMENTS` on 3.12.10): no tags
+/// are parsed inside; content runs verbatim to the matching close and
+/// is dropped entirely when no close exists (probed).
 fn is_raw(name: &str) -> bool {
-    matches!(
-        name,
-        "script"
-            | "style"
-            | "title"
-            | "textarea"
-            | "xmp"
-            | "iframe"
-            | "noembed"
-            | "noframes"
-            | "plaintext"
+    matches!(name, "script" | "style")
+}
+
+/// Python `re` `\s` for `str` patterns (probed on 3.12.10): ASCII
+/// whitespace plus `\x0b`, `\x1c`-`\x1f`, and Unicode White_Space
+/// (`\x85`, `\xa0`, `\u1680`, `\u2000`-`\u200a`, `\u2028`-`\u2029`,
+/// `\u202f`, `\u205f`, `\u3000`). Rust `char::is_whitespace` lacks
+/// only `\x1c`-`\x1f`; `\u180e` and `\ufeff` are excluded on both.
+fn is_py_space(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
+}
+
+/// Byte length of the Python-space char at `bytes[k]` (0 when the byte
+/// at `k` starts no space; callers only pass char boundaries).
+fn py_space_len(bytes: &[u8], k: usize) -> usize {
+    let b = bytes[k];
+    if b < 0x80 {
+        return usize::from(matches!(
+            b,
+            b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c | 0x1c | 0x1d | 0x1e | 0x1f
+        ));
+    }
+    let s = std::str::from_utf8(&bytes[k..]).unwrap_or("");
+    match s.chars().next() {
+        Some(c) if c.is_whitespace() => c.len_utf8(),
+        _ => 0,
+    }
+}
+
+/// Skip Python spaces from `k` (`\s*`).
+fn skip_py_spaces(bytes: &[u8], mut k: usize) -> usize {
+    while k < bytes.len() {
+        let n = py_space_len(bytes, k);
+        if n == 0 {
+            break;
+        }
+        k += n;
+    }
+    k
+}
+
+/// Skip one `(?:\s|/(?!>))*` run from `k` (callers pass a char
+/// boundary; the result is one too).
+fn skip_tag_sep(bytes: &[u8], mut k: usize) -> usize {
+    while k < bytes.len() {
+        let n = py_space_len(bytes, k);
+        if n > 0 {
+            k += n;
+            continue;
+        }
+        if bytes[k] == b'/' && !(k + 1 < bytes.len() && bytes[k + 1] == b'>') {
+            k += 1;
+            continue;
+        }
+        break;
+    }
+    k
+}
+
+/// Scan a bare attr value (`[^>\s]*`) from `v` (a boundary).
+fn skip_bare_value(bytes: &[u8], mut v: usize) -> usize {
+    while v < bytes.len() {
+        let b = bytes[v];
+        if b == b'>' {
+            break;
+        }
+        if b < 0x80 {
+            if py_space_len(bytes, v) > 0 {
+                break;
+            }
+            v += 1;
+        } else {
+            match std::str::from_utf8(&bytes[v..])
+                .unwrap_or("")
+                .chars()
+                .next()
+            {
+                Some(c) if !c.is_whitespace() => {
+                    v += c.len_utf8();
+                }
+                _ => break,
+            }
+        }
+    }
+    v
+}
+
+/// The optional `=value` group after an attr name ending at `m`:
+/// `(value, w)`. A present `=` almost always wins (probed):
+/// quoted values scan unbounded for their closer; when none exists
+/// the post-`=` spaces backtrack to an empty bare value (`a= "y`
+/// keeps `a=""` and `"y` becomes the next attr); else one `=`
+/// joins a bare value (`a==="y` keeps `="y`); only a single `=`
+/// with no spaces drops the group. `None` (with `w = m`) means no
+/// `=` followed, or that dropped single-`=` shape.
+fn scan_attr_value(bytes: &[u8], m: usize) -> (Option<String>, usize) {
+    let len = bytes.len();
+    let mut v = skip_py_spaces(bytes, m);
+    if v >= len || bytes[v] != b'=' {
+        return (None, m);
+    }
+    let eq = v;
+    v += 1;
+    while v < len && bytes[v] == b'=' {
+        v += 1;
+    }
+    let val_start = skip_py_spaces(bytes, v);
+    let post_spaces = val_start - v;
+    v = val_start;
+    if v < len && (bytes[v] == b'"' || bytes[v] == b'\'') {
+        let q = bytes[v];
+        let mut n = v + 1;
+        while n < len && bytes[n] != q {
+            n += 1;
+        }
+        if n < len {
+            return (
+                Some(html_unescape(
+                    std::str::from_utf8(&bytes[v + 1..n]).unwrap_or(""),
+                )),
+                n + 1,
+            );
+        }
+        if post_spaces > 0 {
+            return (Some(String::new()), v);
+        }
+        if v - eq > 1 {
+            // One `=` rejoins as a bare value (`a==="y`).
+            let n = skip_bare_value(bytes, v - 1);
+            return (
+                Some(html_unescape(
+                    std::str::from_utf8(&bytes[v - 1..n]).unwrap_or(""),
+                )),
+                n,
+            );
+        }
+        return (None, m);
+    }
+    let n = skip_bare_value(bytes, v);
+    (
+        Some(html_unescape(
+            std::str::from_utf8(&bytes[v..n]).unwrap_or(""),
+        )),
+        n,
     )
 }
 
-/// RCDATA elements: entities decoded, tags-as-text (probed).
-fn is_rcdata(name: &str) -> bool {
-    matches!(name, "title" | "textarea")
-}
-
-/// Verbatim raw elements (script/style): content emitted byte-for-byte.
-/// All other raw elements escape `&`, `<`, `>` on output (xmp, iframe,
-/// noembed, noframes and plaintext escape without decoding; title and
-/// textarea decode then escape — probed).
-fn is_verbatim_raw(name: &str) -> bool {
-    matches!(name, "script" | "style")
+/// Char ending at byte `k` (`0 < k <= len`, boundary) for the
+/// attrfind lookbehind.
+fn char_before(bytes: &[u8], k: usize) -> char {
+    debug_assert!(k > 0 && k <= bytes.len());
+    if bytes[k - 1] < 0x80 {
+        return bytes[k - 1] as char;
+    }
+    let mut s = k - 1;
+    while s > 0 && bytes[s] & 0xC0 == 0x80 {
+        s -= 1;
+    }
+    std::str::from_utf8(&bytes[s..k])
+        .unwrap_or("")
+        .chars()
+        .next()
+        .unwrap_or('\u{fffd}')
 }
 
 /// Whitespace-preserving elements: the ws-collapse never applies inside
@@ -172,8 +329,9 @@ fn collapse_ws(chunk: &str) -> &str {
     }
 }
 
-/// Parsed attributes: `(attrs, end, selfclose)`.
-type ParsedAttrs = (Vec<(String, String)>, usize, bool);
+/// Whether a `parse_*` consumed a construct (classic `goahead`: a
+/// -1 with `end` set falls back to the data slice below).
+use MarkupFlow::{Consumed, Incomplete};
 
 /// One open element on the builder stack.
 struct OpenElement {
@@ -202,8 +360,26 @@ struct Parser<'a> {
     /// detonates (remainder raw to EOF). A regex match always decodes
     /// and never consults this. Global to the input — tags and valid
     /// refs never reset it. Attributes never consult it
-    /// (`html.unescape` is stateless).
+    /// (`html.unescape` is stateless). Mechanically this is bs4's
+    /// feed-then-close split: the first bad ref is consumed by `feed`
+    /// and parsing resumes in `close`, while the second breaks `close`
+    /// and flushes the rest as data.
     charref_armed: bool,
+    /// A markup construct already hit the EOF data rule. Classic
+    /// `feed` stops at the first incomplete construct, so an invalid
+    /// `&#` after one is processed by `close` and detonates at once
+    /// (probed) instead of arming.
+    saw_markup_break: bool,
+}
+
+/// What a markup parse decided (classic `goahead` dispatch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarkupFlow {
+    /// A construct was consumed (`self.pos` advanced past it).
+    Consumed,
+    /// No complete construct (`parse_*` returned -1): the caller emits
+    /// the EOF data slice. Nothing was flushed or advanced.
+    Incomplete,
 }
 
 impl<'a> Parser<'a> {
@@ -217,6 +393,7 @@ impl<'a> Parser<'a> {
             pre_depth: 0,
             mentions: Vec::new(),
             charref_armed: false,
+            saw_markup_break: false,
         }
     }
 
@@ -232,6 +409,15 @@ impl<'a> Parser<'a> {
     /// recorded char boundaries, so this cannot fail).
     fn slice(&self, from: usize, to: usize) -> &'a str {
         std::str::from_utf8(&self.bytes[from..to]).unwrap_or("")
+    }
+
+    /// Char starting at byte `k` (`None` at EOF; callers pass char
+    /// boundaries).
+    fn char_at(&self, k: usize) -> Option<char> {
+        if k >= self.bytes.len() {
+            return None;
+        }
+        self.slice(k, self.bytes.len()).chars().next()
     }
 
     fn run(&mut self) {
@@ -434,14 +620,15 @@ impl<'a> Parser<'a> {
     /// `&#` that fails the `charref` match (not followed by digits,
     /// or digits with a hex-letter terminator): the classic break
     /// when no `;` appears anywhere later (remainder raw to EOF);
-    /// otherwise arm when fresh, detonate when armed, then literal
+    /// otherwise arm when fresh, detonate when armed (or after a
+    /// markup break, which already spent `feed`'s pass), then literal
     /// `&` (probed).
     fn hash_break(&mut self) -> EntityFlow {
         if !self.bytes[self.pos + 1..].contains(&b';') {
             self.raw_rest();
             return EntityFlow::Break;
         }
-        if self.charref_armed {
+        if self.charref_armed || self.saw_markup_break {
             self.raw_rest();
             return EntityFlow::Break;
         }
@@ -492,96 +679,112 @@ fn quote_attr(value: &str, out: &mut String) {
 
 impl<'a> Parser<'a> {
     /// Parse markup at `self.pos` (which is `<`). Returns whether a
-    /// markup construct was consumed (`false` = literal `<` text).
+    /// markup construct was consumed (`false` = literal `<` text,
+    /// merged into the pending chunk by the caller).
     fn parse_markup(&mut self) -> bool {
         let len = self.bytes.len();
         if self.pos + 1 >= len {
             return false;
         }
-        let next = self.bytes[self.pos + 1];
-        if is_name_start(next) {
-            self.flush_text();
-            self.parse_open_tag();
-            return true;
+        let start = self.pos;
+        let next = self.bytes[start + 1];
+        let flow = if is_name_start(next) {
+            self.parse_open_tag(start)
+        } else if next == b'/' {
+            self.parse_end_tag(start)
+        } else if self.starts_with(b"<!--") {
+            self.parse_comment(start)
+        } else if next == b'?' {
+            self.parse_pi(start)
+        } else if next == b'!' {
+            self.parse_declaration(start)
+        } else {
+            return false;
+        };
+        if flow == Incomplete {
+            self.eof_data(start);
         }
-        if self.starts_with(b"<!--") {
-            self.flush_text();
-            self.parse_comment();
-            return true;
-        }
-        if self.starts_with(b"<![CDATA[") {
-            self.flush_text();
-            self.parse_cdata();
-            return true;
-        }
-        if self.is_doctype() {
-            self.flush_text();
-            self.parse_doctype();
-            return true;
-        }
-        if next == b'!' {
-            self.flush_text();
-            self.parse_bogus(self.pos + 2);
-            return true;
-        }
-        if next == b'/' {
-            if self.pos + 2 < len && is_name_start(self.bytes[self.pos + 2]) {
-                self.flush_text();
-                self.parse_end_tag();
-                return true;
-            }
-            if self.starts_with(b"</>") {
-                // Dropped silently (probed) — not even a chunk split.
-                self.pos += 3;
-                return true;
-            }
-            if self.pos + 2 >= len {
-                return false;
-            }
-            self.flush_text();
-            self.parse_bogus(self.pos + 2);
-            return true;
-        }
-        if next == b'?' {
-            self.flush_text();
-            self.parse_pi();
-            return true;
-        }
-        false
+        true
+    }
+
+    /// Classic `goahead` with `end` set and a -1: data runs to the
+    /// next `>` past the `<`, else to the next `<`, else one char
+    /// (probed). The slice merges into the pending chunk — bs4 sees
+    /// one data run, so no flush happens here.
+    fn eof_data(&mut self, start: usize) {
+        let after = start + 1;
+        let rest = &self.bytes[after..];
+        let k = rest
+            .iter()
+            .position(|&b| b == b'>')
+            .map(|p| after + p + 1)
+            .or_else(|| rest.iter().position(|&b| b == b'<').map(|p| after + p))
+            .unwrap_or(after);
+        self.pending.push_str(self.slice(start, k));
+        self.pos = k;
+        self.saw_markup_break = true;
     }
 
     /// `<!` followed by the 7-letter `doctype` word (case-insensitive,
     /// no word boundary — probed: `<!doctypeX>` is a doctype).
-    fn is_doctype(&self) -> bool {
-        self.rest().len() >= 9 && self.rest()[2..9].eq_ignore_ascii_case(b"doctype")
+    fn is_doctype_at(&self, start: usize) -> bool {
+        self.bytes.len() >= start + 9
+            && self.bytes[start..start + 9].eq_ignore_ascii_case(b"<!doctype")
     }
 
-    /// Parse an open tag at `self.pos`. An incomplete tag (no `>`,
-    /// unterminated quote) drops the whole remainder (probed).
-    fn parse_open_tag(&mut self) {
+    /// Parse an open tag at `start` (`<` + letter). An incomplete
+    /// tag reports [`Incomplete`][] (the caller applies the EOF data
+    /// rule); when the attrs do not consume to `>`/`/>` the tag span
+    /// itself becomes data (probed).
+    fn parse_open_tag(&mut self, start: usize) -> MarkupFlow {
         let len = self.bytes.len();
-        let mut j = self.pos + 2;
-        // `tagfind_tolerant` group 1: NUL is a name char (probed).
+        // `tagfind_tolerant` group 1: ASCII letter, then anything but
+        // HTML space, `/`, `>` or NUL (`\x0b` and multibyte included).
+        let mut j = start + 2;
         while j < len
             && !matches!(
                 self.bytes[j],
-                b'\t' | b'\n' | 0x0c | b'\r' | b' ' | b'/' | b'>'
+                b'\t' | b'\n' | 0x0c | b'\r' | b' ' | b'/' | b'>' | 0x00
             )
         {
             j += 1;
         }
         // Tag names lowercase with Unicode `lower` (Python `str.lower`).
-        let name = self.slice(self.pos + 1, j).to_lowercase();
-        let Some((attrs, end, selfclose)) = self.parse_attrs(j) else {
-            self.pos = len;
-            return;
+        let name = self.slice(start + 1, j).to_lowercase();
+        let Some(endpos) = self.check_for_whole_start_tag(start, j) else {
+            return Incomplete;
         };
-        self.pos = end;
-        let start = self.out.len();
+        let mut k = skip_tag_sep(self.bytes, j);
+        let mut attrs = Vec::new();
+        while k < endpos {
+            let Some(((attr_name, attr_value), next)) = self.scan_attr(k) else {
+                break;
+            };
+            attrs.push((attr_name, attr_value));
+            k = next;
+        }
+        // `end = rawdata[k:endpos].strip()` (empty when the attr scan
+        // ran past the tag end — slicing clamps).
+        let end = if k > endpos {
+            ""
+        } else {
+            self.slice(k, endpos).trim_matches(is_py_space)
+        };
+        if end != ">" && end != "/>" {
+            // Attrs did not consume the tag: the source span becomes
+            // data (no markup break — `feed` never stopped here).
+            self.pending.push_str(self.slice(start, endpos));
+            self.pos = endpos;
+            return Consumed;
+        }
+        self.flush_text();
+        self.pos = endpos;
+        let start_out = self.out.len();
         self.out.push('<');
         self.out.push_str(&name);
         emit_attrs(&attrs, &mut self.out);
-        if selfclose {
+        if end == "/>" {
+            // XHTML-style empty tag: start immediately followed by end.
             if is_void(&name) {
                 self.out.push_str("/>");
             } else {
@@ -590,18 +793,18 @@ impl<'a> Parser<'a> {
                 self.out.push_str(&name);
                 self.out.push('>');
                 if name == "mention-component" {
-                    self.record_mention(start, self.out.len(), &attrs);
+                    self.record_mention(start_out, self.out.len(), &attrs);
                 }
             }
-            return;
+            return Consumed;
         }
         if is_void(&name) {
             self.out.push_str("/>");
-            return;
+            return Consumed;
         }
         self.out.push('>');
         let mention = if name == "mention-component" {
-            Some(self.claim_mention(start, &attrs))
+            Some(self.claim_mention(start_out, &attrs))
         } else {
             None
         };
@@ -613,124 +816,183 @@ impl<'a> Parser<'a> {
             pre,
         });
         if is_raw(&name) {
-            self.parse_raw(&name);
+            self.parse_rawtext(&name);
+        }
+        Consumed
+    }
+
+    /// `check_for_whole_start_tag`: the `locatestarttagend_tolerant`
+    /// scan from the tag name end. Returns the byte past `>`/`/>`, or
+    /// `None` when the tag is incomplete (buffer boundary, or a name
+    /// char where the end was expected — probed). Shape: one `[\s/]*`
+    /// run, then attr iterations (separator backtracking needs no
+    /// emulation: attr-start chars and separators are disjoint, so
+    /// greedy skips are deterministic).
+    fn check_for_whole_start_tag(&self, start: usize, mut k: usize) -> Option<usize> {
+        let len = self.bytes.len();
+        // `[\s/]*` once, before the attribute iterations.
+        while k < len {
+            let n = py_space_len(self.bytes, k);
+            if n > 0 {
+                k += n;
+                continue;
+            }
+            if self.bytes[k] == b'/' {
+                k += 1;
+                continue;
+            }
+            break;
+        }
+        // Attribute iterations (each requires a name).
+        while let Some(first) = self.char_at(k) {
+            let prev = char_before(self.bytes, k);
+            if !(prev == '"' || prev == '\'' || prev == '/' || is_py_space(prev))
+                || is_py_space(first)
+                || first == '/'
+                || first == '>'
+            {
+                break;
+            }
+            let mut m = k + first.len_utf8();
+            while m < len {
+                match self.char_at(m) {
+                    Some(c) if !is_py_space(c) && !matches!(c, '/' | '=' | '>') => {
+                        m += c.len_utf8();
+                    }
+                    _ => break,
+                }
+            }
+            let (_, w) = scan_attr_value(self.bytes, m);
+            k = skip_tag_sep(self.bytes, w);
+        }
+        let k = skip_py_spaces(self.bytes, k);
+        if k >= len {
+            return None;
+        }
+        let nb = self.bytes[k];
+        if nb == b'>' {
+            return Some(k + 1);
+        }
+        if nb == b'/' {
+            if self.bytes[k..].starts_with(b"/>") {
+                return Some(k + 2);
+            }
+            // A `/` that is not `/>` here never completes (buffer
+            // boundary in CPython terms).
+            return None;
+        }
+        if nb.is_ascii_alphabetic() || nb == b'=' || nb == b'/' {
+            // End of input in or before an attribute value.
+            return None;
+        }
+        if k > start {
+            Some(k)
+        } else {
+            Some(start + 1)
         }
     }
 
-    /// Parse attributes from `j`: `(attrs, end, selfclose)`, or `None`
-    /// for an incomplete tag (drops the remainder — probed).
-    fn parse_attrs(&self, mut k: usize) -> Option<ParsedAttrs> {
+    /// One `attrfind_tolerant` match at `k`: the attribute plus the end
+    /// position, or `None` (the loop breaks with `k` unchanged).
+    /// Quoted values scan unbounded for their closer, past `>` and to
+    /// EOF; `=` repeats collapse (`a==b` keeps `b` — probed).
+    fn scan_attr(&self, k: usize) -> Option<((String, String), usize)> {
         let len = self.bytes.len();
-        let mut attrs = Vec::new();
-        loop {
-            // Separators: whitespace plus `/` not immediately before
-            // `>` (probed: `<p a/b>`, `<p /a>`, `<p / >`).
-            while k < len
-                && (is_html_ws(self.bytes[k])
-                    || (self.bytes[k] == b'/' && !(k + 1 < len && self.bytes[k + 1] == b'>')))
-            {
-                k += 1;
+        if k == 0 || k >= len {
+            return None;
+        }
+        // Lookbehind `(?<=['"\s/])`.
+        let prev = char_before(self.bytes, k);
+        if !(prev == '"' || prev == '\'' || prev == '/' || is_py_space(prev)) {
+            return None;
+        }
+        // Name: `[^\s/>]` + `[^\s/=>]*` (quotes, `=`, `<`, NUL all
+        // allowed inside — probed).
+        let first = self.char_at(k)?;
+        if is_py_space(first) || first == '/' || first == '>' {
+            return None;
+        }
+        let mut m = k + first.len_utf8();
+        while m < len {
+            match self.char_at(m) {
+                Some(c) if !is_py_space(c) && !matches!(c, '/' | '=' | '>') => {
+                    m += c.len_utf8();
+                }
+                _ => break,
             }
-            if k >= len {
-                return None;
-            }
-            if self.bytes[k] == b'>' {
-                return Some((attrs, k + 1, false));
-            }
-            if self.bytes[k] == b'/' && k + 1 < len && self.bytes[k + 1] == b'>' {
-                return Some((attrs, k + 2, true));
-            }
-            // Name: one `[^ws/>]` char (quotes, `=`, `<` allowed —
-            // probed) plus `[^ws/=>]*`.
+        }
+        let attr_name = self.slice(k, m).to_lowercase();
+        let (value, w) = scan_attr_value(self.bytes, m);
+        let w = skip_tag_sep(self.bytes, w);
+        Some(((attr_name, value.unwrap_or_default()), w))
+    }
+
+    /// Parse an end tag at `start` (any `</`). `endendtag` finds
+    /// the first `>` past it (none: [`Incomplete`][]); a clean
+    /// `</name>` (spaces allowed around the name — probed) closes,
+    /// else the `tagfind` name closes at the first `>` past the name
+    /// (junk is skipped whole, quotes included — probed); `</>` drops
+    /// silently; anything else is a bogus comment. Closes stack
+    /// elements through the match; unmatched names are dropped.
+    fn parse_end_tag(&mut self, start: usize) -> MarkupFlow {
+        let len = self.bytes.len();
+        let Some(rel) = self.bytes[start + 1..].iter().position(|&b| b == b'>') else {
+            return Incomplete;
+        };
+        let gtpos = start + 1 + rel + 1;
+        // Clean close: `endtagfind` = `</\s*([a-zA-Z][-.a-zA-Z0-9:_]*)\s*>`.
+        let k = skip_py_spaces(self.bytes, start + 2);
+        if k < len && self.bytes[k].is_ascii_alphabetic() {
             let mut m = k + 1;
             while m < len
-                && !is_html_ws(self.bytes[m])
-                && !matches!(self.bytes[m], b'=' | b'>' | b'/')
+                && matches!(self.bytes[m], b'-' | b'.' | b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b':' | b'_')
             {
                 m += 1;
             }
-            let attr_name = self.slice(k, m).to_lowercase();
-            let after_name = m;
-            k = m;
-            while k < len && is_html_ws(self.bytes[k]) {
-                k += 1;
+            if skip_py_spaces(self.bytes, m) + 1 == gtpos {
+                let name = self.slice(k, m).to_lowercase();
+                self.flush_text();
+                self.pos = gtpos;
+                self.close_through(&name);
+                return Consumed;
             }
-            let mut value = String::new();
-            if k < len && self.bytes[k] == b'=' {
-                let eq_pos = k;
-                k += 1;
-                while k < len && is_html_ws(self.bytes[k]) {
-                    k += 1;
-                }
-                if k >= len {
-                    return None;
-                }
-                let q = self.bytes[k];
-                if q == b'"' || q == b'\'' {
-                    let mut n = k + 1;
-                    while n < len && self.bytes[n] != q {
-                        n += 1;
-                    }
-                    if n >= len {
-                        // Unterminated quote. With post-`=` ws
-                        // consumed, CPython backtracks the ws to empty
-                        // and keeps `=` + empty-bare (`a=""`),
-                        // resuming after the `=` (probed: `<p a= "y>`
-                        // completes). With no post-`=` ws the value
-                        // group matches empty and the scan resumes
-                        // after the attrname — but only past
-                        // attrfind's lookbehind, i.e. a skipped sep
-                        // (pre-`=` ws: `eq_pos > after_name`) or a
-                        // quote-final name (probed: `<p a ="y>` and
-                        // `<p a"="y>` complete, `<p a="y>` drops the
-                        // tag); otherwise the tag is incomplete.
-                        if k > eq_pos + 1 {
-                            k = eq_pos + 1;
-                        } else if eq_pos > after_name
-                            || matches!(self.bytes[after_name - 1], b'"' | b'\'')
-                        {
-                            k = after_name;
-                        } else {
-                            return None;
-                        }
-                    } else {
-                        value = html_unescape(self.slice(k + 1, n));
-                        k = n + 1;
-                    }
-                } else {
-                    // Bare: everything to whitespace or `>` (quotes and
-                    // `/` included — probed: `a=b'c'`, `value=1/`).
-                    let mut n = k;
-                    while n < len && !is_html_ws(self.bytes[n]) && self.bytes[n] != b'>' {
-                        n += 1;
-                    }
-                    value = html_unescape(self.slice(k, n));
-                    k = n;
-                }
-            }
-            attrs.push((attr_name, value));
         }
+        // Fallback: the `tagfind_tolerant` name closes at the first
+        // `>` past it (`</p=foo>` never matches the stack, so it
+        // drops — probed).
+        if start + 2 < len && is_name_start(self.bytes[start + 2]) {
+            let mut j = start + 3;
+            while j < len
+                && !matches!(
+                    self.bytes[j],
+                    b'\t' | b'\n' | 0x0c | b'\r' | b' ' | b'/' | b'>' | 0x00
+                )
+            {
+                j += 1;
+            }
+            let name = self.slice(start + 2, j).to_lowercase();
+            let end = self.bytes[j..]
+                .iter()
+                .position(|&b| b == b'>')
+                .map(|p| j + p + 1)
+                .unwrap_or(len);
+            self.flush_text();
+            self.pos = end;
+            self.close_through(&name);
+            return Consumed;
+        }
+        if self.bytes[start..].starts_with(b"</>") {
+            // Dropped silently (probed) — not even a chunk split.
+            self.pos = start + 3;
+            return Consumed;
+        }
+        self.parse_bogus_inner(start)
     }
 
-    /// Parse an end tag at `self.pos` (`</` + letter). The name is
-    /// `tagfind_tolerant` group 1 (`=`, `<`, quotes and NUL included —
-    /// probed: `</p=foo>`, `</p<x>`, `</p"x">` never match the stack,
-    /// so they are dropped); junk after it scans attrfind-shaped to
-    /// `>` (a scan that never reaches `>` swallows to EOF, where the
-    /// auto-close is byte-identical — so normal tags complete either
-    /// way). Closes stack elements through the match; unmatched names
-    /// are dropped.
-    fn parse_end_tag(&mut self) {
-        let mut j = self.pos + 3;
-        let len = self.bytes.len();
-        while j < len && !is_html_ws(self.bytes[j]) && !matches!(self.bytes[j], b'/' | b'>') {
-            j += 1;
-        }
-        let name = self.slice(self.pos + 2, j).to_lowercase();
-        self.pos = scan_endtag_junk(self.bytes, j).unwrap_or(len);
-        // Pop through the match, emitting each close (probed
-        // misnesting: `</b>` in `<b><i>` emits `</i></b>`).
-        if let Some(idx) = self.stack.iter().rposition(|e| e.name == name) {
+    /// Pop stack elements through `name`, emitting each close (probed
+    /// misnesting: `</b>` in `<b><i>` emits `</i></b>`).
+    fn close_through(&mut self, name: &str) {
+        if let Some(idx) = self.stack.iter().rposition(|e| e.name == *name) {
             while self.stack.len() > idx {
                 let elem = self.stack.pop().expect("idx in range");
                 self.pre_depth -= usize::from(elem.pre);
@@ -821,109 +1083,127 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `<!--...-->`: ends at the first `-->` or `--!>`
-    /// (`commentclose = --!?>` — probed), whichever comes first. With
-    /// neither later, `<!-->`/`<!--->` close abruptly (empty);
-    /// otherwise the content runs to EOF minus one trailing `--!`,
-    /// `--` or `-` (probed).
-    fn parse_comment(&mut self) {
-        let len = self.bytes.len();
-        let body = self.pos + 4;
-        let tail = &self.bytes[body..];
-        // `(content_end, closer_len)`: `-->` is 3 bytes, `--!>` is 4.
-        let end = match (find_bytes(tail, b"-->"), find_bytes(tail, b"--!>")) {
-            (Some(a), Some(b)) => {
-                if a <= b {
-                    Some((a, 3))
-                } else {
-                    Some((b, 4))
-                }
-            }
-            (Some(a), None) => Some((a, 3)),
-            (None, Some(b)) => Some((b, 4)),
-            (None, None) => None,
+    /// `<!--...-->`: ends at the first `-->` or `-- >`
+    /// (`commentclose = --\s*>` — probed); `--!>` never closes and
+    /// there is no abrupt close, so `<!-->`/`<!--a--!>` without a
+    /// later closer report [`Incomplete`][] and become text.
+    fn parse_comment(&mut self, start: usize) -> MarkupFlow {
+        let body = start + 4;
+        let Some((content_end, after)) = find_comment_close(self.bytes, body) else {
+            return Incomplete;
         };
-        if let Some((end, closer)) = end {
-            self.out.push_str("<!--");
-            self.emit_opaque(self.slice(body, body + end));
-            self.out.push_str("-->");
-            self.pos = body + end + closer;
-            return;
-        }
-        let rest = &self.rest()[4..];
-        if rest.starts_with(b">") {
-            self.out.push_str("<!-- -->");
-            self.pos += 5;
-        } else if rest.starts_with(b"->") {
-            self.out.push_str("<!-- -->");
-            self.pos += 6;
-        } else {
-            // Unterminated at EOF: `goahead` end-handling strips one
-            // trailing `--!`, else `--`, else `-` before
-            // `handle_comment` (probed: `<!--a--` → `<!--a-->`,
-            // `<!--a---` → `<!--a--->`, `<!---` → `<!-- -->`).
-            let mut end = len;
-            for suffix in [&b"--!"[..], &b"--"[..], &b"-"[..]] {
-                if end - body >= suffix.len() && self.bytes[end - suffix.len()..end] == *suffix {
-                    end -= suffix.len();
-                    break;
-                }
-            }
-            self.out.push_str("<!--");
-            self.emit_opaque(self.slice(body, end));
-            self.out.push_str("-->");
-            self.pos = len;
-        }
+        self.flush_text();
+        self.out.push_str("<!--");
+        self.emit_opaque(self.slice(body, content_end));
+        self.out.push_str("-->");
+        self.pos = after;
+        Consumed
     }
 
-    /// `<![CDATA[...]]>`: verbatim through `]]>` (auto-closed at EOF),
-    /// same ws/empty rules as comments (probed).
-    fn parse_cdata(&mut self) {
-        let len = self.bytes.len();
-        let body = self.pos + 9;
-        self.out.push_str("<![CDATA[");
-        if let Some(end) = find_bytes(&self.bytes[body..], b"]]>") {
-            self.emit_opaque(self.slice(body, body + end));
-            self.pos = body + end + 3;
-        } else {
-            self.emit_opaque(self.slice(body, len));
-            self.pos = len;
+    /// `<!...>` dispatch (`parse_html_declaration`): `<!--` (already
+    /// handled by the caller, kept for the shared shape), `<![` marked
+    /// sections, `<!doctype` (9-char case-insensitive prefix, no word
+    /// boundary — probed), else bogus comment.
+    fn parse_declaration(&mut self, start: usize) -> MarkupFlow {
+        if self.bytes[start..].starts_with(b"<![") {
+            return self.parse_marked_section(start);
         }
-        self.out.push_str("]]>");
+        if self.is_doctype_at(start) {
+            return self.parse_doctype(start);
+        }
+        self.parse_bogus_inner(start)
     }
 
-    /// `<?...?>`: ends at the first `>` (auto-closed at EOF), content
-    /// verbatim, never ws-collapsed, empty → single space (probed).
-    fn parse_pi(&mut self) {
-        let len = self.bytes.len();
-        let body = self.pos + 2;
+    /// `<![...]>` marked section (`_markupbase`): the decl name decides
+    /// the closer (`cdata`/`temp`/`ignore`/`include`/`rcdata` take
+    /// `]\s*]\s*>`, `if`/`else`/`endif` take `]\s*>`). CDATA renders
+    /// as `<![CDATA[...]]>`, the rest as `Declaration` (`<?...?>` —
+    /// bs4's `PREFIX`/`SUFFIX`). Unknown names and non-name content
+    /// raise `AssertionError` in CPython (bs4 refuses the markup), so
+    /// they have no portable output; treat them as bogus (probed:
+    /// unreachable from the corpus, which never raises).
+    fn parse_marked_section(&mut self, start: usize) -> MarkupFlow {
+        // `_declname_match` = `[a-zA-Z][-_.a-zA-Z0-9]*\s*`.
+        let mut k = start + 3;
+        if k >= self.bytes.len() || !is_name_start(self.bytes[k]) {
+            return self.parse_bogus_inner(start);
+        }
+        k += 1;
+        while k < self.bytes.len()
+            && matches!(self.bytes[k], b'-' | b'_' | b'.' | b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9')
+        {
+            k += 1;
+        }
+        let name = self.slice(start + 3, k).to_lowercase();
+        k = skip_py_spaces(self.bytes, k);
+        if k >= self.bytes.len() {
+            // A name running to EOF is incomplete (`_scan_name`
+            // returns -1).
+            return Incomplete;
+        }
+        let ms_close = matches!(name.as_str(), "if" | "else" | "endif");
+        if !ms_close
+            && !matches!(
+                name.as_str(),
+                "temp" | "cdata" | "ignore" | "include" | "rcdata"
+            )
+        {
+            return self.parse_bogus_inner(start);
+        }
+        let body = start + 3;
+        let found = if ms_close {
+            find_ms_close(self.bytes, body)
+        } else {
+            find_marked_close(self.bytes, body)
+        };
+        let Some((content_end, after)) = found else {
+            return Incomplete;
+        };
+        let mut content = self.slice(body, content_end);
+        self.flush_text();
+        // `unknown_decl`: `CDATA[`-prefixed content (case-insensitive)
+        // is a CDATA section, the rest a declaration.
+        if content.len() >= 6 && content.as_bytes()[..6].eq_ignore_ascii_case(b"CDATA[") {
+            content = &content[6..];
+            self.out.push_str("<![CDATA[");
+            self.emit_opaque(content);
+            self.out.push_str("]]>");
+        } else {
+            self.out.push_str("<?");
+            self.out.push_str(content);
+            self.out.push_str("?>");
+        }
+        self.pos = after;
+        Consumed
+    }
+
+    /// `<?...?>`: ends at the first `>` (none: [`Incomplete`][]),
+    /// content verbatim, never ws-collapsed, empty → single space
+    /// (probed).
+    fn parse_pi(&mut self, start: usize) -> MarkupFlow {
+        let body = start + 2;
+        let Some(rel) = self.bytes[body..].iter().position(|&b| b == b'>') else {
+            return Incomplete;
+        };
+        self.flush_text();
         self.out.push_str("<?");
-        match self.bytes[body..].iter().position(|&b| b == b'>') {
-            Some(end) => {
-                let data = self.slice(body, body + end);
-                self.out.push_str(if data.is_empty() { " " } else { data });
-                self.pos = body + end + 1;
-            }
-            None => {
-                let data = self.slice(body, len);
-                self.out.push_str(if data.is_empty() { " " } else { data });
-                self.pos = len;
-            }
-        }
+        let data = self.slice(body, body + rel);
+        self.out.push_str(if data.is_empty() { " " } else { data });
         self.out.push('>');
+        self.pos = body + rel + 1;
+        Consumed
     }
 
     /// `<!DOCTYPE...>` (and case variants): keyword uppercased, the
     /// first 8 data chars (`doctype` + one) stripped, `>\n` appended
-    /// (probed). Completes at EOF too.
-    fn parse_doctype(&mut self) {
-        let len = self.bytes.len();
-        let body = self.pos + 2;
-        let end = self.bytes[body..]
-            .iter()
-            .position(|&b| b == b'>')
-            .map(|e| body + e)
-            .unwrap_or(len);
+    /// (probed). No `>`: [`Incomplete`][].
+    fn parse_doctype(&mut self, start: usize) -> MarkupFlow {
+        let body = start + 2;
+        let search_from = start + 9;
+        let Some(rel) = self.bytes[search_from..].iter().position(|&b| b == b'>') else {
+            return Incomplete;
+        };
+        let end = search_from + rel;
         let data = self.slice(body, end);
         // Python strips 8 *characters* (`doctype` + one); cut at the
         // 8th char boundary (byte 8 can split a multibyte char).
@@ -932,166 +1212,76 @@ impl<'a> Parser<'a> {
             .nth(8)
             .map(|(i, _)| &data[i..])
             .unwrap_or("");
+        self.flush_text();
         self.out.push_str("<!DOCTYPE ");
         self.out.push_str(rest);
         if rest.is_empty() {
             self.out.push(' ');
         }
         self.out.push_str(">\n");
-        self.pos = (end + 1).min(len);
+        self.pos = end + 1;
+        Consumed
     }
 
-    /// Bogus comment (`<!...>` that is not a comment/CDATA/doctype, or
-    /// `</` + non-letter): content to the first `>` or EOF (probed).
-    fn parse_bogus(&mut self, body: usize) {
-        let len = self.bytes.len();
-        let end = self.bytes[body..]
-            .iter()
-            .position(|&b| b == b'>')
-            .map(|e| body + e)
-            .unwrap_or(len);
+    /// Bogus comment (`<!...>` that is not a comment/marked
+    /// section/doctype, or `</` + non-letter): content to the first
+    /// `>` (none: [`Incomplete`][] — probed).
+    fn parse_bogus_inner(&mut self, start: usize) -> MarkupFlow {
+        let body = start + 2;
+        let Some(rel) = self.bytes[body..].iter().position(|&b| b == b'>') else {
+            return Incomplete;
+        };
+        self.flush_text();
         self.out.push_str("<!--");
-        self.emit_opaque(self.slice(body, end));
+        self.emit_opaque(self.slice(body, body + rel));
         self.out.push_str("-->");
-        self.pos = (end + 1).min(len);
+        self.pos = body + rel + 1;
+        Consumed
     }
 
-    /// Raw-text content for the just-pushed `name` element.
-    /// `plaintext` runs to EOF and never closes (probed). script/style
-    /// run verbatim to the matching close; xmp/iframe/noembed/noframes
-    /// and plaintext escape without decoding. RCDATA (title/textarea)
-    /// decodes entities with the text-path decoder while watching for
-    /// the close — interleaved, because the `&#` break swallows the
-    /// close itself (probed R16).
-    fn parse_raw(&mut self, name: &str) {
-        if name == "plaintext" {
-            let content = self.slice(self.pos, self.bytes.len());
-            self.emit_escaped_raw(content);
-            self.pos = self.bytes.len();
-            self.pop_raw();
-            return;
-        }
-        if !is_rcdata(name) {
-            self.parse_rawtext(name);
-            return;
-        }
-        self.parse_rcdata(name);
-    }
-
-    /// RAWTEXT content to the matching close (`</name` + ignored
-    /// junk + `>`). A junk scan that never reaches `>` drops the
-    /// would-be close: content ends before `</`, the element
-    /// auto-closes (probed).
+    /// Raw-text content for the just-pushed script/style element:
+    /// the `interesting` regex (`</\s*name\s*>`, case-insensitive)
+    /// finds the close anywhere later; the content runs verbatim to
+    /// it. With no close anywhere, `feed` and `close` both stall and
+    /// the whole rest is dropped (probed: `<script>a` renders
+    /// `<script></script>`).
     fn parse_rawtext(&mut self, name: &str) {
         let len = self.bytes.len();
         let content_start = self.pos;
         let mut k = content_start;
         let mut found: Option<(usize, usize)> = None;
-        let mut dropped_at: Option<usize> = None;
         while k < len {
-            if self.bytes[k] == b'<'
-                && k + 1 < len
-                && self.bytes[k + 1] == b'/'
-                && match_close_name(&self.bytes[k + 2..], name)
-            {
-                match scan_endtag_junk(self.bytes, k + 2 + name.len()) {
-                    Some(after) => {
-                        found = Some((k, after));
-                    }
-                    // The failed scan swallows everything after it
-                    // (probed), so no later close can rescue it.
-                    None => {
-                        dropped_at = Some(k);
-                    }
+            if self.bytes[k] == b'<' {
+                if let Some(after) = match_cdata_close(self.bytes, k, name) {
+                    found = Some((k, after));
+                    break;
                 }
-                break;
             }
             k += 1;
         }
         match found {
             Some((close_at, after)) => {
-                self.emit_rawtext(self.slice(content_start, close_at), is_verbatim_raw(name));
+                self.emit_rawtext(self.slice(content_start, close_at));
                 self.pos = after;
                 self.pop_raw();
             }
             None => {
-                let end = dropped_at.unwrap_or(len);
-                self.emit_rawtext(self.slice(content_start, end), is_verbatim_raw(name));
                 self.pos = len;
                 self.pop_raw();
             }
         }
     }
 
-    /// Emit RAWTEXT content (collapsed when whitespace-only outside
-    /// `<pre>`/`<textarea>` — probed): script/style verbatim, the rest
-    /// escaped without decoding.
-    fn emit_rawtext(&mut self, content: &str, verbatim: bool) {
+    /// Emit raw-text content verbatim (collapsed when whitespace-only
+    /// outside `<pre>`/`<textarea>` — probed).
+    fn emit_rawtext(&mut self, content: &str) {
         if content.is_empty() {
-            // No output for empty RAWTEXT.
+            // No output for empty raw text.
         } else if self.pre_depth == 0 && content.bytes().all(is_html_ws) {
             self.out.push_str(collapse_ws(content));
-        } else if verbatim {
-            self.out.push_str(content);
         } else {
-            escape_text(content, &mut self.out);
+            self.out.push_str(content);
         }
-    }
-
-    /// Emit escaped raw content (plaintext; same collapse rule).
-    fn emit_escaped_raw(&mut self, content: &str) {
-        self.emit_rawtext(content, false);
-    }
-
-    /// RCDATA content (title/textarea): tags-as-text, entities decoded
-    /// with the shared text-path decoder (the `&#` break swallows the
-    /// close itself — probed R16, hence interleaved rather than
-    /// pre-scanned). The pending buffer holds exactly this chunk: the
-    /// raw open flushed it before pushing.
-    fn parse_rcdata(&mut self, name: &str) {
-        let len = self.bytes.len();
-        while self.pos < len {
-            if self.bytes[self.pos] == b'<'
-                && self.pos + 1 < len
-                && self.bytes[self.pos + 1] == b'/'
-                && match_close_name(&self.bytes[self.pos + 2..], name)
-            {
-                match scan_endtag_junk(self.bytes, self.pos + 2 + name.len()) {
-                    Some(after) => {
-                        self.flush_text();
-                        self.pos = after;
-                        self.pop_raw();
-                        return;
-                    }
-                    // The would-be close drops: content ends before
-                    // `</`, the element auto-closes (probed).
-                    None => {
-                        self.flush_text();
-                        self.pos = len;
-                        self.pop_raw();
-                        return;
-                    }
-                }
-            }
-            if self.bytes[self.pos] == b'<' {
-                // Tags-as-text (probed).
-                self.pending.push('<');
-                self.pos += 1;
-                continue;
-            }
-            if self.bytes[self.pos] == b'&' {
-                if self.entity_text() == EntityFlow::Break {
-                    break;
-                }
-                continue;
-            }
-            let c = self.slice(self.pos, len).chars().next().unwrap_or('\0');
-            self.pending.push(c);
-            self.pos += c.len_utf8().max(1);
-        }
-        // EOF without a close: auto-close (probed).
-        self.flush_text();
-        self.pop_raw();
     }
 
     /// Pop the raw element itself, emitting its close (called with the
@@ -1107,125 +1297,73 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// `</` + `name` + delimiter (whitespace, `/`, `>` — probed) at
-/// the start of `s`, case-insensitive. EOF is NOT a delimiter: the
-/// `interesting` lookahead needs a char, so `</name` at EOF stays
-/// content (probed: `<script>x</script` keeps it verbatim).
-fn match_close_name(s: &[u8], name: &str) -> bool {
-    let nb = name.as_bytes();
-    if s.len() <= nb.len() || !s[..nb.len()].eq_ignore_ascii_case(nb) {
-        return false;
-    }
-    // `plaintext` never matches (it never closes) — handled by caller.
-    matches!(
-        s[nb.len()],
-        b'\t' | b'\n' | 0x0c | b'\r' | b' ' | b'/' | b'>'
-    )
-}
-
-/// Scan end-tag junk from `k` (`locatetagend` past the tag name):
-/// whitespace and `/` separators, then `attrfind_tolerant` items —
-/// an attrname, an optional `=value` (quoted values scan unbounded
-/// for the matching quote) — repeating to `>`. Returns the byte past
-/// `>`, or `None` when the scan stops without one.
-///
-/// Bare quotes never protect `>` (probed: `</p "a>b">` closes at the
-/// inner `>`); only `name="..."` values do (probed: `</p a=">">`
-/// closes at the outer). An unterminated quoted value backtracks the
-/// post-`=` ws to empty and keeps `=` + empty-bare when ws was
-/// consumed (probed: `</p a= "y>` closes at the inner `>`); with no
-/// ws the value group matches empty (CPython rewinds past the
-/// attrname), so the next attrname needs attrfind's lookbehind — a
-/// quote, whitespace or `/` (probed rewind pair: `</p a="y>`
-/// swallows, `</p a ="y>` closes at the inner `>`).
-fn scan_endtag_junk(bytes: &[u8], mut k: usize) -> Option<usize> {
-    let len = bytes.len();
-    // Junk always starts at whitespace, `/`, `>` or EOF (where the
-    // name scan stopped), so the first iteration finishes or skips a
-    // separator; this seed value is never consulted.
-    let mut prev = bytes[k.saturating_sub(1)];
-    loop {
-        while k < len && (is_html_ws(bytes[k]) || bytes[k] == b'/') {
-            prev = bytes[k];
-            k += 1;
-        }
-        if k >= len {
-            return None;
-        }
-        if bytes[k] == b'>' {
-            return Some(k + 1);
-        }
-        if !(prev == b'"' || prev == b'\'' || is_html_ws(prev) || prev == b'/') {
-            return None;
-        }
-        // Attrname: `[^ws/>]` + `[^ws/=>]*` (`=`, `<`, quotes and NUL
-        // all allowed first — probed).
-        prev = bytes[k];
-        k += 1;
-        while k < len && !is_html_ws(bytes[k]) && !matches!(bytes[k], b'/' | b'=' | b'>') {
-            prev = bytes[k];
-            k += 1;
-        }
-        let after_name = k;
-        let prev_after_name = prev;
-        // The value group (`=value`) is optional as a whole: only
-        // advance past the pre-`=` gap when `=` is actually there.
-        let mut v = k;
-        while v < len && is_html_ws(bytes[v]) {
-            v += 1;
-        }
-        if v >= len || bytes[v] != b'=' {
-            continue;
-        }
-        let eq_pos = v;
-        v += 1;
-        while v < len && is_html_ws(bytes[v]) {
-            v += 1;
-        }
-        if v < len && (bytes[v] == b'"' || bytes[v] == b'\'') {
-            let q = bytes[v];
-            let mut w = v + 1;
-            while w < len && bytes[w] != q {
-                w += 1;
-            }
-            if w >= len {
-                // Unterminated quote: CPython backtracks the
-                // post-`=` ws to empty and keeps `=` + empty-bare
-                // (`a= "y` → `a=""`), so the scan continues after
-                // the ws — but only when ws was actually consumed
-                // (probed: `</p a= "y>` closes inner, `</p a="y>`
-                // swallows). With no ws the value group matches
-                // empty: back after the attrname.
-                if v > eq_pos + 1 {
-                    k = eq_pos + 1;
-                    prev = b'=';
-                } else {
-                    k = after_name;
-                    prev = prev_after_name;
-                }
-                continue;
-            }
-            prev = q;
-            k = w + 1;
-        } else {
-            // Bare value (possibly empty): to whitespace, `>` or EOF.
-            while v < len && bytes[v] != b'>' && !is_html_ws(bytes[v]) {
-                v += 1;
-            }
-            k = v;
-        }
-    }
-}
-
-/// Find a byte needle in a haystack.
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    if haystack.len() < needle.len() {
+/// `</\s*name\s*>` at `k` (the `interesting` regex in cdata
+/// mode), case-insensitive: the byte past `>`, or `None` (probed:
+/// `</script foo>` and `</script/>` never close).
+fn match_cdata_close(bytes: &[u8], k: usize, name: &str) -> Option<usize> {
+    if !bytes[k..].starts_with(b"</") {
         return None;
     }
-    (0..=haystack.len() - needle.len()).find(|&i| &haystack[i..i + needle.len()] == needle)
+    let mut m = skip_py_spaces(bytes, k + 2);
+    let nb = name.as_bytes();
+    if bytes.len() < m + nb.len() || !bytes[m..m + nb.len()].eq_ignore_ascii_case(nb) {
+        return None;
+    }
+    m = skip_py_spaces(bytes, m + nb.len());
+    if m < bytes.len() && bytes[m] == b'>' {
+        Some(m + 1)
+    } else {
+        None
+    }
+}
+
+/// First `--\s*>` at or past `from`: `(content_end, after)`.
+fn find_comment_close(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
+    let mut k = from;
+    while k + 1 < bytes.len() {
+        if bytes[k] == b'-' && bytes[k + 1] == b'-' {
+            let m = skip_py_spaces(bytes, k + 2);
+            if m < bytes.len() && bytes[m] == b'>' {
+                return Some((k, m + 1));
+            }
+        }
+        k += 1;
+    }
+    None
+}
+
+/// First `]\s*]\s*>` at or past `from`: `(content_end, after)`.
+fn find_marked_close(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
+    let mut k = from;
+    while k < bytes.len() {
+        if bytes[k] == b']' {
+            let m = skip_py_spaces(bytes, k + 1);
+            if m < bytes.len() && bytes[m] == b']' {
+                let n = skip_py_spaces(bytes, m + 1);
+                if n < bytes.len() && bytes[n] == b'>' {
+                    return Some((k, n + 1));
+                }
+            }
+        }
+        k += 1;
+    }
+    None
+}
+
+/// First `]\s*>` at or past `from`: `(content_end, after)` (MS Office
+/// `if`/`else`/`endif` sections).
+fn find_ms_close(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
+    let mut k = from;
+    while k < bytes.len() {
+        if bytes[k] == b']' {
+            let m = skip_py_spaces(bytes, k + 1);
+            if m < bytes.len() && bytes[m] == b'>' {
+                return Some((k, m + 1));
+            }
+        }
+        k += 1;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1236,11 +1374,29 @@ mod tests {
         normalize_bs(html).html
     }
 
+    /// The recording interpreter pinned by PIDASHCONV-1693: the
+    /// golden asserts production's parser (3.12.10, classic
+    /// `html.parser`), and the test refuses a golden recorded
+    /// anywhere else so an oracle skew fails loudly instead of
+    /// silently re-pinning behavior.
+    const GOLDEN_PYTHON: &str = "3.12.10";
+    const GOLDEN_BS4: &str = "4.12.3";
+
     #[test]
     fn golden_bs4_normalize() {
         let raw =
             include_str!("../../../../fixtures/tasks_mail/send/F-SEND.bs4_normalize.golden.json");
         let fixture: serde_json::Value = serde_json::from_str(raw).expect("golden fixture parses");
+        assert_eq!(
+            fixture["_python"].as_str().unwrap_or("?"),
+            GOLDEN_PYTHON,
+            "golden recorded on the wrong interpreter"
+        );
+        assert_eq!(
+            fixture["_bs4"].as_str().unwrap_or("?"),
+            GOLDEN_BS4,
+            "golden recorded against the wrong bs4"
+        );
         let cases = fixture["cases"].as_array().expect("cases array");
         assert!(!cases.is_empty(), "golden fixture has no cases");
         let mut failures: Vec<String> = Vec::new();
@@ -1325,21 +1481,17 @@ mod tests {
     }
 
     #[test]
-    fn endtag_junk_is_attrfind_shaped_not_quote_aware() {
-        // Bare quotes never protect `>`: close at the inner one.
+    fn endtag_junk_closes_at_first_gt() {
+        // Junk is skipped whole to the first `>` past the name —
+        // quotes (bare or `name="..."`) never protect it.
         assert_eq!(norm("<p>x</p \"a>b\">tail"), "<p>x</p>b\"&gt;tail");
-        assert_eq!(
-            norm("<script>x</script \"a>b\">tail"),
-            "<script>x</script>b\"&gt;tail"
-        );
+        assert_eq!(norm("<script>x</script \"a>b\">tail"), "<script></script>");
         assert_eq!(
             norm("<title>x</title \"a>b\">tail"),
             "<title>x</title>b\"&gt;tail"
         );
-        // Only `name="..."` values protect `>`: close at the outer.
-        assert_eq!(norm("<p>x</p a=\">\">tail"), "<p>x</p>tail");
-        // Unterminated quoted value: rewind, then the lookbehind decides.
-        assert_eq!(norm("<p>x</p a=\"y>TAIL"), "<p>x</p>");
+        assert_eq!(norm("<p>x</p a=\">\">tail"), "<p>x</p>\"&gt;tail");
+        assert_eq!(norm("<p>x</p a=\"y>TAIL"), "<p>x</p>TAIL");
         assert_eq!(norm("<p>x</p a =\"y>TAIL"), "<p>x</p>TAIL");
         // `=` and `/` start junk attrs.
         assert_eq!(norm("<p>x</p =>tail"), "<p>x</p>tail");
@@ -1347,75 +1499,89 @@ mod tests {
     }
 
     #[test]
-    fn endtag_junk_backtracks_post_eq_ws_before_unterminated_quote() {
-        // CPython backtracks the post-`=` ws to empty and keeps `=` +
-        // empty-bare, so the scan continues after the ws and closes at
-        // the inner `>`.
+    fn endtag_junk_with_quotes_closes_at_inner_gt() {
+        // Post-`=` ws, quote style, and tab ws change nothing: the
+        // close still lands on the inner `>`.
         assert_eq!(norm("<p>x</p a= \"y>TAIL"), "<p>x</p>TAIL");
         assert_eq!(norm("<p>x</p a= 'y>TAIL"), "<p>x</p>TAIL");
         assert_eq!(norm("<p>x</p a=  \"y>TAIL"), "<p>x</p>TAIL");
         assert_eq!(norm("<p>x</p a=\t\"y>TAIL"), "<p>x</p>TAIL");
-        // Same shape at the raw/RCDATA sites.
+        // A junky would-be close inside script content is content: the
+        // later clean close wins and keeps everything verbatim.
         assert_eq!(
             norm("<script>x</script a= \"y>TAIL</script>END"),
-            "<script>x</script>TAILEND"
+            "<script>x</script a= \"y>TAIL</script>END"
         );
         assert_eq!(
             norm("<title>x</title a= \"y>TAIL</title>END"),
             "<title>x</title>TAILEND"
         );
-        // Controls: no post-`=` ws means a full rewind (drops); the
-        // pre-ws-only, terminated and EOF shapes are unchanged.
+        // Controls: terminated and `\x0b` shapes close; the EOF shape
+        // (no `>` at all) becomes text.
         assert_eq!(norm("<p>x</p a= \"b\">TAIL"), "<p>x</p>TAIL");
-        assert_eq!(norm("<p>x</p a= \"y"), "<p>x</p>");
+        assert_eq!(norm("<p>x</p a= \"y"), "<p>x&lt;/p a= \"y</p>");
         assert_eq!(norm("<p>x</p a=\x0b\"y>TAIL"), "<p>x</p>TAIL");
     }
 
     #[test]
     fn open_tag_backtracks_post_eq_ws_before_unterminated_quote() {
-        // The open-tag analog: `a` keeps `=` + empty-bare (`a=""`),
-        // then `"y` parses as a bare attrname and the tag completes
-        // (attrs render sorted).
+        // `a` keeps `=` + empty-bare (`a=""`), then `"y` parses as a
+        // bare attrname and the tag completes (attrs render sorted).
         assert_eq!(norm("<p a= \"y>z</p>"), "<p \"y=\"\" a=\"\">z</p>");
         assert_eq!(norm("<p a= 'y>z</p>"), "<p 'y=\"\" a=\"\">z</p>");
         assert_eq!(norm("<p a=  \"y>z</p>"), "<p \"y=\"\" a=\"\">z</p>");
         assert_eq!(norm("<p a=\t\"y>z</p>"), "<p \"y=\"\" a=\"\">z</p>");
-        // Controls: no-ws and EOF drop the tag; pre-ws-only and
-        // terminated shapes are unchanged; `\x0b` is a bare value.
-        assert_eq!(norm("<p a=\"y>z</p>"), "");
+        // Controls: no-ws and EOF shapes become text; pre-ws-only and
+        // terminated shapes are unchanged; `\x0b` is a separator, so
+        // it backtracks like a space.
+        assert_eq!(norm("<p a=\"y>z</p>"), "&lt;p a=\"y&gt;z");
         assert_eq!(norm("<p a =\"y>z</p>"), "<p =\"y=\"\" a=\"\">z</p>");
         assert_eq!(norm("<p a= \"b\">z</p>"), "<p a=\"b\">z</p>");
-        assert_eq!(norm("<p a= \"y"), "");
-        assert_eq!(norm("<p a=\x0b\"y>z</p>"), "<p a='\x0b\"y'>z</p>");
+        assert_eq!(norm("<p a= \"y"), "&lt;p a= \"y");
+        assert_eq!(norm("<p a=\x0b\"y>z</p>"), "<p \"y=\"\" a=\"\">z</p>");
         // No post-`=` ws: the value group matches empty, so the scan
         // resumes after the attrname past attrfind's lookbehind — a
         // skipped pre-`=` sep or a quote-final name completes the tag.
         assert_eq!(norm("<p a\"=\"y>z</p>"), "<p =\"y=\"\" a\"=\"\">z</p>");
         assert_eq!(norm("<p a\" =\"y>z</p>"), "<p =\"y=\"\" a\"=\"\">z</p>");
         assert_eq!(norm("<p ab =\"y>z</p>"), "<p =\"y=\"\" ab=\"\">z</p>");
-        assert_eq!(norm("<p ab=\"y>z</p>"), "");
+        assert_eq!(norm("<p ab=\"y>z</p>"), "&lt;p ab=\"y&gt;z");
         assert_eq!(norm("<p a\t=\"y>z</p>"), "<p =\"y=\"\" a=\"\">z</p>");
         assert_eq!(
             norm("<p b=\"1\" a =\"y>z</p>"),
             "<p =\"y=\"\" a=\"\" b=\"1\">z</p>"
         );
-        assert_eq!(norm("<p a =\"y"), "");
+        assert_eq!(norm("<p a =\"y"), "&lt;p a =\"y");
     }
 
     #[test]
-    fn raw_close_with_junk_at_eof_drops() {
-        assert_eq!(norm("<script>x</script <b"), "<script>x</script>");
-        assert_eq!(norm("<style>x</style <b"), "<style>x</style>");
-        assert_eq!(norm("<title>x</title <b"), "<title>x</title>");
-        assert_eq!(norm("<textarea>x</textarea <b"), "<textarea>x</textarea>");
-        assert_eq!(norm("<iframe>x</iframe <b"), "<iframe>x</iframe>");
-        // …but `</name` at EOF (no delimiter) stays content.
-        assert_eq!(norm("<script>x</script"), "<script>x</script</script>");
+    fn raw_close_needs_clean_close_or_content_drops() {
+        // Junky would-be closes never match `</name\s*>`, so the
+        // whole rest drops for script/style.
+        assert_eq!(norm("<script>x</script <b"), "<script></script>");
+        assert_eq!(norm("<style>x</style <b"), "<style></style>");
+        // title/textarea/iframe are normal elements: the dangling
+        // end tag becomes text instead.
+        assert_eq!(
+            norm("<title>x</title <b"),
+            "<title>x&lt;/title &lt;b</title>"
+        );
+        assert_eq!(
+            norm("<textarea>x</textarea <b"),
+            "<textarea>x&lt;/textarea &lt;b</textarea>"
+        );
+        assert_eq!(
+            norm("<iframe>x</iframe <b"),
+            "<iframe>x&lt;/iframe &lt;b</iframe>"
+        );
+        // `</name` at EOF drops the content the same way.
+        assert_eq!(norm("<script>x</script"), "<script></script>");
         assert_eq!(norm("<title>x</title"), "<title>x&lt;/title</title>");
-        // A later complete close still wins mid-input.
+        // A later clean close wins mid-input and keeps everything
+        // before it verbatim.
         assert_eq!(
             norm("<script>x</script <b>y</script>TAIL"),
-            "<script>x</script>yTAIL"
+            "<script>x</script <b>y</script>TAIL"
         );
     }
 
@@ -1430,37 +1596,42 @@ mod tests {
     }
 
     #[test]
-    fn nul_is_a_tag_name_char() {
-        assert_eq!(norm("<p\x00>x</p>"), "<p\x00>x</p\x00>");
-        assert_eq!(norm("<p>x</p\x00>tail"), "<p>xtail</p>");
-        assert_eq!(norm("<p\x00>x</p\x00>tail"), "<p\x00>x</p\x00>tail");
+    fn nul_is_not_a_tag_name_char() {
+        // NUL ends the open-tag name scan (the tag then fails its
+        // end check and becomes text), while end tags still match
+        // the name before it.
+        assert_eq!(norm("<p\x00>x</p>"), "&lt;p\x00&gt;x");
+        assert_eq!(norm("<p>x</p\x00>tail"), "<p>x</p>tail");
+        assert_eq!(norm("<p\x00>x</p\x00>tail"), "&lt;p\x00&gt;xtail");
     }
 
     #[test]
-    fn dash_bang_gt_closes_comments() {
-        assert_eq!(norm("<!--x--!>"), "<!--x-->");
-        assert_eq!(norm("<!--a--!>b-->"), "<!--a-->b--&gt;");
-        assert_eq!(norm("<!--a--!>TAIL"), "<!--a-->TAIL");
+    fn dash_bang_gt_does_not_close_comments() {
+        // `--!>` is not a closer (`commentclose` is `--\s*>`), so a
+        // `--!>` without a later `-->` becomes text; with one, the
+        // `--!>` stays inside the comment.
+        assert_eq!(norm("<!--x--!>"), "&lt;!--x--!&gt;");
+        assert_eq!(norm("<!--a--!>b-->"), "<!--a--!>b-->");
+        assert_eq!(norm("<!--a--!>TAIL"), "&lt;!--a--!&gt;TAIL");
         assert_eq!(norm("<!--x-->TAIL"), "<!--x-->TAIL");
     }
 
     #[test]
-    fn unterminated_comment_at_eof_strips_one_suffix() {
-        // `goahead` end-handling strips one trailing `--!`, else `--`,
-        // else `-` before `handle_comment`.
-        assert_eq!(norm("<!--a--"), "<!--a-->");
-        assert_eq!(norm("<!--a-"), "<!--a-->");
-        assert_eq!(norm("<!--a--!"), "<!--a-->");
-        assert_eq!(norm("<!--a---"), "<!--a--->");
-        assert_eq!(norm("<!-----"), "<!----->");
-        assert_eq!(norm("<!---"), "<!-- -->");
-        // Controls: no strip without the suffix at EOF.
-        assert_eq!(norm("<!--a--x"), "<!--a--x-->");
-        assert_eq!(norm("<!--a-- "), "<!--a-- -->");
-        assert_eq!(norm("<!--a-- x"), "<!--a-- x-->");
-        assert_eq!(norm("<!--!"), "<!--!-->");
-        assert_eq!(norm("<!--a"), "<!--a-->");
-        assert_eq!(norm("<!--"), "<!-- -->");
+    fn unterminated_comment_at_eof_becomes_text() {
+        // No closer anywhere: the EOF data rule emits the whole
+        // construct as text (no abrupt close, no suffix strip).
+        assert_eq!(norm("<!--a--"), "&lt;!--a--");
+        assert_eq!(norm("<!--a-"), "&lt;!--a-");
+        assert_eq!(norm("<!--a--!"), "&lt;!--a--!");
+        assert_eq!(norm("<!--a---"), "&lt;!--a---");
+        assert_eq!(norm("<!-----"), "&lt;!-----");
+        assert_eq!(norm("<!---"), "&lt;!---");
+        assert_eq!(norm("<!--a--x"), "&lt;!--a--x");
+        assert_eq!(norm("<!--a-- "), "&lt;!--a-- ");
+        assert_eq!(norm("<!--a-- x"), "&lt;!--a-- x");
+        assert_eq!(norm("<!--!"), "&lt;!--!");
+        assert_eq!(norm("<!--a"), "&lt;!--a");
+        assert_eq!(norm("<!--"), "&lt;!--");
     }
 
     #[test]
@@ -1516,11 +1687,22 @@ mod tests {
         assert!(n.mentions.is_empty());
         let n = normalize_bs("<!--<mention-component entity_identifier=\"u1\"/>-->");
         assert!(n.mentions.is_empty());
-        let n = normalize_bs("<title><mention-component entity_identifier=\"u1\"/></title>");
-        assert!(n.mentions.is_empty());
         let n =
             normalize_bs("<p title=\"<mention-component entity_identifier=&#34;u1&#34;>\">x</p>");
         assert!(n.mentions.is_empty());
+    }
+
+    #[test]
+    fn mention_inside_title_is_a_span() {
+        // `title` is a normal element on 3.12.10 (no RCDATA), so an
+        // inner mention is a real element (probed).
+        let n = normalize_bs("<title><mention-component entity_identifier=\"u1\"/></title>");
+        assert_eq!(
+            n.html,
+            "<title><mention-component entity_identifier=\"u1\"></mention-component></title>"
+        );
+        assert_eq!(n.mentions.len(), 1);
+        assert_eq!(n.mentions[0].entity_id.as_deref(), Some("u1"));
     }
 
     #[test]

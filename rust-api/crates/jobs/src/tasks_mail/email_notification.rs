@@ -2344,17 +2344,18 @@ mod part2_tests {
     }
 
     #[test]
-    fn mention_unclosed_tag_at_eof_is_dropped() {
+    fn mention_unclosed_tag_at_eof_becomes_text() {
         // Python never sees the element (the tag needs `>`), so there
-        // is no KeyError and no output for it.
+        // is no KeyError — but the tag source survives as text
+        // (classic EOF data rule, probed on 3.12.10).
         let map = names(&[("u1", "Ada")]);
         assert_eq!(
             process_mention(
                 "<p>a<mention-component entity_identifier=\"u1\"",
                 &lookup_of(&map)
             )
-            .expect("drop"),
-            "<p>a</p>"
+            .expect("text"),
+            "<p>a&lt;mention-component entity_identifier=\"u1\"</p>"
         );
     }
 
