@@ -2503,3 +2503,199 @@ def test_1327_rust_reclaims_stale_running_rows(db_conn):
         timeout=RECLAIM_BOUND_SECS,
         what="stale no-op row reclaimed and acked",
     )
+
+
+# --- workspace_seed agent-collision replay (PIDASHCONV-1701) ---
+#
+# Mirrors test_workspace_seed_agent_collision.py assertion for assertion;
+# only the publish path changes (rust queue instead of the broker) plus
+# the ack wait (PIDASHCONV-900: views/pages land after issues).
+
+
+def _seed_colliding_user_values():
+    # seed_helpers.user always tag-suffixes its username, so the exact
+    # reserved name is built with insert_row (same columns as seed.user).
+    return {
+        "username": "pi_dash_agent",
+        "email": "pi_dash_agent@example.com",
+        "password": seed_helpers.password_hash("contract-suite-password"),
+        "display_name": "pi_dash_agent",
+        "first_name": "",
+        "last_name": "",
+        "avatar": "",
+        "date_joined": seed_helpers._now_iso(),
+        "is_active": True,
+        "last_location": "",
+        "created_location": "",
+        "is_superuser": False,
+        "is_managed": False,
+        "is_password_expired": False,
+        "is_staff": False,
+        "is_email_verified": False,
+        "is_password_autoset": False,
+        "token": "",
+        "user_timezone": "UTC",
+        "last_login_ip": "127.0.0.1",
+        "last_logout_ip": "127.0.0.1",
+        "last_login_medium": "email",
+        "last_login_uagent": "",
+        "is_bot": False,
+        "is_email_valid": True,
+        "is_password_reset_required": False,
+    }
+
+
+def _seed_hold_collision(conn):
+    """Make ``pi_dash_agent`` a colliding non-bot row; return a restore thunk.
+
+    FK-safe (the fire_tick_seam live_b8 precedent): an existing row — usually
+    the real bot, already referenced by earlier bounce comments — is flipped
+    non-bot and flipped back; only a row created here is deleted.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id, is_bot FROM users WHERE username = %s", ("pi_dash_agent",)
+        )
+        existing = cur.fetchone()
+    if existing is not None:
+
+        def _restore_flip():
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET is_bot = %s WHERE id = %s::uuid",
+                    (existing["is_bot"], str(existing["id"])),
+                )
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET is_bot = false WHERE id = %s::uuid",
+                (str(existing["id"]),),
+            )
+        return _restore_flip
+
+    insert_row(conn, "users", _seed_colliding_user_values())
+
+    def _restore_delete():
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM issue_comments WHERE actor_id IN"
+                " (SELECT id FROM users WHERE username = %s)",
+                ("pi_dash_agent",),
+            )
+            cur.execute(
+                "DELETE FROM users WHERE username = %s", ("pi_dash_agent",)
+            )
+
+    return _restore_delete
+
+
+def test_rust_workspace_seed_agent_collision(db_conn):
+    tag = uuid.uuid4().hex[:8]
+    owner = seed_helpers.user(db_conn, f"rust-collide1701-owner-{tag}")
+    other = seed_helpers.user(db_conn, f"rust-collide1701-other-{tag}")
+    workspace = seed_helpers.workspace(
+        db_conn,
+        f"rustcollide1701{tag}",
+        owner["id"],
+        name=f"Rust Collision 1701 {tag}",
+    )
+    seed_helpers.workspace_member(db_conn, workspace["id"], owner["id"], role=5)
+    seed_helpers.workspace_member(db_conn, workspace["id"], other["id"], role=10)
+
+    seed_issues = _seed_rows("issues.json")
+    seed_states = _seed_rows("states.json")
+    seed_views = _seed_rows("views.json")
+    seed_pages = _seed_rows("pages.json")
+
+    restore = _seed_hold_collision(db_conn)
+    try:
+        seed_celery_id = rust_queue.publish(
+            f"{M}.workspace_seed_task.workspace_seed", args=[str(workspace["id"])]
+        )
+
+        project = wait_for(
+            lambda: _seed_one(
+                db_conn,
+                "projects",
+                "WHERE workspace_id = %s::uuid AND deleted_at IS NULL",
+                (str(workspace["id"]),),
+            ),
+            what="rust collision seed project created",
+        )
+        wait_for(
+            lambda: (
+                _seed_count(
+                    db_conn,
+                    "issues",
+                    "WHERE project_id = %s::uuid",
+                    (str(project["id"]),),
+                )
+                == len(seed_issues)
+            )
+            or None,
+            what="rust collision seed issues created",
+        )
+        rust_queue.wait_for_settled(seed_celery_id, what="rust collision seed acked")
+
+        issues = _seed_project_rows(db_conn, "issues", project["id"])
+        assert len(issues) == len(seed_issues)
+        assert {i["sequence_id"] for i in issues} == set(
+            range(1, len(seed_issues) + 1)
+        )
+        assert (
+            _seed_count(
+                db_conn,
+                "issue_views",
+                "WHERE project_id = %s::uuid",
+                (str(project["id"]),),
+            )
+            == len(seed_views)
+        )
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                'SELECT * FROM "pages" WHERE workspace_id = %s::uuid'
+                " AND deleted_at IS NULL",
+                (str(workspace["id"]),),
+            )
+            ws_pages = cur.fetchall()
+        assert len(ws_pages) == len(seed_pages)
+
+        # Ticking seeds keep their seeded state with no bounce comment: the
+        # probe fails and is swallowed, so no bounce lands.
+        ticking = {
+            ("In Progress", "started"),
+            ("In Review", "review"),
+            ("In Test", "test"),
+        }
+        ticking_seed_states = {
+            s["id"] for s in seed_states if (s["name"], s.get("group")) in ticking
+        }
+        by_sequence = {i["sequence_id"]: i for i in issues}
+        ticking_n = [
+            n
+            for n, row in enumerate(seed_issues, start=1)
+            if row["state_id"] in ticking_seed_states
+        ]
+        assert ticking_n, "seed data must carry at least one ticking-state issue"
+        for n in ticking_n:
+            issue = by_sequence[n]
+            with db_conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    'SELECT "group" FROM "states" WHERE id = %s::uuid',
+                    (str(issue["state_id"]),),
+                )
+                group = cur.fetchone()["group"]
+            assert group in ("started", "review", "test"), (
+                f"issue {issue['id']} must keep its ticking state"
+            )
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT count(*) AS n FROM issue_comments c"
+                " JOIN issues i ON i.id = c.issue_id"
+                " WHERE i.project_id = %s::uuid"
+                " AND c.comment_html LIKE '%%Agent run skipped%%'",
+                (str(project["id"]),),
+            )
+            assert cur.fetchone()["n"] == 0, "no bounce comment may land"
+    finally:
+        restore()
