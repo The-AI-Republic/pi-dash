@@ -973,7 +973,7 @@ pub fn now_stamp() -> String {
     format_cutoff(chrono::Utc::now())
 }
 
-/// A walked row's primary key: `UUID` on 112 of the 113 `deleted_at`
+/// A walked row's primary key: `UUID` on 113 of the 114 `deleted_at`
 /// tables, `BIGINT` on `project_identifiers` (a `BigAutoField`, the only
 /// non-UUID soft-delete PK in the schema — PIDASHCONV-900 review defect
 /// 3). Django stamps identifier rows through the project O2O and the
