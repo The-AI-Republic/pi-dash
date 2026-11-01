@@ -32,6 +32,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
 
 from pi_dash.app.views.base import BaseAPIView
+from pi_dash.assistant.dictation import dictation_disabled_response, dictation_is_enabled
 from pi_dash.assistant.errors import AssistantError
 from pi_dash.ee.assistant.stt_provider import has_usable_stt_config, resolve_stt_provider
 
@@ -64,6 +65,10 @@ class AssistantTranscribeEndpoint(BaseAPIView):
     throttle_classes = [AssistantTranscribeThrottle]
 
     def post(self, request):
+        # Kill switch first: with dictation off the endpoint does not exist.
+        if not dictation_is_enabled():
+            return dictation_disabled_response()
+
         # Gate before touching the upload: no usable config -> a code the
         # composer turns into a "configure dictation in Settings" state.
         if not has_usable_stt_config(request.user):
