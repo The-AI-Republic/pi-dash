@@ -501,11 +501,13 @@ fn s3_retryable_status(status: u16) -> bool {
     matches!(status, 500 | 502 | 503 | 504 | 509 | 429)
 }
 
-/// Error codes retried regardless of status: the legacy throttling
-/// policies plus S3's 400 policies (`RequestTimeout`, `BadDigest`).
-/// `SlowDown` is deliberately absent: S3 sends it with a 503 (covered
-/// by the status rule), and legacy mode does not code-retry it on a
-/// 400 — verified against boto3 1.34.96.
+/// Error codes retried on a 400: the legacy throttling policies plus
+/// S3's 400 policies (`RequestTimeout`, `BadDigest`). Every one of
+/// these policies pairs the code with `http_status_code` 400, so a
+/// retryable code on any other status (e.g. 403) is final after one
+/// attempt. `SlowDown` is deliberately absent: S3 sends it with a 503
+/// (covered by the status rule), and legacy mode does not code-retry
+/// it on a 400 — verified against boto3 1.34.96.
 fn s3_retryable_code(code: &str) -> bool {
     matches!(
         code,
@@ -524,7 +526,7 @@ fn s3_retryable_answer(status: u16, code: Option<&str>) -> bool {
     if s3_retryable_status(status) {
         return true;
     }
-    code.is_some_and(s3_retryable_code)
+    status == 400 && code.is_some_and(s3_retryable_code)
 }
 
 /// Extract the `<Code>` from an S3 error body, if any.
@@ -2786,6 +2788,10 @@ mod tests {
         assert!(!s3_retryable_answer(400, None));
         assert!(!s3_retryable_answer(400, Some("SlowDown")));
         assert!(!s3_retryable_answer(403, Some("AccessDenied")));
+        // A retryable code on a non-400 status is final: every legacy
+        // code policy pairs the code with `http_status_code` 400.
+        assert!(!s3_retryable_answer(403, Some("Throttling")));
+        assert!(!s3_retryable_answer(404, Some("RequestTimeout")));
     }
 
     #[test]
