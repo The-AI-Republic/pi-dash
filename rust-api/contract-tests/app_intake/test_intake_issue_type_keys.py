@@ -5,7 +5,8 @@ Django's NEWFRONT-984 change adds ``type_id``/``is_epic`` to
 ``IntakeIssueDetailSerializer`` — and the ``issue_current_instance`` dump,
 which renders through the same shape — carries both keys in
 ``Meta.fields`` order: after ``parent_id`` (``cycle_id`` stays
-``SkipField``ed; the intake queryset never annotates it).
+``SkipField``ed; the intake queryset never annotates it). The create
+response renders the same serializer, so POST carries the keys too.
 
 The intake-write shapes stay put: ``duplicate_issue_detail`` and the
 ``IntakeIssueSerializer`` nested issue are ``IssueIntakeSerializer`` (no
@@ -133,6 +134,38 @@ def test_patch_nested_issue_carries_type_keys(admin):
     assert nested["type_id"] == epic_type
     assert nested["is_epic"] is True
     assert nested["name"] == "Patched typed probe"
+
+
+def test_create_nested_issue_carries_type_keys(admin):
+    urls = intake_urls(admin)
+    created = create_intake_issue(
+        admin["client"], urls["intake_issues"], name="Create type-keys probe"
+    )
+    nested = created["issue"]
+    assert list(nested) == NESTED_ISSUE_KEYS_ORDERED
+    assert nested["type_id"] is None
+    assert nested["is_epic"] is False
+
+
+def test_create_epic_typed_nested_issue(admin):
+    # POST through the inbox-issues alias: same viewset, same nested shape.
+    urls = intake_urls(admin)
+    epic_type = _make_type(admin, "Epic", is_epic=True)
+    response = admin["client"].post(
+        urls["inbox_issues"],
+        json={
+            "issue": {
+                "name": "Typed create probe",
+                "priority": "high",
+                "type": epic_type,
+            }
+        },
+    )
+    assert response.status_code == 200, response.text[:500]
+    nested = response.json()["issue"]
+    assert list(nested) == NESTED_ISSUE_KEYS_ORDERED
+    assert nested["type_id"] == epic_type
+    assert nested["is_epic"] is True
 
 
 def test_duplicate_issue_detail_keeps_intake_shape(make_tenant):
