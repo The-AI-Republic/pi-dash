@@ -158,6 +158,7 @@ const ENTRY_TABLES: &[(&str, &str, &str)] = &[
     ("db", "issueversion", "issue_versions"),
     ("db", "issueview", "issue_views"),
     ("db", "issuevote", "issue_votes"),
+    ("db", "issueworklog", "issue_worklogs"),
     ("db", "label", "labels"),
     ("db", "loopjob", "loop_jobs"),
     ("db", "looptarget", "loop_targets"),
@@ -249,7 +250,7 @@ const ENTRY_TABLES: &[(&str, &str, &str)] = &[
 ///     if hasattr(m, "deleted_at"):
 ///         print(m._meta.db_table)
 /// ```
-pub const HARD_DELETE_SWEEP_TABLES: [&str; 113] = [
+pub const HARD_DELETE_SWEEP_TABLES: [&str; 114] = [
     "analytic_views",
     "api_tokens",
     "cli_device_codes",
@@ -358,6 +359,7 @@ pub const HARD_DELETE_SWEEP_TABLES: [&str; 113] = [
     "loop_jobs",
     "loop_targets",
     "loop_user_preferences",
+    "issue_worklogs",
     "instances",
     "instance_admins",
     "instance_configurations",
@@ -2161,7 +2163,7 @@ mod tests {
 
     #[test]
     fn sweep_order_freeze_covers_the_named_tables() {
-        assert_eq!(HARD_DELETE_SWEEP_TABLES.len(), 113);
+        assert_eq!(HARD_DELETE_SWEEP_TABLES.len(), 114);
         for table in HARD_DELETE_NAMED_TABLES {
             assert!(
                 HARD_DELETE_SWEEP_TABLES.contains(&table),
@@ -2179,7 +2181,11 @@ mod tests {
         };
         assert!(position("issues") < position("issue_activities"));
         assert!(position("git_provider_accounts") < position("git_repository_bindings"));
-        assert_eq!(HARD_DELETE_SWEEP_TABLES[112], "pod");
+        // `issue_worklogs` sits at its Django `_meta` position: last of
+        // the `db` app, before the `license` models (PIDASHCONV-1703).
+        assert!(position("loop_user_preferences") < position("issue_worklogs"));
+        assert!(position("issue_worklogs") < position("instances"));
+        assert_eq!(HARD_DELETE_SWEEP_TABLES[113], "pod");
     }
 
     #[test]
