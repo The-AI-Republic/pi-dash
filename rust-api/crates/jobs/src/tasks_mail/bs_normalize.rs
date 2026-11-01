@@ -29,6 +29,12 @@
 //! in text) stay surrogates in CPython's output but map to U+FFFD here —
 //! a Rust `String` cannot hold a surrogate. The golden records U+FFFD for
 //! those cases with this note as the justification.
+//!
+//! Known minor divergence: CPython's `re.I` close scan finds non-ASCII
+//! case variants (`</ſcript>`, U+017F) and keeps them as content, while
+//! this ASCII-only scan misses them and drops the tail instead
+//! (`<script>x</ſcript>TAIL` keeps `x</ſcript>` there, drops all here).
+//! Corpus-absent; ASCII closes and all recorded behavior are unaffected.
 
 use pidash_types::html_entities::{c1_remap, html_unescape, lookup_bare_entity};
 
