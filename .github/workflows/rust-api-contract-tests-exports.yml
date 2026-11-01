@@ -143,6 +143,12 @@ jobs:
         working-directory: rust-api/contract-tests
         run: pytest exports/test_oracle_exports.py -v
 
+      # PIDASHCONV-1700: under-limit exports stay plain zip (no zip64
+      # records). Separate step so the suite boots its own oracle worker.
+      - name: Run export zip64 Django oracle
+        working-directory: rust-api/contract-tests
+        run: pytest tasks_cleanup/test_export_zip64.py -v
+
       - name: Upload oracle worker log on failure
         if: failure()
         uses: actions/upload-artifact@v4

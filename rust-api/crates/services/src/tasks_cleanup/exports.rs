@@ -414,78 +414,253 @@ pub struct ZipEntry<'a> {
     pub content: &'a [u8],
 }
 
+/// Plain-format ceiling for ZIP sizes and offsets: CPython 3.12 `zipfile`
+/// (`ZIP64_LIMIT`) writes zip64 records once a value is *above* this limit
+/// — so entries between 2 GiB and 4 GiB already carry zip64 extras on the
+/// Django side, and anything at or past 4 GiB needs them for correctness.
+/// The contract suites pin Python 3.12, so the writer mirrors it exactly.
+const ZIP64_LIMIT: u64 = 0x7FFF_FFFF;
+
+/// One compressed entry ready to serialize. Lengths are declared, not
+/// derived, so tests can probe the zip64 thresholds with tiny payloads;
+/// [`build_zip`] always passes the true lengths and offsets.
+struct ZipRecord<'a> {
+    name: &'a [u8],
+    crc: u32,
+    uncomp_len: u64,
+    comp: &'a [u8],
+    comp_len: u64,
+    header_offset: u64,
+}
+
 /// `create_zip_file:28-38`: ZIP_DEFLATED entries, duplicate names append,
 /// buffer rewound (`seek(0)`) before return — the `Vec<u8>` is the whole
 /// buffer from position zero. Deflate compression mirrors
 /// `ZIP_DEFLATED`; entry timestamps are fixed metadata (Python stamps
 /// local time, which no consumer reads).
+///
+/// Sizes and offsets that pass [`ZIP64_LIMIT`] ride zip64 extras and the
+/// zip64 end-of-central-directory record, exactly as CPython 3.12
+/// `zipfile` writes them (`ZipFile.writestr` + `_write_end_record`, both
+/// triggered by `>` comparisons); below every threshold the bytes are the
+/// plain format with no zip64 records. All arithmetic is checked `u64`, so
+/// no size or offset can wrap or truncate (PIDASHCONV-1700).
 pub fn build_zip(entries: &[ZipEntry<'_>]) -> Vec<u8> {
-    const METHOD_DEFLATED: u16 = 8;
-    let mut data_blocks: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
-    let mut out: Vec<u8> = Vec::new();
-
+    let mut blocks: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
     for entry in entries {
         let mut encoder =
             flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
         encoder
             .write_all(entry.content)
             .expect("deflate encode cannot fail");
-        let compressed = encoder.finish().expect("deflate finish cannot fail");
-        let crc = crc32fast::hash(entry.content);
-        let name = entry.name.as_bytes();
+        blocks.push(encoder.finish().expect("deflate finish cannot fail"));
+    }
+    // Layout: local header (30) + name + extra + payload per entry, with
+    // checked offsets. `usize as u64` widens and cannot truncate.
+    let mut records: Vec<ZipRecord<'_>> = Vec::with_capacity(entries.len());
+    let mut offset: u64 = 0;
+    for (entry, comp) in entries.iter().zip(blocks.iter()) {
+        let uncomp_len = entry.content.len() as u64;
+        let comp_len = comp.len() as u64;
+        let extra_len: u64 = if uncomp_len > ZIP64_LIMIT || comp_len > ZIP64_LIMIT {
+            // Extra id + size + the paired u64 sizes (see `assemble_zip`).
+            20
+        } else {
+            0
+        };
+        records.push(ZipRecord {
+            name: entry.name.as_bytes(),
+            crc: crc32fast::hash(entry.content),
+            uncomp_len,
+            comp,
+            comp_len,
+            header_offset: offset,
+        });
+        offset = offset
+            .checked_add(30)
+            .and_then(|v| v.checked_add(entry.name.len() as u64))
+            .and_then(|v| v.checked_add(extra_len))
+            .and_then(|v| v.checked_add(comp_len))
+            .expect("zip local section exceeds u64");
+    }
+    assemble_zip(&records)
+}
 
+/// Serialize compressed records: local headers + payloads, the central
+/// directory, then the zip64 EOCD record + locator (only when needed) and
+/// the plain EOCD. Mirrors CPython 3.12 `zipfile`: a per-entry extra
+/// (id `0x0001`) when either size passes [`ZIP64_LIMIT`] — local extras
+/// always pair both sizes, central extras append the header offset when it
+/// passes the limit — version 45 on entries carrying an extra, and a zip64
+/// EOCD record when the count passes `0xFFFF` or the central directory
+/// size or offset passes the limit (plain EOCD fields clamp to the marker,
+/// as `zipfile`'s `min(...)` does).
+fn assemble_zip(records: &[ZipRecord<'_>]) -> Vec<u8> {
+    const METHOD_DEFLATED: u16 = 8;
+    const VERSION_PLAIN: u16 = 20;
+    const VERSION_ZIP64: u16 = 45;
+    let mut out: Vec<u8> = Vec::new();
+
+    for record in records {
+        let size64 = record.uncomp_len > ZIP64_LIMIT || record.comp_len > ZIP64_LIMIT;
+        let version = if size64 { VERSION_ZIP64 } else { VERSION_PLAIN };
+        // CPython `struct.pack("<H", len(name))` raises past 64 KiB; export
+        // names are short, so reaching this is a programming error either way.
+        let name_len = u16::try_from(record.name.len()).expect("zip entry name exceeds u16");
         // Local file header.
         out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
-        out.extend_from_slice(&20u16.to_le_bytes());
+        out.extend_from_slice(&version.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&METHOD_DEFLATED.to_le_bytes());
         // Fixed MS-DOS date/time (metadata only; see docs above).
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&0x2Bu16.to_le_bytes());
-        out.extend_from_slice(&crc.to_le_bytes());
-        out.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(entry.content.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(name);
-        out.extend_from_slice(&compressed);
-        data_blocks.push(compressed);
+        out.extend_from_slice(&record.crc.to_le_bytes());
+        if size64 {
+            out.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+            out.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        } else {
+            // Guarded by `size64`: both values fit u32 here.
+            out.extend_from_slice(&u32::try_from(record.comp_len).expect("u32").to_le_bytes());
+            out.extend_from_slice(&u32::try_from(record.uncomp_len).expect("u32").to_le_bytes());
+        }
+        out.extend_from_slice(&name_len.to_le_bytes());
+        if size64 {
+            out.extend_from_slice(&20u16.to_le_bytes());
+        } else {
+            out.extend_from_slice(&0u16.to_le_bytes());
+        }
+        out.extend_from_slice(record.name);
+        if size64 {
+            out.extend_from_slice(&1u16.to_le_bytes());
+            out.extend_from_slice(&16u16.to_le_bytes());
+            out.extend_from_slice(&record.uncomp_len.to_le_bytes());
+            out.extend_from_slice(&record.comp_len.to_le_bytes());
+        }
+        out.extend_from_slice(record.comp);
     }
 
-    let central_start = out.len() as u32;
-    let mut offset = 0u32;
-    for (entry, compressed) in entries.iter().zip(data_blocks.iter()) {
-        let crc = crc32fast::hash(entry.content);
-        let name = entry.name.as_bytes();
+    let central_start = out.len() as u64;
+    for record in records {
+        let size64 = record.uncomp_len > ZIP64_LIMIT || record.comp_len > ZIP64_LIMIT;
+        let off64 = record.header_offset > ZIP64_LIMIT;
+        let version = if size64 || off64 {
+            VERSION_ZIP64
+        } else {
+            VERSION_PLAIN
+        };
+        let name_len = u16::try_from(record.name.len()).expect("zip entry name exceeds u16");
         out.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
-        out.extend_from_slice(&20u16.to_le_bytes());
-        out.extend_from_slice(&20u16.to_le_bytes());
+        out.extend_from_slice(&version.to_le_bytes());
+        out.extend_from_slice(&version.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&8u16.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&0x2Bu16.to_le_bytes());
-        out.extend_from_slice(&crc.to_le_bytes());
-        out.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(entry.content.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&record.crc.to_le_bytes());
+        if size64 {
+            out.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+            out.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        } else {
+            // Guarded by `size64`: both values fit u32 here.
+            out.extend_from_slice(&u32::try_from(record.comp_len).expect("u32").to_le_bytes());
+            out.extend_from_slice(&u32::try_from(record.uncomp_len).expect("u32").to_le_bytes());
+        }
+        out.extend_from_slice(&name_len.to_le_bytes());
+        // Central extras carry only the overflowing fields, sizes first.
+        let mut extra_fields: u64 = 0;
+        if size64 {
+            extra_fields += 2;
+        }
+        if off64 {
+            extra_fields += 1;
+        }
+        let central_extra_len = if size64 || off64 {
+            4 + 8 * extra_fields
+        } else {
+            0
+        };
+        out.extend_from_slice(
+            &u16::try_from(central_extra_len)
+                .expect("zip64 extra fits u16")
+                .to_le_bytes(),
+        );
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&0u32.to_le_bytes());
-        out.extend_from_slice(&offset.to_le_bytes());
-        out.extend_from_slice(name);
-        // Local header (30) + name + payload sizes feed the next offset.
-        offset += 30 + name.len() as u32 + compressed.len() as u32;
+        if off64 {
+            out.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        } else {
+            // Guarded by `off64`: the offset fits u32 here.
+            out.extend_from_slice(
+                &u32::try_from(record.header_offset)
+                    .expect("u32")
+                    .to_le_bytes(),
+            );
+        }
+        out.extend_from_slice(record.name);
+        if size64 || off64 {
+            out.extend_from_slice(&1u16.to_le_bytes());
+            out.extend_from_slice(
+                &u16::try_from(8 * extra_fields)
+                    .expect("zip64 extra fits u16")
+                    .to_le_bytes(),
+            );
+            if size64 {
+                out.extend_from_slice(&record.uncomp_len.to_le_bytes());
+                out.extend_from_slice(&record.comp_len.to_le_bytes());
+            }
+            if off64 {
+                out.extend_from_slice(&record.header_offset.to_le_bytes());
+            }
+        }
     }
-    let central_len = out.len() as u32 - central_start;
+    let central_len = out.len() as u64 - central_start;
+
+    let count = records.len() as u64;
+    if count > 0xFFFF || central_len > ZIP64_LIMIT || central_start > ZIP64_LIMIT {
+        // Zip64 end-of-central-directory record + locator, ahead of the
+        // plain EOCD (CPython `_write_end_record` field order).
+        let record_at = out.len() as u64;
+        out.extend_from_slice(&0x0606_4b50u32.to_le_bytes());
+        out.extend_from_slice(&44u64.to_le_bytes());
+        out.extend_from_slice(&VERSION_ZIP64.to_le_bytes());
+        out.extend_from_slice(&VERSION_ZIP64.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&central_len.to_le_bytes());
+        out.extend_from_slice(&central_start.to_le_bytes());
+        out.extend_from_slice(&0x0706_4b50u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&record_at.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
+    }
     out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-    out.extend_from_slice(&central_len.to_le_bytes());
-    out.extend_from_slice(&central_start.to_le_bytes());
+    out.extend_from_slice(
+        &u16::try_from(count.min(0xFFFF))
+            .expect("clamped")
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(
+        &u16::try_from(count.min(0xFFFF))
+            .expect("clamped")
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(
+        &u32::try_from(central_len.min(0xFFFF_FFFF))
+            .expect("clamped")
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(
+        &u32::try_from(central_start.min(0xFFFF_FFFF))
+            .expect("clamped")
+            .to_le_bytes(),
+    );
     out.extend_from_slice(&0u16.to_le_bytes());
     out
 }
@@ -1078,6 +1253,323 @@ mod tests {
                 ("a".to_owned(), b"1".to_vec()),
                 ("a".to_owned(), b"2".to_vec())
             ]
+        );
+    }
+
+    /// End-of-central-directory fields of a `build_zip` archive (our
+    /// writer emits no archive comment, so EOCD is the last 22 bytes).
+    fn read_eocd(data: &[u8]) -> (u16, u16, u32, u32) {
+        let eocd = &data[data.len() - 22..];
+        assert_eq!(
+            u32::from_le_bytes(eocd[0..4].try_into().unwrap()),
+            0x0605_4b50
+        );
+        (
+            u16::from_le_bytes(eocd[8..10].try_into().unwrap()),
+            u16::from_le_bytes(eocd[10..12].try_into().unwrap()),
+            u32::from_le_bytes(eocd[12..16].try_into().unwrap()),
+            u32::from_le_bytes(eocd[16..20].try_into().unwrap()),
+        )
+    }
+
+    fn has_sig(data: &[u8], sig: u32) -> bool {
+        let sig = sig.to_le_bytes();
+        data.windows(4).any(|w| w == sig)
+    }
+
+    #[test]
+    fn zip_count_past_u16_uses_zip64_eocd() {
+        // PIDASHCONV-1700: counts past 0xFFFF ride the zip64
+        // end-of-central-directory record (CPython 3.12 `zipfile`:
+        // `centDirCount > ZIP_FILECOUNT_LIMIT`), not a truncated u16.
+        let names: Vec<String> = (0..70_000).map(|i| format!("f-{i:06}")).collect();
+        let entries: Vec<ZipEntry<'_>> = names
+            .iter()
+            .map(|nm| ZipEntry {
+                name: nm.as_str(),
+                content: b"x",
+            })
+            .collect();
+        let data = build_zip(&entries);
+        assert!(has_sig(&data, 0x0606_4b50), "zip64 EOCD record missing");
+        assert!(has_sig(&data, 0x0706_4b50), "zip64 EOCD locator missing");
+        // Plain EOCD counts clamp to the marker; the 20-byte locator sits
+        // directly before it and points at the zip64 record, whose total
+        // entry count is the true u64 value.
+        assert_eq!(read_eocd(&data).0, 0xFFFF);
+        assert_eq!(read_eocd(&data).1, 0xFFFF);
+        let locator = &data[data.len() - 42..data.len() - 22];
+        assert_eq!(
+            u32::from_le_bytes(locator[0..4].try_into().unwrap()),
+            0x0706_4b50
+        );
+        let record_at = u64::from_le_bytes(locator[8..16].try_into().unwrap()) as usize;
+        let record = &data[record_at..];
+        assert_eq!(
+            u32::from_le_bytes(record[0..4].try_into().unwrap()),
+            0x0606_4b50
+        );
+        assert_eq!(
+            u64::from_le_bytes(record[32..40].try_into().unwrap()),
+            70_000
+        );
+        // Count-only overflow leaves every entry header untouched: local
+        // extras stay empty and central versions stay 20.
+        assert_eq!(u16::from_le_bytes(data[28..30].try_into().unwrap()), 0);
+        let central_at = read_eocd(&data).3 as usize;
+        assert_eq!(
+            u32::from_le_bytes(data[central_at..central_at + 4].try_into().unwrap()),
+            0x0201_4b50
+        );
+        assert_eq!(
+            u16::from_le_bytes(data[central_at + 4..central_at + 6].try_into().unwrap()),
+            20
+        );
+        assert_eq!(
+            u16::from_le_bytes(data[central_at + 6..central_at + 8].try_into().unwrap()),
+            20
+        );
+        assert_eq!(read_zip(&data).len(), 70_000);
+    }
+
+    #[test]
+    fn zip_count_at_u16_limit_has_no_zip64() {
+        // Boundary: exactly 0xFFFF entries still fit the EOCD u16 fields
+        // (CPython uses `>`, not `>=`), so no zip64 records are written.
+        let names: Vec<String> = (0..0xFFFF).map(|i| format!("f-{i:06}")).collect();
+        let entries: Vec<ZipEntry<'_>> = names
+            .iter()
+            .map(|nm| ZipEntry {
+                name: nm.as_str(),
+                content: b"x",
+            })
+            .collect();
+        let data = build_zip(&entries);
+        assert!(!has_sig(&data, 0x0606_4b50));
+        assert!(!has_sig(&data, 0x0706_4b50));
+        let (this_disk, total, _, _) = read_eocd(&data);
+        assert_eq!((this_disk, total), (0xFFFF, 0xFFFF));
+        assert_eq!(read_zip(&data).len(), 0xFFFF);
+    }
+
+    #[test]
+    fn zip_size_past_limit_uses_zip64_extras() {
+        // Synthetic 4 GiB declared size over a 1-byte payload: the local
+        // header carries version 45, 0xFFFFFFFF placeholders and the
+        // paired u64 sizes; the central header matches. Small central
+        // directory, so no zip64 EOCD (as in the Django 4 GiB baseline).
+        let data = assemble_zip(&[ZipRecord {
+            name: b"big.bin",
+            crc: 0x1234_5678,
+            uncomp_len: 0x1_0000_0000,
+            comp: b"x",
+            comp_len: 3,
+            header_offset: 0,
+        }]);
+        assert_eq!(
+            u32::from_le_bytes(data[0..4].try_into().unwrap()),
+            0x0403_4b50
+        );
+        assert_eq!(u16::from_le_bytes(data[4..6].try_into().unwrap()), 45);
+        assert_eq!(
+            u32::from_le_bytes(data[18..22].try_into().unwrap()),
+            0xFFFF_FFFF
+        );
+        assert_eq!(
+            u32::from_le_bytes(data[22..26].try_into().unwrap()),
+            0xFFFF_FFFF
+        );
+        let name_len = u16::from_le_bytes(data[26..28].try_into().unwrap()) as usize;
+        assert_eq!(u16::from_le_bytes(data[28..30].try_into().unwrap()), 20);
+        let extra = &data[30 + name_len..30 + name_len + 20];
+        assert_eq!(u16::from_le_bytes(extra[0..2].try_into().unwrap()), 1);
+        assert_eq!(u16::from_le_bytes(extra[2..4].try_into().unwrap()), 16);
+        assert_eq!(
+            u64::from_le_bytes(extra[4..12].try_into().unwrap()),
+            0x1_0000_0000
+        );
+        assert_eq!(u64::from_le_bytes(extra[12..20].try_into().unwrap()), 3);
+        let central_at = 30 + name_len + 20 + 1;
+        assert_eq!(
+            u32::from_le_bytes(data[central_at..central_at + 4].try_into().unwrap()),
+            0x0201_4b50
+        );
+        assert_eq!(
+            u16::from_le_bytes(data[central_at + 4..central_at + 6].try_into().unwrap()),
+            45
+        );
+        assert_eq!(
+            u16::from_le_bytes(data[central_at + 6..central_at + 8].try_into().unwrap()),
+            45
+        );
+        assert_eq!(
+            u32::from_le_bytes(data[central_at + 20..central_at + 24].try_into().unwrap()),
+            0xFFFF_FFFF
+        );
+        assert_eq!(
+            u32::from_le_bytes(data[central_at + 24..central_at + 28].try_into().unwrap()),
+            0xFFFF_FFFF
+        );
+        assert_eq!(
+            u16::from_le_bytes(data[central_at + 30..central_at + 32].try_into().unwrap()),
+            20
+        );
+        assert_eq!(
+            u32::from_le_bytes(data[central_at + 42..central_at + 46].try_into().unwrap()),
+            0
+        );
+        let cextra = &data[central_at + 46 + name_len..central_at + 46 + name_len + 20];
+        assert_eq!(u16::from_le_bytes(cextra[0..2].try_into().unwrap()), 1);
+        assert_eq!(u16::from_le_bytes(cextra[2..4].try_into().unwrap()), 16);
+        assert_eq!(
+            u64::from_le_bytes(cextra[4..12].try_into().unwrap()),
+            0x1_0000_0000
+        );
+        assert_eq!(u64::from_le_bytes(cextra[12..20].try_into().unwrap()), 3);
+        assert!(!has_sig(&data, 0x0606_4b50));
+        assert!(!has_sig(&data, 0x0706_4b50));
+    }
+
+    #[test]
+    fn zip_offset_past_limit_rides_central_extra() {
+        // Synthetic 4 GiB header offset with small sizes: the local header
+        // stays plain (version 20, no extra — CPython never puts the
+        // offset in local extras) while the central header carries version
+        // 45, the offset placeholder and an 8-byte extra holding the
+        // offset alone.
+        let data = assemble_zip(&[ZipRecord {
+            name: b"late.bin",
+            crc: 0,
+            uncomp_len: 1,
+            comp: b"x",
+            comp_len: 1,
+            header_offset: 0x1_0000_0000,
+        }]);
+        assert_eq!(u16::from_le_bytes(data[4..6].try_into().unwrap()), 20);
+        assert_eq!(u32::from_le_bytes(data[18..22].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(data[22..26].try_into().unwrap()), 1);
+        assert_eq!(u16::from_le_bytes(data[28..30].try_into().unwrap()), 0);
+        let central_at = 30 + b"late.bin".len() + 1;
+        assert_eq!(
+            u16::from_le_bytes(data[central_at + 4..central_at + 6].try_into().unwrap()),
+            45
+        );
+        assert_eq!(
+            u16::from_le_bytes(data[central_at + 6..central_at + 8].try_into().unwrap()),
+            45
+        );
+        assert_eq!(
+            u32::from_le_bytes(data[central_at + 20..central_at + 24].try_into().unwrap()),
+            1
+        );
+        assert_eq!(
+            u16::from_le_bytes(data[central_at + 30..central_at + 32].try_into().unwrap()),
+            12
+        );
+        assert_eq!(
+            u32::from_le_bytes(data[central_at + 42..central_at + 46].try_into().unwrap()),
+            0xFFFF_FFFF
+        );
+        let cextra =
+            &data[central_at + 46 + b"late.bin".len()..central_at + 46 + b"late.bin".len() + 12];
+        assert_eq!(u16::from_le_bytes(cextra[0..2].try_into().unwrap()), 1);
+        assert_eq!(u16::from_le_bytes(cextra[2..4].try_into().unwrap()), 8);
+        assert_eq!(
+            u64::from_le_bytes(cextra[4..12].try_into().unwrap()),
+            0x1_0000_0000
+        );
+    }
+
+    #[test]
+    fn zip_size_at_limit_stays_plain() {
+        // `>` semantics: exactly ZIP64_LIMIT fits the u32 fields, so no
+        // extras and version 20 (mirrors CPython's comparisons).
+        let data = assemble_zip(&[ZipRecord {
+            name: b"edge.bin",
+            crc: 0,
+            uncomp_len: ZIP64_LIMIT,
+            comp: b"x",
+            comp_len: ZIP64_LIMIT,
+            header_offset: ZIP64_LIMIT,
+        }]);
+        assert_eq!(u16::from_le_bytes(data[4..6].try_into().unwrap()), 20);
+        assert_eq!(
+            u32::from_le_bytes(data[18..22].try_into().unwrap()),
+            0x7FFF_FFFF
+        );
+        assert_eq!(
+            u32::from_le_bytes(data[22..26].try_into().unwrap()),
+            0x7FFF_FFFF
+        );
+        assert_eq!(u16::from_le_bytes(data[28..30].try_into().unwrap()), 0);
+        assert!(!has_sig(&data, 0x0606_4b50));
+        assert!(!has_sig(&data, 0x0706_4b50));
+    }
+
+    #[test]
+    fn zip_under_limit_has_no_zip64_records() {
+        // PIDASHCONV-1700 second criterion at writer level: small archives
+        // stay plain — no zip64 EOCD, no extras, version 20 throughout.
+        let data = build_zip(&[
+            ZipEntry {
+                name: "issues.json",
+                content: br#"{"a": 1}"#,
+            },
+            ZipEntry {
+                name: "issues.csv",
+                content: b"h1,h2\nv1,v2\n",
+            },
+        ]);
+        assert!(!has_sig(&data, 0x0606_4b50));
+        assert!(!has_sig(&data, 0x0706_4b50));
+        let (this_disk, total, central_len, central_start) = read_eocd(&data);
+        assert_eq!((this_disk, total), (2, 2));
+        let mut pos = 0;
+        for _ in 0..2 {
+            assert_eq!(
+                u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()),
+                0x0403_4b50
+            );
+            assert_eq!(
+                u16::from_le_bytes(data[pos + 4..pos + 6].try_into().unwrap()),
+                20
+            );
+            let comp_len =
+                u32::from_le_bytes(data[pos + 18..pos + 22].try_into().unwrap()) as usize;
+            let name_len =
+                u16::from_le_bytes(data[pos + 26..pos + 28].try_into().unwrap()) as usize;
+            assert_eq!(
+                u16::from_le_bytes(data[pos + 28..pos + 30].try_into().unwrap()),
+                0
+            );
+            pos += 30 + name_len + comp_len;
+        }
+        assert_eq!(pos as u64, u64::from(central_start));
+        let mut cpos = usize::try_from(central_start).expect("central dir fits usize");
+        for _ in 0..2 {
+            assert_eq!(
+                u32::from_le_bytes(data[cpos..cpos + 4].try_into().unwrap()),
+                0x0201_4b50
+            );
+            assert_eq!(
+                u16::from_le_bytes(data[cpos + 4..cpos + 6].try_into().unwrap()),
+                20
+            );
+            assert_eq!(
+                u16::from_le_bytes(data[cpos + 6..cpos + 8].try_into().unwrap()),
+                20
+            );
+            let name_len =
+                u16::from_le_bytes(data[cpos + 28..cpos + 30].try_into().unwrap()) as usize;
+            assert_eq!(
+                u16::from_le_bytes(data[cpos + 30..cpos + 32].try_into().unwrap()),
+                0
+            );
+            cpos += 46 + name_len;
+        }
+        assert_eq!(
+            cpos as u64 - u64::from(central_start),
+            u64::from(central_len)
         );
     }
 
