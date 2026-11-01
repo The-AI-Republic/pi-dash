@@ -1812,7 +1812,7 @@ impl SeedStore for PgSeedStore {
         };
         use pidash_services::orchestration::dispatch::preflight_eligibility_or_bounce;
         use pidash_services::orchestration::entries::{
-            fire_state_transition, FireOutcome, FireRequest,
+            bump_orchestration_error_count, fire_state_transition, FireOutcome, FireRequest,
         };
 
         // Per-fire dispatch inputs (the fire_tick_live shape): the
@@ -1966,15 +1966,16 @@ impl SeedStore for PgSeedStore {
                 }
                 Err(error) => {
                     // The drive never ran, so there is nothing to keep:
-                    // roll the tx back (subsuming the savepoint), log,
-                    // and let the seed continue. The orchestration
-                    // error counter is not bumped — its bump is private
-                    // to services (PIDASHCONV-1704 will wire it).
+                    // roll the tx back (subsuming the savepoint), bump
+                    // the counter like `Failed`, log, and let the seed
+                    // continue.
                     let _ = tx.rollback().await;
+                    let total_errors = bump_orchestration_error_count();
                     tracing::error!(
                         issue_id = %issue_id,
                         %error,
-                        "workspace_seed: preflight probe failed; the save stands",
+                        "workspace_seed: preflight probe failed; the save stands \
+                         (total_errors={total_errors})",
                     );
                     return Ok(());
                 }
@@ -2060,13 +2061,15 @@ impl SeedStore for PgSeedStore {
                 }
                 Err(error) => {
                     // The drive's writes go with the bounce's: roll the
-                    // tx back, log, and let the seed continue. (Counter
-                    // note as at the probe swallow: PIDASHCONV-1704.)
+                    // tx back, bump the counter like `Failed`, log, and
+                    // let the seed continue.
                     let _ = tx.rollback().await;
+                    let total_errors = bump_orchestration_error_count();
                     tracing::error!(
                         issue_id = %issue_id,
                         %error,
-                        "workspace_seed: preflight re-run failed; the save stands",
+                        "workspace_seed: preflight re-run failed; the save stands \
+                         (total_errors={total_errors})",
                     );
                     return Ok(());
                 }
