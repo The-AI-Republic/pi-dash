@@ -2,18 +2,16 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""GitHub project-invite join must 500 like Django (PIDASHCONV-1084, PB-1008).
+"""GitHub project-invite join succeeds like Django (PIDASHCONV-1686, PB-1008 retired).
 
 Django ``process_workspace_project_invitations``
-(``authentication/utils/workspace_project_join.py:76-87``) builds
-``ProjectMember`` rows without ``project`` while
-``project_members.project_id`` is NOT NULL, so every app-callback success
-with accepted project invites raises ``IntegrityError`` into a 500 *after*
-the workspace-member rows commit: no invite delete, no login, no account
-upsert. Google, gitlab and gitea port the 500; the github port selected
-``project_id`` from the invite and inserted it, so github wrongly
-succeeded. The fix drops ``project_id`` from the github
-``project_members`` INSERT.
+(``authentication/utils/workspace_project_join.py:76-87``) sets
+``project_id`` on the ``ProjectMember`` bulk (Django main, NEWFRONT-151),
+so sign-up/sign-in carrying accepted project invites succeeds: the user
+joins every invite workspace (role clamped to 5/15) *and* every invite
+project, the invites are consumed, and login completes. PB-1008 (the
+port that omitted ``project_id`` and 500d) is retired; every provider
+port plus email and magic bind the invite's ``project_id``.
 
 Why this file is a kernel-level harness instead of an end-to-end github
 login: the github token/userinfo URLs are hardcoded ``https://`` on both
@@ -23,34 +21,34 @@ test seam exists on either side — so no provider stub can feed both
 backends without changing shipped behavior, which translate-don't-redesign
 forbids. The stage-1 suite already records the success branch as
 hermetically untestable (see "Known oracle limits" in
-``test_permissions.py``). The issue delegates the harness choice to the fix
-run; this file pins the bug from four sides instead:
+``test_permissions.py``). This file pins the join from four sides instead:
 
-1. ``test_project_invite_signin_500s_with_partial_writes`` drives the
+1. ``test_project_invite_signin_succeeds_with_member_rows`` drives the
    *shared* invite-join kernel live on both backends through the
    provider-free email sign-in path (``EmailProvider`` passes the same
-   ``callback=post_user_auth_workflow``): 500, no session cookie, the
-   workspace-member row committed (role clamped to 5/15), zero
-   project-member rows, the invite intact, ``last_login`` still NULL.
-   Green before and after the fix — it is the kernel oracle.
-2. ``test_github_project_members_insert_omits_project_id`` is the
+   ``callback=post_user_auth_workflow``): 302, session cookie set, the
+   workspace-member row (role clamped to 5/15), the project-member row
+   carrying the invite's ``project_id``, the invite consumed, and
+   ``last_login`` stamped. It FAILS on the pre-fix code (500, partial
+   writes) and passes after, in both backend runs.
+2. ``test_github_project_members_insert_binds_project_id`` is the
    regression test: it reads the shipped ``oauth_github.rs``, extracts the
-   ``project_members`` INSERT block, and asserts the statement cannot
-   insert a real ``project_id`` (omitted column like google/gitlab, or an
-   explicit NULL like gitea, with no ``project_id`` bind). It FAILS on the
-   pre-fix code and passes after, in both backend runs.
-3. ``test_django_join_builds_project_members_without_project`` pins the
-   Django side of the contract: if ``workspace_project_join.py`` ever sets
-   ``project=``, PB-1008's premise changed and every provider port must be
-   revisited.
+   ``project_members`` call block, and asserts the site binds the invite's
+   ``project_id`` (``Some(..)``, never ``None``). It FAILS on the pre-fix
+   code and passes after, in both backend runs.
+3. ``test_django_join_sets_project_id_on_project_members`` pins the
+   Django side of the contract: ``workspace_project_join.py`` must set
+   ``project_id=`` on ``ProjectMember``. It FAILS on a checkout whose
+   Django predates the main fix (a maintainer sync merges main into
+   rust-dev first).
 4. ``test_project_members_project_id_is_not_null`` proves the schema
    premise live against the backend's own database: a complete row with a
    real ``project_id`` inserts fine, the same row with NULL raises a NOT
    NULL violation naming ``project_id``.
 
-Together: the kernel 500s live (1), the github copy carries the same
-omission (2), Django still omits (3), and the column still rejects NULL
-(4) — so the github callback must 500 exactly where Django does.
+Together: the kernel joins live (1), the github copy binds the id (2),
+Django sets it (3), and the column still rejects NULL (4) — so the
+github callback succeeds exactly where Django does.
 """
 
 import os
@@ -108,16 +106,17 @@ def _signin_post(client: httpx.Client, email: str, password: str) -> httpx.Respo
     )
 
 
-def test_project_invite_signin_500s_with_partial_writes(
+def test_project_invite_signin_succeeds_with_member_rows(
     client: httpx.Client, ensure_instance
 ):
-    """Accepted project invite: 500 on both, workspace row kept, invite intact.
+    """Accepted project invite: 302 on both, both member rows, invite consumed.
 
     Drives the shared ``process_workspace_project_invitations`` kernel live
     through email sign-in (same callback Django wires into every OAuth
     provider): the project-arm ``workspace_members`` row commits, the
-    ``project_members`` bulk raises the ported IntegrityError, and the
-    invite deletes plus ``login()`` never run.
+    ``project_members`` row carries the invite's ``project_id`` (role
+    clamped to 5/15 on both), the invite is consumed, and ``login()``
+    stamps ``last_login``.
     """
     database_url = config.database_url()
     database = Database(database_url)
@@ -132,9 +131,11 @@ def test_project_invite_signin_500s_with_partial_writes(
     )
     try:
         res = _signin_post(client, email, user["password"])
-        assert res.status_code == 500, f"expected 500, got {res.status_code}: {res.text[:300]}"
-        for raw in res.headers.get_list("set-cookie"):
-            assert not raw.startswith(SESSION_COOKIE + "="), f"session cookie set: {raw!r}"
+        assert res.status_code == 302, f"expected 302, got {res.status_code}: {res.text[:300]}"
+        assert any(
+            raw.startswith(SESSION_COOKIE + "=")
+            for raw in res.headers.get_list("set-cookie")
+        ), f"no session cookie: {res.headers.get_list('set-cookie')!r}"
 
         members = db.fetchall(
             database_url,
@@ -142,25 +143,32 @@ def test_project_invite_signin_500s_with_partial_writes(
             (user["id"],),
         )
         assert [(m["ws"], m["role"]) for m in members] == [(workspace["id"], 15)], members
-        project_rows = db.fetchone(
+        project_rows = db.fetchall(
             database_url,
-            "SELECT COUNT(*) AS n FROM project_members WHERE member_id = %s",
+            "SELECT project_id::text AS pj, workspace_id::text AS ws, role"
+            " FROM project_members WHERE member_id = %s",
             (user["id"],),
         )
-        assert project_rows["n"] == 0, project_rows
-        invite = db.fetchone(
+        assert [(m["pj"], m["ws"], m["role"]) for m in project_rows] == [
+            (project["id"], workspace["id"], 15)
+        ], project_rows
+        # No live accepted invite remains on either backend. (Django
+        # soft-deletes the row while Rust-email hard-deletes it -- the
+        # hardness divergence test_signin_invite_join.py already records
+        # as outside the join scope.)
+        live = db.fetchone(
             database_url,
-            "SELECT accepted, deleted_at FROM project_member_invites WHERE id = %s",
+            "SELECT COUNT(*) AS n FROM project_member_invites"
+            " WHERE id = %s AND accepted AND deleted_at IS NULL",
             (invite_id,),
         )
-        assert invite is not None and invite["accepted"] is True, invite
-        assert invite["deleted_at"] is None, invite
+        assert live["n"] == 0, live
         stamps = db.fetchone(
             database_url,
             "SELECT last_login FROM users WHERE id = %s",
             (user["id"],),
         )
-        assert stamps["last_login"] is None, stamps
+        assert stamps["last_login"] is not None, stamps
     finally:
         db.execute(
             database_url,
@@ -248,27 +256,25 @@ def _github_insert_block() -> str:
     return text[at : end + 2]
 
 
-def test_github_project_members_insert_omits_project_id():
-    """Regression test: the github INSERT must not carry a real project_id.
+def test_github_project_members_insert_binds_project_id():
+    """Regression test: the github INSERT must carry the invite's project_id.
 
-    The call site must pass ``project_id: None`` (the explicit-NULL
-    shape the issue sanctions for the per-row replays) and no
-    ``.bind(project_id)`` may feed the write. FAILS on pre-fix code.
+    The call site must pass ``project_id: Some(..)`` (never ``None`` —
+    the retired PB-1008 shape 500d). FAILS on pre-fix code.
     """
     block = _github_insert_block()
-    bind_has = re.search(r"\.bind\(\s*&?\s*\*?project_id\s*\)", block) is not None
-    assert not bind_has, (
-        "PB-1008: oauth_github.rs binds the invite's project_id into"
-        " project_members — Django omits it and 500s; drop the bind"
+    assert "project_id: None" not in block, (
+        "PIDASHCONV-1686: oauth_github.rs still passes project_id: None —"
+        " bind the invite's project_id (PB-1008 is retired)"
     )
-    assert "project_id: None" in block, (
-        "PB-1008: oauth_github.rs must pass project_id: None — a real"
-        " project_id would stop the ported 500"
+    assert re.search(r"project_id:\s*Some\(", block) is not None, (
+        "PIDASHCONV-1686: oauth_github.rs must pass project_id: Some(..)"
+        " into project_members"
     )
 
 
-def test_django_join_builds_project_members_without_project():
-    """Django pin: ProjectMember(...) sets no project (PB-1008 premise)."""
+def test_django_join_sets_project_id_on_project_members():
+    """Django pin: ProjectMember(...) sets project_id (PB-1008 retired)."""
     assert JOIN_PY.is_file(), f"harness: {JOIN_PY} moved — update test paths"
     text = JOIN_PY.read_text()
     start = text.find("ProjectMember(\n")
@@ -277,7 +283,8 @@ def test_django_join_builds_project_members_without_project():
     assert end != -1, "harness: invite loop not found after ProjectMember("
     block = text[start:end]
     assert "workspace_id=" in block, "harness: extracted the wrong block"
-    assert re.search(r"\bproject\s*=", block) is None, (
-        "PB-1008 premise changed: workspace_project_join.py now sets"
-        " project= on ProjectMember — revisit every provider port"
+    assert re.search(r"\bproject_id\s*=", block) is not None, (
+        "PIDASHCONV-1686: workspace_project_join.py sets no project_id="
+        " on ProjectMember — the checkout's Django predates the main fix;"
+        " a maintainer sync merges main into rust-dev first"
     )

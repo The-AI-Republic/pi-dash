@@ -713,14 +713,15 @@ async fn accepted_workspace_invites(
 }
 
 /// Accepted project invites newest-first (`ProjectMemberInvite.Meta`
-/// `ordering = ("-created_at",)`): `(workspace_id, role, created_by)`.
+/// `ordering = ("-created_at",)`): `(workspace_id, project_id, role,
+/// created_by)`.
 async fn accepted_project_invites(
     pool: &sqlx::PgPool,
     email: &str,
-) -> Result<Vec<(uuid::Uuid, i16, Option<uuid::Uuid>)>, sqlx::Error> {
+) -> Result<Vec<(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)>, sqlx::Error> {
     // `role` is `smallint` (see above): `i16`, not `i32`.
-    let rows: Vec<(uuid::Uuid, i16, Option<uuid::Uuid>)> = sqlx::query_as(
-        r#"SELECT "workspace_id", "role", "created_by_id"
+    let rows: Vec<(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)> = sqlx::query_as(
+        r#"SELECT "workspace_id", "project_id", "role", "created_by_id"
            FROM "project_member_invites" WHERE "email" = $1 AND "accepted" = true
            ORDER BY "created_at" DESC"#,
     )
@@ -803,8 +804,7 @@ async fn publish_message(
 /// `WorkspaceMember.objects.bulk_create(..., ignore_conflicts=True)`
 /// over ALL accepted project invites (`workspace_project_join.py:62-73`):
 /// one multi-row `INSERT` with `ON CONFLICT DO NOTHING`, committed before
-/// the project arm's ported `IntegrityError` below. Same
-/// `QueryBuilder.push_values` shape as the OAuth twin
+/// the project arm's bulk below. Same bulk shape as the OAuth twin
 /// (`auth_oauth/oauth_google.rs:insert_workspace_members`); empty input
 /// emits no statement (Django's `bulk_create([])` is a no-op).
 // `Response` is axum's handle type, so boxing it buys no runtime win;
@@ -812,7 +812,7 @@ async fn publish_message(
 #[allow(clippy::result_large_err)]
 async fn insert_project_arm_workspace_members(
     pool: &sqlx::PgPool,
-    rows: &[(uuid::Uuid, i16, Option<uuid::Uuid>)],
+    rows: &[(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)],
     user_id: uuid::Uuid,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), Response> {
@@ -823,12 +823,14 @@ async fn insert_project_arm_workspace_members(
     let issue_props = issue_props_json();
     let bulk_rows: Vec<members::BulkMember> = rows
         .iter()
-        .map(|(workspace_id, role, created_by)| members::BulkMember {
-            workspace_id: *workspace_id,
-            user_id,
-            role: invite_member_role(*role),
-            created_by: *created_by,
-        })
+        .map(
+            |(workspace_id, _project_id, role, created_by)| members::BulkMember {
+                workspace_id: *workspace_id,
+                user_id,
+                role: invite_member_role(*role),
+                created_by: *created_by,
+            },
+        )
         .collect();
     members::bulk_add(pool, &bulk_rows, &default_props, &issue_props, now)
         .await
@@ -837,19 +839,15 @@ async fn insert_project_arm_workspace_members(
 }
 
 /// `ProjectMember.objects.bulk_create(..., ignore_conflicts=True)` as
-/// written (`workspace_project_join.py:76-87`): the `ProjectMember`
-/// constructor never sets `project`, so `project_id` is missing although
-/// the column is NOT NULL and any accepted project invite raises
-/// `IntegrityError` even with `ON CONFLICT DO NOTHING` — the ported 500,
-/// with the workspace rows above already committed. Same
-/// `QueryBuilder.push_values` shape as the OAuth twin
-/// (`auth_oauth/oauth_google.rs:insert_project_members`).
+/// written (`workspace_project_join.py:76-87`): every row carries its
+/// invite's `project_id` (Django main; PB-1008 retired). Same bulk shape
+/// as the OAuth twin (`auth_oauth/oauth_google.rs:insert_project_members`).
 // `Response` is axum's handle type, so boxing it buys no runtime win;
 // the crate-wide `Result<_, Response>` helper shape stays as-is.
 #[allow(clippy::result_large_err)]
 async fn insert_project_arm_project_members(
     pool: &sqlx::PgPool,
-    rows: &[(uuid::Uuid, i16, Option<uuid::Uuid>)],
+    rows: &[(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)],
     user_id: uuid::Uuid,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), Response> {
@@ -860,13 +858,10 @@ async fn insert_project_arm_project_members(
     let preferences = default_preferences_json();
     let bulk: Vec<pidash_services::domain::projects::members::BulkRow> = rows
         .iter()
-        .map(|(workspace_id, role, created_by)| {
+        .map(|(workspace_id, project_id, role, created_by)| {
             pidash_services::domain::projects::members::BulkRow {
                 workspace_id: *workspace_id,
-                // PB-1008: the project arm omits `project_id`; the
-                // explicit `NULL` raises the same 23502 as the omitted
-                // column (identical message, identical effect).
-                project_id: None,
+                project_id: Some(*project_id),
                 user_id,
                 role: pidash_services::domain::projects::members::RoleBind::Int(i64::from(
                     invite_member_role(*role),
@@ -894,8 +889,8 @@ async fn insert_project_arm_project_members(
 /// members (per-row `INSERT ... ON CONFLICT DO NOTHING`, same committed
 /// rows as the bulk) and publishes one `track_event.delay` per invite;
 /// the project arm replays Django's two bulk statements (all
-/// `workspace_members` rows first, then the `project_members` bulk that
-/// raises the ported `IntegrityError`); then the invite deletes. Cache
+/// `workspace_members` rows first, then the `project_members` bulk with
+/// each invite's `project_id`); then the invite deletes. Cache
 /// invalidation is a documented no-op (see the module docs). Each
 /// statement is its own autocommit write — no `transaction.atomic`
 /// anywhere — so a later failure keeps the earlier rows, exactly like
@@ -952,8 +947,7 @@ async fn post_user_auth_workflow(
         .await
         .map_err(|_| server_error())?;
     // Two bulk statements, not one loop: Django commits every project-arm
-    // `workspace_members` row before the `project_members` bulk below
-    // raises the ported `IntegrityError`.
+    // `workspace_members` row before the `project_members` bulk below.
     insert_project_arm_workspace_members(pool, &project_invites, user_id, now).await?;
     insert_project_arm_project_members(pool, &project_invites, user_id, now).await?;
     sqlx::query(

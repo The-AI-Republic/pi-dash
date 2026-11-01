@@ -2,23 +2,21 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Two-workspace project-invite join must keep every workspace row (PIDASHCONV-1359).
+"""Two-workspace project-invite join keeps every row (PIDASHCONV-1359, -1686).
 
 Django ``process_workspace_project_invitations``
 (``authentication/utils/workspace_project_join.py:59-87``) bulk-inserts
 ``workspace_members`` for EVERY accepted project invite first, and only
-then runs the ``project_members`` bulk that raises the ported
-IntegrityError (PB-1008: the ``ProjectMember`` rows omit ``project``
-while ``project_members.project_id`` is NOT NULL). There is no
-``ATOMIC_REQUESTS``, so every invite's workspace row stays committed
-before the 500.
+then runs the ``project_members`` bulk — which sets ``project_id`` on
+every row (Django main, NEWFRONT-151; PB-1008 retired), so the join
+succeeds: both workspace rows, both project rows, both invites
+consumed. There is no ``ATOMIC_REQUESTS``.
 
-The Rust github and gitea copies ran both inserts per invite in one
-loop, so ``?`` aborted on the first failing ``project_members`` insert:
-only the first invite's workspace got a member row, the invites never
-soft-deleted, and every later login repeated the partial join. Google,
-gitlab and email already insert all workspace rows first. The fix splits
-both loops into workspace-first/project-second phases.
+PIDASHCONV-1359: the Rust github and gitea copies ran both inserts per
+invite in one loop, so ``?`` aborted after the first invite's
+workspace; the fix splits both copies into workspace-first /
+project-second phases, which this module's order pins keep. Google,
+gitlab and email already insert all workspace rows first.
 
 Harness choice (github is sealed end to end, like PIDASHCONV-1083/1084:
 Django posts the exchange to hardcoded ``https://github.com`` /
@@ -33,13 +31,14 @@ a fabricated ``GithubAuth``):
 
 1. ``test_app_gitea_two_project_invites_join_both_workspaces`` drives
    the full app-gitea callback over plain HTTP on both backends (the
-   1089 stub pattern): 500, both workspace-member rows committed (role
-   clamped to 5/15), zero project-member rows, both invites intact.
-   FAILS on pre-fix Rust (one row), passes on Django and fixed Rust.
+   1089 stub pattern): 302, both workspace-member rows (role clamped to
+   5/15), both project-member rows carrying their invite's
+   ``project_id``, both invites soft-deleted. FAILS on pre-fix Rust
+   (500, partial writes), passes on Django and fixed Rust.
 2. ``test_email_signin_two_project_invites_join_both_workspaces``
-   drives the same kernel through email sign-in on both backends: 500
-   plus both rows. Green before and after the fix — it is the kernel
-   oracle pinning the Django premise.
+   drives the same kernel through email sign-in on both backends: 302
+   plus both row sets. It is the kernel oracle pinning the Django
+   premise — FAILS on pre-fix Rust, passes on Django and fixed Rust.
 3. ``test_github_project_arm_inserts_all_workspaces_first`` and
    ``test_gitea_project_arm_inserts_all_workspaces_first`` pin the
    fixed statement order in the shipped sources: the project-invite
@@ -113,7 +112,7 @@ def _delete_gitea_config(database_url):
 
 def _delete_login_world(database_url, email, owner_email, workspace_ids, project_ids, invite_ids):
     """Best-effort teardown of a callback-created world; tolerates partial
-    seeds (the 500 branch never reaches the account upsert)."""
+    seeds (the pre-fix 500 branch never reaches the account upsert)."""
     for iid in invite_ids:
         db.execute(
             database_url, "DELETE FROM project_member_invites WHERE id = %s", (iid,)
@@ -122,11 +121,14 @@ def _delete_login_world(database_url, email, owner_email, workspace_ids, project
         "accounts",
         "profiles",
         "workspace_members",
+        "project_members",
         "user_notification_preferences",
     ):
         # Django's post_save receivers auto-create profile/notification
         # rows for the callback-created user (no-op on Rust).
-        column = "user_id" if table != "workspace_members" else "member_id"
+        column = (
+            "member_id" if table in ("workspace_members", "project_members") else "user_id"
+        )
         db.execute(
             database_url,
             f"DELETE FROM {table} WHERE {column} IN"
@@ -142,12 +144,13 @@ def _delete_login_world(database_url, email, owner_email, workspace_ids, project
 
 
 def test_app_gitea_two_project_invites_join_both_workspaces(base_url: str):
-    """Full app-gitea callback: 500 keeps BOTH workspace-member rows.
+    """Full app-gitea callback: 302 joins BOTH workspaces AND projects.
 
-    Runs against both backends. Pre-fix Rust commits only the first
-    invite's row before the ported PB-1008 500, so the two-row assertion
-    fails; post-fix both backends keep both rows (role clamped to 5/15),
-    write zero project-member rows, and leave both invites live.
+    Runs against both backends. Both backends write both
+    workspace-member rows (role clamped to 5/15) and both
+    project-member rows carrying their invite's ``project_id``, and
+    soft-delete both invites. FAILS on pre-fix Rust (500, partial
+    writes).
     """
     database_url = config.database_url()
     store = Database(database_url)
@@ -243,13 +246,14 @@ def test_app_gitea_two_project_invites_join_both_workspaces(base_url: str):
                 else []
             )
             project_rows = (
-                db.fetchone(
+                db.fetchall(
                     database_url,
-                    "SELECT COUNT(*) AS n FROM project_members WHERE member_id = %s",
+                    "SELECT project_id::text AS pj, workspace_id::text AS ws, role"
+                    " FROM project_members WHERE member_id = %s",
                     (user["id"],),
-                )["n"]
+                )
                 if user is not None
-                else 0
+                else []
             )
             invites = db.fetchall(
                 database_url,
@@ -264,20 +268,22 @@ def test_app_gitea_two_project_invites_join_both_workspaces(base_url: str):
                 database_url, email, owner_email, workspace_ids, project_ids, invite_ids
             )
 
-    assert resp.status_code == 500, (
-        f"expected the ported PB-1008 500, got {resp.status_code}: {resp.text[:300]}"
+    assert resp.status_code == 302, (
+        f"expected 302, got {resp.status_code}: {resp.text[:300]}"
     )
     assert ("POST", "/login/oauth/access_token") in hits, stub.requests
     assert ("GET", "/api/v1/user") in hits, stub.requests
-    assert user is not None, "callback created the user before the join 500d"
+    assert user is not None, "callback created the user"
     assert sorted((m["ws"], m["role"]) for m in members) == sorted(
         [(workspace_ids[0], 5), (workspace_ids[1], 15)]
     ), f"both invite workspaces joined (role 20 clamps to 15): {members}"
-    assert project_rows == 0, "project bulk raised before writing anything"
+    assert sorted((m["pj"], m["ws"], m["role"]) for m in project_rows) == sorted(
+        [(project_ids[0], workspace_ids[0], 5), (project_ids[1], workspace_ids[1], 15)]
+    ), f"both invite projects joined with their project_ids: {project_rows}"
     assert sorted(i["ws"] for i in invites) == sorted(workspace_ids), invites
     assert all(i["accepted"] is True for i in invites), invites
-    assert all(i["deleted_at"] is None for i in invites), (
-        f"both invites stay live: {invites}"
+    assert all(i["deleted_at"] is not None for i in invites), (
+        f"both invites soft-deleted: {invites}"
     )
 
 
@@ -307,14 +313,14 @@ def _signin_post(client: httpx.Client, email: str, password: str) -> httpx.Respo
 def test_email_signin_two_project_invites_join_both_workspaces(
     client: httpx.Client, ensure_instance
 ):
-    """Kernel oracle: email sign-in 500s with BOTH workspace rows kept.
+    """Kernel oracle: email sign-in joins BOTH workspaces AND projects.
 
     Drives the shared ``process_workspace_project_invitations`` kernel
     live on both backends (the same callback every OAuth provider wires
     in): the project-arm ``workspace_members`` rows for both invites
-    commit, the ``project_members`` bulk raises the ported IntegrityError,
-    and the invite deletes plus ``login()`` never run. Green before and
-    after the fix.
+    commit, both ``project_members`` rows carry their invite's
+    ``project_id``, the invites are consumed, and ``login()`` stamps
+    ``last_login``. FAILS on pre-fix Rust (500, partial writes).
     """
     database_url = config.database_url()
     database = Database(database_url)
@@ -331,9 +337,13 @@ def test_email_signin_two_project_invites_join_both_workspaces(
         invite_ids.append(iid)
     try:
         res = _signin_post(client, email, user["password"])
-        assert res.status_code == 500, (
-            f"expected 500, got {res.status_code}: {res.text[:300]}"
+        assert res.status_code == 302, (
+            f"expected 302, got {res.status_code}: {res.text[:300]}"
         )
+        assert any(
+            raw.startswith(SESSION_COOKIE + "=")
+            for raw in res.headers.get_list("set-cookie")
+        ), f"no session cookie: {res.headers.get_list('set-cookie')!r}"
 
         members = db.fetchall(
             database_url,
@@ -344,20 +354,35 @@ def test_email_signin_two_project_invites_join_both_workspaces(
         assert sorted((m["ws"], m["role"]) for m in members) == sorted(
             [(workspace_ids[0], 5), (workspace_ids[1], 15)]
         ), f"both invite workspaces joined (role 20 clamps to 15): {members}"
-        project_rows = db.fetchone(
+        project_rows = db.fetchall(
             database_url,
-            "SELECT COUNT(*) AS n FROM project_members WHERE member_id = %s",
+            "SELECT project_id::text AS pj, workspace_id::text AS ws, role"
+            " FROM project_members WHERE member_id = %s",
             (user["id"],),
         )
-        assert project_rows["n"] == 0, project_rows
-        invites = db.fetchall(
+        assert sorted((m["pj"], m["ws"], m["role"]) for m in project_rows) == sorted(
+            [
+                (project_ids[0], workspace_ids[0], 5),
+                (project_ids[1], workspace_ids[1], 15),
+            ]
+        ), f"both invite projects joined with their project_ids: {project_rows}"
+        # No live accepted invite remains on either backend. (Django
+        # soft-deletes the rows while Rust-email hard-deletes them --
+        # the hardness divergence test_signin_invite_join.py already
+        # records as outside the join scope.)
+        live = db.fetchone(
             database_url,
-            "SELECT accepted, deleted_at FROM project_member_invites WHERE id = ANY(%s)",
+            "SELECT COUNT(*) AS n FROM project_member_invites"
+            " WHERE id = ANY(%s) AND accepted AND deleted_at IS NULL",
             (invite_ids,),
         )
-        assert len(invites) == 2, invites
-        assert all(i["accepted"] is True for i in invites), invites
-        assert all(i["deleted_at"] is None for i in invites), invites
+        assert live["n"] == 0, live
+        stamps = db.fetchone(
+            database_url,
+            "SELECT last_login FROM users WHERE id = %s",
+            (user["id"],),
+        )
+        assert stamps["last_login"] is not None, stamps
     finally:
         for iid in invite_ids:
             db.execute(
@@ -394,7 +419,7 @@ def _assert_workspace_phases_first(path: Path, fetch_marker: str, end_marker: st
         f"PIDASHCONV-1359: {path.name} runs {len(loops)} project-invite loop(s),"
         " want 2 (all workspace_members rows first, then the project_members"
         " rows) — Django commits every invite's workspace row before the"
-        " ported PB-1008 500"
+        " project_members bulk"
     )
     # Match the write statements, not bare table names (comments name the
     # tables too). ORM-07 moved the workspace write into
@@ -423,7 +448,7 @@ def test_github_project_arm_inserts_all_workspaces_first():
     ``github_kernel_two_project_invites_join_both_workspaces``."""
     _assert_workspace_phases_first(
         GITHUB_RS,
-        "let project_invites: Vec<(Uuid, i16, Option<Uuid>)>",
+        "let project_invites: Vec<(Uuid, Uuid, i16, Option<Uuid>)>",
         "// Both invite sets soft-delete",
     )
 
