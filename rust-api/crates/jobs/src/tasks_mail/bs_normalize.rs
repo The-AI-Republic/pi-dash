@@ -15,7 +15,8 @@
 //! to-next-`>`/`<`/one-char data rule, whitespace-only collapsing
 //! outside `<pre>`/`<textarea>`) and serializes exactly like bs4
 //! (entities decoded then minimally re-escaped, void elements as `<x/>`,
-//! attributes lowercased, sorted, double-quoted). Every rule is
+//! attributes lowercased, sorted, double-quoted, cdata-list attributes
+//! split on whitespace and rejoined with one space). Every rule is
 //! probe-verified; the full probe corpus plus a whole-table sweep pins
 //! the behavior in
 //! `fixtures/tasks_mail/send/F-SEND.bs4_normalize.golden.json`.
@@ -25,16 +26,15 @@
 //! CDATA sections or attribute values are never elements — exactly like
 //! `soup.find_all("mention-component")`.
 //!
+//! Markup that makes CPython raise `AssertionError` (`<![` + non-letter,
+//! unknown marked-section names — bs4 surfaces `ParserRejectedMarkup`)
+//! fails the whole parse with [`RejectedMarkup`], exactly like the
+//! constructor raising before `find_all` runs.
+//!
 //! Known unavoidable divergence: lone surrogates (`&#xD800;`-`&#xDFFF;`
 //! in text) stay surrogates in CPython's output but map to U+FFFD here —
 //! a Rust `String` cannot hold a surrogate. The golden records U+FFFD for
 //! those cases with this note as the justification.
-//!
-//! Known minor divergence: CPython's `re.I` close scan finds non-ASCII
-//! case variants (`</ſcript>`, U+017F) and keeps them as content, while
-//! this ASCII-only scan misses them and drops the tail instead
-//! (`<script>x</ſcript>TAIL` keeps `x</ſcript>` there, drops all here).
-//! Corpus-absent; ASCII closes and all recorded behavior are unaffected.
 
 use pidash_types::html_entities::{c1_remap, html_unescape, lookup_bare_entity};
 
@@ -62,15 +62,24 @@ pub struct NormalizedMention {
     pub entity_id: Option<String>,
 }
 
+/// The parse failed exactly like `BeautifulSoup(html, "html.parser")`
+/// raising `ParserRejectedMarkup`: CPython's `_markupbase` hit `<![` +
+/// a non-letter or an unknown marked-section name (probed: the whole
+/// constructor raises, so there is no partial output and no spans).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("html.parser rejected the markup")]
+pub struct RejectedMarkup;
+
 /// Normalize `html` like `str(BeautifulSoup(html, "html.parser"))` and
 /// collect the `<mention-component>` spans (`soup.find_all` order).
-pub fn normalize_bs(html: &str) -> Normalized {
+/// Returns [`RejectedMarkup`] where the constructor raises.
+pub fn normalize_bs(html: &str) -> Result<Normalized, RejectedMarkup> {
     let mut p = Parser::new(html);
-    p.run();
-    Normalized {
+    p.run()?;
+    Ok(Normalized {
         html: p.out,
         mentions: p.mentions,
-    }
+    })
 }
 
 /// ASCII whitespace per the HTML spec (`\x0b` excluded — probed).
@@ -292,6 +301,41 @@ fn is_pre(name: &str) -> bool {
     matches!(name, "pre" | "textarea")
 }
 
+/// bs4 `DEFAULT_CDATA_LIST_ATTRIBUTES` (4.12.3): `class`, `accesskey`
+/// and `dropzone` on every tag, plus the tag-specific lists (`rel` on
+/// `a`/`link`/`area`, `headers` on `td`/`th`, …). Tag and attr names
+/// are already lowercased when this is consulted (probed: `CLASS`
+/// normalizes, `P.CLASS` too).
+fn is_cdata_list_attr(tag: &str, attr: &str) -> bool {
+    matches!(attr, "class" | "accesskey" | "dropzone")
+        || matches!(
+            (tag, attr),
+            ("a", "rel" | "rev")
+                | ("link", "rel" | "rev")
+                | ("td" | "th", "headers")
+                | ("form", "accept-charset")
+                | ("object", "archive")
+                | ("area", "rel")
+                | ("icon", "sizes")
+                | ("iframe", "sandbox")
+                | ("output", "for")
+        )
+}
+
+/// Split a cdata-list value on whitespace and rejoin with one space:
+/// bs4's `Tag` construction runs `nonwhitespace_re.findall` (`\S+`)
+/// over the unescaped value and `decode` joins the list with `" "`
+/// (probed: `class="a  b"` renders `class="a b"`, blank renders
+/// `class=""`, `\xa0`/`\x0b`/`\x1c` and entities split, `\u{200b}`
+/// does not).
+fn normalize_cdata_list(value: &str) -> String {
+    value
+        .split(is_py_space)
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Text-path numeric value (`html.parser` greedy rule, probed):
 /// C1 remapped, NUL kept, huge → U+FFFD. Surrogates cannot live in a
 /// Rust `String`, so they map to U+FFFD (Python keeps the lone
@@ -331,7 +375,7 @@ fn collapse_ws(chunk: &str) -> &str {
 
 /// Whether a `parse_*` consumed a construct (classic `goahead`: a
 /// -1 with `end` set falls back to the data slice below).
-use MarkupFlow::{Consumed, Incomplete};
+use MarkupFlow::{Consumed, Incomplete, Rejected};
 
 /// One open element on the builder stack.
 struct OpenElement {
@@ -380,6 +424,10 @@ enum MarkupFlow {
     /// No complete construct (`parse_*` returned -1): the caller emits
     /// the EOF data slice. Nothing was flushed or advanced.
     Incomplete,
+    /// CPython raised `AssertionError` here (only
+    /// `parse_marked_section` reports this): the whole parse fails with
+    /// [`RejectedMarkup`].
+    Rejected,
 }
 
 impl<'a> Parser<'a> {
@@ -420,10 +468,10 @@ impl<'a> Parser<'a> {
         self.slice(k, self.bytes.len()).chars().next()
     }
 
-    fn run(&mut self) {
+    fn run(&mut self) -> Result<(), RejectedMarkup> {
         while self.pos < self.bytes.len() {
             if self.bytes[self.pos] == b'<' {
-                if !self.parse_markup() {
+                if !self.parse_markup()? {
                     // `<` that opens nothing is literal text (it merges
                     // into the pending chunk — probed).
                     self.pending.push('<');
@@ -435,6 +483,7 @@ impl<'a> Parser<'a> {
         }
         self.flush_text();
         self.close_all_at_eof();
+        Ok(())
     }
 
     /// Flush the pending text chunk: collapse when whitespace-only and
@@ -680,11 +729,12 @@ fn quote_attr(value: &str, out: &mut String) {
 impl<'a> Parser<'a> {
     /// Parse markup at `self.pos` (which is `<`). Returns whether a
     /// markup construct was consumed (`false` = literal `<` text,
-    /// merged into the pending chunk by the caller).
-    fn parse_markup(&mut self) -> bool {
+    /// merged into the pending chunk by the caller), or
+    /// [`RejectedMarkup`] where CPython raises.
+    fn parse_markup(&mut self) -> Result<bool, RejectedMarkup> {
         let len = self.bytes.len();
         if self.pos + 1 >= len {
-            return false;
+            return Ok(false);
         }
         let start = self.pos;
         let next = self.bytes[start + 1];
@@ -699,12 +749,14 @@ impl<'a> Parser<'a> {
         } else if next == b'!' {
             self.parse_declaration(start)
         } else {
-            return false;
+            return Ok(false);
         };
-        if flow == Incomplete {
-            self.eof_data(start);
+        match flow {
+            Incomplete => self.eof_data(start),
+            Rejected => return Err(RejectedMarkup),
+            Consumed => {}
         }
-        true
+        Ok(true)
     }
 
     /// Classic `goahead` with `end` set and a -1: data runs to the
@@ -759,6 +811,14 @@ impl<'a> Parser<'a> {
         while k < endpos {
             let Some(((attr_name, attr_value), next)) = self.scan_attr(k) else {
                 break;
+            };
+            // bs4 splits cdata-list values after the last-wins dict
+            // merge; per-value normalization plus last-wins at emit is
+            // the same (probed: dup `class` keeps the normalized last).
+            let attr_value = if is_cdata_list_attr(&name, &attr_name) {
+                normalize_cdata_list(&attr_value)
+            } else {
+                attr_value
             };
             attrs.push((attr_name, attr_value));
             k = next;
@@ -1118,15 +1178,21 @@ impl<'a> Parser<'a> {
     /// the closer (`cdata`/`temp`/`ignore`/`include`/`rcdata` take
     /// `]\s*]\s*>`, `if`/`else`/`endif` take `]\s*>`). CDATA renders
     /// as `<![CDATA[...]]>`, the rest as `Declaration` (`<?...?>` —
-    /// bs4's `PREFIX`/`SUFFIX`). Unknown names and non-name content
-    /// raise `AssertionError` in CPython (bs4 refuses the markup), so
-    /// they have no portable output; treat them as bogus (probed:
-    /// unreachable from the corpus, which never raises).
+    /// bs4's `PREFIX`/`SUFFIX`). A non-letter after `<![` and unknown
+    /// names raise `AssertionError` in CPython (bs4 refuses the whole
+    /// markup), reported here as [`Rejected`][]; EOF right after `<![`
+    /// or a bare name is incomplete instead (probed).
     fn parse_marked_section(&mut self, start: usize) -> MarkupFlow {
         // `_declname_match` = `[a-zA-Z][-_.a-zA-Z0-9]*\s*`.
         let mut k = start + 3;
-        if k >= self.bytes.len() || !is_name_start(self.bytes[k]) {
-            return self.parse_bogus_inner(start);
+        if k >= self.bytes.len() {
+            // `_scan_name` at end of buffer returns -1.
+            return Incomplete;
+        }
+        if !is_name_start(self.bytes[k]) {
+            // `_scan_name` raises (`<![5]>`, `<![ foo]>`, `<![é]]>` —
+            // probed, with or without a later `>`).
+            return Rejected;
         }
         k += 1;
         while k < self.bytes.len()
@@ -1148,7 +1214,9 @@ impl<'a> Parser<'a> {
                 "temp" | "cdata" | "ignore" | "include" | "rcdata"
             )
         {
-            return self.parse_bogus_inner(start);
+            // Unknown status keyword raises (`<![foo bar]]>`, `<![foo>`
+            // — probed, regardless of closers).
+            return Rejected;
         }
         let body = start + 3;
         let found = if ms_close {
@@ -1240,32 +1308,47 @@ impl<'a> Parser<'a> {
     }
 
     /// Raw-text content for the just-pushed script/style element:
-    /// the `interesting` regex (`</\s*name\s*>`, case-insensitive)
-    /// finds the close anywhere later; the content runs verbatim to
-    /// it. With no close anywhere, `feed` and `close` both stall and
-    /// the whole rest is dropped (probed: `<script>a` renders
-    /// `<script></script>`).
+    /// the `interesting` regex (`</\s*name\s*>`, `re.I`) finds each
+    /// close candidate anywhere later, and ASCII-only `endtagfind`
+    /// decides: a clean match closes (content runs verbatim to it),
+    /// while a non-ASCII fold (`</ſcript>`, probed below) is kept as
+    /// content and scanning continues past it. With no clean close
+    /// anywhere the tail past the last kept candidate is dropped
+    /// (probed: `<script>a` renders `<script></script>`, but
+    /// `<script>x</ſcript>TAIL` keeps `x</ſcript>`).
     fn parse_rawtext(&mut self, name: &str) {
         let len = self.bytes.len();
-        let content_start = self.pos;
-        let mut k = content_start;
-        let mut found: Option<(usize, usize)> = None;
+        let mut content = String::new();
+        // Start of the not-yet-emitted content segment.
+        let mut seg = self.pos;
+        let mut k = self.pos;
+        let mut closed_after: Option<usize> = None;
         while k < len {
             if self.bytes[k] == b'<' {
-                if let Some(after) = match_cdata_close(self.bytes, k, name) {
-                    found = Some((k, after));
-                    break;
+                if let Some(end) = match_close_candidate(self.bytes, k, name) {
+                    if match_cdata_close(self.bytes, k, name).is_some() {
+                        content.push_str(self.slice(seg, k));
+                        closed_after = Some(end);
+                        break;
+                    }
+                    // Found by `interesting`, rejected by ASCII
+                    // `endtagfind`: content, and scanning continues.
+                    content.push_str(self.slice(seg, end));
+                    seg = end;
+                    k = end;
+                    continue;
                 }
             }
             k += 1;
         }
-        match found {
-            Some((close_at, after)) => {
-                self.emit_rawtext(self.slice(content_start, close_at));
+        match closed_after {
+            Some(after) => {
+                self.emit_rawtext(&content);
                 self.pos = after;
                 self.pop_raw();
             }
             None => {
+                self.emit_rawtext(&content);
                 self.pos = len;
                 self.pop_raw();
             }
@@ -1297,9 +1380,46 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// `</\s*name\s*>` at `k` (the `interesting` regex in cdata
-/// mode), case-insensitive: the byte past `>`, or `None` (probed:
-/// `</script foo>` and `</script/>` never close).
+/// `</\s*name\s*>` at `k` under CPython `re.I` (the `interesting`
+/// regex in cdata mode): the byte past `>`, or `None`. The name
+/// matches per [`fold_eq`]; `</script foo>` and `</script/>` never
+/// match (probed).
+fn match_close_candidate(bytes: &[u8], k: usize, name: &str) -> Option<usize> {
+    if !bytes[k..].starts_with(b"</") {
+        return None;
+    }
+    let mut m = skip_py_spaces(bytes, k + 2);
+    for &want in name.as_bytes() {
+        let c = std::str::from_utf8(&bytes[m..]).ok()?.chars().next()?;
+        if !fold_eq(c, want) {
+            return None;
+        }
+        m += c.len_utf8();
+    }
+    m = skip_py_spaces(bytes, m);
+    if m < bytes.len() && bytes[m] == b'>' {
+        Some(m + 1)
+    } else {
+        None
+    }
+}
+
+/// `re.I` equality of a candidate char against a lowercase ASCII name
+/// letter (probed exhaustively on 3.12.10 over the Latin, Latin
+/// Extended, Greek, halfwidth/fullwidth and letterlike ranges): ASCII
+/// case plus `ſ` (U+017F) for `s` and `İ`/`ı` (U+0130/U+0131) for
+/// `i`; every other letter is ASCII-only (fullwidth and precomposed
+/// accents all miss).
+fn fold_eq(c: char, ascii_lower: u8) -> bool {
+    c == ascii_lower as char
+        || c == ascii_lower.to_ascii_uppercase() as char
+        || (ascii_lower == b's' && c == 'ſ')
+        || (ascii_lower == b'i' && (c == 'İ' || c == 'ı'))
+}
+
+/// ASCII-only `</\s*name\s*>` at `k` (CPython `endtagfind` in cdata
+/// mode): the byte past `>`, or `None`. Only this closes the element;
+/// a candidate it rejects stays content (probed).
 fn match_cdata_close(bytes: &[u8], k: usize, name: &str) -> Option<usize> {
     if !bytes[k..].starts_with(b"</") {
         return None;
@@ -1371,7 +1491,7 @@ mod tests {
     use super::*;
 
     fn norm(html: &str) -> String {
-        normalize_bs(html).html
+        normalize_bs(html).expect("test input parses").html
     }
 
     /// The recording interpreter pinned by PIDASHCONV-1693: the
@@ -1404,7 +1524,18 @@ mod tests {
             let name = case["name"].as_str().unwrap_or("?");
             let input = case["in"].as_str().unwrap_or("");
             let expected = case["out"].as_str().unwrap_or("");
-            let got = norm(input);
+            let got = match normalize_bs(input) {
+                Ok(normalized) => normalized.html,
+                Err(rejected) => {
+                    failures.push(format!(
+                        "{name}\n  in:       {input:?}\n  expected:  {expected:?}\n  got:       {rejected:?}"
+                    ));
+                    if failures.len() >= 15 {
+                        break;
+                    }
+                    continue;
+                }
+            };
             if got != expected {
                 failures.push(format!(
                     "{name}\n  in:       {input:?}\n  expected:  {expected:?}\n  got:       {got:?}"
@@ -1447,14 +1578,17 @@ mod tests {
                 let _ = normalize_bs(&format!("</{rest}>x"));
             }
             // `<mention-componenté…>` is not a tag (é is no delimiter).
-            let n = normalize_bs(&format!("<mention-component{ch} tail>x"));
+            let n =
+                normalize_bs(&format!("<mention-component{ch} tail>x")).expect("test input parses");
             assert!(n.mentions.is_empty(), "char {ch:?}");
             // `</mention-componenté>` never closes the real element.
-            let n = normalize_bs(&format!("<p>x</mention-component{ch}>tail"));
+            let n = normalize_bs(&format!("<p>x</mention-component{ch}>tail"))
+                .expect("test input parses");
             assert_eq!(n.html, "<p>xtail</p>", "char {ch:?}");
         }
         // Positive control: the real tag still matches.
-        let n = normalize_bs("<mention-component entity_identifier=\"u1\">x</mention-component>");
+        let n = normalize_bs("<mention-component entity_identifier=\"u1\">x</mention-component>")
+            .expect("test input parses");
         assert_eq!(n.mentions.len(), 1);
     }
 
@@ -1646,7 +1780,8 @@ mod tests {
         let n = normalize_bs(
             "<p>a<mention-component entity_identifier=\"u1\">x</mention-component> \
             b<mention-component entity_identifier=\"u2\"/>c</p>",
-        );
+        )
+        .expect("test input parses");
         assert_eq!(
             n.html,
             "<p>a<mention-component entity_identifier=\"u1\">x</mention-component> \
@@ -1667,7 +1802,8 @@ mod tests {
 
     #[test]
     fn mention_missing_attribute_records_none() {
-        let n = normalize_bs("<mention-component>oops</mention-component>");
+        let n =
+            normalize_bs("<mention-component>oops</mention-component>").expect("test input parses");
         assert_eq!(n.mentions.len(), 1);
         assert_eq!(n.mentions[0].entity_id, None);
     }
@@ -1675,7 +1811,8 @@ mod tests {
     #[test]
     fn mention_entity_identifier_is_decoded() {
         // bs4 hands Python the decoded attr value (`mention[…]`).
-        let n = normalize_bs("<mention-component entity_identifier=\"a&amp;b\"/>");
+        let n = normalize_bs("<mention-component entity_identifier=\"a&amp;b\"/>")
+            .expect("test input parses");
         assert_eq!(n.mentions[0].entity_id.as_deref(), Some("a&b"));
     }
 
@@ -1683,12 +1820,15 @@ mod tests {
     fn mention_lookalikes_outside_elements_are_not_spans() {
         // Raw text keeps `<mention-component…>` verbatim but it is not
         // an element (Python `find_all` finds nothing there).
-        let n = normalize_bs("<script><mention-component entity_identifier=\"u1\"/></script>");
+        let n = normalize_bs("<script><mention-component entity_identifier=\"u1\"/></script>")
+            .expect("test input parses");
         assert!(n.mentions.is_empty());
-        let n = normalize_bs("<!--<mention-component entity_identifier=\"u1\"/>-->");
+        let n = normalize_bs("<!--<mention-component entity_identifier=\"u1\"/>-->")
+            .expect("test input parses");
         assert!(n.mentions.is_empty());
         let n =
-            normalize_bs("<p title=\"<mention-component entity_identifier=&#34;u1&#34;>\">x</p>");
+            normalize_bs("<p title=\"<mention-component entity_identifier=&#34;u1&#34;>\">x</p>")
+                .expect("test input parses");
         assert!(n.mentions.is_empty());
     }
 
@@ -1696,7 +1836,8 @@ mod tests {
     fn mention_inside_title_is_a_span() {
         // `title` is a normal element on 3.12.10 (no RCDATA), so an
         // inner mention is a real element (probed).
-        let n = normalize_bs("<title><mention-component entity_identifier=\"u1\"/></title>");
+        let n = normalize_bs("<title><mention-component entity_identifier=\"u1\"/></title>")
+            .expect("test input parses");
         assert_eq!(
             n.html,
             "<title><mention-component entity_identifier=\"u1\"></mention-component></title>"
@@ -1707,7 +1848,7 @@ mod tests {
 
     #[test]
     fn nested_mentions_both_recorded_outer_first() {
-        let n = normalize_bs("<mention-component entity_identifier=\"o\">a<mention-component entity_identifier=\"i\">b</mention-component>c</mention-component>");
+        let n = normalize_bs("<mention-component entity_identifier=\"o\">a<mention-component entity_identifier=\"i\">b</mention-component>c</mention-component>").expect("test input parses");
         assert_eq!(n.mentions.len(), 2);
         assert_eq!(n.mentions[0].entity_id.as_deref(), Some("o"));
         assert_eq!(n.mentions[1].entity_id.as_deref(), Some("i"));
@@ -1747,5 +1888,215 @@ mod tests {
         assert_eq!(norm("<p>&#x110000;</p>"), "<p>\u{fffd}</p>");
         // Surrogates cannot live in a Rust String (Python keeps them).
         assert_eq!(norm("<p>&#xD800;</p>"), "<p>\u{fffd}</p>");
+    }
+
+    #[test]
+    fn marked_section_rejections_fail_like_bs4() {
+        // PIDASHCONV-1696 gap 1: markup that makes CPython raise
+        // AssertionError (bs4: ParserRejectedMarkup) fails the whole
+        // parse — the constructor raises before `find_all` runs, so
+        // position and surrounding mentions change nothing (probed).
+        for html in [
+            "<![5]>",
+            "<![foo bar]]>",
+            "<![ foo]>",
+            "<![5",
+            "<![ ",
+            "<![foo>",
+            "<![foo bar",
+            "<p><![5]></p>",
+            "<div><![foo]]></div>",
+            "<![é]]>",
+            "<mention-component entity_identifier=\"u1\"><![5]></mention-component>",
+            "<mention-component entity_identifier=\"u1\">x</mention-component><![5]>",
+            "<![CDATA[a]]><![5]>",
+        ] {
+            assert_eq!(normalize_bs(html), Err(RejectedMarkup), "rejects: {html:?}");
+        }
+        // EOF right after `<![` or a bare name is incomplete (text),
+        // and the positive shapes still parse.
+        assert_eq!(norm("<!["), "&lt;![");
+        assert_eq!(norm("<![foo"), "&lt;![foo");
+        assert_eq!(norm("<![foo "), "&lt;![foo ");
+        assert_eq!(norm("<![CDATA["), "&lt;![CDATA[");
+        assert_eq!(norm("<![CDATA[x]]>"), "<![CDATA[x]]>");
+        assert_eq!(norm("<![if foo]>x<![endif]>"), "<?if foo?>x<?endif?>");
+        assert_eq!(norm("<![endif]>"), "<?endif?>");
+        assert_eq!(norm("<![INCLUDE[x]]>"), "<?INCLUDE[x?>");
+        // The raise never fires where no dispatch happens: comments,
+        // raw text, PIs and attribute values all pass through.
+        assert_eq!(norm("<!--<![5]>-->"), "<!--<![5]>-->");
+        assert_eq!(norm("<script><![5]></script>"), "<script><![5]></script>");
+        assert_eq!(norm("<?<![5]>?>"), "<?<![5]>?&gt;");
+        assert_eq!(
+            norm("<p title=\"<![5]>\">x</p>"),
+            "<p title=\"&lt;![5]&gt;\">x</p>"
+        );
+    }
+
+    #[test]
+    fn cdata_list_attrs_split_and_rejoin() {
+        // PIDASHCONV-1696 gap 2: bs4 splits cdata-list attributes on
+        // whitespace into a list (Tag construction) and rejoins with
+        // one space on decode — `class="a  b"` renders `class="a b"`.
+        // Table is bs4 4.12.3 `DEFAULT_CDATA_LIST_ATTRIBUTES` (probed).
+        let pairs = [
+            ("p", "class"),
+            ("div", "class"),
+            ("a", "rel"),
+            ("a", "rev"),
+            ("td", "headers"),
+            ("th", "headers"),
+            ("form", "accept-charset"),
+            ("object", "archive"),
+            ("icon", "sizes"),
+            ("iframe", "sandbox"),
+            ("output", "for"),
+            ("p", "accesskey"),
+            ("p", "dropzone"),
+        ];
+        for (tag, attr) in pairs {
+            let html = format!(r#"<{tag} {attr}="a  b">x</{tag}>"#);
+            assert_eq!(
+                norm(&html),
+                format!(r#"<{tag} {attr}="a b">x</{tag}>"#),
+                "{tag}.{attr}"
+            );
+        }
+        // Void tags normalize the same way.
+        assert_eq!(
+            norm(r#"<link rel="a  b">x</link>"#),
+            r#"<link rel="a b"/>x"#
+        );
+        assert_eq!(
+            norm(r#"<area rel="a  b">x</area>"#),
+            r#"<area rel="a b"/>x"#
+        );
+        // Other attributes stay verbatim (entities still unescaped).
+        assert_eq!(norm(r#"<p rel="a  b">x</p>"#), r#"<p rel="a  b">x</p>"#);
+        assert_eq!(norm(r#"<p id="a  b">x</p>"#), r#"<p id="a  b">x</p>"#);
+        assert_eq!(
+            norm(r#"<a headers="a  b">x</a>"#),
+            r#"<a headers="a  b">x</a>"#
+        );
+        assert_eq!(
+            norm(r#"<span for="a  b">x</span>"#),
+            r#"<span for="a  b">x</span>"#
+        );
+        assert_eq!(
+            norm(r#"<p title="a&#32;b">x</p>"#),
+            r#"<p title="a b">x</p>"#
+        );
+        // Split details: tabs/newlines/NBSP/entities, edge trim, empties.
+        assert_eq!(
+            norm("<p class=\"a\tb\nc\">x</p>"),
+            "<p class=\"a b c\">x</p>"
+        );
+        assert_eq!(
+            norm("<p class=\"a\u{a0}b\">x</p>"),
+            "<p class=\"a b\">x</p>"
+        );
+        assert_eq!(norm("<p class=\"a\x0bb\">x</p>"), "<p class=\"a b\">x</p>");
+        assert_eq!(norm("<p class=\"a\x1cb\">x</p>"), "<p class=\"a b\">x</p>");
+        assert_eq!(
+            norm("<p class=\"a\u{200b}b\">x</p>"),
+            "<p class=\"a\u{200b}b\">x</p>"
+        );
+        assert_eq!(norm("<p class=\"a&#32;b\">x</p>"), "<p class=\"a b\">x</p>");
+        assert_eq!(norm("<p class=\" a \">x</p>"), "<p class=\"a\">x</p>");
+        assert_eq!(norm("<p class=\" \">x</p>"), "<p class=\"\">x</p>");
+        assert_eq!(norm("<p class=\"\">x</p>"), "<p class=\"\">x</p>");
+        // Valueless, case variants, duplicates, voids, self-close.
+        assert_eq!(norm("<p class>x</p>"), "<p class=\"\">x</p>");
+        assert_eq!(norm("<p CLASS=\"a  b\">x</p>"), "<p class=\"a b\">x</p>");
+        assert_eq!(norm("<P CLASS=\"a  b\">x</P>"), "<p class=\"a b\">x</p>");
+        assert_eq!(
+            norm("<p class=\"a\" class=\"b  c\">x</p>"),
+            "<p class=\"b c\">x</p>"
+        );
+        assert_eq!(
+            norm("<p class=\"b  c\" class=\"a\">x</p>"),
+            "<p class=\"a\">x</p>"
+        );
+        assert_eq!(
+            norm("<img class=\"a  b\" src=\"y\">"),
+            "<img class=\"a b\" src=\"y\"/>"
+        );
+        assert_eq!(norm("<p class=\"a  b\"/>"), "<p class=\"a b\"></p>");
+        assert_eq!(norm("<a REL=\"a  b\">x</a>"), "<a rel=\"a b\">x</a>");
+    }
+
+    #[test]
+    fn rawtext_close_scan_finds_non_ascii_folds_as_content() {
+        // PIDASHCONV-1696 gap 3: the cdata close scan is CPython `re.I`
+        // (`interesting`): non-ASCII folds (ſ/İ/ı) are found but
+        // rejected by the ASCII `endtagfind`, so they stay content and
+        // scanning continues; the tail past the last candidate drops
+        // without an ASCII close (probed on 3.12.10).
+        assert_eq!(
+            norm("<script>x</ſcript>TAIL"),
+            "<script>x</ſcript></script>"
+        );
+        assert_eq!(
+            norm("<script>x</ſcript>TAIL</script>"),
+            "<script>x</ſcript>TAIL</script>"
+        );
+        assert_eq!(norm("<script></ſcript>"), "<script></ſcript></script>");
+        assert_eq!(
+            norm("<script>a</ſcript>b</ſcript>c"),
+            "<script>a</ſcript>b</ſcript></script>"
+        );
+        assert_eq!(
+            norm("<script>a</ſcript>b</script>c"),
+            "<script>a</ſcript>b</script>c"
+        );
+        assert_eq!(
+            norm("<script>  </ſcript>  </script>"),
+            "<script>  </ſcript>  </script>"
+        );
+        assert_eq!(
+            norm("<script>  </ſcript>  "),
+            "<script>  </ſcript></script>"
+        );
+        assert_eq!(
+            norm("<script>x</scrİpt>TAIL"),
+            "<script>x</scrİpt></script>"
+        );
+        assert_eq!(
+            norm("<script>x</scrİpt>TAIL</script>"),
+            "<script>x</scrİpt>TAIL</script>"
+        );
+        assert_eq!(
+            norm("<script>x</scrıpt>TAIL"),
+            "<script>x</scrıpt></script>"
+        );
+        assert_eq!(
+            norm("<script>x</scrıpt>TAIL</script>"),
+            "<script>x</scrıpt>TAIL</script>"
+        );
+        assert_eq!(
+            norm("<script>x</ ſcript >TAIL"),
+            "<script>x</ ſcript ></script>"
+        );
+        assert_eq!(
+            norm("<script>x</ ſcript >TAIL</script>"),
+            "<script>x</ ſcript >TAIL</script>"
+        );
+        assert_eq!(norm("<style>x</ſtyle>TAIL"), "<style>x</ſtyle></style>");
+        assert_eq!(
+            norm("<style>x</ſtyle>TAIL</style>"),
+            "<style>x</ſtyle>TAIL</style>"
+        );
+        // Non-folds still miss: all dropped, or content to an ASCII close.
+        assert_eq!(norm("<script>x</ｓcript>TAIL"), "<script></script>");
+        assert_eq!(
+            norm("<script>x</ｓcript>TAIL</script>"),
+            "<script>x</ｓcript>TAIL</script>"
+        );
+        assert_eq!(norm("<script>x</ſcript"), "<script></script>");
+        assert_eq!(
+            norm("<SCRIPT>x</ſcript>TAIL"),
+            "<script>x</ſcript></script>"
+        );
     }
 }
