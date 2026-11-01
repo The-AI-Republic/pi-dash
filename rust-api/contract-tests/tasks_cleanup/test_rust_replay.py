@@ -2060,9 +2060,20 @@ def _rust_page_html(conn, page_id) -> str:
 def _rust_asset_row(conn, asset_id):
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            'SELECT id, asset, is_uploaded, storage_metadata FROM "file_assets"'
+            'SELECT id, asset, is_uploaded, storage_metadata,'
+            ' created_by_id, updated_by_id FROM "file_assets"'
             " WHERE id = %s::uuid AND deleted_at IS NULL",
             (str(asset_id),),
+        )
+        return cur.fetchone()
+
+
+def _rust_page_row(conn, page_id):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            'SELECT id, created_by_id, updated_by_id FROM "pages"'
+            " WHERE id = %s::uuid AND deleted_at IS NULL",
+            (str(page_id),),
         )
         return cur.fetchone()
 
@@ -2153,6 +2164,103 @@ def test_rust_copy_task_copies_s3_objects_and_rewrites_page(db_conn):
             f"duplicate {src} points at S3 key {row['asset']} with no object behind it"
         )
     assert s3_helpers.s3_key_exists(bucket, src_key)
+
+
+def test_rust_copy_task_nulls_audit_columns(db_conn):
+    """Rust replay of test_copy_task_nulls_audit_columns (PIDASHCONV-1698).
+
+    Same seeds, same payload through ``rust_queue``: the duplicate asset
+    and the page both read NULL/NULL after the task, matching the Django
+    worker saves. Red while the port binds the requester as
+    ``created_by_id`` and leaves page audit untouched; green once the
+    duplicate insert and both description saves NULL the audit columns.
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"rcopy1698-{tag}")
+    ws_id = str(chain["workspace"]["id"])
+    proj_id = str(chain["project"]["id"])
+    bucket = s3_helpers.contract_bucket()
+    s3_helpers.s3_setup_bucket(bucket)
+    body = b"1698-copy-probe-image"
+    src_key = f"{ws_id}/rcopy1698-{tag}.png"
+    s3_helpers.s3_put_key(bucket, src_key, body)
+    assert s3_helpers.s3_key_exists(bucket, src_key)
+    asset = insert_row(
+        db_conn,
+        "file_assets",
+        {
+            "asset": src_key,
+            "attributes": {"name": f"rcopy1698-{tag}.png", "type": "png", "size": len(body)},
+            "size": float(len(body)),
+            "workspace_id": ws_id,
+            "project_id": proj_id,
+            "created_by_id": str(chain["owner"]["id"]),
+            "entity_type": "PAGE_DESCRIPTION",
+            "is_uploaded": True,
+            "is_deleted": False,
+            "is_archived": False,
+            "storage_metadata": {},
+        },
+    )
+    seed_html = f'<p>t</p><image-component src="{asset["id"]}"></image-component>'
+    page = insert_row(
+        db_conn,
+        "pages",
+        {
+            "workspace_id": ws_id,
+            "owned_by_id": str(chain["owner"]["id"]),
+            "created_by_id": str(chain["owner"]["id"]),
+            "updated_by_id": str(chain["owner"]["id"]),
+            "name": f"rcopy1698-{tag}",
+            "description_json": {},
+            "description_html": seed_html,
+            "access": 0,
+            "color": "",
+            "is_locked": False,
+            "view_props": {},
+            "logo_props": {},
+            "is_global": False,
+            "sort_order": 65535,
+        },
+    )
+    page_id = str(page["id"])
+    source_id = str(asset["id"])
+    before = _rust_page_row(db_conn, page_id)
+    assert before["created_by_id"] is not None, "seed must set page created_by"
+    assert before["updated_by_id"] is not None, "seed must set page updated_by"
+    rust_queue.publish(
+        _RUST_COPY_TASK,
+        kwargs={
+            "entity_name": "PAGE",
+            "entity_identifier": page_id,
+            "project_id": proj_id,
+            "slug": chain["workspace"]["slug"],
+            "user_id": str(chain["owner"]["id"]),
+        },
+    )
+    assert wait_for(
+        lambda: _rust_page_html(db_conn, page_id) != seed_html,
+        what="rust copy task rewrote the page description",
+    )
+    srcs = _rust_image_srcs(_rust_page_html(db_conn, page_id))
+    assert srcs, "rewrite removed every image-component"
+    assert source_id not in srcs, "srcs still point at the source asset"
+    for src in srcs:
+        row = _rust_asset_row(db_conn, src)
+        assert row is not None, f"src {src} resolves to no file_assets row"
+        assert row["created_by_id"] is None, (
+            f"duplicate {src} keeps created_by {row['created_by_id']}"
+        )
+        assert row["updated_by_id"] is None, (
+            f"duplicate {src} keeps updated_by {row['updated_by_id']}"
+        )
+    page_row = _rust_page_row(db_conn, page_id)
+    assert page_row["created_by_id"] is None, (
+        f"duplicate page keeps created_by {page_row['created_by_id']}"
+    )
+    assert page_row["updated_by_id"] is None, (
+        f"duplicate page keeps updated_by {page_row['updated_by_id']}"
+    )
 
 
 def test_rust_metadata_task_stores_head_dict(db_conn):
