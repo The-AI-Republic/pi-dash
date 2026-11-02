@@ -2245,7 +2245,7 @@ async fn timezone_throttle(
 /// (`int(%z)`, `label`), offset stripped. Python's naive `now()` plus
 /// per-zone `astimezone` is exactly `Utc::now` in each zone (the
 /// server zone cancels out); `chrono-tz` 0.10.4 agrees with pytz
-/// 2024.1 on all 113 zone ids at the pinned instant (unit test below).
+/// 2025.2 on all 113 zone ids at the pinned instant (unit test below).
 fn timezone_entries(now: DateTime<Utc>) -> Vec<TimezoneEntry<'static>> {
     let mut rows: Vec<(i32, TimezoneEntry<'static>)> = Vec::with_capacity(TIMEZONE_TABLE.len());
     for (label, tzid) in TIMEZONE_TABLE {
@@ -2825,7 +2825,7 @@ mod tests {
         }
     }
 
-    // pytz 2024.1 %z at 2026-10-03T15:13:00Z for all 113 unique zone ids.
+    // pytz 2025.2 %z at 2026-10-03T15:13:00Z for all 113 unique zone ids.
     const FIXED_OFFSETS: &[(&str, &str)] = &[
         ("Africa/Algiers", "+0100"),
         ("Africa/Casablanca", "+0100"),

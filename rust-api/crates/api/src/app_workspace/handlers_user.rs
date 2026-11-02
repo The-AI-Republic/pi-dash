@@ -807,9 +807,9 @@ fn bool_field(value: &Value) -> Result<bool, Vec<String>> {
     parse_drf_bool(value).map_err(|()| vec![INVALID_BOOLEAN_MESSAGE.to_owned()])
 }
 
-/// `USER_TIMEZONE_CHOICES` (`pytz.common_timezones`, pinned pytz==2024.1, 433 zones).
+/// `USER_TIMEZONE_CHOICES` (`pytz.common_timezones`, pinned pytz==2025.2, 433 zones).
 /// Exact membership list for the `user_timezone` ChoiceField.
-const PYTZ_2024_1_ZONES: &[&str] = &[
+const PYTZ_2025_2_ZONES: &[&str] = &[
     "Africa/Abidjan",
     "Africa/Accra",
     "Africa/Addis_Ababa",
@@ -901,6 +901,7 @@ const PYTZ_2024_1_ZONES: &[&str] = &[
     "America/Chihuahua",
     "America/Ciudad_Juarez",
     "America/Costa_Rica",
+    "America/Coyhaique",
     "America/Creston",
     "America/Cuiaba",
     "America/Curacao",
@@ -1034,7 +1035,6 @@ const PYTZ_2024_1_ZONES: &[&str] = &[
     "Asia/Bishkek",
     "Asia/Brunei",
     "Asia/Chita",
-    "Asia/Choibalsan",
     "Asia/Colombo",
     "Asia/Damascus",
     "Asia/Dhaka",
@@ -1254,7 +1254,7 @@ fn choice_timezone(value: &Value) -> Result<String, Vec<String>> {
         return Err(vec![NULL_MESSAGE.to_owned()]);
     }
     if let Value::String(text) = value {
-        if PYTZ_2024_1_ZONES.contains(&text.as_str()) {
+        if PYTZ_2025_2_ZONES.contains(&text.as_str()) {
             return Ok(text.clone());
         }
         return Err(vec![format!("\"{text}\" is not a valid choice.")]);
@@ -3986,8 +3986,8 @@ mod tests {
     }
 
     #[test]
-    fn pytz_list_is_the_pinned_2024_1_transcription() {
-        assert_eq!(PYTZ_2024_1_ZONES.len(), 433);
+    fn pytz_list_is_the_pinned_2025_2_transcription() {
+        assert_eq!(PYTZ_2025_2_ZONES.len(), 433);
         for zone in [
             "UTC",
             "Asia/Kolkata",
@@ -3995,12 +3995,12 @@ mod tests {
             "Europe/Berlin",
             "Pacific/Auckland",
         ] {
-            assert!(PYTZ_2024_1_ZONES.contains(&zone), "{zone} listed");
+            assert!(PYTZ_2025_2_ZONES.contains(&zone), "{zone} listed");
         }
-        // pytz 2024.1 membership (differs from the `v1_projects`
-        // transcription by one zone each way).
-        assert!(PYTZ_2024_1_ZONES.contains(&"Asia/Choibalsan"));
-        assert!(!PYTZ_2024_1_ZONES.contains(&"America/Coyhaique"));
+        // pytz 2025.2 membership (`Asia/Choibalsan` left the common list when
+        // tzdata merged it into `Asia/Ulaanbaatar`).
+        assert!(!PYTZ_2025_2_ZONES.contains(&"Asia/Choibalsan"));
+        assert!(PYTZ_2025_2_ZONES.contains(&"America/Coyhaique"));
     }
 
     #[test]

@@ -157,6 +157,12 @@ djangorestframework 3.15.2, Django 4.2.30.
   unit tests in `doc.rs` and the contract test
   `rust-api/contract-tests/v1_openapi/test_refs_resolve.py`.
 
+PDASHOSS01-331 refresh (pytz 2024.1 -> 2025.2): only the seven `timezone`
+properties changed (`Asia/Choibalsan` out, `America/Coyhaique` in, in `enum`
+and `description`; `x-spec-enum-id` e7668cf5fe0b8280 -> 5de22777dc4bb067).
+Each now equals the same property from `manage.py spectacular` on that Python
+branch. Other properties in the fixture were left at their recorded state.
+
 ## Out of scope (reading context, not ported here)
 
 - `pi_dash/urls.py:31-44` (the 3 schema routes + `ENABLE_DRF_SPECTACULAR`

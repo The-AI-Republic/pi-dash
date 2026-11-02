@@ -92,6 +92,7 @@ pub const PYTZ_COMMON_TIMEZONES: &[&str] = &[
     "America/Chihuahua",
     "America/Ciudad_Juarez",
     "America/Costa_Rica",
+    "America/Coyhaique",
     "America/Creston",
     "America/Cuiaba",
     "America/Curacao",
@@ -225,7 +226,6 @@ pub const PYTZ_COMMON_TIMEZONES: &[&str] = &[
     "Asia/Bishkek",
     "Asia/Brunei",
     "Asia/Chita",
-    "Asia/Choibalsan",
     "Asia/Colombo",
     "Asia/Damascus",
     "Asia/Dhaka",
@@ -441,14 +441,24 @@ mod tests {
     use super::PYTZ_COMMON_TIMEZONES;
 
     #[test]
-    fn pytz_list_is_the_pinned_2024_1_transcription() {
-        // `pytz==2024.1` (`apps/api/requirements/base.txt`):
+    fn pytz_list_is_the_pinned_2025_2_transcription() {
+        // `pytz==2025.2` (`apps/api/requirements/base.txt`):
         // `common_timezones` has 433 entries (PIDASHCONV-1389).
         assert_eq!(PYTZ_COMMON_TIMEZONES.len(), 433);
-        assert!(PYTZ_COMMON_TIMEZONES.contains(&"Asia/Choibalsan"));
-        assert!(!PYTZ_COMMON_TIMEZONES.contains(&"America/Coyhaique"));
+        assert!(!PYTZ_COMMON_TIMEZONES.contains(&"Asia/Choibalsan"));
+        assert!(PYTZ_COMMON_TIMEZONES.contains(&"America/Coyhaique"));
         let mut sorted = PYTZ_COMMON_TIMEZONES.to_vec();
         sorted.sort_unstable();
         assert_eq!(sorted, PYTZ_COMMON_TIMEZONES);
+    }
+
+    /// Offsets come from `chrono-tz`'s bundled tzdata and Django's from
+    /// pytz's. They must be the same IANA release or the backends render
+    /// different offsets (PDASHOSS01-331). Bumping `chrono-tz` to another
+    /// release means moving the `pytz` pin in `apps/api/requirements/base.txt`
+    /// to the matching one, and updating `test_pytz_tzdata_matches_chrono_tz`.
+    #[test]
+    fn chrono_tz_tzdata_matches_the_pytz_pin() {
+        assert_eq!(chrono_tz::IANA_TZDB_VERSION, "2025b");
     }
 }
