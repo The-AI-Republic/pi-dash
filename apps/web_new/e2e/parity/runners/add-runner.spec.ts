@@ -658,9 +658,9 @@ test(
       // Claude Code pins Opus 4.8 rather than the agent default.
       expect((await driver.addRunnerForm()).model).toBe("Opus 4.8");
       const claude = await driver.addRunnerModelOptions();
-      // RUN-049 adds Opus 5.5 to the new app; the old app only grows when
-      // main#544 lands. Both arms stay exact — neither is weakened.
-      expect(claude.length).toBe(driver.target === "web_new" ? 7 : 6);
+      // RUN-049 (main#544, NEWFRONT-192): Opus 5.5 landed in both apps, so
+      // both legs list the default sentinel plus six Claude models.
+      expect(claude.length).toBe(7);
       expect(claude).toContain("Default (agent's built-in model)");
       expect(claude).toContain("Fable 5");
       await driver.addRunnerPickAgent("Cursor");
@@ -769,10 +769,10 @@ test(
     await openSignedIn(driver, seed);
     await driver.addRunnerOpenFromRunners(seed.workspaceSlug);
 
-    // The old app proves the parts RUN-049 did not change: the pinned
-    // default and Cursor's unchanged list. Only the unlanded Opus 5.5
-    // entry is a target step (main#544); that step throws on `web` as a
-    // target-only probe, so this row is not oracle green until #544 lands.
+    // main#544 landed Opus 5.5 in the old app (NEWFRONT-192), so every
+    // step below runs on both legs: the pinned default, the Opus 5.5
+    // entry above Opus 5 with its --model slug, and Cursor's unchanged
+    // list.
 
     await test.step("Claude Code keeps its Opus 4.8 default", async () => {
       expect((await driver.addRunnerForm()).model).toBe("Opus 4.8");

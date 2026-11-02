@@ -400,6 +400,32 @@ export class WebDriver implements ParityDriver {
   private static readonly WAIT_MS = 30_000;
   /** Tighter bound for menus and dialogs, which render synchronously once open. */
   private static readonly OPEN_MS = 30_000;
+  /** The old recurrence builder's unit values (main#561) to driver unit names. */
+  private static readonly RECURRENCE_UNITS: Record<string, string> = {
+    NONE: "none",
+    DAILY: "day",
+    WEEKLY: "week",
+    MONTHLY: "month",
+    YEARLY: "year",
+  };
+  /** Ordinal words in the old monthly-mode option to their BYDAY numbers. */
+  private static readonly RECURRENCE_ORDINALS: Record<string, string> = {
+    first: "1",
+    second: "2",
+    third: "3",
+    fourth: "4",
+    last: "-1",
+  };
+  /** Weekday names in the old monthly-mode option to their BYDAY codes. */
+  private static readonly RECURRENCE_WEEKDAY_CODES: Record<string, string> = {
+    monday: "MO",
+    tuesday: "TU",
+    wednesday: "WE",
+    thursday: "TH",
+    friday: "FR",
+    saturday: "SA",
+    sunday: "SU",
+  };
 
   async openEntry(): Promise<void> {
     // The entry render occasionally never arrives under concurrent
@@ -15768,10 +15794,13 @@ export class WebDriver implements ParityDriver {
 
   private async schedulerScheduleValues(dialog: Locator): Promise<SchedulerScheduleValues> {
     const toggle = dialog.getByRole("switch");
+    // The rule textarea lives under the builder's advanced disclosure
+    // (main#561); reveal it before reading, as a person would.
+    await this.schedulerEnsureRawRuleOpen(dialog);
     return {
       dtstart: await dialog.getByLabel("Starts at").inputValue(),
       tzid: await dialog.getByLabel("Time zone").inputValue(),
-      rrule: await dialog.getByLabel("Recurrence (RRULE)").inputValue(),
+      rrule: await dialog.getByLabel("Recurrence", { exact: true }).inputValue(),
       extraContext: await dialog.getByLabel("Project context (optional)").inputValue(),
       enabled: (await toggle.getAttribute("aria-checked")) === "true",
     };
@@ -15783,9 +15812,29 @@ export class WebDriver implements ParityDriver {
   ): Promise<void> {
     if (input.dtstart !== undefined) await dialog.getByLabel("Starts at").fill(input.dtstart);
     if (input.tzid !== undefined) await dialog.getByLabel("Time zone").selectOption(input.tzid);
-    if (input.rrule !== undefined) await dialog.getByLabel("Recurrence (RRULE)").fill(input.rrule);
+    if (input.rrule !== undefined) {
+      // The widget keeps the rule text under its advanced disclosure
+      // (main#561); reveal it before typing, exactly as a person would.
+      await this.schedulerEnsureRawRuleOpen(dialog);
+      await dialog.getByLabel("Recurrence", { exact: true }).fill(input.rrule);
+    }
     if (input.extraContext !== undefined)
       await dialog.getByLabel("Project context (optional)").fill(input.extraContext);
+  }
+
+  /**
+   * Reveal the builder's raw rule textarea when the disclosure holds it
+   * closed. A rule the builder cannot express forces raw mode with no
+   * disclosure to open, so a missing toggle with no field is left alone
+   * for the caller's read or fill to fail honestly.
+   */
+  private async schedulerEnsureRawRuleOpen(dialog: Locator): Promise<void> {
+    const rawField = dialog.getByLabel("Recurrence", { exact: true });
+    if ((await rawField.count()) > 0 && (await rawField.first().isVisible())) return;
+    const toggle = dialog.getByRole("button", { name: "Advanced: edit raw RRULE", exact: true });
+    if ((await toggle.count()) === 0) return;
+    await toggle.first().click();
+    await rawField.first().waitFor({ timeout: WebDriver.OPEN_MS });
   }
 
   private async schedulerHumanizer(dialog: Locator): Promise<string> {
@@ -16234,43 +16283,227 @@ export class WebDriver implements ParityDriver {
   }
 
   async schedulerRecurrenceFacts(): Promise<SchedulerRecurrenceFacts> {
-    // The oracle has no builder: the recurrence editor is one plain
-    // textarea. The sentence under it is still the same live line, so the
-    // scenario can compare that half on both targets.
     const dialog = this.schedulerDialog();
-    const rawField = dialog.getByLabel("Recurrence (RRULE)");
+    // The builder's unit select is the stable anchor: the weekday chips
+    // and monthly fields come and go with it, but the control itself
+    // always renders for an expressible rule (main#561).
+    const unitSelect = dialog.getByLabel("Repeat every", { exact: true });
+    const visible = (await unitSelect.count()) > 0 && (await unitSelect.first().isVisible());
+    const rawField = dialog.getByLabel("Recurrence", { exact: true });
     const rawVisible = (await rawField.count()) > 0 && (await rawField.first().isVisible());
+    // The old widget unmounts its raw field while the disclosure holds
+    // it closed, so the serialized rule is only readable while open.
+    const rawValue = rawVisible ? await rawField.first().inputValue() : null;
+    const openToggle = dialog.getByRole("button", { name: "Advanced: edit raw RRULE", exact: true });
+    const closeToggle = dialog.getByRole("button", { name: "Hide raw RRULE", exact: true });
+    const advancedVisible =
+      ((await openToggle.count()) > 0 && (await openToggle.first().isVisible())) ||
+      ((await closeToggle.count()) > 0 && (await closeToggle.first().isVisible()));
+    const sentence = await this.schedulerHumanizer(dialog).catch(() => "");
+    if (!visible) {
+      return {
+        visible: false,
+        interval: null,
+        unit: null,
+        unitOptions: [],
+        weekdays: [],
+        monthlyPattern: null,
+        dayOfMonth: null,
+        ordinal: null,
+        weekdayOfMonth: null,
+        ends: null,
+        endDate: null,
+        occurrences: null,
+        rawVisible,
+        rawValue,
+        advancedVisible,
+        sentence,
+      };
+    }
+    const maybeValue = async (locator: Locator): Promise<string | null> => {
+      if ((await locator.count()) === 0 || !(await locator.first().isVisible())) return null;
+      return locator.first().inputValue();
+    };
+    const unitRaw = await unitSelect.first().inputValue();
+    const optionValues = await unitSelect
+      .first()
+      .locator("option")
+      .evaluateAll((nodes) => nodes.map((node) => (node as unknown as HTMLOptionElement).value));
+    const weekdayGroup = dialog.getByRole("group", { name: "Repeat on", exact: true });
+    const weekdays: SchedulerRecurrenceWeekday[] = [];
+    if ((await weekdayGroup.count()) > 0) {
+      const chips = weekdayGroup.getByRole("button");
+      const total = await chips.count();
+      for (let i = 0; i < total; i += 1) {
+        const chip = chips.nth(i);
+        weekdays.push({
+          name: (await chip.getAttribute("aria-label")) ?? "",
+          pressed: (await chip.getAttribute("aria-pressed")) === "true",
+        });
+      }
+    }
+    const { monthlyPattern, dayOfMonth, ordinal, weekdayOfMonth } = await this.schedulerMonthlyFacts(dialog);
+    let ends: string | null = null;
+    for (const entry of await this.schedulerEndsRadios(dialog)) {
+      if (await entry.radio.isChecked().catch(() => false)) {
+        ends = entry.mode;
+        break;
+      }
+    }
+    // The old inputs stay mounted but disabled off-mode; report a value
+    // only for the mode the group actually shows, like the new target.
+    let endDate: string | null = null;
+    if (ends === "on") endDate = await maybeValue(dialog.getByLabel("End date (UTC)", { exact: true }));
+    let occurrences: string | null = null;
+    if (ends === "after") occurrences = await maybeValue(dialog.getByLabel("Number of occurrences", { exact: true }));
     return {
-      visible: false,
-      interval: null,
-      unit: null,
-      unitOptions: [],
-      weekdays: [],
-      monthlyPattern: null,
-      dayOfMonth: null,
-      ordinal: null,
-      weekdayOfMonth: null,
-      ends: null,
-      endDate: null,
-      occurrences: null,
+      visible,
+      interval: await maybeValue(dialog.getByLabel("Interval", { exact: true })),
+      unit: WebDriver.RECURRENCE_UNITS[unitRaw] ?? null,
+      unitOptions: optionValues.map((value) => WebDriver.RECURRENCE_UNITS[value] ?? value),
+      weekdays,
+      monthlyPattern,
+      dayOfMonth,
+      ordinal,
+      weekdayOfMonth,
+      ends,
+      endDate,
+      occurrences,
       rawVisible,
-      rawValue: rawVisible ? await rawField.first().inputValue() : null,
-      advancedVisible: false,
-      sentence: await this.schedulerHumanizer(dialog).catch(() => ""),
+      rawValue,
+      advancedVisible,
+      sentence,
     };
   }
 
-  async schedulerRecurrenceAct(_action: SchedulerRecurrenceAction): Promise<void> {
-    throw new Error("[parity] the recurrence builder is a web_new target; the oracle has only a raw RRULE field.");
+  /**
+   * The old monthly form is one mode select whose selected option carries
+   * the live day ("Monthly on day 9") or nth weekday ("Monthly on the
+   * second Monday"): read the selection back out of its own words.
+   */
+  private async schedulerMonthlyFacts(dialog: Locator): Promise<{
+    monthlyPattern: string | null;
+    dayOfMonth: string | null;
+    ordinal: string | null;
+    weekdayOfMonth: string | null;
+  }> {
+    const none = { monthlyPattern: null, dayOfMonth: null, ordinal: null, weekdayOfMonth: null };
+    const select = dialog.getByLabel("Monthly repeat mode", { exact: true });
+    if ((await select.count()) === 0 || !(await select.first().isVisible())) return none;
+    const mode = await select.first().inputValue();
+    const selectedText = await select.first().evaluate((node) => {
+      const el = node as unknown as HTMLSelectElement;
+      return el.selectedOptions.length > 0 ? el.selectedOptions[0].text : "";
+    });
+    if (mode === "monthday") {
+      return {
+        ...none,
+        monthlyPattern: "day",
+        dayOfMonth: selectedText.match(/Monthly on day (\d+)/)?.[1] ?? null,
+      };
+    }
+    if (mode === "weekday") {
+      const nth = selectedText.match(/Monthly on the (\w+) (\w+)/);
+      const ordinal = nth ? (WebDriver.RECURRENCE_ORDINALS[nth[1].toLowerCase()] ?? null) : null;
+      const weekdayOfMonth = nth ? (WebDriver.RECURRENCE_WEEKDAY_CODES[nth[2].toLowerCase()] ?? null) : null;
+      return { ...none, monthlyPattern: "weekday", ordinal, weekdayOfMonth };
+    }
+    return none;
+  }
+
+  /**
+   * The Ends radios with their modes, read off the wrapping labels (the
+   * inputs carry no value attributes). Empty when the unit hides the
+   * group, so callers can share one lookup for reads and clicks.
+   */
+  private async schedulerEndsRadios(dialog: Locator): Promise<{ mode: "never" | "on" | "after"; radio: Locator }[]> {
+    const group = dialog.getByRole("group", { name: "Ends", exact: true });
+    if ((await group.count()) === 0) return [];
+    const radios = group.getByRole("radio");
+    const total = await radios.count();
+    const out: { mode: "never" | "on" | "after"; radio: Locator }[] = [];
+    for (let i = 0; i < total; i += 1) {
+      const radio = radios.nth(i);
+      const label = radio.locator("xpath=ancestor::label[1]");
+      const text = ((await label.innerText().catch(() => "")) ?? "").trim().toLowerCase();
+      if (text.startsWith("never")) out.push({ mode: "never", radio });
+      else if (text.startsWith("on")) out.push({ mode: "on", radio });
+      else if (text.startsWith("after")) out.push({ mode: "after", radio });
+    }
+    return out;
+  }
+
+  async schedulerRecurrenceAct(action: SchedulerRecurrenceAction): Promise<void> {
+    const dialog = this.schedulerDialog();
+    switch (action.kind) {
+      case "interval":
+        await dialog.getByLabel("Interval", { exact: true }).fill(String(action.value));
+        return;
+      case "unit": {
+        const value = { none: "NONE", day: "DAILY", week: "WEEKLY", month: "MONTHLY", year: "YEARLY" }[action.value];
+        await dialog.getByLabel("Repeat every", { exact: true }).selectOption(value);
+        return;
+      }
+      case "weekday":
+        await dialog
+          .getByRole("group", { name: "Repeat on", exact: true })
+          .getByRole("button", { name: action.value, exact: true })
+          .click();
+        return;
+      case "monthly":
+        await dialog
+          .getByLabel("Monthly repeat mode", { exact: true })
+          .selectOption(action.value === "day" ? "monthday" : "weekday");
+        return;
+      case "day":
+      case "ordinal":
+      case "weekdayOfMonth":
+        throw new Error(
+          `[parity] the oracle recurrence builder offers no ${action.kind} control (main#561 switches the monthly mode but never edits its day).`
+        );
+      case "ends": {
+        for (const entry of await this.schedulerEndsRadios(dialog)) {
+          if (entry.mode === action.value) {
+            await entry.radio.click();
+            return;
+          }
+        }
+        throw new Error(`[parity] the oracle Ends group offers no ${action.value} radio.`);
+      }
+      case "endDate":
+        await dialog.getByLabel("End date (UTC)", { exact: true }).fill(action.value);
+        return;
+      case "occurrences":
+        await dialog.getByLabel("Number of occurrences", { exact: true }).fill(String(action.value));
+        return;
+    }
   }
 
   async schedulerRecurrenceAdvanced(): Promise<boolean> {
-    // No disclosure exists on the oracle: its raw field is always open.
-    return (await this.schedulerDialog().getByLabel("Recurrence (RRULE)").count()) > 0;
+    const dialog = this.schedulerDialog();
+    const openToggle = dialog.getByRole("button", { name: "Advanced: edit raw RRULE", exact: true });
+    if ((await openToggle.count()) > 0) {
+      await openToggle.first().click();
+      await dialog.getByLabel("Recurrence", { exact: true }).first().waitFor({ timeout: WebDriver.OPEN_MS });
+      return true;
+    }
+    const closeToggle = dialog.getByRole("button", { name: "Hide raw RRULE", exact: true });
+    if ((await closeToggle.count()) > 0) {
+      await closeToggle.first().click();
+      // The toggle swaps its own label on the flip; settle on the swap
+      // so a slow paint never reads the pre-click state.
+      await expect.poll(() => openToggle.count(), { timeout: WebDriver.OPEN_MS }).toBe(1);
+      return false;
+    }
+    // An inexpressible stored rule forces raw mode: there is no disclosure
+    // to toggle, and the textarea is already open.
+    return true;
   }
 
   async schedulerRecurrenceRaw(rule: string): Promise<void> {
-    await this.schedulerDialog().getByLabel("Recurrence (RRULE)").fill(rule);
+    const dialog = this.schedulerDialog();
+    await this.schedulerEnsureRawRuleOpen(dialog);
+    await dialog.getByLabel("Recurrence", { exact: true }).fill(rule);
   }
 
   async schedulerProjectEditErrors(): Promise<string[]> {

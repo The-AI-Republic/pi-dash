@@ -12,15 +12,15 @@
 // rule the widget cannot express opens raw and submits byte-identical
 // unless actually edited.
 //
-// Target note: this checkout has only a plain RRULE textarea, so the
-// builder-specific reads and interactions are target-only. The oracle leg
-// still proves the shared halves it can express: the stored rule pre-fills
-// verbatim, raw editing persists, and the live sentence tracks it. Those
-// branches are documented per step, including the sentence wording: the
-// oracle prints rrule's `toText()` ("every month on the 15th", no trailing
-// full stop), while the builder's own sentence says "every month on day 15"
-// (NEWFRONT-899 dropped the invented stop). The step asserts each leg's own
-// wording so both prove the line is live.
+// Oracle leg (NEWFRONT-192): main#561 landed the same builder in the old
+// app, so both legs drive the widget and only the known divergences
+// branch per step: the old unit order lists does-not-repeat last, its
+// on-date prefill is today-plus-90-days (not start-plus-a-year), its
+// after-N prefill is 13 (not 10), and it switches the monthly mode
+// without day or ordinal controls. The sentence wording also differs
+// for a monthly day: the oracle prints rrule's `toText()` ("every month
+// on the 15th", no trailing full stop), while the builder's own sentence
+// says "every month on day 15" (NEWFRONT-899 dropped the invented stop).
 // Row: AGT-065.
 import { test, expect } from "../../fixtures";
 import {
@@ -91,11 +91,6 @@ test(
     });
 
     await test.step("opening reconstructs widget state from the stored rule", async () => {
-      if (driver.target !== "web_new") {
-        // The oracle's plain textarea still pre-fills the stored rule.
-        expect((await driver.schedulerProjectEditValues()).rrule).toBe("FREQ=DAILY");
-        return;
-      }
       const facts = await driver.schedulerRecurrenceFacts();
       expect(facts.visible).toBe(true);
       expect(facts.unit).toBe("day");
@@ -104,14 +99,23 @@ test(
       expect(facts.rawVisible).toBe(false);
       expect(facts.advancedVisible).toBe(true);
       expect(facts.sentence).toBe("every day");
+      if (driver.target !== "web_new") {
+        // The oracle unmounts its raw field while closed, so the steps
+        // below that poll the serialized rule need it open from here on.
+        await expect(driver.schedulerRecurrenceAdvanced()).resolves.toBe(true);
+      }
     });
 
     await test.step("repeat count and unit serialize a bare frequency", async () => {
-      if (driver.target !== "web_new") return;
       // The unit control offers no sub-daily cadence: the builder's
-      // smallest repeat is a day, as §14 requires.
+      // smallest repeat is a day, as §14 requires. The old widget lists
+      // does-not-repeat last instead of first.
       const units = (await driver.schedulerRecurrenceFacts()).unitOptions;
-      expect(units).toEqual(["none", "day", "week", "month", "year"]);
+      expect(units).toEqual(
+        driver.target === "web_new"
+          ? ["none", "day", "week", "month", "year"]
+          : ["day", "week", "month", "year", "none"]
+      );
       expect(units.filter((unit) => /hour|minute|second/i.test(unit))).toEqual([]);
       await driver.schedulerRecurrenceAct({ kind: "interval", value: 3 });
       await expect.poll(async () => (await driver.schedulerRecurrenceFacts()).rawValue).toBe("FREQ=DAILY;INTERVAL=3");
@@ -132,7 +136,6 @@ test(
     });
 
     await test.step("weekly chips default from the start and never go empty", async () => {
-      if (driver.target !== "web_new") return;
       await driver.schedulerRecurrenceAct({ kind: "unit", value: "week" });
       await expect.poll(async () => (await driver.schedulerRecurrenceFacts()).rawValue).toBe("FREQ=WEEKLY;BYDAY=MO");
       let facts = await driver.schedulerRecurrenceFacts();
@@ -156,7 +159,6 @@ test(
     });
 
     await test.step("monthly defaults from the start day and switches to nth weekday", async () => {
-      if (driver.target !== "web_new") return;
       await driver.schedulerRecurrenceAct({ kind: "unit", value: "month" });
       await expect
         .poll(async () => (await driver.schedulerRecurrenceFacts()).rawValue)
@@ -169,6 +171,9 @@ test(
       facts = await driver.schedulerRecurrenceFacts();
       expect(facts.ordinal).toBe("2");
       expect(facts.weekdayOfMonth).toBe("MO");
+      // The old widget switches the monthly mode but offers no day or
+      // ordinal controls, so those edits stay target-only.
+      if (driver.target !== "web_new") return;
       await driver.schedulerRecurrenceAct({ kind: "ordinal", value: "-1" });
       await expect.poll(async () => (await driver.schedulerRecurrenceFacts()).rawValue).toBe("FREQ=MONTHLY;BYDAY=-1MO");
       await driver.schedulerRecurrenceAct({ kind: "monthly", value: "day" });
@@ -179,18 +184,24 @@ test(
     });
 
     await test.step("Ends offers never, on-date at end-of-day UTC and after-N with a prefill", async () => {
-      if (driver.target !== "web_new") return;
       await driver.schedulerRecurrenceAct({ kind: "unit", value: "week" });
       await driver.schedulerRecurrenceAct({ kind: "ends", value: "on" });
       let facts = await driver.schedulerRecurrenceFacts();
-      expect(facts.endDate).toBe("2027-11-09");
+      if (driver.target === "web_new") {
+        expect(facts.endDate).toBe("2027-11-09");
+      } else {
+        // The old widget prefills the on-date with today plus 90 days.
+        const prefill = new Date();
+        prefill.setUTCDate(prefill.getUTCDate() + 90);
+        expect(facts.endDate).toBe(prefill.toISOString().slice(0, 10));
+      }
       await driver.schedulerRecurrenceAct({ kind: "endDate", value: "2027-01-05" });
       await expect
         .poll(async () => (await driver.schedulerRecurrenceFacts()).rawValue)
         .toBe("FREQ=WEEKLY;BYDAY=MO;UNTIL=20270105T235959Z");
       await driver.schedulerRecurrenceAct({ kind: "ends", value: "after" });
       facts = await driver.schedulerRecurrenceFacts();
-      expect(facts.occurrences).toBe("10");
+      expect(facts.occurrences).toBe(driver.target === "web_new" ? "10" : "13");
       await driver.schedulerRecurrenceAct({ kind: "occurrences", value: 4 });
       await expect
         .poll(async () => (await driver.schedulerRecurrenceFacts()).rawValue)
@@ -202,7 +213,11 @@ test(
     });
 
     await test.step("the raw textarea sits under the advanced disclosure and re-syncs the widget", async () => {
-      if (driver.target !== "web_new") return;
+      if (driver.target !== "web_new") {
+        // The builder steps above left the oracle's raw field open, so
+        // prove the disclosure closes before proving it opens.
+        await expect(driver.schedulerRecurrenceAdvanced()).resolves.toBe(false);
+      }
       expect((await driver.schedulerRecurrenceFacts()).rawVisible).toBe(false);
       await expect(driver.schedulerRecurrenceAdvanced()).resolves.toBe(true);
       expect((await driver.schedulerRecurrenceFacts()).rawVisible).toBe(true);
@@ -219,22 +234,15 @@ test(
     await test.step("saving persists exactly what the builder serialized", async () => {
       await driver.schedulerProjectEditSubmit();
       await expect.poll(() => driver.schedulerProjectEditOpen(), { timeout: 30_000 }).toBe(false);
-      // The builder steps above are target-only, so the oracle still holds
-      // its untouched stored rule; both legs prove the save round-trips the
-      // editor's current text.
-      const expected = driver.target === "web_new" ? "FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,FR" : "FREQ=DAILY";
-      expect(await storedRule(workspaceSlug, project.id, handle, ownerSession)).toBe(expected);
+      // Both legs typed the same raw rule above, so both prove the save
+      // round-trips the editor's current text.
+      expect(await storedRule(workspaceSlug, project.id, handle, ownerSession)).toBe(
+        "FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,FR"
+      );
     });
 
     await test.step("reopening reconstructs the builder from the saved rule", async () => {
       await openEdit(driver, workspaceSlug, project.id, handle);
-      if (driver.target !== "web_new") {
-        // The oracle's plain textarea pre-fills its saved rule verbatim
-        // (the builder steps above are target-only, so it still saved DAILY).
-        expect((await driver.schedulerProjectEditValues()).rrule).toBe("FREQ=DAILY");
-        await driver.schedulerCloseProjectEdit();
-        return;
-      }
       // The saved rule is not the builder's default: unit, interval and the
       // pressed weekday chips all have to come back from it.
       const facts = await driver.schedulerRecurrenceFacts();
@@ -258,12 +266,12 @@ test(
       expect(await storedRule(workspaceSlug, project.id, handle, ownerSession)).toBe(stored);
 
       await openEdit(driver, workspaceSlug, project.id, handle);
-      if (driver.target === "web_new") {
-        const facts = await driver.schedulerRecurrenceFacts();
-        expect(facts.rawVisible).toBe(true);
-        expect(facts.advancedVisible).toBe(false);
-        expect(facts.rawValue).toBe(stored);
-      }
+      // An inexpressible rule forces raw mode with no disclosure on both
+      // legs; the stored bytes show verbatim.
+      const facts = await driver.schedulerRecurrenceFacts();
+      expect(facts.rawVisible).toBe(true);
+      expect(facts.advancedVisible).toBe(false);
+      expect(facts.rawValue).toBe(stored);
       // Untouched: the stored bytes must round-trip through the editor.
       await driver.schedulerProjectEditSubmit();
       await expect.poll(() => driver.schedulerProjectEditOpen(), { timeout: 30_000 }).toBe(false);
