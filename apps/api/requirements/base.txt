@@ -82,7 +82,9 @@ cachetools==5.5.2
 # password validator
 zxcvbn==4.4.28
 # timezone
-pytz==2024.1
+# Keep on the tzdata release bundled in chrono-tz (rust-api/Cargo.lock): pytz 2025.2
+# and chrono-tz 0.10.4 are both 2025b. Newer pytz makes the backends disagree on offsets.
+pytz==2025.2
 # jwt
 PyJWT==2.12.0
 # OpenTelemetry
