@@ -34,18 +34,21 @@
 //!   exdate cannot arrive and every exdate on these paths is exact. The
 //!   aware-exdate behavior (exact-instant exclusion) is preserved and pinned
 //!   by the `*-aware-exdate-*` golden vectors.
-//! - `validate_rrule_string` drops Python's `dtstart` anchor parameter:
-//!   Django's anchor is always aware (`dtstart or now(utc)`), and only its
-//!   awareness feeds the verdict (a naive `UNTIL` under an aware anchor is
-//!   rejected), so the port treats the anchor as aware unless the rule text
-//!   carries its own naive `DTSTART` line, which `rrulestr` substitutes.
+//! - `validate_rrule_string` takes the `dtstart or now(utc)` anchor Django
+//!   passes (`_rrule.py:238`): its awareness feeds the `UNTIL` check and
+//!   its hour/minute/second feed `__construct_byset` (`rrule.py:1032-1077`),
+//!   which rejects `BYHOUR`/`BYMINUTE`/`BYSECOND` values no `INTERVAL`
+//!   step can reach from the anchor. A `DTSTART` line in the rule text
+//!   substitutes for the anchor wholesale (awareness and wall-clock
+//!   parts), exactly as `rrulestr` substitutes it (`rrule.py:1698`);
+//!   otherwise the anchor is always aware.
 //! - Naive datetimes are normalized to UTC at the caller boundary (Python
 //!   does `dtstart.replace(tzinfo=utc)` inline); this module takes
 //!   `DateTime<Utc>` throughout.
 
 use std::fmt;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 
 // ---------------------------------------------------------------------------
 // errors
@@ -492,8 +495,18 @@ fn parse_loose_datetime(value: &str) -> bool {
 /// awareness of `DTSTART` and `UNTIL` (`rrule.py:465-472`), so the
 /// distinction the boolean form discards is needed here.
 fn parse_loose_datetime_aware(value: &str) -> Option<bool> {
-    if chrono::DateTime::parse_from_rfc3339(value).is_ok() {
-        return Some(true);
+    parse_loose_datetime_parts(value).map(|(aware, _, _, _)| aware)
+}
+
+/// [`parse_loose_datetime_aware`] plus the wall-clock time parts a text
+/// `DTSTART` contributes when `rrulestr` substitutes it for the anchor:
+/// `(aware, hour, minute, second)`. `__construct_byset` reads the anchor's
+/// components as written (a zone shifts the instant, not the parts —
+/// `rrule.py:636,656,676`), and a date-only value means midnight, as in
+/// `dateutil`'s parser. The accept set is exactly the awareness form's.
+fn parse_loose_datetime_parts(value: &str) -> Option<(bool, u32, u32, u32)> {
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Some((true, parsed.hour(), parsed.minute(), parsed.second()));
     }
     const FORMATS: [(&str, bool); 7] = [
         ("%Y%m%dT%H%M%SZ", true),
@@ -505,10 +518,10 @@ fn parse_loose_datetime_aware(value: &str) -> Option<bool> {
         ("%Y-%m-%d", false),
     ];
     FORMATS.iter().find_map(|(fmt, aware)| {
-        if chrono::NaiveDateTime::parse_from_str(value, fmt).is_ok()
-            || chrono::NaiveDate::parse_from_str(value, fmt).is_ok()
-        {
-            Some(*aware)
+        if let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(value, fmt) {
+            Some((*aware, parsed.hour(), parsed.minute(), parsed.second()))
+        } else if chrono::NaiveDate::parse_from_str(value, fmt).is_ok() {
+            Some((*aware, 0, 0, 0))
         } else {
             None
         }
@@ -553,7 +566,11 @@ fn check_byday(value: &str) -> bool {
         if wday.contains('(') {
             // `TH(+1)` form — shared parse with expansion canonicalization
             // (the input is already uppercased, so the verdict is unchanged).
-            parse_paren_byday(wday).is_some()
+            // A zero ordinal fails `dateutil`'s `weekday` constructor
+            // ("Can't create weekday with n==0", `rrule.py:72`), which
+            // `_parse_rfc_rrule` reports as `invalid 'BYDAY'` — the same
+            // rejection the `+1MO` branch below applies.
+            matches!(parse_paren_byday(wday), Some((_, n)) if n != 0)
         } else {
             // `+1MO` form: leading `[+-0-9]*` is the ordinal, the rest the code.
             let idx = wday
@@ -562,7 +579,7 @@ fn check_byday(value: &str) -> bool {
                 .map(|(i, _)| i)
                 .unwrap_or(wday.len());
             let (n_str, w) = wday.split_at(idx);
-            if !n_str.is_empty() && parse_rrule_int(n_str).is_none() {
+            if !n_str.is_empty() && matches!(parse_rrule_int(n_str), None | Some(0)) {
                 return false;
             }
             WEEKDAYS.contains(&w)
@@ -690,14 +707,22 @@ fn check_freq_interval(parsed: &ParsedRule) -> Result<(), RRuleValidationError> 
 /// side (`dateutil/rrule.py:465-499,838-848`), returning the bare
 /// `dateutil` message so the caller wraps it as `invalid RRULE: …`. Only the
 /// properties the stored subset can carry are checked: `UNTIL` awareness
-/// against the implicit aware anchor (or an explicit `DTSTART`), the
-/// `BYSETPOS` range, and the
+/// against the anchor (or an explicit `DTSTART`), the `BYSETPOS` range, the
+/// same-level byset reachability from the anchor's hour/minute/second
+/// (`__construct_byset`, `rrule.py:1032-1077`), and the
 /// `BYHOUR`/`BYMINUTE`/`BYSECOND` ranges (which `dateutil` enforces by
 /// building a `datetime.time` per `(hour, minute, second)` combination,
 /// lowest FREQ below `HOURLY`). `BYMONTH`, `BYMONTHDAY`, `BYYEARDAY` and
 /// `BYWEEKNO` have no range check in `rrule.__init__` — confirmed against a
 /// live `dateutil` — so they are deliberately not checked here.
-fn check_rrule_init_semantics(parsed: &ParsedRule, anchor_aware: bool) -> Result<(), String> {
+///
+/// `anchor_hms` is the anchor's wall-clock `(hour, minute, second)` — the
+/// passed anchor's, or the text `DTSTART`'s when the rule carries one.
+fn check_rrule_init_semantics(
+    parsed: &ParsedRule,
+    anchor_aware: bool,
+    anchor_hms: (u32, u32, u32),
+) -> Result<(), String> {
     // `if self._dtstart and self._until:` — the awareness must match
     // (`rrule.py:462-472`); either mismatch direction raises the same
     // message. The anchor is the aware `datetime.now(tz=utc)` unless the
@@ -717,6 +742,34 @@ fn check_rrule_init_semantics(parsed: &ParsedRule, anchor_aware: bool) -> Result
             if *pos == 0 || !(-366..=366).contains(pos) {
                 return Err("bysetpos must be between 1 and 366, or between -366 and -1".to_owned());
             }
+        }
+    }
+
+    // A `BYXXX` at the same level as `FREQ` goes through
+    // `__construct_byset` (`rrule.py:625-685` dispatch, `:1032-1077` the
+    // check): values no `INTERVAL` step can reach from the anchor's
+    // component are dropped, and an empty survivor set is invalid. The
+    // raw parsed interval feeds the gcd (`INTERVAL=0` keeps only the
+    // anchor's own value); our `or 1` floor runs later, in
+    // `check_freq_interval`. Shared with the expansion fallback so the
+    // two cannot drift; only the verdict is kept here.
+    let interval = parsed.interval.unwrap_or(1);
+    if parsed.freq.as_deref() == Some("HOURLY") {
+        if let Some(values) = &parsed.byhour {
+            fallback::construct_byset(i64::from(anchor_hms.0), values.clone(), interval, 24)
+                .map_err(|_| "Invalid rrule byxxx generates an empty set.".to_owned())?;
+        }
+    }
+    if parsed.freq.as_deref() == Some("MINUTELY") {
+        if let Some(values) = &parsed.byminute {
+            fallback::construct_byset(i64::from(anchor_hms.1), values.clone(), interval, 60)
+                .map_err(|_| "Invalid rrule byxxx generates an empty set.".to_owned())?;
+        }
+    }
+    if parsed.freq.as_deref() == Some("SECONDLY") {
+        if let Some(values) = &parsed.bysecond {
+            fallback::construct_byset(i64::from(anchor_hms.2), values.clone(), interval, 60)
+                .map_err(|_| "Invalid rrule byxxx generates an empty set.".to_owned())?;
         }
     }
 
@@ -763,11 +816,15 @@ fn sorted_set(values: &[i64]) -> Vec<i64> {
 /// `rrulestr` runs `rrule.__init__` before Django applies its own FREQ/
 /// INTERVAL constraints, so the constructor's semantic checks come first; a
 /// missing FREQ is the constructor's `TypeError` and wins over both.
-fn check_parsed_rule(parsed: &ParsedRule, anchor_aware: bool) -> Result<(), RRuleValidationError> {
+fn check_parsed_rule(
+    parsed: &ParsedRule,
+    anchor_aware: bool,
+    anchor_hms: (u32, u32, u32),
+) -> Result<(), RRuleValidationError> {
     if parsed.freq.is_none() {
         return check_freq_interval(parsed);
     }
-    check_rrule_init_semantics(parsed, anchor_aware)
+    check_rrule_init_semantics(parsed, anchor_aware, anchor_hms)
         .map_err(|msg| RRuleValidationError(format!("invalid RRULE: {msg}")))?;
     check_freq_interval(parsed)
 }
@@ -820,15 +877,24 @@ fn check_date_line(prop: &str, parms: &[&str], value: &str) -> Result<bool, Stri
 ///
 /// Constraints: parses cleanly the way `dateutil.rrule.rrulestr` parses it
 /// (including `rrule.__init__`'s semantic checks: `UNTIL` awareness against
-/// the aware anchor, the `BYSETPOS` range, the `BYHOUR`/`BYMINUTE`/`BYSECOND`
-/// ranges;
+/// the anchor, the `BYSETPOS` range, the `BYHOUR`/`BYMINUTE`/`BYSECOND`
+/// ranges, and the same-level byset reachability from the anchor's
+/// hour/minute/second;
 /// FREQ is one of MINUTELY/HOURLY/DAILY/WEEKLY/MONTHLY/YEARLY; the effective
 /// fire rate is >= 1 minute (`INTERVAL >= 1`, with `0` meaning the default
 /// `1` as in `dateutil`).
 ///
+/// `anchor` is Django's `dtstart or now(utc)` (`_rrule.py:238`): field
+/// validation passes the request time, the binding cross-field re-check
+/// the binding's dtstart, the loop guard the request time. A `DTSTART`
+/// line in the rule text substitutes for it wholesale, as in `rrulestr`.
+///
 /// The empty string is valid: `rrule_str` is optional in the model and
 /// callers pass `""` for single-shot bindings (which fire once at `dtstart`).
-pub fn validate_rrule_string(rrule_str: &str) -> Result<(), RRuleValidationError> {
+pub fn validate_rrule_string(
+    rrule_str: &str,
+    anchor: DateTime<Utc>,
+) -> Result<(), RRuleValidationError> {
     if rrule_str.is_empty() {
         return Ok(()); // empty = single-shot, fine.
     }
@@ -842,10 +908,11 @@ pub fn validate_rrule_string(rrule_str: &str) -> Result<(), RRuleValidationError
     // Without `unfold`, `dateutil` splits lines on any whitespace run.
     let lines: Vec<&str> = upper.split_whitespace().collect();
     let invalid = |msg: String| RRuleValidationError(format!("invalid RRULE: {msg}"));
+    let anchor_hms = (anchor.hour(), anchor.minute(), anchor.second());
 
     if lines.len() == 1 && (!lines[0].contains(':') || lines[0].starts_with("RRULE:")) {
         let parsed = parse_single_rule(lines[0]).map_err(invalid)?;
-        return check_parsed_rule(&parsed, true);
+        return check_parsed_rule(&parsed, true, anchor_hms);
     }
 
     // Multi-property mode. `dateutil` assembles a set (which never carries
@@ -857,6 +924,7 @@ pub fn validate_rrule_string(rrule_str: &str) -> Result<(), RRuleValidationError
     let mut forces_set = false;
     let mut only_rule: Option<ParsedRule> = None;
     let mut anchor_aware = true;
+    let mut anchor_hms = anchor_hms;
     for line in &lines {
         if !line.contains(':') {
             let parsed = parse_single_rule(line).map_err(invalid)?;
@@ -891,6 +959,14 @@ pub fn validate_rrule_string(rrule_str: &str) -> Result<(), RRuleValidationError
             "DTSTART" => {
                 check_date_line(prop, &parms, value).map_err(invalid)?;
                 anchor_aware = dtstart_aware(&parms, value);
+                // `rrulestr` substitutes a text `DTSTART` for the anchor
+                // wholesale (`rrule.py:1698`): its wall-clock parts
+                // drive the byset check below. `check_date_line` already
+                // accepted the value, so the parts parse cannot fail;
+                // the passed anchor survives if it ever did.
+                if let Some((_, hour, minute, second)) = parse_loose_datetime_parts(value) {
+                    anchor_hms = (hour, minute, second);
+                }
             }
             _ => {
                 return Err(invalid(format!("unsupported property: {prop}")));
@@ -899,7 +975,7 @@ pub fn validate_rrule_string(rrule_str: &str) -> Result<(), RRuleValidationError
     }
     if rrule_count == 1 && !forces_set {
         if let Some(parsed) = &only_rule {
-            return check_parsed_rule(parsed, anchor_aware);
+            return check_parsed_rule(parsed, anchor_aware, anchor_hms);
         }
     }
     // `rrule_count == 0` (e.g. a lone `DTSTART:` line) hits `rrulevals[0]`
@@ -1247,8 +1323,11 @@ mod fallback {
     /// (which `_rrule.py` maps to "no expansion"), or one of the
     /// documented dateutil-500/hang classes (also "no expansion" here).
     /// No message crosses this boundary — the caller only needs `None`.
+    /// Visible to the parent module only because `construct_byset` is
+    /// shared with validation; validation maps it to the `dateutil`
+    /// message without naming it.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct FallbackError;
+    pub(super) struct FallbackError;
 
     type Result<T> = std::result::Result<T, FallbackError>;
 
@@ -1484,7 +1563,14 @@ mod fallback {
     /// `__construct_byset` (`rrule.py:1032-1077`): keep the `BYXXX` values
     /// reachable from `start` stepping `interval` modulo `base`; an empty
     /// set is invalid. (`divmod(x, g)[1]` with `g > 0` is `rem_euclid`.)
-    fn construct_byset(start: i64, values: Vec<i64>, interval: i64, base: i64) -> Result<Vec<i64>> {
+    /// Shared with `check_rrule_init_semantics`: validation runs the same
+    /// constructor check and keeps only the verdict.
+    pub(super) fn construct_byset(
+        start: i64,
+        values: Vec<i64>,
+        interval: i64,
+        base: i64,
+    ) -> Result<Vec<i64>> {
         let mut kept: Vec<i64> = values
             .into_iter()
             .filter(|num| {
@@ -3270,7 +3356,8 @@ mod tests {
     }
 
     // FX-TICKER-02: `rrule/validate.golden.json` (`bgtasks/_rrule.py:218-263`;
-    // empty ok 230-231; SECONDLY rejected 256-259).
+    // empty ok 230-231; SECONDLY rejected 256-259). The vectors are
+    // anchor-insensitive, so one fixed anchor covers them all.
     #[test]
     fn validate_rrule_string_matches_fx_ticker_02() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
@@ -3279,9 +3366,10 @@ mod tests {
         .unwrap();
         let vectors = fixture["vectors"].as_array().unwrap();
         assert!(!vectors.is_empty());
+        let anchor = utc(2026, 1, 1, 8, 7);
         for vector in vectors {
             let rrule = vector["rrule"].as_str().unwrap();
-            match validate_rrule_string(rrule) {
+            match validate_rrule_string(rrule, anchor) {
                 Ok(()) => assert!(
                     vector["valid"].as_bool().unwrap(),
                     "rrule {rrule:?} unexpectedly valid"
@@ -3303,6 +3391,151 @@ mod tests {
                 }
             }
         }
+    }
+
+    // PIDASHCONV-1706: same-level `BYHOUR`/`BYMINUTE`/`BYSECOND`
+    // values no `INTERVAL` step can reach from the anchor are invalid
+    // (`__construct_byset`, `rrule.py:1032-1077`). Vectors verified
+    // against live `dateutil` 2.8.2.
+    #[test]
+    fn validate_rejects_byset_unreachable_from_anchor() {
+        let byset_empty = "invalid RRULE: Invalid rrule byxxx generates an empty set.";
+        for (rule, anchor) in [
+            (
+                "FREQ=MINUTELY;INTERVAL=30;BYMINUTE=0",
+                utc(2026, 1, 1, 8, 7),
+            ),
+            (
+                "FREQ=MINUTELY;INTERVAL=15;BYMINUTE=0,15,30,45",
+                utc(2026, 1, 1, 8, 7),
+            ),
+            ("FREQ=HOURLY;INTERVAL=3;BYHOUR=7", utc(2026, 1, 1, 9, 0)),
+            ("FREQ=HOURLY;INTERVAL=2;BYHOUR=9,11", utc(2026, 1, 1, 8, 7)),
+            // SECONDLY never survives the FREQ allowlist, but the
+            // constructor check runs first, so its message wins here.
+            (
+                "FREQ=SECONDLY;INTERVAL=30;BYSECOND=0",
+                Utc.with_ymd_and_hms(2026, 1, 1, 8, 7, 5).unwrap(),
+            ),
+        ] {
+            assert_eq!(
+                validate_rrule_string(rule, anchor).unwrap_err().message(),
+                byset_empty,
+                "rrule {rule:?}"
+            );
+        }
+        // Reachable values stay valid; keeping some values keeps the rule.
+        for (rule, anchor) in [
+            ("FREQ=MINUTELY;INTERVAL=2;BYMINUTE=0", utc(2026, 1, 1, 8, 6)),
+            (
+                "FREQ=MINUTELY;INTERVAL=2;BYMINUTE=0,1",
+                utc(2026, 1, 1, 8, 7),
+            ),
+            ("FREQ=HOURLY;INTERVAL=3;BYHOUR=9", utc(2026, 1, 1, 9, 0)),
+            ("FREQ=HOURLY;INTERVAL=3;BYHOUR=0,1,2", utc(2026, 1, 1, 9, 0)),
+            ("FREQ=MINUTELY;BYMINUTE=0", utc(2026, 1, 1, 8, 7)),
+            ("FREQ=HOURLY;BYHOUR=7", utc(2026, 1, 1, 8, 7)),
+        ] {
+            assert!(
+                validate_rrule_string(rule, anchor).is_ok(),
+                "rrule {rule:?}"
+            );
+        }
+        // A reachable SECONDLY falls through to the FREQ allowlist.
+        assert_eq!(
+            validate_rrule_string(
+                "FREQ=SECONDLY;INTERVAL=30;BYSECOND=0",
+                Utc.with_ymd_and_hms(2026, 1, 1, 8, 7, 0).unwrap(),
+            )
+            .unwrap_err()
+            .message(),
+            "FREQ=SECONDLY is not allowed (allowed: ['DAILY', 'HOURLY', \
+             'MINUTELY', 'MONTHLY', 'WEEKLY', 'YEARLY'])",
+        );
+    }
+
+    // PIDASHCONV-1706: the raw parsed interval feeds the byset gcd —
+    // `INTERVAL=0` keeps only the anchor's own value (`gcd(0, 60) == 60`)
+    // and a negative interval fails the byset check before our `>= 1`
+    // floor runs (the constructor runs first).
+    #[test]
+    fn validate_byset_uses_raw_interval_before_floor() {
+        let anchor = utc(2026, 1, 1, 8, 7);
+        assert!(validate_rrule_string("FREQ=MINUTELY;INTERVAL=0;BYMINUTE=7", anchor).is_ok());
+        assert_eq!(
+            validate_rrule_string("FREQ=MINUTELY;INTERVAL=0;BYMINUTE=5", anchor)
+                .unwrap_err()
+                .message(),
+            "invalid RRULE: Invalid rrule byxxx generates an empty set.",
+        );
+        assert_eq!(
+            validate_rrule_string("FREQ=MINUTELY;INTERVAL=-2;BYMINUTE=0", anchor)
+                .unwrap_err()
+                .message(),
+            "invalid RRULE: Invalid rrule byxxx generates an empty set.",
+        );
+        assert_eq!(
+            validate_rrule_string("FREQ=MINUTELY;INTERVAL=-2;BYMINUTE=1", anchor)
+                .unwrap_err()
+                .message(),
+            "INTERVAL must be >= 1, got -2",
+        );
+    }
+
+    // PIDASHCONV-1706: a `DTSTART` line substitutes for the passed anchor
+    // wholesale — its wall-clock parts drive the byset check.
+    #[test]
+    fn validate_byset_reads_text_dtstart_anchor() {
+        assert_eq!(
+            validate_rrule_string(
+                "DTSTART:20260101T080700Z\nRRULE:FREQ=MINUTELY;INTERVAL=30;BYMINUTE=0",
+                utc(2026, 1, 1, 8, 0),
+            )
+            .unwrap_err()
+            .message(),
+            "invalid RRULE: Invalid rrule byxxx generates an empty set.",
+        );
+        assert!(validate_rrule_string(
+            "DTSTART;TZID=UTC:20260101T080000\nRRULE:FREQ=MINUTELY;INTERVAL=30;BYMINUTE=0",
+            utc(2026, 1, 1, 8, 7),
+        )
+        .is_ok());
+    }
+
+    // PIDASHCONV-1706: `dateutil`'s `weekday` rejects `n == 0`, which
+    // `_parse_rfc_rrule` reports as `invalid 'BYDAY'` — in both the
+    // `+1MO` and the `TH(+1)` spellings. (The bare forms are also pinned
+    // by the `validate.golden.json` vectors.)
+    #[test]
+    fn validate_rejects_zero_byday_ordinal() {
+        for (rule, expected) in [
+            (
+                "FREQ=WEEKLY;BYDAY=0MO",
+                "invalid RRULE: invalid 'BYDAY': 0MO",
+            ),
+            (
+                "FREQ=MONTHLY;BYDAY=+0MO",
+                "invalid RRULE: invalid 'BYDAY': +0MO",
+            ),
+            (
+                "FREQ=MONTHLY;BYDAY=MO(0)",
+                "invalid RRULE: invalid 'BYDAY': MO(0)",
+            ),
+            (
+                "FREQ=MONTHLY;BYDAY=1MO,0TU",
+                "invalid RRULE: invalid 'BYDAY': 1MO,0TU",
+            ),
+        ] {
+            assert_eq!(
+                validate_rrule_string(rule, utc(2026, 1, 1, 8, 7))
+                    .unwrap_err()
+                    .message(),
+                expected,
+                "rrule {rule:?}"
+            );
+        }
+        assert!(validate_rrule_string("FREQ=MONTHLY;BYDAY=1MO", utc(2026, 1, 1, 8, 7)).is_ok());
+        assert!(validate_rrule_string("FREQ=MONTHLY;BYDAY=MO(-1)", utc(2026, 1, 1, 8, 7)).is_ok());
     }
 
     /// Reconstructed inputs for the `next_fire` golden vectors
@@ -3758,7 +3991,7 @@ mod tests {
     #[test]
     fn paren_byday_non_ascii_tail_expands_as_first_monday() {
         let rule = "FREQ=MONTHLY;BYDAY=MO(1\u{20ac}";
-        assert!(validate_rrule_string(rule).is_ok());
+        assert!(validate_rrule_string(rule, utc(2026, 11, 1, 9, 0)).is_ok());
         let dtstart = utc(2026, 11, 1, 9, 0);
         let next = next_fire_from_rrule(dtstart, rule, "UTC", &[], &[], utc(2026, 11, 1, 0, 0));
         assert_golden(next.unwrap(), "2026-11-02T09:00:00+00:00");
@@ -3784,7 +4017,7 @@ mod tests {
     #[test]
     fn paren_byday_ascii_expands_as_first_thursday() {
         let rule = "FREQ=MONTHLY;BYDAY=TH(+1)";
-        assert!(validate_rrule_string(rule).is_ok());
+        assert!(validate_rrule_string(rule, utc(2026, 11, 1, 9, 0)).is_ok());
         let dtstart = utc(2026, 11, 1, 9, 0);
         let next = next_fire_from_rrule(dtstart, rule, "UTC", &[], &[], utc(2026, 11, 1, 0, 0));
         assert_golden(next.unwrap(), "2026-11-05T09:00:00+00:00");
