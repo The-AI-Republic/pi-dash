@@ -6,6 +6,7 @@ Routes (apps/api/pi_dash/app/urls/views.py):
 """
 
 import os
+from uuid import uuid4
 
 from .conftest import session_headers
 
@@ -138,6 +139,44 @@ def test_retrieve_guest_sees_only_own(api, seed, tenant_a, project_a, auth_a):
     r = api.get(_view_url(tenant_a, project_a, view_id), headers=other_headers)
     assert r.status_code == 403, r.text
     assert r.json() == {"error": "You are not allowed to view this issue"}
+
+
+def test_retrieve_unknown_view_id_returns_404(api, seed, tenant_a, project_a, auth_a):
+    """Port of test_unknown_view_id_returns_404
+    (apps/api/pi_dash/tests/contract/app/test_view_app.py, VIEW-022): an
+    unknown project view id misses with 404 before the guest recheck."""
+    r = api.get(_view_url(tenant_a, project_a, uuid4()), headers=auth_a)
+    assert r.status_code == 404, r.text
+    assert r.json() == {"error": "View not found"}
+
+
+def test_retrieve_unknown_view_id_member_returns_404(api, seed, tenant_a, project_a):
+    """Same miss for a project member (role 15): 404, not the old
+    get_initial() 200 (PIDASHCONV-1683)."""
+    other = seed.user()
+    seed.member(tenant_a["workspace"]["id"], other["id"], role=20)
+    seed.project_member(project_a, tenant_a["workspace"]["id"], other["id"], role=15)
+    other_headers = session_headers(
+        seed, other, other["password"], os.environ["CONTRACT_SECRET_KEY"]
+    )
+    r = api.get(_view_url(tenant_a, project_a, uuid4()), headers=other_headers)
+    assert r.status_code == 404, r.text
+    assert r.json() == {"error": "View not found"}
+
+
+def test_retrieve_unknown_view_id_guest_returns_404(api, seed, tenant_a, project_a):
+    """Same miss for a guest (role 5) with guest_view_all_features off
+    (the seed default): 404, not the old AttributeError 500
+    (PIDASHCONV-1683)."""
+    other = seed.user()
+    seed.member(tenant_a["workspace"]["id"], other["id"], role=20)
+    seed.project_member(project_a, tenant_a["workspace"]["id"], other["id"], role=5)
+    other_headers = session_headers(
+        seed, other, other["password"], os.environ["CONTRACT_SECRET_KEY"]
+    )
+    r = api.get(_view_url(tenant_a, project_a, uuid4()), headers=other_headers)
+    assert r.status_code == 404, r.text
+    assert r.json() == {"error": "View not found"}
 
 
 def test_partial_update(api, seed, tenant_a, project_a, auth_a):

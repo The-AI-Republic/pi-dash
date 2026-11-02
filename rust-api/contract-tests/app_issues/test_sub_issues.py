@@ -7,7 +7,7 @@ API-created throwaway child and deletes it, leaving the seed intact.
 SUB_KEYS = {
     "id", "name", "state_id", "sort_order", "completed_at",
     "estimate_point", "priority", "start_date", "target_date",
-    "sequence_id", "project_id", "parent_id", "cycle_id", "module_ids",
+    "sequence_id", "project_id", "parent_id", "type_id", "cycle_id", "module_ids",
     "label_ids", "assignee_ids", "sub_issues_count", "created_at",
     "updated_at", "created_by", "updated_by", "attachment_count",
     "link_count", "is_draft", "archived_at", "state_group",

@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
       - run: pip install -r rust-api/contract-tests/requirements.txt
       - run: cd rust-api/contract-tests && python -m pytest --collect-only -q
 
@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
       - run: pip install -r rust-api/contract-tests/requirements.txt
       - name: Run contract suites against the backend
         env:

@@ -37,10 +37,10 @@
 //!
 //! Ported bugs (translate, don't redesign — also listed in the PR):
 //!
-//! * The unfiltered history branch sorts raw model instances with
-//!   `instance["created_at"]` (`activity.py:81-84`) and raises `TypeError`
-//!   into the generic 500 — but only when at least one row exists; an
-//!   empty feed sorts to `[]` and answers 200. Both halves ported.
+//! * The unfiltered history branch (retired by PIDASHCONV-1680): Django
+//!   `b4defc50f` serializes each side and merges the dicts sorted by
+//!   `created_at`, so the old `instance["created_at"]` `TypeError` →
+//!   generic 500 is gone on both backends; the merged feed answers 200.
 //! * Duplicate issue reactions surface the generic `IntegrityError` body
 //!   (`{"error": "The payload is not valid"}`): unlike comment reactions,
 //!   the view catches nothing (`reaction.py:46-62`).
@@ -4025,6 +4025,17 @@ async fn history(
     }
 }
 
+/// The merged read's sort key: Django subscripts each serialized dict
+/// (`entry["created_at"]`), so a missing key raises into the generic
+/// 500 — unreachable here (both renderers always emit it), mapped to
+/// `ServerError` all the same.
+fn rendered_created_at(value: &Value) -> Result<&str, Denial> {
+    value
+        .get("created_at")
+        .and_then(Value::as_str)
+        .ok_or(Denial::ServerError)
+}
+
 async fn history_inner(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -4124,10 +4135,12 @@ async fn history_inner(
             serde_json::to_string(&out).map_err(|_| Denial::ServerError)
         }
         _ => {
-            // The default branch sorts RAW instances with
-            // `instance["created_at"]`: a `TypeError` → generic 500 on the
-            // first row — but an empty feed sorts to `[]` and answers
-            // 200. Evaluation order is activities first, then comments.
+            // The merged read (`activity.py:88-103`): serialize each
+            // side with its own renderer first, then merge the plain
+            // values and sort stably by the rendered `created_at` —
+            // ties keep chain order, activities first. The intake
+            // prefetch rides every branch now, so the merged read
+            // carries it too.
             let mut binder = Binder::new();
             let mut sql = history_activities_sql(&mut binder, slug, *issue_id, *user_id, None);
             if let Some(ts) = created_after {
@@ -4138,8 +4151,18 @@ async fn history_inner(
                 );
             }
             let activities = fetch_positional_rows(pool, &sql, binder.values()).await?;
+            let mut intake: Option<IntakeOwned> = None;
             if !activities.is_empty() {
-                return Err(Denial::ServerError);
+                let mut binder = Binder::new();
+                let sql = history_intake_prefetch_sql(&mut binder, &[*issue_id]);
+                let intake_rows = fetch_positional_rows(pool, &sql, binder.values()).await?;
+                if let Some(row) = intake_rows.first() {
+                    intake = Some(IntakeOwned {
+                        source: cell_opt_string(row, 1)?,
+                        source_email: cell_opt_string(row, 2)?,
+                        extra: cell_json(row, 3)?,
+                    });
+                }
             }
             let mut binder = Binder::new();
             let mut sql = history_comments_sql(&mut binder, slug, *issue_id, *user_id, None);
@@ -4151,10 +4174,45 @@ async fn history_inner(
                 );
             }
             let comments = fetch_positional_rows(pool, &sql, binder.values()).await?;
+            let mut grouped: HashMap<uuid::Uuid, Vec<CommentReactionView>> = HashMap::new();
             if !comments.is_empty() {
-                return Err(Denial::ServerError);
+                let mut ids = Vec::with_capacity(comments.len());
+                for row in &comments {
+                    ids.push(cell_uuid(row, C_ID)?);
+                }
+                let mut binder = Binder::new();
+                let sql = history_reactions_prefetch_sql(&mut binder, &ids);
+                let prefetched = fetch_positional_rows(pool, &sql, binder.values()).await?;
+                for row in &prefetched {
+                    let view = render_prefetched_reaction(row, tz)?;
+                    grouped
+                        .entry(cell_uuid(row, R_COMMENT_ID)?)
+                        .or_default()
+                        .push(view);
+                }
             }
-            Ok("[]".to_owned())
+            // Chain order is activities first, then comments, and
+            // `sort_by` is stable — equal `created_at` strings keep
+            // that order, exactly `sorted(chain(...), key=...)`.
+            let mut merged: Vec<(String, Value)> =
+                Vec::with_capacity(activities.len() + comments.len());
+            for row in &activities {
+                let intake = intake.as_ref().map(|owned| IntakeOwned {
+                    source: owned.source.clone(),
+                    source_email: owned.source_email.clone(),
+                    extra: owned.extra.clone(),
+                });
+                let rendered = render_history_activity(pool, row, tz, intake).await?;
+                merged.push((rendered_created_at(&rendered)?.to_owned(), rendered));
+            }
+            for row in &comments {
+                let reactions = grouped.remove(&cell_uuid(row, C_ID)?).unwrap_or_default();
+                let rendered = render_history_comment(pool, row, tz, reactions).await?;
+                merged.push((rendered_created_at(&rendered)?.to_owned(), rendered));
+            }
+            merged.sort_by(|left, right| left.0.cmp(&right.0));
+            let out: Vec<Value> = merged.into_iter().map(|(_, value)| value).collect();
+            serde_json::to_string(&out).map_err(|_| Denial::ServerError)
         }
     }
 }

@@ -22,6 +22,7 @@ RETRIEVE_KEYS = {
     "id", "name", "state_id", "sort_order", "completed_at",
     "estimate_point", "priority", "complexity_score", "start_date",
     "target_date", "sequence_id", "project_id", "parent_id", "cycle_id",
+    "type_id", "is_epic",
     "assigned_pod_id", "agent_executor", "module_ids", "label_ids",
     "assignee_ids", "sub_issues_count", "created_at", "updated_at",
     "created_by", "updated_by", "attachment_count", "link_count",

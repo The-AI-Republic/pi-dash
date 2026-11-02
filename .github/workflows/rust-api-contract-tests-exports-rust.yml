@@ -79,7 +79,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12.x"
+          python-version: "3.12.10"
           cache: pip
           cache-dependency-path: |
             apps/api/requirements.txt
@@ -159,6 +159,12 @@ jobs:
         # Same plugin dodge as the Django oracle job: the API install puts
         # pytest-django in this interpreter; the replay never touches Django.
         run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django exports/test_rust_replay.py -v
+
+      # PIDASHCONV-1700: under-limit exports stay plain zip (no zip64
+      # records). Same worker serves this replay file.
+      - name: Run export zip64 Rust replay
+        working-directory: rust-api/contract-tests
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django tasks_cleanup/test_rust_replay_export_zip64.py -v
 
       - name: Upload worker log on failure
         if: failure()
