@@ -4530,6 +4530,15 @@ mod tests {
         let mixed_parm = "DTSTART;TzID=America/New_York:20261101T080000 RRULE:FREQ=DAILY;COUNT=3";
         assert!(!bundle_needs_crate(mixed_parm));
         assert!(next_fire_with_error(dtstart, mixed_parm, "UTC", &[], &[], now).is_err());
+        // A lowercase `dtstart` line name also stays on the fallback: it
+        // uppercases the bundle, so post-flip Rust expands it exactly as
+        // `dateutil` does (pre-flip the crate refused it).
+        let lower_dtstart = "dtstart:20261101T060000Z rrule:freq=daily;count=3";
+        assert!(!bundle_needs_crate(lower_dtstart));
+        assert_eq!(
+            next_fire_with_error(dtstart, lower_dtstart, "UTC", &[], &[], now),
+            Ok(Some(golden("2026-11-03T06:00:00+00:00")))
+        );
         // Preserved crate-refusal verdicts: `UNTIL` with a `+0000` offset is
         // refused on both engines (a known fallback gap vs `dateutil`, which
         // expands it — follow-up, not this issue), and an `UNTIL` carrying
