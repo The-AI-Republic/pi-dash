@@ -105,30 +105,38 @@ describe("oracle dictation and recurrence fallbacks", () => {
     }
   });
 
-  it("reads the plain recurrence field and fills it without a builder", async () => {
+  it("reads a forced raw rule with no builder to toggle", async () => {
     const fill = vi.fn(async () => undefined);
+    const stored = "FREQ=WEEKLY;BYDAY=MO;BYHOUR=9";
     const raw = {
       count: async () => 1,
       isVisible: async () => true,
-      inputValue: async () => "FREQ=DAILY",
+      inputValue: async () => stored,
       fill,
       first: () => raw,
     };
-    const line = { waitFor: async () => undefined, innerText: async () => "every day" };
+    const line = { waitFor: async () => undefined, innerText: async () => stored };
     const lineNode: Record<string, unknown> = { ...line };
     lineNode["locator"] = () => lineNode;
     lineNode["first"] = () => lineNode;
     const dialog = {
-      getByLabel: (label: string) => (label === "Recurrence (RRULE)" ? raw : { count: async () => 0 }),
+      getByLabel: (label: string) => (label === "Recurrence" ? raw : { count: async () => 0 }),
+      getByRole: () => ({ count: async () => 0 }),
       locator: () => lineNode,
     };
     const page = { getByRole: () => ({ last: () => dialog }), locator: () => ({ last: () => dialog }) };
     const driver = driverWith(page);
     const facts = await driver.schedulerRecurrenceFacts();
-    expect(facts).toMatchObject({ visible: false, rawVisible: true, rawValue: "FREQ=DAILY", sentence: "every day" });
+    expect(facts).toMatchObject({
+      visible: false,
+      rawVisible: true,
+      rawValue: stored,
+      advancedVisible: false,
+      sentence: stored,
+    });
     await expect(driver.schedulerRecurrenceAdvanced()).resolves.toBe(true);
-    await driver.schedulerRecurrenceRaw("FREQ=WEEKLY");
-    expect(fill).toHaveBeenCalledWith("FREQ=WEEKLY");
+    await driver.schedulerRecurrenceRaw("FREQ=DAILY");
+    expect(fill).toHaveBeenCalledWith("FREQ=DAILY");
   });
 
   it("answers the unflagged endpoint statuses", async () => {
