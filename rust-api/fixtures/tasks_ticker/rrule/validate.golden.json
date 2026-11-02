@@ -101,6 +101,18 @@
       "valid": false,
       "error": "RRuleValidationError",
       "message": "invalid RRULE: RRULE UNTIL values must be specified in UTC when DTSTART is timezone-aware"
+    },
+    {
+      "rrule": "FREQ=WEEKLY;BYDAY=0MO",
+      "valid": false,
+      "error": "RRuleValidationError",
+      "message": "invalid RRULE: invalid 'BYDAY': 0MO"
+    },
+    {
+      "rrule": "FREQ=MONTHLY;BYDAY=+0MO",
+      "valid": false,
+      "error": "RRuleValidationError",
+      "message": "invalid RRULE: invalid 'BYDAY': +0MO"
     }
   ]
 }
