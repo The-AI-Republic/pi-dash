@@ -27,6 +27,7 @@ interface Options {
   fill?: (value: string) => Promise<void>;
   selectOption?: (value: string) => Promise<void>;
   evaluate?: unknown;
+  evaluateNode?: unknown;
   evaluateAll?: (fn: (nodes: { value: string }[]) => unknown) => Promise<unknown>;
   isChecked?: () => Promise<boolean>;
   innerText?: () => Promise<string>;
@@ -87,8 +88,10 @@ class FakeLocator {
   getByLabel(label: string): FakeLocator {
     return this.options.byLabel?.(label) ?? absent();
   }
-  evaluate(): Promise<unknown> {
+  evaluate(pageFunction?: (node: unknown) => unknown): Promise<unknown> {
     if (this.options.throws === true) return Promise.reject(new Error("evaluate failed"));
+    if (pageFunction !== undefined && this.options.evaluateNode !== undefined)
+      return Promise.resolve(pageFunction(this.options.evaluateNode));
     return Promise.resolve(this.options.evaluate ?? "");
   }
   evaluateAll(fn: (nodes: { value: string }[]) => unknown): Promise<unknown> {
@@ -296,6 +299,133 @@ describe("recurrence facts", () => {
     expect(facts.endDate).toBeNull();
   });
 
+  it("treats an unreadable ends radio as unchecked", async () => {
+    const flakyLabel = new FakeLocator({ text: "Never" });
+    const flaky = new FakeLocator({
+      isChecked: async () => {
+        throw new Error("detached");
+      },
+      locate: (selector: string) => (selector === "xpath=ancestor::label[1]" ? flakyLabel : absent()),
+    });
+    const dialog = builderDialog({
+      unit: unitSelect("DAILY", ["DAILY"]),
+      roles: (role: string, options?: Record<string, unknown>) => {
+        if (role === "group" && options?.["name"] === "Ends") {
+          const group = new FakeLocator({ count: 1 });
+          group.options.role = () => new FakeLocator({ items: [flaky, endsRadio("On (UTC, inclusive)", true)] });
+          return group;
+        }
+        return absent();
+      },
+    });
+    const facts = await new WebDriver(dialogPage(dialog)).schedulerRecurrenceFacts();
+    expect(facts.ends).toBe("on");
+  });
+
+  it("reads the monthly selection through the option-text probe", async () => {
+    const dialog = builderDialog({
+      unit: unitSelect("MONTHLY", ["MONTHLY"]),
+      labels: {
+        "Monthly repeat mode": fake({
+          count: 1,
+          visible: true,
+          input: "monthday",
+          evaluateNode: { selectedOptions: [{ text: "Monthly on day 9" }] },
+        }),
+      },
+    });
+    const facts = await new WebDriver(dialogPage(dialog)).schedulerRecurrenceFacts();
+    expect(facts.monthlyPattern).toBe("day");
+    expect(facts.dayOfMonth).toBe("9");
+  });
+
+  it("reads no monthly day when nothing is selected", async () => {
+    const dialog = builderDialog({
+      unit: unitSelect("MONTHLY", ["MONTHLY"]),
+      labels: {
+        "Monthly repeat mode": fake({
+          count: 1,
+          visible: true,
+          input: "monthday",
+          evaluateNode: { selectedOptions: [] },
+        }),
+      },
+    });
+    const facts = await new WebDriver(dialogPage(dialog)).schedulerRecurrenceFacts();
+    expect(facts.monthlyPattern).toBe("day");
+    expect(facts.dayOfMonth).toBeNull();
+  });
+
+  it("reads chips missing accessible names as blank", async () => {
+    const nameless = new FakeLocator({ attributes: { "aria-pressed": "true" } });
+    const dialog = builderDialog({
+      unit: unitSelect("WEEKLY", ["WEEKLY"]),
+      roles: (role: string, options?: Record<string, unknown>) => {
+        if (role === "group" && options?.["name"] === "Repeat on") {
+          const group = new FakeLocator({ items: [nameless] });
+          group.options.role = (inner: string) =>
+            inner === "button" ? new FakeLocator({ items: [nameless] }) : absent();
+          return group;
+        }
+        return absent();
+      },
+    });
+    const facts = await new WebDriver(dialogPage(dialog)).schedulerRecurrenceFacts();
+    expect(facts.weekdays).toEqual([{ name: "", pressed: true }]);
+  });
+
+  it("reads no monthly ordinal out of an unrecognized selection", async () => {
+    const dialog = builderDialog({
+      unit: unitSelect("MONTHLY", ["MONTHLY"]),
+      labels: {
+        "Monthly repeat mode": fake({ count: 1, visible: true, input: "weekday", evaluate: "Every fortnight" }),
+      },
+    });
+    const facts = await new WebDriver(dialogPage(dialog)).schedulerRecurrenceFacts();
+    expect(facts.monthlyPattern).toBe("weekday");
+    expect(facts.ordinal).toBeNull();
+    expect(facts.weekdayOfMonth).toBeNull();
+  });
+
+  it("reads no monthly ordinal out of unknown schedule words", async () => {
+    const dialog = builderDialog({
+      unit: unitSelect("MONTHLY", ["MONTHLY"]),
+      labels: {
+        "Monthly repeat mode": fake({
+          count: 1,
+          visible: true,
+          input: "weekday",
+          evaluate: "Monthly on the zeroth Funday",
+        }),
+      },
+    });
+    const facts = await new WebDriver(dialogPage(dialog)).schedulerRecurrenceFacts();
+    expect(facts.monthlyPattern).toBe("weekday");
+    expect(facts.ordinal).toBeNull();
+    expect(facts.weekdayOfMonth).toBeNull();
+  });
+
+  it("skips an ends radio whose label reads blank", async () => {
+    const blankLabel = new FakeLocator({ innerText: async () => null as unknown as string });
+    const blank = new FakeLocator({
+      checked: true,
+      locate: (selector: string) => (selector === "xpath=ancestor::label[1]" ? blankLabel : absent()),
+    });
+    const dialog = builderDialog({
+      unit: unitSelect("DAILY", ["DAILY"]),
+      roles: (role: string, options?: Record<string, unknown>) => {
+        if (role === "group" && options?.["name"] === "Ends") {
+          const group = new FakeLocator({ count: 1 });
+          group.options.role = () => new FakeLocator({ items: [blank, endsRadio("Never", false)] });
+          return group;
+        }
+        return absent();
+      },
+    });
+    const facts = await new WebDriver(dialogPage(dialog)).schedulerRecurrenceFacts();
+    expect(facts.ends).toBeNull();
+  });
+
   it("reads the monthly day out of the selected option", async () => {
     const dialog = builderDialog({
       unit: unitSelect("MONTHLY", ["DAILY", "WEEKLY", "MONTHLY", "YEARLY", "NONE"]),
@@ -469,6 +599,20 @@ describe("recurrence actions", () => {
     await driver.schedulerRecurrenceAct({ kind: "unit", value: "week" });
     await driver.schedulerRecurrenceAct({ kind: "unit", value: "year" });
     expect(seen).toEqual(["NONE", "DAILY", "WEEKLY", "YEARLY"]);
+  });
+
+  it("maps each monthly pattern onto the old select value", async () => {
+    const seen: string[] = [];
+    const dialog = new FakeLocator({
+      byLabel: (label: string) =>
+        label === "Monthly repeat mode"
+          ? fake({ count: 1, selectOption: async (value: string) => void seen.push(value) })
+          : absent(),
+    });
+    const driver = new WebDriver(dialogPage(dialog));
+    await driver.schedulerRecurrenceAct({ kind: "monthly", value: "day" });
+    await driver.schedulerRecurrenceAct({ kind: "monthly", value: "weekday" });
+    expect(seen).toEqual(["monthday", "weekday"]);
   });
 
   it("clicks the ends radio whose label matches", async () => {
