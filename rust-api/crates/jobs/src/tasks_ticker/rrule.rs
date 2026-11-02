@@ -1126,6 +1126,39 @@ fn expansion_set(
     Some(set)
 }
 
+/// True when the bundle needs the `rrule` crate: a `TZID` the fallback
+/// cannot expand — a non-UTC/GMT zone on an embedded `DTSTART`/`EXDATE`
+/// line. `dateutil` honors `TZID` only on those two lines (`_parse_rfc`
+/// rejects every other parm outright), and looks the name up through
+/// `TZID_NAMES`, built by a case-sensitive `TZID=` regex — so the parm
+/// trigger here is the exact-uppercase spelling, while the line name and
+/// the UTC/GMT comparison are case-insensitive (the fallback uppercases
+/// the whole bundle before its own check).
+///
+/// Everything else — including `TZID=UTC`/`GMT` (aware UTC either way)
+/// and the `TZID` parms `dateutil` rejects — expands through the
+/// fallback, which agrees with `dateutil` on all of them.
+fn bundle_needs_crate(rrule_str: &str) -> bool {
+    for token in rrule_str.split_whitespace() {
+        let Some((head, _)) = token.split_once(':') else {
+            continue;
+        };
+        let mut parts = head.split(';');
+        let name = parts.next().unwrap_or("");
+        if !(name.eq_ignore_ascii_case("DTSTART") || name.eq_ignore_ascii_case("EXDATE")) {
+            continue;
+        }
+        for parm in parts {
+            if let Some(zone) = parm.strip_prefix("TZID=") {
+                if !(zone.eq_ignore_ascii_case("UTC") || zone.eq_ignore_ascii_case("GMT")) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Return the next datetime the RRULE bundle is due strictly after `now`.
 ///
 /// Returns `None` both on parse error and when the series is legitimately
@@ -1183,10 +1216,21 @@ pub fn next_fire_with_error(
         // (Single-shot rdates are not exdate-filtered, like Python.)
         return Ok(rdates.iter().copied().filter(|d| *d > now).min());
     }
+    if !bundle_needs_crate(rrule_str) {
+        // The fallback dateutil port is the engine (PIDASHCONV-1705): the
+        // crate diverges from `dateutil` on rules it accepts
+        // (MINUTELY+BYHOUR+day filter, ordinal BYDAY below MONTHLY,
+        // whole-second exdates). It also keeps expanding the rules the
+        // crate refuses (PIDASHCONV-1300), and agrees with the crate on
+        // rules dateutil rejects — reported as the parse error.
+        return fallback::next_fire_with_error(dtstart, rrule_str, rdates, exdates, now)
+            .inspect_err(|error| {
+                tracing::warn!(rrule = rrule_str, err = %error, "scheduler.rrule_parse: bad rrule");
+            });
+    }
     let Some(set) = expansion_set(dtstart, rrule_str, rdates, exdates) else {
-        // The crate refuses rules dateutil expands (PIDASHCONV-1300); the
-        // dateutil-faithful fallback expands those, and agrees with the
-        // crate on rules dateutil rejects — reported as the parse error.
+        // A non-UTC `TZID` the crate itself refuses is unexpandable here
+        // too — reported as the parse error, as before.
         return fallback::next_fire_with_error(dtstart, rrule_str, rdates, exdates, now)
             .inspect_err(|error| {
                 tracing::warn!(rrule = rrule_str, err = %error, "scheduler.rrule_parse: bad rrule");
@@ -1232,6 +1276,18 @@ pub fn occurrences_between(
         }
         out.sort();
         return (out, false);
+    }
+    if !bundle_needs_crate(rrule_str) {
+        // Fallback-first, as in [`next_fire_with_error`] (PIDASHCONV-1705).
+        return fallback::occurrences(
+            dtstart,
+            rrule_str,
+            rdates,
+            exdates,
+            window_start,
+            window_end,
+            cap,
+        );
     }
     let Some(set) = expansion_set(dtstart, rrule_str, rdates, exdates) else {
         return fallback::occurrences(
@@ -1287,7 +1343,9 @@ pub fn occurrences_between(
 /// this module ports the dateutil 2.8.2 engine pieces that matter for
 /// expansion — `_parse_rfc` + `_parse_rfc_rrule`, `rrule.__init__`,
 /// `rrule._iter`, `_iterinfo`, `rruleset._iter`, `easter.easter` — and is
-/// used only when [`expansion_set`] returns `None`.
+/// the engine for every bundle without a non-UTC `TZID`
+/// (PIDASHCONV-1705; previously only when [`expansion_set`] returned
+/// `None`).
 ///
 /// Every failure maps to "no expansion" (`None`), mirroring
 /// `bgtasks/_rrule.py`'s `except (ValueError, TypeError)`. Three dateutil
@@ -4144,5 +4202,365 @@ mod tests {
             next_fire_from_rrule(dtstart, "FREQ=MINUTELY;COUNT=2", "UTC", &[], &[], now),
             None
         );
+    }
+
+    /// One PIDASHCONV-1705 issue-table row: the `dateutil` answer for a rule
+    /// the `rrule` crate accepts but expands differently.
+    struct EngineVector {
+        label: &'static str,
+        rule: &'static str,
+        dtstart: DateTime<Utc>,
+        now: DateTime<Utc>,
+        window_days: i64,
+        exdates: Vec<DateTime<Utc>>,
+        next: &'static str,
+        occs: usize,
+        has_more: bool,
+        first: &'static str,
+        last: &'static str,
+    }
+
+    // PIDASHCONV-1705: the crate is the engine for rules it accepts, and it
+    // diverges from `dateutil` there — MINUTELY+BYHOUR+day filter skips or
+    // silently ends the series (`counter_date.rs`, `rrule_iter.rs`), ordinal
+    // BYDAY below MONTHLY fires daily or drops items (`filters.rs`), and
+    // exdates compare whole-second (`rruleset_iter.rs`). The fallback
+    // dateutil port answers every row below exactly as `_rrule.py` does
+    // (expectations measured on dateutil 2.8.2 at Django be79fd494).
+    #[test]
+    fn engine_matches_dateutil_on_crate_divergent_rules() {
+        use chrono::Datelike;
+        let now = golden("2026-11-02T12:00:00+00:00");
+        let r1 = "FREQ=MINUTELY;INTERVAL=30;BYHOUR=9,17;BYDAY=MO,WE,FR";
+        let r2 = "FREQ=MINUTELY;INTERVAL=15;\
+                  BYHOUR=9,10,11,12,13,14,15,16,17;BYDAY=MO,TU,WE,TH,FR";
+        let micros = Utc
+            .with_ymd_and_hms(2026, 6, 30, 17, 45, 10)
+            .unwrap()
+            .with_nanosecond(500_000_000)
+            .unwrap();
+        let vectors = [
+            EngineVector {
+                label: "minutely-byhour-byday/none-dtstart",
+                rule: r1,
+                dtstart: golden("2026-11-01T06:00:00+00:00"),
+                now,
+                window_days: 30,
+                exdates: Vec::new(),
+                next: "2026-11-02T17:00:00+00:00",
+                occs: 50,
+                has_more: true,
+                first: "2026-11-02T17:00:00+00:00",
+                last: "2026-11-30T17:30:00+00:00",
+            },
+            EngineVector {
+                label: "minutely-byhour-byday/partial-dtstart",
+                rule: r1,
+                dtstart: golden("2026-11-02T08:00:00+00:00"),
+                now,
+                window_days: 30,
+                exdates: Vec::new(),
+                next: "2026-11-02T17:00:00+00:00",
+                occs: 50,
+                has_more: true,
+                first: "2026-11-02T17:00:00+00:00",
+                last: "2026-11-30T17:30:00+00:00",
+            },
+            EngineVector {
+                label: "business-hours/none-dtstart",
+                rule: r2,
+                dtstart: golden("2026-01-31T00:00:00+00:00"),
+                now,
+                window_days: 30,
+                exdates: Vec::new(),
+                next: "2026-11-02T12:15:00+00:00",
+                occs: 50,
+                has_more: true,
+                first: "2026-11-02T12:00:00+00:00",
+                last: "2026-11-03T15:15:00+00:00",
+            },
+            EngineVector {
+                label: "business-hours/shifted-dtstart",
+                rule: r2,
+                dtstart: golden("2026-11-01T06:00:00+00:00"),
+                now,
+                window_days: 30,
+                exdates: Vec::new(),
+                next: "2026-11-02T12:15:00+00:00",
+                occs: 50,
+                has_more: true,
+                first: "2026-11-02T12:00:00+00:00",
+                last: "2026-11-03T15:15:00+00:00",
+            },
+            EngineVector {
+                label: "minutely-byhour-monday",
+                rule: "FREQ=MINUTELY;INTERVAL=15;BYHOUR=9;BYDAY=MO",
+                dtstart: golden("2026-11-02T08:00:00+00:00"),
+                now,
+                window_days: 30,
+                exdates: Vec::new(),
+                next: "2026-11-09T09:00:00+00:00",
+                occs: 16,
+                has_more: false,
+                first: "2026-11-09T09:00:00+00:00",
+                last: "2026-11-30T09:45:00+00:00",
+            },
+            EngineVector {
+                label: "weekly-ordinal-byday",
+                rule: "FREQ=WEEKLY;BYDAY=1MO",
+                dtstart: golden("2026-11-02T08:00:00+00:00"),
+                now,
+                window_days: 30,
+                exdates: Vec::new(),
+                next: "2026-11-09T08:00:00+00:00",
+                occs: 4,
+                has_more: false,
+                first: "2026-11-09T08:00:00+00:00",
+                last: "2026-11-30T08:00:00+00:00",
+            },
+            EngineVector {
+                label: "daily-ordinal-byday",
+                rule: "FREQ=DAILY;BYDAY=1MO",
+                dtstart: golden("2026-10-01T09:00:00+00:00"),
+                now,
+                window_days: 1200,
+                exdates: Vec::new(),
+                next: "2026-11-09T09:00:00+00:00",
+                occs: 50,
+                has_more: true,
+                first: "2026-11-09T09:00:00+00:00",
+                last: "2027-10-18T09:00:00+00:00",
+            },
+            EngineVector {
+                label: "weekly-mixed-ordinal-byday",
+                rule: "FREQ=WEEKLY;BYDAY=TH,+1TU",
+                dtstart: golden("2026-01-31T09:00:00+00:00"),
+                now: golden("2026-01-28T09:00:00+00:00"),
+                window_days: 30,
+                exdates: Vec::new(),
+                next: "2026-02-03T09:00:00+00:00",
+                occs: 8,
+                has_more: false,
+                first: "2026-02-03T09:00:00+00:00",
+                last: "2026-02-26T09:00:00+00:00",
+            },
+            EngineVector {
+                label: "yearly-exdate-micros",
+                rule: "FREQ=YEARLY;COUNT=3",
+                dtstart: micros,
+                now: golden("2026-06-27T17:45:10.5+00:00"),
+                window_days: 30,
+                exdates: vec![micros],
+                next: "2026-06-30T17:45:10+00:00",
+                occs: 1,
+                has_more: false,
+                first: "2026-06-30T17:45:10+00:00",
+                last: "2026-06-30T17:45:10+00:00",
+            },
+        ];
+        for vector in &vectors {
+            let next = next_fire_with_error(
+                vector.dtstart,
+                vector.rule,
+                "UTC",
+                &[],
+                &vector.exdates,
+                vector.now,
+            );
+            assert_eq!(next, Ok(Some(golden(vector.next))), "{}", vector.label);
+            let end = vector.now + chrono::Duration::days(vector.window_days);
+            let (occs, has_more) = occurrences_between(
+                vector.dtstart,
+                vector.rule,
+                "UTC",
+                &[],
+                &vector.exdates,
+                vector.now,
+                end,
+                50,
+            );
+            assert_eq!(occs.len(), vector.occs, "{}: count", vector.label);
+            assert_eq!(has_more, vector.has_more, "{}: cap", vector.label);
+            assert_eq!(
+                occs.first(),
+                Some(&golden(vector.first)),
+                "{}: first",
+                vector.label
+            );
+            assert_eq!(
+                occs.last(),
+                Some(&golden(vector.last)),
+                "{}: last",
+                vector.label
+            );
+        }
+        // The ordinal rows fire on Mondays only — never daily — and the
+        // MINUTELY rows keep every BYHOUR/BYDAY clause on every instant.
+        let end = now + chrono::Duration::days(1200);
+        let (daily_ord, _) = occurrences_between(
+            golden("2026-10-01T09:00:00+00:00"),
+            "FREQ=DAILY;BYDAY=1MO",
+            "UTC",
+            &[],
+            &[],
+            now,
+            end,
+            50,
+        );
+        assert!(daily_ord.iter().all(|occ| {
+            occ.weekday() == chrono::Weekday::Mon
+                && occ.time() == golden("2026-11-09T09:00:00+00:00").time()
+        }));
+        let end = now + chrono::Duration::days(30);
+        let (biz, _) = occurrences_between(
+            golden("2026-01-31T00:00:00+00:00"),
+            r2,
+            "UTC",
+            &[],
+            &[],
+            now,
+            end,
+            50,
+        );
+        assert!(biz.iter().all(|occ| {
+            !matches!(occ.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun)
+                && (9..=17).contains(&occ.hour())
+                && occ.minute() % 15 == 0
+        }));
+        // Small rows, pinned instant by instant.
+        let end = now + chrono::Duration::days(30);
+        let (mondays, _) = occurrences_between(
+            golden("2026-11-02T08:00:00+00:00"),
+            "FREQ=MINUTELY;INTERVAL=15;BYHOUR=9;BYDAY=MO",
+            "UTC",
+            &[],
+            &[],
+            now,
+            end,
+            50,
+        );
+        let mut expected = Vec::new();
+        for day in [9, 16, 23, 30] {
+            for minute in [0, 15, 30, 45] {
+                expected.push(Utc.with_ymd_and_hms(2026, 11, day, 9, minute, 0).unwrap());
+            }
+        }
+        assert_eq!(mondays, expected);
+        let (mixed, _) = occurrences_between(
+            golden("2026-01-31T09:00:00+00:00"),
+            "FREQ=WEEKLY;BYDAY=TH,+1TU",
+            "UTC",
+            &[],
+            &[],
+            golden("2026-01-28T09:00:00+00:00"),
+            golden("2026-01-28T09:00:00+00:00") + chrono::Duration::days(30),
+            50,
+        );
+        let expected: Vec<DateTime<Utc>> = [3, 5, 10, 12, 17, 19, 24, 26]
+            .into_iter()
+            .map(|day| Utc.with_ymd_and_hms(2026, 2, day, 9, 0, 0).unwrap())
+            .collect();
+        assert_eq!(mixed, expected);
+    }
+
+    // PIDASHCONV-1705 routing: the crate stays the engine only for bundles
+    // the fallback cannot expand — a non-UTC/GMT `TZID` on an embedded
+    // `DTSTART`/`EXDATE` line (`dateutil` honors `TZID` only there, looked
+    // up case-sensitively). Every other bundle goes to the fallback,
+    // including `TZID=UTC`/`GMT` (aware UTC either way) and `TZID` parms
+    // `dateutil` rejects (`RDATE`, lowercase/mixed-case spellings).
+    #[test]
+    fn crate_kept_only_for_non_utc_tzid() {
+        let now = golden("2026-11-02T12:00:00+00:00");
+        let dtstart = golden("2026-11-01T12:00:00+00:00");
+        // Embedded New York DTSTART: the crate expands with zone math,
+        // exactly as `dateutil` does; the fallback reports it unsupported.
+        let ny = "DTSTART;TZID=America/New_York:20261101T080000 RRULE:FREQ=DAILY;COUNT=3";
+        assert!(bundle_needs_crate(ny));
+        assert_eq!(
+            next_fire_with_error(dtstart, ny, "UTC", &[], &[], now),
+            Ok(Some(golden("2026-11-02T13:00:00+00:00")))
+        );
+        // A New York EXDATE routes the same way and excludes by zone instant.
+        let ny_ex = "DTSTART:20261101T080000Z RRULE:FREQ=DAILY;COUNT=5 \
+                     EXDATE;TZID=America/New_York:20261103T030000";
+        assert!(bundle_needs_crate(ny_ex));
+        assert_eq!(
+            next_fire_with_error(dtstart, ny_ex, "UTC", &[], &[], now),
+            Ok(Some(golden("2026-11-04T08:00:00+00:00")))
+        );
+        // `TZID=UTC` on an embedded DTSTART stays on the fallback — and the
+        // MINUTELY+BYHOUR rule underneath still expands the dateutil way.
+        let utc_dtstart = "DTSTART;TZID=UTC:20261101T060000 \
+                           RRULE:FREQ=MINUTELY;INTERVAL=30;BYHOUR=9,17;BYDAY=MO,WE,FR";
+        assert!(!bundle_needs_crate(utc_dtstart));
+        assert_eq!(
+            next_fire_with_error(
+                golden("2026-11-01T06:00:00+00:00"),
+                utc_dtstart,
+                "UTC",
+                &[],
+                &[],
+                now
+            ),
+            Ok(Some(golden("2026-11-02T17:00:00+00:00")))
+        );
+        // `TZID=GMT` is UTC under another name: fallback, dateutil answer.
+        let gmt = "DTSTART;TZID=GMT:20261101T080000 RRULE:FREQ=DAILY;COUNT=3";
+        assert!(!bundle_needs_crate(gmt));
+        assert_eq!(
+            next_fire_with_error(dtstart, gmt, "UTC", &[], &[], now),
+            Ok(Some(golden("2026-11-03T08:00:00+00:00")))
+        );
+        // `TZID` where `dateutil` rejects it is a parse error, not a crate
+        // rule: `RDATE` parms and non-uppercase spellings (`TZID_NAMES`
+        // is built by a case-sensitive regex, so `dateutil` ignores them
+        // and then fails the naive/aware comparison).
+        let rdate_tzid = "RRULE:FREQ=DAILY;COUNT=3 RDATE;TZID=America/New_York:20261103T080000";
+        assert!(!bundle_needs_crate(rdate_tzid));
+        assert!(next_fire_with_error(
+            golden("2026-11-01T08:00:00+00:00"),
+            rdate_tzid,
+            "UTC",
+            &[],
+            &[],
+            golden("2026-10-01T00:00:00+00:00")
+        )
+        .is_err());
+        let mixed_parm = "DTSTART;TzID=America/New_York:20261101T080000 RRULE:FREQ=DAILY;COUNT=3";
+        assert!(!bundle_needs_crate(mixed_parm));
+        assert!(next_fire_with_error(dtstart, mixed_parm, "UTC", &[], &[], now).is_err());
+        // A lowercase `dtstart` line name also stays on the fallback: it
+        // uppercases the bundle, so post-flip Rust expands it exactly as
+        // `dateutil` does (pre-flip the crate refused it).
+        let lower_dtstart = "dtstart:20261101T060000Z rrule:freq=daily;count=3";
+        assert!(!bundle_needs_crate(lower_dtstart));
+        assert_eq!(
+            next_fire_with_error(dtstart, lower_dtstart, "UTC", &[], &[], now),
+            Ok(Some(golden("2026-11-03T06:00:00+00:00")))
+        );
+        // Preserved crate-refusal verdicts: `UNTIL` with a `+0000` offset is
+        // refused on both engines (a known fallback gap vs `dateutil`, which
+        // expands it — follow-up, not this issue), and an `UNTIL` carrying
+        // `:` breaks the line protocol in `dateutil` too.
+        assert!(!bundle_needs_crate("FREQ=DAILY;UNTIL=20261105T120000+0000"));
+        assert!(next_fire_with_error(
+            golden("2026-11-01T12:00:00+00:00"),
+            "FREQ=DAILY;UNTIL=20261105T120000+0000",
+            "UTC",
+            &[],
+            &[],
+            now
+        )
+        .is_err());
+        assert!(next_fire_with_error(
+            golden("2026-11-01T12:00:00+00:00"),
+            "FREQ=DAILY;UNTIL=2026-11-05T12:00:00+00:00",
+            "UTC",
+            &[],
+            &[],
+            now
+        )
+        .is_err());
     }
 }
