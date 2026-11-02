@@ -3123,9 +3123,13 @@ export interface ParityDriver {
   schedulerProjectEditSetEnabled(enabled: boolean): Promise<void>;
   /** The live recurrence sentence under the edit dialog's RRULE field. */
   schedulerProjectEditHumanizer(): Promise<string>;
-  /** Current builder state in the edit dialog; `visible: false` on a plain-textarea target. */
+  /** Current builder state in the open edit dialog; `visible: false` when an inexpressible rule forces raw mode. */
   schedulerRecurrenceFacts(): Promise<SchedulerRecurrenceFacts>;
-  /** One builder interaction in the open edit dialog (target-only; throws on the oracle). */
+  /**
+   * One builder interaction in the open edit dialog. The oracle
+   * (main#561) switches the monthly mode but offers no day, ordinal or
+   * weekday-of-month control, so those three kinds throw there.
+   */
   schedulerRecurrenceAct(action: SchedulerRecurrenceAction): Promise<void>;
   /** Toggle the advanced raw-rule disclosure; returns its expanded state. */
   schedulerRecurrenceAdvanced(): Promise<boolean>;
@@ -11635,7 +11639,7 @@ export interface SchedulerRecurrenceWeekday {
 
 /** Current state of the calendar-style recurrence builder. */
 export interface SchedulerRecurrenceFacts {
-  /** Whether the builder renders (the oracle still has a plain textarea). */
+  /** Whether the builder renders (false when an inexpressible rule forces raw mode). */
   visible: boolean;
   /** Repeat-every count, or null when the single-shot form hides it. */
   interval: string | null;

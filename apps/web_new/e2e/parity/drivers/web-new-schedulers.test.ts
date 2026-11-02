@@ -879,12 +879,13 @@ describe("recurrence builder", () => {
     await expect(new WebNewDriver(page).schedulerRecurrenceAdvanced()).resolves.toBe(true);
   });
 
-  it("leaves the oracle's builder actions target-only", async () => {
+  it("maps the oracle's builder actions onto the old widget", async () => {
     const { WebDriver } = await import("./web");
-    const driver = new WebDriver(pageOf({ getByRole: () => fake({ last: () => fake({ locate: () => absent() }) }) }));
-    await expect(driver.schedulerRecurrenceAct({ kind: "unit", value: "week" })).rejects.toThrow(
-      "recurrence builder is a web_new target"
-    );
+    const selectOption = vi.fn(async () => undefined);
+    const dialog = fake({ byLabel: () => fake({ count: 1, selectOption }) });
+    const page = pageOf({ locator: () => fake({ last: () => dialog }) });
+    await new WebDriver(page).schedulerRecurrenceAct({ kind: "unit", value: "week" });
+    expect(selectOption).toHaveBeenCalledWith("WEEKLY");
   });
 });
 
