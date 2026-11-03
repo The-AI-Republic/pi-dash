@@ -16,11 +16,24 @@ import { AGENT_RUN_TERMINAL_STATUSES } from "@pi-dash/types";
 import type { TBadgeVariant } from "@pi-dash/ui";
 import { AlertModalCore, Badge, Button, Spinner } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
-import { RunStatusBadge } from "@/components/runners/run-status-badge";
+import { executorKindLabel } from "@/components/dropdowns/pod/execution-target";
+import { RunStatusBadge, statusLabel } from "@/components/runners/run-status-badge";
 import { RunnersTabs } from "@/components/runners/runners-tabs";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
 const service = new RunnerService();
+
+type TranslationFn = ReturnType<typeof useTranslation>["t"];
+
+// A managed run that is queued because the owner's desktop is closed is not
+// "queued" in the capacity sense — it is waiting for that one machine to come
+// back. Surface the wait plainly (§8.5 / MR-6) rather than a generic badge.
+function runStatusLabel(run: Pick<IAgentRun, "status" | "executor_kind" | "error_code">, t: TranslationFn): string {
+  if (run.status === "queued" && run.executor_kind === "managed_runner" && run.error_code === "desktop_not_connected") {
+    return t("Waiting for your desktop");
+  }
+  return statusLabel(run.status, t);
+}
 
 const ERROR_SOURCE_BADGE_VARIANT: Record<TAgentRunErrorSource, TBadgeVariant> = {
   agent: "accent-warning",
@@ -172,7 +185,7 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
                   >
                     <td className="px-3 py-2 whitespace-nowrap">{new Date(r.created_at).toLocaleString()}</td>
                     <td className="px-3 py-2">
-                      <RunStatusBadge status={r.status} t={t} />
+                      <RunStatusBadge status={r.status} label={runStatusLabel(r, t)} t={t} />
                     </td>
                     <td className="font-mono max-w-[180px] truncate px-3 py-2 text-11">{r.prompt}</td>
                   </tr>
@@ -225,12 +238,12 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
                 <div>
                   <div className="font-mono text-11">{detail.id}</div>
                   <div className="mt-1 flex items-center gap-2">
-                    <RunStatusBadge status={detail.status} t={t} />
+                    <RunStatusBadge status={detail.status} label={runStatusLabel(detail, t)} t={t} />
                     <Badge
                       variant={detail.executor_kind === "cloud_agent" ? "accent-primary" : "accent-neutral"}
                       size="sm"
                     >
-                      {detail.executor_kind === "cloud_agent" ? t("Pi Dash Cloud Agent") : t("Local Runner")}
+                      {executorKindLabel(detail.executor_kind, t)}
                     </Badge>
                   </div>
                 </div>
