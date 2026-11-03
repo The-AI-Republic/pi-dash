@@ -21,6 +21,17 @@ test client: HTTP goes through httpx, seeding goes straight into
 Postgres via `psycopg`, and authenticated sessions come from the real
 sign-in endpoint (black box).
 
+## Oracle Python version
+
+Run the Django oracle on CPython **3.12.10** — the same interpreter as
+the production image (`apps/api/Dockerfile.api`). `html.parser`
+differs across 3.12 patch versions (PIDASHCONV-1693): distro 3.12.3
+builds and later 3.12.x carry the HTML5 rewrite, while 3.12.10 has the
+classic parser, and recorded fixtures pin the 3.12.10 behavior. CI
+pins `python-version: "3.12.10"` on every `rust-api-*` workflow; match
+it locally (e.g. a 3.12.10 venv or container) before recording or
+re-recording fixtures.
+
 ## Layout
 
 - `_harness/` — shared helpers. Extend, never fork: `env.py` (env

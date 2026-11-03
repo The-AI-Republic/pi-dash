@@ -1,5 +1,6 @@
-//! v1 scheduler endpoints: reads (stage 8 drift, PIDASHCONV-1061) and the
-//! binding / definition writes PDASHOSS01-278 added ([`writes`]).
+//! v1 scheduler endpoints: reads (stage 8 drift, PIDASHCONV-1061), the
+//! binding / definition writes PDASHOSS01-278 added, and the create /
+//! install / uninstall / delete writes of PDASHOSS01-318 ([`writes`]).
 //!
 //! Ports `apps/api/pi_dash/api/views/scheduler.py`,
 //! `api/serializers/scheduler.py` and `api/urls/scheduler.py` (04920ea3,
@@ -670,6 +671,21 @@ pub fn owned(
 ) -> axum::routing::MethodRouter<AppState> {
     get_handler
         .post(crate::edge::proxy)
+        .put(crate::edge::proxy)
+        .patch(crate::edge::proxy)
+        .delete(crate::edge::proxy)
+        .head(crate::edge::proxy)
+        .options(crate::edge::proxy)
+}
+
+/// An owned GET + POST path (the two list routes, whose POST is a
+/// PDASHOSS01-318 write): every other method falls through to Django.
+pub fn owned_get_post(
+    get_handler: axum::routing::MethodRouter<AppState>,
+    post_handler: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
+    get_handler
+        .merge(post_handler)
         .put(crate::edge::proxy)
         .patch(crate::edge::proxy)
         .delete(crate::edge::proxy)

@@ -333,6 +333,119 @@ pub fn plan_delete_attachment(frame: &TrackFrame) -> ActivityRow {
     )
 }
 
+/// `_worklog_minutes` (`:1070-1077`): `str(int(value))` for positive
+/// ints, else the default. `int()` over JSON-decoded values: bools go
+/// through `int(True) == 1` / `int(False) == 0`, floats truncate
+/// toward zero, strings follow the `int(str)` grammar, and anything
+/// else (null, lists, dicts) misses. Out-of-`i64` floats and huge
+/// integers fall back to the default (Tier 3: minutes arrive from the
+/// serializer as small ints; only hand-crafted task payloads differ).
+fn worklog_minutes(value: Option<&Value>, default: &str) -> String {
+    let minutes: i64 = match value {
+        None | Some(Value::Null) => return default.to_owned(),
+        Some(Value::Bool(true)) => 1,
+        Some(Value::Bool(false)) => 0,
+        Some(Value::Number(number)) => {
+            if let Some(int) = number.as_i64() {
+                int
+            } else if let Some(uint) = number.as_u64() {
+                match i64::try_from(uint) {
+                    Ok(int) => int,
+                    // Past `i64` the value still stringifies whole
+                    // (`int()` is unbounded) and is always positive.
+                    Err(_) => return uint.to_string(),
+                }
+            } else if let Some(float) = number.as_f64() {
+                if !float.is_finite() {
+                    return default.to_owned();
+                }
+                let truncated = float.trunc();
+                if truncated < i64::MIN as f64 || truncated > i64::MAX as f64 {
+                    return default.to_owned();
+                }
+                truncated as i64
+            } else {
+                return default.to_owned();
+            }
+        }
+        Some(Value::String(text)) => match crate::operations::issues::parse_python_int(text) {
+            Some(int) => int,
+            None => return default.to_owned(),
+        },
+        _ => return default.to_owned(),
+    };
+    if minutes > 0 {
+        minutes.to_string()
+    } else {
+        default.to_owned()
+    }
+}
+
+/// `create_worklog_activity` (`:1078-1103`): one `created` row. A null
+/// requested payload means `{}`, not an error (the `None stays None`
+/// rule with an empty-dict default); a parsed non-object still aborts
+/// (`.get` on a list raises in Python).
+pub fn plan_create_worklog(
+    requested_raw: Option<&str>,
+    frame: &TrackFrame,
+) -> Result<ActivityRow, BuildError> {
+    let requested =
+        parse_opt(requested_raw, "requested_data")?.unwrap_or(Value::Object(Default::default()));
+    let requested = as_object(Some(requested), "requested_data")?;
+    let mut out = row(
+        frame,
+        Some(frame.issue_id.clone()),
+        "created",
+        Some("worklog"),
+        "logged time",
+        None,
+        Some(worklog_minutes(requested.get("minutes"), "")),
+    );
+    out.new_identifier = opt_str(requested.get("id"));
+    Ok(out)
+}
+
+/// `update_worklog_activity` (`:1105-1132`): one `updated` row; both
+/// null payloads mean `{}`. Untouched minutes render the before-image
+/// as both values (`_worklog_minutes(None, before) == before`).
+pub fn plan_update_worklog(
+    requested_raw: Option<&str>,
+    current_raw: Option<&str>,
+    frame: &TrackFrame,
+) -> Result<ActivityRow, BuildError> {
+    let requested =
+        parse_opt(requested_raw, "requested_data")?.unwrap_or(Value::Object(Default::default()));
+    let requested = as_object(Some(requested), "requested_data")?;
+    let current =
+        parse_opt(current_raw, "current_instance")?.unwrap_or(Value::Object(Default::default()));
+    let current = as_object(Some(current), "current_instance")?;
+    let before = worklog_minutes(current.get("minutes"), "");
+    Ok(row(
+        frame,
+        Some(frame.issue_id.clone()),
+        "updated",
+        Some("worklog"),
+        "updated logged time",
+        Some(before.clone()),
+        Some(worklog_minutes(requested.get("minutes"), &before)),
+    ))
+}
+
+/// `delete_worklog_activity` (`:1134-1157`): one bare `deleted` row;
+/// both inputs are ignored entirely (not even parsed), like
+/// BUG-ACT-12.
+pub fn plan_delete_worklog(frame: &TrackFrame) -> ActivityRow {
+    row(
+        frame,
+        Some(frame.issue_id.clone()),
+        "deleted",
+        Some("worklog"),
+        "removed logged time",
+        None,
+        None,
+    )
+}
+
 /// `create_issue_reaction_activity` (`:1070-1108`): one `created` row, and
 /// only when the requested reaction resolves to an `IssueReaction` row.
 /// `lookup` is that row's id
@@ -1269,6 +1382,108 @@ mod tests {
         assert_eq!(coerced.verb, "True");
         assert_eq!(coerced.new_value.as_deref(), Some("Accepted"));
         assert_eq!(coerced.old_value.as_deref(), Some("Snoozed"));
+    }
+
+    // FX-ACT-02 · worklog create reads minutes + id from requested.
+    #[test]
+    fn create_worklog_reads_minutes_and_id() {
+        let row = plan_create_worklog(Some(r#"{"minutes":90,"id":"entry-1"}"#), &frame()).unwrap();
+        assert_eq!(row.verb, "created");
+        assert_eq!(row.field.as_deref(), Some("worklog"));
+        assert_eq!(row.comment, "logged time");
+        assert_eq!(row.new_value.as_deref(), Some("90"));
+        assert_eq!(row.new_identifier.as_deref(), Some("entry-1"));
+        assert_eq!(row.issue_id.as_deref(), Some("issue-1"));
+        assert_eq!(row.actor_id, "actor-1");
+    }
+
+    // `_worklog_minutes` grammar: bools, truncation, the `int(str)`
+    // spellings, and the positive-only gate.
+    #[test]
+    fn worklog_minutes_grammar_matches_python_int() {
+        for (input, want) in [
+            (json!(90), "90"),
+            (json!("90"), "90"),
+            (json!(" 90 "), "90"),
+            (json!("1_0"), "10"),
+            (json!(90.9), "90"),
+            (json!(-90.9), ""),
+            (json!(true), "1"),
+            (json!(1_844_674_407_370_955_161_i64), "1844674407370955161"),
+        ] {
+            assert_eq!(worklog_minutes(Some(&input), ""), want, "input {input}");
+        }
+        for input in [
+            json!(0),
+            json!(-30),
+            json!(false),
+            json!(null),
+            json!("abc"),
+            json!("9.5"),
+            json!(""),
+            json!([1]),
+            json!({"n": 1}),
+        ] {
+            assert_eq!(worklog_minutes(Some(&input), ""), "", "input {input}");
+        }
+        assert_eq!(worklog_minutes(None, ""), "");
+        assert_eq!(worklog_minutes(Some(&json!(null)), "dflt"), "dflt");
+        // Past `i64` the value still stringifies whole.
+        assert_eq!(
+            worklog_minutes(Some(&json!(18_446_744_073_709_551_615_u64)), ""),
+            "18446744073709551615"
+        );
+        assert_eq!(worklog_minutes(Some(&json!(1e300)), ""), "");
+    }
+
+    // `create_worklog_activity` with null requested means `{}`, and a
+    // parsed non-object aborts (`.get` on a list raises in Python).
+    #[test]
+    fn create_worklog_null_requested_means_empty() {
+        let row = plan_create_worklog(None, &frame()).unwrap();
+        assert_eq!(row.new_value.as_deref(), Some(""));
+        assert_eq!(row.new_identifier, None);
+        assert!(plan_create_worklog(Some("[1]"), &frame()).is_err());
+    }
+
+    // FX-ACT-02 · worklog update carries the before-image.
+    #[test]
+    fn update_worklog_reads_before_and_after() {
+        let row = plan_update_worklog(
+            Some(r#"{"minutes":120}"#),
+            Some(r#"{"minutes":30,"id":"entry-1"}"#),
+            &frame(),
+        )
+        .unwrap();
+        assert_eq!(row.verb, "updated");
+        assert_eq!(row.field.as_deref(), Some("worklog"));
+        assert_eq!(row.comment, "updated logged time");
+        assert_eq!(row.old_value.as_deref(), Some("30"));
+        assert_eq!(row.new_value.as_deref(), Some("120"));
+    }
+
+    // Untouched minutes render the before-image as both values.
+    #[test]
+    fn update_worklog_untouched_minutes_fall_back() {
+        let row = plan_update_worklog(Some(r#"{"note":"x"}"#), Some(r#"{"minutes":90}"#), &frame())
+            .unwrap();
+        assert_eq!(row.old_value.as_deref(), Some("90"));
+        assert_eq!(row.new_value.as_deref(), Some("90"));
+        let row = plan_update_worklog(None, None, &frame()).unwrap();
+        assert_eq!(row.old_value.as_deref(), Some(""));
+        assert_eq!(row.new_value.as_deref(), Some(""));
+    }
+
+    // FX-ACT-02 · worklog delete is bare; inputs stay unparsed.
+    #[test]
+    fn delete_worklog_is_bare() {
+        let row = plan_delete_worklog(&frame());
+        assert_eq!(row.verb, "deleted");
+        assert_eq!(row.field.as_deref(), Some("worklog"));
+        assert_eq!(row.comment, "removed logged time");
+        assert_eq!(row.old_value, None);
+        assert_eq!(row.new_value, None);
+        assert_eq!(row.new_identifier, None);
     }
 
     // The fixture's golden row count for the misc subset: every builder above

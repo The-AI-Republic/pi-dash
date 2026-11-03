@@ -1,0 +1,674 @@
+// @vitest-environment jsdom
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// Editable page canvas (parity/specs/pages.md §5, PAGE-026–032): the
+// title's Enter reaches the body's start, the bar drives the editor, the
+// editor reports its formatting state back, the cold-document skeleton
+// holds the body area until the document is known, and the canvas hands
+// its command handle to a caller outside it (the version restore).
+
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import * as React from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
+
+import { getPageBodyDraft, resetPageBodyDrafts, setPageBodyDraft } from "../lib/pageBodyDraft.js";
+import { getPageBodyActions, resetPageBodyActions } from "../lib/pageBodyActions.js";
+import { reportPageContentTooLarge, resetPageRealtimeErrors } from "../lib/pageRealtimeErrors.js";
+import { openPageImagePicker, PageEditorSurface, PAGE_BODY_LABEL, PAGE_BODY_PLACEHOLDER } from "./PageEditorSurface.js";
+import { PAGE_OVERSIZED_DISMISS } from "./PageOversizedStrip.js";
+
+const EDITOR_TEST_TIMEOUT = 30_000;
+
+const toaster = vi.hoisted(() => ({ notifyError: vi.fn() }));
+vi.mock("../../../shared/shell/toaster.js", () => ({
+  notifyError: toaster.notifyError,
+}));
+
+const appClient = vi.hoisted(() => ({ getAppClient: vi.fn(() => ({ kind: "app-client" })) }));
+vi.mock("../../../core/api/client.js", () => ({ getAppClient: appClient.getAppClient }));
+
+const pageAssets = vi.hoisted(() => ({
+  uploadPageAsset: vi.fn(),
+  duplicatePageAsset: vi.fn(),
+  searchEntityPreviews: vi.fn(),
+}));
+vi.mock("@pidash/api-client", async (original) => {
+  const actual = await original<typeof import("@pidash/api-client")>();
+  return {
+    ...actual,
+    uploadPageAsset: pageAssets.uploadPageAsset,
+    duplicatePageAsset: pageAssets.duplicatePageAsset,
+    searchEntityPreviews: pageAssets.searchEntityPreviews,
+  };
+});
+
+function mount(props: Partial<React.ComponentProps<typeof PageEditorSurface>> = {}): ReturnType<typeof render> {
+  return render(
+    <PageEditorSurface
+      pageId="page-1"
+      workspaceSlug="acme"
+      projectId="project-1"
+      name="Launch notes"
+      descriptionHtml="<p>Stored words</p>"
+      logoProps={{}}
+      onRename={vi.fn()}
+      onMarkPick={vi.fn()}
+      showBar
+      {...props}
+    />
+  );
+}
+
+function editableBody(): HTMLElement | null {
+  return (
+    screen.queryAllByLabelText(PAGE_BODY_LABEL).find((element) => element.getAttribute("contenteditable") === "true") ??
+    null
+  );
+}
+
+async function body(): Promise<HTMLElement> {
+  await vi.dynamicImportSettled();
+  // The read-only body is the Suspense fallback; wait for the editor.
+  await vi.waitFor(() => expect(editableBody()).not.toBeNull());
+  const editable = editableBody();
+  if (editable === null) throw new Error("the editor never became editable");
+  return editable;
+}
+
+/** Dispatch a stored-markup paste the editor's capture handler reads. */
+function clipboardPaste(target: HTMLElement, html: string): void {
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: { getData: (type: string) => (type === "text/html" ? html : "") },
+  });
+  target.dispatchEvent(event);
+}
+
+/** Dispatch a plain-text paste with no markup flavour. */
+function plainPaste(target: HTMLElement, text: string): void {
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: { getData: (type: string) => (type === "text/plain" ? text : "") },
+  });
+  target.dispatchEvent(event);
+}
+
+/** Put a collapsed caret after `needle`, where a "/" trigger belongs. */
+function caretAtEndOf(root: HTMLElement, needle: string): void {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    const text = node.textContent ?? "";
+    if (!text.includes(needle)) continue;
+    const range = document.createRange();
+    range.setStart(node, text.indexOf(needle) + needle.length);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+    return;
+  }
+  throw new Error(`no text node holds ${needle}`);
+}
+
+afterEach(() => {
+  resetPageBodyDrafts();
+  resetPageBodyActions();
+  resetPageRealtimeErrors();
+  toaster.notifyError.mockReset();
+  appClient.getAppClient.mockClear();
+  pageAssets.uploadPageAsset.mockReset();
+  pageAssets.duplicatePageAsset.mockReset();
+  pageAssets.searchEntityPreviews.mockReset();
+});
+
+describe(
+  "PageEditorSurface",
+  () => {
+    it("renders the title, the bar and the editor for an editable page", async () => {
+      mount();
+      expect(screen.getByRole("textbox", { name: "Page title" })).toBeInTheDocument();
+      expect(screen.getByRole("toolbar", { name: "Formatting" })).toBeInTheDocument();
+      expect(await body()).toHaveAttribute("contenteditable", "true");
+    });
+
+    it("threads the assistant gate to the interaction layer (PAGE-075)", async () => {
+      const plain = mount();
+      expect(plain.getByTestId("page-body-interactions")).toBeInTheDocument();
+      expect(plain.queryByTestId("page-assistant-mount")).not.toBeInTheDocument();
+      plain.unmount();
+      const ready = mount({ assistantReady: true });
+      expect(ready.getByTestId("page-assistant-mount")).toBeInTheDocument();
+      ready.unmount();
+      await vi.dynamicImportSettled();
+    });
+
+    it("marks the bar wide and stamps the stored type preferences", async () => {
+      mount({ fullWidth: true, fontSize: "small-font", fontStyle: "serif" });
+      await body();
+      expect(screen.getByTestId("page-formatting-bar").querySelector(".page-toolbar-content")).toHaveClass(
+        "wide-layout"
+      );
+      expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-small-font", "text-face-serif");
+      expect(screen.getByTestId("page-canvas-header").closest(".frame-renderer") ?? document.body).toBeTruthy();
+    });
+
+    it("omits the wide marker without the full-width preference", async () => {
+      mount();
+      await body();
+      expect(screen.getByTestId("page-formatting-bar").querySelector(".page-toolbar-content")).not.toHaveClass(
+        "wide-layout"
+      );
+      expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-large-font", "text-face-sans-serif");
+    });
+
+    it("captures the standard save gesture without leaving the page", async () => {
+      const onSave = vi.fn();
+      mount({ onSave });
+      const editable = await body();
+      editable.focus();
+      // The gesture is claimed: the browser's own save dialog never opens.
+      expect(fireEvent.keyDown(editable, { key: "s", metaKey: true })).toBe(false);
+      expect(onSave).toHaveBeenCalledTimes(1);
+      expect(editable).toHaveTextContent("Stored words");
+    });
+
+    it("leaves the save gesture alone when it is not the standard chord", async () => {
+      const onSave = vi.fn();
+      mount({ onSave });
+      const editable = await body();
+      editable.focus();
+      fireEvent.keyDown(editable, { key: "s", metaKey: true, shiftKey: true });
+      fireEvent.keyDown(editable, { key: "s", altKey: true });
+      expect(onSave).not.toHaveBeenCalled();
+    });
+
+    it("withholds the bar when asked, for the sticky preference", async () => {
+      mount({ showBar: false });
+      await body();
+      expect(screen.queryByRole("toolbar", { name: "Formatting" })).not.toBeInTheDocument();
+    });
+
+    it("holds the body area with a skeleton until the document is known", async () => {
+      mount({ bodyPending: true });
+      expect(screen.getByRole("status", { name: "Loading page body" })).toBeInTheDocument();
+      expect(screen.getByRole("textbox", { name: "Page title" })).toBeInTheDocument();
+      expect(screen.queryByLabelText(PAGE_BODY_LABEL)).not.toBeInTheDocument();
+    });
+
+    it("opens the stored body and reports edits as a draft", async () => {
+      mount();
+      const editable = await body();
+      expect(editable).toHaveTextContent("Stored words");
+      await vi.waitFor(() => expect(screen.getByRole("button", { name: "Bold" })).toBeInTheDocument());
+      act(() => {
+        fireEvent.click(screen.getByRole("button", { name: "Bold" }));
+      });
+      await vi.waitFor(() =>
+        expect(screen.getByRole("button", { name: "Bold" })).toHaveAttribute("aria-pressed", "true")
+      );
+    });
+
+    it("keeps the transient surfaces out of the measured body container (PAGE-037/049)", async () => {
+      mount();
+      const editable = await body();
+      const user = userEvent.setup();
+      // Type a slash at the caret: the palette opens as a real user sees it.
+      editable.focus();
+      caretAtEndOf(editable, "Stored words");
+      await user.keyboard(" /he");
+      const palette = await screen.findByTestId("page-slash-palette", undefined, { timeout: 10_000 });
+      const container = editable.closest(".editor-container");
+      expect(container).not.toBeNull();
+      // The pane counts the blocks inside `.editor-container`, so a palette
+      // row rendered there would lift Characters/Paragraphs as you type.
+      expect(container?.contains(palette)).toBe(false);
+      expect(container?.contains(screen.getByTestId("page-body-interactions"))).toBe(false);
+    });
+
+    it("reopens a body typed earlier this session over the stored one", async () => {
+      setPageBodyDraft("page-1", "<p>Typed earlier</p>");
+      mount();
+      expect(await body()).toHaveTextContent("Typed earlier");
+    });
+
+    it("puts the caret at the body's top when Enter leaves the title", async () => {
+      mount();
+      const editable = await body();
+      const field = screen.getByRole("textbox", { name: "Page title" });
+      fireEvent.focus(field);
+      fireEvent.keyDown(field, { key: "Enter" });
+      await vi.waitFor(() => expect(document.activeElement).toBe(editable));
+    });
+
+    it("shows the page-body placeholder while the document is empty", async () => {
+      mount({ descriptionHtml: "<p></p>" });
+      await body();
+      expect(screen.getByText(PAGE_BODY_PLACEHOLDER)).toBeInTheDocument();
+    });
+
+    it("runs the alignment chords the editor itself does not bind", async () => {
+      mount();
+      const editable = await body();
+      editable.focus();
+      const event = fireEvent.keyDown(editable, { key: "e", metaKey: true, shiftKey: true });
+      expect(event).toBe(false);
+      await vi.waitFor(() =>
+        expect(screen.getByRole("button", { name: "Center align" })).toHaveAttribute("aria-pressed", "true")
+      );
+    });
+
+    it("leaves the editor's own chords alone", async () => {
+      mount();
+      const editable = await body();
+      editable.focus();
+      // Bold is the editor's own binding; the surface must not also fire it.
+      expect(fireEvent.keyDown(editable, { key: "b", metaKey: true })).toBe(true);
+    });
+
+    it("drops the mark's pin once the title gains text", async () => {
+      mount({ name: "" });
+      await vi.waitFor(() =>
+        expect(screen.getByTestId("page-mark-affordance")).toHaveAttribute("data-revealed", "true")
+      );
+      const user = userEvent.setup();
+      const field = await screen.findByRole("textbox", { name: "Page title" }, { timeout: 10_000 });
+      field.focus();
+      await user.keyboard("Named");
+      await vi.waitFor(() => expect(screen.getByTestId("page-mark-affordance")).not.toHaveAttribute("data-revealed"));
+    });
+
+    it("keeps the affordance pinned while a typed title is cleared", async () => {
+      mount({ name: "Named" });
+      const user = userEvent.setup();
+      const field = await screen.findByRole("textbox", { name: "Page title" }, { timeout: 10_000 });
+      field.focus();
+      await user.clear(field);
+      await vi.waitFor(() =>
+        expect(screen.getByTestId("page-mark-affordance")).toHaveAttribute("data-revealed", "true")
+      );
+    });
+
+    it("passes a picked mark to the page's save path", async () => {
+      const onMarkPick = vi.fn();
+      mount({ logoProps: { in_use: "emoji", emoji: { value: "1f680" } }, onMarkPick });
+      fireEvent.click(screen.getByTestId("page-mark-trigger"));
+      fireEvent.click(await screen.findByRole("button", { name: "Remove mark" }));
+      expect(onMarkPick).toHaveBeenCalledWith({});
+    });
+
+    it("hands the live editor handle out and withdraws it on unmount", async () => {
+      const onHandle = vi.fn();
+      const view = mount({ onHandle });
+      await body();
+      const handle = onHandle.mock.calls.at(-1)?.[0];
+      expect(handle).not.toBeNull();
+      view.unmount();
+      expect(onHandle.mock.calls.at(-1)).toEqual([null]);
+    });
+
+    it("writes a restored body into the editor and reports it as an edit", async () => {
+      const onHandle = vi.fn();
+      mount({ onHandle });
+      const editable = await body();
+      const handle = onHandle.mock.calls.at(-1)?.[0];
+      expect(handle).not.toBeNull();
+      act(() => {
+        handle.replaceBody("<p>Snapshot words</p>");
+      });
+      await vi.waitFor(() => expect(editable).toHaveTextContent("Snapshot words"));
+      expect(editable).not.toHaveTextContent("Stored words");
+      await vi.waitFor(() => expect(getPageBodyDraft("page-1")).toContain("Snapshot words"));
+    });
+
+    it("restyles the caret's block from the typography selector", async () => {
+      mount();
+      await body();
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("page-toolbar-typography"));
+      });
+      await act(async () => {
+        fireEvent.click(await screen.findByRole("menuitem", { name: "Heading 2" }));
+      });
+      await vi.waitFor(() => expect(screen.getByTestId("page-toolbar-typography")).toHaveTextContent("Heading 2"));
+    });
+
+    it("renders the table, image and colour entries after the core twelve", async () => {
+      mount();
+      await body();
+      const bar = screen.getByRole("toolbar", { name: "Formatting" });
+      expect(within(bar).getByRole("button", { name: "Table" })).toBeInTheDocument();
+      expect(within(bar).getByRole("button", { name: "Image" })).toBeInTheDocument();
+      expect(within(bar).getByRole("button", { name: "Color" })).toBeInTheDocument();
+      expect(bar.querySelectorAll("button.grid.size-7")).toHaveLength(14);
+    });
+
+    it("drops a table at the caret from the toolbar tile", async () => {
+      mount();
+      const editable = await body();
+      editable.focus();
+      fireEvent.click(screen.getByRole("button", { name: "Table" }));
+      await vi.waitFor(() => expect(editable.querySelector("table")).not.toBeNull());
+      expect(editable.querySelector("table tr")?.children).toHaveLength(3);
+    });
+
+    it("uploads a picked picture through the injected path and inserts it inline", async () => {
+      const uploadImage = vi.fn().mockResolvedValue({
+        assetId: "asset-1",
+        assetUrl: "/api/assets/v2/workspaces/acme/projects/project-1/asset-1/",
+      });
+      mount({ uploadImage });
+      const editable = await body();
+      const input = screen.getByTestId("page-toolbar-image-input");
+      fireEvent.change(input, { target: { files: [new File(["x"], "shot.png", { type: "image/png" })] } });
+      await vi.waitFor(() => expect(uploadImage).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => {
+        const image = editable.querySelector("image-component");
+        expect(image).not.toBeNull();
+        expect(image?.getAttribute("status")).toBe("uploaded");
+      });
+      // The inserted picture carries its own id, so the assets row keeps a
+      // readable `image-<id>` name after a reload even once the server's
+      // re-serialisation drops the alt text (PAGE-039).
+      const inserted = editable.querySelector("image-component");
+      expect(inserted?.getAttribute("id")).toMatch(/^[0-9a-f-]{16,}$/);
+      expect(inserted?.querySelector("img")?.getAttribute("alt")).toBe("image-asset-1");
+      expect(toaster.notifyError).not.toHaveBeenCalled();
+    });
+
+    it("falls back to the project asset URL when the upload names none", async () => {
+      const uploadImage = vi.fn().mockResolvedValue({ assetId: "asset-9", assetUrl: "" });
+      mount({ uploadImage });
+      const editable = await body();
+      fireEvent.change(screen.getByTestId("page-toolbar-image-input"), {
+        target: { files: [new File(["x"], "shot.png", { type: "image/png" })] },
+      });
+      await vi.waitFor(() => {
+        expect(editable.querySelector("image-component img")?.getAttribute("src")).toBe(
+          "/api/assets/v2/workspaces/acme/projects/project-1/asset-9/"
+        );
+      });
+    });
+
+    it("reports a refused upload instead of inserting a broken picture", async () => {
+      const uploadImage = vi.fn().mockRejectedValue(new Error("Too large."));
+      mount({ uploadImage });
+      const editable = await body();
+      fireEvent.change(screen.getByTestId("page-toolbar-image-input"), {
+        target: { files: [new File(["x"], "shot.png", { type: "image/png" })] },
+      });
+      await vi.waitFor(() => expect(toaster.notifyError).toHaveBeenCalledWith("Too large."));
+      expect(editable.querySelector("image-component")).toBeNull();
+    });
+
+    it("refuses a second pick while the upload is in flight", async () => {
+      let release: (value: { assetId: string; assetUrl: string }) => void = () => undefined;
+      const uploadImage = vi.fn().mockReturnValue(
+        new Promise((resolve) => {
+          release = resolve;
+        })
+      );
+      mount({ uploadImage });
+      await body();
+      fireEvent.change(screen.getByTestId("page-toolbar-image-input"), {
+        target: { files: [new File(["x"], "shot.png", { type: "image/png" })] },
+      });
+      await vi.waitFor(() => expect(screen.getByRole("button", { name: "Image" })).toBeDisabled());
+      release({ assetId: "a", assetUrl: "/api/assets/a/" });
+      await vi.waitFor(() => expect(screen.getByRole("button", { name: "Image" })).toBeEnabled());
+    });
+
+    it("resolves a stored asset id for the editing surface", async () => {
+      mount({ descriptionHtml: '<p><image-component src="asset-7"></image-component></p>' });
+      const editable = await body();
+      await vi.waitFor(() =>
+        expect(editable.querySelector("image-component img")?.getAttribute("src")).toBe(
+          "/api/assets/v2/workspaces/acme/projects/project-1/asset-7/"
+        )
+      );
+    });
+
+    it("uploads through the shared pipeline when no uploader is injected", async () => {
+      pageAssets.uploadPageAsset.mockResolvedValue({ assetId: "asset-5", assetUrl: "/api/assets/asset-5/" });
+      mount();
+      const editable = await body();
+      fireEvent.change(screen.getByTestId("page-toolbar-image-input"), {
+        target: { files: [new File(["x"], "shot.png", { type: "image/png" })] },
+      });
+      await vi.waitFor(() => expect(pageAssets.uploadPageAsset).toHaveBeenCalledTimes(1));
+      expect(appClient.getAppClient).toHaveBeenCalled();
+      const call = pageAssets.uploadPageAsset.mock.calls[0] as unknown[];
+      expect(call[1]).toBe("acme");
+      expect(call[2]).toBe("project-1");
+      expect(call[3]).toBe("page-1");
+      await vi.waitFor(() => expect(editable.querySelector("image-component")).not.toBeNull());
+    });
+
+    it("applies and clears a letter colour from the bar's popover", async () => {
+      mount();
+      const editable = await body();
+      const user = userEvent.setup();
+      await user.dblClick(within(editable).getByText("Stored words"));
+      // The mark must own a text selection before the colour command runs;
+      // a click in the popover tears down a selection that has not landed.
+      await vi.waitFor(() => expect(window.getSelection()?.toString().trim()).not.toBe(""));
+      fireEvent.click(screen.getByRole("button", { name: "Color" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Letter color Pink" }));
+      await vi.waitFor(() => expect(editable.querySelector('[data-text-color="pink"]')).not.toBeNull());
+
+      await vi.waitFor(() => expect(screen.getByTestId("page-color-preview")).toBeInTheDocument());
+      fireEvent.click(screen.getByRole("button", { name: "Color" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Clear letter color" }));
+      await vi.waitFor(() => expect(editable.querySelector("[data-text-color]")).toBeNull());
+    });
+
+    it("opens the colour popover with eight swatches and a clear per row", async () => {
+      mount();
+      await body();
+      fireEvent.click(screen.getByRole("button", { name: "Color" }));
+      for (const kind of ["text", "background"] as const) {
+        const row = await screen.findByTestId(`page-color-row-${kind}`);
+        expect(within(row).getAllByRole("button")).toHaveLength(9);
+      }
+    });
+    it("clones a foreign pasted asset before it lands", async () => {
+      pageAssets.duplicatePageAsset.mockResolvedValue({ asset_id: "asset-cloned" });
+      mount();
+      const editable = await body();
+      clipboardPaste(editable, '<image-component data-stored-src="asset-foreign"></image-component>');
+
+      await vi.waitFor(() => expect(pageAssets.duplicatePageAsset).toHaveBeenCalledTimes(1));
+      const call = pageAssets.duplicatePageAsset.mock.calls[0] as unknown[];
+      expect(call[1]).toBe("acme");
+      expect(call[2]).toBe("project-1");
+      expect(call[3]).toBe("asset-foreign");
+      expect(call[4]).toBe("page-1");
+      await vi.waitFor(() =>
+        expect(editable.querySelector("image-component")?.getAttribute("data-stored-src")).toBe("asset-cloned")
+      );
+    });
+
+    it("opens the surface's own picker from another entry", () => {
+      mount();
+      const input = screen.getByTestId("page-toolbar-image-input") as HTMLInputElement;
+      const click = vi.spyOn(input, "click").mockImplementation(() => undefined);
+      openPageImagePicker();
+      expect(click).toHaveBeenCalledTimes(1);
+    });
+
+    it("publishes the copy entry before the editor handle exists", async () => {
+      mount();
+      await vi.waitFor(() => expect(getPageBodyActions()).not.toBeNull());
+      const writeText = vi.fn(async () => undefined);
+      vi.stubGlobal("navigator", { clipboard: { writeText } });
+      await getPageBodyActions()?.copyMarkdown();
+      expect(writeText).toHaveBeenCalledWith("Stored words\n");
+      vi.unstubAllGlobals();
+    });
+
+    it("reports a refused clone instead of pasting the foreign asset", async () => {
+      pageAssets.duplicatePageAsset.mockRejectedValue(new Error("Clone refused."));
+      mount();
+      const editable = await body();
+      clipboardPaste(editable, '<image-component data-stored-src="asset-foreign"></image-component>');
+      await vi.waitFor(() => expect(toaster.notifyError).toHaveBeenCalledWith("Clone refused."));
+      expect(editable.querySelector("image-component")).toBeNull();
+    });
+
+    it("turns a pasted known work-item key into an entity preview (PAGE-043)", async () => {
+      pageAssets.searchEntityPreviews.mockResolvedValue({
+        issue: [
+          {
+            name: "Fix login",
+            id: "11111111-1111-4111-8111-111111111111",
+            sequence_id: 42,
+            project__identifier: "WEB",
+            project_id: "22222222-2222-4222-8222-222222222222",
+            priority: "medium",
+            state_id: "33333333-3333-4333-8333-333333333333",
+            type_id: null,
+          },
+        ],
+      });
+      mount({ descriptionHtml: "<p></p>" });
+      const editable = await body();
+      plainPaste(editable, "WEB-42");
+      await vi.waitFor(() => expect(pageAssets.searchEntityPreviews).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() =>
+        expect(editable.querySelector("entity-reference-component")?.getAttribute("data-label")).toBe("Fix login")
+      );
+    });
+
+    it("keeps an unknown pasted key as ordinary text", async () => {
+      pageAssets.searchEntityPreviews.mockResolvedValue({ issue: [] });
+      mount({ descriptionHtml: "<p></p>" });
+      const editable = await body();
+      plainPaste(editable, "WEB-99");
+      await vi.waitFor(() => expect(pageAssets.searchEntityPreviews).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(editable.textContent).toContain("WEB-99"));
+      expect(editable.querySelector("entity-reference-component")).toBeNull();
+    });
+
+    it("keeps a pasted key as text when the entity search fails", async () => {
+      pageAssets.searchEntityPreviews.mockRejectedValue(new Error("offline"));
+      mount({ descriptionHtml: "<p></p>" });
+      const editable = await body();
+      plainPaste(editable, "WEB-42");
+      await vi.waitFor(() => expect(pageAssets.searchEntityPreviews).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(editable.textContent).toContain("WEB-42"));
+      expect(editable.querySelector("entity-reference-component")).toBeNull();
+    });
+  },
+  EDITOR_TEST_TIMEOUT
+);
+
+describe("PageEditorSurface oversized strip", () => {
+  it("shows the strip under the toolbar while an incident is live (PAGE-063)", () => {
+    mount();
+    expect(screen.queryByTestId("page-oversized-strip")).not.toBeInTheDocument();
+    act(() => {
+      reportPageContentTooLarge("page-1");
+    });
+    expect(screen.getByTestId("page-oversized-strip")).toBeInTheDocument();
+  });
+
+  it("dismisses the strip without touching the body", () => {
+    mount();
+    act(() => {
+      reportPageContentTooLarge("page-1");
+    });
+    fireEvent.click(screen.getByRole("button", { name: PAGE_OVERSIZED_DISMISS }));
+    expect(screen.queryByTestId("page-oversized-strip")).not.toBeInTheDocument();
+  });
+
+  it("ignores incidents raised for other pages", () => {
+    mount();
+    act(() => {
+      reportPageContentTooLarge("page-2");
+    });
+    expect(screen.queryByTestId("page-oversized-strip")).not.toBeInTheDocument();
+  });
+});
+
+describe(
+  "PageEditorSurface snapshot heal",
+  () => {
+    const snapshot = (): Record<string, unknown> => ({
+      type: "doc",
+      content: [
+        { type: "paragraph", content: [{ type: "text", text: "before embed" }] },
+        {
+          type: "issue-embed-component",
+          attrs: {
+            id: "emb-1",
+            entity_identifier: "ISS-1",
+            project_identifier: "P",
+            workspace_identifier: "acme",
+            entity_name: "Embedded",
+          },
+        },
+      ],
+    });
+
+    it("heals a JSON-only embed into the community upgrade card (PAGE-040)", async () => {
+      mount({ descriptionHtml: "<p>before embed</p>", descriptionJson: snapshot() });
+      const editable = await body();
+      const card = await vi.waitFor(() => {
+        const found = editable.querySelector('issue-embed-component [data-testid="page-embed-upgrade"]');
+        expect(found).not.toBeNull();
+        return found as HTMLElement;
+      });
+      expect(card.querySelector("a")?.getAttribute("href")).toBe("https://airepublic.com/pricing");
+      expect(editable).toHaveTextContent("before embed");
+    });
+
+    it("withholds the snapshot while a session draft is newer (PAGE-040)", async () => {
+      // The draft is the operator's own newer body: healing the older
+      // snapshot over it could resurrect an embed deleted this session.
+      setPageBodyDraft("page-1", "<p>Typed earlier</p>");
+      mount({ descriptionHtml: "<p>before embed</p>", descriptionJson: snapshot() });
+      const editable = await body();
+      expect(editable).toHaveTextContent("Typed earlier");
+      expect(editable.querySelector("issue-embed-component")).toBeNull();
+    });
+  },
+  EDITOR_TEST_TIMEOUT
+);
+
+describe("PageEditorSurface collaboration", () => {
+  function sharedDoc(title: string, body: string): Y.Doc {
+    const peer = new Y.Doc();
+    const heading = new Y.XmlElement("heading");
+    heading.setAttribute("level", "1");
+    heading.insert(0, [new Y.XmlText(title)]);
+    peer.getXmlFragment("title").insert(0, [heading]);
+    const paragraph = new Y.XmlElement("paragraph");
+    paragraph.insert(0, [new Y.XmlText(body)]);
+    peer.getXmlFragment("default").insert(0, [paragraph]);
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(peer));
+    return doc;
+  }
+
+  function titleHeading(): HTMLElement {
+    const heading = screen.getByTestId("page-detail-title").querySelector("h1");
+    if (heading === null) throw new Error("the title field never mounted");
+    return heading;
+  }
+
+  it("binds the title and the body to the shared document", async () => {
+    mount({ collab: { doc: sharedDoc("Shared name", "Shared body") }, seedDocument: true });
+    await vi.waitFor(() => expect(titleHeading()).toHaveTextContent("Shared name"));
+    expect(await body()).toHaveTextContent("Shared body");
+  });
+
+  it("seeds empty shared fields from the stored page", async () => {
+    const doc = new Y.Doc();
+    mount({ collab: { doc }, seedDocument: true });
+    await vi.waitFor(() => expect(titleHeading()).toHaveTextContent("Launch notes"));
+    expect(await body()).toHaveTextContent("Stored words");
+  });
+});

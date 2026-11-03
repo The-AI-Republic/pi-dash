@@ -55,10 +55,11 @@
 //!   `.first()` unconditionally — unknown pk returns HTTP 200 with JSON
 //!   `null`, not 404. The queryset builder is shared; the handler port
 //!   must keep the null body.
-//! * B1b (`base.py:317-327`): `IssueViewViewSet.retrieve` dereferences
-//!   `issue_view.owned_by` after `.first()`; unknown pk plus a guest
-//!   without `guest_view_all_features` raises `AttributeError` (500),
-//!   not 404. The handler port must keep the crash order.
+//! * B1b (retired by VIEW-022, `base.py:309-312` on main):
+//!   `IssueViewViewSet.retrieve` used to dereference `issue_view.owned_by`
+//!   after `.first()`; unknown pk plus a guest without
+//!   `guest_view_all_features` raised `AttributeError` (500), not 404.
+//!   The row miss now 404s before the guest recheck.
 //! * B4 (`base.py:404-411`): `IssueViewFavoriteViewSet.get_queryset` calls
 //!   `.select_related("view")`, but `UserFavorite` has no FK named `view`
 //!   — Django raises `FieldError` on every list request. Ported as

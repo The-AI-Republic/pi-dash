@@ -301,45 +301,63 @@ pub async fn binding_install(
         Ok(None) => return Denial::NotFound(NOT_FOUND_SCHEDULER_BODY).into_response(),
         Err(denial) => return denial.into_response(),
     };
-    // Serializer validation with the view-supplied project context.
-    let attrs = match validate_binding_fields(pool, body, None, &resolved.timezone).await {
-        Ok(attrs) => attrs,
-        Err(denial) => return denial.into_response(),
-    };
-    if let Err(denial) = enforce_unique_install(pool, &scheduler_id, attrs.project.flatten()).await
-    {
-        return denial.into_response();
-    }
-    let install = InstallAttrs {
+    let target = InstallTarget {
         scheduler_id,
         project_id,
         workspace_id: project.workspace_id,
         actor_id: resolved.user_id,
-        attrs,
     };
-    if let Err(denial) = validate_install_cross(&install, &project_id) {
-        return denial.into_response();
-    }
-    let mut saved = match insert_binding(pool, &install).await {
+    let saved = match apply_install(pool, body, &target, &resolved.timezone).await {
         Ok(saved) => saved,
         Err(denial) => return denial.into_response(),
     };
-    // Install recompute (`:216-220`): always compute after save, write back
-    // only when non-null AND different from stored (NULL here).
+    let body = render_saved_binding(&saved, &sched, &resolved.timezone);
+    json_response(StatusCode::CREATED, body)
+}
+
+/// The ids an install pins at save: the guarded scheduler, the URL project
+/// and its workspace, and the acting user.
+pub(crate) struct InstallTarget {
+    pub scheduler_id: Uuid,
+    pub project_id: Uuid,
+    pub workspace_id: Uuid,
+    pub actor_id: Uuid,
+}
+
+/// The install write shared by the web app and the v1 surface
+/// (`scheduler/binding_writes.py::install_binding`, PDASHOSS01-318):
+/// serializer validation with the URL project as context, the unique
+/// check, the cross-field `validate()`, the INSERT, then the first
+/// `next_run_at` (`views.py:216-220`: always computed after save, written
+/// back only when non-null AND different from stored — NULL here).
+pub(crate) async fn apply_install(
+    pool: &PgPool,
+    body: &Map<String, Value>,
+    target: &InstallTarget,
+    timezone: &Tz,
+) -> Result<SavedBinding, Denial> {
+    let attrs = validate_binding_fields(pool, body, None, timezone).await?;
+    enforce_unique_install(pool, &target.scheduler_id, attrs.project.flatten()).await?;
+    let install = InstallAttrs {
+        scheduler_id: target.scheduler_id,
+        project_id: target.project_id,
+        workspace_id: target.workspace_id,
+        actor_id: target.actor_id,
+        attrs,
+    };
+    validate_install_cross(&install, &target.project_id)?;
+    let mut saved = insert_binding(pool, &install).await?;
     let now = Utc::now();
     let bundle = saved.recompute_bundle();
     let write =
         queries::install_next_run_at(&bundle, saved.row.next_run_at, now, next_fire_for_binding);
     if let Some(computed) = write {
         let stamp = Utc::now();
-        if let Err(denial) = write_next_run_at(pool, &saved.row.id, Some(&computed), &stamp).await {
-            return denial.into_response();
-        }
+        write_next_run_at(pool, &saved.row.id, Some(&computed), &stamp).await?;
         saved.row.next_run_at = Some(computed);
         saved.row.updated_at = stamp;
     }
-    let body = render_saved_binding(&saved, &sched, &resolved.timezone);
-    json_response(StatusCode::CREATED, body)
+    Ok(saved)
 }
 
 /// `GET .../scheduler-bindings/<uuid>/` (`views.py:237-249`): 200 or 404.
@@ -1045,7 +1063,7 @@ fn int_hex16(text: &str) -> Option<u128> {
 /// (all occurrences, case-sensitive), strip `{}` ends, drop `-`, require
 /// 32 characters, then `int(hex, 16)` with its whitespace/sign/underscore
 /// leniency and the `0..2^128` range check.
-fn uuid_from_hex_forms(text: &str) -> Option<Uuid> {
+pub(crate) fn uuid_from_hex_forms(text: &str) -> Option<Uuid> {
     let no_prefix = text.replace("urn:", "").replace("uuid:", "");
     // `str.strip('{}')` strips ALL leading/trailing braces, not one pair.
     let stripped = no_prefix.trim_matches(['{', '}']);
@@ -1720,7 +1738,12 @@ async fn validate_binding_fields(
     timezone: &Tz,
 ) -> Result<BindingAttrs, Denial> {
     let partial = instance.is_some();
-    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &rrule_validator;
+    // Field-level `validate_rrule` anchors on the request time: Django
+    // passes no dtstart, so the validator stamps `now(utc)` itself
+    // (`scheduler.py:245`, `_rrule.py:238`).
+    let field_anchor = Utc::now();
+    let field_validator = move |value: &str| rrule_validator(value, field_anchor);
+    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &field_validator;
     let mut attrs = BindingAttrs::default();
     // (field, error) in `_writable_fields` order: scheduler, project,
     // dtstart, tzid, rrule, rdates, exdates, extra_context, enabled,
@@ -2057,7 +2080,13 @@ async fn enforce_unique_patch(
 /// the pod-must-belong-to-project check with the view-supplied URL project
 /// as context.
 fn validate_install_cross(install: &InstallAttrs, url_project: &Uuid) -> Result<(), Denial> {
-    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &rrule_validator;
+    // The cross-field re-check anchors on the binding's dtstart
+    // (`scheduler.py:297`, `_rrule.py:238`): `dtstart or now(utc)`.
+    // Field validation already passed here, so dtstart is always `Some`
+    // on install; the fallback mirrors Django's shape regardless.
+    let cross_anchor = install.attrs.dtstart.unwrap_or_else(Utc::now);
+    let cross_validator = move |value: &str| rrule_validator(value, cross_anchor);
+    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &cross_validator;
     if let Err(message) =
         shape::validate_cross_rrule(install.attrs.rrule.as_deref(), None, rrule_validator)
     {
@@ -2113,7 +2142,11 @@ fn validate_patch_cross(
             return Err(single_field_denial("project", &message));
         }
     }
-    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &rrule_validator;
+    // Same anchor as install: attrs-first, instance-second — `dtstart`
+    // is `NOT NULL`, so no `now` fallback is reachable here.
+    let cross_anchor = attrs.dtstart.unwrap_or(current.dtstart);
+    let cross_validator = move |value: &str| rrule_validator(value, cross_anchor);
+    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &cross_validator;
     if let Err(message) = shape::validate_cross_rrule(
         attrs.rrule.as_deref(),
         Some(current.rrule.as_str()),
@@ -2205,11 +2238,11 @@ fn db_denial(error: sqlx::Error) -> Denial {
 }
 
 /// BR3 install project lookup: `(id, workspace_id)` or `None`.
-struct InstallProject {
-    workspace_id: Uuid,
+pub(crate) struct InstallProject {
+    pub(crate) workspace_id: Uuid,
 }
 
-async fn fetch_install_project(
+pub(crate) async fn fetch_install_project(
     pool: &PgPool,
     project_id: &Uuid,
     slug: &str,
@@ -2540,8 +2573,8 @@ struct InstallAttrs {
 
 /// The just-inserted row in memory (what the 201 re-renders) plus the
 /// validated pod name (the serializer's cached `pod` dereference).
-struct SavedBinding {
-    row: scheduler_binding::SchedulerBinding,
+pub(crate) struct SavedBinding {
+    pub(crate) row: scheduler_binding::SchedulerBinding,
     pod_name: Option<String>,
 }
 
@@ -2788,7 +2821,7 @@ fn soft_delete_message(binding_id: &Uuid) -> pidash_jobs::TaskMessage {
 
 /// Best-effort publish of [`soft_delete_message`]: without the queue
 /// the response still stands.
-async fn enqueue_soft_delete(pool: &PgPool, binding_id: &Uuid) {
+pub(crate) async fn enqueue_soft_delete(pool: &PgPool, binding_id: &Uuid) {
     let message = soft_delete_message(binding_id);
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
@@ -2803,8 +2836,8 @@ async fn enqueue_soft_delete(pool: &PgPool, binding_id: &Uuid) {
 /// BR8 uninstall (`:290`): `binding.delete()` soft-delete with two `now()`
 /// samples (ported quirk 5). The caller enqueues the related-objects
 /// sweep separately ([`enqueue_soft_delete`]).
-async fn uninstall_binding(
-    pool: &PgPool,
+pub(crate) async fn uninstall_binding(
+    executor: impl sqlx::PgExecutor<'_>,
     binding_id: &Uuid,
     user_id: &Uuid,
     now: &DateTime<Utc>,
@@ -2819,7 +2852,7 @@ async fn uninstall_binding(
         .bind(now2)
         .bind(user_id)
         .bind(binding_id)
-        .execute(pool)
+        .execute(executor)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -3259,9 +3292,12 @@ fn render_saved_binding(
 /// `rrule_validator` over
 /// `pidash_jobs::tasks_ticker::rrule::validate_rrule_string`: only the
 /// message string crosses the seam (all Python uses is `str(e)`), into
-/// shape validation (field-level + the cross-field re-check).
-fn rrule_validator(value: &str) -> Result<(), String> {
-    pidash_jobs::tasks_ticker::rrule::validate_rrule_string(value)
+/// shape validation (field-level + the cross-field re-check). `anchor` is
+/// Django's `dtstart or now(utc)` (`_rrule.py:238`): the request time for
+/// field validation, the binding's dtstart for the cross-field re-check.
+/// Call sites bind it into the `Fn(&str)` closure the seam takes.
+fn rrule_validator(value: &str, anchor: DateTime<Utc>) -> Result<(), String> {
+    pidash_jobs::tasks_ticker::rrule::validate_rrule_string(value, anchor)
         .map_err(|error| error.message().to_owned())
 }
 
@@ -4115,11 +4151,12 @@ mod tests {
 
     #[test]
     fn rrule_closure_reports_jobs_messages() {
-        assert_eq!(rrule_validator("FREQ=DAILY"), Ok(()));
-        assert_eq!(rrule_validator(""), Ok(()));
+        let anchor = utc(2026, 5, 4, 11, 7, 0);
+        assert_eq!(rrule_validator("FREQ=DAILY", anchor), Ok(()));
+        assert_eq!(rrule_validator("", anchor), Ok(()));
         // F36-03 pins, through the seam (only the message crosses).
         assert_eq!(
-            rrule_validator("FREQ=NEVER"),
+            rrule_validator("FREQ=NEVER", anchor),
             Err("invalid RRULE: invalid 'FREQ': NEVER".to_owned())
         );
         // NOTE: the F36-03 `rrule_field_level` SECONDLY pin
@@ -4127,7 +4164,7 @@ mod tests {
         // the source — `bgtasks/_rrule.py` raises its own message below
         // (verified against the Python source; the jobs port matches it).
         assert_eq!(
-            rrule_validator("FREQ=SECONDLY"),
+            rrule_validator("FREQ=SECONDLY", anchor),
             Err(
                 "FREQ=SECONDLY is not allowed (allowed: ['DAILY', 'HOURLY', 'MINUTELY', 'MONTHLY', 'WEEKLY', 'YEARLY'])"
                     .to_owned()
@@ -4137,8 +4174,21 @@ mod tests {
         // dateutil's unpack `ValueError` wrapped in `invalid RRULE:`
         // (verified against dateutil 2.8.2; the jobs port matches it).
         assert_eq!(
-            rrule_validator("garbage"),
+            rrule_validator("garbage", anchor),
             Err("invalid RRULE: not enough values to unpack (expected 2, got 1)".to_owned())
+        );
+        // PIDASHCONV-1706: the bound anchor feeds the verdict — the
+        // byset check reads the anchor's minute (7 here).
+        assert_eq!(
+            rrule_validator("FREQ=MINUTELY;INTERVAL=2;BYMINUTE=0", anchor),
+            Err("invalid RRULE: Invalid rrule byxxx generates an empty set.".to_owned())
+        );
+        assert_eq!(
+            rrule_validator(
+                "FREQ=MINUTELY;INTERVAL=2;BYMINUTE=0",
+                utc(2026, 5, 4, 11, 6, 0)
+            ),
+            Ok(())
         );
     }
 

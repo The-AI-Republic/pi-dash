@@ -540,11 +540,40 @@ def seed_github_pull_request_link(conn, tag: str):
     return row["id"], {}
 
 
+def seed_issue_worklog(conn, tag: str):
+    """One live worklog row (PIDASHCONV-1703, migration 0169).
+
+    ``db/models/worklog.py``: ``IssueWorklog(ProjectBaseModel)`` carries
+    ``minutes``/``logged_on``/``note`` plus CASCADE FKs to issue, project
+    and workspace (actor nullable CASCADE). Nothing points back at it,
+    so the soft-delete walk stamps only the row itself.
+    """
+    chain = seed_helpers.issue_chain(conn, f"sde1703wl{tag}")
+    actor = seed_helpers.user(conn, f"sde1703-{tag}-actor")
+    row = insert_row(
+        conn,
+        "issue_worklogs",
+        {
+            "minutes": 90,
+            "logged_on": "2026-10-22",
+            "note": "entry probe",
+            "actor_id": str(actor["id"]),
+            "issue_id": str(chain["issue"]["id"]),
+            "project_id": str(chain["project"]["id"]),
+            "workspace_id": str(chain["workspace"]["id"]),
+        },
+    )
+    return row["id"], {}
+
+
 # (model_name, table, seeder): every model name the Rust API enqueues
 # through `soft_delete_related_objects` that the entry map was missing
 # (PIDASHCONV-1293). The draft case doubles as the cascade test (its
 # `children` extra pins the CASCADE stamps); the schedulerbinding case
-# pins the `agent_run.scheduler_binding_id` SET_NULL.
+# pins the `agent_run.scheduler_binding_id` SET_NULL. The issueworklog
+# case (PIDASHCONV-1703, migration 0169) anticipates the 1676 handler:
+# no Rust caller enqueues it yet, but the catalog must already resolve
+# it the way Django's `apps.get_model` does.
 ENTRY_CASES = [
     ("draftissue", "draft_issues", seed_draft_tree),
     ("schedulerbinding", "scheduler_bindings", seed_scheduler_binding),
@@ -560,4 +589,5 @@ ENTRY_CASES = [
     ("modulelink", "module_links", seed_module_link),
     ("gitcodereviewlink", "git_code_review_links", seed_git_code_review_link),
     ("githubpullrequestlink", "github_pull_request_links", seed_github_pull_request_link),
+    ("issueworklog", "issue_worklogs", seed_issue_worklog),
 ]

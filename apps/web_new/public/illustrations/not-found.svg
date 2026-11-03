@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 240" role="img" aria-label="Illustration of an empty notice board with a missing pin">
+  <rect x="60" y="30" width="200" height="150" rx="10" fill="none" stroke="#5b6b76" stroke-width="6"/>
+  <line x1="60" y1="66" x2="260" y2="66" stroke="#5b6b76" stroke-width="6"/>
+  <circle cx="230" cy="48" r="10" fill="none" stroke="#5b6b76" stroke-width="6"/>
+  <rect x="88" y="92" width="96" height="14" rx="7" fill="#9fb0ba"/>
+  <rect x="88" y="116" width="144" height="14" rx="7" fill="#c6d2d9"/>
+  <rect x="88" y="140" width="64" height="14" rx="7" fill="#c6d2d9"/>
+  <circle cx="252" cy="196" r="26" fill="none" stroke="#1f7a6b" stroke-width="8"/>
+  <line x1="270" y1="214" x2="292" y2="236" stroke="#1f7a6b" stroke-width="10" stroke-linecap="round"/>
+</svg>
