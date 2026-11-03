@@ -1,0 +1,30 @@
+# Workflow branch-filter guard (PIDASH-1): fails if any workflow's
+# branches / branches-ignore filter names `master` (the default branch is main).
+name: workflow-branches
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - ".github/scripts/check-workflow-branches*.mjs"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - ".github/scripts/check-workflow-branches*.mjs"
+
+jobs:
+  guard:
+    name: no master branch filters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Unit tests for the guard
+        run: node --test .github/scripts/check-workflow-branches.test.mjs
+      - name: Check workflow branch filters
+        run: node .github/scripts/check-workflow-branches.mjs
