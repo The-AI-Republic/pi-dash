@@ -270,6 +270,26 @@ class ProjectMemberViewSet(BaseViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+        is_own_membership = request.user.id == project_member.member_id
+
+        # Only project admins and workspace admins can edit someone else's membership, through any field
+        if (
+            not is_own_membership
+            and requested_project_member.role < ROLE.ADMIN.value
+            and not is_requester_workspace_admin
+        ):
+            return Response(
+                {"error": "You do not have permission to update this member"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Nobody can change their own active status here; leaving a project has its own endpoint
+        if is_own_membership and "is_active" in request.data:
+            return Response(
+                {"error": "You cannot update your own membership status"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         serializer = ProjectMemberSerializer(project_member, data=request.data, partial=True)
 
         if serializer.is_valid():
