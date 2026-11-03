@@ -1,0 +1,30 @@
+{
+  "trace": "apps/api/pi_dash/assistant/ssrf.py:14-43",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "blocking_enabled": {
+    "source": "apps/api/pi_dash/assistant/ssrf.py:21-22",
+    "setting": "ASSISTANT_BLOCK_PRIVATE_URLS (default False; True in cloud)",
+    "vectors": {
+      "enabled": false,
+      "blocked_private": false
+    }
+  },
+  "is_blocked": {
+    "source": "apps/api/pi_dash/assistant/ssrf.py:25-43",
+    "rule": "private/loopback/link-local/reserved/multicast -> blocked; unresolvable host -> blocked; empty hostname -> blocked",
+    "vectors_enabled": {
+      "enabled": true,
+      "public_ip": false,
+      "loopback": true,
+      "private10": true,
+      "private192": true,
+      "linklocal": true,
+      "multicast": true,
+      "reserved": true,
+      "ipv6_loop": true,
+      "unresolvable": true,
+      "empty": true,
+      "no_scheme_host": true
+    }
+  }
+}

@@ -1,0 +1,10 @@
+-- queries/config_patch.sql
+-- Read: InstanceConfiguration.objects.filter(key__in=<request keys>) (api/views/configuration.py:44).
+-- Emitted shape (2-key example):
+-- SELECT "instance_configurations"."created_at", "instance_configurations"."updated_at", "instance_configurations"."created_by_id", "instance_configurations"."updated_by_id", "instance_configurations"."deleted_at", "instance_configurations"."id", "instance_configurations"."key", "instance_configurations"."value", "instance_configurations"."category", "instance_configurations"."is_encrypted" FROM "instance_configurations" WHERE ("instance_configurations"."deleted_at" IS NULL AND "instance_configurations"."key" IN (%s, %s)) ORDER BY "instance_configurations"."created_at" DESC;
+-- Write: InstanceConfiguration.objects.bulk_update(rows, ["value"], batch_size=100) (configuration.py:57).
+-- Per-row transform BEFORE the write (configuration.py:48-54): value = "" if raw is None else str(raw).strip();
+-- encrypted rows store encrypt_data(value), plain rows store the stripped string.
+-- Unknown keys in the request are silently ignored (never fetched, never created).
+-- bulk_update emits one UPDATE per batch (batch_size=100 -> single statement under 100 rows):
+-- UPDATE "instance_configurations" SET "value" = CASE "id" WHEN %s THEN %s ... END WHERE "id" IN (%s, ...);

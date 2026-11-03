@@ -1,0 +1,159 @@
+{
+ "_fixture": "FX-AUTH-09",
+ "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+ "_sources": [
+  "apps/api/pi_dash/authentication/views/app/magic.py:54 + views/space/magic.py:50 (magic_link.delay(email, key, token))",
+  "apps/api/pi_dash/authentication/views/app/password_management.py:87 + views/space/password_management.py:99 (forgot_password.delay(first_name, email, uidb64, token, current_site), user-exists branch)",
+  "apps/api/pi_dash/authentication/adapter/base.py:230 (user_activation_email.delay(base_host(request), user.id), inactive-user branch)",
+  "apps/api/pi_dash/bgtasks/magic_link_code_task.py:23 (def magic_link(email, key, token))",
+  "apps/api/pi_dash/bgtasks/forgot_password_task.py:23 (def forgot_password(first_name, email, uidb64, token, current_site))",
+  "apps/api/pi_dash/bgtasks/user_activation_email_task.py:23 (def user_activation_email(current_site, user_id))"
+ ],
+ "_method": "publish args observed end-to-end in probe_fx78 (mock-captured .delay calls: magic_link 3 args, forgot_password 5 args) and probe_fx06w (user_activation_email 2 args). Wire envelopes built with the real kombu/celery 5.x create_task_message via /tmp/fx279venv/bin/python /tmp/probe_fx09.py (memory:// broker, task_protocol=2, json serializer \u2014 same construction as rust-api/contract-tests/_harness/celery_wire.py); volatile header ids normalized to <uuid>, origin to <origin>. Task BODIES owned by D-07; only publish args recorded here.",
+ "call_sites": {
+  "magic_link": {
+   "args": [
+    "email",
+    "key",
+    "token"
+   ],
+   "observed": [
+    [
+     "h@x.com",
+     "magic_h@x.com",
+     "815926"
+    ]
+   ],
+   "code": [
+    "views/app/magic.py:54",
+    "views/space/magic.py:50"
+   ]
+  },
+  "forgot_password": {
+   "args": [
+    "first_name",
+    "email",
+    "uidb64",
+    "token",
+    "current_site"
+   ],
+   "observed_nargs": [
+    5
+   ],
+   "observed_first_arg_first_name": [
+    ""
+   ],
+   "code": [
+    "views/app/password_management.py:87",
+    "views/space/password_management.py:99"
+   ]
+  },
+  "user_activation_email": {
+   "args": [
+    "current_site",
+    "user_id"
+   ],
+   "observed": [
+    [
+     "http://localhost:8000",
+     "3f83c0e3-94a5-40db-ac68-ae8944447692",
+     {}
+    ]
+   ],
+   "code": [
+    "adapter/base.py:230"
+   ]
+  }
+ },
+ "wire": {
+  "magic_link": {
+   "headers": {
+    "lang": "py",
+    "task": "pi_dash.bgtasks.magic_link_code_task.magic_link",
+    "id": "<uuid>",
+    "eta": null,
+    "expires": null,
+    "retries": 0,
+    "timelimit": [
+     null,
+     null
+    ],
+    "root_id": "<uuid>",
+    "parent_id": null,
+    "origin": "<origin>"
+   },
+   "body_args": [
+    "h@x.com",
+    "magic_h@x.com",
+    "815926"
+   ],
+   "body_kwargs": {},
+   "embed": {
+    "callbacks": null,
+    "errbacks": null,
+    "chain": null,
+    "chord": null
+   }
+  },
+  "forgot_password": {
+   "headers": {
+    "lang": "py",
+    "task": "pi_dash.bgtasks.forgot_password_task.forgot_password",
+    "id": "<uuid>",
+    "eta": null,
+    "expires": null,
+    "retries": 0,
+    "timelimit": [
+     null,
+     null
+    ],
+    "root_id": "<uuid>",
+    "parent_id": null,
+    "origin": "<origin>"
+   },
+   "body_args": [
+    "Ada",
+    "h@x.com",
+    "ZjEzZjlk",
+    "cvxsd1-abc123",
+    "http://localhost:3000"
+   ],
+   "body_kwargs": {},
+   "embed": {
+    "callbacks": null,
+    "errbacks": null,
+    "chain": null,
+    "chord": null
+   }
+  },
+  "user_activation_email": {
+   "headers": {
+    "lang": "py",
+    "task": "pi_dash.bgtasks.user_activation_email_task.user_activation_email",
+    "id": "<uuid>",
+    "eta": null,
+    "expires": null,
+    "retries": 0,
+    "timelimit": [
+     null,
+     null
+    ],
+    "root_id": "<uuid>",
+    "parent_id": null,
+    "origin": "<origin>"
+   },
+   "body_args": [
+    "http://localhost:8000",
+    "11111111-1111-1111-1111-111111111111"
+   ],
+   "body_kwargs": {},
+   "embed": {
+    "callbacks": null,
+    "errbacks": null,
+    "chain": null,
+    "chord": null
+   }
+  }
+ },
+ "wire_note": "all three publish positionally (body_kwargs {}); no countdown/eta (eta null, retries 0, timelimit [null, null])."
+}

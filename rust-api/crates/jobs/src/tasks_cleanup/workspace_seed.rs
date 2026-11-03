@@ -1,0 +1,3108 @@
+//! Workspace seed worker task (D-09, stage 5).
+//!
+//! Port of `apps/api/pi_dash/bgtasks/workspace_seed_task.py:504-570`
+//! (`@shared_task`, no decorator options — default ack-on-success, Celery
+//! `max_retries = 3` / `default_retry_delay = 180s` per the jobs plane).
+//! The pure planners live in
+//! [`pidash_services::tasks_cleanup::workspace_seed`]; this module owns the
+//! SQL, the [`SeedStore`] trait the fakes replay, [`run`] (the orchestration
+//! at `:543-564`), [`delay_message`] (the `.delay()` equivalent), and
+//! [`register`] (the worker [`Registry`][crate::worker::Registry] entry).
+//!
+//! Every write runs under an explicit
+//! [`pidash_db::context::RequestContext`] whose actor is the seed bot user
+//! created at `:522-532` — the jobs-plane form of
+//! `save(created_by_id=bot_user.id, disable_auto_set_user=True)`.
+//! `updated_by` stays NULL on every seeded row except `Page` and
+//! `ProjectPage`, which pass `updated_by_id=bot_user.id` (`:370-371,
+//! :384`) — mirrored per table below.
+//!
+//! SQL mirrors the Django ORM statement for statement, in source order:
+//!
+//! * bot `User.objects.create :522` — `email.lower().strip()` (`user.py`),
+//!   `password = make_password(uuid4hex)` (pbkdf2_sha256/600000), all other
+//!   columns at their model defaults.
+//! * `WorkspaceMember.objects.create :535` (role 20, `company_role=""`).
+//! * `create_project_and_member`: `WorkspaceMember.objects.filter(
+//!   workspace).values("member_id", "role")` (`:87`, `-created_at` model
+//!   ordering); `Project.save` side effects — `identifier.strip().upper()`,
+//!   timezone copied from the workspace, first-project `is_default` with
+//!   the atomic demote-others update (`project.py:255-298`);
+//!   `ProjectMember` + `ProjectUserProperty` bulk inserts with the FIXED
+//!   display literals and the model-default JSON (`get_default_props`/
+//!   `get_default_filters`/`get_default_preferences`).
+//! * `create_project_states/labels`: max-queries through the model managers
+//!   (`StateManager` excludes triage) then inserts.
+//! * `create_cycles`: `UPCOMING` chains off
+//!   `Cycle.objects.filter(project).order_by("-end_date").first()` (`:418`);
+//!   min-sort insert scope is the default manager.
+//! * `create_modules`: per-index `now + index*2d` dates stored as DATEs
+//!   (Django `DateField` truncates the datetimes at `:460-461`).
+//! * `create_project_and_member`: after the insert, the project-`save`
+//!   post-step creates the `{identifier}_pod_1` default pod
+//!   (`runner/signals.py:32-66`), so the issues step below resolves it.
+//! * `create_project_issues`: `Issue.save` advisory xact lock keyed by
+//!   `convert_uuid_to_integer(project.id)` (`sha256(str(uuid))[:8]` signed
+//!   big-endian, `utils/uuid.py:19-26`); the auto `IssueSequence` row from
+//!   `save` (NULL audit, workspace from project) PLUS the explicit
+//!   `IssueSequence.objects.create` row (NULL audit: the constructor arg
+//!   never reaches `BaseModel.save`, which wipes both audit columns with
+//!   no crum user) — two rows per issue, ported as-is; `assigned_pod` resolves through
+//!   `Pod.default_for_project_id` (`runner/models.py:174-176`, NULL only
+//!   when the pod insert was swallowed); `completed_at` from the state's
+//!   group; each insert fires the `post_save` state transition from
+//!   `None` (ticker reconcile, then dispatch or a preflight bounce,
+//!   `orchestration/signals.py:74-107`).
+//! * `create_views`: `query` is `{}` for the seed rows (empty filters).
+//! * `create_pages`: `ProjectPage` link rows for `PROJECT`-type pages with
+//!   a `project_id`.
+//! * Failure re-raises after logging (`:568-570`): [`run`] returns `Err`,
+//!   and [`register`] maps it to a handler error (requeue while the Celery
+//!   retry budget lasts, then park as failed).
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
+
+use pidash_db::context::RequestContext;
+use pidash_db::runner_runs::pod::NewProject;
+use pidash_services::app_project::ser_project::next_work_item_sequence;
+use pidash_services::orchestration::creation::{CreationError, STATE_SELECT_SQL};
+use pidash_services::orchestration::entries::PreflightSeam;
+use pidash_services::tasks_cleanup::workspace_seed as logic;
+use pidash_types::orchestration::{is_ticking_state, StateRef};
+
+use crate::task_message::TaskMessage;
+use crate::worker::{Handler, Registry, Verdict};
+
+/// Celery wire name: the default `<module>.<function>` name Celery derives
+/// for `workspace_seed` in `pi_dash/bgtasks/workspace_seed_task.py`.
+pub const TASK_NAME: &str = "pi_dash.bgtasks.workspace_seed_task.workspace_seed";
+
+/// Bot membership role (`WorkspaceMember.objects.create ... role=20
+/// :535-540`).
+pub const BOT_WORKSPACE_ROLE: i16 = 20;
+
+/// One workspace-membership row as read at `:87`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceMemberRow {
+    pub member_id: uuid::Uuid,
+    pub role: i16,
+}
+
+/// Workspace columns the task reads (`:84,522,260`): name for the project
+/// name/identifier, timezone for the `Project.save` copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceRow {
+    pub name: String,
+    pub timezone: String,
+}
+
+/// Parameters for one project insert, after the `Project.save` pure steps.
+#[derive(Debug, Clone)]
+pub struct ProjectInsert {
+    pub name: String,
+    pub identifier: String,
+    pub timezone: String,
+    pub is_default: bool,
+    pub description: String,
+    pub network: i16,
+    pub cover_image: Option<String>,
+    pub logo_props: Value,
+    pub default_agent_executor: String,
+}
+
+/// Parameters for one state insert.
+#[derive(Debug, Clone)]
+pub struct StateInsert {
+    pub name: String,
+    pub color: String,
+    pub group: String,
+    pub is_default: bool,
+    pub sequence: f64,
+    pub slug: String,
+}
+
+/// Parameters for one label insert.
+#[derive(Debug, Clone)]
+pub struct LabelInsert {
+    pub name: String,
+    pub color: String,
+    pub sort_order: f64,
+}
+
+/// Parameters for one cycle insert.
+#[derive(Debug, Clone)]
+pub struct CycleInsert {
+    pub name: String,
+    pub timezone: String,
+    pub start_date: DateTime<Utc>,
+    pub end_date: DateTime<Utc>,
+    pub sort_order: f64,
+}
+
+/// Parameters for one module insert.
+#[derive(Debug, Clone)]
+pub struct ModuleInsert {
+    pub name: String,
+    pub description: String,
+    pub status: String,
+    pub start_date: chrono::NaiveDate,
+    pub target_date: chrono::NaiveDate,
+    pub sort_order: f64,
+}
+
+/// Parameters for one issue insert.
+#[derive(Debug, Clone)]
+pub struct IssueInsert {
+    pub name: String,
+    pub description_html: String,
+    pub description_stripped: Option<String>,
+    pub priority: String,
+    pub sequence_id: i64,
+    pub sort_order: f64,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub state_id: uuid::Uuid,
+    pub assigned_pod_id: Option<uuid::Uuid>,
+    pub rest: Map<String, Value>,
+}
+
+/// Parameters for one page insert.
+#[derive(Debug, Clone)]
+pub struct PageInsert {
+    pub name: String,
+    pub access: i16,
+    pub description_json: Value,
+    pub description_html: String,
+    pub description_stripped: Option<String>,
+    pub description_binary: Option<Vec<u8>>,
+}
+
+/// Parameters for one view insert.
+#[derive(Debug, Clone)]
+pub struct ViewInsert {
+    pub name: String,
+    pub description: String,
+    pub access: i16,
+    pub filters: Value,
+    pub query: Value,
+    pub display_filters: Value,
+    pub display_properties: Value,
+    pub rich_filters: Value,
+    pub sort_order: f64,
+    pub rest: Map<String, Value>,
+}
+
+/// Where the seed rows go. One method per read/insert family so fakes stay
+/// trivial and the Postgres implementation stays the only SQL owner (the
+/// [`crate::license::tasks::TraceDb`] pattern). Every `insert_*` takes the
+/// request context explicitly and stamps `created_by` (and `updated_by`
+/// for pages) from its actor.
+///
+/// Reads that Django scopes through soft-delete managers carry
+/// `AND deleted_at IS NULL`; the state max additionally excludes
+/// `group = 'triage'` (`StateManager`); the issue max/sort additionally
+/// exclude triage-state, archived, project-archived and draft rows
+/// (`IssueManager`).
+pub trait SeedStore {
+    /// `Workspace.objects.get(id=...)` — name + timezone (`:84,260,519`).
+    fn workspace(
+        &self,
+        workspace_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<Option<WorkspaceRow>, String>> + Send;
+
+    /// `WorkspaceMember.objects.filter(workspace).values("member_id",
+    /// "role")` (`:87`), `-created_at` model ordering.
+    fn workspace_members(
+        &self,
+        workspace_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<Vec<WorkspaceMemberRow>, String>> + Send;
+
+    /// `Project.objects.filter(workspace, is_default=True,
+    /// deleted_at__isnull=True).exists()` (`project.py:263-270`).
+    fn default_project_exists(
+        &self,
+        workspace_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<bool, String>> + Send;
+
+    /// `State.objects.filter(project).aggregate(Max("sequence"))`
+    /// (`state.py:136`): triage-excluded, soft-delete-filtered.
+    fn max_state_sequence(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<Option<f64>, String>> + Send;
+
+    /// `Label.objects.filter(project).aggregate(Max("sort_order"))`
+    /// (`label.py:49`).
+    fn max_label_sort_order(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<Option<f64>, String>> + Send;
+
+    /// `Cycle.objects.filter(project).aggregate(Min("sort_order"))`
+    /// (`cycle.py:89-91`).
+    fn min_cycle_sort_order(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<Option<f64>, String>> + Send;
+
+    /// `Module.objects.filter(project).aggregate(Min("sort_order"))`
+    /// (`module.py`).
+    fn min_module_sort_order(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<Option<f64>, String>> + Send;
+
+    /// `IssueView.objects.filter(project).aggregate(Max("sort_order"))`
+    /// (`view.py:86-88`).
+    fn max_view_sort_order(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<Option<f64>, String>> + Send;
+
+    /// `IssueSequence.objects.filter(project).aggregate(Max("sequence"))`
+    /// under the per-project advisory xact lock (`issue.py:313-328`).
+    fn max_issue_sequence(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<Option<i64>, String>> + Send;
+
+    /// `Issue.objects.filter(project, state).aggregate(Max("sort_order"))`
+    /// (`issue.py:335-337`): the plain soft-delete manager (`Issue.objects`
+    /// is inherited from `SoftDeleteModel`, not the triage/archived/draft
+    /// excluding `issue_objects = IssueManager()`), so only `deleted_at IS
+    /// NULL` applies.
+    fn max_issue_sort_order(
+        &self,
+        project_id: uuid::Uuid,
+        state_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<Option<f64>, String>> + Send;
+
+    /// `Cycle.objects.filter(project).order_by("-end_date").first()` end
+    /// date for `UPCOMING` chaining (`:418`).
+    fn last_cycle_end(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<Option<DateTime<Utc>>, String>> + Send;
+
+    /// The state's `group` for the `completed_at` branch (`issue.py:303`).
+    fn state_group(
+        &self,
+        state_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<Option<String>, String>> + Send;
+
+    /// `Pod.default_for_project_id` (`runner/models.py:174-176`): the
+    /// default pod for the project, if one exists. `Pod.objects` is the
+    /// `PodManager`, so soft-deleted pods are excluded.
+    fn default_pod_for_project(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<Option<uuid::Uuid>, String>> + Send;
+
+    /// `User.objects.create :522-532` — returns the bot user id.
+    fn insert_bot_user(
+        &self,
+        username: &str,
+        email: &str,
+        password_hash: &str,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// `WorkspaceMember.objects.create :535-540` — returns the row id.
+    fn insert_workspace_member(
+        &self,
+        workspace_id: uuid::Uuid,
+        member_id: uuid::Uuid,
+        role: i16,
+        company_role: &str,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// `Project(...)` + `save` (`:101-112`) with the demote-others update
+    /// when `is_default` (`project.py:292-298`) — returns the project id.
+    fn insert_project(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        project: &ProjectInsert,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// The project-`save` post-step
+    /// (`create_default_pod_for_new_project`,
+    /// `runner/signals.py:32-66`): ensure `{identifier}_pod_1` exists
+    /// before the issues step resolves it. Returns the new pod id, or
+    /// `None` when a pod already existed or the insert was swallowed.
+    /// An exists-guard storage failure propagates (outside Django's
+    /// `try`); the insert itself is swallowed and logged.
+    fn ensure_default_pod(
+        &self,
+        project: &NewProject,
+    ) -> impl std::future::Future<Output = Result<Option<uuid::Uuid>, String>> + Send;
+
+    /// One `ProjectMember` bulk row (`:115-126`).
+    fn insert_project_member(
+        &self,
+        ctx: &RequestContext,
+        project_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+        member_id: uuid::Uuid,
+        role: i16,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// One `ProjectUserProperty` bulk row (`:129-168`).
+    fn insert_project_user_property(
+        &self,
+        ctx: &RequestContext,
+        project_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+        user_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// One `State` row (`:199-205`).
+    fn insert_state(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        state: &StateInsert,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// One `Label` row (`:233-238`).
+    fn insert_label(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        label: &LabelInsert,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// One `Cycle` row (`:426-435`).
+    fn insert_cycle(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        cycle: &CycleInsert,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// One `Module` row (`:464-471`).
+    fn insert_module(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        module: &ModuleInsert,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// One `Issue` row (`:285-292`) — returns the issue id. The
+    /// `Issue.save` auto-`IssueSequence` row is a separate
+    /// [`SeedStore::insert_save_sequence`] call so the double-row quirk
+    /// stays visible.
+    fn insert_issue(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        issue: &IssueInsert,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// The `Issue.save` post-save fire
+    /// (`fire_state_transition`, `orchestration/signals.py:74-107`)
+    /// for one freshly seeded issue: the transition from `None` to
+    /// the seeded state (ticker reconcile, then dispatch or a
+    /// preflight bounce). A handler failure — including a probe,
+    /// re-run or `resolve_*` failure — is swallowed and logged — the
+    /// save stands; only a state-lookup storage failure propagates
+    /// (Django's `try` placement: `_lookup_state` outside, the
+    /// handler call inside).
+    fn drive_seed_transition(
+        &self,
+        issue_id: uuid::Uuid,
+        state_id: uuid::Uuid,
+        now: DateTime<Utc>,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
+
+    /// The `Issue.save`-created `IssueSequence(issue, sequence=sequence_id)`
+    /// row (`issue.py:343`): NULL audit, workspace from project.
+    fn insert_save_sequence(
+        &self,
+        issue_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+        sequence: i64,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// The explicit `IssueSequence.objects.create :293-298` row (NULL
+    /// audit — `BaseModel.save` wipes the constructor arg with no crum
+    /// user; default `sequence = 1`).
+    fn insert_issue_sequence(
+        &self,
+        ctx: &RequestContext,
+        issue_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// `IssueActivity.objects.create :300-308` (epoch = run time).
+    fn insert_issue_activity(
+        &self,
+        issue_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+        actor_id: uuid::Uuid,
+        epoch_secs: f64,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// `IssueLabel.objects.create :312-318`.
+    fn insert_issue_label(
+        &self,
+        ctx: &RequestContext,
+        issue_id: uuid::Uuid,
+        label_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// `CycleIssue.objects.create :322-328`.
+    fn insert_cycle_issue(
+        &self,
+        ctx: &RequestContext,
+        issue_id: uuid::Uuid,
+        cycle_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// `ModuleIssue.objects.create :333-339`.
+    fn insert_module_issue(
+        &self,
+        ctx: &RequestContext,
+        issue_id: uuid::Uuid,
+        module_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// One `Page` row (`:361-375`).
+    fn insert_page(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        page: &PageInsert,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// `ProjectPage` link (`:379-386`).
+    fn insert_project_page(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        page_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+
+    /// One `IssueView` row (`:493-500`).
+    fn insert_view(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        view: &ViewInsert,
+    ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
+}
+
+/// Input for one [`run`]: the seed-data directory (`settings.SEED_DIR /
+/// "data"`), the target workspace, the run clock (`timezone.now()`), fresh
+/// bot secrets, and the resolved project-executor default.
+#[derive(Debug, Clone)]
+pub struct RunInput {
+    pub seed_data_dir: PathBuf,
+    pub workspace_id: uuid::Uuid,
+    pub now: DateTime<Utc>,
+    /// `uuid.uuid4().hex` for `make_password` (`:530`).
+    pub password_hex: String,
+    /// 22-char alphanumerics for the password salt (Django
+    /// `get_random_string` alphabet).
+    pub password_salt: String,
+    /// `get_default_agent_executor()` (`core/agent_execution.py:26-31`).
+    pub default_agent_executor: String,
+}
+
+impl RunInput {
+    /// Build the per-run input exactly like the task does: fresh secrets
+    /// plus the executor default.
+    pub fn now_for(seed_data_dir: &Path, workspace_id: uuid::Uuid, now: DateTime<Utc>) -> Self {
+        Self {
+            seed_data_dir: seed_data_dir.to_owned(),
+            workspace_id,
+            now,
+            password_hex: uuid::Uuid::new_v4().simple().to_string(),
+            password_salt: uuid::Uuid::new_v4()
+                .simple()
+                .to_string()
+                .chars()
+                .take(22)
+                .collect(),
+            default_agent_executor: default_agent_executor(),
+        }
+    }
+}
+
+/// `get_default_agent_executor` (`core/agent_execution.py:26-31`):
+/// `DEFAULT_AGENT_EXECUTOR` (`settings/common.py:545`, itself
+/// `get_config("DEFAULT_AGENT_EXECUTOR", "local_runner")`) validated
+/// against the executor choices, else `local_runner`.
+pub fn default_agent_executor() -> String {
+    match std::env::var("DEFAULT_AGENT_EXECUTOR") {
+        Ok(value)
+            if matches!(
+                value.as_str(),
+                "local_runner" | "cloud_agent" | "managed_runner"
+            ) =>
+        {
+            value
+        }
+        _ => "local_runner".to_owned(),
+    }
+}
+
+/// What one [`run`] seeded, in orchestration order — the DB before/after
+/// assertion surface.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SeedReport {
+    pub projects: usize,
+    pub states: usize,
+    pub labels: usize,
+    pub cycles: usize,
+    pub modules: usize,
+    pub issues: usize,
+    pub views: usize,
+    pub pages: usize,
+    pub project_pages: usize,
+    /// The `:274` missing-field error logs (ported bug 1 keeps processing).
+    pub warnings: Vec<String>,
+}
+
+fn key_error(key: &str) -> String {
+    format!("KeyError: {key}")
+}
+
+fn map_lookup(
+    map: &HashMap<i64, uuid::Uuid>,
+    seed_id: i64,
+    what: &str,
+) -> Result<uuid::Uuid, String> {
+    map.get(&seed_id)
+        .copied()
+        .ok_or_else(|| key_error(&format!("{what} {seed_id}")))
+}
+
+fn seed_str<'a>(row: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
+    row.get(key).and_then(Value::as_str)
+}
+
+fn seed_f64(row: &Map<String, Value>, key: &str) -> Option<f64> {
+    row.get(key).and_then(Value::as_f64)
+}
+
+/// Run the task (`workspace_seed :516-570`): bot user, membership, then
+/// creators in `:543-564` order. Any failure aborts with the Python
+/// exception's shape (`:568-570` re-raise) — the caller logs and returns
+/// `Err`, and [`register`] turns it into a worker retry/park.
+pub async fn run<S: SeedStore>(store: &S, input: &RunInput) -> Result<SeedReport, String> {
+    let workspace_id = input.workspace_id;
+    let workspace = store.workspace(workspace_id).await?.ok_or_else(|| {
+        // `Workspace.objects.get` DoesNotExist.
+        "Workspace matching query does not exist.".to_owned()
+    })?;
+
+    // Bot user + membership (`:521-540`).
+    let bot_username = logic::bot_username(&workspace_id.to_string());
+    let bot_email = logic::bot_email(&workspace_id.to_string());
+    let password_hash = logic::bot_password_hash(&input.password_hex, &input.password_salt);
+    let bot_id = store
+        .insert_bot_user(
+            &bot_username,
+            &logic::normalize_user_email(&bot_email),
+            &password_hash,
+        )
+        .await?;
+    let ctx = RequestContext::new(
+        pidash_types::WorkspaceId::from(workspace_id.to_string()),
+        Some(pidash_types::UserId::from(bot_id.to_string())),
+    );
+    store
+        .insert_workspace_member(workspace_id, bot_id, BOT_WORKSPACE_ROLE, "")
+        .await?;
+
+    let mut report = SeedReport::default();
+
+    // Projects + members (`:543`, `create_project_and_member :71-173`).
+    let members = store.workspace_members(workspace_id).await?;
+    let mut project_map: HashMap<i64, uuid::Uuid> = HashMap::new();
+    if let Some(rows) = logic::read_seed_file(&input.seed_data_dir, "projects.json") {
+        let identifier = logic::normalize_identifier(&logic::project_identifier(&workspace.name));
+        for mut row in rows {
+            let row = row
+                .as_object_mut()
+                .ok_or_else(|| key_error("project row"))?;
+            let seed_id = row
+                .remove("id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| key_error("id"))?;
+            row.remove("name");
+            row.remove("identifier");
+            let project_id = store
+                .insert_project(
+                    &ctx,
+                    workspace_id,
+                    &ProjectInsert {
+                        name: workspace.name.clone(),
+                        identifier: identifier.clone(),
+                        timezone: workspace.timezone.clone(),
+                        is_default: !store.default_project_exists(workspace_id).await?,
+                        description: seed_str(row, "description").unwrap_or("").to_owned(),
+                        network: row.get("network").and_then(Value::as_i64).unwrap_or(2) as i16,
+                        cover_image: seed_str(row, "cover_image").map(str::to_owned),
+                        logo_props: row
+                            .get("logo_props")
+                            .cloned()
+                            .unwrap_or(Value::Object(Map::new())),
+                        default_agent_executor: input.default_agent_executor.clone(),
+                    },
+                )
+                .await?;
+            // The project-`save` post-step (`signals.py:32-66`): the
+            // default pod must exist before the issues step resolves
+            // it. The seed project carries no lead or default
+            // assignee, so the pod's `created_by` is NULL.
+            let new_project = NewProject {
+                id: project_id,
+                workspace_id,
+                identifier: identifier.clone(),
+                created: true,
+                project_lead: None,
+                default_assignee: None,
+            };
+            store.ensure_default_pod(&new_project).await?;
+            for member in &members {
+                store
+                    .insert_project_member(
+                        &ctx,
+                        project_id,
+                        workspace_id,
+                        member.member_id,
+                        member.role,
+                    )
+                    .await?;
+                store
+                    .insert_project_user_property(&ctx, project_id, workspace_id, member.member_id)
+                    .await?;
+            }
+            project_map.insert(seed_id, project_id);
+            report.projects += 1;
+        }
+    }
+
+    // States (`:546`, `:176-208`).
+    let mut state_map: HashMap<i64, uuid::Uuid> = HashMap::new();
+    if let Some(rows) = logic::read_seed_file(&input.seed_data_dir, "states.json") {
+        for value in rows {
+            let mut row = value.as_object().cloned().unwrap_or_default();
+            let seed_id = row
+                .remove("id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| key_error("id"))?;
+            let project_seed_id = row
+                .remove("project_id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| key_error("project_id"))?;
+            let project_id = map_lookup(&project_map, project_seed_id, "project")?;
+            let name = seed_str(&row, "name").unwrap_or("").to_owned();
+            let sequence = logic::next_state_sequence(store.max_state_sequence(project_id).await?)
+                .unwrap_or_else(|| seed_f64(&row, "sequence").unwrap_or(65_535.0));
+            let state_id = store
+                .insert_state(
+                    &ctx,
+                    workspace_id,
+                    project_id,
+                    &StateInsert {
+                        slug: logic::slugify(&name),
+                        name,
+                        color: seed_str(&row, "color").unwrap_or("").to_owned(),
+                        group: seed_str(&row, "group").unwrap_or("backlog").to_owned(),
+                        is_default: row.get("default").and_then(Value::as_bool).unwrap_or(false),
+                        sequence,
+                    },
+                )
+                .await?;
+            state_map.insert(seed_id, state_id);
+            report.states += 1;
+        }
+    }
+
+    // Labels (`:549`, `:211-242`).
+    let mut label_map: HashMap<i64, uuid::Uuid> = HashMap::new();
+    if let Some(rows) = logic::read_seed_file(&input.seed_data_dir, "labels.json") {
+        for value in rows {
+            let mut row = value.as_object().cloned().unwrap_or_default();
+            let seed_id = row
+                .remove("id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| key_error("id"))?;
+            let project_seed_id = row
+                .remove("project_id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| key_error("project_id"))?;
+            let project_id = map_lookup(&project_map, project_seed_id, "project")?;
+            let sort_order =
+                logic::next_label_sort_order(store.max_label_sort_order(project_id).await?)
+                    .unwrap_or_else(|| seed_f64(&row, "sort_order").unwrap_or(65_535.0));
+            let label_id = store
+                .insert_label(
+                    &ctx,
+                    workspace_id,
+                    project_id,
+                    &LabelInsert {
+                        name: seed_str(&row, "name").unwrap_or("").to_owned(),
+                        color: seed_str(&row, "color").unwrap_or("").to_owned(),
+                        sort_order,
+                    },
+                )
+                .await?;
+            label_map.insert(seed_id, label_id);
+            report.labels += 1;
+        }
+    }
+
+    // Cycles (`:552`, `:391-439`).
+    let mut cycle_map: HashMap<i64, uuid::Uuid> = HashMap::new();
+    if let Some(rows) = logic::read_seed_file(&input.seed_data_dir, "cycles.json") {
+        for value in rows {
+            let mut row = value.as_object().cloned().unwrap_or_default();
+            let seed_id = row
+                .remove("id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| key_error("id"))?;
+            let project_seed_id = row
+                .remove("project_id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| key_error("project_id"))?;
+            let project_id = map_lookup(&project_map, project_seed_id, "project")?;
+            let cycle_type = seed_str(&row, "type").map(str::to_owned);
+            row.remove("type");
+            let last_end = store.last_cycle_end(project_id).await?;
+            let plan = logic::plan_cycle_dates(cycle_type.as_deref(), last_end.is_some()).map_err(
+                |e| match e {
+                    logic::CycleSeedError::MissingType => key_error("'type'"),
+                    // `NameError: name 'start_date' is not defined` at
+                    // `Cycle(...) :426` for any other type value.
+                    logic::CycleSeedError::UnboundDates(_) => {
+                        "NameError: name 'start_date' is not defined".to_owned()
+                    }
+                },
+            )?;
+            let anchor_day = match plan.anchor {
+                logic::CycleAnchor::Now => input.now,
+                logic::CycleAnchor::LastCycleEnd => {
+                    last_end.expect("UPCOMING-with-history always has an end")
+                }
+            };
+            let start_date = anchor_day + chrono::Duration::days(plan.start_offset_days);
+            let end_date = anchor_day + chrono::Duration::days(plan.end_offset_days);
+            let sort_order =
+                logic::next_cycle_sort_order(store.min_cycle_sort_order(project_id).await?)
+                    .unwrap_or_else(|| seed_f64(&row, "sort_order").unwrap_or(65_535.0));
+            let cycle_id = store
+                .insert_cycle(
+                    &ctx,
+                    workspace_id,
+                    project_id,
+                    &CycleInsert {
+                        name: seed_str(&row, "name").unwrap_or("").to_owned(),
+                        timezone: seed_str(&row, "timezone").unwrap_or("UTC").to_owned(),
+                        start_date,
+                        end_date,
+                        sort_order,
+                    },
+                )
+                .await?;
+            cycle_map.insert(seed_id, cycle_id);
+            report.cycles += 1;
+        }
+    }
+
+    // Modules (`:555`, `:442-474`).
+    let mut module_map: HashMap<i64, uuid::Uuid> = HashMap::new();
+    if let Some(rows) = logic::read_seed_file(&input.seed_data_dir, "modules.json") {
+        for (index, value) in rows.into_iter().enumerate() {
+            let mut row = value.as_object().cloned().unwrap_or_default();
+            let seed_id = row
+                .remove("id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| key_error("id"))?;
+            let project_seed_id = row
+                .remove("project_id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| key_error("project_id"))?;
+            let project_id = map_lookup(&project_map, project_seed_id, "project")?;
+            let dates = logic::plan_module_dates(index);
+            let today = input.now.date_naive();
+            let sort_order =
+                logic::next_cycle_sort_order(store.min_module_sort_order(project_id).await?)
+                    .unwrap_or_else(|| seed_f64(&row, "sort_order").unwrap_or(65_535.0));
+            let module_id = store
+                .insert_module(
+                    &ctx,
+                    workspace_id,
+                    project_id,
+                    &ModuleInsert {
+                        name: seed_str(&row, "name").unwrap_or("").to_owned(),
+                        description: seed_str(&row, "description").unwrap_or("").to_owned(),
+                        status: seed_str(&row, "status").unwrap_or("planned").to_owned(),
+                        start_date: today + chrono::Duration::days(dates.start_offset_days),
+                        target_date: today + chrono::Duration::days(dates.target_offset_days),
+                        sort_order,
+                    },
+                )
+                .await?;
+            module_map.insert(seed_id, module_id);
+            report.modules += 1;
+        }
+    }
+
+    // Issues (`:558`, `:245-342`).
+    if let Some(rows) = logic::read_seed_file(&input.seed_data_dir, "issues.json") {
+        for value in rows {
+            let row = value.as_object().cloned().unwrap_or_default();
+            let (warnings, planned) = logic::plan_issue_seed(&row);
+            report.warnings.extend(warnings);
+            let plan = planned.map_err(|e| match e {
+                logic::IssueSeedError::MissingKey(key) => key_error(&key),
+            })?;
+            // `Issue(**rest)`: unknown seed keys are `TypeError`.
+            for key in plan.rest.keys() {
+                if !matches!(
+                    key.as_str(),
+                    "name" | "priority" | "description_html" | "sequence_id" | "sort_order"
+                ) {
+                    return Err(format!(
+                        "TypeError: Issue() got an unexpected keyword argument '{key}'"
+                    ));
+                }
+            }
+            let project_seed_id: i64 = plan
+                .project_id
+                .parse()
+                .map_err(|_| key_error("project_id"))?;
+            let state_seed_id: i64 = plan.state_id.parse().map_err(|_| key_error("state_id"))?;
+            let project_id = map_lookup(&project_map, project_seed_id, "project")?;
+            let state_id = map_lookup(&state_map, state_seed_id, "state")?;
+            let group = store.state_group(state_id).await?.unwrap_or_default();
+            let completed_at = if logic::issue_completed(&group) {
+                Some(input.now)
+            } else {
+                None
+            };
+            let sequence_id = next_work_item_sequence(store.max_issue_sequence(project_id).await?);
+            let sort_order = logic::next_issue_sort_order(
+                store.max_issue_sort_order(project_id, state_id).await?,
+            )
+            .unwrap_or_else(|| {
+                plan.rest
+                    .get("sort_order")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(65_535.0)
+            });
+            let stripped = plan
+                .rest
+                .get("description_html")
+                .and_then(Value::as_str)
+                .map(logic::strip_tags);
+            let description_stripped = match plan.rest.get("description_html") {
+                None => None,
+                Some(Value::Null) => None,
+                Some(Value::String(s)) if s.is_empty() => None,
+                _ => stripped,
+            };
+            let assigned_pod_id = store.default_pod_for_project(project_id).await?;
+            let issue_id = store
+                .insert_issue(
+                    &ctx,
+                    workspace_id,
+                    project_id,
+                    &IssueInsert {
+                        name: plan
+                            .rest
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
+                        description_html: plan
+                            .rest
+                            .get("description_html")
+                            .and_then(Value::as_str)
+                            .unwrap_or("<p></p>")
+                            .to_owned(),
+                        description_stripped,
+                        priority: plan
+                            .rest
+                            .get("priority")
+                            .and_then(Value::as_str)
+                            .unwrap_or("none")
+                            .to_owned(),
+                        sequence_id,
+                        sort_order,
+                        completed_at,
+                        state_id,
+                        assigned_pod_id,
+                        rest: plan.rest.clone(),
+                    },
+                )
+                .await?;
+            // The `Issue.save` post-save fire (`signals.py:74-107`):
+            // from `None` to the seeded state — the ticker reconcile,
+            // then a dispatch or a preflight bounce. Every issue goes
+            // through the fire, like the receiver; the driver no-ops
+            // on non-trigger states.
+            store
+                .drive_seed_transition(issue_id, state_id, input.now)
+                .await?;
+            // `Issue.save` auto-row (ported double-row quirk) + explicit row.
+            store
+                .insert_save_sequence(issue_id, project_id, workspace_id, sequence_id)
+                .await?;
+            store
+                .insert_issue_sequence(&ctx, issue_id, project_id, workspace_id)
+                .await?;
+            store
+                .insert_issue_activity(
+                    issue_id,
+                    project_id,
+                    workspace_id,
+                    bot_id,
+                    input.now.timestamp_millis() as f64 / 1000.0,
+                )
+                .await?;
+            for label_seed_id in &plan.label_ids {
+                let label_id = map_lookup(&label_map, *label_seed_id, "label")?;
+                store
+                    .insert_issue_label(&ctx, issue_id, label_id, project_id, workspace_id)
+                    .await?;
+            }
+            // `if cycle_id:` — nonzero ints link (`:321`).
+            if matches!(plan.cycle_id, Some(v) if v != 0) {
+                let cycle_id = map_lookup(&cycle_map, plan.cycle_id.unwrap_or(0), "cycle")?;
+                store
+                    .insert_cycle_issue(&ctx, issue_id, cycle_id, project_id, workspace_id)
+                    .await?;
+            }
+            // `if module_ids:` — non-empty lists link (`:331`).
+            if matches!(&plan.module_ids, Some(ids) if !ids.is_empty()) {
+                for module_seed_id in plan.module_ids.as_deref().unwrap_or(&[]) {
+                    let module_id = map_lookup(&module_map, *module_seed_id, "module")?;
+                    store
+                        .insert_module_issue(&ctx, issue_id, module_id, project_id, workspace_id)
+                        .await?;
+                }
+            }
+            report.issues += 1;
+        }
+    }
+
+    // Views (`:561`, `:477-500`).
+    if let Some(rows) = logic::read_seed_file(&input.seed_data_dir, "views.json") {
+        for value in rows {
+            let row = value.as_object().cloned().unwrap_or_default();
+            let (project_seed_id, rest) = logic::plan_view_seed(&row);
+            let project_seed_id = project_seed_id.ok_or_else(|| key_error("project_id"))?;
+            // `IssueView(**rest)`: unknown seed keys are `TypeError`.
+            for key in rest.keys() {
+                if !matches!(
+                    key.as_str(),
+                    "name"
+                        | "description"
+                        | "access"
+                        | "filters"
+                        | "display_filters"
+                        | "display_properties"
+                        | "rich_filters"
+                        | "sort_order"
+                ) {
+                    return Err(format!(
+                        "TypeError: IssueView() got an unexpected keyword argument '{key}'"
+                    ));
+                }
+            }
+            let project_id = map_lookup(&project_map, project_seed_id, "project")?;
+            let filters = rest
+                .get("filters")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let query = logic::view_query_value(&filters, input.now.date_naive())
+                .map_err(|e| format!("issue_filters: {e}"))?;
+            let sort_order =
+                logic::next_view_sort_order(store.max_view_sort_order(project_id).await?)
+                    .unwrap_or_else(|| {
+                        rest.get("sort_order")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(65_535.0)
+                    });
+            store
+                .insert_view(
+                    &ctx,
+                    workspace_id,
+                    project_id,
+                    &ViewInsert {
+                        name: rest
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
+                        description: rest
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
+                        // `access` model default is 1 (`view.py`).
+                        access: rest.get("access").and_then(Value::as_i64).unwrap_or(1) as i16,
+                        filters: rest
+                            .get("filters")
+                            .cloned()
+                            .unwrap_or(Value::Object(Map::new())),
+                        query,
+                        display_filters: rest
+                            .get("display_filters")
+                            .cloned()
+                            .unwrap_or_else(logic::issue_default_display_filters),
+                        display_properties: rest
+                            .get("display_properties")
+                            .cloned()
+                            .unwrap_or_else(logic::issue_default_display_properties),
+                        rich_filters: rest
+                            .get("rich_filters")
+                            .cloned()
+                            .unwrap_or(Value::Object(Map::new())),
+                        sort_order,
+                        rest,
+                    },
+                )
+                .await?;
+            report.views += 1;
+        }
+    }
+
+    // Pages (`:564`, `:345-388`).
+    if let Some(rows) = logic::read_seed_file(&input.seed_data_dir, "pages.json") {
+        for value in rows {
+            let mut row = value.as_object().cloned().unwrap_or_default();
+            let _seed_id = row
+                .remove("id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| key_error("id"))?;
+            let description_html = row
+                .get("description_html")
+                .and_then(Value::as_str)
+                .unwrap_or("<p></p>")
+                .to_owned();
+            let page_id = store
+                .insert_page(
+                    &ctx,
+                    workspace_id,
+                    &PageInsert {
+                        name: row
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
+                        access: row.get("access").and_then(Value::as_i64).unwrap_or(0) as i16,
+                        // `page_seed.get("description_json", {})` plus the
+                        // `or {}`: explicit null also stores `{}`.
+                        description_json: match row.get("description_json") {
+                            Some(Value::Object(map)) if !map.is_empty() => {
+                                Value::Object(map.clone())
+                            }
+                            _ => Value::Object(Map::new()),
+                        },
+                        description_stripped: logic::description_stripped(Some(&description_html)),
+                        description_html,
+                        // Seed rows carry no binary payload
+                        // (`page_seed.get("description_binary", None)`).
+                        description_binary: None,
+                    },
+                )
+                .await?;
+            report.pages += 1;
+            // `PROJECT`-type pages with a `project_id` link through
+            // `ProjectPage` (`:378-386`).
+            let is_project_page = row.get("type").and_then(Value::as_str) == Some("PROJECT")
+                && row.get("project_id").and_then(Value::as_i64).is_some();
+            if is_project_page {
+                let project_seed_id = row.get("project_id").and_then(Value::as_i64).unwrap_or(0);
+                let project_id = map_lookup(&project_map, project_seed_id, "project")?;
+                store
+                    .insert_project_page(&ctx, workspace_id, project_id, page_id)
+                    .await?;
+                report.project_pages += 1;
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+/// `convert_uuid_to_integer` (`utils/uuid.py:19-26`): sha256 of the uuid
+/// string, first 8 bytes as signed big-endian — the `Issue.save`
+/// `pg_advisory_xact_lock` key (`issue.py:317-322`).
+pub fn advisory_lock_key(project_id: uuid::Uuid) -> i64 {
+    let digest = Sha256::digest(project_id.to_string().as_bytes());
+    i64::from_be_bytes(digest[..8].try_into().expect("sha256 is 32 bytes"))
+}
+
+/// `get_default_props` (`db/models/workspace.py:22`): workspace-member
+/// `view_props`/`default_props` (note: WITH `display_properties`, unlike
+/// the project-level twin).
+fn ws_default_props() -> Value {
+    serde_json::json!({
+        "filters": {
+            "priority": null, "state": null, "state_group": null,
+            "assignees": null, "created_by": null, "labels": null,
+            "start_date": null, "target_date": null, "subscriber": null,
+        },
+        "display_filters": {
+            "group_by": null, "order_by": "-created_at", "type": null,
+            "sub_issue": true, "show_empty_groups": true, "layout": "list",
+            "calendar_date_range": "",
+        },
+        "display_properties": {
+            "assignee": true, "attachment_count": true, "created_on": true,
+            "due_date": true, "estimate": true, "key": true, "labels": true,
+            "link": true, "priority": true, "start_date": true,
+            "state": true, "sub_issue_count": true, "updated_on": true,
+        },
+    })
+}
+
+/// `get_issue_props` (`db/models/workspace.py:110-111`).
+fn ws_issue_props() -> Value {
+    serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true})
+}
+
+/// `get_default_props` (`db/models/project.py:43`): project-member
+/// `view_props`/`default_props` (WITHOUT `display_properties`).
+fn project_default_props() -> Value {
+    serde_json::json!({
+        "filters": {
+            "priority": null, "state": null, "state_group": null,
+            "assignees": null, "created_by": null, "labels": null,
+            "start_date": null, "target_date": null, "subscriber": null,
+        },
+        "display_filters": {
+            "group_by": null, "order_by": "-created_at", "type": null,
+            "sub_issue": true, "show_empty_groups": true, "layout": "list",
+            "calendar_date_range": "",
+        },
+    })
+}
+
+/// `get_default_preferences` (`db/models/project.py:68`).
+fn default_preferences() -> Value {
+    serde_json::json!({"pages": {"block_display": true},
+        "navigation": {"default_tab": "work_items", "hide_in_more_menu": []}})
+}
+
+/// `get_default_filters` (`db/models/issue.py:50`).
+fn default_issue_filters() -> Value {
+    serde_json::json!({
+        "priority": null, "state": null, "state_group": null,
+        "assignees": null, "created_by": null, "labels": null,
+        "start_date": null, "target_date": null, "subscriber": null,
+    })
+}
+
+/// `get_view_props` (`db/models/page.py:19-20`).
+fn page_view_props() -> Value {
+    serde_json::json!({"full_width": false})
+}
+
+/// Postgres [`SeedStore`]: the exact Django query shapes. Timestamps are
+/// one clock (`RunInput::now`) the way `auto_now_add`/`auto_now` stamp
+/// statement time; uuids are v4 like the model default. The dispatch
+/// inputs (`cloud`, `managed`, `toolsets`, `assistant_seam`) feed the
+/// per-issue post-save fire ([`SeedStore::drive_seed_transition`]) —
+/// the `LiveFireTickSeam` field shape, worker-installed.
+pub struct PgSeedStore {
+    pool: sqlx::PgPool,
+    now: DateTime<Utc>,
+    cloud: pidash_db::config::CloudAgentSettings,
+    managed: pidash_db::config::ManagedRunnerSettings,
+    toolsets: std::sync::Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+    assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
+}
+
+impl PgSeedStore {
+    pub fn new(
+        pool: sqlx::PgPool,
+        now: DateTime<Utc>,
+        cloud: pidash_db::config::CloudAgentSettings,
+        managed: pidash_db::config::ManagedRunnerSettings,
+        toolsets: std::sync::Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+        assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
+    ) -> Self {
+        Self {
+            pool,
+            now,
+            cloud,
+            managed,
+            toolsets,
+            assistant_seam,
+        }
+    }
+
+    fn db_err(e: sqlx::Error) -> String {
+        e.to_string()
+    }
+}
+
+/// Fixed-decision [`PreflightSeam`] for the seed drive (the 1251
+/// probe/stub/re-run shape): answers the probed decision and records
+/// whether the driver consulted it at all, so only a consulted stub
+/// owes the bounce re-run.
+struct FixedPreflight {
+    proceed: bool,
+    consulted: bool,
+}
+
+impl PreflightSeam for FixedPreflight {
+    async fn preflight_eligibility_or_bounce(
+        &mut self,
+        _issue_id: uuid::Uuid,
+        _creator_id: uuid::Uuid,
+        _pod_id: uuid::Uuid,
+        _triggered_by: &str,
+    ) -> Result<bool, CreationError> {
+        self.consulted = true;
+        Ok(self.proceed)
+    }
+}
+
+impl SeedStore for PgSeedStore {
+    async fn workspace(&self, workspace_id: uuid::Uuid) -> Result<Option<WorkspaceRow>, String> {
+        // `Workspace.objects.get`: default soft-delete manager.
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT name, timezone FROM workspaces WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(workspace_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Self::db_err)?;
+        Ok(row.map(|(name, timezone)| WorkspaceRow { name, timezone }))
+    }
+
+    async fn workspace_members(
+        &self,
+        workspace_id: uuid::Uuid,
+    ) -> Result<Vec<WorkspaceMemberRow>, String> {
+        // `.values("member_id", "role")`, `-created_at` model ordering.
+        let rows: Vec<(uuid::Uuid, i16)> = sqlx::query_as(
+            "SELECT member_id, role FROM workspace_members
+             WHERE workspace_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Self::db_err)?;
+        Ok(rows
+            .into_iter()
+            .map(|(member_id, role)| WorkspaceMemberRow { member_id, role })
+            .collect())
+    }
+
+    async fn default_project_exists(&self, workspace_id: uuid::Uuid) -> Result<bool, String> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM projects
+             WHERE workspace_id = $1 AND is_default AND deleted_at IS NULL)",
+        )
+        .bind(workspace_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)?;
+        Ok(exists)
+    }
+
+    async fn max_state_sequence(&self, project_id: uuid::Uuid) -> Result<Option<f64>, String> {
+        // `StateManager`: triage excluded.
+        sqlx::query_scalar(
+            "SELECT MAX(sequence) FROM states
+             WHERE project_id = $1 AND deleted_at IS NULL AND \"group\" <> 'triage'",
+        )
+        .bind(project_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)
+    }
+
+    async fn max_label_sort_order(&self, project_id: uuid::Uuid) -> Result<Option<f64>, String> {
+        sqlx::query_scalar(
+            "SELECT MAX(sort_order) FROM labels WHERE project_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(project_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)
+    }
+
+    async fn min_cycle_sort_order(&self, project_id: uuid::Uuid) -> Result<Option<f64>, String> {
+        sqlx::query_scalar(
+            "SELECT MIN(sort_order) FROM cycles WHERE project_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(project_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)
+    }
+
+    async fn min_module_sort_order(&self, project_id: uuid::Uuid) -> Result<Option<f64>, String> {
+        sqlx::query_scalar(
+            "SELECT MIN(sort_order) FROM modules WHERE project_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(project_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)
+    }
+
+    async fn max_view_sort_order(&self, project_id: uuid::Uuid) -> Result<Option<f64>, String> {
+        sqlx::query_scalar(
+            "SELECT MAX(sort_order) FROM issue_views WHERE project_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(project_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)
+    }
+
+    async fn max_issue_sequence(&self, project_id: uuid::Uuid) -> Result<Option<i64>, String> {
+        // `SELECT pg_advisory_xact_lock` + max in one transaction, like
+        // `Issue.save` (`issue.py:313-328`). The seeded project is brand
+        // new, so no concurrent writer exists; the lock is parity, not
+        // protection.
+        let mut tx = self.pool.begin().await.map_err(Self::db_err)?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(advisory_lock_key(project_id))
+            .execute(&mut *tx)
+            .await
+            .map_err(Self::db_err)?;
+        let max: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(sequence) FROM issue_sequences WHERE project_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(project_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(Self::db_err)?;
+        tx.commit().await.map_err(Self::db_err)?;
+        Ok(max)
+    }
+
+    async fn max_issue_sort_order(
+        &self,
+        project_id: uuid::Uuid,
+        state_id: uuid::Uuid,
+    ) -> Result<Option<f64>, String> {
+        // Plain `Issue.objects` scope: soft-delete only. (`issue_objects`
+        // would exclude triage/archived/draft, but `Issue.save` queries
+        // through `Issue.objects`.)
+        sqlx::query_scalar(
+            "SELECT MAX(sort_order) FROM issues
+             WHERE project_id = $1 AND state_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(project_id)
+        .bind(state_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)
+    }
+
+    async fn last_cycle_end(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> Result<Option<DateTime<Utc>>, String> {
+        // `.order_by("-end_date").first()`: plain DESC, NULLS FIRST like
+        // Django's ordering.
+        Ok(sqlx::query_scalar(
+            "SELECT end_date FROM cycles
+             WHERE project_id = $1 AND deleted_at IS NULL ORDER BY end_date DESC LIMIT 1",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Self::db_err)?
+        .flatten())
+    }
+
+    async fn state_group(&self, state_id: uuid::Uuid) -> Result<Option<String>, String> {
+        Ok(
+            sqlx::query_scalar("SELECT \"group\" FROM states WHERE id = $1")
+                .bind(state_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(Self::db_err)?
+                .flatten(),
+        )
+    }
+
+    async fn default_pod_for_project(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> Result<Option<uuid::Uuid>, String> {
+        // `Pod.default_for_project_id` (`runner/models.py:174-176`):
+        // `PodManager` excludes soft-deleted pods.
+        Ok(
+            sqlx::query_scalar("SELECT id FROM pod WHERE project_id = $1 AND is_default AND deleted_at IS NULL LIMIT 1")
+                .bind(project_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(Self::db_err)?
+                .flatten(),
+        )
+    }
+
+    async fn insert_bot_user(
+        &self,
+        username: &str,
+        email: &str,
+        password_hash: &str,
+    ) -> Result<uuid::Uuid, String> {
+        // `User.objects.create :522-532` + `User.save` email/display
+        // normalization; every other column at its model default.
+        use pidash_services::domain::identity::{create_bot_user, NewBotUser};
+        create_bot_user(
+            &self.pool,
+            &NewBotUser {
+                id: None,
+                username,
+                email,
+                password_hash,
+                display_name: "Pi Dash",
+                first_name: "Pi Dash",
+                last_name: "",
+                is_password_autoset: true,
+                bot_type: Some("WORKSPACE_SEED"),
+                now: self.now,
+            },
+        )
+        .await
+        .map_err(Self::db_err)
+    }
+
+    async fn insert_workspace_member(
+        &self,
+        workspace_id: uuid::Uuid,
+        member_id: uuid::Uuid,
+        role: i16,
+        company_role: &str,
+    ) -> Result<uuid::Uuid, String> {
+        // `.objects.create` without `created_by`: NULL audit.
+        use pidash_services::domain::workspaces::members::{add_seed, SeedMember};
+        let view_props = ws_default_props();
+        let issue_props = ws_issue_props();
+        add_seed(
+            &self.pool,
+            &SeedMember {
+                workspace_id,
+                member_id,
+                role,
+                company_role,
+                view_props: &view_props,
+                issue_props: &issue_props,
+                now: self.now,
+            },
+        )
+        .await
+        .map_err(Self::db_err)
+    }
+
+    async fn insert_project(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        project: &ProjectInsert,
+    ) -> Result<uuid::Uuid, String> {
+        // `Project(...) :101-111` + `save` in one transaction: the
+        // demote-others update (`project.py:292-298`) and the insert are
+        // atomic, like `Project.save`'s `transaction.atomic` block.
+        use pidash_services::domain::projects::{create_seed_project, SeedProject};
+        let actor = ctx_actor(ctx)?;
+        create_seed_project(
+            &self.pool,
+            &SeedProject {
+                workspace_id,
+                name: &project.name,
+                identifier: &project.identifier,
+                timezone: &project.timezone,
+                is_default: project.is_default,
+                description: &project.description,
+                network: project.network,
+                cover_image: project.cover_image.as_deref(),
+                logo_props: &project.logo_props,
+                default_agent_executor: &project.default_agent_executor,
+                created_by: actor,
+                now: self.now,
+            },
+        )
+        .await
+        .map_err(Self::db_err)
+    }
+
+    async fn ensure_default_pod(&self, project: &NewProject) -> Result<Option<uuid::Uuid>, String> {
+        pidash_db::runner_runs::pod::ensure_default_pod(&self.pool, project)
+            .await
+            .map_err(Self::db_err)
+    }
+
+    async fn insert_project_member(
+        &self,
+        ctx: &RequestContext,
+        project_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+        member_id: uuid::Uuid,
+        role: i16,
+    ) -> Result<uuid::Uuid, String> {
+        // One `bulk_create` row (`:115-126`): `bulk_create` skips
+        // `ProjectMember.save`, so no auto `ProjectUserProperty` row here.
+        use pidash_services::domain::projects::members::{add_seed, SeedProjectMember};
+        let actor = ctx_actor(ctx)?;
+        let view_props = project_default_props();
+        let preferences = default_preferences();
+        add_seed(
+            &self.pool,
+            &SeedProjectMember {
+                project_id,
+                workspace_id,
+                member_id,
+                role,
+                created_by: actor,
+                view_props: &view_props,
+                preferences: &preferences,
+                now: self.now,
+            },
+        )
+        .await
+        .map_err(Self::db_err)
+    }
+
+    async fn insert_project_user_property(
+        &self,
+        ctx: &RequestContext,
+        project_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+        user_id: uuid::Uuid,
+    ) -> Result<uuid::Uuid, String> {
+        // One `bulk_create` row (`:129-168`) with the FIXED literals.
+        let actor = ctx_actor(ctx)?;
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO project_user_properties (created_at, updated_at, id,
+               display_properties, created_by_id, project_id, updated_by_id, user_id,
+               workspace_id, display_filters, filters, deleted_at, rich_filters,
+               preferences, sort_order)
+             VALUES ($1, $1, $2,
+               $3, $4, $5, NULL, $6,
+               $7, $8, $9, NULL, '{}',
+               $10, 65535)
+             RETURNING id",
+        )
+        .bind(self.now)
+        .bind(uuid::Uuid::new_v4())
+        .bind(sqlx::types::Json(logic::seed_display_properties()))
+        .bind(actor)
+        .bind(project_id)
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(sqlx::types::Json(logic::seed_display_filters()))
+        .bind(sqlx::types::Json(default_issue_filters()))
+        .bind(sqlx::types::Json(default_preferences()))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)?;
+        Ok(id)
+    }
+
+    async fn insert_state(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        state: &StateInsert,
+    ) -> Result<uuid::Uuid, String> {
+        use pidash_services::domain::projects::states::{add_seed, SeedState};
+        let actor = ctx_actor(ctx)?;
+        add_seed(
+            &self.pool,
+            &SeedState {
+                workspace_id,
+                project_id,
+                created_by: actor,
+                name: &state.name,
+                color: &state.color,
+                slug: &state.slug,
+                group: &state.group,
+                sequence: state.sequence,
+                is_default: state.is_default,
+                now: self.now,
+            },
+        )
+        .await
+        .map_err(Self::db_err)
+    }
+
+    async fn insert_label(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        label: &LabelInsert,
+    ) -> Result<uuid::Uuid, String> {
+        let actor = ctx_actor(ctx)?;
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO labels (created_at, updated_at, id, name, description,
+               created_by_id, project_id, updated_by_id, workspace_id, parent_id,
+               color, sort_order, external_id, external_source, deleted_at)
+             VALUES ($1, $1, $2, $3, '',
+               $4, $5, NULL, $6, NULL,
+               $7, $8, NULL, NULL, NULL)
+             RETURNING id",
+        )
+        .bind(self.now)
+        .bind(uuid::Uuid::new_v4())
+        .bind(&label.name)
+        .bind(actor)
+        .bind(project_id)
+        .bind(workspace_id)
+        .bind(&label.color)
+        .bind(label.sort_order)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)?;
+        Ok(id)
+    }
+
+    async fn insert_cycle(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        cycle: &CycleInsert,
+    ) -> Result<uuid::Uuid, String> {
+        let actor = ctx_actor(ctx)?;
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO cycles (created_at, updated_at, id, name, description,
+               start_date, end_date, created_by_id, owned_by_id, project_id,
+               updated_by_id, workspace_id, view_props, sort_order, external_id,
+               external_source, progress_snapshot, archived_at, logo_props,
+               deleted_at, timezone, version)
+             VALUES ($1, $1, $2, $3, '',
+               $4, $5, $6, $6, $7,
+               NULL, $8, '{}', $9, NULL,
+               NULL, '{}', NULL, '{}',
+               NULL, $10, 1)
+             RETURNING id",
+        )
+        .bind(self.now)
+        .bind(uuid::Uuid::new_v4())
+        .bind(&cycle.name)
+        .bind(cycle.start_date)
+        .bind(cycle.end_date)
+        .bind(actor)
+        .bind(project_id)
+        .bind(workspace_id)
+        .bind(cycle.sort_order)
+        .bind(&cycle.timezone)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)?;
+        Ok(id)
+    }
+
+    async fn insert_module(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        module: &ModuleInsert,
+    ) -> Result<uuid::Uuid, String> {
+        let actor = ctx_actor(ctx)?;
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO modules (created_at, updated_at, id, name, description,
+               description_text, description_html, start_date, target_date, status,
+               created_by_id, lead_id, project_id, updated_by_id, workspace_id,
+               view_props, sort_order, external_id, external_source, archived_at,
+               logo_props, deleted_at)
+             VALUES ($1, $1, $2, $3, $4,
+               NULL, NULL, $5, $6, $7,
+               $8, NULL, $9, NULL, $10,
+               '{}', $11, NULL, NULL, NULL,
+               '{}', NULL)
+             RETURNING id",
+        )
+        .bind(self.now)
+        .bind(uuid::Uuid::new_v4())
+        .bind(&module.name)
+        .bind(&module.description)
+        .bind(module.start_date)
+        .bind(module.target_date)
+        .bind(&module.status)
+        .bind(actor)
+        .bind(project_id)
+        .bind(workspace_id)
+        .bind(module.sort_order)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)?;
+        Ok(id)
+    }
+
+    async fn insert_issue(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        issue: &IssueInsert,
+    ) -> Result<uuid::Uuid, String> {
+        use pidash_services::domain::issues::{insert_seed_issue, SeedIssue};
+        let actor = ctx_actor(ctx)?;
+        insert_seed_issue(
+            &self.pool,
+            &SeedIssue {
+                workspace_id,
+                project_id,
+                state_id: issue.state_id,
+                created_by: actor,
+                name: &issue.name,
+                description_html: &issue.description_html,
+                description_stripped: issue.description_stripped.as_deref(),
+                priority: &issue.priority,
+                sequence_id: issue.sequence_id,
+                sort_order: issue.sort_order,
+                completed_at: issue.completed_at,
+                assigned_pod_id: issue.assigned_pod_id,
+                now: self.now,
+            },
+        )
+        .await
+        .map_err(Self::db_err)
+    }
+
+    async fn drive_seed_transition(
+        &self,
+        issue_id: uuid::Uuid,
+        state_id: uuid::Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<(), String> {
+        use crate::admission::RedisAdmissionCache;
+        use crate::orchestration::live_inputs::{
+            creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
+        };
+        use crate::orchestration::{LiveCreationStore, StoreDeps};
+        use pidash_db::dispatch::status::AgentRunTrigger;
+        use pidash_services::dispatch::consume_admission_token;
+        use pidash_services::orchestration::creation::{
+            resolve_fallback_creator, resolve_pod_for_issue,
+        };
+        use pidash_services::orchestration::dispatch::preflight_eligibility_or_bounce;
+        use pidash_services::orchestration::entries::{
+            bump_orchestration_error_count, fire_state_transition, FireOutcome, FireRequest,
+        };
+
+        // Per-fire dispatch inputs (the fire_tick_live shape): the
+        // creator universe over committed state, LLM-key presence,
+        // then one installed-seam consult per user.
+        let universe = creator_universe(&self.pool, None, issue_id)
+            .await
+            .map_err(Self::db_err)?;
+        let presence = std::sync::Arc::new(
+            fetch_presence(&self.pool, &universe)
+                .await
+                .map_err(Self::db_err)?,
+        );
+        let verdicts = std::sync::Arc::new(gate_verdicts(&self.assistant_seam, &presence).await);
+        let cloud = self.cloud.clone();
+        let managed = self.managed.clone();
+        let toolsets = self.toolsets.clone();
+        let now_unix_secs = now.timestamp();
+        // Built fresh per store (probe, drive and bounce take owned
+        // deps; the driver consults preflight at most once per drive).
+        let make_deps = || StoreDeps {
+            cloud: cloud.clone(),
+            managed: managed.clone(),
+            cache: RedisAdmissionCache::from_env(),
+            has_usable_llm_config: gate_fn(verdicts.clone()),
+            toolsets: toolsets.clone(),
+            llm_profile: profile_fn(presence.clone()),
+            now_unix_secs,
+        };
+        // `fire_state_transition` (`signals.py:74-107`): prior state
+        // None (a create has no pre-save row), the seeded state, the
+        // receiver defaults. `jitter_secs: 0.0`: the L5 quirk-5
+        // precedent (every driver passes 0.0). `created_by: None`:
+        // the seed runs in the worker with no request user, so the
+        // ticker create stamps NULL, like Django's crum-less save.
+        let request = FireRequest {
+            issue_id,
+            prev_state_id: None,
+            current_state_id: Some(state_id),
+            dispatch_immediate: true,
+            moved_by_run: None,
+            now,
+            jitter_secs: 0.0,
+            created_by: None,
+        };
+        // One transaction for the whole drive: the issue already
+        // committed (no outer atomic survives `insert_issue`), so the
+        // drive owns it. Preflight runs on that same transaction —
+        // the fused 1251 shape: the bounce must see this drive's own
+        // uncommitted ticker row (a pool-side bounce would see no row
+        // and skip the explicit disarm, while a pool-side lock would
+        // hang on this transaction's ticker lock). So the driver
+        // lends the tx to only one seam at a time: probe the decision
+        // behind a savepoint (the probe's bounce writes roll back),
+        // drive with a fixed-decision stub, and — only when stubbed
+        // false — re-run the services preflight after the drive, so
+        // the real bounce lands post-reconcile, exactly as in Python.
+        let matcher = JobsMatcher::new(self.pool.clone());
+        let triggered_by = AgentRunTrigger::StateTransition.value();
+        // The `service.py:226` gate: a seeded non-ticking state never
+        // reaches preflight in Python (`not-a-trigger-state` returns
+        // before it), so the probe is skipped for it — probing would
+        // bounce, and could raise (e.g. the reserved-username
+        // collision), where Django never looks. The read mirrors the
+        // seam's state lookup (no soft-delete scope, like
+        // `all_state_objects`); a lookup failure propagates like the
+        // driver's own state reads below.
+        let seeded_state: Option<(uuid::Uuid, String, String)> = sqlx::query_as(STATE_SELECT_SQL)
+            .bind(state_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Self::db_err)?;
+        let Some((_, seeded_name, seeded_group)) = seeded_state else {
+            return Err(format!(
+                "workspace_seed: seeded state {state_id} has no states row"
+            ));
+        };
+        let seeded_ref = StateRef {
+            group: &seeded_group,
+            name: &seeded_name,
+        };
+        let seed_ticking = is_ticking_state(Some(&seeded_ref));
+        let mut tx = pidash_db::tx::Transaction::begin(&self.pool)
+            .await
+            .map_err(Self::db_err)?;
+        let (probed_creator, probed_pod, proceed) = if !seed_ticking {
+            // Non-ticking: no probe (see the gate above). The drive
+            // below still runs and answers `not-a-trigger-state`
+            // without consulting preflight, exactly as in Python.
+            (None, None, false)
+        } else {
+            sqlx::query("SAVEPOINT seed_preflight_probe")
+                .execute(&mut **tx.inner())
+                .await
+                .map_err(Self::db_err)?;
+            let mut probe_store = LiveCreationStore::new(tx, &self.pool, make_deps());
+            // `resolve_pod_for_issue` reads issue + pods only (no
+            // ticker), and the fallback creator reads issue + project
+            // only, so probing pre-reconcile decides identically to
+            // Python's post-reconcile preflight. A missing creator or pod
+            // stubs false: the drive re-resolves both itself, and only
+            // consults the stub when it finds them (the appear-race) —
+            // the re-run then derives the true decision.
+            //
+            // The probe and its reads are handler work (preflight), so a
+            // failure is swallowed like `Failed` (`signals.py:98`): the
+            // save stands and the seed continues — it must never abort
+            // the seed (PIDASHCONV-1701).
+            let probed: Result<(Option<uuid::Uuid>, Option<uuid::Uuid>, bool), String> = async {
+                let probed_creator = resolve_fallback_creator(&mut probe_store, issue_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let probed_pod = resolve_pod_for_issue(&mut probe_store, issue_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let proceed = match (probed_creator, probed_pod) {
+                    (Some(creator), Some(pod_id)) => {
+                        let probe = preflight_eligibility_or_bounce(
+                            &mut probe_store,
+                            issue_id,
+                            Some(creator),
+                            pod_id,
+                            triggered_by,
+                            &matcher,
+                            now,
+                            0.0,
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
+                        probe.proceed
+                    }
+                    _ => false,
+                };
+                Ok((probed_creator, probed_pod, proceed))
+            }
+            .await;
+            // The probe's outboxes stay empty (the bounce dispatches,
+            // defers, and finalizes nothing), so only the tx is
+            // recovered; the savepoint rollback erases the probe's
+            // writes, and its log lines are dropped (the re-run emits
+            // the real bounce's lines once).
+            let (tx_back, _, _, _, _, _) = probe_store.into_parts();
+            tx = tx_back;
+            match probed {
+                Ok(triple) => {
+                    sqlx::query("ROLLBACK TO SAVEPOINT seed_preflight_probe")
+                        .execute(&mut **tx.inner())
+                        .await
+                        .map_err(Self::db_err)?;
+                    triple
+                }
+                Err(error) => {
+                    // The drive never ran, so there is nothing to keep:
+                    // roll the tx back (subsuming the savepoint), bump
+                    // the counter like `Failed`, log, and let the seed
+                    // continue.
+                    let _ = tx.rollback().await;
+                    let total_errors = bump_orchestration_error_count();
+                    tracing::error!(
+                        issue_id = %issue_id,
+                        %error,
+                        "workspace_seed: preflight probe failed; the save stands \
+                         (total_errors={total_errors})",
+                    );
+                    return Ok(());
+                }
+            }
+        };
+        let mut drive_store = LiveCreationStore::new(tx, &self.pool, make_deps());
+        let mut stub = FixedPreflight {
+            proceed,
+            consulted: false,
+        };
+        let outcome = fire_state_transition(&mut drive_store, &mut stub, &request).await;
+        let (tx, pool, cache, mut dispatches, mut deferred, mut terminal_effects) =
+            drive_store.into_parts();
+        // Only a state-*lookup* storage failure propagates (Python's
+        // `try` wraps the handler call alone, `signals.py:89-98`): the
+        // probe, the re-run and their `resolve_*` reads are handler
+        // work and swallowed like `Failed`, while a handler failure
+        // inside the drive arrives as `Failed` and is swallowed in
+        // the match below.
+        let outcome = outcome.map_err(|error| error.to_string())?;
+        // Only a consulted stub owes the re-run: early returns
+        // (parked, queued, no creator/pod, race lost) consult
+        // nothing, and Python bounces on none of them.
+        let (tx, dispatches, deferred, terminal_effects) = if !proceed && stub.consulted {
+            // The re-run IS the real bounce when it still says so
+            // (same services fn, same tx, post-reconcile state);
+            // when eligibility flipped concurrently it proceeds and
+            // the armed ticker covers the entry on the next tick.
+            // Fresh reads first (closest to Python's read position),
+            // the probed ids when the rows vanished mid-drive (as
+            // Python's single read would have seen them).
+            //
+            // Like the probe, the re-run and its reads are handler
+            // work: a failure is swallowed like `Failed` (the save
+            // stands, the seed continues), never propagated
+            // (PIDASHCONV-1701).
+            let mut bounce_store = LiveCreationStore::new(tx, &self.pool, make_deps());
+            let rerun_outcome: Result<(), String> = async {
+                let fresh_creator = resolve_fallback_creator(&mut bounce_store, issue_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let fresh_pod = resolve_pod_for_issue(&mut bounce_store, issue_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if let (Some(creator), Some(pod_id)) =
+                    (fresh_creator.or(probed_creator), fresh_pod.or(probed_pod))
+                {
+                    let rerun = preflight_eligibility_or_bounce(
+                        &mut bounce_store,
+                        issue_id,
+                        Some(creator),
+                        pod_id,
+                        triggered_by,
+                        &matcher,
+                        now,
+                        0.0,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                    for log in &rerun.logs {
+                        if log.level == "WARNING" {
+                            tracing::warn!(target: "pidash.preflight", "{}", log.message);
+                        } else {
+                            tracing::info!(target: "pidash.preflight", "{}", log.message);
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        target: "pidash.preflight",
+                        "seed drive: creator or pod vanished mid-drive for issue {issue_id}, skipping bounce",
+                    );
+                }
+                Ok(())
+            }
+            .await;
+            let (tx, _, _, redispatches, redeferred, reterminal) = bounce_store.into_parts();
+            match rerun_outcome {
+                Ok(()) => {
+                    dispatches.extend(redispatches);
+                    deferred.extend(redeferred);
+                    terminal_effects.extend(reterminal);
+                    (tx, dispatches, deferred, terminal_effects)
+                }
+                Err(error) => {
+                    // The drive's writes go with the bounce's: roll the
+                    // tx back, bump the counter like `Failed`, log, and
+                    // let the seed continue.
+                    let _ = tx.rollback().await;
+                    let total_errors = bump_orchestration_error_count();
+                    tracing::error!(
+                        issue_id = %issue_id,
+                        %error,
+                        "workspace_seed: preflight re-run failed; the save stands \
+                         (total_errors={total_errors})",
+                    );
+                    return Ok(());
+                }
+            }
+        } else {
+            (tx, dispatches, deferred, terminal_effects)
+        };
+        match outcome {
+            FireOutcome::NoTransition => {
+                let _ = tx.rollback().await;
+                Ok(())
+            }
+            FireOutcome::Failed { log_line, .. } => {
+                // The save stands; nothing this drive wrote is kept
+                // (the `fire_issue_transition` precedent,
+                // PIDASHCONV-1216). The counter already bumped inside.
+                let _ = tx.rollback().await;
+                tracing::error!("{log_line}");
+                Ok(())
+            }
+            FireOutcome::Called(_) => {
+                tx.commit().await.map_err(Self::db_err)?;
+                // Post-commit dispatch drain, after the commit so the
+                // runner read sees the rows (the `drive_transition`
+                // drain shape). A drain failure is swallowed and
+                // logged: the Django signal wraps the whole handler
+                // — dispatch included — in its `try`, so a failed
+                // dispatch never fails the save.
+                for run_id in dispatches {
+                    if let Err(error) =
+                        crate::dispatch::dispatch_agent_run(pool, &cloud, run_id, now).await
+                    {
+                        tracing::error!(
+                            %error,
+                            issue_id = %issue_id,
+                            run_id = %run_id,
+                            "workspace_seed: post-commit dispatch failed; the save stands",
+                        );
+                    }
+                }
+                for consume in &deferred {
+                    consume_admission_token(&cache, consume);
+                }
+                if !terminal_effects.is_empty() {
+                    // Python's transition never finalizes a run:
+                    // loud, but the save stands.
+                    tracing::error!(
+                        issue_id = %issue_id,
+                        "workspace_seed: transition finalized runs: unreachable, no finalization on this path",
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
+
+    async fn insert_save_sequence(
+        &self,
+        issue_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+        sequence: i64,
+    ) -> Result<uuid::Uuid, String> {
+        // The `Issue.save` row (`issue.py:343`): NULL audit, workspace set
+        // from the project by `ProjectBaseModel.save`.
+        use pidash_services::domain::issues::{insert_seed_issue_sequence, SeedIssueSequence};
+        insert_seed_issue_sequence(
+            &self.pool,
+            &SeedIssueSequence {
+                issue_id,
+                project_id,
+                workspace_id,
+                sequence,
+                now: self.now,
+            },
+        )
+        .await
+        .map_err(Self::db_err)
+    }
+
+    async fn insert_issue_sequence(
+        &self,
+        _ctx: &RequestContext,
+        issue_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+    ) -> Result<uuid::Uuid, String> {
+        // The explicit `.objects.create` row (`:293-298`): NULL audit
+        // (`BaseModel.save` wipes the constructor arg, no crum user),
+        // default `sequence = 1`.
+        use pidash_services::domain::issues::{insert_seed_issue_sequence, SeedIssueSequence};
+        insert_seed_issue_sequence(
+            &self.pool,
+            &SeedIssueSequence {
+                issue_id,
+                project_id,
+                workspace_id,
+                sequence: 1,
+                now: self.now,
+            },
+        )
+        .await
+        .map_err(Self::db_err)
+    }
+
+    async fn insert_issue_activity(
+        &self,
+        issue_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+        actor_id: uuid::Uuid,
+        epoch_secs: f64,
+    ) -> Result<uuid::Uuid, String> {
+        // `.objects.create :300-308` without `created_by`: NULL audit.
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO issue_activities (created_at, updated_at, id, verb, field,
+               old_value, new_value, comment, attachments, created_by_id, issue_id,
+               issue_comment_id, project_id, updated_by_id, workspace_id, actor_id,
+               new_identifier, old_identifier, epoch, deleted_at)
+             VALUES ($1, $1, $2, 'created', NULL,
+               NULL, NULL, 'created the issue', '{}', NULL, $3,
+               NULL, $4, NULL, $5, $6,
+               NULL, NULL, $7, NULL)
+             RETURNING id",
+        )
+        .bind(self.now)
+        .bind(uuid::Uuid::new_v4())
+        .bind(issue_id)
+        .bind(project_id)
+        .bind(workspace_id)
+        .bind(actor_id)
+        .bind(epoch_secs)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)?;
+        Ok(id)
+    }
+
+    async fn insert_issue_label(
+        &self,
+        _ctx: &RequestContext,
+        issue_id: uuid::Uuid,
+        label_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+    ) -> Result<uuid::Uuid, String> {
+        // `.objects.create :312-318`: NULL audit (`BaseModel.save` wipes
+        // the constructor arg, no crum user).
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO issue_labels (created_at, updated_at, id, created_by_id,
+               issue_id, label_id, project_id, updated_by_id, workspace_id, deleted_at)
+             VALUES ($1, $1, $2, NULL,
+               $3, $4, $5, NULL, $6, NULL)
+             RETURNING id",
+        )
+        .bind(self.now)
+        .bind(uuid::Uuid::new_v4())
+        .bind(issue_id)
+        .bind(label_id)
+        .bind(project_id)
+        .bind(workspace_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)?;
+        Ok(id)
+    }
+
+    async fn insert_cycle_issue(
+        &self,
+        _ctx: &RequestContext,
+        issue_id: uuid::Uuid,
+        cycle_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+    ) -> Result<uuid::Uuid, String> {
+        // `.objects.create :322-328`: NULL audit (`BaseModel.save` wipes
+        // the constructor arg, no crum user).
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO cycle_issues (created_at, updated_at, id, created_by_id,
+               cycle_id, issue_id, project_id, updated_by_id, workspace_id, deleted_at)
+             VALUES ($1, $1, $2, NULL,
+               $3, $4, $5, NULL, $6, NULL)
+             RETURNING id",
+        )
+        .bind(self.now)
+        .bind(uuid::Uuid::new_v4())
+        .bind(cycle_id)
+        .bind(issue_id)
+        .bind(project_id)
+        .bind(workspace_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)?;
+        Ok(id)
+    }
+
+    async fn insert_module_issue(
+        &self,
+        _ctx: &RequestContext,
+        issue_id: uuid::Uuid,
+        module_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+    ) -> Result<uuid::Uuid, String> {
+        // `.objects.create :333-339`: NULL audit (`BaseModel.save` wipes
+        // the constructor arg, no crum user).
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO module_issues (created_at, updated_at, id, created_by_id,
+               issue_id, module_id, project_id, updated_by_id, workspace_id, deleted_at)
+             VALUES ($1, $1, $2, NULL,
+               $3, $4, $5, NULL, $6, NULL)
+             RETURNING id",
+        )
+        .bind(self.now)
+        .bind(uuid::Uuid::new_v4())
+        .bind(issue_id)
+        .bind(module_id)
+        .bind(project_id)
+        .bind(workspace_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)?;
+        Ok(id)
+    }
+
+    async fn insert_page(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        page: &PageInsert,
+    ) -> Result<uuid::Uuid, String> {
+        // `Page(...) :361-373`: bot owns AND audits (`updated_by_id` set,
+        // unlike every other seeded row).
+        let actor = ctx_actor(ctx)?;
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO pages (created_at, updated_at, id, name, description_json,
+               description_html, description_stripped, access, created_by_id,
+               owned_by_id, updated_by_id, workspace_id, color, archived_at, is_locked,
+               parent_id, view_props, logo_props, description_binary, is_global,
+               deleted_at, moved_to_page, moved_to_project, external_id,
+               external_source, sort_order)
+             VALUES ($1, $1, $2, $3, $4,
+               $5, $6, $7, $8,
+               $8, $8, $9, '', NULL, false,
+               NULL, $10, '{}', NULL, false,
+               NULL, NULL, NULL, NULL,
+               NULL, 65535)
+             RETURNING id",
+        )
+        .bind(self.now)
+        .bind(uuid::Uuid::new_v4())
+        .bind(&page.name)
+        .bind(sqlx::types::Json(page.description_json.clone()))
+        .bind(&page.description_html)
+        .bind(page.description_stripped.as_deref())
+        .bind(page.access)
+        .bind(actor)
+        .bind(workspace_id)
+        .bind(sqlx::types::Json(page_view_props()))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)?;
+        Ok(id)
+    }
+
+    async fn insert_project_page(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        page_id: uuid::Uuid,
+    ) -> Result<uuid::Uuid, String> {
+        let actor = ctx_actor(ctx)?;
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO project_pages (created_at, updated_at, id, created_by_id,
+               page_id, project_id, updated_by_id, workspace_id, deleted_at)
+             VALUES ($1, $1, $2, $3,
+               $4, $5, $3, $6, NULL)
+             RETURNING id",
+        )
+        .bind(self.now)
+        .bind(uuid::Uuid::new_v4())
+        .bind(actor)
+        .bind(page_id)
+        .bind(project_id)
+        .bind(workspace_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)?;
+        Ok(id)
+    }
+
+    async fn insert_view(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+        view: &ViewInsert,
+    ) -> Result<uuid::Uuid, String> {
+        let actor = ctx_actor(ctx)?;
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO issue_views (created_at, updated_at, id, name, description,
+               query, access, filters, created_by_id, project_id, updated_by_id,
+               workspace_id, display_filters, display_properties, sort_order,
+               logo_props, is_locked, owned_by_id, deleted_at, rich_filters, archived_at)
+             VALUES ($1, $1, $2, $3, $4,
+               $5, $6, $7, $8, $9, NULL,
+               $10, $11, $12, $13,
+               '{}', false, $8, NULL, $14, NULL)
+             RETURNING id",
+        )
+        .bind(self.now)
+        .bind(uuid::Uuid::new_v4())
+        .bind(&view.name)
+        .bind(&view.description)
+        .bind(sqlx::types::Json(view.query.clone()))
+        .bind(view.access)
+        .bind(sqlx::types::Json(view.filters.clone()))
+        .bind(actor)
+        .bind(project_id)
+        .bind(workspace_id)
+        .bind(sqlx::types::Json(view.display_filters.clone()))
+        .bind(sqlx::types::Json(view.display_properties.clone()))
+        .bind(view.sort_order)
+        .bind(sqlx::types::Json(view.rich_filters.clone()))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Self::db_err)?;
+        Ok(id)
+    }
+}
+
+/// The request-context actor as a uuid for `created_by` columns. The
+/// context is built from the bot id inside [`run`], so this is infallible
+/// by construction; a foreign context surfaces as an explicit error, never
+/// a NULL audit.
+fn ctx_actor(ctx: &RequestContext) -> Result<uuid::Uuid, String> {
+    ctx.audit_actor()
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .ok_or_else(|| "workspace_seed: request context has no bot actor".to_owned())
+}
+
+/// The `.delay()` equivalent: a first-attempt Celery protocol v2 message
+/// for `workspace_seed.delay(workspace_id)`, exactly what the call sites
+/// publish.
+pub fn delay_message(workspace_id: uuid::Uuid) -> TaskMessage {
+    TaskMessage::new(
+        TASK_NAME,
+        vec![Value::String(workspace_id.to_string())],
+        Map::new(),
+    )
+}
+
+/// Install the worker handler owning [`TASK_NAME`]. A store failure (or a
+/// seed-data `KeyError`/`NameError`/`TypeError`) propagates as a handler
+/// error: the worker requeues with `DEFAULT_RETRY_DELAY_SECS` while the
+/// Celery retry budget (`max_retries = 3`) lasts, then parks the row as
+/// failed with this text. The bare `@shared_task` carries no ack overrides
+/// (contract `test_task_options_parity` pins the empty option set).
+/// The dispatch inputs feed the per-issue post-save fire
+/// ([`SeedStore::drive_seed_transition`]).
+pub fn register_workspace_seed(
+    registry: &mut Registry,
+    pool: sqlx::PgPool,
+    seed_data_dir: PathBuf,
+    cloud: pidash_db::config::CloudAgentSettings,
+    managed: pidash_db::config::ManagedRunnerSettings,
+    toolsets: std::sync::Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+    assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
+) {
+    let handler: Handler = Arc::new(move |job: crate::queue::JobRow| {
+        let pool = pool.clone();
+        let seed_data_dir = seed_data_dir.clone();
+        let cloud = cloud.clone();
+        let managed = managed.clone();
+        let toolsets = toolsets.clone();
+        let assistant_seam = assistant_seam.clone();
+        Box::pin(async move {
+            let workspace_id: uuid::Uuid = job
+                .args
+                .as_array()
+                .and_then(|args| args.first())
+                .and_then(|v| v.as_str())
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .ok_or_else(|| "workspace_seed: args[0] must be a workspace uuid".to_owned())?;
+            let now = Utc::now();
+            let store = PgSeedStore::new(pool, now, cloud, managed, toolsets, assistant_seam);
+            let input = RunInput::now_for(&seed_data_dir, workspace_id, now);
+            match run(&store, &input).await {
+                Ok(report) => {
+                    tracing::info!(
+                        task = TASK_NAME,
+                        workspace = %workspace_id,
+                        projects = report.projects,
+                        states = report.states,
+                        labels = report.labels,
+                        cycles = report.cycles,
+                        modules = report.modules,
+                        issues = report.issues,
+                        views = report.views,
+                        pages = report.pages,
+                        "workspace seeded"
+                    );
+                    Ok(Verdict::Ack)
+                }
+                Err(error) => {
+                    tracing::error!(task = TASK_NAME, workspace = %workspace_id, %error, "seed failed");
+                    Err(error)
+                }
+            }
+        })
+    });
+    registry.register(TASK_NAME, handler);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    struct FakeStore {
+        inner: Mutex<FakeInner>,
+    }
+
+    #[derive(Default)]
+    struct FakeInner {
+        events: Vec<String>,
+        next_id: u128,
+        workspace: Option<WorkspaceRow>,
+        members: Vec<WorkspaceMemberRow>,
+        default_exists: bool,
+        state_groups: HashMap<uuid::Uuid, String>,
+        maxes_f64: Option<f64>,
+        max_seq: Option<i64>,
+        last_end: Option<DateTime<Utc>>,
+    }
+
+    impl FakeStore {
+        fn with_workspace(name: &str) -> Self {
+            Self {
+                inner: Mutex::new(FakeInner {
+                    workspace: Some(WorkspaceRow {
+                        name: name.to_owned(),
+                        timezone: "UTC".to_owned(),
+                    }),
+                    ..Default::default()
+                }),
+            }
+        }
+
+        fn events(&self) -> Vec<String> {
+            self.inner.lock().unwrap().events.clone()
+        }
+
+        fn minted(&self) -> Vec<uuid::Uuid> {
+            // Every insert mints `Uuid::from_u128(counter)` in call order.
+            let inner = self.inner.lock().unwrap();
+            (1..=inner.next_id).map(uuid::Uuid::from_u128).collect()
+        }
+    }
+
+    impl FakeInner {
+        fn mint(&mut self, what: &str) -> uuid::Uuid {
+            self.next_id += 1;
+            let id = uuid::Uuid::from_u128(self.next_id);
+            self.events.push(format!("{what} {id}"));
+            id
+        }
+    }
+
+    impl SeedStore for FakeStore {
+        async fn workspace(&self, _id: uuid::Uuid) -> Result<Option<WorkspaceRow>, String> {
+            Ok(self.inner.lock().unwrap().workspace.clone())
+        }
+        async fn workspace_members(
+            &self,
+            _id: uuid::Uuid,
+        ) -> Result<Vec<WorkspaceMemberRow>, String> {
+            Ok(self.inner.lock().unwrap().members.clone())
+        }
+        async fn default_project_exists(&self, _id: uuid::Uuid) -> Result<bool, String> {
+            Ok(self.inner.lock().unwrap().default_exists)
+        }
+        async fn max_state_sequence(&self, _id: uuid::Uuid) -> Result<Option<f64>, String> {
+            Ok(self.inner.lock().unwrap().maxes_f64)
+        }
+        async fn max_label_sort_order(&self, _id: uuid::Uuid) -> Result<Option<f64>, String> {
+            Ok(self.inner.lock().unwrap().maxes_f64)
+        }
+        async fn min_cycle_sort_order(&self, _id: uuid::Uuid) -> Result<Option<f64>, String> {
+            Ok(self.inner.lock().unwrap().maxes_f64)
+        }
+        async fn min_module_sort_order(&self, _id: uuid::Uuid) -> Result<Option<f64>, String> {
+            Ok(self.inner.lock().unwrap().maxes_f64)
+        }
+        async fn max_view_sort_order(&self, _id: uuid::Uuid) -> Result<Option<f64>, String> {
+            Ok(self.inner.lock().unwrap().maxes_f64)
+        }
+        async fn max_issue_sequence(&self, _id: uuid::Uuid) -> Result<Option<i64>, String> {
+            Ok(self.inner.lock().unwrap().max_seq)
+        }
+        async fn max_issue_sort_order(
+            &self,
+            _project: uuid::Uuid,
+            _state: uuid::Uuid,
+        ) -> Result<Option<f64>, String> {
+            Ok(self.inner.lock().unwrap().maxes_f64)
+        }
+        async fn last_cycle_end(&self, _id: uuid::Uuid) -> Result<Option<DateTime<Utc>>, String> {
+            Ok(self.inner.lock().unwrap().last_end)
+        }
+        async fn state_group(&self, id: uuid::Uuid) -> Result<Option<String>, String> {
+            Ok(self.inner.lock().unwrap().state_groups.get(&id).cloned())
+        }
+        async fn default_pod_for_project(
+            &self,
+            _id: uuid::Uuid,
+        ) -> Result<Option<uuid::Uuid>, String> {
+            Ok(None)
+        }
+        async fn insert_bot_user(
+            &self,
+            username: &str,
+            email: &str,
+            _hash: &str,
+        ) -> Result<uuid::Uuid, String> {
+            assert!(username.starts_with("bot_user_"), "bot username shape");
+            assert!(email.ends_with("@example.com"), "bot email shape");
+            Ok(self.inner.lock().unwrap().mint("bot"))
+        }
+        async fn insert_workspace_member(
+            &self,
+            _ws: uuid::Uuid,
+            _member: uuid::Uuid,
+            role: i16,
+            company: &str,
+        ) -> Result<uuid::Uuid, String> {
+            assert_eq!((role, company), (BOT_WORKSPACE_ROLE, ""));
+            Ok(self.inner.lock().unwrap().mint("ws_member"))
+        }
+        async fn insert_project(
+            &self,
+            ctx: &RequestContext,
+            _ws: uuid::Uuid,
+            project: &ProjectInsert,
+        ) -> Result<uuid::Uuid, String> {
+            assert!(
+                ctx.actor_id().is_some(),
+                "explicit request context on writes"
+            );
+            assert_eq!(project.identifier, project.identifier.to_uppercase());
+            Ok(self.inner.lock().unwrap().mint("project"))
+        }
+        async fn ensure_default_pod(
+            &self,
+            project: &NewProject,
+        ) -> Result<Option<uuid::Uuid>, String> {
+            assert!(project.created, "seed projects are always created");
+            self.inner
+                .lock()
+                .unwrap()
+                .events
+                .push(format!("ensure_pod {} {}", project.id, project.identifier));
+            Ok(None)
+        }
+        async fn insert_project_member(
+            &self,
+            ctx: &RequestContext,
+            _p: uuid::Uuid,
+            _ws: uuid::Uuid,
+            _m: uuid::Uuid,
+            _r: i16,
+        ) -> Result<uuid::Uuid, String> {
+            assert!(ctx.actor_id().is_some());
+            Ok(self.inner.lock().unwrap().mint("project_member"))
+        }
+        async fn insert_project_user_property(
+            &self,
+            ctx: &RequestContext,
+            _p: uuid::Uuid,
+            _ws: uuid::Uuid,
+            _u: uuid::Uuid,
+        ) -> Result<uuid::Uuid, String> {
+            assert!(ctx.actor_id().is_some());
+            Ok(self.inner.lock().unwrap().mint("user_property"))
+        }
+        async fn insert_state(
+            &self,
+            _ctx: &RequestContext,
+            _ws: uuid::Uuid,
+            _p: uuid::Uuid,
+            state: &StateInsert,
+        ) -> Result<uuid::Uuid, String> {
+            assert_eq!(state.slug, logic::slugify(&state.name));
+            Ok(self.inner.lock().unwrap().mint("state"))
+        }
+        async fn insert_label(
+            &self,
+            _ctx: &RequestContext,
+            _ws: uuid::Uuid,
+            _p: uuid::Uuid,
+            _label: &LabelInsert,
+        ) -> Result<uuid::Uuid, String> {
+            Ok(self.inner.lock().unwrap().mint("label"))
+        }
+        async fn insert_cycle(
+            &self,
+            _ctx: &RequestContext,
+            _ws: uuid::Uuid,
+            _p: uuid::Uuid,
+            cycle: &CycleInsert,
+        ) -> Result<uuid::Uuid, String> {
+            assert!(cycle.end_date > cycle.start_date);
+            Ok(self.inner.lock().unwrap().mint("cycle"))
+        }
+        async fn insert_module(
+            &self,
+            _ctx: &RequestContext,
+            _ws: uuid::Uuid,
+            _p: uuid::Uuid,
+            module: &ModuleInsert,
+        ) -> Result<uuid::Uuid, String> {
+            assert!(module.target_date > module.start_date);
+            Ok(self.inner.lock().unwrap().mint("module"))
+        }
+        async fn insert_issue(
+            &self,
+            _ctx: &RequestContext,
+            _ws: uuid::Uuid,
+            _p: uuid::Uuid,
+            _issue: &IssueInsert,
+        ) -> Result<uuid::Uuid, String> {
+            Ok(self.inner.lock().unwrap().mint("issue"))
+        }
+        async fn drive_seed_transition(
+            &self,
+            issue_id: uuid::Uuid,
+            state_id: uuid::Uuid,
+            _now: DateTime<Utc>,
+        ) -> Result<(), String> {
+            self.inner
+                .lock()
+                .unwrap()
+                .events
+                .push(format!("drive {issue_id} {state_id}"));
+            Ok(())
+        }
+        async fn insert_save_sequence(
+            &self,
+            _issue: uuid::Uuid,
+            _p: uuid::Uuid,
+            _ws: uuid::Uuid,
+            _seq: i64,
+        ) -> Result<uuid::Uuid, String> {
+            Ok(self.inner.lock().unwrap().mint("save_sequence"))
+        }
+        async fn insert_issue_sequence(
+            &self,
+            _ctx: &RequestContext,
+            _issue: uuid::Uuid,
+            _p: uuid::Uuid,
+            _ws: uuid::Uuid,
+        ) -> Result<uuid::Uuid, String> {
+            Ok(self.inner.lock().unwrap().mint("issue_sequence"))
+        }
+        async fn insert_issue_activity(
+            &self,
+            _issue: uuid::Uuid,
+            _p: uuid::Uuid,
+            _ws: uuid::Uuid,
+            _actor: uuid::Uuid,
+            _epoch: f64,
+        ) -> Result<uuid::Uuid, String> {
+            Ok(self.inner.lock().unwrap().mint("activity"))
+        }
+        async fn insert_issue_label(
+            &self,
+            _ctx: &RequestContext,
+            _issue: uuid::Uuid,
+            _label: uuid::Uuid,
+            _p: uuid::Uuid,
+            _ws: uuid::Uuid,
+        ) -> Result<uuid::Uuid, String> {
+            Ok(self.inner.lock().unwrap().mint("issue_label"))
+        }
+        async fn insert_cycle_issue(
+            &self,
+            _ctx: &RequestContext,
+            _issue: uuid::Uuid,
+            _cycle: uuid::Uuid,
+            _p: uuid::Uuid,
+            _ws: uuid::Uuid,
+        ) -> Result<uuid::Uuid, String> {
+            Ok(self.inner.lock().unwrap().mint("cycle_issue"))
+        }
+        async fn insert_module_issue(
+            &self,
+            _ctx: &RequestContext,
+            _issue: uuid::Uuid,
+            _module: uuid::Uuid,
+            _p: uuid::Uuid,
+            _ws: uuid::Uuid,
+        ) -> Result<uuid::Uuid, String> {
+            Ok(self.inner.lock().unwrap().mint("module_issue"))
+        }
+        async fn insert_page(
+            &self,
+            _ctx: &RequestContext,
+            _ws: uuid::Uuid,
+            _page: &PageInsert,
+        ) -> Result<uuid::Uuid, String> {
+            Ok(self.inner.lock().unwrap().mint("page"))
+        }
+        async fn insert_project_page(
+            &self,
+            _ctx: &RequestContext,
+            _ws: uuid::Uuid,
+            _p: uuid::Uuid,
+            _page: uuid::Uuid,
+        ) -> Result<uuid::Uuid, String> {
+            Ok(self.inner.lock().unwrap().mint("project_page"))
+        }
+        async fn insert_view(
+            &self,
+            _ctx: &RequestContext,
+            _ws: uuid::Uuid,
+            _p: uuid::Uuid,
+            _view: &ViewInsert,
+        ) -> Result<uuid::Uuid, String> {
+            Ok(self.inner.lock().unwrap().mint("view"))
+        }
+    }
+
+    fn seed_dir(name: &str, files: &[(&str, &str)]) -> PathBuf {
+        // Unique per call (PIDASHCONV-221): the old fixed
+        // `pidash-seed-{name}` path raced under parallel `cargo test`
+        // (`remove_dir_all` + recreate), so reads saw an empty dir and
+        // every section was silently skipped (all-zero `SeedReport`).
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "pidash-seed-{name}-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (file, body) in files {
+            std::fs::write(dir.join(file), body).unwrap();
+        }
+        dir
+    }
+
+    fn mini_seed() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (
+                "projects.json",
+                r##"[{"id": 1, "description": "", "network": 2, "cover_image": null, "logo_props": {}}]"##,
+            ),
+            (
+                "states.json",
+                r##"[{"id": 1, "project_id": 1, "name": "Backlog", "color": "#ccc", "group": "backlog", "default": true, "sequence": 15000},
+                    {"id": 2, "project_id": 1, "name": "Done", "color": "#0c0", "group": "completed", "default": false, "sequence": 45000}]"##,
+            ),
+            (
+                "labels.json",
+                r##"[{"id": 1, "project_id": 1, "name": "bug", "color": "#f00", "sort_order": 65535}]"##,
+            ),
+            (
+                "cycles.json",
+                r##"[{"id": 1, "project_id": 1, "name": "C1", "timezone": "UTC", "type": "CURRENT", "sort_order": 65535},
+                    {"id": 2, "project_id": 1, "name": "C2", "timezone": "UTC", "type": "UPCOMING", "sort_order": 65535}]"##,
+            ),
+            (
+                "modules.json",
+                r##"[{"id": 1, "project_id": 1, "name": "M1", "description": "", "status": "planned", "sort_order": 65535}]"##,
+            ),
+            (
+                "issues.json",
+                r##"[{"id": 1, "project_id": 1, "state_id": 1, "labels": [1], "name": "A",
+                     "description_html": "<p>Hi</p>", "priority": "urgent", "sequence_id": 1, "sort_order": 1000,
+                     "cycle_id": 1, "module_ids": [1]},
+                    {"id": 2, "project_id": 1, "state_id": 2, "labels": [], "name": "B",
+                     "description_html": "<p></p>", "priority": "none", "sequence_id": 2, "sort_order": 1000,
+                     "cycle_id": null, "module_ids": null}]"##,
+            ),
+            (
+                "views.json",
+                r##"[{"id": 1, "project_id": 1, "name": "V", "description": "V", "access": 1,
+                     "filters": {}, "display_filters": {}, "display_properties": {},
+                     "rich_filters": {}, "sort_order": 75535}]"##,
+            ),
+            (
+                "pages.json",
+                r##"[{"id": 1, "name": "P1", "access": 0, "description_html": "<p>x</p>", "project_id": 1, "type": "PROJECT"},
+                    {"id": 2, "name": "P2", "access": 0, "description_html": "<p>y</p>"}]"##,
+            ),
+        ]
+    }
+
+    fn input_for(dir: &Path, ws: uuid::Uuid) -> RunInput {
+        RunInput {
+            seed_data_dir: dir.to_owned(),
+            workspace_id: ws,
+            now: chrono::DateTime::from_timestamp(1_789_000_000, 0).unwrap(),
+            password_hex: "00".repeat(16),
+            password_salt: "s".repeat(22),
+            default_agent_executor: "local_runner".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn full_run_threads_maps_in_source_order() {
+        let ws = uuid::Uuid::from_u128(900);
+        let store = FakeStore::with_workspace("Acme Workspace");
+        let dir = seed_dir("full", &mini_seed());
+        let report = run(&store, &input_for(&dir, ws))
+            .await
+            .expect("mini seed runs");
+
+        assert_eq!(
+            report,
+            SeedReport {
+                projects: 1,
+                states: 2,
+                labels: 1,
+                cycles: 2,
+                modules: 1,
+                issues: 2,
+                views: 1,
+                pages: 2,
+                project_pages: 1,
+                warnings: vec![],
+            }
+        );
+
+        // Insert order mirrors `:543-564`: bot, membership, project (+0
+        // members here) with its `post_save` default-pod ensure, states,
+        // labels, cycles, modules, issues (each with the post-save
+        // transition drive, then the double sequence rows + activity +
+        // links), views, pages.
+        let events = store.events();
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(|e| e.split_whitespace().next().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "bot",
+                "ws_member",
+                "project",
+                "ensure_pod",
+                "state",
+                "state",
+                "label",
+                "cycle",
+                "cycle",
+                "module",
+                "issue",
+                "drive",
+                "save_sequence",
+                "issue_sequence",
+                "activity",
+                "issue_label",
+                "cycle_issue",
+                "module_issue",
+                "issue",
+                "drive",
+                "save_sequence",
+                "issue_sequence",
+                "activity",
+                "view",
+                // `ProjectPage` links inline per page (`:378-387` inside
+                // the loop), so P1's link precedes P2's row.
+                "page",
+                "project_page",
+                "page",
+            ]
+        );
+
+        // Id-mapping is threaded: the project id minted first is the one
+        // every later creator references (fake asserts shapes; the minted
+        // sequence pins the threading).
+        let minted = store.minted();
+        assert_eq!(minted[0], uuid::Uuid::from_u128(1)); // bot
+        assert_eq!(minted[2], uuid::Uuid::from_u128(3)); // project
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn seed_run_ensures_pod_and_drives_each_issue() {
+        // PIDASHCONV-1297: the `post_save` pair — one default-pod
+        // ensure per project (normalized identifier, created) and one
+        // transition drive per issue (inserted id, mapped state id).
+        let ws = uuid::Uuid::from_u128(904);
+        let store = FakeStore::with_workspace("Acme Workspace");
+        let dir = seed_dir("postsave", &mini_seed());
+        run(&store, &input_for(&dir, ws))
+            .await
+            .expect("mini seed runs");
+        let project = uuid::Uuid::from_u128(3);
+        let events = store.events();
+        assert!(
+            events.contains(&format!("ensure_pod {project} ACMEW")),
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&format!(
+                "drive {} {}",
+                uuid::Uuid::from_u128(10),
+                uuid::Uuid::from_u128(4)
+            )),
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&format!(
+                "drive {} {}",
+                uuid::Uuid::from_u128(17),
+                uuid::Uuid::from_u128(5)
+            )),
+            "{events:?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_workspace_aborts_like_get() {
+        let store = FakeStore {
+            inner: Mutex::new(FakeInner::default()),
+        };
+        let dir = seed_dir("nows", &mini_seed());
+        let err = run(&store, &input_for(&dir, uuid::Uuid::from_u128(1)))
+            .await
+            .expect_err("no workspace must fail");
+        assert!(
+            err.contains("Workspace matching query does not exist"),
+            "{err}"
+        );
+        assert!(store.events().is_empty(), "nothing written before the read");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unknown_cycle_type_is_name_error() {
+        let ws = uuid::Uuid::from_u128(901);
+        let store = FakeStore::with_workspace("Acme");
+        let dir = seed_dir(
+            "badcycle",
+            &[
+                ("projects.json", r##"[{"id": 1}]"##),
+                (
+                    "cycles.json",
+                    r##"[{"id": 1, "project_id": 1, "name": "C", "type": "PAUSED"}]"##,
+                ),
+            ],
+        );
+        let err = run(&store, &input_for(&dir, ws))
+            .await
+            .expect_err("must fail");
+        assert!(err.contains("NameError"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_projects_cascades_to_key_error() {
+        // No `projects.json` → empty map, and the states creator still
+        // runs into `project_map[1]` (`KeyError`), like Python.
+        let ws = uuid::Uuid::from_u128(902);
+        let store = FakeStore::with_workspace("Acme");
+        let dir = seed_dir(
+            "noproj",
+            &[(
+                "states.json",
+                r##"[{"id": 1, "project_id": 1, "name": "Backlog", "group": "backlog"}]"##,
+            )],
+        );
+        let err = run(&store, &input_for(&dir, ws))
+            .await
+            .expect_err("must fail");
+        assert!(err.contains("KeyError"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn issue_missing_field_warns_then_key_errors() {
+        // Ported bug 1 end to end: the warning is recorded AND the row
+        // still fails on the pop.
+        let ws = uuid::Uuid::from_u128(903);
+        let store = FakeStore::with_workspace("Acme");
+        let dir = seed_dir(
+            "badissue",
+            &[
+                ("projects.json", r##"[{"id": 1}]"##),
+                (
+                    "states.json",
+                    r##"[{"id": 1, "project_id": 1, "name": "Backlog", "group": "backlog"}]"##,
+                ),
+                (
+                    "issues.json",
+                    r##"[{"id": 1, "project_id": 1, "state_id": 1, "name": "A",
+                         "cycle_id": null, "module_ids": null}]"##,
+                ),
+            ],
+        );
+        let err = run(&store, &input_for(&dir, ws))
+            .await
+            .expect_err("must fail");
+        assert!(err.contains("KeyError") && err.contains("labels"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn advisory_key_matches_python() {
+        // Golden from `hashlib.sha256` (`utils/uuid.py:19-26`).
+        let id = uuid::Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
+        assert_eq!(advisory_lock_key(id), 8400349069047396436);
+    }
+
+    #[test]
+    fn executor_default_parses_like_django_settings() {
+        assert_eq!(default_agent_executor(), "local_runner");
+    }
+
+    #[test]
+    fn delay_message_carries_wire_name_and_workspace_arg() {
+        let ws = uuid::Uuid::from_u128(42);
+        let message = delay_message(ws);
+        let debug = format!("{message:?}");
+        assert!(debug.contains(TASK_NAME), "{debug}");
+        assert!(debug.contains(&ws.to_string()), "{debug}");
+        assert_eq!(
+            TASK_NAME,
+            "pi_dash.bgtasks.workspace_seed_task.workspace_seed"
+        );
+    }
+}

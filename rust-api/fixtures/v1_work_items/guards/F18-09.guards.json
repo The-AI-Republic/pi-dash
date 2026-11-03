@@ -1,0 +1,361 @@
+{
+  "$schema_note": "Static behaviour record. No code is executed by this file.",
+  "fixture": "F18-09",
+  "_method": "Shell probes (stub requests) for pure guards + live HTTP (httpx, 4 principals) for the permission matrix and page archive guard, on scratch pidash_conv659.",
+  "_source": "apps/api/pi_dash/api/views/issue.py:175-189,1070-1174; api/views/page.py:491-517; app/permissions/project.py:56-143",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "units": {
+    "user_has_issue_permission": {
+      "source": "api/views/issue.py:175-189",
+      "matrix": {
+        "creator_allow": true,
+        "creator_deny_flag": true,
+        "member_admin": true,
+        "guest_in_roles": true,
+        "guest_not_in_roles": false,
+        "guest_no_roles_filter": true,
+        "outsider": false,
+        "issue_none_admin": true,
+        "issue_none_outsider": false
+      },
+      "note": "allow_creator short-circuits before any DB role check; allowed_roles=None means any active membership."
+    },
+    "run_belongs_to": {
+      "source": "api/views/issue.py:1070-1085",
+      "matrix": {
+        "none_user": false,
+        "none_run": false,
+        "created_by": true,
+        "owner_field": true,
+        "runner_owner": true,
+        "stranger": false
+      }
+    },
+    "resolve_moved_by_run": {
+      "source": "api/views/issue.py:1086-1122",
+      "matrix": {
+        "bad_uuid": {
+          "run": null,
+          "error": "X-Pi-Dash-Run-Id is not a UUID"
+        },
+        "unknown_uuid": {
+          "run": null,
+          "error": null
+        },
+        "other_issue_run": {
+          "run": null,
+          "error": null
+        },
+        "finished_run": {
+          "run": null,
+          "error": null
+        },
+        "no_header_owner_infers": {
+          "run": "32bbc5d2-1407-45d8-8df2-266935de26e7",
+          "error": null,
+          "is_run_active": true
+        },
+        "own_active_run": {
+          "run": "32bbc5d2-1407-45d8-8df2-266935de26e7",
+          "error": null
+        },
+        "foreign_run": {
+          "run": null,
+          "error": "X-Pi-Dash-Run-Id names a run that is not yours"
+        },
+        "no_header_outsider_infers_own": {
+          "run": "faeeabd9-b92e-4e9b-bcb6-9039c786c6d5",
+          "error": null
+        },
+        "no_header_guest_infers_runner_run": {
+          "run": "a0dd8187-1b0b-4e22-a19c-118229c3bbc8",
+          "error": null
+        }
+      }
+    },
+    "active_run_of_caller": {
+      "source": "api/views/issue.py:1123-1132",
+      "matrix": {
+        "owner": "32bbc5d2-1407-45d8-8df2-266935de26e7",
+        "outsider_sees_own": "faeeabd9-b92e-4e9b-bcb6-9039c786c6d5",
+        "guest_runner_owned_run": "a0dd8187-1b0b-4e22-a19c-118229c3bbc8"
+      }
+    },
+    "refuse_agent_action": {
+      "source": "api/views/issue.py:1133-1164",
+      "matrix": {
+        "no_header": null,
+        "bad_uuid_allowed": null,
+        "other_issue_allowed": null,
+        "finished_allowed": null,
+        "own_active_runai": {
+          "status": 403,
+          "body": {
+            "error": "Run AI is a human action; it cannot be requested from inside an agent run"
+          }
+        },
+        "own_active_retick": {
+          "status": 403,
+          "body": {
+            "error": "re-tick is a human action; it cannot be requested from inside an agent run"
+          }
+        },
+        "foreign_active_on_issue_refused": {
+          "status": 403,
+          "body": {
+            "error": "Run AI is a human action; it cannot be requested from inside an agent run"
+          }
+        }
+      },
+      "note": "Refusal ignores run ownership: ANY active run on THIS issue named by the header refuses (see foreign_active_on_issue_refused). Malformed/unknown ids are allowed through."
+    },
+    "permission_matrix": {
+      "source": "app/permissions/project.py:56-143; declarations views/issue.py (Entity default, Lite :1802/:1958 comments, Member :1319/:1445 labels, IsAuthenticated :1266 yield); page/github_pr/git_code_review Entity",
+      "matrix": {
+        "anon_list": {
+          "status": 401,
+          "body": {
+            "detail": "Authentication credentials were not provided."
+          }
+        },
+        "outsider_list": {
+          "status": 403,
+          "body": {
+            "detail": "You do not have permission to perform this action."
+          }
+        },
+        "guest_list_safe": {
+          "status": 200,
+          "body": {
+            "grouped_by": null,
+            "sub_grouped_by": null,
+            "total_count": 8,
+            "next_cursor": "1000:1:0",
+            "prev_cursor": "1000:-1:1",
+            "next_page_results": false,
+            "prev_page_results": false,
+            "count": 8,
+            "total_pages": 1,
+            "total_results": 8,
+            "extra_stats": null,
+            "results_count": "omitted"
+          }
+        },
+        "guest_create_entity": {
+          "status": 403,
+          "body": {
+            "detail": "You do not have permission to perform this action."
+          }
+        },
+        "member_create_entity": {
+          "status": 201,
+          "body": {
+            "id": "c2cb70a1-b2c7-47b1-a56b-aa260c3d4f5f",
+            "type_id": null,
+            "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-7",
+            "created_at": "2026-10-02T23:33:38.758054Z",
+            "updated_at": "2026-10-02T23:33:38.758065Z",
+            "deleted_at": null,
+            "point": null,
+            "name": "perm probe",
+            "description_html": "<p></p>",
+            "description_binary": null,
+            "priority": "none",
+            "complexity_score": 0,
+            "start_date": null,
+            "target_date": null,
+            "sequence_id": 7,
+            "sort_order": 135535.0,
+            "completed_at": null,
+            "archived_at": null,
+            "is_draft": false,
+            "external_source": null,
+            "external_id": null,
+            "git_work_branch": "",
+            "created_via": null,
+            "agent_executor": null,
+            "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+            "updated_by": null,
+            "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+            "workspace": "92989e99-51c6-4725-8069-45784951694f",
+            "parent": null,
+            "state": "97b22834-b823-4109-a527-b39aa310ceae",
+            "estimate_point": null,
+            "type": null,
+            "assigned_pod": null,
+            "assignees": [],
+            "labels": [],
+            "relations_summary": {
+              "blocked_by": [],
+              "blocking": []
+            },
+            "has_open_blockers": false
+          }
+        },
+        "guest_comment_create_lite": {
+          "status": 201,
+          "body": {
+            "id": "9c3230e4-8396-492e-bff6-c9c9f5d92141",
+            "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-1",
+            "created_at": "2026-10-02T23:33:38.828716Z",
+            "updated_at": "2026-10-02T23:33:38.818209Z",
+            "deleted_at": null,
+            "comment_html": "<p>g</p>",
+            "attachments": [],
+            "labels": [],
+            "access": "INTERNAL",
+            "external_source": null,
+            "external_id": null,
+            "speaker_type": "human",
+            "speaker_label": "",
+            "speaker_agent_run_id": null,
+            "edited_at": null,
+            "created_by": "83fb2e45-81a4-4c79-bf46-073cfc7cb845",
+            "updated_by": "83fb2e45-81a4-4c79-bf46-073cfc7cb845",
+            "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+            "workspace": "92989e99-51c6-4725-8069-45784951694f",
+            "description": "990ee7fb-f5f1-4172-8e1b-d308b8c2838b",
+            "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+            "actor": "83fb2e45-81a4-4c79-bf46-073cfc7cb845",
+            "parent": null
+          }
+        },
+        "guest_label_create_memberperm": {
+          "status": 403,
+          "body": {
+            "detail": "You do not have permission to perform this action."
+          }
+        },
+        "guest_label_list": {
+          "status": 200,
+          "body": {
+            "grouped_by": null,
+            "sub_grouped_by": null,
+            "total_count": 2,
+            "next_cursor": "1000:1:0",
+            "prev_cursor": "1000:-1:1",
+            "next_page_results": false,
+            "prev_page_results": false,
+            "count": 2,
+            "total_pages": 1,
+            "total_results": 2,
+            "extra_stats": null,
+            "results_count": "omitted"
+          }
+        },
+        "outsider_label_list": {
+          "status": 403,
+          "body": {
+            "detail": "You do not have permission to perform this action."
+          }
+        },
+        "inactive_member_list": {
+          "status": 403,
+          "body": {
+            "detail": "You do not have permission to perform this action."
+          }
+        },
+        "archived_project_list": {
+          "status": 200,
+          "body": {
+            "grouped_by": null,
+            "sub_grouped_by": null,
+            "total_count": 0,
+            "next_cursor": "1000:1:0",
+            "prev_cursor": "1000:-1:1",
+            "next_page_results": false,
+            "prev_page_results": false,
+            "count": 0,
+            "total_pages": 0,
+            "total_results": 0,
+            "extra_stats": null,
+            "results_count": "omitted"
+          }
+        }
+      },
+      "rules": {
+        "ProjectEntityPermission": "SAFE: any active project member. Unsafe: role ADMIN/MEMBER only (guests 403).",
+        "ProjectLitePermission": "ANY active project member, all methods (guests can comment).",
+        "ProjectMemberPermission": "SAFE: any active member in workspace. POST: workspace ADMIN/MEMBER. Other unsafe: project ADMIN/MEMBER.",
+        "IsAuthenticated": "Any authenticated caller (agent-runs yield)."
+      }
+    },
+    "page_archive_guard": {
+      "source": "api/views/page.py:491-502; post :518-538; delete :554-573",
+      "matrix": {
+        "guest_archive": {
+          "status": 403,
+          "body": {
+            "detail": "You do not have permission to perform this action."
+          }
+        },
+        "owner_archive": {
+          "status": 200,
+          "body": {
+            "id": "255f3646-9ace-4f46-9620-788071f7a05e",
+            "name": "Fixture page",
+            "parent": null,
+            "owned_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+            "access": 0,
+            "is_locked": false,
+            "archived_at": "2026-10-02",
+            "created_at": "2026-10-02T23:17:12.040770Z",
+            "updated_at": "2026-10-02T23:17:12.040770Z",
+            "description_html": "<h1>Title</h1><p>para with <strong>bold</strong></p><ul><li>a</li><li>b</li></ul>",
+            "description_stripped": "Titlepara with boldab",
+            "description_markdown": "# Title\n\npara with **bold**\n\n- a\n- b"
+          }
+        },
+        "owner_archive_again_noop": {
+          "status": 200,
+          "body": {
+            "id": "255f3646-9ace-4f46-9620-788071f7a05e",
+            "name": "Fixture page",
+            "parent": null,
+            "owned_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+            "access": 0,
+            "is_locked": false,
+            "archived_at": "2026-10-02",
+            "created_at": "2026-10-02T23:17:12.040770Z",
+            "updated_at": "2026-10-02T23:17:12.040770Z",
+            "description_html": "<h1>Title</h1><p>para with <strong>bold</strong></p><ul><li>a</li><li>b</li></ul>",
+            "description_stripped": "Titlepara with boldab",
+            "description_markdown": "# Title\n\npara with **bold**\n\n- a\n- b"
+          }
+        },
+        "owner_unarchive": {
+          "status": 200,
+          "body": {
+            "id": "255f3646-9ace-4f46-9620-788071f7a05e",
+            "name": "Fixture page",
+            "parent": null,
+            "owned_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
+            "access": 0,
+            "is_locked": false,
+            "archived_at": null,
+            "created_at": "2026-10-02T23:17:12.040770Z",
+            "updated_at": "2026-10-02T23:17:12.040770Z",
+            "description_html": "<h1>Title</h1><p>para with <strong>bold</strong></p><ul><li>a</li><li>b</li></ul>",
+            "description_stripped": "Titlepara with boldab",
+            "description_markdown": "# Title\n\npara with **bold**\n\n- a\n- b"
+          }
+        },
+        "locked_archive": {
+          "status": 409,
+          "body": {
+            "error": "Page is locked",
+            "error_code": 4701,
+            "error_message": "PAGE_LOCKED"
+          }
+        },
+        "member_nonowner_archive": {
+          "status": 403,
+          "body": {
+            "error": "Only the page owner or a project admin can archive or unarchive it"
+          }
+        }
+      },
+      "note": "Guest POST is refused by ProjectEntityPermission (403 Detail) before reaching _check_can_archive; a MEMBER (role 15) passes permission and gets the owner/admin 403 message."
+    }
+  }
+}

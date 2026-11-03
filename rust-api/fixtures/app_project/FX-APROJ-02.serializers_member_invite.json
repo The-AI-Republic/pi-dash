@@ -1,0 +1,432 @@
+{
+  "_trace": "apps/api/pi_dash/app/serializers/project.py:193-200 (ProjectMemberSerializer), :203-212 (ProjectMemberPreferenceSerializer), :215-222 (ProjectMemberAdminSerializer), :225-231 (ProjectMemberRoleSerializer), :234-240 (ProjectMemberInviteSerializer); nested: apps/api/pi_dash/app/serializers/user.py:141-170 (UserLiteSerializer, UserAdminLiteSerializer), apps/api/pi_dash/app/serializers/workspace.py:79-83 (WorkspaceLiteSerializer); DynamicBaseSerializer fields= behavior apps/api/pi_dash/app/serializers/base.py:12-31",
+  "_method": "Django shell probes (pi_dash.settings.test) against scratch Postgres pidash_562_fixtures; ORM + serializer + queryset code executed directly. Django 4.2.30, djangorestframework 3.15.2. Serializers rendered from live ORM rows; validate_preferences driven through is_valid()/save() with deep-copied snapshots (validation mutates the instance in place).",
+  "member": {
+    "keys": [
+      "id",
+      "workspace",
+      "project",
+      "member",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+      "comment",
+      "role",
+      "view_props",
+      "default_props",
+      "preferences",
+      "sort_order",
+      "is_active",
+      "created_by",
+      "updated_by"
+    ],
+    "data": {
+      "id": "cfe32791-6566-4044-978f-3ecf21414596",
+      "workspace": {
+        "name": "fx02 4e33a3a3",
+        "slug": "fx02w-4e33a3a3",
+        "id": "eec47df5-8eb2-4aae-9093-320975d58cd3",
+        "logo_url": null
+      },
+      "project": {
+        "id": "8ddb0885-215e-4ae3-a772-bfa2b42d4295",
+        "identifier": "P4E33A3A",
+        "name": "P4e33a3a3",
+        "cover_image": null,
+        "cover_image_url": null,
+        "logo_props": {},
+        "description": "",
+        "is_default": true
+      },
+      "member": {
+        "id": "86ce5cd4-f3fe-4d07-909f-2be168a0fab6",
+        "first_name": "Fix",
+        "last_name": "Ture",
+        "avatar": "",
+        "avatar_url": null,
+        "is_bot": false,
+        "display_name": "fx02-4e33a3a3"
+      },
+      "created_at": "2026-10-02T22:13:44.998644Z",
+      "updated_at": "2026-10-02T22:13:44.998649Z",
+      "deleted_at": null,
+      "comment": null,
+      "role": 20,
+      "view_props": {
+        "filters": {
+          "priority": null,
+          "state": null,
+          "state_group": null,
+          "assignees": null,
+          "created_by": null,
+          "labels": null,
+          "start_date": null,
+          "target_date": null,
+          "subscriber": null
+        },
+        "display_filters": {
+          "group_by": null,
+          "order_by": "-created_at",
+          "type": null,
+          "sub_issue": true,
+          "show_empty_groups": true,
+          "layout": "list",
+          "calendar_date_range": ""
+        }
+      },
+      "default_props": {
+        "filters": {
+          "priority": null,
+          "state": null,
+          "state_group": null,
+          "assignees": null,
+          "created_by": null,
+          "labels": null,
+          "start_date": null,
+          "target_date": null,
+          "subscriber": null
+        },
+        "display_filters": {
+          "group_by": null,
+          "order_by": "-created_at",
+          "type": null,
+          "sub_issue": true,
+          "show_empty_groups": true,
+          "layout": "list",
+          "calendar_date_range": ""
+        }
+      },
+      "preferences": {
+        "pages": {
+          "block_display": true
+        },
+        "navigation": {
+          "default_tab": "work_items",
+          "hide_in_more_menu": []
+        }
+      },
+      "sort_order": 65535.0,
+      "is_active": true,
+      "created_by": null,
+      "updated_by": null
+    }
+  },
+  "member_admin": {
+    "keys": [
+      "id",
+      "workspace",
+      "project",
+      "member",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+      "comment",
+      "role",
+      "view_props",
+      "default_props",
+      "preferences",
+      "sort_order",
+      "is_active",
+      "created_by",
+      "updated_by"
+    ],
+    "data": {
+      "id": "cfe32791-6566-4044-978f-3ecf21414596",
+      "workspace": {
+        "name": "fx02 4e33a3a3",
+        "slug": "fx02w-4e33a3a3",
+        "id": "eec47df5-8eb2-4aae-9093-320975d58cd3",
+        "logo_url": null
+      },
+      "project": {
+        "id": "8ddb0885-215e-4ae3-a772-bfa2b42d4295",
+        "identifier": "P4E33A3A",
+        "name": "P4e33a3a3",
+        "cover_image": null,
+        "cover_image_url": null,
+        "logo_props": {},
+        "description": "",
+        "is_default": true
+      },
+      "member": {
+        "id": "86ce5cd4-f3fe-4d07-909f-2be168a0fab6",
+        "first_name": "Fix",
+        "last_name": "Ture",
+        "avatar": "",
+        "avatar_url": null,
+        "is_bot": false,
+        "display_name": "fx02-4e33a3a3",
+        "email": "fx02-4e33a3a3@example.com",
+        "last_login_medium": "email"
+      },
+      "created_at": "2026-10-02T22:13:44.998644Z",
+      "updated_at": "2026-10-02T22:13:44.998649Z",
+      "deleted_at": null,
+      "comment": null,
+      "role": 20,
+      "view_props": {
+        "filters": {
+          "priority": null,
+          "state": null,
+          "state_group": null,
+          "assignees": null,
+          "created_by": null,
+          "labels": null,
+          "start_date": null,
+          "target_date": null,
+          "subscriber": null
+        },
+        "display_filters": {
+          "group_by": null,
+          "order_by": "-created_at",
+          "type": null,
+          "sub_issue": true,
+          "show_empty_groups": true,
+          "layout": "list",
+          "calendar_date_range": ""
+        }
+      },
+      "default_props": {
+        "filters": {
+          "priority": null,
+          "state": null,
+          "state_group": null,
+          "assignees": null,
+          "created_by": null,
+          "labels": null,
+          "start_date": null,
+          "target_date": null,
+          "subscriber": null
+        },
+        "display_filters": {
+          "group_by": null,
+          "order_by": "-created_at",
+          "type": null,
+          "sub_issue": true,
+          "show_empty_groups": true,
+          "layout": "list",
+          "calendar_date_range": ""
+        }
+      },
+      "preferences": {
+        "pages": {
+          "block_display": true
+        },
+        "navigation": {
+          "default_tab": "work_items",
+          "hide_in_more_menu": []
+        }
+      },
+      "sort_order": 65535.0,
+      "is_active": true,
+      "created_by": null,
+      "updated_by": null
+    }
+  },
+  "member_role": {
+    "keys": [
+      "id",
+      "role",
+      "member",
+      "project",
+      "original_role",
+      "created_at"
+    ],
+    "data": {
+      "id": "cfe32791-6566-4044-978f-3ecf21414596",
+      "role": 20,
+      "member": "86ce5cd4-f3fe-4d07-909f-2be168a0fab6",
+      "project": "8ddb0885-215e-4ae3-a772-bfa2b42d4295",
+      "original_role": 20,
+      "created_at": "2026-10-02T22:13:44.998644Z"
+    }
+  },
+  "member_role_fields_kwarg_ignored": {
+    "keys": [
+      "id",
+      "role",
+      "member",
+      "project",
+      "original_role",
+      "created_at"
+    ],
+    "data": {
+      "id": "cfe32791-6566-4044-978f-3ecf21414596",
+      "role": 20,
+      "member": "86ce5cd4-f3fe-4d07-909f-2be168a0fab6",
+      "project": "8ddb0885-215e-4ae3-a772-bfa2b42d4295",
+      "original_role": 20,
+      "created_at": "2026-10-02T22:13:44.998644Z"
+    }
+  },
+  "preference": {
+    "keys": [
+      "preferences",
+      "project_id",
+      "member_id",
+      "workspace_id"
+    ],
+    "data": {
+      "preferences": {
+        "pages": {
+          "block_display": true
+        },
+        "navigation": {
+          "default_tab": "work_items",
+          "hide_in_more_menu": []
+        }
+      },
+      "project_id": "8ddb0885-215e-4ae3-a772-bfa2b42d4295",
+      "member_id": "86ce5cd4-f3fe-4d07-909f-2be168a0fab6",
+      "workspace_id": "eec47df5-8eb2-4aae-9093-320975d58cd3"
+    }
+  },
+  "preference_merge": {
+    "initial": {
+      "pages": {
+        "block_display": true
+      },
+      "navigation": {
+        "default_tab": "work_items",
+        "hide_in_more_menu": []
+      }
+    },
+    "after_first_validate": {
+      "pages": {
+        "block_display": true
+      },
+      "navigation": {
+        "default_tab": "work_items",
+        "hide_in_more_menu": []
+      },
+      "theme": "dark"
+    },
+    "after_first_save": {
+      "pages": {
+        "block_display": true
+      },
+      "theme": "dark",
+      "navigation": {
+        "default_tab": "work_items",
+        "hide_in_more_menu": []
+      }
+    },
+    "after_second_validate_nested_replace": {
+      "pages": {
+        "block_display": false
+      },
+      "theme": "dark",
+      "navigation": {
+        "default_tab": "work_items",
+        "hide_in_more_menu": []
+      }
+    },
+    "note": "dict.update: shallow \u2014 a nested dict in the patch REPLACES the whole sub-dict."
+  },
+  "invite": {
+    "keys": [
+      "id",
+      "project",
+      "workspace",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+      "email",
+      "accepted",
+      "token",
+      "message",
+      "responded_at",
+      "role",
+      "created_by",
+      "updated_by"
+    ],
+    "data": {
+      "id": "32f59689-1725-4583-8c65-8395612acbe4",
+      "project": {
+        "id": "8ddb0885-215e-4ae3-a772-bfa2b42d4295",
+        "identifier": "P4E33A3A",
+        "name": "P4e33a3a3",
+        "cover_image": null,
+        "cover_image_url": null,
+        "logo_props": {},
+        "description": "",
+        "is_default": true
+      },
+      "workspace": {
+        "name": "fx02 4e33a3a3",
+        "slug": "fx02w-4e33a3a3",
+        "id": "eec47df5-8eb2-4aae-9093-320975d58cd3",
+        "logo_url": null
+      },
+      "created_at": "2026-10-02T22:13:45.009331Z",
+      "updated_at": "2026-10-02T22:13:45.009339Z",
+      "deleted_at": null,
+      "email": "inv@example.com",
+      "accepted": false,
+      "token": "tok123",
+      "message": null,
+      "responded_at": null,
+      "role": 15,
+      "created_by": null,
+      "updated_by": null
+    }
+  },
+  "nested_user_lite": {
+    "keys": [
+      "id",
+      "first_name",
+      "last_name",
+      "avatar",
+      "avatar_url",
+      "is_bot",
+      "display_name"
+    ],
+    "data": {
+      "id": "86ce5cd4-f3fe-4d07-909f-2be168a0fab6",
+      "first_name": "Fix",
+      "last_name": "Ture",
+      "avatar": "",
+      "avatar_url": null,
+      "is_bot": false,
+      "display_name": "fx02-4e33a3a3"
+    }
+  },
+  "nested_user_admin_lite": {
+    "keys": [
+      "id",
+      "first_name",
+      "last_name",
+      "avatar",
+      "avatar_url",
+      "is_bot",
+      "display_name",
+      "email",
+      "last_login_medium"
+    ],
+    "data": {
+      "id": "86ce5cd4-f3fe-4d07-909f-2be168a0fab6",
+      "first_name": "Fix",
+      "last_name": "Ture",
+      "avatar": "",
+      "avatar_url": null,
+      "is_bot": false,
+      "display_name": "fx02-4e33a3a3",
+      "email": "fx02-4e33a3a3@example.com",
+      "last_login_medium": "email"
+    }
+  },
+  "nested_workspace_lite": {
+    "keys": [
+      "name",
+      "slug",
+      "id",
+      "logo_url"
+    ],
+    "data": {
+      "name": "fx02 4e33a3a3",
+      "slug": "fx02w-4e33a3a3",
+      "id": "eec47df5-8eb2-4aae-9093-320975d58cd3",
+      "logo_url": null
+    }
+  }
+}

@@ -1,0 +1,1180 @@
+{
+ "_note": "FX-RUN-01 types+pure. Sources: runner/models.py:207-329 (AgentRunStatus :207-234, AgentRunTrigger :237-253 + HUMAN_TRIGGERS :259-266 + AUTOMATIC_ISSUE_TRIGGERS :273 + run_is_human_triggered :276-278, RefusalCategory :281-292, ApprovalStatus :295-299, ApprovalKind :302-306, AgentChatSessionStatus :309-312, AgentChatMessageRole :315-319, AgentChatMessageStatus :322-328, ToolCallStatus :1178-1184); runner/services/usage.py:1-173 (coerce_token :69-79, normalize_usage :129-148, merge_usage :151-162, flat_token_fields :165-173, BIGINT_MAX :35, CANONICAL_USAGE_KEYS :37); runner/diagnostics.py:1-245 (infer_agent_label :103-128, enrich_run_error :149-170, classify_run_error :173-245); consts runner/views/runs.py:36-37 (DEFAULT_PER_PAGE 30, MAX_PER_PAGE 200), runner/views/run_endpoints.py:45 (MAX_EVENT_PAYLOAD_BYTES 64KiB) + :463-514 (stream ticket ex=60), runner/views/chat.py:64 (CHAT_EVENT_PAYLOAD_MAX_BYTES 256KiB), runner/services/chat.py:40-41 (CHAT_EVENT_CHANNEL_PREFIX, CHAT_ACTIVE_TIMEOUT_SECS), runner/tasks.py:208,219 (RUN_MESSAGE_DEDUPE_TTL_SECS default 604800). Method: venv python (3.12 / Django 4.2.30 / DRF 3.15.2) with DJANGO_SETTINGS_MODULE=pi_dash.settings.test; enums read off the live TextChoices classes; every vector below is the literal return value of the named function (probe /tmp/probe549_01.py; DB never touched).",
+ "enums": {
+  "AgentRunStatus": [
+   {
+    "name": "QUEUED",
+    "value": "queued",
+    "label": "Queued"
+   },
+   {
+    "name": "ASSIGNED",
+    "value": "assigned",
+    "label": "Assigned"
+   },
+   {
+    "name": "WAITING_FOR_WORKTREE",
+    "value": "waiting_for_worktree",
+    "label": "Waiting for Worktree"
+   },
+   {
+    "name": "RUNNING",
+    "value": "running",
+    "label": "Running"
+   },
+   {
+    "name": "CANCEL_REQUESTED",
+    "value": "cancel_requested",
+    "label": "Cancellation Requested"
+   },
+   {
+    "name": "AWAITING_APPROVAL",
+    "value": "awaiting_approval",
+    "label": "Awaiting Approval"
+   },
+   {
+    "name": "AWAITING_REAUTH",
+    "value": "awaiting_reauth",
+    "label": "Awaiting Reauth"
+   },
+   {
+    "name": "PAUSED_AWAITING_INPUT",
+    "value": "paused_awaiting_input",
+    "label": "Paused \u2014 Awaiting Input"
+   },
+   {
+    "name": "BLOCKED",
+    "value": "blocked",
+    "label": "Blocked"
+   },
+   {
+    "name": "COMPLETED",
+    "value": "completed",
+    "label": "Completed"
+   },
+   {
+    "name": "FAILED",
+    "value": "failed",
+    "label": "Failed"
+   },
+   {
+    "name": "CANCELLED",
+    "value": "cancelled",
+    "label": "Cancelled"
+   },
+   {
+    "name": "REFUSED",
+    "value": "refused",
+    "label": "Refused"
+   }
+  ],
+  "AgentRunTrigger": [
+   {
+    "name": "STATE_TRANSITION",
+    "value": "state_transition",
+    "label": "State transition"
+   },
+   {
+    "name": "RUN_AI",
+    "value": "run_ai",
+    "label": "Run AI button"
+   },
+   {
+    "name": "COMMENT_AND_RUN",
+    "value": "comment_and_run",
+    "label": "Comment & Run"
+   },
+   {
+    "name": "TICK",
+    "value": "tick",
+    "label": "Automatic tick"
+   },
+   {
+    "name": "SCHEDULER",
+    "value": "scheduler",
+    "label": "Scheduler beat"
+   },
+   {
+    "name": "DIRECT",
+    "value": "direct",
+    "label": "Direct"
+   }
+  ],
+  "RefusalCategory": [
+   {
+    "name": "CYBER",
+    "value": "cyber",
+    "label": "Cyber"
+   },
+   {
+    "name": "BIO",
+    "value": "bio",
+    "label": "Bio"
+   },
+   {
+    "name": "REASONING_EXTRACTION",
+    "value": "reasoning_extraction",
+    "label": "Reasoning Extraction"
+   },
+   {
+    "name": "UNKNOWN",
+    "value": "unknown",
+    "label": "Unknown"
+   }
+  ],
+  "ApprovalStatus": [
+   {
+    "name": "PENDING",
+    "value": "pending",
+    "label": "Pending"
+   },
+   {
+    "name": "ACCEPTED",
+    "value": "accepted",
+    "label": "Accepted"
+   },
+   {
+    "name": "DECLINED",
+    "value": "declined",
+    "label": "Declined"
+   },
+   {
+    "name": "EXPIRED",
+    "value": "expired",
+    "label": "Expired"
+   }
+  ],
+  "ApprovalKind": [
+   {
+    "name": "COMMAND_EXECUTION",
+    "value": "command_execution",
+    "label": "Command Execution"
+   },
+   {
+    "name": "FILE_CHANGE",
+    "value": "file_change",
+    "label": "File Change"
+   },
+   {
+    "name": "NETWORK_ACCESS",
+    "value": "network_access",
+    "label": "Network Access"
+   },
+   {
+    "name": "OTHER",
+    "value": "other",
+    "label": "Other"
+   }
+  ],
+  "AgentChatSessionStatus": [
+   {
+    "name": "OPEN",
+    "value": "open",
+    "label": "Open"
+   },
+   {
+    "name": "CLOSED",
+    "value": "closed",
+    "label": "Closed"
+   },
+   {
+    "name": "FAILED",
+    "value": "failed",
+    "label": "Failed"
+   }
+  ],
+  "AgentChatMessageRole": [
+   {
+    "name": "USER",
+    "value": "user",
+    "label": "User"
+   },
+   {
+    "name": "ASSISTANT",
+    "value": "assistant",
+    "label": "Assistant"
+   },
+   {
+    "name": "TOOL",
+    "value": "tool",
+    "label": "Tool"
+   },
+   {
+    "name": "SYSTEM",
+    "value": "system",
+    "label": "System"
+   }
+  ],
+  "AgentChatMessageStatus": [
+   {
+    "name": "QUEUED",
+    "value": "queued",
+    "label": "Queued"
+   },
+   {
+    "name": "SENT",
+    "value": "sent",
+    "label": "Sent"
+   },
+   {
+    "name": "STREAMING",
+    "value": "streaming",
+    "label": "Streaming"
+   },
+   {
+    "name": "COMPLETED",
+    "value": "completed",
+    "label": "Completed"
+   },
+   {
+    "name": "FAILED",
+    "value": "failed",
+    "label": "Failed"
+   },
+   {
+    "name": "CANCELLED",
+    "value": "cancelled",
+    "label": "Cancelled"
+   }
+  ],
+  "ToolCallStatus": [
+   {
+    "name": "PREPARED",
+    "value": "prepared",
+    "label": "Prepared"
+   },
+   {
+    "name": "SUBMITTED",
+    "value": "submitted",
+    "label": "Submitted"
+   },
+   {
+    "name": "SUCCEEDED",
+    "value": "succeeded",
+    "label": "Succeeded"
+   },
+   {
+    "name": "FAILED",
+    "value": "failed",
+    "label": "Failed"
+   },
+   {
+    "name": "UNKNOWN",
+    "value": "unknown",
+    "label": "Outcome unknown"
+   },
+   {
+    "name": "DENIED",
+    "value": "denied",
+    "label": "Denied"
+   }
+  ]
+ },
+ "enum_meta": {
+  "BIGINT_MAX": 9223372036854775807,
+  "CANONICAL_USAGE_KEYS": [
+   "input",
+   "output",
+   "total",
+   "cache_read",
+   "cache_write",
+   "reasoning"
+  ]
+ },
+ "usage": {
+  "coerce_token": [
+   {
+    "in": "None",
+    "out": null
+   },
+   {
+    "in": "''",
+    "out": null
+   },
+   {
+    "in": "True",
+    "out": null
+   },
+   {
+    "in": "False",
+    "out": null
+   },
+   {
+    "in": "0",
+    "out": 0
+   },
+   {
+    "in": "5",
+    "out": 5
+   },
+   {
+    "in": "-1",
+    "out": null
+   },
+   {
+    "in": "'42'",
+    "out": 42
+   },
+   {
+    "in": "' 7 '",
+    "out": 7
+   },
+   {
+    "in": "'4.5'",
+    "out": null
+   },
+   {
+    "in": "4.5",
+    "out": 4
+   },
+   {
+    "in": "4.0",
+    "out": 4
+   },
+   {
+    "in": "'0x10'",
+    "out": null
+   },
+   {
+    "in": "9223372036854775807",
+    "out": 9223372036854775807
+   },
+   {
+    "in": "9223372036854775808",
+    "out": null
+   },
+   {
+    "in": "'9223372036854775807'",
+    "out": 9223372036854775807
+   },
+   {
+    "in": "'9223372036854775808'",
+    "out": null
+   },
+   {
+    "in": "[]",
+    "out": null
+   },
+   {
+    "in": "{}",
+    "out": null
+   },
+   {
+    "in": "'abc'",
+    "out": null
+   },
+   {
+    "in": "'12abc'",
+    "out": null
+   }
+  ],
+  "normalize_usage": [
+   {
+    "case": "empty-dict",
+    "in": {},
+    "out": {}
+   },
+   {
+    "case": "none",
+    "in": null,
+    "out": {}
+   },
+   {
+    "case": "list",
+    "in": [
+     1,
+     2
+    ],
+    "out": {}
+   },
+   {
+    "case": "string",
+    "in": "x",
+    "out": {}
+   },
+   {
+    "case": "canonical-full",
+    "in": {
+     "input": 12000,
+     "output": 800,
+     "total": 12800,
+     "cache_read": 9000,
+     "cache_write": 1200,
+     "reasoning": 400,
+     "raw": {
+      "a": 1
+     }
+    },
+    "out": {
+     "input": 12000,
+     "output": 800,
+     "total": 12800,
+     "cache_read": 9000,
+     "cache_write": 1200,
+     "reasoning": 400,
+     "raw": {
+      "a": 1
+     }
+    }
+   },
+   {
+    "case": "canonical-input-output-only",
+    "in": {
+     "input": 100,
+     "output": 50
+    },
+    "out": {
+     "input": 100,
+     "output": 50,
+     "total": 150
+    }
+   },
+   {
+    "case": "canonical-input-only",
+    "in": {
+     "input": 100
+    },
+    "out": {
+     "input": 100
+    }
+   },
+   {
+    "case": "canonical-with-empty-raw",
+    "in": {
+     "input": 1,
+     "output": 2,
+     "raw": {}
+    },
+    "out": {
+     "input": 1,
+     "output": 2,
+     "total": 3
+    }
+   },
+   {
+    "case": "canonical-with-none-raw",
+    "in": {
+     "input": 1,
+     "output": 2,
+     "raw": null
+    },
+    "out": {
+     "input": 1,
+     "output": 2,
+     "total": 3
+    }
+   },
+   {
+    "case": "canonical-with-string-raw",
+    "in": {
+     "input": 1,
+     "output": 2,
+     "raw": ""
+    },
+    "out": {
+     "input": 1,
+     "output": 2,
+     "total": 3
+    }
+   },
+   {
+    "case": "canonical-with-list-raw",
+    "in": {
+     "input": 1,
+     "output": 2,
+     "raw": [
+      1
+     ]
+    },
+    "out": {
+     "input": 1,
+     "output": 2,
+     "total": 3,
+     "raw": [
+      1
+     ]
+    }
+   },
+   {
+    "case": "canonical-string-numbers",
+    "in": {
+     "input": "10",
+     "output": "5"
+    },
+    "out": {
+     "input": 10,
+     "output": 5,
+     "total": 15
+    }
+   },
+   {
+    "case": "canonical-bad-numbers",
+    "in": {
+     "input": "x",
+     "output": -3
+    },
+    "out": {}
+   },
+   {
+    "case": "canonical-total-only",
+    "in": {
+     "total": 9
+    },
+    "out": {
+     "total": 9
+    }
+   },
+   {
+    "case": "canonical-zero",
+    "in": {
+     "input": 0,
+     "output": 0
+    },
+    "out": {
+     "input": 0,
+     "output": 0,
+     "total": 0
+    }
+   },
+   {
+    "case": "anthropic",
+    "in": {
+     "input_tokens": 1000,
+     "output_tokens": 200,
+     "cache_read_input_tokens": 700,
+     "cache_creation_input_tokens": 100
+    },
+    "out": {
+     "input": 1800,
+     "output": 200,
+     "cache_read": 700,
+     "cache_write": 100,
+     "total": 2000,
+     "raw": {
+      "input_tokens": 1000,
+      "output_tokens": 200,
+      "cache_read_input_tokens": 700,
+      "cache_creation_input_tokens": 100
+     }
+    }
+   },
+   {
+    "case": "anthropic-no-cache",
+    "in": {
+     "input_tokens": 1000,
+     "output_tokens": 200
+    },
+    "out": {
+     "input": 1000,
+     "output": 200,
+     "total": 1200,
+     "raw": {
+      "input_tokens": 1000,
+      "output_tokens": 200
+     }
+    }
+   },
+   {
+    "case": "openai-chat",
+    "in": {
+     "prompt_tokens": 50,
+     "completion_tokens": 10,
+     "total_tokens": 60
+    },
+    "out": {
+     "input": 50,
+     "output": 10,
+     "total": 60,
+     "raw": {
+      "prompt_tokens": 50,
+      "completion_tokens": 10,
+      "total_tokens": 60
+     }
+    }
+   },
+   {
+    "case": "openai-chat-nested",
+    "in": {
+     "prompt_tokens": 50,
+     "completion_tokens": 10,
+     "prompt_tokens_details": {
+      "cached_tokens": 20
+     },
+     "completion_tokens_details": {
+      "reasoning_tokens": 4
+     }
+    },
+    "out": {
+     "input": 50,
+     "output": 10,
+     "cache_read": 20,
+     "reasoning": 4,
+     "total": 60,
+     "raw": {
+      "prompt_tokens": 50,
+      "completion_tokens": 10,
+      "prompt_tokens_details": {
+       "cached_tokens": 20
+      },
+      "completion_tokens_details": {
+       "reasoning_tokens": 4
+      }
+     }
+    }
+   },
+   {
+    "case": "codex-v2",
+    "in": {
+     "inputTokens": 5,
+     "outputTokens": 6,
+     "totalTokens": 11,
+     "cachedInputTokens": 2,
+     "cacheWriteInputTokens": 1,
+     "reasoningOutputTokens": 3
+    },
+    "out": {
+     "input": 5,
+     "output": 6,
+     "total": 11,
+     "cache_read": 2,
+     "cache_write": 1,
+     "reasoning": 3,
+     "raw": {
+      "inputTokens": 5,
+      "outputTokens": 6,
+      "totalTokens": 11,
+      "cachedInputTokens": 2,
+      "cacheWriteInputTokens": 1,
+      "reasoningOutputTokens": 3
+     }
+    }
+   },
+   {
+    "case": "pydantic-ai",
+    "in": {
+     "input_tokens": 7,
+     "output_tokens": 8,
+     "details": {
+      "reasoning_tokens": 2
+     }
+    },
+    "out": {
+     "input": 7,
+     "output": 8,
+     "reasoning": 2,
+     "total": 15,
+     "raw": {
+      "input_tokens": 7,
+      "output_tokens": 8,
+      "details": {
+       "reasoning_tokens": 2
+      }
+     }
+    }
+   },
+   {
+    "case": "total-only-provider",
+    "in": {
+     "total_tokens": 42
+    },
+    "out": {
+     "total": 42,
+     "raw": {
+      "total_tokens": 42
+     }
+    }
+   },
+   {
+    "case": "unrecognized-keys",
+    "in": {
+     "foo": 1,
+     "bar": 2
+    },
+    "out": {
+     "raw": {
+      "foo": 1,
+      "bar": 2
+     }
+    }
+   },
+   {
+    "case": "bool-values",
+    "in": {
+     "input_tokens": true,
+     "output_tokens": false
+    },
+    "out": {
+     "raw": {
+      "input_tokens": true,
+      "output_tokens": false
+     }
+    }
+   }
+  ],
+  "merge_usage": [
+   {
+    "case": "no-sources",
+    "out": {}
+   },
+   {
+    "case": "single",
+    "out": {
+     "input": 1,
+     "output": 2,
+     "total": 3
+    }
+   },
+   {
+    "case": "freshest-wins-per-counter",
+    "out": {
+     "input": 120,
+     "output": 60,
+     "total": 180,
+     "raw": {
+      "input_tokens": 120,
+      "output_tokens": 60
+     }
+    }
+   },
+   {
+    "case": "older-counter-survives",
+    "out": {
+     "input": 100,
+     "output": 60,
+     "cache_read": 90,
+     "total": 150
+    }
+   },
+   {
+    "case": "three-sources",
+    "out": {
+     "input": 3,
+     "output": 2,
+     "total": 99
+    }
+   },
+   {
+    "case": "none-source-skipped",
+    "out": {
+     "input": 1,
+     "output": 5,
+     "total": 3
+    }
+   },
+   {
+    "case": "raw-overlay",
+    "out": {
+     "input": 10,
+     "output": 20,
+     "total": 30,
+     "raw": {
+      "a": 1
+     }
+    }
+   }
+  ],
+  "flat_token_fields": [
+   {
+    "in": {
+     "input": 1,
+     "output": 2,
+     "total": 3
+    },
+    "out": {
+     "input_tokens": 1,
+     "output_tokens": 2,
+     "total_tokens": 3
+    }
+   },
+   {
+    "in": {
+     "input": "x"
+    },
+    "out": {
+     "input_tokens": null,
+     "output_tokens": null,
+     "total_tokens": null
+    }
+   },
+   {
+    "in": {},
+    "out": {
+     "input_tokens": null,
+     "output_tokens": null,
+     "total_tokens": null
+    }
+   },
+   {
+    "in": null,
+    "out": {
+     "input_tokens": null,
+     "output_tokens": null,
+     "total_tokens": null
+    }
+   },
+   {
+    "in": "str",
+    "out": {
+     "input_tokens": null,
+     "output_tokens": null,
+     "total_tokens": null
+    }
+   },
+   {
+    "in": {
+     "total": 9223372036854775808
+    },
+    "out": {
+     "input_tokens": null,
+     "output_tokens": null,
+     "total_tokens": null
+    }
+   }
+  ],
+  "rules": {
+   "canonical_detection": "any key of CANONICAL_USAGE_KEYS present -> canonical path (usage.py:140); else provider path",
+   "total_rule": "total = input + output only when total absent AND both present (usage.py:104-107); explicit total always wins",
+   "anthropic_rule": "input += cache_read + cache_write when an _ANTHROPIC_CACHE_KEYS key is present (usage.py:124-125)",
+   "raw_rule": "canonical path: raw passes through verbatim unless None/{}/\"\" (usage.py:146-147); provider path: whole input dict kept under raw",
+   "merge_rule": "later source wins per top-level key after per-source normalize; no total recompute across sources (usage.py:159-162)"
+  }
+ },
+ "diagnostics": {
+  "infer_agent_label": [
+   {
+    "case": "model-claude",
+    "out": "Claude Code",
+    "note": "kwargs: model='claude-opus-4-5'"
+   },
+   {
+    "case": "model-grok-weak",
+    "out": "",
+    "note": "kwargs: model='grok-4.3'"
+   },
+   {
+    "case": "model-empty",
+    "out": "",
+    "note": "kwargs: model=None"
+   },
+   {
+    "case": "caps-codex",
+    "out": "Codex",
+    "note": "kwargs: runner={'name': '', 'host_label': '', 'capabilities': {'executor': 'codex'}, 'dev_machine': None}"
+   },
+   {
+    "case": "caps-list",
+    "out": "Cursor",
+    "note": "kwargs: runner={'name': '', 'host_label': '', 'capabilities': ['cursor_agent'], 'dev_machine': None}"
+   },
+   {
+    "case": "caps-nested",
+    "out": "OpenClaw",
+    "note": "kwargs: runner={'name': '', 'host_label': '', 'capabilities': {'a': {'b': ['openclaw']}}, 'dev_machine': None}"
+   },
+   {
+    "case": "runner-name-grok",
+    "out": "Grok",
+    "note": "kwargs: runner={'name': 'grok-runner-1', 'host_label': '', 'capabilities': None, 'dev_machine': None}"
+   },
+   {
+    "case": "runner-name-museum",
+    "out": "",
+    "note": "kwargs: runner={'name': 'museum-host', 'host_label': '', 'capabilities': None, 'dev_machine': None}"
+   },
+   {
+    "case": "runner-name-muse-code",
+    "out": "Muse Code",
+    "note": "kwargs: runner={'name': 'muse_code daemon', 'host_label': '', 'capabilities': None, 'dev_machine': None}"
+   },
+   {
+    "case": "host-label",
+    "out": "Claude Code",
+    "note": "kwargs: runner={'name': '', 'host_label': 'My Claude box', 'capabilities': None, 'dev_machine': None}"
+   },
+   {
+    "case": "error-fallback",
+    "out": "Claude Code",
+    "note": "kwargs: error='claude crashed'"
+   },
+   {
+    "case": "error-path-mention",
+    "out": "Claude Code",
+    "note": "kwargs: error='/Users/claude/x failed',runner={'name': 'plain', 'host_label': '', 'capabilities': None, 'dev_machine': None}"
+   },
+   {
+    "case": "precedence-model-over-caps",
+    "out": "Codex",
+    "note": "kwargs: model='codex',runner={'name': '', 'host_label': '', 'capabilities': ['cursor'], 'dev_machine': None}"
+   },
+   {
+    "case": "precedence-caps-over-name",
+    "out": "Codex",
+    "note": "kwargs: runner={'name': 'cursor box', 'host_label': '', 'capabilities': ['codex'], 'dev_machine': None}"
+   },
+   {
+    "case": "precedence-name-over-host",
+    "out": "Codex",
+    "note": "kwargs: runner={'name': 'codex', 'host_label': 'cursor', 'capabilities': None, 'dev_machine': None}"
+   },
+   {
+    "case": "nothing",
+    "out": "",
+    "note": "kwargs: "
+   },
+   {
+    "case": "runner-none",
+    "out": "",
+    "note": "kwargs: runner=None,error='',model=None"
+   }
+  ],
+  "enrich_run_error": [
+   {
+    "case": "empty",
+    "in": "",
+    "kwargs": {},
+    "out": ""
+   },
+   {
+    "case": "already-enriched",
+    "in": "Raw agent error:\nx",
+    "kwargs": {},
+    "out": "Raw agent error:\nx"
+   },
+   {
+    "case": "non-auth",
+    "in": "boom",
+    "kwargs": {},
+    "out": "boom"
+   },
+   {
+    "case": "auth-401",
+    "in": "Error 401: Invalid authentication credentials",
+    "kwargs": {},
+    "out": "401 authentication_failed\nAI agent: AI agent auth appears expired or invalid. Go to the dev machine and re-authenticate the AI agent, then restart the Pi Dash runner.\n\nRaw agent error:\nError 401: Invalid authentication credentials"
+   },
+   {
+    "case": "auth-403",
+    "in": "403 failed to authenticate token",
+    "kwargs": {},
+    "out": "403 authentication_failed\nAI agent: AI agent auth appears expired or invalid. Go to the dev machine and re-authenticate the AI agent, then restart the Pi Dash runner.\n\nRaw agent error:\n403 failed to authenticate token"
+   },
+   {
+    "case": "auth-no-code",
+    "in": "failed to authenticate",
+    "kwargs": {},
+    "out": "authentication_failed\nAI agent: AI agent auth appears expired or invalid. Go to the dev machine and re-authenticate the AI agent, then restart the Pi Dash runner.\n\nRaw agent error:\nfailed to authenticate"
+   },
+   {
+    "case": "auth-with-runner",
+    "in": "Invalid authentication credentials",
+    "kwargs": {
+     "runner": {
+      "name": "r1",
+      "host_label": "",
+      "capabilities": null,
+      "dev_machine": "<__main__.FakeMachine object at 0x10f5bd0d0>"
+     }
+    },
+    "out": "authentication_failed\nAI agent: AI agent auth appears expired or invalid. Go to the dev machine \"mac\" for runner \"r1\" and re-authenticate the AI agent, then restart the Pi Dash runner.\n\nRaw agent error:\nInvalid authentication credentials"
+   },
+   {
+    "case": "auth-with-model",
+    "in": "Invalid authentication credentials",
+    "kwargs": {
+     "model": "codex-mini"
+    },
+    "out": "authentication_failed\nAI agent: Codex auth appears expired or invalid. Go to the dev machine and re-authenticate Codex, then restart the Pi Dash runner.\n\nRaw agent error:\nInvalid authentication credentials"
+   }
+  ],
+  "classify_run_error": [
+   {
+    "in": "''",
+    "out": null
+   },
+   {
+    "in": "'   '",
+    "out": null
+   },
+   {
+    "in": "None",
+    "out": null
+   },
+   {
+    "in": "[]",
+    "out": null
+   },
+   {
+    "in": "'Invalid authentication credentials for model'",
+    "out": {
+     "source": "agent",
+     "source_label": "Agent CLI",
+     "kind": "agent_authentication",
+     "summary": "Invalid authentication credentials for model",
+     "action": "Re-authenticate the agent CLI on the runner machine, then restart the Pi Dash runner."
+    }
+   },
+   {
+    "in": "'authentication_failed: bad token'",
+    "out": {
+     "source": "agent",
+     "source_label": "Agent CLI",
+     "kind": "agent_authentication",
+     "summary": "authentication_failed: bad token",
+     "action": "Re-authenticate the agent CLI on the runner machine, then restart the Pi Dash runner."
+    }
+   },
+   {
+    "in": "'Failed to authenticate with provider'",
+    "out": {
+     "source": "agent",
+     "source_label": "Agent CLI",
+     "kind": "agent_authentication",
+     "summary": "Failed to authenticate with provider",
+     "action": "Re-authenticate the agent CLI on the runner machine, then restart the Pi Dash runner."
+    }
+   },
+   {
+    "in": "'The selected model may not exist'",
+    "out": {
+     "source": "agent",
+     "source_label": "Agent CLI",
+     "kind": "agent_model_access",
+     "summary": "The selected model may not exist",
+     "action": "Choose a model the agent account can access, then retry the run."
+    }
+   },
+   {
+    "in": "'The selected model may not have access to this org'",
+    "out": {
+     "source": "agent",
+     "source_label": "Agent CLI",
+     "kind": "agent_model_access",
+     "summary": "The selected model may not have access to this org",
+     "action": "Choose a model the agent account can access, then retry the run."
+    }
+   },
+   {
+    "in": "'runner_not_found: gone'",
+    "out": {
+     "source": "pidash_cloud",
+     "source_label": "Pi Dash cloud",
+     "kind": "runner_registration",
+     "summary": "runner_not_found: gone",
+     "action": "Remove or re-add the stale local runner registration."
+    }
+   },
+   {
+    "in": "'run_not_owned_by_runner'",
+    "out": {
+     "source": "pidash_cloud",
+     "source_label": "Pi Dash cloud",
+     "kind": "runner_registration",
+     "summary": "run_not_owned_by_runner",
+     "action": "Remove or re-add the stale local runner registration."
+    }
+   },
+   {
+    "in": "'daemon shutdown requested'",
+    "out": {
+     "source": "pidash_runner",
+     "source_label": "Pi Dash runner",
+     "kind": "runner_lifecycle",
+     "summary": "daemon shutdown requested",
+     "action": "Check runner service status and restart the runner if it should still accept work."
+    }
+   },
+   {
+    "in": "'runner revoked by admin'",
+    "out": {
+     "source": "pidash_runner",
+     "source_label": "Pi Dash runner",
+     "kind": "runner_lifecycle",
+     "summary": "runner revoked by admin",
+     "action": "Check runner service status and restart the runner if it should still accept work."
+    }
+   },
+   {
+    "in": "'session_evicted from pool'",
+    "out": {
+     "source": "pidash_runner",
+     "source_label": "Pi Dash runner",
+     "kind": "runner_lifecycle",
+     "summary": "session_evicted from pool",
+     "action": "Check runner service status and restart the runner if it should still accept work."
+    }
+   },
+   {
+    "in": "'agent stalled: no output'",
+    "out": {
+     "source": "agent",
+     "source_label": "Agent CLI",
+     "kind": "agent_stalled",
+     "summary": "agent stalled: no output",
+     "action": "Inspect the runner machine for a stuck agent process or long-running tool call."
+    }
+   },
+   {
+    "in": "'run ended without new agent events'",
+    "out": {
+     "source": "agent",
+     "source_label": "Agent CLI",
+     "kind": "agent_stalled",
+     "summary": "run ended without new agent events",
+     "action": "Inspect the runner machine for a stuck agent process or long-running tool call."
+    }
+   },
+   {
+    "in": "'some random crash'",
+    "out": {
+     "source": "unknown",
+     "source_label": "Unknown",
+     "kind": "unknown",
+     "summary": "some random crash",
+     "action": ""
+    }
+   },
+   {
+    "in": "'401 authentication_failed\\nAI agent: Codex auth appears expired or invalid. blah'",
+    "out": {
+     "source": "agent",
+     "source_label": "Codex",
+     "kind": "agent_authentication",
+     "summary": "401 authentication_failed",
+     "action": "Re-authenticate Codex on the runner machine, then restart the Pi Dash runner."
+    }
+   }
+  ],
+  "rules": {
+   "infer_precedence": "model (from_model=True, grok excluded) -> capabilities (deep text walk) -> name -> host_label -> error text (diagnostics.py:113-128)",
+   "enrich_gate": "empty or already containing 'Raw agent error:' passes through; else only kind==agent_authentication is enriched (diagnostics.py:152-158)",
+   "auth_header": "first 401/403 in text becomes '<code> authentication_failed', else bare 'authentication_failed' (diagnostics.py:22-33)",
+   "label_recovery": "enriched errors recover the agent from the 'AI agent: <label> auth ...' line (diagnostics.py:90-100)"
+  }
+ },
+ "consts": {
+  "DEFAULT_PER_PAGE": 30,
+  "MAX_PER_PAGE": 200,
+  "MAX_EVENT_PAYLOAD_BYTES": 65536,
+  "CHAT_EVENT_PAYLOAD_MAX_BYTES": 262144,
+  "CHAT_EVENT_CHANNEL_PREFIX": "agent_chat_session:",
+  "CHAT_ACTIVE_TIMEOUT_SECS": 1800,
+  "RUN_MESSAGE_DEDUPE_TTL_SECS_default": 604800,
+  "stream_ticket": {
+   "key": "ws_upgrade_ticket:{ticket}",
+   "ex_secs": 60,
+   "expires_in_secs": 60,
+   "payload_keys": [
+    "run_id",
+    "stream",
+    "runner_id",
+    "expires_at"
+   ],
+   "source": "runner/views/run_endpoints.py:491-503"
+  },
+  "event_channel": {
+   "source": "runner/services/chat.py:44-45",
+   "def": "def event_channel(session_id) -> str: return f\"{CHAT_EVENT_CHANNEL_PREFIX}{session_id}\"",
+   "example": "agent_chat_session:<session_id>"
+  }
+ }
+}

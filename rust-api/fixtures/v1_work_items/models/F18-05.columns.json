@@ -1,0 +1,1835 @@
+{
+  "$schema_note": "Static behaviour record. No code is executed by this file.",
+  "fixture": "F18-05",
+  "_method": "information_schema.columns (ordinal order) on scratch pidash_conv659 after `manage.py migrate` (pi_dash.settings.test); cross-checked against Django model _meta fields. For verification against the db crate.",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "tables": {
+    "Issue": {
+      "db_table": "issues",
+      "model_source": "apps/api/pi_dash/db/models/issue.py",
+      "column_count": 34,
+      "columns": [
+        {
+          "name": "created_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "name",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "description_json",
+          "data_type": "jsonb",
+          "udt": "jsonb",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "priority",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 30
+        },
+        {
+          "name": "start_date",
+          "data_type": "date",
+          "udt": "date",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "target_date",
+          "data_type": "date",
+          "udt": "date",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "sequence_id",
+          "data_type": "integer",
+          "udt": "int4",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "created_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "parent_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "project_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "state_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "workspace_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "description_html",
+          "data_type": "text",
+          "udt": "text",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "description_stripped",
+          "data_type": "text",
+          "udt": "text",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "completed_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "sort_order",
+          "data_type": "double precision",
+          "udt": "float8",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "point",
+          "data_type": "integer",
+          "udt": "int4",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "archived_at",
+          "data_type": "date",
+          "udt": "date",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "is_draft",
+          "data_type": "boolean",
+          "udt": "bool",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "external_id",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": true,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "external_source",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": true,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "description_binary",
+          "data_type": "bytea",
+          "udt": "bytea",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "estimate_point_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "type_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "deleted_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "git_work_branch",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 128
+        },
+        {
+          "name": "assigned_pod_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "workpad",
+          "data_type": "text",
+          "udt": "text",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "created_via",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": true,
+          "default": null,
+          "max_length": 32
+        },
+        {
+          "name": "agent_executor",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": true,
+          "default": null,
+          "max_length": 24
+        },
+        {
+          "name": "complexity_score",
+          "data_type": "integer",
+          "udt": "int4",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        }
+      ],
+      "model_fields_not_in_db": [],
+      "db_columns_not_in_model": []
+    },
+    "Label": {
+      "db_table": "labels",
+      "model_source": "apps/api/pi_dash/db/models/label.py",
+      "column_count": 15,
+      "columns": [
+        {
+          "name": "created_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "name",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "description",
+          "data_type": "text",
+          "udt": "text",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "created_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "project_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "workspace_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "parent_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "color",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "sort_order",
+          "data_type": "double precision",
+          "udt": "float8",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "external_id",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": true,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "external_source",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": true,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "deleted_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        }
+      ],
+      "model_fields_not_in_db": [],
+      "db_columns_not_in_model": []
+    },
+    "IssueLink": {
+      "db_table": "issue_links",
+      "model_source": "apps/api/pi_dash/db/models/issue.py:471-484",
+      "column_count": 12,
+      "columns": [
+        {
+          "name": "created_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "title",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": true,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "url",
+          "data_type": "text",
+          "udt": "text",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "created_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "issue_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "project_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "workspace_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "metadata",
+          "data_type": "jsonb",
+          "udt": "jsonb",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "deleted_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        }
+      ],
+      "model_fields_not_in_db": [],
+      "db_columns_not_in_model": []
+    },
+    "IssueComment": {
+      "db_table": "issue_comments",
+      "model_source": "apps/api/pi_dash/db/models/comment.py",
+      "column_count": 24,
+      "columns": [
+        {
+          "name": "created_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "comment_stripped",
+          "data_type": "text",
+          "udt": "text",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "attachments",
+          "data_type": "ARRAY",
+          "udt": "_varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "created_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "issue_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "project_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "workspace_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "actor_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "comment_html",
+          "data_type": "text",
+          "udt": "text",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "comment_json",
+          "data_type": "jsonb",
+          "udt": "jsonb",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "access",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 100
+        },
+        {
+          "name": "external_id",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": true,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "external_source",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": true,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "deleted_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "edited_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "description_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "parent_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "speaker_type",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 32
+        },
+        {
+          "name": "speaker_label",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 128
+        },
+        {
+          "name": "speaker_agent_run_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "labels",
+          "data_type": "ARRAY",
+          "udt": "_varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        }
+      ],
+      "model_fields_not_in_db": [],
+      "db_columns_not_in_model": []
+    },
+    "IssueActivity": {
+      "db_table": "issue_activities",
+      "model_source": "apps/api/pi_dash/db/models/activity.py",
+      "column_count": 20,
+      "columns": [
+        {
+          "name": "created_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "verb",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "field",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": true,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "old_value",
+          "data_type": "text",
+          "udt": "text",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "new_value",
+          "data_type": "text",
+          "udt": "text",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "comment",
+          "data_type": "text",
+          "udt": "text",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "attachments",
+          "data_type": "ARRAY",
+          "udt": "_varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "created_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "issue_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "issue_comment_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "project_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "workspace_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "actor_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "new_identifier",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "old_identifier",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "epoch",
+          "data_type": "double precision",
+          "udt": "float8",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "deleted_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        }
+      ],
+      "model_fields_not_in_db": [],
+      "db_columns_not_in_model": []
+    },
+    "FileAsset": {
+      "db_table": "file_assets",
+      "model_source": "apps/api/pi_dash/db/models/asset.py",
+      "column_count": 24,
+      "columns": [
+        {
+          "name": "created_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "attributes",
+          "data_type": "jsonb",
+          "udt": "jsonb",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "asset",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 800
+        },
+        {
+          "name": "created_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "workspace_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "is_deleted",
+          "data_type": "boolean",
+          "udt": "bool",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "deleted_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "is_archived",
+          "data_type": "boolean",
+          "udt": "bool",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "comment_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "entity_type",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": true,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "external_id",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": true,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "external_source",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": true,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "is_uploaded",
+          "data_type": "boolean",
+          "udt": "bool",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "issue_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "page_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "project_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "size",
+          "data_type": "double precision",
+          "udt": "float8",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "storage_metadata",
+          "data_type": "jsonb",
+          "udt": "jsonb",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "user_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "draft_issue_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "entity_identifier",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": true,
+          "default": null,
+          "max_length": 255
+        }
+      ],
+      "model_fields_not_in_db": [],
+      "db_columns_not_in_model": []
+    },
+    "IssueRelation": {
+      "db_table": "issue_relations",
+      "model_source": "apps/api/pi_dash/db/models/relation.py",
+      "column_count": 11,
+      "columns": [
+        {
+          "name": "created_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "relation_type",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 20
+        },
+        {
+          "name": "created_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "issue_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "project_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "related_issue_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "workspace_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "deleted_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        }
+      ],
+      "model_fields_not_in_db": [],
+      "db_columns_not_in_model": []
+    },
+    "GithubPullRequestLink": {
+      "db_table": "github_pull_request_links",
+      "model_source": "apps/api/pi_dash/db/models/github_pr.py",
+      "column_count": 18,
+      "columns": [
+        {
+          "name": "created_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "deleted_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "repo_owner",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "repo_name",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "pr_number",
+          "data_type": "integer",
+          "udt": "int4",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "url",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 500
+        },
+        {
+          "name": "title",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 500
+        },
+        {
+          "name": "state",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 12
+        },
+        {
+          "name": "merged",
+          "data_type": "boolean",
+          "udt": "bool",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "draft",
+          "data_type": "boolean",
+          "udt": "bool",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "pr_updated_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "created_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "issue_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "project_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "workspace_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        }
+      ],
+      "model_fields_not_in_db": [],
+      "db_columns_not_in_model": []
+    },
+    "GitCodeReviewLink": {
+      "db_table": "git_code_review_links",
+      "model_source": "apps/api/pi_dash/db/models/code_review.py",
+      "column_count": 23,
+      "columns": [
+        {
+          "name": "created_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "deleted_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "provider",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 32
+        },
+        {
+          "name": "host_url",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 500
+        },
+        {
+          "name": "namespace",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 500
+        },
+        {
+          "name": "repo_name",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 500
+        },
+        {
+          "name": "repo_external_id",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "external_id",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "external_iid",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "url",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 1000
+        },
+        {
+          "name": "title",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 500
+        },
+        {
+          "name": "state",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 16
+        },
+        {
+          "name": "merged",
+          "data_type": "boolean",
+          "udt": "bool",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "draft",
+          "data_type": "boolean",
+          "udt": "bool",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "remote_updated_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "metadata",
+          "data_type": "jsonb",
+          "udt": "jsonb",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "created_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "issue_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "project_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "workspace_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        }
+      ],
+      "model_fields_not_in_db": [],
+      "db_columns_not_in_model": []
+    },
+    "Page": {
+      "db_table": "pages",
+      "model_source": "apps/api/pi_dash/db/models/page.py",
+      "column_count": 26,
+      "columns": [
+        {
+          "name": "created_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "name",
+          "data_type": "text",
+          "udt": "text",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "description_json",
+          "data_type": "jsonb",
+          "udt": "jsonb",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "description_html",
+          "data_type": "text",
+          "udt": "text",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "description_stripped",
+          "data_type": "text",
+          "udt": "text",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "access",
+          "data_type": "smallint",
+          "udt": "int2",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "created_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "owned_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "workspace_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "color",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": false,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "archived_at",
+          "data_type": "date",
+          "udt": "date",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "is_locked",
+          "data_type": "boolean",
+          "udt": "bool",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "parent_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "view_props",
+          "data_type": "jsonb",
+          "udt": "jsonb",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "logo_props",
+          "data_type": "jsonb",
+          "udt": "jsonb",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "description_binary",
+          "data_type": "bytea",
+          "udt": "bytea",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "is_global",
+          "data_type": "boolean",
+          "udt": "bool",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "deleted_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "moved_to_page",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "moved_to_project",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "external_id",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": true,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "external_source",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": true,
+          "default": null,
+          "max_length": 255
+        },
+        {
+          "name": "sort_order",
+          "data_type": "double precision",
+          "udt": "float8",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        }
+      ],
+      "model_fields_not_in_db": [],
+      "db_columns_not_in_model": []
+    },
+    "ProjectPage": {
+      "db_table": "project_pages",
+      "model_source": "apps/api/pi_dash/db/models/page.py",
+      "column_count": 9,
+      "columns": [
+        {
+          "name": "created_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "created_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "page_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "project_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "updated_by_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "workspace_id",
+          "data_type": "uuid",
+          "udt": "uuid",
+          "nullable": false,
+          "default": null,
+          "max_length": null
+        },
+        {
+          "name": "deleted_at",
+          "data_type": "timestamp with time zone",
+          "udt": "timestamptz",
+          "nullable": true,
+          "default": null,
+          "max_length": null
+        }
+      ],
+      "model_fields_not_in_db": [],
+      "db_columns_not_in_model": []
+    }
+  }
+}

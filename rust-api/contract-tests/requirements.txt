@@ -1,0 +1,51 @@
+# Contract-test dependencies (test runner side only).
+# The Django server under test uses apps/api/requirements/*.txt.
+celery>=5.3
+httpx==0.28.1
+psycopg[binary]==3.3.0
+pika>=1.3
+requests>=2.31
+redis
+
+pytest==9.0.3
+
+# PIDASHCONV-81 (v1_openapi domain + _harness/tests/test_sinks.py):
+aiosmtpd>=1.4.5
+pyyaml>=6  # v1_openapi: parse the default YAML rendering of the schema doc
+
+# Rules (from PIDASHCONV-1, binding):
+# - Never import Django or use its test client. HTTP via httpx, seeding via SQL.
+# - Extend ``_harness/``, never fork it per domain.
+
+# PIDASHCONV-83: SMTP sink backend (lazy import in _harness/sinks.py).
+aiosmtpd==1.4.6
+
+# PIDASHCONV-75 (orchestration domain): redis-transport wire publisher.
+kombu>=5.3
+
+# PIDASHCONV-99 (runner websocket oracle): WS client for the ws/runner/
+# close-code suite (test_ws_close.py). Handshake-only; no Django imports.
+websockets>=15
+
+# PIDASHCONV-138 (prompting data plane): Jinja2 sandbox for the dual-engine
+# render check (test_data_plane_dual_engine.py). Same engine the Django
+# renderer uses; compared against minijinja, never Django imports.
+jinja2>=3.1
+
+# PIDASHCONV-809 (ops instance group): Fernet for decrypting seeded
+# instance_configurations rows when comparing plaintext (test_instance.py).
+cryptography>=42
+
+# PIDASHCONV-1106 (exports domain): fetch the uploaded zips back from
+# the fixture S3 (LocalStack) for byte comparison. Never touches Django.
+boto3>=1.34
+
+# PIDASHCONV-1290 (tasks_cleanup mongo oracle): plant the conflicting
+# archive document + unique index on `id`. Never touches Django.
+pymongo>=4.6
+
+# PIDASHCONV-1505 (tasks_webhooks link-crawl oracles): test_link_crawl_decoding.py
+# and test_link_crawl_rcdata.py import bs4 at module top. Pinned to the exact
+# version the oracles assert (bs4.__version__ == "4.12.3") and Django uses
+# (apps/api/requirements/base.txt) — a drift would reshape the entity table.
+beautifulsoup4==4.12.3

@@ -1,0 +1,28 @@
+{
+  "_fixture": "F-SEND",
+  "_method": "executed: .venv-django python /tmp/probe_d07_pure.py (real function body, real re)",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_sources": [
+    "apps/api/pi_dash/bgtasks/email_notification_task.py:27-30"
+  ],
+  "cases": [
+    {
+      "in": "PROJ-12 Fix\u0007 login bug",
+      "out": "PROJ-12 Fix login bug"
+    },
+    {
+      "in": "Hello\u0000World\u001f!\u007f T\u0080e\u009fst",
+      "out": "HelloWorld! Test"
+    },
+    {
+      "in": "clean subject",
+      "out": "clean subject"
+    },
+    {
+      "in": "tab\there",
+      "out": "tabhere"
+    }
+  ],
+  "note": "tab/newline are stripped too (\\x09-\\x0D in range); only used on the subject issue.name",
+  "regex": "[\\x00-\\x1F\\x7F-\\x9F] -> ''"
+}

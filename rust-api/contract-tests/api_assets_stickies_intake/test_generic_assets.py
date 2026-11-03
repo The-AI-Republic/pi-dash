@@ -1,0 +1,271 @@
+"""Generic workspace assets: upload, download URL, mark-uploaded.
+
+``GenericAssetEndpoint`` (``POST /api/v1/workspaces/<slug>/assets/``,
+``GET``/``PATCH /api/v1/workspaces/<slug>/assets/<uuid>/``). Any
+authenticated caller may mint an upload; download/patch resolve the row by
+``(id, workspace, is_deleted=False)``. The download shape
+(``asset_id``/``asset_url``/``asset_name``/``asset_type``) is the wire format
+installed runners consume, so it is pinned exactly.
+"""
+
+import uuid
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+
+
+def _base(org):
+    return f"/api/v1/workspaces/{org.workspace['slug']}/assets/"
+
+
+def _upload(org, role="admin", **overrides):
+    payload = {"name": "report.pdf", "type": "application/pdf", "size": 204800, **overrides}
+    r = org.request("POST", _base(org), role, json=payload)
+    assert r.status_code == 200, r.text[:500]
+    return r.json()
+
+
+def _updated_at(org, asset_id):
+    """Read the stored ``file_assets.updated_at`` (the column, not the wire)."""
+    return org.conn.execute(
+        "SELECT updated_at FROM file_assets WHERE id = %s", (asset_id,)
+    ).fetchone()[0]
+
+
+def _mark_uploaded(org, asset_id):
+    r = org.request(
+        "PATCH", f"{_base(org)}{asset_id}/", "admin", json={"is_uploaded": True}
+    )
+    assert r.status_code == 204, r.text[:500]
+
+
+def test_generic_patch_noop_leaves_updated_at(org):
+    """A bodyless ``PATCH {}`` writes only ``is_uploaded``, like Django.
+
+    ``asset.py:617`` calls ``asset.save(update_fields=["is_uploaded"])``;
+    Django 4.2 ``_save_table`` filters the columns to ``update_fields`` and
+    never adds the ``auto_now`` column, so the stored ``updated_at`` is
+    byte-identical before and after. The generic PATCH's extra
+    ``updated_at = now()`` on Rust moves it forward, and reads that render
+    the column (``FileAssetSerializer`` is ``fields="__all__"``) then
+    disagree between backends.
+    """
+    asset_id = _upload(org)["asset_id"]
+    _mark_uploaded(org, asset_id)
+    before = _updated_at(org, asset_id)
+    r = org.request("PATCH", f"{_base(org)}{asset_id}/", "admin", json={})
+    assert r.status_code == 204
+    assert r.text == ""
+    assert _updated_at(org, asset_id) == before
+
+
+def test_generic_patch_is_uploaded_leaves_updated_at(org):
+    """``PATCH {"is_uploaded": true}`` leaves ``updated_at`` untouched."""
+    asset_id = _upload(org)["asset_id"]
+    before = _updated_at(org, asset_id)
+    r = org.request(
+        "PATCH", f"{_base(org)}{asset_id}/", "admin", json={"is_uploaded": True}
+    )
+    assert r.status_code == 204
+    assert r.text == ""
+    row = org.conn.execute(
+        "SELECT is_uploaded, updated_at FROM file_assets WHERE id = %s", (asset_id,)
+    ).fetchone()
+    assert row[0] is True
+    assert row[1] == before
+
+
+def test_generic_upload_shape(org):
+    body = _upload(org)
+    assert set(body) == {"upload_data", "asset_id", "asset_url"}
+    assert set(body["upload_data"]) == {"url", "fields"}
+    assert body["upload_data"]["url"].startswith("http")
+    assert body["upload_data"]["fields"]["key"].endswith("-report.pdf")
+    # No project/issue bound yet: the attachment URL carries None segments.
+    assert body["asset_url"] == (
+        f"/api/assets/v2/workspaces/{org.workspace['slug']}/projects/None"
+        f"/issues/None/attachments/{body['asset_id']}/"
+    )
+
+
+def test_generic_upload_with_project_and_external_tracking(org):
+    body = _upload(
+        org,
+        project_id=org.project["id"],
+        external_id="ext-123",
+        external_source="github",
+    )
+    assert set(body) == {"upload_data", "asset_id", "asset_url"}
+    assert f"/projects/{org.project['id']}/" in body["asset_url"]
+
+
+def test_generic_upload_conflict_on_external_id(org):
+    _upload(org, external_id="dup-1", external_source="github")
+    payload = {
+        "name": "other.pdf",
+        "type": "application/pdf",
+        "size": 100,
+        "external_id": "dup-1",
+        "external_source": "github",
+    }
+    r = org.request("POST", _base(org), "admin", json=payload)
+    assert r.status_code == 409
+    body = r.json()
+    assert set(body) == {"message", "asset_id", "asset_url"}
+    assert body["message"] == "Asset with same external id and source already exists"
+
+
+def test_generic_upload_missing_name_or_size(org):
+    r = org.request("POST", _base(org), "admin", json={"type": "application/pdf"})
+    assert r.status_code == 400
+    assert r.json() == {"error": "Name and size are required fields.", "status": False}
+
+
+def test_generic_upload_invalid_file_type(org):
+    r = org.request(
+        "POST", _base(org), "admin",
+        json={"name": "x.bin", "type": "application/x-sh", "size": 100},
+    )
+    assert r.status_code == 400
+    assert r.json() == {"error": "Invalid file type.", "status": False}
+
+
+def test_generic_download_before_upload_400(org):
+    asset_id = _upload(org)["asset_id"]
+    r = org.request("GET", f"{_base(org)}{asset_id}/", "admin")
+    assert r.status_code == 400
+    assert r.json() == {"error": "Asset not yet uploaded"}
+
+
+def test_generic_patch_then_download_shape(org):
+    asset_id = _upload(org)["asset_id"]
+    r = org.request("PATCH", f"{_base(org)}{asset_id}/", "admin", json={"is_uploaded": True})
+    assert r.status_code == 204
+    assert r.text == ""
+    r = org.request("GET", f"{_base(org)}{asset_id}/", "admin")
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"asset_id", "asset_url", "asset_name", "asset_type"}
+    assert body["asset_id"] == asset_id
+    assert body["asset_name"] == "report.pdf"
+    assert body["asset_type"] == "application/pdf"
+    assert body["asset_url"].startswith("http")
+    assert "response-content-disposition" in body["asset_url"]
+
+
+def test_generic_download_empty_name_bare_disposition(org):
+    """An empty stored name signs a bare ``inline`` disposition, no ``filename*``.
+
+    ``S3Storage._get_content_disposition`` (``storage.py:115-124``) treats
+    ``""`` as falsy and returns the bare disposition; the v1 generic GET
+    (``asset.py:443-445``) passes ``attributes.get("name")`` straight
+    through. The v1 POST rejects an empty name, so the stored state is
+    seeded directly — it is reachable in production through the app v2
+    asset routes (the PIDASHCONV-1150 twin, which fixed the app_assets
+    copy of this presigner).
+    """
+    asset_id = _upload(org)["asset_id"]
+    _mark_uploaded(org, asset_id)
+    org.conn.execute(
+        "UPDATE file_assets SET attributes = jsonb_set(attributes, '{name}', '\"\"') "
+        "WHERE id = %s",
+        (asset_id,),
+    )
+    r = org.request("GET", f"{_base(org)}{asset_id}/", "admin")
+    assert r.status_code == 200, r.text[:500]
+    disposition = parse_qs(urlparse(r.json()["asset_url"]).query)[
+        "response-content-disposition"
+    ][0]
+    assert disposition == "inline"
+
+
+def test_generic_download_unknown_asset_404(org):
+    r = org.request("GET", f"{_base(org)}{uuid.uuid4()}/", "admin")
+    assert r.status_code == 404
+    assert r.json() == {"error": "Asset not found"}
+
+
+def test_generic_download_unknown_workspace_404(org):
+    asset_id = _upload(org)["asset_id"]
+    org.conn.execute(
+        "UPDATE file_assets SET is_uploaded = true WHERE id = %s", (asset_id,)
+    )
+    r = org.request("GET", f"/api/v1/workspaces/nope-{org.tag}/assets/{asset_id}/", "admin")
+    assert r.status_code == 404
+    assert r.json() == {"error": "Workspace not found"}
+
+
+def test_generic_download_cross_workspace_404(org):
+    asset_id = _upload(org)["asset_id"]
+    org.conn.execute(
+        "UPDATE file_assets SET is_uploaded = true WHERE id = %s", (asset_id,)
+    )
+    r = org.request(
+        "GET",
+        f"/api/v1/workspaces/{org.workspace2['slug']}/assets/{asset_id}/",
+        "other_admin",
+    )
+    assert r.status_code == 404
+    assert r.json() == {"error": "Asset not found"}
+
+
+def test_generic_download_anonymous_401(org):
+    asset_id = _upload(org)["asset_id"]
+    r = org.request("GET", f"{_base(org)}{asset_id}/", None)
+    assert r.status_code == 401
+
+
+def _post_generic(org, role="admin", **overrides):
+    payload = {"name": "x.pdf", "type": "application/pdf", "size": 100, **overrides}
+    return org.request("POST", _base(org), role, json=payload)
+
+
+def _stored_external(org, asset_id):
+    return org.conn.execute(
+        "SELECT external_id, external_source FROM file_assets WHERE id = %s",
+        (asset_id,),
+    ).fetchone()
+
+
+@pytest.mark.parametrize(
+    ("external_id", "spelling"),
+    [([1], "[1]"), ({"a": 1}, "{'a': 1}")],
+)
+def test_generic_upload_container_external_id(org, external_id, spelling):
+    """Django `CharField.to_python` str()ifies a container external_id.
+
+    A JSON array/object is stored as its CPython `str()` spelling and the
+    POST succeeds; the dedupe on a repeat POST finds the row and 409s.
+    """
+    r = _post_generic(org, external_id=external_id, external_source="s")
+    assert r.status_code == 200, r.text[:500]
+    body = r.json()
+    assert set(body) == {"upload_data", "asset_id", "asset_url"}
+    external_id_col, external_source_col = _stored_external(org, body["asset_id"])
+    assert external_id_col == spelling
+    assert external_source_col == "s"
+    repeat = _post_generic(org, external_id=external_id, external_source="s")
+    assert repeat.status_code == 409, repeat.text[:500]
+    repeat_body = repeat.json()
+    assert repeat_body["message"] == "Asset with same external id and source already exists"
+    assert repeat_body["asset_id"] == body["asset_id"]
+
+
+@pytest.mark.parametrize(
+    ("external_source", "spelling"),
+    [([1], "[1]"), ({"a": 1}, "{'a': 1}")],
+)
+def test_generic_upload_container_external_source(org, external_source, spelling):
+    """The same `str()` coercion applies to a container external_source."""
+    r = _post_generic(org, external_id="fixed-ext", external_source=external_source)
+    assert r.status_code == 200, r.text[:500]
+    body = r.json()
+    assert set(body) == {"upload_data", "asset_id", "asset_url"}
+    external_id_col, external_source_col = _stored_external(org, body["asset_id"])
+    assert external_id_col == "fixed-ext"
+    assert external_source_col == spelling
+    repeat = _post_generic(org, external_id="fixed-ext", external_source=external_source)
+    assert repeat.status_code == 409, repeat.text[:500]
+    repeat_body = repeat.json()
+    assert repeat_body["message"] == "Asset with same external id and source already exists"
+    assert repeat_body["asset_id"] == body["asset_id"]

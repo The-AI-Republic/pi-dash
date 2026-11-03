@@ -1,0 +1,36 @@
+{
+  "fixture": "FX-A-T-01",
+  "source": "bgtasks/export_task.py:128-226",
+  "task": "issue_export_task(provider, workspace_id, project_ids, token_id, multiple, slug)",
+  "before": {"exporters row": {"token": "<token>", "status": "queued", "url": null, "key": "", "reason": ""}},
+  "steps": [
+    "load ExporterHistory by token; set status=processing (save update_fields=[status])",
+    "workspace_issues = Issue.objects.filter(workspace__id, project_id__in, project member active, project archived null).select_related(project, workspace, state, created_by, estimate_point).prefetch_related(labels, issue_cycle__cycle, issue_module__module, assignees, issue_link, issue_subscribers+subscriber, issue_comments+actor order created_at, issue_relation+related, issue_related+issue, parent+type+project)",
+    "DataExporter(IssueExportSerializer, format_type=provider); ValueError -> status=failed, reason=str(e), return",
+    "multiple=true: one export per project_id (filename {slug}-{project_id}); false: single file (filename {slug}-{workspace_id})",
+    "create_zip_file(files) -> upload_to_s3(zip, workspace_id, token_id, slug)",
+    "any exception -> reload row, status=failed, reason=str(e), log_exception, return"
+  ],
+  "after_success": {"status": "processing->completed (in upload_to_s3)", "url": "<presigned GET url>", "key": "<workspace_id>/export-<slug>-<token[:6]>-<YYYY-MM-DD>.zip"},
+  "after_failure": {"status": "failed", "reason": "<str(exception)>"},
+  "fixtures": {
+    "FX-A-T-02a": {
+      "source": "bgtasks/export_task.py:28-38",
+      "fn": "create_zip_file(files: list[tuple[str, str|bytes]]) -> BytesIO",
+      "golden": {"input": [["an-ws-<wid>.csv", "Project,Name\nAN,I3\n"]], "output": "BytesIO positioned at 0; zip contains one entry with exact bytes (ZIP_DEFLATED)", "empty_input": "valid empty zip (no entries)"}
+    },
+    "FX-A-T-02b": {
+      "source": "bgtasks/export_task.py:42-124",
+      "fn": "upload_to_s3(zip_file, workspace_id, token_id, slug)",
+      "golden": {
+        "file_name": "{workspace_id}/export-{slug}-{token_id[:6]}-{today}.zip",
+        "expires_in": 604800,
+        "minio_branch": "upload ACL public-read ContentType application/zip, presign via custom-domain client",
+        "aws_branch": "upload ContentType application/zip (endpoint client when AWS_S3_ENDPOINT_URL else regional), presign via same client",
+        "db_write": "url=presigned (status completed, key=file_name) if presigned_url else status failed; save update_fields=[status, url, key]",
+        "todo": "line 41 TODO: move to file-asset storage (not done)"
+      }
+    }
+  },
+  "out_of_scope": ["exporter_expired_task.py and analytic_plot_export.py belong to D-09"]
+}

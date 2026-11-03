@@ -1,0 +1,23 @@
+{
+ "annotated_exists": [
+  "_member",
+  "_job_off",
+  "_paused",
+  "_llm"
+ ],
+ "excluded": [
+  {
+   "check": "min_role",
+   "id": "cf014988-eb26-4ab6-a87d-ff7897a2a8a5",
+   "user_email": "fxloop-guest@e.com"
+  }
+ ],
+ "method": "Ran eligible_due_targets() on scratch DB pidash_loop_fx; excluded row diagnosed with eligibility.check().",
+ "rows": [
+  {
+   "id": "49ba8fd1-f22f-4ca0-ae96-24d722c35934",
+   "user_email": "fxloop-member@e.com"
+  }
+ ],
+ "source": "apps/api/pi_dash/loop/eligibility.py:103-114"
+}

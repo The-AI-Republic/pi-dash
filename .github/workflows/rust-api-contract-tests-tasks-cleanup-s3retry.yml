@@ -1,0 +1,301 @@
+name: rust-api-contract-tests-tasks-cleanup-s3retry
+
+# PIDASHCONV-1697: asset-task S3 retries against a scripted stub, both
+# backends. Each job boots its worker with the S3 endpoint pointed at a
+# stub port (http://127.0.0.1:4598) instead of live LocalStack: the test
+# module binds the scripted stub itself at run time (both backends dial S3
+# lazily per task run, so the stub only needs to exist while the
+# instrumented job runs). No beat: a beat-fired run would contend with the
+# instrumented job for the single worker slot. Workers run serially
+# (solo pool / --concurrency 1) so the sentinel job's DB effect proves the
+# conn-drop job finished.
+#
+# The Django job pins botocore's legacy retry mode (5 attempts,
+# rand*2**(n-1) backoff, 200-<Error> as 500) and passes throughout; the
+# Rust job fails until the store retries the same way. Push-only like the
+# mongo job: CI runs after merge to rust-dev, never on PRs.
+
+on:
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-contract-tests-tasks-cleanup-s3retry.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  tasks-cleanup-s3retry-django:
+    name: tasks_cleanup S3 retry vs Django worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:15.7-alpine
+        env:
+          POSTGRES_USER: pi_dash
+          POSTGRES_PASSWORD: pi_dash
+          POSTGRES_DB: pi_dash
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: valkey/valkey:7.2.11-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      rabbitmq:
+        image: rabbitmq:3.13.6-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: pi_dash
+          RABBITMQ_DEFAULT_PASS: pi_dash
+          RABBITMQ_DEFAULT_VHOST: pi_dash
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.local
+      POSTGRES_USER: pi_dash
+      POSTGRES_PASSWORD: pi_dash
+      POSTGRES_DB: pi_dash
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://localhost:6379/
+      RABBITMQ_HOST: localhost
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: pi_dash
+      RABBITMQ_PASSWORD: pi_dash
+      RABBITMQ_VHOST: pi_dash
+      WEB_URL: http://localhost
+      APP_BASE_URL: http://localhost
+      EMAIL_BACKEND: django.core.mail.backends.smtp.EmailBackend
+      EMAIL_HOST: localhost
+      EMAIL_PORT: "1025"
+      EMAIL_USE_TLS: "0"
+      EMAIL_USE_SSL: "0"
+      EMAIL_FROM: Pi Dash Contract <contract@example.com>
+      HARD_DELETE_AFTER_DAYS: "0"
+      UNUPLOADED_ASSET_DELETE_DAYS: "0"
+      USE_MINIO: "1"
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_STORAGE_BUCKET_NAME: pi-dash-contract
+      AWS_S3_BUCKET_NAME: pi-dash-contract
+      # No live S3 in this job: the worker dials the test's scripted stub.
+      AWS_S3_ENDPOINT_URL: http://127.0.0.1:4598
+      S3RETRY_S3_PORT: "4598"
+      DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
+      CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
+      CONTRACT_REDIS_URL: redis://localhost:6379/0
+      CONTRACT_TASK_TIMEOUT: "60"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements.txt
+            apps/api/requirements/base.txt
+            apps/api/requirements/test.txt
+            rust-api/contract-tests/requirements.txt
+
+      - name: Install API dependencies
+        working-directory: apps/api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements/test.txt
+          # pi_dash.settings.local imports debug_toolbar (requirements/local.txt)
+          pip install "django-debug-toolbar==4.3.0"
+
+      - name: Install contract-test dependencies
+        working-directory: rust-api/contract-tests
+        run: pip install -r requirements.txt
+
+      - name: Migrate contract database
+        working-directory: apps/api
+        run: python manage.py migrate --no-input
+
+      - name: Start Celery worker (solo, stub endpoint, no beat)
+        working-directory: apps/api
+        run: |
+          # Same oracle includes as the worker-plane job (PIDASHCONV-1104):
+          # task modules the stock worker never imports (PDASHOSS01-292).
+          INCLUDES=$(grep -v '^[[:space:]]*#' ../../rust-api/contract-tests/_harness/oracle_worker_includes.txt | grep -v '^[[:space:]]*$' | paste -sd,)
+          nohup celery -A pi_dash worker -E --pool=solo -I "$INCLUDES" --loglevel=info \
+            > /tmp/contract-s3retry-worker.log 2>&1 &
+
+      - name: Run S3 retry oracle (Django)
+        working-directory: rust-api/contract-tests
+        # Same plugin dodge as the worker-plane job: the API install puts
+        # pytest-django in this interpreter; the oracle never touches Django.
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django tasks_cleanup/test_s3_retry.py -v
+
+      - name: Upload worker log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-s3retry-worker-log
+          path: /tmp/contract-s3retry-worker.log
+
+  tasks-cleanup-s3retry-rust:
+    name: tasks_cleanup S3 retry vs Rust worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:15.7-alpine
+        env:
+          POSTGRES_USER: pi_dash
+          POSTGRES_PASSWORD: pi_dash
+          POSTGRES_DB: pi_dash
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: valkey/valkey:7.2.11-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      rabbitmq:
+        image: rabbitmq:3.13.6-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: pi_dash
+          RABBITMQ_DEFAULT_PASS: pi_dash
+          RABBITMQ_DEFAULT_VHOST: pi_dash
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.local
+      POSTGRES_USER: pi_dash
+      POSTGRES_PASSWORD: pi_dash
+      POSTGRES_DB: pi_dash
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://localhost:6379/
+      RABBITMQ_HOST: localhost
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: pi_dash
+      RABBITMQ_PASSWORD: pi_dash
+      RABBITMQ_VHOST: pi_dash
+      WEB_URL: http://localhost
+      APP_BASE_URL: http://localhost
+      EMAIL_BACKEND: django.core.mail.backends.smtp.EmailBackend
+      EMAIL_HOST: localhost
+      EMAIL_PORT: "1025"
+      EMAIL_USE_TLS: "0"
+      EMAIL_USE_SSL: "0"
+      EMAIL_FROM: Pi Dash Contract <contract@example.com>
+      HARD_DELETE_AFTER_DAYS: "0"
+      UNUPLOADED_ASSET_DELETE_DAYS: "0"
+      USE_MINIO: "1"
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_STORAGE_BUCKET_NAME: pi-dash-contract
+      AWS_S3_BUCKET_NAME: pi-dash-contract
+      # No live S3 in this job: the worker dials the test's scripted stub.
+      AWS_S3_ENDPOINT_URL: http://127.0.0.1:4598
+      S3RETRY_S3_PORT: "4598"
+      BASE_URL: http://localhost:8000
+      DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
+      CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
+      CONTRACT_REDIS_URL: redis://localhost:6379/0
+      CONTRACT_TASK_TIMEOUT: "60"
+      # The Rust worker joins SEED_DIR directly with the seed filenames
+      # (services workspace_seed::read_seed_file); see the replay job.
+      SEED_DIR: ${{ github.workspace }}/apps/api/pi_dash/seeds/data
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements.txt
+            apps/api/requirements/base.txt
+            apps/api/requirements/test.txt
+            rust-api/contract-tests/requirements.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-api
+
+      - name: Install API dependencies
+        working-directory: apps/api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements/test.txt
+          pip install "django-debug-toolbar==4.3.0"
+
+      - name: Install contract-test dependencies
+        working-directory: rust-api/contract-tests
+        run: pip install -r requirements.txt
+
+      - name: Migrate contract database
+        working-directory: apps/api
+        run: python manage.py migrate --no-input
+
+      - name: Build Rust worker
+        working-directory: rust-api
+        run: cargo build --bin pidash-api
+
+      - name: Start Rust worker (concurrency 1, stub endpoint)
+        working-directory: rust-api
+        run: |
+          nohup ./target/debug/pidash-api worker --concurrency 1 \
+            > /tmp/contract-s3retry-rust-worker.log 2>&1 &
+          for i in $(seq 1 30); do
+            grep -q "worker + scheduler loops started" /tmp/contract-s3retry-rust-worker.log && break
+            sleep 2
+          done
+          grep -q "worker + scheduler loops started" /tmp/contract-s3retry-rust-worker.log
+
+      - name: Run S3 retry replay (Rust)
+        working-directory: rust-api/contract-tests
+        # Same plugin dodge as the replay job: the API install puts
+        # pytest-django in this interpreter; the replay never touches Django.
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django tasks_cleanup/test_rust_replay_s3_retry.py -v
+
+      - name: Upload worker log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-s3retry-rust-worker-log
+          path: /tmp/contract-s3retry-rust-worker.log

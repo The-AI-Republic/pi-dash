@@ -1,0 +1,100 @@
+# Contract suite: api-v1 work items (PIDASHCONV-76). Boots the live Django
+# backend (Postgres + Redis services) and runs the same pytest+httpx suite
+# that later runs against the Rust server through the proxy.
+name: rust-api contract tests — v1 work items
+
+on:
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - "apps/api/**"
+      - ".github/workflows/rust-api-contract-tests-v1-work-items.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  v1-work-items:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: pidash_contract
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/pidash_contract
+      REDIS_URL: redis://localhost:6379/0
+      AMQP_URL: redis://localhost:6379/1
+      WEB_URL: http://localhost
+      APP_BASE_URL: http://localhost
+      EMAIL_HOST: localhost
+      API_KEY_RATE_LIMIT: 100000/minute
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.test
+      BASE_URL: http://127.0.0.1:8000
+      # Stub live-document server the page-create tests bind (PIDASHCONV-1503):
+      # the backend converts through it only while a test holds it up; with
+      # the stub down conversion fails and the 503 tests still pass.
+      LIVE_BASE_URL: http://127.0.0.1:18096
+      # Dummy S3 settings for the attachment-presign tests (PIDASHCONV-789):
+      # presigning is offline (no S3 service needed), but without a
+      # key/secret/region/bucket botocore raises NoCredentialsError and
+      # Django 500s every attachment POST.
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: us-east-1
+      AWS_S3_BUCKET_NAME: pi-dash-contract
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+
+      - name: Install system deps for psycopg-c
+        run: sudo apt-get update -y && sudo apt-get install -y libpq-dev
+
+      - name: Install Django server and contract-test deps
+        run: >-
+          python -m pip install
+          -r apps/api/requirements/base.txt
+          -r rust-api/contract-tests/requirements.txt
+
+      - name: Migrate contract database
+        working-directory: apps/api
+        run: python manage.py migrate --noinput
+
+      - name: Start live Django server
+        working-directory: apps/api
+        run: |
+          python manage.py runserver 127.0.0.1:8000 --noreload > /tmp/django-contract.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null "$BASE_URL/"; then
+              echo "Django is up"; exit 0
+            fi
+            sleep 4
+          done
+          echo "Django did not start:"; tail -n 50 /tmp/django-contract.log; exit 1
+
+      - name: Run v1_work_items contract suite
+        working-directory: rust-api/contract-tests
+        run: python -m pytest v1_work_items -v

@@ -1,0 +1,261 @@
+name: rust-api-contract-tests-ops
+
+# PIDASHCONV-808: D-37 ops command suites. Binary-driven: each test seeds
+# Postgres with raw SQL, runs `manage.py <command>` (Django oracle) and
+# `pidash-api ops <command>` (Rust port) as subprocesses, and asserts
+# byte-identical stdout/stderr/exit plus equivalent DB/broker effects.
+# Runs the whole ops/ dir so sibling command issues inherit this job.
+# No servers or workers: nothing consumes the broker `celery` queue
+# while the sync_* tests drain their own marker messages.
+
+# PIDASHCONV-806: ops-boot-storage job (commands A: boot + storage).
+# F37-01/F37-02 replay against scratch Postgres + Redis + LocalStack S3.
+# No Django is needed: the suite drives the binary directly, seeds
+# django_migrations over SQL, and (for the 403/denied/drop branches) an
+# in-test SigV4-verifying stub. Only the LocalStack happy paths need the
+# S3 container in that job.
+
+on:
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-contract-tests-ops.yml"
+
+permissions:
+  contents: read
+
+# Pull requests cancel their superseded run. Pushes to rust-dev do not: with
+# merges landing every few minutes a cancelled-on-push run never finishes, so
+# the branch would have no post-merge result. Same group without cancel means
+# at most one run in progress and one pending (a newer push replaces the
+# pending one).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ops-repair:
+    name: ops oracle vs Rust binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:15.7-alpine
+        env:
+          POSTGRES_USER: pi_dash
+          POSTGRES_PASSWORD: pi_dash
+          POSTGRES_DB: pi_dash
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: valkey/valkey:7.2.11-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      rabbitmq:
+        image: rabbitmq:3.13.6-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: pi_dash
+          RABBITMQ_DEFAULT_PASS: pi_dash
+          RABBITMQ_DEFAULT_VHOST: pi_dash
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.local
+      POSTGRES_USER: pi_dash
+      POSTGRES_PASSWORD: pi_dash
+      POSTGRES_DB: pi_dash
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://localhost:6379/
+      RABBITMQ_HOST: localhost
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: pi_dash
+      RABBITMQ_PASSWORD: pi_dash
+      RABBITMQ_VHOST: pi_dash
+      WEB_URL: http://localhost
+      APP_BASE_URL: http://localhost
+      EMAIL_BACKEND: django.core.mail.backends.smtp.EmailBackend
+      EMAIL_HOST: localhost
+      EMAIL_PORT: "1025"
+      EMAIL_USE_TLS: "0"
+      EMAIL_USE_SSL: "0"
+      EMAIL_FROM: Pi Dash Contract <contract@example.com>
+      BASE_URL: http://localhost:8000
+      DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
+      ORACLE_DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash_oracle
+      CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
+      AMQP_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
+      CONTRACT_TASK_TIMEOUT: "60"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements.txt
+            apps/api/requirements/base.txt
+            apps/api/requirements/test.txt
+            rust-api/contract-tests/requirements.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-api
+
+      - name: Install API dependencies
+        working-directory: apps/api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements/test.txt
+          pip install "django-debug-toolbar==4.3.0"
+
+      - name: Install contract-test dependencies
+        working-directory: rust-api/contract-tests
+        run: pip install -r requirements.txt
+
+      - name: Create oracle database
+        # PIDASHCONV-818: the prompting suite (810) runs the Django oracle
+        # and the Rust binary against two independent scratch DBs, so the
+        # oracle DB is created here and migrated below, mirroring DATABASE_URL.
+        # psycopg comes from the contract-test deps installed above.
+        run: |
+          python - <<'EOF'
+          import os
+          from urllib.parse import urlsplit
+
+          import psycopg
+
+          oracle = os.environ["ORACLE_DATABASE_URL"]
+          dbname = urlsplit(oracle).path.lstrip("/")
+          conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+          with conn.cursor() as cur:
+              cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (dbname,))
+              if cur.fetchone() is None:
+                  cur.execute(f'CREATE DATABASE "{dbname}"')
+          conn.close()
+          EOF
+
+      - name: Migrate contract database
+        working-directory: apps/api
+        run: python manage.py migrate --no-input
+
+      - name: Migrate oracle database
+        working-directory: apps/api
+        env:
+          DATABASE_URL: ${{ env.ORACLE_DATABASE_URL }}
+        run: python manage.py migrate --no-input
+
+      - name: Build Rust binary
+        working-directory: rust-api
+        run: cargo build --bin pidash-api
+
+      - name: Run ops suites
+        working-directory: rust-api/contract-tests
+        # The API install puts pytest-django in this interpreter; the
+        # parent never imports Django (manage.py runs as a subprocess
+        # with this same environment).
+        # ops/test_boot_storage.py (PIDASHCONV-806) runs in the
+        # ops-boot-storage job below: it needs the LocalStack S3
+        # backend + AWS_* env that this job does not provide.
+        run: pytest -p no:django ops/ -v --ignore=ops/test_boot_storage.py
+
+  ops-boot-storage:
+    name: ops boot + storage vs binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:15.7-alpine
+        env:
+          POSTGRES_USER: pi_dash
+          POSTGRES_PASSWORD: pi_dash
+          POSTGRES_DB: pi_dash
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: valkey/valkey:7.2.11-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
+      # Dedicated database number: the clear_cache path runs a real
+      # FLUSHDB here, like Django (same convention as the ops cargo test).
+      REDIS_URL: redis://localhost:6379/6
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_S3_ENDPOINT_URL: http://localhost:4566
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: rust-api/contract-tests/requirements.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-api
+
+      - name: Install contract-test dependencies
+        working-directory: rust-api/contract-tests
+        run: pip install -r requirements.txt
+
+      - name: Start S3 (LocalStack)
+        run: |
+          docker run -d --name contract-s3 -p 4566:4566 \
+            -e SERVICES=s3 \
+            localstack/localstack:4.5.0
+          for i in $(seq 1 45); do
+            curl -sf http://localhost:4566/_localstack/health && break
+            sleep 2
+          done
+
+      - name: Build pidash-api binary
+        working-directory: rust-api
+        run: cargo build --bin pidash-api
+
+      - name: Run ops contract suite
+        working-directory: rust-api/contract-tests
+        env:
+          PIDASH_API_BIN: ${{ github.workspace }}/rust-api/target/debug/pidash-api
+        run: python -m pytest ops/test_boot_storage.py -v

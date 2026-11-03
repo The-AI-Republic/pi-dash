@@ -1,0 +1,406 @@
+{
+  "_trace": "apps/api/pi_dash/app/permissions/base.py:13-16 (ROLE), :19-87 (allow_permission); apps/api/pi_dash/app/permissions/project.py:56-82 (ProjectMemberPermission), :85-116 (ProjectEntityPermission), :146-184 (can_mutate_states); apps/api/pi_dash/app/permissions/workspace.py:103-110 (WorkspaceUserPermission); decorator call sites: project/base.py:100,144,225,257,433,441,450,461, invite.py:53,128, member.py:46,156,171,205,267,300,367,379, state/base.py:49,66,84,112,122,148, estimate/base.py:35,154,170,185; apps/api/pi_dash/utils/cache.py:15-22 (generate_cache_key), :54-88 (invalidate_cache_directly/invalidate_cache); apps/api/pi_dash/utils/host.py:17-70 (base_host); 401 bodies from DRF IsAuthenticated via apps/api/pi_dash/authentication/adapter/exception.py:17-32",
+  "_method": "Permission-class matrices + can_mutate_states + cache/host: Django shell probes (pi_dash.settings.test) against scratch Postgres pidash_562_fixtures; ORM + serializer + queryset code executed directly. Django 4.2.30, djangorestframework 3.15.2. allow_permission matrix + 401 bodies: Live captures against Django runserver (pi_dash.settings.test) from this checkout on scratch Postgres pidash_562_fixtures (own cluster 127.0.0.1:5434), BASE_URL http://127.0.0.1:8460, SECRET_KEY=562-fixtures-secret-not-for-prod, CLOUD_AGENT_ENABLED unset (False), redis db 14 as Celery broker. Django 4.2.30, djangorestframework 3.15.2. IDs/datetimes are live values (volatile); key sets, key order, statuses and error bodies are the pins.",
+  "allow_permission_matrix": {
+    "AMG_WS__list_projects": {
+      "admin20/20": {
+        "status": 200,
+        "body": "<list len=1>"
+      },
+      "member15/15": {
+        "status": 200,
+        "body": "<list len=1>"
+      },
+      "guest5/5": {
+        "status": 200,
+        "body": "<list len=1>"
+      },
+      "ws_member_no_project": {
+        "status": 200,
+        "body": "<list len=1>"
+      },
+      "ws_admin_project_guest": {
+        "status": 200,
+        "body": "<list len=1>"
+      },
+      "outsider": {
+        "status": 403,
+        "body": {
+          "error": "You don't have the required permissions."
+        }
+      },
+      "anonymous": {
+        "status": 401,
+        "body": {
+          "detail": "Authentication credentials were not provided."
+        }
+      }
+    },
+    "AM_WS__create_project": {
+      "admin20/20": {
+        "status": 201,
+        "body": "<dict len=55>"
+      },
+      "member15/15": {
+        "status": 201,
+        "body": "<dict len=55>"
+      },
+      "guest5/5": {
+        "status": 403,
+        "body": {
+          "error": "You don't have the required permissions."
+        }
+      },
+      "ws_member_no_project": {
+        "status": 201,
+        "body": "<dict len=55>"
+      },
+      "ws_admin_project_guest": {
+        "status": 201,
+        "body": "<dict len=55>"
+      },
+      "outsider": {
+        "status": 403,
+        "body": {
+          "error": "You don't have the required permissions."
+        }
+      },
+      "anonymous": {
+        "status": 401,
+        "body": {
+          "detail": "Authentication credentials were not provided."
+        }
+      }
+    },
+    "AM_P__archive": {
+      "admin20/20": {
+        "status": 200,
+        "body": "<dict len=1>"
+      },
+      "member15/15": {
+        "status": 200,
+        "body": "<dict len=1>"
+      },
+      "guest5/5": {
+        "status": 403,
+        "body": {
+          "error": "You don't have the required permissions."
+        }
+      },
+      "ws_member_no_project": {
+        "status": 403,
+        "body": {
+          "error": "You don't have the required permissions."
+        }
+      },
+      "ws_admin_project_guest": {
+        "status": 200,
+        "body": "<dict len=1>"
+      },
+      "outsider": {
+        "status": 403,
+        "body": {
+          "error": "You don't have the required permissions."
+        }
+      },
+      "anonymous": {
+        "status": 401,
+        "body": {
+          "detail": "Authentication credentials were not provided."
+        }
+      }
+    },
+    "A_P__member_create": {
+      "admin20/20": {
+        "status": 400,
+        "body": {
+          "error": "At least one member is required"
+        }
+      },
+      "member15/15": {
+        "status": 403,
+        "body": {
+          "error": "You don't have the required permissions."
+        }
+      },
+      "guest5/5": {
+        "status": 403,
+        "body": {
+          "error": "You don't have the required permissions."
+        }
+      },
+      "ws_member_no_project": {
+        "status": 403,
+        "body": {
+          "error": "You don't have the required permissions."
+        }
+      },
+      "ws_admin_project_guest": {
+        "status": 400,
+        "body": {
+          "error": "At least one member is required"
+        }
+      },
+      "outsider": {
+        "status": 403,
+        "body": {
+          "error": "You don't have the required permissions."
+        }
+      },
+      "anonymous": {
+        "status": 401,
+        "body": {
+          "detail": "Authentication credentials were not provided."
+        }
+      }
+    },
+    "AMG_P__member_list": {
+      "admin20/20": {
+        "status": 200,
+        "body": "<list len=4>"
+      },
+      "member15/15": {
+        "status": 200,
+        "body": "<list len=4>"
+      },
+      "guest5/5": {
+        "status": 200,
+        "body": "<list len=4>"
+      },
+      "ws_member_no_project": {
+        "status": 403,
+        "body": {
+          "error": "You don't have the required permissions."
+        }
+      },
+      "ws_admin_project_guest": {
+        "status": 200,
+        "body": "<list len=4>"
+      },
+      "outsider": {
+        "status": 403,
+        "body": {
+          "error": "You don't have the required permissions."
+        }
+      },
+      "anonymous": {
+        "status": 401,
+        "body": {
+          "detail": "Authentication credentials were not provided."
+        }
+      }
+    }
+  },
+  "allow_permission_shapes": {
+    "note": "29 decorator call sites collapse to 5 distinct (roles \u00d7 level) shapes; one live route per shape above. creator= is never used in D-25 (only intake/view domains). PROJECT-level gates add the workspace-admin override (base.py:64-78): a ws-admin with any project membership passes \u2014 see ws_admin_project_guest row."
+  },
+  "ProjectMemberPermission": {
+    "admin": {
+      "GET": true,
+      "POST": true,
+      "PATCH": true,
+      "DELETE": true
+    },
+    "member": {
+      "GET": true,
+      "POST": true,
+      "PATCH": true,
+      "DELETE": true
+    },
+    "guest": {
+      "GET": true,
+      "POST": false,
+      "PATCH": false,
+      "DELETE": false
+    },
+    "outsider": {
+      "GET": false,
+      "POST": false,
+      "PATCH": false,
+      "DELETE": false
+    },
+    "anonymous": {
+      "GET": false,
+      "POST": false,
+      "PATCH": false,
+      "DELETE": false
+    }
+  },
+  "ProjectEntityPermission": {
+    "admin": {
+      "GET": true,
+      "POST": true,
+      "PATCH": true,
+      "DELETE": true
+    },
+    "member": {
+      "GET": true,
+      "POST": true,
+      "PATCH": true,
+      "DELETE": true
+    },
+    "guest": {
+      "GET": true,
+      "POST": false,
+      "PATCH": false,
+      "DELETE": false
+    },
+    "outsider": {
+      "GET": false,
+      "POST": false,
+      "PATCH": false,
+      "DELETE": false
+    },
+    "anonymous": {
+      "GET": false,
+      "POST": false,
+      "PATCH": false,
+      "DELETE": false
+    }
+  },
+  "ProjectEntityPermission_identifier_branch": {
+    "admin": {
+      "GET": true,
+      "POST": true,
+      "PATCH": true,
+      "DELETE": true
+    },
+    "member": {
+      "GET": true,
+      "POST": true,
+      "PATCH": true,
+      "DELETE": true
+    },
+    "guest": {
+      "GET": true,
+      "POST": false,
+      "PATCH": false,
+      "DELETE": false
+    },
+    "outsider": {
+      "GET": false,
+      "POST": false,
+      "PATCH": false,
+      "DELETE": false
+    },
+    "anonymous": {
+      "GET": false,
+      "POST": false,
+      "PATCH": false,
+      "DELETE": false
+    }
+  },
+  "ProjectEntityPermission_note": "No D-25 view sets project_identifier, so the :91-98 branch is dead in this domain; matrix recorded for the port anyway.",
+  "WorkspaceUserPermission": {
+    "admin": {
+      "GET": true,
+      "POST": true,
+      "PATCH": true,
+      "DELETE": true
+    },
+    "member": {
+      "GET": true,
+      "POST": true,
+      "PATCH": true,
+      "DELETE": true
+    },
+    "guest": {
+      "GET": true,
+      "POST": true,
+      "PATCH": true,
+      "DELETE": true
+    },
+    "outsider": {
+      "GET": false,
+      "POST": false,
+      "PATCH": false,
+      "DELETE": false
+    },
+    "anonymous": {
+      "GET": false,
+      "POST": false,
+      "PATCH": false,
+      "DELETE": false
+    }
+  },
+  "can_mutate_states": {
+    "members_can_edit_states_true": {
+      "admin": true,
+      "member": true,
+      "guest": false,
+      "outsider": false,
+      "anonymous": false
+    },
+    "members_can_edit_states_false": {
+      "admin": true,
+      "member": false,
+      "guest": false,
+      "outsider": false,
+      "anonymous": false
+    },
+    "ws_admin_project_guest_flag_off": true,
+    "guest_inactive_membership": false
+  },
+  "cache_keys": {
+    "no_auth": "/api/x/",
+    "with_auth": "/api/x/:user-1",
+    "none_auth": "/api/x/"
+  },
+  "invalidate_cache_keys": {
+    "deleted_keys": [
+      "workspaces/fx07w-e8e47221/states/",
+      "/api/workspaces/fx07w-e8e47221/estimates/",
+      "/api/full/path/?a=1:bfa7056d-321c-4620-83f7-aa8030bbc02f",
+      "/api/anon/"
+    ],
+    "vectors": [
+      "states path w/ url_params (slug substituted, user=False)",
+      "estimates path w/ url_params",
+      "full-path + user id suffix (default user=True)",
+      "anonymous \u2192 no user suffix even with user=True (base cache.py:63)"
+    ]
+  },
+  "base_host": {
+    "is_app_true": "http://127.0.0.1:8460",
+    "default": "http://127.0.0.1:8460"
+  },
+  "unauthenticated_401": {
+    "list": {
+      "status": 401,
+      "body": {
+        "detail": "Authentication credentials were not provided."
+      }
+    },
+    "create": {
+      "status": 401,
+      "body": {
+        "detail": "Authentication credentials were not provided."
+      }
+    },
+    "states": {
+      "status": 401,
+      "body": {
+        "detail": "Authentication credentials were not provided."
+      }
+    },
+    "estimates": {
+      "status": 401,
+      "body": {
+        "detail": "Authentication credentials were not provided."
+      }
+    },
+    "members": {
+      "status": 401,
+      "body": {
+        "detail": "Authentication credentials were not provided."
+      }
+    },
+    "join_get": {
+      "status": 404,
+      "body": {
+        "error": "The required object does not exist."
+      }
+    }
+  },
+  "unauthenticated_note": "AllowAny join GET has no 401: anonymous callers reach the view and get the view's own 404 (see FX-APROJ-09 join)."
+}

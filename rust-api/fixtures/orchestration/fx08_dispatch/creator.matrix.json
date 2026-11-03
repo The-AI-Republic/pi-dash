@@ -1,0 +1,95 @@
+{
+  "_trace": "orchestration/scheduling.py:860-868 (TRIGGER_* + _MACHINE_TRIGGERS); :887-952 (_resolve_creator_for_trigger); local :892-899; cloud/managed filter :901-952",
+  "_method": "live resolver on pidash_524_scratch; frozen clock; real effective_executor_for_issue; D-11/F-06 seams (user_has_llm_config, check_project_role, enrolled_managed_runners) scripted per cloud/managed case; candidate order proven by an llm spy",
+  "cases": {
+    "triggers": {
+      "TRIGGER_TICK": "tick",
+      "TRIGGER_COMMENT_AND_RUN": "comment_and_run",
+      "TRIGGER_RUN_AI": "run_ai",
+      "MACHINE_TRIGGERS": [
+        "tick"
+      ]
+    },
+    "L1_local_actor_wins": {
+      "executor": "local_runner",
+      "actor": "fx8-live@example.com",
+      "triggered_by": "tick",
+      "result": "fx8-live@example.com"
+    },
+    "L2_local_tick_system_user": {
+      "executor": "local_runner",
+      "actor": null,
+      "triggered_by": "tick",
+      "result": "agent@example.com"
+    },
+    "L3_local_run_ai_creator": {
+      "executor": "local_runner",
+      "actor": null,
+      "triggered_by": "run_ai",
+      "created_by": "fx8-creator@example.com",
+      "result": "fx8-creator@example.com"
+    },
+    "L4_local_chain_none": {
+      "created_by": null,
+      "lead": null,
+      "assignee": null,
+      "result": null
+    },
+    "C1_cloud_actor_fast_path": {
+      "executor": "cloud_agent",
+      "actor": "fx8-live@example.com",
+      "triggered_by": "run_ai",
+      "seams": "llm=True, role=True",
+      "result": "fx8-live@example.com"
+    },
+    "C2_cloud_tick_ignores_actor": {
+      "executor": "cloud_agent",
+      "actor": "fx8-live@example.com (valid but not a candidate)",
+      "triggered_by": "tick",
+      "created_by": "fx8-creator@example.com",
+      "result": "fx8-creator@example.com"
+    },
+    "C3a_cloud_lead_wins": {
+      "created_by": "fx8-bot@example.com (bot, skipped)",
+      "lead": "fx8-lead@example.com",
+      "assignees": [
+        "fx8-lead (dup)",
+        "fx8-live",
+        "fx8-old (soft-deleted)"
+      ],
+      "llm": "True for lead only",
+      "result": "fx8-lead@example.com",
+      "llm_call_order": [
+        "fx8-lead@example.com"
+      ]
+    },
+    "C3b_cloud_assignee_wins": {
+      "llm": "True for live only",
+      "result": "fx8-live@example.com",
+      "llm_call_order": [
+        "fx8-lead@example.com",
+        "fx8-live@example.com"
+      ],
+      "note": "lead appears once despite the dup assignee row; the soft-deleted row is never offered"
+    },
+    "C4_cloud_inactive_skipped": {
+      "created_by": "fx8-old@example.com (inactive)",
+      "result": "fx8-live@example.com",
+      "llm_call_order": [
+        "fx8-lead@example.com",
+        "fx8-live@example.com"
+      ]
+    },
+    "C5_managed_enrollment": {
+      "executor": "managed_runner",
+      "created_by": "fx8-creator@example.com (not enrolled)",
+      "lead": "fx8-lead@example.com (not enrolled)",
+      "assignee": "fx8-live@example.com (enrolled)",
+      "result": "fx8-live@example.com"
+    },
+    "C6_cloud_none_qualifies": {
+      "seam": "llm=False for all",
+      "result": null
+    }
+  }
+}

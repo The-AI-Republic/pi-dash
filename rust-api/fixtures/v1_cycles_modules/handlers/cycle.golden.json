@@ -1,0 +1,251 @@
+{
+ "_method": "ast walk of api/urls/cycle.py, api/urls/module.py (route table) and api/views/cycle.py + module.py handler bodies: Response literals + status codes extracted, cross-checked against contract tests PIDASHCONV-78; run: python3 /tmp/gen_cycmod_fixtures.py",
+ "extracted_responses": [
+  {
+   "body": null,
+   "line": 476,
+   "status": "status.HTTP_200_OK"
+  },
+  {
+   "body": null,
+   "line": 561,
+   "status": "status.HTTP_400_BAD_REQUEST"
+  },
+  {
+   "body": null,
+   "line": 613,
+   "status": "status.HTTP_204_NO_CONTENT"
+  },
+  {
+   "body": null,
+   "line": 783,
+   "status": "status.HTTP_204_NO_CONTENT"
+  },
+  {
+   "body": null,
+   "line": 803,
+   "status": "status.HTTP_204_NO_CONTENT"
+  },
+  {
+   "body": null,
+   "line": 1007,
+   "status": "status.HTTP_200_OK"
+  },
+  {
+   "body": null,
+   "line": 1076,
+   "status": "status.HTTP_200_OK"
+  },
+  {
+   "body": null,
+   "line": 1114,
+   "status": "status.HTTP_204_NO_CONTENT"
+  },
+  {
+   "body": null,
+   "line": 210,
+   "status": "status.HTTP_200_OK"
+  },
+  {
+   "body": null,
+   "line": 351,
+   "status": "status.HTTP_400_BAD_REQUEST"
+  },
+  {
+   "body": {
+    "error": "Both start date and end date are either required or are to be null"
+   },
+   "line": 353,
+   "status": "status.HTTP_400_BAD_REQUEST"
+  },
+  {
+   "body": {
+    "error": "Archived cycle cannot be edited"
+   },
+   "line": 505,
+   "status": "status.HTTP_400_BAD_REQUEST"
+  },
+  {
+   "body": null,
+   "line": 560,
+   "status": "status.HTTP_200_OK"
+  },
+  {
+   "body": {
+    "error": "Only admin or creator can delete the cycle"
+   },
+   "line": 587,
+   "status": "status.HTTP_403_FORBIDDEN"
+  },
+  {
+   "body": {
+    "error": "Only completed cycles can be archived"
+   },
+   "line": 771,
+   "status": "status.HTTP_400_BAD_REQUEST"
+  },
+  {
+   "body": {
+    "code": "MISSING_WORK_ITEMS",
+    "error": "Work items are required"
+   },
+   "line": 929,
+   "status": "status.HTTP_400_BAD_REQUEST"
+  },
+  {
+   "body": {
+    "code": "CYCLE_COMPLETED",
+    "message": "The Cycle has already been completed so no new issues can be added"
+   },
+   "line": 937,
+   "status": "status.HTTP_400_BAD_REQUEST"
+  },
+  {
+   "body": {
+    "error": "New Cycle Id is required"
+   },
+   "line": 1176,
+   "status": "status.HTTP_400_BAD_REQUEST"
+  },
+  {
+   "body": {
+    "error": "The old cycle is not completed yet"
+   },
+   "line": 1188,
+   "status": "status.HTTP_400_BAD_REQUEST"
+  },
+  {
+   "body": {
+    "message": "Success"
+   },
+   "line": 1205,
+   "status": "status.HTTP_200_OK"
+  },
+  {
+   "body": "Dict(keys=[Constant(value='error')], values=[Call(func=Attribute(value=Name(id='result', ctx=Load()), attr='get', ctx=Load()), args=[Constant(value='error')], keywords=[])])",
+   "line": 1207,
+   "status": "status.HTTP_400_BAD_REQUEST"
+  },
+  {
+   "body": null,
+   "line": 350,
+   "status": "status.HTTP_201_CREATED"
+  },
+  {
+   "body": {
+    "error": "The Cycle has already been completed so it cannot be edited"
+   },
+   "line": 517,
+   "status": "status.HTTP_400_BAD_REQUEST"
+  },
+  {
+   "body": "Dict(keys=[Constant(value='error'), Constant(value='id')], values=[Constant(value='Cycle with the same external id and external source already exists'), Call(func=Name(id='str', ctx=Load()), args=[Attribute(value=Name(id='cycle', ctx=Load()), attr='id', ctx=Load())], keywords=[])])",
+   "line": 539,
+   "status": "status.HTTP_409_CONFLICT"
+  },
+  {
+   "body": "Dict(keys=[Constant(value='error'), Constant(value='id')], values=[Constant(value='Cycle with the same external id and external source already exists'), Call(func=Name(id='str', ctx=Load()), args=[Attribute(value=Name(id='cycle', ctx=Load()), attr='id', ctx=Load())], keywords=[])])",
+   "line": 329,
+   "status": "status.HTTP_409_CONFLICT"
+  }
+ ],
+ "fixture": "FX-CYCMOD-08",
+ "handler_shapes": {
+  "archive": "POST archive -> end_date >= now required else 400; null end_date -> 500 TypeError (views/cycle.py:763-783); success sets archived_at, prunes favorites, 204",
+  "archived_list": "GET archived-cycles/ -> paginated incl estimate sums (views/cycle.py:741-751)",
+  "create": "POST cycles/ -> 201 CycleSerializer (no metric annotations \u2014 re-fetched row serialised bare); 400 serializer.errors; 400 {error: Both start date...} half-dates; 409 {error, id} external dup (views/cycle.py:299-356)",
+  "detail_delete": "DELETE pk -> non-owner non-admin 403; else issue_activity + soft delete + favorites pruned, 204 (views/cycle.py:571-613)",
+  "detail_get": "GET pk -> 200 full CYCLE_KEYS incl metrics; 404 base handler (views/cycle.py:462-476)",
+  "detail_patch": "PATCH pk -> archived 400; completed non-sort_order 400; completed sort_order 200 NO-OP (serializer lacks sort_order field; views/cycle.py:494-561); external dup 409; else 200 bare serializer",
+  "issue_add": "POST cycle-issues/ -> empty 400 {error, code MISSING_WORK_ITEMS}; completed cycle 400 {code CYCLE_COMPLETED}; else 200 CycleIssueSerializer list (views/cycle.py:920-1010)",
+  "issue_detail_delete": "DELETE issue -> 204 + issue_activity deleted (views/cycle.py:1086-1114, delay :1100)",
+  "issue_detail_get": "GET issue -> 200 CycleIssueSerializer single (views/cycle.py:1063-1076)",
+  "issue_list": "GET cycle-issues/ -> paginated Issue shape + bridge/link/attachment counts (views/cycle.py:854-901)",
+  "list": "GET cycles/ -> paginated envelope (cycle_view=all/upcoming/completed/draft/incomplete) EXCEPT cycle_view=current -> bare list 200 (views/cycle.py:190-281); BUG-PORT bare list",
+  "transfer": "POST transfer-issues/ -> missing id 400; old cycle incomplete 400; else util result: 200 {message: Success} or 400 {error} (views/cycle.py:1167-1210)",
+  "unarchive": "DELETE unarchive -> archived_at=None, 204 (views/cycle.py:794-803)"
+ },
+ "routes": [
+  {
+   "line": 17,
+   "methods": [
+    "get",
+    "post"
+   ],
+   "path": "workspaces/<str:slug>/projects/<str:project_id>/cycles/",
+   "url_name": "cycles",
+   "view": "CycleListCreateAPIEndpoint.as_view"
+  },
+  {
+   "line": 22,
+   "methods": [
+    "get",
+    "patch",
+    "delete"
+   ],
+   "path": "workspaces/<str:slug>/projects/<str:project_id>/cycles/<uuid:pk>/",
+   "url_name": "cycles",
+   "view": "CycleDetailAPIEndpoint.as_view"
+  },
+  {
+   "line": 27,
+   "methods": [
+    "get",
+    "post"
+   ],
+   "path": "workspaces/<str:slug>/projects/<str:project_id>/cycles/<uuid:cycle_id>/cycle-issues/",
+   "url_name": "cycle-issues",
+   "view": "CycleIssueListCreateAPIEndpoint.as_view"
+  },
+  {
+   "line": 32,
+   "methods": [
+    "get",
+    "delete"
+   ],
+   "path": "workspaces/<str:slug>/projects/<str:project_id>/cycles/<uuid:cycle_id>/cycle-issues/<uuid:issue_id>/",
+   "url_name": "cycle-issues",
+   "view": "CycleIssueDetailAPIEndpoint.as_view"
+  },
+  {
+   "line": 37,
+   "methods": [
+    "post"
+   ],
+   "path": "workspaces/<str:slug>/projects/<str:project_id>/cycles/<uuid:cycle_id>/transfer-issues/",
+   "url_name": "transfer-issues",
+   "view": "TransferCycleIssueAPIEndpoint.as_view"
+  },
+  {
+   "line": 42,
+   "methods": [
+    "post"
+   ],
+   "path": "workspaces/<str:slug>/projects/<str:project_id>/cycles/<uuid:cycle_id>/archive/",
+   "url_name": "cycle-archive-unarchive",
+   "view": "CycleArchiveUnarchiveAPIEndpoint.as_view"
+  },
+  {
+   "line": 47,
+   "methods": [
+    "get"
+   ],
+   "path": "workspaces/<str:slug>/projects/<str:project_id>/archived-cycles/",
+   "url_name": "cycle-archive-unarchive",
+   "view": "CycleArchiveUnarchiveAPIEndpoint.as_view"
+  },
+  {
+   "line": 52,
+   "methods": [
+    "delete"
+   ],
+   "path": "workspaces/<str:slug>/projects/<str:project_id>/archived-cycles/<uuid:cycle_id>/unarchive/",
+   "url_name": "cycle-archive-unarchive",
+   "view": "CycleArchiveUnarchiveAPIEndpoint.as_view"
+  }
+ ],
+ "trace": [
+  "routes api/urls/cycle.py:16-57 (8 routes)",
+  "handlers api/views/cycle.py:80-1210"
+ ]
+}

@@ -1,0 +1,73 @@
+{
+  "trace": "apps/api/pi_dash/assistant/runtime/mcp.py + pydantic-ai-slim==1.107.0/fastmcp==3.4.4/mcp==1.30.0",
+  "ported_from": "d656243d3700dd5ff749f1bfeb2bc74c918a33ba",
+  "case": "init_timeout",
+  "stack": {
+    "pydantic_ai_slim": "1.107.0",
+    "fastmcp": "3.4.4",
+    "mcp": "1.30.0",
+    "python": "3.12"
+  },
+  "toolset": {
+    "timeout": 0.3,
+    "read_timeout": 5.0,
+    "prefix": "mcp_probe",
+    "auth": false,
+    "server_name": "probe",
+    "url_path": "/mcp"
+  },
+  "flow": [
+    "enter",
+    "list",
+    "call"
+  ],
+  "call": {
+    "tool": "mcp_probe_echo",
+    "args": {
+      "text": "hi"
+    },
+    "fabricate": true
+  },
+  "stub": {
+    "framing": "json",
+    "sleep": {
+      "initialize": 3
+    }
+  },
+  "wire": [
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json"
+      },
+      "body": "{\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"mcp\",\"version\":\"0.1.0\"}},\"jsonrpc\":\"2.0\",\"id\":0}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json"
+      },
+      "body": "{\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"mcp\",\"version\":\"0.1.0\"}},\"jsonrpc\":\"2.0\",\"id\":0}"
+    }
+  ],
+  "expect": {
+    "tools": {},
+    "call": {
+      "absorbed": {
+        "class": "RuntimeError",
+        "text": "Tool server 'probe' was unavailable for this call (RuntimeError)."
+      }
+    },
+    "failures": {
+      "after_enter": "RuntimeError",
+      "after_list": "RuntimeError",
+      "after_call": "RuntimeError",
+      "at_exit": "RuntimeError"
+    },
+    "delete_seen": false
+  }
+}

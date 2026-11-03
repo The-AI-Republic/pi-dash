@@ -1,0 +1,76 @@
+{
+  "_trace": "core/querysets.py:19-52; seeds via Issue/assignees/IssueSubscriber/ProjectMember",
+  "_method": "live rows on pidash_524_scratch; u_member is active role-15 on FX2 only (sections A-D issues live in FX0, excluded)",
+  "seeds": [
+    {
+      "label": "q-assigned",
+      "id": "11111111-2222-3333-4444-000000003031",
+      "project": "FX2",
+      "assignees": [
+        "fx2_member"
+      ],
+      "created_by": "fx2_other",
+      "subscribed": false
+    },
+    {
+      "label": "q-created",
+      "id": "11111111-2222-3333-4444-000000003032",
+      "project": "FX2",
+      "assignees": [],
+      "created_by": "fx2_member",
+      "subscribed": false
+    },
+    {
+      "label": "q-subscribed",
+      "id": "11111111-2222-3333-4444-000000003033",
+      "project": "FX2",
+      "assignees": [],
+      "created_by": "fx2_other",
+      "subscribed": true
+    },
+    {
+      "label": "q-uninvolved",
+      "id": "11111111-2222-3333-4444-000000003034",
+      "project": "FX2",
+      "assignees": [],
+      "created_by": "fx2_other",
+      "subscribed": false
+    },
+    {
+      "label": "q-nonmember-project",
+      "id": "11111111-2222-3333-4444-000000003035",
+      "project": "FX2B",
+      "assignees": [
+        "fx2_member"
+      ],
+      "created_by": "fx2_other",
+      "subscribed": false
+    }
+  ],
+  "results": {
+    "member_project_issues": [
+      "11111111-2222-3333-4444-000000003031",
+      "11111111-2222-3333-4444-000000003032",
+      "11111111-2222-3333-4444-000000003033",
+      "11111111-2222-3333-4444-000000003034"
+    ],
+    "user_issues_queryset scope=all": [
+      "11111111-2222-3333-4444-000000003031",
+      "11111111-2222-3333-4444-000000003032",
+      "11111111-2222-3333-4444-000000003033"
+    ],
+    "user_issues_queryset scope=assigned": [
+      "11111111-2222-3333-4444-000000003031"
+    ],
+    "user_issues_queryset scope=created": [
+      "11111111-2222-3333-4444-000000003032"
+    ]
+  },
+  "label_by_id": {
+    "11111111-2222-3333-4444-000000003031": "q-assigned",
+    "11111111-2222-3333-4444-000000003032": "q-created",
+    "11111111-2222-3333-4444-000000003033": "q-subscribed",
+    "11111111-2222-3333-4444-000000003034": "q-uninvolved",
+    "11111111-2222-3333-4444-000000003035": "q-nonmember-project"
+  }
+}

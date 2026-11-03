@@ -1,0 +1,74 @@
+{
+  "trace": "apps/api/pi_dash/assistant/serializers.py:78-120 (UserSTTConfigSerializer)",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "serializer": "UserSTTConfigSerializer",
+  "source": "apps/api/pi_dash/assistant/serializers.py:78",
+  "meta": {
+    "fields": [
+      "base_url",
+      "model_name",
+      "api_key",
+      "has_api_key",
+      "last_verified_at"
+    ],
+    "read_only": [
+      "has_api_key",
+      "last_verified_at"
+    ],
+    "write_only": [
+      "api_key"
+    ],
+    "note": "no provider_kind field; base_url always required (:116-120)"
+  },
+  "fields": {
+    "base_url": {
+      "write_only": false,
+      "read_only": false,
+      "required": false,
+      "allow_blank": true,
+      "max_length": 500
+    },
+    "model_name": {
+      "write_only": false,
+      "read_only": false,
+      "required": false,
+      "allow_blank": true,
+      "max_length": 255
+    },
+    "api_key": {
+      "write_only": true,
+      "read_only": false,
+      "required": false,
+      "allow_blank": true,
+      "max_length": 512
+    },
+    "has_api_key": {
+      "write_only": false,
+      "read_only": true,
+      "required": false,
+      "allow_blank": null,
+      "max_length": null
+    },
+    "last_verified_at": {
+      "write_only": false,
+      "read_only": true,
+      "required": false,
+      "allow_blank": null,
+      "max_length": null
+    }
+  },
+  "cases": [
+    {
+      "name": "empty attrs rejected (no instance base_url)",
+      "source": "apps/api/pi_dash/assistant/serializers.py:116-120",
+      "error": {
+        "base_url": "base_url is required."
+      }
+    },
+    {
+      "name": "validators mirror LLM config",
+      "source": "apps/api/pi_dash/assistant/serializers.py:94-114",
+      "note": "validate_model_name/base_url/api_key identical messages to UserLLMConfigSerializer"
+    }
+  ]
+}

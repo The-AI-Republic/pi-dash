@@ -1,0 +1,34 @@
+{
+ "method": "Ran SkipReason.choices under pi_dash.settings.test (no DB).",
+ "source": "apps/api/pi_dash/db/models/loop.py:25-39",
+ "values": [
+  {
+   "label": "User disabled this job",
+   "value": "user_disabled"
+  },
+  {
+   "label": "User paused all Auto PM",
+   "value": "master_paused"
+  },
+  {
+   "label": "Below the job's minimum role",
+   "value": "min_role"
+  },
+  {
+   "label": "No usable LLM credentials",
+   "value": "llm_config_missing"
+  },
+  {
+   "label": "No active workspace membership",
+   "value": "membership_gone"
+  },
+  {
+   "label": "Previous run still in flight",
+   "value": "turn_active"
+  },
+  {
+   "label": "Unexpected error creating the turn",
+   "value": "dispatch_error"
+  }
+ ]
+}

@@ -1,0 +1,121 @@
+{
+  "_trace": "orchestration/service.py:110-154 (parent_for_next_run); :528-547 (_pinned_runner_for)",
+  "_method": "live pure/matrix calls on pidash_524_scratch; frozen clock; kinds resolved live via kind_for(template_name_for(state))",
+  "kinds": {
+    "in_progress": "coding-task",
+    "in_review": "review",
+    "in_test": "test",
+    "KIND_CODING_TASK": "coding-task"
+  },
+  "fresh_session_on_entry": {
+    "in_progress": false,
+    "in_review": true,
+    "in_test": true,
+    "todo": null
+  },
+  "parent_for_next_run": {
+    "P1_no_latest": {
+      "issue": "FX6-11",
+      "state": "In Progress",
+      "result": {
+        "parent": null,
+        "fresh_session": true
+      }
+    },
+    "P2_non_ticking_state": {
+      "issue": "FX6-12",
+      "state": "Todo",
+      "latest": "run-P2-latest",
+      "result": {
+        "parent": "run-P2-latest",
+        "fresh_session": false
+      }
+    },
+    "P3_same_stage": {
+      "issue": "FX6-13",
+      "state": "In Progress",
+      "latest": "run-P3-latest",
+      "latest_phase_kind": "coding-task",
+      "result": {
+        "parent": "run-P3-latest",
+        "fresh_session": false
+      }
+    },
+    "P4_cross_stage_fresh_entry": {
+      "issue": "FX6-14",
+      "state": "In Review",
+      "latest": "run-P4-latest",
+      "latest_phase_kind": "coding-task",
+      "result": {
+        "parent": null,
+        "fresh_session": true
+      }
+    },
+    "P5_handback_with_resume_parent": {
+      "issue": "FX6-15",
+      "state": "In Progress",
+      "latest": "run-P5-review",
+      "latest_phase_kind": "review",
+      "resume_parent_run": "run-P5-impl",
+      "result": {
+        "parent": "run-P5-impl",
+        "fresh_session": false
+      }
+    },
+    "P6_handback_no_resume_parent": {
+      "issue": "FX6-16",
+      "state": "In Progress",
+      "latest": "run-P6-latest",
+      "latest_phase_kind": "review",
+      "resume_parent_run": null,
+      "result": {
+        "parent": null,
+        "fresh_session": true
+      }
+    },
+    "P7_explicit_cross_stage_false": {
+      "issue": "FX6-16",
+      "state": "In Progress",
+      "latest": "run-P6-latest",
+      "result": {
+        "parent": "run-P6-latest",
+        "fresh_session": false
+      }
+    },
+    "P8_explicit_cross_stage_true": {
+      "issue": "FX6-17",
+      "state": "In Review",
+      "latest": "run-P8-latest (same kind)",
+      "result": {
+        "parent": null,
+        "fresh_session": true
+      }
+    }
+  },
+  "pinned_runner_for": {
+    "M1_parent_without_runner": {
+      "parent": "run-M-norunner",
+      "result": null
+    },
+    "M2_parent_runner_revoked": {
+      "parent": "run-M-revoked",
+      "result": null
+    },
+    "M3_runner_pod_mismatch": {
+      "parent": "run-M-mismatch",
+      "runner_pod": "fx6-extra",
+      "target_pod": "FX6_pod_1",
+      "result": null
+    },
+    "M4_eligible_runner_pinned": {
+      "parent": "run-M-ok",
+      "target_pod": "FX6_pod_1",
+      "result": "fx6-runner"
+    },
+    "M5_no_target_pod_skips_check": {
+      "parent": "run-M-ok",
+      "target_pod": null,
+      "result": "fx6-runner"
+    }
+  }
+}

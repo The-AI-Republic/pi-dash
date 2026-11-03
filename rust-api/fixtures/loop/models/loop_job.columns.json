@@ -1,0 +1,144 @@
+{
+ "columns": [
+  {
+   "blank": true,
+   "name": "created_at",
+   "nullable": false,
+   "type": "timestamp with time zone"
+  },
+  {
+   "blank": true,
+   "name": "updated_at",
+   "nullable": false,
+   "type": "timestamp with time zone"
+  },
+  {
+   "blank": false,
+   "column": "created_by_id",
+   "fk_to": "db.User",
+   "name": "created_by",
+   "nullable": true,
+   "on_delete": "SET_NULL",
+   "related_name": "loopjob_created_by",
+   "type": "uuid"
+  },
+  {
+   "blank": false,
+   "column": "updated_by_id",
+   "fk_to": "db.User",
+   "name": "updated_by",
+   "nullable": true,
+   "on_delete": "SET_NULL",
+   "related_name": "loopjob_updated_by",
+   "type": "uuid"
+  },
+  {
+   "blank": true,
+   "name": "deleted_at",
+   "nullable": true,
+   "type": "timestamp with time zone"
+  },
+  {
+   "blank": false,
+   "default": "uuid4 (callable, per-row)",
+   "name": "id",
+   "nullable": false,
+   "pk": true,
+   "type": "uuid"
+  },
+  {
+   "blank": false,
+   "max_length": 64,
+   "name": "slug",
+   "nullable": false,
+   "type": "varchar(64)"
+  },
+  {
+   "blank": false,
+   "max_length": 255,
+   "name": "name",
+   "nullable": false,
+   "type": "varchar(255)"
+  },
+  {
+   "blank": false,
+   "max_length": 255,
+   "name": "public_name",
+   "nullable": false,
+   "type": "varchar(255)"
+  },
+  {
+   "blank": true,
+   "default": "",
+   "name": "public_description",
+   "nullable": false,
+   "type": "text"
+  },
+  {
+   "blank": false,
+   "name": "prompt",
+   "nullable": false,
+   "type": "text"
+  },
+  {
+   "blank": false,
+   "default": 15,
+   "name": "min_role",
+   "nullable": false,
+   "type": "smallint"
+  },
+  {
+   "blank": false,
+   "default": true,
+   "name": "enabled",
+   "nullable": false,
+   "type": "boolean"
+  },
+  {
+   "blank": false,
+   "default": true,
+   "name": "is_builtin",
+   "nullable": false,
+   "type": "boolean"
+  },
+  {
+   "blank": false,
+   "name": "dtstart",
+   "nullable": false,
+   "type": "timestamp with time zone"
+  },
+  {
+   "blank": false,
+   "max_length": 255,
+   "name": "rrule",
+   "nullable": false,
+   "type": "varchar(255)"
+  },
+  {
+   "blank": false,
+   "default": "UTC",
+   "max_length": 64,
+   "name": "tzid",
+   "nullable": false,
+   "type": "varchar(64)"
+  }
+ ],
+ "constraints": [
+  {
+   "condition": "(AND: ('deleted_at__isnull', True))",
+   "fields": [
+    "slug"
+   ],
+   "name": "loop_job_unique_slug_when_active",
+   "type": "UniqueConstraint"
+  }
+ ],
+ "db_table": "loop_jobs",
+ "indexes": [],
+ "method": "Ran model _meta introspection under pi_dash.settings.test (no DB). db_type() via the postgres backend ops; constraint conditions str(Q).",
+ "model": "LoopJob",
+ "ordering": [
+  "-created_at"
+ ],
+ "source": "apps/api/pi_dash/db/models/loop.py:41-81 (Meta 67-78); audit cols db/mixins.py:16-19,26-38,57-69; id db/models/base.py:17-21"
+}

@@ -1,0 +1,26 @@
+#![forbid(unsafe_code)]
+
+//! Shared value types for the Pi Dash Rust backend.
+//!
+//! This crate holds identifiers, enums, DTOs, shared parity helpers and the
+//! error type. It performs no I/O: no database, no network, no filesystem.
+
+pub mod assistant;
+pub mod dispatch;
+pub mod error;
+pub mod health;
+pub mod html_entities;
+mod html_entities_generated;
+pub mod ids;
+pub mod integrations;
+pub mod license;
+pub mod orchestration;
+pub mod runner_runs;
+pub mod runner_sessions;
+pub mod tasks_cleanup;
+pub mod v1_assets;
+pub mod v1_cycles_modules;
+
+pub use error::Error;
+pub use health::HealthStatus;
+pub use ids::{IssueId, ProjectId, UserId, WorkspaceId};

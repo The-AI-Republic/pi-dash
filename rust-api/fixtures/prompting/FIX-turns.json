@@ -1,0 +1,30 @@
+{
+  "bugs": [],
+  "data": {
+    "turns": {
+      "direct_cloud_has_markers": true,
+      "direct_cloud_manifest_kind": "direct",
+      "direct_local_manifest_none": true,
+      "direct_local_passthrough": true,
+      "first_turn_len": 70334,
+      "first_turn_manifest_entries": 16,
+      "first_turn_manifest_keys": ["line_end", "line_start", "section_key", "source", "version"],
+      "first_turn_no_jinja_left": true,
+      "first_turn_sha256": "85a8affc7af767fac45bb81eaf78a324aa156e2d47f6f7cfe757a8088ea24195",
+      "scheduler_turn_len": 21849,
+      "scheduler_turn_manifest_entries": 6,
+      "scheduler_turn_sha256": "6b55c03e5b5e99194d75bf65cab802371ed27d510826dc4ff2fec9ed0307ddc5",
+      "trace": "composer.py:372-380 (_user_for_run: created_by iff human-triggered), 383-415 (build_first_turn: phase kind + manifest stamp), 426-456 (build_scheduler_turn: user=None always), 459-514 (build_direct_turn: local passthrough + manifest=None; cloud wraps with <user_task> markers)"
+    }
+  },
+  "fixture_id": "FIX-turns",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world).",
+  "notes": [
+    "Scheduler turns always resolve user=None (automatic). Direct/local returns the raw prompt verbatim with prompt_manifest=None."
+  ],
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "prompting/composer.py:383-424 (build_first_turn/build_first_turn_context), 426-456 (build_scheduler_turn), 459-514 (build_direct_turn)",
+    "pi_dash/runner/models.py:259 (HUMAN_TRIGGERS), 276-278 (run_is_human_triggered)"
+  ]
+}
