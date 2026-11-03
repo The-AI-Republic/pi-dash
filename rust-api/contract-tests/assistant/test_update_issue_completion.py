@@ -582,10 +582,12 @@ def test_update_issue_prompt_failure_commits_move(db_conn):
         assert len(runs) == 1, "the failed prompt build still commits its run row"
         run = runs[0]
         assert run["status"] == "failed"
-        assert run["error_code"] == "prompt_build_failed"
+        assert run["error_details"]["code"] == "prompt_build_failed"
         assert run["trigger"] == "state_transition"
         assert run["phase_kind"] == "coding-task"
-        assert run["error"].startswith("prompt build failed:")
+        assert run["error_details"]["message"].startswith("prompt build failed:")
+        assert set(run["error_details"]) == {"code", "message"}
+        assert run["refusal_category"] == ""
         results = _tool_results(stub.payloads)
         assert len(results) == 1, "the follow-up carries exactly one tool result"
         result = results[0]

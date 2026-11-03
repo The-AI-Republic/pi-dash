@@ -61,7 +61,7 @@ export const SubIssuesCollapsibleContent = observer(function SubIssuesCollapsibl
   const {
     toggleCreateIssueModal,
     toggleDeleteIssueModal,
-    subIssues: { subIssueHelpersByIssueId, setSubIssueHelpers },
+    subIssues: { subIssueHelpersByIssueId, markSubIssueHelper, unmarkSubIssueHelper },
   } = useIssueDetail(issueServiceType);
 
   // helpers
@@ -85,18 +85,31 @@ export const SubIssuesCollapsibleContent = observer(function SubIssuesCollapsibl
 
   const handleFetchSubIssues = useCallback(async () => {
     const currentSubIssueHelpers = subIssueHelpersByIssueId(`${parentIssueId}_root`);
-    if (!currentSubIssueHelpers.issue_visibility.includes(parentIssueId)) {
+    // the preview_loader check keeps a StrictMode double-invoked mount effect from
+    // firing a second fetch while the first one is still in flight
+    if (
+      !currentSubIssueHelpers.issue_visibility.includes(parentIssueId) &&
+      !currentSubIssueHelpers.preview_loader.includes(parentIssueId)
+    ) {
       try {
-        setSubIssueHelpers(`${parentIssueId}_root`, "preview_loader", parentIssueId);
+        markSubIssueHelper(`${parentIssueId}_root`, "preview_loader", parentIssueId);
         await subIssueOperations.fetchSubIssues(workspaceSlug, projectId, parentIssueId);
-        setSubIssueHelpers(`${parentIssueId}_root`, "issue_visibility", parentIssueId);
+        markSubIssueHelper(`${parentIssueId}_root`, "issue_visibility", parentIssueId);
       } catch (error) {
         console.error("Error fetching sub-work items:", error);
       } finally {
-        setSubIssueHelpers(`${parentIssueId}_root`, "preview_loader", "");
+        unmarkSubIssueHelper(`${parentIssueId}_root`, "preview_loader", parentIssueId);
       }
     }
-  }, [parentIssueId, projectId, setSubIssueHelpers, subIssueHelpersByIssueId, subIssueOperations, workspaceSlug]);
+  }, [
+    markSubIssueHelper,
+    parentIssueId,
+    projectId,
+    subIssueHelpersByIssueId,
+    subIssueOperations,
+    unmarkSubIssueHelper,
+    workspaceSlug,
+  ]);
 
   useEffect(() => {
     handleFetchSubIssues();

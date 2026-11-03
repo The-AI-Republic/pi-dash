@@ -1,0 +1,143 @@
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+import { describe, expect, it } from "vitest";
+
+import {
+  INTAKE_SOURCE_PILL_FLAG,
+  ISSUE_DEDUPE_FLAG,
+  PAGE_ASSISTANT_FLAG,
+  PAGE_MOVE_FLAG,
+  isAppRailEnabled,
+  isPageAssistantEnabled,
+  isPageMoveEnabled,
+  isSidebarToggleEnabled,
+  edition,
+} from "./index.js";
+import { edition as ossEdition } from "./oss.js";
+import type { Edition } from "./types.js";
+// The public values the private cloud module references through the
+// @web_new alias (NEWFRONT-948). The OSS assertions above pin absence;
+// these pin that the fillings the cloud build points at exist.
+import {
+  CLOUD_WORKSPACE_VIEW_LAYOUTS,
+  cloudViewAccessSlot,
+  cloudViewPublishSlot,
+  cloudWorkspaceViewLayouts,
+} from "../../features/views/edition/cloudSlots.js";
+
+describe("edition", () => {
+  it("resolves the OSS edition through the index", () => {
+    expect(edition).toBe(ossEdition);
+    expect(edition.id).toBe("oss");
+  });
+
+  it("contributes no cloud surface", () => {
+    expect(edition.routes ?? []).toEqual([]);
+    expect(edition.sidebar ?? []).toEqual([]);
+    expect(edition.rail ?? []).toEqual([]);
+    expect(edition.settingsSections ?? []).toEqual([]);
+    // The four native providers are backend-native, not a cloud extra: the
+    // instance flags alone decide which buttons show (AUTH-003).
+    expect(edition.auth ?? []).toEqual([
+      { id: "google", label: "Google" },
+      { id: "github", label: "GitHub" },
+      { id: "gitlab", label: "GitLab" },
+      { id: "gitea", label: "Gitea" },
+    ]);
+    expect(edition.api ?? []).toEqual([]);
+    expect(edition.flags).toEqual({});
+    expect(edition.slots ?? {}).toEqual({});
+  });
+
+  it("leaves the cloud god-mode entry absent (ADM-074: OSS renders the bootstrap gate)", () => {
+    expect(edition.slots?.godModeCloudEntry).toBeUndefined();
+  });
+
+  it("leaves the cloud login card absent (CLOUD-002: OSS keeps /login's redirect)", () => {
+    expect(edition.slots?.cloudLoginCard).toBeUndefined();
+  });
+
+  it("leaves the view access slot absent (VIEW-019: OSS renders no selector)", () => {
+    expect(edition.slots?.viewAccess).toBeUndefined();
+  });
+
+  it("leaves the view publish slot absent (VIEW-020: OSS renders no publish entry)", () => {
+    expect(edition.slots?.viewPublish).toBeUndefined();
+  });
+
+  it("leaves the workspace layouts slot absent (VIEW-040: OSS renders no selector)", () => {
+    expect(edition.slots?.workspaceViewLayouts).toBeUndefined();
+  });
+
+  it("leaves the intake source pill flag absent (INT-034: OSS renders no source indicator)", () => {
+    expect(edition.flags[INTAKE_SOURCE_PILL_FLAG]).toBeUndefined();
+    expect(edition.flags[ISSUE_DEDUPE_FLAG]).toBeUndefined();
+  });
+
+  it("leaves the cross-project page move absent (PAGE-017: community pins no affordance)", () => {
+    expect(edition.flags[PAGE_MOVE_FLAG]).toBeUndefined();
+    expect(isPageMoveEnabled(edition)).toBe(false);
+  });
+
+  it("leaves the page assistant absent (PAGE-075: community pins no handle or menu)", () => {
+    expect(edition.flags[PAGE_ASSISTANT_FLAG]).toBeUndefined();
+    expect(isPageAssistantEnabled(edition)).toBe(false);
+  });
+
+  it("leaves the page cloud slots absent (PAGE-076-078: community renders nothing)", () => {
+    expect(edition.slots?.["page.share"]).toBeUndefined();
+    expect(edition.slots?.["page.collaborators"]).toBeUndefined();
+    expect(edition.slots?.["page.headerActions"]).toBeUndefined();
+    expect(edition.slots?.["page.extraPaneTabs"]).toBeUndefined();
+    expect(edition.slots?.["page.slashRegistry"]).toBeUndefined();
+  });
+});
+
+describe("cloud views slot values", () => {
+  it("ships the access selector and its write (VIEW-019)", () => {
+    expect(typeof cloudViewAccessSlot.Field).toBe("function");
+    expect(typeof cloudViewAccessSlot.storeAccess).toBe("function");
+  });
+
+  it("ships the publish seam (VIEW-020)", () => {
+    expect(typeof cloudViewPublishSlot.publish).toBe("function");
+    expect(typeof cloudViewPublishSlot.unpublish).toBe("function");
+    expect(typeof cloudViewPublishSlot.publicLink).toBe("function");
+  });
+
+  it("ships the workspace layouts (VIEW-040)", () => {
+    expect(cloudWorkspaceViewLayouts.layouts).toEqual(CLOUD_WORKSPACE_VIEW_LAYOUTS);
+    expect(cloudWorkspaceViewLayouts.layouts.length).toBeGreaterThan(0);
+  });
+});
+
+describe("shell edition gates", () => {
+  const flags = (entries: Record<string, boolean>): Edition => ({ id: "test", flags: entries });
+
+  it("suppresses the rail unless the edition opts in", () => {
+    expect(isAppRailEnabled(flags({}))).toBe(false);
+    expect(isAppRailEnabled(flags({ "app-rail": false }))).toBe(false);
+    expect(isAppRailEnabled(flags({ "app-rail": true }))).toBe(true);
+    expect(isAppRailEnabled(edition)).toBe(false);
+  });
+
+  it("enables the cross-project page move only where the edition opts in", () => {
+    expect(isPageMoveEnabled(flags({}))).toBe(false);
+    expect(isPageMoveEnabled(flags({ "page-move": false }))).toBe(false);
+    expect(isPageMoveEnabled(flags({ "page-move": true }))).toBe(true);
+  });
+
+  it("enables the page assistant only where the edition opts in", () => {
+    expect(isPageAssistantEnabled(flags({}))).toBe(false);
+    expect(isPageAssistantEnabled(flags({ "page-assistant": false }))).toBe(false);
+    expect(isPageAssistantEnabled(flags({ "page-assistant": true }))).toBe(true);
+  });
+
+  it("mounts the sidebar toggle unless the edition opts out", () => {
+    expect(isSidebarToggleEnabled(flags({}))).toBe(true);
+    expect(isSidebarToggleEnabled(flags({ "sidebar-toggle": true }))).toBe(true);
+    expect(isSidebarToggleEnabled(flags({ "sidebar-toggle": false }))).toBe(false);
+    expect(isSidebarToggleEnabled(edition)).toBe(true);
+  });
+});

@@ -58,20 +58,14 @@ use pidash_services::orchestration::entries::{
 };
 use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
 use pidash_services::runner_runs::LifecycleEffect;
-use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
 use pidash_types::dispatch::AgentExecutorKind;
 use serde_json::{Map, Value};
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::admission::RedisAdmissionCache;
 use crate::dispatch::{dispatch_agent_run, DispatchDecision};
-use crate::orchestration::live_inputs::{
-    creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
-};
 use crate::orchestration::{LiveCreationStore, StoreDeps};
-use crate::runner_runs::sweeps_chat::terminal_effects_job;
 
 /// Drain finalized runs' publish pairs in order. The api binary implements
 /// this over its `project_move_handoff` drain; a jobs-context caller passes
@@ -227,6 +221,27 @@ pub async fn enqueue_completion_comment(
     prev_state_id: Option<&Uuid>,
     current_state_id: Option<&Uuid>,
 ) {
+    let Some(job) = completion_comment_job(pool, issue_id, prev_state_id, current_state_id).await
+    else {
+        return;
+    };
+    if let Err(error) = crate::queue::enqueue(pool, &job).await {
+        tracing::warn!(%error, task = %job.task, "task enqueue failed; op stands");
+    }
+}
+
+/// The completion-comment dispatch lookup half of
+/// [`enqueue_completion_comment`]: resolve the dispatch (group, mirror,
+/// idempotency guards) and build the provider's `post_completion_comment`
+/// job, or `None` when the leg skips. Best-effort: failures only warn.
+/// Shared with the public [`hooks::TransitionHook`][crate::hooks::TransitionHook],
+/// which sends the job through its queue sink instead of the outbox.
+pub(crate) async fn completion_comment_job(
+    pool: &PgPool,
+    issue_id: &Uuid,
+    prev_state_id: Option<&Uuid>,
+    current_state_id: Option<&Uuid>,
+) -> Option<crate::queue::NewJob> {
     use crate::integrations::github_signals::{
         dispatch_completion_comment, dispatch_job, DispatchOutcome,
     };
@@ -234,16 +249,13 @@ pub async fn enqueue_completion_comment(
         dispatch_completion_comment(pool, issue_id, current_state_id, false, prev_state_id).await;
     let target = match outcome {
         Ok(DispatchOutcome::Dispatch(target)) => target,
-        Ok(DispatchOutcome::Skip(_)) => return,
+        Ok(DispatchOutcome::Skip(_)) => return None,
         Err(error) => {
             tracing::warn!(%error, "completion comment dispatch lookup failed; op stands");
-            return;
+            return None;
         }
     };
-    let job = dispatch_job(&target);
-    if let Err(error) = crate::queue::enqueue(pool, &job).await {
-        tracing::warn!(%error, task = %job.task, "task enqueue failed; op stands");
-    }
+    Some(dispatch_job(&target))
 }
 
 /// The ticker/clock seam methods run pool-direct (autocommit); everything
@@ -678,74 +690,14 @@ where
 // Worker hook: the jobs binding over the transition entry points
 // ---------------------------------------------------------------------------
 
-/// The worker's post-commit drains for the transition core (the api
-/// `TransitionDrains` shape over worker inputs): the terminal-effects
-/// publish drain enqueues the effects task and skips the inline apply
-/// (no live `RunnerRunsSeams` here — the queued task covers the hooks
-/// idempotently, PIDASHCONV-859, the `tools_exec` fire precedent); the
-/// pod drain is the live session drain.
-struct WorkerTransitionDrains {
-    pool: PgPool,
-    redis: Option<redis::Client>,
-    runner: RunnerSettings,
-}
-
-impl PublishEffectsDrain for WorkerTransitionDrains {
-    fn drain(
-        &self,
-        effects: Vec<LifecycleEffect>,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        let pool = self.pool.clone();
-        Box::pin(async move {
-            for effect in effects {
-                match effect {
-                    LifecycleEffect::PublishTerminalEffects { run_id } => {
-                        let job = terminal_effects_job(&run_id);
-                        if let Err(error) = crate::queue::enqueue(&pool, &job).await {
-                            tracing::error!(%error, "failed to publish terminal effects for run {run_id}");
-                        }
-                    }
-                    LifecycleEffect::ApplyTerminalEffectsInline { run_id } => {
-                        tracing::warn!(
-                            "skipping inline terminal effects for run {run_id}: no live RunnerRunsSeams \
-                             (PIDASHCONV-859); the queued effects task covers the hooks idempotently"
-                        );
-                    }
-                    // Unreachable: `plan_publish_effects` emits exactly these two.
-                    _ => {}
-                }
-            }
-        })
-    }
-}
-
-impl PodDrain for WorkerTransitionDrains {
-    fn drain_pod(&self, pod_id: Uuid) -> Pin<Box<dyn Future<Output = Result<(), ()>> + Send + '_>> {
-        let pool = self.pool.clone();
-        let redis = self.redis.clone();
-        let runner = self.runner.clone();
-        Box::pin(async move {
-            drain_pod_by_id(&pool, redis.as_ref(), &runner, pod_id)
-                .await
-                .map(|_| ())
-                .map_err(|_| ())
-        })
-    }
-}
-
-/// The worker's [`IssueTransitionHook`]: the public transition entry
-/// points bound to worker settings + seams (the api `AppTransitionHook`
-/// shape). The worker installs one over its pools/settings/seams and
-/// hands it to the sync drivers, so sync-created/adopted mirrors run
-/// the same post-save legs as every other issue write (PIDASHCONV-1576).
+/// The worker's [`IssueTransitionHook`]: the public
+/// [`hooks::TransitionHook`][crate::hooks::TransitionHook] over worker
+/// settings + seams and the queue/live drains. The worker installs one
+/// over its pools/settings/seams and hands it to the sync drivers, so
+/// sync-created/adopted mirrors run the same post-save legs as every
+/// other issue write (PIDASHCONV-1576).
 pub struct WorkerTransitionHook {
-    pool: PgPool,
-    cloud: CloudAgentSettings,
-    managed: ManagedRunnerSettings,
-    redis: Option<redis::Client>,
-    runner: RunnerSettings,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
-    assistant_seam: Arc<dyn AssistantModelSeam>,
+    hook: crate::hooks::TransitionHook,
 }
 
 impl WorkerTransitionHook {
@@ -759,14 +711,29 @@ impl WorkerTransitionHook {
         toolsets: Arc<dyn CloudAgentToolsetsSeam>,
         assistant_seam: Arc<dyn AssistantModelSeam>,
     ) -> Self {
-        Self {
+        use crate::hooks::{
+            HookDeps, LivePodDrain, OutboxTaskSink, QueuePublishDrain, QueueTerminalEffectsDrain,
+            TransitionHook,
+        };
+        let publish = Arc::new(QueuePublishDrain::new(&pool));
+        let pods = Arc::new(LivePodDrain::new(&pool, redis.clone(), runner.clone()));
+        let terminal = Arc::new(QueueTerminalEffectsDrain::new(&pool));
+        let deps = HookDeps {
             pool,
             cloud,
             managed,
+            cache: crate::admission::RedisAdmissionCache::from_env(),
             redis,
             runner,
             toolsets,
             assistant_seam,
+            publish,
+            pods,
+            terminal,
+            queue: Arc::new(OutboxTaskSink),
+        };
+        Self {
+            hook: TransitionHook::new(&deps),
         }
     }
 }
@@ -778,16 +745,8 @@ impl IssueTransitionHook for WorkerTransitionHook {
         prev_state_id: Option<Uuid>,
         current_state_id: Option<Uuid>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        let pool = self.pool.clone();
-        Box::pin(async move {
-            enqueue_completion_comment(
-                &pool,
-                &issue_id,
-                prev_state_id.as_ref(),
-                current_state_id.as_ref(),
-            )
-            .await;
-        })
+        self.hook
+            .enqueue_completion_comment(issue_id, prev_state_id, current_state_id)
     }
 
     fn fire(
@@ -795,72 +754,27 @@ impl IssueTransitionHook for WorkerTransitionHook {
         actor_id: Uuid,
         request: FireRequest,
     ) -> Pin<Box<dyn Future<Output = Result<FireOutcome, ()>> + Send + '_>> {
-        let pool = self.pool.clone();
-        let cloud = self.cloud.clone();
-        let managed = self.managed.clone();
-        let redis = self.redis.clone();
-        let runner = self.runner.clone();
-        let toolsets = self.toolsets.clone();
-        let assistant_seam = self.assistant_seam.clone();
-        Box::pin(async move {
-            // Per-fire inputs (the fire_tick live shape): the universe
-            // around this fire's actor, LLM-key presence, and the
-            // installed seam's gate verdicts over it. Each erasure logs
-            // its cause first (PIDASHCONV-1563).
-            let universe = creator_universe(&pool, Some(actor_id), request.issue_id)
-                .await
-                .map_err(|error| {
-                    tracing::warn!(%error, "sync transition fire: creator universe lookup failed");
-                })?;
-            let presence = Arc::new(fetch_presence(&pool, &universe).await.map_err(|error| {
-                tracing::warn!(%error, "sync transition fire: presence lookup failed");
-            })?);
-            let verdicts = Arc::new(gate_verdicts(&assistant_seam, &presence).await);
-            let build_deps = || StoreDeps {
-                cloud: cloud.clone(),
-                managed: managed.clone(),
-                cache: RedisAdmissionCache::from_env(),
-                has_usable_llm_config: gate_fn(Arc::clone(&verdicts)),
-                toolsets: Arc::clone(&toolsets),
-                llm_profile: profile_fn(Arc::clone(&presence)),
-                now_unix_secs: request.now.timestamp(),
-            };
-            let matcher = JobsMatcher::new(pool.clone());
-            let drains = WorkerTransitionDrains {
-                pool: pool.clone(),
-                redis,
-                runner,
-            };
-            fire_transition(
-                &pool,
-                build_deps(),
-                build_deps(),
-                matcher,
-                &cloud,
-                request,
-                &drains,
-                &drains,
-            )
-            .await
-        })
+        self.hook.fire(actor_id, request)
     }
 }
 
-/// The worker's [`TaskEnqueueHook`]: `task.delay(*args, **kwargs)`
-/// through the jobs queue kernel, mirroring the api binary's
-/// `AppTaskEnqueueHook` (`crates/api/src/domain_hooks.rs`), which this
-/// crate cannot name. Worker drivers that drive domain writes (the
-/// cloud-agent tools, PIDASHCONV-1596) register one on the
+/// The worker's [`TaskEnqueueHook`]: the public
+/// [`hooks::EnqueueHook`][crate::hooks::EnqueueHook] over the outbox
+/// sink. Worker drivers that drive domain writes (the cloud-agent
+/// tools, PIDASHCONV-1596) register one on the
 /// [`WriteTxn`][pidash_services::domain::WriteTxn] hook registry next
 /// to the [`WorkerTransitionHook`]. Enqueue failures log and the save
 /// stands.
 pub struct WorkerTaskEnqueueHook {
-    pool: PgPool,
+    hook: crate::hooks::EnqueueHook,
 }
 
 impl WorkerTaskEnqueueHook {
     pub fn new(pool: &PgPool) -> Self {
-        Self { pool: pool.clone() }
+        use crate::hooks::{EnqueueHook, OutboxTaskSink};
+        Self {
+            hook: EnqueueHook::new(pool, Arc::new(OutboxTaskSink)),
+        }
     }
 }
 
@@ -871,18 +785,7 @@ impl TaskEnqueueHook for WorkerTaskEnqueueHook {
         args: Vec<Value>,
         kwargs: Map<String, Value>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        let pool = self.pool.clone();
-        let message = crate::TaskMessage::new(task, args, kwargs);
-        Box::pin(async move {
-            let job = crate::queue::NewJob::new(
-                message.task.clone(),
-                Value::Array(message.args.clone()),
-                Value::Object(message.kwargs.clone()),
-            );
-            if let Err(error) = crate::queue::enqueue(&pool, &job).await {
-                tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; save stands");
-            }
-        })
+        self.hook.enqueue_task(task, args, kwargs)
     }
 }
 

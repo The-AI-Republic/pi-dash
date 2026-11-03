@@ -389,10 +389,10 @@ def _poll_bookkeeping(runner, body: Dict[str, Any], sid):
                 "status": RunnerStatus.BUSY if reports_busy else RunnerStatus.ONLINE,
             }
             # The worktree pool is retired (PDASHOSS01-137): there is no
-            # per-runner desk capacity to track, so a reported ``free_worktrees``
-            # hint is no longer persisted. A post-retirement daemon omits the
-            # field and a pre-retirement daemon still sends it — either way it
-            # is simply ignored here, and the deprecated column is left untouched.
+            # per-runner desk capacity to track, so a reported capacity hint is
+            # no longer persisted. A post-retirement daemon omits the field and
+            # a pre-retirement daemon still sends it — either way it is simply
+            # ignored here.
             Runner.objects.filter(pk=runner.id).update(**runner_updates)
             if status_entry:
                 session_service.reap_stale_busy_runs(runner, status_entry)
