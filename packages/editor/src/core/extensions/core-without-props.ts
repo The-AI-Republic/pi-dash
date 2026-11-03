@@ -15,6 +15,7 @@ import { CustomCalloutExtensionConfig } from "./callout/extension-config";
 import { CustomCodeBlockExtensionWithoutProps } from "./code/without-props";
 import { CustomCodeInlineExtension } from "./code-inline";
 import { CustomColorExtension } from "./custom-color";
+import { EntityReferenceExtensionConfig } from "./entity-reference/extension-config";
 import { CustomImageExtensionConfig } from "./custom-image/extension-config";
 import { CustomLinkExtension } from "./custom-link";
 import { EmojiExtension } from "./emoji/extension";
@@ -63,4 +64,4 @@ export const CoreEditorExtensionsWithoutProps = [
   ...CoreEditorAdditionalExtensionsWithoutProps,
 ];
 
-export const DocumentEditorExtensionsWithoutProps = [WorkItemEmbedExtensionConfig];
+export const DocumentEditorExtensionsWithoutProps = [WorkItemEmbedExtensionConfig, EntityReferenceExtensionConfig];

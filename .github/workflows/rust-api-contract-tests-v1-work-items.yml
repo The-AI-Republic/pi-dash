@@ -5,7 +5,7 @@ name: rust-api contract tests — v1 work items
 
 on:
   push:
-    branches: [rust-dev]
+    branches: [main]
     paths:
       - "rust-api/**"
       - "apps/api/**"

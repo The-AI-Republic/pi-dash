@@ -152,6 +152,8 @@ class SubIssuesEndpoint(BaseAPIView):
                 "project_id",
                 "parent_id",
                 "cycle_id",
+                # The cloud type filter scopes these rows client-side (NEWFRONT-984).
+                "type_id",
                 "module_ids",
                 "label_ids",
                 "assignee_ids",
