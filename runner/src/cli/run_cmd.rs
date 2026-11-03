@@ -23,6 +23,10 @@ pub struct RunCmdArgs {
 pub enum RunCmdCommand {
     /// Report this run's outcome to Pi Dash's ticking clock. Call it once,
     /// as the last `pidash` command of the run, after any state move.
+    ///
+    /// A scheduled run yields the same way: it has no issue and no clock,
+    /// so the outcome is recorded on the run itself and the response says
+    /// `"run_kind": "scheduler"`.
     Yield(YieldArgs),
 }
 
@@ -70,7 +74,9 @@ pub struct YieldArgs {
     pub note: Option<String>,
     /// Stop this issue's ticking clock: no further agent run should be
     /// scheduled on it. Use when the issue is finished or parked for a
-    /// human. Outcomes alone never stop the clock.
+    /// human. Outcomes alone never stop the clock. A scheduled run has no
+    /// clock: the flag is accepted and ignored, and never disables the
+    /// schedule.
     #[arg(long)]
     pub stop_ticking: bool,
     /// Override the run id. Defaults to `PIDASH_RUN_ID`, which the daemon
