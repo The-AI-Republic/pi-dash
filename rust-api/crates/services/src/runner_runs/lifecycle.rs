@@ -582,13 +582,13 @@ pub fn plan_requeue_from_locked(run: &RequeueRunFacts) -> RequeuePlan {
 
 /// Requeue `UPDATE` (`apply_run_resume_unavailable:282-290`):
 /// `save(update_fields=["status", "runner", "pinned_runner",
-/// "assigned_at", "queue_position"])`, in that order. Params: `$1`
-/// `queued`, `$2..$5` null, `$6` run id. Zero rows raise
+/// "assigned_at"])`, in that order. Params: `$1`
+/// `queued`, `$2..$4` null, `$5` run id. Zero rows raise
 /// `DatabaseError`.
 pub fn requeue_update_sql() -> &'static str {
     "UPDATE \"agent_run\" SET \"status\" = $1, \"runner_id\" = $2, \
-     \"pinned_runner_id\" = $3, \"assigned_at\" = $4, \"queue_position\" = $5 \
-     WHERE \"agent_run\".\"id\" = $6"
+     \"pinned_runner_id\" = $3, \"assigned_at\" = $4 \
+     WHERE \"agent_run\".\"id\" = $5"
 }
 
 /// Parent thread clear (`apply_run_resume_unavailable:279-281`):
@@ -640,7 +640,7 @@ pub struct TerminalUpdateInputs<'a> {
 }
 
 /// Per-status terminal writes (`finalize_run_terminal:426-449`).
-/// `status`/`ended_at`/`queue_position` are always written (base of
+/// `status`/`ended_at` are always written (base of
 /// the finalize values); `done_payload` only on `COMPLETED` (verbatim,
 /// pre-merge — the merge runs in the finalize step against the locked
 /// row); `error` on `COMPLETED` (`""`), `FAILED` (enriched, only when
@@ -720,7 +720,7 @@ fn terminal_detail_str(detail: &Value) -> Result<&str, LifecycleError> {
 /// Caller-`updates` extras for the finalize values, in exact dict
 /// insertion order: per-status keys first (`done_payload`, `error` /
 /// `refusal_category`, `error` / `error`), then `usage`, then
-/// `llm_model`. `status`/`ended_at`/`queue_position` are *not* extras —
+/// `llm_model`. `status`/`ended_at` are *not* extras —
 /// they overwrite the finalize base in place.
 pub fn terminal_extras(updates: &TerminalUpdates) -> Vec<(&'static str, SetValue)> {
     let mut extras = Vec::new();
@@ -1231,7 +1231,6 @@ mod tests {
         assert!(row.get("runner").unwrap().is_null());
         assert!(row.get("pinned").unwrap().is_null());
         assert!(row.get("assigned_at").unwrap().is_null());
-        assert!(row.get("queue_position").unwrap().is_null());
         assert_eq!(
             fx["resume_unavailable"]
                 .get("parent_thread_id")
@@ -1544,11 +1543,10 @@ mod tests {
             [
                 "status",
                 "ended_at",
-                "queue_position",
                 "terminal_hooks_applied_at",
                 "terminal_capacity_released_at",
                 "done_payload",
-                "error",
+                "error_details",
             ]
         );
         let inputs = terminal_inputs(
@@ -1728,7 +1726,7 @@ mod tests {
     fn lock_sql_match_django_tails() {
         let pause = lock_run_for_pause_sql();
         assert!(pause.starts_with("SELECT \"agent_run\".\"id\", "), "prefix");
-        assert_eq!(select_runs(&pause), vec![("\"agent_run\"".to_owned(), 41)]);
+        assert_eq!(select_runs(&pause), vec![("\"agent_run\"".to_owned(), 39)]);
         assert!(
             pause.ends_with(
                 " FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND \
@@ -1741,7 +1739,7 @@ mod tests {
         let requeue = lock_run_for_requeue_sql();
         assert_eq!(
             select_runs(&requeue),
-            vec![("\"agent_run\"".to_owned(), 41)]
+            vec![("\"agent_run\"".to_owned(), 39)]
         );
         assert!(
             requeue.ends_with(
@@ -1760,7 +1758,7 @@ mod tests {
         assert_eq!(
             select_runs(&reread),
             vec![
-                ("\"agent_run\"".to_owned(), 41),
+                ("\"agent_run\"".to_owned(), 39),
                 ("\"issues\"".to_owned(), 34),
             ]
         );
@@ -1776,7 +1774,7 @@ mod tests {
         assert_eq!(
             select_runs(&drain),
             vec![
-                ("\"agent_run\"".to_owned(), 41),
+                ("\"agent_run\"".to_owned(), 39),
                 ("\"issues\"".to_owned(), 34),
                 ("\"projects\"".to_owned(), 46),
                 ("\"states\"".to_owned(), 18),
@@ -1796,7 +1794,7 @@ mod tests {
         assert_eq!(
             select_runs(&failure),
             vec![
-                ("\"agent_run\"".to_owned(), 41),
+                ("\"agent_run\"".to_owned(), 39),
                 ("\"issues\"".to_owned(), 34),
                 ("\"projects\"".to_owned(), 46),
             ]
@@ -1870,8 +1868,8 @@ mod tests {
         assert_eq!(
             requeue_update_sql(),
             "UPDATE \"agent_run\" SET \"status\" = $1, \"runner_id\" = $2, \
-             \"pinned_runner_id\" = $3, \"assigned_at\" = $4, \"queue_position\" = $5 \
-             WHERE \"agent_run\".\"id\" = $6"
+             \"pinned_runner_id\" = $3, \"assigned_at\" = $4 \
+             WHERE \"agent_run\".\"id\" = $5"
         );
         assert_eq!(
             parent_thread_clear_sql(),

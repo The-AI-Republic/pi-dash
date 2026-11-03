@@ -264,6 +264,52 @@ def test_patch_can_change_rrule_and_enabled(binding):
 
 
 # ---------------------------------------------------------------------------
+# series_exhausted — "Completed" signal for finished finite series
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_series_exhausted_false_when_next_run_scheduled(binding):
+    binding.next_run_at = datetime(2030, 1, 1, tzinfo=dt_timezone.utc)
+    binding.save(update_fields=["next_run_at"])
+    assert SchedulerBindingSerializer(binding).data["series_exhausted"] is False
+
+
+@pytest.mark.unit
+def test_series_exhausted_true_for_finished_count_series(binding):
+    # COUNT=1 from _ANCHOR: the sole occurrence is the (past) anchor itself.
+    binding.rrule = "FREQ=DAILY;COUNT=1"
+    binding.next_run_at = None
+    binding.save(update_fields=["rrule", "next_run_at"])
+    assert SchedulerBindingSerializer(binding).data["series_exhausted"] is True
+
+
+@pytest.mark.unit
+def test_series_exhausted_true_for_past_single_shot(binding):
+    binding.rrule = ""
+    binding.next_run_at = None
+    binding.save(update_fields=["rrule", "next_run_at"])
+    assert SchedulerBindingSerializer(binding).data["series_exhausted"] is True
+
+
+@pytest.mark.unit
+def test_series_exhausted_false_for_invalid_rrule(binding):
+    # An invalid bundle is a configuration error, not a completed series.
+    binding.rrule = "garbage"
+    binding.next_run_at = None
+    binding.save(update_fields=["rrule", "next_run_at"])
+    assert SchedulerBindingSerializer(binding).data["series_exhausted"] is False
+
+
+@pytest.mark.unit
+def test_series_exhausted_false_for_open_ended_rule_never_scheduled(binding):
+    # Fresh binding shape: NULL next_run_at, infinite rule → not exhausted.
+    binding.next_run_at = None
+    binding.save(update_fields=["next_run_at"])
+    assert SchedulerBindingSerializer(binding).data["series_exhausted"] is False
+
+
+# ---------------------------------------------------------------------------
 # active_binding_count fallback  (Codex review #12)
 # ---------------------------------------------------------------------------
 

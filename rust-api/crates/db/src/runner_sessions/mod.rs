@@ -60,8 +60,7 @@
 //! `runner.id` (`related_name="sessions"`, `CASCADE`). Not
 //! referenced by D-14 SQL: `name`, `host_label`, `visibility`,
 //! refresh/enrollment token columns, `enrolled_at`,
-//! `protocol_version`, `free_worktrees` (explicitly retired,
-//! `sessions.py` poll ignores the hint), `updated_at`,
+//! `protocol_version`, `updated_at`,
 //! `revoked_at` / `revoked_reason` (revocation is tested via
 //! `status` only).
 //!
@@ -84,7 +83,6 @@
 //! filter/update, resume_ack read), `executor_kind` (varchar;
 //! `MACHINE_EXECUTORS` + managed/local splits), `assigned_at`
 //! (timestamptz null; reaper cutoff, FIFO order, assign update),
-//! `queue_position` (smallint null; cancel-barrier clear),
 //! `created_at` (timestamptz; FIFO order and `Meta.ordering`
 //! `["-created_at"]` for unordered `.first()`), `ended_at`
 //! (timestamptz null; cancel-barrier update). Row-reads from fetched

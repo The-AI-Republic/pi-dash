@@ -8,12 +8,12 @@ name: rust-api-write-guard
 # before merge. The gate is the local check in rust-api/README.md.
 on:
   push:
-    branches: [rust-dev]
+    branches: [main]
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api-write-guard.yml"
   pull_request:
-    branches: [rust-dev]
+    branches: [main]
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api-write-guard.yml"

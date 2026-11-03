@@ -1321,9 +1321,20 @@ def _page_html(conn, page_id) -> str:
 def _asset_row(conn, asset_id):
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            'SELECT id, asset, is_uploaded, storage_metadata FROM "file_assets"'
+            'SELECT id, asset, is_uploaded, storage_metadata,'
+            ' created_by_id, updated_by_id FROM "file_assets"'
             " WHERE id = %s::uuid AND deleted_at IS NULL",
             (str(asset_id),),
+        )
+        return cur.fetchone()
+
+
+def _page_row(conn, page_id):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            'SELECT id, created_by_id, updated_by_id FROM "pages"'
+            " WHERE id = %s::uuid AND deleted_at IS NULL",
+            (str(page_id),),
         )
         return cur.fetchone()
 
@@ -1332,8 +1343,13 @@ def _image_srcs(html: str) -> list:
     return re.findall(r'<image-component\s+src="([^"]+)"', html or "")
 
 
-def _seed_copy_world(db_conn, tag: str) -> dict:
-    """Page + uploaded source asset + real S3 object for the copy task."""
+def _seed_copy_world(db_conn, tag: str, seed_template: str | None = None) -> dict:
+    """Page + uploaded source asset + real S3 object for the copy task.
+
+    ``seed_template`` overrides the description; ``{src}`` formats to the
+    source asset id (PIDASHCONV-1699 reserialize cases). ``None`` keeps the
+    original ``<p>t</p>`` + image-component seed.
+    """
     chain = seed_helpers.issue_chain(db_conn, f"copy1292-{tag}")
     ws_id = str(chain["workspace"]["id"])
     proj_id = str(chain["project"]["id"])
@@ -1360,13 +1376,18 @@ def _seed_copy_world(db_conn, tag: str) -> dict:
             "storage_metadata": {},
         },
     )
-    seed_html = f'<p>t</p><image-component src="{asset["id"]}"></image-component>'
+    if seed_template is None:
+        seed_html = f'<p>t</p><image-component src="{asset["id"]}"></image-component>'
+    else:
+        seed_html = seed_template.format(src=asset["id"])
     page = insert_row(
         db_conn,
         "pages",
         {
             "workspace_id": ws_id,
             "owned_by_id": str(chain["owner"]["id"]),
+            "created_by_id": str(chain["owner"]["id"]),
+            "updated_by_id": str(chain["owner"]["id"]),
             "name": f"copy1292-{tag}",
             "description_json": {},
             "description_html": seed_html,
@@ -1431,6 +1452,59 @@ def test_copy_task_copies_s3_objects_and_rewrites_page(db_conn, broker_url):
         )
     # Copy, not move: the source object still exists.
     assert s3_helpers.s3_key_exists(world["bucket"], world["src_key"])
+
+
+def test_copy_task_nulls_audit_columns(db_conn, broker_url):
+    """Copy task: worker saves NULL both audit columns on duplicate rows (PIDASHCONV-1698).
+
+    ``FileAsset.objects.create(created_by_id=user_id, ...)`` passes the
+    requester to the model constructor, not as the ``save()`` keyword, so
+    ``BaseModel.save`` (``db/models/base.py:23-33``) sees
+    ``created_by_id=None``; with no crum user in a worker it blanks
+    ``created_by`` and ``updated_by`` before the INSERT. The page's
+    ``entity.save()`` (``copy_s3_object.py:58``, full save, twice) does
+    the same. Seed page + source asset with both audit columns set;
+    after the task the duplicate asset and the page both read NULL/NULL.
+    Same worker semantics already ported as PB-2008/PB-2009/PB-2032.
+    """
+    tag = uuid.uuid4().hex[:8]
+    world = _seed_copy_world(db_conn, tag)
+    before = _page_row(db_conn, world["page_id"])
+    assert before["created_by_id"] is not None, "seed must set page created_by"
+    assert before["updated_by_id"] is not None, "seed must set page updated_by"
+    celery_wire.publish(
+        COPY_TASK,
+        kwargs={
+            "entity_name": "PAGE",
+            "entity_identifier": world["page_id"],
+            "project_id": world["project_id"],
+            "slug": world["slug"],
+            "user_id": world["owner_id"],
+        },
+    )
+    assert wait_for(
+        lambda: _page_html(db_conn, world["page_id"]) != world["seed_html"],
+        what="copy task rewrote the page description",
+    )
+    srcs = _image_srcs(_page_html(db_conn, world["page_id"]))
+    assert srcs, "rewrite removed every image-component"
+    assert world["asset_id"] not in srcs, "srcs still point at the source asset"
+    for src in srcs:
+        row = _asset_row(db_conn, src)
+        assert row is not None, f"src {src} resolves to no file_assets row"
+        assert row["created_by_id"] is None, (
+            f"duplicate {src} keeps created_by {row['created_by_id']}"
+        )
+        assert row["updated_by_id"] is None, (
+            f"duplicate {src} keeps updated_by {row['updated_by_id']}"
+        )
+    page = _page_row(db_conn, world["page_id"])
+    assert page["created_by_id"] is None, (
+        f"duplicate page keeps created_by {page['created_by_id']}"
+    )
+    assert page["updated_by_id"] is None, (
+        f"duplicate page keeps updated_by {page['updated_by_id']}"
+    )
 
 
 def test_metadata_task_stores_head_dict(db_conn, broker_url):
@@ -1750,3 +1824,149 @@ def test_1327_failing_task_is_recorded_and_worker_continues(db_conn, broker_url)
                 (str(chain["issue"]["id"]),),
             )
             cur.execute('DELETE FROM "pod" WHERE id = %s::uuid', (str(pod["id"]),))
+
+
+# --- PIDASHCONV-1699: the copy task stores str(soup), not the input bytes ---
+#
+# Django's replace_asset_ids (copy_s3_object.py:42-52) returns str(soup) —
+# entities decoded, voids as <x/>, attributes lowercased/sorted/double-quoted —
+# whether or not any src changed. Expected values below were recorded from
+# the live Django worker (bs4 4.12.3); the Rust replay pins the same bytes.
+
+COPY_RESERIALIZE_CASES = [
+    ("entities", "<p>a&nbsp;b &#39;q&#39;</p>", "<p>a\xa0b 'q'</p>"),
+    ("voids", "<p>x<br>y</p><hr>", "<p>x<br/>y</p><hr/>"),
+    (
+        "boolattr",
+        '<input type="checkbox" checked>',
+        '<input checked="" type="checkbox"/>',
+    ),
+]
+
+COPY_RESERIALIZE_PAIRED_CASES = [
+    (
+        "entities",
+        '<p>a&nbsp;b &#39;q&#39;</p><image-component src="{src}"></image-component>',
+        '<p>a\xa0b \'q\'</p><image-component src="{src}"></image-component>',
+    ),
+    (
+        "voids",
+        '<p>x<br>y</p><hr><image-component src="{src}"></image-component>',
+        '<p>x<br/>y</p><hr/><image-component src="{src}"></image-component>',
+    ),
+    (
+        "boolattr",
+        '<input type="checkbox" checked><image-component src="{src}"></image-component>',
+        '<input checked="" type="checkbox"/><image-component src="{src}"></image-component>',
+    ),
+]
+
+
+def _seed_copy_page(db_conn, tag: str, html: str) -> dict:
+    """Page with caller-chosen description_html for the copy task (no asset)."""
+    # Short prefix: the workspace slug is varchar(48) and the seeder wraps
+    # it as "contract" + slug + "-" + uuid8.
+    chain = seed_helpers.issue_chain(db_conn, f"c1699-{tag}")
+    page = insert_row(
+        db_conn,
+        "pages",
+        {
+            "workspace_id": str(chain["workspace"]["id"]),
+            "owned_by_id": str(chain["owner"]["id"]),
+            "name": f"c1699-{tag}",
+            "description_json": {},
+            "description_html": html,
+            "access": 0,
+            "color": "",
+            "is_locked": False,
+            "view_props": {},
+            "logo_props": {},
+            "is_global": False,
+            "sort_order": 65535,
+        },
+    )
+    return {
+        "page_id": str(page["id"]),
+        "project_id": str(chain["project"]["id"]),
+        "owner_id": str(chain["owner"]["id"]),
+        "slug": chain["workspace"]["slug"],
+        "seed_html": html,
+    }
+
+
+@pytest.mark.parametrize(
+    "name,seed,expected", COPY_RESERIALIZE_CASES, ids=[c[0] for c in COPY_RESERIALIZE_CASES]
+)
+def test_copy_task_reserializes_description_without_pairs(
+    db_conn, broker_url, name, seed, expected
+):
+    """Zero-pair copies still store str(soup): entities, voids, bool attrs.
+
+    The page holds no image-component, so no pair can match; Django still
+    re-serializes through BeautifulSoup before saving (PB-1547). Red on
+    Rust while replace_asset_ids returns the input unchanged.
+    """
+    tag = uuid.uuid4().hex[:8]
+    world = _seed_copy_page(db_conn, f"zero-{name}-{tag}", seed)
+    celery_wire.publish(
+        COPY_TASK,
+        kwargs={
+            "entity_name": "PAGE",
+            "entity_identifier": world["page_id"],
+            "project_id": world["project_id"],
+            "slug": world["slug"],
+            "user_id": world["owner_id"],
+        },
+    )
+    assert wait_for(
+        lambda: _page_html(db_conn, world["page_id"]) != world["seed_html"],
+        what=f"copy task reserialized the {name} description",
+    )
+    assert _page_html(db_conn, world["page_id"]) == expected
+
+
+@pytest.mark.parametrize(
+    "name,template,expected_template",
+    COPY_RESERIALIZE_PAIRED_CASES,
+    ids=[c[0] for c in COPY_RESERIALIZE_PAIRED_CASES],
+)
+def test_copy_task_reserializes_description_with_pairs(
+    db_conn, broker_url, name, template, expected_template
+):
+    """Paired copies rewrite the src AND store str(soup) around it.
+
+    Same seeds as the base copy test plus one reserialize probe each; the
+    stored html must equal the Django serialization with the duplicate's
+    src substituted, and the duplicate keeps the base copy contract
+    (uploaded row, real S3 object behind it).
+    """
+    tag = uuid.uuid4().hex[:8]
+    # Short tag: the workspace slug is varchar(48); the seeder wraps it as
+    # "contract" + "copy1292-" + tag + "-" + uuid8.
+    world = _seed_copy_world(db_conn, f"{name}-{tag}", seed_template=template)
+    celery_wire.publish(
+        COPY_TASK,
+        kwargs={
+            "entity_name": "PAGE",
+            "entity_identifier": world["page_id"],
+            "project_id": world["project_id"],
+            "slug": world["slug"],
+            "user_id": world["owner_id"],
+        },
+    )
+    assert wait_for(
+        lambda: _page_html(db_conn, world["page_id"]) != world["seed_html"],
+        what=f"copy task rewrote the {name} page description",
+    )
+    stored = _page_html(db_conn, world["page_id"])
+    srcs = _image_srcs(stored)
+    assert len(srcs) == 1, f"expected one image-component, got {srcs!r} in {stored!r}"
+    assert srcs[0] != world["asset_id"], "src still points at the source asset"
+    assert stored == expected_template.format(src=srcs[0])
+    row = _asset_row(db_conn, srcs[0])
+    assert row is not None, f"src {srcs[0]} resolves to no file_assets row"
+    assert row["is_uploaded"] is True, f"duplicate {srcs[0]} never marked uploaded"
+    assert s3_helpers.s3_key_exists(world["bucket"], row["asset"]), (
+        f"duplicate {srcs[0]} points at S3 key {row['asset']} with no object behind it"
+    )
+    assert s3_helpers.s3_key_exists(world["bucket"], world["src_key"])

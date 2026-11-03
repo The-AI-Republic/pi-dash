@@ -3146,6 +3146,7 @@ dependencies = [
  "reqwest",
  "rrule",
  "rustls",
+ "sea-orm",
  "sea-query",
  "serde",
  "serde_json",
@@ -3233,6 +3234,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "unicode-general-category",
  "uuid",
  "zxcvbn",
 ]

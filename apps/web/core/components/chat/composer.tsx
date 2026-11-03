@@ -6,7 +6,7 @@
 
 import { useCallback, useRef, type ReactNode } from "react";
 import { Mic, Send, Square } from "lucide-react";
-import { Link, useNavigate } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
 import { Button } from "@pi-dash/ui";
 import { cn } from "@pi-dash/utils";
 import { DICTATION_SETTINGS_ANCHOR } from "@/components/settings/profile/content/pages/dictation-settings";
@@ -25,7 +25,8 @@ interface ChatComposerProps {
   bordered?: boolean;
 }
 
-const DICTATION_SETTINGS_HREF = `/settings/profile/ai-assistant#${DICTATION_SETTINGS_ANCHOR}`;
+const dictationSettingsHref = (workspaceSlug: string | undefined) =>
+  `/${workspaceSlug}/settings/account/ai-assistant#${DICTATION_SETTINGS_ANCHOR}`;
 
 function formatElapsed(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
@@ -54,6 +55,8 @@ export function ChatComposer({
 }: ChatComposerProps) {
   const disabled = !!disabledReason;
   const navigate = useNavigate();
+  const { workspaceSlug } = useParams();
+  const dictationHref = dictationSettingsHref(workspaceSlug);
 
   // Keep the latest draft reachable from the (stable) onResult callback so the
   // transcript appends to whatever is in the box when recording finishes.
@@ -83,13 +86,13 @@ export function ChatComposer({
     if (disabled) return;
     // Not set up yet: route to settings instead of a silent no-op recording.
     if (isUnconfigured) {
-      navigate(DICTATION_SETTINGS_HREF);
+      navigate(dictationHref);
       return;
     }
     // A prior error / denied press should retry cleanly.
     if (dictationStatus === "error" || dictationStatus === "denied") resetDictation();
     void startDictation();
-  }, [disabled, isUnconfigured, dictationStatus, navigate, resetDictation, startDictation]);
+  }, [disabled, isUnconfigured, dictationStatus, dictationHref, navigate, resetDictation, startDictation]);
 
   const endDictation = useCallback(() => {
     if (dictationStatus === "recording" || dictationStatus === "requesting") stopDictation();
@@ -127,7 +130,7 @@ export function ChatComposer({
     dictationHint = (
       <span className="text-secondary">
         Voice dictation isn&apos;t set up.{" "}
-        <Link to={DICTATION_SETTINGS_HREF} className="text-accent-strong underline underline-offset-2">
+        <Link to={dictationHref} className="text-accent-strong underline underline-offset-2">
           Configure it
         </Link>
         .

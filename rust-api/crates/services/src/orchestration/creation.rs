@@ -97,6 +97,7 @@ use crate::runner_sessions::guards::HEARTBEAT_GRACE_SECS;
 use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
 use pidash_db::orchestration::is_terminal_status;
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
+use pidash_db::runner_runs::agent_run;
 use pidash_types::dispatch::AgentExecutorKind;
 pub use pidash_types::orchestration::PROJECT_MOVE_HANDOFF_CONFIG_KEY;
 use pidash_types::orchestration::{ContinuationOutcome, PhaseConfig, StateRef, TransitionOutcome};
@@ -188,7 +189,7 @@ pub const PROJECT_SELECT_SQL: &str = "SELECT id, workspace_id, identifier, name,
 pub const STATE_SELECT_SQL: &str = "SELECT id, name, \"group\" FROM states WHERE id = $1";
 
 /// The consumed `agent_run` projection for creation reads. Django
-/// selects the full 41-column row; the L2 `READ_COLUMNS` projection
+/// selects the full 39-column row; the L2 `READ_COLUMNS` projection
 /// lacks `parent_run_id` / `run_config` / `phase_kind` /
 /// `prompt_manifest` / `ended_at`, so creation projects its own.
 pub const RUN_VIEW_COLUMNS: &[&str] = &[
@@ -206,8 +207,7 @@ pub const RUN_VIEW_COLUMNS: &[&str] = &[
     "phase_kind",
     "run_config",
     "tool_plan",
-    "error_code",
-    "error",
+    "error_details",
     "prompt",
     "prompt_manifest",
     "ended_at",
@@ -304,20 +304,21 @@ pub fn run_lock_sql() -> String {
 /// The full-row INSERT (`AgentRun.objects.create`, `service.py:478-495`,
 /// `:604-616`, `:785-799`): Django inserts every concrete column, so
 /// this lists every non-generated column in model order (the three
-/// `JSONKeyBigIntegerField` generated columns excluded). Fixed values
+/// `JSONKeyBigIntegerField` generated columns and the
+/// `JSONKeyTextField` `refusal_category` excluded). Fixed values
 /// are literals (`queued`, `0`, `""`, `{}`, `[]`, NULLs); `$1..$14`
 /// carry the caller-supplied fields in [`NewAgentRun`] order.
 pub const RUN_INSERT_SQL: &str =
     "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, \
     pod_id, runner_id, pinned_runner_id, work_item_id, scheduler_binding_id, parent_run_id, \
-    status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, error_code, \
+    status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, \
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
     prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-    lease_expires_at, done_payload, error, refusal_category, llm_model, usage, created_at, \
-    assigned_at, queue_position, started_at, ended_at) \
-    VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, NULL, $7, 'queued', $8, 0, NULL, '', $9, $10, \
-    NULL, NULL, '', $11, NULL, $12, $13, '[]', '', '{}', NULL, NULL, '', '', '', '{}', $14, \
-    NULL, NULL, NULL, NULL)";
+    lease_expires_at, done_payload, error_details, llm_model, usage, created_at, \
+    assigned_at, started_at, ended_at) \
+    VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, NULL, $7, 'queued', $8, 0, NULL, '', $10, \
+    NULL, NULL, '', $11, NULL, $12, $13, '[]', '', '{}', NULL, NULL, $9, '', '{}', $14, \
+    NULL, NULL, NULL)";
 
 /// `run.save(update_fields=["prompt", "prompt_manifest"])`
 /// (`service.py:522,639,824`). `$1`/`$2` are prompt/manifest, `$3` the
@@ -351,12 +352,45 @@ pub fn finalize_lock_sql() -> String {
 }
 
 /// The finalize write (`agent_run_finalization.py:52-71`):
-/// status/ended_at/queue NULL/terminal NULLs + the updates
-/// (`error_code`, `error`). `$1` ended_at, `$2` error_code, `$3` error,
-/// `$4` the run id.
-pub const FINALIZE_UPDATE_SQL: &str = "UPDATE agent_run SET status = 'failed', ended_at = $1, \
-    queue_position = NULL, terminal_hooks_applied_at = NULL, \
-    terminal_capacity_released_at = NULL, error_code = $2, error = $3 WHERE id = $4";
+/// status/ended_at/terminal NULLs + the updates
+/// (`error_code`, `error`), folded into `error_details` under the
+/// finalize lock (PDASHOSS01-187). `$1` ended_at, `$2` the
+/// [`finalize_error_details_patch`], `$3` the run id.
+pub fn finalize_update_sql() -> String {
+    format!(
+        "UPDATE agent_run SET status = 'failed', ended_at = $1, \
+         terminal_hooks_applied_at = NULL, \
+         terminal_capacity_released_at = NULL, error_details = {} WHERE id = $3",
+        crate::runner_runs::finalization::error_details_merge_sql("$2")
+    )
+}
+
+/// The `error_details` patch [`finalize_update_sql`] merges: the two
+/// flat updates under their bag keys, an empty value as `null` (which
+/// removes the key, like `merge_error_details`).
+pub fn finalize_error_details_patch(error_code: &str, error: &str) -> Value {
+    let text = |value: &str| {
+        if value.is_empty() {
+            Value::Null
+        } else {
+            Value::String(value.to_owned())
+        }
+    };
+    serde_json::json!({
+        agent_run::ERROR_DETAILS_CODE: text(error_code),
+        agent_run::ERROR_DETAILS_MESSAGE: text(error),
+    })
+}
+
+/// The bag a new run starts with: `{}`, or `{"code": …}` on the
+/// managed waiting path that stamps a code at creation
+/// (`cloud_agent/creation.py`, `fields["error_details"]`).
+pub fn initial_error_details(error_code: &str) -> Value {
+    agent_run::merge_error_details(
+        &serde_json::json!({}),
+        &[("error_code", Value::String(error_code.to_owned()))],
+    )
+}
 
 /// The cloud terminal-event guard (`agent_run_finalization.py:72-75`).
 /// `$1` is the run id.
@@ -586,14 +620,23 @@ pub struct RunView {
     pub phase_kind: String,
     pub run_config: Value,
     pub tool_plan: Value,
-    pub error_code: String,
-    pub error: String,
+    pub error_details: Value,
     pub prompt: String,
     pub prompt_manifest: Option<Value>,
     pub ended_at: Option<DateTime<Utc>>,
 }
 
 impl RunView {
+    /// `AgentRun.error_code`: the `code` key of `error_details`.
+    pub fn error_code(&self) -> &str {
+        agent_run::error_details_text(&self.error_details, agent_run::ERROR_DETAILS_CODE)
+    }
+
+    /// `AgentRun.error`: the `message` key of `error_details`.
+    pub fn error(&self) -> &str {
+        agent_run::error_details_text(&self.error_details, agent_run::ERROR_DETAILS_MESSAGE)
+    }
+
     /// `AgentRun.is_terminal` (`runner/models.py:1137-1144`).
     pub fn is_terminal(&self) -> bool {
         is_terminal_status(self.status)
@@ -647,8 +690,7 @@ pub fn map_run_view(row: &PgRow) -> Result<RunView, sqlx::Error> {
         phase_kind: row.try_get("phase_kind")?,
         run_config: row.try_get("run_config")?,
         tool_plan: row.try_get("tool_plan")?,
-        error_code: row.try_get("error_code")?,
-        error: row.try_get("error")?,
+        error_details: row.try_get("error_details")?,
         prompt: row.try_get("prompt")?,
         prompt_manifest: row.try_get("prompt_manifest")?,
         ended_at: row.try_get("ended_at")?,
@@ -699,8 +741,9 @@ pub struct NewAgentRun {
     pub work_item_id: Uuid,
     pub parent_run_id: Option<Uuid>,
     pub executor_kind: AgentExecutorKind,
-    /// The `error_code` splat (`""` except the managed waiting path).
-    pub error_code: String,
+    /// The `error_details` splat (`{}` except the managed waiting
+    /// path's `{"code": …}`; see [`initial_error_details`]).
+    pub error_details: Value,
     pub tool_plan: Value,
     /// The raw stamped value: the handoff builder inherits the
     /// parent's verbatim (`service.py:612`), which may itself be
@@ -1575,7 +1618,9 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
             work_item_id: issue.id,
             parent_run_id: effective_parent.as_ref().map(|parent| parent.id),
             executor_kind: execution.executor_kind,
-            error_code: execution.error_code.clone().unwrap_or_default(),
+            error_details: initial_error_details(
+                execution.error_code.as_deref().unwrap_or_default(),
+            ),
             tool_plan: execution.tool_plan.clone(),
             trigger: req.trigger.clone(),
             phase_kind: kind.clone(),
@@ -1711,7 +1756,9 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
             work_item_id: issue.id,
             parent_run_id: Some(req.parent.id),
             executor_kind: execution.executor_kind,
-            error_code: execution.error_code.clone().unwrap_or_default(),
+            error_details: initial_error_details(
+                execution.error_code.as_deref().unwrap_or_default(),
+            ),
             tool_plan: execution.tool_plan.clone(),
             trigger: req.trigger.clone(),
             phase_kind: kind.clone(),
@@ -1829,7 +1876,9 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
             work_item_id: issue.id,
             parent_run_id: Some(req.parent.id),
             executor_kind: execution.executor_kind,
-            error_code: execution.error_code.clone().unwrap_or_default(),
+            error_details: initial_error_details(
+                execution.error_code.as_deref().unwrap_or_default(),
+            ),
             tool_plan: execution.tool_plan.clone(),
             trigger: req.parent.trigger.clone(),
             phase_kind: String::new(),
@@ -2213,8 +2262,7 @@ mod tests {
             phase_kind: "coding-task".to_owned(),
             run_config: json!({}),
             tool_plan: json!({}),
-            error_code: String::new(),
-            error: String::new(),
+            error_details: json!({}),
             prompt: String::new(),
             prompt_manifest: None,
             ended_at: None,
@@ -2529,8 +2577,7 @@ mod tests {
                 phase_kind: row.phase_kind.clone(),
                 run_config: row.run_config.clone(),
                 tool_plan,
-                error_code: row.error_code.clone(),
-                error: String::new(),
+                error_details: row.error_details.clone(),
                 prompt: String::new(),
                 prompt_manifest: None,
                 ended_at: None,
@@ -2623,8 +2670,13 @@ mod tests {
             let mut runs = self.runs.borrow_mut();
             let run = runs.get_mut(&run_id).expect("run exists");
             run.status = AgentRunStatus::Failed;
-            run.error_code = error_code.to_owned();
-            run.error = error.to_owned();
+            run.error_details = agent_run::merge_error_details(
+                &run.error_details,
+                &[
+                    ("error_code", Value::String(error_code.to_owned())),
+                    ("error", Value::String(error.to_owned())),
+                ],
+            );
             run.ended_at = Some(now);
             Ok(run.clone())
         }
@@ -3220,10 +3272,10 @@ mod tests {
         let run = seam.runs.borrow()[&created].clone();
         assert_eq!(run.status, AgentRunStatus::Failed);
         assert_eq!(
-            run.error_code,
+            run.error_code(),
             case["after"]["error_code"].as_str().unwrap()
         );
-        assert_eq!(run.error, case["after"]["error"].as_str().unwrap());
+        assert_eq!(run.error(), case["after"]["error"].as_str().unwrap());
         assert_eq!(run.ended_at, Some(now()));
         assert!(run.prompt.is_empty());
         assert_eq!(run.prompt_manifest, None);
@@ -3926,25 +3978,42 @@ mod tests {
             "thread_id",
             "agent_metadata",
             "done_payload",
-            "refusal_category",
+            "error_details",
             "llm_model",
             "usage",
             "created_at",
             "assigned_at",
-            "queue_position",
             "started_at",
             "ended_at",
         ] {
             assert!(RUN_INSERT_SQL.contains(column), "missing {column}");
         }
-        // Generated token columns are excluded (Postgres computes them).
-        for column in ["input_tokens", "output_tokens", "total_tokens"] {
+        // Generated columns are excluded (Postgres computes them), and
+        // the folded trio is one `error_details` column now.
+        for column in [
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "refusal_category",
+            "error_code",
+            "error,",
+        ] {
             assert!(!RUN_INSERT_SQL.contains(column), "generated {column}");
         }
         // `$1..$14` in NewAgentRun order.
         assert!(RUN_INSERT_SQL.contains("$14"));
         assert!(!RUN_INSERT_SQL.contains("$15"));
         assert!(PROMPT_UPDATE_SQL.contains("prompt_manifest"));
-        assert!(FINALIZE_UPDATE_SQL.contains("queue_position = NULL"));
+        assert!(!finalize_update_sql().contains("queue_position"));
+        assert!(!RUN_INSERT_SQL.contains("queue_position"));
+        assert_eq!(initial_error_details(""), json!({}));
+        assert_eq!(
+            initial_error_details("not_connected"),
+            json!({"code": "not_connected"})
+        );
+        assert_eq!(
+            finalize_error_details_patch("run_quota_exceeded", ""),
+            json!({"code": "run_quota_exceeded", "message": null})
+        );
     }
 }

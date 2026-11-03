@@ -1382,22 +1382,20 @@ async fn process_invitations(
     // Accepted project invites → workspace members (role clamped to 5/15)
     // + project members, `ignore_conflicts=True` on both. Two phases, not
     // one loop: Django commits every project-arm `workspace_members` row
-    // before the `project_members` bulk below raises (PIDASHCONV-1359 —
-    // a per-invite loop aborts on `?` after the first workspace, so a
-    // user invited in several workspaces only ever joins the first).
-    // Ported bug PB-1008 (`workspace_project_join.py:76-87`): the
-    // `ProjectMember` bulk omits `project` although
-    // `project_members.project_id` is NOT NULL, so any accepted project
-    // invite raises into the 500 after the rows above commit (google and
-    // gitlab omit the column too; gitea binds explicit NULL).
-    let project_invites: Vec<(Uuid, i16, Option<Uuid>)> = sqlx::query_as(
-        r#"SELECT workspace_id, role, created_by_id FROM project_member_invites
+    // before the `project_members` bulk below (PIDASHCONV-1359 — a
+    // per-invite loop aborts on `?` after the first workspace, so a user
+    // invited in several workspaces only ever joins the first).
+    // `workspace_project_join.py:76-87` sets `project_id` on every
+    // `ProjectMember` row (Django main; PB-1008 retired), so the join
+    // succeeds and the invite is consumed.
+    let project_invites: Vec<(Uuid, Uuid, i16, Option<Uuid>)> = sqlx::query_as(
+        r#"SELECT workspace_id, project_id, role, created_by_id FROM project_member_invites
            WHERE email = $1 AND accepted AND deleted_at IS NULL"#,
     )
     .bind(email)
     .fetch_all(pool)
     .await?;
-    for (workspace_id, role, created_by) in &project_invites {
+    for (workspace_id, _project_id, role, created_by) in &project_invites {
         let clamped = if *role == 5 || *role == 15 { *role } else { 15 };
         let view_props = workspace_default_props();
         let issue_props = serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true});
@@ -1419,7 +1417,7 @@ async fn process_invitations(
         )
         .await?;
     }
-    for (workspace_id, role, created_by) in &project_invites {
+    for (workspace_id, project_id, role, created_by) in &project_invites {
         let clamped = if *role == 5 || *role == 15 { *role } else { 15 };
         let prefs = serde_json::json!({"pages": {"block_display": true},
                     "navigation": {"default_tab": "work_items", "hide_in_more_menu": []}});
@@ -1427,7 +1425,7 @@ async fn process_invitations(
             pool,
             &pidash_services::domain::projects::members::NewProjectMember {
                 workspace_id: *workspace_id,
-                project_id: None,
+                project_id: Some(*project_id),
                 user_id: Some(user_id),
                 role: clamped,
                 created_by: *created_by,
@@ -2535,7 +2533,7 @@ mod tests {
         pool: &sqlx::PgPool,
         email: &str,
         slug: &str,
-    ) -> (Uuid, Vec<Uuid>) {
+    ) -> (Uuid, Vec<Uuid>, Vec<Uuid>) {
         let user_id = Uuid::new_v4();
         let now = chrono::Utc::now();
         sqlx::query(
@@ -2559,6 +2557,7 @@ mod tests {
         .await
         .expect("seed user");
         let mut workspace_ids = Vec::new();
+        let mut project_ids = Vec::new();
         for (index, role) in [(1, 5), (2, 20)] {
             let workspace_id = Uuid::new_v4();
             let project_id = Uuid::new_v4();
@@ -2620,8 +2619,9 @@ mod tests {
             .await
             .expect("seed project invite");
             workspace_ids.push(workspace_id);
+            project_ids.push(project_id);
         }
-        (user_id, workspace_ids)
+        (user_id, workspace_ids, project_ids)
     }
 
     fn tag_suffix() -> String {
@@ -2684,11 +2684,12 @@ mod tests {
         }
     }
 
-    /// Two accepted project invites in two workspaces: the kernel fails
-    /// into `Server` (the ported PB-1008 500) only AFTER committing both
-    /// workspace-member rows (PIDASHCONV-1359 — the pre-fix per-invite
-    /// loop aborted on `?` after the first workspace, so the user never
-    /// joined the second). Zero project-member rows, both invites intact.
+    /// Two accepted project invites in two workspaces: the kernel joins
+    /// both workspaces AND both projects (PIDASHCONV-1359 order — the
+    /// pre-fix per-invite loop aborted on `?` after the first workspace,
+    /// so the user never joined the second; PIDASHCONV-1686 binds each
+    /// invite's `project_id`, retiring the ported PB-1008 500). Both
+    /// invites soft-delete.
     #[tokio::test]
     async fn github_kernel_two_project_invites_join_both_workspaces() {
         let _kernel = KERNEL_LOCK.lock().await;
@@ -2698,7 +2699,7 @@ mod tests {
         let tag = Uuid::new_v4().simple().to_string()[..8].to_owned();
         let email = format!("gh1359-{tag}@example.test");
         let slug = format!("gh1359-{tag}");
-        let (user_id, workspace_ids) =
+        let (user_id, workspace_ids, project_ids) =
             seed_active_user_two_project_invites(&pool, &email, &slug).await;
 
         let auth = kernel_auth(&email);
@@ -2732,12 +2733,14 @@ mod tests {
         .fetch_all(&pool)
         .await
         .expect("read members");
-        let project_rows: i64 =
-            sqlx::query_scalar(r#"SELECT COUNT(*) FROM "project_members" WHERE "member_id" = $1"#)
-                .bind(user_id)
-                .fetch_one(&pool)
-                .await
-                .expect("count project members");
+        let project_rows: Vec<(Uuid, Uuid, i16)> = sqlx::query_as(
+            r#"SELECT "project_id", "workspace_id", "role" FROM "project_members"
+               WHERE "member_id" = $1"#,
+        )
+        .bind(user_id)
+        .fetch_all(&pool)
+        .await
+        .expect("read project members");
         let invites: Vec<(bool, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
             r#"SELECT "accepted", "deleted_at" FROM "project_member_invites"
                WHERE "email" = $1"#,
@@ -2748,10 +2751,7 @@ mod tests {
         .expect("read invites");
         cleanup_project_kernel_world(&pool, &email, &workspace_ids).await;
 
-        assert!(
-            matches!(outcome, Err(CallbackFailure::Server)),
-            "kernel fails into the ported 500"
-        );
+        assert!(outcome.is_ok(), "kernel succeeds (PB-1008 retired)");
         let mut got = members;
         got.sort();
         let mut want = vec![(workspace_ids[0], 5), (workspace_ids[1], 15)];
@@ -2760,9 +2760,16 @@ mod tests {
             got, want,
             "both invite workspaces joined (role 20 clamps to 15)"
         );
+        let mut got_projects = project_rows;
+        got_projects.sort();
+        let mut want_projects = vec![
+            (project_ids[0], workspace_ids[0], 5),
+            (project_ids[1], workspace_ids[1], 15),
+        ];
+        want_projects.sort();
         assert_eq!(
-            project_rows, 0,
-            "project bulk raised before writing anything"
+            got_projects, want_projects,
+            "both invite projects joined with their project_ids"
         );
         assert_eq!(invites.len(), 2, "both invites survive");
         assert!(
@@ -2770,8 +2777,8 @@ mod tests {
             "invites stay accepted"
         );
         assert!(
-            invites.iter().all(|(_, deleted_at)| deleted_at.is_none()),
-            "invites stay live"
+            invites.iter().all(|(_, deleted_at)| deleted_at.is_some()),
+            "invites soft-delete"
         );
     }
 

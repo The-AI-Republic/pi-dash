@@ -520,15 +520,18 @@ pub async fn fetch_source(
 
 /// `_check_targets` (`relations.py:166-177`): self-relation and
 /// cross-workspace refusals, then first-seen dedupe. The refusals fire
-/// before the dedupe check, so a duplicate self-ref still 400s.
+/// before the dedupe check, so a duplicate self-ref still 400s. With
+/// `raw_targets` the self-refusal and the dedupe are skipped (the MCP
+/// per-iteration loop); the cross-workspace refusal still runs.
 fn check_targets(
     source: &SourceIssue,
     targets: Vec<ResolvedIssue>,
+    raw_targets: bool,
 ) -> Result<Vec<ResolvedIssue>, Error> {
     let mut unique = Vec::with_capacity(targets.len());
     let mut seen = std::collections::HashSet::new();
     for target in targets {
-        if target.id == source.id {
+        if !raw_targets && target.id == source.id {
             return Err(Error::BadError(format!(
                 "{} cannot be related to itself",
                 source.identifier()
@@ -540,7 +543,7 @@ fn check_targets(
                 target.identifier()
             )));
         }
-        if seen.insert(target.id) {
+        if raw_targets || seen.insert(target.id) {
             unique.push(target);
         }
     }
@@ -859,7 +862,10 @@ async fn insert_relation_row(
 /// target", idempotent. Returns the response map minus `relations` (the
 /// caller appends the grouped read). With `pair_exact`, creation matches
 /// the exact oriented pair (the MCP `get_or_create`) instead of deduping
-/// across orientations.
+/// across orientations. With `raw_targets`, self ids and duplicate ids
+/// are processed per-iteration instead of refused/deduped (the MCP
+/// loop over the raw `related_issue_ids`).
+#[allow(clippy::too_many_arguments)]
 async fn relate_op(
     deps: &Deps,
     source: &SourceIssue,
@@ -868,9 +874,10 @@ async fn relate_op(
     actor_id: &Uuid,
     emit_activity: bool,
     pair_exact: bool,
+    raw_targets: bool,
 ) -> Result<Map<String, Value>, Error> {
     let pool = &deps.pool;
-    let targets = check_targets(source, targets)?;
+    let targets = check_targets(source, targets, raw_targets)?;
     let mut created: Vec<&ResolvedIssue> = Vec::new();
     let mut unchanged: Vec<String> = Vec::new();
     let mut conflicts: Vec<Value> = Vec::new();
@@ -990,7 +997,10 @@ async fn relate_op(
 /// response map minus `relations`. With `newest_only`, only the first
 /// match is removed: [`fetch_pair_rows`] returns newest-first (the
 /// model's `-created_at` ordering), so that is the row the MCP
-/// queryset's `.first()` deletes.
+/// queryset's `.first()` deletes. With `raw_targets`, self ids and
+/// duplicate ids are processed per-iteration instead of
+/// refused/deduped (the MCP loop over the raw `related_issue_ids`).
+#[allow(clippy::too_many_arguments)]
 async fn unrelate_op(
     deps: &Deps,
     source: &SourceIssue,
@@ -999,16 +1009,31 @@ async fn unrelate_op(
     actor_id: &Uuid,
     emit_activity: bool,
     newest_only: bool,
+    raw_targets: bool,
 ) -> Result<Map<String, Value>, Error> {
     let pool = &deps.pool;
-    let targets = check_targets(source, targets)?;
+    let targets = check_targets(source, targets, raw_targets)?;
     let mut removed: Vec<String> = Vec::new();
     let mut not_related: Vec<String> = Vec::new();
     for target in &targets {
         let rows = fetch_pair_rows(pool, &source.id, &target.id).await?;
+        // Self targets only arrive in raw mode (the default refuses
+        // them in `check_targets`): the MCP queryset names the stored
+        // endpoints and the canonical type
+        // (`pi_dash_cloud/mcp/tools.py:726-732`), so a reverse-named
+        // request (`blocking`) still matches the canonically stored
+        // self row (`blocked_by`) — the viewpoint classifier would
+        // only echo the stored name from the issue side.
+        let self_target = target.id == source.id;
         let mut matching: Vec<&PairRow> = rows
             .iter()
-            .filter(|row| type_from(row, &source.id) == relation_type)
+            .filter(|row| {
+                if self_target {
+                    row.relation_type == actual_relation(relation_type)
+                } else {
+                    type_from(row, &source.id) == relation_type
+                }
+            })
             .collect();
         if matching.is_empty() {
             not_related.push(target.identifier());
@@ -1107,7 +1132,9 @@ async fn unrelate_op(
 /// pre-fetched `write.source` before parsing the body, so a bogus issue
 /// 404s before a malformed body 400s (`:3165-3167`). `pair_exact` is
 /// the relate leg's option only and `newest_only` the unrelate leg's;
-/// each leg ignores the other's.
+/// each leg ignores the other's. `raw_targets` applies to both legs'
+/// target check.
+#[allow(clippy::too_many_arguments)]
 async fn relate_shared(
     deps: &Deps,
     ctx: &WriteCtx,
@@ -1116,6 +1143,7 @@ async fn relate_shared(
     is_relate: bool,
     newest_only: bool,
     pair_exact: bool,
+    raw_targets: bool,
 ) -> Result<Outcome, Error> {
     let pool = &deps.pool;
     let slug = write.slug;
@@ -1156,6 +1184,7 @@ async fn relate_shared(
             &actor_id,
             emit_activity,
             pair_exact,
+            raw_targets,
         )
         .await?
     } else {
@@ -1167,6 +1196,7 @@ async fn relate_shared(
             &actor_id,
             emit_activity,
             newest_only,
+            raw_targets,
         )
         .await?
     };
@@ -1207,6 +1237,15 @@ pub struct RelateOptions {
     /// `pi_dash_cloud/mcp/tools.py:664-675`). The v1 handler passes
     /// `false`; MCP passes `true`.
     pub pair_exact: bool,
+    /// Skip the self-refusal and the first-seen dedupe in
+    /// [`check_targets`] and loop the raw targets (design D6: the v1
+    /// agent endpoint refuses self-relations and dedupes —
+    /// `orchestration/relations.py:166-177` — while the MCP tool loops
+    /// the raw `related_issue_ids` — `pi_dash_cloud/mcp/tools.py:660`
+    /// — so a self id `get_or_create`s a row and duplicate ids report
+    /// per-iteration). The cross-workspace refusal still runs. The v1
+    /// handler passes `false`; MCP passes `true`.
+    pub raw_targets: bool,
 }
 
 /// Per-caller options for [`unrelate`].
@@ -1226,6 +1265,15 @@ pub struct UnrelateOptions {
     /// on both sides). The v1 handler passes `false`; MCP passes
     /// `true`.
     pub newest_only: bool,
+    /// Skip the self-refusal and the first-seen dedupe in
+    /// [`check_targets`] and loop the raw targets (design D6: the v1
+    /// agent endpoint refuses self-relations and dedupes —
+    /// `orchestration/relations.py:166-177` — while the MCP tool loops
+    /// the raw `related_issue_ids` — `pi_dash_cloud/mcp/tools.py:722`
+    /// — so a self id deletes the newest self row when one exists and
+    /// duplicate ids delete per-iteration). The cross-workspace refusal
+    /// still runs. The v1 handler passes `false`; MCP passes `true`.
+    pub raw_targets: bool,
 }
 
 /// `POST .../relations/relate/` (`views/issue.py:3232-3235`): record
@@ -1245,6 +1293,7 @@ pub async fn relate(
         true,
         false,
         options.pair_exact,
+        options.raw_targets,
     )
     .await
 }
@@ -1266,6 +1315,7 @@ pub async fn unrelate(
         false,
         options.newest_only,
         false,
+        options.raw_targets,
     )
     .await
 }
@@ -1560,6 +1610,7 @@ mod tests {
                 target("22222222-2222-2222-2222-222222222222", workspace),
                 target("22222222-2222-2222-2222-222222222222", workspace),
             ],
+            false,
         )
         .expect("dedupe");
         assert_eq!(kept.len(), 1);
@@ -1568,6 +1619,7 @@ mod tests {
             check_targets(
                 &source,
                 vec![target("11111111-1111-1111-1111-111111111111", workspace)],
+                false,
             ),
             Err(Error::BadError(
                 "CT-1 cannot be related to itself".to_owned()
@@ -1576,10 +1628,38 @@ mod tests {
         // Cross-workspace 400s.
         let elsewhere = Uuid::parse_str("44444444-4444-4444-4444-444444444444").expect("uuid");
         assert!(matches!(
-            check_targets(&source, vec![target(
-                "22222222-2222-2222-2222-222222222222",
-                elsewhere
-            )]),
+            check_targets(
+                &source,
+                vec![target(
+                    "22222222-2222-2222-2222-222222222222",
+                    elsewhere
+                )],
+                false,
+            ),
+            Err(Error::BadError(message)) if message.ends_with("is in a different workspace"),
+        ));
+        // Raw targets: self passes through and duplicates are kept.
+        let kept = check_targets(
+            &source,
+            vec![
+                target("11111111-1111-1111-1111-111111111111", workspace),
+                target("22222222-2222-2222-2222-222222222222", workspace),
+                target("22222222-2222-2222-2222-222222222222", workspace),
+            ],
+            true,
+        )
+        .expect("raw keeps self and dupes");
+        assert_eq!(kept.len(), 3);
+        // Raw targets still refuse cross-workspace ids.
+        assert!(matches!(
+            check_targets(
+                &source,
+                vec![target(
+                    "22222222-2222-2222-2222-222222222222",
+                    elsewhere
+                )],
+                true,
+            ),
             Err(Error::BadError(message)) if message.ends_with("is in a different workspace"),
         ));
     }
@@ -1709,6 +1789,16 @@ mod tests {
                 project_identifier: self.project_identifier.clone(),
                 sequence_id: self.target_seq,
             }]
+        }
+
+        fn targets_twice(&self) -> Vec<ResolvedIssue> {
+            let one = ResolvedIssue {
+                id: self.target_id,
+                workspace_id: self.workspace_id,
+                project_identifier: self.project_identifier.clone(),
+                sequence_id: self.target_seq,
+            };
+            vec![one.clone(), one]
         }
 
         fn target_identifier(&self) -> String {
@@ -1927,6 +2017,7 @@ mod tests {
             &scope.actor,
             false,
             true,
+            false,
         )
         .await
         .expect("unrelate newest-only");
@@ -1978,6 +2069,7 @@ mod tests {
             "duplicate",
             scope.targets(),
             &scope.actor,
+            false,
             false,
             false,
         )
@@ -2036,6 +2128,7 @@ mod tests {
             &scope.actor,
             false,
             true,
+            false,
         )
         .await
         .expect("relate exact");
@@ -2053,6 +2146,7 @@ mod tests {
             &scope.actor,
             false,
             true,
+            false,
         )
         .await
         .expect("relate exact reversed");
@@ -2089,6 +2183,7 @@ mod tests {
             &scope.actor,
             false,
             false,
+            false,
         )
         .await
         .expect("relate default");
@@ -2104,6 +2199,7 @@ mod tests {
             "duplicate",
             scope.source_targets(),
             &scope.actor,
+            false,
             false,
             false,
         )
@@ -2124,5 +2220,313 @@ mod tests {
             rows,
             vec![(scope.source_id, scope.target_id, "duplicate".to_owned())]
         );
+    }
+
+    // --- Live-DB raw-target tests (PIDASHCONV-1659) ---
+
+    #[tokio::test]
+    async fn live_raw_targets_self_relate_creates_row() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "rawself").await;
+        let (deps, _enqueue) = op_deps(&pool);
+        // The MCP relate combo (pair-exact + raw): a self id creates
+        // the row instead of 400ing (`pi_dash_cloud/mcp/tools.py:664-675`).
+        let out = relate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.source_targets(),
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw self relate");
+        assert_eq!(
+            out.get("created"),
+            Some(&Value::Array(vec![Value::String(
+                scope.source_identifier()
+            )]))
+        );
+        assert_eq!(out.get("unchanged"), Some(&Value::Array(vec![])));
+        let rows = live_pair_rows(&pool, scope.source_id, scope.source_id).await;
+        assert_eq!(
+            rows,
+            vec![(scope.source_id, scope.source_id, "duplicate".to_owned())]
+        );
+        // The v1 default still refuses the same input.
+        let err = relate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.source_targets(),
+            &scope.actor,
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect_err("default self relate 400s");
+        assert_eq!(
+            err,
+            Error::BadError(format!(
+                "{} cannot be related to itself",
+                scope.source_identifier()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn live_raw_targets_relate_dupes_created_plus_unchanged() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "rawdupe").await;
+        let (deps, _enqueue) = op_deps(&pool);
+        // The MCP relate combo: [A, A] with no live row creates once
+        // and reports the second iteration under `unchanged` (MCP
+        // shapes it as `skipped`).
+        let out = relate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.targets_twice(),
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw relate dupes");
+        let item = Value::String(scope.target_identifier());
+        assert_eq!(out.get("created"), Some(&Value::Array(vec![item.clone()])));
+        assert_eq!(out.get("unchanged"), Some(&Value::Array(vec![item])));
+        let rows = live_pair_rows(&pool, scope.source_id, scope.target_id).await;
+        assert_eq!(
+            rows,
+            vec![(scope.source_id, scope.target_id, "duplicate".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn live_default_relate_dupes_deduped() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "ddupes").await;
+        let (deps, _enqueue) = op_deps(&pool);
+        // The v1 default dedupes [A, A] to one target: created once,
+        // with no second-iteration report.
+        let out = relate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.targets_twice(),
+            &scope.actor,
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("default relate dupes");
+        assert_eq!(
+            out.get("created"),
+            Some(&Value::Array(vec![Value::String(
+                scope.target_identifier()
+            )]))
+        );
+        assert_eq!(out.get("unchanged"), Some(&Value::Array(vec![])));
+    }
+
+    #[tokio::test]
+    async fn live_raw_targets_unrelate_dupes_delete_per_iteration() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "rawundup").await;
+        let now = Utc::now();
+        let older = insert_relation(
+            &pool,
+            &scope,
+            scope.source_id,
+            scope.target_id,
+            now - chrono::Duration::hours(1),
+        )
+        .await;
+        let newer = insert_relation(&pool, &scope, scope.target_id, scope.source_id, now).await;
+        let (deps, enqueue) = op_deps(&pool);
+        // The MCP unrelate combo (newest-only + raw): [A, A] over the
+        // symmetric-duplicate pair deletes one row per iteration and
+        // reports the target twice.
+        let out = unrelate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.targets_twice(),
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw unrelate dupes");
+        let item = Value::String(scope.target_identifier());
+        assert_eq!(
+            out.get("removed"),
+            Some(&Value::Array(vec![item.clone(), item]))
+        );
+        assert_eq!(out.get("not_related"), Some(&Value::Array(vec![])));
+        assert!(deleted_at_of(&pool, newer).await.is_some());
+        assert!(deleted_at_of(&pool, older).await.is_some());
+        // One sweep per deleted row (newest first); no activity.
+        let calls = enqueue.calls.lock().expect("calls lock");
+        assert_eq!(
+            sweep_pks(&calls),
+            vec![newer.to_string(), older.to_string()]
+        );
+        assert_eq!(calls.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn live_default_unrelate_dupes_deduped() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "dundup").await;
+        let now = Utc::now();
+        let first = insert_relation(
+            &pool,
+            &scope,
+            scope.source_id,
+            scope.target_id,
+            now - chrono::Duration::hours(1),
+        )
+        .await;
+        let second = insert_relation(&pool, &scope, scope.target_id, scope.source_id, now).await;
+        let (deps, _enqueue) = op_deps(&pool);
+        // The v1 default dedupes [A, A] to one target and deletes every
+        // matching row for it, reporting the target once.
+        let out = unrelate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.targets_twice(),
+            &scope.actor,
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("default unrelate dupes");
+        assert_eq!(
+            out.get("removed"),
+            Some(&Value::Array(vec![Value::String(
+                scope.target_identifier()
+            )]))
+        );
+        assert_eq!(out.get("not_related"), Some(&Value::Array(vec![])));
+        assert!(deleted_at_of(&pool, first).await.is_some());
+        assert!(deleted_at_of(&pool, second).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn live_raw_targets_unrelate_self_deletes_row() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "rawunself").await;
+        let (deps, _enqueue) = op_deps(&pool);
+        relate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.source_targets(),
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw self relate");
+        // The MCP unrelate combo (newest-only + raw): [S, S] deletes
+        // the live self row on the first iteration and reports the
+        // second under `not_related`
+        // (`pi_dash_cloud/mcp/tools.py:722-734`).
+        let mut twice = scope.source_targets();
+        twice.extend(scope.source_targets());
+        let out = unrelate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            twice,
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw self unrelate dupes");
+        let item = Value::String(scope.source_identifier());
+        assert_eq!(out.get("removed"), Some(&Value::Array(vec![item.clone()])));
+        assert_eq!(out.get("not_related"), Some(&Value::Array(vec![item])));
+        assert!(live_pair_rows(&pool, scope.source_id, scope.source_id)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_raw_targets_unrelate_self_reverse_type_deletes_row() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "rawunrev").await;
+        let (deps, _enqueue) = op_deps(&pool);
+        // Relating self under the reverse name stores the canonical
+        // row (the endpoint swap is a no-op when both ends are the
+        // source).
+        relate_op(
+            &deps,
+            &scope.source(),
+            "blocking",
+            scope.source_targets(),
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw self relate reverse");
+        assert_eq!(
+            live_pair_rows(&pool, scope.source_id, scope.source_id).await,
+            vec![(scope.source_id, scope.source_id, "blocked_by".to_owned())]
+        );
+        // The MCP queryset names the canonical stored type
+        // (`pi_dash_cloud/mcp/tools.py:729-732`), so the
+        // reverse-named request matches the self row.
+        let out = unrelate_op(
+            &deps,
+            &scope.source(),
+            "blocking",
+            scope.source_targets(),
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw self unrelate reverse");
+        assert_eq!(
+            out.get("removed"),
+            Some(&Value::Array(vec![Value::String(
+                scope.source_identifier()
+            )]))
+        );
+        assert_eq!(out.get("not_related"), Some(&Value::Array(vec![])));
+        assert!(live_pair_rows(&pool, scope.source_id, scope.source_id)
+            .await
+            .is_empty());
     }
 }
