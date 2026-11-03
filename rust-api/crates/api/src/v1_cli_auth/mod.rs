@@ -7,6 +7,10 @@
 //!
 //! * [`runner`] — the DELETE handler (auth → lookup → guards →
 //!   purge-flag parse → `delete_runner` service → 204).
+//! * [`project_runners`] — `ProjectRunnersEndpoint` (`GET
+//!   /api/v1/workspaces/<slug>/projects/<project_id>/runners/`,
+//!   PDASHOSS01-245): the CLI's cloud runner list, sharing the web list's
+//!   visibility read.
 //!
 //! Wiring note: the crate root declares `pub mod v1_cli_auth;` (seam for
 //! this issue's new files); every file under this module is new. The
@@ -14,6 +18,7 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
+pub mod project_runners;
 pub mod runner;
 
 use axum::Router;
@@ -23,14 +28,26 @@ use crate::state::AppState;
 /// `api/urls/runner.py:10-14` under the `api/v1/` include.
 pub const RUNNER_DELETE_PATH: &str = "/api/v1/runners/{runner_id}/";
 
-/// Domain router: the DELETE-owned runner path. Registration is the
-/// cutover granularity — sibling `api/v1/` paths have no Rust route and
-/// keep proxying to Django through the fallback.
+/// `api/urls/runner.py` `api-project-runners` under the `api/v1/` include
+/// (`<str:slug>` / `<str:project_id>`: any non-empty segment).
+pub const PROJECT_RUNNERS_PATH: &str = "/api/v1/workspaces/{slug}/projects/{project_id}/runners/";
+
+/// Domain router: the DELETE-owned runner path and the GET-owned project
+/// runner list. Registration is the cutover granularity — sibling
+/// `api/v1/` paths have no Rust route and keep proxying to Django through
+/// the fallback.
 pub fn routes() -> Router<AppState> {
-    Router::new().route(
-        RUNNER_DELETE_PATH,
-        owned_delete(axum::routing::delete(runner::delete_runner)),
-    )
+    Router::new()
+        .route(
+            RUNNER_DELETE_PATH,
+            owned_delete(axum::routing::delete(runner::delete_runner)),
+        )
+        .route(
+            PROJECT_RUNNERS_PATH,
+            // `http_method_names=["get"]`: GET serves Rust, every other
+            // method (HEAD included) proxies for Django's own 405.
+            crate::v1_schedulers::owned(axum::routing::get(project_runners::project_runners)),
+        )
 }
 
 /// A DELETE-owned path (the pilot `owned()` pattern): DELETE serves from
@@ -114,6 +131,38 @@ mod tests {
                 status("DELETE", &format!("/api/v1/runners/{segment}/"),).await,
                 StatusCode::BAD_GATEWAY,
                 "{segment}"
+            );
+        }
+    }
+
+    /// The project runner list's GET serves from Rust: anonymous callers
+    /// 401 at the auth layer (never a proxy 502), before any pool access —
+    /// for a UUID and an identifier segment alike.
+    #[tokio::test]
+    async fn project_runners_get_answers_401_anonymous() {
+        for project in ["11111111-1111-1111-1111-111111111111", "PDASHOSS01"] {
+            assert_eq!(
+                status(
+                    "GET",
+                    &format!("/api/v1/workspaces/acme/projects/{project}/runners/")
+                )
+                .await,
+                StatusCode::UNAUTHORIZED,
+                "{project}"
+            );
+        }
+    }
+
+    /// Every non-GET method on the project runner list proxies to Django
+    /// (502 fail-closed with the test edge) for its own 405.
+    #[tokio::test]
+    async fn project_runners_unowned_methods_proxy() {
+        let uri = "/api/v1/workspaces/acme/projects/PDASHOSS01/runners/";
+        for method in ["HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] {
+            assert_eq!(
+                status(method, uri).await,
+                StatusCode::BAD_GATEWAY,
+                "{method}"
             );
         }
     }

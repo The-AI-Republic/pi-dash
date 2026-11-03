@@ -1,26 +1,26 @@
 {
   "_trace": "live GET /api/schema/ (+ ?format=json) against Django with ENABLE_DRF_SPECTACULAR=1 (routes pi_dash/urls.py:31-44); securityScheme rendered from utils/openapi/auth.py:15-34 (APIKeyAuthenticationExtension.get_security_definition)",
-  "_method": "httpx GETs to http://127.0.0.1:18890 (scratch DB pidash_1090_dj, ENABLE_DRF_SPECTACULAR=1); YAML parsed with yaml.safe_load, JSON with r.json(); equality asserted on the parsed docs",
+  "_method": "httpx GETs to http://127.0.0.1:8245 (scratch DB contract245, ENABLE_DRF_SPECTACULAR=1; re-recorded PDASHOSS01-245); YAML parsed with yaml.safe_load, JSON with r.json(); equality asserted on the parsed docs",
   "openapi_version": "3.0.3",
   "default_rendering": {
     "url": "/api/schema/",
     "status": 200,
     "content_type": "application/vnd.oai.openapi; charset=utf-8",
-    "body_bytes": 830731,
-    "body_sha256": "574b92976f8f6a7ad19fbee064ab14792781bb166d00ad5c9fa42c7347b7cabf",
+    "body_bytes": 832847,
+    "body_sha256": "139e53af21a4666919b87d417d280e5844e206b033a9ca13725c1fc80e4e1408",
     "note": "YAML by default; content-type has NO +json suffix"
   },
   "json_rendering": {
     "url": "/api/schema/?format=json",
     "status": 200,
     "content_type": "application/vnd.oai.openapi+json",
-    "body_bytes": 1397521,
-    "body_sha256": "9760cb0b3c7c0885b37f020ebc848b7e69b87f1fb02bdd1db0c9578131b669f7"
+    "body_bytes": 1400463,
+    "body_sha256": "0bfb75e22fc449fd7d3308d5b09847a3524f89b900d9c6c92d3681158eee36f8"
   },
   "doc_equality_proof": {
     "parsed_equal": true,
-    "yaml_paths": 125,
-    "json_paths": 125
+    "yaml_paths": 126,
+    "json_paths": 126
   },
   "route_map_matches_golden": true,
   "security_schemes": {
@@ -10695,6 +10695,49 @@
               }
             },
             "description": "Project member updated"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{slug}/projects/{project_id}/runners/": {
+      "get": {
+        "operationId": "workspaces_projects_runners_retrieve",
+        "tags": [
+          "workspaces"
+        ],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+            "examples": {
+              "uuid": {
+                "value": "00000000-0000-0000-0000-000000000000",
+                "summary": "UUID form"
+              },
+              "slug": {
+                "value": "ENG",
+                "summary": "Workspace-scoped identifier"
+              }
+            }
+          },
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "No response body"
           }
         }
       }

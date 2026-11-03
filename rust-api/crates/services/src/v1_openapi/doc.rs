@@ -237,7 +237,7 @@ fn component_schemas() -> Value {
 }
 
 /// Per-operation essentials: `{path: {method: {operationId, tags, summary,
-/// parameters, responses}}}` for all 193 golden operations, pretty JSON
+/// parameters, responses}}}` for all 194 golden operations, pretty JSON
 /// extracted from the `operations` key of
 /// `rust-api/fixtures/v1_openapi/FX-OPENAPI-04.doc_essentials.json`.
 ///
@@ -10916,6 +10916,49 @@ const OPERATIONS_JSON: &str = r##"
       }
     }
   },
+  "/api/v1/workspaces/{slug}/projects/{project_id}/runners/": {
+    "get": {
+      "operationId": "workspaces_projects_runners_retrieve",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "schema": {
+            "type": "string"
+          },
+          "required": true,
+          "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+          "examples": {
+            "uuid": {
+              "value": "00000000-0000-0000-0000-000000000000",
+              "summary": "UUID form"
+            },
+            "slug": {
+              "value": "ENG",
+              "summary": "Workspace-scoped identifier"
+            }
+          }
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
   "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/": {
     "get": {
       "operationId": "workspaces_projects_schedulers_retrieve",
@@ -16756,7 +16799,7 @@ mod tests {
                 ops += 1;
             }
         }
-        assert_eq!(ops, 193);
+        assert_eq!(ops, 194);
     }
 
     #[test]
@@ -16988,7 +17031,7 @@ mod tests {
             }
         }
         assert_eq!(omitted_parameters, 16);
-        assert_eq!(omitted_summaries, 99);
+        assert_eq!(omitted_summaries, 100);
     }
 
     #[test]
