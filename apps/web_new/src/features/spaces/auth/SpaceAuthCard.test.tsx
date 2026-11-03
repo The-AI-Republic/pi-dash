@@ -669,11 +669,11 @@ describe("provider buttons", () => {
     renderCard({ instance: WITH_PROVIDERS, nextPath: "/issues/a?board=x" });
     const block = screen.getByTestId("space-auth-providers");
     const google = within(block).getByRole("link", { name: "Create your account with Google" });
-    expect(google).toHaveAttribute("href", "/auth/google/?next_path=%2Fissues%2Fa%3Fboard%3Dx");
+    expect(google).toHaveAttribute("href", "/auth/spaces/google/?next_path=%2Fissues%2Fa%3Fboard%3Dx");
     expect(google).toHaveAttribute("data-provider", "google");
     expect(within(block).getByRole("link", { name: "Create your account with GitHub" })).toHaveAttribute(
       "href",
-      "/auth/github/?next_path=%2Fissues%2Fa%3Fboard%3Dx"
+      "/auth/spaces/github/?next_path=%2Fissues%2Fa%3Fboard%3Dx"
     );
     expect(screen.getByTestId("space-auth-providers-divider")).toHaveTextContent("or");
   });
@@ -699,7 +699,7 @@ describe("provider buttons", () => {
     const block = screen.getByTestId("space-auth-providers");
     const google = within(block).getByRole("link", { name: "Continue with Google" });
     expect(google).toHaveTextContent("GO");
-    expect(google).toHaveAttribute("href", "/auth/google/");
+    expect(google).toHaveAttribute("href", "/auth/spaces/google/");
     expect(within(block).getByRole("link", { name: "Continue with GitHub" })).toHaveTextContent("GH");
   });
 
@@ -708,7 +708,7 @@ describe("provider buttons", () => {
     const block = screen.getByTestId("space-auth-providers");
     expect(within(block).getByRole("link", { name: "Create your account with Google" })).toHaveAttribute(
       "href",
-      "/auth/google/"
+      "/auth/spaces/google/"
     );
   });
 });
