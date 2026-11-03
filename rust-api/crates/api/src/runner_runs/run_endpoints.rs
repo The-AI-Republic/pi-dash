@@ -591,8 +591,8 @@ async fn live_state_facts(
 
 /// Bind one finalize `SET` clause, in values order. `Now` is the
 /// statement's single timestamp; `Null` binds the column's typed
-/// null (the only nulls the terminal path writes are the queue
-/// position and the two markers).
+/// null (the only nulls the terminal path writes are the two
+/// markers).
 fn bind_finalize_value<'q>(
     query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     column: &str,
@@ -604,7 +604,6 @@ fn bind_finalize_value<'q>(
         (_, SetValue::Now) => query.bind(*now),
         (_, SetValue::Text(text)) => query.bind(text.clone()),
         (_, SetValue::Json(payload)) => query.bind(payload.clone()),
-        ("queue_position", SetValue::Null) => query.bind(None::<i16>),
         (_, SetValue::Null) => query.bind(None::<DateTime<Utc>>),
     }
 }
@@ -882,7 +881,6 @@ pub async fn execute_requeue(
         .bind(None::<Uuid>)
         .bind(None::<Uuid>)
         .bind(None::<DateTime<Utc>>)
-        .bind(None::<i16>)
         .bind(locked.id)
         .execute(&mut **tx)
         .await
@@ -964,7 +962,9 @@ pub async fn execute_terminal_effects(
     // `lock_run_for_effects_sql`: same predicates and lock, targeted
     // columns (status, config, error, category, binding, marker).
     let locked: Option<EffectsLockRow> = sqlx::query_as(
-        r#"SELECT "status", "run_config", "error", "refusal_category",
+        r#"SELECT "status", "run_config",
+                  COALESCE("agent_run"."error_details" ->> 'message', '') AS "error",
+                  "refusal_category",
                   "scheduler_binding_id", "terminal_hooks_applied_at"
                FROM "agent_run"
                WHERE ("agent_run"."id" = $1 AND "agent_run"."status" IN ($2, $3, $4, $5, $6))
@@ -1519,11 +1519,10 @@ async fn run_accept_inner(
         return pending;
     }
     if sqlx::query(
-        r#"UPDATE "agent_run" SET "status" = $1, "queue_position" = $2
-           WHERE "agent_run"."id" = $3"#,
+        r#"UPDATE "agent_run" SET "status" = $1
+           WHERE "agent_run"."id" = $2"#,
     )
     .bind(AgentRunStatus::Running.value())
-    .bind(None::<i16>)
     .bind(locked.id)
     .execute(&mut *tx)
     .await

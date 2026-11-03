@@ -2215,7 +2215,6 @@ struct AgentRunOwned {
     id: String,
     status: String,
     executor_kind: String,
-    queue_position: Option<i16>,
     runner_id: Option<String>,
     runner_name: Option<String>,
     created_at: String,
@@ -2522,36 +2521,35 @@ async fn fetch_agent_run(
     let id: Uuid = row.try_get(0).map_err(|_| Denial::ServerError)?;
     let status: String = row.try_get(1).map_err(|_| Denial::ServerError)?;
     let executor_kind: String = row.try_get(2).map_err(|_| Denial::ServerError)?;
-    let queue_position: Option<i16> = row.try_get(3).map_err(|_| Denial::ServerError)?;
-    let runner_id: Option<Uuid> = row.try_get(4).map_err(|_| Denial::ServerError)?;
-    let created_at: DateTime<Utc> = row.try_get(5).map_err(|_| Denial::ServerError)?;
-    let assigned_at: Option<DateTime<Utc>> = row.try_get(6).map_err(|_| Denial::ServerError)?;
-    let started_at: Option<DateTime<Utc>> = row.try_get(7).map_err(|_| Denial::ServerError)?;
-    let ended_at: Option<DateTime<Utc>> = row.try_get(8).map_err(|_| Denial::ServerError)?;
+    let runner_id: Option<Uuid> = row.try_get(3).map_err(|_| Denial::ServerError)?;
+    let created_at: DateTime<Utc> = row.try_get(4).map_err(|_| Denial::ServerError)?;
+    let assigned_at: Option<DateTime<Utc>> = row.try_get(5).map_err(|_| Denial::ServerError)?;
+    let started_at: Option<DateTime<Utc>> = row.try_get(6).map_err(|_| Denial::ServerError)?;
+    let ended_at: Option<DateTime<Utc>> = row.try_get(7).map_err(|_| Denial::ServerError)?;
     let done_payload: Option<serde_json::Value> =
-        row.try_get(9).map_err(|_| Denial::ServerError)?;
-    let error: String = row.try_get(10).map_err(|_| Denial::ServerError)?;
-    let error_code: String = row.try_get(11).map_err(|_| Denial::ServerError)?;
-    let llm_model: String = row.try_get(12).map_err(|_| Denial::ServerError)?;
-    let input_tokens: Option<i64> = row.try_get(13).map_err(|_| Denial::ServerError)?;
-    let output_tokens: Option<i64> = row.try_get(14).map_err(|_| Denial::ServerError)?;
-    let total_tokens: Option<i64> = row.try_get(15).map_err(|_| Denial::ServerError)?;
-    let runner_name: Option<String> = row.try_get(16).map_err(|_| Denial::ServerError)?;
-    let observed_run_id: Option<Uuid> = row.try_get(17).map_err(|_| Denial::ServerError)?;
-    let last_event_at: Option<DateTime<Utc>> = row.try_get(18).map_err(|_| Denial::ServerError)?;
-    let last_event_kind: Option<String> = row.try_get(19).map_err(|_| Denial::ServerError)?;
-    let last_event_summary: Option<String> = row.try_get(20).map_err(|_| Denial::ServerError)?;
-    let agent_pid: Option<i32> = row.try_get(21).map_err(|_| Denial::ServerError)?;
-    let agent_subprocess_alive: Option<bool> = row.try_get(22).map_err(|_| Denial::ServerError)?;
-    let approvals_pending: Option<i32> = row.try_get(23).map_err(|_| Denial::ServerError)?;
-    let usage: Option<serde_json::Value> = row.try_get(24).map_err(|_| Denial::ServerError)?;
-    let live_llm_model: Option<String> = row.try_get(25).map_err(|_| Denial::ServerError)?;
-    let turn_count: Option<i32> = row.try_get(26).map_err(|_| Denial::ServerError)?;
-    let agent_health: Option<String> = row.try_get(27).map_err(|_| Denial::ServerError)?;
+        row.try_get(8).map_err(|_| Denial::ServerError)?;
+    let error: String = row.try_get(9).map_err(|_| Denial::ServerError)?;
+    let error_code: String = row.try_get(10).map_err(|_| Denial::ServerError)?;
+    let llm_model: String = row.try_get(11).map_err(|_| Denial::ServerError)?;
+    let input_tokens: Option<i64> = row.try_get(12).map_err(|_| Denial::ServerError)?;
+    let output_tokens: Option<i64> = row.try_get(13).map_err(|_| Denial::ServerError)?;
+    let total_tokens: Option<i64> = row.try_get(14).map_err(|_| Denial::ServerError)?;
+    let runner_name: Option<String> = row.try_get(15).map_err(|_| Denial::ServerError)?;
+    let observed_run_id: Option<Uuid> = row.try_get(16).map_err(|_| Denial::ServerError)?;
+    let last_event_at: Option<DateTime<Utc>> = row.try_get(17).map_err(|_| Denial::ServerError)?;
+    let last_event_kind: Option<String> = row.try_get(18).map_err(|_| Denial::ServerError)?;
+    let last_event_summary: Option<String> = row.try_get(19).map_err(|_| Denial::ServerError)?;
+    let agent_pid: Option<i32> = row.try_get(20).map_err(|_| Denial::ServerError)?;
+    let agent_subprocess_alive: Option<bool> = row.try_get(21).map_err(|_| Denial::ServerError)?;
+    let approvals_pending: Option<i32> = row.try_get(22).map_err(|_| Denial::ServerError)?;
+    let usage: Option<serde_json::Value> = row.try_get(23).map_err(|_| Denial::ServerError)?;
+    let live_llm_model: Option<String> = row.try_get(24).map_err(|_| Denial::ServerError)?;
+    let turn_count: Option<i32> = row.try_get(25).map_err(|_| Denial::ServerError)?;
+    let agent_health: Option<String> = row.try_get(26).map_err(|_| Denial::ServerError)?;
     let agent_last_activity_at: Option<DateTime<Utc>> =
-        row.try_get(28).map_err(|_| Denial::ServerError)?;
+        row.try_get(27).map_err(|_| Denial::ServerError)?;
     let live_updated_at: Option<DateTime<Utc>> =
-        row.try_get(29).map_err(|_| Denial::ServerError)?;
+        row.try_get(28).map_err(|_| Denial::ServerError)?;
     let live = live_updated_at.map(|updated_at| AgentLiveOwned {
         observed_run_id: observed_run_id.map(|id| id.to_string()),
         last_event_at: iso(last_event_at),
@@ -2571,7 +2569,6 @@ async fn fetch_agent_run(
         id: id.to_string(),
         status,
         executor_kind,
-        queue_position,
         runner_id: runner_id.map(|id| id.to_string()),
         runner_name,
         created_at: serialize_iso_datetime(created_at),
@@ -2610,7 +2607,6 @@ fn agent_run_detail_row(run: &AgentRunOwned) -> AgentRunDetailRow<'_> {
         id: run.id.as_str(),
         status: run.status.as_str(),
         executor_kind: run.executor_kind.as_str(),
-        queue_position: run.queue_position,
         runner_id: run.runner_id.as_deref(),
         runner_name: run.runner_name.as_deref(),
         created_at: run.created_at.as_str(),
@@ -2702,12 +2698,29 @@ pub fn render_issue_intake(
     serde_json::Value::Object(map)
 }
 
+/// `get_is_epic` (`issue.py:1109-1112`): false when the row is untyped,
+/// without a query; otherwise the type row's flag. A missing row is
+/// Django's `DoesNotExist` → the generic 500 (unreachable — the FK
+/// holds). No soft-delete guard: `IssueType` rides the plain manager.
+async fn fetch_is_epic(pool: &PgPool, type_id: Option<Uuid>) -> Result<bool, Denial> {
+    let Some(id) = type_id else {
+        return Ok(false);
+    };
+    let row: Option<(bool,)> = sqlx::query_as("SELECT is_epic FROM issue_types WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.map(|flag| flag.0).ok_or(Denial::ServerError)
+}
+
 /// `IssueDetailSerializer` (`serializers/issue.py:1034-1070,1226+`):
-/// the 29 wire keys in declaration order. The seven annotation/
+/// the 31 wire keys in declaration order. The seven annotation/
 /// relation-backed keys the detail fetches never carry (`cycle_id`,
 /// `module_ids`, `sub_issues_count`, `attachment_count`, `link_count`,
 /// `is_subscribed`, `is_intake`) are absent, exactly like the live
-/// backend renders them.
+/// backend renders them. `type_id` (a model column) and `is_epic` (a
+/// `SerializerMethodField`) always render (NEWFRONT-984).
 #[allow(clippy::too_many_arguments)]
 pub async fn render_issue_detail(
     pool: &PgPool,
@@ -2740,7 +2753,8 @@ pub async fn render_issue_detail(
     };
     let status = render_agent_status(pool, issue, ticker_view).await?;
     let summary = blocker_summary(pool, &issue.id, &issue.workspace_id).await?;
-    let mut map = serde_json::Map::with_capacity(29);
+    let is_epic = fetch_is_epic(pool, issue.type_id).await?;
+    let mut map = serde_json::Map::with_capacity(31);
     map.insert(
         "id".to_owned(),
         serde_json::Value::String(issue.id.to_string()),
@@ -2781,6 +2795,8 @@ pub async fn render_issue_detail(
         serde_json::Value::String(issue.project_id.to_string()),
     );
     map.insert("parent_id".to_owned(), opt_uuid(&issue.parent_id));
+    map.insert("type_id".to_owned(), opt_uuid(&issue.type_id));
+    map.insert("is_epic".to_owned(), serde_json::Value::Bool(is_epic));
     map.insert(
         "assigned_pod_id".to_owned(),
         opt_uuid(&issue.assigned_pod_id),
@@ -6087,6 +6103,8 @@ struct CreatedRows {
     sequence_id: i32,
     project_id: Uuid,
     parent_id: Option<Uuid>,
+    type_id: Option<Uuid>,
+    is_epic: bool,
     assigned_pod_id: Option<Uuid>,
     agent_executor: Option<String>,
     created_at: DateTime<Utc>,
@@ -6129,10 +6147,10 @@ async fn render_created_detail(
     let Some((bridge_id, status, duplicate_to_id, snoozed_till, source)) = bridge else {
         return Err(Denial::ServerError.into_response());
     };
-    // Untyped fetch (a 21-column tuple exceeds sqlx's `FromRow`
+    // Untyped fetch (a 22-column tuple exceeds sqlx's `FromRow`
     // impls); single-table so names are unambiguous.
     let issue = sqlx::query(
-        "SELECT \"id\", \"name\", \"state_id\", \"sort_order\", \"estimate_point_id\", \"priority\", \"complexity_score\", \"start_date\", \"target_date\", \"sequence_id\", \"project_id\", \"parent_id\", \"assigned_pod_id\", \"agent_executor\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"is_draft\", \"archived_at\", \"description_html\" FROM \"issues\" WHERE (\"id\" = $1)",
+        "SELECT \"id\", \"name\", \"state_id\", \"sort_order\", \"estimate_point_id\", \"priority\", \"complexity_score\", \"start_date\", \"target_date\", \"sequence_id\", \"project_id\", \"parent_id\", \"type_id\", \"assigned_pod_id\", \"agent_executor\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"is_draft\", \"archived_at\", \"description_html\" FROM \"issues\" WHERE (\"id\" = $1)",
     )
     .bind(issue_id)
     .fetch_optional(pool)
@@ -6157,6 +6175,14 @@ async fn render_created_detail(
     let Some(fetched) = issue else {
         return Err(Denial::ServerError.into_response());
     };
+    // `get_is_epic` rides the shared helper (NEWFRONT-984), like the
+    // retrieve / partial-update renderer above.
+    let created_type_id: Option<Uuid> = fetched
+        .try_get("type_id")
+        .map_err(|_| Denial::ServerError.into_response())?;
+    let created_is_epic = fetch_is_epic(pool, created_type_id)
+        .await
+        .map_err(|denial| denial.into_response())?;
     let get = |column: &str| fetched.try_get::<Uuid, _>(column);
     let rows = CreatedRows {
         bridge_id,
@@ -6198,6 +6224,8 @@ async fn render_created_detail(
         parent_id: fetched
             .try_get::<Option<Uuid>, _>("parent_id")
             .map_err(|_| Denial::ServerError.into_response())?,
+        type_id: created_type_id,
+        is_epic: created_is_epic,
         assigned_pod_id: fetched
             .try_get::<Option<Uuid>, _>("assigned_pod_id")
             .map_err(|_| Denial::ServerError.into_response())?,
@@ -6253,8 +6281,9 @@ async fn render_created_detail(
 /// `module_ids`, the three counts) and attribute-less declared fields
 /// (`is_subscribed`, `is_intake`) are absent, exactly as DRF skips
 /// them; ticker/runs/relations are null/empty on a fresh row.
+/// `type_id` and `is_epic` always render (NEWFRONT-984).
 fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_json::Value {
-    let mut issue = serde_json::Map::with_capacity(32);
+    let mut issue = serde_json::Map::with_capacity(31);
     issue.insert("id".to_owned(), uuid_string(&rows.issue_id));
     issue.insert(
         "name".to_owned(),
@@ -6300,6 +6329,8 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
     );
     issue.insert("project_id".to_owned(), uuid_string(&rows.project_id));
     issue.insert("parent_id".to_owned(), opt_uuid(&rows.parent_id));
+    issue.insert("type_id".to_owned(), opt_uuid(&rows.type_id));
+    issue.insert("is_epic".to_owned(), serde_json::Value::Bool(rows.is_epic));
     issue.insert(
         "assigned_pod_id".to_owned(),
         opt_uuid(&rows.assigned_pod_id),

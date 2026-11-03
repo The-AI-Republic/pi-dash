@@ -38,6 +38,11 @@ pub mod dispatch;
 /// owns, no `mod.rs`.
 #[path = "dispatch/execute.rs"]
 pub mod dispatch_execute;
+/// Public domain-write hooks (OVL-16, PIDASHCONV-1660): OSS's own
+/// transition / enqueue / move-drain bindings over explicit deps, for
+/// any caller of `operations::*` and the domain writes. The api
+/// `App*` and worker `Worker*` types wrap these.
+pub mod hooks;
 pub mod integrations;
 /// Issue post-save orchestration (PIDASHCONV-1520): the completion
 /// comment, the transition fire core, and the pool-direct ticker seams.

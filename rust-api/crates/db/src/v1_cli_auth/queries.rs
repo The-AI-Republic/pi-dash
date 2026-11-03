@@ -30,7 +30,7 @@
 //! Django's Q1 carries `ORDER BY "runner"."last_heartbeat_at" DESC,
 //! "runner"."created_at" DESC LIMIT 1` (`Meta.ordering` + `.first()`).
 //! The ordering is semantically vacuous on a pk lookup (at most one row
-//! matches), so the port uses the plain shape — `SELECT <32 cols> FROM
+//! matches), so the port uses the plain shape — `SELECT <31 cols> FROM
 //! runner WHERE id = $1` — and [`runner_lookup::find_by_pk`] uses
 //! `fetch_optional` for the `.first()` LIMIT-1 cardinality.
 //!
@@ -54,13 +54,13 @@ pub mod runner_lookup {
     pub const TABLE: &str = "runner";
 
     /// `Runner.objects.filter(pk=runner_id).first()` projected to the
-    /// full 32-column row (`09738d222` adds the pause pair): the guard
+    /// full 31-column row (`09738d222` adds the pause pair): the guard
     /// reads (`visibility`, `owner_id`)
     /// come off it and `delete_runner` takes the row itself, so there
     /// is no narrow projection. Fixture F3 `q1_by_pk` (Django `%s` →
     /// `$1`); the vacuous `ORDER BY` + `LIMIT 1` are omitted (see
     /// module docs).
-    pub const BY_PK_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"free_worktrees\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE \"runner\".\"id\" = $1";
+    pub const BY_PK_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE \"runner\".\"id\" = $1";
 
     /// Guard facts for `can_view_runner` / `can_manage_runner`
     /// (`permissions.py:74-75, :135-136`): the `(visibility, owner_id)`
@@ -112,7 +112,6 @@ pub mod runner_lookup {
             dev_metadata: row.try_get("dev_metadata")?,
             protocol_version: row.try_get("protocol_version")?,
             last_heartbeat_at: row.try_get("last_heartbeat_at")?,
-            free_worktrees: row.try_get("free_worktrees")?,
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
             revoked_at: row.try_get("revoked_at")?,
@@ -165,7 +164,7 @@ mod tests {
             .filter(|l| !l.trim_start().starts_with("--"))
             .collect::<Vec<_>>()
             .join("\n");
-        // The recorded Django Q1 projects all 32 F2 columns quoted.
+        // The recorded Django Q1 projects all 31 F2 columns quoted.
         for col in runner::COLUMNS {
             let quoted = format!("\"runner\".\"{col}\"");
             assert!(sql.contains(&quoted), "Django Q1 projects {quoted}");
@@ -187,13 +186,13 @@ mod tests {
         assert!(!sql.to_lowercase().contains("join"), "no join on this path");
         // The port-shape note pins the plain form.
         assert!(
-            raw.contains("SELECT <32 cols> FROM runner WHERE id = $1"),
+            raw.contains("SELECT <31 cols> FROM runner WHERE id = $1"),
             "port-shape note"
         );
     }
 
     #[test]
-    fn f3_port_sql_projects_32_cols_with_plain_pk_filter() {
+    fn f3_port_sql_projects_31_cols_with_plain_pk_filter() {
         let sql = runner_lookup::BY_PK_SQL;
         // Same projected set and order as the Django Q1 / F2 columns.
         let mut cursor = 0;
@@ -234,7 +233,7 @@ mod tests {
         keys.sort_unstable();
         let mut cols: Vec<&str> = runner::COLUMNS.to_vec();
         cols.sort_unstable();
-        assert_eq!(keys, cols, "example row carries exactly the 32 columns");
+        assert_eq!(keys, cols, "example row carries exactly the 31 columns");
         // The example row deserializes into the read model: types line up
         // (UUIDs, i16/i32 ints, timestamptz datetimes, JSON values).
         let runner: Runner = serde_json::from_value(hit.clone()).expect("example row fits Runner");

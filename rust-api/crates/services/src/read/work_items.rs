@@ -1308,6 +1308,88 @@ pub async fn fetch_comment_direct(
     Ok(row)
 }
 
+/// Comment list rows (`views/issue.py:1805-1828`): the link predicates
+/// plus the `is_member=Exists(...)` annotation (explicit
+/// `ProjectMember.objects` filter — WITH the manager's `deleted_at IS
+/// NULL`, unlike the guard). Newest first. (Moved from the v1
+/// work-items handlers by PIDASHCONV-1661.)
+pub async fn fetch_comment_list_rows(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+    user_id: &Uuid,
+) -> Result<Vec<sqlx::postgres::PgRow>, Error> {
+    let rows = sqlx::query(
+        r#"SELECT DISTINCT c.*, EXISTS (
+             SELECT 1 FROM "project_members" pm
+             WHERE pm."deleted_at" IS NULL AND pm."is_active"
+               AND pm."member_id" = $4 AND pm."project_id" = $2
+               AND pm."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
+           ) AS "is_member"
+           FROM "issue_comments" c
+           WHERE c."deleted_at" IS NULL
+             AND c."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
+             AND c."project_id" = $2 AND c."issue_id" = $3
+             AND EXISTS (SELECT 1 FROM "project_members" pm
+                         WHERE pm."project_id" = c."project_id" AND pm."member_id" = $4 AND pm."is_active")
+             AND EXISTS (SELECT 1 FROM "projects" p
+                         WHERE p."id" = c."project_id" AND p."archived_at" IS NULL)
+           ORDER BY c."created_at" DESC"#,
+    )
+    .bind(slug)
+    .bind(project_id)
+    .bind(issue_id)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| DbError::new("comment-list", error))?;
+    Ok(rows)
+}
+
+/// The comment columns, in table order (moved from the MCP read tools
+/// with the queryset below, PIDASHCONV-1661).
+pub const COMMENT_COLUMNS: &str = "issue_comments.id, issue_comments.created_at, \
+     issue_comments.updated_at, issue_comments.created_by_id, issue_comments.updated_by_id, \
+     issue_comments.project_id, issue_comments.workspace_id, issue_comments.comment_stripped, \
+     issue_comments.comment_json, issue_comments.comment_html, issue_comments.description_id, \
+     issue_comments.attachments, issue_comments.labels, issue_comments.issue_id, \
+     issue_comments.actor_id, issue_comments.access, issue_comments.external_source, \
+     issue_comments.external_id, issue_comments.speaker_type, issue_comments.speaker_label, \
+     issue_comments.speaker_agent_run_id, issue_comments.edited_at, issue_comments.parent_id";
+
+/// `IssueComment.objects.filter(workspace__slug=..., project_id=...,
+/// issue_id=...).order_by("created_at")[:limit]`
+/// (`pi_dash_cloud/mcp/tools.py:1151-1158`): the default manager hides
+/// soft-deleted rows; ascending `created_at`; the caller resolved the
+/// issue and checked membership before calling, so the queryset carries
+/// no member/archived guards of its own. (Moved from the MCP read
+/// tools by PIDASHCONV-1661; Rule 5: queries on OSS tables live here.)
+pub async fn fetch_comment_list_ascending(
+    pool: &PgPool,
+    workspace_slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    limit: i64,
+) -> Result<Vec<sqlx::postgres::PgRow>, Error> {
+    let sql = format!(
+        "SELECT {COMMENT_COLUMNS} FROM issue_comments \
+         JOIN workspaces ON workspaces.id = issue_comments.workspace_id \
+         WHERE workspaces.slug = $1 AND issue_comments.project_id = $2 \
+           AND issue_comments.issue_id = $3 AND issue_comments.deleted_at IS NULL \
+         ORDER BY issue_comments.created_at ASC LIMIT $4"
+    );
+    let rows = sqlx::query(&sql)
+        .bind(workspace_slug)
+        .bind(project_id)
+        .bind(issue_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| DbError::new("comment-list-ascending", error))?;
+    Ok(rows)
+}
+
 /// One decoded comment row: owned strings the [`CommentRow`] borrows.
 pub struct DecodedComment {
     pub id: String,
@@ -1461,5 +1543,89 @@ mod live {
             rendered["project"]["identifier"],
             Value::String("SEED".to_owned())
         );
+    }
+
+    async fn seed_member(pool: &PgPool, world: &crate::read::test_support::World) {
+        sqlx::query(
+            "INSERT INTO project_members (id, role, project_id, workspace_id, member_id, \
+             view_props, default_props, sort_order, preferences, is_active, created_at, updated_at) \
+             VALUES ($1, 20, $2, $3, $4, '{}', '{}', 65535, '{}', true, now(), now())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(world.project_id)
+        .bind(world.workspace_id)
+        .bind(world.user_id)
+        .execute(pool)
+        .await
+        .expect("seed member");
+    }
+
+    #[tokio::test]
+    async fn comment_list_rows_hit_desc_with_member() {
+        let Some(db) = pool().await else { return };
+        let world = seed_world(&db).await;
+        seed_member(&db, &world).await;
+        let rows = fetch_comment_list_rows(
+            &db,
+            &world.workspace_slug,
+            &world.project_id,
+            &world.issue_id,
+            &world.user_id,
+        )
+        .await
+        .expect("hit");
+        assert_eq!(rows.len(), 1);
+        let id: Uuid = rows[0].try_get("id").expect("id");
+        assert_eq!(id, world.comment_id);
+        let is_member: Option<bool> = rows[0].try_get("is_member").expect("is_member");
+        assert_eq!(is_member, Some(true));
+    }
+
+    #[tokio::test]
+    async fn comment_list_ascending_order_and_limit() {
+        let Some(db) = pool().await else { return };
+        let world = seed_world(&db).await;
+        let second = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO issue_comments (id, workspace_id, project_id, comment_stripped, \
+             comment_json, comment_html, attachments, labels, issue_id, actor_id, access, \
+             speaker_type, speaker_label, created_at, updated_at) \
+             VALUES ($1,$2,$3,'second','{}','<p>second</p>','{}','{}',$4,$5, \
+             'EXTERNAL','human','',now() + interval '1 second',now())",
+        )
+        .bind(second)
+        .bind(world.workspace_id)
+        .bind(world.project_id)
+        .bind(world.issue_id)
+        .bind(world.user_id)
+        .execute(&db)
+        .await
+        .expect("seed second comment");
+        let rows = fetch_comment_list_ascending(
+            &db,
+            &world.workspace_slug,
+            world.project_id,
+            world.issue_id,
+            10,
+        )
+        .await
+        .expect("hit");
+        assert_eq!(rows.len(), 2);
+        let first: Uuid = rows[0].try_get("id").expect("id");
+        let last: Uuid = rows[1].try_get("id").expect("id");
+        assert_eq!(first, world.comment_id);
+        assert_eq!(last, second);
+        let one = fetch_comment_list_ascending(
+            &db,
+            &world.workspace_slug,
+            world.project_id,
+            world.issue_id,
+            1,
+        )
+        .await
+        .expect("limited");
+        assert_eq!(one.len(), 1);
+        let only: Uuid = one[0].try_get("id").expect("id");
+        assert_eq!(only, world.comment_id);
     }
 }

@@ -732,13 +732,61 @@ def test_archive_unarchive_cycle(world, db):
         assert cur.fetchone()["archived_at"] is None
 
 
-def test_favorites_list_empty_is_500_known_bug(world):
-    # Known bug, pinned: the favorites list queryset/serializer raises, so
-    # the endpoint 500s even with no favorites. The Rust port must reproduce.
+FAVORITE_KEYS = ["id", "entity_type", "entity_identifier", "entity_data", "name",
+                 "is_folder", "sequence", "parent", "workspace_id", "project_id"]
+
+
+def test_favorites_list_empty(world):
+    # PDASHOSS01-293 (PB-0500 retired): the viewset now lists through
+    # UserFavoriteSerializer, so an empty list is 200 [] instead of 500.
     client, _, ws, _ = world.full_stack()
     resp = client.get(f"/api/workspaces/{ws['slug']}/user-favorite-projects/")
-    assert resp.status_code == 500
-    assert resp.json() == {"error": "Something went wrong please try again later"}
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_favorites_list_shape(world):
+    client, _, ws, project = world.full_stack()
+    url = f"/api/workspaces/{ws['slug']}/user-favorite-projects/"
+    assert client.post(url, json={"project": str(project["id"])}).status_code == 204
+    resp = client.get(url)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    fav = body[0]
+    assert list(fav.keys()) == FAVORITE_KEYS
+    assert fav["entity_type"] == "project"
+    assert fav["entity_identifier"] == str(project["id"])
+    assert fav["project_id"] == str(project["id"])
+    assert fav["workspace_id"] == str(ws["id"])
+    assert fav["name"] is None
+    assert fav["is_folder"] is False
+    assert fav["parent"] is None
+    assert fav["sequence"] == 65535.0
+    assert list(fav["entity_data"].keys()) == ["id", "name", "logo_props"]
+    assert fav["entity_data"]["id"] == str(project["id"])
+    assert fav["entity_data"]["name"] == project["name"]
+
+
+def test_favorites_list_only_callers_rows_newest_first(world, db):
+    client, user, ws, project = world.full_stack()
+    url = f"/api/workspaces/{ws['slug']}/user-favorite-projects/"
+    assert client.post(url, json={"project": str(project["id"])}).status_code == 204
+    # A second live row of the caller's (a folder, older) and a deleted
+    # row: the list keeps every live entity type, drops the deleted one.
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO user_favorites (id, workspace_id, project_id, user_id, entity_type,"
+            " entity_identifier, name, is_folder, sequence, parent_id, created_at, updated_at,"
+            " deleted_at) VALUES (gen_random_uuid(), %s, NULL, %s, 'folder', NULL, 'F', true,"
+            " 1, NULL, now() - interval '1 day', now(), NULL),"
+            " (gen_random_uuid(), %s, NULL, %s, 'folder', NULL, 'gone', true, 2, NULL,"
+            " now(), now(), now())",
+            (str(ws["id"]), str(user["id"]), str(ws["id"]), str(user["id"])))
+    db.commit()
+    body = client.get(url).json()
+    assert [(f["entity_type"], f["name"]) for f in body] == [("project", None), ("folder", "F")]
+    assert body[1]["entity_data"] is None
 
 
 def test_favorites_create_and_destroy(world, db):

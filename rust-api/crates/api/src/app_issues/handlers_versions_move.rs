@@ -1232,7 +1232,7 @@ fn map_move_domain_error(error: domain::DomainError) -> Denial {
 /// The move's 200 body: `IssueSerializer(issue).data` over the
 /// refreshed (or same-project) issue — a bare instance, so the 7
 /// queryset-annotation keys omit via `SkipField` and the 639 base shape
-/// renders 22 keys. Datetimes render in the request's zone (DRF
+/// renders 24 keys. Datetimes render in the request's zone (DRF
 /// `DateTimeField`); `archived_at` renders a bare date; `is_synced`
 /// answers the merged predicate against the live sync tables.
 async fn render_moved_issue(
@@ -1249,6 +1249,7 @@ async fn render_moved_issue(
         .as_ref()
         .map(|at| render_date(&at.date_naive()));
     let is_synced = moved_is_synced(pool, issue).await?;
+    let is_epic = moved_is_epic(pool, issue.type_id.as_deref()).await?;
     let id = uuid_string(&issue.id);
     let state_id = issue.state_id.map(|id| uuid_string(&id));
     let parent_id = issue.parent_id.map(|id| uuid_string(&id));
@@ -1277,6 +1278,8 @@ async fn render_moved_issue(
         project_id: &project_id,
         parent_id: parent_id.as_deref(),
         cycle_id: None,
+        type_id: issue.type_id.as_deref(),
+        is_epic,
         assigned_pod_id: assigned_pod_id.as_deref(),
         agent_executor: issue.agent_executor.as_deref(),
         module_ids: None,
@@ -1295,6 +1298,23 @@ async fn render_moved_issue(
     };
     let view = issue_detail_base_to_representation(&row);
     serde_json::to_string(&view).map_err(|_| Denial::ServerError)
+}
+
+/// `get_is_epic` (`issue.py:1109-1112`): false when the row is untyped,
+/// without a query; otherwise the type row's flag. A missing row is
+/// Django's `DoesNotExist` → the generic 500 (unreachable — the FK
+/// holds). No soft-delete guard: `IssueType` rides the plain manager.
+async fn moved_is_epic(pool: &PgPool, type_id: Option<&str>) -> Result<bool, Denial> {
+    let Some(raw) = type_id else {
+        return Ok(false);
+    };
+    let id = raw.parse::<Uuid>().map_err(|_| Denial::ServerError)?;
+    let row: Option<(bool,)> = sqlx::query_as("SELECT is_epic FROM issue_types WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.map(|flag| flag.0).ok_or(Denial::ServerError)
 }
 
 /// The move's `is_synced` (`serializers/issue.py:297-323`): the bare

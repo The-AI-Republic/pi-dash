@@ -41,7 +41,7 @@ LIST_ROW_KEYS = {
     "project_ids",
 }
 
-DETAIL_ROW_KEYS = LIST_ROW_KEYS | {"description_html"}
+DETAIL_ROW_KEYS = LIST_ROW_KEYS | {"description_html", "description_json"}
 
 # partial_update answers with the update-bound PageDetailSerializer over a
 # plain Page.objects.get() instance, while create re-fetches through the

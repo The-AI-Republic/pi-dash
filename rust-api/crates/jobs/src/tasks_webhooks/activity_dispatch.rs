@@ -1,7 +1,7 @@
 //! `issue_activity` dispatcher task (D-08, jobs layer).
 //!
 //! Port of the `@shared_task` entry point of
-//! `apps/api/pi_dash/bgtasks/issue_activities_task.py:1503-1604`
+//! `apps/api/pi_dash/bgtasks/issue_activities_task.py:1592-1695`
 //! (`issue_activity`). The pure row builders live in `pidash-services`
 //! (`tasks_webhooks::activity_issue` for issue/comment/cycle/module,
 //! `tasks_webhooks::activity_misc` for the rest); this module owns the
@@ -9,28 +9,29 @@
 //! dispatcher body in call order, and the [`Registry`] wiring:
 //!
 //! 1. `project_id` uuid-v4 guard — `not is_valid_uuid(str(project_id))`
-//!    returns *before any DB access* (`:1521`).
-//! 2. `Project.objects.get` → `workspace_id` (`:1524-1525`; raises →
+//!    returns *before any DB access* (`:1609`).
+//! 2. `Project.objects.get` → `workspace_id` (`:1612-1613`; raises →
 //!    broad-except).
 //! 3. `origin` → `redis.set(str(issue_id), origin, ex=600)` when `issue_id`
 //!    is not `None` and `origin` is truthy, then the `Issue` touch
-//!    (`updated_at = now()`, own try/except-pass) (`:1527-1538`).
-//! 4. The 27-entry `ACTIVITY_MAPPER` (`:1540-1568`), `bulk_create` with no
-//!    batch size and no `ignore_conflicts` (`:1584`).
+//!    (`updated_at = now()`, own try/except-pass) (`:1615-1626`).
+//! 4. The 30-entry `ACTIVITY_MAPPER` (`:1628-1659`), `bulk_create` with no
+//!    batch size and no `ignore_conflicts` (`:1675`).
 //! 5. `notifications.delay` with the `IssueActivitySerializer` JSON when
-//!    `notification` is true (`:1586-1599`).
+//!    `notification` is true (`:1677-1690`).
 //! 6. Broad `except Exception: log_exception(e); return` — the task never
 //!    raises to Celery, so every handler path here settles `Ack`
-//!    (`:1602-1604`; plain `@shared_task`, no autoretry).
+//!    (`:1693-1695`; plain `@shared_task`, no autoretry).
 //!
 //! # Ported bugs and quirks (translate, don't redesign)
 //!
-//! * The mapper holds **27** entries — the issue text says "28-type" but
-//!   the literal at `:1540-1568` (and FX-ACT-02's `mapper_type_keys`) has
-//!   27. Ported as-is; there is no `cycle.activity.updated`, no
+//! * The mapper holds **30** entries (27 at port time plus the three
+//!   `worklog.activity.*` keys at `:1644-1646`, added by PIDASHCONV-1676)
+//!   — the D-08 issue text said "28-type" but the literal then had 27.
+//!   Ported as-is; there is no `cycle.activity.updated`, no
 //!   `module.activity.updated`, no `attachment.activity.updated` and no
 //!   intake update/delete.
-//! * `intake` is accepted but never read (dead parameter, `:1515`);
+//! * `intake` is accepted but never read (dead parameter, `:1603`);
 //!   binding tolerates it and drops it.
 //! * `create_issue_activity` inserts its row *immediately*
 //!   (`IssueActivity.objects.create`, `:568`) and rewrites `created_at` /
@@ -103,9 +104,10 @@ use pidash_services::tasks_webhooks::activity_issue::{
 use pidash_services::tasks_webhooks::activity_misc::{
     plan_create_attachment, plan_create_comment_reaction, plan_create_draft, plan_create_intake,
     plan_create_issue_reaction, plan_create_link, plan_create_relation, plan_create_vote,
-    plan_delete_attachment, plan_delete_comment_reaction, plan_delete_draft,
+    plan_create_worklog, plan_delete_attachment, plan_delete_comment_reaction, plan_delete_draft,
     plan_delete_issue_reaction, plan_delete_link, plan_delete_relation, plan_delete_vote,
-    plan_update_draft, plan_update_link, CommentRef, IssueRef,
+    plan_delete_worklog, plan_update_draft, plan_update_link, plan_update_worklog, CommentRef,
+    IssueRef,
 };
 use pidash_services::tasks_webhooks::activity_tracks::{
     DescriptionLatest, EstimatePointRef, IssueActivityDraft, IssueSubscriberDraft, LabelRef,
@@ -121,11 +123,11 @@ pub use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 /// `notifications.delay(...)` target (`notification_task.py:190-200`).
 pub const NOTIFICATIONS_TASK: &str = "pi_dash.bgtasks.notification_task.notifications";
 
-/// `ri.set(str(issue_id), origin, ex=600)` (`:1531`).
+/// `ri.set(str(issue_id), origin, ex=600)` (`:1619`).
 pub const ORIGIN_TTL_SECS: u64 = 600;
 
-/// The 27 `ACTIVITY_MAPPER` keys (`:1540-1568`), in source order.
-pub const ACTIVITY_TYPES: [&str; 27] = [
+/// The 30 `ACTIVITY_MAPPER` keys (`:1628-1659`), in source order.
+pub const ACTIVITY_TYPES: [&str; 30] = [
     "issue.activity.created",
     "issue.activity.updated",
     "issue.activity.deleted",
@@ -141,6 +143,9 @@ pub const ACTIVITY_TYPES: [&str; 27] = [
     "link.activity.deleted",
     "attachment.activity.created",
     "attachment.activity.deleted",
+    "worklog.activity.created",
+    "worklog.activity.updated",
+    "worklog.activity.deleted",
     "issue_relation.activity.created",
     "issue_relation.activity.deleted",
     "issue_reaction.activity.created",
@@ -155,7 +160,7 @@ pub const ACTIVITY_TYPES: [&str; 27] = [
     "intake.activity.created",
 ];
 
-/// `ACTIVITY_MAPPER.get(type) is not None` (`:1570-1571`).
+/// `ACTIVITY_MAPPER.get(type) is not None` (`:1661-1662`).
 pub fn is_known_activity_type(activity_type: &str) -> bool {
     ACTIVITY_TYPES.contains(&activity_type)
 }
@@ -163,10 +168,10 @@ pub fn is_known_activity_type(activity_type: &str) -> bool {
 /// `is_valid_uuid` (`utils/uuid.py`; ported in `pidash-services` by
 /// PIDASHCONV-196): parses like `uuid.UUID(...)` and requires version 4.
 /// Re-exported here so dispatcher callers test the same guard the driver
-/// enforces (`:1521`).
+/// enforces (`:1609`).
 pub use pidash_services::tasks_webhooks::activity_tracks::is_valid_uuid;
 
-/// The bound `issue_activity` call (`:1504-1516`). `requested_data` and
+/// The bound `issue_activity` call (`:1593-1605`). `requested_data` and
 /// `current_instance` stay raw (`Option<String>`); `intake` is accepted
 /// and dropped (dead parameter).
 #[derive(Debug, Clone, PartialEq)]
@@ -300,13 +305,13 @@ pub fn bind_issue_activity(args: &Value, kwargs: &Value) -> Result<IssueActivity
     })
 }
 
-/// `Project.objects.get(pk=project_id)` (`:1524`): the default manager is
+/// `Project.objects.get(pk=project_id)` (`:1612`): the default manager is
 /// `SoftDeletionManager`, so soft-deleted projects miss here exactly as in
 /// Python (`db_table = "projects"`, `project.py:252`).
 pub const FIND_PROJECT_WORKSPACE_SQL: &str =
     r#"SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL"#;
 
-/// `Issue.objects.filter(pk=issue_id).first()` for the touch (`:1532`).
+/// `Issue.objects.filter(pk=issue_id).first()` for the touch (`:1620`).
 /// The touch itself is [`pidash_services::domain::issues::touch_issue`].
 pub const FIND_ISSUE_SQL: &str = r#"SELECT id FROM issues WHERE id = $1 AND deleted_at IS NULL"#;
 
@@ -392,7 +397,7 @@ pub const FIND_ISSUE_FLAT_SQL: &str = r#"SELECT id, name, description_json, desc
 /// The Redis surface the dispatcher needs. There is no shared Redis client
 /// in the Rust crates yet (same position as `tasks_mail`'s `RedisLock`),
 /// so this domain-owned trait records the exact call shape the Python
-/// makes: `ri.set(str(issue_id), origin, ex=600)` (`:1529-1531`). The
+/// makes: `ri.set(str(issue_id), origin, ex=600)` (`:1617-1619`). The
 /// return is ignored in Python; failures propagate to the broad-except, so
 /// this returns a `Result`.
 pub trait RedisOrigin {
@@ -417,7 +422,7 @@ pub fn drf_datetime(value: &DateTime<Utc>) -> String {
 pub use pidash_compat::py::django_dumps;
 
 /// One inserted `IssueActivity` row plus its `RETURNING` columns, ready to
-/// serialize (`bulk_create` returns the created rows, `:1584`, and the
+/// serialize (`bulk_create` returns the created rows, `:1675`, and the
 /// serializer runs over them, `:1593-1596`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredActivityRow {
@@ -671,7 +676,7 @@ use std::collections::{HashMap, HashSet};
 
 use pidash_services::tasks_webhooks::activity_tracks::extract_ids;
 
-/// How the driver fails. The Python broad-except (`:1602-1604`) swallows
+/// How the driver fails. The Python broad-except (`:1693-1695`) swallows
 /// everything into log-and-return, so the handler always settles `Ack`:
 /// `Quiet` skips the log for the guard paths that return before any work,
 /// `Log` carries the message for `tracing::error!`.
@@ -1389,6 +1394,15 @@ async fn collect_rows(
             plan_create_attachment(requested, current, frame).map_err(fail)?,
         )?,
         "attachment.activity.deleted" => push(&mut out, plan_delete_attachment(frame))?,
+        "worklog.activity.created" => push(
+            &mut out,
+            plan_create_worklog(requested, frame).map_err(fail)?,
+        )?,
+        "worklog.activity.updated" => push(
+            &mut out,
+            plan_update_worklog(requested, current, frame).map_err(fail)?,
+        )?,
+        "worklog.activity.deleted" => push(&mut out, plan_delete_worklog(frame))?,
         "issue_reaction.activity.created" => {
             let reaction = reaction_string(parsed_opt(requested).as_ref())?;
             let lookup = match (&reaction, &call.actor_id) {
@@ -1548,7 +1562,7 @@ async fn collect_rows(
                 plan_create_intake(requested, current, frame).map_err(fail)?,
             )?;
         }
-        // Unknown types append nothing (`func is None`, `:1570-1571`); the
+        // Unknown types append nothing (`func is None`, `:1661-1662`); the
         // empty batch still flows through `bulk_create` below.
         _ => {}
     }
@@ -1587,7 +1601,7 @@ async fn fetch_issue_refs(
     Ok(map)
 }
 
-/// `IssueActivity.objects.bulk_create(issue_activities)` (`:1584`): plain
+/// `IssueActivity.objects.bulk_create(issue_activities)` (`:1675`): plain
 /// multi-row `INSERT`, no batch size, no conflict handling — one statement
 /// or none (Django skips the query for an empty list). Returns the rows
 /// with their `RETURNING` columns for the notification payload, in batch
@@ -1730,7 +1744,7 @@ async fn persist(
     bulk_insert(pool, collected.rows, now).await
 }
 
-/// The `issue_activity` body (`:1517-1604`) against live seams. Every
+/// The `issue_activity` body (`:1606-1695`) against live seams. Every
 /// failure maps to the broad-except (`log_exception(e); return`); the
 /// caller acks unconditionally.
 pub async fn run_activity<R: RedisOrigin>(
@@ -1738,13 +1752,13 @@ pub async fn run_activity<R: RedisOrigin>(
     redis: &R,
     call: &IssueActivityCall,
 ) -> Result<(), DispatchError> {
-    // `:1521` — before any DB access. A missing id stringifies to
+    // `:1609` — before any DB access. A missing id stringifies to
     // `"None"`, which is invalid, exactly like `str(None)` in Python.
     let project_id = call.project_id.as_deref().unwrap_or("None");
     if !is_valid_uuid(project_id) {
         return Err(DispatchError::Quiet);
     }
-    // `:1524-1525` — raises (miss) into the broad-except.
+    // `:1612-1613` — raises (miss) into the broad-except.
     let project_uuid = Uuid::parse_str(project_id).map_err(|_| DispatchError::Quiet)?;
     let workspace_id: Uuid = sqlx::query(FIND_PROJECT_WORKSPACE_SQL)
         .bind(project_uuid)
@@ -1766,7 +1780,7 @@ pub async fn run_activity<R: RedisOrigin>(
         actor_id: call.actor_id.clone().unwrap_or_default(),
         epoch: call.epoch,
     };
-    // `:1527-1538` — skipped entirely when `issue_id is None`.
+    // `:1615-1626` — skipped entirely when `issue_id is None`.
     if let Some(issue_id) = &call.issue_id {
         if let Some(origin) = &call.origin {
             if !origin.is_empty() {
@@ -1790,7 +1804,7 @@ pub async fn run_activity<R: RedisOrigin>(
     let collected = collect_rows(pool, &frame, call, project_id).await?;
     let now = Utc::now();
     let stored = persist(pool, collected, now).await?;
-    // `:1586-1599` — independent of the activity type; an empty batch
+    // `:1677-1690` — independent of the activity type; an empty batch
     // serializes to `"[]"` without touching the issue row.
     if call.notification {
         let serialized = if stored.is_empty() {
@@ -1931,7 +1945,7 @@ mod tests {
         }
     }
 
-    // FX-ACT-03 · the Celery task name and the 27-type mapper.
+    // FX-ACT-03 · the Celery task name and the 30-type mapper.
     #[test]
     fn task_name_and_mapper_keys() {
         assert_eq!(
@@ -1942,7 +1956,7 @@ mod tests {
             NOTIFICATIONS_TASK,
             "pi_dash.bgtasks.notification_task.notifications"
         );
-        assert_eq!(ACTIVITY_TYPES.len(), 27);
+        assert_eq!(ACTIVITY_TYPES.len(), 30);
         assert!(is_known_activity_type("link.activity.created"));
         assert!(is_known_activity_type("intake.activity.created"));
         assert!(!is_known_activity_type("cycle.activity.updated"));

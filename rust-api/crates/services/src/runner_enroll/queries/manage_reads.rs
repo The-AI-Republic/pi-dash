@@ -815,7 +815,6 @@ mod tests {
         "dev_metadata",
         "protocol_version",
         "last_heartbeat_at",
-        "free_worktrees",
         "created_at",
         "updated_at",
         "revoked_at",

@@ -7,7 +7,7 @@
 //! - `GET archived-issues/` (`IssueArchiveViewSet.list`, `:106-219`):
 //!   the pilot-2 list machinery over the archive scope (non-epic,
 //!   archived, this project/slug) with the archive annotations.
-//! - `GET issues/<pk>/archive/` (`retrieve`, `:221-255`): the 28-key
+//! - `GET issues/<pk>/archive/` (`retrieve`, `:221-255`): the 30-key
 //!   [`ISSUE_DETAIL_ARCHIVE_FIELDS`] detail (only `is_subscribed`
 //!   annotated).
 //! - `POST issues/<pk>/archive/` (`archive`, `:257-279`): the
@@ -48,11 +48,11 @@
 //!
 //! # Fixture deltas (fixtures untouched — outside this issue's paths)
 //!
-//! * FX-ISS-19 says archive-retrieve returns the 35-key shape; it is 28
+//! * FX-ISS-19 says archive-retrieve returns the 37-key shape; it is 30
 //!   keys (only `is_subscribed` annotated — the 639 finding, pinned by
 //!   `ARCHIVE_DETAIL_KEYS` in `test_archive.py`).
-//! * FX-ISS-19 says `current_instance` is the 29-key shape; the enqueue
-//!   serializes a bare instance, so DRF omits the 7 annotation keys (22
+//! * FX-ISS-19 says `current_instance` is the 31-key shape; the enqueue
+//!   serializes a bare instance, so DRF omits the 7 annotation keys (24
 //!   keys — the pilot-2 `SERIALIZER_FIELDS` rule, verified live).
 //! * FX-ISS-19 omits the `save()` recomputes (`completed_at`,
 //!   `updated_at`, `description_stripped`, NULL-state default).
@@ -60,7 +60,7 @@
 //! # Known gaps (precedent: pilot-2 records the same)
 //!
 //! * `?expand=` on archive retrieve only *adds* nested keys; the nested
-//!   expansion fleet is out of scope, so the base 28-key shape renders
+//!   expansion fleet is out of scope, so the base 30-key shape renders
 //!   (the contract suite never sends `expand` here).
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
@@ -216,7 +216,7 @@ struct ArchiveContext {
 /// `@allow_permission([ADMIN, MEMBER])` at `PROJECT` level: an active
 /// project membership with role 20/15, or any active project membership
 /// plus an active workspace ADMIN membership — else the allow-style 403.
-async fn archive_allow(
+pub(crate) async fn archive_allow(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
@@ -272,7 +272,7 @@ async fn archive_allow(
 /// `ProjectEntityPermission` for the bulk POST (non-safe method): an
 /// active project membership with role 20/15 — no workspace-admin
 /// fallback.
-async fn entity_allowed(
+pub(crate) async fn entity_allowed(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
@@ -525,7 +525,7 @@ fn archive_filtered_set(
 // Archive retrieve (`archive.py:221-255`)
 // ---------------------------------------------------------------------------
 
-/// `GET .../issues/<pk>/archive/`: the 28-key detail. Django serializes
+/// `GET .../issues/<pk>/archive/`: the 30-key detail. Django serializes
 /// through the same `IssueDetailSerializer(issue, expand=self.expand)`, so
 /// `?expand=` runs the shared `DynamicBaseSerializer` kernel — mapper names
 /// nest, declared names clobber, `issue_attachments` appends, and a mapped
@@ -663,7 +663,7 @@ fn json_drf(row: &Map<String, Value>, key: &str) -> Result<String, Denial> {
     json_drf_opt(row, key)?.ok_or(Denial::ServerError)
 }
 
-/// Everything the 28-key render borrows: the base scalars plus the
+/// Everything the 30-key render borrows: the base scalars plus the
 /// ticker/policy/state/run/blocker inputs, all owned.
 struct DetailOwned {
     id: String,
@@ -679,6 +679,8 @@ struct DetailOwned {
     sequence_id: i32,
     project_id: String,
     parent_id: Option<String>,
+    type_id: Option<String>,
+    is_epic: bool,
     assigned_pod_id: Option<String>,
     agent_executor: Option<String>,
     created_at: String,
@@ -705,7 +707,6 @@ struct OwnedRun {
     id: String,
     status: String,
     executor_kind: String,
-    queue_position: Option<i16>,
     runner_id: Option<String>,
     runner_name: Option<String>,
     created_at: String,
@@ -783,6 +784,8 @@ impl DetailOwned {
             sequence_id: json_i32(row, "sequence_id")?,
             project_id,
             parent_id: json_str_opt(row, "parent_id"),
+            type_id: json_str_opt(row, "type_id"),
+            is_epic: fetch_is_epic(pool, json_str_opt(row, "type_id")).await?,
             assigned_pod_id: json_str_opt(row, "assigned_pod_id"),
             agent_executor: json_str_opt(row, "agent_executor"),
             created_at: json_drf(row, "created_at")?,
@@ -807,7 +810,7 @@ impl DetailOwned {
 
     /// Borrow the render input: the seven annotation fields stay `None`
     /// (unannotated → omitted) and `is_intake` stays `None`, which is the
-    /// 28-key archive shape.
+    /// 30-key archive shape.
     fn view(&self) -> IssueDetailRow<'_> {
         let base = IssueDetailBaseRow {
             id: &self.id,
@@ -824,6 +827,8 @@ impl DetailOwned {
             project_id: &self.project_id,
             parent_id: self.parent_id.as_deref(),
             cycle_id: None,
+            type_id: self.type_id.as_deref(),
+            is_epic: self.is_epic,
             assigned_pod_id: self.assigned_pod_id.as_deref(),
             agent_executor: self.agent_executor.as_deref(),
             module_ids: None,
@@ -868,7 +873,6 @@ impl OwnedRun {
             id: &self.id,
             status: &self.status,
             executor_kind: &self.executor_kind,
-            queue_position: self.queue_position,
             runner_id: self.runner_id.as_deref(),
             runner_name: self.runner_name.as_deref(),
             created_at: &self.created_at,
@@ -903,6 +907,23 @@ impl OwnedRun {
 
 /// `_issue_is_actively_synced`: no probes without a source; the git probe
 /// first, the github probe only on a git miss (Django's short-circuit).
+/// `get_is_epic` (`issue.py:1109-1112`): false when the row is untyped,
+/// without a query; otherwise the type row's flag. A missing row is
+/// Django's `DoesNotExist` → the generic 500 (unreachable — the FK
+/// holds). No soft-delete guard: `IssueType` rides the plain manager.
+async fn fetch_is_epic(pool: &sqlx::PgPool, type_id: Option<String>) -> Result<bool, Denial> {
+    let Some(raw) = type_id else {
+        return Ok(false);
+    };
+    let id = raw.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?;
+    let row: Option<(bool,)> = sqlx::query_as("SELECT is_epic FROM issue_types WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.map(|flag| flag.0).ok_or(Denial::ServerError)
+}
+
 async fn fetch_is_synced(
     pool: &sqlx::PgPool,
     issue_id: uuid::Uuid,
@@ -1085,45 +1106,43 @@ async fn fetch_agent_run(
     let id: uuid::Uuid = row.try_get(0).map_err(|_| Denial::ServerError)?;
     let status: String = row.try_get(1).map_err(|_| Denial::ServerError)?;
     let executor_kind: String = row.try_get(2).map_err(|_| Denial::ServerError)?;
-    let queue_position: Option<i16> = row.try_get(3).map_err(|_| Denial::ServerError)?;
-    let runner_id: Option<uuid::Uuid> = row.try_get(4).map_err(|_| Denial::ServerError)?;
+    let runner_id: Option<uuid::Uuid> = row.try_get(3).map_err(|_| Denial::ServerError)?;
     let created_at: chrono::DateTime<chrono::Utc> =
-        row.try_get(5).map_err(|_| Denial::ServerError)?;
+        row.try_get(4).map_err(|_| Denial::ServerError)?;
     let assigned_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get(6).map_err(|_| Denial::ServerError)?;
+        row.try_get(5).map_err(|_| Denial::ServerError)?;
     let started_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get(7).map_err(|_| Denial::ServerError)?;
+        row.try_get(6).map_err(|_| Denial::ServerError)?;
     let ended_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get(8).map_err(|_| Denial::ServerError)?;
-    let done_payload: Option<Value> = row.try_get(9).map_err(|_| Denial::ServerError)?;
-    let error: String = row.try_get(10).map_err(|_| Denial::ServerError)?;
-    let error_code: String = row.try_get(11).map_err(|_| Denial::ServerError)?;
-    let llm_model: String = row.try_get(12).map_err(|_| Denial::ServerError)?;
-    let input_tokens: Option<i64> = row.try_get(13).map_err(|_| Denial::ServerError)?;
-    let output_tokens: Option<i64> = row.try_get(14).map_err(|_| Denial::ServerError)?;
-    let total_tokens: Option<i64> = row.try_get(15).map_err(|_| Denial::ServerError)?;
-    let runner_name: Option<String> = row.try_get(16).map_err(|_| Denial::ServerError)?;
-    let observed_run_id: Option<uuid::Uuid> = row.try_get(17).map_err(|_| Denial::ServerError)?;
+        row.try_get(7).map_err(|_| Denial::ServerError)?;
+    let done_payload: Option<Value> = row.try_get(8).map_err(|_| Denial::ServerError)?;
+    let error: String = row.try_get(9).map_err(|_| Denial::ServerError)?;
+    let error_code: String = row.try_get(10).map_err(|_| Denial::ServerError)?;
+    let llm_model: String = row.try_get(11).map_err(|_| Denial::ServerError)?;
+    let input_tokens: Option<i64> = row.try_get(12).map_err(|_| Denial::ServerError)?;
+    let output_tokens: Option<i64> = row.try_get(13).map_err(|_| Denial::ServerError)?;
+    let total_tokens: Option<i64> = row.try_get(14).map_err(|_| Denial::ServerError)?;
+    let runner_name: Option<String> = row.try_get(15).map_err(|_| Denial::ServerError)?;
+    let observed_run_id: Option<uuid::Uuid> = row.try_get(16).map_err(|_| Denial::ServerError)?;
     let last_event_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get(18).map_err(|_| Denial::ServerError)?;
-    let last_event_kind: Option<String> = row.try_get(19).map_err(|_| Denial::ServerError)?;
-    let last_event_summary: Option<String> = row.try_get(20).map_err(|_| Denial::ServerError)?;
-    let agent_pid: Option<i32> = row.try_get(21).map_err(|_| Denial::ServerError)?;
-    let agent_subprocess_alive: Option<bool> = row.try_get(22).map_err(|_| Denial::ServerError)?;
-    let approvals_pending: Option<i32> = row.try_get(23).map_err(|_| Denial::ServerError)?;
-    let usage: Option<Value> = row.try_get(24).map_err(|_| Denial::ServerError)?;
-    let live_llm_model: Option<String> = row.try_get(25).map_err(|_| Denial::ServerError)?;
-    let turn_count: Option<i32> = row.try_get(26).map_err(|_| Denial::ServerError)?;
-    let agent_health: Option<String> = row.try_get(27).map_err(|_| Denial::ServerError)?;
+        row.try_get(17).map_err(|_| Denial::ServerError)?;
+    let last_event_kind: Option<String> = row.try_get(18).map_err(|_| Denial::ServerError)?;
+    let last_event_summary: Option<String> = row.try_get(19).map_err(|_| Denial::ServerError)?;
+    let agent_pid: Option<i32> = row.try_get(20).map_err(|_| Denial::ServerError)?;
+    let agent_subprocess_alive: Option<bool> = row.try_get(21).map_err(|_| Denial::ServerError)?;
+    let approvals_pending: Option<i32> = row.try_get(22).map_err(|_| Denial::ServerError)?;
+    let usage: Option<Value> = row.try_get(23).map_err(|_| Denial::ServerError)?;
+    let live_llm_model: Option<String> = row.try_get(24).map_err(|_| Denial::ServerError)?;
+    let turn_count: Option<i32> = row.try_get(25).map_err(|_| Denial::ServerError)?;
+    let agent_health: Option<String> = row.try_get(26).map_err(|_| Denial::ServerError)?;
     let agent_last_activity_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get(28).map_err(|_| Denial::ServerError)?;
+        row.try_get(27).map_err(|_| Denial::ServerError)?;
     let live_updated_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get(29).map_err(|_| Denial::ServerError)?;
+        row.try_get(28).map_err(|_| Denial::ServerError)?;
     Ok(Some(OwnedRun {
         id: id.to_string(),
         status,
         executor_kind,
-        queue_position,
         runner_id: runner_id.map(|id| id.to_string()),
         runner_name,
         created_at: serialize_iso_datetime(created_at),
@@ -1238,6 +1257,7 @@ struct WriteRow {
     sequence_id: i32,
     project_id: uuid::Uuid,
     parent_id: Option<String>,
+    type_id: Option<String>,
     assigned_pod_id: Option<String>,
     agent_executor: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
@@ -1434,7 +1454,7 @@ async fn fetch_archive_issue(
         "SELECT issue.id, issue.name, issue.state_id, s.\"group\" AS state_group, \
          issue.sort_order, issue.completed_at, issue.estimate_point_id, issue.priority, \
          issue.complexity_score, issue.start_date, issue.target_date, issue.sequence_id, \
-         issue.project_id, issue.parent_id, issue.assigned_pod_id, issue.agent_executor, \
+         issue.project_id, issue.parent_id, issue.type_id, issue.assigned_pod_id, issue.agent_executor, \
          issue.created_at, issue.updated_at, issue.created_by_id, issue.updated_by_id, \
          issue.is_draft, issue.archived_at, issue.external_source, issue.description_html \
          FROM issues AS issue \
@@ -1469,7 +1489,7 @@ async fn fetch_unarchive_issue(
         "SELECT issue.id, issue.name, issue.state_id, s.\"group\" AS state_group, \
          issue.sort_order, issue.completed_at, issue.estimate_point_id, issue.priority, \
          issue.complexity_score, issue.start_date, issue.target_date, issue.sequence_id, \
-         issue.project_id, issue.parent_id, issue.assigned_pod_id, issue.agent_executor, \
+         issue.project_id, issue.parent_id, issue.type_id, issue.assigned_pod_id, issue.agent_executor, \
          issue.created_at, issue.updated_at, issue.created_by_id, issue.updated_by_id, \
          issue.is_draft, issue.archived_at, issue.external_source, issue.description_html \
          FROM issues AS issue \
@@ -1502,6 +1522,7 @@ fn write_row(row: sqlx::postgres::PgRow) -> Result<WriteRow, Denial> {
         .map_err(|_| Denial::ServerError)?;
     let parent_id: Option<uuid::Uuid> =
         row.try_get("parent_id").map_err(|_| Denial::ServerError)?;
+    let type_id: Option<uuid::Uuid> = row.try_get("type_id").map_err(|_| Denial::ServerError)?;
     let assigned_pod_id: Option<uuid::Uuid> = row
         .try_get("assigned_pod_id")
         .map_err(|_| Denial::ServerError)?;
@@ -1534,6 +1555,7 @@ fn write_row(row: sqlx::postgres::PgRow) -> Result<WriteRow, Denial> {
             .map_err(|_| Denial::ServerError)?,
         project_id: row.try_get("project_id").map_err(|_| Denial::ServerError)?,
         parent_id: parent_id.map(|id| id.to_string()),
+        type_id: type_id.map(|id| id.to_string()),
         assigned_pod_id: assigned_pod_id.map(|id| id.to_string()),
         agent_executor: row
             .try_get("agent_executor")
@@ -1553,10 +1575,11 @@ fn write_row(row: sqlx::postgres::PgRow) -> Result<WriteRow, Denial> {
     })
 }
 
-/// `current_instance`: the 22-key bare-instance shape over the pre-save
+/// `current_instance`: the 24-key bare-instance shape over the pre-save
 /// row, `json.dumps` spacing (`", "` / `": "`).
 async fn current_instance_json(pool: &sqlx::PgPool, row: &WriteRow) -> Result<String, Denial> {
     let is_synced = fetch_is_synced(pool, row.id, row.external_source.as_deref()).await?;
+    let is_epic = fetch_is_epic(pool, row.type_id.clone()).await?;
     let id = row.id.to_string();
     let state_id = row.state_id.map(|id| id.to_string());
     let project_id = row.project_id.to_string();
@@ -1578,6 +1601,8 @@ async fn current_instance_json(pool: &sqlx::PgPool, row: &WriteRow) -> Result<St
         project_id: &project_id,
         parent_id: row.parent_id.as_deref(),
         cycle_id: None,
+        type_id: row.type_id.as_deref(),
+        is_epic,
         assigned_pod_id: row.assigned_pod_id.as_deref(),
         agent_executor: row.agent_executor.as_deref(),
         module_ids: None,
@@ -1870,7 +1895,7 @@ async fn fetch_bulk_issues(
         "SELECT issue.id, issue.name, issue.state_id, s.\"group\" AS state_group, \
          issue.sort_order, issue.completed_at, issue.estimate_point_id, issue.priority, \
          issue.complexity_score, issue.start_date, issue.target_date, issue.sequence_id, \
-         issue.project_id, issue.parent_id, issue.assigned_pod_id, issue.agent_executor, \
+         issue.project_id, issue.parent_id, issue.type_id, issue.assigned_pod_id, issue.agent_executor, \
          issue.created_at, issue.updated_at, issue.created_by_id, issue.updated_by_id, \
          issue.is_draft, issue.archived_at, issue.external_source, issue.description_html \
          FROM issues AS issue \
@@ -1990,7 +2015,7 @@ mod tests {
     }
 
     #[test]
-    fn current_instance_is_22_keys_in_meta_order() {
+    fn current_instance_is_24_keys_in_meta_order() {
         let base = IssueDetailBaseRow {
             id: "id",
             name: "name",
@@ -2006,6 +2031,8 @@ mod tests {
             project_id: "project",
             parent_id: None,
             cycle_id: None,
+            type_id: None,
+            is_epic: false,
             assigned_pod_id: None,
             agent_executor: None,
             module_ids: None,
@@ -2038,14 +2065,14 @@ mod tests {
         ] {
             expected.retain(|kept| *kept != key);
         }
-        assert_eq!(parsed.len(), 22);
+        assert_eq!(parsed.len(), 24);
         let keys: Vec<&str> = parsed.keys().map(String::as_str).collect();
         assert_eq!(keys, expected);
         assert!(rendered.contains("\"sort_order\": 10000.0"));
     }
 
     #[test]
-    fn archive_detail_is_28_keys() {
+    fn archive_detail_is_30_keys() {
         use pidash_services::orchestration::blockers::{RelationDirections, RelationsSummary};
         let blockers = RelationsSummary {
             relations_summary: RelationDirections {
@@ -2069,6 +2096,8 @@ mod tests {
             project_id: "project",
             parent_id: None,
             cycle_id: None,
+            type_id: None,
+            is_epic: false,
             assigned_pod_id: None,
             agent_executor: None,
             module_ids: None,
