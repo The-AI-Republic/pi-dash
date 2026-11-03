@@ -8,6 +8,19 @@ import { API_BASE_URL } from "@pi-dash/constants";
 import { APIService } from "@pi-dash/services";
 import { AGENT_RUNTIME_REASON_MESSAGES, CSRF_TOKEN_PATH } from "@/pi-dash-web/components/desktop/agent-runtime-edition";
 import { restoreApprovalModes } from "@/services/desktop-approval-modes";
+import type { DaemonStatus } from "@/services/desktop-account-sync";
+import {
+  activeDaemonRuns,
+  CLI_OUTDATED_MESSAGE,
+  cliErrorCode,
+  cliErrorMessage,
+  daemonUserUnknown,
+  getDaemonAuthStatus,
+  observeDesktopAuth,
+  reportDaemonStatus,
+  signDaemonIn,
+  signDaemonOut,
+} from "@/services/desktop-account-sync";
 
 // Shares the SPA's axios setup — including any edition 401 -> refresh ->
 // retry interceptor — so a normal access-cookie expiry does not revoke the
@@ -20,7 +33,9 @@ type Profile = { available: boolean; reason_code: string; base_url: string; mode
 type Native = { core: { invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> } };
 /** What the user chose in the sign-out dialog. */
 export type SignOutChoice = { deleteChatHistory: boolean };
-type SignOutPrompt = (resolve: (choice: SignOutChoice | null) => void) => void;
+/** What the sign-out dialog has to say before asking. */
+export type SignOutContext = { activeRuns: number };
+type SignOutPrompt = (resolve: (choice: SignOutChoice | null) => void, context: SignOutContext) => void;
 
 export function isDesktop() {
   return typeof window !== "undefined" && "__TAURI__" in window;
@@ -59,13 +74,37 @@ export function registerSignOutPrompt(prompt: SignOutPrompt | null) {
  * Ask the user to confirm a sign-out they started, and whether to delete this
  * account's chat history with it. Resolves `null` when they cancel.
  *
+ * Signing the app out signs this computer's `pidash` CLI out too, which stops
+ * the shared daemon's runs — so the dialog says how many are in progress.
+ *
  * Deletion is opt-in: with no dialog to ask through, sign-out proceeds and
  * keeps the history.
  */
-export function confirmSignOut(): Promise<SignOutChoice | null> {
+export async function confirmSignOut(): Promise<SignOutChoice | null> {
+  if (!isDesktop() || !signOutPrompt) return { deleteChatHistory: false };
+  const activeRuns = await activeDaemonRuns();
   const prompt = signOutPrompt;
-  if (!isDesktop() || !prompt) return Promise.resolve({ deleteChatHistory: false });
-  return new Promise((resolve) => prompt(resolve));
+  if (!prompt) return { deleteChatHistory: false };
+  return new Promise((resolve) => prompt(resolve, { activeRuns }));
+}
+
+// Set while the app signs out to follow the CLI, which is already signed out
+// (or signed in as someone else): signing the CLI out then would undo the very
+// change being followed.
+let followingCli = false;
+
+/**
+ * Sign the app out because the CLI's sign-in or sign-out is the more recent
+ * one (account sync). Runs `signOut` — the store's — without signing the CLI
+ * out.
+ */
+export async function signOutFollowingCli(signOut: () => Promise<void>): Promise<void> {
+  followingCli = true;
+  try {
+    await signOut();
+  } finally {
+    followingCli = false;
+  }
 }
 
 function invoke<T>(command: string, args?: Record<string, unknown>) {
@@ -99,6 +138,7 @@ async function api<T>(path: string, method = "GET", body?: unknown): Promise<T> 
 let pending: Promise<unknown> = Promise.resolve();
 let generation = 0;
 let stopped = false;
+// Workspaces with a built-in engine runner enrolled in this sign-in.
 const workspaces = new Set<string>();
 // The one project each workspace's local chat is enrolled against. Sticky:
 // every extra project is another runner in the daemon, so it is chosen once
@@ -180,8 +220,9 @@ export function resumeAgentRuntime(userId?: string) {
 async function configure() {
   const profile = await api<Profile>("/api/users/me/ai-assistant/agent-profile/");
   if (!profile.available) {
+    // The daemon is shared with the user's own runners, so it keeps running;
+    // only the built-in engine stops being offered.
     chatReady.clear();
-    await invoke("managed_stop_daemon", { graceSeconds: 5 });
     throw new Error(AGENT_RUNTIME_REASON_MESSAGES[profile.reason_code] ?? profile.reason_code);
   }
   await invoke("managed_write_engine_config", { account: requireAccount(), profile });
@@ -226,51 +267,125 @@ export async function refreshModelCredential(): Promise<void> {
   });
 }
 
+/**
+ * Make sure this computer's `pidash` CLI — whose default config the shared
+ * daemon runs from — is signed in as this account and bound to `workspaceSlug`.
+ *
+ * The built-in engine's runners are registered with the CLI's machine token,
+ * which belongs to one account and one workspace. A CLI that is signed out is
+ * signed in here; one signed in as someone else is left alone (account sync
+ * decides which sign-in wins, by which is more recent).
+ */
+async function ensureCliSignedIn(workspaceSlug: string): Promise<void> {
+  const account = requireAccount();
+  const read = () =>
+    getDaemonAuthStatus().catch((error: unknown) => {
+      throw new Error(
+        cliErrorCode(error) === "cli_outdated"
+          ? `${CLI_OUTDATED_MESSAGE} It is needed to run the built-in agent.`
+          : cliErrorMessage(error),
+        { cause: error }
+      );
+    });
+  let status = await read();
+  if (!status.signed_in) {
+    try {
+      await signDaemonIn(workspaceSlug);
+    } catch (error) {
+      throw new Error(cliErrorMessage(error), { cause: error });
+    }
+    status = await read();
+  }
+  if (!status.signed_in) throw new Error("Pi Dash could not sign in the pidash CLI on this computer.");
+  // A CLI that cannot name its user may be someone else's sign-in: enrolling
+  // this account's runner under it is not ours to decide. Account sync asks
+  // the user whether to re-sign it.
+  if (daemonUserUnknown(status)) {
+    throw new Error(
+      "The pidash CLI on this computer is signed in to an account Pi Dash cannot identify. " +
+        "Switch it to this account when asked, or sign the CLI in again, to use the built-in agent."
+    );
+  }
+  if (status.user && status.user.id !== account) {
+    throw new Error(
+      `The pidash CLI on this computer is signed in as ${status.user.email || "another account"}. ` +
+        "Sign in to Pi Dash as that account, or sign the CLI out, to use the built-in agent."
+    );
+  }
+  if (status.workspace_slug && status.workspace_slug !== workspaceSlug) {
+    throw new Error(
+      `Pi Dash Agent on this computer runs in the "${status.workspace_slug}" workspace. ` +
+        "Open that workspace to use the built-in agent."
+    );
+  }
+}
+
+/** Point the engine's runners at this account and make sure the daemon runs. */
+async function startDaemon(): Promise<void> {
+  let status: DaemonStatus;
+  try {
+    status = await invoke<DaemonStatus>("managed_start_daemon", { account: requireAccount() });
+  } catch (error) {
+    throw new Error(cliErrorMessage(error), { cause: error });
+  }
+  reportDaemonStatus(status);
+  if (status.mode === "unavailable" || status.mode === "idle") {
+    throw new Error(status.message ?? "Pi Dash Agent could not start on this computer.");
+  }
+}
+
+/** Register the engine's runner for one project in the shared config. */
+async function enroll(workspaceSlug: string, project: string, chat: boolean): Promise<void> {
+  try {
+    await invoke("managed_enroll", {
+      account: requireAccount(),
+      workspace: workspaceSlug,
+      project,
+      hostLabel,
+      chat,
+    });
+  } catch (error) {
+    throw new Error(cliErrorMessage(error), { cause: error });
+  }
+  if (!workspaces.has(workspaceSlug)) {
+    workspaces.add(workspaceSlug);
+    saveEnrollmentCache();
+  }
+}
+
+/** The bundled engine must be present; the doctor also names this host. */
+async function checkBundle() {
+  const doctor = await invoke<{
+    runner_present: boolean;
+    engine_present: boolean;
+    host_label: string;
+  }>("managed_doctor");
+  if (!doctor.runner_present || !doctor.engine_present)
+    throw new Error("Pi Dash Agent needs repair. Reinstall the desktop app to restore its bundled engine.");
+  if (hostLabel && hostLabel !== doctor.host_label) forgetEnrollments();
+  hostLabel = doctor.host_label;
+}
+
 export async function connectAgentProject(workspaceSlug: string, projectId: string) {
   if (!isDesktop()) return;
   const current = generation;
   return enqueue(async () => {
     if (stopped || current !== generation) throw new Error("Pi Dash Agent is signed out.");
-    const doctor = await invoke<{
-      runner_present: boolean;
-      engine_present: boolean;
-      host_label: string;
-    }>("managed_doctor");
-    if (!doctor.runner_present || !doctor.engine_present)
-      throw new Error("Pi Dash Agent needs repair. Reinstall the desktop app to restore its bundled engine.");
-    if (hostLabel && hostLabel !== doctor.host_label) forgetEnrollments();
-    hostLabel = doctor.host_label;
+    await checkBundle();
     await configure();
     if (stopped || current !== generation) return;
-    if (!workspaces.has(workspaceSlug)) {
-      const enrollment = await api<{ machine_token: string; dev_machine_id: string }>(
-        "/api/v1/runner/dev-machines/desktop-enroll/",
-        "POST",
-        { workspace_slug: workspaceSlug, host_label: hostLabel }
-      );
-      await invoke("managed_bootstrap", {
-        cloudUrl: API_BASE_URL,
-        workspace: workspaceSlug,
-        machineToken: enrollment.machine_token,
-        devMachineId: enrollment.dev_machine_id,
-      });
-      workspaces.add(workspaceSlug);
-      saveEnrollmentCache();
-    }
+    await ensureCliSignedIn(workspaceSlug);
+    if (stopped || current !== generation) return;
     const project = await api<{ identifier: string }>(`/api/workspaces/${workspaceSlug}/projects/${projectId}/`);
-    await invoke("managed_enroll", {
-      account: requireAccount(),
-      workspace: workspaceSlug,
-      project: project.identifier,
-      hostLabel,
-    });
     // A project the user connected themselves is the one chat should ride on.
+    const forChat = (chatProjects.get(workspaceSlug) ?? project.identifier) === project.identifier;
+    await enroll(workspaceSlug, project.identifier, forChat);
     if (!chatProjects.has(workspaceSlug)) {
       chatProjects.set(workspaceSlug, project.identifier);
       saveEnrollmentCache();
     }
     if (stopped || current !== generation) return;
-    await invoke("managed_start_daemon", { account: requireAccount(), workspace: workspaceSlug });
+    await startDaemon();
   });
 }
 
@@ -308,19 +423,19 @@ async function resolveChatProject(workspaceSlug: string): Promise<string> {
  * Make the bundled runtime usable for a **local chat**, independent of any
  * project the user has opened.
  *
- * Local chat talks to the bundled daemon (the daemon owns every engine
- * process), and until this existed the only thing that ever started that
- * daemon was {@link connectAgentProject} — so a user who signed in and opened
- * the built-in agent got a chat box with nothing behind it: the send failed at
- * "connecting to managed daemon" and the turn never arrived.
+ * Local chat talks to the shared daemon (the daemon owns every engine
+ * process), so the daemon has to be up with the engine's runner in it before
+ * the first message — otherwise a user who signed in and opened the built-in
+ * agent got a chat box with nothing behind it.
  *
  * Same sequence as {@link connectAgentProject}, minus the caller-supplied
- * project: enrolment still registers this machine against one project, so one
- * is picked per workspace and kept (see {@link resolveChatProject}). It is
- * idempotent and serialised through the same queue, and the full sequence runs
- * once per workspace per page: after that a warm/send only renews an expiring
- * model credential and checks the daemon, so it costs no network. Profile
- * changes are picked up by {@link refreshAgentRuntime}, not here.
+ * project: enrolment still registers the engine against one project, so one
+ * is picked per workspace and kept (see {@link resolveChatProject}), and that
+ * runner is the one chat requests name. It is idempotent and serialised
+ * through the same queue, and the full sequence runs once per workspace per
+ * page: after that a warm/send only renews an expiring model credential and
+ * checks the daemon, so it costs no network. Profile changes are picked up by
+ * {@link refreshAgentRuntime}, not here.
  */
 /**
  * Whether this server will let the bundled agent run, and why not when it
@@ -355,46 +470,20 @@ export async function ensureChatRuntime(workspaceSlug: string): Promise<void> {
       if (tokenExpiresAt < Date.now() + 120_000) await configure();
       if (stopped || current !== generation) return;
       // A no-op while the daemon runs; restarts it if it died.
-      await invoke("managed_start_daemon", { account: requireAccount(), workspace: workspaceSlug });
+      await startDaemon();
       return;
     }
-    const doctor = await invoke<{
-      runner_present: boolean;
-      engine_present: boolean;
-      host_label: string;
-    }>("managed_doctor");
-    if (!doctor.runner_present || !doctor.engine_present)
-      throw new Error("Pi Dash Agent needs repair. Reinstall the desktop app to restore its bundled engine.");
-    if (hostLabel && hostLabel !== doctor.host_label) forgetEnrollments();
-    hostLabel = doctor.host_label;
+    await checkBundle();
     // Writes the engine config and a fresh model credential — chat cannot
     // reach a model without it.
     await configure();
     if (stopped || current !== generation) return;
-    if (!workspaces.has(workspaceSlug)) {
-      const enrollment = await api<{ machine_token: string; dev_machine_id: string }>(
-        "/api/v1/runner/dev-machines/desktop-enroll/",
-        "POST",
-        { workspace_slug: workspaceSlug, host_label: hostLabel }
-      );
-      await invoke("managed_bootstrap", {
-        cloudUrl: API_BASE_URL,
-        workspace: workspaceSlug,
-        machineToken: enrollment.machine_token,
-        devMachineId: enrollment.dev_machine_id,
-      });
-      workspaces.add(workspaceSlug);
-      saveEnrollmentCache();
-    }
-    const identifier = await resolveChatProject(workspaceSlug);
-    await invoke("managed_enroll", {
-      account: requireAccount(),
-      workspace: workspaceSlug,
-      project: identifier,
-      hostLabel,
-    });
+    await ensureCliSignedIn(workspaceSlug);
     if (stopped || current !== generation) return;
-    await invoke("managed_start_daemon", { account: requireAccount(), workspace: workspaceSlug });
+    const identifier = await resolveChatProject(workspaceSlug);
+    await enroll(workspaceSlug, identifier, true);
+    if (stopped || current !== generation) return;
+    await startDaemon();
     chatReady.set(workspaceSlug, chatStamp());
   });
 }
@@ -434,18 +523,23 @@ export async function refreshAgentRuntime() {
       await configure();
     } catch (error) {
       chatReady.clear();
-      if (tokenExpiresAt <= Date.now()) await invoke("managed_stop_daemon", { graceSeconds: 5 });
       throw error;
     }
     if (stopped) return;
-    const account = requireAccount();
-    // eslint-disable-next-line no-await-in-loop -- Serialize daemon lifecycle commands.
-    for (const workspace of workspaces) await invoke("managed_start_daemon", { account, workspace });
+    // One shared daemon serves every workspace.
+    await startDaemon();
   });
 }
 
 /**
  * Tear the runtime down for a sign-out.
+ *
+ * Signing the app out signs this computer's `pidash` CLI out first
+ * (`pidash auth logout --yes`, after `confirmSignOut` warned about runs in
+ * progress): one sign-in covers both, and a CLI left signed in would hand its
+ * session straight back to the app on the next account-sync pass. If the CLI
+ * cannot be signed out, the sign-out stops there and says why. Not when the
+ * app is following the CLI's own sign-out (see {@link signOutFollowingCli}).
  *
  * `choice` comes from the sign-out dialog and is the only thing that can make
  * a sign-out delete chat history. The session-expiry teardown in `api` and the
@@ -453,6 +547,7 @@ export async function refreshAgentRuntime() {
  */
 export async function disposeAgentRuntime(choice?: SignOutChoice): Promise<void> {
   if (!isDesktop()) return;
+  if (!followingCli) await signDaemonOut();
   stopped = true;
   generation++;
   clearEnrollmentCache();
@@ -463,19 +558,12 @@ export async function disposeAgentRuntime(choice?: SignOutChoice): Promise<void>
   );
   await enqueue(async () => {
     try {
-      if (hostLabel)
-        await api("/api/v1/runner/dev-machines/desktop-enroll/", "DELETE", {
-          host_label: hostLabel,
-        });
-    } catch {
-      // An expired desktop session or unreachable server must not trap the
-      // user in the app. Local credentials are removed below; the caller
-      // must still clear the web session through the regular logout endpoint.
-      console.warn("Pi Dash Agent server enrollment cleanup failed; continuing local sign-out.");
-    } finally {
       await invoke("managed_sign_out");
+    } finally {
       forgetEnrollments();
       tokenExpiresAt = 0;
     }
   });
+  // The app's own sign-out time, for account sync's "most recent wins".
+  await observeDesktopAuth(null).catch(() => {});
 }

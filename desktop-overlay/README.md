@@ -72,9 +72,14 @@ desktop/src-tauri/dist/
   desktop bundle. Desktop-only routes go here.
 - `apps/web/react-router.config.ts` — `ssr: false`, no prerendering.
 - `apps/web/core/services/agent-runtime.ts`, `core/components/agent-runtime.tsx`
-  — the real implementations of the `apps/web` agent-runtime stubs: enroll
-  this machine, write the engine config and model credential, supervise the
-  bundled daemon.
+  — the real implementations of the `apps/web` agent-runtime stubs: register
+  the built-in engine's runners in the shared `pidash` config, write the
+  engine config and model credential, keep the shared daemon running.
+- `apps/web/core/services/desktop-account-sync.ts`,
+  `core/components/desktop-daemon-notice.tsx` — one `pidash` daemon and one
+  sign-in for the app and the CLI on this computer: account sync ("most
+  recent sign-in or sign-out wins"), and the corner notice offering Repair
+  (daemon running only while the app is open) or a CLI update.
 - `apps/web/core/components/desktop-update-button.tsx` — the corner button
   beside the sidebar's user menu while an app update is waiting (found by
   the daily check, or deferred at launch); clicking it installs and restarts.

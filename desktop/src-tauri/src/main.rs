@@ -6,6 +6,7 @@
 
 mod about;
 mod account_settings;
+mod account_sync;
 mod chat;
 mod chat_history;
 mod desktop_http;
@@ -16,6 +17,7 @@ mod dist_guard;
 mod ipc;
 mod managed_runner;
 mod pidash_cli;
+mod shared_daemon;
 mod updates;
 
 use std::sync::Mutex;
@@ -46,6 +48,19 @@ struct AppConfig {
     /// Public origin of the hosted web app — what an in-app path becomes
     /// when it has to leave the window (see `browser_url_for_new_window`).
     web_base: Url,
+    /// API origin, when it differs from `target_url`. The sign-in handoff
+    /// (`account_sync::pidash_desktop_handoff`) loads its redeem URL from the
+    /// host the CLI talks to, which is the API's; that view's redirect must
+    /// bounce back to the bundle exactly as one from `target_url` does.
+    api_url: Url,
+}
+
+impl AppConfig {
+    /// [`bundle_redirect_for`] against every server host the window may visit.
+    fn bundle_redirect(&self, url: &Url, bundle_root: &Url) -> Option<Url> {
+        bundle_redirect_for(url, &self.target_url, bundle_root)
+            .or_else(|| bundle_redirect_for(url, &self.api_url, bundle_root))
+    }
 }
 
 /// Where Tauri serves `WebviewUrl::App` from. Windows is plain `http`
@@ -108,9 +123,11 @@ fn bundle_url(bundle_root: &Url, path_and_query: &str) -> Url {
 }
 
 /// The desktop window never shows the server's hosted web app — only the
-/// bundled SPA. The one legitimate trip to the server host is the sign-in
-/// hand-off (`/api/auth/desktop-exchange/`, navigated by `handle_deep_link`
-/// so the session cookies land in the webview's jar). That view answers
+/// bundled SPA. The legitimate trips to the server host are the sign-in
+/// hand-offs: `/api/auth/desktop-exchange/` (navigated by `handle_deep_link`)
+/// and the CLI handoff's redeem URL (`…/desktop-handoff/redeem/`, navigated
+/// by `account_sync::pidash_desktop_handoff`), both under `/api/` so the
+/// session cookies land in the webview's jar. That view answers
 /// with a relative redirect to an app route (or `/sign-in?error=…` when
 /// the exchange fails), which would otherwise load `https://<server>/…` —
 /// whatever web UI the server hosts — inside the app. Map any non-API
@@ -378,7 +395,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             api_url.origin().ascii_serialization()
         );
     }
-    let desktop_http = desktop_http::DesktopHttp::new(api_url)?;
+    let desktop_http = desktop_http::DesktopHttp::new(api_url.clone())?;
     let initial_webview = if hot_reload {
         WebviewUrl::External(target_url.clone())
     } else {
@@ -452,8 +469,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .manage(ZoomState(Mutex::new(1.0)))
         .manage(desktop_http)
-        .manage(AppConfig { target_url, bundle_root, web_base })
-        .manage(managed_runner::DaemonState::default())
+        .manage(AppConfig { target_url, bundle_root, web_base, api_url })
+        .manage(shared_daemon::SharedDaemon::default())
         .manage(chat::ChatState::default())
         .manage(<updates::UpdateState>::default())
         .invoke_handler(tauri::generate_handler![
@@ -464,6 +481,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pidash_cli::detect_pidash_cli,
             pidash_cli::install_pidash_cli,
             pidash_cli::pidash_cli_login,
+            // The one `pidash` daemon shared with the CLI, and one sign-in
+            // for both (contract: dev-machine identity §7). Each command
+            // builds its own argv; none takes a program or argument from JS.
+            shared_daemon::daemon_ensure,
+            shared_daemon::daemon_repair,
+            account_sync::pidash_auth_status,
+            account_sync::pidash_auth_logout,
+            account_sync::pidash_desktop_handoff,
+            account_sync::desktop_auth_observe,
             // Direct local chat with the built-in engine (PDASHOSS01-159):
             // these reach the daemon over its IPC socket and stream Chat*
             // frames back to the webview as `chat://frame` events — never via
@@ -477,12 +503,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // makes the authenticated calls, then hands the results to these
             // commands, which own the local files and the daemon process.
             managed_runner::managed_paths,
-            managed_runner::managed_bootstrap,
             managed_runner::managed_enroll,
             managed_runner::managed_write_engine_config,
             managed_runner::managed_write_model_token,
             managed_runner::managed_start_daemon,
-            managed_runner::managed_stop_daemon,
             managed_runner::managed_sign_out,
             desktop_clear_web_data,
             updates::desktop_pending_update,
@@ -515,7 +539,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let config = webview.state::<AppConfig>();
             let Some(root) = &config.bundle_root else { return };
-            if let Some(target) = bundle_redirect_for(payload.url(), &config.target_url, root) {
+            if let Some(target) = config.bundle_redirect(payload.url(), root) {
                 eprintln!("nav: server host page loaded ({}), bouncing to bundle", payload.url());
                 if let Err(e) = webview.navigate(target) {
                     eprintln!("nav: bounce failed: {e}");
@@ -554,7 +578,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window = window.on_navigation(move |url| {
                     let config = bounce_app.state::<AppConfig>();
                     let Some(root) = &config.bundle_root else { return true };
-                    let Some(target) = bundle_redirect_for(url, &config.target_url, root) else {
+                    let Some(target) = config.bundle_redirect(url, root) else {
                         return true;
                     };
                     eprintln!("nav: blocked server host navigation to {url}, bouncing to bundle");
@@ -690,18 +714,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tauri::async_runtime::spawn(updates::run_daily_checks(app.handle().clone()));
             }
 
-            // The agent uses the bundled CLI. Launching the desktop must not
-            // install a second CLI into the user's PATH or personal config.
+            // The shared daemon (installing the CLI and adopting legacy
+            // per-workspace configs first) is ensured by the overlay on
+            // launch, where it can show progress and the Repair action.
 
             Ok(())
         })
         .build(context)?
         .run(|app, event| {
-            // Stop the bundled daemon when the app exits. Without this it
-            // outlives the window: the server would keep the runner ONLINE and
-            // dispatch work to a machine whose user has closed Pi Dash.
+            // Stop the daemon when the app exits — but only a child daemon
+            // this app started because the service was unavailable. That one
+            // promised "runs only while the app is open"; left running, the
+            // server would keep its runners ONLINE for a closed app. A service
+            // daemon is the user's and keeps running.
             if let tauri::RunEvent::Exit = event {
-                managed_runner::shutdown(app);
+                shared_daemon::shutdown(app);
             }
         });
 
@@ -884,6 +911,34 @@ mod tests {
         let url = Url::parse("https://pidash.example.com/?next_path=%2Facme%2F").unwrap();
         let target = bundle_redirect_for(&url, &server(), &root()).unwrap();
         assert_eq!(target.as_str(), "tauri://localhost/?next_path=%2Facme%2F");
+    }
+
+    #[test]
+    fn handoff_redeem_on_the_api_host_passes_and_its_redirect_bounces() {
+        let config = AppConfig {
+            target_url: server(),
+            bundle_root: Some(root()),
+            web_base: web(),
+            api_url: Url::parse("https://api.pidash.example.com").unwrap(),
+        };
+        for redeem in [
+            "https://api.pidash.example.com/api/v1/auth/desktop-handoff/redeem/?code=c",
+            "https://pidash.example.com/api/auth/desktop-handoff/redeem/?code=c",
+        ] {
+            assert_eq!(config.bundle_redirect(&Url::parse(redeem).unwrap(), &root()), None, "{redeem}");
+        }
+        // The redeem view's redirects land in the bundle, whichever host.
+        for (landing, bundle) in [
+            ("https://api.pidash.example.com/", "tauri://localhost/"),
+            (
+                "https://api.pidash.example.com/sign-in?error=handoff_invalid",
+                "tauri://localhost/sign-in?error=handoff_invalid",
+            ),
+            ("https://pidash.example.com/", "tauri://localhost/"),
+        ] {
+            let target = config.bundle_redirect(&Url::parse(landing).unwrap(), &root()).unwrap();
+            assert_eq!(target.as_str(), bundle, "{landing}");
+        }
     }
 
     #[test]

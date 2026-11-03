@@ -49,7 +49,6 @@ function makeBridge(overrides: Partial<Record<string, unknown>> = {}) {
     listen,
     getAccount: () => "acct-1",
     ensureRuntime,
-    workspaceSlug: () => "acme",
     refreshModelCredential,
     topUpUrl,
   };
@@ -407,21 +406,18 @@ describe("LocalChatTransport verbs", () => {
     expect(order).toEqual(["ensureRuntime", "chat_warm", "ensureRuntime", "chat_send"]);
   });
 
-  it("carries the workspace slug — the daemon's socket lives in that workspace's tree", async () => {
-    // The daemon runs per workspace with its data dir re-rooted under
-    // `managed/pidash/<workspace>/data`, so its control socket is
-    // `<that>/runtime/pidash.sock`. Without the slug the host resolved the
-    // shared `managed/runtime/` instead and every send failed with
-    // "connecting to managed daemon" while the daemon was up.
+  it("names no workspace — one shared daemon serves them all", async () => {
+    // Earlier builds ran a daemon per workspace and every command had to say
+    // which socket to use. The shared daemon has one socket, which the host
+    // resolves itself.
     await transport.warmChatSession(SESSION);
     await transport.cancelChat(SESSION);
-    const chatCalls = ctx.invoke.mock.calls.filter(([command]) => String(command).startsWith("chat_"));
-    const commandCalls = chatCalls.filter(([command]) =>
+    const commandCalls = ctx.invoke.mock.calls.filter(([command]) =>
       ["chat_warm", "chat_send", "chat_cancel", "chat_close", "chat_decide"].includes(String(command))
     );
     expect(commandCalls.length).toBeGreaterThan(0);
     for (const [command, args] of commandCalls) {
-      expect((args as Record<string, unknown>).workspace, `${command} must carry the workspace`).toBe("acme");
+      expect(args as Record<string, unknown>, String(command)).not.toHaveProperty("workspace");
     }
   });
 

@@ -5,9 +5,12 @@
 //! Provisioning and supervision of the built-in agent engine.
 //!
 //! The desktop app ships three things: this window, the `pidash` daemon, and
-//! the agent engine. This module owns the second and third — it writes their
-//! configuration, starts the daemon as a child process, keeps the model
-//! credential fresh on disk, and tears all of it down on sign-out.
+//! the agent engine. This module owns the engine — it writes its
+//! configuration, registers its runners, keeps the model credential fresh on
+//! disk, and tears the credential down on sign-out. The daemon itself is the
+//! one shared with the user's `pidash` CLI (see `shared_daemon`), and the
+//! engine's runners live in that daemon's default config next to the user's
+//! own.
 //!
 //! **What this module deliberately does not do.** It never talks to the Pi
 //! Dash API itself. The session lives in the webview's cookie jar, so the
@@ -17,20 +20,19 @@
 //!
 //! It also never re-implements enrollment. Writing `config.toml`, registering
 //! a runner and applying the response are `pidash`'s own code paths, reached
-//! through the hidden `pidash __managed` subcommands. A second implementation
-//! in a second language would drift from the first the week after it shipped.
+//! through the hidden `pidash __managed` subcommands of the installed CLI at
+//! its default paths. A second implementation in a second language would
+//! drift from the first the week after it shipped.
 //!
 //! See `pi-dash/.ai_design/managed_runner/design.md` §9.
 
-use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::Duration;
-use std::sync::Mutex;
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager, Runtime};
+
+use crate::shared_daemon::{self, CliError, DaemonStatus};
 
 /// Name the agent engine ships under.
 ///
@@ -58,19 +60,14 @@ fn engine_bin_path(resource_dir: &Path) -> PathBuf {
     resource_dir.join("bin").join(ENGINE_BIN)
 }
 
-/// Daemons this app started, keyed by workspace.
-///
-/// Empty whenever no daemon is running — which is the normal state before
-/// sign-in and after sign-out, not an error.
-#[derive(Default)]
-pub struct DaemonState(pub Mutex<BTreeMap<String, Child>>);
-
 /// Absolute paths of the managed tree, derived once from Tauri's app-data dir.
 ///
-/// Everything the bundled runner touches lives under `managed/`, passed to it
-/// as `PIDASH_CONFIG_DIR` / `PIDASH_DATA_DIR`. A user-installed `pidash` uses
-/// the XDG defaults and never sees any of this, which is what keeps the two
-/// installs from colliding in either direction.
+/// What the built-in engine owns lives under `managed/`: its per-account
+/// homes, the model credential, the task working copies and the local chat
+/// store. The daemon's own config is no longer here — it is the shared
+/// default one — but `config_dir` still names where builds before the shared
+/// daemon kept their per-workspace configs, which `shared_daemon` adopts into
+/// the default config and then deletes.
 #[derive(Debug, Clone, Serialize)]
 pub struct ManagedPaths {
     pub root: PathBuf,
@@ -94,29 +91,6 @@ pub struct ManagedPaths {
 }
 
 impl ManagedPaths {
-    pub(crate) fn for_workspace<R: Runtime>(app: &AppHandle<R>, workspace: &str) -> Result<Self, String> {
-        if !valid_component(workspace) {
-            return Err("Invalid workspace slug".into());
-        }
-        let mut paths = Self::resolve(app)?;
-        paths.config_dir = paths.config_dir.join(workspace);
-        paths.data_dir = paths.config_dir.join("data");
-        Ok(paths)
-    }
-
-    /// Where the daemon for *this* tree binds its control socket.
-    ///
-    /// Not `runtime_dir`. The daemon is started per workspace with
-    /// `PIDASH_DATA_DIR` pointing at the re-rooted `data_dir`, and the runner
-    /// derives its runtime dir as `<data_dir>/runtime` whenever that override
-    /// is present (`runner/src/util/paths.rs`). `runtime_dir` here is the
-    /// *shared* tree that holds the model token, which no daemon binds under —
-    /// reaching for it is how the chat transport ended up looking for a socket
-    /// nothing was listening on.
-    pub(crate) fn daemon_runtime_dir(&self) -> PathBuf {
-        self.data_dir.join("runtime")
-    }
-
     pub fn resolve<R: Runtime>(app: &AppHandle<R>) -> Result<Self, String> {
         let base = app
             .path()
@@ -268,56 +242,16 @@ pub async fn managed_paths<R: Runtime>(app: AppHandle<R>) -> Result<ManagedPaths
     ManagedPaths::resolve(&app)
 }
 
-/// Write the machine token into the managed config.
-///
-/// Takes the token as an argument from the overlay (which fetched it from the
-/// session-authenticated enroll endpoint) and pipes it to `pidash` on **stdin**
-/// rather than argv, so it never appears in the process table.
-#[tauri::command]
-pub async fn managed_bootstrap<R: Runtime>(
-    app: AppHandle<R>,
-    cloud_url: String,
-    workspace: String,
-    machine_token: String,
-    dev_machine_id: String,
-) -> Result<String, String> {
-    let paths = ManagedPaths::for_workspace(&app, &workspace)?;
-    paths.ensure()?;
-
-    let mut child = base_command(&paths, &paths.runner)
-        .args([
-            "__managed",
-            "bootstrap",
-            "--cloud-url",
-            &cloud_url,
-            "--workspace",
-            &workspace,
-            "--dev-machine-id",
-            &dev_machine_id,
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawning pidash __managed bootstrap: {e}"))?;
-
-    child
-        .stdin
-        .as_mut()
-        .ok_or_else(|| "pidash stdin unavailable".to_string())?
-        .write_all(machine_token.as_bytes())
-        .map_err(|e| format!("writing machine token: {e}"))?;
-    // Drop stdin so the child sees EOF; without this it blocks reading forever.
-    drop(child.stdin.take());
-
-    finish(child, "bootstrap")
-}
-
-/// Register a runner for one project and write its `[[runner]]` block.
+/// Register a runner for one project and write its `[[runner]]` block into
+/// the shared default config.
 ///
 /// Idempotent by design: the overlay calls this every time a project is
 /// opened, and `__managed enroll` reuses an existing block rather than minting
-/// a second runner.
+/// a second runner. The CLI must already be signed in to `workspace` (the
+/// overlay signs it in first); its machine token is what registers the runner.
+///
+/// `chat` marks the runner local chat talks to: the shared daemon may host
+/// other runners too, so chat requests have to name this one.
 #[tauri::command]
 pub async fn managed_enroll<R: Runtime>(
     app: AppHandle<R>,
@@ -325,44 +259,61 @@ pub async fn managed_enroll<R: Runtime>(
     workspace: String,
     project: String,
     host_label: String,
-) -> Result<String, String> {
-    if !valid_component(&project) {
-        return Err("Invalid project identifier".into());
+    chat: Option<bool>,
+) -> Result<String, CliError> {
+    if !valid_component(&workspace) {
+        return Err(CliError::new("invalid_input", "Invalid workspace slug"));
     }
-    let paths = ManagedPaths::for_workspace(&app, &workspace)?;
-    paths.ensure()?;
-    let engine_home = paths.ensure_engine_home(&account)?;
+    if !valid_component(&project) {
+        return Err(CliError::new("invalid_input", "Invalid project identifier"));
+    }
+    let local = |e: String| CliError::new("cli_failed", e);
+    let paths = ManagedPaths::resolve(&app).map_err(local)?;
+    paths.ensure().map_err(local)?;
+    let engine_home = paths.ensure_engine_home(&account).map_err(local)?;
     let working_dir = paths.workdirs.join(&workspace).join(&project);
     std::fs::create_dir_all(&working_dir)
-        .map_err(|e| format!("creating {}: {e}", working_dir.display()))?;
+        .map_err(|e| local(format!("creating {}: {e}", working_dir.display())))?;
 
-    let child = base_command(&paths, &paths.runner)
-        .args([
-            "__managed",
-            "enroll",
-            "--workspace",
-            &workspace,
-            "--project",
-            &project,
-            "--host-label",
-            &host_label,
-            "--engine",
-            &paths.engine.to_string_lossy(),
-            "--codex-home",
-            &engine_home.to_string_lossy(),
-            "--working-dir",
-            &working_dir.to_string_lossy(),
-            "--path-prepend",
-            &paths.bin_dir.to_string_lossy(),
-            "--model-token-file",
-            &paths.model_token_file.to_string_lossy(),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawning pidash __managed enroll: {e}"))?;
-    finish(child, "enroll")
+    let lossy = |p: &Path| p.to_string_lossy().into_owned();
+    let args = vec![
+        "__managed".into(),
+        "enroll".into(),
+        "--workspace".into(),
+        workspace,
+        "--project".into(),
+        project,
+        "--host-label".into(),
+        host_label,
+        "--engine".into(),
+        lossy(&paths.engine),
+        "--codex-home".into(),
+        lossy(&engine_home),
+        "--working-dir".into(),
+        lossy(&working_dir),
+        "--path-prepend".into(),
+        lossy(&paths.bin_dir),
+        "--model-token-file".into(),
+        lossy(&paths.model_token_file),
+    ];
+    let out = shared_daemon::run(&app, args, None).await?;
+    if !out.success {
+        return Err(out.error("__managed enroll"));
+    }
+    let stdout = out.stdout.trim().to_string();
+    if chat.unwrap_or(false) {
+        match enrolled_runner_name(&stdout) {
+            Some(name) => app.state::<shared_daemon::SharedDaemon>().set_chat_runner(name),
+            None => return Err(CliError::new("cli_failed", "pidash __managed enroll did not name its runner")),
+        }
+    }
+    Ok(stdout)
+}
+
+/// The runner name in `__managed enroll`'s `{"ok": true, "name": ...}`.
+fn enrolled_runner_name(stdout: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(stdout).ok()?;
+    value.get("name")?.as_str().map(str::to_string)
 }
 
 /// Write the account's managed `CODEX_HOME/config.toml` from the cloud's
@@ -404,141 +355,49 @@ pub async fn managed_write_model_token<R: Runtime>(
     atomic_write(&paths.model_token_file, token.trim().as_bytes())
 }
 
-/// Start the bundled daemon as a child of this app.
+/// Point the built-in engine's runners at this build and account, then make
+/// sure the shared daemon runs.
 ///
-/// Deliberately not a system service: the managed runner is online exactly
-/// while the app is open, which is the contract the cloud's availability check
-/// and the "Runs on this computer" affordance are built on. A service would
-/// keep accepting work after the user closed the window.
+/// The rebind refreshes every engine runner's host-owned paths — the bundled
+/// engine, the account's engine home, the model credential — even when
+/// sessionStorage restores a workspace without reopening each project.
+/// AppImage mounts are ephemeral; paths persisted by the previous launch are
+/// invalid. The user's own runners are left alone (the CLI only touches blocks
+/// that carry the managed engine fields).
 #[tauri::command]
 pub async fn managed_start_daemon<R: Runtime>(
     app: AppHandle<R>,
     account: String,
-    workspace: String,
-) -> Result<(), String> {
-    let paths = ManagedPaths::for_workspace(&app, &workspace)?;
-    paths.ensure()?;
-    let engine_home = paths.ensure_engine_home(&account)?;
-    // The spawn is synchronous and holds the daemon-state lock; keeping it in
-    // its own function guarantees the (non-`Send`) guard is dropped before the
-    // await below, and keeps this command's future `Send`.
-    if spawn_daemon_locked(&app, &paths, &engine_home, &workspace)? == DaemonStart::AlreadyRunning {
-        return Ok(());
+) -> Result<DaemonStatus, CliError> {
+    let local = |e: String| CliError::new("cli_failed", e);
+    let paths = ManagedPaths::resolve(&app).map_err(local)?;
+    paths.ensure().map_err(local)?;
+    let engine_home = paths.ensure_engine_home(&account).map_err(local)?;
+    let lossy = |p: &Path| p.to_string_lossy().into_owned();
+    let rebind = shared_daemon::run(
+        &app,
+        vec![
+            "__managed".into(),
+            "rebind".into(),
+            "--engine".into(),
+            lossy(&paths.engine),
+            "--codex-home".into(),
+            lossy(&engine_home),
+            "--path-prepend".into(),
+            lossy(&paths.bin_dir),
+            "--model-token-file".into(),
+            lossy(&paths.model_token_file),
+        ],
+        None,
+    )
+    .await?;
+    if !rebind.success {
+        return Err(rebind.error("__managed rebind"));
     }
-    // Spawning is not the same as being reachable. The daemon binds its control
-    // socket a moment after exec, and callers — the chat transport above all —
-    // connect the instant this returns, so returning early surfaced as
-    // "connecting to managed daemon: … pidash.sock" on the first send of a
-    // session. Wait for the socket to answer before claiming the daemon is up.
-    wait_for_daemon(&paths).await;
-    Ok(())
-}
-
-#[derive(PartialEq)]
-enum DaemonStart {
-    Spawned,
-    AlreadyRunning,
-}
-
-/// Spawn the daemon for `workspace` unless one is already running. Synchronous
-/// on purpose — see the caller.
-fn spawn_daemon_locked<R: Runtime>(
-    app: &AppHandle<R>,
-    paths: &ManagedPaths,
-    engine_home: &Path,
-    workspace: &str,
-) -> Result<DaemonStart, String> {
-    let state = app.state::<DaemonState>();
-    let mut guard = state.0.lock().map_err(|_| "daemon state poisoned")?;
-    if let Some(child) = guard.get_mut(workspace) {
-        match child.try_wait() {
-            // Already running — starting a second daemon on the same config
-            // would have two processes claiming the same runner rows.
-            Ok(None) => return Ok(DaemonStart::AlreadyRunning),
-            _ => {
-                guard.remove(workspace);
-            }
-        }
-    }
-
-    // Refresh every configured project's paths, even when sessionStorage
-    // restores a workspace without reopening each project. AppImage mounts
-    // are ephemeral; persisted paths from the previous launch are invalid.
-    let rebind = base_command(paths, &paths.runner)
-        .args(["__managed", "rebind", "--engine"])
-        .arg(&paths.engine)
-        .arg("--codex-home")
-        .arg(engine_home)
-        .arg("--path-prepend")
-        .arg(&paths.bin_dir)
-        .arg("--model-token-file")
-        .arg(&paths.model_token_file)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawning managed path refresh: {e}"))?;
-    finish(rebind, "rebind")?;
-
-    let child = spawn_daemon_process(paths)?;
-    guard.insert(workspace.to_string(), child);
-    Ok(DaemonStart::Spawned)
-}
-
-/// Spawn `pidash __run` with its output captured in `desktop-daemon.log`.
-///
-/// Both streams go to the file: the daemon's tracing output is written to
-/// stdout, while panics and its fatal startup error go to stderr.
-fn spawn_daemon_process(paths: &ManagedPaths) -> Result<Child, String> {
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(paths.data_dir.join("desktop-daemon.log"))
-        .map_err(|e| format!("opening daemon log: {e}"))?;
-    let log_stdout = log
-        .try_clone()
-        .map_err(|e| format!("opening daemon log: {e}"))?;
-    base_command(paths, &paths.runner)
-        .arg("__run")
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log_stdout))
-        .stderr(Stdio::from(log))
-        .spawn()
-        .map_err(|e| format!("spawning pidash __run: {e}"))
-}
-
-/// Poll the daemon's control socket until it answers, or give up.
-///
-/// Best-effort by design: a daemon that is slow to bind is common (cold start,
-/// a busy machine), while one that never binds is a real failure the caller
-/// will see on its first request with a far better error than anything this
-/// could invent. So the timeout is generous and a miss is not an error.
-async fn wait_for_daemon(paths: &ManagedPaths) {
-    const ATTEMPTS: u32 = 40;
-    const INTERVAL: Duration = Duration::from_millis(250);
-    for _ in 0..ATTEMPTS {
-        if crate::ipc::managed_status(paths).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(INTERVAL).await;
-    }
-}
-
-/// Stop the daemon, waiting briefly for an in-flight run to finish.
-///
-/// The cloud's heartbeat reaper will clean up whatever we kill mid-run, but a
-/// killed run is a failed run in the user's history — worth a few seconds of
-/// patience on a normal window close.
-///
-/// `grace_seconds` applies on Unix only; on Windows there is no way to ask this
-/// daemon to exit, so the stop is immediate (see `stop_daemon`).
-#[tauri::command]
-pub async fn managed_stop_daemon<R: Runtime>(
-    app: AppHandle<R>,
-    grace_seconds: Option<u64>,
-) -> Result<(), String> {
-    stop_daemon(&app, grace_seconds.unwrap_or(30));
-    Ok(())
+    // Spawning is not the same as being reachable; `ensure` waits for the
+    // socket to answer before reporting the daemon up, so the chat transport
+    // never connects into the gap between spawn and bind.
+    Ok(shared_daemon::ensure(&app).await)
 }
 
 /// What sign-out should do with the signed-out account's local chat history.
@@ -554,11 +413,13 @@ pub struct ClearChatHistory {
     pub account: String,
 }
 
-/// Sign-out teardown: stop the daemon and destroy every local credential.
+/// Sign-out teardown: destroy the engine's local credential.
 ///
-/// After this the bundled binaries are inert — the engine has no model
-/// credential and the daemon has no machine token — which is what makes
-/// "signed out" mean something for a binary the user could still execute.
+/// After this the bundled engine is inert — it has no model credential. The
+/// shared daemon's machine token is the CLI's, and is revoked by
+/// `pidash auth logout` (which the overlay runs first, after warning about
+/// in-flight runs); the daemon picks that up and stops the runners itself.
+/// The daemon process keeps running: it is the user's, not the app's.
 ///
 /// Chat history is deliberately **not** removed here by default: it belongs to
 /// the account and is kept, hidden, until that account signs in again. The only
@@ -570,7 +431,6 @@ pub async fn managed_sign_out<R: Runtime>(
     app: AppHandle<R>,
     clear_chat_history: Option<ClearChatHistory>,
 ) -> Result<(), String> {
-    stop_daemon(&app, 5);
     let paths = ManagedPaths::resolve(&app)?;
     sign_out_teardown(&paths, clear_chat_history)
 }
@@ -589,6 +449,8 @@ fn sign_out_teardown(
         None => Ok(()),
     };
     let _ = std::fs::remove_file(&paths.model_token_file);
+    // Any legacy per-workspace config not yet adopted still holds a machine
+    // token; it goes too.
     let _ = std::fs::remove_file(paths.config_dir.join("credentials.toml"));
     let _ = std::fs::remove_file(paths.config_dir.join("config.toml"));
     if let Ok(entries) = std::fs::read_dir(&paths.config_dir) {
@@ -631,7 +493,6 @@ pub async fn managed_doctor<R: Runtime>(app: AppHandle<R>) -> Result<serde_json:
         "host_label": format!("desktop-{}", device_id.trim()),
         "runner_present": paths.runner.exists(),
         "engine_present": paths.engine.exists(),
-        "config_present": config_present(&paths.config_dir),
         "token_present": paths.model_token_file.exists(),
         "accounts_dir": paths.accounts_dir.to_string_lossy(),
     }))
@@ -641,113 +502,11 @@ pub async fn managed_doctor<R: Runtime>(app: AppHandle<R>) -> Result<serde_json:
 // Internals
 // ---------------------------------------------------------------------------
 
-/// Whether any workspace on this machine has a written `pidash` config.
-///
-/// `managed_bootstrap` goes through `ManagedPaths::for_workspace`, which roots
-/// `config_dir` at `<config_dir>/<workspace>/`, so the config never lands at
-/// the top level that `ManagedPaths::resolve` returns — probing that path
-/// directly reports "not configured" on a fully provisioned machine. Mirrors
-/// the layout `managed_sign_out` already walks: the per-workspace
-/// subdirectories, plus the flat path older installs wrote.
-fn config_present(config_dir: &Path) -> bool {
-    if config_dir.join("config.toml").is_file() {
-        return true;
-    }
-    let Ok(entries) = std::fs::read_dir(config_dir) else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
-        entry.file_type().is_ok_and(|kind| kind.is_dir()) && entry.path().join("config.toml").is_file()
-    })
-}
-
-/// A `pidash` invocation pointed at the managed tree.
-///
-/// Every call goes through here so no code path can accidentally run against
-/// the user's own `pidash` configuration.
-fn base_command(paths: &ManagedPaths, program: &Path) -> Command {
-    let mut cmd = Command::new(program);
-    cmd.env("PIDASH_CONFIG_DIR", &paths.config_dir);
-    cmd.env("PIDASH_DATA_DIR", &paths.data_dir);
-    #[cfg(windows)]
-    {
-        // Keep the console window from flashing on every invocation.
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    cmd
-}
-
 fn valid_component(value: &str) -> bool {
     !value.is_empty()
         && value
             .chars()
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-}
-
-fn finish(child: Child, what: &str) -> Result<String, String> {
-    let out = child
-        .wait_with_output()
-        .map_err(|e| format!("waiting for pidash {what}: {e}"))?;
-    if !out.status.success() {
-        // stderr carries pidash's own diagnostics, which are more useful to a
-        // user than anything we could synthesise here.
-        return Err(format!(
-            "pidash {what} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-fn stop_daemon<R: Runtime>(app: &AppHandle<R>, grace_seconds: u64) {
-    let Some(state) = app.try_state::<DaemonState>() else {
-        return;
-    };
-    let Ok(mut guard) = state.0.lock() else {
-        return;
-    };
-    let children = std::mem::take(&mut *guard);
-    // Windows has no way to ask this daemon to exit (see the loop below), so the
-    // grace period does not apply there.
-    #[cfg(not(unix))]
-    let _ = grace_seconds;
-    for (_, mut child) in children {
-        // Ask the daemon to finish its current run and exit, then wait for it.
-        //
-        // Unix only. `base_command` spawns every `pidash` invocation with
-        // CREATE_NO_WINDOW on Windows so a GUI app never flashes a console, and
-        // a process with no console cannot receive console control events —
-        // GenerateConsoleCtrlEvent only reaches a process group sharing the
-        // caller's console. A real graceful stop on Windows needs an
-        // out-of-band channel the daemon listens on (a control socket, or a
-        // stop file polled by `pidash __run`); none exists today. Until one
-        // does, waiting out the grace period on Windows would only delay a kill
-        // that is going to happen regardless, so go straight to it rather than
-        // hanging every app exit for `grace_seconds`.
-        #[cfg(unix)]
-        {
-            unsafe {
-                // SIGTERM asks the daemon to finish its current run and shut
-                // down cleanly; the kill below is the fallback if it does not.
-                libc::kill(child.id() as i32, libc::SIGTERM);
-            }
-            // Poll rather than sleeping the full grace period: a daemon with
-            // nothing in flight exits immediately and the user should not wait
-            // for a timer.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(grace_seconds);
-            while std::time::Instant::now() < deadline {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
-                    Err(_) => break,
-                }
-            }
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-    }
 }
 
 fn render_engine_config(profile: &AgentProfile, runner: &Path, token_file: &Path) -> String {
@@ -825,11 +584,6 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         file.sync_all().ok();
     }
     std::fs::rename(&tmp, path).map_err(|e| format!("renaming into {}: {e}", path.display()))
-}
-
-/// Best-effort teardown for app exit.
-pub fn shutdown<R: Runtime>(app: &AppHandle<R>) {
-    stop_daemon(app, 5);
 }
 
 #[cfg(test)]
@@ -1046,7 +800,7 @@ sandbox_mode = "danger-full-access"#
         let token = config_home.join("model.token");
         let config = render_engine_config(&profile(), Path::new(&runner), &token);
         std::fs::write(config_home.join("config.toml"), config).unwrap();
-        let output = Command::new("python3")
+        let output = std::process::Command::new("python3")
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/engine_auth_smoke.py"))
             .arg("--engine")
             .arg(engine)
@@ -1105,39 +859,13 @@ sandbox_mode = "danger-full-access"#
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
     }
 
-    /// The daemon logs through tracing, which writes to stdout; only panics
-    /// and the fatal startup error reach stderr. Both have to land in
-    /// `desktop-daemon.log`, or the file is empty exactly when a run fails
-    /// (PIDESKAPP-22).
-    #[cfg(unix)]
     #[test]
-    fn daemon_log_captures_stdout_and_stderr() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let paths = ManagedPaths::for_test_root(dir.path().to_path_buf());
-        std::fs::create_dir_all(&paths.bin_dir).unwrap();
-        std::fs::create_dir_all(&paths.data_dir).unwrap();
-        std::fs::write(
-            &paths.runner,
-            "#!/bin/sh\necho \"stdout from $1\"\necho \"stderr from $1\" >&2\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&paths.runner, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        // A concurrently forking test can briefly inherit the script's write
-        // handle, which makes exec fail with ETXTBSY; retry past it.
-        let mut child = loop {
-            match spawn_daemon_process(&paths) {
-                Err(e) if e.contains("Text file busy") => {
-                    std::thread::sleep(Duration::from_millis(20))
-                }
-                other => break other.unwrap(),
-            }
-        };
-        assert!(child.wait().unwrap().success());
-
-        let log = std::fs::read_to_string(paths.data_dir.join("desktop-daemon.log")).unwrap();
-        assert!(log.contains("stdout from __run"), "stdout missing: {log:?}");
-        assert!(log.contains("stderr from __run"), "stderr missing: {log:?}");
+    fn enrolled_runner_name_is_read_from_the_cli_result() {
+        assert_eq!(
+            enrolled_runner_name(r#"{"ok":true,"reused":true,"runner_id":"r","name":"desktop-host-TEST"}"#).as_deref(),
+            Some("desktop-host-TEST")
+        );
+        assert_eq!(enrolled_runner_name(r#"{"ok":true}"#), None);
+        assert_eq!(enrolled_runner_name("not json"), None);
     }
 }

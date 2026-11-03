@@ -11,16 +11,18 @@
 //! `$HOME/.local/bin` (or `%LOCALAPPDATA%\Programs\pidash\`) and add the
 //! directory to the user's PATH.
 //!
-//! The desktop wrapper consumes the runner over IPC for the local-runner
-//! feature (desktop+runner on the same machine talk directly, bypassing the
-//! cloud's WebSocket reroute). This module exposes two Tauri commands:
+//! The desktop app runs no daemon of its own: it drives this CLI at its
+//! default paths, and talks to the CLI's daemon over IPC (`shared_daemon`).
+//! This module exposes three Tauri commands:
 //!
 //!   * [`detect_pidash_cli`] — non-destructive probe; returns whether and
 //!     where the binary is installed plus its reported version.
-//!   * [`install_pidash_cli`] — gated behind UI confirmation; downloads
-//!     and runs the OSS installer for the current OS. Streams stdout/stderr
-//!     line-by-line back to the webview as ``pidash-install-log`` events
-//!     so the UI can render install progress.
+//!   * [`install_pidash_cli`] — installs the CLI from the app bundle, or
+//!     downloads and runs the OSS installer for the current OS. Streams
+//!     stdout/stderr line-by-line back to the webview as
+//!     ``pidash-install-log`` events so the UI can render install progress.
+//!   * [`pidash_cli_login`] — signs the CLI in with a device code the app
+//!     approved with its own session.
 //!
 //! Security posture: the installer URL is hardcoded to a specific GitHub
 //! release path. JS in the webview cannot influence which script is run
@@ -370,32 +372,31 @@ fn install_from_bundle<R: Runtime>(app: &AppHandle<R>) -> Result<Option<PathBuf>
 /// makes. What it must not do is write the CLI's credential file: the machine
 /// token, the workspace binding and the config format all belong to the
 /// runner. So it hands the approved device code to the installed CLI
-/// (`pidash auth login --device-code-stdin`), which finishes exactly as an
-/// interactive login would.
+/// (`pidash auth login --device-code-stdin --yes`), which finishes exactly as
+/// an interactive login would — at the default config path, which is the one
+/// the shared daemon runs from (see `shared_daemon`).
 ///
-/// Output is streamed to the webview as `pidash-install-log`, the same channel
-/// the installer uses.
+/// `--yes` skips the CLI's own account-switch confirmation: the app has
+/// already said what signing in does. An older CLI without the flag has no
+/// such prompt, so the login is retried without it.
 #[tauri::command]
 pub async fn pidash_cli_login<R: Runtime>(
     app: AppHandle<R>,
     device_code: String,
     cloud_url: String,
     workspace: Option<String>,
-) -> Result<(), String> {
-    let status = detect_pidash_cli().await;
-    let Some(cli) = status.path else {
-        return Err("The pidash CLI is not installed yet.".to_string());
-    };
+) -> Result<(), crate::shared_daemon::CliError> {
     let (args, stdin) = login_invocation(device_code, cloud_url, workspace);
-    let app_clone = app.clone();
-    match tauri::async_runtime::spawn_blocking(move || {
-        run_installer(&app_clone, &cli, &args, stdin.as_deref())
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(e) => Err(format!("login task panicked: {e}")),
+    let out = crate::shared_daemon::run(&app, args.clone(), stdin.clone()).await?;
+    if out.success {
+        return Ok(());
     }
+    if out.rejected_command_line() {
+        let legacy: Vec<String> = args.into_iter().filter(|a| a != "--yes").collect();
+        let retry = crate::shared_daemon::run(&app, legacy, stdin).await?;
+        return if retry.success { Ok(()) } else { Err(retry.error("auth login")) };
+    }
+    Err(out.error("auth login"))
 }
 
 /// The argv and stdin for the `pidash auth login` child of [`pidash_cli_login`].
@@ -415,6 +416,7 @@ fn login_invocation(
         "--url".to_string(),
         cloud_url,
         "--device-code-stdin".to_string(),
+        "--yes".to_string(),
     ];
     if let Some(slug) = workspace.filter(|s| !s.is_empty()) {
         args.push("--workspace".to_string());
@@ -583,6 +585,17 @@ struct InstallLogLine {
 /// installation.
 #[tauri::command]
 pub async fn install_pidash_cli<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    install_cli(&app).await?;
+    // Whatever was cached may be the copy this just replaced.
+    if let Some(state) = tauri::Manager::try_state::<crate::shared_daemon::SharedDaemon>(&app) {
+        state.forget_cli();
+    }
+    Ok(())
+}
+
+/// The install behind [`install_pidash_cli`], also used by the shared daemon
+/// when it finds no CLI at all.
+pub(crate) async fn install_cli<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     // Concurrency guard — rejects re-entry (double-click, or a collision with
     // the background startup auto-install) rather than spawning a second
     // installer against the same destination. The guard clears the flag on
@@ -591,12 +604,11 @@ pub async fn install_pidash_cli<R: Runtime>(app: AppHandle<R>) -> Result<(), Str
         return Err(INSTALL_BUSY_MESSAGE.to_string());
     };
 
-    // The app already ships this exact program — it runs it as the managed
-    // daemon — so install from the bundle rather than downloading a second
-    // copy. Offline, instant, and the bytes are the ones this app was tested
-    // with. Falls through to the network installer when there is no bundle to
-    // copy from (a dev build, or Windows, whose PATH the official installer
-    // owns).
+    // The app already ships this exact program, so install from the bundle
+    // rather than downloading a second copy. Offline, instant, and the bytes
+    // are the ones this app was tested with. Falls through to the network
+    // installer when there is no bundle to copy from (a dev build, or
+    // Windows, whose PATH the official installer owns).
     let bundle_app = app.clone();
     match tauri::async_runtime::spawn_blocking(move || install_from_bundle(&bundle_app)).await {
         Ok(Ok(Some(_))) => return Ok(()),
@@ -618,7 +630,7 @@ pub async fn install_pidash_cli<R: Runtime>(app: AppHandle<R>) -> Result<(), Str
     let app_clone = app.clone();
     let join =
         tauri::async_runtime::spawn_blocking(move || {
-            run_installer(&app_clone, &program, &args, None)
+            run_installer(&app_clone, &program, &args)
         });
     match join.await {
         Ok(result) => result,
@@ -729,44 +741,25 @@ fn windows_installer_script() -> String {
     )
 }
 
-/// Spawn `program` with stdout/stderr piped. `stdin`, when given, is written
-/// to the child followed by EOF; otherwise the child gets a null stdin.
-fn spawn_piped(program: &PathBuf, args: &[String], stdin: Option<&str>) -> Result<Child, String> {
-    use std::io::Write;
-
-    let mut child = Command::new(program)
+/// Spawn `program` with stdout/stderr piped and a null stdin.
+fn spawn_piped(program: &PathBuf, args: &[String]) -> Result<Child, String> {
+    Command::new(program)
         .args(args)
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("failed to spawn {}: {e}", program.display()))?;
-
-    if let Some(input) = stdin {
-        // A child that exits without reading (e.g. an older CLI rejecting the
-        // flag) breaks the pipe; ignore that so its own error output is still
-        // streamed and its exit status reported.
-        if let Some(mut pipe) = child.stdin.take() {
-            let _ = pipe.write_all(input.as_bytes());
-        }
-        // `pipe` dropped here: the child sees EOF instead of blocking forever.
-    }
-    Ok(child)
+        .map_err(|e| format!("failed to spawn {}: {e}", program.display()))
 }
 
 fn run_installer<R: Runtime>(
     app: &AppHandle<R>,
     program: &PathBuf,
     args: &[String],
-    stdin: Option<&str>,
 ) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
 
-    let mut child = spawn_piped(program, args, stdin)?;
+    let mut child = spawn_piped(program, args)?;
 
     // Take stdout/stderr before wait() so we can stream them in parallel.
     let stdout = child.stdout.take().ok_or("missing stdout pipe")?;
@@ -866,6 +859,7 @@ mod login_tests {
                 "--url",
                 "https://pidash.example.com",
                 "--device-code-stdin",
+                "--yes",
                 "--workspace",
                 "acme"
             ]
@@ -890,8 +884,18 @@ mod login_tests {
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let (args, stdin) = invocation();
-        let mut child = spawn_piped(&fake, &args, stdin.as_deref()).unwrap();
-        assert!(child.wait().unwrap().success());
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = loop {
+            // A concurrently forking test can briefly hold the script open for
+            // writing, which makes exec fail with ETXTBSY; retry past it.
+            match crate::shared_daemon::run_cli(&fake, &args, stdin.as_deref(), crate::shared_daemon::CLI_TIMEOUT) {
+                Err(e) if e.message.contains("Text file busy") => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                other => break other.unwrap(),
+            }
+        };
+        assert!(out.success);
 
         let cmdline = std::fs::read_to_string(tmp.path().join("cmdline")).unwrap();
         assert!(

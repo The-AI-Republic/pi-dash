@@ -42,12 +42,19 @@ describe("setUpCliForThisMachine", () => {
   it("installs the CLI, approves its own grant, and hands the code to the CLI", async () => {
     invoke.mockImplementation(async (command: string) => {
       if (command === "detect_pidash_cli") return { installed: false, path: null, version: null };
+      if (command === "daemon_ensure") return { mode: "service", cli_outdated: false, message: null };
       return undefined;
     });
     const { setUpCliForThisMachine } = await import("@/services/pidash-cli");
     await setUpCliForThisMachine("acme");
 
-    expect(invoke.mock.calls.map(([c]) => c)).toEqual(["detect_pidash_cli", "install_pidash_cli", "pidash_cli_login"]);
+    expect(invoke.mock.calls.map(([c]) => c)).toEqual([
+      "detect_pidash_cli",
+      "install_pidash_cli",
+      "pidash_cli_login",
+      // Signed in, the shared daemon can start.
+      "daemon_ensure",
+    ]);
     // The approval is the half only a signed-in session can do.
     const approve = request.mock.calls.find(([c]) => c.url === "/api/v1/auth/device/approve/");
     expect(approve?.[0].data).toEqual({ user_code: "ABCD1234" });
@@ -64,10 +71,11 @@ describe("setUpCliForThisMachine", () => {
     invoke.mockImplementation(async (command: string) => {
       if (command === "detect_pidash_cli")
         return { installed: true, path: "/home/dev/.local/bin/pidash", version: "0.1.23" };
+      if (command === "daemon_ensure") return { mode: "service", cli_outdated: false, message: null };
       return undefined;
     });
     const { setUpCliForThisMachine } = await import("@/services/pidash-cli");
     await setUpCliForThisMachine("acme");
-    expect(invoke.mock.calls.map(([c]) => c)).toEqual(["detect_pidash_cli", "pidash_cli_login"]);
+    expect(invoke.mock.calls.map(([c]) => c)).toEqual(["detect_pidash_cli", "pidash_cli_login", "daemon_ensure"]);
   });
 });

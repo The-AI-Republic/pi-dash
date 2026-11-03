@@ -2,59 +2,41 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 
-//! Desktop → managed-daemon IPC.
+//! Desktop → daemon IPC.
 //!
-//! The desktop app starts and supervises the bundled `pidash` daemon
-//! (`managed_runner`), but until now it had no live connection to it. This
-//! module is that connection: a thin wrapper over the shared
-//! [`pidash_ipc::Client`] that talks to the managed daemon over its control
-//! socket (`<runtime_dir>/pidash.sock` — a Unix socket on macOS/Linux, a
-//! named pipe on Windows, both handled by `pidash_ipc::Client`).
+//! A thin wrapper over the shared [`pidash_ipc::Client`] that talks to the
+//! shared `pidash` daemon (see `shared_daemon`) over its control socket — a
+//! Unix socket on macOS/Linux, a named pipe on Windows, both handled by
+//! `pidash_ipc::Client`.
 //!
-//! The socket path matches the daemon's own `RunnerPaths::ipc_socket_path`
-//! (`<runtime_dir>/pidash.sock`). Which runtime dir matters: the daemon runs
-//! **per workspace** with `PIDASH_DATA_DIR` set to the re-rooted `data_dir`,
-//! so it binds under `<data_dir>/runtime`, not the shared `managed/runtime/`
-//! that holds the model token. Use [`ManagedPaths::daemon_runtime_dir`] (via
-//! `ManagedPaths::for_workspace`) rather than `paths.runtime_dir`.
-//!
-//! Scope note (PDASHOSS01-158): this lands the *capability* — the desktop
-//! crate depends on `pidash-ipc` (not the runner) and can round-trip
-//! `StatusGet`. The live status / approvals surface is deliberately out of
-//! scope; the user sees agent activity through the chat UI (PDASHOSS01-159),
-//! which is the real consumer of this helper.
-#![allow(dead_code)] // Consumed by PDASHOSS01-159 (direct local chat); no caller in-tree yet.
+//! Which socket: the daemon's default one, as the installed CLI resolves it
+//! (`shared_daemon::socket`). The app no longer runs private per-workspace
+//! daemons with re-rooted data dirs, so there is exactly one.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 use pidash_ipc::protocol::{Request, Response, StatusSnapshot};
 
-use crate::managed_runner::ManagedPaths;
-
-/// The managed daemon's control socket, derived from the managed runtime dir.
-///
-/// Kept byte-identical to the daemon's `RunnerPaths::ipc_socket_path` so both
-/// ends agree without a shared constant crossing the crate boundary.
+/// A daemon's control socket inside its runtime dir, for tests that bind a
+/// stub daemon. Kept byte-identical to the daemon's `Paths::ipc_socket_path`;
+/// the app itself gets the shared daemon's socket from the CLI.
+#[cfg(test)]
 pub fn socket_path(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join("pidash.sock")
 }
 
-/// Fetch a one-shot status snapshot from the managed daemon.
+/// Connect to the daemon at `socket` and complete a single `StatusGet`
+/// round-trip.
 ///
-/// Returns `Err` when the daemon isn't running (socket absent / refused) or
-/// answers with anything other than a `Status` frame — the caller decides
-/// whether "no daemon" is an error or just "not signed in yet".
-pub async fn managed_status(paths: &ManagedPaths) -> Result<StatusSnapshot, String> {
-    status_over(&socket_path(&paths.daemon_runtime_dir())).await
-}
-
-/// Connect to a daemon at `socket` and complete a single `StatusGet`
-/// round-trip. Split out from [`managed_status`] so it can be driven against
-/// a stub socket in tests.
-async fn status_over(socket: &Path) -> Result<StatusSnapshot, String> {
+/// Returns `Err` when no daemon is running there (socket absent / refused) or
+/// it answers with anything other than a `Status` frame — the caller decides
+/// whether "no daemon" is an error or just "not started yet".
+pub async fn daemon_status(socket: &Path) -> Result<StatusSnapshot, String> {
     let mut client = pidash_ipc::Client::connect(socket)
         .await
-        .map_err(|e| format!("connecting to managed daemon: {e}"))?;
+        .map_err(|e| format!("connecting to the pidash daemon: {e}"))?;
     match client
         .call(Request::StatusGet)
         .await
@@ -114,7 +96,7 @@ mod tests {
             reader.get_mut().flush().await.unwrap();
         });
 
-        let snapshot = status_over(&socket).await.expect("StatusGet round-trip");
+        let snapshot = daemon_status(&socket).await.expect("StatusGet round-trip");
         assert_eq!(snapshot.daemon.cloud_url, "https://example.test");
         assert!(snapshot.daemon.connected);
         assert_eq!(snapshot.daemon.uptime_secs, 7);
@@ -128,6 +110,6 @@ mod tests {
     async fn status_over_missing_socket_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let socket = socket_path(dir.path()); // never bound
-        assert!(status_over(&socket).await.is_err());
+        assert!(daemon_status(&socket).await.is_err());
     }
 }

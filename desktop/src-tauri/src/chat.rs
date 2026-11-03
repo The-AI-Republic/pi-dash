@@ -40,8 +40,7 @@ use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use uuid::Uuid;
 
-use crate::ipc::socket_path;
-use crate::managed_runner::ManagedPaths;
+use crate::shared_daemon::SharedDaemon;
 
 /// Tauri event carrying one streamed `Response::Chat*` frame to the webview.
 /// The payload is the frame serialized with its usual `result`/`data` tagging.
@@ -224,18 +223,22 @@ async fn call_once(socket: &Path, req: Request) -> Result<(), String> {
     }
 }
 
-/// Resolve the managed daemon's control socket for this app.
-/// The managed daemon's control socket **for this workspace**.
+/// The shared daemon's control socket (see `shared_daemon`).
 ///
-/// The daemon is started per workspace (`managed_start_daemon`) with its data
-/// dir re-rooted under `managed/pidash/<workspace>/data`, and the runner binds
-/// its socket at `<data_dir>/runtime/pidash.sock`. Resolving from the shared
-/// `managed/runtime/` instead — which only holds the model token — is a socket
-/// nothing listens on, and every chat send failed with "connecting to managed
-/// daemon" even though the daemon was up.
-fn resolve_socket<R: Runtime>(app: &AppHandle<R>, workspace: &str) -> Result<PathBuf, String> {
-    let paths = ManagedPaths::for_workspace(app, workspace)?;
-    Ok(socket_path(&paths.daemon_runtime_dir()))
+/// One daemon serves every workspace now, so there is no per-workspace
+/// socket to pick; the CLI says where its default socket is.
+async fn resolve_socket<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    crate::shared_daemon::socket(app).await
+}
+
+/// The runner a chat request targets: the caller's choice, else the built-in
+/// engine runner enrolled for chat.
+///
+/// The shared daemon can host the user's own runners beside the built-in
+/// one, and only picks a runner by itself when it hosts exactly one — so an
+/// unnamed request would fail as soon as the user added a runner of their own.
+fn resolve_runner<R: Runtime>(app: &AppHandle<R>, runner: Option<String>) -> Option<String> {
+    runner.or_else(|| app.state::<SharedDaemon>().chat_runner())
 }
 
 /// Spawn the background reader for a streaming request and register its handle
@@ -322,7 +325,6 @@ fn start_stream<S: ChatSink>(
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_warm<R: Runtime>(
     app: AppHandle<R>,
-    workspace: String,
     chat_session_id: Uuid,
     runner: Option<String>,
     cwd: Option<String>,
@@ -331,7 +333,8 @@ pub async fn chat_warm<R: Runtime>(
     local_thread_id: Option<String>,
     local_session_id: Option<String>,
 ) -> Result<(), String> {
-    let socket = resolve_socket(&app, &workspace)?;
+    let socket = resolve_socket(&app).await?;
+    let runner = resolve_runner(&app, runner);
     let req = Request::ChatWarm {
         chat_session_id,
         runner,
@@ -351,7 +354,6 @@ pub async fn chat_warm<R: Runtime>(
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_send<R: Runtime>(
     app: AppHandle<R>,
-    workspace: String,
     chat_session_id: Uuid,
     message_id: Uuid,
     content: String,
@@ -362,7 +364,8 @@ pub async fn chat_send<R: Runtime>(
     local_thread_id: Option<String>,
     local_session_id: Option<String>,
 ) -> Result<(), String> {
-    let socket = resolve_socket(&app, &workspace)?;
+    let socket = resolve_socket(&app).await?;
+    let runner = resolve_runner(&app, runner);
     let req = Request::ChatSend {
         chat_session_id,
         message_id,
@@ -381,12 +384,12 @@ pub async fn chat_send<R: Runtime>(
 #[tauri::command]
 pub async fn chat_cancel<R: Runtime>(
     app: AppHandle<R>,
-    workspace: String,
     chat_session_id: Uuid,
     runner: Option<String>,
     reason: Option<String>,
 ) -> Result<(), String> {
-    let socket = resolve_socket(&app, &workspace)?;
+    let socket = resolve_socket(&app).await?;
+    let runner = resolve_runner(&app, runner);
     call_once(
         &socket,
         Request::ChatCancel {
@@ -403,12 +406,12 @@ pub async fn chat_cancel<R: Runtime>(
 #[tauri::command]
 pub async fn chat_close<R: Runtime>(
     app: AppHandle<R>,
-    workspace: String,
     chat_session_id: Uuid,
     runner: Option<String>,
     reason: Option<String>,
 ) -> Result<(), String> {
-    let socket = resolve_socket(&app, &workspace)?;
+    let socket = resolve_socket(&app).await?;
+    let runner = resolve_runner(&app, runner);
     let result = call_once(
         &socket,
         Request::ChatClose {
@@ -438,13 +441,13 @@ pub async fn chat_close<R: Runtime>(
 #[tauri::command]
 pub async fn chat_decide<R: Runtime>(
     app: AppHandle<R>,
-    workspace: String,
     chat_session_id: Uuid,
     local_approval_id: String,
     decision: ApprovalDecision,
     runner: Option<String>,
 ) -> Result<(), String> {
-    let socket = resolve_socket(&app, &workspace)?;
+    let socket = resolve_socket(&app).await?;
+    let runner = resolve_runner(&app, runner);
     call_once(
         &socket,
         Request::ChatDecide {
@@ -460,6 +463,7 @@ pub async fn chat_decide<R: Runtime>(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::ipc::socket_path;
     use pidash_ipc::protocol::RpcError;
     use std::sync::Mutex as StdMutex;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

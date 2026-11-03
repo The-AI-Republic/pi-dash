@@ -4,17 +4,30 @@
  * See the LICENSE file for details.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { observer } from "mobx-react";
 import { useMatches } from "react-router";
 import { useUser } from "@/hooks/store/user";
 import { useProject } from "@/hooks/store/use-project";
+import { DesktopAccountSwitchDialog } from "@/components/desktop-account-switch-dialog";
+import { DesktopDaemonNotice } from "@/components/desktop-daemon-notice";
 import { DesktopSignOutDialog } from "@/components/desktop-sign-out-dialog";
-import { connectAgentProject, isDesktop, refreshAgentRuntime, resumeAgentRuntime } from "@/services/agent-runtime";
+import {
+  connectAgentProject,
+  isDesktop,
+  refreshAgentRuntime,
+  resumeAgentRuntime,
+  signOutFollowingCli,
+} from "@/services/agent-runtime";
+import { ensureSharedDaemon, syncAccounts } from "@/services/desktop-account-sync";
 import { registerLocalChatTransport } from "@/services/local-chat-transport";
 
+/** How often account sync re-checks the CLI's sign-in while the app is open. */
+const ACCOUNT_SYNC_INTERVAL_MS = 15_000;
+
 export const AgentRuntime = observer(function AgentRuntime() {
-  const { data: user } = useUser();
+  const userStore = useUser();
+  const { data: user } = userStore;
   const { fetchProjectDetails, workspaceProjectIds, getProjectById } = useProject();
   // `useParams()` resolves against the route that renders the component, and
   // this one is mounted on the root route (`app/provider.tsx`, inside
@@ -40,6 +53,41 @@ export const AgentRuntime = observer(function AgentRuntime() {
       ? workspaceProjectIds?.find((id) => getProjectById(id)?.identifier === workItem.replace(/-\d+$/, ""))
       : undefined);
   const [message, setMessage] = useState("");
+
+  // Latest values for the account-sync loop, which outlives renders.
+  const syncContext = useRef({ userId: user?.id, email: user?.email, workspaceSlug, signOut: userStore.signOut });
+  syncContext.current = { userId: user?.id, email: user?.email, workspaceSlug, signOut: userStore.signOut };
+
+  // The one `pidash` daemon this computer shares with the CLI: install the
+  // CLI and start the daemon on launch, then keep the app's sign-in and the
+  // CLI's in step — on launch, on focus and every 15 s. Runs signed out too:
+  // that is when a CLI sign-in is handed to the app.
+  useEffect(() => {
+    if (!isDesktop()) return;
+    let active = true;
+    const sync = () => {
+      if (!active) return;
+      const { userId, email, workspaceSlug: slug, signOut } = syncContext.current;
+      void syncAccounts({
+        desktopUserId: userId,
+        desktopEmail: email,
+        workspaceSlug: slug,
+        signOutDesktop: () => signOutFollowingCli(() => signOut({ skipConfirmation: true })),
+      }).catch((error: unknown) => {
+        console.warn("Pi Dash account sync failed:", error);
+      });
+    };
+    void ensureSharedDaemon()
+      .catch((error: unknown) => console.warn("Pi Dash daemon start failed:", error))
+      .finally(sync);
+    const timer = setInterval(sync, ACCOUNT_SYNC_INTERVAL_MS);
+    window.addEventListener("focus", sync);
+    return () => {
+      active = false;
+      clearInterval(timer);
+      window.removeEventListener("focus", sync);
+    };
+  }, []);
 
   useEffect(() => {
     if (!isDesktop() || !user?.id) return;
@@ -93,7 +141,7 @@ export const AgentRuntime = observer(function AgentRuntime() {
         else startPolling();
         setMessage(
           available
-            ? "Runs on this computer · Pi Dash uses its own working copy. Keep the app open while the agent runs."
+            ? "Runs on this computer · Pi Dash uses its own working copy."
             : "Waiting for Pi Dash Agent to connect…"
         );
       } catch (error) {
@@ -145,6 +193,8 @@ export const AgentRuntime = observer(function AgentRuntime() {
     <>
       {/* Mounted on every page: sign-out can be started from any of them. */}
       <DesktopSignOutDialog />
+      <DesktopDaemonNotice />
+      <DesktopAccountSwitchDialog />
       {user?.id && projectId && message && (
         <div
           role="status"
