@@ -6757,7 +6757,8 @@ fn check_worklog_minutes(
     };
     let text: String = match value {
         Value::String(text) => {
-            if text.len() > MAX_STRING_LENGTH {
+            // `len(data)` counts code points, like Python (`fields.py:911`).
+            if text.chars().count() > MAX_STRING_LENGTH {
                 push_error(errors, "minutes", "String value too large.".to_owned());
                 return Presence::Missing;
             }
@@ -8594,6 +8595,22 @@ mod worklog_tests {
         assert_eq!(minutes_of(json!({"logged_on": "2026-10-20"})), Ok(None));
         assert_eq!(
             minutes_of(json!({"minutes": "9".repeat(1001), "logged_on": "2026-10-20"})),
+            Err(json!({"minutes": ["String value too large."]}))
+        );
+        // `len(data)` counts code points, not bytes (`fields.py:911`):
+        // 600 non-ASCII chars (1200 bytes) fall through to `int()`,
+        // which fails them as invalid — only past 1000 *chars* does
+        // the length guard fire.
+        assert_eq!(
+            minutes_of(json!({"minutes": "é".repeat(600), "logged_on": "2026-10-20"})),
+            Err(json!({"minutes": ["A valid integer is required."]}))
+        );
+        assert_eq!(
+            minutes_of(json!({"minutes": "é".repeat(1000), "logged_on": "2026-10-20"})),
+            Err(json!({"minutes": ["A valid integer is required."]}))
+        );
+        assert_eq!(
+            minutes_of(json!({"minutes": "é".repeat(1001), "logged_on": "2026-10-20"})),
             Err(json!({"minutes": ["String value too large."]}))
         );
     }
