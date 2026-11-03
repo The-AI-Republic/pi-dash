@@ -11,7 +11,7 @@ name: rust-api-parity
 
 on:
   push:
-    branches: [rust-dev]
+    branches: [main]
     paths:
       - "rust-api/**"
       - "apps/api/**"

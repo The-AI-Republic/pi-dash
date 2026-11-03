@@ -41,6 +41,7 @@
     "NEWFRONT-1030": { "reason": "settings move to /{ws}/settings/account needs its migrated route + proxy regen", "paths": ["^apps/proxy/Caddyfile[^/]*$", "^apps/proxy/Dockerfile\\.ce$"] },
     "NEWFRONT-1035": { "reason": "mirror PDASHOSS01-310 on web-new-dev: guest cycle-issues reads", "paths": ["^apps/api/pi_dash/app/views/cycle/issue\\.py$", "^apps/api/pi_dash/tests/contract/app/test_cycle_issue_access\\.py$"] },
     "NEWFRONT-1036": { "reason": "mirror PDASHOSS01-327 on web-new-dev: guest cycle retrieve", "paths": ["^apps/api/pi_dash/app/views/cycle/base\\.py$", "^apps/api/pi_dash/tests/contract/app/test_cycle_retrieve[a-z_]*\\.py$"] },
+    "NEWFRONT-1048": { "reason": "release blocker: web_new in the self-hosted compose and all-in-one builds (owner grant)", "paths": ["^deployments/cli/community/(docker-compose|build)\\.yml$", "^deployments/aio/community/Dockerfile$", "^\\.github/workflows/build-branch\\.yml$"] },
     "NEWFRONT-1037": { "reason": "mirror PDASHOSS01-328 on web-new-dev: project role authorization", "paths": ["^apps/api/pi_dash/app/views/project/member\\.py$", "^apps/api/pi_dash/tests/contract/app/test_project_member_role_app\\.py$"] },
     "NEWFRONT-334": { "reason": "module guest reads backend", "paths": ["^apps/api/pi_dash/app/views/module/", "^apps/api/pi_dash/tests/"] },
     "NEWFRONT-880": { "reason": "keep oxfmt off parity specs", "paths": ["^\\.prettierignore$"] },

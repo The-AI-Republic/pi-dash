@@ -1,0 +1,82 @@
+# syntax=docker/dockerfile:1.7
+FROM node:22-alpine AS base
+
+# Setup pnpm package manager with corepack and configure global bin directory for caching
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PNPM_HOME/bin:$PATH"
+RUN corepack enable
+
+# *****************************************************************************
+# STAGE 1: Prune the monorepo to the web_new workspace
+# *****************************************************************************
+FROM base AS builder
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+
+ARG TURBO_VERSION=2.9.4
+RUN corepack enable pnpm && pnpm add -g turbo@${TURBO_VERSION}
+COPY . .
+
+RUN turbo prune --scope=web_new --docker
+
+# *****************************************************************************
+# STAGE 2: Install dependencies & build the web bundle
+# *****************************************************************************
+# Add lockfile and package.json's of isolated subworkspace
+FROM base AS installer
+
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+
+# First install the dependencies (as they change less often)
+COPY .gitignore .gitignore
+COPY --from=builder /app/out/json/ .
+COPY --from=builder /app/out/pnpm-lock.yaml ./pnpm-lock.yaml
+RUN corepack enable pnpm
+
+# Copy full directory structure before fetch to ensure all package.json files are available
+COPY --from=builder /app/out/full/ .
+
+# Fetch dependencies to cache store, then install offline with dev deps
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store pnpm fetch --store-dir=/pnpm/store
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store CI=true pnpm install --offline --frozen-lockfile --store-dir=/pnpm/store
+
+# Build-time client configuration. Empty keeps the app on its serving
+# origin (the CE proxy serves app and API on one origin); the workflow may
+# override these per release. VITE_SPACE_BASE_PATH keeps its /spaces
+# default so published-board links keep their prefix when the base URL is
+# unset. No PIDASH_EDITION_MODULE: community builds ship the OSS edition.
+ARG VITE_API_BASE_URL=""
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+
+ARG VITE_WEB_BASE_URL=""
+ENV VITE_WEB_BASE_URL=$VITE_WEB_BASE_URL
+
+ARG VITE_SPACE_BASE_URL=""
+ENV VITE_SPACE_BASE_URL=$VITE_SPACE_BASE_URL
+
+ARG VITE_SPACE_BASE_PATH="/spaces"
+ENV VITE_SPACE_BASE_PATH=$VITE_SPACE_BASE_PATH
+
+# Workspace libraries first (the kit CSS entries resolve to the built
+# package), then the web bundle only. `build` would also build the desktop
+# bundle, which this image never serves.
+RUN pnpm --filter @pidash/kit --filter @pidash/api-client build
+RUN pnpm --filter web_new build:web
+
+# *****************************************************************************
+# STAGE 3: Serve with nginx
+# *****************************************************************************
+FROM nginx:1.27-alpine AS production
+
+RUN apk add --no-cache curl
+
+COPY apps/web_new/nginx/nginx.conf /etc/nginx/nginx.conf
+COPY --from=installer /app/apps/web_new/dist/web /usr/share/nginx/html
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:3000/ >/dev/null || exit 1
+
+CMD ["nginx", "-g", "daemon off;"]

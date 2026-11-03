@@ -1,10 +1,12 @@
-//! Activity + comments + reactions + subscribers handlers (D-26 handlers-D).
+//! Activity + comments + reactions + subscribers + worklogs handlers
+//! (D-26 handlers-D, plus the PIDASHCONV-1676 worklog drift port).
 //!
 //! Ports `apps/api/pi_dash/app/views/issue/activity.py:24-86`
 //! (`IssueActivityEndpoint`), `comment.py:36-258` (`IssueCommentViewSet`,
-//! `CommentReactionViewSet`), `reaction.py:25-85` (`IssueReactionViewSet`)
-//! and `subscriber.py:16-104` (`IssueSubscriberViewSet`) — 5 units over the
-//! 10 routes in `app/urls/issue.py:172-235`.
+//! `CommentReactionViewSet`), `reaction.py:25-85` (`IssueReactionViewSet`),
+//! `subscriber.py:16-104` (`IssueSubscriberViewSet`) and
+//! `worklog.py:32-168` (`IssueWorklogViewSet`) — 6 units over the
+//! 12 routes in `app/urls/issue.py:172-256`.
 //!
 //! Fixture ids: FX-ISS-17 (`rust-api/fixtures/app_issues/handlers/`) pins
 //! every behavior below; FX-ISS-21 (`guards/`) pins the enqueue payloads.
@@ -124,9 +126,15 @@ pub const COMMENT_REACTIONS_PATH: &str =
 /// `CommentReactionViewSet` destroy (`app/urls/issue.py:232-236`).
 pub const COMMENT_REACTION_PATH: &str =
     "/api/workspaces/{slug}/projects/{project_id}/comments/{comment_id}/reactions/{reaction_code}/";
+/// `IssueWorklogViewSet` collection (`app/urls/issue.py:241-244`).
+pub const WORKLOGS_PATH: &str =
+    "/api/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/worklogs/";
+/// `IssueWorklogViewSet` detail (`app/urls/issue.py:245-256`).
+pub const WORKLOG_PATH: &str =
+    "/api/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/worklogs/{pk}/";
 
-/// Register the ten engage routes. Owned methods serve from Rust; every
-/// other method on these paths falls through to Django (its
+/// Register the twelve engage routes. Owned methods serve from Rust;
+/// every other method on these paths falls through to Django (its
 /// 405-after-auth, `HEAD`, and metadata responses live there).
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -193,6 +201,22 @@ pub fn routes() -> Router<AppState> {
             COMMENT_REACTION_PATH,
             edge::owned(axum::routing::delete(comment_reaction_destroy), &["DELETE"]),
         )
+        .route(
+            WORKLOGS_PATH,
+            edge::owned(
+                axum::routing::get(worklog_list).post(worklog_create),
+                &["GET", "POST"],
+            ),
+        )
+        .route(
+            WORKLOG_PATH,
+            edge::owned(
+                axum::routing::get(worklog_retrieve)
+                    .patch(worklog_partial_update)
+                    .delete(worklog_destroy),
+                &["GET", "PATCH", "DELETE"],
+            ),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -208,10 +232,14 @@ pub(crate) enum Denial {
     Forbidden,
     /// 403, DRF `PermissionDenied` (class-permission denials).
     ForbiddenDetail,
+    /// 403, `{"error": ...}` (view-inline refusals like `_can_log`).
+    ForbiddenError(String),
     /// 404, `ObjectDoesNotExist` branch (bare `.get()` misses).
     NotFound,
     /// 404, `get_object_or_404` over comments (retrieve / PUT misses).
     NotFoundDetail,
+    /// 404, `get_object_or_404` over worklogs (retrieve misses).
+    NotFoundWorklog,
     /// 404, `{"detail": "Project not found"}` (project-kwarg rewrite miss).
     ProjectNotFound,
     /// 400, `{"detail": ...}` (JSON `ParseError`).
@@ -238,6 +266,11 @@ const VIEWSET_FORBIDDEN_BODY: &str =
 /// `detail` — verified against live Django.
 const COMMENT_NOT_FOUND_BODY: &str = r#"{"detail":"No IssueComment matches the given query."}"#;
 
+/// DRF `get_object_or_404` over worklogs: same `Http404` shape as the
+/// comment twin, naming this model — verified against live Django
+/// (PIDASHCONV-1676 byte probe).
+const WORKLOG_NOT_FOUND_BODY: &str = r#"{"detail":"No IssueWorklog matches the given query."}"#;
+
 impl Denial {
     fn status_and_body(&self) -> (StatusCode, String) {
         match self {
@@ -252,6 +285,7 @@ impl Denial {
             Denial::ForbiddenDetail => (StatusCode::FORBIDDEN, VIEWSET_FORBIDDEN_BODY.to_owned()),
             Denial::NotFound => (StatusCode::NOT_FOUND, super::NOT_FOUND_BODY.to_owned()),
             Denial::NotFoundDetail => (StatusCode::NOT_FOUND, COMMENT_NOT_FOUND_BODY.to_owned()),
+            Denial::NotFoundWorklog => (StatusCode::NOT_FOUND, WORKLOG_NOT_FOUND_BODY.to_owned()),
             Denial::ProjectNotFound => (
                 StatusCode::NOT_FOUND,
                 super::PROJECT_NOT_FOUND_BODY.to_owned(),
@@ -259,6 +293,10 @@ impl Denial {
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
                 format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            Denial::ForbiddenError(message) => (
+                StatusCode::FORBIDDEN,
+                format!("{{\"error\":{}}}", json_string(message)),
             ),
             Denial::BadError(message) => (
                 StatusCode::BAD_REQUEST,
@@ -6500,6 +6538,1010 @@ async fn subscription_status(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Worklogs
+// ---------------------------------------------------------------------------
+
+/// An owned `issue_worklogs` row: every column the
+/// `IssueWorklogSerializer` reads (`serializers/worklog.py:11-28` —
+/// `__all__` plus the `actor_detail` nest).
+struct WorklogBaseOwned {
+    id: uuid::Uuid,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    minutes: i32,
+    logged_on: chrono::NaiveDate,
+    note: String,
+    created_by: Option<uuid::Uuid>,
+    updated_by: Option<uuid::Uuid>,
+    project_id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+    issue_id: uuid::Uuid,
+    actor_id: Option<uuid::Uuid>,
+}
+
+impl WorklogBaseOwned {
+    fn from_map(map: &Map<String, Value>) -> Result<Self, Denial> {
+        let uuid = |key: &str| -> Result<uuid::Uuid, Denial> {
+            req_str(map, key)?
+                .parse::<uuid::Uuid>()
+                .map_err(|_| Denial::ServerError)
+        };
+        let opt_uuid = |key: &str| -> Result<Option<uuid::Uuid>, Denial> {
+            opt_str(map, key)?
+                .map(|raw| raw.parse::<uuid::Uuid>())
+                .transpose()
+                .map_err(|_| Denial::ServerError)
+        };
+        let dt = |key: &str| -> Result<chrono::DateTime<chrono::Utc>, Denial> {
+            let raw = req_str(map, key)?;
+            chrono::DateTime::parse_from_rfc3339(&raw)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|_| Denial::ServerError)
+        };
+        let opt_dt = |key: &str| -> Result<Option<chrono::DateTime<chrono::Utc>>, Denial> {
+            opt_str(map, key)?
+                .map(|raw| {
+                    chrono::DateTime::parse_from_rfc3339(&raw)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                })
+                .transpose()
+                .map_err(|_| Denial::ServerError)
+        };
+        let minutes = match map.get("minutes") {
+            Some(Value::Number(number)) => number
+                .as_i64()
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or(Denial::ServerError)?,
+            _ => return Err(Denial::ServerError),
+        };
+        let logged_on = chrono::NaiveDate::parse_from_str(&req_str(map, "logged_on")?, "%Y-%m-%d")
+            .map_err(|_| Denial::ServerError)?;
+        Ok(Self {
+            id: uuid("id")?,
+            created_at: dt("created_at")?,
+            updated_at: dt("updated_at")?,
+            deleted_at: opt_dt("deleted_at")?,
+            minutes,
+            logged_on,
+            note: req_str(map, "note")?,
+            created_by: opt_uuid("created_by_id")?.or(opt_uuid("created_by")?),
+            updated_by: opt_uuid("updated_by_id")?.or(opt_uuid("updated_by")?),
+            project_id: uuid("project_id")?,
+            workspace_id: uuid("workspace_id")?,
+            issue_id: uuid("issue_id")?,
+            actor_id: opt_uuid("actor_id")?.or(opt_uuid("actor")?),
+        })
+    }
+}
+
+/// The `IssueWorklogSerializer` shape in field order: the two declared
+/// fields (`id`, `actor_detail`) first, then the model columns
+/// (`worklog.py:11-28`, order verified against live Django).
+#[derive(Debug, serde::Serialize)]
+struct WorklogView {
+    id: String,
+    actor_detail: Option<Value>,
+    created_at: String,
+    updated_at: String,
+    deleted_at: Option<String>,
+    minutes: i32,
+    logged_on: String,
+    note: String,
+    created_by: Option<String>,
+    updated_by: Option<String>,
+    project: String,
+    workspace: String,
+    issue: String,
+    actor: Option<String>,
+}
+
+fn assemble_worklog_view(
+    base: &WorklogBaseOwned,
+    actor_detail: Option<Value>,
+    tz: &Tz,
+) -> WorklogView {
+    WorklogView {
+        id: base.id.to_string(),
+        actor_detail,
+        created_at: render_dt(&base.created_at, tz),
+        updated_at: render_dt(&base.updated_at, tz),
+        deleted_at: render_dt_opt(base.deleted_at, tz),
+        minutes: base.minutes,
+        logged_on: render_date(&base.logged_on),
+        note: base.note.clone(),
+        created_by: base.created_by.map(|id| id.to_string()),
+        updated_by: base.updated_by.map(|id| id.to_string()),
+        project: base.project_id.to_string(),
+        workspace: base.workspace_id.to_string(),
+        issue: base.issue_id.to_string(),
+        actor: base.actor_id.map(|id| id.to_string()),
+    }
+}
+
+/// Render one entry: the actor nest loads lazily (no actor join on any
+/// worklog statement), exactly like the serializer over a fresh
+/// instance. A null actor renders `"actor_detail": null` (DRF renders
+/// the nested serializer `None`).
+async fn render_worklog(
+    pool: &sqlx::PgPool,
+    base: &WorklogBaseOwned,
+    tz: &Tz,
+) -> Result<Value, Denial> {
+    let actor_detail = match base.actor_id {
+        None => None,
+        Some(id) => Some(
+            fetch_user_lite(pool, &id)
+                .await
+                .map(|row| user_lite_value(&row))??,
+        ),
+    };
+    let view = assemble_worklog_view(base, actor_detail, tz);
+    serde_json::to_value(&view).map_err(|_| Denial::ServerError)
+}
+
+/// Python `int(text, 10)` over ASCII digits: surrounding `str.strip()`,
+/// an optional sign, digits with single `_` separators between digits
+/// only. Saturates past `i64` (the min/max arms below keep their
+/// verdicts — any saturating magnitude is out of range either way).
+/// Non-ASCII decimal digits are rejected (Tier 3: `int()` accepts
+/// them; no Pi Dash client sends them).
+fn parse_worklog_int(text: &str) -> Option<i64> {
+    let text = text.trim_matches(is_py_strip_ws);
+    let (negative, digits) = match text.strip_prefix(['+', '-']) {
+        Some(rest) => (text.starts_with('-'), rest),
+        None => (false, text),
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut cleaned = String::with_capacity(digits.len());
+    let mut prev_underscore = true;
+    for ch in digits.chars() {
+        if ch == '_' {
+            if prev_underscore {
+                return None;
+            }
+            prev_underscore = true;
+            continue;
+        }
+        if !ch.is_ascii_digit() {
+            return None;
+        }
+        prev_underscore = false;
+        cleaned.push(ch);
+    }
+    if prev_underscore {
+        return None;
+    }
+    // Past i128 the verdict is already fixed: positive overflows the
+    // max arm, negative overflows the min arm.
+    let magnitude: i128 = match cleaned.parse() {
+        Ok(magnitude) => magnitude,
+        Err(_) => return Some(if negative { i64::MIN } else { i64::MAX }),
+    };
+    let signed = if negative { -magnitude } else { magnitude };
+    Some(signed.clamp(i64::MIN as i128, i64::MAX as i128) as i64)
+}
+
+/// Python `re` `\s` (for the `re_decimal` tail below): Rust
+/// `White_Space` plus U+001C-U+001F, like [`is_py_strip_ws`] (the
+/// remaining exotic Unicode spaces are Tier 3).
+fn is_re_space(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+}
+
+/// DRF `IntegerField` input for `minutes` (`fields.py:910-918`):
+/// `int(re_decimal.sub('', str(data)))` where `re_decimal` strips one
+/// trailing `.0*` + whitespace suffix — then the model
+/// `MinValueValidator(1)` and the field max 2147483647. Every arm below
+/// is probed against live Django: `" 90 "` / `90.0` / `"90.0"` /
+/// `"90."` / `"+90"` / `"1_0"` pass; `1.5` / `"9.5"` / `true` / `[1]` /
+/// `""` / `"_1"` / `"1__0"` fail invalid; `0` / `-30` / `-2**40` fail
+/// with only the min-1 message (no lower field bound rides along);
+/// `2**40` fails with only the max message; >1000-char strings fail
+/// "String value too large."
+fn check_worklog_minutes(
+    errors: &mut Map<String, Value>,
+    body: &Map<String, Value>,
+) -> Presence<i32> {
+    const MAX_STRING_LENGTH: usize = 1000;
+    let value = match body.get("minutes") {
+        None => return Presence::Missing,
+        Some(Value::Null) => {
+            push_error(errors, "minutes", "This field may not be null.".to_owned());
+            return Presence::Missing;
+        }
+        Some(value) => value,
+    };
+    let text: String = match value {
+        Value::String(text) => {
+            // `len(data)` counts code points, like Python (`fields.py:911`).
+            if text.chars().count() > MAX_STRING_LENGTH {
+                push_error(errors, "minutes", "String value too large.".to_owned());
+                return Presence::Missing;
+            }
+            text.clone()
+        }
+        Value::Number(number) => py_str_value(&Value::Number(number.clone())),
+        _ => {
+            push_error(errors, "minutes", "A valid integer is required.".to_owned());
+            return Presence::Missing;
+        }
+    };
+    // `re_decimal = re.compile(r'\.0*\s*$')`: only a trailing `.0*`
+    // suffix strips (the `$` anchors; only the last dot can match to
+    // the end).
+    let mut core = text.as_str();
+    if let Some(dot) = core.rfind('.') {
+        let (head, tail) = core.split_at(dot);
+        let zeros = tail[1..].trim_start_matches('0');
+        if zeros.trim_matches(is_re_space).is_empty() {
+            core = head;
+        }
+    }
+    let number = match parse_worklog_int(core) {
+        Some(number) => number,
+        None => {
+            push_error(errors, "minutes", "A valid integer is required.".to_owned());
+            return Presence::Missing;
+        }
+    };
+    if number < 1 {
+        push_error(
+            errors,
+            "minutes",
+            "Ensure this value is greater than or equal to 1.".to_owned(),
+        );
+        return Presence::Missing;
+    }
+    if number > 2_147_483_647 {
+        push_error(
+            errors,
+            "minutes",
+            "Ensure this value is less than or equal to 2147483647.".to_owned(),
+        );
+        return Presence::Missing;
+    }
+    Presence::Value(number as i32)
+}
+
+/// Python 3.12 `date.fromisoformat` as Django's `parse_date` meets it
+/// (`dateparse.py:67-78`): extended `YYYY-MM-DD`, basic `YYYYMMDD` and
+/// week `YYYY-Www-D` / `YYYYWwwD` — all strict, all verified against
+/// live Django, which rejects ordinal dates, padded input and year 0
+/// (`datetime.date` starts at year 1; chrono would accept year 0, so
+/// every arm below guards it explicitly).
+fn worklog_fromisodate(text: &str) -> Option<chrono::NaiveDate> {
+    let bytes = text.as_bytes();
+    // Extended `YYYY-MM-DD`.
+    if bytes.len() == 10 && bytes[4] == b'-' && bytes[7] == b'-' {
+        let year: i32 = text[0..4].parse().ok()?;
+        let month: u32 = text[5..7].parse().ok()?;
+        let day: u32 = text[8..10].parse().ok()?;
+        if year < 1 {
+            return None;
+        }
+        return chrono::NaiveDate::from_ymd_opt(year, month, day);
+    }
+    // Week `YYYY-Www-D`.
+    if bytes.len() == 10 && bytes[4] == b'-' && bytes[5] == b'W' && bytes[8] == b'-' {
+        let year: i32 = text[0..4].parse().ok()?;
+        let week: u32 = text[6..8].parse().ok()?;
+        let weekday: u32 = text[9..10].parse().ok()?;
+        if year < 1 {
+            return None;
+        }
+        let weekday = u8::try_from(weekday)
+            .ok()?
+            .checked_sub(1)
+            .and_then(|w| chrono::Weekday::try_from(w).ok())?;
+        return chrono::NaiveDate::from_isoywd_opt(year, week, weekday);
+    }
+    // Basic `YYYYMMDD` / week `YYYYWwwD`.
+    if bytes.len() == 8 && bytes.iter().all(|b| b.is_ascii_digit()) {
+        let year: i32 = text[0..4].parse().ok()?;
+        let month: u32 = text[4..6].parse().ok()?;
+        let day: u32 = text[6..8].parse().ok()?;
+        if year < 1 {
+            return None;
+        }
+        return chrono::NaiveDate::from_ymd_opt(year, month, day);
+    }
+    if bytes.len() == 8 && bytes[4] == b'W' {
+        let year: i32 = text[0..4].parse().ok()?;
+        let week: u32 = text[5..7].parse().ok()?;
+        let weekday: u32 = text[7..8].parse().ok()?;
+        if !text[0..4].bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if year < 1 {
+            return None;
+        }
+        let weekday = u8::try_from(weekday)
+            .ok()?
+            .checked_sub(1)
+            .and_then(|w| chrono::Weekday::try_from(w).ok())?;
+        return chrono::NaiveDate::from_isoywd_opt(year, week, weekday);
+    }
+    None
+}
+
+/// Django `date_re` fallback (`dateparse.py:13,76-78`):
+/// `(\d{4})-(\d{1,2})-(\d{1,2})$`, where `$` also matches just before
+/// ONE trailing newline (probed: `"2026-10-20\n"` passes,
+/// `"2026-10-20\r"` / `"\n2026-10-20"` fail). Well formatted but
+/// impossible dates fail too.
+fn worklog_date_re(text: &str) -> Option<chrono::NaiveDate> {
+    let core = text.strip_suffix('\n').unwrap_or(text);
+    let mut parts = core.split('-');
+    let (year, month, day) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    if year.len() != 4 || month.is_empty() || month.len() > 2 || day.is_empty() || day.len() > 2 {
+        return None;
+    }
+    if !year.bytes().all(|b| b.is_ascii_digit())
+        || !month.bytes().all(|b| b.is_ascii_digit())
+        || !day.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let year: i32 = year.parse().ok()?;
+    if year < 1 {
+        return None;
+    }
+    chrono::NaiveDate::from_ymd_opt(year, month.parse().ok()?, day.parse().ok()?)
+}
+
+/// DRF `DateField` input for `logged_on` (`fields.py:1231-1258` over
+/// `DATE_INPUT_FORMATS = [iso-8601]`): Django `parse_date` or the
+/// invalid message. Non-strings always miss; the parsed date renders
+/// back zero-padded (`"2026-1-5"` stores as `2026-01-05`).
+fn check_worklog_date(
+    errors: &mut Map<String, Value>,
+    body: &Map<String, Value>,
+) -> Presence<chrono::NaiveDate> {
+    const INVALID: &str = "Date has wrong format. Use one of these formats instead: YYYY-MM-DD.";
+    match body.get("logged_on") {
+        None => Presence::Missing,
+        Some(Value::Null) => {
+            push_error(
+                errors,
+                "logged_on",
+                "This field may not be null.".to_owned(),
+            );
+            Presence::Missing
+        }
+        Some(Value::String(text)) => {
+            match worklog_fromisodate(text).or_else(|| worklog_date_re(text)) {
+                Some(date) => Presence::Value(date),
+                None => {
+                    push_error(errors, "logged_on", INVALID.to_owned());
+                    Presence::Missing
+                }
+            }
+        }
+        _ => {
+            push_error(errors, "logged_on", INVALID.to_owned());
+            Presence::Missing
+        }
+    }
+}
+
+/// The validated worklog write triple: `minutes` + `logged_on`
+/// (required on create, skipped-when-missing on partial) and `note`
+/// (blankable, defaulting to `""` on create).
+#[derive(Debug, PartialEq)]
+struct WorklogAttrs {
+    minutes: Option<i32>,
+    logged_on: Option<chrono::NaiveDate>,
+    note: Option<String>,
+}
+
+/// Validate one worklog write body in serializer field order
+/// (`minutes`, `logged_on`, `note` — the error dict keeps it): every
+/// other input key is read-only or unknown, both ignored by DRF.
+/// `partial` selects create (missing → required errors + `""` note
+/// default) vs partial-update (missing → untouched) semantics.
+fn validate_worklog_input(body: &Map<String, Value>, partial: bool) -> Result<WorklogAttrs, Value> {
+    let mut errors = Map::new();
+    let minutes = match check_worklog_minutes(&mut errors, body) {
+        Presence::Value(minutes) => Some(minutes),
+        _ => {
+            if !partial && !body.contains_key("minutes") {
+                push_error(&mut errors, "minutes", "This field is required.".to_owned());
+            }
+            None
+        }
+    };
+    let logged_on = match check_worklog_date(&mut errors, body) {
+        Presence::Value(date) => Some(date),
+        _ => {
+            if !partial && !body.contains_key("logged_on") {
+                push_error(
+                    &mut errors,
+                    "logged_on",
+                    "This field is required.".to_owned(),
+                );
+            }
+            None
+        }
+    };
+    let note = match check_text(&mut errors, body, "note", None, false, true) {
+        Presence::Value(note) => Some(note),
+        Presence::Null => None,
+        Presence::Missing => {
+            if partial || !errors.is_empty() {
+                None
+            } else {
+                Some(String::new())
+            }
+        }
+    };
+    if errors.is_empty() {
+        Ok(WorklogAttrs {
+            minutes,
+            logged_on,
+            note,
+        })
+    } else {
+        Err(Value::Object(errors))
+    }
+}
+
+/// The `IssueWorklogViewSet.get_queryset` scope (`worklog.py:45-63`):
+/// tenant + issue filters, live project membership, unarchived
+/// project, newest first. Single-table select (the serializer reads no
+/// joined nest but the lazily-loaded actor), so the joined scope still
+/// decodes through the row maps. The member join excludes soft-deleted
+/// rows (the reverse-FK traversal uses the default manager).
+const WORKLOG_LIST_SQL: &str = "SELECT DISTINCT issue_worklogs.* FROM issue_worklogs INNER JOIN workspaces ON issue_worklogs.workspace_id = workspaces.id INNER JOIN projects ON issue_worklogs.project_id = projects.id INNER JOIN project_members ON projects.id = project_members.project_id WHERE issue_worklogs.deleted_at IS NULL AND workspaces.slug = $1 AND issue_worklogs.project_id = $2 AND issue_worklogs.issue_id = $3 AND project_members.member_id = $4 AND project_members.is_active AND project_members.deleted_at IS NULL AND projects.archived_at IS NULL ORDER BY issue_worklogs.created_at DESC";
+
+/// `IssueWorklogViewSet.list` (`worklog.py:45-63` over DRF's default):
+/// class `IsAuthenticated` only — outsiders list `[]`, every active
+/// project member reads, bare array, newest first.
+async fn worklog_list(
+    State(state): State<AppState>,
+    Path((slug, project_raw, issue_raw)): Path<(String, String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
+) -> Response {
+    let issue_id = match path_uuid(&issue_raw) {
+        Ok(id) => id,
+        Err(_) => return crate::edge::proxy(State(state), req).await,
+    };
+    let ctx = match read_context(&state, &slug, &project_raw, issue_id, extension).await {
+        Ok(ctx) => ctx,
+        Err(error) => return error.into_response(),
+    };
+    let rows = match fetch_all_objects(
+        &ctx.pool,
+        WORKLOG_LIST_SQL,
+        &[
+            SqlParam::Text(&ctx.slug),
+            SqlParam::Uuid(ctx.project_id),
+            SqlParam::Uuid(ctx.issue_id),
+            SqlParam::Uuid(ctx.user_id),
+        ],
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => return error.into_response(),
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let base = match row
+            .as_object()
+            .ok_or(Denial::ServerError)
+            .and_then(WorklogBaseOwned::from_map)
+        {
+            Ok(base) => base,
+            Err(error) => return error.into_response(),
+        };
+        match render_worklog(&ctx.pool, &base, &ctx.timezone).await {
+            Ok(value) => out.push(value),
+            Err(error) => return error.into_response(),
+        }
+    }
+    match serde_json::to_string(&out) {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(_) => Denial::ServerError.into_response(),
+    }
+}
+
+/// `IssueWorklogViewSet.retrieve`: `get_object` over the list queryset;
+/// a miss is the model-naming `Http404` detail body.
+async fn worklog_retrieve(
+    State(state): State<AppState>,
+    Path((slug, project_raw, issue_raw, pk_raw)): Path<(String, String, String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
+) -> Response {
+    let (issue_id, pk) = match (path_uuid(&issue_raw), path_uuid(&pk_raw)) {
+        (Ok(issue_id), Ok(pk)) => (issue_id, pk),
+        _ => return crate::edge::proxy(State(state), req).await,
+    };
+    let ctx = match read_context(&state, &slug, &project_raw, issue_id, extension).await {
+        Ok(ctx) => ctx,
+        Err(error) => return error.into_response(),
+    };
+    let sql = WORKLOG_LIST_SQL.replacen(
+        "ORDER BY issue_worklogs.created_at DESC",
+        "AND issue_worklogs.id = $5 ORDER BY issue_worklogs.created_at DESC",
+        1,
+    );
+    let rows = match fetch_all_objects(
+        &ctx.pool,
+        &sql,
+        &[
+            SqlParam::Text(&ctx.slug),
+            SqlParam::Uuid(ctx.project_id),
+            SqlParam::Uuid(ctx.issue_id),
+            SqlParam::Uuid(ctx.user_id),
+            SqlParam::Uuid(pk),
+        ],
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => return error.into_response(),
+    };
+    let Some(row) = rows.first() else {
+        return Denial::NotFoundWorklog.into_response();
+    };
+    let base = match row
+        .as_object()
+        .ok_or(Denial::ServerError)
+        .and_then(WorklogBaseOwned::from_map)
+    {
+        Ok(base) => base,
+        Err(error) => return error.into_response(),
+    };
+    match render_worklog(&ctx.pool, &base, &ctx.timezone).await {
+        Ok(value) => match serde_json::to_string(&value) {
+            Ok(body) => json_response(StatusCode::OK, body),
+            Err(_) => Denial::ServerError.into_response(),
+        },
+        Err(error) => error.into_response(),
+    }
+}
+
+/// `IssueWorklogViewSet._can_log` (`worklog.py:65-93`): any live
+/// project membership exists, and the caller is a project ADMIN, a
+/// workspace ADMIN, or a live assignee of the issue.
+async fn worklog_can_log(
+    pool: &sqlx::PgPool,
+    membership: &Membership,
+    issue_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> Result<bool, Denial> {
+    if membership.project_role.is_none() {
+        return Ok(false);
+    }
+    if membership.project_role == Some(20) || membership.workspace_role == Some(20) {
+        return Ok(true);
+    }
+    let assigned: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM issue_assignees WHERE issue_id = $1 AND assignee_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(issue_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(assigned.is_some())
+}
+
+/// The scoped `.get()` behind `partial_update` / `destroy`
+/// (`worklog.py:132,154`): default manager (soft-deleted rows miss),
+/// tenant-scoped, pk included.
+async fn fetch_scoped_worklog(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    issue_id: &uuid::Uuid,
+    pk: &uuid::Uuid,
+) -> Result<Option<WorklogBaseOwned>, Denial> {
+    let row = fetch_optional_object(
+        pool,
+        "SELECT issue_worklogs.* FROM issue_worklogs INNER JOIN workspaces ON (issue_worklogs.workspace_id = workspaces.id) WHERE (issue_worklogs.deleted_at IS NULL AND workspaces.slug = $1 AND issue_worklogs.project_id = $2 AND issue_worklogs.issue_id = $3 AND issue_worklogs.id = $4) LIMIT 1",
+        &[
+            SqlParam::Text(slug),
+            SqlParam::Uuid(*project_id),
+            SqlParam::Uuid(*issue_id),
+            SqlParam::Uuid(*pk),
+        ],
+    )
+    .await?;
+    row.map(|value| WorklogBaseOwned::from_map(obj(&value)?))
+        .transpose()
+}
+
+/// `IssueWorklogViewSet.create` (`worklog.py:95-128`): ADMIN + MEMBER
+/// gate, live-issue lookup, intake refusal, `_can_log`, validation,
+/// save (workspace backfilled from the project, actor forced to the
+/// caller), one `worklog.activity.created` enqueue — and no
+/// `model_activity` (the view imports only `issue_activity`).
+async fn worklog_create(
+    State(state): State<AppState>,
+    Path((slug, project_raw, issue_raw)): Path<(String, String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
+) -> Response {
+    let issue_id = match path_uuid(&issue_raw) {
+        Ok(id) => id,
+        Err(_) => return crate::edge::proxy(State(state), req).await,
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(error) => return error.into_response(),
+    };
+    let user_id = match actor_user_id(&pool, extension).await {
+        Ok(id) => id,
+        Err(error) => return error.into_response(),
+    };
+    let project_id = match resolve_project_id(&pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(error) => return error.into_response(),
+    };
+    let membership = match fetch_membership(&pool, &slug, &project_id, &user_id).await {
+        Ok(membership) => membership,
+        Err(error) => return error.into_response(),
+    };
+    if let Err(error) = check_allow(&membership, &[20, 15]) {
+        return error.into_response();
+    }
+    // `Issue.objects.get(pk=issue_id, project_id=project_id)`: default
+    // manager (soft-deleted rows miss), unscoped by workspace slug.
+    let issue: Option<(uuid::Uuid,)> = match sqlx::query_as(
+        "SELECT id FROM issues WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(issue_id)
+    .bind(project_id)
+    .fetch_optional(&pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if issue.is_none() {
+        return Denial::NotFound.into_response();
+    }
+    // The intake refusal precedes `_can_log` (`worklog.py:98-112`).
+    let intake: Option<(i32,)> = match sqlx::query_as(
+        "SELECT 1 FROM intake_issues INNER JOIN workspaces ON intake_issues.workspace_id = workspaces.id WHERE intake_issues.issue_id = $1 AND intake_issues.status IN (-2, 0) AND workspaces.slug = $2 AND intake_issues.project_id = $3 AND intake_issues.deleted_at IS NULL",
+    )
+    .bind(issue_id)
+    .bind(&slug)
+    .bind(project_id)
+    .fetch_optional(&pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if intake.is_some() {
+        return Denial::BadError("Time cannot be logged on an intake item.".to_owned())
+            .into_response();
+    }
+    match worklog_can_log(&pool, &membership, &issue_id, &user_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return Denial::ForbiddenError(
+                "Only admins and assignees can log time on this work item.".to_owned(),
+            )
+            .into_response();
+        }
+        Err(error) => return error.into_response(),
+    }
+    let tenant = match tenant_context(&pool, &user_id).await {
+        Ok(tenant) => tenant,
+        Err(error) => return error.into_response(),
+    };
+    let request_body = match read_body(req).await {
+        Ok(request_body) => request_body,
+        Err(error) => return error.into_response(),
+    };
+    let RequestBody { map: body, .. } = request_body;
+    let attrs = match validate_worklog_input(&body, false) {
+        Ok(attrs) => attrs,
+        Err(errors) => return Denial::BadJson(errors).into_response(),
+    };
+    // `serializer.save(project_id=..., issue_id=..., actor=user)`:
+    // `ProjectBaseModel.save` backfills the workspace from the project
+    // (lazy forward-FK read — soft-deleted projects count) and
+    // `BaseModel.save` stamps `created_by`, leaving `updated_by` null.
+    let workspace_id = match fetch_project_workspace_unguarded(&pool, &project_id).await {
+        Ok(id) => id,
+        Err(error) => return error.into_response(),
+    };
+    // Full create: validation guarantees both (missing pushed
+    // required errors above).
+    let (Some(minutes), Some(logged_on)) = (attrs.minutes, attrs.logged_on) else {
+        return Denial::ServerError.into_response();
+    };
+    let now = chrono::Utc::now();
+    let base = WorklogBaseOwned {
+        id: uuid::Uuid::new_v4(),
+        created_at: now,
+        updated_at: now,
+        deleted_at: None,
+        minutes,
+        logged_on,
+        note: attrs.note.unwrap_or_default(),
+        created_by: Some(user_id),
+        updated_by: None,
+        project_id,
+        workspace_id,
+        issue_id,
+        actor_id: Some(user_id),
+    };
+    if let Err(error) = sqlx::query(
+        r#"INSERT INTO issue_worklogs (id, created_at, updated_at, deleted_at, minutes,
+            logged_on, note, created_by_id, updated_by_id, project_id, workspace_id,
+            issue_id, actor_id)
+           VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, NULL, $8, $9, $10, $11)"#,
+    )
+    .bind(base.id)
+    .bind(base.created_at)
+    .bind(base.updated_at)
+    .bind(base.minutes)
+    .bind(base.logged_on)
+    .bind(&base.note)
+    .bind(base.created_by)
+    .bind(base.project_id)
+    .bind(base.workspace_id)
+    .bind(base.issue_id)
+    .bind(base.actor_id)
+    .execute(&pool)
+    .await
+    {
+        return integrity_denial(error).into_response();
+    }
+    let rendered = match render_worklog(&pool, &base, &tenant.timezone).await {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
+    };
+    let epoch = chrono::Utc::now().timestamp();
+    let mut activity = Map::new();
+    activity.insert(
+        "type".to_owned(),
+        Value::String("worklog.activity.created".to_owned()),
+    );
+    // `requested_data` is the full serialized response
+    // (`json.dumps(serializer.data)`), `current_instance` is null.
+    activity.insert(
+        "requested_data".to_owned(),
+        Value::String(python_dumps(&rendered)),
+    );
+    activity.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
+    activity.insert("issue_id".to_owned(), Value::String(issue_id.to_string()));
+    activity.insert(
+        "project_id".to_owned(),
+        Value::String(project_id.to_string()),
+    );
+    activity.insert("current_instance".to_owned(), Value::Null);
+    activity.insert("epoch".to_owned(), Value::Number(epoch.into()));
+    activity.insert("notification".to_owned(), Value::Bool(true));
+    activity.insert("origin".to_owned(), Value::String(app_origin(&state)));
+    enqueue_kwargs(&pool, ISSUE_ACTIVITY_TASK, activity).await;
+    match serde_json::to_string(&rendered) {
+        Ok(text) => json_response(StatusCode::CREATED, text),
+        Err(_) => Denial::ServerError.into_response(),
+    }
+}
+
+/// `IssueWorklogViewSet.partial_update` (`worklog.py:130-150`): ADMIN +
+/// creator gate, scoped lookup, partial validation (missing fields stay
+/// untouched, an empty body still stamps `updated_at`/`updated_by`
+/// through the save), one `worklog.activity.updated` enqueue carrying
+/// the raw body and the before-image render.
+async fn worklog_partial_update(
+    State(state): State<AppState>,
+    Path((slug, project_raw, issue_raw, pk_raw)): Path<(String, String, String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
+) -> Response {
+    let (issue_id, pk) = match (path_uuid(&issue_raw), path_uuid(&pk_raw)) {
+        (Ok(issue_id), Ok(pk)) => (issue_id, pk),
+        _ => return crate::edge::proxy(State(state), req).await,
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(error) => return error.into_response(),
+    };
+    let user_id = match actor_user_id(&pool, extension).await {
+        Ok(id) => id,
+        Err(error) => return error.into_response(),
+    };
+    let project_id = match resolve_project_id(&pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(error) => return error.into_response(),
+    };
+    if let Err(error) =
+        check_admin_creator(&pool, &slug, &project_id, &user_id, "issue_worklogs", &pk).await
+    {
+        return error.into_response();
+    }
+    let stored = match fetch_scoped_worklog(&pool, &slug, &project_id, &issue_id, &pk).await {
+        Ok(Some(base)) => base,
+        Ok(None) => return Denial::NotFound.into_response(),
+        Err(error) => return error.into_response(),
+    };
+    let tenant = match tenant_context(&pool, &user_id).await {
+        Ok(tenant) => tenant,
+        Err(error) => return error.into_response(),
+    };
+    let request_body = match read_body(req).await {
+        Ok(request_body) => request_body,
+        Err(error) => return error.into_response(),
+    };
+    let RequestBody { map: body, is_html } = request_body;
+    // Task bytes render the raw QueryDict (PIDASHCONV-763): form list
+    // fields dump as last-wins scalars. A projected COPY — validation
+    // below keeps the arrays.
+    let requested_data = if is_html {
+        let mut projected = body.clone();
+        shared_body::project_list_scalars(&mut projected, ENGAGE_BODY_SPEC.list_fields);
+        python_dumps(&Value::Object(projected))
+    } else {
+        python_dumps(&Value::Object(body.clone()))
+    };
+    let current_rendered = match render_worklog(&pool, &stored, &tenant.timezone).await {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
+    };
+    let current_instance = python_dumps(&current_rendered);
+    let attrs = match validate_worklog_input(&body, true) {
+        Ok(attrs) => attrs,
+        Err(errors) => return Denial::BadJson(errors).into_response(),
+    };
+    let now = chrono::Utc::now();
+    let base = WorklogBaseOwned {
+        minutes: attrs.minutes.unwrap_or(stored.minutes),
+        logged_on: attrs.logged_on.unwrap_or(stored.logged_on),
+        note: attrs.note.unwrap_or_else(|| stored.note.clone()),
+        updated_at: now,
+        updated_by: Some(user_id),
+        ..stored
+    };
+    if let Err(error) = sqlx::query(
+        "UPDATE issue_worklogs SET minutes = $1, logged_on = $2, note = $3, updated_at = $4, updated_by_id = $5 WHERE id = $6",
+    )
+    .bind(base.minutes)
+    .bind(base.logged_on)
+    .bind(&base.note)
+    .bind(base.updated_at)
+    .bind(base.updated_by)
+    .bind(base.id)
+    .execute(&pool)
+    .await
+    {
+        return integrity_denial(error).into_response();
+    }
+    let epoch = chrono::Utc::now().timestamp();
+    let origin = app_origin(&state);
+    let mut activity = Map::new();
+    activity.insert(
+        "type".to_owned(),
+        Value::String("worklog.activity.updated".to_owned()),
+    );
+    activity.insert(
+        "requested_data".to_owned(),
+        Value::String(requested_data.clone()),
+    );
+    activity.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
+    activity.insert("issue_id".to_owned(), Value::String(issue_id.to_string()));
+    activity.insert(
+        "project_id".to_owned(),
+        Value::String(project_id.to_string()),
+    );
+    activity.insert(
+        "current_instance".to_owned(),
+        Value::String(current_instance.clone()),
+    );
+    activity.insert("epoch".to_owned(), Value::Number(epoch.into()));
+    activity.insert("notification".to_owned(), Value::Bool(true));
+    activity.insert("origin".to_owned(), Value::String(origin));
+    enqueue_kwargs(&pool, ISSUE_ACTIVITY_TASK, activity).await;
+    match render_worklog(&pool, &base, &tenant.timezone).await {
+        Ok(value) => match serde_json::to_string(&value) {
+            Ok(text) => json_response(StatusCode::OK, text),
+            Err(_) => Denial::ServerError.into_response(),
+        },
+        Err(error) => error.into_response(),
+    }
+}
+
+/// `IssueWorklogViewSet.destroy` (`worklog.py:152-168`): ADMIN +
+/// creator gate, soft delete (the `SoftDeleteModel` default — the row
+/// stays with `deleted_at` stamped, firing
+/// `soft_delete_related_objects` before the `worklog.activity.deleted`
+/// enqueue, which carries `{"worklog_id": pk}` and the before-image).
+async fn worklog_destroy(
+    State(state): State<AppState>,
+    Path((slug, project_raw, issue_raw, pk_raw)): Path<(String, String, String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
+) -> Response {
+    let (issue_id, pk) = match (path_uuid(&issue_raw), path_uuid(&pk_raw)) {
+        (Ok(issue_id), Ok(pk)) => (issue_id, pk),
+        _ => return crate::edge::proxy(State(state), req).await,
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(error) => return error.into_response(),
+    };
+    let user_id = match actor_user_id(&pool, extension).await {
+        Ok(id) => id,
+        Err(error) => return error.into_response(),
+    };
+    let project_id = match resolve_project_id(&pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(error) => return error.into_response(),
+    };
+    if let Err(error) =
+        check_admin_creator(&pool, &slug, &project_id, &user_id, "issue_worklogs", &pk).await
+    {
+        return error.into_response();
+    }
+    let stored = match fetch_scoped_worklog(&pool, &slug, &project_id, &issue_id, &pk).await {
+        Ok(Some(base)) => base,
+        Ok(None) => return Denial::NotFound.into_response(),
+        Err(error) => return error.into_response(),
+    };
+    // The request body is never read on this path (not even for
+    // errors); drop `req` without parsing.
+    let _ = req;
+    let tenant = match tenant_context(&pool, &user_id).await {
+        Ok(tenant) => tenant,
+        Err(error) => return error.into_response(),
+    };
+    let current_rendered = match render_worklog(&pool, &stored, &tenant.timezone).await {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
+    };
+    let now = chrono::Utc::now();
+    if let Err(error) = soft_delete_row(&pool, "issue_worklogs", &stored.id, &user_id, &now).await {
+        return error.into_response();
+    }
+    let mut requested = Map::new();
+    requested.insert("worklog_id".to_owned(), Value::String(pk.to_string()));
+    let epoch = chrono::Utc::now().timestamp();
+    let mut activity = Map::new();
+    activity.insert(
+        "type".to_owned(),
+        Value::String("worklog.activity.deleted".to_owned()),
+    );
+    activity.insert(
+        "requested_data".to_owned(),
+        Value::String(python_dumps(&Value::Object(requested))),
+    );
+    activity.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
+    activity.insert("issue_id".to_owned(), Value::String(issue_id.to_string()));
+    activity.insert(
+        "project_id".to_owned(),
+        Value::String(project_id.to_string()),
+    );
+    activity.insert(
+        "current_instance".to_owned(),
+        Value::String(python_dumps(&current_rendered)),
+    );
+    activity.insert("epoch".to_owned(), Value::Number(epoch.into()));
+    activity.insert("notification".to_owned(), Value::Bool(true));
+    activity.insert("origin".to_owned(), Value::String(app_origin(&state)));
+    // Order mirrors `worklog.py:156-167`: `worklog.delete()` (which
+    // fires `soft_delete_related_objects` from `db/mixins.py:78`) runs
+    // BEFORE the `issue_activity.delay`.
+    enqueue_soft_delete(&pool, "issueworklog", &stored.id).await;
+    enqueue_kwargs(&pool, ISSUE_ACTIVITY_TASK, activity).await;
+    empty_response(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7479,6 +8521,314 @@ mod tests {
         assert_eq!(map["labels"], json!("b"));
         assert_eq!(map["attachments"], json!("f2"));
         assert_eq!(map["reaction"], json!("hooray"));
+    }
+}
+
+#[cfg(test)]
+mod worklog_tests {
+    use super::{
+        assemble_worklog_view, check_worklog_date, check_worklog_minutes, validate_worklog_input,
+        Presence, WorklogBaseOwned, WORKLOG_NOT_FOUND_BODY,
+    };
+    use chrono_tz::Tz;
+    use serde_json::{json, Map, Value};
+
+    fn body(value: Value) -> Map<String, Value> {
+        value.as_object().expect("object").clone()
+    }
+
+    fn minutes_of(payload: Value) -> Result<Option<i32>, Value> {
+        let body = body(payload);
+        let mut errors = Map::new();
+        let out = match check_worklog_minutes(&mut errors, &body) {
+            Presence::Value(minutes) => Some(minutes),
+            _ => None,
+        };
+        if errors.is_empty() {
+            Ok(out)
+        } else {
+            Err(Value::Object(errors))
+        }
+    }
+
+    // Every arm probed against live Django (PIDASHCONV-1676).
+    #[test]
+    fn minutes_grammar_matches_drf() {
+        for (input, want) in [
+            (json!(90), 90),
+            (json!("90"), 90),
+            (json!(" 90 "), 90),
+            (json!(90.0), 90),
+            (json!("90.0"), 90),
+            (json!("90."), 90),
+            (json!("+90"), 90),
+            (json!("1_0"), 10),
+        ] {
+            assert_eq!(
+                minutes_of(json!({"minutes": input.clone(), "logged_on": "2026-10-20"})),
+                Ok(Some(want)),
+                "input {input}"
+            );
+        }
+        for input in [
+            json!(1.5),
+            json!("9.5"),
+            json!(true),
+            json!([1]),
+            json!(""),
+            json!("   "),
+            json!("_1"),
+            json!("1__0"),
+            json!("0x10"),
+            json!({"n": 1}),
+        ] {
+            assert_eq!(
+                minutes_of(json!({"minutes": input.clone(), "logged_on": "2026-10-20"})),
+                Err(json!({"minutes": ["A valid integer is required."]})),
+                "input {input}"
+            );
+        }
+        assert_eq!(
+            minutes_of(json!({"minutes": Value::Null, "logged_on": "2026-10-20"})),
+            Err(json!({"minutes": ["This field may not be null."]}))
+        );
+        assert_eq!(minutes_of(json!({"logged_on": "2026-10-20"})), Ok(None));
+        assert_eq!(
+            minutes_of(json!({"minutes": "9".repeat(1001), "logged_on": "2026-10-20"})),
+            Err(json!({"minutes": ["String value too large."]}))
+        );
+        // `len(data)` counts code points, not bytes (`fields.py:911`):
+        // 600 non-ASCII chars (1200 bytes) fall through to `int()`,
+        // which fails them as invalid — only past 1000 *chars* does
+        // the length guard fire.
+        assert_eq!(
+            minutes_of(json!({"minutes": "é".repeat(600), "logged_on": "2026-10-20"})),
+            Err(json!({"minutes": ["A valid integer is required."]}))
+        );
+        assert_eq!(
+            minutes_of(json!({"minutes": "é".repeat(1000), "logged_on": "2026-10-20"})),
+            Err(json!({"minutes": ["A valid integer is required."]}))
+        );
+        assert_eq!(
+            minutes_of(json!({"minutes": "é".repeat(1001), "logged_on": "2026-10-20"})),
+            Err(json!({"minutes": ["String value too large."]}))
+        );
+    }
+
+    #[test]
+    fn minutes_bounds_match_drf() {
+        for input in [json!(0), json!(-30), json!(-(2_i64.pow(40))), json!("-0")] {
+            assert_eq!(
+                minutes_of(json!({"minutes": input.clone(), "logged_on": "2026-10-20"})),
+                Err(json!({"minutes": ["Ensure this value is greater than or equal to 1."]})),
+                "input {input}"
+            );
+        }
+        for input in [json!(2_i64.pow(40)), json!("9".repeat(1000))] {
+            assert_eq!(
+                minutes_of(json!({"minutes": input.clone(), "logged_on": "2026-10-20"})),
+                Err(json!({"minutes": ["Ensure this value is less than or equal to 2147483647."]})),
+                "input {input}"
+            );
+        }
+        assert_eq!(
+            minutes_of(json!({"minutes": 2_147_483_647, "logged_on": "2026-10-20"})),
+            Ok(Some(2_147_483_647))
+        );
+        assert_eq!(
+            minutes_of(json!({"minutes": 1, "logged_on": "2026-10-20"})),
+            Ok(Some(1))
+        );
+    }
+
+    fn date_of(payload: Value) -> Result<Option<String>, Value> {
+        let body = body(payload);
+        let mut errors = Map::new();
+        let out = match check_worklog_date(&mut errors, &body) {
+            Presence::Value(date) => Some(date.format("%Y-%m-%d").to_string()),
+            _ => None,
+        };
+        if errors.is_empty() {
+            Ok(out)
+        } else {
+            Err(Value::Object(errors))
+        }
+    }
+
+    #[test]
+    fn date_grammar_matches_django_parse_date() {
+        for (input, want) in [
+            ("2026-10-20", "2026-10-20"),
+            ("2026-1-5", "2026-01-05"),
+            ("20261020", "2026-10-20"),
+            ("2026-W42-3", "2026-10-14"),
+            ("2026W423", "2026-10-14"),
+            ("2026-10-20\n", "2026-10-20"),
+        ] {
+            assert_eq!(
+                date_of(json!({"minutes": 30, "logged_on": input})),
+                Ok(Some(want.to_owned())),
+                "input {input:?}"
+            );
+        }
+        let invalid = json!({"logged_on": ["Date has wrong format. Use one of these formats instead: YYYY-MM-DD."]});
+        for input in [
+            json!("soon"),
+            json!("2026-13-01"),
+            json!("2026-02-30"),
+            json!("10/20/2026"),
+            json!("2026-10-20T00:00:00Z"),
+            json!("2026-10-20T00:00"),
+            json!(20261020),
+            json!(true),
+            json!("2026-293"),
+            json!("2026293"),
+            json!("0000-01-01"),
+            json!(" 2026-10-20"),
+            json!("2026-10-20 "),
+            json!("2026-10-20\r"),
+        ] {
+            assert_eq!(
+                date_of(json!({"minutes": 30, "logged_on": input.clone()})),
+                Err(invalid.clone()),
+                "input {input}"
+            );
+        }
+        assert_eq!(
+            date_of(json!({"minutes": 30, "logged_on": Value::Null})),
+            Err(json!({"logged_on": ["This field may not be null."]}))
+        );
+        assert_eq!(date_of(json!({"minutes": 30})), Ok(None));
+    }
+
+    #[test]
+    fn worklog_input_create_requires_and_defaults() {
+        // `{}` fails both required fields in serializer order.
+        assert_eq!(
+            validate_worklog_input(&body(json!({})), false),
+            Err(json!({
+                "minutes": ["This field is required."],
+                "logged_on": ["This field is required."],
+            }))
+        );
+        // Read-only and unknown keys are ignored; the note defaults.
+        let attrs = validate_worklog_input(
+            &body(json!({"minutes": 30, "logged_on": "2026-10-20"})),
+            false,
+        )
+        .expect("valid");
+        assert_eq!(attrs.minutes, Some(30));
+        assert_eq!(
+            attrs.logged_on,
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 10, 20).expect("date"))
+        );
+        assert_eq!(attrs.note, Some(String::new()));
+        let attrs = validate_worklog_input(
+            &body(json!({
+                "minutes": 30,
+                "logged_on": "2026-10-20",
+                "note": 5,
+                "actor": "00000000-0000-4000-8000-000000000000",
+                "id": "00000000-0000-4000-8000-000000000001",
+                "zzz": 1,
+            })),
+            false,
+        )
+        .expect("valid");
+        assert_eq!(attrs.note, Some("5".to_owned()));
+    }
+
+    #[test]
+    fn worklog_input_partial_skips_missing() {
+        let attrs = validate_worklog_input(&body(json!({})), true).expect("valid");
+        assert_eq!(attrs.minutes, None);
+        assert_eq!(attrs.logged_on, None);
+        assert_eq!(attrs.note, None);
+        let attrs = validate_worklog_input(&body(json!({"note": "x"})), true).expect("valid");
+        assert_eq!(attrs.note, Some("x".to_owned()));
+        assert!(validate_worklog_input(&body(json!({"minutes": 0})), true).is_err());
+    }
+
+    fn sample_base() -> WorklogBaseOwned {
+        WorklogBaseOwned {
+            id: "11111111-1111-4111-8111-111111111111"
+                .parse()
+                .expect("uuid"),
+            created_at: chrono::DateTime::parse_from_rfc3339("2026-10-20T00:00:00Z")
+                .expect("dt")
+                .with_timezone(&chrono::Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339("2026-10-21T00:00:00Z")
+                .expect("dt")
+                .with_timezone(&chrono::Utc),
+            deleted_at: None,
+            minutes: 90,
+            logged_on: chrono::NaiveDate::from_ymd_opt(2026, 10, 20).expect("date"),
+            note: "Deep work".to_owned(),
+            created_by: Some(
+                "22222222-2222-4222-8222-222222222222"
+                    .parse()
+                    .expect("uuid"),
+            ),
+            updated_by: None,
+            project_id: "33333333-3333-4333-8333-333333333333"
+                .parse()
+                .expect("uuid"),
+            workspace_id: "44444444-4444-4444-8444-444444444444"
+                .parse()
+                .expect("uuid"),
+            issue_id: "55555555-5555-4555-8555-555555555555"
+                .parse()
+                .expect("uuid"),
+            actor_id: Some(
+                "22222222-2222-4222-8222-222222222222"
+                    .parse()
+                    .expect("uuid"),
+            ),
+        }
+    }
+
+    #[test]
+    fn worklog_view_key_order_matches_drf() {
+        let tz: Tz = "UTC".parse().expect("tz");
+        let view = assemble_worklog_view(&sample_base(), None, &tz);
+        let value = serde_json::to_value(&view).expect("value");
+        let keys: Vec<&str> = value
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "id",
+                "actor_detail",
+                "created_at",
+                "updated_at",
+                "deleted_at",
+                "minutes",
+                "logged_on",
+                "note",
+                "created_by",
+                "updated_by",
+                "project",
+                "workspace",
+                "issue",
+                "actor",
+            ]
+        );
+        assert_eq!(value["minutes"], json!(90));
+        assert_eq!(value["logged_on"], json!("2026-10-20"));
+        assert_eq!(value["actor_detail"], Value::Null);
+        assert_eq!(value["created_at"], json!("2026-10-20T00:00:00Z"));
+    }
+
+    #[test]
+    fn worklog_not_found_body_names_the_model() {
+        assert_eq!(
+            WORKLOG_NOT_FOUND_BODY,
+            r#"{"detail":"No IssueWorklog matches the given query."}"#
+        );
     }
 }
 

@@ -67,8 +67,8 @@
       "DELETE FROM \"analytic_views\" WHERE \"analytic_views\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
       "DELETE FROM \"api_tokens\" WHERE \"api_tokens\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'"
     ],
-    "statement_count_observed": 131,
-    "sweep": "After the 18: for model in apps.get_models(): if hasattr(model, 'deleted_at'): same filter+delete. Observed 131 total statements (18 named + 113 sweep incl. re-deletes of the named tables). Returns None.",
+    "statement_count_observed": 132,
+    "sweep": "After the 18: for model in apps.get_models(): if hasattr(model, 'deleted_at'): same filter+delete. Observed 132 total statements (18 named + 114 sweep incl. re-deletes of the named tables). Returns None.",
     "rust_execution_928": "Rust emulates the per-model Collector (PIDASHCONV-928): the 18 named DELETEs in source order, then the sweep in apps.get_models() order (re-inclusive), each model as one pass \u2014 CASCADE closure collected unscoped (live/tombstoned/triage/future rows alike, subquery-seeded so the due set is never materialized), SET_NULL targets nulled unscoped, a remaining PROTECT reference aborting before any write, and the writes landing in ONE transaction whose deferred FK checks enforce DO_NOTHING at commit. Earlier models stay committed on abort, exactly like the sequential Python .delete() calls. Ported bugs (BUG-DEL-3): a due issue with ANY issue_activities fails the whole task (DO_NOTHING edges are never collected; nothing from issues onward is deleted), and a due parent with a later-processed due PROTECT child fails too (the check ignores the delete set). Pins: contract-tests/tasks_cleanup/test_rust_replay.py hard_delete tests against the test_cleanup_tasks.py Django baseline.",
     "all_statements": [
       "DELETE FROM \"workspaces\" WHERE \"workspaces\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
@@ -197,6 +197,7 @@
       "DELETE FROM \"loop_jobs\" WHERE \"loop_jobs\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
       "DELETE FROM \"loop_targets\" WHERE \"loop_targets\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
       "DELETE FROM \"loop_user_preferences\" WHERE \"loop_user_preferences\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
+      "DELETE FROM \"issue_worklogs\" WHERE \"issue_worklogs\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
       "DELETE FROM \"instances\" WHERE \"instances\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
       "DELETE FROM \"instance_admins\" WHERE \"instance_admins\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
       "DELETE FROM \"instance_configurations\" WHERE \"instance_configurations\".\"deleted_at\" < '2026-08-29 06:00:00+00:00'",
