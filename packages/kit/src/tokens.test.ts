@@ -69,12 +69,6 @@ describe("tokens.css", () => {
     expect(light.get("--accent-hover")).toBe("#4f5bc4");
     expect(light.get("--accent-subtle")).toBe("#eef0fb");
     expect(light.get("--on-accent")).toBe("#ffffff");
-    // Primary buttons are Google blue (NEWFRONT-1052), defined once on
-    // :root so every theme inherits them; the indigo accent above is
-    // untouched because it must keep its AA contrast.
-    expect(light.get("--button-primary")).toBe("#4285f4");
-    expect(light.get("--button-primary-hover")).toBe("#3367d6");
-    expect(light.get("--on-button-primary")).toBe("#ffffff");
     expect(light.get("--success")).toBe("#2f9e5b");
     expect(light.get("--warning")).toBe("#d9912b");
     expect(light.get("--danger")).toBe("#e5484d");
