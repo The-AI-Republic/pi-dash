@@ -1079,7 +1079,7 @@ async fn fetch_state(
 /// `LATEST_AGENT_RUN_SQL` / `ACTIVE_AGENT_RUN_SQL`, mapped positionally:
 /// both `llm_model` columns share one name, so name lookup cannot tell
 /// the run's from the live row's. Positions follow the consts' select
-/// order (28 columns; anything else is a 500). A NULL live `updated_at`
+/// order (29 columns; anything else is a 500). A NULL live `updated_at`
 /// means the join missed, so there is no live row.
 async fn fetch_agent_run(
     pool: &sqlx::PgPool,
@@ -1100,7 +1100,7 @@ async fn fetch_agent_run(
     let Some(row) = row else {
         return Ok(None);
     };
-    if row.len() != 28 {
+    if row.len() != 29 {
         return Err(Denial::ServerError);
     }
     let id: uuid::Uuid = row.try_get(0).map_err(|_| Denial::ServerError)?;
