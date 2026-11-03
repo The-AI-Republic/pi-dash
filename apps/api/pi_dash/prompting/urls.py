@@ -6,6 +6,9 @@ from django.urls import path
 
 from pi_dash.prompting.views import (
     PromptCompiledEndpoint,
+    PromptLabelAssignmentEndpoint,
+    PromptLabelDetailEndpoint,
+    PromptLabelListEndpoint,
     PromptPreviewEndpoint,
     PromptSectionDetailEndpoint,
     PromptSectionListEndpoint,
@@ -14,6 +17,21 @@ from pi_dash.prompting.views import (
 app_name = "prompting"
 
 urlpatterns = [
+    path(
+        "workspaces/<slug:slug>/prompt-labels",
+        PromptLabelListEndpoint.as_view(),
+        name="prompt-label-list",
+    ),
+    path(
+        "workspaces/<slug:slug>/prompt-labels/<uuid:label_id>",
+        PromptLabelDetailEndpoint.as_view(),
+        name="prompt-label-detail",
+    ),
+    path(
+        "workspaces/<slug:slug>/prompt-labels/<uuid:label_id>/assignments",
+        PromptLabelAssignmentEndpoint.as_view(),
+        name="prompt-label-assignments",
+    ),
     path(
         "workspaces/<slug:slug>/prompt-sections",
         PromptSectionListEndpoint.as_view(),
