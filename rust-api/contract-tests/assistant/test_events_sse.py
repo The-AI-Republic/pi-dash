@@ -22,6 +22,7 @@ import pytest
 
 from _harness.config import base_url
 from _harness.db import db_cursor
+from _harness.worlds import soft_delete_member
 
 from .conftest import threads_url
 
@@ -138,6 +139,21 @@ def test_sse_missing_thread_is_404(world, member):
     assert status == 404
 
 
+def test_sse_soft_deleted_active_member_is_404(world, member):
+    # Create the thread while the membership is live, then soft-delete it with
+    # is_active left true. If the role gate ignored deleted_at, this request
+    # would find the owned thread and stream 200; the member gate must turn it
+    # into a 404 like Django's _resolve.
+    base = threads_url(world)
+    tid = _new_thread(member, base)
+    assert soft_delete_member(world.ws, world.member) == 1
+
+    status, _, _ = _read_frames(
+        member, f"{base}/threads/{tid}/events/", max_frames=1
+    )
+    assert status == 404
+
+
 def test_sse_live_tail_relays_publish_verbatim(world, member):
     """Live tail: a Redis publish on the thread channel arrives as a
     verbatim ``data:`` frame.
@@ -189,3 +205,25 @@ def test_sse_bad_after_falls_back_to_zero(world, member):
     )
     assert status == 200
     assert _data_payload(frames[0])["seq"] == 1
+
+
+def test_sse_replay_renders_integer_payloads_verbatim(world, member):
+    # PIDASHCONV-1241: integer payload values must replay exactly (0, not
+    # 0.0; no scientific notation for >= 1e16), matching Django's
+    # json.dumps. Asserted on the raw data: bytes: parsed JSON cannot tell
+    # 0 from 0.0 (0.0 == 0), so a decoded comparison would pass on broken
+    # output.
+    base = threads_url(world)
+    tid = _new_thread(member, base)
+    expected = ["0", "7", "12345678901234567"]
+    for seq, index in enumerate(expected, start=1):
+        _seed_event(tid, seq, kind="probe", payload={"index": int(index)})
+
+    status, _, frames = _read_frames(
+        member, f"{base}/threads/{tid}/events/", max_frames=3
+    )
+    assert status == 200
+    assert len(frames) == 3
+    for frame, index in zip(frames, expected):
+        data = [ln for ln in frame.splitlines() if ln.startswith("data: ")][0]
+        assert f'"payload": {{"index": {index}}}' in data, data

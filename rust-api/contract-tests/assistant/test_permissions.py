@@ -15,6 +15,7 @@ that is the deliberate-permission-removal tripwire for this domain.
 import uuid
 
 from .conftest import threads_url
+from _harness.worlds import soft_delete_member
 
 PROFILE_URL = "/api/users/me/ai-assistant/agent-profile/"
 TOKEN_URL = "/api/users/me/ai-assistant/agent-token/"
@@ -64,3 +65,17 @@ def test_cross_workspace_isolation(world, member):
         ).status_code
         == 403
     )
+
+
+def test_soft_deleted_active_membership_denies_threads(world, member):
+    # Django reads WorkspaceMember through SoftDeletionManager, so a row
+    # soft-deleted while still is_active=True is not a membership. Rust must
+    # apply the same deleted_at IS NULL predicate in role_for.
+    assert soft_delete_member(world.ws, world.member) == 1
+
+    res = member.get(f"{threads_url(world)}/threads/")
+    assert res.status_code == 403
+    assert res.json() == {
+        "error": "role_not_allowed",
+        "detail": "The assistant is available to workspace members.",
+    }

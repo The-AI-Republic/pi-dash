@@ -10,6 +10,10 @@ flow is required: a token-less POST hits the custom CSRF failure page
 (HTTP 200) instead of the View.
 """
 
+from urllib.parse import quote_plus
+
+import pytest
+
 from _harness.redirects import (
     assert_error_redirect,
     assert_success_redirect,
@@ -17,6 +21,16 @@ from _harness.redirects import (
     query_of,
 )
 from _harness.sessions import SESSION_COOKIE_NAME
+
+# (raw next_path, iri_to_uri-encoded form): Django's HttpResponseRedirect
+# percent-encodes the composed URL (django/http/response.py via
+# django.utils.encoding.iri_to_uri) before storing Location.
+NEXT_PATH_ENCODING_CASES = [
+    ("/ws/issues?q=a b", "/ws/issues?q=a%20b"),
+    ("/ws/search?q=日本", "/ws/search?q=%E6%97%A5%E6%9C%AC"),
+    ("/ws/café", "/ws/caf%C3%A9"),
+    ("/ws/x?q=a\nb", "/ws/x?q=a%0Ab"),
+]
 
 
 def test_success_redirects_without_error_code(browser, base, user):
@@ -119,3 +133,25 @@ def test_space_failure_paths_use_space_base(browser, space_base):
     assert_error_redirect(res, base=space_base, error_code=5075)
     res = browser().post("/auth/spaces/sign-in/", data={"email": "as-nobody@example.com", "password": "x"})
     assert_error_redirect(res, base=space_base, error_code=5060)
+
+
+@pytest.mark.parametrize("next_path,encoded", NEXT_PATH_ENCODING_CASES)
+def test_error_redirect_percent_encodes_next_path(browser, base, user, next_path, encoded):
+    """The 302 Location carries the iri_to_uri-encoded next_path (PIDASHCONV-1356).
+
+    Wrong password takes the 5065 branch deterministically. The raw Location
+    (not the parse_qs-decoded query) must equal Django's percent-encoded URL:
+    spaces, non-ASCII and newlines never reach the wire raw, and CR/LF never
+    becomes a 500.
+    """
+    res = browser().post(
+        "/auth/sign-in/",
+        data={"email": user["email"], "password": "Wrong-Pass-1!x", "next_path": next_path},
+    )
+    assert res.status_code == 302, res.text
+    expected = (
+        f"{base}/?next_path={encoded}"
+        f"&error_code=5065&error_message=AUTHENTICATION_FAILED_SIGN_IN"
+        f"&email={quote_plus(user['email'])}"
+    )
+    assert location_of(res) == expected

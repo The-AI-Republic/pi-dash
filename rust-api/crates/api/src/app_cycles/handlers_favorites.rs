@@ -40,8 +40,8 @@ use crate::app_issues::Denial;
 use crate::state::AppState;
 
 use super::handlers_cycle_issues::{
-    actor_user_id, check_gate, decode_request_body, empty_response, fetch_allow_facts,
-    parse_uuid_or_invalid, pool_of, resolve_project_id, HandlerResult, INVALID_DETAIL_MSG,
+    actor_user_id, check_gate, coerce_uuid_field, decode_request_body, empty_response,
+    fetch_allow_facts, parse_uuid_or_invalid, pool_of, resolve_project_id, HandlerResult,
 };
 
 /// Collection path in `app/urls/cycle.py:56-60` form.
@@ -101,14 +101,14 @@ fn gate_for_destroy() -> &'static gates::Gate {
 }
 
 /// Coerce `request.data.get("cycle")` to the `entity_identifier` column:
-/// absent/`null` stays NULL; strings must parse as UUIDs
-/// (`ValidationError` → 400); any other JSON type is a `ValidationError`
-/// too, matching the `UUIDField` coercion.
+/// absent/`null` stays NULL (the field is `null=True`); everything else
+/// goes through `UUIDField.to_python` — a string parses as hex, a bool or
+/// a non-negative int below `2**128` becomes `UUID(int=v)`, anything else
+/// is a `ValidationError` → 400.
 fn parse_entity_identifier(value: Option<&Value>) -> Result<Option<uuid::Uuid>, Denial> {
     match value {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(raw)) => parse_uuid_or_invalid(raw).map(Some),
-        Some(_) => Err(Denial::BadError(INVALID_DETAIL_MSG.to_owned())),
+        Some(other) => coerce_uuid_field(other).map(Some),
     }
 }
 
@@ -191,7 +191,16 @@ async fn favorite_destroy(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
 ) -> HandlerResult {
+    // Django's `<uuid:cycle_id>` never routes a non-canonical or garbage
+    // spelling: the resolver 404 comes before auth, so proxy for everyone
+    // rather than answering the view's 400 (member) / auth error (anon).
+    if !super::is_canonical_uuid(&cycle_raw) {
+        return Ok(super::proxy_segment(state, method, uri, headers).await);
+    }
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
@@ -263,8 +272,29 @@ mod tests {
             parse_entity_identifier(Some(&json!(id.to_string()))).unwrap(),
             Some(id)
         );
+        // `UUIDField.to_python` coerces in-range ints and bools
+        // (`input_form = "int"` for a Python `int`), which is exactly what
+        // Django writes into `entity_identifier`.
+        assert_eq!(
+            parse_entity_identifier(Some(&json!(5))).unwrap(),
+            Some(uuid::Uuid::from_u128(5))
+        );
+        assert_eq!(
+            parse_entity_identifier(Some(&json!(true))).unwrap(),
+            Some(uuid::Uuid::from_u128(1))
+        );
+        assert_eq!(
+            parse_entity_identifier(Some(&json!(false))).unwrap(),
+            Some(uuid::Uuid::from_u128(0))
+        );
         assert!(parse_entity_identifier(Some(&json!("nope"))).is_err());
-        assert!(parse_entity_identifier(Some(&json!(7))).is_err());
+        assert!(parse_entity_identifier(Some(&json!(5.5))).is_err());
+        assert!(parse_entity_identifier(Some(&json!(-1))).is_err());
+        let over_max: Value =
+            serde_json::from_str("340282366920938463463374607431768211456").expect("fixture");
+        assert!(parse_entity_identifier(Some(&over_max)).is_err());
+        assert!(parse_entity_identifier(Some(&json!([1]))).is_err());
+        assert!(parse_entity_identifier(Some(&json!({"a": 1}))).is_err());
     }
 
     #[test]

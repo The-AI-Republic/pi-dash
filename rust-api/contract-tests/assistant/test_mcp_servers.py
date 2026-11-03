@@ -14,6 +14,9 @@ this domain: each row becomes one namespaced toolset at run time.
 """
 
 import uuid
+from datetime import datetime, timedelta
+
+from _harness.db import db_cursor
 
 MCP_URL = "/api/users/me/ai-assistant/mcp-servers/"
 SERVER_URL = "https://8.8.8.8/mcp"
@@ -128,3 +131,35 @@ def test_blocked_url_is_rejected(world, member):
 
 def test_anonymous_access_is_refused(world, anon):
     assert anon.get(MCP_URL).status_code == 401
+
+
+def _assert_eastern_timestamp(value):
+    # Django activates ``user.user_timezone`` (TimezoneMixin), so DRF renders
+    # the stamps with the zone's current UTC offset instead of ``Z``.
+    moment = datetime.fromisoformat(value)
+    assert value.endswith(("-04:00", "-05:00")), value
+    assert moment.utcoffset() in (timedelta(hours=-4), timedelta(hours=-5))
+
+
+def test_timestamps_render_in_user_timezone(world, member):
+    with db_cursor() as cur:
+        cur.execute(
+            "UPDATE users SET user_timezone = %s WHERE id = %s",
+            ("America/New_York", world.member.id),
+        )
+
+    created = _create(member, name="Zoned")
+    assert created.status_code == 201, created.text
+    _assert_eastern_timestamp(created.json()["created_at"])
+    _assert_eastern_timestamp(created.json()["updated_at"])
+
+    listed = member.get(MCP_URL)
+    assert listed.status_code == 200, listed.text
+    row = listed.json()[0]
+    _assert_eastern_timestamp(row["created_at"])
+    _assert_eastern_timestamp(row["updated_at"])
+
+    patched = member.patch(f"{MCP_URL}{row['id']}/", json={"is_enabled": False})
+    assert patched.status_code == 200, patched.text
+    _assert_eastern_timestamp(patched.json()["created_at"])
+    _assert_eastern_timestamp(patched.json()["updated_at"])

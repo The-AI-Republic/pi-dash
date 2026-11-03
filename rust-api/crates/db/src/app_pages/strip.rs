@@ -12,8 +12,8 @@
 //! `parse_endtag`, `parse_html_declaration`, `parse_bogus_comment`,
 //! `parse_pi`, `parse_comment` and `html.unescape` (`html/__init__.py`)
 //! with every handler a no-op except `handle_data`, which appends. The
-//! named-entity table lives in [`super::entities`] (generated from
-//! `html.entities.html5`, same source `unescape` reads).
+//! named-entity table and `unescape` live in the shared
+//! `pidash_types::html_entities` (generated from `html.entities.html5`).
 //!
 //! Three behaviors a simpler "drop `<...>` spans" port gets wrong, all
 //! verified against the live `strip_tags` (Python 3.12) before committing:
@@ -37,7 +37,7 @@
 //! `>` (`unknown_decl`/`handle_comment`, both no-ops in `MLStripper`), so
 //! stripping is infallible and `save()` always writes normally.
 
-use super::entities::{HTML5_ENTITIES, INVALID_CHARREFS, INVALID_CODEPOINTS};
+use pidash_types::html_entities::html_unescape;
 
 /// CDATA/RCDATA element (`HTMLParser.CDATA_CONTENT_ELEMENTS` /
 /// `RCDATA_CONTENT_ELEMENTS`, `parser.py`). `set_cdata_mode` lowercases the
@@ -118,12 +118,6 @@ fn is_tag_name_char(c: char) -> bool {
     !(is_html_space(c) || c == '/' || c == '>')
 }
 
-/// Entity-name char (`_charref`, `html/__init__.py`): everything except
-/// `\t \n \f space < > & # ;`.
-fn is_entity_name_char(c: char) -> bool {
-    !matches!(c, '\t' | '\n' | '\x0c' | ' ' | '<' | '>' | '&' | '#' | ';')
-}
-
 /// Attribute-name first char (`attrfind_tolerant`): `[^\t\n\r\f />]`.
 fn is_attr_first_char(c: char) -> bool {
     !(is_html_space(c) || c == '/' || c == '>')
@@ -160,7 +154,7 @@ pub fn ml_strip_tags(html: &str) -> String {
                     // RCDATA decodes entities (`_escapable` with
                     // `convert_charrefs`); RAWTEXT passes through verbatim.
                     if elem.escapable() {
-                        out.push_str(&unescape(&raw[i..start]));
+                        out.push_str(&html_unescape(&raw[i..start].iter().collect::<String>()));
                     } else {
                         out.extend(raw[i..start].iter());
                     }
@@ -213,7 +207,7 @@ pub fn ml_strip_tags(html: &str) -> String {
             }
         }
         if i < j {
-            out.push_str(&unescape(&raw[i..j]));
+            out.push_str(&html_unescape(&raw[i..j].iter().collect::<String>()));
         }
         i = j;
         if i == n {
@@ -575,148 +569,6 @@ fn find_cdata_literal(raw: &[char], from: usize) -> Option<usize> {
     None
 }
 
-/// `html.unescape` (`html/__init__.py:122-135`): the `_charref` regex
-/// (`:130-132`) with `_replace_charref` (`:91-120`).
-fn unescape(raw: &[char]) -> String {
-    let n = raw.len();
-    let mut out = String::with_capacity(n);
-    let mut i = 0;
-    while i < n {
-        if raw[i] != '&' {
-            out.push(raw[i]);
-            i += 1;
-            continue;
-        }
-        if let Some((rep, end)) = match_numeric_ref(raw, i) {
-            out.push_str(&rep);
-            i = end;
-            continue;
-        }
-        if let Some((rep, end)) = match_named_ref(raw, i) {
-            out.push_str(&rep);
-            i = end;
-            continue;
-        }
-        out.push('&');
-        i += 1;
-    }
-    out
-}
-
-/// Numeric arm of `_charref`: `&(#[0-9]+;?|#[xX][0-9a-fA-F]+;?)`.
-fn match_numeric_ref(raw: &[char], i: usize) -> Option<(String, usize)> {
-    let n = raw.len();
-    if i + 2 >= n || raw[i + 1] != '#' {
-        return None;
-    }
-    let (num, mut end) = if raw[i + 2] == 'x' || raw[i + 2] == 'X' {
-        let mut d = i + 3;
-        while d < n && raw[d].is_ascii_hexdigit() {
-            d += 1;
-        }
-        if d == i + 3 {
-            return None;
-        }
-        (parse_saturating_hex(&raw[i + 3..d]), d)
-    } else {
-        let mut d = i + 2;
-        while d < n && raw[d].is_ascii_digit() {
-            d += 1;
-        }
-        if d == i + 2 {
-            return None;
-        }
-        (parse_saturating_dec(&raw[i + 2..d]), d)
-    };
-    if end < n && raw[end] == ';' {
-        end += 1;
-    }
-    Some((decode_numeric(num), end))
-}
-
-fn parse_saturating_dec(digits: &[char]) -> u64 {
-    let mut num: u64 = 0;
-    for c in digits {
-        let d = (*c as u64).wrapping_sub('0' as u64);
-        num = num.saturating_mul(10).saturating_add(d);
-    }
-    num
-}
-
-fn parse_saturating_hex(digits: &[char]) -> u64 {
-    let mut num: u64 = 0;
-    for c in digits {
-        let d = c.to_digit(16).unwrap_or(0) as u64;
-        num = num.saturating_mul(16).saturating_add(d);
-    }
-    num
-}
-
-/// `_replace_charref` numeric half (`html/__init__.py:93-110`). Saturation
-/// preserves Python's outcomes: any value past `0x10FFFF` (including
-/// digit strings that overflow `u64`) decodes to U+FFFD.
-fn decode_numeric(num: u64) -> String {
-    // The `u32` gate comes first: Python compares the full int, so a value
-    // past `u32::MAX` never hits the override table (a truncating cast
-    // would alias it onto a small entry).
-    if num <= u32::MAX as u64 {
-        if let Ok(pos) = INVALID_CHARREFS.binary_search_by(|&(k, _)| k.cmp(&(num as u32))) {
-            return INVALID_CHARREFS[pos].1.to_string();
-        }
-    }
-    if (0xD800..=0xDFFF).contains(&num) || num > 0x10FFFF {
-        return '\u{FFFD}'.to_string();
-    }
-    if INVALID_CODEPOINTS.binary_search(&(num as u32)).is_ok() {
-        return String::new();
-    }
-    char::from_u32(num as u32)
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| '\u{FFFD}'.to_string())
-}
-
-/// Named arm of `_charref`: up to 32 `[^\t\n\f <&#;]` chars plus an
-/// optional `;`, resolved by `_replace_charref`'s named half
-/// (`html/__init__.py:111-120`): exact hit, else longest prefix without a
-/// trailing `;`... (implemented as the longest table hit on a proper
-/// prefix), else the literal `&` + name.
-fn match_named_ref(raw: &[char], i: usize) -> Option<(String, usize)> {
-    let n = raw.len();
-    let mut p = i + 1;
-    while p < n && p - (i + 1) < 32 && is_entity_name_char(raw[p]) {
-        p += 1;
-    }
-    if p == i + 1 {
-        return None;
-    }
-    let mut end = p;
-    if end < n && raw[end] == ';' {
-        end += 1;
-    }
-    let key: String = raw[i + 1..end].iter().collect();
-    if let Some(rep) = lookup_entity(&key) {
-        return Some((rep.to_string(), end));
-    }
-    // Longest matching proper prefix (`range(len(s)-1, 1, -1)`): `x` is a
-    // char count, so rebuild the prefix per length.
-    let chars: Vec<char> = key.chars().collect();
-    for x in (2..chars.len()).rev() {
-        let prefix: String = chars[..x].iter().collect();
-        if let Some(rep) = lookup_entity(&prefix) {
-            let rest: String = chars[x..].iter().collect();
-            return Some((rep.to_string() + &rest, end));
-        }
-    }
-    Some(('&'.to_string() + &key, end))
-}
-
-fn lookup_entity(name: &str) -> Option<&'static str> {
-    HTML5_ENTITIES
-        .binary_search_by(|&(k, _)| k.cmp(name))
-        .ok()
-        .map(|pos| HTML5_ENTITIES[pos].1)
-}
-
 /// `Page.save()` (`page.py:70-77`) and `PageVersion.save()` (`:175-182`)
 /// share one rule: `description_stripped` is `None` when
 /// `description_html` is `""` or `None`, else `strip_tags` of the HTML.
@@ -727,5 +579,135 @@ pub fn sync_description_stripped(description_html: Option<&str>) -> Option<Strin
         None => None,
         Some("") => None,
         Some(html) => Some(ml_strip_tags(html)),
+    }
+}
+
+/// Django's `django.utils.html.strip_tags` — what `Description.save()`
+/// (`description.py:23-29`) recomputes `description_stripped` with.
+/// Entities pass through verbatim (the `handle_entityref` arm), unlike
+/// [`ml_strip_tags`] which decodes them: `"a &amp; b"` stays
+/// `"a &amp; b"` here but becomes `"a & b"` there. Loop `_strip_once`
+/// while both `<` and `>` remain, stopping when an iteration stops
+/// removing `<` (verbatim Django algorithm). Canonical home for the
+/// port: the `api::space::sanitize` and
+/// `services::runner_runs::lifecycle` twins delegate here.
+pub fn django_strip_tags(value: &str) -> String {
+    let mut current = value.to_owned();
+    loop {
+        if !(current.contains('<') && current.contains('>')) {
+            break;
+        }
+        let next = django_strip_once(&current);
+        if next.matches('<').count() == current.matches('<').count() {
+            break;
+        }
+        current = next;
+    }
+    current
+}
+
+/// One Django `_strip_once` pass: collect text and verbatim entity
+/// references, skip tags (quote-aware), comments and declarations.
+fn django_strip_once(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte != b'<' {
+            // Copy one full char ('<' is ASCII, so byte detection never
+            // splits a multi-byte sequence; entities pass through verbatim
+            // like HTMLParser's handle_entityref/handle_charref arms).
+            let ch = value[index..].chars().next().expect("char boundary");
+            out.push(ch);
+            index += ch.len_utf8();
+            continue;
+        }
+        // At '<': comments, declarations, and tags are skipped.
+        if value[index..].starts_with("<!--") {
+            if let Some(end) = value[index..].find("-->") {
+                index += end + 3;
+            } else {
+                // Unterminated comment: HTMLParser bogus-comments to EOF.
+                break;
+            }
+            continue;
+        }
+        if value[index..].starts_with("<!") || value[index..].starts_with("<?") {
+            if let Some(end) = django_find_tag_end(&value[index..]) {
+                index += end;
+            } else {
+                out.push('<');
+                index += 1;
+            }
+            continue;
+        }
+        // A '<' followed by ASCII alpha or '/' opens a tag; anything else
+        // is literal text (HTMLParser parse-starttag rules).
+        let rest = &value[index + 1..];
+        let opener = rest.chars().next().unwrap_or('\0');
+        if opener.is_ascii_alphabetic() || opener == '/' {
+            if let Some(end) = django_find_tag_end(&value[index..]) {
+                index += end;
+                continue;
+            }
+        }
+        out.push('<');
+        index += 1;
+    }
+    out
+}
+
+/// Length in bytes of `<...>` starting at `text[0] == '<'`, respecting
+/// single/double quotes; `None` when unterminated.
+fn django_find_tag_end(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut index = 1;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(q) = quote {
+            if byte == q {
+                quote = None;
+            }
+        } else if byte == b'"' || byte == b'\'' {
+            quote = Some(byte);
+        } else if byte == b'>' {
+            return Some(index + 1);
+        }
+        index += 1;
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn django_strip_tags_matches_django_basics() {
+        // Vectors carried over from the `api::space::sanitize` twin plus
+        // entity cases verified against live `django.utils.html.strip_tags`.
+        assert_eq!(django_strip_tags("<p>why</p>"), "why");
+        assert_eq!(django_strip_tags("plain"), "plain");
+        assert_eq!(django_strip_tags(""), "");
+        assert_eq!(django_strip_tags("<p>a</p><p>b</p>"), "ab");
+        // Entities pass through verbatim (handle_entityref arm).
+        assert_eq!(django_strip_tags("a &amp; b"), "a &amp; b");
+        assert_eq!(django_strip_tags("<p>a &amp; b</p>"), "a &amp; b");
+        assert_eq!(django_strip_tags("R&D"), "R&D");
+        // Bare '<' without '>' is literal; the loop never runs.
+        assert_eq!(django_strip_tags("a < b"), "a < b");
+        // Bare '<' with '>' elsewhere but no tag: kept literally.
+        assert_eq!(django_strip_tags("a < b > c"), "a < b > c");
+    }
+
+    #[test]
+    fn django_and_ml_strippers_differ_on_entities() {
+        // The two save() paths use different strippers on purpose:
+        // `IssueComment.save` (html_processor, decoded) vs
+        // `Description.save` (django.utils, verbatim).
+        assert_eq!(ml_strip_tags("a &amp; b"), "a & b");
+        assert_eq!(django_strip_tags("a &amp; b"), "a &amp; b");
     }
 }

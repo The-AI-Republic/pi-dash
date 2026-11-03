@@ -86,7 +86,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -100,10 +100,16 @@ use pidash_services::app_project::ser_shared as lite_user;
 use pidash_services::app_workspace::{
     models_workspace, queries_membership as queries, ser_invite, ser_workspace, tasks,
 };
+use pidash_services::domain::identity;
+use pidash_services::domain::workspaces::members;
 
 use super::gates;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::db::is_integrity_error;
+use pidash_compat::py::py_strip;
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Exact bodies
@@ -149,8 +155,6 @@ pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#
 /// `handle_exception`'s `ValidationError` branch (400, `app/views/base.py:226-230`):
 /// unparseable UUIDs in the accept list.
 pub const VALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// `handle_exception`'s fallthrough (500, `app/views/base.py:244-248`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// Malformed-JSON 400 (`app_pages` precedent: DRF's `ParseError` prefix;
 /// the `serde_json` suffix is backend-specific and not ported).
 const JSON_PARSE_ERROR: &str = "JSON parse error";
@@ -220,14 +224,6 @@ fn message_envelope(message: &str) -> Value {
     Value::Object(body)
 }
 
-fn json_response(status: StatusCode, body: &str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body.to_owned()))
-        .expect("invites-handler response")
-}
-
 impl IntoResponse for Denial {
     fn into_response(self) -> Response {
         match self {
@@ -281,15 +277,6 @@ async fn read_json_body(req: Request) -> Result<Value, Denial> {
     serde_json::from_slice(&bytes).map_err(|_| Denial::BadDetail(JSON_PARSE_ERROR.to_owned()))
 }
 
-/// Whether a sqlx failure is an integrity violation (SQLSTATE class `23`),
-/// which Django's `handle_exception` answers 400 for (`app_pages` precedent).
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|db| db.code())
-        .is_some_and(|code| code.starts_with("23"))
-}
-
 /// Convert a [`queries`] `:named` statement to sqlx `$n` placeholders.
 /// Numbering follows `params` order; a `:name` only matches when followed
 /// by a non-identifier byte, so `:now` never matches inside `:now2`.
@@ -322,12 +309,6 @@ pub fn positional(sql: &str, params: &[&str]) -> String {
 // ---------------------------------------------------------------------------
 // Python semantics (probed live against CPython + Django 4.2.30 / DRF 3.15.2)
 // ---------------------------------------------------------------------------
-
-/// Python `str.strip()` with no arguments: Unicode whitespace plus
-/// `\x1c`-`\x1f`, which Rust's `char::is_whitespace` does not cover.
-fn py_strip(value: &str) -> &str {
-    value.trim_matches(|c: char| c.is_whitespace() || ('\x1c'..='\x1f').contains(&c))
-}
 
 /// What CPython `int()` strips: Unicode whitespace EXCEPT `\x1c`-`\x1f`
 /// (probed — `int("\x1c5")` raises while `"\x1c5".strip()` is `"5"`),
@@ -413,9 +394,9 @@ fn py_int(value: &Value) -> Result<i128, ()> {
     }
 }
 
-/// Python truthiness (`invite.py:177`): `accepted` is whatever
-/// `request.data.get("accepted", False)` is truthy for — `"false"`, `1`
-/// and `[0]` all accept.
+/// Python truthiness of the raw `accepted` value (`invite.py:181`): once
+/// `to_python` has accepted it, the in-memory raw value picks the
+/// accept/reject branch — `"0"` accepts while storing `false`.
 fn py_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -434,6 +415,39 @@ fn py_truthy(value: &Value) -> bool {
         Value::String(s) => !s.is_empty(),
         Value::Array(a) => !a.is_empty(),
         Value::Object(m) => !m.is_empty(),
+    }
+}
+
+/// `BooleanField.to_python` (`null=False`,
+/// `django/db/models/fields/__init__.py`): `True`/`False` (and anything
+/// `==`-equal: `1`/`0`, `1.0`/`0.0`) coerce, `"t"`/`"True"`/`"1"` pass,
+/// `"f"`/`"False"`/`"0"` fail; `None` stays `None` (the NOT NULL column
+/// then raises the `IntegrityError` 400); anything else is the
+/// `ValidationError` 400. Mirrors the `app_project` port's `prep_bool`
+/// (PB-0595); each domain file keeps its own copy.
+fn prep_bool(value: &Value) -> Result<Option<bool>, ()> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Bool(flag) => Ok(Some(*flag)),
+        Value::Number(number) => {
+            if number.as_i64() == Some(1) || number.as_u64() == Some(1) {
+                Ok(Some(true))
+            } else if number.as_i64() == Some(0) || number.as_u64() == Some(0) {
+                Ok(Some(false))
+            } else if number.as_f64() == Some(1.0) {
+                Ok(Some(true))
+            } else if number.as_f64() == Some(0.0) {
+                Ok(Some(false))
+            } else {
+                Err(())
+            }
+        }
+        Value::String(raw) => match raw.as_str() {
+            "t" | "True" | "1" => Ok(Some(true)),
+            "f" | "False" | "0" => Ok(Some(false)),
+            _ => Err(()),
+        },
+        _ => Err(()),
     }
 }
 
@@ -807,6 +821,16 @@ struct WorkspaceLiteRow {
     slug: String,
     logo: Option<String>,
     logo_asset_id: Option<uuid::Uuid>,
+}
+
+/// The `file_assets` columns the invite-path asset lookup selects.
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct AssetRow {
+    id: uuid::Uuid,
+    entity_type: Option<String>,
+    workspace_slug: Option<String>,
+    project_id: Option<uuid::Uuid>,
+    issue_id: Option<uuid::Uuid>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1451,15 +1475,48 @@ async fn fetch_workspace_lites(
     Ok(out)
 }
 
-/// Fetch `asset_url` values for a set of asset ids, reusing the merged
-/// fetcher rather than forking it.
+/// Fetch `asset_url` values for a set of asset ids (one statement): NO
+/// soft-delete scope — `logo_url`/`avatar_url` follow the forward FK
+/// through the unfiltered `_base_manager`, so soft-deleted assets still
+/// render (PIDASHCONV-1374). Same SELECT as the v1 fetcher minus the
+/// `deleted_at` predicate; the row render stays shared.
 async fn fetch_assets(
     pool: &PgPool,
     asset_ids: &[uuid::Uuid],
 ) -> Result<HashMap<uuid::Uuid, String>, Denial> {
-    crate::v1_projects::handlers_members::fetch_asset_urls(pool, asset_ids)
+    use crate::v1_projects::handlers_members::{render_asset_url, AssetRef};
+    let mut out = HashMap::new();
+    if asset_ids.is_empty() {
+        return Ok(out);
+    }
+    let placeholders: Vec<String> = (1..=asset_ids.len()).map(|i| format!("${i}")).collect();
+    let sql = format!(
+        "SELECT a.id, a.entity_type, w.slug AS workspace_slug, a.project_id, a.issue_id \
+         FROM file_assets a LEFT JOIN workspaces w ON w.id = a.workspace_id \
+         WHERE a.id IN ({})",
+        placeholders.join(", ")
+    );
+    let mut query = sqlx::query_as::<_, AssetRow>(&sql);
+    for id in asset_ids {
+        query = query.bind(*id);
+    }
+    for row in query
+        .fetch_all(pool)
         .await
-        .map_err(|_| Denial::ServerError)
+        .map_err(|_| Denial::ServerError)?
+    {
+        let asset = AssetRef {
+            id: row.id,
+            entity_type: row.entity_type,
+            workspace_slug: row.workspace_slug,
+            project_id: row.project_id,
+            issue_id: row.issue_id,
+        };
+        if let Some(url) = render_asset_url(&asset) {
+            out.insert(asset.id, url);
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -3059,7 +3116,20 @@ async fn join_post(
     // (`db/models/base.py:42`); anonymous nulls BOTH audit columns
     // (`:31-33`), so `created_by` keeps the row's value only when authed.
     let now = Utc::now();
-    let accepted = data.get("accepted").is_some_and(py_truthy);
+    // `accepted = request.data.get("accepted", False)` runs through
+    // `BooleanField.to_python` on `save()` (`invite.py:176-179`): a value
+    // `to_python` rejects is the `ValidationError` 400 with nothing
+    // written, and an explicit null falls to the NOT NULL column (the
+    // `IntegrityError` 400 below). The stored bool is the prepped value,
+    // but the accept/reject branch tests the in-memory raw value
+    // (`:181`), so `"0"` accepts while storing `false`.
+    let missing = Value::Bool(false);
+    let raw = data.get("accepted").unwrap_or(&missing);
+    let stored = match prep_bool(raw) {
+        Ok(stored) => stored,
+        Err(()) => return json_response(StatusCode::BAD_REQUEST, VALID_DETAIL_BODY),
+    };
+    let accept = py_truthy(raw);
     let responder_id: Option<uuid::Uuid> = actor.as_ref().map(|actor| actor.id);
     let (updated_by_id, created_by_id) =
         audit_columns_on_update(responder_id, invite.created_by_id);
@@ -3067,7 +3137,7 @@ async fn join_post(
         "UPDATE workspace_member_invites SET accepted = $1, responded_at = $2, updated_at = $2, \
          updated_by_id = $3, created_by_id = $4 WHERE id = $5",
     )
-    .bind(accepted)
+    .bind(stored)
     .bind(now)
     .bind(updated_by_id)
     .bind(created_by_id)
@@ -3080,7 +3150,7 @@ async fn join_post(
         }
         return Denial::ServerError.into_response();
     }
-    if !accepted {
+    if !accept {
         // Rejected: the invite is KEPT (with `responded_at` set — stuck).
         return (
             StatusCode::OK,
@@ -3144,24 +3214,19 @@ async fn join_post(
             Ok(props) => props,
             Err(denial) => return denial.into_response(),
         };
-    let empty_dict = match member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON)
-    {
-        Ok(props) => props,
-        Err(denial) => return denial.into_response(),
-    };
     if let Some((member_id, member_created_by)) = existing {
         let (updated_by_id, created_by_id) =
             audit_columns_on_update(responder_id, member_created_by);
-        if let Err(error) = sqlx::query(
-            "UPDATE workspace_members SET is_active = TRUE, role = $1, updated_at = $2, \
-             updated_by_id = $3, created_by_id = $4 WHERE id = $5",
+        if let Err(error) = members::update_role(
+            pool,
+            &members::RoleUpdate {
+                id: member_id,
+                role: invite.role,
+                updated_at: now,
+                updated_by: updated_by_id,
+                created_by: Some(created_by_id),
+            },
         )
-        .bind(invite.role)
-        .bind(now)
-        .bind(updated_by_id)
-        .bind(created_by_id)
-        .bind(member_id)
-        .execute(pool)
         .await
         {
             if is_integrity_error(&error) {
@@ -3169,26 +3234,22 @@ async fn join_post(
             }
             return Denial::ServerError.into_response();
         }
-    } else if let Err(error) = sqlx::query(
-        "INSERT INTO workspace_members \
-         (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
-         workspace_id, member_id, role, company_role, view_props, default_props, issue_props, \
-         getting_started_checklist, tips, explored_features, is_active) \
-         VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, NULL, $7, $8, $9, $10, $11, $12, TRUE)",
+    } else if let Err(error) = members::add(
+        pool,
+        &members::NewMember {
+            workspace_id: invite.workspace_id,
+            user_id: Some(user_id),
+            role: invite.role,
+            company_role: None,
+            created_by: responder_id,
+            view_props: &view_props,
+            default_props: &default_props,
+            issue_props: &issue_props,
+            now,
+            ignore_conflicts: false,
+            db_now: false,
+        },
     )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(responder_id)
-    .bind(invite.workspace_id)
-    .bind(user_id)
-    .bind(invite.role)
-    .bind(view_props)
-    .bind(default_props)
-    .bind(issue_props)
-    .bind(empty_dict.clone())
-    .bind(empty_dict.clone())
-    .bind(empty_dict)
-    .execute(pool)
     .await
     {
         if is_integrity_error(&error) {
@@ -3199,10 +3260,7 @@ async fn join_post(
     // `user.last_workspace_id = ...; user.save()` (`:204-205`): `User`
     // has no such column, so Django drops the pointer and the save only
     // stamps `updated_at` ([`queries::user_touch_sql`]).
-    if sqlx::query("UPDATE users SET updated_at = $1 WHERE id = $2")
-        .bind(now)
-        .bind(user_id)
-        .execute(pool)
+    if identity::touch_user_updated_at(pool, user_id, now)
         .await
         .is_err()
     {
@@ -3543,15 +3601,8 @@ async fn my_invites_create(
             continue;
         };
         bust_members_key(&state, &workspace_row.slug).await;
-        if let Err(error) = sqlx::query(
-            "UPDATE workspace_members SET is_active = TRUE, role = $1 \
-             WHERE workspace_id = $2 AND member_id = $3 AND deleted_at IS NULL",
-        )
-        .bind(invite.role)
-        .bind(invite.workspace_id)
-        .bind(user_id)
-        .execute(pool)
-        .await
+        if let Err(error) =
+            members::activate_by_membership(pool, invite.workspace_id, user_id, invite.role).await
         {
             if is_integrity_error(&error) {
                 return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
@@ -3576,78 +3627,32 @@ async fn my_invites_create(
     // carries a DB default, so the JSON props and `is_active` ride
     // along explicitly (PIDASHCONV-751).
     if !invites.is_empty() {
-        let mut values: Vec<String> = Vec::with_capacity(invites.len());
-        for index in 0..invites.len() {
-            let base = index * 13;
-            values.push(format!(
-                "(${}, ${}, ${}, ${}, NULL, NULL, ${}, ${}, ${}, NULL, \
-                 ${}, ${}, ${}, ${}, ${}, ${}, TRUE)",
-                base + 1,
-                base + 2,
-                base + 3,
-                base + 4,
-                base + 5,
-                base + 6,
-                base + 7,
-                base + 8,
-                base + 9,
-                base + 10,
-                base + 11,
-                base + 12,
-                base + 13
-            ));
-        }
-        let sql = format!(
-            "INSERT INTO workspace_members \
-             (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
-             workspace_id, member_id, role, company_role, view_props, default_props, \
-             issue_props, getting_started_checklist, tips, explored_features, is_active) \
-             VALUES {} ON CONFLICT DO NOTHING",
-            values.join(", ")
-        );
-        let mut query = sqlx::query(&sql);
-        for invite in invites.iter() {
-            // Fresh defaults per row: the Django callables mint a new
-            // dict per instance.
-            let view_props = match member_default_json(
-                models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON,
-            ) {
+        // Fresh defaults per row in Django (`get_default_props` /
+        // `get_issue_props` callables mint a new dict per instance);
+        // the shared binds below commit identical bytes.
+        let view_props = match member_default_json(
+            models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON,
+        ) {
+            Ok(props) => props,
+            Err(denial) => return denial.into_response(),
+        };
+        let issue_props =
+            match member_default_json(models_workspace::workspace_member::DEFAULT_ISSUE_PROPS_JSON)
+            {
                 Ok(props) => props,
                 Err(denial) => return denial.into_response(),
             };
-            let default_props = match member_default_json(
-                models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON,
-            ) {
-                Ok(props) => props,
-                Err(denial) => return denial.into_response(),
-            };
-            let issue_props = match member_default_json(
-                models_workspace::workspace_member::DEFAULT_ISSUE_PROPS_JSON,
-            ) {
-                Ok(props) => props,
-                Err(denial) => return denial.into_response(),
-            };
-            let empty_dict =
-                match member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON) {
-                    Ok(props) => props,
-                    Err(denial) => return denial.into_response(),
-                };
-            query = query
-                .bind(uuid::Uuid::new_v4())
-                .bind(now)
-                .bind(now)
-                .bind(user_id)
-                .bind(invite.workspace_id)
-                .bind(user_id)
-                .bind(invite.role)
-                .bind(view_props)
-                .bind(default_props)
-                .bind(issue_props)
-                .bind(empty_dict.clone())
-                .bind(empty_dict.clone())
-                .bind(empty_dict);
-        }
-        if let Err(error) = query.execute(pool).await {
+        // One row per invite; rows carry their own workspace.
+        let rows: Vec<members::BulkMember> = invites
+            .iter()
+            .map(|invite| members::BulkMember {
+                workspace_id: invite.workspace_id,
+                user_id,
+                role: invite.role,
+                created_by: Some(user_id),
+            })
+            .collect();
+        if let Err(error) = members::bulk_add(pool, &rows, &view_props, &issue_props, now).await {
             if is_integrity_error(&error) {
                 return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
             }
@@ -4122,11 +4127,6 @@ async fn join_request_approve(
             Ok(props) => props,
             Err(denial) => return denial.into_response(),
         };
-    let empty_dict = match member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON)
-    {
-        Ok(props) => props,
-        Err(denial) => return denial.into_response(),
-    };
     let approved = async move {
         let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
             "SELECT wm.id FROM workspace_members wm WHERE wm.workspace_id = $1 AND wm.member_id = $2 \
@@ -4139,48 +4139,40 @@ async fn join_request_approve(
         if let Some((member_id,)) = existing {
             // The reactivate `.save()` stamps `updated_by` with the
             // approver (`db/models/base.py:42`).
-            sqlx::query(
-                "UPDATE workspace_members SET is_active = TRUE, role = $1, updated_at = $2, \
-                 updated_by_id = $4 WHERE id = $3",
+            members::update_role(
+                &mut *tx,
+                &members::RoleUpdate {
+                    id: member_id,
+                    role: request_role,
+                    updated_at: now,
+                    updated_by: Some(approver_id),
+                    created_by: None,
+                },
             )
-            .bind(request_role)
-            .bind(now)
-            .bind(member_id)
-            .bind(approver_id)
-            .execute(&mut *tx)
             .await?;
         } else {
             // The create `.save()` keeps `updated_by` NULL on add
             // (`db/models/base.py:37-39`), so the column stays unset —
             // while the JSON props ride the model defaults (`:207-213`).
-            sqlx::query(
-                "INSERT INTO workspace_members \
-                 (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
-                 workspace_id, member_id, role, company_role, view_props, default_props, \
-                 issue_props, getting_started_checklist, tips, explored_features, is_active) \
-                 VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, NULL, $7, $8, $9, \
-                 $10, $11, $12, TRUE)",
+            members::add(
+                &mut *tx,
+                &members::NewMember {
+                    workspace_id,
+                    user_id: Some(requester_id),
+                    role: request_role,
+                    company_role: None,
+                    created_by: Some(approver_id),
+                    view_props: &view_props,
+                    default_props: &default_props,
+                    issue_props: &issue_props,
+                    now,
+                    ignore_conflicts: false,
+                    db_now: false,
+                },
             )
-            .bind(uuid::Uuid::new_v4())
-            .bind(now)
-            .bind(approver_id)
-            .bind(workspace_id)
-            .bind(requester_id)
-            .bind(request_role)
-            .bind(view_props)
-            .bind(default_props)
-            .bind(issue_props)
-            .bind(empty_dict.clone())
-            .bind(empty_dict.clone())
-            .bind(empty_dict)
-            .execute(&mut *tx)
             .await?;
         }
-        sqlx::query("UPDATE profiles SET last_workspace_id = $1 WHERE user_id = $2")
-            .bind(workspace_id)
-            .bind(requester_id)
-            .execute(&mut *tx)
-            .await?;
+        identity::set_last_workspace(&mut *tx, requester_id, workspace_id).await?;
         // The status `.save()` stamps `updated_by` with the approver
         // (`db/models/base.py:42`).
         sqlx::query(
@@ -4610,6 +4602,47 @@ mod tests {
         // A digit-only literal past f64 range is a nonzero Python int.
         let huge: Value = serde_json::from_str(&format!("1{}", "0".repeat(400))).expect("json");
         assert!(py_truthy(&huge));
+    }
+
+    #[test]
+    fn prep_bool_matches_to_python() {
+        // `value in (True, False)` — 1/0 and 1.0/0.0 ride `==`.
+        for (raw, want) in [
+            ("true", Some(true)),
+            ("1", Some(true)),
+            ("1.0", Some(true)),
+            ("false", Some(false)),
+            ("0", Some(false)),
+            ("0.0", Some(false)),
+            ("\"t\"", Some(true)),
+            ("\"True\"", Some(true)),
+            ("\"1\"", Some(true)),
+            ("\"f\"", Some(false)),
+            ("\"False\"", Some(false)),
+            ("\"0\"", Some(false)),
+            // `None` stays `None` (the NOT NULL column 400s the write).
+            ("null", None),
+        ] {
+            let value: Value = serde_json::from_str(raw).expect("case is JSON");
+            assert_eq!(prep_bool(&value), Ok(want), "prep_bool({raw})");
+        }
+        // Exact spellings only — lowercase variants 400.
+        for raw in [
+            "\"true\"",
+            "\"false\"",
+            "\"yes\"",
+            "\"\"",
+            "2",
+            "0.5",
+            "[]",
+            "[0]",
+            "{}",
+            "{\"a\": 1}",
+            "1e999",
+        ] {
+            let value: Value = serde_json::from_str(raw).expect("case is JSON");
+            assert_eq!(prep_bool(&value), Err(()), "prep_bool({raw})");
+        }
     }
 
     #[test]

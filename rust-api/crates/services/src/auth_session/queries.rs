@@ -36,11 +36,12 @@
 //! order and row shape are identical — only the param spelling differs.
 //!
 //! Ported bugs (translated, not fixed; also listed in the PR):
-//! - `BUG-WRITE (workspace_project_join.py:76-87)`: the `ProjectMember`
-//!   `bulk_create` omits `project_id` despite the column being NOT NULL, so
-//!   any signup carrying an accepted project invite raises `IntegrityError`
-//!   on Postgres even with `ignore_conflicts=True`
-//!   ([`project_member_bulk_create_sql`] keeps the missing column).
+//! - `BUG-WRITE (workspace_project_join.py:76-87)`, RETIRED by
+//!   PIDASHCONV-1686: Django main (NEWFRONT-151) sets `project_id` on the
+//!   `ProjectMember` bulk and the six live arms bind the invite's id, so
+//!   the join succeeds and the invite is consumed.
+//!   ([`project_member_bulk_create_sql`] emits the column; the omission it
+//!   used to keep is recorded in PB-1050/1104/1105/1107).
 //! - `BUG-SIGNUP-FLAG (adapter/base.py:299)`: `complete_login_or_signup`
 //!   sets `is_signup = bool(existing_user)` — inverted, so a new-user
 //!   signup reports `is_signup=False` and an existing-user login reports
@@ -49,7 +50,7 @@
 
 use serde_json::Value;
 
-use super::models::{PASSWORD_HASH_ALGORITHM, PASSWORD_HASH_ITERATIONS};
+use super::models::PASSWORD_HASH_ALGORITHM;
 
 // ---------------------------------------------------------------------------
 // User reads
@@ -427,12 +428,13 @@ pub fn project_invite_workspace_member_bulk_create_sql(table: &str, rows: usize)
 }
 
 /// `ProjectMember.objects.bulk_create(..., ignore_conflicts=True)` (`:76-87`)
-/// as written: `project_id` is missing (ported bug — on Postgres this
-/// raises `IntegrityError`, fixture `ported_bugs[0]`).
+/// as written on Django main: the invite's `project_id` rides the bulk
+/// (PB-1008 retired by PIDASHCONV-1686; fixture `ported_bugs[0]`).
+/// Column order follows the model fields (`project.py:302-342`).
 pub fn project_member_bulk_create_sql(table: &str, rows: usize) -> String {
-    let one = "(workspace_id, member_id, role, created_by_id)";
+    let one = "(project_id, workspace_id, member_id, role, created_by_id)";
     let values = vec![one; rows].join(", ");
-    format!("INSERT INTO \"{table}\" (\"workspace_id\", \"member_id\", \"role\", \"created_by_id\") VALUES {values} ON CONFLICT DO NOTHING")
+    format!("INSERT INTO \"{table}\" (\"project_id\", \"workspace_id\", \"member_id\", \"role\", \"created_by_id\") VALUES {values} ON CONFLICT DO NOTHING")
 }
 
 /// Invite deletes (`:90-91`): both querysets deleted after the joins.
@@ -479,8 +481,8 @@ pub fn workspace_join_track_event_call(
 // ---------------------------------------------------------------------------
 
 /// Call sites, as records — the crypto is F-05 library semantics
-/// ([`PASSWORD_HASH_ALGORITHM`] `pbkdf2_sha256`,
-/// [`PASSWORD_HASH_ITERATIONS`] `1500000`; fixture `password` section):
+/// ([`PASSWORD_HASH_ALGORITHM`] `pbkdf2_sha256` plus F-05
+/// `PBKDF2_DEFAULT_ITERATIONS`; fixture `password` section):
 /// `common.py:74` check (skipped when `is_password_autoset`),
 /// `common.py:92,131` + `password_management` views set +
 /// `is_password_autoset = False` + `save()`.
@@ -522,20 +524,21 @@ impl PasswordOp {
             PasswordOp::Check => (
                 "check_password",
                 PASSWORD_HASH_ALGORITHM,
-                PASSWORD_HASH_ITERATIONS,
+                pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS,
             ),
             PasswordOp::Set => (
                 "set_password",
                 PASSWORD_HASH_ALGORITHM,
-                PASSWORD_HASH_ITERATIONS,
+                pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS,
             ),
         }
     }
 }
 
-/// Ported bugs replayed by this module (fixture `ported_bugs`).
+/// Ported bugs replayed by this module (fixture `ported_bugs`);
+/// `[0]` is the retired PB-1008 note, `[1]` the live signup-flag bug.
 pub const PORTED_BUGS: &[&str] = &[
-    "workspace_project_join.py:76-87 ProjectMember bulk_create omits project_id -> IntegrityError on Postgres despite ignore_conflicts=True",
+    "RETIRED by PIDASHCONV-1686: workspace_project_join.py:76-87 ProjectMember bulk_create sets project_id (Django main NEWFRONT-151) — the join succeeds and the invite is consumed",
     "adapter/base.py:299 is_signup=bool(existing_user) inverted: signup reports False, login reports True",
 ];
 
@@ -715,8 +718,8 @@ mod tests {
         ] {
             assert!(sql.contains("ON CONFLICT DO NOTHING"), "{sql}");
         }
-        // Ported bug kept: project_id missing from the ProjectMember arm.
-        assert!(!project_member_bulk_create_sql(PROJECT_MEMBER_TABLE, 1).contains("project_id"));
+        // PB-1008 retired by PIDASHCONV-1686: the bulk carries project_id.
+        assert!(project_member_bulk_create_sql(PROJECT_MEMBER_TABLE, 1).contains("project_id"));
         assert_eq!(
             invite_delete_sql(WORKSPACE_INVITE_TABLE),
             "DELETE FROM \"workspace_member_invites\" WHERE email = $1 AND accepted = TRUE"
@@ -756,7 +759,7 @@ mod tests {
                 .expect("iterations recorded as string")
                 .parse::<u32>()
                 .expect("iterations numeric"),
-            PASSWORD_HASH_ITERATIONS
+            pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS
         );
         assert_eq!(fx["password"]["set_check"]["check_true"], json!(true));
         assert_eq!(fx["password"]["set_check"]["check_false"], json!(false));

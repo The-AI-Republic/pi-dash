@@ -121,8 +121,6 @@
 //! session [`actor`], exact denial bodies, manual envelope assembly for
 //! DRF key order/bytes.
 
-use std::collections::HashMap;
-
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -141,10 +139,14 @@ use super::gates::{
 };
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::workspace::WorkspaceFacts;
+use pidash_compat::py::{py_is_space, py_strip, py_uuid_or_none};
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_services::app_project::ser_member as d25;
 use pidash_services::app_workspace::models_user::user::avatar_url as resolve_avatar_url;
 use pidash_services::app_workspace::queries_membership as qm;
 use pidash_services::app_workspace::{ser_user, ser_workspace};
+use pidash_services::domain::workspaces::members;
 use pidash_types::WorkspaceId;
 
 // ---------------------------------------------------------------------------
@@ -272,8 +274,6 @@ pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 /// collisions at save (DRF runs no uniqueness validators for this
 /// serializer, so the database is the only guard).
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
-/// `handle_exception`'s generic 500 branch — and the last-visited body.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// Self role change (`member.py:81-85`).
 pub const SELF_ROLE_BODY: &str = r#"{"error":"You cannot update your own role"}"#;
 /// Self remove (`member.py:110-114`).
@@ -356,15 +356,6 @@ impl IntoResponse for Denial {
         )
             .into_response()
     }
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    (
-        status,
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
 }
 
 /// DRF `JSONRenderer` post-pass over this project's settings
@@ -610,25 +601,7 @@ fn python_type_name(value: &Value) -> &'static str {
     }
 }
 
-/// One query value, repeated or not: axum's `Query` backend does not coerce
-/// a lone `?key=value` into a sequence, so the extractor uses this untagged
-/// shape and callers read the last value — mirroring Django's `QueryDict`,
-/// where repeats are legal and `.get` returns the last value.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-type QueryMap = HashMap<String, OneOrMany>;
-
-fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    match query.get(key)? {
-        OneOrMany::One(value) => Some(value.clone()),
-        OneOrMany::Many(values) => values.last().cloned(),
-    }
-}
+use pidash_compat::http::{query_last, QueryMap};
 
 /// `SearchFilter` terms (`rest_framework/filters.py`
 /// `search_smart_split` over Django `smart_split`): the last `?search=`
@@ -776,18 +749,6 @@ fn like_param(term: &str) -> String {
     }
     out.push('%');
     out
-}
-
-/// Python whitespace (`str.strip`, `re \s`, `str.isspace` — all the same
-/// 29 chars: Rust's `char::is_whitespace` plus `\x1c`-`\x1f`, verified
-/// equal over the whole scalar range).
-fn py_is_space(ch: char) -> bool {
-    ch.is_whitespace() || ('\x1c'..='\x1f').contains(&ch)
-}
-
-/// Python `str.strip()` with no arguments.
-fn py_strip(value: &str) -> &str {
-    value.trim_matches(py_is_space)
 }
 
 /// Zero code points of the 68 Unicode decimal-digit blocks (general
@@ -2395,8 +2356,8 @@ fn asset_url_for_row(row: &MemberFullRow) -> Result<Option<String>, Denial> {
             let slug = asset_workspace_slug(row)?;
             Ok(Some(format!(
                 "/api/assets/v2/workspaces/{slug}/projects/{}/issues/{}/attachments/{asset_id}/",
-                opt_uuid(&row.fa_project_id),
-                opt_uuid(&row.fa_issue_id),
+                py_uuid_or_none(&row.fa_project_id),
+                py_uuid_or_none(&row.fa_issue_id),
             )))
         }
         Some(
@@ -2408,7 +2369,7 @@ fn asset_url_for_row(row: &MemberFullRow) -> Result<Option<String>, Denial> {
             let slug = asset_workspace_slug(row)?;
             Ok(Some(format!(
                 "/api/assets/v2/workspaces/{slug}/projects/{}/{asset_id}/",
-                opt_uuid(&row.fa_project_id),
+                py_uuid_or_none(&row.fa_project_id),
             )))
         }
         _ => Ok(None),
@@ -2421,12 +2382,6 @@ fn asset_workspace_slug(row: &MemberFullRow) -> Result<&str, Denial> {
         (None, None) => Err(Denial::ServerError),
         (None, Some(_)) => Err(Denial::ObjectNotFound),
     }
-}
-
-/// Python f-string of a nullable id (`None` renders `None`).
-fn opt_uuid(id: &Option<Uuid>) -> String {
-    id.map(|id| id.to_string())
-        .unwrap_or_else(|| "None".to_owned())
 }
 
 /// `User.avatar_url` (`db/models/user.py:142-151`) for one row: attached
@@ -2660,7 +2615,9 @@ impl Cache {
             .url
             .as_deref()
             .filter(|u| !u.is_empty())?;
-        redis::Client::open(url).ok().map(|client| Self { client })
+        pidash_db::redis::open_client(url)
+            .ok()
+            .map(|client| Self { client })
     }
 
     async fn del(&self, key: &str) -> Result<(), redis::RedisError> {
@@ -2741,16 +2698,9 @@ async fn guest_demote_cascade(
     slug: &str,
     target_user_id: &Uuid,
 ) -> Result<(), Denial> {
-    sqlx::query(
-        "UPDATE project_members SET role = 5 WHERE project_members.workspace_id = \
-         (SELECT id FROM workspaces WHERE slug = $1) \
-         AND project_members.member_id = $2 AND project_members.deleted_at IS NULL",
-    )
-    .bind(slug)
-    .bind(target_user_id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    pidash_services::domain::projects::members::demote_cascade(pool, slug, *target_user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -2801,16 +2751,12 @@ async fn deactivate_project_rows(
     target_user_id: &Uuid,
     now: &DateTime<Utc>,
 ) -> Result<(), Denial> {
-    sqlx::query(
-        "UPDATE project_members SET is_active = FALSE, updated_at = $3 \
-         WHERE project_members.workspace_id = (SELECT id FROM workspaces WHERE slug = $1) \
-         AND project_members.member_id = $2 AND project_members.is_active = TRUE \
-         AND project_members.deleted_at IS NULL",
+    pidash_services::domain::projects::members::cascade_deactivate_ws(
+        pool,
+        slug,
+        *target_user_id,
+        *now,
     )
-    .bind(slug)
-    .bind(target_user_id)
-    .bind(now)
-    .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -2824,16 +2770,9 @@ async fn deactivate_member(
     actor_id: &Uuid,
     now: &DateTime<Utc>,
 ) -> Result<(), Denial> {
-    sqlx::query(
-        "UPDATE workspace_members SET is_active = FALSE, updated_at = $2, updated_by_id = $3 \
-         WHERE id = $1",
-    )
-    .bind(target_id)
-    .bind(now)
-    .bind(actor_id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    members::deactivate(pool, *target_id, *now, *actor_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -2999,7 +2938,7 @@ async fn validate_patch(
 /// Apply validated PATCH assignments: the dynamic `SET` plus the
 /// `updated_at`/`updated_by` stamps (`BaseModel.save` overwrites an
 /// explicit `updated_by` input with the request user, so the stamp wins
-/// unconditionally).
+/// unconditionally; `domain::workspaces::members::patch` renders it).
 async fn apply_patch(
     pool: &sqlx::PgPool,
     target_id: &Uuid,
@@ -3007,73 +2946,26 @@ async fn apply_patch(
     sets: &PatchSets,
 ) -> Result<(), Denial> {
     let now = Utc::now();
-    let mut qb = sqlx::QueryBuilder::new("UPDATE workspace_members SET ");
-    {
-        // `Separated` inserts the separator before every item after the
-        // first — binds included — so only the `col = ` half is a
-        // separated item; the placeholder half rides unseparated.
-        let mut sep = qb.separated(", ");
-        if let Some(role) = sets.role {
-            sep.push("role = ");
-            sep.push_bind_unseparated(i16::try_from(role).expect("role fits"));
-        }
-        if let Some(company_role) = &sets.company_role {
-            sep.push("company_role = ");
-            sep.push_bind_unseparated(company_role.clone());
-        }
-        if let Some(view_props) = &sets.view_props {
-            sep.push("view_props = ");
-            sep.push_bind_unseparated(view_props.clone());
-        }
-        if let Some(default_props) = &sets.default_props {
-            sep.push("default_props = ");
-            sep.push_bind_unseparated(default_props.clone());
-        }
-        if let Some(issue_props) = &sets.issue_props {
-            sep.push("issue_props = ");
-            sep.push_bind_unseparated(issue_props.clone());
-        }
-        if let Some(is_active) = sets.is_active {
-            sep.push("is_active = ");
-            sep.push_bind_unseparated(is_active);
-        }
-        if let Some(checklist) = &sets.getting_started_checklist {
-            sep.push("getting_started_checklist = ");
-            sep.push_bind_unseparated(checklist.clone());
-        }
-        if let Some(tips) = &sets.tips {
-            sep.push("tips = ");
-            sep.push_bind_unseparated(tips.clone());
-        }
-        if let Some(features) = &sets.explored_features {
-            sep.push("explored_features = ");
-            sep.push_bind_unseparated(features.clone());
-        }
-        if let Some(created_by) = &sets.created_by {
-            sep.push("created_by_id = ");
-            sep.push_bind_unseparated(*created_by);
-        }
-        if let Some(updated_by) = &sets.updated_by {
-            // Validated (so garbage still 400s above as a field error)
-            // but overwritten by the stamp below, like `BaseModel.save`.
-            let _ = updated_by;
-        }
-        if let Some(workspace) = &sets.workspace {
-            sep.push("workspace_id = ");
-            sep.push_bind_unseparated(*workspace);
-        }
-        if let Some(deleted_at) = &sets.deleted_at {
-            sep.push("deleted_at = ");
-            sep.push_bind_unseparated(*deleted_at);
-        }
-        sep.push("updated_at = ");
-        sep.push_bind_unseparated(now);
-        sep.push("updated_by_id = ");
-        sep.push_bind_unseparated(*actor_id);
-    }
-    qb.push(" WHERE id = ");
-    qb.push_bind(*target_id);
-    qb.build().execute(pool).await.map_err(map_write_error)?;
+    // Validated (so garbage still 400s above as a field error) but
+    // overwritten by the stamp, like `BaseModel.save`.
+    let _ = sets.updated_by;
+    let patch = members::MemberPatch {
+        role: sets.role,
+        company_role: sets.company_role.clone(),
+        view_props: sets.view_props.clone(),
+        default_props: sets.default_props.clone(),
+        issue_props: sets.issue_props.clone(),
+        is_active: sets.is_active,
+        getting_started_checklist: sets.getting_started_checklist.clone(),
+        tips: sets.tips.clone(),
+        explored_features: sets.explored_features.clone(),
+        workspace: sets.workspace,
+        created_by: sets.created_by,
+        deleted_at: sets.deleted_at,
+    };
+    members::patch(pool, target_id, actor_id, &patch, now)
+        .await
+        .map_err(map_write_error)?;
     Ok(())
 }
 
@@ -3423,16 +3315,7 @@ async fn member_views(
         return Denial::BadPayload.into_response();
     }
     let now = Utc::now();
-    let saved = sqlx::query(
-        "UPDATE workspace_members SET view_props = $2, updated_at = $3, updated_by_id = $4 \
-         WHERE id = $1",
-    )
-    .bind(requester.id)
-    .bind(&props)
-    .bind(now)
-    .bind(actor.id)
-    .execute(pool)
-    .await;
+    let saved = members::save_view_props(pool, requester.id, &props, now, actor.id).await;
     if let Err(error) = saved {
         return map_write_error(error).into_response();
     }
@@ -3542,6 +3425,8 @@ async fn last_visited(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pidash_compat::http::OneOrMany;
+    use std::collections::HashMap;
 
     /// F-W24-15 golden
     /// (`rust-api/fixtures/app_workspace/handlers/routes.golden.json`),

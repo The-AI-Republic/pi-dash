@@ -46,9 +46,13 @@ KNOWN_FAILURES_MD = CT / "KNOWN_RUST_FAILURES.md"
 # rust-api-contract-tests-exports-rust.yml), never HTTP. tasks_assistant
 # seeds rust_job_queue with the assistant.run_turn wire payloads and diffs
 # the turn/message rows against a live Rust worker (PIDASHCONV-863, covered
-# by rust-api-contract-tests-tasks-assistant-rust.yml). Add a directory
-# here only with a justification; ``check`` fails on any other unlisted
-# directory.
+# by rust-api-contract-tests-tasks-assistant-rust.yml). worker_lifecycle
+# spawns its own worker/server processes to SIGTERM them (PIDASHCONV-1326):
+# it cannot run against the shared CI servers (killing them) or beside a
+# shared worker (the queue has no per-consumer routing, so a second
+# consumer would race for the probe job); it runs locally until a
+# dedicated no-shared-worker CI job exists. Add a directory here only
+# with a justification; ``check`` fails on any other unlisted directory.
 TASK_ONLY_DIRS = frozenset(
     {
         "dispatch",
@@ -61,6 +65,7 @@ TASK_ONLY_DIRS = frozenset(
         "tasks_mail",
         "tasks_ticker",
         "tasks_webhooks",
+        "worker_lifecycle",
     }
 )
 

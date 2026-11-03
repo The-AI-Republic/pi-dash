@@ -99,8 +99,29 @@ pub fn parse_url(url: &str) -> Result<ParsedUrl, String> {
     if scheme != "http" && scheme != "https" {
         return Err(format!("No connection adapters were found for {url:?}"));
     }
-    let (authority, path) = match rest.split_once('/') {
-        Some((authority, tail)) => (authority, format!("/{tail}")),
+    // `urllib3.util.parse_url` (behind `PreparedRequest.prepare_url`)
+    // ends the authority at the first of `/`, `?` or `#`: a query or
+    // fragment on a bare host is not part of it (PIDASHCONV-1275).
+    let (authority, path) = match rest.find(['/', '?', '#']) {
+        Some(i) => {
+            let (authority, tail) = rest.split_at(i);
+            // `prepare_url`: an empty path becomes `/`; a bare query
+            // keeps its mark (`/?x=1`); the fragment is dropped here
+            // (and below for the `/` case) — it never reaches the wire.
+            let path = if let Some(query) = tail.strip_prefix('?') {
+                let query = query.split_once('#').map_or(query, |(head, _)| head);
+                if query.is_empty() {
+                    "/".to_owned()
+                } else {
+                    format!("/?{query}")
+                }
+            } else if tail.starts_with('#') {
+                "/".to_owned()
+            } else {
+                tail.to_owned()
+            };
+            (authority, path)
+        }
         None => (rest, "/".to_owned()),
     };
     if authority.is_empty() {
@@ -335,52 +356,139 @@ pub fn parse_status_and_headers(bytes: &[u8]) -> Result<StatusAndHeaders, String
     Ok((status, headers, end + 4))
 }
 
+/// Parse one chunk-size line (hex size, `;` extensions ignored).
+fn parse_chunk_size(line: &[u8]) -> Result<usize, String> {
+    let size_text = latin1(line);
+    let size_text = size_text
+        .split_once(';')
+        .map_or(size_text.as_str(), |(n, _)| n)
+        .trim();
+    usize::from_str_radix(size_text, 16).map_err(|_| "Invalid chunked body".to_owned())
+}
+
+/// What the incremental chunked decoder expects next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkedStage {
+    /// A chunk-size line.
+    Size,
+    /// `remaining` more data bytes of the current chunk.
+    Data { remaining: usize },
+    /// The CRLF ending the current chunk's data.
+    DataEnd,
+    /// The bytes after the terminal zero-size line (trailers through the
+    /// blank line, or a bare CRLF).
+    Terminal,
+}
+
+/// Incremental `Transfer-Encoding: chunked` decoder (PIDASHCONV-1673).
+///
+/// The read loop feeds the cumulative buffer after every socket read and
+/// the decoder resumes where it left off, so each byte is parsed and each
+/// completed chunk is copied exactly once: linear in the body size.
+/// Semantics and error strings match the old batch decoder, which now
+/// delegates here (`decode_chunked`).
+struct ChunkedDecoder {
+    body: Vec<u8>,
+    stage: ChunkedStage,
+    /// Offset of the first unconsumed byte in the cumulative buffer.
+    consumed: usize,
+    /// Offset up to which the tail was already scanned for a line ending
+    /// in the current stage; resuming the scan here (with an overlap for
+    /// straddled endings) keeps framing linear as well.
+    scanned: usize,
+}
+
+impl ChunkedDecoder {
+    fn new() -> Self {
+        ChunkedDecoder {
+            body: Vec::new(),
+            stage: ChunkedStage::Size,
+            consumed: 0,
+            scanned: 0,
+        }
+    }
+
+    fn into_body(self) -> Vec<u8> {
+        self.body
+    }
+
+    /// Feed the cumulative buffer; returns the offset just past the
+    /// terminal chunk once the framing is complete, `None` while more
+    /// bytes are needed.
+    fn feed(&mut self, buf: &[u8]) -> Result<Option<usize>, String> {
+        loop {
+            match self.stage {
+                ChunkedStage::Size => {
+                    let from = self.scanned.saturating_sub(1).max(self.consumed);
+                    let Some(rel) = buf[from..].windows(2).position(|w| w == b"\r\n") else {
+                        self.scanned = buf.len();
+                        return Ok(None);
+                    };
+                    let line_end = from + rel;
+                    let size = parse_chunk_size(&buf[self.consumed..line_end])?;
+                    self.consumed = line_end + 2;
+                    self.scanned = self.consumed;
+                    self.stage = if size == 0 {
+                        ChunkedStage::Terminal
+                    } else {
+                        ChunkedStage::Data { remaining: size }
+                    };
+                }
+                ChunkedStage::Data { mut remaining } => {
+                    let take = remaining.min(buf.len().saturating_sub(self.consumed));
+                    self.body
+                        .extend_from_slice(&buf[self.consumed..self.consumed + take]);
+                    self.consumed += take;
+                    remaining -= take;
+                    if remaining > 0 {
+                        self.stage = ChunkedStage::Data { remaining };
+                        return Ok(None);
+                    }
+                    self.scanned = self.consumed;
+                    self.stage = ChunkedStage::DataEnd;
+                }
+                ChunkedStage::DataEnd => {
+                    // A segment may end at the chunk-data edge: missing
+                    // bytes mean truncated (keep reading), present-but-wrong
+                    // bytes mean invalid.
+                    let Some(trailer) = buf.get(self.consumed..self.consumed + 2) else {
+                        return Ok(None);
+                    };
+                    if trailer != b"\r\n" {
+                        return Err("Invalid chunked body".to_owned());
+                    }
+                    self.consumed += 2;
+                    self.scanned = self.consumed;
+                    self.stage = ChunkedStage::Size;
+                }
+                ChunkedStage::Terminal => {
+                    // Consume trailers through the blank line, else a bare
+                    // final CRLF with no trailers — same two searches as
+                    // the old batch decoder, resumed at `scanned`.
+                    let from4 = self.scanned.saturating_sub(3).max(self.consumed);
+                    if let Some(rel) = buf[from4..].windows(4).position(|w| w == b"\r\n\r\n") {
+                        return Ok(Some(from4 + rel + 4));
+                    }
+                    let from2 = self.scanned.saturating_sub(1).max(self.consumed);
+                    if let Some(rel) = buf[from2..].windows(2).position(|w| w == b"\r\n") {
+                        return Ok(Some(from2 + rel + 2));
+                    }
+                    self.scanned = buf.len();
+                    return Ok(None);
+                }
+            }
+        }
+    }
+}
+
 /// Decode one chunked body (extensions and trailers ignored, like
 /// `urllib3`'s reader). Returns the joined bytes and the offset just
 /// past the terminal chunk.
 pub fn decode_chunked(bytes: &[u8]) -> Result<(Vec<u8>, usize), String> {
-    let mut body = Vec::new();
-    let mut at = 0;
-    loop {
-        let line_end = bytes[at..]
-            .windows(2)
-            .position(|w| w == b"\r\n")
-            .ok_or_else(|| "Truncated chunked body".to_owned())?
-            + at;
-        let size_text = latin1(&bytes[at..line_end]);
-        let size_text = size_text
-            .split_once(';')
-            .map_or(size_text.as_str(), |(n, _)| n)
-            .trim();
-        let size =
-            usize::from_str_radix(size_text, 16).map_err(|_| "Invalid chunked body".to_owned())?;
-        at = line_end + 2;
-        if size == 0 {
-            // Consume trailers through the blank line.
-            let trailer_end = bytes[at..]
-                .windows(4)
-                .position(|w| w == b"\r\n\r\n")
-                .map(|p| p + at + 4)
-                .or_else(|| {
-                    // Bare final CRLF with no trailers.
-                    bytes[at..]
-                        .windows(2)
-                        .position(|w| w == b"\r\n")
-                        .map(|p| p + at + 2)
-                })
-                .ok_or_else(|| "Truncated chunked body".to_owned())?;
-            return Ok((body, trailer_end));
-        }
-        let chunk_end = at
-            .checked_add(size)
-            .filter(|end| *end <= bytes.len())
-            .ok_or_else(|| "Truncated chunked body".to_owned())?;
-        body.extend_from_slice(&bytes[at..chunk_end]);
-        at = chunk_end;
-        if bytes.get(at..at + 2) != Some(b"\r\n") {
-            return Err("Invalid chunked body".to_owned());
-        }
-        at += 2;
+    let mut decoder = ChunkedDecoder::new();
+    match decoder.feed(bytes)? {
+        Some(end) => Ok((decoder.into_body(), end)),
+        None => Err("Truncated chunked body".to_owned()),
     }
 }
 
@@ -693,7 +801,10 @@ pub fn resolve_url(base: &str, location: &str) -> String {
     if let Some(network) = location.strip_prefix("//") {
         return inherit_fragment(&format!("{scheme}://{network}"), base);
     }
-    let authority = rest.split_once('/').map_or(rest, |(a, _)| a);
+    // The base head carries no fragment (stripped above), but a
+    // query on a bare host is not part of the authority either
+    // (`urljoin` parity, PIDASHCONV-1275).
+    let authority = rest.find(['/', '?']).map_or(rest, |i| &rest[..i]);
     if location.starts_with('/') {
         // Absolute path (possibly with a new query).
         return inherit_fragment(&format!("{scheme}://{authority}{location}"), base);
@@ -907,11 +1018,19 @@ async fn read_body(
         .split(',')
         .any(|c| c.trim().eq_ignore_ascii_case("chunked"));
     if chunked {
-        // Chunked framing must parse incrementally: read to close, then
-        // decode (trailer handling needs the terminal chunk).
+        // Chunked framing is complete at the terminal chunk; a keep-alive
+        // peer leaves the socket open, so decode incrementally instead of
+        // waiting for EOF. The decoder keeps its position between reads:
+        // each byte is parsed and each completed chunk copied once.
         let mut buf = already;
         let mut chunk = [0u8; 8192];
+        let mut decoder = ChunkedDecoder::new();
         loop {
+            match decoder.feed(&buf) {
+                Ok(Some(_)) => return Ok(decoder.into_body()),
+                Ok(None) => {}
+                Err(detail) => return Err(format!("Chunked encoding error: {detail}")),
+            }
             let step = async {
                 match stream {
                     Stream::Plain(s) => s.read(&mut chunk).await,
@@ -923,13 +1042,10 @@ async fn read_body(
                 .map_err(|_| "Read timed out".to_owned())?
                 .map_err(|e| format!("Connection failed: {e}"))?;
             if read == 0 {
-                break;
+                return Err("Chunked encoding error: Truncated chunked body".to_owned());
             }
             buf.extend_from_slice(&chunk[..read]);
         }
-        let (body, _) =
-            decode_chunked(&buf).map_err(|detail| format!("Chunked encoding error: {detail}"))?;
-        return Ok(body);
     }
     if let Some(length) = header_value(headers, "content-length") {
         // First value wins; garbage means close-delimited (`http.client`).
@@ -940,7 +1056,12 @@ async fn read_body(
                 body.truncate(wanted);
                 return Ok(body);
             }
-            body.reserve(wanted.saturating_sub(body.len()));
+            // Never preallocate from the header (PIDASHCONV-1273): the
+            // URL is tenant-chosen, so a hostile `Content-Length` must
+            // not size the allocation — `requests` grows its buffer as
+            // bytes arrive. EOF before `wanted` bytes stays a transport
+            // error via `read_exact_timeout`.
+            body.reserve(wanted.saturating_sub(body.len()).min(65536));
             while body.len() < wanted {
                 let mut chunk = vec![0u8; (wanted - body.len()).min(65536)];
                 read_exact_timeout(stream, &mut chunk, timeout).await?;
@@ -1137,6 +1258,30 @@ mod tests {
     }
 
     #[test]
+    fn url_parsing_ends_authority_at_query_or_fragment() {
+        // PIDASHCONV-1275: `urllib3.util.parse_url` (behind
+        // `PreparedRequest.prepare_url`) ends the authority at the first
+        // of `/`, `?` or `#`. A query or fragment on a bare host must
+        // not fold into the host; the request target becomes `/?query`
+        // and the fragment is dropped (empty path becomes `/`).
+        let parsed = parse_url("http://h?x=1").unwrap();
+        assert_eq!(parsed.host, "h");
+        assert_eq!(parsed.port, 80);
+        assert_eq!(parsed.path, "/?x=1");
+
+        let parsed = parse_url("http://h#f").unwrap();
+        assert_eq!(parsed.host, "h");
+        assert_eq!(parsed.path, "/");
+
+        // A `?` before the first `/` splits there, not at the `/`.
+        let parsed = parse_url("http://h:8080?x=/y").unwrap();
+        assert_eq!(parsed.host, "h");
+        assert_eq!(parsed.port, 8080);
+        assert_eq!(parsed.path, "/?x=/y");
+        assert_eq!(parsed.host_header(), "h:8080");
+    }
+
+    #[test]
     fn request_bytes_match_requests_wire_order() {
         // Order pinned by the raw-socket probe: Host, caller headers,
         // Content-Length, then the body.
@@ -1199,6 +1344,99 @@ mod tests {
         let raw = b"4;ext=1\r\nWiki\r\n5\r\npedia\r\n0\r\nX-T: v\r\n\r\n";
         let (body, _) = decode_chunked(raw).unwrap();
         assert_eq!(body, b"Wikipedia");
+    }
+
+    #[test]
+    fn chunked_decode_partial_buffer_is_truncated_not_invalid() {
+        // Every prefix of a valid chunked body must decode as truncated
+        // (keep reading), never as invalid: the incremental reader calls
+        // this after each TCP segment, and a segment may end anywhere —
+        // mid-size-line, mid-chunk, at the chunk-data edge, or inside the
+        // trailing CRLF.
+        let full = b"4;ext=1\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n";
+        for end in 1..full.len() {
+            let err = decode_chunked(&full[..end]).unwrap_err();
+            assert_eq!(err, "Truncated chunked body", "prefix len {end}");
+        }
+    }
+
+    /// The incremental decoder agrees with the batch entry point no
+    /// matter where the socket reads split the body — byte-at-a-time
+    /// included. This is what the read loop relies on.
+    #[test]
+    fn chunked_decoder_matches_batch_at_every_split() {
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n", b"Wikipedia"),
+            (b"4;ext=1\r\nWiki\r\n0\r\n\r\n", b"Wiki"),
+            (b"0\r\n\r\n", b""),
+            (b"1\r\na\r\n1\r\nb\r\n1\r\nc\r\n0\r\n\r\n", b"abc"),
+            // Terminal trailers need no blank line (batch parity).
+            (b"2\r\nok\r\n0\r\nX-T: v\r\n", b"ok"),
+        ];
+        for (raw, expected) in cases.iter() {
+            let raw: &[u8] = raw;
+            let expected: &[u8] = expected;
+            // Whole buffer at once.
+            let (batch_body, end) = decode_chunked(raw).unwrap();
+            assert_eq!(batch_body.as_slice(), expected);
+            assert_eq!(end, raw.len());
+            // Every two-part split, as the read loop feeds them.
+            for k in 1..raw.len() {
+                let mut decoder = ChunkedDecoder::new();
+                assert_eq!(decoder.feed(&raw[..k]).unwrap(), None, "split {k}");
+                assert_eq!(decoder.feed(raw).unwrap(), Some(raw.len()), "split {k}");
+                assert_eq!(decoder.into_body().as_slice(), expected, "split {k}");
+            }
+            // Byte at a time.
+            let mut decoder = ChunkedDecoder::new();
+            for k in 1..raw.len() {
+                assert_eq!(decoder.feed(&raw[..k]).unwrap(), None, "byte {k}");
+            }
+            assert_eq!(decoder.feed(raw).unwrap(), Some(raw.len()));
+            assert_eq!(decoder.into_body().as_slice(), expected);
+        }
+        // Trailers through the blank line consume the whole section.
+        let raw = b"0\r\nA: 1\r\nB: 2\r\n\r\n";
+        let (body, end) = decode_chunked(raw).unwrap();
+        assert_eq!(body.as_slice(), b"");
+        assert_eq!(end, raw.len());
+        // ...while a lone trailer line ends at its own CRLF, ignoring
+        // whatever trails it.
+        let (body, end) = decode_chunked(b"0\r\nA: 1\r\nZZ").unwrap();
+        assert_eq!(body.as_slice(), b"");
+        assert_eq!(end, 9);
+    }
+
+    #[test]
+    fn chunked_decoder_reports_invalid_only_on_present_bytes() {
+        // Bad size line: truncated until the line completes, invalid after.
+        for k in 1..4 {
+            let mut decoder = ChunkedDecoder::new();
+            assert_eq!(decoder.feed(&b"ZZ\r\n"[..k]).unwrap(), None);
+            assert_eq!(decoder.feed(b"ZZ\r\n").unwrap_err(), "Invalid chunked body");
+        }
+        assert_eq!(
+            decode_chunked(b"ZZ\r\n").unwrap_err(),
+            "Invalid chunked body"
+        );
+        // Wrong CRLF after chunk data: one byte present is truncated,
+        // two wrong bytes are invalid.
+        let mut decoder = ChunkedDecoder::new();
+        assert_eq!(decoder.feed(b"5\r\nhelloX").unwrap(), None);
+        assert_eq!(
+            decoder.feed(b"5\r\nhelloXX").unwrap_err(),
+            "Invalid chunked body"
+        );
+        assert_eq!(
+            decode_chunked(b"5\r\nhelloXX").unwrap_err(),
+            "Invalid chunked body"
+        );
+        // Empty and short buffers are truncated, never invalid.
+        assert_eq!(decode_chunked(b"").unwrap_err(), "Truncated chunked body");
+        assert_eq!(
+            decode_chunked(b"5\r\nhel").unwrap_err(),
+            "Truncated chunked body"
+        );
     }
 
     #[test]
@@ -1269,6 +1507,11 @@ mod tests {
         assert_eq!(resolve_url("http://h/a/b", "../c"), "http://h/c");
         assert_eq!(resolve_url("http://h/a/b", "?y=2"), "http://h/a/b?y=2");
         assert_eq!(resolve_url("http://h/a", "//o/d"), "http://o/d");
+        // PIDASHCONV-1275: a query on the redirect base's bare host
+        // is not part of its authority (`urljoin` parity).
+        assert_eq!(resolve_url("http://h?x=1", "/c"), "http://h/c");
+        assert_eq!(resolve_url("http://h?x=1", "?y=2"), "http://h?y=2");
+        assert_eq!(resolve_url("http://h?x=1", "c"), "http://h/c");
         assert_eq!(requote_uri("/a b/%7e"), "/a%20b/~");
         assert_eq!(requote_uri("/a%2G"), "/a%252G");
     }
@@ -1398,6 +1641,84 @@ mod tests {
         assert_eq!(seen.len(), 2);
         assert!(seen[0].starts_with("POST /start "), "{}", seen[0]);
         assert!(seen[1].starts_with("GET /next "), "{}", seen[1]);
+        server.await.unwrap();
+    }
+
+    /// Hostile Content-Length must not preallocate (PIDASHCONV-1273):
+    /// a 1 TB length with an immediate close is a transport error
+    /// (`requests` raises `ConnectionError` via `IncompleteRead`), not
+    /// an allocation abort of the worker process.
+    #[tokio::test]
+    async fn hostile_content_length_is_transport_error_not_abort() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let read = socket.read(&mut buf).await.unwrap();
+            assert!(read > 0);
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 1000000000000\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            // Close without sending the body: EOF before `wanted` bytes.
+        });
+        let result = post(
+            &format!("http://127.0.0.1:{port}/hook"),
+            &headers(&[("User-Agent", "Autopilot")]),
+            b"payload",
+            30,
+        )
+        .await;
+        assert!(result.is_err(), "hostile length must fail, got {result:?}");
+        server.await.unwrap();
+    }
+
+    /// A chunked response is complete at the terminal chunk. The peer in
+    /// this test deliberately leaves the socket open afterwards (as a
+    /// keep-alive proxy or server does); the client must return without
+    /// waiting for EOF or the per-read timeout.
+    #[tokio::test]
+    async fn chunked_terminal_chunk_returns_while_socket_stays_open() {
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let read = socket.read(&mut buf).await.unwrap();
+            assert!(read > 0);
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n2\r\nok\r\n0\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+            // Hold the connection open until the client returns.
+            let _ = release_rx.await;
+        });
+        let started = Instant::now();
+        let response = post(
+            &format!("http://127.0.0.1:{port}/hook"),
+            &headers(&[("User-Agent", "Autopilot")]),
+            b"payload",
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(1000),
+            "client waited for EOF instead of the terminal chunk"
+        );
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"ok");
+        release_tx.send(()).unwrap();
         server.await.unwrap();
     }
 }

@@ -19,8 +19,9 @@
 //! F-A6-05 (base_url SSRF check on save), F-A6-07 (test throttle).
 //!
 //! Throttle scope (`assistant_stt_test` 6/minute,
-//! [`super::throttles::STT_TEST_THROTTLE`]) is recorded but not enforced,
-//! same precedent as the LLM handlers (see `super::llm_config`).
+//! [`super::throttles::STT_TEST_THROTTLE`]) is enforced here via
+//! [`super::governor::throttle_check`] right after actor resolution (the
+//! transcribe precedent): DRF checks throttles before the handler body.
 //!
 //! Ported bugs (translate, don't redesign):
 //!
@@ -307,7 +308,7 @@ async fn get_config(
         Ok(row) => row,
         Err(failure) => return failure.into_response(),
     };
-    crate::license::json_response(&serialize_row(row.as_ref()))
+    crate::license::json_response(serialize_row(row.as_ref()))
 }
 
 /// `PUT users/me/ai-assistant/stt-config/` (`stt_config.py:49-77`).
@@ -387,7 +388,7 @@ async fn put_config(
         api_key_encrypted,
         last_verified_at: stored_verified,
     };
-    crate::license::json_response(&serialize_row(Some(&saved)))
+    crate::license::json_response(serialize_row(Some(&saved)))
 }
 
 /// `DELETE users/me/ai-assistant/stt-config/` (`stt_config.py:79-81`).
@@ -524,6 +525,12 @@ async fn post_test(
         Ok(actor) => actor,
         Err(failure) => return failure.into_response(),
     };
+    // DRF `initial()` runs `check_throttles` before the handler body, so
+    // a throttled caller answers 429 without touching the provider probe.
+    if !super::governor::throttle_check(super::throttles::STT_TEST_THROTTLE, &actor.id.to_string())
+    {
+        return super::Denial::throttled().into_response();
+    }
     let row = match fetch_row(&pool, &actor.id).await {
         Ok(row) => row,
         Err(failure) => return failure.into_response(),

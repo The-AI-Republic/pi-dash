@@ -6,17 +6,21 @@
 
 PIDASHCONV-1075: the email sign-in tail must replay Django's statement
 order — the project arm as two bulk statements (all ``workspace_members``
-rows committed before the ported ``project_id`` IntegrityError), the
-``last_login`` stamp after the invitation workflow, invite processing in
-``-created_at`` order, and the activation mail published before the
-``is_active`` save.
+rows first, then the ``project_members`` bulk carrying each invite's
+``project_id``), the ``last_login`` stamp after the invitation workflow,
+invite processing in ``-created_at`` order, and the activation mail
+published before the ``is_active`` save. PIDASHCONV-1686 retired the
+ported PB-1008 500: the project bulk sets ``project_id`` (Django main)
+and the join succeeds.
 
-Run like the rest of the suite (see ``conftest.py``), plus the two broker
-URLs the backends publish ``.delay()`` side effects to: ``AMQP_URL``
-(redis; the Django server publishes here) and the ``RABBITMQ_*`` parts
-(the Rust publisher is AMQP-only, so the Rust server publishes there).
-CI provides both; the order test drains both queues and asserts on
-whichever backend's messages arrive.
+Run like the rest of the suite (see ``conftest.py``), plus the broker
+URLs (``AMQP_URL`` redis, ``RABBITMQ_*``) the Django server publishes
+``.delay()`` side effects to. PIDASHCONV-1108 removed the Rust AMQP
+publisher, so the Rust server enqueues the same side effects onto the
+``rust_job_queue`` Postgres table instead of publishing to a broker.
+Each publish test below collects from both planes — the broker drains
+(Django) and the queue rows (Rust, id order) — and asserts on the
+union; exactly one plane fires per backend run.
 """
 
 import os
@@ -84,10 +88,10 @@ def _drain_redis() -> list:
 def _drain_rabbit() -> list:
     """Consume every pending ``celery`` queue entry on the AMQP broker.
 
-    An unreachable broker yields no messages instead of raising: the
-    Django run never publishes here, so a missing RabbitMQ must not fail
-    the Django side (on a Rust run the 302 assertion below already fails
-    honestly when the backend cannot publish).
+    An unreachable broker yields no messages instead of raising: neither
+    backend publishes here (Django publishes to redis; since
+    PIDASHCONV-1108 the Rust server enqueues to Postgres instead of
+    publishing to AMQP), so a missing RabbitMQ must not fail either side.
     """
     import json
 
@@ -161,6 +165,51 @@ def _drain_task_messages(task: str, timeout: float = 10.0) -> list:
     return [(args, kwargs) for args, kwargs, _embed in seen]
 
 
+def _queue_rows(db, task: str, where: str = "", params: tuple = ()) -> list:
+    """``(args, kwargs)`` rows the Rust plane enqueued for ``task`` (id order).
+
+    The PIDASHCONV-1108 D3 pattern: the Rust server enqueues ``.delay()``
+    side effects onto ``rust_job_queue`` instead of publishing to a
+    broker. The Django plane never writes this table (on a Django-only
+    run it may not exist at all), so a missing table yields no rows.
+    ``auth_session`` is not a worker suite, so no worker drains the rows
+    mid-run.
+    """
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.rust_job_queue') AS t")
+            if cur.fetchone()[0] is None:
+                return []
+            cur.execute(
+                "SELECT args, kwargs FROM rust_job_queue"
+                f" WHERE task = %s{where} ORDER BY id",
+                (task, *params),
+            )
+            return cur.fetchall()
+
+
+def _queue_track_event_kwargs(db, *slugs: str) -> list:
+    """``track_event`` kwargs rows the Rust plane enqueued (id order).
+
+    Scoped to this test's workspace slugs (unique per test), so rows
+    from other tests in the same run never leak in.
+    """
+    return [
+        kwargs
+        for _args, kwargs in _queue_rows(
+            db, TRACK_EVENT_TASK, " AND kwargs ->> 'slug' = ANY(%s)", (list(slugs),)
+        )
+    ]
+
+
+def _queue_task_calls(db, task: str, user_id: str) -> list:
+    """``(args, kwargs)`` rows the Rust plane enqueued for ``task`` (id order).
+
+    Scoped to this test's user id (``args[1]``, unique per test).
+    """
+    return _queue_rows(db, task, " AND args ->> 1 = %s", (user_id,))
+
+
 @pytest.fixture()
 def invite_world(db, user):
     """Two workspaces + projects owned by the user; all rows cleaned after.
@@ -227,16 +276,17 @@ def _seed_workspace_invite(db, workspace_id, email, *, role, created_days_ago):
     return iid
 
 
-def test_project_invites_commit_all_workspace_rows_before_ported_500(
+def test_project_invites_join_both_workspaces_and_projects(
     browser, db, user, invite_world
 ):
-    """Two accepted project invites: 500 on both, N rows kept, no stamp.
+    """Two accepted project invites: 302 on both, both row sets, stamped.
 
     Django commits the whole project-arm ``workspace_members`` bulk before
-    the ``project_members`` bulk raises the ported IntegrityError, and the
-    ``last_login`` stamp (fired from ``login()`` after ``authenticate()``)
-    never runs. ``save_user_data`` still runs first, so ``last_active``
-    is stamped while ``last_login`` stays NULL.
+    the ``project_members`` bulk, which carries each invite's
+    ``project_id`` (role clamped per row), and the ``last_login`` stamp
+    (fired from ``login()`` after ``authenticate()``) runs.
+    ``save_user_data`` still runs first, so ``last_active`` is stamped
+    too. FAILS on pre-fix Rust (500, partial writes).
     """
     email = user["email"]
     old_ws, new_ws = invite_world["workspaces"]
@@ -246,7 +296,7 @@ def test_project_invites_commit_all_workspace_rows_before_ported_500(
     _seed_project_invite(db, new_ws["id"], new_proj["id"], email, role=5, created_days_ago=1)
 
     res = browser().post("/auth/sign-in/", data={"email": email, "password": user["password"]})
-    assert res.status_code == 500, res.text[:300]
+    assert res.status_code == 302, res.text[:300]
 
     with db.connect() as conn:
         with conn.cursor() as cur:
@@ -256,25 +306,34 @@ def test_project_invites_commit_all_workspace_rows_before_ported_500(
                 (user["id"],),
             )
             members = cur.fetchall()
-            cur.execute("SELECT COUNT(*) FROM project_members WHERE member_id = %s", (user["id"],))
-            project_rows = cur.fetchone()[0]
+            cur.execute(
+                "SELECT project_id::text, workspace_id::text, role FROM project_members"
+                " WHERE member_id = %s ORDER BY workspace_id::text",
+                (user["id"],),
+            )
+            project_rows = cur.fetchall()
             cur.execute(
                 "SELECT last_login, last_active FROM users WHERE id = %s", (user["id"],)
             )
             last_login, last_active = cur.fetchone()
             cur.execute(
-                "SELECT COUNT(*) FROM project_member_invites WHERE email = %s AND accepted",
+                "SELECT COUNT(*) FROM project_member_invites"
+                " WHERE email = %s AND accepted AND deleted_at IS NULL",
                 (email,),
             )
-            invites_left = cur.fetchone()[0]
+            invites_live = cur.fetchone()[0]
     assert sorted((w, r) for w, r in members) == sorted(
         [(old_ws["id"], 15), (new_ws["id"], 5)]
     ), members
-    assert project_rows == 0
-    assert last_login is None
+    assert sorted((p, w, r) for p, w, r in project_rows) == sorted(
+        [(old_proj["id"], old_ws["id"], 15), (new_proj["id"], new_ws["id"], 5)]
+    ), project_rows
+    assert last_login is not None
     assert last_active is not None
-    # The invite deletes never run on the 500 path.
-    assert invites_left == 2
+    # No live accepted invite remains on either backend. (Django
+    # soft-deletes the rows while Rust hard-deletes them -- a hardness
+    # divergence outside this issue's write-sequence scope.)
+    assert invites_live == 0
 
 
 def test_workspace_invites_publish_track_event_newest_first(browser, db, user, invite_world):
@@ -294,7 +353,9 @@ def test_workspace_invites_publish_track_event_newest_first(browser, db, user, i
     res = browser().post("/auth/sign-in/", data={"email": email, "password": user["password"]})
     assert res.status_code == 302, res.text[:300]
 
-    track_events = _drain_track_events()
+    track_events = _drain_track_events() + _queue_track_event_kwargs(
+        db, new_ws["slug"], old_ws["slug"]
+    )
     assert [kw.get("slug") for kw in track_events] == [new_ws["slug"], old_ws["slug"]]
 
     with db.connect() as conn:
@@ -340,8 +401,10 @@ def test_inactive_user_signin_publishes_activation_and_succeeds(browser, db, use
     )
     assert res.status_code == 302, res.text[:300]
 
-    activations = _drain_task_messages(ACTIVATION_TASK)
-    # Kombu decodes the user-id arg back to UUID; the Rust publish path
+    activations = _drain_task_messages(ACTIVATION_TASK) + _queue_task_calls(
+        db, ACTIVATION_TASK, user["id"]
+    )
+    # Kombu decodes the user-id arg back to UUID; the Rust queue row
     # carries the plain string -- compare stringified on both.
     assert [str(args[1]) for args, _kwargs in activations] == [user["id"]]
 

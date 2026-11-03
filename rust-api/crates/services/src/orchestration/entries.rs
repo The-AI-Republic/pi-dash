@@ -85,13 +85,13 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::domain::identity::AgentUserCollisionError;
 use pidash_auth::permissions::membership::check_project_role;
 pub use pidash_auth::permissions::membership::ProjectRoleFacts;
 use pidash_db::app_project::models::state::StateGroup;
 use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
 use pidash_db::orchestration::querysets::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
-use pidash_db::orchestration::workpad::AgentUserCollisionError;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::orchestration::{
@@ -113,6 +113,7 @@ use super::creation::{
     FinalizeAgentRunSeam, PodView, ProjectView, RenderedTurn, RunView, StateView,
     ERROR_CODE_PROMPT_BUILD_FAILED, RUN_VIEW_COLUMNS,
 };
+use pidash_compat::py::py_uuid_or_none;
 
 // ---------------------------------------------------------------------------
 // Reasons, error strings, signal attributes (all verbatim)
@@ -236,7 +237,7 @@ pub const CLOCK_POLICY_SQL: &str = "SELECT agent_ticking_enabled, agent_default_
     agent_test_default_interval_seconds FROM projects WHERE id = $1";
 
 /// The scheduler full-row INSERT (`AgentRun.objects.create`,
-/// `service.py:953-965`): the same 38 non-generated columns in model
+/// `service.py:953-965`): the same 36 non-generated columns in model
 /// order as L6's `RUN_INSERT_SQL`, with the scheduler VALUES shape —
 /// `work_item` NULL, `scheduler_binding` bound, `parent_run` NULL, the
 /// `'scheduler'` trigger and `'{}'` run config as literals (fixed by the
@@ -246,14 +247,14 @@ pub const CLOCK_POLICY_SQL: &str = "SELECT agent_ticking_enabled, agent_default_
 pub const SCHEDULER_RUN_INSERT_SQL: &str =
     "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, \
     pod_id, runner_id, pinned_runner_id, work_item_id, scheduler_binding_id, parent_run_id, \
-    status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, error_code, \
+    status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, \
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
     prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-    lease_expires_at, done_payload, error, refusal_category, llm_model, usage, created_at, \
-    assigned_at, queue_position, started_at, ended_at) \
-    VALUES ($1, $2, NULL, $3, $4, NULL, $5, NULL, $6, NULL, 'queued', $7, 0, NULL, '', $8, $9, \
-    NULL, NULL, '', 'scheduler', NULL, '', '{}', '[]', '', '{}', NULL, NULL, '', '', '', '{}', $10, \
-    NULL, NULL, NULL, NULL)";
+    lease_expires_at, done_payload, error_details, llm_model, usage, created_at, \
+    assigned_at, started_at, ended_at) \
+    VALUES ($1, $2, NULL, $3, $4, NULL, $5, NULL, $6, NULL, 'queued', $7, 0, NULL, '', $9, \
+    NULL, NULL, '', 'scheduler', NULL, '', '{}', '[]', '', '{}', NULL, NULL, $8, '', '{}', $10, \
+    NULL, NULL, NULL)";
 
 /// The scheduler INSERT as executed: [`SCHEDULER_RUN_INSERT_SQL`] plus
 /// `RETURNING` the [`RUN_VIEW_COLUMNS`] projection, like `objects.create`.
@@ -325,8 +326,9 @@ pub struct NewSchedulerRun {
     pub pinned_runner_id: Option<Uuid>,
     pub binding_id: Uuid,
     pub executor_kind: AgentExecutorKind,
-    /// The `error_code` splat (`""` except the managed waiting path).
-    pub error_code: String,
+    /// The `error_details` splat (`{}` except the managed waiting
+    /// path's `{"code": …}`).
+    pub error_details: Value,
     pub tool_plan: Value,
     /// `created_at` (`auto_now_add`, supplied explicitly).
     pub now: DateTime<Utc>,
@@ -458,9 +460,9 @@ pub trait EntriesSeam: CreationSeam + FinalizeAgentRunSeam {
     /// and role gates pass, as in Python.
     async fn has_usable_llm_config(&mut self, user_id: Uuid) -> Result<bool, CreationError>;
     /// `get_agent_system_user`: the dedicated bot user, created on first
-    /// call ([`AGENT_USER_SELECT_SQL`](pidash_db::orchestration::workpad::AGENT_USER_SELECT_SQL),
-    /// `AGENT_USER_INSERT_SQL`, `AGENT_USER_PASSWORD_SQL`). The outer
-    /// error is a store failure; the inner is the verbatim collision.
+    /// call (`domain::identity`: find by username, bot insert, unusable
+    /// password stamp). The outer error is a store failure; the inner is
+    /// the verbatim collision.
     async fn agent_system_user(
         &mut self,
     ) -> Result<Result<Uuid, AgentUserCollisionError>, CreationError>;
@@ -544,14 +546,9 @@ pub fn fire_error_log_line(
     format!(
         "orchestration.error: handle_issue_state_transition failed \
          for issue={issue_pk} from_state={} to_state={} (total_errors={total_errors})",
-        opt_uuid(prev_state_id),
-        opt_uuid(current_state_id),
+        py_uuid_or_none(&prev_state_id),
+        py_uuid_or_none(&current_state_id),
     )
-}
-
-/// Python `str()` of an optional id for log lines.
-fn opt_uuid(id: Option<Uuid>) -> String {
-    id.map_or_else(|| "None".to_owned(), |id| id.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,7 +1134,9 @@ pub async fn dispatch_scheduler_run<S: EntriesSeam>(
             pinned_runner_id: execution.merge_pin(None),
             binding_id: binding.id,
             executor_kind: execution.executor_kind,
-            error_code: execution.error_code.clone().unwrap_or_default(),
+            error_details: super::creation::initial_error_details(
+                execution.error_code.as_deref().unwrap_or_default(),
+            ),
             tool_plan: execution.tool_plan.clone(),
             now: req.now,
         })
@@ -1273,7 +1272,10 @@ pub fn orchestration_error_count() -> u64 {
 }
 
 /// Bump the counter; answers the new total for the log line.
-fn bump_orchestration_error_count() -> u64 {
+/// Cross-crate swallow sites that mirror the `Failed` arm (the seed
+/// drive's probe/re-run swallows) bump through this so every
+/// swallowed handler error counts once.
+pub fn bump_orchestration_error_count() -> u64 {
     ORCHESTRATION_ERROR_COUNT.fetch_add(1, Ordering::Relaxed) + 1
 }
 
@@ -1364,9 +1366,9 @@ mod tests {
     use serde_json::{json, Value};
     use uuid::Uuid;
 
+    use crate::domain::identity::AgentUserCollisionError;
     use pidash_auth::permissions::membership::ProjectRoleFacts;
     use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
-    use pidash_db::orchestration::workpad::AgentUserCollisionError;
     use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
     use pidash_types::dispatch::AgentExecutorKind;
     use pidash_types::orchestration::StateRef;
@@ -1502,8 +1504,7 @@ mod tests {
             phase_kind: "coding-task".to_owned(),
             run_config: json!({}),
             tool_plan: json!({}),
-            error_code: String::new(),
-            error: String::new(),
+            error_details: json!({}),
             prompt: String::new(),
             prompt_manifest: None,
             ended_at: None,
@@ -1562,6 +1563,7 @@ mod tests {
             prior_run_count: 0,
             ticker: None,
             direct_parent_payload: None,
+            has_parent_run: false,
             ticker_parent_payload: None,
             override_rows: Vec::new(),
         }
@@ -1856,8 +1858,7 @@ mod tests {
                 phase_kind: row.phase_kind.clone(),
                 run_config: row.run_config.clone(),
                 tool_plan: row.tool_plan.clone(),
-                error_code: row.error_code.clone(),
-                error: String::new(),
+                error_details: row.error_details.clone(),
                 prompt: String::new(),
                 prompt_manifest: None,
                 ended_at: None,
@@ -1943,8 +1944,13 @@ mod tests {
                 .push((run_id, error_code.to_owned(), error.to_owned()));
             let run = self.runs.get_mut(&run_id).expect("run exists");
             run.status = AgentRunStatus::Failed;
-            run.error_code = error_code.to_owned();
-            run.error = error.to_owned();
+            run.error_details = pidash_db::runner_runs::agent_run::merge_error_details(
+                &run.error_details,
+                &[
+                    ("error_code", Value::String(error_code.to_owned())),
+                    ("error", Value::String(error.to_owned())),
+                ],
+            );
             run.ended_at = Some(now);
             Ok(run.clone())
         }
@@ -2109,8 +2115,7 @@ mod tests {
                 phase_kind: String::new(),
                 run_config: json!({}),
                 tool_plan,
-                error_code: row.error_code.clone(),
-                error: String::new(),
+                error_details: row.error_details.clone(),
                 prompt: String::new(),
                 prompt_manifest: None,
                 ended_at: None,
@@ -2617,8 +2622,8 @@ mod tests {
             golden["executor_kind"].as_str().unwrap()
         );
         assert_eq!(run.tool_plan, golden["tool_plan"]);
-        assert_eq!(run.error_code, golden["error_code"].as_str().unwrap());
-        assert_eq!(run.error, golden["error"].as_str().unwrap());
+        assert_eq!(run.error_code(), golden["error_code"].as_str().unwrap());
+        assert_eq!(run.error(), golden["error"].as_str().unwrap());
         assert_eq!(run.ended_at, None);
         assert!(golden["ended_at"].is_null());
         assert_eq!(run.run_config, golden["run_config"]);
@@ -2886,6 +2891,7 @@ mod tests {
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(frozen_now()),
+                paused_at: None,
             },
         );
         let outcome = handle_issue_comment(&mut seam, &comment_req(Some(uid(0x40)), now))
@@ -3054,8 +3060,8 @@ mod tests {
             golden["executor_kind"].as_str().unwrap()
         );
         assert_eq!(run.tool_plan, golden["tool_plan"]);
-        assert_eq!(run.error_code, golden["error_code"].as_str().unwrap());
-        assert_eq!(run.error, golden["error"].as_str().unwrap());
+        assert_eq!(run.error_code(), golden["error_code"].as_str().unwrap());
+        assert_eq!(run.error(), golden["error"].as_str().unwrap());
         assert_eq!(run.ended_at, None);
         assert!(golden["ended_at"].is_null());
         assert_eq!(seam.scheduler_runs.len(), 1);
@@ -3532,8 +3538,8 @@ mod tests {
             golden["executor_kind"].as_str().unwrap()
         );
         assert_eq!(run.tool_plan, golden["tool_plan"]);
-        assert_eq!(run.error_code, golden["error_code"].as_str().unwrap());
-        assert_eq!(run.error, golden["error"].as_str().unwrap());
+        assert_eq!(run.error_code(), golden["error_code"].as_str().unwrap());
+        assert_eq!(run.error(), golden["error"].as_str().unwrap());
         assert_eq!(run.ended_at, Some(now));
         assert_eq!(
             seam.finalized,
@@ -3567,9 +3573,9 @@ mod tests {
         let run = seam.runs.get(&run_id).expect("run stored").clone();
         let golden = &case["after"];
         assert_eq!(run.status.value(), golden["status"].as_str().unwrap());
-        assert_eq!(run.error_code, golden["error_code"].as_str().unwrap());
-        assert_eq!(run.error_code, "prompt_build_failed");
-        assert_eq!(run.error, golden["error"].as_str().unwrap());
+        assert_eq!(run.error_code(), golden["error_code"].as_str().unwrap());
+        assert_eq!(run.error_code(), "prompt_build_failed");
+        assert_eq!(run.error(), golden["error"].as_str().unwrap());
         assert_eq!(run.ended_at, Some(now));
         assert_eq!(run.prompt, golden["prompt"].as_str().unwrap());
         assert!(run.prompt_manifest.is_none());

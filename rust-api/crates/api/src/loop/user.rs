@@ -53,6 +53,7 @@ use serde_json::Value;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
 
+use pidash_compat::response::json_value as error_response;
 use pidash_db::r#loop::models::loop_job::LoopJob;
 use pidash_services::r#loop::shape::{public_job_payload, PublicJobRow};
 
@@ -220,18 +221,6 @@ fn parse_enabled(headers: &HeaderMap, body: &[u8]) -> Result<bool, Denial> {
     // constant — pinned by `guard_bodies_match_golden_errors`).
     crate::r#loop::guards::read_enabled(&data)
         .map_err(|_| Denial::BadError("invalid_payload".to_owned()))
-}
-
-/// Render an exact `{"error": …}` body with its status. The guards module
-/// owns the byte-exact constants; insertion order is preserved by the
-/// crate's `serde_json/preserve_order`.
-fn error_response(status: StatusCode, body: &Value) -> Response {
-    let rendered = serde_json::to_string(body).expect("error body serializes");
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(rendered))
-        .expect("error response")
 }
 
 // ---------------------------------------------------------------------------

@@ -78,6 +78,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::intake_assets::asset_board_first_scoped_sql;
+use crate::assistant::tools_issues::escape_icontains;
 
 // ---------------------------------------------------------------------------
 // L1 anchor lookup (views/issue.py:80-85)
@@ -108,7 +109,12 @@ pub const NOT_PUBLISHED_BODY: &str = r#"{"error": "Project is not published"}"#;
 /// `WHERE` and the `sub_issues_count` subquery share one spelling.
 /// (Single-table rendering of `db::space::columns::issue_objects_scope`,
 /// plus the projects conjunct that scope leaves to the queries layer.)
-pub const ISSUE_OBJECTS_WHERE: &str = "\"issues\".\"deleted_at\" IS NULL AND \"states\".\"group\" != 'triage' AND \"issues\".\"archived_at\" IS NULL AND \"projects\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = false";
+///
+/// Triage trap: Django's `.exclude(state__group='triage')` negates
+/// null-safely over the nullable state FK (PB-0343, PIDASHCONV-1250), so
+/// the exclusion keeps the Django-exact `NOT (... AND ... IS NOT NULL)`
+/// form — a plain `!= 'triage'` would drop stateless issues.
+pub const ISSUE_OBJECTS_WHERE: &str = "\"issues\".\"deleted_at\" IS NULL AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"issues\".\"archived_at\" IS NULL AND \"projects\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = false";
 
 /// Base `WHERE` before user filters: manager exclusions plus tenant scoping
 /// (`workspace__slug=slug, project_id=project_id`, `views/issue.py:88`).
@@ -147,9 +153,10 @@ pub fn attachment_count_annotation_sql() -> String {
 /// `sub_issues_count` annotation subquery (`views/issue.py:118-123`):
 /// `Issue.issue_objects.filter(parent=OuterRef("id"))` counted — the
 /// `IssueManager` exclusions are re-applied, so triage/archived/draft
-/// children are NOT counted.
+/// children are NOT counted. The `states` join is `LEFT OUTER` with the
+/// null-safe triage negation (PB-0343): stateless children ARE counted.
 pub fn sub_issues_count_annotation_sql() -> String {
-    "(SELECT COUNT(U0.\"id\") AS \"count\" FROM \"issues\" U0 INNER JOIN \"states\" U1 ON (U0.\"state_id\" = U1.\"id\") INNER JOIN \"projects\" U2 ON (U0.\"project_id\" = U2.\"id\") WHERE (U0.\"deleted_at\" IS NULL AND U1.\"group\" != 'triage' AND U0.\"archived_at\" IS NULL AND U2.\"archived_at\" IS NULL AND U0.\"is_draft\" = false AND U0.\"parent_id\" = (\"issues\".\"id\"))) AS \"sub_issues_count\"".to_string()
+    "(SELECT COUNT(U0.\"id\") AS \"count\" FROM \"issues\" U0 LEFT OUTER JOIN \"states\" U1 ON (U0.\"state_id\" = U1.\"id\") INNER JOIN \"projects\" U2 ON (U0.\"project_id\" = U2.\"id\") WHERE (U0.\"deleted_at\" IS NULL AND NOT (U1.\"group\" = 'triage' AND U1.\"group\" IS NOT NULL) AND U0.\"archived_at\" IS NULL AND U2.\"archived_at\" IS NULL AND U0.\"is_draft\" = false AND U0.\"parent_id\" = (\"issues\".\"id\"))) AS \"sub_issues_count\"".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -457,8 +464,10 @@ pub fn compile_issue_filters(
                 }
             }
             "name" if !raw.is_empty() => {
+                // `name__icontains` (`issue_filters.py:207-208`): Django runs
+                // `prep_for_like_query`, so `\`, `%` and `_` match literally.
                 conjuncts.push(format!("\"issues\".\"name\" ILIKE ${next}"));
-                params.push(format!("%{raw}%"));
+                params.push(format!("%{}%", escape_icontains(raw)));
                 next += 1;
             }
             // `created_at__date` / `completed_at__date` compare on the date
@@ -658,9 +667,11 @@ fn date_conjuncts(
             }
             next += 1;
         } else {
+            // Bare part is `{term}__contains` (`issue_filters.py:83`): same
+            // `prep_for_like_query` escaping as `icontains`.
             out.push((
                 format!("{}::text LIKE ${next}", lhs(column)),
-                vec![format!("%{}%", parts[0])],
+                vec![format!("%{}%", escape_icontains(parts[0]))],
             ));
             next += 1;
         }
@@ -1238,9 +1249,16 @@ mod tests {
             &[],
             "U0.\"parent_id\" = (\"issues\".\"id\")",
         );
+        // PB-0343: the states leg must not inner-join stateless children
+        // away before the null-safe triage negation can keep them.
+        assert_builder_contains(
+            &sub_issues_count_annotation_sql(),
+            &[],
+            "LEFT OUTER JOIN \"states\" U1 ON (U0.\"state_id\" = U1.\"id\")",
+        );
         for conjunct in [
             "U0.\"deleted_at\" IS NULL",
-            "U1.\"group\" != 'triage'",
+            "NOT (U1.\"group\" = 'triage' AND U1.\"group\" IS NOT NULL)",
             "U0.\"archived_at\" IS NULL",
             "U2.\"archived_at\" IS NULL",
             "U0.\"is_draft\" = false",
@@ -1254,7 +1272,7 @@ mod tests {
         let sql = base_where_sql();
         for conjunct in [
             "\"issues\".\"deleted_at\" IS NULL",
-            "\"states\".\"group\" != 'triage'",
+            "NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL)",
             "\"issues\".\"archived_at\" IS NULL",
             "\"projects\".\"archived_at\" IS NULL",
             "\"issues\".\"is_draft\" = false",
@@ -1427,6 +1445,26 @@ mod tests {
         assert!(both
             .conjuncts
             .contains(&"\"issues\".\"start_date\" IS NOT NULL".to_string()));
+    }
+
+    #[test]
+    fn filters_like_patterns_escape_wildcards() {
+        // `name__icontains` matches literally: `\`, `%`, `_` are escaped
+        // (`prep_for_like_query`), so `?name=a_b` never matches `axb`.
+        let c = compile_issue_filters(&qp(&[("name", "a_b%c\\")]), 3);
+        assert_eq!(
+            c.conjuncts,
+            vec!["\"issues\".\"name\" ILIKE $3".to_string()]
+        );
+        assert_eq!(c.params, vec!["%a\\_b\\%c\\\\%".to_string()]);
+        // The bare date part (`{term}__contains`, `issue_filters.py:83`)
+        // escapes the same way.
+        let one = compile_issue_filters(&qp(&[("created_at", "2026_01%")]), 3);
+        assert_eq!(
+            one.conjuncts,
+            vec!["\"issues\".\"created_at\"::date::text LIKE $3".to_string()]
+        );
+        assert_eq!(one.params, vec!["%2026\\_01\\%%".to_string()]);
     }
 
     #[test]

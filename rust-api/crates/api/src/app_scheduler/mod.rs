@@ -33,31 +33,23 @@ pub mod handlers_bind;
 pub mod handlers_occ;
 pub mod handlers_sched;
 
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::{Extension, Router};
 use sqlx::PgPool;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::response::json_response as json_body;
 
 /// `Project.resolve` miss (`db/models/project.py:213-217`): verbatim
 /// `Http404` args through DRF's handler (no trailing period). Shared by
 /// the project-level handler files (bindings + occurrences).
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 
-fn json_body(status: StatusCode, body: &str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body.to_owned()))
-        .expect("static scheduler response")
-}
-
 /// Render a JSON success/error body with the DRF content type.
-pub fn json_response(status: StatusCode, body: String) -> Response {
-    json_body(status, &body)
-}
+/// Canonical `pidash_compat::response::json_response` (OVL-04).
+pub use pidash_compat::response::json_response;
 
 /// The request pool, or the `handle_exception` 500 when the server runs
 /// pool-less (unreachable in `serve`, which fail-fasts at boot).

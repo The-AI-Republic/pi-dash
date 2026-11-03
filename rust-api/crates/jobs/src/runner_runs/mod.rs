@@ -22,9 +22,9 @@ pub mod sweeps_runs;
 
 pub use offline_recovery::{register_offline_recovery_tasks, FAIL_RUNS_TASK, RELEASE_PINS_TASK};
 pub use sweeps_chat::{
-    register_runner_runs_tasks, RECONCILE_STALLED_RUNS_TASK, RECONCILE_TERMINAL_EFFECTS_TASK,
-    SWEEP_AGENT_CHAT_STATE_TASK, SWEEP_CHAT_MESSAGE_DEDUPE_TASK, SWEEP_RUN_MESSAGE_DEDUPE_TASK,
-    TERMINAL_EFFECTS_TASK,
+    emit_terminal_effects, register_runner_runs_tasks, RECONCILE_STALLED_RUNS_TASK,
+    RECONCILE_TERMINAL_EFFECTS_TASK, SWEEP_AGENT_CHAT_STATE_TASK, SWEEP_CHAT_MESSAGE_DEDUPE_TASK,
+    SWEEP_RUN_MESSAGE_DEDUPE_TASK, TERMINAL_EFFECTS_TASK,
 };
 pub use sweeps_runs::{
     register_sweeps_runs_tasks, EXPIRE_TASK, MARK_OFFLINE_TASK, SWEEP_IDLE_TASK, SWEEP_STALE_TASK,

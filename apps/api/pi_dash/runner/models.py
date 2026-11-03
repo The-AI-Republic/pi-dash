@@ -11,7 +11,7 @@ from django.db import models
 from django.utils import timezone
 
 from pi_dash.core.agent_execution import MACHINE_EXECUTORS, AgentExecutorKind
-from pi_dash.runner.fields import JSONKeyBigIntegerField
+from pi_dash.runner.fields import JSONKeyBigIntegerField, JSONKeyTextField
 from pi_dash.runner.services.usage import flat_token_fields
 
 _logger = logging.getLogger(__name__)
@@ -209,8 +209,10 @@ class AgentRunStatus(models.TextChoices):
     ASSIGNED = "assigned", "Assigned"
     # Non-terminal: the run is assigned to a single-tenant runner that has
     # accepted it but cannot acquire a worktree lease yet, so it waits in the
-    # daemon's local queue. Sits between ASSIGNED and RUNNING; the runner
-    # reports ``queue_position`` for display. See
+    # daemon's local queue. Sits between ASSIGNED and RUNNING. Retained because
+    # historical rows still hold it and it keeps gating (busy / non-terminal
+    # status sets, work_item uniqueness); the worktree pool that created new
+    # rows in this status is retired. See
     # ``.ai_design/worktree_pooling/design.md`` §6.1.
     WAITING_FOR_WORKTREE = "waiting_for_worktree", "Waiting for Worktree"
     RUNNING = "running", "Running"
@@ -379,6 +381,24 @@ class DevMachine(models.Model):
         return self.label or self.host_label or str(self.id)
 
 
+class RunnerQuerySet(models.QuerySet):
+    def assignable(self):
+        """Runners that may take new work right now.
+
+        Online, heartbeat-fresh, and not operator-paused. Every path that
+        picks a runner for new work (matcher drains, follow-up pinning,
+        availability checks) must go through this so a new eligibility
+        rule only has to be added once.
+        """
+        from pi_dash.runner.services.matcher import HEARTBEAT_GRACE
+
+        return self.filter(
+            status=RunnerStatus.ONLINE,
+            last_heartbeat_at__gte=timezone.now() - HEARTBEAT_GRACE,
+            paused_at__isnull=True,
+        )
+
+
 class Runner(models.Model):
     """Cloud-visible worker entity under a dev machine.
 
@@ -390,6 +410,8 @@ class Runner(models.Model):
     """
 
     MAX_PER_USER = 5
+
+    objects = RunnerQuerySet.as_manager()
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False, db_index=True)
     owner = models.ForeignKey(
@@ -464,16 +486,22 @@ class Runner(models.Model):
     dev_metadata = models.JSONField(default=dict, blank=True)
     protocol_version = models.PositiveIntegerField(default=1)
     last_heartbeat_at = models.DateTimeField(null=True, blank=True)
-    # Free worktree count in this runner's work-dir pool, reported in the
-    # long-poll status body. A capacity *hint* the matcher prefers (never
-    # gates) when choosing between equally-eligible idle runners. ``None``
-    # means the runner predates the feature (no hint). See
-    # ``.ai_design/worktree_pooling/design.md`` §6.4.
-    free_worktrees = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
     revoked_reason = models.CharField(max_length=32, blank=True, default="")
+    # Operator pause. Orthogonal to ``status``: ``status`` is connectivity
+    # (rewritten by every poll), while a paused runner keeps heartbeating,
+    # finishes its in-flight run, and is skipped by every matcher path until
+    # resumed. NULL means not paused.
+    paused_at = models.DateTimeField(null=True, blank=True)
+    paused_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
 
     class Meta:
         db_table = "runner"
@@ -534,6 +562,12 @@ class Runner(models.Model):
         if self.pod_id is None:
             return None
         return self.pod.project_id
+
+    @property
+    def is_revoked(self) -> bool:
+        # Either marker counts: legacy and partial revokes may have set only
+        # one of the two.
+        return self.revoked_at is not None or self.status == RunnerStatus.REVOKED
 
     def mark_heartbeat(self) -> None:
         self.last_heartbeat_at = timezone.now()
@@ -959,7 +993,6 @@ class AgentRun(models.Model):
     dispatch_attempts = models.PositiveIntegerField(default=0)
     cancel_requested_at = models.DateTimeField(null=True, blank=True)
     cancel_reason = models.CharField(max_length=512, blank=True, default="")
-    error_code = models.CharField(max_length=64, blank=True, default="", db_index=True)
     tool_plan = models.JSONField(default=dict, blank=True)
     terminal_hooks_applied_at = models.DateTimeField(null=True, blank=True)
     terminal_capacity_released_at = models.DateTimeField(null=True, blank=True)
@@ -1002,16 +1035,29 @@ class AgentRun(models.Model):
     agent_metadata = models.JSONField(default=dict, blank=True)
     lease_expires_at = models.DateTimeField(null=True, blank=True)
     done_payload = models.JSONField(null=True, blank=True)
-    error = models.TextField(blank=True, default="")
-    # Set only when ``status == REFUSED``: the safety-classifier category the
-    # runner reported (mirrors Messages API ``stop_details.category``). Empty
-    # for every non-refusal terminal state.
-    refusal_category = models.CharField(
-        max_length=32,
-        choices=RefusalCategory.choices,
-        blank=True,
-        default="",
-    )
+    # How the run went wrong, as one bag: ``code`` (the short machine reason),
+    # ``message`` (the operator-facing detail) and ``refusal_category`` (set
+    # only when ``status == REFUSED``). Written once, at finalisation, by the
+    # single choke point ``agent_run_finalization.finalize_agent_run``. Keys
+    # are absent rather than empty, so a clean run carries ``{}``.
+    #
+    # These were three columns until PDASHOSS01-187. They describe one concept,
+    # they are written together by one writer, and none was ever a query
+    # predicate — the ``db_index=True`` on ``error_code`` was an index the
+    # database maintained on every write and no query used. The rest of the
+    # table stays columnar: it is a state machine several writers advance by
+    # compare-and-swap against real columns.
+    error_details = models.JSONField(default=dict, blank=True)
+    # Generated from ``error_details`` by Postgres. Migration 0016 added
+    # ``refusal_category`` as a column so a policy decline stays queryable
+    # apart from a crash; folding it into JSON would have traded that for an
+    # expression index the planner estimates badly. A STORED generated column
+    # keeps both — JSON is the single source of truth, and grouping by decline
+    # category still reads a real column with real statistics. Read-only:
+    # write ``error_details`` instead. Values come from
+    # ``RefusalCategory``; ``run_lifecycle._normalize_refusal_category``
+    # is what constrains them on the way in.
+    refusal_category = JSONKeyTextField(source="error_details", key="refusal_category")
     llm_model = models.CharField(max_length=128, blank=True, default="")
     # Token usage as one bag of counters in the canonical shape documented in
     # ``pi_dash.runner.services.usage`` — input / output / total, the cache
@@ -1026,13 +1072,24 @@ class AgentRun(models.Model):
     total_tokens = JSONKeyBigIntegerField(source="usage", key="total")
     created_at = models.DateTimeField(auto_now_add=True)
     assigned_at = models.DateTimeField(null=True, blank=True)
-    # Display-only position in the runner's local worktree queue while the
-    # run is WAITING_FOR_WORKTREE. The runner is the source of truth and
-    # reports it via the ``queued`` lifecycle verb; the cloud never computes
-    # it. See ``.ai_design/worktree_pooling/design.md`` §6.1.
-    queue_position = models.PositiveSmallIntegerField(null=True, blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
     ended_at = models.DateTimeField(null=True, blank=True)
+
+    @property
+    def error_code(self) -> str:
+        """The short machine reason for a terminal failure, or ``""``.
+
+        A column until PDASHOSS01-187; now a view onto ``error_details`` so
+        every reader and both serializers keep their flat key. Read-only —
+        writers pass ``error_code`` to
+        ``agent_run_finalization.finalize_agent_run``, which folds it in.
+        """
+        return (self.error_details or {}).get("code") or ""
+
+    @property
+    def error(self) -> str:
+        """The operator-facing failure detail, or ``""``. See ``error_code``."""
+        return (self.error_details or {}).get("message") or ""
 
     class Meta:
         db_table = "agent_run"
@@ -1071,7 +1128,6 @@ class AgentRun(models.Model):
                         pinned_runner__isnull=True,
                         owner__isnull=True,
                         assigned_at__isnull=True,
-                        queue_position__isnull=True,
                     )
                 ),
                 name="agent_run_cloud_has_no_local_assignment",
@@ -1451,6 +1507,18 @@ class ChatMessageDedupe(models.Model):
         ]
 
 
+class AgentHealth(models.TextChoices):
+    """Activity-watchdog health a runner reports for its in-flight run.
+
+    ``UNHEALTHY`` means the agent has emitted no event for the runner's
+    unhealthy threshold (24h by default). The run is still running: the
+    runner only fails it at its kill threshold (48h by default).
+    """
+
+    HEALTHY = "healthy", "Healthy"
+    UNHEALTHY = "unhealthy", "Unhealthy"
+
+
 class RunnerLiveState(models.Model):
     """Volatile per-runner observability snapshot for the active agent run.
 
@@ -1497,6 +1565,14 @@ class RunnerLiveState(models.Model):
     usage = models.JSONField(default=dict, blank=True)
     llm_model = models.CharField(max_length=128, null=True, blank=True)
     turn_count = models.PositiveIntegerField(null=True, blank=True)
+    # Activity-watchdog health, reported on every poll while a run is in
+    # flight regardless of the runner's ``agent_observability_v1`` flag.
+    # NULL means the runner predates the passive-kill watchdog: it still runs
+    # the legacy short stall timer, and ``reconcile_stalled_runs`` keeps
+    # backstopping it. Non-NULL runners own their watchdog, so the cloud
+    # never fails their runs for silence.
+    agent_health = models.CharField(max_length=16, choices=AgentHealth.choices, null=True, blank=True)
+    agent_last_activity_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

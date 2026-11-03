@@ -74,12 +74,15 @@ pub fn resolve_model_for_user(
 }
 
 /// How the desktop agent engine should reach a model for one user
-/// (`AgentModelProfile`, `model_provider.py:25-42`).
+/// (`AgentModelProfile`, `model_provider.py:26-48`).
 ///
 /// The credential itself is never part of this object (see
 /// [`agent_model_credential_for_user`]). `reason_code` is a
 /// `ManagedRunnerReason` value and is empty exactly when `available` is
 /// true; CE never serves the desktop, so `available` is always false here.
+/// `top_up_url` is where a user adds credit for this lane; empty means
+/// there is nowhere to send them (CE has no credit lane, so always empty
+/// here).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentModelProfile {
     pub available: bool,
@@ -87,6 +90,7 @@ pub struct AgentModelProfile {
     pub base_url: String,
     pub model: String,
     pub reason_code: String,
+    pub top_up_url: String,
 }
 
 /// Describe the model endpoint the desktop engine may call
@@ -107,6 +111,7 @@ pub fn agent_model_profile_for_user(has_api_key: bool) -> AgentModelProfile {
             base_url: String::new(),
             model: String::new(),
             reason_code: REASON_BYOK_UNSUPPORTED.to_owned(),
+            top_up_url: String::new(),
         }
     } else {
         AgentModelProfile {
@@ -115,6 +120,7 @@ pub fn agent_model_profile_for_user(has_api_key: bool) -> AgentModelProfile {
             base_url: String::new(),
             model: String::new(),
             reason_code: REASON_LLM_CONFIG_MISSING.to_owned(),
+            top_up_url: String::new(),
         }
     }
 }
@@ -293,11 +299,13 @@ mod tests {
         assert_eq!(with_key.model, "");
         assert_eq!(with_key.reason_code, REASON_BYOK_UNSUPPORTED);
         assert_eq!(with_key.reason_code, "byok_not_supported_on_desktop");
+        assert!(with_key.top_up_url.is_empty());
         let without_key = agent_model_profile_for_user(false);
         assert!(!without_key.available);
         assert_eq!(without_key.lane, "");
         assert_eq!(without_key.reason_code, REASON_LLM_CONFIG_MISSING);
         assert_eq!(without_key.reason_code, "llm_config_missing");
+        assert!(without_key.top_up_url.is_empty());
     }
 
     #[test]

@@ -82,19 +82,23 @@ pub const PAGE_LOG_ISSUE_ENTITY: &str = "issue";
 // get_queryset (base.py:81-127)
 // ---------------------------------------------------------------------------
 
-/// R1 base filters, in order (`:91-98`): workspace slug (`:91`),
-/// member + active + live project via the projects M2M
-/// (`:92-96`, join `pages -> project_pages -> projects ->
-/// project_members`), top-level only (`:97`), owner-or-public (`:98`).
+/// R1 base filters, in order (`visible_pages`): workspace slug,
+/// member + active + live project via the projects M2M (join `pages ->
+/// project_pages -> projects -> project_members`), owner-or-public — at
+/// any depth. `list` alone narrows to top-level pages
+/// ([`LIST_TOP_LEVEL_SQL`]) or one page's children.
 pub fn queryset_scope_where() -> String {
     [
         "pages.workspace_id = (SELECT id FROM workspaces WHERE slug = :slug)",
         "EXISTS (SELECT 1 FROM project_pages pp_scope JOIN projects ON projects.id = pp_scope.project_id JOIN project_members pm ON pm.project_id = projects.id AND pm.member_id = :user AND pm.is_active = TRUE WHERE pp_scope.page_id = pages.id AND projects.archived_at IS NULL)",
-        "pages.parent_id IS NULL",
         "(pages.owned_by_id = :user OR pages.access = 0)",
     ]
     .join(" AND ")
 }
+
+/// The list's default depth filter (`parent__isnull=True`), dropped for
+/// `?parent=<id>` (`pages.parent_id = :parent`) and for a `?search=`.
+pub const LIST_TOP_LEVEL_SQL: &str = "pages.parent_id IS NULL";
 
 /// `is_favorite = EXISTS(...)` over `user_favorites` (`:82-87`, applied
 /// `:102`): caller, `entity_type='page'`, bridge to this page
@@ -314,17 +318,15 @@ mod tests {
     #[test]
     fn get_queryset_scope_carries_guards_in_source_order() {
         let scope = queryset_scope_where();
-        // R1 (:91-98): slug, member/active/live-project, top-level,
-        // owner-or-public — in that order.
+        // R1: slug, member/active/live-project, owner-or-public — in that
+        // order, at any depth (the list alone adds the top-level guard).
         let slug = scope.find("slug = :slug").expect("slug guard");
         let member = scope.find("pm.member_id = :user").expect("member guard");
-        let parent = scope
-            .find("pages.parent_id IS NULL")
-            .expect("top-level guard");
         let owner = scope
             .find("(pages.owned_by_id = :user OR pages.access = 0)")
             .expect("owner-or-public");
-        assert!(slug < member && member < parent && parent < owner);
+        assert!(slug < member && member < owner);
+        assert!(!scope.contains(LIST_TOP_LEVEL_SQL));
         assert!(scope.contains("pm.is_active = TRUE"));
         assert!(scope.contains("projects.archived_at IS NULL"));
     }

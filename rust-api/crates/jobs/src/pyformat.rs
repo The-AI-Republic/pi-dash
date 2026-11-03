@@ -140,6 +140,25 @@ fn is_py_printable(c: char) -> bool {
         .any(|(lo, hi)| code >= *lo && code <= *hi)
 }
 
+/// `str(value)` for a JSON snapshot scalar where `None` renders as
+/// `""` (`pi_dash_cloud/mcp/oauth.py:453`: `str(userinfo.get("email")
+/// or "")`): strings pass through, `Null` becomes `""`, every other
+/// value renders via [`py_repr`] — exactly what Python's `str()` does
+/// on this str-or-`None` input.
+///
+/// Canonicalized for the overlay (PIDASHCONV-1623), which inlined this
+/// shape in `mcp/oauth.rs`. This is NOT the DRF `ChoiceField` twin in
+/// `api::app_workspace::handlers_user_extras` (that one renders `None`
+/// as `"None"` per `str(data)` — a different Python source, verified —
+/// so it stays local).
+pub fn py_str_or_empty(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Null => String::new(),
+        scalar => py_repr(scalar),
+    }
+}
+
 /// Python `repr` of a string: double-quoted when it holds `'` but no
 /// `"`, else single-quoted; `\n`/`\r`/`\t`/`\\` short escapes, the
 /// active quote escaped, and every other unprintable as `\xhh` / `\uxxxx`
@@ -253,5 +272,17 @@ mod tests {
         assert_eq!(py_repr(&json!(65535.0)), "65535.0");
         // Integers never take the float path.
         assert_eq!(py_repr(&json!(65535)), "65535");
+    }
+
+    #[test]
+    fn str_or_empty_renders_none_as_empty() {
+        // `str(userinfo.get("email") or "")` (`oauth.py:453`).
+        assert_eq!(py_str_or_empty(&Value::Null), "");
+        assert_eq!(py_str_or_empty(&json!("a@x.com")), "a@x.com");
+        assert_eq!(py_str_or_empty(&json!("")), "");
+        assert_eq!(py_str_or_empty(&json!(true)), "True");
+        assert_eq!(py_str_or_empty(&json!(5)), "5");
+        assert_eq!(py_str_or_empty(&json!(1.5)), "1.5");
+        assert_eq!(py_str_or_empty(&json!(["a"])), "['a']");
     }
 }

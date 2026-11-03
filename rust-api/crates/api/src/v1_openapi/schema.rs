@@ -29,7 +29,7 @@ use axum::response::{IntoResponse, Response};
 
 use crate::state::AppState;
 
-use super::throttle::DenialRenderer;
+use super::negotiate::{self, NegotiationError, DOC_RENDERERS};
 
 /// YAML denial/200 content type: the OpenAPI YAML renderer carries
 /// `charset=utf-8` (`renderers.py`, `format='yaml'`).
@@ -48,6 +48,13 @@ pub const DISPOSITION_JSON: &str = "inline; filename=\"The Pi Dash REST API.json
 /// Exact bytes of the `?format=xml` 404 (FX-OPENAPI-05 `unknown_format`):
 /// DRF's `NotFound` through the YAML renderer.
 pub const UNKNOWN_FORMAT_BODY: &str = "detail:\n  string: Not found.\n  code: not_found\n";
+
+/// Exact bytes of the 406 on the document view: DRF's `NotAcceptable`
+/// rendered by the *first* renderer — `perform_content_negotiation`'s
+/// `force=True` fallback (`views.py:302-314`) — i.e. the OpenAPI YAML
+/// renderer, so the `detail` mapping is YAML.
+pub const NOT_ACCEPTABLE_BODY: &str =
+    "detail:\n  string: Could not satisfy the request Accept header.\n  code: not_acceptable\n";
 
 /// Exact bytes of the unsafe-method 405s (FX-OPENAPI-05 `method_denials`,
 /// `/api/schema/`): DRF's `MethodNotAllowed` through the YAML renderer.
@@ -91,106 +98,109 @@ pub const NOT_ALLOWED_BODY_JSON_PATCH: &str =
 pub const NOT_ALLOWED_BODY_JSON_DELETE: &str =
     "{\n    \"detail\": \"Method \\\"DELETE\\\" not allowed.\"\n}";
 
-/// `GET /api/schema/`: the OpenAPI document (YAML default, JSON via
-/// `?format=json`, 404 on unknown formats). Gated on the cutover flip;
-/// `?format=` negotiates before throttling (DRF `initial`), so unknown
-/// formats 404 without spending throttle budget.
+/// `GET /api/schema/`: the OpenAPI document. The renderer is chosen by
+/// DRF content negotiation — the four renderer classes, `?format=` filtering
+/// first, `Accept` picking by precedence, 404 on unknown formats and 406 when
+/// nothing matches. Negotiation runs before throttling (DRF `APIView.initial`),
+/// so unknown formats and unacceptable ones 404/406 without spending throttle
+/// budget.
 pub async fn serve(State(state): State<AppState>, req: Request) -> Response {
     if !super::rust_serves(&state) {
         return crate::edge::proxy(State(state), req).await;
     }
     let format = super::last_format_value(req.uri().query().unwrap_or(""));
-    // Negotiation runs before throttling (DRF `APIView.initial`): an
-    // unknown format 404s without touching the throttle or the session.
-    let renderer = match format.as_deref() {
-        None | Some("") | Some("yaml") => DenialRenderer::Yaml,
-        Some("json") => DenialRenderer::Json,
-        Some(_) => {
-            return super::view_response(
-                StatusCode::NOT_FOUND,
-                CONTENT_TYPE_YAML,
-                UNKNOWN_FORMAT_BODY.as_bytes().to_vec(),
-                true,
-            );
-        }
-    };
+    let accept = negotiate::accept_header(&req);
+    let (renderer, _accepted_media_type) =
+        match negotiate::select_renderer(&DOC_RENDERERS, format.as_deref(), &accept) {
+            Ok(picked) => picked,
+            Err(NegotiationError::NotFound) => {
+                return super::view_response(
+                    StatusCode::NOT_FOUND,
+                    CONTENT_TYPE_YAML,
+                    UNKNOWN_FORMAT_BODY.as_bytes().to_vec(),
+                    true,
+                );
+            }
+            Err(NegotiationError::NotAcceptable) => {
+                return super::view_response(
+                    StatusCode::NOT_ACCEPTABLE,
+                    CONTENT_TYPE_YAML,
+                    NOT_ACCEPTABLE_BODY.as_bytes().to_vec(),
+                    true,
+                );
+            }
+        };
     let ident = super::peer_ident(&req);
     let session = super::session_handle(&req);
     if let Some(denied) = super::throttle_verdict(&state, ident, session).await {
         return super::throttled(renderer, denied.wait, true);
     }
-    if format.as_deref() == Some("json") {
-        doc_response(
-            CONTENT_TYPE_JSON,
-            DISPOSITION_JSON,
-            pidash_services::v1_openapi::doc::render_json().into_bytes(),
-        )
+    let body = if renderer.is_json() {
+        pidash_services::v1_openapi::doc::render_json().into_bytes()
     } else {
-        // Unknown formats returned above; the rest render YAML.
-        doc_response(
-            CONTENT_TYPE_YAML,
-            DISPOSITION_YAML,
-            pidash_services::v1_openapi::doc::render_yaml().into_bytes(),
-        )
-    }
+        pidash_services::v1_openapi::doc::render_yaml().into_bytes()
+    };
+    doc_response(
+        negotiate::content_type(renderer),
+        disposition(renderer.format()),
+        body,
+    )
 }
 
 /// Unsafe methods on `/api/schema/`: the pinned 405 in the negotiated
-/// renderer (JSON iff `?format=json`, else YAML). Negotiation runs before
-/// throttling (DRF `initial`): unknown formats 404 without spending
-/// budget, and a throttled caller answers the negotiated 429 instead.
+/// renderer. Negotiation runs before throttling (DRF `initial`): unknown
+/// formats 404 and unacceptable ones 406 without spending budget, and a
+/// throttled caller answers the negotiated 429 instead.
 pub async fn method_not_allowed(State(state): State<AppState>, req: Request) -> Response {
     if !super::rust_serves(&state) {
         return crate::edge::proxy(State(state), req).await;
     }
     let format = super::last_format_value(req.uri().query().unwrap_or(""));
-    let wants_json = match format.as_deref() {
-        None | Some("") | Some("yaml") => false,
-        Some("json") => true,
-        Some(_) => {
-            return super::view_response(
-                StatusCode::NOT_FOUND,
-                CONTENT_TYPE_YAML,
-                UNKNOWN_FORMAT_BODY.as_bytes().to_vec(),
-                true,
-            );
-        }
-    };
-    let renderer = if wants_json {
-        DenialRenderer::Json
-    } else {
-        DenialRenderer::Yaml
-    };
+    let accept = negotiate::accept_header(&req);
+    let (renderer, _accepted_media_type) =
+        match negotiate::select_renderer(&DOC_RENDERERS, format.as_deref(), &accept) {
+            Ok(picked) => picked,
+            Err(NegotiationError::NotFound) => {
+                return super::view_response(
+                    StatusCode::NOT_FOUND,
+                    CONTENT_TYPE_YAML,
+                    UNKNOWN_FORMAT_BODY.as_bytes().to_vec(),
+                    true,
+                );
+            }
+            Err(NegotiationError::NotAcceptable) => {
+                return super::view_response(
+                    StatusCode::NOT_ACCEPTABLE,
+                    CONTENT_TYPE_YAML,
+                    NOT_ACCEPTABLE_BODY.as_bytes().to_vec(),
+                    true,
+                );
+            }
+        };
     let ident = super::peer_ident(&req);
     let session = super::session_handle(&req);
     if let Some(denied) = super::throttle_verdict(&state, ident, session).await {
         return super::throttled(renderer, denied.wait, true);
     }
     let method = req.method().as_str();
-    let (content_type, body) = if wants_json {
-        (
-            CONTENT_TYPE_JSON,
-            match method {
-                "PUT" => NOT_ALLOWED_BODY_JSON_PUT,
-                "PATCH" => NOT_ALLOWED_BODY_JSON_PATCH,
-                "DELETE" => NOT_ALLOWED_BODY_JSON_DELETE,
-                _ => NOT_ALLOWED_BODY_JSON_POST,
-            },
-        )
+    let body = if renderer.is_json() {
+        match method {
+            "PUT" => NOT_ALLOWED_BODY_JSON_PUT,
+            "PATCH" => NOT_ALLOWED_BODY_JSON_PATCH,
+            "DELETE" => NOT_ALLOWED_BODY_JSON_DELETE,
+            _ => NOT_ALLOWED_BODY_JSON_POST,
+        }
     } else {
-        (
-            CONTENT_TYPE_YAML,
-            match method {
-                "PUT" => NOT_ALLOWED_BODY_PUT,
-                "PATCH" => NOT_ALLOWED_BODY_PATCH,
-                "DELETE" => NOT_ALLOWED_BODY_DELETE,
-                _ => NOT_ALLOWED_BODY_POST,
-            },
-        )
+        match method {
+            "PUT" => NOT_ALLOWED_BODY_PUT,
+            "PATCH" => NOT_ALLOWED_BODY_PATCH,
+            "DELETE" => NOT_ALLOWED_BODY_DELETE,
+            _ => NOT_ALLOWED_BODY_POST,
+        }
     };
     super::view_response(
         StatusCode::METHOD_NOT_ALLOWED,
-        content_type,
+        &negotiate::content_type(renderer),
         body.as_bytes().to_vec(),
         true,
     )
@@ -228,15 +238,23 @@ pub async fn slashless_redirect(State(state): State<AppState>, req: Request) -> 
         .expect("static redirect response")
 }
 
-/// One doc 200: builder bytes with the YAML/JSON content type, the
-/// `Content-Disposition` download hint, and the `Allow`/`Vary` shell.
-fn doc_response(content_type: &'static str, disposition: &'static str, body: Vec<u8>) -> Response {
-    let mut response = super::view_response(StatusCode::OK, content_type, body, true);
-    response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_static(disposition),
-    );
+/// One doc 200: builder bytes with the negotiated content type, the
+/// `Content-Disposition` download hint (`_get_filename`), and the
+/// `Allow`/`Vary` shell.
+fn doc_response(content_type: String, disposition: String, body: Vec<u8>) -> Response {
+    let mut response = super::view_response(StatusCode::OK, &content_type, body, true);
+    if let Ok(disposition) = HeaderValue::from_str(&disposition) {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_DISPOSITION, disposition);
+    }
     response
+}
+
+/// `_get_schema_response`'s `Content-Disposition` filename suffix is the
+/// negotiated renderer's `format` (`views.py:96-101`).
+fn disposition(format: &str) -> String {
+    format!("inline; filename=\"The Pi Dash REST API.{format}\"")
 }
 
 #[cfg(test)]
@@ -803,7 +821,7 @@ mod tests {
     /// method dispatch — only negotiation runs before the throttle).
     #[tokio::test]
     async fn throttled_unsafe_json_format_429_json_denial() {
-        use super::super::throttle::{DENIAL_BODY_JSON, DENIAL_CONTENT_TYPE_JSON};
+        use super::super::negotiate::DENIAL_BODY_JSON;
         for _ in 0..30 {
             let response = flipped_app()
                 .oneshot(get(SCHEMA_PATH, "schema-d4-uwt"))
@@ -819,7 +837,7 @@ mod tests {
         let headers = response.headers().clone();
         assert_eq!(
             headers.get(header::CONTENT_TYPE).expect("ct"),
-            DENIAL_CONTENT_TYPE_JSON
+            "application/vnd.oai.openapi+json"
         );
         assert_eq!(headers.get(header::ALLOW).expect("allow"), ALLOW);
         assert_eq!(headers.get(header::VARY).expect("vary"), "Accept");

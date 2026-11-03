@@ -89,10 +89,17 @@ use uuid::Uuid;
 use crate::app_assets::guards;
 use crate::app_assets::quote_filename;
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_auth::scope::TenantScope;
+use pidash_compat::db::is_integrity_error;
+use pidash_compat::py::py_json_string;
+use pidash_compat::response::{
+    json_response as raw, json_value as json_status, no_content, server_error,
+};
 use pidash_services::app_assets::queries_v2_project as q;
+use pidash_services::domain::projects as domain_projects;
 use pidash_types::WorkspaceId;
 
 /// All ten `EntityTypeContext` values (`db/models/asset.py:33-43`): the
@@ -129,8 +136,6 @@ const DOES_NOT_EXIST_BODY: &str = r#"{"error":"The required object does not exis
 /// `BaseAPIView.handle_exception`: `ValidationError` branch (`:226-230`),
 /// also raised by `UUIDField.to_python` on bad UUID writes.
 const VALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// `BaseAPIView.handle_exception`: generic branch (`:238-243`).
-const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// DRF `NotAuthenticated` denial: anonymous on a guarded route.
 const UNAUTHENTICATED_BODY: &str = r#"{"detail":"Authentication credentials were not provided."}"#;
 /// `Project.resolve` miss (`db/models/project.py:190-217` via `Http404`).
@@ -203,28 +208,6 @@ pub fn routes() -> Router<AppState> {
 // Small responders
 // ---------------------------------------------------------------------------
 
-fn raw(status: StatusCode, body: &'static str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static response")
-}
-
-fn json_status(status: StatusCode, body: Value) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            serde_json::to_string(&body).expect("serializable response"),
-        ))
-        .expect("json response")
-}
-
-fn server_error() -> Response {
-    raw(StatusCode::INTERNAL_SERVER_ERROR, SERVER_ERROR_BODY)
-}
-
 /// `.get()` miss envelope: Django `ObjectDoesNotExist` through
 /// `BaseAPIView.handle_exception` (`app/views/base.py:232-236`).
 fn does_not_exist() -> Response {
@@ -237,10 +220,6 @@ fn page_not_found() -> Response {
 
 fn valid_detail() -> Response {
     raw(StatusCode::BAD_REQUEST, VALID_DETAIL_BODY)
-}
-
-fn no_content() -> Response {
-    StatusCode::NO_CONTENT.into_response()
 }
 
 fn redirect(location: String) -> Response {
@@ -1010,9 +989,12 @@ async fn patch_project_asset(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let pk = match pk_raw.parse::<Uuid>() {
-        Ok(pk) => pk,
-        Err(_) => return page_not_found(),
+    // Django routes `<uuid:pk>` canonically only; anything else is a
+    // resolver 404 before auth, answered locally like garbage (no proxy
+    // plumbing in this module — PIDASHCONV-1399).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1102,9 +1084,10 @@ async fn delete_project_asset(
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Response {
-    let pk = match pk_raw.parse::<Uuid>() {
-        Ok(pk) => pk,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as patch (PIDASHCONV-1399).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1160,9 +1143,10 @@ async fn get_project_asset(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     headers: HeaderMap,
 ) -> Response {
-    let pk = match pk_raw.parse::<Uuid>() {
-        Ok(pk) => pk,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as patch (PIDASHCONV-1399).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1247,9 +1231,11 @@ async fn post_bulk_asset(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let entity_id = match entity_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Django routes `<uuid:entity_id>` canonically only; anything else is
+    // a resolver 404 before auth, answered locally (PIDASHCONV-1399).
+    let entity_id = match classify_uuid_segment(&entity_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1383,14 +1369,15 @@ async fn post_bulk_asset(
                 if exists.is_none() {
                     return does_not_exist();
                 }
-                if sqlx::query(q::SAVE_PROJECT_COVER_SQL)
-                    .bind(project_id)
-                    .bind(row.id)
-                    .bind(Utc::now())
-                    .bind(actor.id)
-                    .execute(&pool)
-                    .await
-                    .is_err()
+                if domain_projects::save_project_cover(
+                    &pool,
+                    project_id,
+                    row.id,
+                    Utc::now(),
+                    actor.id,
+                )
+                .await
+                .is_err()
                 {
                     return server_error();
                 }
@@ -1508,9 +1495,11 @@ async fn get_check_asset(
     Path((slug, asset_raw)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Response {
-    let asset_id = match asset_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Django routes `<uuid:asset_id>` canonically only; anything else is
+    // a resolver 404 before auth, answered locally (PIDASHCONV-1399).
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1549,9 +1538,10 @@ async fn post_duplicate_asset(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let asset_id = match asset_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as check (PIDASHCONV-1399).
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1618,14 +1608,15 @@ async fn post_duplicate_asset(
             return raw(StatusCode::NOT_FOUND, DUPLICATE_PROJECT_BODY);
         }
     }
-    // `S3Storage(request)` (`:754`) is constructed before the original
-    // lookup, so an unsignable region 500s here — ahead of the 404
-    // below and with no row left behind.
+    // `S3Storage(request, is_server=True)` (`:754`) is constructed
+    // before the original lookup, so an unsignable region 500s here —
+    // ahead of the 404 below and with no row left behind. The server
+    // client never reads the request Host (`storage.py:50-57`: the
+    // `request.get_host()` branch needs `not is_server`), so a missing
+    // Host falls through instead of 500ing.
     let storage = &state.settings().storage;
-    let Some(host) = host_of(&headers) else {
-        return server_error();
-    };
-    if endpoint_parts(storage, &scheme_of(&headers), &host, false).is_err() {
+    let host = host_of(&headers).unwrap_or_default();
+    if endpoint_parts(storage, &scheme_of(&headers), &host, false, true).is_err() {
         return server_error();
     }
     // Original lookup on the default manager + `is_uploaded` (`:755`):
@@ -1739,12 +1730,15 @@ async fn post_duplicate_asset(
     // QUIRK (`:776-778`): the row above is committed before the copy;
     // `copy_object` swallows `ClientError` (an S3 error status still
     // flips and 200s), while a transport failure escapes to the 500
-    // fallback with the row left behind unflipped. (`storage`/`host`
-    // resolved above at the `:754` construction point.)
+    // fallback with the row left behind unflipped. The copy signs
+    // against the configured endpoint (`is_server=True` at `:754`),
+    // never the request Host. (`storage` resolved above at the `:754`
+    // construction point.)
     match s3_copy_object(
         storage,
         &scheme_of(&headers),
         &host,
+        true,
         &original.asset_key,
         &destination_key,
     )
@@ -1778,9 +1772,10 @@ async fn get_workspace_download(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     headers: HeaderMap,
 ) -> Response {
-    let asset_id = match asset_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as check (PIDASHCONV-1399).
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     download_asset(
         &state,
@@ -1801,9 +1796,10 @@ async fn get_project_download(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     headers: HeaderMap,
 ) -> Response {
-    let asset_id = match asset_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as check (PIDASHCONV-1399).
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -2037,24 +2033,30 @@ impl std::fmt::Display for InvalidEndpoint {
 impl std::error::Error for InvalidEndpoint {}
 
 /// Endpoint + host/path split for signing, mirroring
-/// `S3Storage.__init__` with a request (`is_server=False`):
-/// MinIO mode signs `{scheme}://{Host}` path-style; an explicit
-/// endpoint URL signs path-style against it; otherwise the
-/// virtual-hosted AWS default. Presigned URLs resolve the global
-/// endpoint for every region (`use_global_endpoint`,
-/// `botocore/signers.py:859`); header auth keeps the regional host.
+/// `S3Storage.__init__` with a request: MinIO mode signs
+/// `{scheme}://{Host}` path-style unless `is_server`, in which case
+/// the caller signs against the configured endpoint like every other
+/// non-MinIO caller; an explicit endpoint URL signs path-style
+/// against it; otherwise the virtual-hosted AWS default. Presigned
+/// URLs resolve the global endpoint for every region
+/// (`use_global_endpoint`, `botocore/signers.py:859`); header auth
+/// keeps the regional host.
 fn endpoint_parts(
     storage: &pidash_db::config::StorageSettings,
     scheme: &str,
     host: &str,
     presign: bool,
+    is_server: bool,
 ) -> Result<(String, String), InvalidEndpoint> {
     if !pidash_db::config::is_valid_region_name(&storage.region) {
         return Err(InvalidEndpoint);
     }
     // `MINIO_ENDPOINT_SSL=1` signs https in MinIO mode (`storage.py:46-51`).
     let scheme = storage.endpoint_protocol(scheme);
-    if storage.use_minio {
+    // `is_server` skips the request-Host branch (`storage.py:50-57`:
+    // `if request is not None and not is_server`), so the duplicate
+    // copy signs against the configured endpoint.
+    if storage.use_minio && !is_server {
         Ok((format!("{scheme}://{host}"), host.to_owned()))
     } else if let Some(endpoint) = storage.endpoint_url.as_deref().filter(|e| !e.is_empty()) {
         let endpoint = endpoint.trim_end_matches('/');
@@ -2137,7 +2139,8 @@ fn presigned_get_url(
     now: &DateTime<Utc>,
 ) -> Result<String, InvalidEndpoint> {
     let region = storage.region.as_str();
-    let (endpoint, signed_host) = endpoint_parts(storage, scheme, host, true)?;
+    // Presigns keep the public host: `S3Storage(request)` (`is_server=False`).
+    let (endpoint, signed_host) = endpoint_parts(storage, scheme, host, true, false)?;
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date = now.format("%Y%m%d").to_string();
     let scope = credential_scope(&date, region);
@@ -2216,7 +2219,8 @@ fn presigned_post(
     now: &DateTime<Utc>,
 ) -> Result<Value, InvalidEndpoint> {
     let region = storage.region.as_str();
-    let (endpoint, _) = endpoint_parts(storage, scheme, host, true)?;
+    // Presigns keep the public host: `S3Storage(request)` (`is_server=False`).
+    let (endpoint, _) = endpoint_parts(storage, scheme, host, true, false)?;
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date = now.format("%Y%m%d").to_string();
     let scope = credential_scope(&date, region);
@@ -2282,37 +2286,6 @@ fn presigned_post(
     Ok(serde_json::json!({"url": url, "fields": fields}))
 }
 
-/// CPython `json.dumps` string encoding (`ensure_ascii`): `"` and
-/// `\` escaped, C0 controls short/`\u00XX`, everything else non-ASCII
-/// as `\uXXXX` (surrogate pairs past the BMP).
-fn py_json_string(input: &str) -> String {
-    let mut out = String::with_capacity(input.len() + 2);
-    out.push('"');
-    for c in input.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c if (c as u32) < 0x7f => out.push(c),
-            c => {
-                let mut buf = [0u16; 2];
-                for unit in c.encode_utf16(&mut buf) {
-                    out.push_str(&format!("\\u{unit:04x}"));
-                }
-            }
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// Standard base64 with padding (policy documents).
 fn base64_encode(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -2354,13 +2327,17 @@ fn copy_auth_headers(
     storage: &pidash_db::config::StorageSettings,
     scheme: &str,
     host: &str,
+    is_server: bool,
     src_key: &str,
     dst_key: &str,
     now: &DateTime<Utc>,
 ) -> Result<(String, Vec<(String, String)>), InvalidEndpoint> {
     let region = storage.region.as_str();
-    let (endpoint, signed_host) = endpoint_parts(storage, scheme, host, false)?;
-    let path_style = storage.use_minio
+    let (endpoint, signed_host) = endpoint_parts(storage, scheme, host, false, is_server)?;
+    // A server copy in MinIO mode without a configured endpoint signs
+    // the AWS default like any non-MinIO caller (boto3 `endpoint_url`
+    // `None`), so only the request-Host branch stays path-style.
+    let path_style = (storage.use_minio && !is_server)
         || storage
             .endpoint_url
             .as_deref()
@@ -2408,18 +2385,29 @@ fn copy_auth_headers(
 
 /// `S3Storage.copy_object` (`storage.py:172-184`) over plain HTTPS: an
 /// empty-body `PUT` to the destination key with `x-amz-copy-source`.
+/// `is_server` mirrors the `S3Storage` constructor flag: the duplicate
+/// copy passes `True` and signs against the configured endpoint.
 async fn s3_copy_object(
     storage: &pidash_db::config::StorageSettings,
     scheme: &str,
     host: &str,
+    is_server: bool,
     src_key: &str,
     dst_key: &str,
 ) -> Result<(), CopyError> {
     // An unsignable region never reaches the wire (`ValueError` at
     // `S3Storage.__init__`); like a transport failure it escapes to the
     // 500 fallback with the row left behind.
-    let (url, headers) = copy_auth_headers(storage, scheme, host, src_key, dst_key, &Utc::now())
-        .map_err(|_| CopyError::Transport)?;
+    let (url, headers) = copy_auth_headers(
+        storage,
+        scheme,
+        host,
+        is_server,
+        src_key,
+        dst_key,
+        &Utc::now(),
+    )
+    .map_err(|_| CopyError::Transport)?;
     // botocore's defaults apply (`storage.py` passes no timeout
     // `Config`): 60s to connect, 60s to read. Bound the client the same
     // way so a wedged object store yields a transport error (→ the 500
@@ -2438,24 +2426,6 @@ async fn s3_copy_object(
         Ok(())
     } else {
         Err(CopyError::Refused)
-    }
-}
-
-/// Django `IntegrityError` (unique/fk/not-null/check) as sqlx sees it:
-/// these branches `pass`, anything else 500s.
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::Database(db) => {
-            let kind = db.kind();
-            matches!(
-                kind,
-                sqlx::error::ErrorKind::UniqueViolation
-                    | sqlx::error::ErrorKind::ForeignKeyViolation
-                    | sqlx::error::ErrorKind::NotNullViolation
-                    | sqlx::error::ErrorKind::CheckViolation
-            )
-        }
-        _ => false,
     }
 }
 
@@ -2483,14 +2453,14 @@ mod tests {
         let mut ssl = test_storage();
         ssl.minio_endpoint_ssl = true;
         assert_eq!(
-            endpoint_parts(&ssl, "http", "h:9", true).expect("minio"),
+            endpoint_parts(&ssl, "http", "h:9", true, false).expect("minio"),
             ("https://h:9".to_owned(), "h:9".to_owned())
         );
         // us-east-1 resolves to the global endpoint (botocore probe A/L).
         let mut aws = test_storage();
         aws.use_minio = false;
         assert_eq!(
-            endpoint_parts(&aws, "http", "h:9", true).expect("aws"),
+            endpoint_parts(&aws, "http", "h:9", true, false).expect("aws"),
             (
                 "https://uploads.s3.amazonaws.com".to_owned(),
                 "uploads.s3.amazonaws.com".to_owned()
@@ -2507,14 +2477,14 @@ mod tests {
         regional.use_minio = false;
         regional.region = "eu-west-1".to_owned();
         assert_eq!(
-            endpoint_parts(&regional, "http", "h:9", true).expect("presign"),
+            endpoint_parts(&regional, "http", "h:9", true, false).expect("presign"),
             (
                 "https://uploads.s3.amazonaws.com".to_owned(),
                 "uploads.s3.amazonaws.com".to_owned()
             )
         );
         assert_eq!(
-            endpoint_parts(&regional, "http", "h:9", false).expect("header auth"),
+            endpoint_parts(&regional, "http", "h:9", false, false).expect("header auth"),
             (
                 "https://uploads.s3.eu-west-1.amazonaws.com".to_owned(),
                 "uploads.s3.eu-west-1.amazonaws.com".to_owned()
@@ -2527,18 +2497,50 @@ mod tests {
         empty.use_minio = false;
         empty.region = String::new();
         assert_eq!(
-            endpoint_parts(&empty, "http", "h:9", true),
+            endpoint_parts(&empty, "http", "h:9", true, false),
             Err(InvalidEndpoint)
         );
         assert_eq!(
-            endpoint_parts(&empty, "http", "h:9", false),
+            endpoint_parts(&empty, "http", "h:9", false, false),
             Err(InvalidEndpoint)
         );
         let mut garbage = test_storage();
         garbage.region = "!!".to_owned();
         assert_eq!(
-            endpoint_parts(&garbage, "http", "h:9", true),
+            endpoint_parts(&garbage, "http", "h:9", true, false),
             Err(InvalidEndpoint)
+        );
+    }
+
+    #[test]
+    fn endpoint_parts_server_skips_request_host() {
+        // `is_server=True` (`storage.py:50-57`): MinIO mode signs the
+        // configured endpoint, never `{scheme}://{Host}`.
+        let mut server = test_storage();
+        server.endpoint_url = Some("http://minio:9000/".to_owned());
+        assert_eq!(
+            endpoint_parts(&server, "http", "public.example", false, true).expect("server"),
+            ("http://minio:9000".to_owned(), "minio:9000".to_owned())
+        );
+        // Without a configured endpoint the server call signs the AWS
+        // default (boto3 `endpoint_url` `None`): global for presigns,
+        // regional for header auth.
+        let minio = test_storage();
+        assert_eq!(
+            endpoint_parts(&minio, "http", "public.example", true, true).expect("server"),
+            (
+                "https://uploads.s3.amazonaws.com".to_owned(),
+                "uploads.s3.amazonaws.com".to_owned()
+            )
+        );
+        let mut regional = test_storage();
+        regional.region = "eu-west-1".to_owned();
+        assert_eq!(
+            endpoint_parts(&regional, "http", "public.example", false, true).expect("server"),
+            (
+                "https://uploads.s3.eu-west-1.amazonaws.com".to_owned(),
+                "uploads.s3.eu-west-1.amazonaws.com".to_owned()
+            )
         );
     }
 
@@ -2716,6 +2718,7 @@ mod tests {
             &test_storage(),
             "http",
             "127.0.0.1:8486",
+            false,
             "ws-id/orig.png",
             "ws-id/ab12-orig.png",
             &test_now(),
@@ -2777,6 +2780,7 @@ mod tests {
             &regional,
             "https",
             "public.example",
+            false,
             "ws-id/orig.png",
             "ws-id/ab12-orig.png",
             &test_now(),
@@ -2796,12 +2800,53 @@ mod tests {
                 &empty,
                 "https",
                 "public.example",
+                false,
                 "ws-id/orig.png",
                 "ws-id/ab12-orig.png",
                 &test_now(),
             ),
             Err(InvalidEndpoint)
         );
+    }
+
+    #[test]
+    fn copy_auth_server_targets_configured_endpoint() {
+        // The duplicate copy (`is_server=True`) PUTs to the configured
+        // endpoint path-style even when the request Host differs.
+        let mut server = test_storage();
+        server.endpoint_url = Some("http://minio:9000".to_owned());
+        let (url, headers) = copy_auth_headers(
+            &server,
+            "http",
+            "public.example",
+            true,
+            "ws-id/orig.png",
+            "ws-id/ab12-orig.png",
+            &test_now(),
+        )
+        .expect("server signs");
+        assert_eq!(url, "http://minio:9000/uploads/ws-id/ab12-orig.png");
+        let get = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .unwrap_or_else(|| panic!("header {name}"))
+                .1
+                .clone()
+        };
+        assert_eq!(get("x-amz-copy-source"), "/uploads/ws-id/orig.png");
+        // No configured endpoint: virtual-hosted AWS default, not path-style.
+        let (url, _) = copy_auth_headers(
+            &test_storage(),
+            "http",
+            "public.example",
+            true,
+            "ws-id/orig.png",
+            "ws-id/ab12-orig.png",
+            &test_now(),
+        )
+        .expect("server signs");
+        assert_eq!(url, "https://uploads.s3.amazonaws.com/ws-id/ab12-orig.png");
     }
 
     #[test]
@@ -2973,6 +3018,7 @@ mod tests {
                 &storage,
                 "http",
                 &addr.to_string(),
+                true,
                 "ws/orig.png",
                 "ws/dup.png",
             ),

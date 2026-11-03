@@ -54,15 +54,25 @@ def publish(
     countdown: float | None = None,
     eta=None,
     broker_url: str | None = None,
+    queue: str | None = None,
 ) -> str:
-    """Publish one job in Celery wire format. Returns the task id."""
+    """Publish one job in Celery wire format. Returns the task id.
+
+    ``queue`` routes to a non-default queue (a test-scoped worker's
+    private queue, PIDASHCONV-1253); unset keeps the default routing
+    byte for byte.
+    """
     app = make_app(broker_url or config.required(config.CELERY_BROKER_URL))
+    options = {}
+    if queue is not None:
+        options["queue"] = queue
     result = app.send_task(
         task_name,
         args=list(args or []),
         kwargs=dict(kwargs or {}),
         countdown=countdown,
         eta=eta,
+        **options,
     )
     return result.id
 

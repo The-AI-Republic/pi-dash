@@ -2,13 +2,14 @@ name: rust-api
 
 on:
   push:
-    branches: [rust-dev]
+    branches: [main]
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api.yml"
       - "Cargo.toml"
       - "Cargo.lock"
   pull_request:
+    branches: [main]
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api.yml"

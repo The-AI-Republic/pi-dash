@@ -76,7 +76,7 @@ pub fn binary_invalid_body() -> Value {
     serde_json::json!({"description_binary": [BINARY_INVALID_MESSAGE]})
 }
 
-/// 10MB input cap (`content_validator.py:16,220`; `str::len` is byte length,
+/// 10MB input cap (`content_validator.py:16,240-242`; `str::len` is byte length,
 /// exactly like `len(html.encode("utf-8"))`).
 pub const MAX_HTML_BYTES: usize = 10 * 1024 * 1024;
 
@@ -133,14 +133,14 @@ impl BinaryError {
     }
 }
 
-/// `validate_html_content` (`content_validator.py:211-247`) for truthy input.
+/// `validate_html_content` (`content_validator.py:232-264`) for truthy input.
 /// Falsy input never reaches here (the serializer guards on truthiness; the
 /// `(True, None, None)` arm is therefore unneeded). The removals-diff log
-/// (`:231-239`) is Sentry-only observability with no wire effect.
+/// (`:252-260`) is Sentry-only observability with no wire effect.
 ///
 /// `nh3` is Python bindings for the [`ammonia`] crate, so the same
 /// configuration renders the same bytes; `nh3.clean` raising on pathological
-/// input maps to [`SanitizeOutcome::Invalid`], like the `except` at `:242-247`.
+/// input maps to [`SanitizeOutcome::Invalid`], like the `except` at `:262-264`.
 pub fn sanitize_html(html: &str) -> SanitizeOutcome {
     if html.len() > MAX_HTML_BYTES {
         return SanitizeOutcome::Invalid;
@@ -298,8 +298,8 @@ pub fn strip_ignored_sticky_keys(input: &Map<String, Value>) -> Map<String, Valu
 
 /// The `nh3.clean(html, tags=ALLOWED_TAGS, attributes=ATTRIBUTES,
 /// url_schemes=SAFE_PROTOCOLS)` configuration
-/// (`content_validator.py:72-159,223-229`): tags are `nh3.ALLOWED_TAGS`
-/// (ammonia's default set, dumped from nh3 0.2.18) plus the four editor
+/// (`content_validator.py:72-180,245-250`): tags are `nh3.ALLOWED_TAGS`
+/// (ammonia's default set, dumped from nh3 0.2.18) plus the six editor
 /// components; attributes are the module dict verbatim (`*` = generic);
 /// schemes are `{"http", "https", "mailto", "tel"}`; everything else is the
 /// ammonia default, which is nh3's default too.
@@ -307,9 +307,10 @@ fn ammonia_builder() -> ammonia::Builder<'static> {
     let mut builder = ammonia::Builder::default();
     builder.tags(tag_set());
     builder.generic_attributes(generic_attributes());
-    for (tag, attrs) in tag_attributes() {
-        builder.add_tag_attributes(tag, attrs);
-    }
+    // `tag_attributes` *replaces* ammonia's default per-tag table, like nh3
+    // passing ATTRIBUTES as the complete table; `add_tag_attributes` would
+    // merge into the defaults and leak align/scope/hreflang/cite/datetime.
+    builder.tag_attributes(tag_attributes());
     builder.url_schemes(url_schemes());
     builder
 }
@@ -392,18 +393,20 @@ fn tag_set() -> std::collections::HashSet<&'static str> {
         "ul",
         "var",
         "wbr",
-        // CUSTOM_TAGS (content_validator.py:72-78).
+        // CUSTOM_TAGS (content_validator.py:72-81).
         "mention-component",
         "label",
         "input",
         "image-component",
+        "issue-embed-component",
+        "entity-reference-component",
     ]
     .into_iter()
     .collect()
 }
 
 fn generic_attributes() -> std::collections::HashSet<&'static str> {
-    // ATTRIBUTES["*"] (content_validator.py:83-107).
+    // ATTRIBUTES["*"] (content_validator.py:86-116).
     [
         "class",
         "id",
@@ -472,6 +475,29 @@ fn tag_attributes(
     add(
         "mention-component",
         &["id", "entity_identifier", "entity_name"],
+    );
+    // content_validator.py:143-149.
+    add(
+        "issue-embed-component",
+        &[
+            "id",
+            "entity_identifier",
+            "project_identifier",
+            "workspace_identifier",
+            "entity_name",
+        ],
+    );
+    // content_validator.py:150-157.
+    add(
+        "entity-reference-component",
+        &[
+            "entity_name",
+            "entity_identifier",
+            "project_identifier",
+            "workspace_identifier",
+            "project_id",
+            "data-label",
+        ],
     );
     add(
         "th",
@@ -571,6 +597,86 @@ mod tests {
                 "<mention-component id=\"1\">@a</mention-component>",
             ),
             ("<p>x</p><p>x</p><p>x</p>", "<p>x</p><p>x</p><p>x</p>"),
+            // PIDASHCONV-1331: ammonia's default per-tag table must not leak
+            // through — nh3 passes ATTRIBUTES as the complete table.
+            (
+                concat!(
+                    "<table><tr><th align=\"left\" scope=\"col\">a</th>",
+                    "<td align=\"right\">b</td></tr></table>",
+                    "<a href=\"https://x\" hreflang=\"en\">l</a>",
+                    "<blockquote cite=\"https://c\">q</blockquote>",
+                    "<img src=\"https://i\" align=\"left\">",
+                    "<ins datetime=\"2020\">i</ins>",
+                ),
+                concat!(
+                    "<table><tbody><tr><th>a</th><td>b</td></tr></tbody></table>",
+                    "<a href=\"https://x\" rel=\"noopener noreferrer\">l</a>",
+                    "<blockquote>q</blockquote>",
+                    "<img src=\"https://i\">",
+                    "<ins>i</ins>",
+                ),
+            ),
+            (
+                "<table><tr><th align=\"left\" scope=\"col\">a</th><td align=\"right\">b</td></tr></table>",
+                "<table><tbody><tr><th>a</th><td>b</td></tr></tbody></table>",
+            ),
+            (
+                "<a href=\"https://x\" hreflang=\"en\">l</a>",
+                "<a href=\"https://x\" rel=\"noopener noreferrer\">l</a>",
+            ),
+            (
+                "<blockquote cite=\"https://c\">q</blockquote>",
+                "<blockquote>q</blockquote>",
+            ),
+            (
+                "<img src=\"https://i\" align=\"left\">",
+                "<img src=\"https://i\">",
+            ),
+            ("<ins datetime=\"2020\">i</ins>", "<ins>i</ins>"),
+            (
+                "<del cite=\"https://c\" datetime=\"2020\">d</del>",
+                "<del>d</del>",
+            ),
+            (
+                "<table><tr><td align=\"center\" char=\".\" headers=\"h1\">c</td></tr></table>",
+                "<table><tbody><tr><td>c</td></tr></tbody></table>",
+            ),
+            // Controls: attributes inside ATTRIBUTES (or generic `*`) survive.
+            (
+                "<table><tr><th colspan=\"2\" style=\"color:red\">h</th></tr></table>",
+                "<table><tbody><tr><th colspan=\"2\" style=\"color:red\">h</th></tr></tbody></table>",
+            ),
+            (
+                "<img src=\"https://i\" alt=\"a\" width=\"3\">",
+                "<img src=\"https://i\" alt=\"a\" width=\"3\">",
+            ),
+            (
+                "<ol start=\"5\"><li>a</li></ol>",
+                "<ol start=\"5\"><li>a</li></ol>",
+            ),
+            // PIDASHCONV-1689: page body nodes (PAGE-040 embeds, PAGE-043
+            // entity references) survive with their allowlisted attributes;
+            // captured by executing `validate_html_content` on Django main.
+            (
+                "<p><issue-embed-component entity_identifier=\"i1\" project_identifier=\"P\"></issue-embed-component></p>",
+                "<p><issue-embed-component entity_identifier=\"i1\" project_identifier=\"P\"></issue-embed-component></p>",
+            ),
+            (
+                "<p><issue-embed-component id=\"emb-1\" entity_identifier=\"ISS-2\" project_identifier=\"P\" workspace_identifier=\"acme\" entity_name=\"issue\"></issue-embed-component></p>",
+                "<p><issue-embed-component id=\"emb-1\" entity_identifier=\"ISS-2\" project_identifier=\"P\" workspace_identifier=\"acme\" entity_name=\"issue\"></issue-embed-component></p>",
+            ),
+            (
+                "<p>see <entity-reference-component entity_name=\"issue\" entity_identifier=\"ISS-2\" project_identifier=\"P\" workspace_identifier=\"acme\" project_id=\"p-1\" data-label=\"Fix login\"></entity-reference-component></p>",
+                "<p>see <entity-reference-component entity_name=\"issue\" entity_identifier=\"ISS-2\" project_identifier=\"P\" workspace_identifier=\"acme\" project_id=\"p-1\" data-label=\"Fix login\"></entity-reference-component></p>",
+            ),
+            (
+                "<p><entity-reference-component></entity-reference-component></p>",
+                "<p><entity-reference-component></entity-reference-component></p>",
+            ),
+            (
+                "<p><issue-embed-component id=\"e\" entity_identifier=\"ISS-2\" onclick=\"alert(1)\">x</issue-embed-component><entity-reference-component entity_name=\"issue\" onerror=\"alert(1)\">y</entity-reference-component></p>",
+                "<p><issue-embed-component id=\"e\" entity_identifier=\"ISS-2\">x</issue-embed-component><entity-reference-component entity_name=\"issue\">y</entity-reference-component></p>",
+            ),
         ];
         for (input, expected) in vectors {
             assert_eq!(

@@ -230,7 +230,7 @@ pub fn success_location(base: &str) -> String {
 /// folding; `trim` + `to_lowercase` is the same operation. Runs only after
 /// the presence check, so missing/empty values never reach it.
 pub fn normalize_email(raw: &str) -> String {
-    raw.trim().to_lowercase()
+    pidash_compat::http::normalize_email(raw)
 }
 
 /// Django `validate_email` verdict (`django/core/validators.py`,
@@ -836,6 +836,8 @@ pub fn encode_password(password: &str, salt: &str, iterations: u32) -> String {
 /// `user.check_password(password)` (`admin.py:322`): `False` on mismatch
 /// *and* on unparsable/foreign-algorithm hashes (Django's `check_password`
 /// returns `False` when `identify_hasher` raises instead of propagating).
+/// The setter side effect (re-hash outdated hashes) lives in the `sign_in`
+/// wiring, not here.
 pub fn check_password(candidate: &str, encoded: &str) -> bool {
     pidash_auth::password::verify_password(candidate, encoded).unwrap_or(false)
 }

@@ -161,12 +161,16 @@ def test_daemon_run_fail_shape(machine_client, daemon_run, seeder):
         seeder.db.fetchval("SELECT status FROM agent_run WHERE id = %s", (daemon_run["id"],))
         == "failed"
     )
+    # The failure lands in the ``error_details`` bag (PDASHOSS01-187).
+    assert seeder.db.fetchval(
+        "SELECT error_details FROM agent_run WHERE id = %s", (daemon_run["id"],)
+    ) == {"message": "boom"}
 
 
 def test_daemon_run_fail_refusal_shape(machine_client, daemon_run, seeder):
     response = machine_client.post(
         f"{DAEMON}/runs/{daemon_run['id']}/fail/",
-        json={"reason": "refusal", "category": "cyber", "detail": "declined"},
+        json={"reason": "refusal", "category": " CYBER ", "detail": "declined"},
         headers=_idem(),
     )
     assert response.json() == {"ok": True, "refused": True}
@@ -175,6 +179,14 @@ def test_daemon_run_fail_refusal_shape(machine_client, daemon_run, seeder):
         seeder.db.fetchval("SELECT status FROM agent_run WHERE id = %s", (daemon_run["id"],))
         == "refused"
     )
+    # The normalized category lands in the bag and the generated column
+    # derives from it (PDASHOSS01-187).
+    assert seeder.db.fetchval(
+        "SELECT error_details FROM agent_run WHERE id = %s", (daemon_run["id"],)
+    ) == {"message": "declined", "refusal_category": "cyber"}
+    assert seeder.db.fetchval(
+        "SELECT refusal_category FROM agent_run WHERE id = %s", (daemon_run["id"],)
+    ) == "cyber"
 
 
 def test_daemon_run_cancelled_shape(machine_client, daemon_run, seeder):
@@ -274,3 +286,119 @@ def test_daemon_run_requires_auth(anon_client, daemon_run):
     assert response.status_code == 403
     assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json() == {"error": "run_not_owned_by_runner"}
+
+
+@pytest.fixture()
+def comment_world(seeder, daemon_world, machine_flow):
+    """An issue plus an assigned daemon run attached to it (PIDASHCONV-1483).
+
+    Server-created rows (comment, description) are removed afterwards — the
+    seed tracker only knows seeded rows.
+    """
+    state = seeder.create_state(
+        daemon_world["workspace"]["id"], daemon_world["project"]["id"]
+    )
+    issue = seeder.create_issue(
+        daemon_world["workspace"]["id"],
+        daemon_world["project"]["id"],
+        state["id"],
+        name="lifecycle comment issue",
+    )
+    run = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="assigned",
+    )
+    seeder.db.execute(
+        "UPDATE agent_run SET work_item_id = %s WHERE id = %s",
+        (issue["id"], run["id"]),
+    )
+    world = {
+        "issue_id": issue["id"],
+        "run_id": run["id"],
+        "owner_id": daemon_world["owner"]["id"],
+    }
+    yield world
+    seeder.db.execute("DELETE FROM run_message_dedupe WHERE run_id = %s", (run["id"],))
+    seeder.db.execute("DELETE FROM agent_run_event WHERE agent_run_id = %s", (run["id"],))
+    seeder.db.execute(
+        "DELETE FROM agent_run_approval WHERE agent_run_id = %s", (run["id"],)
+    )
+    descriptions = seeder.db.fetchall(
+        "SELECT description_id FROM issue_comments WHERE issue_id = %s",
+        (issue["id"],),
+    )
+    seeder.db.execute("DELETE FROM issue_comments WHERE issue_id = %s", (issue["id"],))
+    for row in descriptions:
+        if row["description_id"] is not None:
+            seeder.db.execute(
+                "DELETE FROM descriptions WHERE id = %s", (row["description_id"],)
+            )
+
+
+def _assert_owner_stamped(seeder, comment_world, where, params, body_marker):
+    comments = seeder.db.fetchall(
+        "SELECT id, created_by_id, updated_by_id, description_id, comment_html"
+        f" FROM issue_comments WHERE {where} AND deleted_at IS NULL",
+        params,
+    )
+    assert len(comments) == 1
+    comment = comments[0]
+    assert body_marker in comment["comment_html"]
+    assert str(comment["created_by_id"]) == comment_world["owner_id"]
+    assert comment["updated_by_id"] is None
+    description = seeder.db.fetchone(
+        "SELECT created_by_id, updated_by_id FROM descriptions WHERE id = %s",
+        (comment["description_id"],),
+    )
+    assert description is not None
+    assert str(description["created_by_id"]) == comment_world["owner_id"]
+    assert description["updated_by_id"] is None
+
+
+def test_daemon_run_pause_comment_stamped_with_owner(
+    machine_client, seeder, comment_world
+):
+    machine_client.post(f"{DAEMON}/runs/{comment_world['run_id']}/accept/", json={})
+    response = machine_client.post(
+        f"{DAEMON}/runs/{comment_world['run_id']}/pause/",
+        json={"payload": {"autonomy": {"question_for_human": "Which DB?"}}},
+        headers=_idem(),
+    )
+    assert response.json() == {"ok": True}
+    assert response.headers["allow"] == "POST, OPTIONS"
+    _assert_owner_stamped(
+        seeder,
+        comment_world,
+        "issue_id = %s",
+        (comment_world["issue_id"],),
+        "Which DB?",
+    )
+
+
+def test_daemon_run_fail_comment_stamped_with_owner(
+    machine_client, seeder, comment_world
+):
+    machine_client.post(f"{DAEMON}/runs/{comment_world['run_id']}/accept/", json={})
+    response = machine_client.post(
+        f"{DAEMON}/runs/{comment_world['run_id']}/fail/",
+        json={"detail": "boom"},
+        headers=_idem(),
+    )
+    assert response.json() == {"ok": True}
+    assert response.headers["allow"] == "POST, OPTIONS"
+    assert (
+        seeder.db.fetchval(
+            "SELECT status FROM agent_run WHERE id = %s", (comment_world["run_id"],)
+        )
+        == "failed"
+    )
+    _assert_owner_stamped(
+        seeder,
+        comment_world,
+        "issue_id = %s AND speaker_agent_run_id = %s",
+        (comment_world["issue_id"], comment_world["run_id"]),
+        "boom",
+    )

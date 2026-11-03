@@ -54,6 +54,8 @@ use pidash_auth::permissions::allow::AllowFacts;
 use pidash_types::WorkspaceId;
 
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+pub use pidash_compat::response::{json_response, SERVER_ERROR_BODY};
 
 /// Owned D-33 app-integration routes (cutover granularity: registered
 /// paths serve from Rust, everything else keeps proxying). Sibling
@@ -75,8 +77,6 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `handle_exception`'s `ObjectDoesNotExist` branch
 /// (`app/views/base.py`).
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `IntegrityError` branch.
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
 /// POST duplicate URL (`app/views/webhook/base.py:31-35`).
@@ -137,17 +137,6 @@ pub fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
-/// Render a `serde_json::Map` built in serializer field order as compact
-/// JSON (`JSONRenderer` default: no spaces; `preserve_order` keeps the
-/// insertion order DRF emits).
-pub fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
-}
-
 /// Authenticated actor plus time zone (`TimezoneMixin.initial` activates
 /// the user's zone; datetimes render in it).
 pub struct Actor {
@@ -183,37 +172,17 @@ pub fn pool_of(state: &AppState) -> Result<&PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
-/// Parse a UUID path segment: Django's `<uuid:>` converter 404s on
-/// garbage, so unparseable ids behave as missing rows (the D-02 `space`
-/// `parse_id` precedent).
+/// Parse a UUID path segment: Django's `<uuid:>` converter routes only
+/// the canonical lowercase hyphenated spelling, so anything else takes
+/// the route's existing unmatched path (the D-02 `space` `parse_id`
+/// precedent). `Uuid::parse` also accepts uppercase, simple, braced and
+/// `urn:uuid:` spellings that Django resolver-404s (PIDASHCONV-1463).
 #[allow(clippy::result_large_err)]
 pub fn parse_id(raw: &str) -> Result<Uuid, Response> {
-    raw.parse::<Uuid>()
-        .map_err(|_| Denial::NotFound.into_response())
-}
-
-/// An app path: the owned methods serve from Rust, everything else falls
-/// through to Django (its 405-after-auth and metadata responses live
-/// there). List `"HEAD"` alongside the other unowned methods: axum would
-/// auto-serve it from `get`, but Django defines no `head` and 405s after
-/// auth.
-pub fn owned(
-    handler: axum::routing::MethodRouter<AppState>,
-    unowned: &[&str],
-) -> axum::routing::MethodRouter<AppState> {
-    let mut router = handler;
-    for method in unowned {
-        router = match *method {
-            "POST" => router.post(crate::edge::proxy),
-            "PUT" => router.put(crate::edge::proxy),
-            "PATCH" => router.patch(crate::edge::proxy),
-            "DELETE" => router.delete(crate::edge::proxy),
-            "HEAD" => router.head(crate::edge::proxy),
-            "OPTIONS" => router.options(crate::edge::proxy),
-            _ => router.get(crate::edge::proxy),
-        };
+    match classify_uuid_segment(raw) {
+        UuidSegment::Canonical(id) => Ok(id),
+        UuidSegment::NonCanonical | UuidSegment::Garbage => Err(Denial::NotFound.into_response()),
     }
-    router
 }
 
 /// The `@allow_permission(allowed_roles=[ADMIN], level="WORKSPACE")`
@@ -266,4 +235,27 @@ pub async fn workspace_id_or_404(pool: &PgPool, slug: &str) -> Result<Uuid, Deni
         .await
         .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::NotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_id;
+
+    #[test]
+    fn parse_id_serves_canonical_spelling_only() {
+        // Django's `<uuid:>` converter routes only the canonical
+        // lowercase hyphenated spelling; `Uuid::parse` also accepts the
+        // rest, which take the unmatched path like garbage
+        // (PIDASHCONV-1463).
+        assert!(parse_id("3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f").is_ok());
+        for raw in [
+            "3F9A2C1E-9B1A-4D2E-8F3A-1A2B3C4D5E6F",
+            "3f9a2c1e9b1a4d2e8f3a1a2b3c4d5e6f",
+            "{3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f}",
+            "urn:uuid:3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f",
+            "not-a-uuid",
+        ] {
+            assert!(parse_id(raw).is_err(), "{raw}");
+        }
+    }
 }

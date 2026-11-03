@@ -14,11 +14,15 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import random
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from psycopg.rows import dict_row
+from psycopg.types.json import Json
 
 from . import djangocrypto
 
@@ -186,7 +190,8 @@ class Seed:
         self._rows.clear()
 
     # -- identity ------------------------------------------------------
-    def user(self, *, email=None, password="contract-pw-80", suffix=None):
+    def user(self, *, email=None, password="contract-pw-80", suffix=None,
+             user_timezone="UTC"):
         sfx = suffix or uuid.uuid4().hex[:8]
         email = email or f"ct80-{sfx}@example.com"
         return {
@@ -211,7 +216,7 @@ class Seed:
                 is_email_verified=True,
                 is_password_autoset=False,
                 token=uuid.uuid4().hex,
-                user_timezone="UTC",
+                user_timezone=user_timezone,
                 last_login_ip="127.0.0.1",
                 last_logout_ip="",
                 last_login_medium="",
@@ -486,10 +491,10 @@ class Seed:
         )
 
     def issue(self, workspace_id, project_id, *, name=None,
-              description="", sequence_id=None, state_id=None):
+              description="", sequence_id=None, state_id=None,
+              completed_at=None, archived_at=None):
         """A minimal issue row with FTS-visible text columns set."""
-        return self._insert(
-            "issues",
+        cols = dict(
             name=name or f"CT87 issue {uuid.uuid4().hex[:6]}",
             description_json="{}",
             description_html=f"<p>{description}</p>" if description else "<p></p>",
@@ -507,6 +512,11 @@ class Seed:
             created_at=_now(),
             updated_at=_now(),
         )
+        if completed_at is not None:
+            cols["completed_at"] = completed_at
+        if archived_at is not None:
+            cols["archived_at"] = archived_at
+        return self._insert("issues", **cols)
 
     def favorite_view(self, workspace_id, user_id, view_id, *,
                       project_id=None):
@@ -1271,6 +1281,25 @@ class Seeder:
         self._put("cycles", cycle_id)
         return {"id": cycle_id}
 
+    def create_cycle_issue(
+        self,
+        workspace_id: str,
+        project_id: str,
+        cycle_id: str,
+        issue_id: str,
+        *,
+        created_at: str = "2024-01-01T00:00:00+00:00",
+    ) -> dict[str, Any]:
+        link_id = _uid()
+        self.db.execute(
+            """INSERT INTO cycle_issues
+               (id, workspace_id, project_id, cycle_id, issue_id, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s::timestamptz,%s::timestamptz)""",
+            (link_id, workspace_id, project_id, cycle_id, issue_id, created_at, created_at),
+        )
+        self._put("cycle_issues", link_id)
+        return {"id": link_id}
+
     def create_module(self, workspace_id: str, project_id: str, *, name: str = "Contract module") -> dict[str, Any]:
         module_id = _uid()
         self.db.execute(
@@ -1396,6 +1425,7 @@ class Seeder:
         parent_id: str | None = None,
         description_html: str = "<p></p>",
         description_binary: bytes | None = None,
+        description_json: dict | None = None,
         archived: bool = False,
         locked: bool = False,
     ) -> dict[str, Any]:
@@ -1410,11 +1440,12 @@ class Seeder:
                 owned_by_id, access, workspace_id, color, parent_id, archived_at,
                 is_locked, view_props, logo_props, is_global, sort_order,
                 created_by_id, created_at, updated_at)
-               VALUES (%s,%s,'{}',%s,%s,%s,%s,%s,'',%s,
+               VALUES (%s,%s,CAST(%s AS jsonb),%s,%s,%s,%s,%s,'',%s,
                        CASE WHEN %s THEN CURRENT_DATE ELSE NULL END,
                        %s,'{"full_width": false}','{}',false,65535,%s,now(),now())""",
             (
-                page_id, name, description_binary, description_html,
+                page_id, name, json.dumps({} if description_json is None else description_json),
+                description_binary, description_html,
                 owner_id, access, workspace_id, parent_id,
                 archived, locked, owner_id,
             ),
@@ -1671,6 +1702,49 @@ class Seeder:
             "url": f"https://github.com/{owner}/{name}",
         }
 
+    def create_git_repository_binding(
+        self,
+        workspace_id: str,
+        project_id: str,
+        account_id: str,
+        actor_id: str,
+        *,
+        last_synced_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Seed a ``git_repositories`` + ``git_repository_bindings`` pair."""
+        repo_id = _uid()
+        full = f"contract-owner-{self.tag[:6]}/contract-repo-{self._n + 1}"
+        self.db.execute(
+            """INSERT INTO git_repositories
+               (id, provider, host_url, external_id, namespace, name, full_name,
+                web_url, clone_url_http, clone_url_ssh, default_branch,
+                is_private, metadata, created_at, updated_at)
+               VALUES (%s,'github','https://github.com',%s,%s,%s,%s,
+                       %s,%s,%s,'main',false,'{}',now(),now())""",
+            (
+                repo_id,
+                f"contract:{repo_id[:8]}",
+                f"contract-owner-{self.tag[:6]}",
+                f"contract-repo-{self._n + 1}",
+                full,
+                f"https://github.com/{full}",
+                f"https://github.com/{full}.git",
+                f"git@github.com:{full}.git",
+            ),
+        )
+        self._put("git_repositories", repo_id)
+        binding_id = _uid()
+        self.db.execute(
+            """INSERT INTO git_repository_bindings
+               (id, project_id, workspace_id, repository_id, provider_account_id,
+                actor_id, is_sync_enabled, clone_auth_mode, last_synced_at,
+                last_sync_error, metadata, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,false,'runner_managed',%s,'','{}',now(),now())""",
+            (binding_id, project_id, workspace_id, repo_id, account_id, actor_id, last_synced_at),
+        )
+        self._put("git_repository_bindings", binding_id)
+        return {"id": binding_id, "repository_id": repo_id}
+
     def create_github_app_installation(self, wi_id: str) -> dict[str, Any]:
         """Seed a ``github_app_installations`` row with a unique install id."""
         installation_id = random.randint(1_000_000, 9_999_999)
@@ -1687,6 +1761,159 @@ class Seeder:
         )
         self._put("github_app_installations", row_id)
         return {"id": row_id, "installation_id": installation_id}
+
+    def create_git_repository(self) -> dict[str, Any]:
+        """Seed a ``git_repositories`` row (unique external_id/full_name)."""
+        repo_id = _uid()
+        external_id = f"contract-{self.tag}-{self._n + 1}"
+        name = f"contract-repo-{self.tag}-{self._n + 1}"
+        full_name = f"contract-owner/{name}"
+        self.db.execute(
+            """INSERT INTO git_repositories
+               (id, provider, host_url, external_id, namespace, name, full_name,
+                web_url, clone_url_http, clone_url_ssh, default_branch,
+                is_private, metadata, created_at, updated_at)
+               VALUES (%s,'github','https://github.com',%s,'contract-owner',%s,%s,
+                       %s,%s,'git@github.com:contract-owner/x.git',
+                       'main',false,'{}',now(),now())""",
+            (
+                repo_id,
+                external_id,
+                name,
+                full_name,
+                f"https://github.com/{full_name}",
+                f"https://github.com/{full_name}.git",
+            ),
+        )
+        self._put("git_repositories", repo_id)
+        return {"id": repo_id}
+
+    def create_git_binding(
+        self, workspace_id: str, project_id: str, actor_id: str, repository_id: str, account_id: str
+    ) -> dict[str, Any]:
+        """Seed a ``git_repository_bindings`` row for the project."""
+        binding_id = _uid()
+        self.db.execute(
+            """INSERT INTO git_repository_bindings
+               (id, project_id, workspace_id, repository_id, provider_account_id,
+                actor_id, created_by_id, updated_by_id, is_sync_enabled,
+                clone_auth_mode, last_sync_error, metadata, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,false,'public','',
+                       '{"raw_url": "https://github.com/contract-owner/x"}',
+                       now(),now())""",
+            (binding_id, project_id, workspace_id, repository_id, account_id, actor_id, actor_id, actor_id),
+        )
+        self._put("git_repository_bindings", binding_id)
+        return {"id": binding_id}
+
+    def create_git_issue_sync(
+        self, workspace_id: str, project_id: str, binding_id: str, issue_id: str, *, deleted: bool = False
+    ) -> dict[str, Any]:
+        """Seed a ``git_issue_syncs`` row (``deleted=True`` soft-deletes it)."""
+        sync_id = _uid()
+        iid = f"{random.randint(100_000, 999_999)}"
+        self.db.execute(
+            """INSERT INTO git_issue_syncs
+               (id, binding_id, issue_id, project_id, workspace_id, provider,
+                external_id, external_iid, web_url, remote_state, metadata,
+                deleted_at, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,'github',%s,%s,
+                       'https://github.com/contract-owner/x/issues/1','open','{}',
+                       %s,now(),now())""",
+            (
+                sync_id,
+                binding_id,
+                issue_id,
+                project_id,
+                workspace_id,
+                iid,
+                iid,
+                None,
+            ),
+        )
+        if deleted:
+            self.db.execute("UPDATE git_issue_syncs SET deleted_at = now() WHERE id = %s", (sync_id,))
+        self._put("git_issue_syncs", sync_id)
+        return {"id": sync_id}
+
+    def create_git_comment_sync(
+        self, workspace_id: str, project_id: str, issue_sync_id: str, comment_id: str, *, deleted: bool = False
+    ) -> dict[str, Any]:
+        """Seed a ``git_comment_syncs`` row (``deleted=True`` soft-deletes it)."""
+        sync_id = _uid()
+        self.db.execute(
+            """INSERT INTO git_comment_syncs
+               (id, issue_sync_id, comment_id, project_id, workspace_id,
+                provider, external_id, metadata, deleted_at, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,'github',%s,'{}',%s,now(),now())""",
+            (
+                sync_id,
+                issue_sync_id,
+                comment_id,
+                project_id,
+                workspace_id,
+                f"{random.randint(100_000, 999_999)}",
+                None,
+            ),
+        )
+        if deleted:
+            self.db.execute("UPDATE git_comment_syncs SET deleted_at = now() WHERE id = %s", (sync_id,))
+        self._put("git_comment_syncs", sync_id)
+        return {"id": sync_id}
+
+    def create_github_issue_sync(
+        self, workspace_id: str, project_id: str, sync_id: str, issue_id: str, *, deleted: bool = False
+    ) -> dict[str, Any]:
+        """Seed a ``github_issue_syncs`` row (``deleted=True`` soft-deletes it)."""
+        row_id = _uid()
+        self.db.execute(
+            """INSERT INTO github_issue_syncs
+               (id, repository_sync_id, issue_id, project_id, workspace_id,
+                repo_issue_id, github_issue_id, issue_url, metadata,
+                deleted_at, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,
+                       'https://github.com/contract-owner/x/issues/1','{}',
+                       %s,now(),now())""",
+            (
+                row_id,
+                sync_id,
+                issue_id,
+                project_id,
+                workspace_id,
+                random.randint(1_000_000, 9_999_999),
+                random.randint(1_000_000, 9_999_999),
+                None,
+            ),
+        )
+        if deleted:
+            self.db.execute("UPDATE github_issue_syncs SET deleted_at = now() WHERE id = %s", (row_id,))
+        self._put("github_issue_syncs", row_id)
+        return {"id": row_id}
+
+    def create_github_comment_sync(
+        self, workspace_id: str, project_id: str, issue_sync_id: str, comment_id: str, *, deleted: bool = False
+    ) -> dict[str, Any]:
+        """Seed a ``github_comment_syncs`` row (``deleted=True`` soft-deletes it)."""
+        row_id = _uid()
+        self.db.execute(
+            """INSERT INTO github_comment_syncs
+               (id, issue_sync_id, comment_id, project_id, workspace_id,
+                repo_comment_id, deleted_at, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,now(),now())""",
+            (
+                row_id,
+                issue_sync_id,
+                comment_id,
+                project_id,
+                workspace_id,
+                random.randint(1_000_000, 9_999_999),
+                None,
+            ),
+        )
+        if deleted:
+            self.db.execute("UPDATE github_comment_syncs SET deleted_at = now() WHERE id = %s", (row_id,))
+        self._put("github_comment_syncs", row_id)
+        return {"id": row_id}
 
     # -- api-v1 work items (PIDASHCONV-76) ---------------------------------
     # api-v1 authenticates with ``X-Api-Key`` (APIKeyAuthentication against
@@ -1846,13 +2073,13 @@ class Seeder:
         self.db.execute(
             """INSERT INTO agent_run
                (id, status, prompt, run_config, required_capabilities, thread_id,
-                error, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
-                refusal_category, trigger, executor_kind, dispatch_attempts,
-                cancel_reason, error_code, tool_plan, phase_kind, agent_metadata,
+                error_details, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
+                trigger, executor_kind, dispatch_attempts,
+                cancel_reason, tool_plan, phase_kind, agent_metadata,
                 usage, created_at)
-               VALUES (%s,%s,'contract prompt','{}','{}','contract-thread','',
-                       %s,%s,%s,%s,'contract-model','', 'human', 'local_runner', 0,
-                       '','', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now())""",
+               VALUES (%s,%s,'contract prompt','{}','{}','contract-thread','{}',
+                       %s,%s,%s,%s,'contract-model', 'human', 'local_runner', 0,
+                       '', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now())""",
             (run_id, status, workspace_id, work_item_id, pod_id, created_by_id),
         )
         self._put("agent_run", run_id)
@@ -1986,14 +2213,14 @@ class Seeder:
                (id, workspace_id, owner_id, created_by_id, pod_id, runner_id,
                 status, prompt, trigger, executor_kind, run_config,
                 required_capabilities, thread_id, agent_metadata, tool_plan,
-                usage, dispatch_attempts, error, refusal_category, llm_model,
-                cancel_reason, error_code, phase_kind,
+                usage, dispatch_attempts, error_details, llm_model,
+                cancel_reason, phase_kind,
                 created_at)
                VALUES (%s,%s,%s,%s,%s,%s,
                        %s,'','direct','local_runner','{}',
                        '[]','{}','{}','{}',
-                       '{}',0,'','','',
-                       '','','',
+                       '{}',0,'{}','',
+                       '','',
                        now())""",
             (run_id, workspace_id, owner_id, owner_id, pod_id, runner_id, status),
         )
@@ -2211,6 +2438,51 @@ def issue_chain(conn, slug: str) -> dict:
             "state": state, "issue": issue}
 
 
+def bulk_issues(conn, slug: str, n: int) -> dict:
+    """One workspace with ``n`` live issues for the version backfills.
+
+    PIDASHCONV-1294: the description-version sync writes one multi-row
+    INSERT per workspace group, so the bind-param cap only bites with
+    thousands of live issues in a single workspace. Seeds via
+    ``issue_chain`` plus full-row duplication (``issues`` carries no
+    unique constraints, so copies are safe). Every issue gets
+    ``created_by_id`` so owner resolution never needs the project-admin
+    fallback. Returns the chain plus ``pre_total`` (live issues present
+    before seeding, for the sync ``offset``).
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM issues WHERE deleted_at IS NULL")
+        pre_total = cur.fetchone()["n"]
+    chain = issue_chain(conn, slug)
+    owner_id = chain["owner"]["id"]
+    project_member(conn, chain["project"]["id"], chain["workspace"]["id"], owner_id)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET created_by_id = %s::uuid WHERE id = %s::uuid",
+            (str(owner_id), str(chain["issue"]["id"])),
+        )
+        cur.execute(
+            "SELECT * FROM issues WHERE id = %s::uuid", (str(chain["issue"]["id"]),)
+        )
+        cols = [d.name for d in cur.description]
+        template = dict(zip(cols, cur.fetchone()))
+    col_sql = ", ".join(f'"{c}"' for c in cols)
+    placeholders = ", ".join(["%s"] * len(cols))
+    batch = []
+    for _ in range(n - 1):
+        row = dict(template)
+        row["id"] = uuid.uuid4()
+        batch.append(
+            tuple(Json(v) if isinstance(v, dict) else v for v in (row[c] for c in cols))
+        )
+    with conn.cursor() as cur:
+        cur.executemany(
+            f"INSERT INTO issues ({col_sql}) VALUES ({placeholders})", batch
+        )
+    chain["pre_total"] = pre_total
+    return chain
+
+
 # ---------------------------------------------------------------------------
 # Cycle / module / comment / intake seeds (PIDASHCONV-1105 webhooks fan-out)
 # ---------------------------------------------------------------------------
@@ -2406,6 +2678,37 @@ def project_member(
     }
     values.update(over)
     return insert_row(conn, "project_members", values)
+
+
+def issue_subscriber(conn, project_id, workspace_id, issue_id, user_id, **over) -> dict:
+    """One ``issue_subscribers`` row (PIDASHCONV-1276 closed_to oracle)."""
+    values = {
+        "project_id": str(project_id),
+        "workspace_id": str(workspace_id),
+        "issue_id": str(issue_id),
+        "subscriber_id": str(user_id),
+    }
+    values.update(over)
+    return insert_row(conn, "issue_subscribers", values)
+
+
+def notification_preference(conn, user_id, **over) -> dict:
+    """One ``user_notification_preferences`` row, all flags on (PIDASHCONV-1276).
+
+    ``notifications`` looks the row up with ``.get(user_id=...)`` — a
+    missing row raises inside the task's broad ``except`` and no
+    notification is written — so every notified subscriber needs one.
+    """
+    values = {
+        "user_id": str(user_id),
+        "property_change": True,
+        "state_change": True,
+        "comment": True,
+        "mention": True,
+        "issue_completed": True,
+    }
+    values.update(over)
+    return insert_row(conn, "user_notification_preferences", values)
 
 
 def project_user_property(conn, project_id, workspace_id, user_id, **over) -> dict:

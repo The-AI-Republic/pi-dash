@@ -23,16 +23,31 @@ inserts omitted it, so on a live database every stale turn parked on
 of failing. The assertions below require ``created_at`` on both rows — without
 the fix the sweep never settles and the turn stays ``running``, so the test
 fails.
+
+Regression pinned here (PIDASHCONV-1248): the sweep cut at a hard-coded
+330+60s, ignoring ``ASSISTANT_TURN_HARD_LIMIT``. The worker boots with the
+limit at 900 (see the replay job env) and
+``test_sweep_honors_configured_hard_limit`` seeds turns on both sides of the
+960s cutoff — pre-fix the young turn is swept and the test fails.
+
+Regression pinned here (PIDASHCONV-1247): the sweep persisted the
+``turn_failed`` event row but never PUBLISHed it on the thread channel, so
+open SSE streams spun forever. The publish test below subscribes first and
+requires exactly one ``turn_failed`` frame.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import time
 import uuid
+from datetime import datetime
 
 from psycopg.rows import dict_row
 
 from _harness import rust_queue
+from _harness import redis as redis_helper
 from _harness import seed as seed_helpers
 from _harness.db import wait_for_condition as wait_for
 
@@ -65,13 +80,17 @@ def _seed_member(db_conn, tag: str):
     return user, workspace
 
 
-def _seed_turn_trio(db_conn, user, workspace, *, status="queued", started_at=None):
+def _seed_turn_trio(db_conn, user, workspace, *, status="queued", started_at=None,
+                    thread_id=None):
     """Replicate the message-POST 202 rows (``views/messages.py``).
 
     Thread (with ``active_turn`` set) + user message (seq 1, completed) +
     turn pointing at the message. Returns (thread_id, turn_id, message_id).
+    ``thread_id`` pins the thread when the caller must subscribe to its
+    channel before the rows exist (the sweep-publish test).
     """
-    thread_id, turn_id, message_id = (str(uuid.uuid4()) for _ in range(3))
+    thread_id = thread_id or str(uuid.uuid4())
+    turn_id, message_id = (str(uuid.uuid4()) for _ in range(2))
     now = _now_iso()
     with db_conn.cursor() as cur:
         cur.execute(
@@ -254,3 +273,148 @@ def test_sweep_ignores_fresh_and_terminal(db_conn):
     assert str(_thread_row(db_conn, fresh_thread)["active_turn_id"]) == str(fresh_turn)
     assert [e for e in _turn_events(db_conn, fresh_turn) if e["kind"] == "turn_failed"] == []
     assert [e for e in _turn_events(db_conn, done_turn) if e["kind"] == "turn_failed"] == []
+
+
+def _iso_age(age_secs: int) -> str:
+    """UTC ISO instant ``age_secs`` in the past (a turn's ``started_at``)."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age_secs))
+
+
+def test_sweep_honors_configured_hard_limit(db_conn):
+    """The sweep cuts at ASSISTANT_TURN_HARD_LIMIT + 60 (PIDASHCONV-1248).
+
+    The Rust worker under test boots with ASSISTANT_TURN_HARD_LIMIT=900 (see
+    the sweep-rust replay job env): a turn younger than the 960s cutoff
+    survives the sweep while a turn older than it fails with ``turn_timeout``.
+    The ages derive from the configured value, so the same test pins the
+    default 390s horizon when the override is absent. Pre-fix the worker
+    hard-codes 330 and sweeps the young turn, so this test fails.
+    """
+    limit = int(os.environ.get("ASSISTANT_TURN_HARD_LIMIT", "330"))
+    cutoff = limit + 60
+    user, workspace = _seed_member(db_conn, "hardlimit")
+    _young_thread, young_turn, _m1 = _seed_turn_trio(
+        db_conn, user, workspace, status="running", started_at=_iso_age(cutoff - 30)
+    )
+    _old_thread, old_turn, _m2 = _seed_turn_trio(
+        db_conn, user, workspace, status="running", started_at=_iso_age(cutoff + 30)
+    )
+
+    _publish_sweep()
+
+    row = wait_for(
+        lambda: _turn_row(db_conn, old_turn)
+        if _turn_row(db_conn, old_turn)["status"] == "failed"
+        else None,
+        what="over-cutoff turn swept",
+    )
+    assert row["error_code"] == TIMEOUT_CODE
+    assert row["error_detail"] == TIMEOUT_DETAIL
+    # Settle: the sweep may still be running when the old row flips.
+    time.sleep(2)
+    assert _turn_row(db_conn, young_turn)["status"] == "running", (
+        f"a turn younger than the configured {cutoff}s cutoff must survive the sweep"
+    )
+    assert [e for e in _turn_events(db_conn, young_turn) if e["kind"] == "turn_failed"] == []
+
+
+def _subscribe_thread(rdb, thread_id):
+    """Subscribe to the thread channel; return the confirmed pubsub."""
+    channel = f"assistant:thread:{thread_id}"
+    pubsub = rdb.pubsub(ignore_subscribe_messages=True)
+    pubsub.subscribe(channel)
+    deadline = time.monotonic() + 10
+    while not pubsub.subscribed and time.monotonic() < deadline:
+        pubsub.get_message(timeout=1.0)
+    assert pubsub.subscribed, f"subscription to {channel} never confirmed"
+    return pubsub
+
+
+def _drain_channel(pubsub, timeout=30.0, silence=3.0):
+    """Collect published bodies until ``silence`` idle seconds or ``timeout``.
+
+    A missing publish fails only after the full timeout, so slow
+    assertions stay honest; the silence cut keeps the passing case fast.
+    """
+    bodies = []
+    deadline = time.monotonic() + timeout
+    quiet_until = None
+    while time.monotonic() < deadline:
+        message = pubsub.get_message(timeout=1.0)
+        if message is None:
+            if quiet_until is not None and time.monotonic() >= quiet_until:
+                break
+            continue
+        if message.get("type") != "message":
+            continue
+        bodies.append(message["data"])
+        quiet_until = time.monotonic() + silence
+    return bodies
+
+
+def _failed_event_rows(db_conn, turn_id):
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id, message_id, seq, created_at FROM assistant_event "
+            "WHERE turn_id = %s AND kind = 'turn_failed' ORDER BY id",
+            (turn_id,),
+        )
+        return cur.fetchall()
+
+
+def test_sweep_publishes_turn_failed_on_thread_channel(db_conn):
+    """The Rust sweep PUBLISHes the ``turn_failed`` event (PIDASHCONV-1247).
+
+    Regression: the sweep persisted the event row but published nothing,
+    so open SSE streams (replay at connect, then Redis only) spun forever.
+    The subscription opens before the stale turn exists, so whichever
+    execution sweeps it — this publish or the worker's 30s beat — its
+    frame is caught, exactly once.
+    """
+    user, workspace = _seed_member(db_conn, "sweeppub")
+    thread_id = str(uuid.uuid4())
+    rdb = redis_helper.client()
+    pubsub = _subscribe_thread(rdb, thread_id)
+    try:
+        _trio_thread, turn_id, _msg = _seed_turn_trio(
+            db_conn, user, workspace, status="running", started_at=ANCIENT,
+            thread_id=thread_id,
+        )
+
+        _publish_sweep()
+        wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "failed"
+            else None,
+            what="stale turn swept",
+        )
+        bodies = _drain_channel(pubsub)
+        assert len(bodies) == 1, f"expected one turn_failed publish, got {len(bodies)}"
+        raw = bodies[0]
+        parsed = json.loads(raw)
+        assert parsed["kind"] == "turn_failed"
+        assert parsed["thread"] == thread_id
+        assert parsed["payload"] == {
+            "turn_id": turn_id,
+            "error_code": TIMEOUT_CODE,
+            "detail": TIMEOUT_DETAIL,
+        }
+        assert list(parsed.keys()) == [
+            "id", "thread", "message", "seq", "kind", "payload", "created_at",
+        ]
+        assert raw == json.dumps(parsed), (
+            "publish bytes are json.dumps with default separators/escapes"
+        )
+        rows = _failed_event_rows(db_conn, turn_id)
+        assert len(rows) == 1, "exactly one turn_failed row per swept turn"
+        assert parsed["id"] == rows[0]["id"]
+        assert parsed["seq"] == rows[0]["seq"]
+        assert parsed["message"] == str(rows[0]["message_id"])
+        # The session timezone renders the stored stamp in local time;
+        # compare instants, not strings.
+        assert datetime.fromisoformat(parsed["created_at"]) == rows[0]["created_at"]
+        assert parsed["created_at"].endswith("+00:00")
+    finally:
+        pubsub.unsubscribe()
+        pubsub.close()
+        rdb.close()

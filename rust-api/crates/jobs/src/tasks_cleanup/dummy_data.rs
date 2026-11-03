@@ -34,6 +34,7 @@ use std::sync::Arc;
 
 use chrono::{Datelike, NaiveDate};
 use pidash_db::RequestContext;
+use pidash_services::app_project::ser_project::next_work_item_sequence;
 use pidash_services::tasks_cleanup::dummy_data as plan;
 use pidash_types::{UserId, WorkspaceId};
 use rand::rngs::StdRng;
@@ -374,36 +375,45 @@ impl PgDummyData {
         .fetch_one(&self.pool)
         .await
         .map_err(db_error)?;
+        use pidash_services::domain::projects::{insert_demo_project, DemoProject};
         let now = chrono::Utc::now();
-        let project_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            r#"INSERT INTO projects
-                (id, workspace_id, name, identifier, created_by_id, intake_view, created_at, updated_at,
-                 description, network, cycle_view, module_view, issue_views_view, page_view,
-                 archive_in, close_in, logo_props, is_time_tracking_enabled, is_issue_type_enabled,
-                 is_default, guest_view_all_features, timezone, members_can_edit_states,
-                 repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks,
-                 agent_review_default_interval_seconds, agent_test_default_interval_seconds,
-                 agent_ticking_enabled, default_agent_executor)
-                VALUES ($1::uuid, $2::uuid, $3, $4, NULL, TRUE, $5, $5,
-                 '', 2, FALSE, FALSE, FALSE, TRUE,
-                 0, 0, '{}', FALSE, FALSE,
-                 $6, FALSE, $7, TRUE,
-                 '', 'main', 10800, 10,
-                 10800, 10800,
-                 TRUE, $8)"#,
+        let default_executor = default_agent_executor();
+        let project_id = insert_demo_project(
+            &self.pool,
+            &DemoProject {
+                workspace_id,
+                name: &full_name,
+                identifier: &identifier,
+                is_default: !has_default,
+                timezone: &timezone,
+                default_agent_executor: &default_executor,
+                now,
+            },
         )
-        .bind(&project_id)
-        .bind(workspace_id)
-        .bind(&full_name)
-        .bind(&identifier)
-        .bind(now)
-        .bind(!has_default)
-        .bind(&timezone)
-        .bind(default_agent_executor())
-        .execute(&self.pool)
         .await
         .map_err(db_error)?;
+        // `create_default_pod_for_new_project` (`runner/signals.py:31-66`):
+        // the `post_save` handler fires during `Project.objects.create`,
+        // before the member rows below. Best-effort + idempotent — never
+        // fails the task. Lead/assignee are `None` on this path (the task
+        // passes neither), so `created_by` stamps `NULL`, like Django.
+        if let (Ok(project_uuid), Ok(workspace_uuid)) = (
+            uuid::Uuid::parse_str(&project_id),
+            uuid::Uuid::parse_str(workspace_id),
+        ) {
+            pidash_services::runner_runs::signals::create_default_pod_for_new_project(
+                &self.pool,
+                &pidash_services::runner_runs::signals::NewProject {
+                    id: project_uuid,
+                    workspace_id: workspace_uuid,
+                    identifier: identifier.clone(),
+                    created: true,
+                    project_lead: None,
+                    default_assignee: None,
+                },
+            )
+            .await;
+        }
         // `ProjectMember.objects.create` runs the `save()` hook: the
         // property row persists BEFORE the member row, and `save()`
         // nulls the audit user on both.
@@ -444,21 +454,21 @@ impl PgDummyData {
         .execute(&self.pool)
         .await
         .map_err(db_error)?;
-        sqlx::query(
-            r#"INSERT INTO project_members
-                (id, project_id, workspace_id, member_id, role, created_at, updated_at,
-                 view_props, default_props, preferences, sort_order, is_active)
-                VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $6, $7, $7, $8, 65535, TRUE)"#,
+        use pidash_services::domain::projects::members::{add_demo, DemoProjectMember};
+        add_demo(
+            &self.pool,
+            &DemoProjectMember {
+                project_id: &project_id,
+                workspace_id,
+                member_id: user_id,
+                role: plan::PROJECT_MEMBER_ROLE,
+                sort_order: 65535.0,
+                view_props: &member_props,
+                preferences: &member_prefs,
+                now,
+                ignore_conflicts: false,
+            },
         )
-        .bind(uuid::Uuid::new_v4().to_string())
-        .bind(&project_id)
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(plan::PROJECT_MEMBER_ROLE)
-        .bind(now)
-        .bind(sqlx::types::Json(&member_props))
-        .bind(sqlx::types::Json(&member_prefs))
-        .execute(&self.pool)
         .await
         .map_err(db_error)?;
         Ok(project_id)
@@ -483,25 +493,23 @@ impl PgDummyData {
         let now = chrono::Utc::now();
         let member_props = pidash_db::ops::users::project_member_props_json();
         let member_prefs = pidash_db::ops::users::project_preferences_json();
+        use pidash_services::domain::projects::members::{add_demo, DemoProjectMember};
         for member_id in &user_ids {
             let sort_order = f64::from(randint(rng, 0, 65535));
-            sqlx::query(
-                r#"INSERT INTO project_members
-                    (id, project_id, workspace_id, member_id, role, sort_order, created_at, updated_at,
-                     view_props, default_props, preferences, is_active)
-                    VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $7, $8, $8, $9, TRUE)
-                    ON CONFLICT DO NOTHING"#,
+            add_demo(
+                &self.pool,
+                &DemoProjectMember {
+                    project_id,
+                    workspace_id,
+                    member_id,
+                    role: plan::PROJECT_MEMBER_ROLE,
+                    sort_order,
+                    view_props: &member_props,
+                    preferences: &member_prefs,
+                    now,
+                    ignore_conflicts: true,
+                },
             )
-            .bind(uuid::Uuid::new_v4().to_string())
-            .bind(project_id)
-            .bind(workspace_id)
-            .bind(member_id)
-            .bind(plan::PROJECT_MEMBER_ROLE)
-            .bind(sort_order)
-            .bind(now)
-            .bind(sqlx::types::Json(&member_props))
-            .bind(sqlx::types::Json(&member_prefs))
-            .execute(&self.pool)
             .await
             .map_err(db_error)?;
         }
@@ -516,25 +524,23 @@ impl PgDummyData {
         workspace_id: &str,
         user_id: &str,
     ) -> DbResult<()> {
+        use pidash_services::domain::projects::states::{add_demo, DemoState};
         let now = chrono::Utc::now();
         for state in plan::DEFAULT_STATES {
-            sqlx::query(
-                r#"INSERT INTO states
-                    (id, name, color, project_id, sequence, workspace_id, "group", "default", created_by_id, created_at, updated_at,
-                     description, slug, is_triage)
-                    VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6::uuid, $7, $8, $9::uuid, $10, $10, '', '', FALSE)"#,
+            add_demo(
+                &self.pool,
+                &DemoState {
+                    project_id,
+                    workspace_id,
+                    created_by: user_id,
+                    name: state.name,
+                    color: state.color,
+                    sequence: state.sequence,
+                    group: state.group,
+                    default: state.default,
+                    now,
+                },
             )
-            .bind(uuid::Uuid::new_v4().to_string())
-            .bind(state.name)
-            .bind(state.color)
-            .bind(project_id)
-            .bind(state.sequence)
-            .bind(workspace_id)
-            .bind(state.group)
-            .bind(state.default)
-            .bind(user_id)
-            .bind(now)
-            .execute(&self.pool)
             .await
             .map_err(db_error)?;
         }
@@ -827,7 +833,7 @@ impl PgDummyData {
         .fetch_one(&self.pool)
         .await
         .map_err(db_error)?;
-        let mut last_id = plan::next_sequence(max_sequence);
+        let mut last_id = next_work_item_sequence(max_sequence);
         let probe_state = &state_ids[randint(rng, 0, (state_ids.len() - 1) as u32) as usize];
         let max_sort: Option<f64> = sqlx::query_scalar(
             r#"SELECT MAX(sort_order) FROM issues WHERE project_id = $1::uuid AND state_id = $2::uuid"#,
@@ -837,6 +843,9 @@ impl PgDummyData {
         .fetch_one(&self.pool)
         .await
         .map_err(db_error)?;
+        use pidash_services::domain::issues::{
+            insert_demo_issue, insert_demo_issue_sequence, DemoIssue, DemoIssueSequence,
+        };
         let mut sort_order = plan::initial_sort_order(max_sort);
         let now = chrono::Utc::now();
         let mut issue_ids = Vec::new();
@@ -848,44 +857,42 @@ impl PgDummyData {
             };
             let end = start.map(|day| fake_date_between(&mut fake, day, year_end(today)));
             let text = fake_text(&mut fake, 3000);
-            let issue_id = uuid::Uuid::new_v4().to_string();
-            sqlx::query(
-                r#"INSERT INTO issues
-                    (id, state_id, project_id, workspace_id, name, description_html, description_stripped,
-                     sequence_id, sort_order, start_date, target_date, priority, created_by_id, created_at, updated_at,
-                     description_json, is_draft, git_work_branch, workpad, complexity_score)
-                    VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10, $11, $12, $13::uuid, $14, $14,
-                     '{}', FALSE, '', '', 0)
-                    ON CONFLICT DO NOTHING"#,
+            let description_html = format!("<p>{text}</p>");
+            // Draw order (state, priority, creator) matches the old
+            // bind order.
+            let state_id = &state_ids[randint(rng, 0, (state_ids.len() - 1) as u32) as usize];
+            let priority = plan::PRIORITIES[randint(rng, 0, 4) as usize];
+            let creator_id = &creator_ids[randint(rng, 0, (creator_ids.len() - 1) as u32) as usize];
+            let issue_id = insert_demo_issue(
+                &self.pool,
+                &DemoIssue {
+                    state_id,
+                    project_id,
+                    workspace_id,
+                    created_by: creator_id,
+                    name: plan::truncate_code_points(&text, 254),
+                    description_html: &description_html,
+                    description_stripped: &text,
+                    sequence_id: last_id as i32,
+                    sort_order,
+                    start_date: start,
+                    target_date: end,
+                    priority,
+                    now,
+                },
             )
-            .bind(&issue_id)
-            .bind(&state_ids[randint(rng, 0, (state_ids.len() - 1) as u32) as usize])
-            .bind(project_id)
-            .bind(workspace_id)
-            .bind(plan::truncate_code_points(&text, 254))
-            .bind(format!("<p>{text}</p>"))
-            .bind(&text)
-            .bind(last_id as i32)
-            .bind(sort_order)
-            .bind(start)
-            .bind(end)
-            .bind(plan::PRIORITIES[randint(rng, 0, 4) as usize])
-            .bind(&creator_ids[randint(rng, 0, (creator_ids.len() - 1) as u32) as usize])
-            .bind(now)
-            .execute(&self.pool)
             .await
             .map_err(db_error)?;
-            sqlx::query(
-                r#"INSERT INTO issue_sequences (id, issue_id, sequence, project_id, workspace_id, created_at, updated_at, deleted)
-                    VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5::uuid, $6, $6, FALSE)"#,
+            insert_demo_issue_sequence(
+                &self.pool,
+                &DemoIssueSequence {
+                    issue_id: &issue_id,
+                    project_id,
+                    workspace_id,
+                    sequence: last_id,
+                    now,
+                },
             )
-            .bind(uuid::Uuid::new_v4().to_string())
-            .bind(&issue_id)
-            .bind(last_id)
-            .bind(project_id)
-            .bind(workspace_id)
-            .bind(now)
-            .execute(&self.pool)
             .await
             .map_err(db_error)?;
             sqlx::query(
@@ -1022,26 +1029,23 @@ impl PgDummyData {
         .fetch_all(&self.pool)
         .await
         .map_err(db_error)?;
+        use pidash_services::domain::issues::{insert_demo_issue_assignee, DemoIssueAssignee};
         let take = plan::half_sample_size(issue_count)?;
         let max_draw = plan::per_row_draw_max(assignee_ids.len())?;
         let now = chrono::Utc::now();
         for position in sample_positions(rng, issue_ids.len(), take)? {
             let draw = randint(rng, 0, max_draw as u32) as usize;
             for assignee_position in sample_positions(rng, assignee_ids.len(), draw)? {
-                sqlx::query(
-                    r#"INSERT INTO issue_assignees
-                        (id, issue_id, assignee_id, project_id, workspace_id, created_at, updated_at)
-                        VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7)
-                        ON CONFLICT DO NOTHING"#,
+                insert_demo_issue_assignee(
+                    &self.pool,
+                    &DemoIssueAssignee {
+                        issue_id: &issue_ids[position],
+                        assignee_id: &assignee_ids[assignee_position],
+                        project_id,
+                        workspace_id,
+                        now,
+                    },
                 )
-                .bind(uuid::Uuid::new_v4().to_string())
-                .bind(&issue_ids[position])
-                .bind(&assignee_ids[assignee_position])
-                .bind(project_id)
-                .bind(workspace_id)
-                .bind(now)
-                .bind(now)
-                .execute(&self.pool)
                 .await
                 .map_err(db_error)?;
             }

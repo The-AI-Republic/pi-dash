@@ -156,7 +156,8 @@
       "LLM_CONFIG_MISSING": "llm_config_missing",
       "GATEWAY_SCOPES_MISSING": "gateway_scopes_missing",
       "BYOK_UNSUPPORTED": "byok_not_supported_on_desktop",
-      "NO_RUNNER_FOR_PROJECT": "no_managed_runner_for_project"
+      "NO_RUNNER_FOR_PROJECT": "no_managed_runner_for_project",
+      "RUNNER_PAUSED": "managed_runner_paused"
     },
     "is_ValueError": true,
     "default_detail_is_code": true,

@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 pidash-types = { path = "../types" }
+# OVL-04 (PIDASHCONV-1542): canonical parity plumbing. Leaf crate, no cycle.
+pidash-compat = { path = "../compat" }
 pidash-db = { path = "../db" }
 # Version-task flows call the D-09 decision layer (api-crate precedent).
 pidash-services = { path = "../services" }
@@ -14,6 +16,10 @@ pidash-services = { path = "../services" }
 # Export uploads sign through the shared SigV4 crate (PIDASHCONV-1106),
 # never a local signer (same pin as pidash-api/db: no new downloads).
 pidash-storage = { path = "../storage" }
+# OVL-16 (PIDASHCONV-1660): `hooks::HookDeps::operation_deps` takes the
+# SeaORM connection the domain writes run on. Identical spec to
+# pidash-services (locked sea-orm 1.1.20 — no lock churn).
+sea-orm = { version = "~1.1.20", default-features = false, features = ["sqlx-postgres", "runtime-tokio", "macros", "with-uuid", "with-chrono", "with-json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 uuid = { version = "1", features = ["v4", "v7"] }
@@ -31,9 +37,13 @@ minijinja = "2"
 # Live mail seams (PIDASHCONV-865): the send task's Redis lock + base_api
 # GET run over the same async client + TLS features as pidash-db (no new
 # lockfile packages; the sync trait methods bridge via block_in_place).
-redis = { version = "1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots"] }
+redis = { version = "1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots", "tls-rustls-insecure"] }
 regex = "1"
 base64 = "0.22"
+# tasks_mail header encoding (PIDASHCONV-1286): per-label IDNA for
+# address domains (same locked idna 1.x as pidash-services/api, no new
+# downloads).
+idna = "1"
 hmac = "0.12.1"
 md-5 = "0.10.6"
 # `ring`, not the default `aws-lc-rs`: ring is already vendored (reqwest),
@@ -73,8 +83,10 @@ rand08 = { package = "rand", version = "0.8" }
 # (PIDASHCONV-865: same version + TLS features, no second entry).
 # Same locked futures-util 0.3.x the binary builds on (no new
 # downloads). uuid gains v7 above for the agent loop's `uuid7()`
-# run/conversation ids.
-futures-util = { version = "0.3", default-features = false }
+# run/conversation ids. The `std` feature is only for
+# `FutureExt::catch_unwind` (PIDASHCONV-1327); it pulls alloc +
+# futures-core/std + futures-task/std + slab/std, all already locked.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 sqlparser = "0.63.0"

@@ -75,9 +75,11 @@
 //!   error page there, so only the status is contract-pinned (same position
 //!   as `crate::runner_runs::SERVER_ERROR_BODY`).
 
+use crate::runner_runs::runs::parse_py_uuid;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use pidash_auth::jwt::KeyRing;
+pub use pidash_compat::response::server_error;
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -98,8 +100,16 @@ pub const CODE_MEMBERSHIP_REVOKED: &str = "membership_revoked";
 /// `mt_` path: neither URL `runner_id` nor `X-Runner-Id`
 /// (`authentication.py:136`).
 pub const CODE_RUNNER_ID_REQUIRED: &str = "runner_id_required";
-/// No `Runner` row for the id (`authentication.py:94,140`).
+/// The runner id is not a UUID, so it cannot name any runner
+/// (`authentication.py:117,167`).
 pub const CODE_RUNNER_NOT_FOUND: &str = "runner_not_found";
+/// A verified caller asked for a runner id that no longer exists: a
+/// MachineToken that passed every token, dev-machine and membership check,
+/// or a legacy JWT whose signature and expiry verified. Runner ids are
+/// server-generated UUIDs, so the runner was deleted; the daemon counts
+/// these answers and purges the runner locally (PDASHOSS01-306,
+/// `authentication.py:58-60,123,174`).
+pub const CODE_RUNNER_GONE: &str = "runner_gone";
 /// `Runner.revoked_at` set — the per-request live check, `design.md` §5.4
 /// (`authentication.py:100,142`).
 pub const CODE_RUNNER_REVOKED: &str = "runner_revoked";
@@ -209,21 +219,6 @@ pub fn not_authenticated_response(
     builder
         .body(axum::body::Body::from(body))
         .expect("auth denial builds")
-}
-
-/// Unhandled-failure escape (`UnicodeDecodeError` on the header,
-/// `ValidationError` on a non-UUID id, any `sqlx::Error` outside the
-/// best-effort bump): 500. Django renders its HTML error page here; only
-/// the status is contract-pinned, and the body keeps the sibling-handler
-/// JSON text (same position as `crate::runner_runs::SERVER_ERROR_BODY`).
-pub fn server_error() -> Response {
-    Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            r#"{"error":"Something went wrong please try again later"}"#,
-        ))
-        .expect("server error builds")
 }
 
 // ---------------------------------------------------------------------------
@@ -344,7 +339,6 @@ pub struct RunnerAuthRow {
     pub dev_metadata: Value,
     pub protocol_version: i32,
     pub last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub free_worktrees: Option<i32>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -547,7 +541,7 @@ async fn fetch_runner_for_auth(
                   r."enrollment_token_hash", r."enrollment_token_fingerprint",
                   r."enrolled_at", r."capabilities", r."status", r."os", r."arch",
                   r."runner_version", r."dev_metadata", r."protocol_version",
-                  r."last_heartbeat_at", r."free_worktrees",
+                  r."last_heartbeat_at",
                   r."created_at", r."updated_at", r."revoked_at", r."revoked_reason",
                   dm."revoked_at" IS NOT NULL AS "dev_machine_revoked"
            FROM "runner" r
@@ -588,23 +582,19 @@ async fn workspace_member_role(
 /// rows (revoked is denied earlier), so the `is not None` early return never
 /// fires here.
 async fn revoke_machine_token(pool: &PgPool, token_id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query(r#"UPDATE "machine_token" SET "revoked_at" = $1 WHERE "machine_token"."id" = $2"#)
-        .bind(chrono::Utc::now())
-        .bind(token_id)
-        .execute(pool)
+    pidash_services::domain::tokens::revoke_machine_token_by_id(pool, token_id, chrono::Utc::now())
         .await
-        .map(|_| ())
 }
 
 /// `MachineToken.objects.filter(pk=...).update(last_used_at=...)`: no
 /// `updated_at` touch (`QuerySet.update` writes only the named column).
 async fn bump_machine_token_last_used(pool: &PgPool, token_id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query(r#"UPDATE "machine_token" SET "last_used_at" = $1 WHERE "machine_token"."id" = $2"#)
-        .bind(chrono::Utc::now())
-        .bind(token_id)
-        .execute(pool)
-        .await
-        .map(|_| ())
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(
+        pool,
+        token_id,
+        chrono::Utc::now(),
+    )
+    .await
 }
 
 /// Membership-or-revoke shared by the three `mt_` paths
@@ -688,14 +678,17 @@ async fn authenticate_access_jwt(
         Ok(claims) => claims,
         Err(error) => return Err(bearer_failure_response(error.code(), allow)),
     };
-    // `Runner.objects...get(id=sub)` (`:91-94`): a non-UUID `sub` is the
-    // source's `ValidationError` (500); a missing row is `runner_not_found`.
-    let runner_id: Uuid = payload.sub.parse().map_err(|_| server_error())?;
+    // `_is_uuid(sub)` then `Runner.objects...get(id=sub)` (`:116-123`): a
+    // non-UUID `sub` is `runner_not_found`. The signature verified, so a
+    // missing row is an id this server minted: `runner_gone`.
+    let Some(runner_id) = parse_py_uuid(&payload.sub) else {
+        return Err(bearer_failure_response(CODE_RUNNER_NOT_FOUND, allow));
+    };
     let row = fetch_runner_for_auth(pool, runner_id)
         .await
         .map_err(|_| server_error())?;
     let Some(row) = row else {
-        return Err(bearer_failure_response(CODE_RUNNER_NOT_FOUND, allow));
+        return Err(bearer_failure_response(CODE_RUNNER_GONE, allow));
     };
     if row.revoked_at.is_some() {
         return Err(bearer_failure_response(CODE_RUNNER_REVOKED, allow));
@@ -765,15 +758,19 @@ async fn authenticate_access_machine_token(
     let Some(runner_raw) = runner_raw else {
         return Err(bearer_failure_response(CODE_RUNNER_ID_REQUIRED, allow));
     };
-    // `Runner.objects...get(id=runner_id)` (`:137-140`): a non-UUID id
-    // (only reachable via `X-Runner-Id`; the URL converter 404s first) is
-    // the source's `ValidationError` (500).
-    let runner_id: Uuid = runner_raw.parse().map_err(|_| server_error())?;
+    // `_is_uuid(runner_id)` then `Runner.objects...get(id=runner_id)`
+    // (`:166-174`): a non-UUID id (only reachable via `X-Runner-Id`; the
+    // URL converter 404s first) is `runner_not_found`. Token, dev machine
+    // and membership all checked out above, so a missing row means the
+    // runner was deleted: `runner_gone`.
+    let Some(runner_id) = parse_py_uuid(&runner_raw) else {
+        return Err(bearer_failure_response(CODE_RUNNER_NOT_FOUND, allow));
+    };
     let row = fetch_runner_for_auth(pool, runner_id)
         .await
         .map_err(|_| server_error())?;
     let Some(row) = row else {
-        return Err(bearer_failure_response(CODE_RUNNER_NOT_FOUND, allow));
+        return Err(bearer_failure_response(CODE_RUNNER_GONE, allow));
     };
     if row.revoked_at.is_some() {
         return Err(bearer_failure_response(CODE_RUNNER_REVOKED, allow));
@@ -1015,10 +1012,7 @@ async fn authenticate_api_key_token(
     {
         return Ok(ApiKeyOutcome::Invalid);
     }
-    sqlx::query(r#"UPDATE "api_tokens" SET "last_used" = $1 WHERE "api_tokens"."id" = $2"#)
-        .bind(chrono::Utc::now())
-        .bind(id)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_api_token_last_used_by_id(pool, id, chrono::Utc::now())
         .await
         .map_err(|_| server_error())?;
     // The token loggers stamp this id on the `process_logs` payload

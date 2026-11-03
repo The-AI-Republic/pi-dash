@@ -27,9 +27,10 @@
 //! `pidash_services::space::queries::project_meta`, anchor/error mapping from
 //! `pidash_services::space::guards`, the meta leaf from
 //! `pidash_services::space::serializers::lite`. This module owns the HTTP
-//! shell (routes, session timezone, row fetching) plus the two reads no
-//! query builder covers: the workspace-detail row and the logo/cover asset
-//! row for the `DeployBoardSerializer` nests (see below).
+//! shell (routes, session timezone, row fetching) plus the three reads no
+//! query builder covers: the nested project row, the workspace-detail row
+//! and the logo/cover asset row for the `DeployBoardSerializer` nests
+//! (see below).
 //!
 //! Reads go through `row_to_json` (the `app_issues` pattern): Postgres
 //! renders every column and the handlers shape typed values from the JSON
@@ -57,12 +58,13 @@
 //! else the raw string column, else `null`.
 //!
 //! Forward-FK reads (`board.project`, `board.workspace`, the logo/cover
-//! assets) use Django's `_base_manager`, which here IS the
-//! `SoftDeletionManager` (no `base_manager_name` override in
-//! `db/mixins.py:56-67`), so the nested fetches below keep the
-//! `deleted_at IS NULL` guard — identical to the forward-FK fetches — and a
-//! soft-deleted nested row surfaces the `ObjectDoesNotExist` envelope, the
-//! same mapping DRF's dispatch produces for the Python `DoesNotExist`.
+//! assets) use Django's `_base_manager`, which with no
+//! `base_manager_name` override is a plain `Manager` with no `deleted_at`
+//! filter — so the nested fetches below carry no `deleted_at IS NULL`
+//! guard and a soft-deleted nested row still renders (PIDASHCONV-1262). A
+//! genuinely dangling FK (unreachable under FK integrity) keeps the
+//! `ObjectDoesNotExist` / 500 mapping, the same mapping DRF's dispatch
+//! produces for the Python `DoesNotExist`.
 //!
 //! Ported bugs (translate, don't redesign; also listed in the PR):
 //!
@@ -98,7 +100,7 @@
 //!   as row text (Postgres `float8out` would print `65535`).
 
 use axum::extract::{Extension, Path, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -108,6 +110,8 @@ use sqlx::Row;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::datetime::render_rfc3339_in;
+use pidash_compat::response::json_response;
 use pidash_services::space::guards::{self, AnchorLookup, ErrorBody, ExceptionKind};
 use pidash_services::space::queries::project_meta as queries;
 use pidash_services::space::serializers::lite;
@@ -226,15 +230,6 @@ impl IntoResponse for HandlerError {
     }
 }
 
-/// Render `body` (already exact JSON bytes) as a JSON response.
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
-}
-
 fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, HandlerError> {
     state
         .pools()
@@ -282,14 +277,6 @@ async fn request_tz(
             .map_err(|_| HandlerError::ServerError),
         _ => Ok(chrono_tz::UTC),
     }
-}
-
-/// Render a `row_to_json` timestamptz value exactly like DRF `DateTimeField`
-/// with the default `iso-8601` format: ISO-8601 in the request's zone with
-/// `+00:00` rewritten to `Z`, microseconds only when nonzero (kernel rule).
-fn render_dt(raw: &str, tz: &chrono_tz::Tz) -> Result<String, HandlerError> {
-    let dt = chrono::DateTime::parse_from_rfc3339(raw).map_err(|_| HandlerError::ServerError)?;
-    Ok(crate::serializer::render_datetime_in(&dt, tz))
 }
 
 // ---------------------------------------------------------------------------
@@ -488,9 +475,10 @@ impl BoardRow {
 }
 
 /// The project columns both the board serializer (`project_details`) and the
-/// meta leaf need. Fetched with `project_get_sql` (filtered, same as
-/// `Project.objects.get`); the board-serializer path reads the same row
-/// Django's forward FK would (the managers coincide — see module docs).
+/// meta leaf need. The meta leaf fetches them with `project_get_sql`
+/// (filtered, same as `Project.objects.get`); the board-serializer path
+/// uses [`project_detail_sql`] (unscoped, same as Django's forward FK —
+/// see module docs).
 struct ProjectRow {
     id: String,
     identifier: String,
@@ -531,11 +519,20 @@ struct WorkspaceRow {
     logo_asset_id: Option<String>,
 }
 
+/// `SELECT` for the board serializer's nested project row. No query builder
+/// covers it (the Python reads it through the board's forward FK inside
+/// the serializer); unlike `project_get_sql` it carries no `deleted_at`
+/// guard because the forward FK uses the unscoped `_base_manager`
+/// (module docs). Columns are exactly what [`ProjectRow`] consumes.
+fn project_detail_sql() -> String {
+    "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"icon_prop\", \"projects\".\"emoji\", \"projects\".\"logo_props\", \"projects\".\"description\", \"projects\".\"is_default\" FROM \"projects\" WHERE (\"projects\".\"id\" = $1)".to_string()
+}
+
 /// `SELECT` for the workspace-detail row. No query builder covers it (the
-/// Python reads it through the board's forward FK inside the serializer);
-/// the `deleted_at IS NULL` guard matches that fetch (module docs).
+/// Python reads it through the board's forward FK inside the serializer),
+/// which is unscoped (module docs), so there is no `deleted_at` guard.
 fn workspace_detail_sql() -> String {
-    "SELECT \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"slug\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\" FROM \"workspaces\" WHERE (\"workspaces\".\"deleted_at\" IS NULL AND \"workspaces\".\"id\" = $1)".to_string()
+    "SELECT \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"slug\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\" FROM \"workspaces\" WHERE (\"workspaces\".\"id\" = $1)".to_string()
 }
 
 impl WorkspaceRow {
@@ -556,11 +553,11 @@ impl WorkspaceRow {
 // ---------------------------------------------------------------------------
 
 /// `SELECT` for the logo/cover asset row. No query builder covers it (the
-/// Python reads it through the FK inside the property); the
-/// `deleted_at IS NULL` guard matches that fetch (module docs). The
-/// workspace slug rides along for the attachment URL branches.
+/// Python reads it through the FK inside the property), which is unscoped
+/// (module docs), so there is no `deleted_at` guard. The workspace slug
+/// rides along for the attachment URL branches.
 fn logo_asset_sql() -> String {
-    "SELECT \"a\".\"id\", \"a\".\"entity_type\", \"a\".\"workspace_id\", \"a\".\"project_id\", \"a\".\"issue_id\", \"w\".\"slug\" AS \"workspace_slug\" FROM \"file_assets\" AS \"a\" LEFT OUTER JOIN \"workspaces\" AS \"w\" ON (\"a\".\"workspace_id\" = \"w\".\"id\") WHERE (\"a\".\"deleted_at\" IS NULL AND \"a\".\"id\" = $1)".to_string()
+    "SELECT \"a\".\"id\", \"a\".\"entity_type\", \"a\".\"workspace_id\", \"a\".\"project_id\", \"a\".\"issue_id\", \"w\".\"slug\" AS \"workspace_slug\" FROM \"file_assets\" AS \"a\" LEFT OUTER JOIN \"workspaces\" AS \"w\" ON (\"a\".\"workspace_id\" = \"w\".\"id\") WHERE (\"a\".\"id\" = $1)".to_string()
 }
 
 /// Port of `FileAsset.asset_url` (`db/models/asset.py:80-99`): static-asset
@@ -692,9 +689,11 @@ struct BoardView {
     intake: Option<String>,
 }
 
-/// Render one board row with its nests. `Board` fetch misses for the
-/// nested project/workspace surface the `ObjectDoesNotExist` envelope, the
-/// same mapping DRF's dispatch produces for the Python `DoesNotExist`.
+/// Render one board row with its nests. The nested project/workspace read
+/// through the board's forward FKs, which are unscoped (module docs). A
+/// fetch miss (dangling FK, unreachable under FK integrity) surfaces the
+/// `ObjectDoesNotExist` envelope, the same mapping DRF's dispatch produces
+/// for the Python `DoesNotExist`.
 async fn render_board(
     pool: &sqlx::PgPool,
     board: &BoardRow,
@@ -703,13 +702,10 @@ async fn render_board(
     let project_details = match &board.project_id {
         None => None,
         Some(project_id) => {
-            let row = fetch_optional_object(
-                pool,
-                &queries::project_get_sql(),
-                &[uuid_param(project_id)?],
-            )
-            .await?
-            .ok_or(HandlerError::ObjectNotFound)?;
+            let row =
+                fetch_optional_object(pool, &project_detail_sql(), &[uuid_param(project_id)?])
+                    .await?
+                    .ok_or(HandlerError::ObjectNotFound)?;
             let project = ProjectRow::from_value(&row)?;
             let cover_image_url = logo_or_cover_url(
                 pool,
@@ -745,7 +741,7 @@ async fn render_board(
     .await?;
     let deleted_at = match &board.deleted_at {
         None => None,
-        Some(raw) => Some(render_dt(raw, tz)?),
+        Some(raw) => Some(render_rfc3339_in(raw, tz).map_err(|_| HandlerError::ServerError)?),
     };
     let view = BoardView {
         id: board.id.clone(),
@@ -756,8 +752,10 @@ async fn render_board(
             id: workspace.id,
             logo_url,
         },
-        created_at: render_dt(&board.created_at, tz)?,
-        updated_at: render_dt(&board.updated_at, tz)?,
+        created_at: render_rfc3339_in(&board.created_at, tz)
+            .map_err(|_| HandlerError::ServerError)?,
+        updated_at: render_rfc3339_in(&board.updated_at, tz)
+            .map_err(|_| HandlerError::ServerError)?,
         deleted_at,
         entity_identifier: board.entity_identifier.clone(),
         entity_name: board.entity_name.clone(),

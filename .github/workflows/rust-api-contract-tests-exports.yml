@@ -9,11 +9,7 @@ name: rust-api-contract-tests-exports
 
 on:
   push:
-    branches: [rust-dev]
-    paths:
-      - "rust-api/**"
-      - ".github/workflows/rust-api-contract-tests-exports.yml"
-  pull_request:
+    branches: [main]
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api-contract-tests-exports.yml"
@@ -83,7 +79,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12.x"
+          python-version: "3.12.10"
           cache: pip
           cache-dependency-path: |
             apps/api/requirements.txt
@@ -146,6 +142,12 @@ jobs:
       - name: Run exports Django oracle
         working-directory: rust-api/contract-tests
         run: pytest exports/test_oracle_exports.py -v
+
+      # PIDASHCONV-1700: under-limit exports stay plain zip (no zip64
+      # records). Separate step so the suite boots its own oracle worker.
+      - name: Run export zip64 Django oracle
+        working-directory: rust-api/contract-tests
+        run: pytest tasks_cleanup/test_export_zip64.py -v
 
       - name: Upload oracle worker log on failure
         if: failure()

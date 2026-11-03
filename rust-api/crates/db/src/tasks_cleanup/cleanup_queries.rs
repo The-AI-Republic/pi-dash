@@ -387,6 +387,23 @@ pub enum ArchiveError {
     Transport(String),
 }
 
+/// Classify a mongo archival failure the way `flush_to_mongo_and_delete`
+/// classifies `bulk_write` outcomes (`cleanup_task.py:73-84`): write
+/// failures skip the batch, anything else aborts the task.
+///
+/// `insert_many` reports write and write-concern failures as
+/// `ErrorKind::InsertMany` (mongodb 3.9.1 `src/action/insert_many.rs`);
+/// `ErrorKind::BulkWrite` only comes from `Client::bulk_write`, which this
+/// port does not call — that arm stays for safety.
+fn classify_archive_error(err: &mongodb::error::Error) -> ArchiveError {
+    match *err.kind {
+        mongodb::error::ErrorKind::BulkWrite(_) | mongodb::error::ErrorKind::InsertMany(_) => {
+            ArchiveError::BulkWrite(err.to_string())
+        }
+        _ => ArchiveError::Transport(err.to_string()),
+    }
+}
+
 /// Lazily-connected Mongo handle. Creation performs no I/O, mirroring
 /// `MongoClient(url)` + `get_collection`, which likewise only fail on
 /// misconfiguration — mapped to `None` exactly like Python's broad
@@ -434,10 +451,7 @@ impl MongoSink {
             .ordered(true)
             .await
             .map(|_| ())
-            .map_err(|err| match *err.kind {
-                mongodb::error::ErrorKind::BulkWrite(_) => ArchiveError::BulkWrite(err.to_string()),
-                _ => ArchiveError::Transport(err.to_string()),
-            })
+            .map_err(|err| classify_archive_error(&err))
     }
 }
 
@@ -627,8 +641,24 @@ impl CleanupTask {
     /// (datetime bounds unquoted, exactly as the fixture records them);
     /// Postgres rejects that, so execution quotes it. The cutoff is always
     /// rendered internally by [`render_cutoff`], never user input.
+    ///
+    /// For API logs the executable form also projects the `inet`
+    /// `ip_address` as text: sqlx cannot decode `inet` as `String`, while
+    /// Django reads it through a text loader. `abbrev()` renders what Django
+    /// sees for host addresses (`10.0.0.1`; a `::text` cast would append
+    /// `/32`). `api_logs_sql` keeps Django's exact text for fixture parity.
     pub fn select_sql_for_exec(&self, cutoff: &str) -> String {
-        self.select_sql(&format!("'{cutoff}'"))
+        let sql = self.select_sql(&format!("'{cutoff}'"));
+        // The needle occurs once (select list); WHERE/ORDER BY only touch
+        // created_at, and the unit test below pins the full statement.
+        if matches!(self, CleanupTask::ApiLogs) {
+            sql.replace(
+                "\"api_activity_logs\".\"ip_address\",",
+                "abbrev(\"api_activity_logs\".\"ip_address\") AS \"ip_address\",",
+            )
+        } else {
+            sql
+        }
     }
 }
 
@@ -832,14 +862,23 @@ mod tests {
         // The builders emit Django's `str(query)` debug form (bound
         // unquoted); execution must quote it or Postgres rejects the
         // statement. The window tasks take no bound, so they are unchanged.
+        // The API-log executable form also projects the `inet` ip_address
+        // as text via abbrev() (see select_sql_for_exec).
         let q = fixture_querysets();
         let exec = CleanupTask::ApiLogs.select_sql_for_exec(FROZEN_CUTOFF);
+        // Pin the projection directly: the mirrored replace below would
+        // pass vacuously if the needle ever stopped matching.
+        assert!(exec.contains("abbrev(\"api_activity_logs\".\"ip_address\")"));
         assert_eq!(
             exec,
             q["api_logs_sql"]
                 .as_str()
                 .unwrap()
                 .replace(FROZEN_CUTOFF, &format!("'{FROZEN_CUTOFF}'"))
+                .replace(
+                    "\"api_activity_logs\".\"ip_address\",",
+                    "abbrev(\"api_activity_logs\".\"ip_address\") AS \"ip_address\","
+                )
         );
         assert!(exec.contains(&format!("<= '{FROZEN_CUTOFF}'")));
         assert_eq!(
@@ -976,6 +1015,41 @@ mod tests {
         .unwrap();
         assert_eq!(outcome, FlushOutcome::ArchiveFailedSkipped);
         assert_eq!(archiver.calls.lock().unwrap().len(), 1);
+        assert!(deleter.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn insert_many_write_error_skips_batch() {
+        // `insert_many` reports write failures as `ErrorKind::InsertMany`
+        // (mongodb 3.9.1 `src/action/insert_many.rs`), never as
+        // `ErrorKind::BulkWrite`. Like Django's `BulkWriteError`
+        // (`cleanup_task.py:76-84`) they must skip the batch, not abort
+        // the run (PIDASHCONV-1290). `InsertManyError` is
+        // `#[non_exhaustive]` with a `pub(crate)` ctor, so build one
+        // through its `Deserialize` impl (E11000 dup key).
+        let inner: mongodb::error::InsertManyError = serde_json::from_value(serde_json::json!({
+            "writeErrors": [{"code": 11000, "errmsg": "E11000 duplicate key error"}],
+        }))
+        .expect("fixture deserializes");
+        let err = mongodb::error::Error::from(mongodb::error::ErrorKind::InsertMany(inner));
+        let classified = classify_archive_error(&err);
+        assert!(
+            matches!(classified, ArchiveError::BulkWrite(_)),
+            "InsertMany must classify as BulkWrite, got {classified:?}"
+        );
+        let (archiver, deleter) = fakes(Some(classified));
+        let outcome = flush_batch(
+            Some(&archiver),
+            true,
+            "api_activity_logs",
+            TABLE_API_LOGS,
+            vec![doc(1)],
+            vec![Uuid::nil()],
+            &deleter,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, FlushOutcome::ArchiveFailedSkipped);
         assert!(deleter.calls.lock().unwrap().is_empty());
     }
 

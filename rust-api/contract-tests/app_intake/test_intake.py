@@ -5,9 +5,12 @@ against the live backend: intakes, intake-issues, the inbox aliases, and the
 intake-work-item description-versions pair.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from _harness.checks import require_keys
+from _harness.http import api_client
 from .conftest import intake_urls
 
 pytestmark = pytest.mark.contract
@@ -252,3 +255,39 @@ def test_description_version_detail_shape(admin):
         "GET description-versions/<pk>/",
     )
     assert r.json()["id"] == version_id
+
+
+def test_concurrent_creates_get_distinct_sequence_ids(make_tenant, settings):
+    # PIDASHCONV-1430: Issue.save takes a per-project advisory lock and
+    # assigns MAX(sequence)+1 inside one transaction
+    # (db/models/issue.py:313-343), so N concurrent intake creates must
+    # yield N distinct sequence_ids. The triage state is pre-seeded so
+    # every create takes the reuse path — the triage get-or-create race
+    # is separate Django behavior, out of scope here.
+    tenant = make_tenant()
+    tenant["seeder"].create_state(
+        tenant["workspace"]["id"], tenant["project"]["id"],
+        name="Triage", group="triage",
+    )
+    url = intake_urls(tenant)["intake_issues"]
+    cookies = dict(tenant["client"].cookies)
+    count = 10
+
+    def _one(n):
+        with api_client(settings.base_url) as client:
+            client.cookies.update(cookies)
+            response = client.post(url, json={"issue": {"name": f"race idea {n}"}})
+            assert response.status_code == 200, response.text[:200]
+            return response.json()["issue"]["sequence_id"]
+
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        sequence_ids = list(pool.map(_one, range(count)))
+    assert len(set(sequence_ids)) == count, f"shared sequence_ids: {sorted(sequence_ids)}"
+    # The tenant seeds no issues, so the dupe scan covers only the
+    # created rows.
+    dupes = tenant["_database"].fetchall(
+        "SELECT sequence_id, count(*) AS c FROM issues WHERE project_id=%s"
+        " GROUP BY 1 HAVING count(*) > 1",
+        (tenant["project"]["id"],),
+    )
+    assert dupes == []

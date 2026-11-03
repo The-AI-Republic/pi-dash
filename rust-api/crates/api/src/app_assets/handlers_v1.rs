@@ -73,6 +73,10 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+use pidash_compat::response::{
+    json_response as raw, json_value as json_status, no_content, server_error,
+};
 use pidash_services::app_assets::{queries_v1, shape};
 
 // ---------------------------------------------------------------------------
@@ -90,31 +94,6 @@ const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 /// 400 `{"asset": ["No file was submitted."]}`.
 const NO_FILE_BODY: &str = r#"{"asset":["No file was submitted."]}"#;
 
-fn raw(status: StatusCode, body: &'static str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static response")
-}
-
-fn json_status(status: StatusCode, body: &Value) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            serde_json::to_string(body).expect("serializable response"),
-        ))
-        .expect("json response")
-}
-
-fn server_error() -> Response {
-    raw(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        crate::license::SERVER_ERROR_BODY,
-    )
-}
-
 /// `.get()` miss envelope: `ObjectDoesNotExist` through the view's
 /// `handle_exception` (`app/views/base.py:234-238`).
 fn does_not_exist() -> Response {
@@ -123,10 +102,6 @@ fn does_not_exist() -> Response {
 
 fn page_not_found() -> Response {
     raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY)
-}
-
-fn no_content() -> Response {
-    StatusCode::NO_CONTENT.into_response()
 }
 
 fn pool(state: &AppState) -> Option<&sqlx::PgPool> {
@@ -232,11 +207,11 @@ impl PostBody {
             PostBody::File | PostBody::NoFile => None,
             PostBody::UnsupportedMediaType(content_type) => Some(json_status(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                &json!({"detail": format!("Unsupported media type \"{content_type}\" in request.")}),
+                json!({"detail": format!("Unsupported media type \"{content_type}\" in request.")}),
             )),
             PostBody::Malformed(detail) => Some(json_status(
                 StatusCode::BAD_REQUEST,
-                &json!({"detail": detail}),
+                json!({"detail": detail}),
             )),
         }
     }
@@ -326,49 +301,6 @@ fn request_scheme(headers: &HeaderMap) -> &'static str {
     }
 }
 
-/// `django.utils.encoding.iri_to_uri` (`quote(iri,
-/// safe="/#%[]=:;$&()+,!?*@'~")`, Django 4.2 `utils/encoding.py:110-138`):
-/// `quote` always spares ASCII alphanumerics plus `-_.~`; the safe set
-/// spares the RFC 3986 reserved marks and `%`. Every other byte — UTF-8
-/// multibyte included — becomes uppercase `%XX`.
-fn iri_to_uri(joined: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut out = String::with_capacity(joined.len());
-    for byte in joined.bytes() {
-        let keep = byte.is_ascii_alphanumeric()
-            || matches!(byte, b'-' | b'_' | b'.' | b'~')
-            || matches!(
-                byte,
-                b'/' | b'#'
-                    | b'%'
-                    | b'['
-                    | b']'
-                    | b'='
-                    | b':'
-                    | b';'
-                    | b'$'
-                    | b'&'
-                    | b'('
-                    | b')'
-                    | b'+'
-                    | b','
-                    | b'!'
-                    | b'?'
-                    | b'*'
-                    | b'@'
-                    | b'\''
-            );
-        if keep {
-            out.push(byte as char);
-        } else {
-            out.push('%');
-            out.push(HEX[(byte >> 4) as usize] as char);
-            out.push(HEX[(byte & 15) as usize] as char);
-        }
-    }
-    out
-}
-
 /// Absolute `asset` leaf for the workspace GET, mirroring
 /// `FileAssetSerializer` over `S3Storage` (DRF `FileField` `use_url`
 /// default + `S3Storage.url` returning the bare name,
@@ -387,7 +319,7 @@ fn absolute_asset_url(base: &str, stored: &str) -> String {
     let mut joined = String::with_capacity(base.len() + stored.len());
     joined.push_str(base);
     joined.push_str(stored);
-    iri_to_uri(&joined)
+    pidash_compat::http::iri_to_uri(&joined)
 }
 
 /// Map one `SELECT *` row onto the 24-key serializer shape. Datetimes
@@ -443,7 +375,7 @@ fn file_asset_record(
 fn found_envelope(items: Vec<Value>) -> Response {
     json_status(
         StatusCode::from_u16(queries_v1::FOUND_STATUS).expect("valid status"),
-        &json!({"data": items, "status": true}),
+        json!({"data": items, "status": true}),
     )
 }
 
@@ -452,7 +384,7 @@ fn found_envelope(items: Vec<Value>) -> Response {
 fn miss_body() -> Response {
     json_status(
         StatusCode::from_u16(queries_v1::MISS_STATUS).expect("valid status"),
-        &queries_v1::miss_body(),
+        queries_v1::miss_body(),
     )
 }
 
@@ -462,7 +394,7 @@ fn miss_body() -> Response {
 fn unhandled() -> Response {
     json_status(
         StatusCode::from_u16(queries_v1::USER_GET_FOUND_STATUS).expect("valid status"),
-        &queries_v1::unhandled_body(),
+        queries_v1::unhandled_body(),
     )
 }
 
@@ -477,10 +409,12 @@ async fn workspace_get(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     headers: HeaderMap,
 ) -> Response {
-    // URL resolution precedes authentication in Django: a non-UUID
-    // segment 404s (`<uuid:workspace_id>` converter) even anonymously.
-    let Ok(workspace_id) = workspace_id_raw.parse::<Uuid>() else {
-        return page_not_found();
+    // URL resolution precedes authentication in Django: only the
+    // canonical spelling routes (`<uuid:workspace_id>` converter), so any
+    // other spelling 404s even anonymously (PIDASHCONV-1399).
+    let workspace_id = match classify_uuid_segment(&workspace_id_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_user(&state, extension).await {
         Ok(actor) => actor,
@@ -613,8 +547,10 @@ async fn workspace_delete(
     Path((workspace_id_raw, asset_key)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Response {
-    let Ok(workspace_id) = workspace_id_raw.parse::<Uuid>() else {
-        return page_not_found();
+    // Same canonical-spelling gate as get (PIDASHCONV-1399).
+    let workspace_id = match classify_uuid_segment(&workspace_id_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     if let Err(denial) = require_user(&state, extension).await {
         return denial.into_response();
@@ -628,8 +564,10 @@ async fn workspace_restore(
     Path((workspace_id_raw, asset_key)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Response {
-    let Ok(workspace_id) = workspace_id_raw.parse::<Uuid>() else {
-        return page_not_found();
+    // Same canonical-spelling gate as get (PIDASHCONV-1399).
+    let workspace_id = match classify_uuid_segment(&workspace_id_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     if let Err(denial) = require_user(&state, extension).await {
         return denial.into_response();
@@ -933,25 +871,6 @@ mod tests {
             absolute_asset_url(&base, &stored),
             format!("http://127.0.0.1:18223/api/workspaces/file-assets/{ws}/{leaf}/{ws}/{leaf}")
         );
-    }
-
-    #[test]
-    fn iri_to_uri_matches_django_vectors() {
-        // Oracle: `django.utils.encoding.iri_to_uri` on the venv Django.
-        for (raw, expected) in [
-            ("http://h/p/a b", "http://h/p/a%20b"),
-            ("http://h/p/caf\u{e9}", "http://h/p/caf%C3%A9"),
-            ("http://h/p/100%25x", "http://h/p/100%25x"),
-            ("http://h/p/a?b#c", "http://h/p/a?b#c"),
-            ("http://h/p/a+b", "http://h/p/a+b"),
-            ("http://h/p/a\"b<c>d", "http://h/p/a%22b%3Cc%3Ed"),
-            (
-                "http://h/p/\u{4e2d}\u{6587}",
-                "http://h/p/%E4%B8%AD%E6%96%87",
-            ),
-        ] {
-            assert_eq!(iri_to_uri(raw), expected, "iri_to_uri({raw:?})");
-        }
     }
 
     #[test]

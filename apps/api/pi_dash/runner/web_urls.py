@@ -35,6 +35,8 @@ from pi_dash.runner.views import (
     RunnerDetailEndpoint,
     RunnerInviteEndpoint,
     RunnerListEndpoint,
+    RunnerPauseEndpoint,
+    RunnerResumeEndpoint,
     RunnerReviveEndpoint,
     RunnerRevokeEndpoint,
     chat_event_stream,
@@ -89,6 +91,16 @@ urlpatterns = [
         "<uuid:runner_id>/",
         RunnerDetailEndpoint.as_view(),
         name="runner-detail",
+    ),
+    path(
+        "<uuid:runner_id>/pause/",
+        RunnerPauseEndpoint.as_view(),
+        name="runner-pause",
+    ),
+    path(
+        "<uuid:runner_id>/resume/",
+        RunnerResumeEndpoint.as_view(),
+        name="runner-resume",
     ),
     path(
         "<uuid:runner_id>/revoke/",

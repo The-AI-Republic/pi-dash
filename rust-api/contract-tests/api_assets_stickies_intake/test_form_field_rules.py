@@ -24,6 +24,11 @@ Every case is probed against live Django by the same suite, so the
 assertions are the shared contract, not a Rust-only expectation. The
 JSON-path analogues (a ``RelatedField`` forcing ``""`` → ``None`` on JSON)
 are out of scope here (PIDASHCONV-1127).
+
+PIDASHCONV-1403 adds the ``null``-text case: a form ``description=null`` or
+``logo_props=null`` parses to ``None``, and the save into the NOT NULL
+column raises ``IntegrityError``, which ``BaseViewSet.handle_exception``
+renders as 400 ``{"error": "The payload is not valid"}`` with no write.
 """
 
 import json
@@ -196,3 +201,43 @@ def test_patch_form_blank_text_fields_are_empty_strings(org):
     assert body["name"] == ""
     assert body["color"] == ""
     assert body["background_color"] == ""
+
+
+# --- form JSON null parses to None and dies at the save (PIDASHCONV-1403) --
+
+#: Exact ``handle_exception`` ``IntegrityError`` bytes (no space after the
+#: colon; asserted byte-for-byte, not just as parsed JSON).
+FORM_NULL_BODY = b'{"error":"The payload is not valid"}'
+
+
+def _sticky_count(org):
+    return org.conn.execute(
+        "SELECT COUNT(*) FROM stickies WHERE workspace_id = %s AND deleted_at IS NULL",
+        (org.workspace["id"],),
+    ).fetchone()[0]
+
+
+def _stored_json(org, pk):
+    return org.conn.execute(
+        "SELECT description, logo_props FROM stickies WHERE id = %s", (pk,)
+    ).fetchone()
+
+
+@pytest.mark.parametrize("field", ["description", "logo_props"])
+def test_create_form_json_null_is_payload_not_valid(org, field):
+    before = _sticky_count(org)
+    r = _post_form(org, _form(name="note", **{field: "null"}))
+    assert r.status_code == 400, r.text[:500]
+    assert r.content == FORM_NULL_BODY
+    assert _sticky_count(org) == before
+
+
+@pytest.mark.parametrize("field", ["description", "logo_props"])
+def test_patch_form_json_null_is_payload_not_valid(org, field):
+    created = _make_sticky(org, description={"d": 1}, logo_props={"l": 2})
+    r = _patch_form(org, created["id"], _form(**{field: "null"}))
+    assert r.status_code == 400, r.text[:500]
+    assert r.content == FORM_NULL_BODY
+    stored = _stored_json(org, created["id"])
+    assert stored[0] == {"d": 1}
+    assert stored[1] == {"l": 2}

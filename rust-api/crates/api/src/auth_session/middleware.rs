@@ -128,7 +128,14 @@ mod tests {
         let now = now_unix();
         let signer = Signer::new(SECRET, SESSION_SIGNING_SALT);
         let signed = signer
-            .sign_object(&serde_json::json!({"_auth_user_id": user}), now as u64)
+            .sign_object(
+                &serde_json::json!({
+                    "_auth_user_id": user,
+                    "_auth_user_backend": crate::license::MODEL_BACKEND,
+                    "_auth_user_hash": pidash_compat::http::session_auth_hash("", SECRET),
+                }),
+                now as u64,
+            )
             .expect("signs");
         store
             .save(SessionRow {
@@ -162,6 +169,12 @@ mod tests {
 
     async fn set_login(req: Request<Body>) -> Response<Body> {
         touch(&req, "_auth_user_id", "user-1");
+        touch(&req, "_auth_user_backend", crate::license::MODEL_BACKEND);
+        touch(
+            &req,
+            "_auth_user_hash",
+            &pidash_compat::http::session_auth_hash("", SECRET),
+        );
         Response::builder()
             .status(StatusCode::OK)
             .body(Body::from("ok"))

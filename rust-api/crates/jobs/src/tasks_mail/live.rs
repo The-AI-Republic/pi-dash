@@ -97,7 +97,7 @@ impl LiveRedisMail {
     /// Parse-only constructor (no I/O; safe in tests and the mirror).
     pub fn from_url(url: &str) -> Result<Self, redis::RedisError> {
         Ok(Self {
-            client: redis::Client::open(url)?,
+            client: pidash_db::redis::open_client(url)?,
         })
     }
 

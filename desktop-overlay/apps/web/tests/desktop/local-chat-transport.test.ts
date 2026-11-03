@@ -42,14 +42,18 @@ function makeBridge(overrides: Partial<Record<string, unknown>> = {}) {
     return () => void listeners[event]?.delete(handler);
   });
   const ensureRuntime = vi.fn(async () => {});
+  const refreshModelCredential = vi.fn(async () => {});
+  const topUpUrl = vi.fn(() => "");
   const bridge: TauriBridge = {
     invoke,
     listen,
     getAccount: () => "acct-1",
     ensureRuntime,
     workspaceSlug: () => "acme",
+    refreshModelCredential,
+    topUpUrl,
   };
-  return { bridge, invoke, listen, listeners, ensureRuntime };
+  return { bridge, invoke, listen, listeners, ensureRuntime, refreshModelCredential, topUpUrl };
 }
 
 function emit(listeners: Listeners, event: string, payload: unknown) {
@@ -565,6 +569,163 @@ describe("LocalChatTransport in-flight turn (PIDESKAPP-32)", () => {
     expect(await activeMessage()).toBeNull();
     await transport.sendChatMessage(SESSION, "hello");
     expect(await activeMessage()).not.toBeNull();
+  });
+});
+
+describe("LocalChatTransport gateway refusals (PDASHOSS01-288)", () => {
+  const userEvent = {
+    id: "u1",
+    session_id: SESSION,
+    seq: 1,
+    role: "user",
+    content: "hello",
+    tool_calls: null,
+    approval_decision: null,
+    created_at: 20,
+  };
+  const refused = (code: string, detail?: string) => ({
+    result: "chat_failed",
+    data: { chat_session_id: SESSION, code, detail, failed_at: "2026-10-11T00:00:00Z" },
+  });
+  const CREDIT = "Daily free quota used and LLM credit balance is insufficient; add credit or upgrade your plan.";
+
+  function setup() {
+    const ctx = makeBridge({ chat_append_event: userEvent, chat_list_sessions: [] });
+    const transport = new LocalChatTransport(ctx.bridge);
+    const events: { kind: string; payload: Record<string, unknown> }[] = [];
+    transport.subscribeChatEvents(SESSION, 0, (event) => events.push(event));
+    const calls = (command: string) =>
+      ctx.invoke.mock.calls.filter((c) => c[0] === command).map((c) => (c as unknown[])[1] as Record<string, unknown>);
+    const notes = () =>
+      calls("chat_append_event")
+        .map((args) => args.event as { role: string; content: string })
+        .filter((event) => event.role === "system")
+        .map((event) => event.content);
+    return { ctx, transport, events, calls, notes };
+  }
+
+  it("writes the gateway's credit message to the transcript before the page hears the failure", async () => {
+    const { ctx, transport, events, calls, notes } = setup();
+    ctx.topUpUrl.mockReturnValue("https://hub.example.com/account/credits");
+    await transport.sendChatMessage(SESSION, "hello");
+
+    emit(ctx.listeners, "chat://frame", refused("model_credit_exhausted", CREDIT));
+    // The page refetches history when it hears `chat_failed`; the note has to
+    // be there by then.
+    expect(events.map((e) => e.kind)).not.toContain("chat_failed");
+    await vi.waitFor(() => expect(events.map((e) => e.kind)).toContain("chat_failed"));
+    expect(notes()).toEqual([`${CREDIT}\nAdd credit: https://hub.example.com/account/credits`]);
+
+    // No retry, no new credential, and the composer is released.
+    expect(calls("chat_send")).toHaveLength(1);
+    expect(ctx.refreshModelCredential).not.toHaveBeenCalled();
+    await transport.sendChatMessage(SESSION, "hello");
+  });
+
+  it("shows the credit message without a link when the server names no top-up page", async () => {
+    const { ctx, transport, notes } = setup();
+    await transport.sendChatMessage(SESSION, "hello");
+    emit(ctx.listeners, "chat://frame", refused("model_credit_exhausted", CREDIT));
+    await vi.waitFor(() => expect(notes()).toEqual([CREDIT]));
+    emit(ctx.listeners, "chat://frame", refused("model_credit_exhausted"));
+    await vi.waitFor(() => expect(notes()).toEqual([CREDIT, "Your model credit has run out."]));
+  });
+
+  it("mints a new credential and resubmits a refused turn once, silently", async () => {
+    const { ctx, transport, events, calls, notes } = setup();
+    await transport.sendChatMessage(SESSION, "hello");
+    const first = calls("chat_send")[0];
+
+    emit(ctx.listeners, "chat://frame", refused("model_auth_failed", "Invalid JWT"));
+    await vi.waitFor(() => expect(calls("chat_send")).toHaveLength(2));
+    expect(ctx.refreshModelCredential).toHaveBeenCalledTimes(1);
+    const second = calls("chat_send")[1];
+    expect(second.content).toBe("hello");
+    expect(second.messageId).not.toBe(first.messageId);
+    // The user's message is not written twice, and the page saw no failure:
+    // the session is still busy with the same turn.
+    expect(calls("chat_append_event")).toHaveLength(1);
+    expect(events.map((e) => e.kind)).not.toContain("chat_failed");
+    await expect(transport.sendChatMessage(SESSION, "again")).rejects.toThrow(/still in progress/);
+
+    // The retry succeeds: an ordinary completed turn.
+    emit(ctx.listeners, "chat://frame", {
+      result: "chat_message_completed",
+      data: {
+        chat_session_id: SESSION,
+        message_id: second.messageId,
+        status: "completed",
+        assistant_message: "hi",
+        completed_at: "2026-10-11T00:00:01Z",
+      },
+    });
+    await vi.waitFor(() => expect(events.map((e) => e.kind)).toContain("turn_completed"));
+    expect(notes()).toEqual([]);
+  });
+
+  it("asks the user to sign in when the new credential is refused too, and stops there", async () => {
+    const { ctx, transport, events, calls, notes } = setup();
+    await transport.sendChatMessage(SESSION, "hello");
+    emit(ctx.listeners, "chat://frame", refused("model_auth_failed", "Invalid JWT"));
+    await vi.waitFor(() => expect(calls("chat_send")).toHaveLength(2));
+
+    emit(ctx.listeners, "chat://frame", refused("model_auth_failed", "Invalid JWT"));
+    await vi.waitFor(() => expect(events.map((e) => e.kind)).toContain("chat_failed"));
+    expect(notes()).toHaveLength(1);
+    expect(notes()[0]).toMatch(/sign in again/i);
+    expect(calls("chat_send")).toHaveLength(2);
+    expect(ctx.refreshModelCredential).toHaveBeenCalledTimes(1);
+    // Released: the user can send again after signing in.
+    await transport.sendChatMessage(SESSION, "hello");
+  });
+
+  it("asks the user to sign in without resubmitting when no new credential can be had", async () => {
+    const { ctx, transport, events, calls, notes } = setup();
+    // What the runtime reports when Pi Dash itself answers 401 with no reason.
+    ctx.refreshModelCredential.mockRejectedValueOnce(new Error("Could not connect Pi Dash Agent."));
+    await transport.sendChatMessage(SESSION, "hello");
+    emit(ctx.listeners, "chat://frame", refused("model_auth_failed", "Invalid JWT"));
+    await vi.waitFor(() => expect(events.map((e) => e.kind)).toContain("chat_failed"));
+    expect(notes()).toHaveLength(1);
+    expect(notes()[0]).toMatch(/^Could not connect Pi Dash Agent\.\n/);
+    expect(notes()[0]).toMatch(/sign in again/i);
+    expect(calls("chat_send")).toHaveLength(1);
+    await transport.sendChatMessage(SESSION, "hello");
+  });
+
+  it("retries a refused turn even when its chat is not on screen", async () => {
+    const ctx = makeBridge({ chat_append_event: userEvent });
+    const transport = new LocalChatTransport(ctx.bridge);
+    await transport.sendChatMessage(SESSION, "hello");
+    emit(ctx.listeners, "chat://frame", refused("model_auth_failed"));
+    await vi.waitFor(() => expect(ctx.invoke.mock.calls.filter((c) => c[0] === "chat_send")).toHaveLength(2));
+  });
+
+  it("does not resubmit a turn that was closed while the credential was minted", async () => {
+    const { ctx, transport, calls } = setup();
+    let minted!: () => void;
+    ctx.refreshModelCredential.mockImplementationOnce(() => new Promise<void>((resolve) => (minted = resolve)));
+    await transport.sendChatMessage(SESSION, "hello");
+    emit(ctx.listeners, "chat://frame", refused("model_auth_failed"));
+    await transport.closeChat(SESSION);
+    minted();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls("chat_send")).toHaveLength(1);
+  });
+
+  it("does not resubmit a turn the user stopped while the credential was minted", async () => {
+    const { ctx, transport, events, calls, notes } = setup();
+    let minted!: () => void;
+    ctx.refreshModelCredential.mockImplementationOnce(() => new Promise<void>((resolve) => (minted = resolve)));
+    await transport.sendChatMessage(SESSION, "hello");
+    emit(ctx.listeners, "chat://frame", refused("model_auth_failed"));
+    await transport.cancelChat(SESSION);
+    minted();
+    await vi.waitFor(() => expect(events.map((e) => e.kind)).toContain("chat_failed"));
+    expect(calls("chat_send")).toHaveLength(1);
+    expect(notes()).toEqual([]);
+    // Released, and the next turn gets its own refresh.
+    await transport.sendChatMessage(SESSION, "hello");
   });
 });
 

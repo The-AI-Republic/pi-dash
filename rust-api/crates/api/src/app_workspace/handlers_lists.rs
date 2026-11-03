@@ -91,6 +91,8 @@ use chrono_tz::Tz;
 use crate::app_issues::Denial;
 use crate::app_workspace::gates;
 use crate::state::AppState;
+use pidash_compat::datetime::render_datetime_in;
+use pidash_compat::response::json_response;
 use pidash_services::app_project::ser_shared::{
     workspace_estimate_to_representation, EstimatePointRow as SharedEstimatePointRow,
     WorkspaceEstimateRow as SharedWorkspaceEstimateRow,
@@ -173,14 +175,6 @@ pub const CYCLES_PATH: &str = "/api/workspaces/{slug}/cycles/";
 // ---------------------------------------------------------------------------
 
 type HandlerResult = Result<Response, Denial>;
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
@@ -607,7 +601,7 @@ struct EstimatePointStrings {
 }
 
 fn render_dt(dt: &chrono::DateTime<chrono::Utc>, timezone: &Tz) -> String {
-    crate::serializer::render_datetime_in(dt, timezone)
+    render_datetime_in(dt, timezone)
 }
 
 /// `WorkspaceEstimatesEndpoint.get` (`estimate.py:22-32`): Q1 ids, Q2

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+pidash-compat = { path = "../compat" }
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip: correctly-rounded float parsing (CPython parity) in every
 # build graph; pidash-types sits at the bottom of the dep stack (PIDASHCONV-705).

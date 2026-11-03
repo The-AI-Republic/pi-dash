@@ -18,8 +18,6 @@ a flavour of ``local_runner``.
 
 from __future__ import annotations
 
-from django.utils import timezone
-
 from pi_dash.core.agent_execution import managed_runner_is_enabled
 from pi_dash.managed_runner.errors import ManagedRunnerReason
 
@@ -57,20 +55,9 @@ def enrolled_managed_runners(project, user):
 
 def online_managed_runner(project, user):
     """The viewer's bundled runner on ``project`` that can take work now."""
-    from pi_dash.runner.services.matcher import HEARTBEAT_GRACE
-    from pi_dash.runner.models import RunnerStatus
-
     if user is None:
         return None
-    return (
-        enrolled_managed_runners(project, user)
-        .filter(
-            status=RunnerStatus.ONLINE,
-            last_heartbeat_at__gte=timezone.now() - HEARTBEAT_GRACE,
-        )
-        .order_by("-last_heartbeat_at")
-        .first()
-    )
+    return enrolled_managed_runners(project, user).assignable().order_by("-last_heartbeat_at").first()
 
 
 def managed_runner_availability(project, user) -> tuple[bool, str]:
@@ -92,5 +79,9 @@ def managed_runner_availability(project, user) -> tuple[bool, str]:
     if not enrolled_managed_runners(project, user).exists():
         return False, ManagedRunnerReason.NO_RUNNER_FOR_PROJECT
     if online_managed_runner(project, user) is None:
+        # Connected but paused is a different fix ("resume it") from not
+        # connected ("open the desktop app").
+        if enrolled_managed_runners(project, user).filter(paused_at__isnull=False).exists():
+            return False, ManagedRunnerReason.RUNNER_PAUSED
         return False, ManagedRunnerReason.NOT_CONNECTED
     return True, ""

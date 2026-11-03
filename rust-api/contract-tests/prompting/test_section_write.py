@@ -211,3 +211,35 @@ def test_delete_outsider_forbidden(api, tenant_a, write_b):
         headers=write_b,
     )
     assert r.status_code == 403, r.text
+
+
+def test_put_duplicate_csrftoken_cookies_last_wins(api, tenant_a, write_a):
+    """A stale duplicate csrftoken listed first does not break the write.
+
+    Browsers send older cookies first when a stale host-only csrftoken
+    coexists with a newer one. Django's parse_cookie builds a dict, so
+    the last pair wins and the header token masked from it validates
+    (PIDASHCONV-1235).
+    """
+    cookie = write_a["Cookie"]
+    valid = next(
+        (
+            part.split("=", 1)[1].strip()
+            for part in cookie.split(";")
+            if part.strip().startswith("csrftoken=")
+        ),
+        "",
+    )
+    assert valid, "write fixture must carry a csrftoken cookie"
+    stale = "0" * 32
+    if stale == valid:
+        stale = "1" * 32
+    dup_headers = dict(write_a)
+    dup_headers["Cookie"] = f"csrftoken={stale}; {cookie}"
+    r = api.put(
+        _detail_url(tenant_a, "implementation"),
+        headers=dup_headers,
+        json={"scope": "workspace", "body": "dup-cookie write"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["body"] == "dup-cookie write"

@@ -11,6 +11,8 @@ emails) while SMTP is configured and magic login enabled; otherwise
 
 import uuid
 
+import pytest
+
 from _harness.checks import require_keys
 from _harness.settings import database_url
 
@@ -104,3 +106,37 @@ def test_space_missing_and_invalid_email(anon):
 
 def test_email_lookup_is_case_insensitive(anon, user):
     assert _check(anon, "/auth/email-check/", user["email"].upper())["existing"] is True
+
+
+@pytest.mark.parametrize("path", ["/auth/email-check/", "/auth/spaces/email-check/"])
+def test_throttle_keys_on_full_forwarded_chain(anon, path):
+    """PIDASHCONV-1350: the anon throttle ident is DRF ``get_ident`` (the
+    whole X-Forwarded-For value with whitespace stripped), not the first
+    entry. 31 requests alternating only the later hops stay 200 (two
+    buckets of 16/15), instead of 429ing on #31 (one collapsed bucket)."""
+    email = _unique_email()
+    for i in range(31):
+        hop = "10.0.0.2" if i % 2 == 0 else "10.0.0.3"
+        res = anon.post(
+            path, json={"email": email}, headers={"X-Forwarded-For": f"1.1.1.1, {hop}"}
+        )
+        assert res.status_code == 200, (
+            f"{path} request {i + 1} via 1.1.1.1,{hop}: "
+            f"{res.status_code} {res.text[:200]!r}"
+        )
+
+
+@pytest.mark.parametrize("path", ["/auth/email-check/", "/auth/spaces/email-check/"])
+def test_throttle_malformed_forwarded_chain_is_own_bucket(anon, path):
+    """PIDASHCONV-1350: an XFF whose first entry is empty (``, 9.9.9.9``)
+    throttles as its own ``,9.9.9.9`` ident (DRF ``get_ident``) — never
+    merged into the bare-127.0.0.1 bucket."""
+    email = _unique_email()
+    for i in range(30):
+        res = anon.post(path, json={"email": email})
+        assert res.status_code == 200, f"bare request {i + 1}: {res.status_code}"
+    res = anon.post(path, json={"email": email})
+    assert res.status_code == 429, f"bare request 31: {res.status_code} {res.text[:200]!r}"
+    assert res.json() == {"error_code": 5900, "error_message": "RATE_LIMIT_EXCEEDED"}
+    res = anon.post(path, json={"email": email}, headers={"X-Forwarded-For": ", 9.9.9.9"})
+    assert res.status_code == 200, f"malformed-xff: {res.status_code} {res.text[:200]!r}"

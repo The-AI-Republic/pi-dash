@@ -7,11 +7,10 @@
 //! [`StoreDeps`]: settings, an admission cache, the `H`/`E`/`P`
 //! closures, and `now`. This module builds those inputs live:
 //!
-//! * [`CallCache`]: the per-call admission cache. Mirrors the api
-//!   crate's `RequestCache` exactly (a `Mutex<HashMap>`; the sync
-//!   [`AdmissionCache`] trait cannot reach the async Redis client, and
-//!   the drivers consult it only when building a cloud-executor run).
-//!   A jobs-side type because jobs cannot depend on api (crate graph).
+//! * The admission cache: the shared
+//!   [`RedisAdmissionCache`][crate::admission::RedisAdmissionCache]
+//!   (PIDASHCONV-1487), built by each fire handler from `REDIS_URL` —
+//!   the same buckets the HTTP plane and the Django worker use.
 //! * [`JobsMatcher`]: the live [`PodRunnerMatcher`]. Mirrors the api
 //!   crate's `LiveMatcher` arm for arm over the same services
 //!   [`guards`](pidash_services::runner_sessions::guards) helpers.
@@ -36,66 +35,19 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::assistant::models::has_secret;
 use pidash_services::assistant::seams::agent_model_profile_for_user;
-use pidash_services::dispatch::admission::AdmissionCache;
 use pidash_services::dispatch::LlmProfile;
 use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::dispatch::{
     DispatchError, PodRunnerMatcher, LIVE_ASSIGNEE_CANDIDATES_SQL,
 };
 use pidash_services::runner_sessions::guards as g;
-
-// ---------------------------------------------------------------------------
-// Call cache
-// ---------------------------------------------------------------------------
-
-/// Per-call admission cache: [`CallCache::default`] per dispatch, the
-/// same call-scoped shape as the L6 drivers' caches.
-#[derive(Debug, Default)]
-pub(crate) struct CallCache {
-    buckets: Mutex<HashMap<String, i64>>,
-}
-
-/// The [`AdmissionCache::Error`] for [`CallCache`] (a poisoned mutex).
-#[derive(Debug)]
-pub(crate) struct CacheError(pub(crate) String);
-
-impl std::fmt::Display for CacheError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for CacheError {}
-
-impl AdmissionCache for CallCache {
-    type Error = CacheError;
-
-    fn bucket_count(&self, key: &str) -> Result<Option<i64>, Self::Error> {
-        self.buckets
-            .lock()
-            .map(|buckets| buckets.get(key).copied())
-            .map_err(|error| CacheError(error.to_string()))
-    }
-
-    fn add_or_incr(&self, key: &str, _timeout_secs: i64) -> Result<(), Self::Error> {
-        self.buckets
-            .lock()
-            .map(|mut buckets| {
-                buckets
-                    .entry(key.to_owned())
-                    .and_modify(|count| *count += 1)
-                    .or_insert(1);
-            })
-            .map_err(|error| CacheError(error.to_string()))
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Jobs matcher
@@ -348,17 +300,6 @@ mod tests {
             .expect("SQL parses")
             .pop()
             .expect("one statement")
-    }
-
-    #[test]
-    fn cache_counts_like_request_cache() {
-        let cache = CallCache::default();
-        assert_eq!(cache.bucket_count("k").unwrap(), None);
-        cache.add_or_incr("k", 60).unwrap();
-        assert_eq!(cache.bucket_count("k").unwrap(), Some(1));
-        cache.add_or_incr("k", 60).unwrap();
-        assert_eq!(cache.bucket_count("k").unwrap(), Some(2));
-        assert_eq!(cache.bucket_count("other").unwrap(), None);
     }
 
     #[test]

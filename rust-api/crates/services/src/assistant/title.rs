@@ -87,7 +87,8 @@ pub struct OpenAiTitleRequest<'a> {
 
 impl<'a> OpenAiTitleRequest<'a> {
     /// Exact request body: system + user messages, token budget,
-    /// temperature, and the DeepSeek `extra_body` only on that branch.
+    /// temperature, and the DeepSeek extra options flattened into the
+    /// top level only on that branch, as the OpenAI Python SDK does.
     pub fn body_json(&self) -> Value {
         let mut body = json!({
             "model": self.model,
@@ -98,8 +99,11 @@ impl<'a> OpenAiTitleRequest<'a> {
             "max_tokens": TITLE_MAX_OUTPUT_TOKENS,
             "temperature": TITLE_TEMPERATURE,
         });
-        if let Some(extra) = openai_compatible_extra_body(self.model, self.base_url) {
-            body["extra_body"] = extra;
+        if let Some(Value::Object(extra)) = openai_compatible_extra_body(self.model, self.base_url)
+        {
+            for (key, value) in extra {
+                body[key] = value;
+            }
         }
         body
     }
@@ -409,17 +413,15 @@ mod tests {
     }
 
     #[test]
-    fn openai_request_body_carries_deepseek_extra_body() {
+    fn openai_request_body_flattens_deepseek_extra_options() {
         let body = OpenAiTitleRequest {
             model: "deepseek-v4",
             base_url: "https://x.example/v1",
             description: "d",
         }
         .body_json();
-        assert_eq!(
-            body["extra_body"],
-            json!({"thinking": {"type": "disabled"}})
-        );
+        assert_eq!(body["thinking"], json!({"type": "disabled"}));
+        assert!(body.get("extra_body").is_none());
     }
 
     #[test]

@@ -570,35 +570,37 @@ async fn post_desktop_enroll(
     };
 
     // K2 rotate (`:134-138`): `$1` revoked_at, `$2` machine, `$3` workspace.
-    if sqlx::query(&catalog_reads::desktop_token_revoke_sql())
-        .bind(now_micros())
-        .bind(dev_machine_id)
-        .bind(workspace_id)
-        .execute(&mut *tx)
-        .await
-        .is_err()
+    if pidash_services::domain::tokens::revoke_tokens_for_machine_in_workspace(
+        &mut *tx,
+        dev_machine_id,
+        workspace_id,
+        now_micros(),
+    )
+    .await
+    .is_err()
     {
         return server_error();
     }
     let minted = tokens::mint_machine_token(&secret_key);
     // K2 mint (`:139-149`): `$1..$12` in column order.
     let token_label = catalog_reads::desktop_token_label(&host_label);
-    if sqlx::query(&catalog_reads::machine_token_insert_sql())
-        .bind(Uuid::new_v4())
-        .bind(user_id)
-        .bind(dev_machine_id)
-        .bind(workspace_id)
-        .bind(&host_label)
-        .bind(&minted.hashed)
-        .bind(&minted.fingerprint)
-        .bind(token_label)
-        .bind(true)
-        .bind(now_micros())
-        .bind(Option::<DateTime<Utc>>::None)
-        .bind(Option::<DateTime<Utc>>::None)
-        .execute(&mut *tx)
-        .await
-        .is_err()
+    if pidash_services::domain::tokens::insert_machine_token(
+        &mut *tx,
+        &pidash_services::domain::tokens::NewMachineToken {
+            id: Uuid::new_v4(),
+            user_id,
+            dev_machine_id: Some(dev_machine_id),
+            workspace_id,
+            host_label: host_label.clone(),
+            token_hash: minted.hashed.clone(),
+            token_fingerprint: minted.fingerprint.clone(),
+            label: token_label,
+            is_service: true,
+            created_at: now_micros(),
+        },
+    )
+    .await
+    .is_err()
     {
         return server_error();
     }
@@ -714,12 +716,14 @@ async fn delete_desktop_enroll(
         Err(_) => return server_error(),
     };
     // `$1` revoked_at, `$2..` machine ids in list order.
-    let revoke_sql = catalog_reads::signout_revoke_tokens_sql(machine_ids.len());
-    let mut revoke = sqlx::query(&revoke_sql).bind(now_micros());
-    for id in &machine_ids {
-        revoke = revoke.bind(id);
-    }
-    if revoke.execute(&mut *tx).await.is_err() {
+    if pidash_services::domain::tokens::revoke_tokens_for_dev_machines(
+        &mut *tx,
+        &machine_ids,
+        now_micros(),
+    )
+    .await
+    .is_err()
+    {
         return server_error();
     }
     // `$1` status, `$2..` ids, `$N+2` provisioning, `$N+3` revoked.
@@ -1022,7 +1026,7 @@ mod tests {
     }
 
     fn parse_body(json: &str) -> JVal {
-        crate::v1_cycles_modules::json_cpython::parse_request_bytes(json.as_bytes())
+        crate::v1_cycles_modules::json::parse_request_bytes(json.as_bytes())
             .expect("test json parses")
     }
 

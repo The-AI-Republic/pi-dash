@@ -451,35 +451,10 @@ pub async fn bind_repository<S: GitStore>(
     Ok((binding, clone_url))
 }
 
-/// Project `repo_url`/`base_branch` write (`services.py:341-349`).
-///
-/// Returns the `UPDATE` statement, or `None` when `update_fields` is
-/// empty (Django skips the save). Parameters: `$1` project id, then
-/// one placeholder per `Some` field in order (`repo_url`,
-/// `base_branch`), then `updated_at` last.
-pub fn project_repo_update_sql(
-    repo_url: Option<&str>,
-    base_branch: Option<&str>,
-) -> Option<String> {
-    let mut sets = Vec::new();
-    let mut placeholder = 2u8;
-    if repo_url.is_some() {
-        sets.push(format!("repo_url = ${placeholder}"));
-        placeholder += 1;
-    }
-    if base_branch.is_some() {
-        sets.push(format!("base_branch = ${placeholder}"));
-        placeholder += 1;
-    }
-    if sets.is_empty() {
-        return None;
-    }
-    sets.push(format!("updated_at = ${placeholder}"));
-    Some(format!(
-        "UPDATE projects SET {} WHERE id = $1",
-        sets.join(", ")
-    ))
-}
+// NOTE: the repo-fields builder moved to
+// `domain::projects::project_repo_update_sql` (PIDASHCONV-1630) —
+// `projects` is a covered table, so the builder lives in domain/.
+// No alias: nothing outside this crate's tests used the old path.
 
 /// `get_binding` (`services.py:353-358`).
 pub async fn get_binding<S: GitStore>(
@@ -563,6 +538,7 @@ mod tests {
     use super::super::accounts::fakes::*;
     use super::super::accounts::{GitIntegrationError, GitStore, ServiceError, StoreError};
     use super::*;
+    use crate::domain::projects::project_repo_update_sql;
     use chrono::TimeZone;
     use pidash_db::integrations::git_models::{
         git_provider_account::{self, GitProviderAccount},

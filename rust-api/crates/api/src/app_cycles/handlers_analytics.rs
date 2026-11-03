@@ -75,6 +75,8 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
 use super::gates::{decide_gate, gate_for, tenant_context, GateOutcome, ANON_BODY, FORBIDDEN_BODY};
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -129,9 +131,10 @@ fn owned(
 pub const NO_DATES_BODY: &str = r#"{"error":"Cycle has no start or end date"}"#;
 /// ORM `ValidationError` 400 (`app/views/base.py:126-130`).
 pub const VALIDATION_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// `handle_exception`'s generic 500 branch — also the missing-cycle
-/// `AttributeError` (B1).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
+/// `Project.resolve` miss on a non-UUID identifier
+/// (`db/models/project.py:213-217`) — `_rewrite_project_kwarg`'s
+/// `Http404("Project not found")`.
+pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 
 /// Handler denials with byte-exact bodies.
 pub enum Denial {
@@ -139,6 +142,7 @@ pub enum Denial {
     Forbidden,
     NoDates,
     BadValidation,
+    ProjectNotFound,
     ServerError,
 }
 
@@ -149,6 +153,7 @@ impl Denial {
             Denial::Forbidden => (StatusCode::FORBIDDEN, FORBIDDEN_BODY.to_owned()),
             Denial::NoDates => (StatusCode::BAD_REQUEST, NO_DATES_BODY.to_owned()),
             Denial::BadValidation => (StatusCode::BAD_REQUEST, VALIDATION_BODY.to_owned()),
+            Denial::ProjectNotFound => (StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
@@ -167,15 +172,6 @@ impl IntoResponse for Denial {
         )
             .into_response()
     }
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    (
-        status,
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +194,45 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, Denial> {
         .pools()
         .map(|pools| pools.primary())
         .ok_or(Denial::ServerError)
+}
+
+/// Python `str.strip()` membership (`db/models/project.py:210`): Rust
+/// `White_Space` plus U+001C-U+001F (verified by exhaustively diffing
+/// `str.strip` against `char::is_whitespace` over all code points —
+/// those four are the only differences).
+fn is_py_strip_ws(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+}
+
+/// Normalize a non-UUID identifier for the equality lookup
+/// (`db/models/project.py:210`): `str(value).strip().upper()`.
+fn normalize_resolve_identifier(raw: &str) -> String {
+    raw.trim_matches(is_py_strip_ws).to_uppercase()
+}
+
+/// `_rewrite_project_kwarg` (`app/views/base.py:49-80`): authenticated
+/// callers only (anonymous already 401'd); UUIDs pass through unchecked;
+/// other identifiers resolve `UPPER(identifier)` in the workspace, else
+/// `Http404("Project not found")` (`db/models/project.py:192-219`).
+async fn resolve_project_id(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    raw: &str,
+) -> Result<uuid::Uuid, Denial> {
+    if let Ok(id) = raw.parse::<uuid::Uuid>() {
+        return Ok(id);
+    }
+    let upper = normalize_resolve_identifier(raw);
+    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
+        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
+           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
+    )
+    .bind(slug)
+    .bind(upper)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
 }
 
 async fn membership(
@@ -239,10 +274,12 @@ async fn membership(
 // ---------------------------------------------------------------------------
 
 /// `Project` has a `"points"` estimate (`base.py:832-837`).
+/// `Project.objects` is the soft-deletion manager (`mixins.py:61-67`), so a
+/// soft-deleted project is excluded.
 const ESTIMATE_TYPE_SQL: &str = "SELECT EXISTS(SELECT 1 FROM projects p \
      JOIN workspaces w ON w.id = p.workspace_id AND w.slug = $1 \
      JOIN estimates e ON e.id = p.estimate_id AND e.type = 'points' \
-     WHERE p.id = $2)";
+     WHERE p.id = $2 AND p.deleted_at IS NULL)";
 
 /// Cycle row plus the `total_issues` annotation (`base.py:791-805`):
 /// distinct bridged issues that are not archived, not draft, not
@@ -250,8 +287,10 @@ const ESTIMATE_TYPE_SQL: &str = "SELECT EXISTS(SELECT 1 FROM projects p \
 /// the `IssueManager` excludes (Django never applies a related
 /// model's default manager across a join): no triage predicate, no
 /// project-archive predicate — unlike `DIST_WHERE_SQL` below, which
-/// queries through `issue_objects`. No `deleted_at` predicate on the
-/// cycle itself (plain manager — shared quirk with progress B1).
+/// queries through `issue_objects`. `Cycle.objects` is the soft-deletion
+/// manager (`mixins.py:61-67`), so a soft-deleted cycle reads as missing:
+/// `.first()` returns None and the view 500s on the `start_date`
+/// dereference (`base.py:789-807`), the same as an unknown id.
 const CYCLE_SQL: &str = "SELECT c.id, c.start_date, c.end_date, c.progress_snapshot, \
      (SELECT COUNT(DISTINCT ci.issue_id) FROM cycle_issues ci \
       JOIN issues i ON i.id = ci.issue_id AND i.deleted_at IS NULL \
@@ -259,7 +298,7 @@ const CYCLE_SQL: &str = "SELECT c.id, c.start_date, c.end_date, c.progress_snaps
       WHERE ci.cycle_id = c.id AND ci.deleted_at IS NULL) AS total_issues \
      FROM cycles c \
      JOIN workspaces w ON w.id = c.workspace_id AND w.slug = $1 \
-     WHERE c.project_id = $2 AND c.id = $3";
+     WHERE c.project_id = $2 AND c.id = $3 AND c.deleted_at IS NULL";
 
 /// Base scope shared by the four distribution queries: live bridge row
 /// plus the `IssueManager` excludes (the explicit archived/draft
@@ -286,7 +325,10 @@ const AVATAR_CASE_SQL: &str = "CASE WHEN u.avatar_asset_id IS NOT NULL \
 
 /// Points assignee distribution (`base.py:843-899`): per-assignee
 /// estimate sums ordered by display name. `total_estimates` has no
-/// archived/draft filter (B3); completed/pending do.
+/// archived/draft filter (B3); completed/pending do. Django never
+/// filters on `estimate_point` (a nullable FK), so the ORM emits a LEFT
+/// OUTER JOIN and unestimated issues keep their group with NULL sums
+/// (PIDASHCONV-1185).
 fn points_assignee_sql() -> String {
     format!(
         "SELECT u.display_name, u.id AS assignee_id, {AVATAR_CASE_SQL} AS avatar_url, \
@@ -294,7 +336,7 @@ fn points_assignee_sql() -> String {
          SUM(CAST(ep.value AS DOUBLE PRECISION)) FILTER (WHERE i.completed_at IS NOT NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS completed_estimates, \
          SUM(CAST(ep.value AS DOUBLE PRECISION)) FILTER (WHERE i.completed_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS pending_estimates \
          {DIST_FROM_SQL} \
-         JOIN estimate_points ep ON ep.id = i.estimate_point_id \
+         LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id \
          LEFT JOIN issue_assignees ia ON ia.issue_id = i.id \
          LEFT JOIN users u ON u.id = ia.assignee_id \
          {DIST_WHERE_SQL} \
@@ -303,7 +345,8 @@ fn points_assignee_sql() -> String {
     )
 }
 
-/// Points label distribution (`base.py:901-931`).
+/// Points label distribution (`base.py:901-931`). LEFT-joins
+/// `estimate_points` like the assignee query above (PIDASHCONV-1185).
 fn points_label_sql() -> String {
     format!(
         "SELECT l.name AS label_name, l.color, l.id AS label_id, \
@@ -311,7 +354,7 @@ fn points_label_sql() -> String {
          SUM(CAST(ep.value AS DOUBLE PRECISION)) FILTER (WHERE i.completed_at IS NOT NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS completed_estimates, \
          SUM(CAST(ep.value AS DOUBLE PRECISION)) FILTER (WHERE i.completed_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS pending_estimates \
          {DIST_FROM_SQL} \
-         JOIN estimate_points ep ON ep.id = i.estimate_point_id \
+         LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id \
          LEFT JOIN issue_labels il ON il.issue_id = i.id \
          LEFT JOIN labels l ON l.id = il.label_id \
          {DIST_WHERE_SQL} \
@@ -611,12 +654,15 @@ async fn analytics_get(
     // `<uuid:cycle_id>` never matches a non-UUID tail in Django: proxy
     // so the routing 404 comes from Django byte-for-byte.
     let cycle_id: uuid::Uuid = match cycle_raw.parse() {
-        Ok(id) => id,
-        Err(_) => return Ok(crate::edge::proxy(State(state), req).await),
+        Ok(id) if super::is_canonical_uuid(&cycle_raw) => id,
+        _ => return Ok(crate::edge::proxy(State(state), req).await),
     };
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();
-    let project_id: uuid::Uuid = project_raw.parse().map_err(|_| Denial::BadValidation)?;
+    // `_rewrite_project_kwarg` resolves a non-UUID project_id before the
+    // permission gate (`app/views/base.py:202-204`): a matching identifier
+    // becomes the project UUID, a miss is a 404 (`Project not found`).
+    let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
     let (workspace_role, project_role) =
         membership(&pool, &slug, &project_id, &resolved.id).await?;
     let row = gate_for("GET", ANALYTICS_PATH).expect("analytics route must have a gate");
@@ -668,7 +714,17 @@ async fn analytics_get(
     // `if cycle.progress_snapshot:` — truthiness of the stored dict.
     if let Value::Object(map) = &snapshot {
         if !map.is_empty() {
-            return Ok(json_response(StatusCode::OK, snapshot_envelope(map)));
+            // `distribution = cycle.progress_snapshot.get("distribution", {})`
+            // (`base.py:821-822`): the servable envelope is the snapshot's
+            // nested `distribution`, not the snapshot itself.
+            let distribution = match map.get("distribution") {
+                Some(Value::Object(inner)) => inner.clone(),
+                _ => Map::new(),
+            };
+            return Ok(json_response(
+                StatusCode::OK,
+                snapshot_envelope(&distribution),
+            ));
         }
     }
 

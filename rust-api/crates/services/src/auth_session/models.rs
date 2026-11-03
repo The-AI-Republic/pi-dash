@@ -16,9 +16,10 @@
 //! Scope notes (what is deliberately NOT here):
 //!
 //! * `set_password` / `check_password` are Django `AbstractBaseUser` PBKDF2
-//!   behaviour owned by F-05. Only the recorded algorithm name and iteration
-//!   count are pinned here ([`PASSWORD_HASH_ALGORITHM`],
-//!   [`PASSWORD_HASH_ITERATIONS`]); no hash is computed in this module.
+//!   behaviour owned by F-05. Only the recorded algorithm name is pinned
+//!   here ([`PASSWORD_HASH_ALGORITHM`]); the iteration count lives with
+//!   F-05 (`pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS`), the single
+//!   source of truth — no hash is computed in this module.
 //! * `User.save()` email lower-casing / token rotation / display-name
 //!   backfill (`user.py:169-187`) and `get_display_name` (`:189-197`) are
 //!   recorded in the fixture as reference but belong to the write path the
@@ -30,9 +31,10 @@
 //!
 //! Ported bugs (translate, don't redesign): this slice's semantics carry no
 //! recorded bug. The D-16 bug list (shared-mutable payload default, inverted
-//! `is_signup`, `ProjectMember` bulk_create missing `project_id`, magic
-//! 500s, redirect quirks, dead throttle view) lives in the other FX-AUTH
-//! files and is ported by the layer that owns each unit.
+//! `is_signup`, `ProjectMember` bulk_create `project_id` (PB-1008, retired
+//! by PIDASHCONV-1686), magic 500s, redirect quirks, dead throttle view)
+//! lives in the other FX-AUTH files and is ported by the layer that owns
+//! each unit.
 
 use serde_json::{Map, Value};
 
@@ -790,10 +792,6 @@ pub fn create_model_instance(data: &Map<String, Value>) -> SessionInstance {
 /// never implement hashing in this module.
 pub const PASSWORD_HASH_ALGORITHM: &str = "pbkdf2_sha256";
 
-/// Iteration count recorded in the fixture (`password.iterations`).
-/// Owned by F-05 / Django settings; pinned, not used, here.
-pub const PASSWORD_HASH_ITERATIONS: u32 = 1_500_000;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -963,7 +961,7 @@ mod tests {
                 .expect("iterations recorded as string")
                 .parse::<u32>()
                 .expect("iterations numeric"),
-            PASSWORD_HASH_ITERATIONS
+            pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS
         );
         assert_eq!(fx["password"]["check_true"], json!(true));
         assert_eq!(fx["password"]["check_false"], json!(false));

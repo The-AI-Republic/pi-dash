@@ -66,7 +66,7 @@ const ISSUE_EXPAND_ATTRS: &[&str] = &[
     "issue_link",
 ];
 
-/// `IssueSerializer.Meta.fields` (`issue.py:1063-1092`): 29 names. The flat
+/// `IssueSerializer.Meta.fields` (`issue.py:1071-1103`): 31 names. The flat
 /// branch's serializer declares all of them even though seven annotation-backed
 /// ones `SkipField` out of the body; `expand in self.fields` still sees them, so
 /// a declared-field clobber can add a key the base body omitted.
@@ -85,6 +85,8 @@ pub const FLAT_EXPAND_FIELDS: &[&str] = &[
     "project_id",
     "parent_id",
     "cycle_id",
+    "type_id",
+    "is_epic",
     "assigned_pod_id",
     "agent_executor",
     "module_ids",
@@ -102,7 +104,7 @@ pub const FLAT_EXPAND_FIELDS: &[&str] = &[
     "is_synced",
 ];
 
-/// `IssueDetailSerializer.Meta.fields` (`issue.py:1233-1243`):
+/// `IssueDetailSerializer.Meta.fields` (`issue.py:1250-1260`):
 /// [`FLAT_EXPAND_FIELDS`] plus the seven detail-only names.
 pub const DETAIL_EXPAND_FIELDS: &[&str] = &[
     "id",
@@ -119,6 +121,8 @@ pub const DETAIL_EXPAND_FIELDS: &[&str] = &[
     "project_id",
     "parent_id",
     "cycle_id",
+    "type_id",
+    "is_epic",
     "assigned_pod_id",
     "agent_executor",
     "module_ids",
@@ -281,7 +285,7 @@ async fn render_nested(
         },
         "created_by" => match anchor.created_by_id {
             Some(id) => render_user_lite(pool, id).await,
-            None => Ok(Value::Object(Map::new())),
+            None => Ok(user_lite_initial()),
         },
         "parent" => match anchor.parent_id {
             Some(id) => render_issue_lite(pool, id).await,
@@ -350,6 +354,20 @@ async fn render_user_lite(pool: &PgPool, user_id: Uuid) -> Result<Value, Denial>
         .await
         .map_err(|_| Denial::ServerError)?;
     super::handlers_engage::user_lite_value(&row).map_err(|_| Denial::ServerError)
+}
+
+/// `UserLiteSerializer(None).data`: DRF's unbound `.data` falls back to
+/// `get_initial()`, which keeps every writable field in field order.
+/// `first_name`, `last_name`, `avatar` and `display_name` are writable
+/// CharFields with `initial = ''`; `id`/`is_bot` are read-only and
+/// `avatar_url` is a model property (`app/serializers/user.py:141-153`).
+fn user_lite_initial() -> Value {
+    let mut initial = Map::with_capacity(4);
+    initial.insert("first_name".to_owned(), Value::String(String::new()));
+    initial.insert("last_name".to_owned(), Value::String(String::new()));
+    initial.insert("avatar".to_owned(), Value::String(String::new()));
+    initial.insert("display_name".to_owned(), Value::String(String::new()));
+    Value::Object(initial)
 }
 
 async fn render_state_lite(pool: &PgPool, state_id: Uuid) -> Result<Value, Denial> {

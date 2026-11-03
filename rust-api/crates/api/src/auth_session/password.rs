@@ -64,9 +64,13 @@ use axum::routing::{get, post};
 use axum::Router;
 use serde_json::Value;
 
-use pidash_services::auth_session::{password as pw, tasks as t};
+use pidash_services::auth_session::{password as pw, tasks as t, MAX_URL_REDIRECT_LENGTH};
+use pidash_services::domain::identity;
 
+use crate::auth_session::render::disallowed_redirect;
+use crate::auth_session::throttle_ident;
 use crate::state::AppState;
+use pidash_compat::response::{empty_response_no_content_type, json_response};
 
 /// Register the seven password/CSRF routes. Nothing else: sibling paths
 /// stay unmatched and proxy to Django.
@@ -133,14 +137,6 @@ fn owned_post(
 // Responses (exact bytes)
 // ---------------------------------------------------------------------------
 
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("password response")
-}
-
 fn json_400(pairs: &[(String, Value)]) -> Response {
     json_response(
         StatusCode::BAD_REQUEST,
@@ -148,10 +144,19 @@ fn json_400(pairs: &[(String, Value)]) -> Response {
     )
 }
 
+/// `HttpResponseRedirect(url)`: Django percent-encodes the URL first
+/// (`iri_to_uri`, `django/http/response.py:620`). Past
+/// `MAX_URL_REDIRECT_LENGTH` characters the final `Location` answers
+/// 400 (`DisallowedRedirect`).
 fn redirect_302(location: String) -> Response {
-    let Some(location) = crate::response_headers::header_value(&location) else {
+    let too_long = location.chars().count() > MAX_URL_REDIRECT_LENGTH;
+    let encoded = pidash_compat::http::iri_to_uri(&location);
+    let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
+    if too_long {
+        return disallowed_redirect();
+    }
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)
@@ -201,10 +206,7 @@ fn throttled(wait: Option<f64>) -> Response {
 /// Empty 500. Django's production 500 page is deployment-specific HTML;
 /// only the status is contractual here (the 500 vectors assert status).
 fn server_error() -> Response {
-    Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .body(axum::body::Body::empty())
-        .expect("static 500 response")
+    empty_response_no_content_type(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Custom `csrf_failure` page (`common.py:38-44`): `render()` with the
@@ -591,18 +593,6 @@ fn now_float() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// DRF `get_ident` (`throttling.py:23-40`, `NUM_PROXIES` unset): the
-/// `X-Forwarded-For` header with all whitespace stripped, else the peer
-/// address.
-fn throttle_ident(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> String {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if !xff.is_empty() {
-            return xff.split_whitespace().collect();
-        }
-    }
-    peer.map(|p| p.ip().to_string()).unwrap_or_default()
-}
-
 /// `get_client_ip` (`utils/ip_address.py`): first `X-Forwarded-For`
 /// token (no stripping), else the peer address.
 fn client_ip(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> Option<String> {
@@ -806,7 +796,7 @@ async fn get_csrf_token(
         pidash_services::auth_session::DEFAULT_ANON_SCOPE,
         pidash_services::auth_session::DEFAULT_ANON_RATE,
         actor.is_some(),
-        &throttle_ident(&headers, peer_addr),
+        &throttle_ident(&headers, peer_addr.map(|p| p.ip().to_string())),
     )
     .await
     {
@@ -842,6 +832,7 @@ async fn get_csrf_token(
         &secret,
         &pidash_auth::session::http_date(now + pw::CSRF_COOKIE_AGE_SECS),
         secure,
+        state.settings().session.cookie_domain.as_deref(),
     );
     let mut response = json_response(
         StatusCode::OK,
@@ -854,30 +845,7 @@ async fn get_csrf_token(
     response
 }
 
-/// Session-auth hash for `login()`: `salted_hmac(
-/// "...AbstractBaseUser.get_session_auth_hash", password_field,
-/// SECRET_KEY).hexdigest()` — the same construction `resolve_actor`
-/// verifies.
-fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::{Digest, Sha256};
-    let key = {
-        let mut hasher = Sha256::new();
-        hasher.update(b"django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash");
-        hasher.update(secret_key);
-        hasher.finalize()
-    };
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    let digest = mac.finalize().into_bytes();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(digest.len() * 2);
-    for b in digest {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
+use pidash_compat::http::session_auth_hash;
 
 /// `user_login(user, request, is_app=True)` (`utils/login.py:14-28`) over
 /// the request session: Django `login()` re-keys the session, writes
@@ -937,11 +905,18 @@ async fn relogin(
 
 /// Append the rotated `csrftoken` cookie (`login()` calls
 /// `rotate_token()`, so the browser's secret changes on every re-login).
-fn push_csrf_cookie(response: &mut Response, secret: &str, secure: bool, now: i64) {
+fn push_csrf_cookie(
+    response: &mut Response,
+    secret: &str,
+    secure: bool,
+    now: i64,
+    domain: Option<&str>,
+) {
     let cookie = pw::csrf_set_cookie_value(
         secret,
         &pidash_auth::session::http_date(now + pw::CSRF_COOKIE_AGE_SECS),
         secure,
+        domain,
     );
     if let Ok(value) = header::HeaderValue::from_str(&cookie) {
         response.headers_mut().append(header::SET_COOKIE, value);
@@ -964,20 +939,48 @@ fn user_agent_of(headers: &HeaderMap) -> String {
 async fn password_row(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
-) -> Result<Option<(String, bool)>, sqlx::Error> {
+) -> Result<Option<(String, bool, bool)>, sqlx::Error> {
     use sqlx::Row;
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query("SELECT password, is_password_autoset FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await?;
+    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
+        "SELECT password, is_password_autoset, token_updated_at FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
     row.map(|row| {
         Ok::<_, sqlx::Error>((
             row.try_get("password")?,
             row.try_get("is_password_autoset")?,
+            row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("token_updated_at")?
+                .is_some(),
         ))
     })
     .transpose()
+}
+
+/// Change/set/reset-password write: the encoded password plus the
+/// `User.save()` column effects
+/// (`domain::identity::write_password_with_save_effects`), with a
+/// caller-generated rotation token. `stamp_last_login` selects the
+/// change/set-password twin over reset-password.
+async fn write_password(
+    pool: &sqlx::PgPool,
+    user_id: uuid::Uuid,
+    encoded: &str,
+    stamp_last_login: bool,
+) -> Result<(), sqlx::Error> {
+    let token = crate::auth_session::email::fresh_user_token();
+    identity::write_password_with_save_effects(
+        pool,
+        user_id,
+        &identity::PasswordSave {
+            encoded,
+            fresh_token: &token,
+            rotated_at: chrono::Utc::now(),
+            stamp_last_login,
+        },
+    )
+    .await
 }
 
 /// `POST /auth/change-password/` (`ChangePasswordEndpoint`,
@@ -1016,7 +1019,7 @@ async fn change_password(
         pidash_services::auth_session::DEFAULT_ANON_SCOPE,
         pidash_services::auth_session::DEFAULT_ANON_RATE,
         true,
-        &throttle_ident(&headers, peer_addr),
+        &throttle_ident(&headers, peer_addr.map(|p| p.ip().to_string())),
     )
     .await
     {
@@ -1045,7 +1048,7 @@ async fn change_password(
         Ok(Some(row)) => row,
         _ => return server_error(),
     };
-    let (stored, is_autoset) = row;
+    let (stored, is_autoset, _) = row;
     let old_matches = match &old {
         Field::Text(candidate) => {
             match pidash_auth::password::verify_password(candidate, &stored) {
@@ -1055,6 +1058,27 @@ async fn change_password(
         }
         _ => false,
     };
+    // Django's `check_password` setter (`common.py:74`,
+    // `base_user.py:111-123`): a correct old password on an outdated hash
+    // re-encodes with the default hasher at once — after the
+    // missing-field gates (`:52-71`) but before the zxcvbn gate
+    // (`:82-89`), so a weak-new 400 still persists the upgrade.
+    // `save(update_fields=["password"])` writes only that column (no
+    // `updated_at` bump). Autoset accounts never reach `check_password`
+    // (`:74` short-circuits), and on the success path the new-password
+    // save below overwrites this either way.
+    if !is_autoset && old_present && new_present && old_matches {
+        if let Field::Text(candidate) = &old {
+            if let Some(new_hash) = pidash_auth::password::rehash_if_outdated(candidate, &stored) {
+                if identity::rehash_password(&pool, actor.id, &new_hash)
+                    .await
+                    .is_err()
+                {
+                    return server_error();
+                }
+            }
+        }
+    }
     let new_weak = new_text
         .as_deref()
         .map(pidash_services::auth_session::password::password_is_weak)
@@ -1079,14 +1103,9 @@ async fn change_password(
     );
     // `set_password` + `is_password_autoset = False` + `save()`; the
     // `user_logged_in` signal bumps `last_login` (`update_last_login`).
-    if sqlx::query(
-        "UPDATE users SET password = $1, is_password_autoset = false, last_login = now() WHERE id = $2",
-    )
-    .bind(&encoded)
-    .bind(actor.id)
-    .execute(&pool)
-    .await
-    .is_err()
+    if write_password(&pool, actor.id, &encoded, true)
+        .await
+        .is_err()
     {
         return server_error();
     }
@@ -1112,7 +1131,13 @@ async fn change_password(
         else {
             return server_error();
         };
-        push_csrf_cookie(&mut response, &csrf_secret, secure, now);
+        push_csrf_cookie(
+            &mut response,
+            &csrf_secret,
+            secure,
+            now,
+            state.settings().session.cookie_domain.as_deref(),
+        );
     }
     response
 }
@@ -1151,7 +1176,7 @@ async fn set_password(
         pidash_services::auth_session::DEFAULT_ANON_SCOPE,
         pidash_services::auth_session::DEFAULT_ANON_RATE,
         true,
-        &throttle_ident(&headers, peer_addr),
+        &throttle_ident(&headers, peer_addr.map(|p| p.ip().to_string())),
     )
     .await
     {
@@ -1169,7 +1194,7 @@ async fn set_password(
         Ok(Some(row)) => row,
         _ => return server_error(),
     };
-    let (_, is_autoset) = row;
+    let (_, is_autoset, token_set) = row;
     let password_weak = password_text
         .as_deref()
         .map(pidash_services::auth_session::password::password_is_weak)
@@ -1198,24 +1223,32 @@ async fn set_password(
         &salt,
         pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS,
     );
-    if sqlx::query(
-        "UPDATE users SET password = $1, is_password_autoset = false, last_login = now() WHERE id = $2",
-    )
-    .bind(&encoded)
-    .bind(actor.id)
-    .execute(&pool)
-    .await
-    .is_err()
+    // `set_password` + `is_password_autoset = False` + `save()`; the
+    // `user_logged_in` signal bumps `last_login` (`update_last_login`).
+    if write_password(&pool, actor.id, &encoded, true)
+        .await
+        .is_err()
     {
         return server_error();
     }
     // `invalidate_cache("/api/users/me/")` deletes a key no reader ever
     // sets (`cache_response` never wraps a users/me view), so there is no
     // cache I/O to port — the observable behavior is identical.
-    let snapshot = match user_snapshot(&pool, actor.id).await {
+    let mut snapshot = match user_snapshot(&pool, actor.id).await {
         Ok(Some(snapshot)) => snapshot,
         _ => return server_error(),
     };
+    // `user_login` fires `update_last_login`, whose
+    // `save(update_fields=["last_login"])` runs the overridden `save()`
+    // body in memory: a second token rotation that is never persisted,
+    // but `UserSerializer(user)` reads the in-memory user — so the body
+    // shows a phantom token/timestamp (`body.token != row.token` on
+    // Django; phantom only when a token was already in use).
+    if token_set {
+        let now = chrono::Utc::now();
+        snapshot.token = crate::auth_session::email::fresh_user_token();
+        snapshot.token_updated_at = Some((now.timestamp(), now.timestamp_subsec_micros()));
+    }
     let pairs = pw::user_serializer_pairs(&snapshot);
     let body = crate::auth_session::json_error_string(&pairs);
     let now = now_unix();
@@ -1238,7 +1271,13 @@ async fn set_password(
         else {
             return server_error();
         };
-        push_csrf_cookie(&mut response, &csrf_secret, secure, now);
+        push_csrf_cookie(
+            &mut response,
+            &csrf_secret,
+            secure,
+            now,
+            state.settings().session.cookie_domain.as_deref(),
+        );
     }
     response
 }
@@ -1382,7 +1421,7 @@ async fn forgot_password(
         pidash_services::auth_session::AUTHENTICATION_THROTTLE_SCOPE,
         pidash_services::auth_session::AUTHENTICATION_THROTTLE_RATE,
         false,
-        &throttle_ident(&headers, peer),
+        &throttle_ident(&headers, peer.map(|p| p.ip().to_string())),
     )
     .await
     {
@@ -1400,17 +1439,30 @@ async fn forgot_password(
     if data_get_raises(&data) {
         return server_error();
     }
-    // Instance gate (`Instance.objects.first()`, `is_setup_done`): a
-    // missing row or an unset flag answers INSTANCE_NOT_CONFIGURED.
+    // Django gate order (`app/password_management.py:54-81`, space
+    // `:54-93`): instance, SMTP, `validate_email` — each short-circuits
+    // before the user lookup. The lookup runs last: a NUL byte in the
+    // email makes Postgres reject the bind param, which answered 500
+    // instead of Django's 400 INVALID_EMAIL (PIDASHCONV-1353).
     let instance_row = match pidash_db::license::queries::fetch_instance_first(&pool).await {
         Ok(row) => row,
         Err(_) => return server_error(),
     };
     let instance_setup_done = instance_row.map(|row| row.is_setup_done).unwrap_or(false);
+    if !instance_setup_done {
+        return json_400(&pw::forgot_password_error_pairs(
+            t::ForgotPasswordDecision::InstanceNotConfigured,
+        ));
+    }
     // SMTP gate (`EMAIL_HOST` truthiness).
     let Ok(smtp) = smtp_configured(&pool, &state.settings().secret_key).await else {
         return server_error();
     };
+    if !smtp {
+        return json_400(&pw::forgot_password_error_pairs(
+            t::ForgotPasswordDecision::SmtpNotConfigured,
+        ));
+    }
     // `validate_email`: only `ValidationError` is caught
     // (`app/password_management.py:75-81`). Falsy values and truthy
     // lists/dicts take the `INVALID_EMAIL` branch (`"@" not in [...]`
@@ -1421,17 +1473,20 @@ async fn forgot_password(
         Field::Absent | Field::Opaque => String::new(),
         Field::Scalar => return server_error(),
     };
-    let email_valid = crate::license::handlers_auth_forms::email_is_valid(&email);
+    if !crate::license::handlers_auth_forms::email_is_valid(&email) {
+        return json_400(&pw::forgot_password_error_pairs(
+            t::ForgotPasswordDecision::InvalidEmail,
+        ));
+    }
     let user = match forgot_user_by_email(&pool, &email).await {
         Ok(user) => user,
         Err(_) => return server_error(),
     };
-    let decision =
-        t::forgot_password_decision(instance_setup_done, smtp, email_valid, user.is_some());
-    if decision != t::ForgotPasswordDecision::Emit {
-        return json_400(&pw::forgot_password_error_pairs(decision));
-    }
-    let user = user.expect("decided Emit");
+    let Some(user) = user else {
+        return json_400(&pw::forgot_password_error_pairs(
+            t::ForgotPasswordDecision::UserDoesNotExist,
+        ));
+    };
     let current_site = base_host_for(&state, !is_space, is_space);
     let now = now_unix();
     let (uidb64, token) = pw::make_password_token(
@@ -1634,10 +1689,7 @@ async fn reset_password(
         &salt,
         pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS,
     );
-    if sqlx::query("UPDATE users SET password = $1, is_password_autoset = false WHERE id = $2")
-        .bind(&encoded)
-        .bind(user_id)
-        .execute(&pool)
+    if write_password(&pool, user_id, &encoded, false)
         .await
         .is_err()
     {
@@ -1848,6 +1900,24 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use tower::ServiceExt;
+
+    #[test]
+    fn peerless_throttle_ident_is_drf_none() {
+        // PIDASHCONV-1419: with no XFF and no peer, DRF's `cache_format
+        // % {'ident': None}` renders "None", never "".
+        let headers = axum::http::HeaderMap::new();
+        assert_eq!(throttle_ident(&headers, None), "None");
+    }
+
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(redirect_302(long).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            redirect_302("http://app.test/?next_path=/x".to_owned()).status(),
+            StatusCode::FOUND
+        );
+    }
 
     fn state() -> AppState {
         // No pools: every handler answers 500 through `pool_of`, which

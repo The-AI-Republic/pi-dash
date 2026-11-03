@@ -19,7 +19,7 @@ SELECT r."id", r."owner_id", r."workspace_id", r."dev_machine_id", r."pod_id",
        r."enrollment_token_hash", r."enrollment_token_fingerprint",
        r."enrolled_at", r."capabilities", r."status", r."os", r."arch",
        r."runner_version", r."dev_metadata", r."protocol_version",
-       r."last_heartbeat_at", r."free_worktrees",
+       r."last_heartbeat_at",
        r."created_at", r."updated_at", r."revoked_at", r."revoked_reason",
        w."id", w."slug", p."id", p."name", pr."id", pr."identifier"
 FROM "runner" r
@@ -152,11 +152,11 @@ INSERT INTO "runner"
      "enrollment_token_hash", "enrollment_token_fingerprint",
      "enrolled_at", "capabilities", "status", "os", "arch",
      "runner_version", "dev_metadata", "protocol_version",
-     "last_heartbeat_at", "free_worktrees",
+     "last_heartbeat_at",
      "created_at", "updated_at", "revoked_at", "revoked_reason")
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0,
         '', '', 0, '', 1, '', '', now(), '[]', 'offline', '', '',
-        '', '{}', 1, NULL, NULL, now(), now(), NULL, '');
+        '', '{}', 1, NULL, now(), now(), NULL, '');
 -- IntegrityError (pod,name unique) -> explicit name: 409 runner_name_taken;
 -- auto name: retry (max 5) else 409 could_not_allocate_runner_name.
 -- APIToken callers (auth_machine_token None) + host_label: _rotate_machine_token

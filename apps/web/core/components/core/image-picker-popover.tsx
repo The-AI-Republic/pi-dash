@@ -41,7 +41,6 @@ type Props = {
   onChange: (data: string) => void;
   disabled?: boolean;
   tabIndex?: number;
-  isProfileCover?: boolean;
   projectId?: string | null;
 };
 
@@ -49,7 +48,7 @@ type Props = {
 const fileService = new FileService();
 
 export const ImagePickerPopover = observer(function ImagePickerPopover(props: Props) {
-  const { label, value, control, onChange, disabled = false, tabIndex, isProfileCover = false, projectId } = props;
+  const { label, value, control, onChange, disabled = false, tabIndex, projectId } = props;
   // states
   const [image, setImage] = useState<File | null>(null);
   const [isImageUploading, setIsImageUploading] = useState(false);
@@ -126,47 +125,26 @@ export const ImagePickerPopover = observer(function ImagePickerPopover(props: Pr
       setIsOpen(false);
     };
 
-    if (isProfileCover) {
-      await fileService
-        .uploadUserAsset(
-          {
-            entity_identifier: "",
-            entity_type: EFileAssetType.USER_COVER,
-          },
-          image
-        )
-        .then((res) => uploadCallback(res.asset_url))
-        .catch((error) => {
-          console.error("Error uploading user cover image:", error);
-          setIsImageUploading(false);
-          setToast({
-            message: error?.error ?? "The image could not be uploaded",
-            type: TOAST_TYPE.ERROR,
-            title: "Image not uploaded",
-          });
+    if (!workspaceSlug) return;
+    await fileService
+      .uploadWorkspaceAsset(
+        workspaceSlug.toString(),
+        {
+          entity_identifier: projectId?.toString() ?? "",
+          entity_type: EFileAssetType.PROJECT_COVER,
+        },
+        image
+      )
+      .then((res) => uploadCallback(res.asset_url))
+      .catch((error) => {
+        console.error("Error uploading project cover image:", error);
+        setIsImageUploading(false);
+        setToast({
+          message: error?.error ?? "The image could not be uploaded",
+          type: TOAST_TYPE.ERROR,
+          title: "Image not uploaded",
         });
-    } else {
-      if (!workspaceSlug) return;
-      await fileService
-        .uploadWorkspaceAsset(
-          workspaceSlug.toString(),
-          {
-            entity_identifier: projectId?.toString() ?? "",
-            entity_type: EFileAssetType.PROJECT_COVER,
-          },
-          image
-        )
-        .then((res) => uploadCallback(res.asset_url))
-        .catch((error) => {
-          console.error("Error uploading project cover image:", error);
-          setIsImageUploading(false);
-          setToast({
-            message: error?.error ?? "The image could not be uploaded",
-            type: TOAST_TYPE.ERROR,
-            title: "Image not uploaded",
-          });
-        });
-    }
+      });
   };
 
   const handleClose = () => {

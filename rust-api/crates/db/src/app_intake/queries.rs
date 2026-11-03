@@ -57,10 +57,11 @@
 //!   param against the queryset's fields, so [`order_to_sql`] maps a
 //!   single-level `issue__<field>` to the `issues` columns and a bare
 //!   `<field>` to the `intake_issues` columns (direction from one
-//!   leading `-`). Anything else passes through untouched and raises
-//!   at execution (`FieldError` in Django), which `handle_exception`
-//!   maps to `500 {"error": "Something went wrong please try again
-//!   later"}`; mapping the failure to the 500 body is handlers-owned.
+//!   leading `-`). Anything else is rejected (`None`) — Django raises
+//!   `FieldError` there, which `handle_exception` maps to `500
+//!   {"error": "Something went wrong please try again later"}`;
+//!   mapping the rejection to the 500 body is handlers-owned. User
+//!   text never reaches the statement (PIDASHCONV-1426).
 //! * Falsy status-CSV skip (`base.py:200-202`): `?status=` with only
 //!   `null` tokens parses to `[]`, which is falsy, so **no** status
 //!   filter applies. [`parse_intake_status`] returns `None` for that
@@ -442,7 +443,7 @@ const BRIDGE_ORDER_COLUMNS: &[(&str, &str)] = &[
 /// Django field name → `issues` column for `ORDER BY` through the
 /// `issue__` prefix (`db/models/issue.py:107-~250` plus the same
 /// audit/project base). The M2M fields (`assignees`, `labels`) have no
-/// column and stay passthrough — Django joins them, which this mapping
+/// column and are rejected — Django joins them, which this mapping
 /// does not reproduce (residual divergence, documented below).
 const ISSUE_ORDER_COLUMNS: &[(&str, &str)] = &[
     ("id", "id"),
@@ -501,20 +502,20 @@ fn lookup_order_column<'a>(map: &[(&'a str, &'a str)], field: &str) -> Option<&'
 /// (`base.py:198`, which resolves the param against the queryset's
 /// fields). A single leading `-` selects descending; `issue__<field>`
 /// (one level) resolves against the joined issue's columns and a bare
-/// `<field>` against the `intake_issues` bridge columns. **Anything
-/// else passes through untouched** — unknown fields, M2M names,
-/// deeper `__` join paths and empty spellings: Django raises
+/// `<field>` against the `intake_issues` bridge columns. Anything else
+/// — unknown fields, M2M names, deeper `__` join paths, empty
+/// spellings, SQL syntax — is rejected (`None`): Django raises
 /// `FieldError` there and `handle_exception` answers
-/// `500 {"error": "Something went wrong please try again later"}`;
-/// the raw fragment fails in Postgres and maps to the same 500.
-/// That failure mapping is handlers-owned.
+/// `500 {"error": "Something went wrong please try again later"}`.
+/// That rejection mapping is handlers-owned. User text never reaches
+/// the statement (PIDASHCONV-1426).
 ///
-/// Residual divergence (kept, per the "anything else passes through"
-/// scope): multi-level join paths (`issue__project__name`) and M2M
-/// names (`issue__labels`, bare `assignees` has no bridge column
-/// either) are valid Django orderings via join, but pass through here
-/// and 500. The default (`-issue__created_at`) rendering is unchanged.
-pub fn order_to_sql(raw: &str) -> String {
+/// Residual divergence (kept): multi-level join paths
+/// (`issue__project__name`) and M2M names (`issue__labels`, and bare
+/// `assignees` has no bridge column either) are valid Django orderings
+/// via join, but are rejected here and 500. The default
+/// (`-issue__created_at`) rendering is unchanged.
+pub fn order_to_sql(raw: &str) -> Option<String> {
     let (descending, field) = match raw.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, raw),
@@ -533,10 +534,7 @@ pub fn order_to_sql(raw: &str) -> String {
         lookup_order_column(BRIDGE_ORDER_COLUMNS, field)
             .map(|column| format!(r#""{t}"."{column}""#, t = intake_issue::TABLE))
     };
-    match resolved {
-        Some(expr) => format!("{expr} {direction}"),
-        None => raw.to_owned(),
-    }
+    resolved.map(|expr| format!("{expr} {direction}"))
 }
 
 /// Inputs for [`intake_issue_list_sql`].
@@ -557,6 +555,12 @@ pub struct IntakeIssueListQuery<'a> {
     pub issue_filters_sql: Option<&'a str>,
     /// Number of binds inside `issue_filters_sql`.
     pub issue_filter_binds: usize,
+    /// Extra JOINs the fragment's predicates need (states, assignees,
+    /// mentions, cycles, modules, subscribers); empty when the fragment
+    /// touches only the base tables. Spliced after the label JOINs, as
+    /// the count query does — without them Postgres rejects the
+    /// statement (`missing FROM-clause entry`).
+    pub joins: &'a str,
     /// Guest `created_by` narrowing (`base.py:204-214`, handlers-owned
     /// decision): `true` appends `AND created_by_id = $N`.
     pub guest_created_by: bool,
@@ -575,15 +579,23 @@ pub struct IntakeIssueListQuery<'a> {
 /// narrowing (`:204-214`, via [`IntakeIssueListQuery::guest_created_by`]).
 /// The missing-`Intake` 404 (`:179-180`) and the paginator envelope
 /// (`:215-219`) are handlers-owned.
-pub fn intake_issue_list_sql(q: &IntakeIssueListQuery<'_>) -> String {
+///
+/// Returns `None` when `order_by` names no allowlisted column
+/// (Django's `FieldError` path); the handler answers the generic 500.
+pub fn intake_issue_list_sql(q: &IntakeIssueListQuery<'_>) -> Option<String> {
     let mut sql = format!(
-        r#"SELECT "{t}".*, {labels} AS "label_ids" FROM "{t}" LEFT OUTER JOIN "{i}" ON ("{t}"."issue_id" = "{i}"."id") LEFT OUTER JOIN "{lt}" ON ("{i}"."id" = "{lt}"."issue_id") LEFT OUTER JOIN "{l}" ON ("{lt}"."label_id" = "{l}"."id") WHERE ("{t}"."intake_id" = $1 AND "{t}"."project_id" = $2 AND "{t}"."deleted_at" IS NULL"#,
+        r#"SELECT "{t}".*, {labels} AS "label_ids" FROM "{t}" LEFT OUTER JOIN "{i}" ON ("{t}"."issue_id" = "{i}"."id") LEFT OUTER JOIN "{lt}" ON ("{i}"."id" = "{lt}"."issue_id") LEFT OUTER JOIN "{l}" ON ("{lt}"."label_id" = "{l}"."id")"#,
         t = intake_issue::TABLE,
         i = ISSUE_TABLE,
         lt = ISSUE_LABEL_TABLE,
         l = LABEL_TABLE,
         labels = label_ids_fragment(),
     );
+    sql.push_str(q.joins);
+    sql.push_str(&format!(
+        r#" WHERE ("{t}"."intake_id" = $1 AND "{t}"."project_id" = $2 AND "{t}"."deleted_at" IS NULL"#,
+        t = intake_issue::TABLE
+    ));
     let mut next_bind = 3;
     if let Some(fragment) = q.issue_filters_sql {
         sql.push_str(&format!(" AND ({fragment})"));
@@ -620,13 +632,13 @@ pub fn intake_issue_list_sql(q: &IntakeIssueListQuery<'_>) -> String {
         t = intake_issue::TABLE,
         i = ISSUE_TABLE,
     ));
-    sql.push_str(&format!(" ORDER BY {}", order_to_sql(q.order_by)));
+    sql.push_str(&format!(" ORDER BY {}", order_to_sql(q.order_by)?));
     sql.push_str(&format!(" LIMIT {}", q.limit));
     // Django's `qs[start:start+per]` omits OFFSET when start is 0.
     if q.offset > 0 {
         sql.push_str(&format!(" OFFSET {}", q.offset));
     }
-    sql
+    Some(sql)
 }
 
 // ---------------------------------------------------------------------------
@@ -1022,6 +1034,7 @@ mod tests {
             statuses: parse_intake_status(None).expect("default parses"),
             issue_filters_sql: None,
             issue_filter_binds: 0,
+            joins: "",
             guest_created_by: false,
             limit: 50,
             offset: 0,
@@ -1045,7 +1058,7 @@ mod tests {
                 "missing {part}: {norm_fixture}"
             );
         }
-        let sql = intake_issue_list_sql(&default_list_query());
+        let sql = intake_issue_list_sql(&default_list_query()).expect("default order renders");
         // Default `-2` status filter is a single bind, not inlined.
         assert!(
             sql.contains("\"intake_issues\".\"status\" IN ($3)"),
@@ -1092,66 +1105,98 @@ mod tests {
     }
 
     #[test]
-    fn order_mapping_and_passthrough_bug() {
+    fn order_mapping_and_rejection() {
         assert_eq!(DEFAULT_LIST_ORDER, "-issue__created_at");
         // The default rendering is unchanged.
         assert_eq!(
-            order_to_sql("-issue__created_at"),
-            "\"issues\".\"created_at\" DESC"
+            order_to_sql("-issue__created_at").as_deref(),
+            Some("\"issues\".\"created_at\" DESC")
         );
         assert_eq!(
-            order_to_sql("issue__created_at"),
-            "\"issues\".\"created_at\" ASC"
+            order_to_sql("issue__created_at").as_deref(),
+            Some("\"issues\".\"created_at\" ASC")
         );
         // Bare bridge fields resolve against intake_issues; one leading
         // `-` selects descending (base.py:198 resolves `-created_at` /
         // `-id` to the bridge columns).
-        assert_eq!(order_to_sql("status"), "\"intake_issues\".\"status\" ASC");
-        assert_eq!(order_to_sql("-status"), "\"intake_issues\".\"status\" DESC");
         assert_eq!(
-            order_to_sql("created_at"),
-            "\"intake_issues\".\"created_at\" ASC"
+            order_to_sql("status").as_deref(),
+            Some("\"intake_issues\".\"status\" ASC")
         );
         assert_eq!(
-            order_to_sql("-created_at"),
-            "\"intake_issues\".\"created_at\" DESC"
+            order_to_sql("-status").as_deref(),
+            Some("\"intake_issues\".\"status\" DESC")
         );
-        assert_eq!(order_to_sql("id"), "\"intake_issues\".\"id\" ASC");
-        assert_eq!(order_to_sql("-id"), "\"intake_issues\".\"id\" DESC");
+        assert_eq!(
+            order_to_sql("created_at").as_deref(),
+            Some("\"intake_issues\".\"created_at\" ASC")
+        );
+        assert_eq!(
+            order_to_sql("-created_at").as_deref(),
+            Some("\"intake_issues\".\"created_at\" DESC")
+        );
+        assert_eq!(
+            order_to_sql("id").as_deref(),
+            Some("\"intake_issues\".\"id\" ASC")
+        );
+        assert_eq!(
+            order_to_sql("-id").as_deref(),
+            Some("\"intake_issues\".\"id\" DESC")
+        );
         // Single-level issue__ fields resolve against issues.
-        assert_eq!(order_to_sql("issue__name"), "\"issues\".\"name\" ASC");
-        assert_eq!(order_to_sql("-issue__name"), "\"issues\".\"name\" DESC");
+        assert_eq!(
+            order_to_sql("issue__name").as_deref(),
+            Some("\"issues\".\"name\" ASC")
+        );
+        assert_eq!(
+            order_to_sql("-issue__name").as_deref(),
+            Some("\"issues\".\"name\" DESC")
+        );
         // FK names resolve to their attname columns, both spellings.
         assert_eq!(
-            order_to_sql("created_by"),
-            "\"intake_issues\".\"created_by_id\" ASC"
+            order_to_sql("created_by").as_deref(),
+            Some("\"intake_issues\".\"created_by_id\" ASC")
         );
         assert_eq!(
-            order_to_sql("project_id"),
-            "\"intake_issues\".\"project_id\" ASC"
+            order_to_sql("project_id").as_deref(),
+            Some("\"intake_issues\".\"project_id\" ASC")
         );
-        assert_eq!(order_to_sql("issue__state"), "\"issues\".\"state_id\" ASC");
         assert_eq!(
-            order_to_sql("-issue__priority"),
-            "\"issues\".\"priority\" DESC"
+            order_to_sql("issue__state").as_deref(),
+            Some("\"issues\".\"state_id\" ASC")
         );
-        // Passthrough keeps the 500 quirk: unknown fields, M2M names,
-        // deeper join paths and empty spellings fail at execution on
-        // both backends. The bridge has no `name` column, so bare
-        // `name` stays raw.
-        assert_eq!(order_to_sql("name"), "name");
-        assert_eq!(order_to_sql("bogus_field"), "bogus_field");
-        assert_eq!(order_to_sql("-bogus_field"), "-bogus_field");
-        assert_eq!(order_to_sql("issue__bogus"), "issue__bogus");
-        assert_eq!(order_to_sql("-issue__bogus"), "-issue__bogus");
-        assert_eq!(order_to_sql("issue__labels"), "issue__labels");
-        assert_eq!(order_to_sql("issue__project__name"), "issue__project__name");
-        assert_eq!(order_to_sql("project__name"), "project__name");
-        assert_eq!(order_to_sql("issue__"), "issue__");
-        assert_eq!(order_to_sql(""), "");
-        assert_eq!(order_to_sql("-"), "-");
-        // A second `-` is part of the field name, not direction.
-        assert_eq!(order_to_sql("--created_at"), "--created_at");
+        assert_eq!(
+            order_to_sql("-issue__priority").as_deref(),
+            Some("\"issues\".\"priority\" DESC")
+        );
+        // Rejection keeps the 500 quirk without running SQL: unknown
+        // fields, M2M names, deeper join paths, empty spellings and SQL
+        // syntax all answer Django's FieldError 500 on both backends
+        // (PIDASHCONV-1426). The bridge has no `name` column, so bare
+        // `name` is rejected too.
+        for raw in [
+            "name",
+            "bogus_field",
+            "-bogus_field",
+            "issue__bogus",
+            "-issue__bogus",
+            "issue__labels",
+            "issue__project__name",
+            "project__name",
+            "issue__",
+            "",
+            "-",
+            // A second `-` is part of the field name, not direction.
+            "--created_at",
+            // SQL fragments never reach the statement.
+            "(SELECT 1)",
+            "id; SELECT 1",
+            "(SELECT 1 FROM pg_sleep(2))",
+            "\"intake_issues\".\"id\" DESC",
+            "?created_at",
+        ] {
+            assert_eq!(order_to_sql(raw), None, "order_by={raw:?}");
+        }
     }
 
     #[test]
@@ -1160,7 +1205,7 @@ mod tests {
             order_by: "-created_at",
             ..default_list_query()
         };
-        let sql = intake_issue_list_sql(&q);
+        let sql = intake_issue_list_sql(&q).expect("mapped order renders");
         assert!(
             sql.contains("ORDER BY \"intake_issues\".\"created_at\" DESC"),
             "{sql}"
@@ -1169,14 +1214,27 @@ mod tests {
             order_by: "issue__name",
             ..default_list_query()
         };
-        let sql = intake_issue_list_sql(&q);
+        let sql = intake_issue_list_sql(&q).expect("mapped order renders");
         assert!(sql.contains("ORDER BY \"issues\".\"name\" ASC"), "{sql}");
         // The default still renders the joined issue's creation time.
-        let sql = intake_issue_list_sql(&default_list_query());
+        let sql = intake_issue_list_sql(&default_list_query()).expect("default order renders");
         assert!(
             sql.contains("ORDER BY \"issues\".\"created_at\" DESC"),
             "{sql}"
         );
+    }
+
+    #[test]
+    fn list_rejects_unknown_order_by() {
+        // Django's `FieldError` path: no statement is rendered and the
+        // handler answers the generic 500 (PIDASHCONV-1426).
+        for order_by in ["bogus_field", "(SELECT 1)", "id; SELECT 1", ""] {
+            let q = IntakeIssueListQuery {
+                order_by,
+                ..default_list_query()
+            };
+            assert_eq!(intake_issue_list_sql(&q), None, "order_by={order_by:?}");
+        }
     }
 
     #[test]
@@ -1188,7 +1246,7 @@ mod tests {
             offset: 50,
             ..default_list_query()
         };
-        let sql = intake_issue_list_sql(&q);
+        let sql = intake_issue_list_sql(&q).expect("default order renders");
         // Status binds continue after the caller-supplied filter binds.
         assert!(
             sql.contains("\"intake_issues\".\"status\" IN ($4)"),
@@ -1199,6 +1257,23 @@ mod tests {
             "{sql}"
         );
         assert!(sql.contains("OFFSET 50"), "{sql}");
+    }
+
+    #[test]
+    fn list_splices_filter_joins_after_label_joins() {
+        let q = IntakeIssueListQuery {
+            joins: " INNER JOIN \"issue_assignees\" ON (\"issue_assignees\".\"issue_id\" = \"issues\".\"id\")",
+            ..default_list_query()
+        };
+        let sql = intake_issue_list_sql(&q).expect("default order renders");
+        let labels = sql
+            .find("LEFT OUTER JOIN \"labels\"")
+            .expect("label join present");
+        let extra = sql
+            .find("INNER JOIN \"issue_assignees\"")
+            .expect("joins spliced");
+        let where_at = sql.find(" WHERE (").expect("where present");
+        assert!(labels < extra && extra < where_at, "{sql}");
     }
 
     #[test]

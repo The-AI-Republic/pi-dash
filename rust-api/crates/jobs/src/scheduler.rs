@@ -163,7 +163,10 @@ pub async fn run_scheduler(
             Err(error) => tracing::warn!(%error, "scheduler fire failed"),
         }
         // Purge old failures at most once per minute: the retention
-        // cleanup must not run on every one-second tick.
+        // cleanup must not run on every one-second tick. Stale running
+        // rows are reclaimed on the same cadence (PIDASHCONV-1327): a
+        // worker that dies while already running leaves rows `running`
+        // that `claim` never picks up again.
         let minute = now.format("%Y-%m-%d %H:%M").to_string();
         if minute != last_purge_minute {
             match crate::queue::purge_failed(&pool, FAILED_RETENTION_SECS).await {
@@ -174,6 +177,16 @@ pub async fn run_scheduler(
                     last_purge_minute = minute;
                 }
                 Err(error) => tracing::warn!(%error, "scheduler purge failed"),
+            }
+            match crate::queue::reclaim_stale_running(&pool, crate::queue::STALE_CLAIM_LEASE_SECS)
+                .await
+            {
+                Ok(reclaimed) => {
+                    if reclaimed > 0 {
+                        tracing::info!(reclaimed, "scheduler reclaimed stale running jobs");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "scheduler reclaim failed"),
             }
         }
         if tick(&mut shutdown).await {

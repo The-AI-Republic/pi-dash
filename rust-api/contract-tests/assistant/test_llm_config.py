@@ -7,14 +7,22 @@
 Covers ``users/me/ai-assistant/config/`` (lifecycle, key secrecy, serializer
 validation, the SSRF save-time guard) and ``generate-title/`` (the
 deterministic gates: config missing, blank description, guest denial).
-Successful provider calls need a live LLM, so they are out of scope here;
-the ``/test/`` probe is covered through its missing-config shape.
+The title-generation wire shape is pinned against a recording proxy because
+the provider URL must stay on a public DeepSeek host for the SSRF guard.
+The ``/test/`` probe is covered through its missing-config shape.
 """
+
+import json
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .conftest import PUBLIC_BASE, threads_url
 
 CONFIG_URL = "/api/users/me/ai-assistant/config/"
 TEST_URL = "/api/users/me/ai-assistant/config/test/"
+DEEPSEEK_BASE = "http://api.deepseek.com/v1"
+PROVIDER_PROXY = "http://127.0.0.1:18097"
 
 
 def _unset_shape(body):
@@ -162,3 +170,110 @@ def test_generate_title_blocked_for_guest(world, guest):
         json={"description": "Ship the new dashboard export."},
     )
     assert res.status_code == 403
+
+
+class _RecordingDeepSeekProxy:
+    """HTTP proxy that records the backend's title request and replies like OpenAI."""
+
+    def __init__(self):
+        self.requests = []
+        self._server = None
+        self._thread = None
+
+    def start(self):
+        stub = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b""
+                try:
+                    body = json.loads(raw or b"{}")
+                except ValueError:
+                    body = {}
+                stub.requests.append({"path": self.path, "body": body})
+                response = json.dumps(
+                    {
+                        "id": "stub",
+                        "object": "chat.completion",
+                        "created": 0,
+                        "model": "stub-model",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "DeepSeek stub title.",
+                                },
+                                "finish_reason": "stop",
+                            }
+                        ],
+                    }
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+        host, port = PROVIDER_PROXY.removeprefix("http://").split(":", 1)
+        self._server = ThreadingHTTPServer((host, int(port)), Handler)
+        self._server.daemon_threads = True
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+
+
+def test_generate_title_deepseek_body_flattens_extra_body(world, member):
+    """Django's OpenAI SDK turns ``extra_body`` into top-level ``thinking``.
+
+    The backend under test runs with the SSRF guard on, so the provider URL is
+    the public DeepSeek host. The contract runner sets ``HTTP_PROXY`` to this
+    recording proxy for both backends; ``NO_PROXY`` keeps the pytest client's
+    calls to ``BASE_URL`` direct.
+    """
+    proxy_env = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+    assert proxy_env == PROVIDER_PROXY, (
+        "assistant contract runs must point the backend HTTP_PROXY at "
+        f"{PROVIDER_PROXY} so the DeepSeek wire body can be captured"
+    )
+
+    proxy = _RecordingDeepSeekProxy()
+    proxy.start()
+    try:
+        res = member.put(
+            CONFIG_URL,
+            json={
+                "provider_kind": "openai_compatible",
+                "base_url": DEEPSEEK_BASE,
+                "model_name": "stub-model",
+                "api_key": "test-key-123",
+            },
+        )
+        assert res.status_code == 200, res.text
+
+        res = member.post(
+            f"{threads_url(world)}/generate-title/",
+            json={"description": "Ship the new dashboard export."},
+        )
+        assert res.status_code == 200, res.text
+        assert res.json() == {"title": "DeepSeek stub title"}
+
+        assert len(proxy.requests) == 1
+        request = proxy.requests[0]
+        assert request["path"] == f"{DEEPSEEK_BASE}/chat/completions"
+        body = request["body"]
+        assert body.get("thinking") == {"type": "disabled"}, body
+        assert "extra_body" not in body, body
+    finally:
+        proxy.stop()

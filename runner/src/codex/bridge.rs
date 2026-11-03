@@ -8,6 +8,7 @@ use uuid::Uuid;
 // existing integration tests and any downstream callers that imported them
 // from here keep compiling. The canonical definitions live in `agent::`.
 pub use crate::agent::{BridgeEvent, RunPayload};
+use crate::agent::ENGINE_STARTUP_TIMEOUT;
 use crate::approval::EngineThreadSettings;
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, FailureReason};
 use crate::codex::app_server::AppServer;
@@ -205,7 +206,7 @@ impl Bridge {
         )?;
         self.server.send_raw(&line).await?;
         // Wait for init response.
-        let _ = self.await_response(id, Duration::from_secs(15)).await?;
+        let _ = self.await_response(id, ENGINE_STARTUP_TIMEOUT).await?;
         let line = jsonrpc::notification("initialized", &serde_json::Value::Null)?;
         self.server.send_raw(&line).await?;
         self.initialized = true;
@@ -230,7 +231,7 @@ impl Bridge {
             },
         )?;
         self.server.send_raw(&line).await?;
-        let resp = self.await_response(id, Duration::from_secs(30)).await?;
+        let resp = self.await_response(id, ENGINE_STARTUP_TIMEOUT).await?;
         resp.get("threadId")
             .or_else(|| resp.get("thread").and_then(|t| t.get("id")))
             .or_else(|| resp.get("thread_id"))

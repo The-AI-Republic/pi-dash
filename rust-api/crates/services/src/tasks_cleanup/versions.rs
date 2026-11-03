@@ -52,7 +52,9 @@
 //!   `updated_at` (not `last_saved_at`) on the update path.
 //! * `Page.save`/`PageVersion.save` recompute
 //!   `description_stripped = strip_tags(description_html)` (`None` when the
-//!   html is empty/`None`); [`derive_stripped`] re-derives it identically.
+//!   html is empty/`None`), where `strip_tags` is the HTMLParser-based
+//!   `pi_dash/utils/html_processor.py:28-31` (entities decoded, a bare `<`
+//!   kept as text); [`derive_stripped`] delegates to the shared port.
 //! * The live `Issue` model has no `properties`/`meta` columns, so the sync
 //!   path's `getattr(issue, "properties", {})` always yields `{}`.
 //!
@@ -317,38 +319,13 @@ pub fn empty_sub_pages() -> Value {
     Value::Object(Map::new())
 }
 
-/// Django `strip_tags` (`django.utils.html.strip_tags`): scan for `<...>`
-/// spans and drop them; an unclosed `<` is kept verbatim. Recomputed on
-/// every `Page.save`/`PageVersion.save` (`db/models/page.py:70-80,175-181`),
-/// so the port re-derives instead of trusting a stale column.
-pub fn strip_tags(html: &str) -> String {
-    // ASCII-only delimiters, so every slice lands on a char boundary —
-    // no UTF-8-boundary panic (cf. the Porting guide semantic traps).
-    let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    while let Some(lt) = rest.find('<') {
-        out.push_str(&rest[..lt]);
-        rest = &rest[lt..];
-        match rest.find('>') {
-            Some(rel) => rest = &rest[rel + 1..],
-            None => {
-                out.push_str(rest);
-                return out;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
 /// `description_stripped` derivation shared by both `save()` overrides:
-/// `None` when the html is empty or `None`, else `strip_tags(html)`.
+/// `None` when the html is empty or `None`, else the HTMLParser text
+/// (`pi_dash/utils/html_processor.py:9-31`, entities decoded, a bare `<`
+/// kept as text). Delegates to the shared MLStripper port so this call
+/// site can never drift from the `app_pages` one (PIDASHCONV-1296).
 pub fn derive_stripped(html: Option<&str>) -> Option<String> {
-    match html {
-        None => None,
-        Some("") => None,
-        Some(h) => Some(strip_tags(h)),
-    }
+    pidash_db::app_pages::strip::sync_description_stripped(html)
 }
 
 // ---------------------------------------------------------------------------
@@ -1011,13 +988,29 @@ mod tests {
     }
 
     #[test]
-    fn strip_tags_matches_django() {
-        assert_eq!(strip_tags("<p>hi</p>"), "hi");
-        assert_eq!(strip_tags("a<b>c</b>d"), "acd");
-        // Unclosed `<` is kept verbatim.
-        assert_eq!(strip_tags("a<b"), "a<b");
-        assert_eq!(strip_tags("plain"), "plain");
-        assert_eq!(strip_tags("<p>héllo wörld</p>"), "héllo wörld");
+    fn derive_stripped_matches_django() {
+        assert_eq!(derive_stripped(Some("<p>hi</p>")), Some("hi".to_string()));
+        assert_eq!(derive_stripped(Some("a<b>c</b>d")), Some("acd".to_string()));
+        // Incomplete trailing tag is dropped (`feed` without `close`).
+        assert_eq!(derive_stripped(Some("a<b")), Some("a".to_string()));
+        assert_eq!(derive_stripped(Some("plain")), Some("plain".to_string()));
+        assert_eq!(
+            derive_stripped(Some("<p>héllo wörld</p>")),
+            Some("héllo wörld".to_string())
+        );
+        // Entities decoded, a bare `<` kept as text (PIDASHCONV-1296).
+        assert_eq!(
+            derive_stripped(Some("<p>a &amp; b</p>")),
+            Some("a & b".to_string())
+        );
+        assert_eq!(
+            derive_stripped(Some("<p>1 < 2 and 3 > 1</p>")),
+            Some("1 < 2 and 3 > 1".to_string())
+        );
+        assert_eq!(
+            derive_stripped(Some("<p>x&nbsp;y</p>")),
+            Some("x\u{a0}y".to_string())
+        );
         assert_eq!(derive_stripped(None), None);
         assert_eq!(derive_stripped(Some("")), None);
         assert_eq!(derive_stripped(Some("<p>x</p>")), Some("x".to_string()));

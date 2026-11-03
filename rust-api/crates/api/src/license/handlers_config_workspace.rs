@@ -17,9 +17,10 @@
 //!   the rest `""`); any failure is 400
 //!   `{"error": "Failed to disable email configuration"}`.
 //! - `POST /api/instances/email-credentials-check/` —
-//!   `EmailCredentialCheckEndpoint.post` (`configuration.py:90-172`):
+//!   `EmailCredentialCheckEndpoint.post` (`configuration.py:102-224`):
 //!   `receiver_email`-required 400; `get_email_configuration`;
-//!   `int(EMAIL_PORT)`; send through `settings.EMAIL_BACKEND` — SMTP is
+//!   candidate-or-stored grading with a generic-400 bad port; send
+//!   through `settings.EMAIL_BACKEND` — SMTP is
 //!   the live conversation with the 9-branch error matrix where a
 //!   non-empty array/object receiver is the generic 400 Django's SMTP
 //!   `sanitize_address` raises for (nothing sent); console/locmem validate
@@ -57,10 +58,11 @@
 //!
 //! Ported bugs and deliberate warts (also listed in the PR):
 //!
-//! - BUG-2 (`configuration.py:111`): `int(EMAIL_PORT)` runs outside the
-//!   `try`, so garbage raises `ValueError` into the base 500, not the
-//!   fallthrough 400. `None` (a `NULL` row with no env fallback) raises
-//!   `TypeError` the same way.
+//! - BUG-2 (fixed upstream by NEWFRONT-524): `int(EMAIL_PORT)` used to
+//!   run outside the `try` (rust-dev `configuration.py:111`), so garbage
+//!   raised `ValueError` into the base 500. Django main wraps
+//!   `int(str(...).strip())` in its own `try` (`configuration.py:152-158`)
+//!   and answers the fallthrough 400 instead; the port below follows main.
 //! - BUG-3 (`workspace.py:105-110`): an `IntegrityError` whose string
 //!   lacks `"already exists"` (any non-unique violation: every 23505
 //!   carries a `Key (...) already exists.` DETAIL line through the
@@ -109,7 +111,8 @@ use super::{
     QueryMap,
 };
 use crate::state::AppState;
-use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
+use crate::v1_cycles_modules::json::{self, JsonFail};
+use pidash_compat::db::is_unique_violation;
 
 /// Register the five configuration/workspace paths. Sibling license paths
 /// stay unmatched and proxy to Django; unowned methods on these paths
@@ -460,9 +463,10 @@ fn py_repr_str(s: &str) -> String {
 /// The base match lowercases like Django's `parse_header_parameters`, so
 /// `Application/JSON`, charset params, and the `*/*`, `application/*`,
 /// and `*/json` wildcards all serve. JSON bodies parse through the shared
-/// CPython layer (`json_cpython`, PIDASHCONV-1128), so malformed JSON,
-/// strict constants, int-limit and codec errors carry CPython's exact
-/// text; past the depth cap is Django's JSON 500.
+/// JSON layer (`json`, PIDASHCONV-1128), so malformed JSON is a 400 with
+/// serde's text (tier 3 since PIDASHCONV-1555; the strict-constant,
+/// int-limit and depth-cap texts are gone); codec errors keep CPython's
+/// text; depth failures are 400s, never Django's JSON 500.
 fn decode_json_body(
     headers: &HeaderMap,
     body: &[u8],
@@ -476,11 +480,11 @@ fn decode_json_body(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     match select_body_kind(content_type) {
-        Some(BodyKind::Json) => match json_cpython::parse_request_bytes(body) {
-            Ok(jval) => Ok(ParsedBody::json(json_cpython::to_serde_publish(&jval))),
+        Some(BodyKind::Json) => match json::parse_request_bytes(body) {
+            Ok(jval) => Ok(ParsedBody::json(json::to_serde_publish(&jval))),
             Err(JsonFail::Message(detail)) => Err(Denial::BadDetail(format!(
                 "{}{detail}",
-                json_cpython::JSON_PARSE_PREFIX
+                json::JSON_PARSE_PREFIX
             ))),
             Err(JsonFail::Recursion) => Err(Denial::ServerError),
         },
@@ -535,7 +539,7 @@ async fn disable_email_feature(
 // EmailCredentialCheckEndpoint
 // ---------------------------------------------------------------------------
 
-/// `POST email-credentials-check/` (`configuration.py:89-172`).
+/// `POST email-credentials-check/` (`configuration.py:102-224`).
 async fn email_credential_check(
     State(state): State<AppState>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
@@ -561,14 +565,14 @@ async fn email_credential_check(
         return Denial::ServerError.into_response();
     }
     // `receiver_email = request.data.get("receiver_email", False)`:
-    // anything falsy answers 400 (`configuration.py:91-96`).
+    // anything falsy answers 400 (`configuration.py:116-121`).
     let receiver = data.field("receiver_email");
     if !json_truthy(receiver) {
         return Denial::BadError("Receiver email is required".to_owned()).into_response();
     }
     let recipient = json_recipient(receiver);
     // `get_email_configuration()` runs outside the `try`
-    // (`configuration.py:98-106`): a store failure escapes to the base
+    // (`configuration.py:124-131`): a store failure escapes to the base
     // 500, exactly like a DB error in Python.
     let keyring =
         pidash_services::license::encryption::Keyring::from_secret(&state.settings().secret_key);
@@ -582,34 +586,56 @@ async fn email_credential_check(
             Err(_) => return Denial::ServerError.into_response(),
         };
     let mut values = values.into_iter();
-    let host = values.next().and_then(config_string);
-    let username = values.next().and_then(config_string);
-    let password = values.next().and_then(config_string);
-    let port_raw = values.next();
-    let use_tls = values
-        .next()
-        .is_some_and(|v| v == pidash_db::config::ConfigValue::Str("1".to_owned()));
-    let use_ssl = values
-        .next()
-        .is_some_and(|v| v == pidash_db::config::ConfigValue::Str("1".to_owned()));
-    let from_email = values.next().and_then(config_string);
-    // `port=int(EMAIL_PORT)` (`configuration.py:111`, BUG-2): outside the
-    // `try`, so `ValueError`/`TypeError` answer the base 500.
-    let port = match port_raw {
-        Some(value) => match parse_email_port(&value) {
+    let stored_host = values.next().and_then(config_string);
+    let stored_username = values.next().and_then(config_string);
+    let stored_password = values.next().and_then(config_string);
+    let stored_port = values.next();
+    let stored_use_tls = values.next();
+    let stored_use_ssl = values.next();
+    let stored_from = values.next().and_then(config_string);
+    // `candidate(...)` (`configuration.py:133-143`): a present body
+    // field grades as given (strings stripped); a missing or null
+    // field falls back to the stored configuration. Only the
+    // password treats a blank string as stored: stored secrets read
+    // back blank, so blank means "unchanged".
+    let host = candidate_string(&data, "EMAIL_HOST", stored_host, false);
+    let username = candidate_string(&data, "EMAIL_HOST_USER", stored_username, false);
+    let password = candidate_string(&data, "EMAIL_HOST_PASSWORD", stored_password, true);
+    let from_email = candidate_string(&data, "EMAIL_FROM", stored_from, false);
+    let use_tls = candidate_flag(&data, "EMAIL_USE_TLS", stored_use_tls.as_ref());
+    let use_ssl = candidate_flag(&data, "EMAIL_USE_SSL", stored_use_ssl.as_ref());
+    // `port = int(str(candidate("EMAIL_PORT", ...)).strip())`
+    // (`configuration.py:152-158`): unparseable is the generic 400,
+    // for candidate and stored values alike. A missing stored value
+    // answers the base 500, like the tuple unpack it mirrors
+    // (`configuration.py:124-131`, outside the `try`).
+    let port = match candidate_present(data.field("EMAIL_PORT")) {
+        Some(present) => match parse_py_int(&py_str_value(present)) {
             Some(port) => port,
+            None => {
+                return Denial::BadError(smtp::MailError::Failed.message().to_owned())
+                    .into_response()
+            }
+        },
+        None => match stored_port.as_ref() {
+            Some(value) => match parse_email_port(value) {
+                Some(port) => port,
+                None => {
+                    return Denial::BadError(smtp::MailError::Failed.message().to_owned())
+                        .into_response()
+                }
+            },
             None => return Denial::ServerError.into_response(),
         },
-        None => return Denial::ServerError.into_response(),
     };
-    // `to=[receiver_email]` (`configuration.py:120-127`): Django joins the
+    // `to=[receiver_email]` (`configuration.py:174-181`): Django joins the
     // single value with `str()` into the `To` header. Only the SMTP backend
     // additionally parses it with `sanitize_address` (`smtp.py:_send`); the
     // non-dialing backends never parse it, so a container repr is just a
     // header string there.
     let header = [json_recipient_header(receiver)];
     // `get_connection()` resolves the send through `settings.EMAIL_BACKEND`
-    // (`configuration.py:109`): only the SMTP backend dials out.
+    // (`configuration.py:161`): only the SMTP backend dials out.
     // Console/locmem validate headers and succeed without touching the
     // network; dummy succeeds without even validating; an unknown dotted
     // path fails `import_string` outside the view's `try` and answers the
@@ -624,7 +650,7 @@ async fn email_credential_check(
         };
         return match stub {
             Some(Ok(())) => {
-                json_response(&serde_json::json!({"message": "Email successfully sent."}))
+                json_response(serde_json::json!({"message": "Email successfully sent."}))
             }
             Some(Err(err)) => Denial::BadError(err.message().to_owned()).into_response(),
             None => Denial::ServerError.into_response(),
@@ -633,7 +659,7 @@ async fn email_credential_check(
     // SMTP `_send` parses the recipient with `sanitize_address`: an
     // array/object repr (`"['a@x.test', 'b@x.test']"`) never parses as a
     // mailbox, so `send()` raises inside the view's `try` and the generic
-    // 400 is answered with nothing delivered (`configuration.py:168-172`).
+    // 400 is answered with nothing delivered (`configuration.py:220-224`).
     let Some(recipient) = recipient else {
         return Denial::BadError(smtp::MailError::Failed.message().to_owned()).into_response();
     };
@@ -650,7 +676,7 @@ async fn email_credential_check(
     })
     .await
     {
-        Ok(()) => json_response(&serde_json::json!({"message": "Email successfully sent."})),
+        Ok(()) => json_response(serde_json::json!({"message": "Email successfully sent."})),
         Err(err) => Denial::BadError(err.message().to_owned()).into_response(),
     }
 }
@@ -682,7 +708,7 @@ fn json_truthy(found: BodyField<'_>) -> bool {
     }
 }
 
-/// `msg = ...; to=[receiver_email]` (`configuration.py:120-127`): Django
+/// `msg = ...; to=[receiver_email]` (`configuration.py:174-181`): Django
 /// `force_str`s the single value and parses it as one mailbox
 /// (`sanitize_address`), so a string or scalar is one recipient and an
 /// uploaded file is its name (`str(file)`, probed). `None` is the shape
@@ -699,7 +725,7 @@ fn json_recipient(found: BodyField<'_>) -> Option<String> {
 }
 
 /// The `To` header value Django builds for `to=[receiver_email]`
-/// (`configuration.py:120-127`): `str()` of the single value, so a string
+/// (`configuration.py:174-181`): `str()` of the single value, so a string
 /// is itself, an array/object its `repr()`, an uploaded file its name. The
 /// non-dialing backends only validate this for newlines, never parse it as
 /// a mailbox, so a container repr is a plain header string there.
@@ -736,27 +762,100 @@ fn config_string(value: pidash_db::config::ConfigValue) -> Option<String> {
     }
 }
 
-/// `int(EMAIL_PORT)` (`configuration.py:111`): Python `int()` over the
-/// resolved value. Strings strip surrounding whitespace, take an optional
-/// sign, allow `_` separators, and must otherwise be ASCII digits;
-/// floats truncate toward zero; `True`/`False` are 1/0; anything else
-/// (`None`, garbage strings) raises into the base 500 (BUG-2).
+/// Django `candidate()` presence (`configuration.py:133-143`): a
+/// missing or null field falls back to stored (`None`); anything
+/// else present — a string, a scalar, a container, an uploaded
+/// file — grades as given.
+fn candidate_present(field: BodyField<'_>) -> Option<BodyField<'_>> {
+    match field {
+        BodyField::Missing | BodyField::Json(Value::Null) => None,
+        present => Some(present),
+    }
+}
+
+/// Django `candidate()` for a string-graded field
+/// (`configuration.py:133-143`): missing/null fall back to stored;
+/// a present string grades stripped (and, for the password only, a
+/// blank grades as stored); any other present value grades as
+/// given. Non-string values are `str()`-coerced (tier 3: Django
+/// hands the object itself to the connection/message constructors,
+/// which no admin-form client sends; both land in a 400 branch).
+fn candidate_string(
+    data: &ParsedBody,
+    key: &str,
+    stored: Option<String>,
+    blank_means_stored: bool,
+) -> Option<String> {
+    match data.field(key) {
+        BodyField::Missing | BodyField::Json(Value::Null) => stored,
+        BodyField::Json(Value::String(s)) => {
+            let trimmed = s.trim();
+            if blank_means_stored && trimmed.is_empty() {
+                stored
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }
+        BodyField::Json(value) => Some(json_scalar_string(value)),
+        BodyField::File(file) => Some(file.filename.clone()),
+    }
+}
+
+/// Django `_flag_is_enabled(candidate(...))`
+/// (`configuration.py:89-99,166-167`): a present JSON boolean
+/// passes through; any other present value compares
+/// `str(value).strip() == "1"`; missing/null fall back to the
+/// stored value under the same rule.
+fn candidate_flag(
+    data: &ParsedBody,
+    key: &str,
+    stored: Option<&pidash_db::config::ConfigValue>,
+) -> bool {
+    match candidate_present(data.field(key)) {
+        Some(BodyField::Json(Value::Bool(enabled))) => *enabled,
+        Some(present) => py_str_value(present) == "1",
+        None => stored.is_some_and(flag_is_enabled_stored),
+    }
+}
+
+/// `_flag_is_enabled` over a stored value
+/// (`configuration.py:89-99`): booleans pass through, anything
+/// else compares `str(value).strip() == "1"`.
+fn flag_is_enabled_stored(value: &pidash_db::config::ConfigValue) -> bool {
+    use pidash_db::config::ConfigValue;
+    match value {
+        ConfigValue::Bool(enabled) => *enabled,
+        _ => config_py_str(value).trim() == "1",
+    }
+}
+
+/// `int(str(value).strip())` over a stored port
+/// (`configuration.py:153`): the stored side of the
+/// candidate-or-stored port. `str()` renders ints plainly, floats
+/// as `repr` (never int-parseable), `True`/`False` capitalized
+/// (never parseable) and `None` as `"None"` (likewise), so only
+/// strings and ints can resolve; anything else is `None` and the
+/// caller answers the generic 400.
 /// Returns the raw integer; range is checked by the SMTP layer, where an
 /// out-of-range port raises `OverflowError` into the generic fallthrough.
 pub fn parse_email_port(value: &pidash_db::config::ConfigValue) -> Option<i64> {
+    parse_py_int(&config_py_str(value))
+}
+
+/// Python `str()` over a stored email value for the port/flag
+/// coercions (`configuration.py:89-99,153`): DB/env rows are
+/// strings; the port default can be the int 587; a missing host
+/// default is `None`. `str()` renders ints plainly, floats as
+/// `repr`, `True`/`False` capitalized, `None` as `"None"`.
+fn config_py_str(value: &pidash_db::config::ConfigValue) -> String {
     use pidash_db::config::ConfigValue;
     match value {
-        ConfigValue::Int(i) => Some(*i),
-        ConfigValue::Bool(b) => Some(i64::from(*b)),
-        ConfigValue::Float(f) => {
-            if f.is_finite() {
-                Some(*f as i64)
-            } else {
-                None
-            }
-        }
-        ConfigValue::Str(s) => parse_py_int(s),
-        ConfigValue::Null => None,
+        ConfigValue::Str(s) => s.clone(),
+        ConfigValue::Int(i) => i.to_string(),
+        ConfigValue::Float(f) => crate::paginator::py_float_str(*f),
+        ConfigValue::Bool(true) => "True".to_owned(),
+        ConfigValue::Bool(false) => "False".to_owned(),
+        ConfigValue::Null => "None".to_owned(),
     }
 }
 
@@ -806,7 +905,7 @@ pub fn parse_py_int(text: &str) -> Option<i64> {
 // ---------------------------------------------------------------------------
 
 /// The send behind `email-credentials-check`, through `settings.EMAIL_BACKEND`
-/// the way `get_connection()` resolves it (`configuration.py:108-172`).
+/// the way `get_connection()` resolves it (`configuration.py:161-224`).
 /// The SMTP backend is the genuine conversation, speaking SMTP the way
 /// `smtplib` + Django's `EmailBackend` do: connect (+implicit TLS),
 /// greeting, EHLO/HELO, STARTTLS, AUTH, `MAIL`, `RCPT`, `DATA`, `QUIT`.
@@ -827,13 +926,49 @@ mod smtp {
     pub const LOCMEM_BACKEND: &str = "django.core.mail.backends.locmem.EmailBackend";
     pub const DUMMY_BACKEND: &str = "django.core.mail.backends.dummy.EmailBackend";
 
-    /// Fixed probe content (`configuration.py:118-119`).
+    /// Fixed probe content (`configuration.py:170-171`).
     const SUBJECT: &str = "Email Notification from Pi Dash";
     const BODY: &str = "This is a sample email notification sent from Pi Dash application.";
     /// Django's global default (`DEFAULT_FROM_EMAIL`): the project does not
     /// override it, so a `NULL` `EMAIL_FROM` row falls back here
     /// (`EmailMessage.from_email` → `settings.DEFAULT_FROM_EMAIL`).
     const DEFAULT_FROM_EMAIL: &str = "webmaster@localhost";
+    /// Django's `EMAIL_HOST`/`EMAIL_PORT` globals: the project overrides
+    /// neither (`settings/common.py`), so a falsy host dials `localhost`
+    /// and port 0 dials 25 (`smtp.py:33-34`).
+    const DEFAULT_SMTP_HOST: &str = "localhost";
+    const DEFAULT_SMTP_PORT: i64 = 25;
+
+    /// `self.host = host or settings.EMAIL_HOST` (`smtp.py:33`): `None`
+    /// arrives as `""` (see the `EmailConfig` construction), and both
+    /// fall back to `localhost`.
+    fn resolve_host(host: &str) -> &str {
+        if host.is_empty() {
+            DEFAULT_SMTP_HOST
+        } else {
+            host
+        }
+    }
+
+    /// `self.port = port or settings.EMAIL_PORT` (`smtp.py:34`): only 0
+    /// is falsy, so only 0 falls back to 25; negatives and huge ports
+    /// keep failing at connect, exactly like Python's `OverflowError`.
+    fn resolve_port(port: i64) -> i64 {
+        if port == 0 {
+            DEFAULT_SMTP_PORT
+        } else {
+            port
+        }
+    }
+
+    /// `self.from_email = from_email or settings.DEFAULT_FROM_EMAIL`
+    /// (`message.py:239`): `None` and `""` both fall back.
+    fn resolve_from(from_email: Option<&str>) -> &str {
+        match from_email {
+            Some(from) if !from.is_empty() => from,
+            _ => DEFAULT_FROM_EMAIL,
+        }
+    }
     /// `local_hostname`: Django sends the cached FQDN; only the bytes on
     /// the wire differ, never any response, so a fixed name is used.
     const LOCAL_HOSTNAME: &str = "localhost";
@@ -851,7 +986,7 @@ mod smtp {
         pub recipients: &'a [String],
     }
 
-    /// One Python exception branch of `configuration.py:131-172`.
+    /// One Python exception branch of `configuration.py:183-224`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum MailError {
         BadHeader,
@@ -982,28 +1117,13 @@ mod smtp {
         }
     }
 
-    /// `smtplib.quoteaddr`: parse the display name off, wrap the bare
-    /// addr-spec in `<>`; unparseable input passes through in `<>` unless
-    /// it already starts with `<`.
-    fn quote_address(raw: &str) -> String {
-        let trimmed = raw.trim();
-        if let Some(start) = trimmed.rfind('<') {
-            if let Some(end) = trimmed[start..].find('>') {
-                let inner = trimmed[start + 1..start + end].trim();
-                if !inner.is_empty() {
-                    return format!("<{inner}>");
-                }
-            }
-        }
-        if trimmed.starts_with('<') {
-            return trimmed.to_owned();
-        }
-        format!("<{trimmed}>")
-    }
-
     /// `EmailMessage.message()` header validation: any header value
     /// containing a newline raises `BadHeaderError`. Subject and body are
     /// constants; `from_email` and the recipients come from config/input.
+    /// This runs after the envelope sanitize on the SMTP path (`_send`
+    /// order, `smtp.py:144-150`): a newline the envelope rejects is the
+    /// envelope `ValueError` (generic 400), and only a newline the
+    /// envelope accepts (smuggled inside a stripped comment) reaches here.
     fn check_headers(from: &str, recipients: &[String]) -> Result<(), MailError> {
         if [SUBJECT, from].iter().any(|h| h.contains(['\r', '\n'])) {
             return Err(MailError::BadHeader);
@@ -1014,17 +1134,21 @@ mod smtp {
         Ok(())
     }
 
-    /// `console.EmailBackend.send_messages`: header validation runs (via
-    /// `message.message()`), then the rendered message plus the 79-dash
-    /// separator goes to stdout, flushed per message. A failed write
-    /// propagates (`fail_silently=False`) into the generic fallthrough.
+    /// `console.EmailBackend.send_messages`: the message renders (via
+    /// `message.message()`, which is also where header validation runs),
+    /// then the rendered message plus the 79-dash separator goes to
+    /// stdout, flushed per message. A failed write propagates
+    /// (`fail_silently=False`) into the generic fallthrough, and so does
+    /// a render failure past the newline check (an unparsable address is
+    /// the `ValueError` the view answers generically).
     pub fn send_console(from_email: Option<&str>, recipients: &[String]) -> Result<(), MailError> {
-        let from = from_email.unwrap_or(DEFAULT_FROM_EMAIL);
+        let from = resolve_from(from_email);
         check_headers(from, recipients)?;
         // The render is shared with the DATA path (same accepted
         // approximation: exact bytes unobservable past the server), with
         // the email policy's `\n` endings the console backend writes.
-        let text = String::from_utf8_lossy(&message_bytes(from, recipients)).replace("\r\n", "\n");
+        let rendered = message_bytes(from, recipients).map_err(|_| MailError::Failed)?;
+        let text = String::from_utf8_lossy(&rendered).replace("\r\n", "\n");
         use std::io::Write as _;
         let mut out = std::io::stdout().lock();
         writeln!(out, "{text}")
@@ -1033,12 +1157,17 @@ mod smtp {
             .map_err(|_| MailError::Failed)
     }
 
-    /// `locmem.EmailBackend.send_messages`: header validation runs, then
-    /// success — the outbox append is in-process with no HTTP-observable
-    /// effect, so there is nothing further to mirror.
+    /// `locmem.EmailBackend.send_messages`: the message renders (via
+    /// `message.message()`), then success — the outbox append is
+    /// in-process with no HTTP-observable effect, so there is nothing
+    /// further to mirror. A render failure past the newline check is the
+    /// `ValueError` the view answers generically.
     pub fn send_locmem(from_email: Option<&str>, recipients: &[String]) -> Result<(), MailError> {
-        let from = from_email.unwrap_or(DEFAULT_FROM_EMAIL);
-        check_headers(from, recipients)
+        let from = resolve_from(from_email);
+        check_headers(from, recipients)?;
+        message_bytes(from, recipients)
+            .map(|_| ())
+            .map_err(|_| MailError::Failed)
     }
 
     fn base64_encode(bytes: &[u8]) -> String {
@@ -1295,14 +1424,21 @@ mod smtp {
         Err(last)
     }
 
-    fn message_bytes(from: &str, recipients: &[String]) -> Vec<u8> {
+    fn message_bytes(from: &str, recipients: &[String]) -> Result<Vec<u8>, String> {
         // `message.as_bytes(linesep="\r\n")`: headers plus the plain body.
         // Exact bytes are unobservable past the server; the headers carry
-        // the validated values.
+        // the validated values. `From`/`To`/`Subject` render through the
+        // shared tasks_mail encoder (PIDASHCONV-1286), never a second port:
+        // RFC 2047 words plus IDNA plus the generator refold. Every caller
+        // ran `check_headers` first, so a failure here is an unparsable
+        // address (the `ValueError` the view answers generically).
         let to = recipients.join(", ");
+        let from = pidash_jobs::tasks_mail::mail_send::address_header("From", from)?;
+        let to = pidash_jobs::tasks_mail::mail_send::address_header("To", &to)?;
+        let subject = pidash_jobs::tasks_mail::mail_send::subject_header(SUBJECT)?;
         let now = chrono::Utc::now();
         let date = now.format("%a, %d %b %Y %H:%M:%S +0000").to_string();
-        let mut out = format!("From: {from}\r\nTo: {to}\r\nSubject: {SUBJECT}\r\nDate: {date}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"utf-8\"\r\nContent-Transfer-Encoding: 7bit\r\n\r\n{BODY}\r\n");
+        let mut out = format!("{from}\r\n{to}\r\n{subject}\r\nDate: {date}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"utf-8\"\r\nContent-Transfer-Encoding: 7bit\r\n\r\n{BODY}\r\n");
         // Dot-stuffing (`smtplib.data` quotes leading periods).
         let mut stuffed = String::with_capacity(out.len());
         for line in out.split_inclusive('\n') {
@@ -1312,21 +1448,24 @@ mod smtp {
             stuffed.push_str(line);
         }
         out = stuffed;
-        out.into_bytes()
+        Ok(out.into_bytes())
     }
 
     pub async fn send_test_email(cfg: EmailConfig<'_>) -> Result<(), MailError> {
+        // `EmailBackend.__init__` (`smtp.py:33-34`): falsy host/port fall
+        // back to the globals before anything dials.
+        let host = resolve_host(cfg.host);
         // `port=int(...)` already ran; a range failure is `OverflowError`
         // at connect, inside the `try` — the generic fallthrough.
-        let port: u16 = u16::try_from(cfg.port).map_err(|_| MailError::Failed)?;
+        let port: u16 = u16::try_from(resolve_port(cfg.port)).map_err(|_| MailError::Failed)?;
         // `SMTP(host, port)` / `SMTP_SSL(host, port)`: refused/reset-class
         // errors are builtin `ConnectionError`, timeouts `TimeoutError`,
         // DNS and the rest fall through.
-        let stream = TcpStream::connect((cfg.host, port)).await.map_err(map_io)?;
+        let stream = TcpStream::connect((host, port)).await.map_err(map_io)?;
         let mut io = if cfg.use_ssl {
             // `SMTP_SSL`: the TLS handshake error is `ssl.SSLError`,
             // inside the `try` — the generic fallthrough.
-            upgrade_tls(stream, cfg.host).await?
+            upgrade_tls(stream, host).await?
         } else {
             Io::Plain(tokio::io::BufReader::new(stream))
         };
@@ -1355,7 +1494,7 @@ mod smtp {
             };
             // The buffer is drained here (every reply was consumed), so
             // reclaiming the stream loses nothing past STARTTLS.
-            io = upgrade_tls(buffered.into_inner(), cfg.host).await?;
+            io = upgrade_tls(buffered.into_inner(), host).await?;
             lines = ehlo(&mut io).await?;
         }
         // `login()` when both are set (`if self.username and self.password`).
@@ -1375,12 +1514,22 @@ mod smtp {
             )
             .await?;
         }
-        // `_send`: addresses are sanitized and the message rendered here —
-        // after the transport is up — so a bad header answers
-        // `BadHeaderError` even though the server was already reached.
-        let from = cfg.from_email.unwrap_or(DEFAULT_FROM_EMAIL);
+        // `_send` (`smtp.py:141-159`), after the transport is up: the
+        // envelope sanitizes first through the shared tasks_mail encoder
+        // (PIDASHCONV-1286, never a second port) — an unparsable address
+        // is the `ValueError` the view answers generically — then the
+        // headers validate (`BadHeaderError`), then the message renders.
+        let from = resolve_from(cfg.from_email);
+        let envelope_from = pidash_jobs::tasks_mail::mail_send::envelope_address(from)
+            .map_err(|_| MailError::Failed)?;
+        let mut envelope_rcpts = Vec::with_capacity(cfg.recipients.len());
+        for recipient in cfg.recipients {
+            envelope_rcpts.push(
+                pidash_jobs::tasks_mail::mail_send::envelope_address(recipient)
+                    .map_err(|_| MailError::Failed)?,
+            );
+        }
         check_headers(from, cfg.recipients)?;
-        let envelope_from = quote_address(from);
         // `sendmail`: `MAIL` refusal (any code, 421 included) is
         // `SMTPSenderRefused`.
         io.write_str(&format!("MAIL FROM:{envelope_from}")).await?;
@@ -1391,9 +1540,8 @@ mod smtp {
         // `RCPT`: 250/251 accepted; anything else recorded; 421 aborts the
         // loop immediately; all-refused is `SMTPRecipientsRefused`.
         let mut refused = 0usize;
-        for recipient in cfg.recipients {
-            io.write_str(&format!("RCPT TO:{}", quote_address(recipient)))
-                .await?;
+        for envelope_rcpt in &envelope_rcpts {
+            io.write_str(&format!("RCPT TO:{envelope_rcpt}")).await?;
             let (code, _) = io.read_reply().await?;
             if code == 250 || code == 251 {
                 continue;
@@ -1413,7 +1561,7 @@ mod smtp {
         if code != 354 {
             return Err(MailError::Failed);
         }
-        let content = message_bytes(from, cfg.recipients);
+        let content = message_bytes(from, cfg.recipients).map_err(|_| MailError::Failed)?;
         io.write_bytes(&content).await?;
         io.write_bytes(b"\r\n.\r\n").await?;
         let (code, _) = io.read_reply().await?;
@@ -1493,17 +1641,199 @@ mod smtp {
             );
         }
 
+        /// PIDASHCONV-1366: Django's framework fallbacks. `host or
+        /// settings.EMAIL_HOST` / `port or settings.EMAIL_PORT`
+        /// (`smtp.py:33-34`) and `from_email or settings.DEFAULT_FROM_EMAIL`
+        /// (`message.py:239`); the project overrides none of the globals
+        /// (`settings/common.py`), so `localhost` / 25 /
+        /// `webmaster@localhost`. Only `""`/`None` (host, from) and 0
+        /// (port) are falsy — a blank space or a negative port stays.
         #[test]
-        fn quote_address_strips_display_names() {
+        fn fallback_resolvers_match_django_falsiness() {
+            assert_eq!(resolve_host(""), DEFAULT_SMTP_HOST);
+            assert_eq!(resolve_host("mail.example.com"), "mail.example.com");
+            assert_eq!(resolve_host(" "), " ");
+            assert_eq!(resolve_port(0), DEFAULT_SMTP_PORT);
+            assert_eq!(resolve_port(587), 587);
+            assert_eq!(resolve_port(-1), -1);
+            assert_eq!(resolve_from(None), DEFAULT_FROM_EMAIL);
+            assert_eq!(resolve_from(Some("")), DEFAULT_FROM_EMAIL);
             assert_eq!(
-                quote_address("Team Pi Dash <team@airepublic.com>"),
+                resolve_from(Some("noreply@example.com")),
+                "noreply@example.com"
+            );
+        }
+
+        /// PIDASHCONV-1445: the private `quote_address` is gone — the
+        /// envelope goes through the shared tasks_mail encoder
+        /// (`sanitize_address` + `quoteaddr`, `smtp.py:144-149`). Same
+        /// display-stripping expectations as before, plus the IDNA and
+        /// failure shapes the old pass-through never had.
+        #[test]
+        fn envelope_sanitizes_like_django_send() {
+            let envelope = pidash_jobs::tasks_mail::mail_send::envelope_address;
+            assert_eq!(
+                envelope("Team Pi Dash <team@airepublic.com>").expect("valid"),
                 "<team@airepublic.com>"
             );
-            assert_eq!(quote_address("plain@example.com"), "<plain@example.com>");
             assert_eq!(
-                quote_address("<bracketed@example.com>"),
+                envelope("plain@example.com").expect("valid"),
+                "<plain@example.com>"
+            );
+            assert_eq!(
+                envelope("<bracketed@example.com>").expect("valid"),
                 "<bracketed@example.com>"
             );
+            assert_eq!(
+                envelope("Équipe Pi Dash <team@x.com>").expect("valid"),
+                "<team@x.com>"
+            );
+            assert_eq!(
+                envelope("invite@münchen.de").expect("valid"),
+                "<invite@xn--mnchen-3ya.de>"
+            );
+            assert!(envelope("['a@x.test', 'b@x.test']").is_err());
+        }
+
+        /// PIDASHCONV-1445: the DATA headers go through the shared
+        /// tasks_mail encoder (`forbid_multi_line_headers`,
+        /// `message.py:55-76`): a non-ASCII From display name is RFC
+        /// 2047-encoded, an IDN To domain is punycoded, and the fixed
+        /// ASCII Subject renders verbatim. Pre-fix all three went out
+        /// as raw UTF-8.
+        #[test]
+        fn message_bytes_encodes_headers_like_django() {
+            let to = ["invite@münchen.de".to_owned()];
+            let bytes =
+                message_bytes("Équipe Pi Dash <team@x.com>", &to).expect("encodable headers");
+            let text = String::from_utf8(bytes).expect("DATA must stay valid UTF-8");
+            assert!(
+                text.contains("From: =?utf-8?q?=C3=89quipe_Pi_Dash?= <team@x.com>"),
+                "From display name not RFC 2047-encoded:\n{text}"
+            );
+            assert!(
+                text.contains("To: invite@xn--mnchen-3ya.de"),
+                "To domain not punycoded:\n{text}"
+            );
+            assert!(
+                text.contains("Subject: Email Notification from Pi Dash"),
+                "Subject changed:\n{text}"
+            );
+        }
+
+        /// PIDASHCONV-1445: the envelope goes through the shared
+        /// tasks_mail encoder (`smtp.py:_send` sanitize + `quoteaddr`,
+        /// `smtp.py:144-149`): IDN domains are punycoded and the From
+        /// display name never reaches the wire. Pre-fix the envelope
+        /// carried raw UTF-8 domains.
+        #[tokio::test]
+        async fn send_test_email_encodes_envelope_like_django() {
+            let to = ["invite@münchen.de".to_owned()];
+            let (addr, server) = run_fake_smtp(FakeSmtp {
+                extensions: vec![],
+                expect_user: String::new(),
+                expect_password: String::new(),
+                reject_plain: false,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(EmailConfig {
+                host: "127.0.0.1",
+                port: i64::from(addr.port()),
+                username: None,
+                password: None,
+                use_tls: false,
+                use_ssl: false,
+                from_email: Some("Équipe Pi Dash <team@münchen.de>"),
+                recipients: &to,
+            })
+            .await;
+            assert_eq!(result, Ok(()));
+            let transcript = server.await.unwrap();
+            assert!(
+                transcript
+                    .iter()
+                    .any(|l| l == "C: MAIL FROM:<team@xn--mnchen-3ya.de>"),
+                "MAIL FROM not sanitized: {transcript:?}"
+            );
+            assert!(
+                transcript
+                    .iter()
+                    .any(|l| l == "C: RCPT TO:<invite@xn--mnchen-3ya.de>"),
+                "RCPT TO not punycoded: {transcript:?}"
+            );
+        }
+
+        /// PIDASHCONV-1445: `_send` sanitizes the envelope before the
+        /// message renders (`smtp.py:144-150`), so a newline recipient
+        /// is the envelope `ValueError` (generic 400), not
+        /// `BadHeaderError`. Pre-fix the header check ran first and
+        /// answered `BadHeader`.
+        #[tokio::test]
+        async fn send_test_email_envelope_before_headers_like_django_send() {
+            let to = ["a@b.com\nBcc: x@example.com".to_owned()];
+            let (addr, server) = run_fake_smtp(FakeSmtp {
+                extensions: vec![],
+                expect_user: String::new(),
+                expect_password: String::new(),
+                reject_plain: false,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(EmailConfig {
+                host: "127.0.0.1",
+                port: i64::from(addr.port()),
+                username: None,
+                password: None,
+                use_tls: false,
+                use_ssl: false,
+                from_email: Some("noreply@example.com"),
+                recipients: &to,
+            })
+            .await;
+            assert_eq!(result, Err(MailError::Failed));
+            drop(server);
+        }
+
+        /// PIDASHCONV-1445: a newline smuggled inside a comment passes
+        /// the envelope sanitize (comments strip, `message.py:82-104`)
+        /// and still fails the header render (`BadHeaderError`,
+        /// `message.py:58-62`). Guards the envelope-first reorder.
+        #[tokio::test]
+        async fn send_test_email_comment_smuggled_newline_is_bad_header() {
+            let to = ["a@b.com (note\nline)".to_owned()];
+            let (addr, server) = run_fake_smtp(FakeSmtp {
+                extensions: vec![],
+                expect_user: String::new(),
+                expect_password: String::new(),
+                reject_plain: false,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(EmailConfig {
+                host: "127.0.0.1",
+                port: i64::from(addr.port()),
+                username: None,
+                password: None,
+                use_tls: false,
+                use_ssl: false,
+                from_email: Some("noreply@example.com"),
+                recipients: &to,
+            })
+            .await;
+            assert_eq!(result, Err(MailError::BadHeader));
+            drop(server);
+        }
+
+        /// PIDASHCONV-1445: the stub backends render the message too
+        /// (`message.message()`), so a non-ASCII unparsable From is the
+        /// render `ValueError` (generic 400) there as well — probed on
+        /// Django 4.2.30, where `message()` raises instead of returning.
+        #[test]
+        fn stub_backends_reject_unparsable_non_ascii_from() {
+            let to = ["probe@example.com".to_owned()];
+            assert_eq!(send_console(Some("José"), &to), Err(MailError::Failed));
+            assert_eq!(send_locmem(Some("José"), &to), Err(MailError::Failed));
         }
 
         /// Multiline replies arrive in one TCP segment: the reader keeps
@@ -1822,6 +2152,70 @@ mod smtp {
             assert_eq!(result, Err(MailError::RecipientsRefused));
         }
 
+        /// PIDASHCONV-1366: an empty host dials `localhost` (`smtp.py:33`),
+        /// so a local sink answers and the send succeeds. Pre-fix this
+        /// failed resolving `""` (`MailError::Failed`).
+        #[tokio::test]
+        async fn empty_host_falls_back_to_localhost() {
+            let to = ["probe@example.com".to_owned()];
+            let (addr, server) = run_fake_smtp(FakeSmtp {
+                extensions: vec![],
+                expect_user: String::new(),
+                expect_password: String::new(),
+                reject_plain: false,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(EmailConfig {
+                host: "",
+                port: i64::from(addr.port()),
+                username: None,
+                password: None,
+                use_tls: false,
+                use_ssl: false,
+                from_email: Some("noreply@example.com"),
+                recipients: &to,
+            })
+            .await;
+            assert_eq!(result, Ok(()));
+            server.await.unwrap();
+        }
+
+        /// PIDASHCONV-1366: an empty from address sends as
+        /// `webmaster@localhost` (`message.py:239`). Pre-fix the envelope
+        /// was `MAIL FROM:<>` with an empty `From:` header.
+        #[tokio::test]
+        async fn empty_from_uses_default_sender() {
+            let to = ["probe@example.com".to_owned()];
+            let (addr, server) = run_fake_smtp(FakeSmtp {
+                extensions: vec![],
+                expect_user: String::new(),
+                expect_password: String::new(),
+                reject_plain: false,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(EmailConfig {
+                host: "127.0.0.1",
+                port: i64::from(addr.port()),
+                username: None,
+                password: None,
+                use_tls: false,
+                use_ssl: false,
+                from_email: Some(""),
+                recipients: &to,
+            })
+            .await;
+            assert_eq!(result, Ok(()));
+            let transcript = server.await.unwrap();
+            assert!(
+                transcript
+                    .iter()
+                    .any(|l| l == "C: MAIL FROM:<webmaster@localhost>"),
+                "transcript: {transcript:?}"
+            );
+        }
+
         #[test]
         fn io_kinds_map_like_builtin_exceptions() {
             use std::io::ErrorKind;
@@ -1877,7 +2271,7 @@ async fn workspace_slug_check(
     };
     let restricted = pidash_types::license::serializers_workspace::RESTRICTED_WORKSPACE_SLUGS
         .contains(&slug.as_str());
-    json_response(&serde_json::json!({"status": !(exists || restricted)}))
+    json_response(serde_json::json!({"status": !(exists || restricted)}))
 }
 
 async fn slug_exists(pool: &sqlx::PgPool, slug: &str) -> Result<bool, Denial> {
@@ -1991,7 +2385,7 @@ async fn list_workspaces(
         extra_stats: None,
         results,
     };
-    json_response(&envelope.to_json_value())
+    json_response(envelope.to_json_value())
 }
 
 async fn workspace_total_count(pool: &sqlx::PgPool, search: Option<&str>) -> Result<i64, Denial> {
@@ -2247,29 +2641,25 @@ async fn create_workspace(
     let workspace_id = uuid::Uuid::new_v4();
     let created_at = chrono::Utc::now();
     let updated_at = chrono::Utc::now();
-    let insert: Result<Option<(uuid::Uuid,)>, sqlx::Error> = sqlx::query_as(
-        r#"INSERT INTO workspaces
-           (created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            id, name, logo, logo_asset_id, owner_id, slug,
-            organization_size, timezone, background_color)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-           RETURNING id"#,
+    let insert = pidash_services::domain::workspaces::create(
+        &pool,
+        &pidash_services::domain::workspaces::NewWorkspace {
+            id: workspace_id,
+            name: &validated.name,
+            slug: &validated.slug,
+            owner_id: actor.id,
+            created_by: Some(actor.id),
+            logo: validated.logo.as_deref(),
+            logo_asset_id: validated.logo_asset,
+            organization_size: validated.organization_size.as_deref(),
+            timezone: &validated.timezone,
+            background_color: &validated.background_color,
+            deleted_at: validated.deleted_at,
+            created_at,
+            updated_at,
+            seed_created_by: Some(actor.id),
+        },
     )
-    .bind(created_at)
-    .bind(updated_at)
-    .bind(actor.id)
-    .bind(None::<uuid::Uuid>)
-    .bind(validated.deleted_at)
-    .bind(workspace_id)
-    .bind(&validated.name)
-    .bind(&validated.logo)
-    .bind(validated.logo_asset)
-    .bind(actor.id)
-    .bind(&validated.slug)
-    .bind(&validated.organization_size)
-    .bind(&validated.timezone)
-    .bind(&validated.background_color)
-    .fetch_optional(&pool)
     .await;
     match insert {
         Ok(_) => {}
@@ -2288,47 +2678,28 @@ async fn create_workspace(
             return Denial::ServerError.into_response();
         }
     }
-    // `post_save` on `Workspace` (`scheduler/signals.py:28-39`) fires
-    // during the save above, before the member row below: seed the
-    // builtin schedulers. The receiver swallows every failure, so this
-    // never fails the request.
-    crate::app_workspace::handlers_workspace::seed_builtin_schedulers(
-        &pool,
-        workspace_id,
-        actor.id,
-    )
-    .await;
     // `WorkspaceMember.objects.create(workspace_id, member=user, role=20,
     // company_role=...)`: model `JSONField` defaults apply Python-side.
     let company_role = company_role_value(data.field("company_role"));
     let member_now = chrono::Utc::now();
-    let member_result = sqlx::query(
-        r#"INSERT INTO workspace_members
-           (created_at, updated_at, id, role, member_id, workspace_id,
-            view_props, default_props, issue_props, is_active,
-            explored_features, getting_started_checklist, tips,
-            company_role, created_by_id, updated_by_id, deleted_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                   $14, $15, $16, $17)"#,
+    let member_view_props = default_view_props();
+    let member_issue_props = default_issue_props();
+    let member_result = pidash_services::domain::workspaces::members::add(
+        &pool,
+        &pidash_services::domain::workspaces::members::NewMember {
+            workspace_id,
+            user_id: Some(actor.id),
+            role: 20,
+            company_role: company_role.as_deref(),
+            created_by: Some(actor.id),
+            view_props: &member_view_props,
+            default_props: &member_view_props,
+            issue_props: &member_issue_props,
+            now: member_now,
+            ignore_conflicts: false,
+            db_now: false,
+        },
     )
-    .bind(member_now)
-    .bind(member_now)
-    .bind(uuid::Uuid::new_v4())
-    .bind(20i16)
-    .bind(actor.id)
-    .bind(workspace_id)
-    .bind(sqlx::types::Json(default_view_props()))
-    .bind(sqlx::types::Json(default_view_props()))
-    .bind(sqlx::types::Json(default_issue_props()))
-    .bind(true)
-    .bind(sqlx::types::Json(serde_json::json!({})))
-    .bind(sqlx::types::Json(serde_json::json!({})))
-    .bind(sqlx::types::Json(serde_json::json!({})))
-    .bind(company_role)
-    .bind(actor.id)
-    .bind(None::<uuid::Uuid>)
-    .bind(None::<chrono::DateTime<chrono::Utc>>)
-    .execute(&pool)
     .await;
     if let Err(err) = member_result {
         // Same `except IntegrityError` as the workspace row: a unique
@@ -2420,18 +2791,6 @@ fn json_len(found: BodyField<'_>) -> Option<usize> {
         Some(Value::Object(map)) => Some(map.len()),
         _ => None,
     }
-}
-
-/// True when `err` takes Django's `"already exists" in str(e)` branch:
-/// every Postgres unique violation renders a `Key (...) already exists.`
-/// DETAIL line (which is what psycopg's `str` matches on), and `sqlx`
-/// exposes no `DETAIL` accessor — hence the kind check instead of a
-/// string match (the `app_integrations` `is_duplicate_url` precedent).
-fn is_unique_violation(err: &sqlx::Error) -> bool {
-    let sqlx::Error::Database(db_error) = err else {
-        return false;
-    };
-    db_error.is_unique_violation()
 }
 
 /// `request.data.get("company_role", "")` into `CharField`: missing
@@ -3426,7 +3785,7 @@ mod handler_tests {
     use super::*;
     use serde_json::json;
 
-    /// `to=[receiver_email]` (`configuration.py:120-127`): a string or
+    /// `to=[receiver_email]` (`configuration.py:174-181`): a string or
     /// scalar is one recipient, an array or object repr is not a mailbox
     /// and the handler answers Django's generic 400 without a send.
     #[test]
@@ -3511,19 +3870,161 @@ mod handler_tests {
 
     #[test]
     fn port_resolution_matches_python() {
+        // `int(str(value).strip())` (`configuration.py:153`): only
+        // strings and ints resolve. `str(True)` is `"True"`,
+        // `str(587.9)` is `"587.9"`, `str(None)` is `"None"` — none
+        // int-parseable, so all three are the generic 400 now (the old
+        // direct-`int()` answers died with BUG-2).
         use pidash_db::config::ConfigValue;
         assert_eq!(parse_email_port(&ConfigValue::Int(587)), Some(587));
         assert_eq!(
             parse_email_port(&ConfigValue::Str("587".to_owned())),
             Some(587)
         );
-        assert_eq!(parse_email_port(&ConfigValue::Bool(true)), Some(1));
-        assert_eq!(parse_email_port(&ConfigValue::Float(587.9)), Some(587));
+        assert_eq!(
+            parse_email_port(&ConfigValue::Str("  2525  ".to_owned())),
+            Some(2525)
+        );
+        assert_eq!(parse_email_port(&ConfigValue::Bool(true)), None);
+        assert_eq!(parse_email_port(&ConfigValue::Bool(false)), None);
+        assert_eq!(parse_email_port(&ConfigValue::Float(587.9)), None);
         assert_eq!(parse_email_port(&ConfigValue::Null), None);
         assert_eq!(
             parse_email_port(&ConfigValue::Str("garbage".to_owned())),
             None
         );
+    }
+
+    #[test]
+    fn candidate_strings_fall_back_per_field() {
+        // `candidate()` (`configuration.py:133-143`): missing/null fall
+        // back per field; present strings grade stripped; only the
+        // password treats blank as stored.
+        use serde_json::json;
+        let stored = || Some("stored".to_owned());
+        let body = ParsedBody::json(json!({"EMAIL_HOST": "  candidate  ", "EMAIL_PORT": null}));
+        assert_eq!(
+            candidate_string(&body, "EMAIL_HOST", stored(), false),
+            Some("candidate".to_owned())
+        );
+        assert_eq!(
+            candidate_string(&body, "EMAIL_HOST_USER", stored(), false),
+            stored()
+        );
+        assert_eq!(
+            candidate_string(&body, "EMAIL_PORT", stored(), false),
+            stored()
+        );
+        // An empty non-password grades as given, not stored.
+        let body = ParsedBody::json(json!({"EMAIL_HOST": ""}));
+        assert_eq!(
+            candidate_string(&body, "EMAIL_HOST", stored(), false),
+            Some(String::new())
+        );
+        // A blank password (even whitespace) means stored.
+        for blank in ["", "   "] {
+            let body = ParsedBody::json(json!({"EMAIL_HOST_PASSWORD": blank}));
+            assert_eq!(
+                candidate_string(&body, "EMAIL_HOST_PASSWORD", stored(), true),
+                stored(),
+                "blank password {blank:?}"
+            );
+        }
+        let body = ParsedBody::json(json!({"EMAIL_HOST_PASSWORD": "candidate-secret"}));
+        assert_eq!(
+            candidate_string(&body, "EMAIL_HOST_PASSWORD", stored(), true),
+            Some("candidate-secret".to_owned())
+        );
+    }
+
+    #[test]
+    fn candidate_flags_match_python() {
+        // `_flag_is_enabled` (`configuration.py:89-99`): booleans pass
+        // through, anything else compares `str(value).strip() == "1"`.
+        // Cases mirror the Django coercion table in
+        // `test_email_credentials_check.py::test_flag_and_port_coercions`.
+        use pidash_db::config::ConfigValue;
+        use serde_json::json;
+        let stored_on = ConfigValue::Str("1".to_owned());
+        let stored_off = ConfigValue::Str("0".to_owned());
+        let flag = |body: &ParsedBody, stored: Option<&ConfigValue>| {
+            candidate_flag(body, "EMAIL_USE_TLS", stored)
+        };
+        // JSON booleans pass through, ignoring stored.
+        assert!(flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": true})),
+            Some(&stored_off)
+        ));
+        assert!(!flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": false})),
+            Some(&stored_on)
+        ));
+        // Ints compare as `str()`.
+        assert!(flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": 1})),
+            Some(&stored_off)
+        ));
+        assert!(!flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": 0})),
+            Some(&stored_on)
+        ));
+        // Strings strip, then compare; non-canonical spellings are off.
+        assert!(flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": "1"})),
+            Some(&stored_off)
+        ));
+        assert!(!flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": "0"})),
+            Some(&stored_on)
+        ));
+        assert!(!flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": "true"})),
+            Some(&stored_on)
+        ));
+        assert!(!flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": "True"})),
+            Some(&stored_on)
+        ));
+        assert!(flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": " 1 "})),
+            Some(&stored_off)
+        ));
+        // Missing/null fall back to stored under the same rule.
+        assert!(flag(&ParsedBody::json(json!({})), Some(&stored_on)));
+        assert!(flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": null})),
+            Some(&stored_on)
+        ));
+        assert!(!flag(&ParsedBody::json(json!({})), Some(&stored_off)));
+        assert!(!flag(
+            &ParsedBody::json(json!({})),
+            Some(&ConfigValue::Str("true".to_owned()))
+        ));
+        assert!(flag(
+            &ParsedBody::json(json!({})),
+            Some(&ConfigValue::Int(1))
+        ));
+        assert!(flag(
+            &ParsedBody::json(json!({})),
+            Some(&ConfigValue::Bool(true))
+        ));
+        assert!(!flag(&ParsedBody::json(json!({})), None));
+    }
+
+    #[test]
+    fn candidate_port_coercions_match_python() {
+        // `int(str(candidate).strip())` (`configuration.py:153`): ints
+        // and int-strings (padded included) resolve; bools, floats and
+        // containers render unparseable and answer the generic 400.
+        use serde_json::json;
+        let port = |value: serde_json::Value| parse_py_int(&py_str_value(BodyField::Json(&value)));
+        assert_eq!(port(json!(1025)), Some(1025));
+        assert_eq!(port(json!("1026")), Some(1026));
+        assert_eq!(port(json!(" 1027 ")), Some(1027));
+        assert_eq!(port(json!(true)), None);
+        assert_eq!(port(json!(587.9)), None);
+        assert_eq!(port(json!(["587"])), None);
+        assert_eq!(port(json!("not-a-port")), None);
     }
 
     #[test]

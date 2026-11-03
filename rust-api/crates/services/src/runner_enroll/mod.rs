@@ -25,6 +25,7 @@
 //! this issue's new files); sibling D-13 issues add their own files here.
 //! `mod.rs` edits stay additive-only.
 pub mod delete;
+pub mod fire;
 pub mod pod_naming;
 pub mod purge;
 pub mod queries;

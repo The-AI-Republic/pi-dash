@@ -51,8 +51,8 @@ and PIDASHCONV-238 registers them in the ``pidash-api`` binary with
 live providers. Every test below therefore asserts the SAME row-level
 DB diffs as the Django oracle, seed for seed: fan-out attempt set,
 unknown-id no-ops (both providers), completion idempotency, auth
-error-record, setup-ordering pin, redelivery guards. No skipped or
-weakened assertions.
+error-record, setup-ordering pin, redelivery guards, github_app config
+sourcing. No skipped or weakened assertions.
 
 Residue: settled rows are acked (deleted), so the queue drains to
 zero actionable rows after each test; seeded domain rows are removed
@@ -64,6 +64,7 @@ comment base URL) park a ``failed`` row per worker design
 
 from __future__ import annotations
 
+import os
 import uuid
 
 import pytest
@@ -410,3 +411,167 @@ def test_rust_legacy_sync_one_unknown_id_is_noop(database_url):
         "n"
     ]
     assert after == before
+
+
+GITLAB_PLAIN_PAT = "contract-test-gitlab-pat-1470"
+
+
+def _worker_secret_key() -> str:
+    value = os.environ.get("SECRET_KEY")
+    if not value:
+        raise pytest.skip("SECRET_KEY is not set — must match the worker's")
+    return value
+
+
+@pytest.fixture()
+def gitlab_binding(database_url, chain, rscope) -> dict:
+    """Enabled GitLab binding with a Fernet-encrypted token (production shape).
+
+    Requires the Rust worker to boot with ``seed.GITLAB_SELFHOST`` in
+    GITLAB_ALLOWED_HOSTS (same worker env as the Django oracle leg in
+    ``test_gitlab_sync.py``).
+    """
+    token = seed.encrypt_token_for_worker(GITLAB_PLAIN_PAT, _worker_secret_key())
+    assert token and token != GITLAB_PLAIN_PAT
+    return seed.gitlab_binding(database_url, chain, rscope, token=token)
+
+
+def test_rust_sync_one_allowed_selfhosted_passes_gate(database_url, gitlab_binding):
+    """PIDASHCONV-1470 replay: the Rust worker passes the allowlist gate.
+
+    Mirror of ``test_gitlab_sync.py::test_sync_one_allowed_selfhosted_passes_gate``:
+    the unresolvable self-host is allowed, so the attempt reaches the
+    transport (DNS fails there): a recorded, non-empty error with no gate
+    text, and the account stays connected. Before the fix the default
+    config refused the host (``GitLab host is not allowed`` + degraded).
+    """
+    binding_id = gitlab_binding["binding_id"]
+    account_id = gitlab_binding["account_id"]
+
+    _publish_and_drain(SYNC_ONE, args=[binding_id])
+
+    row = db.wait_for(
+        database_url,
+        "SELECT last_sync_error, last_synced_at FROM git_repository_bindings WHERE id = %s"
+        " AND last_sync_error <> ''",
+        (binding_id,),
+    )
+    assert row is not None, "enabled GitLab binding shows no sync attempt"
+    assert "not allowed" not in row["last_sync_error"], row["last_sync_error"]
+    assert "must use HTTPS" not in row["last_sync_error"], row["last_sync_error"]
+    assert "gitlab-allowed.invalid" in row["last_sync_error"], row["last_sync_error"]
+    assert row["last_synced_at"] is None
+
+    account = db.fetchone(
+        database_url,
+        "SELECT status, last_check_error FROM git_provider_accounts WHERE id = %s",
+        (account_id,),
+    )
+    assert account["status"] == "connected", account
+    assert account["last_check_error"] == "", account
+
+    assert (
+        db.fetchone(
+            database_url,
+            "SELECT count(*) AS n FROM git_issue_syncs WHERE binding_id = %s",
+            (binding_id,),
+        )["n"]
+        == 0
+    )
+
+
+def test_rust_post_completion_allowed_selfhosted_passes_gate(
+    database_url, chain, rscope, gitlab_binding
+):
+    """PIDASHCONV-1470 replay: the completion comment passes the gate too."""
+    sync_id = seed.git_issue_sync(
+        database_url,
+        chain,
+        rscope,
+        binding_id=gitlab_binding["binding_id"],
+        issue_id=str(chain["issue"]["id"]),
+        external_iid="424242",
+        metadata={},
+        provider="gitlab",
+    )
+    _publish_and_drain(POST_COMMENT, args=[sync_id])
+
+    row = db.wait_for(
+        database_url,
+        "SELECT metadata FROM git_issue_syncs WHERE id = %s"
+        " AND metadata ? 'completion_comment_error'",
+        (sync_id,),
+    )
+    assert row is not None, "expected completion_comment_error after DNS failure"
+    error = row["metadata"]["completion_comment_error"]
+    assert "not allowed" not in error, error
+    assert "must use HTTPS" not in error, error
+    assert "gitlab-allowed.invalid" in error, error
+    assert error != ""
+    assert "completion_comment_id" not in row["metadata"]
+
+
+def test_rust_sync_one_github_app_config_db_sourced(database_url, chain, rscope):
+    """Mirror of test_sync_one_github_app_config_db_sourced.
+
+    Same two phases through ``rust_job_queue``: phase (a) pins the exact
+    config-missing message (byte-identical to Django); phase (b) proves
+    the mint ran with the db id (HTTP 404 + GitHub's "Integration not
+    found" body — the 404, not a JWT-decode 401, proves the numeric db id
+    reached the wire as the JWT issuer). The phase-(b) message shape is
+    the port's own mint-failure rendering (Django records the HTTPError
+    line instead); the shared contract is "mint attempted, not
+    config-missing". Retry rows are not actionable, so the queue drains
+    while the redeliveries wait; each phase deletes its triple right
+    after asserting (one active binding per project, and the pending
+    redeliveries then ack on the missing row).
+    """
+    keys = ["GITHUB_APP_ID", "GITHUB_APP_SLUG"]
+    saved = seed.save_instance_config(database_url, keys)
+    try:
+        # Phase (a): nothing configured anywhere.
+        seed.clear_instance_config(database_url, keys)
+        seeded_a = seed.github_app_binding(
+            database_url, chain, rscope, suffix=f"cfg-a-{uuid.uuid4().hex[:8]}"
+        )
+        _publish_and_drain(SYNC_ONE, args=[seeded_a["binding_id"]])
+        row_a = db.wait_for(
+            database_url,
+            "SELECT last_sync_error, last_synced_at FROM git_repository_bindings"
+            " WHERE id = %s AND last_sync_error <> ''",
+            (seeded_a["binding_id"],),
+        )
+        assert row_a is not None, "sync never recorded last_sync_error"
+        assert (
+            row_a["last_sync_error"] == "GitHub App config missing: app_id, app_slug"
+        ), row_a["last_sync_error"]
+        assert row_a["last_synced_at"] is None
+        seed.delete_binding_triple(database_url, seeded_a)
+
+        # Phase (b): numeric app id lives only in the DB.
+        seed.set_instance_config(
+            database_url,
+            {"GITHUB_APP_ID": "14719999", "GITHUB_APP_SLUG": "ct-1471-app-slug"},
+        )
+        seeded_b = seed.github_app_binding(
+            database_url, chain, rscope, suffix=f"cfg-b-{uuid.uuid4().hex[:8]}"
+        )
+        _publish_and_drain(SYNC_ONE, args=[seeded_b["binding_id"]])
+        row_b = db.wait_for(
+            database_url,
+            "SELECT last_sync_error, last_synced_at FROM git_repository_bindings"
+            " WHERE id = %s AND last_sync_error <> ''",
+            (seeded_b["binding_id"],),
+        )
+        assert row_b is not None, "sync never recorded last_sync_error"
+        assert "GitHub App config missing" not in row_b["last_sync_error"], row_b[
+            "last_sync_error"
+        ]
+        assert "HTTP 404" in row_b["last_sync_error"], row_b["last_sync_error"]
+        assert "Integration not found" in row_b["last_sync_error"], row_b[
+            "last_sync_error"
+        ]
+        assert row_b["last_synced_at"] is None
+        seed.delete_binding_triple(database_url, seeded_b)
+    finally:
+        seed.restore_instance_config(database_url, saved)

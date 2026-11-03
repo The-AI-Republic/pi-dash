@@ -84,7 +84,7 @@
         "has key -> {available:false, lane:'byok', reason:'byok_unsupported'}",
         "no key -> {available:false, lane:'', reason:'llm_config_missing'}"
       ],
-      "shape": "AgentModelProfile(available, lane, base_url, model, reason_code) (model_provider.py:24-42)"
+      "shape": "AgentModelProfile(available, lane, base_url, model, reason_code, top_up_url) (model_provider.py:26-48)"
     },
     "agent_model_credential_for_user": {
       "source": "apps/api/pi_dash/ee/assistant/model_provider.py:92-108",

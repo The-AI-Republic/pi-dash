@@ -32,7 +32,7 @@ from . import _live_state
 FIRE = _live_state.FIRE
 
 
-def test_fire_tick_claims_state_created_after_boot(db_conn, broker_url):
+def test_fire_tick_claims_state_created_after_boot(db_conn):
     """A due ticker on an In Progress issue created after boot is claimed."""
     _w, issue = _live_state.seed_state_after_boot("rust")
     ticker_id = str(_live_state.ticker(issue)["id"])

@@ -137,6 +137,26 @@ djangorestframework 3.15.2, Django 4.2.30.
   diff. The live capture in FX-OPENAPI-04 asserted route-map equality
   against this file at capture time.
 
+## FX-OPENAPI-07 components registry (PIDASHCONV-1208)
+
+- `FX-OPENAPI-07.components_schemas.json` — `components.schemas` of the
+  live Django document (`GET /api/schema/?format=json` with
+  `ENABLE_DRF_SPECTACULAR=1`) at `apps/api == origin/main d656243d3`;
+  89 schemas, copied verbatim (key order preserved). Provenance: the
+  served JSON body is 1,397,521 bytes, sha256
+  `9760cb0b3c7c0885b37f020ebc848b7e69b87f1fb02bdd1db0c9578131b669f7` —
+  identical to FX-OPENAPI-04's `json_rendering`, so the registry is from
+  the same document the operation essentials were extracted from.
+  Method: `curl` GET against a scratch Django server (scratch DB
+  `pidash_1208_dj`); the fixture is `{...metadata..., "schemas": {...}}`.
+  drf-spectacular's `SchemaGenerator.get_schema`
+  (`0.28.0 generators.py:282-293`) writes `components=self.registry.build(...)`,
+  so Django serves this registry and every operation `$ref` resolves; the
+  Rust port emits it from `rust-api/crates/services/src/v1_openapi/doc.rs`
+  (`COMPONENT_SCHEMAS_JSON`) so no `$ref` dangles. Guarded by the Rust
+  unit tests in `doc.rs` and the contract test
+  `rust-api/contract-tests/v1_openapi/test_refs_resolve.py`.
+
 ## Out of scope (reading context, not ported here)
 
 - `pi_dash/urls.py:31-44` (the 3 schema routes + `ENABLE_DRF_SPECTACULAR`

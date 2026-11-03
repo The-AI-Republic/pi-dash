@@ -103,6 +103,13 @@ WEBHOOK_SINK_BASE = optional("WEBHOOK_SINK_BASE", "http://127.0.0.1:18099")
 # POSTHOG_HOST; track_event POSTs its /batch/ capture to <base>/batch/.
 POSTHOG_SINK_BASE = optional("POSTHOG_SINK_BASE", "http://127.0.0.1:18098")
 
+# Base URL of the stub live-document conversion server the harness starts
+# for page-write tests (PIDASHCONV-1503). The backend under test must point
+# LIVE_BASE_URL here; the stub answers POST <base>/live/convert-document/
+# with a fixed usable document. 18097 is the assistant proxy, 18098 the
+# PostHog sink, 18099 the webhook sink.
+LIVE_DOC_STUB_BASE = optional("LIVE_DOC_STUB_BASE", "http://127.0.0.1:18096")
+
 # Redis the Django worker reads (mail send tasks look up the per-issue base
 # URL under the issue id; tests prime it before publishing).
 REDIS_URL = optional("REDIS_URL", "redis://localhost:6379/0")

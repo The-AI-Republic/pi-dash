@@ -19,7 +19,16 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
     let exe = std::env::current_exe()?;
     let exe_str = super::validate_path_for_unit(&exe)?;
     let config_dir = super::validate_path_for_unit(&paths.config_dir)?;
-    let data_dir = super::validate_path_for_unit(&paths.data_dir)?;
+    // Only bake PIDASH_DATA_DIR into the unit for a genuine override.
+    // Exporting the *default* data dir made `Paths::resolve` inside the
+    // daemon treat the install as isolated and move the IPC socket under
+    // `<data_dir>/runtime/`, where no override-less CLI could find it
+    // (PDASHOSS01-230).
+    let data_dir = if paths.data_dir_is_default() {
+        None
+    } else {
+        Some(super::validate_path_for_unit(&paths.data_dir)?)
+    };
     // See `service::capture_install_time_path` for why we bake $PATH in.
     let path_env = super::capture_install_time_path();
     let body = render_unit(exe_str, config_dir, data_dir, path_env.as_deref());
@@ -42,9 +51,17 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
 fn render_unit(
     exe: &str,
     config_dir: &str,
-    data_dir: &str,
+    data_dir: Option<&str>,
     path_env: Option<&str>,
 ) -> String {
+    // `data_dir` is None for a default-location install: the daemon
+    // resolves the same directory on its own, and exporting it would
+    // flip `Paths::resolve` into isolated mode and move the IPC socket
+    // (PDASHOSS01-230).
+    let data_line = match data_dir {
+        Some(d) => format!("\nEnvironment=PIDASH_DATA_DIR={d}"),
+        None => String::new(),
+    };
     let path_line = match path_env {
         Some(p) => format!("\nEnvironment=\"PATH={}\"", systemd_double_quoted_escape(p)),
         None => String::new(),
@@ -58,8 +75,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart={exe} __run
-Environment=PIDASH_CONFIG_DIR={config_dir}
-Environment=PIDASH_DATA_DIR={data_dir}{path_line}
+Environment=PIDASH_CONFIG_DIR={config_dir}{data_line}{path_line}
 Restart=on-failure
 RestartSec=5
 
@@ -246,7 +262,7 @@ mod tests {
         let body = render_unit(
             "/home/user/.cargo/bin/pidash",
             "/home/user/.config/pidash",
-            "/home/user/.local/share/pidash",
+            Some("/home/user/.local/share/pidash"),
             None,
         );
         assert!(
@@ -257,15 +273,101 @@ mod tests {
 
     #[test]
     fn unit_body_includes_exec_start_and_dirs() {
-        let body = render_unit("/bin/pidash", "/etc/pidash", "/var/lib/pidash", None);
+        let body = render_unit("/bin/pidash", "/etc/pidash", Some("/var/lib/pidash"), None);
         assert!(body.contains("ExecStart=/bin/pidash __run"));
         assert!(body.contains("Environment=PIDASH_CONFIG_DIR=/etc/pidash"));
         assert!(body.contains("Environment=PIDASH_DATA_DIR=/var/lib/pidash"));
     }
 
     #[test]
+    fn unit_body_omits_data_dir_for_default_install() {
+        // Regression: exporting the *default* data dir flipped
+        // `Paths::resolve` in the daemon into isolated mode, moving the
+        // IPC socket to <data>/runtime/ where the override-less CLI
+        // never looks (PDASHOSS01-230).
+        let body = render_unit("/bin/pidash", "/etc/pidash", None, None);
+        assert!(
+            !body.contains("PIDASH_DATA_DIR"),
+            "unit body must not export PIDASH_DATA_DIR for a default-location install; got:\n{body}"
+        );
+        // The config line must survive the omission without a dangling blank line.
+        assert!(body.contains("Environment=PIDASH_CONFIG_DIR=/etc/pidash\nRestart=on-failure"));
+    }
+
+    /// The value a unit body exports for `key` via `Environment=KEY=VALUE`,
+    /// i.e. what the daemon's clap `env = "..."` args will see.
+    fn unit_env(body: &str, key: &str) -> Option<PathBuf> {
+        let prefix = format!("Environment={key}=");
+        body.lines()
+            .find_map(|l| l.strip_prefix(&prefix))
+            .map(PathBuf::from)
+    }
+
+    /// Resolve paths the way `pidash __run` does under this unit.
+    fn daemon_paths_under(body: &str) -> Paths {
+        Paths::resolve(
+            unit_env(body, "PIDASH_CONFIG_DIR"),
+            unit_env(body, "PIDASH_DATA_DIR"),
+        )
+        .unwrap()
+    }
+
+    fn default_data_dir() -> PathBuf {
+        Paths::resolve(None, None).unwrap().data_dir
+    }
+
+    #[test]
+    fn existing_unit_exporting_default_data_dir_shares_the_shell_socket() {
+        // Regression for PDASHOSS01-311: units written by 0.1.29 and
+        // earlier export the default data dir. After upgrading only the
+        // binary (unit untouched), the daemon must listen where a plain
+        // shell CLI — no PIDASH_DATA_DIR — connects.
+        let data = default_data_dir();
+        let legacy_unit = format!(
+            "[Service]\nType=simple\nExecStart=/home/u/.local/bin/pidash __run\n\
+             Environment=PIDASH_CONFIG_DIR=/home/u/.config/pidash\n\
+             Environment=PIDASH_DATA_DIR={}\nRestart=on-failure\n",
+            data.display()
+        );
+        let daemon = daemon_paths_under(&legacy_unit);
+        let shell = Paths::resolve(None, None).unwrap();
+        assert_eq!(daemon.data_dir, data);
+        assert_eq!(daemon.ipc_socket_path(), shell.ipc_socket_path());
+        assert_eq!(daemon.pid_path(), shell.pid_path());
+    }
+
+    #[test]
+    fn fresh_default_unit_shares_the_shell_socket() {
+        let body = render_unit("/bin/pidash", "/home/u/.config/pidash", None, None);
+        let daemon = daemon_paths_under(&body);
+        let shell = Paths::resolve(None, None).unwrap();
+        assert_eq!(daemon.ipc_socket_path(), shell.ipc_socket_path());
+    }
+
+    #[test]
+    fn custom_data_dir_unit_keeps_its_own_socket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = tmp.path().join("app-data");
+        let body = render_unit(
+            "/bin/pidash",
+            "/home/u/.config/pidash",
+            Some(custom.to_str().unwrap()),
+            None,
+        );
+        let daemon = daemon_paths_under(&body);
+        assert_eq!(daemon.ipc_socket_path(), custom.join("runtime/pidash.sock"));
+        assert_ne!(
+            daemon.ipc_socket_path(),
+            Paths::resolve(None, None).unwrap().ipc_socket_path()
+        );
+        // Only a shell passing the same override reaches it.
+        let shell = Paths::resolve(None, Some(custom)).unwrap();
+        assert_eq!(daemon.ipc_socket_path(), shell.ipc_socket_path());
+    }
+
+    #[test]
     fn unit_body_omits_path_when_not_captured() {
-        let body = render_unit("/bin/pidash", "/etc/pidash", "/var/lib/pidash", None);
+        let body = render_unit("/bin/pidash", "/etc/pidash", Some("/var/lib/pidash"), None);
         assert!(
             !body.contains("Environment=\"PATH=") && !body.contains("Environment=PATH="),
             "unit body must not declare PATH when path_env is None; got:\n{body}"
@@ -277,7 +379,7 @@ mod tests {
         let body = render_unit(
             "/bin/pidash",
             "/etc/pidash",
-            "/var/lib/pidash",
+            Some("/var/lib/pidash"),
             Some("/home/user/.local/bin:/usr/local/bin:/usr/bin"),
         );
         assert!(

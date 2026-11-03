@@ -61,18 +61,15 @@ pub fn parse_list_param(raw: Option<&str>) -> Option<Vec<String>> {
 
 /// Render an aware datetime exactly like DRF `DateTimeField` with the
 /// default `iso-8601` format: ISO-8601 with `+00:00` rewritten to `Z`.
+/// Canonical implementation in [`pidash_compat::datetime`].
 pub fn render_datetime<Tz: TimeZone>(dt: &DateTime<Tz>) -> String {
-    let utc = dt.with_timezone(&chrono::Utc);
-    render_utc_parts(
-        &utc.format("%Y-%m-%dT%H:%M:%S").to_string(),
-        utc.timestamp_subsec_nanos(),
-        "Z",
-    )
+    pidash_compat::datetime::render_datetime(dt)
 }
 
 /// Render an aware datetime in a caller-chosen zone (the request's zone).
 /// Non-UTC offsets are kept verbatim; a `+00:00` offset is rewritten to `Z`,
 /// exactly like DRF does.
+/// Canonical implementation in [`pidash_compat::datetime`].
 pub fn render_datetime_in<TzFrom: TimeZone, TzTo: TimeZone>(
     dt: &DateTime<TzFrom>,
     tz: &TzTo,
@@ -80,59 +77,19 @@ pub fn render_datetime_in<TzFrom: TimeZone, TzTo: TimeZone>(
 where
     TzTo::Offset: std::fmt::Display,
 {
-    let local = dt.with_timezone(tz);
-    let suffix = local.format("%:z").to_string();
-    let suffix = if suffix == "+00:00" {
-        "Z".to_owned()
-    } else {
-        suffix
-    };
-    render_utc_parts(
-        &local.format("%Y-%m-%dT%H:%M:%S").to_string(),
-        local.timestamp_subsec_nanos(),
-        &suffix,
-    )
+    pidash_compat::datetime::render_datetime_in(dt, tz)
 }
 
 /// Render a naive datetime through the request's zone. Under the project's
 /// settings (`USE_TZ = True`) DRF makes naive values aware in the field's
 /// timezone before rendering, so a naive value renders exactly like the same
 /// wall time in `tz` (including the `Z` rewrite for `+00:00`).
+/// Canonical implementation in [`pidash_compat::datetime`].
 pub fn render_naive_datetime_in<TzTo: TimeZone>(dt: &NaiveDateTime, tz: &TzTo) -> String
 where
     TzTo::Offset: std::fmt::Display,
 {
-    use chrono::MappedLocalTime;
-    let local = match tz.from_local_datetime(dt) {
-        MappedLocalTime::Single(local) | MappedLocalTime::Ambiguous(local, _) => local,
-        // A wall time inside a DST gap has no local offset; fall back to the
-        // same wall time read as UTC (Python's zoneinfo attach never raises).
-        MappedLocalTime::None => return render_datetime_in(&dt.and_utc(), tz),
-    };
-    let suffix = local.format("%:z").to_string();
-    let suffix = if suffix == "+00:00" {
-        "Z".to_owned()
-    } else {
-        suffix
-    };
-    render_utc_parts(
-        &dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
-        dt.and_utc().timestamp_subsec_nanos(),
-        &suffix,
-    )
-}
-
-fn render_utc_parts(base: &str, nanos: u32, suffix: &str) -> String {
-    // DRF `DateTimeField` renders Python datetimes, which carry only
-    // microseconds: no fraction when micros == 0, exactly 6 digits
-    // otherwise. Truncate sub-microsecond nanos (e.g. `Utc::now()`
-    // stamps) so HTTP output never carries 9 digits (PIDASHCONV-867).
-    let micros = nanos / 1000;
-    if micros == 0 {
-        format!("{base}{suffix}")
-    } else {
-        format!("{base}.{:06}{suffix}", micros)
-    }
+    pidash_compat::datetime::render_naive_datetime_in(dt, tz)
 }
 
 /// Render a `Decimal` as DRF does with `COERCE_DECIMAL_TO_STRING`:
@@ -300,8 +257,6 @@ pub fn needs_attachments(fields: &[String], expand: &[SelItem]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Timelike as _;
-    use chrono_tz::Tz;
     use std::str::FromStr;
 
     #[test]
@@ -318,89 +273,6 @@ mod tests {
             parse_list_param(Some("a, b,")),
             Some(vec!["a".to_owned(), " b".to_owned()])
         );
-    }
-
-    #[test]
-    fn datetime_renders_drf_iso8601_with_z() {
-        let dt = chrono::Utc
-            .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
-            .unwrap()
-            .with_nanosecond(123_456_000)
-            .unwrap();
-        assert_eq!(render_datetime(&dt), "2024-01-02T03:04:05.123456Z");
-    }
-
-    #[test]
-    fn datetime_without_micros_has_no_fraction() {
-        let dt = chrono::Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap();
-        assert_eq!(render_datetime(&dt), "2024-01-02T03:04:05Z");
-    }
-
-    #[test]
-    fn datetime_in_user_zone_keeps_offset() {
-        let dt = chrono::Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap();
-        let eastern: Tz = "America/New_York".parse().unwrap();
-        assert_eq!(
-            render_datetime_in(&dt, &eastern),
-            "2024-01-01T22:04:05-05:00"
-        );
-    }
-
-    #[test]
-    fn datetime_fixed_offset_zone() {
-        let dt = chrono::Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap();
-        let zone = chrono::FixedOffset::east_opt(5 * 3600 + 1800).unwrap();
-        assert_eq!(render_datetime_in(&dt, &zone), "2024-01-02T08:34:05+05:30");
-    }
-
-    #[test]
-    fn utc_zone_renders_z_not_offset() {
-        // Oracle: DRF rewrites a trailing `+00:00` to `Z` for every zone,
-        // so the default request zone (UTC) takes the `Z` path.
-        let dt = chrono::Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap();
-        assert_eq!(
-            render_datetime_in(&dt, &chrono::Utc),
-            "2024-01-02T03:04:05Z"
-        );
-    }
-
-    #[test]
-    fn naive_datetime_renders_through_the_request_zone() {
-        // Oracle (DRF 3.15, USE_TZ=True): naive values are made aware in the
-        // field timezone before rendering.
-        let dt = chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
-            .unwrap()
-            .and_hms_opt(3, 4, 5)
-            .unwrap();
-        assert_eq!(
-            render_naive_datetime_in(&dt, &chrono::Utc),
-            "2024-01-02T03:04:05Z"
-        );
-        let eastern: Tz = "America/New_York".parse().unwrap();
-        assert_eq!(
-            render_naive_datetime_in(&dt, &eastern),
-            "2024-01-02T03:04:05-05:00"
-        );
-    }
-
-    #[test]
-    fn sub_microsecond_nanos_truncate_to_micros() {
-        // PIDASHCONV-867: Python datetimes carry only micros, so DRF
-        // never emits 9 digits; sub-micro nanos truncate.
-        let dt = chrono::Utc
-            .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
-            .unwrap()
-            .with_nanosecond(123_456_789)
-            .unwrap();
-        assert_eq!(render_datetime(&dt), "2024-01-02T03:04:05.123456Z");
-        // Sub-micro-only nanos (< 1µs) render with no fraction, like
-        // DRF with microsecond == 0.
-        let tiny = chrono::Utc
-            .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
-            .unwrap()
-            .with_nanosecond(999)
-            .unwrap();
-        assert_eq!(render_datetime(&tiny), "2024-01-02T03:04:05Z");
     }
 
     #[test]

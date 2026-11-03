@@ -112,6 +112,9 @@ use crate::license::form_body::{select_body_kind, BodyKind};
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_auth::token as auth_token;
+use pidash_compat::py::py_json_string;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_compat::response::{json_response as raw, json_value as json_body, no_content};
 use pidash_db::v1_assets::asset_queries;
 
 // ---------------------------------------------------------------------------
@@ -139,8 +142,6 @@ pub const POST_WORKSPACE_MISSING_BODY: &str =
 pub const PAYLOAD_NOT_VALID_BODY: &str = r#"{"error":"The payload is not valid"}"#;
 /// `handle_exception` `ValidationError` (`base.py:148-152`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// `handle_exception` generic 500 (`base.py:166-171`; `log_exception` + 500).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// DRF `NotAuthenticated` (`IsAuthenticated` denial on every route here).
 pub const UNAUTHENTICATED_BODY: &str =
     r#"{"detail":"Authentication credentials were not provided."}"#;
@@ -263,24 +264,6 @@ pub fn routes() -> Router<AppState> {
 // Small responders (exact Django bytes)
 // ---------------------------------------------------------------------------
 
-fn raw(status: StatusCode, body: &'static str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static response")
-}
-
-fn json_body(status: StatusCode, body: Value) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            serde_json::to_string(&body).expect("serializable response"),
-        ))
-        .expect("json response")
-}
-
 /// GET blanket `except` (`asset.py:461-466`).
 fn get_server_error(error: impl std::fmt::Display) -> Response {
     tracing::warn!(%error, "generic asset GET failed");
@@ -290,11 +273,7 @@ fn get_server_error(error: impl std::fmt::Display) -> Response {
 /// `handle_exception` generic 500 (`base.py:166-171`).
 fn server_error(error: impl std::fmt::Display) -> Response {
     tracing::warn!(%error, "generic asset handler failed");
-    raw(StatusCode::INTERNAL_SERVER_ERROR, SERVER_ERROR_BODY)
-}
-
-fn no_content() -> Response {
-    StatusCode::NO_CONTENT.into_response()
+    pidash_compat::response::server_error()
 }
 
 fn pool(state: &AppState) -> Option<&sqlx::PgPool> {
@@ -444,9 +423,7 @@ async fn authenticate_api_token(pool: &sqlx::PgPool, presented: &str) -> Result<
     auth_token::validate_api_token(Some(&kernel_row), presented, now.timestamp())
         .map_err(|_| Denial::InvalidToken)?;
     // `api_token.last_used = now; save(update_fields=["last_used"])`.
-    sqlx::query("UPDATE api_tokens SET last_used = now() WHERE token = $1")
-        .bind(presented)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, presented)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(user_id)
@@ -492,16 +469,12 @@ async fn authenticate_machine_token(
     .await
     .map_err(|_| Denial::ServerError)?;
     if !member {
-        sqlx::query("UPDATE machine_token SET revoked_at = now() WHERE id = $1")
-            .bind(row.id)
-            .execute(pool)
+        pidash_services::domain::tokens::revoke_machine_token_by_id_now(pool, row.id)
             .await
             .map_err(|_| Denial::ServerError)?;
         return Err(Denial::InvalidToken);
     }
-    sqlx::query("UPDATE machine_token SET last_used_at = now() WHERE id = $1")
-        .bind(row.id)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id_now(pool, row.id)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(row.user_id)
@@ -1514,11 +1487,17 @@ fn presigned_get_url(
     let date = now.format("%Y%m%d").to_string();
     let scope = credential_scope(&date, region);
     let credential = format!("{}/{}", storage.access_key_id, scope);
-    let name = match filename {
-        Some(name) => quote_filename(&name),
-        None => Uuid::new_v4().simple().to_string(),
+    // `_get_content_disposition` (`storage.py:115-124`): a missing name
+    // mints a fresh uuid4 hex; an empty string is falsy and yields the bare
+    // disposition with no `filename*` part; any other string is quoted in.
+    let content_disposition = match filename {
+        None => format!(
+            "{disposition}; filename*=UTF-8''{}",
+            Uuid::new_v4().simple()
+        ),
+        Some(name) if name.is_empty() => disposition.to_owned(),
+        Some(name) => format!("{disposition}; filename*=UTF-8''{}", quote_filename(&name)),
     };
-    let content_disposition = format!("{disposition}; filename*=UTF-8''{name}");
     // botocore renders the URL in insertion order (the response override
     // first, then the signer params) while the SigV4 canonical string
     // sorts them — verified against live `generate_presigned_url`.
@@ -1661,37 +1640,6 @@ fn presigned_post(
     fields.insert("policy".to_owned(), Value::String(policy_b64));
     fields.insert("x-amz-signature".to_owned(), Value::String(signature));
     Ok(serde_json::json!({"url": url, "fields": fields}))
-}
-
-/// CPython `json.dumps` string encoding (`ensure_ascii`): `"` and
-/// `\` escaped, C0 controls short/`\u00XX`, everything else non-ASCII
-/// as `\uXXXX` (surrogate pairs past the BMP).
-fn py_json_string(input: &str) -> String {
-    let mut out = String::with_capacity(input.len() + 2);
-    out.push('"');
-    for c in input.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c if (c as u32) < 0x7f => out.push(c),
-            c => {
-                let mut buf = [0u16; 2];
-                for unit in c.encode_utf16(&mut buf) {
-                    out.push_str(&format!("\\u{unit:04x}"));
-                }
-            }
-        }
-    }
-    out.push('"');
-    out
 }
 
 /// Standard base64 with padding (policy documents).

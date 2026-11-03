@@ -10,12 +10,7 @@ name: rust-api-replay
 
 on:
   push:
-    branches: [rust-dev]
-    paths:
-      - "rust-api/**"
-      - "apps/api/**"
-      - ".github/workflows/rust-api-replay.yml"
-  pull_request:
+    branches: [main]
     paths:
       - "rust-api/**"
       - "apps/api/**"
@@ -135,7 +130,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12.x"
+          python-version: "3.12.10"
           cache: pip
           cache-dependency-path: |
             apps/api/requirements.txt

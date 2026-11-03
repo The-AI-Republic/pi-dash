@@ -14,11 +14,7 @@ name: rust-api-contract-tests-assistant-sweep-rust
 
 on:
   push:
-    branches: [rust-dev]
-    paths:
-      - "rust-api/**"
-      - ".github/workflows/rust-api-contract-tests-assistant-sweep-rust.yml"
-  pull_request:
+    branches: [main]
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api-contract-tests-assistant-sweep-rust.yml"
@@ -94,13 +90,17 @@ jobs:
       # database; never a real secret).
       ASSISTANT_CRYPTO_BACKEND: fernet
       ASSISTANT_ENCRYPTION_KEY: -k26Q_XWFtfq5jzJTSUY483-H3-wrdJ67w2kQgLDmlU=
+      # PIDASHCONV-1248: the sweep honors a non-default hard limit — the
+      # replay pins both sides of the resulting 960s cutoff (pre-fix the
+      # worker sweeps the young turn and the test fails).
+      ASSISTANT_TURN_HARD_LIMIT: "900"
     steps:
       - uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12.x"
+          python-version: "3.12.10"
           cache: pip
           cache-dependency-path: |
             apps/api/requirements.txt

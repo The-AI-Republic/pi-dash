@@ -12,6 +12,8 @@ endpoint, so they stay out; the ``/test/`` probe is covered through its
 missing-config shape.
 """
 
+import pytest
+
 from .conftest import PUBLIC_BASE
 
 CONFIG_URL = "/api/users/me/ai-assistant/stt-config/"
@@ -130,3 +132,33 @@ def test_transcribe_rejects_oversize_upload(world, member):
     res = member.post(TRANSCRIBE_URL, files={"file": big}, timeout=120.0)
     assert res.status_code == 413
     assert res.json()["error"] == "REQUEST_BODY_TOO_LARGE"
+
+
+def test_transcribe_delimiter_at_body_offset_one_gets_a_response(world, member):
+    # PIDASHCONV-1244: a boundary delimiter starting at body offset 1
+    # panicked Rust's split_parts (`i - 2` underflow) and dropped the
+    # connection with no response. Django parses the framing
+    # (preamble-tolerant) and forwards the file to the provider, so its
+    # status depends on provider reachability (200 with text vs 502
+    # provider_unreachable); Rust answers 400 no_audio. The regression
+    # property both backends share: a normal HTTP response, never a
+    # dropped connection. Pre-fix this raises RemoteProtocolError on Rust.
+    _configure_stt(member)
+    body = (
+        b'x--B\r\nContent-Disposition: form-data; name="file"; '
+        b'filename="a.webm"\r\n\r\nabc\r\n--B--\r\n'
+    )
+    res = member.post(
+        TRANSCRIBE_URL,
+        content=body,
+        headers={"Content-Type": "multipart/form-data; boundary=B"},
+        timeout=60.0,
+    )
+    if res.status_code == 400:
+        assert res.json()["error"] == "no_audio"
+    elif res.status_code == 200:
+        assert "text" in res.json()
+    elif res.status_code == 502:
+        assert res.json()["error"] == "provider_unreachable"
+    else:
+        pytest.fail(f"unexpected status {res.status_code}: {res.text[:200]}")

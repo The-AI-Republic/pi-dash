@@ -58,6 +58,16 @@ async fn stub_app() -> axum::Router {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_owned();
+        let host = headers
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        let forwarded_host = headers
+            .get("x-forwarded-host")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
         axum::Json(serde_json::json!({
             "method": method,
             "path": path,
@@ -65,6 +75,8 @@ async fn stub_app() -> axum::Router {
             "body": String::from_utf8_lossy(&body),
             "x_custom": x_custom,
             "x_forwarded_for": forwarded_for,
+            "host": host,
+            "x_forwarded_host": forwarded_host,
         }))
         .into_response()
     }
@@ -315,6 +327,31 @@ async fn proxy_relays_method_path_query_body_and_headers() {
         .as_str()
         .unwrap_or("")
         .contains("127.0.0.1"));
+}
+
+#[tokio::test]
+async fn proxy_forwards_client_host_to_upstream() {
+    // PIDASHCONV-1303: Django builds client-visible URLs and security
+    // checks from `request.get_host()` and ignores `X-Forwarded-Host`
+    // (no `USE_X_FORWARDED_HOST`), so the edge must forward the client's
+    // Host unchanged (Caddy parity) instead of letting reqwest re-derive
+    // it from the upstream URL. The existing `X-Forwarded-Host` copy is
+    // kept alongside.
+    let (stub_base, _stub) = spawn(stub_app().await).await;
+    let edge = spawn_edge(&stub_base).await;
+    let client = client();
+
+    let response = client
+        .get(format!("{}/api/v1/things", edge.base))
+        .header("Host", "pidash.example.com")
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(response.status(), 200);
+    let body = response.bytes().await.expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["host"], "pidash.example.com");
+    assert_eq!(json["x_forwarded_host"], "pidash.example.com");
 }
 
 #[tokio::test]

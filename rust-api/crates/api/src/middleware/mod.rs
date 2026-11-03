@@ -46,7 +46,7 @@ pub use logging::{
 pub use security::{SecurityConfig, SecurityLayer};
 pub use session::{
     MemorySessionStore, PgSessionStore, RequestSession, SessionConfig, SessionExpiry,
-    SessionHandle, SessionLayer, SessionRow, SessionStore, StoreError, StoredSession,
+    SessionHandle, SessionLayer, SessionRow, SessionStore, SessionUser, StoreError, StoredSession,
 };
 
 /// Fail-closed 502 for truncated body reads (upstream died mid-stream).

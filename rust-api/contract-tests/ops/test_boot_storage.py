@@ -28,6 +28,7 @@ import hashlib
 import hmac
 import json
 import os
+import select
 import subprocess
 import threading
 import time
@@ -287,6 +288,32 @@ def test_stub_verifier_accepts_botocore_vector():
 DROP = object()  # route marker: close the connection without responding
 
 
+class TrickleBody:
+    """Route marker: send `status` headers at once, then drip `total` bytes
+    in `chunk`-byte writes every `interval` seconds (PIDASHCONV-1270: the
+    GetObject probe must succeed without reading any of it)."""
+
+    def __init__(self, status, total, chunk, interval):
+        self.status = status
+        self.total = total
+        self.chunk = chunk
+        self.interval = interval
+
+
+def _wait_or_gone(conn, seconds):
+    """Wait `seconds`; return True early if the peer disconnected (FIN/RST
+    makes its socket readable), so a dripping handler exits promptly once
+    the client stops reading."""
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        ready, _, _ = select.select([conn], [], [], min(0.5, remaining))
+        if ready:
+            return True
+
+
 def _error_xml(code, message):
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -379,12 +406,32 @@ class _StubHandler(BaseHTTPRequestHandler):
                 pass
             self.close_connection = True
             return None
+        if isinstance(entry, TrickleBody):
+            return self._respond_trickle(entry)
         if len(entry) == 3:
             status, payload, force_body = entry
         else:
             status, payload = entry
             force_body = False
         return self._respond(status, payload, force_body=force_body)
+
+    def _respond_trickle(self, trickle):
+        self.send_response(trickle.status)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(trickle.total))
+        self.end_headers()
+        remaining = trickle.total
+        while remaining > 0:
+            if _wait_or_gone(self.connection, trickle.interval):
+                return None
+            try:
+                piece = min(trickle.chunk, remaining)
+                self.wfile.write(b"x" * piece)
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                return None
+            remaining -= piece
+        return None
 
     def _respond(self, status, payload, force_body=False):
         self.send_response(status)
@@ -1361,6 +1408,47 @@ def test_update_bucket_dropped_list_takes_quirk_path_via_stub(stub_s3, tmp_path)
     )
     assert proc.stderr == f"{transport}\n"
     assert not (tmp_path / "permissions.json").exists()
+
+
+def test_update_bucket_trickling_getobject_succeeds_via_stub(stub_s3, tmp_path):
+    """PIDASHCONV-1270: the GetObject probe succeeds on the headers alone
+    (Django never reads the StreamingBody), so a body that drips past the
+    old 60s request budget still takes the success path: the fast-success
+    stdout, exit 0, no permissions.json, and the per-object policy applied
+    (live-diffed against manage.py on the same stub shape)."""
+    bucket = "trickle-bkt"
+    keys = ["big.bin", "a.txt"]
+    stub_s3.routes[("HEAD", bucket, "bucket")] = (200, b"")
+    stub_s3.routes[("GET", bucket, "list")] = (200, _echo_list_xml(bucket, keys))
+    stub_s3.routes[("GET", bucket, "object")] = TrickleBody(200, 4, 1, 20)
+    stub_s3.routes[("PUT", bucket, "object")] = (200, b"")
+    stub_s3.routes[("DELETE", bucket, "object")] = (204, b"")
+    stub_s3.routes[("PUT", bucket, "policy")] = (200, b"")
+    started = time.monotonic()
+    proc = run_ops(
+        "update_bucket", env_extra=stub_env(stub_s3, bucket), cwd=tmp_path, timeout=120
+    )
+    elapsed = time.monotonic() - started
+    assert proc.returncode == 0
+    assert proc.stdout == (
+        f"Checking bucket...\n"
+        f"Bucket '{bucket}' exists.\n"
+        "Access key has the required permissions.\n"
+        "Bucket is private, but existing objects remain public.\n"
+    )
+    assert proc.stderr == ""
+    # The probe ran against the trickling first key (not skipped), and the
+    # run finished without reading the 80s body.
+    gets = [
+        entry for entry in stub_s3.log
+        if entry["method"] == "GET" and not entry["query"]
+    ]
+    assert [entry["path"] for entry in gets] == [f"/{bucket}/big.bin"]
+    assert elapsed < 60
+    assert not (tmp_path / "permissions.json").exists()
+    policies = [entry for entry in stub_s3.log if entry["query"] == "policy"]
+    assert len(policies) == 2  # the probe policy, then make_objects_public
+    assert policies[-1]["body"].decode() == json.dumps(_expected_policy(bucket, keys))
 
 
 def test_update_bucket_unwritable_cwd(tmp_path):

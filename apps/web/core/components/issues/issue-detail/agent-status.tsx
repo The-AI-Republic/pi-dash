@@ -155,7 +155,8 @@ function getPayloadStringList(payload: Record<string, unknown> | null | undefine
 function getLiveDetail(run: TIssueAgentRunSummary, now: number, t: TranslationFn): string | null {
   const liveState = run.live_state;
   if (!liveState) return null;
-  const lastActivity = formatRelativePast(liveState.last_event_at, now, t);
+  // With observability off only the watchdog's activity stamp is reported.
+  const lastActivity = formatRelativePast(liveState.last_event_at ?? liveState.agent_last_activity_at, now, t);
   if (liveState.last_event_summary && lastActivity) {
     return `${truncate(liveState.last_event_summary)} (${lastActivity})`;
   }
@@ -214,6 +215,18 @@ export function getRunView(
         iconClassName: "animate-spin text-accent-primary",
       };
     case "running":
+      // The runner's passive-kill watchdog has seen no agent event for its
+      // unhealthy threshold; the run is still going until the kill threshold.
+      if (run.live_state?.agent_health === "unhealthy") {
+        return {
+          title: t("AI agent has gone quiet"),
+          detail: liveDetail ?? runnerDetail,
+          badge: t("Unhealthy"),
+          badgeVariant: "warning",
+          icon: CircleAlert,
+          iconClassName: "text-warning-primary",
+        };
+      }
       return {
         title: t("AI agent is working on this issue"),
         detail:

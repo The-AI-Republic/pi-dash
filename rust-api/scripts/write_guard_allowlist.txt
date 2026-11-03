@@ -1,0 +1,6 @@
+# ORM write-guard allowlist (ORM-09, design D7).
+# One line per pre-existing write to a covered table outside pidash_services::domain:
+# <path> | <OP table> | <statement fingerprint> | <sql|sea-query>.
+# Fingerprints hash the statement, not line numbers: unrelated edits do not churn this list.
+# The list only shrinks: remove the entry in the same PR that removes the site.
+# Seeded at 5e249b4d (399 sites). Do not add new sites; move them into domain/ instead.

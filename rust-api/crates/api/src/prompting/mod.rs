@@ -108,9 +108,12 @@ use crate::state::AppState;
 
 use crate::assistant::throttles::{allow_request, cache_key, ThrottleSpec, RATE_LIMIT_BODY};
 use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{
+use crate::v1_cycles_modules::json::{
     parse_request_bytes_spans, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
+use pidash_compat::datetime::render_isoformat;
+use pidash_compat::db::is_unique_violation;
+use pidash_compat::response::json_value as json_response;
 use pidash_services::prompting::{composer, context, recipes, registry, validation};
 
 /// `views.py:59`: numeric `WorkspaceMember.role` for the admin role.
@@ -381,9 +384,10 @@ async fn check_user_throttle(state: &AppState, user_id: &uuid::Uuid) -> Result<(
 //
 // * safe methods (`GET`/`HEAD`/`OPTIONS`/`TRACE`) skip everything;
 // * an `Origin` header is verified first (same-origin or a trusted
-//   origin from `CSRF_TRUSTED_ORIGINS`, which the project sets to
-//   `CORS_ALLOWED_ORIGINS` — `settings/common.py:612` — so the Rust
-//   `Settings.cors_allowed_origins` is the same list);
+//   origin from `CSRF_TRUSTED_ORIGINS`, which OSS sets to the CORS
+//   list (`settings/common.py:617`) and the cloud overlay augments
+//   with the desktop origins — the Rust
+//   `Settings.csrf_trusted_origins`);
 // * `is_secure()` follows the URI scheme, or `X-Forwarded-Proto: https`
 //   when `Settings.secure_proxy_ssl_header` is set (the production
 //   profile, mirroring `middleware/security.rs::is_secure`). When the
@@ -434,7 +438,7 @@ fn check_csrf_cookie(
     let settings = state.settings();
     let secure = request_is_secure(uri_scheme, headers, settings.secure_proxy_ssl_header);
     enforce_csrf_cookie(
-        &settings.cors_allowed_origins,
+        &settings.csrf_trusted_origins,
         settings.session.cookie_domain.as_deref(),
         secure,
         headers,
@@ -820,9 +824,11 @@ fn csrf_secret_from_headers(headers: &axum::http::HeaderMap) -> Result<String, S
         .get("cookie")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
+    // `parse_cookie` builds a dict, so a later duplicate overwrites an
+    // earlier one: the LAST `csrftoken` pair wins (PIDASHCONV-1235).
     let secret = parse_cookies(cookie_header)
         .into_iter()
-        .find(|(name, _)| *name == "csrftoken")
+        .rfind(|(name, _)| *name == "csrftoken")
         .map(|(_, value)| value.to_owned());
     let Some(secret) = secret else {
         return Err("CSRF cookie not set.".to_owned());
@@ -877,16 +883,6 @@ fn ordered_error_detail(error: &str, detail: &str) -> String {
     map.insert("error".to_owned(), Value::String(error.to_owned()));
     map.insert("detail".to_owned(), Value::String(detail.to_owned()));
     serde_json::to_string(&Value::Object(map)).expect("error/detail serializes")
-}
-
-/// Render an exact-JSON response body with its status.
-fn json_response(status: StatusCode, body: &Value) -> Response {
-    let rendered = serde_json::to_string(body).expect("prompting body serializes");
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(rendered))
-        .expect("prompting response")
 }
 
 // ---------------------------------------------------------------------------
@@ -1685,15 +1681,6 @@ async fn apply_update(
     updated.map(record_from_row).ok_or(Denial::ServerError)
 }
 
-/// SQLSTATE 23505 carries the lost-create race (the `IntegrityError`
-/// branch); anything else on the create path is a generic failure.
-fn is_unique_violation(err: &sqlx::Error) -> bool {
-    if let sqlx::Error::Database(db) = err {
-        return db.code().as_deref() == Some("23505");
-    }
-    false
-}
-
 /// `PromptSectionDetailEndpoint.delete` (`views.py:292-319`):
 /// soft-deactivate the active row at this scope, 204 with an empty body.
 async fn delete_override(
@@ -2313,12 +2300,14 @@ async fn load_state(
 }
 
 /// `issue.labels` (`context.py:536`): label names, newest first
-/// (`Label.Meta.ordering`), through + target soft-delete filtered.
+/// (`Label.Meta.ordering`). The M2M manager never filters the link
+/// table's `deleted_at`, so soft-deleted links still render and
+/// re-added labels repeat once per historical row (PB-2031).
 async fn load_labels(pool: &sqlx::PgPool, issue_id: &uuid::Uuid) -> Result<Vec<String>, Denial> {
     let rows: Vec<(String,)> = sqlx::query_as(
         r#"SELECT l.name FROM issue_labels il
            JOIN labels l ON l.id = il.label_id
-           WHERE il.issue_id = $1 AND il.deleted_at IS NULL AND l.deleted_at IS NULL
+           WHERE il.issue_id = $1 AND l.deleted_at IS NULL
            ORDER BY l.created_at DESC"#,
     )
     .bind(issue_id)
@@ -2329,13 +2318,16 @@ async fn load_labels(pool: &sqlx::PgPool, issue_id: &uuid::Uuid) -> Result<Vec<S
 }
 
 /// `issue.assignees` (`context.py:537`): display name, else email, else
-/// empty (`context.py:257-265`).
+/// empty (`context.py:257-265`). The M2M manager never filters the
+/// link table's `deleted_at`, so soft-deleted assignments still render
+/// and re-added assignees repeat once per historical row (PB-2031);
+/// newest user first (`User.Meta.ordering`, `-created_at`).
 async fn load_assignees(pool: &sqlx::PgPool, issue_id: &uuid::Uuid) -> Result<Vec<String>, Denial> {
     let rows: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
         r#"SELECT u.display_name, u.email FROM issue_assignees ia
            JOIN users u ON u.id = ia.assignee_id
-           WHERE ia.issue_id = $1 AND ia.deleted_at IS NULL
-           ORDER BY u.id"#,
+           WHERE ia.issue_id = $1
+           ORDER BY u.created_at DESC"#,
     )
     .bind(issue_id)
     .fetch_all(pool)
@@ -2553,18 +2545,6 @@ async fn load_comments(
             },
         )
         .collect())
-}
-
-/// Python `datetime.isoformat()` for an aware UTC timestamp: `+00:00`
-/// offset, microseconds only when nonzero (`context.py:322`).
-fn render_isoformat(dt: chrono::DateTime<chrono::Utc>) -> String {
-    // `AutoSi` trims trailing zeros (`.123000` -> `.123`); Python always
-    // prints six digits when microseconds are nonzero.
-    if dt.timestamp_subsec_micros() == 0 {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
-    } else {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
-    }
 }
 
 /// `_code_reviews_context` (`context.py:472-494`): attached review links,
@@ -2900,8 +2880,10 @@ fn sorted_pretty(value: &Value) -> String {
     // matching CPython `json.dumps(indent=2)` for JSON scalars. Python
     // renders `True/False/None`; payloads crossing this path are JSON
     // column values, which carry no such scalars beyond what serde
-    // already normalizes.
-    serde_json::to_string_pretty(&sort(value)).unwrap_or_else(|_| "{}".to_owned())
+    // already normalizes. The `ensure_ascii` pass matches Python's
+    // default escaping of non-ASCII (PIDASHCONV-1234).
+    let pretty = serde_json::to_string_pretty(&sort(value)).unwrap_or_else(|_| "{}".to_owned());
+    context::ensure_ascii_json(&pretty)
 }
 
 /// `_scheduler_context` (`views.py:463-483`): the binding must live in
@@ -3016,6 +2998,46 @@ mod tests {
     }
 
     #[test]
+    fn csrf_origin_trust_comes_from_the_csrf_list() {
+        // PIDASHCONV-1506: the gate reads `Settings.csrf_trusted_origins`,
+        // not the CORS list, so a cloud overlay that augments CSRF trust
+        // (the desktop triple under wildcard CORS) applies here while
+        // CORS semantics stay untouched.
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.cors_allowed_origins = vec!["https://cors-only.example".to_owned()];
+        settings.cors_allow_all_origins = true;
+        settings.csrf_trusted_origins = vec!["http://tauri.localhost".to_owned()];
+        let state = AppState::with_settings("test", settings);
+        let secret = "a".repeat(CSRF_SECRET_LENGTH);
+        let headers_for = |origin: &'static str| {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert("host", axum::http::HeaderValue::from_static("127.0.0.1:1"));
+            headers.insert("origin", axum::http::HeaderValue::from_static(origin));
+            headers.insert(
+                "cookie",
+                axum::http::HeaderValue::from_str(&format!("csrftoken={secret}")).expect("cookie"),
+            );
+            headers.insert(
+                "x-csrftoken",
+                axum::http::HeaderValue::from_str(&secret).expect("token"),
+            );
+            headers
+        };
+        // Trusted via the CSRF list alone (the CORS list is irrelevant).
+        assert!(check_csrf(&state, None, &headers_for("http://tauri.localhost"), "PUT").is_ok());
+        // An origin on the CORS list but not the CSRF list is rejected.
+        assert!(check_csrf(
+            &state,
+            None,
+            &headers_for("https://cors-only.example"),
+            "PUT"
+        )
+        .is_err());
+        // An origin on neither list is rejected.
+        assert!(check_csrf(&state, None, &headers_for("https://evil.test"), "PUT").is_err());
+    }
+
+    #[test]
     fn scope_defaults_to_user() {
         assert_eq!(resolve_scope(&query_map(&[])), SCOPE_USER);
         assert_eq!(resolve_scope(&query_map(&[("scope", "bogus")])), SCOPE_USER);
@@ -3115,6 +3137,23 @@ mod tests {
         assert_eq!(
             sorted_pretty(&payload),
             "{\n  \"a\": {\n    \"c\": 3,\n    \"d\": 4\n  },\n  \"z\": 1\n}"
+        );
+    }
+
+    #[test]
+    fn parent_payload_escapes_non_ascii_like_ensure_ascii() {
+        // PIDASHCONV-1234: preview parity with `json.dumps(payload,
+        // indent=2, sort_keys=True)` — lowercase `\uXXXX`, surrogate
+        // pairs above the BMP, never raw UTF-8.
+        let payload = serde_json::json!({"summary": "fix — done ✓"});
+        assert_eq!(
+            sorted_pretty(&payload),
+            "{\n  \"summary\": \"fix \\u2014 done \\u2713\"\n}"
+        );
+        let astral = serde_json::json!({"note": "ship 🚀"});
+        assert_eq!(
+            sorted_pretty(&astral),
+            "{\n  \"note\": \"ship \\ud83d\\ude80\"\n}"
         );
     }
 

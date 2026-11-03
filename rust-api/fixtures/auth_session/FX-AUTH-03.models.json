@@ -546,7 +546,7 @@
  "create_model_instance_note": "user_id=data.get('_auth_user_id') with ValueError/TypeError->None (an int passes through unconverted); device_info kept only if dict else None; non-dict data raises AttributeError (uncaught) \u2014 code-evident.",
  "password": {
   "algo": "pbkdf2_sha256",
-  "iterations": "1500000",
+  "iterations": "600000",
   "check_true": true,
   "check_false": false
  },

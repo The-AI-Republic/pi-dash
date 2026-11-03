@@ -670,6 +670,11 @@ by receiving `null` when the runner goes idle.
 
 #### 4.5.3 Server-side stall watchdog — explicit run-id match
 
+> **Superseded for current runners by §4.6.** A runner that reports
+> `agent_health` runs the passive-kill watchdog itself, and this task skips
+> its runs (`runner__live_state__agent_health__isnull=True`). What follows
+> still describes the backstop for runners that predate §4.6.
+
 A Celery beat task running every 30s. The watchdog requires both
 that the snapshot's `observed_run_id` matches the run's id **and**
 that the snapshot's `last_event_at` is older than the threshold.
@@ -784,6 +789,56 @@ This is roughly what Symphony's terminal dashboard renders
 (`status_dashboard.ex:590-633`), translated to a web component —
 but with the lifecycle classification done on the client side
 rather than persisted as state.
+
+### 4.6 Passive-kill activity watchdog
+
+The runner cannot tell a frozen agent from a live one sitting silent inside a
+long tool call (an integration suite, a migration, a remote CI wait): both
+look like "no agent event, a command in flight". The 5-minute (Codex) /
+15-minute (other agents) stall timer killed the second kind, throwing away the
+run's whole context, so it is replaced by a passive-kill model: **a run is
+failed only on proof of death, or after a very long silence.**
+
+Proof of death, handled where it surfaces (unchanged):
+
+- agent stdout closes (the process exited or crashed) — §4.4;
+- the agent reports a terminal error (`error` with `willRetry: false`);
+- the turn ends (`turn/completed`), which ends the run either way;
+- the runner itself goes away — cloud heartbeat sweeps.
+
+The silence backstop (`runner/src/daemon/activity_watchdog.rs`), one policy for
+every agent kind, measured from the last agent event:
+
+| Silence                              | Effect                                                                |
+| ------------------------------------ | --------------------------------------------------------------------- |
+| `unhealthy_after_hours` (default 24) | run marked **unhealthy**; keeps running                               |
+| `kill_after_hours` (default 48)      | run failed (`timeout`, "agent stalled: no agent events for 48 hours") |
+
+Any agent event resets both clocks and clears the mark. A pending approval
+keeps the clock fresh (a human-wait is legitimate silence); while one is
+pending the loop re-checks every 30s, so an approval answered with no agent
+event after it still re-arms the watchdog. Thresholds live in
+`[daemon.agent_watchdog]` in `config.toml`; `validate()` rejects a zero
+unhealthy threshold, a kill threshold below it, or either above one year.
+
+Reporting. On every busy poll — regardless of `agent_observability_v1`,
+because health is lifecycle, not opt-in telemetry — the runner sends
+`observed_run_id`, `agent_health` (`healthy` / `unhealthy`) and
+`agent_last_activity_at`. The cloud stores them on `RunnerLiveState` (wiped on
+run change like every snapshot field) and serialises them on the runner's
+`live_state` and the issue detail's agent run `live_state`. Each transition is also pushed to the run's event timeline as a
+`runner/agent_health` event (`runner_agent_health_v1`), written to the local
+run history as a `healthy` / `unhealthy` lifecycle entry, and logged.
+
+The web panel (§4.5.4) shows **Unhealthy** from the runner's verdict and
+**Quiet** (neutral) for a few silent minutes on such runners; runners without
+`agent_health` keep the short **Stalled** heuristic that matches their timer.
+The issue page's agent card shows **Unhealthy** ("AI agent has gone quiet") on
+a running run the runner reports unhealthy, and falls back to
+`agent_last_activity_at` for "last activity" when observability is off.
+
+Not covered on purpose: an agent that freezes after its command finished (the
+child exited but no completion event arrives). It falls to the 48h backstop.
 
 ## 5. Phasing
 

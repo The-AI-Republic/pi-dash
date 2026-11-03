@@ -9,11 +9,7 @@ name: rust-api-contract-tests-ops-instance
 
 on:
   push:
-    branches: [rust-dev]
-    paths:
-      - "rust-api/**"
-      - ".github/workflows/rust-api-contract-tests-ops-instance.yml"
-  pull_request:
+    branches: [main]
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api-contract-tests-ops-instance.yml"
@@ -89,7 +85,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12.x"
+          python-version: "3.12.10"
           cache: pip
           cache-dependency-path: |
             apps/api/requirements.txt

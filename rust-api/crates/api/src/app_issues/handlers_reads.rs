@@ -26,7 +26,7 @@
 //!   `super::queries_engage` (`meta_sql`, the identifier project / member /
 //!   lite / full statements).
 //! - Shapes: `pidash_services::app_issues` (`issue_detail_to_representation`
-//!   for the 36-key identifier-full body, `issue_detail_base_to_representation`
+//!   for the 38-key identifier-full body, `issue_detail_base_to_representation`
 //!   for the sub-issue POST rows, `project_user_property_to_representation`,
 //!   `issue_is_actively_synced`, `order_sql`).
 //! - Row fetching / shaping: `super::{fetch_json_rows, fetch_count,
@@ -75,13 +75,16 @@ use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
 
+use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 
 use super::queries_core;
 use super::queries_engage;
 use super::{
     fetch_count, fetch_json_rows, order_key, query_last, shape_row, Binder, Denial, QueryMap,
+    NOT_FOUND_BODY,
 };
+use pidash_compat::response::json_response;
 use pidash_db::tasks_ticker::IssueAgentTicker;
 use pidash_services::app_issues::serializers_assoc::{
     project_user_property_to_representation, ProjectUserPropertyRow,
@@ -156,6 +159,16 @@ pub fn routes() -> Router<AppState> {
             "/api/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/sub-issues/",
             axum::routing::get(sub_issues_get)
                 .post(sub_issues_post)
+                .put(crate::edge::proxy)
+                .patch(crate::edge::proxy)
+                .delete(crate::edge::proxy)
+                .head(crate::edge::proxy)
+                .options(crate::edge::proxy),
+        )
+        .route(
+            EPIC_WORK_ITEMS_PATH,
+            axum::routing::get(epic_work_items_get)
+                .post(epic_work_items_post)
                 .put(crate::edge::proxy)
                 .patch(crate::edge::proxy)
                 .delete(crate::edge::proxy)
@@ -398,14 +411,6 @@ async fn resolve_entity_gate(
 // Small responses
 // ---------------------------------------------------------------------------
 
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static response")
-}
-
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
@@ -433,15 +438,13 @@ fn dates_exceeded_body() -> Response {
 // ---------------------------------------------------------------------------
 
 /// Read the JSON body of a proxied-or-owned request (the cycles `detail_body`
-/// shape): same 2 MiB default limit as axum's `Json`; an empty body reads as
-/// `{}`, like DRF; a non-JSON media type is DRF's 415; a malformed document
-/// answers the extractor rejection.
+/// shape): unbounded past the serve-wide `BodyLimitLayer`; an empty body
+/// reads as `{}`, like DRF; a non-JSON media type is DRF's 415; a malformed
+/// document answers the extractor rejection.
 async fn read_body(state: &AppState, req: axum::extract::Request) -> Result<Value, Response> {
     use axum::extract::FromRequest;
     let (parts, body) = req.into_parts();
-    let bytes = axum::body::to_bytes(body, 2 * 1024 * 1024)
-        .await
-        .map_err(|_| Denial::ServerError.into_response())?;
+    let bytes = read_request_bytes(body).await?;
     if bytes.is_empty() {
         return Ok(Value::Object(Map::new()));
     }
@@ -538,22 +541,22 @@ fn get_id_list(row: &Map<String, Value>, key: &str) -> Vec<String> {
 // Deferred publishes (best-effort `rust_job_queue` rows; the response stands)
 // ---------------------------------------------------------------------------
 
-/// Celery wire name for `issue_activity`
-/// (`bgtasks/issue_activities_task.py:1504`).
-const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+// Canonical task name lives in `pidash_services::domain::activity`.
+use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 /// Celery wire name for `recent_visited_task` (bare `@shared_task` default).
 const RECENT_VISITED_TASK: &str = "pi_dash.bgtasks.recent_visited_task.recent_visited_task";
 
-/// `base_host(request, is_app=True)` (`utils/host.py:17`): `WEB_URL` else
-/// `APP_BASE_URL`; unset skips the enqueue (the cycles precedent — Django
-/// would 500, but every merged handler treats the queue as best-effort).
+/// `base_host(request, is_app=True)` (`utils/host.py:17-66`):
+/// `APP_BASE_URL` wins when set, else `WEB_URL`; unset skips the enqueue
+/// (the cycles precedent — Django would 500, but every merged handler
+/// treats the queue as best-effort). Empty strings fall through like
+/// Python's `or` (PIDASHCONV-1587).
 fn request_origin(state: &AppState) -> Option<String> {
-    state
-        .settings()
-        .urls
-        .web_url
+    let urls = &state.settings().urls;
+    urls.app_base_url
         .clone()
-        .or_else(|| state.settings().urls.app_base_url.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.web_url.clone().filter(|s| !s.is_empty()))
 }
 
 /// Best-effort deferred publish (the space intake precedent): without the
@@ -802,28 +805,27 @@ async fn fetch_or_create_property(
         return Err(Denial::NotFound);
     };
     let now = Utc::now();
-    let id = uuid::Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO project_user_properties (id, created_at, updated_at, created_by_id, \
-        updated_by_id, deleted_at, project_id, workspace_id, user_id, filters, display_filters, \
-        display_properties, rich_filters, preferences, sort_order) \
-        VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
-        ON CONFLICT (user_id, project_id) WHERE deleted_at IS NULL DO NOTHING",
+    let filters = default_filters();
+    let display_filters = default_display_filters();
+    let display_properties = default_display_properties();
+    let rich = Value::Object(Map::new());
+    let preferences = default_preferences();
+    pidash_services::domain::projects::members::get_or_create_property(
+        pool,
+        &pidash_services::domain::projects::members::NewMemberProperty {
+            workspace_id,
+            project_id: gate.project_id,
+            user_id: gate.user_id,
+            filters: &filters,
+            display_filters: &display_filters,
+            display_properties: &display_properties,
+            rich_filters: &rich,
+            preferences: &preferences,
+            sort_order: 65535.0,
+            created_by: Some(gate.user_id),
+            now,
+        },
     )
-    .bind(id)
-    .bind(now)
-    .bind(now)
-    .bind(gate.user_id)
-    .bind(gate.project_id)
-    .bind(workspace_id)
-    .bind(gate.user_id)
-    .bind(default_filters())
-    .bind(default_display_filters())
-    .bind(default_display_properties())
-    .bind(Value::Object(Map::new()))
-    .bind(default_preferences())
-    .bind(65535.0f64)
-    .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     fetch_property(pool, gate).await?.ok_or(Denial::ServerError)
@@ -1252,65 +1254,20 @@ fn upsert_write<'a>(
 /// signals, `updated_at` untouched. Unset halves keep their stored value
 /// (Django rewrites the same value — a no-op either way).
 async fn apply_bulk_dates(pool: &sqlx::PgPool, writes: &[BulkWrite<'_>]) -> Result<(), Denial> {
-    if writes.is_empty() {
-        return Ok(());
-    }
-    // Placeholder plan: the CASE values in arm order (start arms, then
-    // target arms), then the id list. A side with no arms is omitted
-    // entirely (an armless `CASE` is a syntax error; Django rewrites the
-    // stored value there — a no-op either way).
-    let mut ids: Vec<String> = Vec::new();
-    let mut values: Vec<(String, chrono::NaiveDate)> = Vec::new();
-    let mut target_values: Vec<(String, chrono::NaiveDate)> = Vec::new();
+    // Parsed up front: the twin takes typed ids, and an unparseable id
+    // 500s before any SQL runs, exactly as the inline binds did.
+    let mut parsed_writes = Vec::with_capacity(writes.len());
     for write in writes {
-        ids.push(write.id.to_owned());
-        if let Some(date) = write.start_date {
-            values.push((write.id.to_owned(), date));
-        }
-        if let Some(date) = write.target_date {
-            target_values.push((write.id.to_owned(), date));
-        }
+        let id: uuid::Uuid = write.id.parse().map_err(|_| Denial::ServerError)?;
+        parsed_writes.push(pidash_services::domain::issues::BulkIssueDates {
+            id,
+            start_date: write.start_date,
+            target_date: write.target_date,
+        });
     }
-    let mut sql = String::from("UPDATE issues SET ");
-    let mut placeholder: usize = 1;
-    let mut first_set = true;
-    for (column, arms) in [("start_date", &values), ("target_date", &target_values)] {
-        if arms.is_empty() {
-            continue;
-        }
-        if !first_set {
-            sql.push_str(", ");
-        }
-        first_set = false;
-        sql.push_str(&format!("{column} = CASE id "));
-        for _ in arms {
-            sql.push_str(&format!("WHEN ${} THEN ${} ", placeholder, placeholder + 1));
-            placeholder += 2;
-        }
-        sql.push_str(&format!("ELSE {column} END"));
-    }
-    sql.push_str(" WHERE id IN (");
-    let mut first = true;
-    for _ in &ids {
-        if !first {
-            sql.push(',');
-        }
-        first = false;
-        sql.push_str(&format!("${placeholder}"));
-        placeholder += 1;
-    }
-    sql.push(')');
-    let mut query = sqlx::query(&sql);
-    for (id, date) in values.iter().chain(target_values.iter()) {
-        let parsed: uuid::Uuid = id.parse().map_err(|_| Denial::ServerError)?;
-        query = query.bind(parsed).bind(*date);
-    }
-    for id in &ids {
-        let parsed: uuid::Uuid = id.parse().map_err(|_| Denial::ServerError)?;
-        query = query.bind(parsed);
-    }
-    query.execute(pool).await.map_err(|_| Denial::ServerError)?;
-    Ok(())
+    pidash_services::domain::issues::bulk_update_issue_dates(pool, &parsed_writes)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// Python truthiness for the `if start_date:` / `if target_date:` guards.
@@ -1858,6 +1815,7 @@ struct AgentRunOwned {
     started_at: Option<String>,
     ended_at: Option<String>,
     live_last_event_at: Option<String>,
+    live_agent_last_activity_at: Option<String>,
     live_updated_at: Option<String>,
 }
 
@@ -1894,6 +1852,7 @@ async fn fetch_agent_run(
         started_at: render_iso_moment(&row, "started_at"),
         ended_at: render_iso_moment(&row, "ended_at"),
         live_last_event_at: render_iso_moment(&row, "last_event_at"),
+        live_agent_last_activity_at: render_iso_moment(&row, "agent_last_activity_at"),
         live_updated_at,
         created_at,
         row,
@@ -1915,6 +1874,8 @@ fn agent_run_detail_row(run: &AgentRunOwned) -> AgentRunDetailRow<'_> {
             usage,
             llm_model: get_str(row, "live_llm_model"),
             turn_count: get_i32(row, "turn_count"),
+            agent_health: get_str(row, "agent_health"),
+            agent_last_activity_at: run.live_agent_last_activity_at.as_deref(),
             updated_at,
         }
     });
@@ -1922,7 +1883,6 @@ fn agent_run_detail_row(run: &AgentRunOwned) -> AgentRunDetailRow<'_> {
         id: get_str(row, "id").unwrap_or_default(),
         status: get_str(row, "status").unwrap_or_default(),
         executor_kind: get_str(row, "executor_kind").unwrap_or_default(),
-        queue_position: get_i32(row, "queue_position").and_then(|value| i16::try_from(value).ok()),
         runner_id: get_str(row, "runner_id"),
         runner_name: get_str(row, "runner_name"),
         created_at: &run.created_at,
@@ -2033,7 +1993,7 @@ fn decode_ticker(row: &Map<String, Value>) -> Result<Option<IssueAgentTicker>, D
     }))
 }
 
-/// `IssueDetailSerializer(issue)` (`:1488`): the 36-key full body —
+/// `IssueDetailSerializer(issue)` (`:1488`): the 38-key full body —
 /// `is_intake` INCLUDED on this path (unlike retrieve).
 async fn render_full(
     pool: &sqlx::PgPool,
@@ -2050,6 +2010,7 @@ async fn render_full(
     let label_ids = get_id_list(row, "label_ids");
     let assignee_ids = get_id_list(row, "assignee_ids");
     let is_synced = full_is_synced(pool, row, issue_id).await?;
+    let is_epic = probe_is_epic(pool, get_str(row, "i_type_id")).await?;
     let latest = fetch_agent_run(pool, LATEST_AGENT_RUN_SQL, issue_id).await?;
     let active = fetch_agent_run(pool, ACTIVE_AGENT_RUN_SQL, issue_id).await?;
     let mut count_binder = Binder::new();
@@ -2103,6 +2064,8 @@ async fn render_full(
         project_id: req_str(row, "i_project_id")?,
         parent_id: get_str(row, "i_parent_id"),
         cycle_id: Some(get_str(row, "cycle_id")),
+        type_id: get_str(row, "i_type_id"),
+        is_epic,
         assigned_pod_id: get_str(row, "i_assigned_pod_id"),
         agent_executor: get_str(row, "i_agent_executor"),
         module_ids: Some(str_refs(&module_ids)),
@@ -2133,6 +2096,23 @@ async fn render_full(
     let view = issue_detail_to_representation(&detail);
     let body = serde_json::to_string(&view).map_err(|_| Denial::ServerError)?;
     Ok(json_response(StatusCode::OK, body))
+}
+
+/// `get_is_epic` (`issue.py:1109-1112`): false when the row is untyped,
+/// without a query; otherwise the type row's flag. A missing row is
+/// Django's `DoesNotExist` → the generic 500 (unreachable — the FK
+/// holds). No soft-delete guard: `IssueType` rides the plain manager.
+async fn probe_is_epic(pool: &sqlx::PgPool, type_id: Option<&str>) -> Result<bool, Denial> {
+    let Some(raw) = type_id else {
+        return Ok(false);
+    };
+    let id = raw.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?;
+    let row: Option<(bool,)> = sqlx::query_as("SELECT is_epic FROM issue_types WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.map(|flag| flag.0).ok_or(Denial::ServerError)
 }
 
 /// Shared sync-probe evaluation: `external_source` short-circuits false;
@@ -2181,13 +2161,31 @@ async fn sub_issues_get(
         return Ok(crate::edge::proxy(State(state), req).await);
     };
     let (pool, gate) = resolve_entity_gate(&state, &slug, &project_raw, extension, false).await?;
-    let order_param = query_last(&query, "order_by").unwrap_or_else(|| "-created_at".to_owned());
-    let order = sub_issues_order(&order_param).map_err(IntoResponse::into_response)?;
+    sub_issues_get_inner(&pool, &gate, &slug, parent_id, &query).await
+}
+
+/// The sub-issue list pipeline after the gate: ordering, the 27-key row
+/// query + distribution, timezone shaping, and the grouped/ungrouped
+/// render.
+async fn sub_issues_get_inner(
+    pool: &sqlx::PgPool,
+    gate: &ReadsGate,
+    slug: &str,
+    parent_id: uuid::Uuid,
+    query: &QueryMap,
+) -> Result<Response, Response> {
+    let order_param = query_last(query, "order_by").unwrap_or_else(|| "-created_at".to_owned());
+    let (order, order_joins) =
+        sub_issues_order(&order_param).map_err(IntoResponse::into_response)?;
     let mut binder = Binder::new();
     let selects = queries_core::sub_issues_selects();
-    let from_where = queries_core::sub_issues_from_where(&mut binder, &slug, parent_id);
-    let inner = format!("SELECT {selects} {from_where} {order}");
-    let rows = fetch_json_rows(&pool, &inner, binder.values())
+    let from_where = queries_core::sub_issues_from_where(&mut binder, slug, parent_id);
+    // The cycle-name traversal joins ride on the row query, so a
+    // multi-linked child fans out into one row per link like Django (the
+    // distribution below counts the fanned rows too).
+    let row_where = super::with_order_joins(&from_where, &order_joins);
+    let inner = format!("SELECT {selects} {row_where} {order}");
+    let rows = fetch_json_rows(pool, &inner, binder.values())
         .await
         .map_err(IntoResponse::into_response)?;
     // The distribution reads the RAW rows (`:171-174`), before the timezone
@@ -2210,7 +2208,7 @@ async fn sub_issues_get(
         .iter()
         .map(|row| shape_row(row, &fields, &gate.timezone, true))
         .collect();
-    match query_last(&query, "group_by") {
+    match query_last(query, "group_by") {
         None => Ok(render_sub_list(&shaped, &distribution)),
         Some(param) if param.is_empty() => Ok(render_sub_list(&shaped, &distribution)),
         Some(param) if param == "assignees__ids" => {
@@ -2238,9 +2236,12 @@ async fn sub_issues_get(
 /// skips the port explicitly and falls back to the model ordering
 /// (`-created_at` — the same statement); an unknown field is Django's
 /// `FieldError` → generic 500.
-fn sub_issues_order(order_by_param: &str) -> Result<String, Denial> {
+fn sub_issues_order(order_by_param: &str) -> Result<(String, String), Denial> {
     if order_by_param.is_empty() {
-        return Ok(queries_core::SUB_ISSUES_DEFAULT_ORDER.to_owned());
+        return Ok((
+            queries_core::SUB_ISSUES_DEFAULT_ORDER.to_owned(),
+            String::new(),
+        ));
     }
     let spec = order_sql(order_by_param, "state.\"group\"", |name| {
         format!("min_{}", name.replace("__", "_"))
@@ -2258,24 +2259,31 @@ fn sub_issues_order(order_by_param: &str) -> Result<String, Denial> {
         let sql = spec
             .order_by_sql
             .replace("created_at DESC", "issue.created_at DESC");
-        return Ok(format!("ORDER BY {sql}"));
+        return Ok((format!("ORDER BY {sql}"), String::new()));
     }
+    // The sub-issue list annotates `Coalesce(..., 0)` counts, so its count
+    // keys order `0`-style.
     if out == "min_values" || out == "-min_values" {
-        let (expr, descending) = order_key(out, order_by_param)?;
-        return Ok(format!(
-            "ORDER BY {expr} {}, issue.created_at DESC",
-            if descending { "DESC" } else { "ASC" }
+        let key = order_key(out, order_by_param, None, false)?;
+        return Ok((
+            format!(
+                "ORDER BY {expr} {}, issue.created_at DESC",
+                if key.descending { "DESC" } else { "ASC" },
+                expr = key.expr,
+            ),
+            key.joins,
         ));
     }
-    let (expr, descending) = order_key(out, order_by_param)?;
+    let key = order_key(out, order_by_param, None, false)?;
     let mut sql = format!(
         "ORDER BY {expr} {}",
-        if descending { "DESC" } else { "ASC" }
+        if key.descending { "DESC" } else { "ASC" },
+        expr = key.expr,
     );
     if !order_by_param.contains("created_at") {
         sql.push_str(", issue.created_at DESC");
     }
-    Ok(sql)
+    Ok((sql, key.joins))
 }
 
 /// Insertion-ordered string→list buckets (what `defaultdict(list)` renders).
@@ -2449,11 +2457,24 @@ async fn sub_issues_post(
         return Ok(crate::edge::proxy(State(state), req).await);
     };
     let (pool, gate) = resolve_entity_gate(&state, &slug, &project_raw, extension, true).await?;
-    let body = read_body(&state, req).await?;
+    sub_issues_post_inner(&state, &pool, &gate, parent_id, req).await
+}
+
+/// The sub-issue link pipeline after the gate: body read, the scoped
+/// parent lookup, id parsing, `bulk_update`, per-requested-id enqueues,
+/// then the `IssueSerializer` rows + distribution over the found rows.
+async fn sub_issues_post_inner(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    gate: &ReadsGate,
+    parent_id: uuid::Uuid,
+    req: axum::extract::Request,
+) -> Result<Response, Response> {
+    let body = read_body(state, req).await?;
     // The parent lookup runs FIRST (`:205`): scoped-manager `get(pk)` with
     // NO workspace/project filter — missing, triage, archived or draft →
     // 404.
-    let parent = fetch_scoped_issue(&pool, &parent_id)
+    let parent = fetch_scoped_issue(pool, &parent_id)
         .await
         .map_err(IntoResponse::into_response)?;
     if parent.is_none() {
@@ -2478,20 +2499,20 @@ async fn sub_issues_post(
             }
         }
     }
-    let found = fetch_scoped_issue_ids(&pool, &parsed)
+    let found = fetch_scoped_issue_ids(pool, &parsed)
         .await
         .map_err(IntoResponse::into_response)?;
     if !found.is_empty() {
-        link_sub_issues(&pool, &parent_id, &found)
+        link_sub_issues(pool, &parent_id, &found)
             .await
             .map_err(IntoResponse::into_response)?;
     }
     // Enqueues cover every REQUESTED id — even ids with no row — with a
     // fresh epoch each (`timezone.now()` inside the comprehension).
-    if let Some(origin) = request_origin(&state) {
+    if let Some(origin) = request_origin(state) {
         for id in &sub_ids {
             enqueue_message(
-                &pool,
+                pool,
                 sub_issue_activity_message(
                     &parent_id,
                     id.raw(),
@@ -2504,7 +2525,7 @@ async fn sub_issues_post(
             .await;
         }
     }
-    let rows = fetch_post_rows(&pool, &found)
+    let rows = fetch_post_rows(pool, &found)
         .await
         .map_err(IntoResponse::into_response)?;
     let mut distribution: Buckets = Vec::new();
@@ -2519,7 +2540,7 @@ async fn sub_issues_post(
     let mut rendered: Vec<String> = Vec::with_capacity(rows.len());
     for row in &rows {
         rendered.push(
-            render_post_row(&pool, row, &gate.timezone)
+            render_post_row(pool, row, &gate.timezone)
                 .await
                 .map_err(IntoResponse::into_response)?,
         );
@@ -2655,29 +2676,15 @@ async fn link_sub_issues(
     parent_id: &uuid::Uuid,
     found: &[uuid::Uuid],
 ) -> Result<(), Denial> {
-    let mut binder = Binder::new();
-    let parent = binder.bind_uuid(*parent_id);
-    let mut holders = Vec::with_capacity(found.len());
-    for id in found {
-        holders.push(binder.bind_uuid(*id));
-    }
-    let sql = format!(
-        "UPDATE issues SET parent_id = {parent} WHERE id IN ({})",
-        holders.join(",")
-    );
-    let mut query = sqlx::query(&sql);
-    query = query.bind(parent_id);
-    for id in found {
-        query = query.bind(id);
-    }
-    query.execute(pool).await.map_err(|_| Denial::ServerError)?;
-    Ok(())
+    pidash_services::domain::issues::link_sub_issue_parents(pool, *parent_id, found)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 const POST_ROW_COLUMNS: &str = "issue.id, issue.name, issue.state_id, issue.sort_order, \
     issue.completed_at, issue.estimate_point_id AS estimate_point, issue.priority, \
     issue.complexity_score, issue.start_date, issue.target_date, issue.sequence_id, \
-    issue.project_id, issue.parent_id, issue.assigned_pod_id, issue.agent_executor, \
+    issue.project_id, issue.parent_id, issue.type_id, issue.assigned_pod_id, issue.agent_executor, \
     issue.created_at, issue.updated_at, issue.created_by_id AS created_by, \
     issue.updated_by_id AS updated_by, issue.is_draft, issue.archived_at, \
     issue.external_source, state.\"group\" AS state_group";
@@ -2717,6 +2724,7 @@ async fn render_post_row(
         .and_then(|text| text.parse::<uuid::Uuid>().ok())
         .ok_or(Denial::ServerError)?;
     let is_synced = probe_synced(pool, &issue_id, get_str(row, "external_source")).await?;
+    let is_epic = probe_is_epic(pool, get_str(row, "type_id")).await?;
     let created_at = render_actor_moment(row, "created_at", timezone).ok_or(Denial::ServerError)?;
     let updated_at = render_actor_moment(row, "updated_at", timezone).ok_or(Denial::ServerError)?;
     let completed_at = render_actor_moment(row, "completed_at", timezone);
@@ -2735,6 +2743,8 @@ async fn render_post_row(
         project_id: req_str(row, "project_id")?,
         parent_id: get_str(row, "parent_id"),
         cycle_id: None,
+        type_id: get_str(row, "type_id"),
+        is_epic,
         assigned_pod_id: get_str(row, "assigned_pod_id"),
         agent_executor: get_str(row, "agent_executor"),
         module_ids: None,
@@ -2755,10 +2765,129 @@ async fn render_post_row(
     serde_json::to_string(&view).map_err(|_| Denial::ServerError)
 }
 
+// ---------------------------------------------------------------------------
+// Epic work items (`app/views/issue/epics.py:205-231`, NEWFRONT-984)
+// ---------------------------------------------------------------------------
+
+/// Work-items path in `app/urls/issue.py:139-143` form.
+pub const EPIC_WORK_ITEMS_PATH: &str =
+    "/api/workspaces/{slug}/projects/{project_id}/epics/{epic_id}/issues/";
+
+/// The epic boundary (`epics.py:208-214`): the row exists in the
+/// `issue_objects` scope for this project/slug AND is epic-typed.
+/// Django's `filter(type__is_epic=True)` inner-joins with no
+/// related-manager guard, so untyped rows fall outside while rows under
+/// inactive or soft-deleted epic types still match.
+async fn epic_exists(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    epic_id: &uuid::Uuid,
+) -> Result<bool, Denial> {
+    let row: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM issues AS issue \
+         JOIN projects AS project ON project.id = issue.project_id \
+         JOIN workspaces ON workspaces.id = issue.workspace_id \
+         LEFT JOIN states AS state ON state.id = issue.state_id \
+         JOIN issue_types ON issue_types.id = issue.type_id \
+         WHERE issue.deleted_at IS NULL AND issue.id = $1 \
+         AND issue.project_id = $2 AND workspaces.slug = $3 \
+         AND NOT (state.\"group\" = 'triage' AND state.\"group\" IS NOT NULL) \
+         AND issue.archived_at IS NULL AND project.archived_at IS NULL \
+         AND issue.is_draft = FALSE AND issue_types.is_epic",
+    )
+    .bind(epic_id)
+    .bind(project_id)
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(row.is_some())
+}
+
+/// `GET .../epics/<epic_id>/issues/` (`epics.py:216-223`): the sub-issues
+/// read gate, the epic boundary, then the shared sub-issue list pipeline
+/// with the epic as the parent.
+pub async fn epic_work_items_get(
+    State(state): State<AppState>,
+    Path((slug, project_raw, epic_raw)): Path<(String, String, String)>,
+    Query(query): Query<QueryMap>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
+) -> Result<Response, Response> {
+    let Ok(epic_id) = epic_raw.parse::<uuid::Uuid>() else {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    };
+    let (pool, gate) = resolve_entity_gate(&state, &slug, &project_raw, extension, false).await?;
+    if !epic_exists(&pool, &slug, &gate.project_id, &epic_id)
+        .await
+        .map_err(IntoResponse::into_response)?
+    {
+        return Ok(json_response(
+            StatusCode::NOT_FOUND,
+            NOT_FOUND_BODY.to_owned(),
+        ));
+    }
+    sub_issues_get_inner(&pool, &gate, &slug, epic_id, &query).await
+}
+
+/// `POST .../epics/<epic_id>/issues/` (`epics.py:225-231`): the sub-issues
+/// write gate, the epic boundary, then the shared sub-issue link pipeline
+/// with the epic as the parent.
+pub async fn epic_work_items_post(
+    State(state): State<AppState>,
+    Path((slug, project_raw, epic_raw)): Path<(String, String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
+) -> Result<Response, Response> {
+    let Ok(epic_id) = epic_raw.parse::<uuid::Uuid>() else {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    };
+    let (pool, gate) = resolve_entity_gate(&state, &slug, &project_raw, extension, true).await?;
+    if !epic_exists(&pool, &slug, &gate.project_id, &epic_id)
+        .await
+        .map_err(IntoResponse::into_response)?
+    {
+        return Ok(json_response(
+            StatusCode::NOT_FOUND,
+            NOT_FOUND_BODY.to_owned(),
+        ));
+    }
+    sub_issues_post_inner(&state, &pool, &gate, epic_id, req).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app_issues::OneOrMany;
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1587): an empty `APP_BASE_URL` falls back to
+    /// `WEB_URL`, and empty everywhere is `None` (the enqueue is
+    /// skipped). `APP_BASE_URL` wins when both are set
+    /// (PIDASHCONV-1641).
+    #[test]
+    fn request_origin_falls_through_empty_strings() {
+        let app = "https://app.example.invalid";
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(request_origin(&state).as_deref(), Some(web));
+        let state = origin_state(Some(app), Some(""));
+        assert_eq!(request_origin(&state).as_deref(), Some(app));
+        let state = origin_state(Some(""), Some(""));
+        assert_eq!(request_origin(&state), None);
+        let state = origin_state(None, None);
+        assert_eq!(request_origin(&state), None);
+        let state = origin_state(Some(app), Some(web));
+        assert_eq!(request_origin(&state).as_deref(), Some(app));
+    }
 
     #[test]
     fn strict_int_matrix() {
@@ -2914,19 +3043,30 @@ mod tests {
     fn sub_issues_order_branches() {
         assert_eq!(
             sub_issues_order("").unwrap(),
-            queries_core::SUB_ISSUES_DEFAULT_ORDER
+            (
+                queries_core::SUB_ISSUES_DEFAULT_ORDER.to_owned(),
+                String::new()
+            )
         );
         assert_eq!(
             sub_issues_order("-created_at").unwrap(),
-            "ORDER BY issue.\"created_at\" DESC"
+            (
+                "ORDER BY issue.\"created_at\" DESC".to_owned(),
+                String::new()
+            )
         );
         let priority = sub_issues_order("priority").unwrap();
-        assert!(priority.contains("WHEN issue.priority = 'urgent'"));
-        assert!(priority.contains("issue.created_at DESC"));
-        assert!(!priority.contains(" created_at DESC"));
+        assert!(priority.0.contains("WHEN issue.priority = 'urgent'"));
+        assert!(priority.0.contains("issue.created_at DESC"));
+        assert!(!priority.0.contains(" created_at DESC"));
+        assert!(priority.1.is_empty());
         let min = sub_issues_order("-labels__name").unwrap();
-        assert!(min.contains("MIN(l.name)"));
-        assert!(min.contains("issue.created_at DESC"));
+        assert!(min.0.contains("MIN(l.name)"));
+        assert!(min.0.contains("issue.created_at DESC"));
+        assert!(min.1.is_empty());
+        let crossed = sub_issues_order("issue_cycle__cycle__name").unwrap();
+        assert!(crossed.0.contains("__order_c.name ASC"));
+        assert!(crossed.1.contains("LEFT JOIN cycle_issues AS __order_ci"));
         assert!(sub_issues_order("nope").is_err());
     }
 

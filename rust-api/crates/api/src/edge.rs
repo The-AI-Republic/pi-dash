@@ -295,7 +295,11 @@ pub(crate) async fn serve_web_bytes(
     let owned =
         edge.flags().is_rust(Prefix::Web) && matches!(*req.method(), Method::GET | Method::HEAD);
     if !owned {
-        return proxy_request(state, req).await;
+        // Through `proxy` (not `proxy_request` directly) so the answer
+        // carries `ProxiedUpstream` like every other proxied arm — the
+        // session layer stays transparent on marked responses
+        // (PIDASHCONV-1304).
+        return proxy(State(state.clone()), req).await;
     }
     let mut response = ([(header::CONTENT_TYPE, content_type)], body).into_response();
     if req.method() == Method::HEAD {
@@ -318,6 +322,43 @@ pub async fn proxy(State(state): State<AppState>, req: Request) -> Response {
     let mut response = proxy_request(&state, req).await;
     response.extensions_mut().insert(ProxiedUpstream);
     response
+}
+
+/// An owned path: the `owned` methods serve from `methods` as built,
+/// everything else falls through to Django ([`proxy`]).
+///
+/// Canonical home of the per-module `owned` cutover helper
+/// (PIDASHCONV-1593): every other copy is a call to this. `owned`
+/// lists the methods to leave untouched — served by `methods`, or by
+/// axum's default when `methods` does not register them. All eight of
+/// `GET POST PUT PATCH DELETE OPTIONS HEAD TRACE` outside the list
+/// route to [`proxy`], so `HEAD` and `TRACE` proxy explicitly: axum's
+/// implicit `HEAD`-from-`GET` and its empty 405 would otherwise
+/// diverge from Django (no `head` on these views, and `TRACE` 405s
+/// as JSON everywhere).
+pub fn owned(
+    methods: axum::routing::MethodRouter<AppState>,
+    owned: &[&str],
+) -> axum::routing::MethodRouter<AppState> {
+    let mut router = methods;
+    for other in [
+        "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE",
+    ] {
+        if owned.contains(&other) {
+            continue;
+        }
+        router = match other {
+            "GET" => router.get(proxy),
+            "POST" => router.post(proxy),
+            "PUT" => router.put(proxy),
+            "PATCH" => router.patch(proxy),
+            "DELETE" => router.delete(proxy),
+            "HEAD" => router.head(proxy),
+            "TRACE" => router.trace(proxy),
+            _ => router.options(proxy),
+        };
+    }
+    router
 }
 
 async fn proxy_request(state: &AppState, req: Request) -> Response {
@@ -348,11 +389,19 @@ async fn proxy_request(state: &AppState, req: Request) -> Response {
 
     let mut forwarded = HeaderMap::new();
     for (name, value) in req.headers() {
-        if is_hop_by_hop(name) || *name == header::HOST {
+        if is_hop_by_hop(name) {
             continue;
         }
         forwarded.append(name, value.clone());
     }
+    // The client's Host is forwarded unchanged (Caddy parity): Django
+    // builds client-visible URLs and security checks from
+    // `request.get_host()` and never reads `X-Forwarded-Host` (no
+    // `USE_X_FORWARDED_HOST` under `apps/api/pi_dash/settings/`), so
+    // letting reqwest re-derive Host from the upstream URL breaks OAuth
+    // `redirect_uri`s, MinIO presigned URLs and the webhook self-host
+    // guard (PIDASHCONV-1303). Requests without a Host header (HTTP/1.0)
+    // still fall back to reqwest's URL-derived Host.
     // Present only when served with `into_make_service_with_connect_info`
     // (as `serve` does); absent in tests, where no forwarding headers apply.
     if let Some(peer) = req
@@ -459,6 +508,11 @@ fn is_hop_by_hop(name: &header::HeaderName) -> bool {
         || *name == header::HeaderName::from_static("keep-alive")
 }
 
+/// Exact body [`bad_gateway`] renders, shared so `Denial`-typed handlers
+/// map a truncated request-body read to the same 502 bytes (PIDASHCONV-1308).
+pub(crate) const BAD_GATEWAY_BODY: &str =
+    r#"{"error":{"code":"bad_gateway","message":"bad gateway: django upstream unreachable"}}"#;
+
 /// Fail-closed 502 in the shared error shape. Also used by the F-08
 /// middleware layers when a proxied body truncates mid-read.
 pub(crate) fn bad_gateway() -> Response {
@@ -477,6 +531,26 @@ pub(crate) fn bad_gateway() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bad_gateway_renders_the_shared_body() {
+        // `BAD_GATEWAY_BODY` is the const `Denial` arms reuse for the
+        // truncated-body 502; it must stay byte-identical to this render.
+        let response = bad_gateway();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("body")
+            .to_bytes();
+        assert_eq!(bytes.as_ref(), BAD_GATEWAY_BODY.as_bytes());
+    }
 
     #[test]
     fn table_covers_every_inventory_prefix() {
@@ -583,5 +657,63 @@ mod tests {
         let edge = EdgeHandle::for_tests("http://django:8000/");
         assert_eq!(edge.upstream(), "http://django:8000");
         assert_eq!(edge.target("/?a=1"), "http://django:8000/?a=1");
+    }
+
+    #[tokio::test]
+    async fn owned_serves_listed_and_proxies_the_rest() {
+        use tower::ServiceExt;
+
+        async fn hello() -> &'static str {
+            "hello"
+        }
+
+        // Unreachable upstream (port 1 is never bound): proxied methods
+        // fail closed with 502 (the `space::social` cutover-test shape).
+        let state = AppState::with_edge("0.1.0", EdgeHandle::for_tests("http://127.0.0.1:1"));
+        let app = crate::routes::with_routes(
+            state,
+            axum::Router::new()
+                .route("/get-only", owned(axum::routing::get(hello), &["GET"]))
+                .route("/post-only", owned(axum::routing::post(hello), &["POST"])),
+        );
+        async fn status_of(app: axum::Router, method: &str, path: &str) -> StatusCode {
+            app.oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve")
+            .status()
+        }
+
+        // The listed method serves from Rust.
+        assert_eq!(
+            status_of(app.clone(), "GET", "/get-only").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status_of(app.clone(), "POST", "/post-only").await,
+            StatusCode::OK
+        );
+        // Every other of the eight proxies and fails closed — `HEAD`
+        // and `TRACE` explicitly, never axum's implicit-HEAD-from-`GET`
+        // or its empty 405.
+        for method in ["POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE"] {
+            assert_eq!(
+                status_of(app.clone(), method, "/get-only").await,
+                StatusCode::BAD_GATEWAY,
+                "unowned {method} must proxy"
+            );
+        }
+        for method in ["GET", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE"] {
+            assert_eq!(
+                status_of(app.clone(), method, "/post-only").await,
+                StatusCode::BAD_GATEWAY,
+                "unowned {method} must proxy"
+            );
+        }
     }
 }

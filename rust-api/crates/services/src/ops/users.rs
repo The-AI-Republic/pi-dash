@@ -57,6 +57,7 @@
 //!   different binary; the `ops` CLI is clap and renders clap errors.
 
 use chrono::{DateTime, Utc};
+pub use pidash_compat::py::py_strip;
 use pidash_db::ops::users::UserSaveWrite;
 
 // ---------------------------------------------------------------------------
@@ -157,14 +158,6 @@ pub const GETPASS_ECHO_WARNING: &str = "Warning: Password input may be echoed.";
 // ---------------------------------------------------------------------------
 // Python `str.strip()` + `User.save()` email semantics
 // ---------------------------------------------------------------------------
-
-/// Python `str.strip()` with no args: Unicode whitespace plus the four
-/// ASCII control chars (`\x1c`-`\x1f`) CPython's `Py_UNICODE_ISSPACE`
-/// accepts but Rust's `char::is_whitespace` does not. Same recipe as
-/// the `app_workspace` `py_strip` precedent.
-pub fn py_strip(value: &str) -> &str {
-    value.trim_matches(|c: char| c.is_whitespace() || ('\x1c'..='\x1f').contains(&c))
-}
 
 /// `User.save()` (`db/models/user.py:169-182`): `email.lower().strip()`
 /// plus the `display_name` fill. `split("@")` never returns an empty

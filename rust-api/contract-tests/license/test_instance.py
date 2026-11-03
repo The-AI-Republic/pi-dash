@@ -181,3 +181,51 @@ def test_patch_instance_id_colliding_soft_deleted_row_is_invalid_payload(admin_a
         count = conn.execute("select count(*) from instances;").fetchone()[0]
     assert row[0] == before
     assert count == 2
+
+
+def test_patch_null_semantics(admin_api, world):
+    # Explicit JSON nulls are not skips under partial=True (DRF
+    # validate_empty_values): non-nullable fields 400 with "This field may
+    # not be null." in field order and write nothing; nullable fields
+    # clear to NULL. PIDASHCONV-1365.
+    with world["db"].connect() as conn:
+        conn.execute(
+            "update instances set namespace = 'ns-1',"
+            " whitelist_emails = 'a@x.y';"
+        )
+        conn.commit()
+    with world["db"].connect() as conn:
+        before = conn.execute(
+            "select instance_name, namespace, whitelist_emails,"
+            " is_telemetry_enabled, updated_by_id from instances;"
+        ).fetchone()
+
+    res = admin_api.patch(
+        "/api/instances/",
+        json={"instance_name": None, "is_telemetry_enabled": None},
+    )
+    assert res.status_code == 400
+    assert res.content == (
+        b'{"instance_name":["This field may not be null."],'
+        b'"is_telemetry_enabled":["This field may not be null."]}'
+    )
+    with world["db"].connect() as conn:
+        after = conn.execute(
+            "select instance_name, namespace, whitelist_emails,"
+            " is_telemetry_enabled, updated_by_id from instances;"
+        ).fetchone()
+    assert after == before
+
+    res = admin_api.patch(
+        "/api/instances/", json={"namespace": None, "whitelist_emails": None}
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["namespace"] is None
+    assert body["whitelist_emails"] is None
+    with world["db"].connect() as conn:
+        row = conn.execute(
+            "select namespace, whitelist_emails from instances;"
+        ).fetchone()
+    assert row[0] is None
+    assert row[1] is None

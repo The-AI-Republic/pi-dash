@@ -78,9 +78,8 @@ use crate::worker::{Handler, Registry, Verdict};
 pub const RECENT_VISITED_TASK_NAME: &str =
     "pi_dash.bgtasks.recent_visited_task.recent_visited_task";
 
-/// `page_transaction` (`page_transaction_task.py:84`).
-pub const PAGE_TRANSACTION_TASK_NAME: &str =
-    "pi_dash.bgtasks.page_transaction_task.page_transaction";
+/// Re-export of the canonical [`pidash_services::domain::activity::PAGE_TRANSACTION_TASK`].
+pub use pidash_services::domain::activity::PAGE_TRANSACTION_TASK as PAGE_TRANSACTION_TASK_NAME;
 
 /// `recent_visited_task.delay(slug, entity_name, entity_identifier,
 /// user_id, project_id)`: the Django call sites pass everything as
@@ -599,10 +598,17 @@ async fn run_page_transaction(pool: &PgPool, args: PageTransactionArgs) -> Drive
     // transaction) makes re-inserts silent no-ops. The ids parse to
     // `Uuid` before binding (PIDASHCONV-1107): sqlx binds `String` as
     // text and Postgres refuses text into uuid columns, while Django
-    // sends UUID-typed params. A garbage id fails its chunk exactly
-    // like the `bulk_create` batch it poisons (earlier chunks stay
-    // inserted on both backends).
+    // sends UUID-typed params. `bulk_create` wraps every batch in one
+    // `transaction.atomic(savepoint=False)` (Django 4.2
+    // `QuerySet.bulk_create`), so a garbage id anywhere rolls back all
+    // batches: every chunk INSERT runs in one transaction here too
+    // (PIDASHCONV-1282). The cleanup below stays outside it, exactly
+    // like the `:135-136` delete outside the `bulk_create` call.
     let now = Utc::now();
+    let mut txn = pool
+        .begin()
+        .await
+        .map_err(|error| DriverFailure::Log(format!("page_transaction: insert: {error}")))?;
     for chunk in plan.inserts.chunks(50) {
         let mut bound: Vec<(Uuid, Option<Uuid>, &PlannedPageLog)> = Vec::with_capacity(chunk.len());
         for item in chunk {
@@ -639,10 +645,13 @@ async fn run_page_transaction(pool: &PgPool, args: PageTransactionArgs) -> Drive
         builder.push(" ON CONFLICT DO NOTHING");
         builder
             .build()
-            .execute(pool)
+            .execute(&mut *txn)
             .await
             .map_err(|error| DriverFailure::Log(format!("page_transaction: insert: {error}")))?;
     }
+    txn.commit()
+        .await
+        .map_err(|error| DriverFailure::Log(format!("page_transaction: insert: {error}")))?;
 
     // Cleanup (`:135-136` + QUIRK-4): ONE global soft-delete over the
     // union set, skipped when empty.

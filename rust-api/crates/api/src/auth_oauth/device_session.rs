@@ -13,19 +13,21 @@
 //! * `POST auth/revoke/` — invalidate the caller's CLI token, idempotent
 //!   (`device.py:485-511`).
 //!
-//! Only these three path+method pairs are registered, so the edge serves
-//! exactly this family from Rust while every sibling path keeps proxying
-//! to Django — route registration is the cutover granularity, no flag
-//! needed. Every other method on the owned paths proxies too, so Django
-//! answers its own 405-after-auth and metadata OPTIONS byte for byte
-//! (the loop-handlers precedent).
+//! Only these three path+method pairs are served from Rust while every
+//! sibling path keeps proxying to Django — route registration is the
+//! cutover granularity, no flag needed. Every other method on the owned
+//! paths answers locally in DRF order (auth first, then the 405), because
+//! the token lives in Rust's database and a proxied verdict would fail
+//! Django's copy of the gate before its own method check (PIDASHCONV-1478);
+//! only OPTIONS still proxies so DRF's metadata response is preserved byte
+//! for byte (the `v1_openapi::owned` precedent).
 //!
 //! Layering: the device-machine / rotate SQL text and pure helpers
 //! (`normalize_host_label`, `machine_token_label`, touch-field selection,
 //! lock/create/touch statements, ownership errors) live in the Done layer
 //! [`pidash_db::auth_oauth::queries::dev_machine`] (PIDASHCONV-327,
 //! AUTHOAUTH-F8); `deactivate_api_token` in
-//! [`pidash_db::auth_oauth::queries::cli_token`] (AUTHOAUTH-F7); the
+//! [`pidash_services::domain::tokens::cli_token`] (AUTHOAUTH-F7); the
 //! token classify/hash/fingerprint kernels in [`pidash_auth::token`]
 //! (foundation). This module owns the HTTP shell (routes, API-key auth,
 //! body validation), the membership/workspace/APIToken/MachineToken SQL,
@@ -55,7 +57,7 @@
 //!   Python (500); the auth shell answers 500 the same way.
 
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use base64::Engine as _;
@@ -63,7 +65,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use pidash_auth::token as token_kernel;
-use pidash_db::auth_oauth::queries::{cli_token, dev_machine};
+use pidash_db::auth_oauth::queries::dev_machine;
+use pidash_services::domain::tokens::cli_token;
 
 use crate::assistant::common::{
     body_get, json_response, parse_body, pool_of, request_content_type, BodyField, BodyMap,
@@ -96,31 +99,44 @@ pub fn routes() -> Router<AppState> {
         .route(REVOKE_PATH, owned_post(post(post_revoke)))
 }
 
-/// A GET-owned path: the GET handler serves from Rust, everything else
-/// falls through to Django.
+/// A GET-owned path: the GET handler serves from Rust; every other
+/// method answers the local 405 past the auth gate, and only OPTIONS
+/// proxies for DRF's metadata. HEAD is explicit: the view defines no
+/// `head`, so DRF 405s it — axum's automatic GET-backed HEAD would
+/// wrongly answer 200.
 fn owned_get(
     get_handler: axum::routing::MethodRouter<AppState>,
 ) -> axum::routing::MethodRouter<AppState> {
     get_handler
-        .post(crate::edge::proxy)
-        .put(crate::edge::proxy)
-        .patch(crate::edge::proxy)
-        .delete(crate::edge::proxy)
-        .head(crate::edge::proxy)
+        .post(workspaces_method_not_allowed)
+        .put(workspaces_method_not_allowed)
+        .patch(workspaces_method_not_allowed)
+        .delete(workspaces_method_not_allowed)
+        .head(workspaces_method_not_allowed)
+        .trace(workspaces_method_not_allowed)
+        .connect(workspaces_method_not_allowed)
         .options(crate::edge::proxy)
+        .fallback(workspaces_method_not_allowed)
 }
 
-/// A POST-owned path: the POST handler serves from Rust, everything
-/// else falls through to Django.
+/// A POST-owned path: the POST handler serves from Rust; every other
+/// method answers the local 405 past the auth gate, and only OPTIONS
+/// proxies for DRF's metadata. HEAD is explicit (DRF 405s it) so the
+/// denial keeps its body, which runserver sends on the wire — axum's
+/// automatic GET-backed HEAD would strip it.
 fn owned_post(
     post_handler: axum::routing::MethodRouter<AppState>,
 ) -> axum::routing::MethodRouter<AppState> {
     post_handler
-        .get(crate::edge::proxy)
-        .put(crate::edge::proxy)
-        .patch(crate::edge::proxy)
-        .delete(crate::edge::proxy)
+        .get(post_only_method_not_allowed)
+        .put(post_only_method_not_allowed)
+        .patch(post_only_method_not_allowed)
+        .delete(post_only_method_not_allowed)
+        .head(post_only_method_not_allowed)
+        .trace(post_only_method_not_allowed)
+        .connect(post_only_method_not_allowed)
         .options(crate::edge::proxy)
+        .fallback(post_only_method_not_allowed)
 }
 
 fn invalid_token() -> Response {
@@ -154,7 +170,7 @@ async fn authenticate(
     headers: &HeaderMap,
 ) -> Result<Caller, Response> {
     let Some(raw) = headers.get(token_kernel::API_KEY_HEADER) else {
-        // `if not token: return None` (`api_authentication.py:70-72`) —
+        // `if not token: return None` (`api_authentication.py:68-69`) —
         // the `IsAuthenticated` gate then answers 401.
         return Err(Failure::unauthorized().into_response());
     };
@@ -170,6 +186,17 @@ async fn authenticate(
     } else {
         authenticate_api(pool, presented).await
     }
+}
+
+/// Whether the request presents a credential for the auth gate: the
+/// `X-Api-Key` header is set to a non-empty value. Mirrors the no-DB
+/// 401 branches of [`authenticate`] exactly (a missing or empty header
+/// never reaches the pool); undecodable bytes still need the lookup (a
+/// miss is 403, never 401).
+fn has_presented_credential(headers: &HeaderMap) -> bool {
+    headers
+        .get(token_kernel::API_KEY_HEADER)
+        .is_some_and(|raw| !matches!(raw.to_str(), Ok(value) if value.is_empty()))
 }
 
 /// One `api_tokens` row for the lookup: `(id, user_id, is_active,
@@ -203,10 +230,7 @@ async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Caller
         }
     }
     // `api_token.last_used = now; save(update_fields=["last_used"])`.
-    sqlx::query(r#"UPDATE api_tokens SET last_used = $1 WHERE id = $2"#)
-        .bind(now)
-        .bind(id)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_api_token_last_used_by_id(pool, id, now)
         .await
         .map_err(|_| Failure::server_error().into_response())?;
     // The token loggers stamp this id on the `process_logs` payload
@@ -275,19 +299,13 @@ async fn authenticate_machine(
     if !is_member(pool, workspace_id, user_id).await? {
         // `machine_token.revoke()` on the way out (`revoked_at` is `None`
         // here, so the guard is a no-op and the write always lands).
-        sqlx::query(r#"UPDATE machine_token SET revoked_at = $1 WHERE id = $2"#)
-            .bind(now)
-            .bind(id)
-            .execute(pool)
+        pidash_services::domain::tokens::revoke_machine_token_by_id(pool, id, now)
             .await
             .map_err(|_| Failure::server_error().into_response())?;
         return Err(invalid_token());
     }
     // `MachineToken.objects.filter(pk=...).update(last_used_at=now)`.
-    sqlx::query(r#"UPDATE machine_token SET last_used_at = $1 WHERE id = $2"#)
-        .bind(now)
-        .bind(id)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(pool, id, now)
         .await
         .map_err(|_| Failure::server_error().into_response())?;
     // The token loggers stamp this id on the `process_logs` payload
@@ -322,6 +340,80 @@ async fn is_member(
 
 fn not_found(error: &str) -> Failure {
     Failure::bare_error(StatusCode::NOT_FOUND, error)
+}
+
+// ---------------------------------------------------------------------------
+// wrong-method denial (PIDASHCONV-1478)
+// ---------------------------------------------------------------------------
+
+/// DRF `default_response_headers` `Allow` for the GET-owned view:
+/// `WorkspaceListEndpoint` defines only `get` (`device.py:395`), so
+/// `_allowed_methods` is `GET, OPTIONS` (plus the inherited DRF
+/// `options`; there is no `head`).
+const ALLOW_WORKSPACES: &str = "GET, OPTIONS";
+/// DRF `default_response_headers` `Allow` for the POST-owned views,
+/// which define only `post` (`device.py:417,496`).
+const ALLOW_POST_ONLY: &str = "POST, OPTIONS";
+
+/// DRF `MethodNotAllowed` body for these views (compact JSON, probed
+/// live): `{"detail":"Method \"<M>\" not allowed."}`. `method` is an
+/// `http::Method`, whose token charset needs no JSON escaping.
+fn not_allowed_body(method: &str) -> String {
+    format!(r#"{{"detail":"Method \"{method}\" not allowed."}}"#)
+}
+
+/// Wrong method on `GET auth/workspaces/`: DRF order — the auth gate
+/// first (its 401/403 stand), then the 405.
+async fn workspaces_method_not_allowed(
+    State(state): State<AppState>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
+    deny_method(&state, &method, &headers, ALLOW_WORKSPACES).await
+}
+
+/// Wrong method on the POST-owned paths: the same DRF order with the
+/// POST-only `Allow`.
+async fn post_only_method_not_allowed(
+    State(state): State<AppState>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
+    deny_method(&state, &method, &headers, ALLOW_POST_ONLY).await
+}
+
+/// Authenticate, then answer DRF's 405. A proxied verdict cannot work
+/// here: the token lives in Rust's database, so Django's copy of the
+/// gate 403s before its own method check.
+async fn deny_method(
+    state: &AppState,
+    method: &Method,
+    headers: &HeaderMap,
+    allow: &'static str,
+) -> Response {
+    // The gate before the pool: Django's `authenticate` returns None
+    // without a query when no credential is presented
+    // (`api_authentication.py:68-69`), and `IsAuthenticated` answers
+    // 401 — so a credential-less request 401s here without demanding
+    // a pool (PIDASHCONV-1536). Only a presented credential needs the
+    // lookup below.
+    if !has_presented_credential(headers) {
+        return Failure::unauthorized().into_response();
+    }
+    let pool = match pool_of(state) {
+        Ok(pool) => pool,
+        Err(failure) => return failure.into_response(),
+    };
+    if let Err(denial) = authenticate(&pool, state.settings().secret_key.as_bytes(), headers).await
+    {
+        return denial;
+    }
+    Response::builder()
+        .status(StatusCode::METHOD_NOT_ALLOWED)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(axum::http::header::ALLOW, allow)
+        .body(axum::body::Body::from(not_allowed_body(method.as_str())))
+        .expect("static denial response")
 }
 
 /// One `{"slug", "name"}` entry in Python dict order
@@ -694,35 +786,37 @@ async fn exchange_in_transaction(
     }
     // `_rotate_machine_token` (`device.py:112-129`): revoke every live
     // token for the pair, then mint.
-    sqlx::query(dev_machine::ROTATE_REVOKE_SQL)
-        .bind(now)
-        .bind(workspace_id)
-        .bind(params.dev_machine_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| Failure::server_error().into_response())?;
+    pidash_services::domain::tokens::revoke_tokens_for_device_pair(
+        &mut **tx,
+        workspace_id,
+        params.dev_machine_id,
+        now,
+    )
+    .await
+    .map_err(|_| Failure::server_error().into_response())?;
     let raw = format!(
         "{}{}",
         token_kernel::MACHINE_TOKEN_PREFIX,
         token_urlsafe_32()
     );
     let token_id = Uuid::new_v4();
-    sqlx::query(dev_machine::ROTATE_CREATE_SQL)
-        .bind(token_id)
-        .bind(user_id)
-        .bind(params.dev_machine_id)
-        .bind(workspace_id)
-        .bind(dev_machine::rotate_host_label(&params.host_label))
-        .bind(token_kernel::hash_token(&raw, secret_key))
-        .bind(token_kernel::fingerprint(&raw))
-        .bind(dev_machine::machine_token_label(&params.host_label))
-        .bind(true)
-        .bind(now)
-        .bind(None::<DateTime<Utc>>)
-        .bind(None::<DateTime<Utc>>)
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| Failure::server_error().into_response())?;
+    pidash_services::domain::tokens::insert_machine_token(
+        &mut **tx,
+        &pidash_services::domain::tokens::NewMachineToken {
+            id: token_id,
+            user_id,
+            dev_machine_id: Some(params.dev_machine_id),
+            workspace_id,
+            host_label: dev_machine::rotate_host_label(&params.host_label),
+            token_hash: token_kernel::hash_token(&raw, secret_key),
+            token_fingerprint: token_kernel::fingerprint(&raw),
+            label: dev_machine::machine_token_label(&params.host_label),
+            is_service: true,
+            created_at: now,
+        },
+    )
+    .await
+    .map_err(|_| Failure::server_error().into_response())?;
     // The bridge is an in-memory credential: deactivate it for API-key
     // callers, keep machine-token callers on their rotation
     // (`device.py:466-467`).
@@ -757,12 +851,11 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
         Caller::Machine { token_id, .. } => {
             // `machine_token.revoke()`: no-op when already revoked, else
             // stamp `revoked_at` (`runner/models.py:865-869`).
-            if sqlx::query(
-                r#"UPDATE machine_token SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL"#,
+            if pidash_services::domain::tokens::revoke_machine_token_by_id_if_active(
+                &pool,
+                token_id,
+                Utc::now(),
             )
-            .bind(Utc::now())
-            .bind(token_id)
-            .execute(&pool)
             .await
             .is_err()
             {
@@ -788,12 +881,11 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
                 Err(_) => return Failure::server_error().into_response(),
             };
             if let Some((id, true)) = row {
-                if sqlx::query(
-                    r#"UPDATE api_tokens SET is_active = false, updated_at = $1 WHERE id = $2"#,
+                if pidash_services::domain::tokens::deactivate_api_token_by_id(
+                    &pool,
+                    id,
+                    Utc::now(),
                 )
-                .bind(Utc::now())
-                .bind(id)
-                .execute(&pool)
                 .await
                 .is_err()
                 {
@@ -849,6 +941,51 @@ mod tests {
             INVALID_TOKEN_BODY,
             r#"{"detail":"Given API token is not valid"}"#
         );
+    }
+
+    #[test]
+    fn method_not_allowed_body_and_allow_match_live_django() {
+        // DRF `exception_handler` (`{'Detail': ...}`) + compact
+        // `JSONRenderer`, and each view's `_allowed_methods`
+        // (PIDASHCONV-1478).
+        assert_eq!(
+            not_allowed_body("GET"),
+            r#"{"detail":"Method \"GET\" not allowed."}"#
+        );
+        assert_eq!(
+            not_allowed_body("POST"),
+            r#"{"detail":"Method \"POST\" not allowed."}"#
+        );
+        assert_eq!(
+            not_allowed_body("DELETE"),
+            r#"{"detail":"Method \"DELETE\" not allowed."}"#
+        );
+        assert_eq!(ALLOW_WORKSPACES, "GET, OPTIONS");
+        assert_eq!(ALLOW_POST_ONLY, "POST, OPTIONS");
+    }
+
+    #[test]
+    fn presented_credential_mirrors_authenticate_no_db_branches() {
+        // Missing or empty is the 401 without a query
+        // (`api_authentication.py:68-69`); anything else — including
+        // undecodable bytes, a lookup miss — needs the pool
+        // (PIDASHCONV-1536).
+        use axum::http::{HeaderName, HeaderValue};
+        let name: HeaderName = token_kernel::API_KEY_HEADER
+            .parse()
+            .expect("api key header name");
+        let empty = HeaderMap::new();
+        assert!(!has_presented_credential(&empty));
+        let mut headers = HeaderMap::new();
+        headers.insert(name.clone(), HeaderValue::from_static(""));
+        assert!(!has_presented_credential(&headers));
+        headers.insert(name.clone(), HeaderValue::from_static("x"));
+        assert!(has_presented_credential(&headers));
+        headers.insert(
+            name,
+            HeaderValue::from_bytes(&[0xff]).expect("opaque bytes"),
+        );
+        assert!(has_presented_credential(&headers));
     }
 
     #[test]

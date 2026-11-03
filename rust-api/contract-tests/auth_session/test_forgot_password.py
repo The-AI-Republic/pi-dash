@@ -42,6 +42,22 @@ def test_missing_email_is_invalid_email(anon):
     assert res.json() == {"error_code": 5005, "error_message": "INVALID_EMAIL"}
 
 
+def test_nul_byte_email_is_invalid_email(anon):
+    # PIDASHCONV-1353: the INVALID_EMAIL gate must run before the user
+    # lookup — Postgres rejects a NUL byte in the SELECT bind param,
+    # which answered 500 instead of Django's 400.
+    res = anon.post("/auth/forgot-password/", json={"email": "a\x00@example.com"})
+    assert res.status_code == 400
+    assert res.json() == {"error_code": 5005, "error_message": "INVALID_EMAIL"}
+
+
+def test_space_nul_byte_email_is_invalid_email(anon):
+    # Space twin of the above (same shared handler, same gate order).
+    res = anon.post("/auth/spaces/forgot-password/", json={"email": "a\x00@example.com"})
+    assert res.status_code == 400
+    assert res.json() == {"error_code": 5005, "error_message": "INVALID_EMAIL"}
+
+
 def test_smtp_not_configured(anon, db, user):
     with db.connect() as conn:
         with conn.cursor() as cur:

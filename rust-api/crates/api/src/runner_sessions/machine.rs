@@ -69,15 +69,15 @@
 
 use std::time::{Duration, Instant};
 
-use axum::body::Bytes;
-use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::extract::{Path, Request, State};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use http_body_util::BodyExt as _;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use pidash_db::redis::client_from_settings;
 use pidash_db::runner_sessions::machine_outbox;
 use pidash_db::runner_sessions::models::machine_session;
 use pidash_db::runner_sessions::models::machine_session::machine_session_from_row;
@@ -91,8 +91,9 @@ use pidash_types::runner_sessions::{
 use crate::runner_enroll::auth::{
     authenticate_machine_token, MachineAuth, ALLOW_DELETE, ALLOW_POST, AUTHENTICATE_HEADER_BEARER,
 };
-use crate::runner_runs::{json_response, pool_of, server_error};
+use crate::runner_runs::{is_uuid_path_segment, json_response, pool_of, server_error};
 use crate::state::AppState;
+use pidash_compat::py::py_truthy;
 
 /// Long-poll wait slice (`_POLL_SLICE_MS`, `machine_sessions.py:49`).
 const POLL_SLICE_MS: u64 = 1000;
@@ -103,11 +104,6 @@ const POLL_READ_COUNT: i64 = 100;
 /// here — verified against the FX-RSES-02 machine SQL captures).
 const DEV_MACHINE_TOUCH_SQL: &str =
     "UPDATE \"dev_machine\" SET \"last_seen_at\" = $1 WHERE \"dev_machine\".\"id\" = $2";
-/// Django's `custom_404_view` bytes (`app/views/error_404.py`):
-/// `JsonResponse({"error": "Page not found."})`. The `<uuid:>`
-/// converter 404s non-UUID segments before any view runs; axum matches
-/// the segment, so the handlers answer those bytes on a bad id.
-const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 /// Revoke reason stamped on the prior session at open (`:97`).
 const REASON_EVICTED_BY_NEW_SESSION: &str = "evicted_by_new_session";
 /// Revoke reason stamped at delete (`:156`).
@@ -123,14 +119,16 @@ fn render(response: HttpResponse) -> Response {
     json_response(status, response.body)
 }
 
-/// Resolver-404 for a non-UUID path id (see [`PAGE_NOT_FOUND_BODY`]).
-fn page_not_found() -> Response {
-    json_response(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY.to_owned())
-}
-
-/// Parse a `<uuid:>` path segment, or the resolver-404.
-fn parse_uuid(raw: &str) -> Result<Uuid, Response> {
-    raw.parse().map_err(|_| page_not_found())
+/// Parse a `<uuid:>` path segment. The converter regex is
+/// lowercase-hex-only; anything else matches no Django route, so
+/// callers proxy the request to Django, reproducing its 404
+/// byte-for-byte in every settings flavor (the `runner_open.rs`
+/// `parse_uuid` precedent).
+fn parse_uuid(raw: &str) -> Result<Uuid, ()> {
+    if !is_uuid_path_segment(raw) {
+        return Err(());
+    }
+    raw.parse().map_err(|_| ())
 }
 
 /// `timezone.now().isoformat()`: `+00:00` suffix, microseconds iff
@@ -143,47 +141,12 @@ fn django_isoformat(now: DateTime<Utc>) -> String {
     truncated.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
 }
 
-/// Api-crate-owned Redis client (the `LivePorts` precedent):
-/// `None` when `REDIS_URL` is unset, empty, or unparsable, mirroring
-/// `redis_instance()` / `async_redis_instance()` returning `None`.
-fn redis_client(state: &AppState) -> Option<redis::Client> {
-    state
-        .settings()
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .and_then(|url| redis::Client::open(url).ok())
-}
-
 /// `_auth_dev_machine` (`machine_sessions.py:54-67`) as data: the URL
 /// machine id iff the presented token is bound to it, else `None`.
 fn authed_machine_id(auth: Option<&MachineAuth>, url_id: Uuid) -> Option<Uuid> {
     match auth {
         Some(auth) if auth.token.dev_machine_id == Some(url_id) => Some(url_id),
         _ => None,
-    }
-}
-
-/// Python truthiness for JSON values (`None`/`False`/`0`/`""`/`[]`/`{}`
-/// are falsy; everything else is truthy) — the `or []` half of
-/// `body.get("ack") or []` (`:197`).
-fn py_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(flag) => *flag,
-        Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                int != 0
-            } else if let Some(uint) = number.as_u64() {
-                uint != 0
-            } else {
-                number.as_f64().is_some_and(|float| float != 0.0)
-            }
-        }
-        Value::String(text) => !text.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(map) => !map.is_empty(),
     }
 }
 
@@ -364,14 +327,17 @@ async fn poll_denial(response: Response) -> Response {
 pub async fn machine_session_open(
     State(state): State<AppState>,
     Path(raw_mid): Path<String>,
-    headers: HeaderMap,
+    req: Request,
 ) -> Response {
-    let pool = match pool_of(&state) {
-        Ok(pool) => pool.clone(),
-        Err(response) => return response,
-    };
+    // Resolver first (Django 404s non-converter segments before any
+    // view code — and before touching the database).
     let dev_machine_id = match parse_uuid(&raw_mid) {
         Ok(id) => id,
+        Err(()) => return crate::edge::proxy(State(state), req).await,
+    };
+    let headers = req.headers().clone();
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool.clone(),
         Err(response) => return response,
     };
     let secret = state.settings().secret_key.clone();
@@ -384,7 +350,7 @@ pub async fn machine_session_open(
         return render(dev_machine_mismatch_drf());
     }
 
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     let mid = dev_machine_id.to_string();
     if machine_outbox::ensure_stream_group(redis.as_ref(), &mid)
         .await
@@ -503,18 +469,17 @@ pub async fn machine_session_open(
 pub async fn machine_session_delete(
     State(state): State<AppState>,
     Path((raw_mid, raw_sid)): Path<(String, String)>,
-    headers: HeaderMap,
+    req: Request,
 ) -> Response {
+    // Either segment off-converter matches no Django route (proxied,
+    // like the open path above).
+    let (dev_machine_id, sid) = match (parse_uuid(&raw_mid), parse_uuid(&raw_sid)) {
+        (Ok(dev_machine_id), Ok(sid)) => (dev_machine_id, sid),
+        _ => return crate::edge::proxy(State(state), req).await,
+    };
+    let headers = req.headers().clone();
     let pool = match pool_of(&state) {
         Ok(pool) => pool.clone(),
-        Err(response) => return response,
-    };
-    let dev_machine_id = match parse_uuid(&raw_mid) {
-        Ok(id) => id,
-        Err(response) => return response,
-    };
-    let sid = match parse_uuid(&raw_sid) {
-        Ok(id) => id,
         Err(response) => return response,
     };
     let secret = state.settings().secret_key.clone();
@@ -527,7 +492,7 @@ pub async fn machine_session_delete(
         return render(dev_machine_mismatch_drf());
     }
 
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     // Canonical (lowercase) rendering: the marker key must match what
     // the open/poll paths write however the URL spelled the id.
     let sid_str = sid.to_string();
@@ -725,19 +690,21 @@ async fn read_with_eviction_awareness(
 pub async fn machine_session_poll(
     State(state): State<AppState>,
     Path((raw_mid, raw_sid)): Path<(String, String)>,
-    headers: HeaderMap,
-    body: Bytes,
+    req: Request,
 ) -> Response {
+    // Resolver first (Django 404s non-converter segments before any
+    // view code — and before touching the database).
+    let (dev_machine_id, sid) = match (parse_uuid(&raw_mid), parse_uuid(&raw_sid)) {
+        (Ok(dev_machine_id), Ok(sid)) => (dev_machine_id, sid),
+        _ => return crate::edge::proxy(State(state), req).await,
+    };
+    let headers = req.headers().clone();
+    let body = match req.into_body().collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return server_error(),
+    };
     let pool = match pool_of(&state) {
         Ok(pool) => pool.clone(),
-        Err(response) => return response,
-    };
-    let dev_machine_id = match parse_uuid(&raw_mid) {
-        Ok(id) => id,
-        Err(response) => return response,
-    };
-    let sid = match parse_uuid(&raw_sid) {
-        Ok(id) => id,
         Err(response) => return response,
     };
     let secret = state.settings().secret_key.clone();
@@ -806,7 +773,7 @@ pub async fn machine_session_poll(
     {
         return server_error();
     }
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     if !ack_ids.is_empty()
         && machine_outbox::ack_for_session(redis.as_ref(), &mid, &ack_ids)
             .await

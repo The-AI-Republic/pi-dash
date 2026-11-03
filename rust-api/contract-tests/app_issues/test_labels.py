@@ -130,3 +130,28 @@ def test_bulk_create_labels(clients, seed):
         assert set(label) == LABEL_KEYS
         assert admin.delete(
             f"{_base(ws, pid)}/issue-labels/{label['id']}/").status_code == 204
+
+
+def test_bulk_create_labels_rolls_back_on_bad_late_row(
+        clients, seed, db_conn):
+    # PIDASHCONV-1380: Django wraps every bulk_create batch in one
+    # transaction, so a NULL name in batch 2 rolls back batch 1: the
+    # whole request writes all labels or none.
+    import uuid
+    admin = clients["admin"]
+    ws, pid = seed["ws_slug"], seed["project"]
+    tag = uuid.uuid4().hex[:8]
+    payload = [{"name": "rb%s-%02d" % (tag, n)} for n in range(50)]
+    payload.append({"name": None})
+    resp = admin.post(
+        f"{_base(ws, pid)}/bulk-create-labels/",
+        json={"label_data": payload},
+    )
+    assert resp.status_code == 400
+    assert resp.json() == {"error": "The payload is not valid"}
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM labels WHERE project_id = %s AND name LIKE %s",
+            (pid, "rb%s-%%" % tag),
+        )
+        assert cur.fetchone()[0] == 0

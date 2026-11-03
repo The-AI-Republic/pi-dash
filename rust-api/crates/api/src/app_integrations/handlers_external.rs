@@ -751,7 +751,7 @@ async fn post_project_assistant(
     );
     map.insert("project_detail".to_owned(), project_detail(&project));
     map.insert("workspace_detail".to_owned(), workspace_detail(&workspace));
-    json_response(&Value::Object(map))
+    json_response(Value::Object(map))
 }
 
 /// `POST workspaces/<slug>/ai-assistant/`
@@ -816,7 +816,7 @@ async fn post_workspace_assistant(
         "response_html".to_owned(),
         Value::String(external::response_html(&text)),
     );
-    json_response(&Value::Object(map))
+    json_response(Value::Object(map))
 }
 
 /// `GET unsplash/` (`UnsplashEndpoint.get`, `base.py:215-243`): no
@@ -852,7 +852,7 @@ async fn get_unsplash(
     };
     let access_key = access_key.unwrap_or_default();
     if access_key.is_empty() {
-        return json_response(&Vec::<Value>::new());
+        return json_response(Vec::<Value>::new());
     }
     let url = external::unsplash_url(
         &access_key,

@@ -16,7 +16,7 @@ class AgentAPI extends APIService {}
 const agentAPI = new AgentAPI(API_BASE_URL);
 
 export type AgentRunTarget = { workspaceSlug: string; projectId: string; issueId: string };
-type Profile = { available: boolean; reason_code: string; base_url: string; model: string };
+type Profile = { available: boolean; reason_code: string; base_url: string; model: string; top_up_url?: string };
 type Native = { core: { invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> } };
 /** What the user chose in the sign-out dialog. */
 export type SignOutChoice = { deleteChatHistory: boolean };
@@ -115,6 +115,7 @@ const chatReady = new Map<string, string>();
 function chatStamp() {
   return `${generation}:${activeUserId}:${hostLabel}`;
 }
+let topUpUrl = "";
 
 function enrollmentKey() {
   return `pidash-managed-workspaces:${activeUserId}`;
@@ -184,6 +185,7 @@ async function configure() {
     throw new Error(AGENT_RUNTIME_REASON_MESSAGES[profile.reason_code] ?? profile.reason_code);
   }
   await invoke("managed_write_engine_config", { account: requireAccount(), profile });
+  topUpUrl = profile.top_up_url ?? "";
   if (tokenExpiresAt < Date.now() + 120_000) {
     const credential = await api<{ token: string; expires_at: string }>(
       "/api/users/me/ai-assistant/agent-token/",
@@ -197,6 +199,31 @@ async function configure() {
     await invoke("managed_write_model_token", { token: credential.token });
     tokenExpiresAt = expiresAt;
   }
+}
+
+/**
+ * Where the user adds model credit, as reported by the last agent profile.
+ * Empty when the server names no such place.
+ */
+export function getModelTopUpUrl(): string {
+  return topUpUrl;
+}
+
+/**
+ * Replace the engine's model credential now, whatever its recorded expiry.
+ *
+ * For a gateway that has just refused the stored one: the file can hold a
+ * token the gateway no longer accepts well before `expires_at`. Rejects when
+ * no new credential can be had — the caller asks the user to sign in.
+ */
+export async function refreshModelCredential(): Promise<void> {
+  if (!isDesktop()) return;
+  const current = generation;
+  return enqueue(async () => {
+    if (stopped || current !== generation) throw new Error("Pi Dash Agent is signed out.");
+    tokenExpiresAt = 0;
+    await configure();
+  });
 }
 
 export async function connectAgentProject(workspaceSlug: string, projectId: string) {

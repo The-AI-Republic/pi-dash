@@ -60,6 +60,7 @@ use serde_json::{Map, Value};
 
 use crate::pyformat::py_repr;
 use crate::task_message::TaskMessage;
+use pidash_compat::py::render_number;
 
 /// `webhook_send_task` (`:260`): full Celery name.
 pub const WEBHOOK_SEND_TASK_NAME: &str = "pi_dash.bgtasks.webhook_task.webhook_send_task";
@@ -177,7 +178,7 @@ fn render_value(value: &Value, out: &mut String) {
         Value::Null => out.push_str("null"),
         Value::Bool(true) => out.push_str("true"),
         Value::Bool(false) => out.push_str("false"),
-        Value::Number(number) => render_number(number, out),
+        Value::Number(number) => render_number(out, number),
         Value::String(text) => render_py_json_str(text, out),
         Value::Array(items) => {
             out.push('[');
@@ -201,18 +202,6 @@ fn render_value(value: &Value, out: &mut String) {
             }
             out.push('}');
         }
-    }
-}
-
-fn render_number(number: &serde_json::Number, out: &mut String) {
-    if let Some(unsigned) = number.as_u64() {
-        out.push_str(&unsigned.to_string());
-    } else if let Some(signed) = number.as_i64() {
-        out.push_str(&signed.to_string());
-    } else if let Some(float) = number.as_f64() {
-        out.push_str(&crate::pyformat::py_float_repr(float));
-    } else {
-        out.push_str(&number.to_string());
     }
 }
 
@@ -1151,11 +1140,14 @@ pub async fn run_deactivation_email(pool: &sqlx::PgPool, call: &DeactivationEmai
     };
     // `f"{current_site}/..."`: `None` formats as `"None"`.
     let current_site = py_json_str(&call.current_site);
-    let context = std::collections::HashMap::from([
-        ("email".to_owned(), receiver_email.clone()),
-        ("message".to_owned(), deactivation_message(&url)),
+    // Pre-escaped: `render_template` runs with autoescape off, so raw
+    // values would inject HTML (PIDASHCONV-1690); every other mail task
+    // builds its context with `escape_context`.
+    let context = crate::tasks_mail::mail_send::escape_context(&[
+        ("email", receiver_email.clone()),
+        ("message", deactivation_message(&url)),
         (
-            "webhook_url".to_owned(),
+            "webhook_url",
             deactivation_webhook_url(&current_site, &slug, &webhook_id.to_string()),
         ),
     ]);

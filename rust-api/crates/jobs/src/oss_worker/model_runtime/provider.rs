@@ -3,10 +3,11 @@
 //! `pydantic_ai/models/{anthropic,openai}.py`, pinned 1.107.0).
 //!
 //! Covers exactly the configuration `cloud_agent/runtime.py` exercises:
-//! non-streaming requests, `{max_tokens, timeout}` settings, no thinking,
-//! no cache controls, no native tools, no compaction. Anything outside
-//! that surface (streaming, images, native tools) is unreachable here
-//! because the run drive never sends it.
+//! non-streaming requests, `{max_tokens, timeout}` settings, thinking on
+//! the OpenAI-compatible lane only (tags plus the `reasoning` /
+//! `reasoning_content` fields), no cache controls, no native tools, no
+//! compaction. Anything outside that surface (streaming, images, native
+//! tools) is unreachable here because the run drive never sends it.
 //!
 //! Wire notes (each cites its probe or SDK line):
 //!
@@ -53,11 +54,11 @@ pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 
 /// Stainless retry contract (`openai/_constants.py:10-14`, identical
-/// in `anthropic/_constants.py`).
-pub const MAX_RETRIES: u32 = 2;
-const INITIAL_RETRY_DELAY_SECS: f64 = 0.5;
-const MAX_RETRY_DELAY_SECS: f64 = 8.0;
-const RETRY_AFTER_MAX_SECS: f64 = 60.0;
+/// in `anthropic/_constants.py`): the canonical
+/// [`pidash_services::assistant::retry`] policy (OVL-07 moved the
+/// former private copy there; the turn streaming loop shares it).
+pub use pidash_services::assistant::retry::MAX_RETRIES;
+use pidash_services::assistant::retry::{should_retry_status, sleep_for_retry};
 
 /// A provider lane: the [`ModelRef`][pidash_services::assistant::llm::ModelRef]
 /// branch plus the creator's decrypted key.
@@ -552,11 +553,21 @@ pub enum RetryContent {
     Errors(Vec<crate::oss_worker::model_runtime::validation::ValidationDetail>),
 }
 
-/// A response-side part (`ModelResponsePart` subset: no thinking,
-/// files, or native tools in this configuration).
+/// A response-side part (`ModelResponsePart` subset: no files or
+/// native tools in this configuration; thinking occurs on the
+/// OpenAI-compatible lane only).
 #[derive(Debug, Clone)]
 pub enum ResponsePart {
     Text(String),
+    /// `ThinkingPart`: `id` is the source field (`reasoning`,
+    /// `reasoning_content`) or `"content"` for tag-sourced thinking.
+    /// The provider always matches this lane, and no custom thinking
+    /// field is configured, so the id alone decides the replay shape
+    /// (`_process_response`, `openai.py:1103-1110,1142-1176`).
+    Thinking {
+        id: String,
+        content: String,
+    },
     ToolCall(ToolCall),
 }
 
@@ -594,6 +605,19 @@ pub fn tool_result_text(content: &Value) -> String {
     match content {
         Value::String(text) => text.clone(),
         other => serde_json::to_string(other).unwrap_or("null".to_owned()),
+    }
+}
+
+/// Render one tool-return value for an OpenAI tool message
+/// (`model_response_str`, `messages.py:1243-1250`): empty data — an
+/// empty list or null — renders as `""` (`_unwrap_data`,
+/// `messages.py:1179-1187`, returns None for it), anything else
+/// through `tool_result_text`.
+pub fn openai_tool_result_text(content: &Value) -> String {
+    match content {
+        Value::Array(items) if items.is_empty() => String::new(),
+        Value::Null => String::new(),
+        other => tool_result_text(other),
     }
 }
 
@@ -701,7 +725,7 @@ pub fn openai_request_body(
                                 ("tool_call_id".to_owned(), Value::String(call_id.to_owned())),
                                 (
                                     "content".to_owned(),
-                                    Value::String(tool_result_text(content)),
+                                    Value::String(openai_tool_result_text(content)),
                                 ),
                             ])));
                         }
@@ -780,15 +804,36 @@ fn openai_role_message(role: &str, content: &str) -> Value {
     ]))
 }
 
-/// The assistant replay (`_MapModelResponseContext`, `openai.py:1293-1363`):
-/// texts joined with `\n\n`, `content: null` without texts, tool
-/// calls in order; `None` when there is nothing to send.
+/// The assistant replay (`_MapModelResponseContext`,
+/// `openai.py:1293-1400`): texts joined with `\n\n`, thinking replayed
+/// per the `auto` mode (field-sourced as `message[field]`,
+/// tag-sourced as a `<think>` block inside the texts), `content: null`
+/// without texts, tool calls in order; `None` when there is nothing
+/// to send.
 fn openai_assistant_message(parts: &[ResponsePart]) -> Option<Value> {
-    let mut texts: Vec<&str> = Vec::new();
+    let mut texts: Vec<String> = Vec::new();
+    let mut thinkings: Vec<(&str, Vec<&str>)> = Vec::new();
     let mut calls: Vec<Value> = Vec::new();
     for part in parts {
         match part {
-            ResponsePart::Text(text) => texts.push(text.as_str()),
+            ResponsePart::Text(text) => texts.push(text.clone()),
+            // `_map_response_thinking_part`, `auto` mode
+            // (`openai.py:1363-1394`): `id == "content"` means
+            // tag-sourced, so tags mode; a field id replays as its
+            // own field (the provider always matches this lane, and
+            // no custom field is configured).
+            ResponsePart::Thinking { id, content } => {
+                if id == "content" {
+                    let (start_tag, end_tag) = THINKING_TAGS;
+                    texts.push([start_tag, content.as_str(), end_tag].join("\n"));
+                } else if let Some((_, contents)) =
+                    thinkings.iter_mut().find(|(field, _)| *field == id)
+                {
+                    contents.push(content.as_str());
+                } else {
+                    thinkings.push((id.as_str(), vec![content.as_str()]));
+                }
+            }
             ResponsePart::ToolCall(call) => {
                 calls.push(Value::Object(Map::from_iter([
                     ("id".to_owned(), Value::String(call.call_id.clone())),
@@ -807,10 +852,13 @@ fn openai_assistant_message(parts: &[ResponsePart]) -> Option<Value> {
             }
         }
     }
-    if texts.is_empty() && calls.is_empty() {
+    if texts.is_empty() && thinkings.is_empty() && calls.is_empty() {
         return None;
     }
     let mut message = Map::from_iter([("role".to_owned(), Value::String("assistant".to_owned()))]);
+    for (field, contents) in &thinkings {
+        message.insert((*field).to_owned(), Value::String(contents.join("\n\n")));
+    }
     if texts.is_empty() {
         message.insert("content".to_owned(), Value::Null);
     } else {
@@ -909,6 +957,12 @@ pub fn anthropic_request_body(
                                 blocks.push(anthropic_text_block(text));
                             }
                         }
+                        // Thinking never occurs on this lane: the
+                        // Anthropic parse emits only text and tool
+                        // calls (thinking blocks are outside this
+                        // configuration), so there is nothing to
+                        // replay.
+                        ResponsePart::Thinking { .. } => {}
                         ResponsePart::ToolCall(call) => {
                             blocks.push(Value::Object(Map::from_iter([
                                 ("id".to_owned(), Value::String(call.call_id.clone())),
@@ -1020,8 +1074,9 @@ fn anthropic_wire_tool(tool: &WireTool) -> Value {
 pub enum ProviderError {
     /// `APIStatusError` → `ModelHTTPError(status_code, model_name,
     /// body)`: an HTTP error status after retries. `body_text` is
-    /// the raw text; `body_json` the parsed body when the payload is
-    /// JSON (the SDK's `e.body` reads parsed-JSON-or-text).
+    /// the stripped text; `body_json` the parsed body when the
+    /// payload is JSON (the SDK's `e.body` reads
+    /// parsed-JSON-or-text).
     Http {
         status: u16,
         body_text: String,
@@ -1053,9 +1108,21 @@ impl ProviderError {
             } => {
                 // `f'status_code: {s}, model_name: {m}, body: {body}'`
                 // with the body Python-`repr`'d (a parsed dict) or raw
-                // (text).
+                // (text). On the OpenAI lane the SDK unwraps the
+                // envelope first (`data = body.get("error", body) if
+                // is_mapping(body) else body`, `_make_status_error`
+                // in `openai/_client.py`); the Anthropic SDK has no
+                // such unwrap, so that lane keeps the full body.
                 let body = match body_json {
-                    Some(json) => py_repr(json),
+                    Some(json) => {
+                        let shown = match (lane, json) {
+                            (Lane::OpenAICompatible { .. }, Value::Object(map)) => {
+                                map.get("error").unwrap_or(json)
+                            }
+                            _ => json,
+                        };
+                        py_repr(shown)
+                    }
                     None => body_text.clone(),
                 };
                 format!(
@@ -1164,6 +1231,65 @@ pub struct ParsedResponse {
     pub response_id: Option<String>,
 }
 
+/// The default profile thinking tags (`profiles/__init__.py:125`);
+/// `openai_model_profile` does not override them.
+const THINKING_TAGS: (&str, &str) = ("<think>", "</think>");
+
+/// `split_content_into_text_and_thinking` (`_thinking_part.py:6-31`):
+/// tag-sourced thinking carries `id: "content"` (`openai.py:1108`).
+/// Empty think spans still emit a part, an unclosed tag folds the
+/// rest into text (tag lost), and empty text spans emit nothing.
+fn split_content_into_text_and_thinking(content: &str) -> Vec<ResponsePart> {
+    let (start_tag, end_tag) = THINKING_TAGS;
+    let mut parts = Vec::new();
+    let mut rest = content;
+    while let Some(start) = rest.find(start_tag) {
+        let (before, after_start) = rest.split_at(start);
+        if !before.is_empty() {
+            parts.push(ResponsePart::Text(before.to_owned()));
+        }
+        let after_tag = &after_start[start_tag.len()..];
+        match after_tag.find(end_tag) {
+            Some(end) => {
+                let (think, after_end) = after_tag.split_at(end);
+                parts.push(ResponsePart::Thinking {
+                    id: "content".to_owned(),
+                    content: think.to_owned(),
+                });
+                rest = &after_end[end_tag.len()..];
+            }
+            None => {
+                parts.push(ResponsePart::Text(after_tag.to_owned()));
+                rest = "";
+            }
+        }
+    }
+    if !rest.is_empty() {
+        parts.push(ResponsePart::Text(rest.to_owned()));
+    }
+    parts
+}
+
+/// `_process_thinking` (`openai.py:1142-1176`) for this
+/// configuration: no custom field, so `reasoning` then
+/// `reasoning_content`; the first non-empty string wins and anything
+/// else (missing, null, empty, non-string) falls through to the next
+/// field, like the SDK's warn-and-continue.
+fn openai_thinking_part(message: &Map<String, Value>) -> Option<ResponsePart> {
+    for field in ["reasoning", "reasoning_content"] {
+        match message.get(field) {
+            Some(Value::String(reasoning)) if !reasoning.is_empty() => {
+                return Some(ResponsePart::Thinking {
+                    id: field.to_owned(),
+                    content: reasoning.clone(),
+                });
+            }
+            _ => continue,
+        }
+    }
+    None
+}
+
 /// Parse an OpenAI chat-completions payload. `request_id` feeds the
 /// Ollama-`None` workaround only through the value itself.
 pub fn parse_openai_response(
@@ -1221,12 +1347,13 @@ pub fn parse_openai_response(
         });
     }
     let mut parts: Vec<ResponsePart> = Vec::new();
+    // Field-sourced thinking lands first (`openai.py:1103-1104`).
+    if let Some(thinking) = openai_thinking_part(message) {
+        parts.push(thinking);
+    }
     if let Some(content) = message.get("content").and_then(Value::as_str) {
-        // No thinking tags in this configuration: the content is one
-        // text part (`split_content_into_text_and_thinking` with the
-        // default profile).
         if !content.is_empty() {
-            parts.push(ResponsePart::Text(content.to_owned()));
+            parts.extend(split_content_into_text_and_thinking(content));
         }
     }
     if let Some(Value::Array(calls)) = message.get("tool_calls") {
@@ -1511,6 +1638,16 @@ pub async fn complete(
     }
 }
 
+/// The error-status body split (`_make_status_error_from_response`,
+/// `openai/_base_client.py:407-427`, identical in the Anthropic
+/// SDK): strip the text first, then parse-or-keep, so both the
+/// JSON and the text slots carry the stripped form.
+fn parse_error_body(bytes: &[u8]) -> (String, Option<Value>) {
+    let text = String::from_utf8_lossy(bytes).trim().to_owned();
+    let json = serde_json::from_str::<Value>(&text).ok();
+    (text, json)
+}
+
 /// POST with the stainless retry loop (`openai/_base_client.py:990-1060`,
 /// async mirror at 1610-1660; identical in the Anthropic SDK):
 /// timeouts and connection errors retry while attempts remain, else
@@ -1562,7 +1699,28 @@ async fn post_with_retries(
             Ok(response) => {
                 let status = response.status().as_u16();
                 let headers = response.headers().clone();
-                let bytes = response.bytes().await.unwrap_or_default().to_vec();
+                // The non-streaming SDK `send` reads the body inside the
+                // request try block, so a body-read failure (read timeout
+                // or mid-body reset) retries exactly like a send failure.
+                let bytes = match response.bytes().await {
+                    Ok(body) => body.to_vec(),
+                    Err(error) if error.is_timeout() => {
+                        if retries_taken < MAX_RETRIES {
+                            sleep_for_retry(retries_taken, None).await;
+                            retries_taken += 1;
+                            continue;
+                        }
+                        return Err(ProviderError::Timeout);
+                    }
+                    Err(_) => {
+                        if retries_taken < MAX_RETRIES {
+                            sleep_for_retry(retries_taken, None).await;
+                            retries_taken += 1;
+                            continue;
+                        }
+                        return Err(ProviderError::Connection);
+                    }
+                };
                 if status < 400 {
                     return Ok(bytes);
                 }
@@ -1571,8 +1729,7 @@ async fn post_with_retries(
                     retries_taken += 1;
                     continue;
                 }
-                let body_text = String::from_utf8_lossy(&bytes).into_owned();
-                let body_json = serde_json::from_slice::<Value>(&bytes).ok();
+                let (body_text, body_json) = parse_error_body(&bytes);
                 return Err(ProviderError::Http {
                     status,
                     body_text,
@@ -1581,72 +1738,6 @@ async fn post_with_retries(
             }
         }
     }
-}
-
-/// `_should_retry` (`openai/_base_client.py:773-807`): the
-/// `x-should-retry` override wins, else 408/409/429/5xx retry.
-fn should_retry_status(status: u16, headers: &reqwest::header::HeaderMap) -> bool {
-    if let Some(flag) = headers
-        .get("x-should-retry")
-        .and_then(|value| value.to_str().ok())
-    {
-        if flag == "true" {
-            return true;
-        }
-        if flag == "false" {
-            return false;
-        }
-    }
-    status == 408 || status == 409 || status == 429 || status >= 500
-}
-
-/// `_sleep_for_retry` / `_calculate_retry_timeout`: the parsed
-/// `retry-after` wins when within `(0, 60]`, else exponential
-/// backoff with jitter.
-async fn sleep_for_retry(retries_taken: u32, headers: Option<&reqwest::header::HeaderMap>) {
-    let mut seconds = retry_after_seconds(headers)
-        .filter(|secs| secs.is_finite() && *secs > 0.0 && *secs <= RETRY_AFTER_MAX_SECS);
-    if seconds.is_none() {
-        let capped = retries_taken.min(1000) as f64;
-        let backoff = (INITIAL_RETRY_DELAY_SECS * 2_f64.powf(capped)).min(MAX_RETRY_DELAY_SECS);
-        seconds = Some((backoff * (1.0 - 0.25 * unit_random())).max(0.0));
-    }
-    if let Some(secs) = seconds {
-        tokio::time::sleep(std::time::Duration::from_secs_f64(secs)).await;
-    }
-}
-
-/// `_parse_retry_after_header`: `retry-after-ms` first, then
-/// `retry-after` as seconds (floats honoured), then as an HTTP-date.
-fn retry_after_seconds(headers: Option<&reqwest::header::HeaderMap>) -> Option<f64> {
-    let headers = headers?;
-    if let Some(ms) = headers
-        .get("retry-after-ms")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|text| text.parse::<f64>().ok())
-    {
-        return Some(ms / 1000.0);
-    }
-    let text = headers
-        .get("retry-after")
-        .and_then(|value| value.to_str().ok())?;
-    if let Ok(secs) = text.parse::<f64>() {
-        return Some(secs);
-    }
-    // HTTP-date (`email.utils.parsedate_tz` / `mktime_tz`): IMF-fixdate
-    // parses as RFC 2822.
-    let when = chrono::DateTime::parse_from_rfc2822(text).ok()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs_f64())
-        .unwrap_or(0.0);
-    Some(when.timestamp() as f64 - now)
-}
-
-/// A uniform `[0, 1)` draw for retry jitter, from UUID randomness
-/// (no RNG crate is locked; `uuid::v4` bits serve).
-fn unit_random() -> f64 {
-    (uuid::Uuid::new_v4().as_u128() as f64) / (u128::MAX as f64)
 }
 
 #[cfg(test)]
@@ -2142,19 +2233,52 @@ mod tests {
             base_url: "https://t/v1".to_owned(),
             api_key: "k".to_owned(),
         };
+        let wrapped: Value = serde_json::from_str(
+            r#"{"error":{"message":"bad key","type":"invalid_request_error","code":null}}"#,
+        )
+        .unwrap();
         let error = ProviderError::Http {
             status: 400,
             body_text: String::new(),
-            body_json: Some(
-                serde_json::from_str::<Value>(
-                    r#"{"error":{"message":"bad key","type":"invalid_request_error","code":null}}"#,
-                )
-                .unwrap(),
-            ),
+            body_json: Some(wrapped.clone()),
+        };
+        // The OpenAI lane unwraps `body["error"]` (`_make_status_error`).
+        assert_eq!(
+            error.message(&lane),
+            "status_code: 400, model_name: gpt-4o-mini, body: {'message': 'bad key', 'type': 'invalid_request_error', 'code': None}"
+        );
+        // The Anthropic lane keeps the full body (no SDK unwrap).
+        let anthropic = Lane::Anthropic {
+            model: "claude-test".to_owned(),
+            api_key: "k".to_owned(),
+        };
+        let error = ProviderError::Http {
+            status: 400,
+            body_text: String::new(),
+            body_json: Some(wrapped),
+        };
+        assert_eq!(
+            error.message(&anthropic),
+            "status_code: 400, model_name: claude-test, body: {'error': {'message': 'bad key', 'type': 'invalid_request_error', 'code': None}}"
+        );
+        // Objects without an `error` key and non-object bodies repr whole.
+        let error = ProviderError::Http {
+            status: 400,
+            body_text: String::new(),
+            body_json: Some(serde_json::from_str(r#"{"message":"nope"}"#).unwrap()),
         };
         assert_eq!(
             error.message(&lane),
-            "status_code: 400, model_name: gpt-4o-mini, body: {'error': {'message': 'bad key', 'type': 'invalid_request_error', 'code': None}}"
+            "status_code: 400, model_name: gpt-4o-mini, body: {'message': 'nope'}"
+        );
+        let error = ProviderError::Http {
+            status: 400,
+            body_text: String::new(),
+            body_json: Some(serde_json::from_str(r#"["oops"]"#).unwrap()),
+        };
+        assert_eq!(
+            error.message(&lane),
+            "status_code: 400, model_name: gpt-4o-mini, body: ['oops']"
         );
         assert_eq!(ProviderError::Timeout.message(&lane), "Request timed out.");
         assert_eq!(
@@ -2164,17 +2288,193 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_parsing() {
-        use reqwest::header::{HeaderMap, HeaderValue};
-        assert_eq!(retry_after_seconds(None), None);
-        let mut headers = HeaderMap::new();
-        assert_eq!(retry_after_seconds(Some(&headers)), None);
-        headers.insert("retry-after-ms", HeaderValue::from_static("1500"));
-        assert_eq!(retry_after_seconds(Some(&headers)), Some(1.5));
-        headers.remove("retry-after-ms");
-        headers.insert("retry-after", HeaderValue::from_static("3"));
-        assert_eq!(retry_after_seconds(Some(&headers)), Some(3.0));
-        headers.insert("retry-after", HeaderValue::from_static("2.5"));
-        assert_eq!(retry_after_seconds(Some(&headers)), Some(2.5));
+    fn error_body_strips_before_parsing() {
+        // `err_text = response.text.strip()`, then parse-or-keep.
+        let (text, json) = parse_error_body(b"upstream exploded\n\n");
+        assert_eq!(text, "upstream exploded");
+        assert_eq!(json, None);
+        let (text, json) = parse_error_body(b"  {\"a\": 1}  \n");
+        assert_eq!(text, "{\"a\": 1}");
+        assert_eq!(json, Some(serde_json::from_str(r#"{"a": 1}"#).unwrap()));
+        let (text, json) = parse_error_body(b"");
+        assert_eq!(text, "");
+        assert_eq!(json, None);
+    }
+
+    fn thinking_lane() -> Lane {
+        Lane::OpenAICompatible {
+            model: "m".to_owned(),
+            base_url: "https://t/v1".to_owned(),
+            api_key: "k".to_owned(),
+        }
+    }
+
+    fn parse_message(message: &str) -> ParsedResponse {
+        let golden = Golden::load().expect("golden parses");
+        let table = ProviderTable::load(&golden).expect("table compiles");
+        let payload: Value = serde_json::from_str(&format!(
+            r#"{{"id":"c","model":"m","choices":[{{"index":0,"message":{message},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}}}"#,
+        ))
+        .unwrap();
+        parse_openai_response(&thinking_lane(), &payload, &table).expect("parses")
+    }
+
+    fn thinking_parts(parts: &[ResponsePart]) -> Vec<(&str, &str)> {
+        parts
+            .iter()
+            .map(|part| match part {
+                ResponsePart::Text(text) => ("text", text.as_str()),
+                ResponsePart::Thinking { id, content } => (id.as_str(), content.as_str()),
+                ResponsePart::ToolCall(call) => ("tool", call.name.as_str()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn openai_thinking_fields_map_first_non_empty() {
+        // `_process_thinking` (`openai.py:1160-1176`): `reasoning`
+        // wins over `reasoning_content`; empty and non-string values
+        // fall through, and field-sourced thinking lands first.
+        let parsed = parse_message(
+            r#"{"role":"assistant","content":"hi","reasoning":"r1","reasoning_content":"rc"}"#,
+        );
+        assert_eq!(
+            thinking_parts(&parsed.parts),
+            vec![("reasoning", "r1"), ("text", "hi")]
+        );
+        let parsed = parse_message(r#"{"role":"assistant","content":"","reasoning_content":"rc"}"#);
+        assert_eq!(
+            thinking_parts(&parsed.parts),
+            vec![("reasoning_content", "rc")]
+        );
+        let parsed = parse_message(
+            r#"{"role":"assistant","content":null,"reasoning":"","reasoning_content":"rc"}"#,
+        );
+        assert_eq!(
+            thinking_parts(&parsed.parts),
+            vec![("reasoning_content", "rc")]
+        );
+        let parsed = parse_message(
+            r#"{"role":"assistant","content":null,"reasoning":{"deep":true},"reasoning_content":"rc"}"#,
+        );
+        assert_eq!(
+            thinking_parts(&parsed.parts),
+            vec![("reasoning_content", "rc")]
+        );
+        let parsed = parse_message(r#"{"role":"assistant","content":"hi"}"#);
+        assert_eq!(thinking_parts(&parsed.parts), vec![("text", "hi")]);
+        // Non-string reasoning with nothing after it: no thinking part.
+        let parsed = parse_message(r#"{"role":"assistant","content":null,"reasoning":["x"]}"#);
+        assert!(parsed.parts.is_empty());
+    }
+
+    #[test]
+    fn content_think_tags_split() {
+        // `split_content_into_text_and_thinking`
+        // (`_thinking_part.py:6-31`): tag-sourced thinking carries
+        // `id: "content"`, empty think spans still emit, an unclosed
+        // tag folds the rest into text, and empty text spans emit
+        // nothing.
+        assert_eq!(
+            thinking_parts(&split_content_into_text_and_thinking(
+                "<think>plan</think>{\"a\":1}"
+            )),
+            vec![("content", "plan"), ("text", "{\"a\":1}")]
+        );
+        assert_eq!(
+            thinking_parts(&split_content_into_text_and_thinking("a<think>b</think>c")),
+            vec![("text", "a"), ("content", "b"), ("text", "c")]
+        );
+        assert_eq!(
+            thinking_parts(&split_content_into_text_and_thinking("<think></think>")),
+            vec![("content", "")]
+        );
+        assert_eq!(
+            thinking_parts(&split_content_into_text_and_thinking("<think>abc")),
+            vec![("text", "abc")]
+        );
+        assert_eq!(
+            thinking_parts(&split_content_into_text_and_thinking("plain")),
+            vec![("text", "plain")]
+        );
+        assert!(split_content_into_text_and_thinking("").is_empty());
+        // Through the full parse: tags split and the JSON validates
+        // downstream (the issue's case (a)).
+        let parsed =
+            parse_message(r#"{"role":"assistant","content":"<think>plan</think>{\"a\":1}"}"#);
+        assert_eq!(
+            thinking_parts(&parsed.parts),
+            vec![("content", "plan"), ("text", "{\"a\":1}")]
+        );
+    }
+
+    #[test]
+    fn openai_assistant_message_replays_thinking() {
+        // `auto` mode (`openai.py:1363-1400`): field-sourced thinking
+        // replays as `message[field]` with `content: null` when
+        // textless; tag-sourced thinking replays as a `<think>` block
+        // inside the texts, in order; a thinking-only response still
+        // emits a message, while a partless one emits nothing.
+        let field = openai_assistant_message(&[ResponsePart::Thinking {
+            id: "reasoning_content".to_owned(),
+            content: "plan".to_owned(),
+        }])
+        .expect("thinking emits a message");
+        assert_eq!(
+            field,
+            serde_json::json!({
+                "role": "assistant",
+                "reasoning_content": "plan",
+                "content": null,
+            })
+        );
+        assert_eq!(
+            serde_json::to_string(&field).unwrap(),
+            r#"{"role":"assistant","reasoning_content":"plan","content":null}"#,
+        );
+        let mixed = openai_assistant_message(&[
+            ResponsePart::Text("a".to_owned()),
+            ResponsePart::Thinking {
+                id: "content".to_owned(),
+                content: "b".to_owned(),
+            },
+            ResponsePart::Text("c".to_owned()),
+        ])
+        .expect("mixed emits a message");
+        assert_eq!(
+            mixed["content"],
+            Value::String("a\n\n<think>\nb\n</think>\n\nc".to_owned())
+        );
+        assert!(mixed.get("reasoning_content").is_none());
+        let empty: Vec<ResponsePart> = Vec::new();
+        assert!(openai_assistant_message(&empty).is_none());
+    }
+
+    #[test]
+    fn openai_empty_tool_result_is_empty_string() {
+        // `_unwrap_data` (`messages.py:1179-1187`) returns None for
+        // empty data, so `model_response_str` (`messages.py:1243-1250`)
+        // renders an empty list or null as `''` — not `"[]"`/`"null"`.
+        // Non-empty lists still render as compact JSON.
+        for (content, expected) in [
+            (Value::Array(Vec::new()), ""),
+            (Value::Null, ""),
+            (serde_json::json!([{"id": "1"}]), r#"[{"id":"1"}]"#),
+        ] {
+            let history = vec![HistoryMessage::Request {
+                parts: vec![RequestPart::ToolReturn {
+                    name: "pidash_search_project_issues".to_owned(),
+                    content,
+                    call_id: "call_1".to_owned(),
+                }],
+            }];
+            let body = openai_request_body("gpt-4o-mini", "", &history, &[], 0);
+            assert_eq!(
+                body["messages"],
+                serde_json::json!([
+                    {"role": "tool", "tool_call_id": "call_1", "content": expected},
+                ])
+            );
+        }
     }
 }
