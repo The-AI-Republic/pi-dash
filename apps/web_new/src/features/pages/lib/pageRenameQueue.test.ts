@@ -7,7 +7,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { createPageRenameQueue, type PageRenameOutcome } from "./pageRenameQueue.js";
+import { createPageRenameChannels, createPageRenameQueue, type PageRenameOutcome } from "./pageRenameQueue.js";
 
 interface Gate {
   resolve: () => void;
@@ -105,17 +105,17 @@ describe("createPageRenameQueue", () => {
 
   it("hands each write the payload it was enqueued with, not a later one", async () => {
     const seen: string[] = [];
-    let release: (() => void) | null = null;
+    const opened: { release?: () => void } = {};
     const queue = createPageRenameQueue<string>((payload) => {
       seen.push(payload);
       return new Promise<void>((resolve) => {
-        release = resolve;
+        opened.release = resolve;
       });
     });
     queue.enqueue("first", outcomes().settle);
     queue.enqueue("second", outcomes().settle);
     expect(seen).toEqual(["first"]);
-    release?.();
+    opened.release?.();
     await vi.waitFor(() => expect(seen).toEqual(["first", "second"]));
   });
 
@@ -144,3 +144,91 @@ describe("createPageRenameQueue", () => {
     await vi.waitFor(() => expect(first.seen).toEqual([{ superseded: true, failed: false, error: expect.anything() }]));
   });
 });
+
+interface PageWrite {
+  pageId: string;
+  name: string;
+}
+
+describe("createPageRenameChannels", () => {
+  /** A per-page write sink whose calls the test releases one at a time. */
+  function pagedWrites(): {
+    write: (payload: PageWrite) => Promise<void>;
+    sent: PageWrite[];
+    release: (index: number) => void;
+  } {
+    const sent: PageWrite[] = [];
+    const open: Array<() => void> = [];
+    return {
+      sent,
+      release: (index) => open[index]?.(),
+      write: (payload) => {
+        sent.push(payload);
+        return new Promise<void>((resolve) => open.push(resolve));
+      },
+    };
+  }
+
+  it("keeps one write at a time within a page", async () => {
+    const sink = pagedWrites();
+    const channels = createPageRenameChannels<PageWrite>((payload) => payload.pageId, sink.write);
+    const first = outcomes();
+    channels.enqueue({ pageId: "A", name: "A1" }, first.settle);
+    channels.enqueue({ pageId: "A", name: "A2" }, outcomes().settle);
+    expect(sink.sent.map((payload) => payload.name)).toEqual(["A1"]);
+    sink.release(0);
+    await vi.waitFor(() => expect(sink.sent.map((payload) => payload.name)).toEqual(["A1", "A2"]));
+  });
+
+  it("does not let a rename on one page supersede a waiting name on another", async () => {
+    const sink = pagedWrites();
+    const channels = createPageRenameChannels<PageWrite>((payload) => payload.pageId, sink.write);
+    const first = outcomes();
+    const left = outcomes();
+    const next = outcomes();
+    channels.enqueue({ pageId: "A", name: "A1" }, first.settle);
+    channels.enqueue({ pageId: "A", name: "A final" }, left.settle);
+    channels.enqueue({ pageId: "B", name: "B1" }, next.settle);
+    // B writes on its own channel, beside A's one in-flight write.
+    expect(sink.sent.map((payload) => payload.name)).toEqual(["A1", "B1"]);
+    expect(left.seen).toEqual([]);
+    sink.release(0);
+    await vi.waitFor(() => expect(sink.sent.map((payload) => payload.name)).toEqual(["A1", "B1", "A final"]));
+    expect(left.seen).toEqual([]);
+    sink.release(1);
+    sink.release(2);
+    await vi.waitFor(() => expect(left.seen).toEqual([{ superseded: false, failed: false }]));
+    await vi.waitFor(() => expect(next.seen).toEqual([{ superseded: false, failed: false }]));
+  });
+
+  it("releases a channel once it is idle so the next write starts fresh", async () => {
+    const sink = pagedWrites();
+    const channels = createPageRenameChannels<PageWrite>((payload) => payload.pageId, sink.write);
+    const first = outcomes();
+    channels.enqueue({ pageId: "A", name: "A1" }, first.settle);
+    sink.release(0);
+    await vi.waitFor(() => expect(first.seen).toEqual([{ superseded: false, failed: false }]));
+    const second = outcomes();
+    channels.enqueue({ pageId: "A", name: "A2" }, second.settle);
+    expect(sink.sent.map((payload) => payload.name)).toEqual(["A1", "A2"]);
+    sink.release(1);
+    await vi.waitFor(() => expect(second.seen).toEqual([{ superseded: false, failed: false }]));
+  });
+
+  it("keeps a channel open while a newer name is still waiting", async () => {
+    const sink = pagedWrites();
+    const channels = createPageRenameChannels<PageWrite>((payload) => payload.pageId, sink.write);
+    const last = outcomes();
+    channels.enqueue({ pageId: "A", name: "A1" }, outcomes().settle);
+    channels.enqueue({ pageId: "A", name: "A2" }, last.settle);
+    sink.release(0);
+    await vi.waitFor(() => expect(sink.sent.map((payload) => payload.name)).toEqual(["A1", "A2"]));
+    sink.release(1);
+    await vi.waitFor(() => expect(last.seen).toEqual([{ superseded: false, failed: false }]));
+  });
+});
+
+interface PageWrite {
+  pageId: string;
+  name: string;
+}

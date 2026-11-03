@@ -13,13 +13,13 @@
 // arriving last (NEWFRONT-358).
 
 import { updatePage, type PageDetail, type PageMark, type PageRow } from "@pidash/api-client";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { notifyError } from "../../../shared/shell/toaster.js";
-import { createPageRenameQueue, type PageRenameQueue } from "../lib/pageRenameQueue.js";
+import { createPageRenameChannels, type PageRenameChannels } from "../lib/pageRenameQueue.js";
 import { pageKeys } from "./keys.js";
 
 export const PAGE_RENAME_FAILED_TITLE = "Page title could not be saved.";
@@ -50,6 +50,7 @@ interface RenameWrite {
 
 /** The settled answer to one asked-for rename. */
 interface PageRenameResult {
+  write: RenameWrite;
   name: string;
   /** A newer name replaced this one: it must not touch caches or notices. */
   superseded: boolean;
@@ -62,39 +63,72 @@ interface PageRenameResult {
  * the last keystroke is the last write (NEWFRONT-358). A superseded save
  * answers quietly — no cache write and no notice, since its name is stale
  * and a newer save is on its way.
+ *
+ * The channels live on the query client, addressed by page, because the
+ * detail route keeps its screen across `$pageId` changes and remounts it
+ * when the operator comes back: a name waiting on the page being left
+ * must not be dropped by a rename on the page being opened, and a page
+ * opened again must not start a second channel beside the first. Every
+ * answered write patches the page it names, never the page the screen
+ * shows now. The page identity travels with the mutation's variables,
+ * not with the render, because the mutation runs after the screen may
+ * already have moved on.
  */
 export function usePageRename(workspaceSlug: string, projectId: string, pageId: string) {
   const queryClient = useQueryClient();
-  const detailKey = pageKeys.detail(workspaceSlug, projectId, pageId);
-  const listKey = pageKeys.list(workspaceSlug, projectId);
-  // Each write carries the name and the record it belongs to, so one that
-  // settles after the screen moved on still patches the page it was asked
-  // for. The queue lives for the lifetime of this page's screen.
-  const queueRef = React.useRef<PageRenameQueue<RenameWrite> | null>(null);
-  if (queueRef.current === null) {
-    queueRef.current = createPageRenameQueue<RenameWrite>(async (write) => {
-      await updatePage(getAppClient(), write.workspaceSlug, write.projectId, write.pageId, { name: write.name });
-    });
-  }
-  const queue = queueRef.current;
-  return useMutation<PageRenameResult, unknown, string>({
-    mutationFn: (name) =>
+  const channels = renameChannelsFor(queryClient);
+  const mutation = useMutation<PageRenameResult, unknown, RenameWrite>({
+    mutationFn: (write) =>
       new Promise<PageRenameResult>((resolve, reject) => {
-        queue.enqueue({ workspaceSlug, projectId, pageId, name }, (outcome) => {
-          if (outcome.superseded) resolve({ name, superseded: true });
+        channels.enqueue(write, (outcome) => {
+          if (outcome.superseded) resolve({ write, name: write.name, superseded: true });
           else if (outcome.failed) reject(outcome.error);
-          else resolve({ name, superseded: false });
+          else resolve({ write, name: write.name, superseded: false });
         });
       }),
-    onSuccess: ({ name, superseded }) => {
+    // Patch from the write's own identifiers: a rename that settles after
+    // the screen opened another page still belongs to the page it renamed.
+    onSuccess: ({ write, name, superseded }) => {
       if (superseded) return;
-      queryClient.setQueryData<PageDetail>(detailKey, (page) => (page === undefined ? page : { ...page, name }));
-      queryClient.setQueryData<PageRow[]>(listKey, (rows) => renameInList(rows, pageId, name));
+      queryClient.setQueryData<PageDetail>(
+        pageKeys.detail(write.workspaceSlug, write.projectId, write.pageId),
+        (page) => (page === undefined ? page : { ...page, name })
+      );
+      queryClient.setQueryData<PageRow[]>(pageKeys.list(write.workspaceSlug, write.projectId), (rows) =>
+        renameInList(rows, write.pageId, name)
+      );
     },
     onError: () => {
       notifyError(PAGE_RENAME_FAILED_TITLE);
     },
   });
+  const { mutate: runRename } = mutation;
+  // The commit the title calls: the page named here travels with the
+  // write, so a later render of this screen cannot retarget it.
+  const commit = React.useCallback(
+    (name: string) => {
+      runRename({ workspaceSlug, projectId, pageId, name });
+    },
+    [runRename, workspaceSlug, projectId, pageId]
+  );
+  return { ...mutation, mutate: commit };
+}
+
+/** One rename channel per page, shared by every screen on one cache. */
+const channelsByClient = new WeakMap<QueryClient, PageRenameChannels<RenameWrite>>();
+
+function renameChannelsFor(queryClient: QueryClient): PageRenameChannels<RenameWrite> {
+  let channels = channelsByClient.get(queryClient);
+  if (channels === undefined) {
+    channels = createPageRenameChannels<RenameWrite>(
+      (write) => `${write.workspaceSlug}\u0000${write.projectId}\u0000${write.pageId}`,
+      async (write) => {
+        await updatePage(getAppClient(), write.workspaceSlug, write.projectId, write.pageId, { name: write.name });
+      }
+    );
+    channelsByClient.set(queryClient, channels);
+  }
+  return channels;
 }
 
 /**

@@ -23,6 +23,8 @@ import { PAGE_MARK_FAILED_TITLE, PAGE_RENAME_FAILED_TITLE, usePageMark, usePageR
 
 let status = 200;
 let patches: { url: string; body: unknown }[] = [];
+/** The page an operator opens after the one under test. */
+const OTHER_PAGE_ID = "423e4567-e89b-12d3-a456-426614174004";
 /** When set, each rename PATCH waits for this test to release it. */
 let gate: { open: Array<() => void>; count: () => number } | null = null;
 
@@ -64,8 +66,12 @@ afterEach(() => {
 function harness(): { client: QueryClient; wrapper: React.FC<{ children: React.ReactNode }> } {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const detail: PageDetail = { ...makePageRow({ name: "Old name" }), description_html: "" };
-  const other = makePageRow({ id: "423e4567-e89b-12d3-a456-426614174004", name: "Other" });
+  const other = makePageRow({ id: OTHER_PAGE_ID, name: "Other" });
   client.setQueryData(pageKeys.detail("acme", PAGES_PROJECT_ID, PAGES_PAGE_ID), detail);
+  client.setQueryData<PageDetail>(pageKeys.detail("acme", PAGES_PROJECT_ID, OTHER_PAGE_ID), {
+    ...other,
+    description_html: "",
+  });
   client.setQueryData<PageRow[]>(pageKeys.list("acme", PAGES_PROJECT_ID), [detail, other]);
   const wrapper = ({ children }: { children: React.ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
@@ -151,6 +157,73 @@ describe("usePageRename", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(client.getQueryData(pageKeys.detail("acme", PAGES_PROJECT_ID, PAGES_PAGE_ID))).toBeUndefined();
     expect(client.getQueryData(pageKeys.list("acme", PAGES_PROJECT_ID))).toBeUndefined();
+  });
+
+  it("sends the page being left's waiting name after a rename on the next page (NEWFRONT-358)", async () => {
+    holdPatches();
+    const { wrapper } = harness();
+    // The detail route keeps one screen across `$pageId` changes, so the
+    // hook is re-rendered with the next page rather than remounted.
+    const { result, rerender } = renderHook(
+      ({ pageId }: { pageId: string }) => usePageRename("acme", PAGES_PROJECT_ID, pageId),
+      {
+        wrapper,
+        initialProps: { pageId: PAGES_PAGE_ID },
+      }
+    );
+    // The title's commit path holds this screen's `mutate`; the blur that
+    // leaves A fires it before the route hands the screen page B.
+    const saveA = result.current.mutate;
+    saveA("A1");
+    await vi.waitFor(() => expect(patches.map((patch) => patch.body)).toEqual([{ name: "A1" }]));
+    // Leaving A commits its final name, which waits behind "A1".
+    saveA("A final");
+    rerender({ pageId: OTHER_PAGE_ID });
+    // B's rename must not supersede A's waiting name: each page has its own
+    // channel, so B writes beside A's one in-flight rename.
+    result.current.mutate("B1");
+    await vi.waitFor(() => expect(patches.map((patch) => patch.body)).toEqual([{ name: "A1" }, { name: "B1" }]));
+    expect(patches[1]?.url).toContain(`/pages/${OTHER_PAGE_ID}/`);
+    // Neither page has two renames on the wire at once.
+    expect(gate?.count()).toBe(2);
+    await releaseOldest();
+    // A's final name is still sent, to A, once A's earlier write settled.
+    await vi.waitFor(() => expect(patches.map((patch) => patch.body)).toContainEqual({ name: "A final" }));
+    const finalOnA = patches.findIndex((patch) => (patch.body as { name: string }).name === "A final");
+    expect(patches[finalOnA]?.url).toContain(`/pages/${PAGES_PAGE_ID}/`);
+    // Still only A's final name on A and B1 on B: one per page.
+    expect(gate?.count()).toBe(2);
+    await releaseOldest();
+    await releaseOldest();
+    expect(toaster.notifyError).not.toHaveBeenCalled();
+  });
+
+  it("patches the renamed page's caches after the screen moved to another page (NEWFRONT-358)", async () => {
+    holdPatches();
+    const { client, wrapper } = harness();
+    const { result, rerender } = renderHook(
+      ({ pageId }: { pageId: string }) => usePageRename("acme", PAGES_PROJECT_ID, pageId),
+      {
+        wrapper,
+        initialProps: { pageId: PAGES_PAGE_ID },
+      }
+    );
+    const saveA = result.current.mutate;
+    saveA("Renamed A");
+    await vi.waitFor(() => expect(patches).toHaveLength(1));
+    rerender({ pageId: OTHER_PAGE_ID });
+    await releaseOldest();
+    await waitFor(() =>
+      expect(client.getQueryData<PageDetail>(pageKeys.detail("acme", PAGES_PROJECT_ID, PAGES_PAGE_ID))?.name).toBe(
+        "Renamed A"
+      )
+    );
+    expect(client.getQueryData<PageDetail>(pageKeys.detail("acme", PAGES_PROJECT_ID, OTHER_PAGE_ID))?.name).toBe(
+      "Other"
+    );
+    const rows = client.getQueryData<PageRow[]>(pageKeys.list("acme", PAGES_PROJECT_ID)) ?? [];
+    expect(rows.map((row) => row.name)).toEqual(["Renamed A", "Other"]);
+    expect(toaster.notifyError).not.toHaveBeenCalled();
   });
 });
 
