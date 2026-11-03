@@ -9,7 +9,7 @@ name: rust-api-contract-tests-ops-routing
 
 on:
   push:
-    branches: [rust-dev]
+    branches: [main]
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api-contract-tests-ops-routing.yml"
@@ -37,7 +37,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
 
       - name: Install contract-test dependencies
         working-directory: rust-api/contract-tests

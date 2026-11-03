@@ -63,7 +63,8 @@ in this domain; `transfer_cycle_issues` is synchronous.
   :270/:335/:411 (MEMBER write/read), :477-478 (ADMIN creator-only destroy),
   :521/:571/:581/:595 (MEMBER date-check/favorite/transfer),
   :626/:646/:659/:787 (GUEST userprops/progress/analytics); archive.py:271/:586/:606
-  (MEMBER); issue.py:109/:223/:299 (MEMBER); mechanism
+  (MEMBER); issue.py:132/:242 (GUEST list/retrieve, PDASHOSS01-310),
+  :256/:260/:264/:340 (MEMBER update/partial_update/create/destroy); mechanism
   `app/permissions/base.py:19-86`; roles `app/permissions/base.py:14-16`;
   PUT-update fallthrough (no `def update` in base.py; PUT mapped in
   `app/urls/cycle.py:29-38`).

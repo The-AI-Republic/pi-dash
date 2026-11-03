@@ -195,11 +195,11 @@ def make_run(issue_id: str, workspace_id: str, creator_id: str, pod_id: str,
     row = {
         "id": run_id, "status": status, "prompt": "", "run_config": "{}",
         "required_capabilities": "{}",
-        "thread_id": "", "error": "", "workspace_id": workspace_id,
+        "thread_id": "", "error_details": "{}", "workspace_id": workspace_id,
         "pod_id": pod_id, "created_by_id": creator_id, "work_item_id": issue_id,
-        "llm_model": "", "refusal_category": "", "trigger": "tick",
+        "llm_model": "", "trigger": "tick",
         "executor_kind": "local_runner", "dispatch_attempts": 0, "cancel_reason": "",
-        "error_code": "", "tool_plan": "{}", "phase_kind": "",
+        "tool_plan": "{}", "phase_kind": "",
         "agent_metadata": "{}", "usage": "{}",
     }
     row.update(fields)

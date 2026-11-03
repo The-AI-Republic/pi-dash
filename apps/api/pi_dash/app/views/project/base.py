@@ -21,6 +21,7 @@ from pi_dash.app.serializers import (
     DeployBoardSerializer,
     ProjectListSerializer,
     ProjectSerializer,
+    UserFavoriteSerializer,
 )
 from pi_dash.app.views.base import BaseAPIView, BaseViewSet
 from pi_dash.bgtasks.recent_visited_task import recent_visited_task
@@ -502,6 +503,7 @@ class ProjectUserViewsEndpoint(BaseAPIView):
 
 class ProjectFavoritesViewSet(BaseViewSet):
     model = UserFavorite
+    serializer_class = UserFavoriteSerializer
 
     def get_queryset(self):
         return self.filter_queryset(

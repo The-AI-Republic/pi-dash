@@ -40,7 +40,7 @@ export const GeneralProjectSettingsControlSection = observer(function GeneralPro
   if (!currentProjectDetails) return null;
 
   return (
-    <div className="mt-10">
+    <div className="mt-10" data-testid="general-danger">
       {workspaceSlug && (
         <ArchiveRestoreProjectModal
           workspaceSlug={workspaceSlug}
@@ -62,7 +62,7 @@ export const GeneralProjectSettingsControlSection = observer(function GeneralPro
           title={t("Archive")}
           description="Archiving a project will unlist your project from your side navigation although you will still be able to access it from your projects page. You can restore the project or delete it whenever you want."
           control={
-            <Button variant="secondary" onClick={() => setArchiveProject(true)}>
+            <Button variant="secondary" onClick={() => setArchiveProject(true)} data-testid="general-archive-open">
               {t("Archive")}
             </Button>
           }
@@ -77,6 +77,7 @@ export const GeneralProjectSettingsControlSection = observer(function GeneralPro
               variant="error-outline"
               onClick={() => setSelectedProject(currentProjectDetails.id ?? null)}
               data-ph-element={PROJECT_TRACKER_ELEMENTS.DELETE_PROJECT_BUTTON}
+              data-testid="general-delete-open"
             >
               {t("Delete")}
             </Button>

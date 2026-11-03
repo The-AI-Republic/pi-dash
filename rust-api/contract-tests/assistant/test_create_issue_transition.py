@@ -497,8 +497,8 @@ def test_create_issue_dispatches_entry_run(db_conn, broker_url):
     assert run["runner_id"] is None
     assert run["pinned_runner_id"] is None
     assert run["scheduler_binding_id"] is None
-    assert run["error"] == ""
-    assert run["error_code"] == ""
+    assert run["error_details"] == {}
+    assert run["refusal_category"] == ""
     assert run["dispatch_attempts"] == 0
     assert run["run_config"] == {"repo_ref": None, "repo_url": None, "git_work_branch": None}
     assert run["required_capabilities"] == []
@@ -565,9 +565,11 @@ def test_create_issue_prompt_failure_completes_turn(db_conn, broker_url):
     assert len(runs) == 1, "the failed prompt build still commits its run row"
     run = runs[0]
     assert run["status"] == "failed"
-    assert run["error_code"] == "prompt_build_failed"
+    assert run["error_details"]["code"] == "prompt_build_failed"
     assert run["trigger"] == "state_transition"
-    assert run["error"].startswith("prompt build failed:")
+    assert run["error_details"]["message"].startswith("prompt build failed:")
+    assert set(run["error_details"]) == {"code", "message"}
+    assert run["refusal_category"] == ""
     result = _tool_result(requests)
     assert result["created"] is True
     assert str(result["id"]) == str(issue["id"])

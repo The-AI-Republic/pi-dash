@@ -301,45 +301,63 @@ pub async fn binding_install(
         Ok(None) => return Denial::NotFound(NOT_FOUND_SCHEDULER_BODY).into_response(),
         Err(denial) => return denial.into_response(),
     };
-    // Serializer validation with the view-supplied project context.
-    let attrs = match validate_binding_fields(pool, body, None, &resolved.timezone).await {
-        Ok(attrs) => attrs,
-        Err(denial) => return denial.into_response(),
-    };
-    if let Err(denial) = enforce_unique_install(pool, &scheduler_id, attrs.project.flatten()).await
-    {
-        return denial.into_response();
-    }
-    let install = InstallAttrs {
+    let target = InstallTarget {
         scheduler_id,
         project_id,
         workspace_id: project.workspace_id,
         actor_id: resolved.user_id,
-        attrs,
     };
-    if let Err(denial) = validate_install_cross(&install, &project_id) {
-        return denial.into_response();
-    }
-    let mut saved = match insert_binding(pool, &install).await {
+    let saved = match apply_install(pool, body, &target, &resolved.timezone).await {
         Ok(saved) => saved,
         Err(denial) => return denial.into_response(),
     };
-    // Install recompute (`:216-220`): always compute after save, write back
-    // only when non-null AND different from stored (NULL here).
+    let body = render_saved_binding(&saved, &sched, &resolved.timezone);
+    json_response(StatusCode::CREATED, body)
+}
+
+/// The ids an install pins at save: the guarded scheduler, the URL project
+/// and its workspace, and the acting user.
+pub(crate) struct InstallTarget {
+    pub scheduler_id: Uuid,
+    pub project_id: Uuid,
+    pub workspace_id: Uuid,
+    pub actor_id: Uuid,
+}
+
+/// The install write shared by the web app and the v1 surface
+/// (`scheduler/binding_writes.py::install_binding`, PDASHOSS01-318):
+/// serializer validation with the URL project as context, the unique
+/// check, the cross-field `validate()`, the INSERT, then the first
+/// `next_run_at` (`views.py:216-220`: always computed after save, written
+/// back only when non-null AND different from stored — NULL here).
+pub(crate) async fn apply_install(
+    pool: &PgPool,
+    body: &Map<String, Value>,
+    target: &InstallTarget,
+    timezone: &Tz,
+) -> Result<SavedBinding, Denial> {
+    let attrs = validate_binding_fields(pool, body, None, timezone).await?;
+    enforce_unique_install(pool, &target.scheduler_id, attrs.project.flatten()).await?;
+    let install = InstallAttrs {
+        scheduler_id: target.scheduler_id,
+        project_id: target.project_id,
+        workspace_id: target.workspace_id,
+        actor_id: target.actor_id,
+        attrs,
+    };
+    validate_install_cross(&install, &target.project_id)?;
+    let mut saved = insert_binding(pool, &install).await?;
     let now = Utc::now();
     let bundle = saved.recompute_bundle();
     let write =
         queries::install_next_run_at(&bundle, saved.row.next_run_at, now, next_fire_for_binding);
     if let Some(computed) = write {
         let stamp = Utc::now();
-        if let Err(denial) = write_next_run_at(pool, &saved.row.id, &computed, &stamp).await {
-            return denial.into_response();
-        }
+        write_next_run_at(pool, &saved.row.id, Some(&computed), &stamp).await?;
         saved.row.next_run_at = Some(computed);
         saved.row.updated_at = stamp;
     }
-    let body = render_saved_binding(&saved, &sched, &resolved.timezone);
-    json_response(StatusCode::CREATED, body)
+    Ok(saved)
 }
 
 /// `GET .../scheduler-bindings/<uuid>/` (`views.py:237-249`): 200 or 404.
@@ -430,17 +448,69 @@ pub async fn binding_patch(
         Ok(data) => data,
         Err(response) => return response,
     };
-    // Unlike install, the body feeds straight into the serializer: a
-    // JSON `null` fails `validate_empty_values` with the serializer's
-    // `null` message ("No data provided" — serializers override the
-    // field-level "This field may not be null."), and any other
-    // non-object body 400s with the standard `non_field_errors` message.
-    let Value::Object(body) = &data else {
-        let message = match &data {
+    // Unlike install, the body feeds straight into the serializer
+    // ([`apply_binding_patch`] answers the non-object 400s).
+    let mut conn = match pool.acquire().await {
+        Ok(conn) => conn,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let row = match apply_binding_patch(
+        pool,
+        &mut conn,
+        &BindingPatchTarget {
+            binding_id: &binding_id,
+            project_id: &project_id,
+            slug: &slug,
+        },
+        &current,
+        &data,
+        &resolved.timezone,
+        &resolved.user_id,
+    )
+    .await
+    {
+        Ok(row) => row,
+        Err(denial) => return denial.into_response(),
+    };
+    match render_detail_binding(pool, &row, &resolved.timezone).await {
+        Ok(rendered) => json_response(StatusCode::OK, rendered),
+        Err(denial) => denial.into_response(),
+    }
+}
+
+/// The binding a PATCH writes: its id plus the URL scope its refresh
+/// re-reads under.
+pub(crate) struct BindingPatchTarget<'a> {
+    pub binding_id: &'a Uuid,
+    pub project_id: &'a Uuid,
+    pub slug: &'a str,
+}
+
+/// The PATCH write path shared by the web app's binding PATCH and the v1
+/// binding edit (PDASHOSS01-278, Python `scheduler/binding_writes.py`
+/// `update_binding`): field validation, the unique check, cross-field
+/// `validate()`, the save, then the RRULE-bundle-key recompute. Returns
+/// the row the 200 re-renders.
+///
+/// `body` is the object the serializer sees (`request.data`); `pool`
+/// serves the validation lookups, `conn` the save and the refresh, so a
+/// caller holding the row lock in a transaction passes that transaction.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_binding_patch(
+    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
+    target: &BindingPatchTarget<'_>,
+    current: &scheduler_binding::SchedulerBinding,
+    data: &Value,
+    timezone: &Tz,
+    user_id: &Uuid,
+) -> Result<scheduler_binding::SchedulerBinding, Denial> {
+    let Value::Object(body) = data else {
+        let message = match data {
             Value::Null => "No data provided".to_owned(),
             _ => format!(
                 "Invalid data. Expected a dictionary, but got {}.",
-                shape::json_type_name(&data)
+                shape::json_type_name(data)
             ),
         };
         let mut errors = Map::new();
@@ -448,47 +518,37 @@ pub async fn binding_patch(
             "non_field_errors".to_owned(),
             Value::Array(vec![Value::String(message)]),
         );
-        return Denial::BadJson(Value::Object(errors)).into_response();
+        return Err(Denial::BadJson(Value::Object(errors)));
     };
-    let attrs = match validate_binding_fields(pool, body, Some(&current), &resolved.timezone).await
-    {
-        Ok(attrs) => attrs,
-        Err(denial) => return denial.into_response(),
-    };
-    if let Err(denial) = enforce_unique_patch(pool, &binding_id, &current, &attrs).await {
-        return denial.into_response();
-    }
-    if let Err(denial) = validate_patch_cross(&current, &attrs) {
-        return denial.into_response();
-    }
+    let attrs = validate_binding_fields(pool, body, Some(current), timezone).await?;
+    enforce_unique_patch(pool, target.binding_id, current, &attrs).await?;
+    validate_patch_cross(current, &attrs)?;
     let stamp = Utc::now();
-    if let Err(denial) = update_binding(
-        pool,
-        &binding_id,
-        &current,
+    update_binding(
+        &mut *conn,
+        target.binding_id,
+        current,
         &attrs,
-        &resolved.user_id,
+        user_id,
         &stamp,
     )
-    .await
-    {
-        return denial.into_response();
-    }
+    .await?;
     // The response re-renders the in-memory row: saved values plus the
     // conditional recompute below.
-    let mut row = patched_row(&current, &attrs, &resolved.user_id, &stamp);
-    if queries::patch_triggers_recompute(&data) {
+    let mut row = patched_row(current, &attrs, user_id, &stamp);
+    if queries::patch_triggers_recompute(data) {
         // `:270`: refresh from the DB before computing, so the expansion
-        // sees the just-saved row.
-        let refreshed = match fetch_binding_detail(pool, &binding_id, &project_id, &slug).await {
-            Ok(Some(refreshed)) => refreshed,
-            // `refresh_from_db` on a vanished row raises bare
-            // `DoesNotExist` (not `get_object_or_404`) → the
-            // `ObjectDoesNotExist` 404 branch. Unreachable except races.
-            Ok(None) => return Denial::ObjectNotFound.into_response(),
-            Err(denial) => return denial.into_response(),
-        };
-        row = refreshed;
+        // sees the just-saved row. `refresh_from_db` on a vanished row
+        // raises bare `DoesNotExist` (not `get_object_or_404`) → the
+        // `ObjectDoesNotExist` 404 branch. Unreachable except races.
+        row = fetch_binding_detail(
+            &mut *conn,
+            target.binding_id,
+            target.project_id,
+            target.slug,
+        )
+        .await?
+        .ok_or(Denial::ObjectNotFound)?;
         let bundle = queries::RruleBundle {
             dtstart: row.dtstart,
             rrule: row.rrule.as_str(),
@@ -497,19 +557,16 @@ pub async fn binding_patch(
             exdates: &row.exdates,
         };
         let now = Utc::now();
-        if let Some(computed) = queries::patch_next_run_at(&bundle, now, next_fire_for_binding) {
+        if let Some(computed) =
+            queries::patch_next_run_at(&bundle, row.next_run_at, now, next_fire_for_binding_checked)
+        {
             let stamp = Utc::now();
-            if let Err(denial) = write_next_run_at(pool, &row.id, &computed, &stamp).await {
-                return denial.into_response();
-            }
-            row.next_run_at = Some(computed);
+            write_next_run_at(&mut *conn, &row.id, computed.as_ref(), &stamp).await?;
+            row.next_run_at = computed;
             row.updated_at = stamp;
         }
     }
-    match render_detail_binding(pool, &row, &resolved.timezone).await {
-        Ok(rendered) => json_response(StatusCode::OK, rendered),
-        Err(denial) => denial.into_response(),
-    }
+    Ok(row)
 }
 
 /// `DELETE .../scheduler-bindings/<uuid>/` (`views.py:281-291`): uninstall
@@ -740,7 +797,7 @@ fn binding_runs_count_sql() -> String {
     )
 }
 
-/// Binding-runs page (`views.py:353-359`): the 41-column run image plus
+/// Binding-runs page (`views.py:353-359`): the 39-column run image plus
 /// the pod-mini columns, `-created_at`, `LIMIT $4` / `OFFSET $5`.
 /// Django's page additionally INNER JOINs `scheduler_bindings` +
 /// `schedulers` (the `scheduler_binding__scheduler` select_related
@@ -840,7 +897,7 @@ async fn resolve_binding_request(
 ///   the exact form behavior / 415 there. Safe: no write precedes
 ///   `request.data` access on either path.
 #[allow(clippy::result_large_err)]
-async fn read_request_data(state: &AppState, req: Request) -> Result<Value, Response> {
+pub(crate) async fn read_request_data(state: &AppState, req: Request) -> Result<Value, Response> {
     let content_length = req
         .headers()
         .get(axum::http::header::CONTENT_LENGTH)
@@ -1006,7 +1063,7 @@ fn int_hex16(text: &str) -> Option<u128> {
 /// (all occurrences, case-sensitive), strip `{}` ends, drop `-`, require
 /// 32 characters, then `int(hex, 16)` with its whitespace/sign/underscore
 /// leniency and the `0..2^128` range check.
-fn uuid_from_hex_forms(text: &str) -> Option<Uuid> {
+pub(crate) fn uuid_from_hex_forms(text: &str) -> Option<Uuid> {
     let no_prefix = text.replace("urn:", "").replace("uuid:", "");
     // `str.strip('{}')` strips ALL leading/trailing braces, not one pair.
     let stripped = no_prefix.trim_matches(['{', '}']);
@@ -1503,7 +1560,9 @@ fn parse_fromiso_offset(text: &str) -> Option<Option<chrono::Duration>> {
 
 /// `fromisoformat` whole: date, then end-of-input (midnight) or exactly
 /// one separator character — any character, even a digit — plus the time.
-fn parse_fromiso_datetime(text: &str) -> Option<(chrono::NaiveDateTime, Option<chrono::Duration>)> {
+pub(crate) fn parse_fromiso_datetime(
+    text: &str,
+) -> Option<(chrono::NaiveDateTime, Option<chrono::Duration>)> {
     let (date, tail) = parse_fromiso_date(text)?;
     if tail.is_empty() {
         return Some((
@@ -1524,7 +1583,7 @@ fn parse_fromiso_datetime(text: &str) -> Option<(chrono::NaiveDateTime, Option<c
 }
 
 /// Python `re` `\s` over `str`: ASCII whitespace plus the Unicode spaces.
-fn is_python_space(char: char) -> bool {
+pub(crate) fn is_python_space(char: char) -> bool {
     char.is_whitespace() || matches!(char, '\u{1c}' | '\u{1d}' | '\u{1e}' | '\u{1f}')
 }
 
@@ -1533,7 +1592,9 @@ fn is_python_space(char: char) -> bool {
 /// before an optional `Z` / `±HH[[:]MM]` zone, then end (the `$` anchor
 /// also tolerates one trailing newline). Values run through the
 /// `datetime` constructor; the zone total must stay strictly inside a day.
-fn parse_regex_datetime(text: &str) -> Option<(chrono::NaiveDateTime, Option<chrono::Duration>)> {
+pub(crate) fn parse_regex_datetime(
+    text: &str,
+) -> Option<(chrono::NaiveDateTime, Option<chrono::Duration>)> {
     let (date_part, clock) = text.split_once(['T', ' '])?;
     let mut date_pieces = date_part.split('-');
     let (year_s, month_s, day_s) = (
@@ -1677,7 +1738,12 @@ async fn validate_binding_fields(
     timezone: &Tz,
 ) -> Result<BindingAttrs, Denial> {
     let partial = instance.is_some();
-    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &rrule_validator;
+    // Field-level `validate_rrule` anchors on the request time: Django
+    // passes no dtstart, so the validator stamps `now(utc)` itself
+    // (`scheduler.py:245`, `_rrule.py:238`).
+    let field_anchor = Utc::now();
+    let field_validator = move |value: &str| rrule_validator(value, field_anchor);
+    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &field_validator;
     let mut attrs = BindingAttrs::default();
     // (field, error) in `_writable_fields` order: scheduler, project,
     // dtstart, tzid, rrule, rdates, exdates, extra_context, enabled,
@@ -2014,7 +2080,13 @@ async fn enforce_unique_patch(
 /// the pod-must-belong-to-project check with the view-supplied URL project
 /// as context.
 fn validate_install_cross(install: &InstallAttrs, url_project: &Uuid) -> Result<(), Denial> {
-    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &rrule_validator;
+    // The cross-field re-check anchors on the binding's dtstart
+    // (`scheduler.py:297`, `_rrule.py:238`): `dtstart or now(utc)`.
+    // Field validation already passed here, so dtstart is always `Some`
+    // on install; the fallback mirrors Django's shape regardless.
+    let cross_anchor = install.attrs.dtstart.unwrap_or_else(Utc::now);
+    let cross_validator = move |value: &str| rrule_validator(value, cross_anchor);
+    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &cross_validator;
     if let Err(message) =
         shape::validate_cross_rrule(install.attrs.rrule.as_deref(), None, rrule_validator)
     {
@@ -2070,7 +2142,11 @@ fn validate_patch_cross(
             return Err(single_field_denial("project", &message));
         }
     }
-    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &rrule_validator;
+    // Same anchor as install: attrs-first, instance-second — `dtstart`
+    // is `NOT NULL`, so no `now` fallback is reachable here.
+    let cross_anchor = attrs.dtstart.unwrap_or(current.dtstart);
+    let cross_validator = move |value: &str| rrule_validator(value, cross_anchor);
+    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &cross_validator;
     if let Err(message) = shape::validate_cross_rrule(
         attrs.rrule.as_deref(),
         Some(current.rrule.as_str()),
@@ -2162,11 +2238,11 @@ fn db_denial(error: sqlx::Error) -> Denial {
 }
 
 /// BR3 install project lookup: `(id, workspace_id)` or `None`.
-struct InstallProject {
-    workspace_id: Uuid,
+pub(crate) struct InstallProject {
+    pub(crate) workspace_id: Uuid,
 }
 
-async fn fetch_install_project(
+pub(crate) async fn fetch_install_project(
     pool: &PgPool,
     project_id: &Uuid,
     slug: &str,
@@ -2248,8 +2324,8 @@ async fn fetch_binding_list(
 }
 
 /// BR2 binding detail lookup (GET/PATCH/uninstall share the shape).
-async fn fetch_binding_detail(
-    pool: &PgPool,
+pub(crate) async fn fetch_binding_detail(
+    executor: impl sqlx::PgExecutor<'_>,
     binding_id: &Uuid,
     project_id: &Uuid,
     slug: &str,
@@ -2259,7 +2335,7 @@ async fn fetch_binding_detail(
         .bind(binding_id)
         .bind(project_id)
         .bind(slug)
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await
         .map_err(|_| Denial::ServerError)?;
     row.map(|row| decode_binding(&row)).transpose()
@@ -2270,13 +2346,13 @@ async fn fetch_binding_detail(
 // ---------------------------------------------------------------------------
 
 /// Column counts per BR1 segment (bindings 22 + schedulers 14 +
-/// `AGENT_RUN_COLUMNS` 41 + `POD_COLUMNS` 10 = 87; pinned in tests).
+/// `AGENT_RUN_COLUMNS` 39 + `POD_COLUMNS` 10 = 85; pinned in tests).
 const BINDING_COLUMN_COUNT: usize = 22;
 const SCHEDULER_COLUMN_COUNT: usize = 14;
 
 /// Decode one `scheduler_bindings` row in fixture SELECT order
 /// (created_at … pod_id).
-fn decode_binding(
+pub(crate) fn decode_binding(
     row: &sqlx::postgres::PgRow,
 ) -> Result<scheduler_binding::SchedulerBinding, Denial> {
     Ok(scheduler_binding::SchedulerBinding {
@@ -2353,32 +2429,30 @@ fn decode_agent_run_at(
         dispatch_attempts: row.try_get(base + 12).map_err(|_| Denial::ServerError)?,
         cancel_requested_at: row.try_get(base + 13).map_err(|_| Denial::ServerError)?,
         cancel_reason: row.try_get(base + 14).map_err(|_| Denial::ServerError)?,
-        error_code: row.try_get(base + 15).map_err(|_| Denial::ServerError)?,
-        tool_plan: row.try_get(base + 16).map_err(|_| Denial::ServerError)?,
-        terminal_hooks_applied_at: row.try_get(base + 17).map_err(|_| Denial::ServerError)?,
-        terminal_capacity_released_at: row.try_get(base + 18).map_err(|_| Denial::ServerError)?,
-        prompt: row.try_get(base + 19).map_err(|_| Denial::ServerError)?,
-        trigger: row.try_get(base + 20).map_err(|_| Denial::ServerError)?,
-        prompt_manifest: row.try_get(base + 21).map_err(|_| Denial::ServerError)?,
-        phase_kind: row.try_get(base + 22).map_err(|_| Denial::ServerError)?,
-        run_config: row.try_get(base + 23).map_err(|_| Denial::ServerError)?,
-        required_capabilities: row.try_get(base + 24).map_err(|_| Denial::ServerError)?,
-        thread_id: row.try_get(base + 25).map_err(|_| Denial::ServerError)?,
-        agent_metadata: row.try_get(base + 26).map_err(|_| Denial::ServerError)?,
-        lease_expires_at: row.try_get(base + 27).map_err(|_| Denial::ServerError)?,
-        done_payload: row.try_get(base + 28).map_err(|_| Denial::ServerError)?,
-        error: row.try_get(base + 29).map_err(|_| Denial::ServerError)?,
-        refusal_category: row.try_get(base + 30).map_err(|_| Denial::ServerError)?,
-        llm_model: row.try_get(base + 31).map_err(|_| Denial::ServerError)?,
-        usage: row.try_get(base + 32).map_err(|_| Denial::ServerError)?,
-        input_tokens: row.try_get(base + 33).map_err(|_| Denial::ServerError)?,
-        output_tokens: row.try_get(base + 34).map_err(|_| Denial::ServerError)?,
-        total_tokens: row.try_get(base + 35).map_err(|_| Denial::ServerError)?,
-        created_at: row.try_get(base + 36).map_err(|_| Denial::ServerError)?,
-        assigned_at: row.try_get(base + 37).map_err(|_| Denial::ServerError)?,
-        queue_position: row.try_get(base + 38).map_err(|_| Denial::ServerError)?,
-        started_at: row.try_get(base + 39).map_err(|_| Denial::ServerError)?,
-        ended_at: row.try_get(base + 40).map_err(|_| Denial::ServerError)?,
+        tool_plan: row.try_get(base + 15).map_err(|_| Denial::ServerError)?,
+        terminal_hooks_applied_at: row.try_get(base + 16).map_err(|_| Denial::ServerError)?,
+        terminal_capacity_released_at: row.try_get(base + 17).map_err(|_| Denial::ServerError)?,
+        prompt: row.try_get(base + 18).map_err(|_| Denial::ServerError)?,
+        trigger: row.try_get(base + 19).map_err(|_| Denial::ServerError)?,
+        prompt_manifest: row.try_get(base + 20).map_err(|_| Denial::ServerError)?,
+        phase_kind: row.try_get(base + 21).map_err(|_| Denial::ServerError)?,
+        run_config: row.try_get(base + 22).map_err(|_| Denial::ServerError)?,
+        required_capabilities: row.try_get(base + 23).map_err(|_| Denial::ServerError)?,
+        thread_id: row.try_get(base + 24).map_err(|_| Denial::ServerError)?,
+        agent_metadata: row.try_get(base + 25).map_err(|_| Denial::ServerError)?,
+        lease_expires_at: row.try_get(base + 26).map_err(|_| Denial::ServerError)?,
+        done_payload: row.try_get(base + 27).map_err(|_| Denial::ServerError)?,
+        error_details: row.try_get(base + 28).map_err(|_| Denial::ServerError)?,
+        refusal_category: row.try_get(base + 29).map_err(|_| Denial::ServerError)?,
+        llm_model: row.try_get(base + 30).map_err(|_| Denial::ServerError)?,
+        usage: row.try_get(base + 31).map_err(|_| Denial::ServerError)?,
+        input_tokens: row.try_get(base + 32).map_err(|_| Denial::ServerError)?,
+        output_tokens: row.try_get(base + 33).map_err(|_| Denial::ServerError)?,
+        total_tokens: row.try_get(base + 34).map_err(|_| Denial::ServerError)?,
+        created_at: row.try_get(base + 35).map_err(|_| Denial::ServerError)?,
+        assigned_at: row.try_get(base + 36).map_err(|_| Denial::ServerError)?,
+        started_at: row.try_get(base + 37).map_err(|_| Denial::ServerError)?,
+        ended_at: row.try_get(base + 38).map_err(|_| Denial::ServerError)?,
     })
 }
 
@@ -2499,8 +2573,8 @@ struct InstallAttrs {
 
 /// The just-inserted row in memory (what the 201 re-renders) plus the
 /// validated pod name (the serializer's cached `pod` dereference).
-struct SavedBinding {
-    row: scheduler_binding::SchedulerBinding,
+pub(crate) struct SavedBinding {
+    pub(crate) row: scheduler_binding::SchedulerBinding,
     pod_name: Option<String>,
 }
 
@@ -2609,7 +2683,7 @@ async fn insert_binding(pool: &PgPool, install: &InstallAttrs) -> Result<SavedBi
 /// BR7 PATCH save (`:263`): writable columns (provided values, untouched
 /// ones rewritten) + `updated_at`/`updated_by` refresh.
 async fn update_binding(
-    pool: &PgPool,
+    executor: impl sqlx::PgExecutor<'_>,
     binding_id: &Uuid,
     current: &scheduler_binding::SchedulerBinding,
     attrs: &BindingAttrs,
@@ -2656,7 +2730,7 @@ async fn update_binding(
         .bind(&outcome_mode)
         .bind(pod_id)
         .bind(binding_id)
-        .execute(pool)
+        .execute(executor)
         .await
         .map_err(db_denial)?;
     Ok(())
@@ -2705,10 +2779,10 @@ fn patched_row(
 
 /// BR6 `next_run_at` write-back: `next_run_at` + `updated_at` only
 /// (`updated_by` is NOT rewritten).
-async fn write_next_run_at(
-    pool: &PgPool,
+pub(crate) async fn write_next_run_at(
+    executor: impl sqlx::PgExecutor<'_>,
     binding_id: &Uuid,
-    computed: &DateTime<Utc>,
+    computed: Option<&DateTime<Utc>>,
     stamp: &DateTime<Utc>,
 ) -> Result<(), Denial> {
     let sql = translate_placeholders(
@@ -2719,7 +2793,7 @@ async fn write_next_run_at(
         .bind(computed)
         .bind(stamp)
         .bind(binding_id)
-        .execute(pool)
+        .execute(executor)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -2747,7 +2821,7 @@ fn soft_delete_message(binding_id: &Uuid) -> pidash_jobs::TaskMessage {
 
 /// Best-effort publish of [`soft_delete_message`]: without the queue
 /// the response still stands.
-async fn enqueue_soft_delete(pool: &PgPool, binding_id: &Uuid) {
+pub(crate) async fn enqueue_soft_delete(pool: &PgPool, binding_id: &Uuid) {
     let message = soft_delete_message(binding_id);
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
@@ -2762,8 +2836,8 @@ async fn enqueue_soft_delete(pool: &PgPool, binding_id: &Uuid) {
 /// BR8 uninstall (`:290`): `binding.delete()` soft-delete with two `now()`
 /// samples (ported quirk 5). The caller enqueues the related-objects
 /// sweep separately ([`enqueue_soft_delete`]).
-async fn uninstall_binding(
-    pool: &PgPool,
+pub(crate) async fn uninstall_binding(
+    executor: impl sqlx::PgExecutor<'_>,
     binding_id: &Uuid,
     user_id: &Uuid,
     now: &DateTime<Utc>,
@@ -2778,7 +2852,7 @@ async fn uninstall_binding(
         .bind(now2)
         .bind(user_id)
         .bind(binding_id)
-        .execute(pool)
+        .execute(executor)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -2891,7 +2965,7 @@ struct BindingDetailExtra<'a> {
 /// against [`shape::BINDING_SERIALIZER_FIELDS`] in tests). `detail` is
 /// `Some` on the detail GET / PATCH response only, appending the 4
 /// detail keys in [`shape::BINDING_DETAIL_FIELDS`] order (list/install
-/// pass `None` — their 25-key bodies are unchanged).
+/// pass `None` — their 26-key bodies are unchanged).
 #[allow(clippy::too_many_arguments)]
 fn render_binding_object(
     id: &Uuid,
@@ -2979,6 +3053,17 @@ fn render_binding_object(
     row.insert(
         "last_error".to_owned(),
         Value::String(last_error.to_owned()),
+    );
+    let bundle = queries::RruleBundle {
+        dtstart: *dtstart,
+        rrule,
+        tzid,
+        rdates,
+        exdates,
+    };
+    row.insert(
+        "series_exhausted".to_owned(),
+        Value::Bool(series_exhausted(next_run_at, &bundle, Utc::now())),
     );
     row.insert("actor".to_owned(), render_uuid_opt(actor_id));
     row.insert(
@@ -3207,9 +3292,12 @@ fn render_saved_binding(
 /// `rrule_validator` over
 /// `pidash_jobs::tasks_ticker::rrule::validate_rrule_string`: only the
 /// message string crosses the seam (all Python uses is `str(e)`), into
-/// shape validation (field-level + the cross-field re-check).
-fn rrule_validator(value: &str) -> Result<(), String> {
-    pidash_jobs::tasks_ticker::rrule::validate_rrule_string(value)
+/// shape validation (field-level + the cross-field re-check). `anchor` is
+/// Django's `dtstart or now(utc)` (`_rrule.py:238`): the request time for
+/// field validation, the binding's dtstart for the cross-field re-check.
+/// Call sites bind it into the `Fn(&str)` closure the seam takes.
+fn rrule_validator(value: &str, anchor: DateTime<Utc>) -> Result<(), String> {
+    pidash_jobs::tasks_ticker::rrule::validate_rrule_string(value, anchor)
         .map_err(|error| error.message().to_owned())
 }
 
@@ -3218,16 +3306,26 @@ fn rrule_validator(value: &str) -> Result<(), String> {
 /// (`bgtasks/scheduler.py:70-83`) into the queries install/patch writes.
 /// The `rrule or ""` guard is a no-op on `&str`; the `tzid or "UTC"`
 /// guard is unobservable (expansion runs in UTC) but ported, not dropped.
-fn next_fire_for_binding(
+pub(crate) fn next_fire_for_binding(
     bundle: &queries::RruleBundle<'_>,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
+    next_fire_for_binding_checked(bundle, now).ok().flatten()
+}
+
+/// `_next_fire_for_binding_checked` (`bgtasks/scheduler.py`): the same
+/// call shape over `next_fire_with_error`, so a parse error (`Err`) is
+/// told apart from an exhausted series (`Ok(None)`).
+fn next_fire_for_binding_checked(
+    bundle: &queries::RruleBundle<'_>,
+    now: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>, String> {
     let tzid = if bundle.tzid.is_empty() {
         "UTC"
     } else {
         bundle.tzid
     };
-    pidash_jobs::tasks_ticker::rrule::next_fire_from_rrule(
+    pidash_jobs::tasks_ticker::rrule::next_fire_with_error(
         bundle.dtstart,
         bundle.rrule,
         tzid,
@@ -3235,6 +3333,23 @@ fn next_fire_for_binding(
         &pidash_jobs::tasks_ticker::fire_binding::coerce_iso_datetimes(bundle.exdates),
         now,
     )
+}
+
+/// `get_series_exhausted` (`app/serializers/scheduler.py`): true when the
+/// RRULE bundle is valid but has no occurrence left after now — a finite
+/// COUNT/UNTIL series that finished, or a single-shot whose `dtstart`
+/// passed. A binding with a scheduled next fire is trivially not
+/// exhausted, which also keeps list rendering from expanding every
+/// healthy row.
+fn series_exhausted(
+    next_run_at: &Option<DateTime<Utc>>,
+    bundle: &queries::RruleBundle<'_>,
+    now: DateTime<Utc>,
+) -> bool {
+    if next_run_at.is_some() {
+        return false;
+    }
+    matches!(next_fire_for_binding_checked(bundle, now), Ok(None))
 }
 
 #[cfg(test)]
@@ -3393,25 +3508,25 @@ mod tests {
     fn br1_segment_layout_matches_layer_consts() {
         assert_eq!(BINDING_COLUMN_COUNT, 22);
         assert_eq!(SCHEDULER_COLUMN_COUNT, 14);
-        assert_eq!(queries::AGENT_RUN_COLUMNS.len(), 41);
+        assert_eq!(queries::AGENT_RUN_COLUMNS.len(), 39);
         assert_eq!(queries::POD_COLUMNS.len(), 10);
         assert_eq!(
             BINDING_COLUMN_COUNT
                 + SCHEDULER_COLUMN_COUNT
                 + queries::AGENT_RUN_COLUMNS.len()
                 + queries::POD_COLUMNS.len(),
-            87
+            85
         );
         // The display columns the render reads, by layer-const position.
         let run_base = BINDING_COLUMN_COUNT + SCHEDULER_COLUMN_COUNT;
         let pod_base = run_base + queries::AGENT_RUN_COLUMNS.len();
         assert_eq!(queries::AGENT_RUN_COLUMNS[0], "id");
         assert_eq!(queries::AGENT_RUN_COLUMNS[10], "status");
-        assert_eq!(queries::AGENT_RUN_COLUMNS[40], "ended_at");
+        assert_eq!(queries::AGENT_RUN_COLUMNS[38], "ended_at");
         assert_eq!(queries::POD_COLUMNS[0], "id");
         assert_eq!(queries::POD_COLUMNS[3], "name");
         assert_eq!(run_base, 36);
-        assert_eq!(pod_base, 77);
+        assert_eq!(pod_base, 75);
     }
 
     // -- Render ---------------------------------------------------------------
@@ -3474,6 +3589,40 @@ mod tests {
         assert_eq!(parsed["enabled"], true);
         assert_eq!(parsed["last_run"], Value::Null);
         assert_eq!(parsed["pod_name"], Value::Null);
+        // A single-shot whose dtstart passed with no cursor is finished.
+        assert_eq!(parsed["series_exhausted"], true);
+    }
+
+    // `get_series_exhausted`: a scheduled cursor short-circuits to false;
+    // with no cursor, only a valid bundle with nothing left is exhausted —
+    // a parse error is NOT (that is the misconfiguration case).
+    #[test]
+    fn series_exhausted_tells_finished_from_broken() {
+        let empty = Value::Array(vec![]);
+        let dtstart = utc(2026, 9, 28, 11, 58, 0);
+        let now = utc(2026, 9, 28, 12, 0, 0);
+        let bundle = |rrule: &'static str| queries::RruleBundle {
+            dtstart,
+            rrule,
+            tzid: "UTC",
+            rdates: &empty,
+            exdates: &empty,
+        };
+        let finished = bundle("FREQ=MINUTELY;COUNT=2");
+        assert!(series_exhausted(&None, &finished, now));
+        assert!(!series_exhausted(&Some(now), &finished, now));
+        assert!(series_exhausted(&None, &bundle(""), now));
+        assert!(!series_exhausted(&None, &bundle("FREQ=MINUTELY"), now));
+        assert!(!series_exhausted(
+            &None,
+            &bundle("this is not a real rrule"),
+            now
+        ));
+        let future_single = queries::RruleBundle {
+            dtstart: utc(2026, 9, 29, 0, 0, 0),
+            ..bundle("")
+        };
+        assert!(!series_exhausted(&None, &future_single, now));
     }
 
     #[test]
@@ -4002,11 +4151,12 @@ mod tests {
 
     #[test]
     fn rrule_closure_reports_jobs_messages() {
-        assert_eq!(rrule_validator("FREQ=DAILY"), Ok(()));
-        assert_eq!(rrule_validator(""), Ok(()));
+        let anchor = utc(2026, 5, 4, 11, 7, 0);
+        assert_eq!(rrule_validator("FREQ=DAILY", anchor), Ok(()));
+        assert_eq!(rrule_validator("", anchor), Ok(()));
         // F36-03 pins, through the seam (only the message crosses).
         assert_eq!(
-            rrule_validator("FREQ=NEVER"),
+            rrule_validator("FREQ=NEVER", anchor),
             Err("invalid RRULE: invalid 'FREQ': NEVER".to_owned())
         );
         // NOTE: the F36-03 `rrule_field_level` SECONDLY pin
@@ -4014,7 +4164,7 @@ mod tests {
         // the source — `bgtasks/_rrule.py` raises its own message below
         // (verified against the Python source; the jobs port matches it).
         assert_eq!(
-            rrule_validator("FREQ=SECONDLY"),
+            rrule_validator("FREQ=SECONDLY", anchor),
             Err(
                 "FREQ=SECONDLY is not allowed (allowed: ['DAILY', 'HOURLY', 'MINUTELY', 'MONTHLY', 'WEEKLY', 'YEARLY'])"
                     .to_owned()
@@ -4024,8 +4174,21 @@ mod tests {
         // dateutil's unpack `ValueError` wrapped in `invalid RRULE:`
         // (verified against dateutil 2.8.2; the jobs port matches it).
         assert_eq!(
-            rrule_validator("garbage"),
+            rrule_validator("garbage", anchor),
             Err("invalid RRULE: not enough values to unpack (expected 2, got 1)".to_owned())
+        );
+        // PIDASHCONV-1706: the bound anchor feeds the verdict — the
+        // byset check reads the anchor's minute (7 here).
+        assert_eq!(
+            rrule_validator("FREQ=MINUTELY;INTERVAL=2;BYMINUTE=0", anchor),
+            Err("invalid RRULE: Invalid rrule byxxx generates an empty set.".to_owned())
+        );
+        assert_eq!(
+            rrule_validator(
+                "FREQ=MINUTELY;INTERVAL=2;BYMINUTE=0",
+                utc(2026, 5, 4, 11, 6, 0)
+            ),
+            Ok(())
         );
     }
 
