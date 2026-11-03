@@ -101,9 +101,8 @@ pub struct TurnInputItem {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ApprovalResponseParams {
-    pub approval_id: String,
-    pub decision: String,
+/// Result of an `item/*/requestApproval` request.
+#[derive(Debug, Clone, Serialize)]
+pub struct ApprovalResponse {
+    pub decision: &'static str,
 }
