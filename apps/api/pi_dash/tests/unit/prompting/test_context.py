@@ -664,9 +664,41 @@ def test_context_includes_project_description_when_set(workspace, create_user):
 def test_context_project_description_defaults_to_empty_string(issue, run):
     # The `project` fixture above doesn't set `description`, so the model's
     # TextField(blank=True) default applies — must surface as "" (never None)
-    # so the template's `{% if project.description %}` guard behaves.
+    # so a custom template's `{% if project.description %}` guard behaves.
     ctx = build_context(issue, run)
     assert ctx["project"]["description"] == ""
+
+
+@pytest.mark.unit
+def test_context_includes_project_context_when_set(workspace, create_user):
+    project = Project.objects.create(
+        name="Agent Project",
+        identifier="AP",
+        workspace=workspace,
+        created_by=create_user,
+        description="Billing admin tool.",
+        context="Prefer additive migrations. Never push to main.",
+    )
+    project_state = State.objects.create(name="Todo", project=project, group="unstarted")
+    issue = Issue.objects.create(
+        name="Fix a thing",
+        workspace=workspace,
+        project=project,
+        state=project_state,
+        created_by=create_user,
+    )
+    run = AgentRun.objects.create(owner=create_user, workspace=workspace, prompt="", work_item=issue)
+    ctx = build_context(issue, run)
+    assert ctx["project"]["context"] == "Prefer additive migrations. Never push to main."
+    # `description` stays in the dict for custom templates, as its own value.
+    assert ctx["project"]["description"] == "Billing admin tool."
+
+
+@pytest.mark.unit
+def test_context_project_context_defaults_to_empty_string(issue, run):
+    # "" (never None) so the built-in `{% if project.context %}` guard behaves.
+    ctx = build_context(issue, run)
+    assert ctx["project"]["context"] == ""
 
 
 @pytest.mark.unit

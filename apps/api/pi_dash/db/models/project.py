@@ -73,6 +73,9 @@ class Project(BaseModel):
     NETWORK_CHOICES = ((0, "Secret"), (2, "Public"))
     name = models.CharField(max_length=255, verbose_name="Project Name")
     description = models.TextField(verbose_name="Project Description", blank=True)
+    # Instructions and background injected into every agent prompt for this
+    # project. Kept apart from `description`, which is the human-facing summary.
+    context = models.TextField(verbose_name="Project Context", blank=True, default="")
     description_text = models.JSONField(verbose_name="Project Description RT", blank=True, null=True)
     description_html = models.JSONField(verbose_name="Project Description HTML", blank=True, null=True)
     network = models.PositiveSmallIntegerField(default=2, choices=NETWORK_CHOICES)

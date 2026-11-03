@@ -60,6 +60,8 @@ export interface IProject extends IPartialProject {
   default_assignee?: IUser | string | null;
   default_state?: string | null;
   description?: string;
+  // instructions and background sent to AI agents on every run in the project
+  context?: string;
   estimate?: string | null;
   anchor?: string | null;
   is_favorite?: boolean;

@@ -64,6 +64,9 @@ def _serialize_projects(workspace_id) -> list[dict]:
             "identifier": p.identifier,
             "name": p.name,
             "description": p.description,
+            # Agent-facing instructions (PDASHOSS01-294). ``description`` stays
+            # for runner builds that predate the split.
+            "context": p.context,
             "is_default": p.is_default,
             "default_pod_id": (
                 str(default_pod_ids[p.id]) if p.id in default_pod_ids else None
