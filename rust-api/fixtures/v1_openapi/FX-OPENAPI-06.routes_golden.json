@@ -130,6 +130,9 @@
   "/api/v1/users/me/": [
     "get"
   ],
+  "/api/v1/workspaces/{slug}/agent-runs/{run_id}/release-pin/": [
+    "post"
+  ],
   "/api/v1/workspaces/{slug}/agent-runs/{run_id}/yield/": [
     "post"
   ],

@@ -237,7 +237,7 @@ fn component_schemas() -> Value {
 }
 
 /// Per-operation essentials: `{path: {method: {operationId, tags, summary,
-/// parameters, responses}}}` for all 193 golden operations, pretty JSON
+/// parameters, responses}}}` for all 194 golden operations, pretty JSON
 /// extracted from the `operations` key of
 /// `rust-api/fixtures/v1_openapi/FX-OPENAPI-04.doc_essentials.json`.
 ///
@@ -1317,6 +1317,53 @@ const OPERATIONS_JSON: &str = r##"
             }
           },
           "description": "Current user profile"
+        }
+      }
+    }
+  },
+  "/api/v1/workspaces/{slug}/agent-runs/{run_id}/release-pin/": {
+    "post": {
+      "operationId": "release_agent_run_pin",
+      "tags": [
+        "Work Items"
+      ],
+      "summary": "Release a queued run's runner pin",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "run_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "description": "Workspace slug",
+          "required": true,
+          "examples": {
+            "ExampleWorkspace": {
+              "value": "my-workspace",
+              "summary": "Example workspace",
+              "description": "A typical workspace slug"
+            }
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Pin released"
+        },
+        "404": {
+          "description": "Run not found"
+        },
+        "409": {
+          "description": "Run is not a pinned, queued local run"
         }
       }
     }
@@ -16756,7 +16803,7 @@ mod tests {
                 ops += 1;
             }
         }
-        assert_eq!(ops, 193);
+        assert_eq!(ops, 194);
     }
 
     #[test]

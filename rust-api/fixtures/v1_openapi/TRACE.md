@@ -85,10 +85,10 @@ djangorestframework 3.15.2, Django 4.2.30.
   `?format=json`) against Django with `ENABLE_DRF_SPECTACULAR=1` (routes
   `pi_dash/urls.py:31-44`); per-operation essentials (operationId, tags,
   summary, parameters, responses — verbatim) for every path × method in
-  the golden route map (125 paths, 193 operations); default content-type
+  the golden route map (126 paths, 194 operations; re-recorded PDASHOSS01-272 for `release-pin`); default content-type
   `application/vnd.oai.openapi; charset=utf-8` (YAML, no `+json`),
   `?format=json` content-type `application/vnd.oai.openapi+json`, parsed
-  doc-equality proof (`parsed_equal: true`, 125 paths each), route-map ==
+  doc-equality proof (`parsed_equal: true`, 126 paths each), route-map ==
   golden assertion, `ApiKeyAuthentication` securityScheme block verbatim
   (rendered from `utils/openapi/auth.py:15-34`
   `APIKeyAuthenticationExtension.get_security_definition`).
@@ -130,8 +130,8 @@ djangorestframework 3.15.2, Django 4.2.30.
 
 - `FX-OPENAPI-06.routes_golden.json` — byte copy of
   `rust-api/contract-tests/v1_openapi/routes_golden.json` from PIDASHCONV-81
-  (`54254ec8`, PR #479; re-recorded PIDASHCONV-1090): 125 paths, sha256
-  `ded70c9f9ab4d979087043985e77eacac3f5589c72d2e5344a079d1eedde3229`.
+  (`54254ec8`, PR #479; re-recorded PIDASHCONV-1090, PDASHOSS01-272): 126 paths, sha256
+  `9d0f3fc01467760c98cb9c217d724b8be687b67881a9770371e6d6b5f231828f`.
   Regen rule (from `test_routes_golden.py`, never blanket-update):
   `REGEN_GOLDEN=1 pytest v1_openapi/test_routes_golden.py` + reviewed
   diff. The live capture in FX-OPENAPI-04 asserted route-map equality
@@ -147,6 +147,9 @@ djangorestframework 3.15.2, Django 4.2.30.
   `9760cb0b3c7c0885b37f020ebc848b7e69b87f1fb02bdd1db0c9578131b669f7` —
   identical to FX-OPENAPI-04's `json_rendering`, so the registry is from
   the same document the operation essentials were extracted from.
+  PDASHOSS01-272 re-recorded FX-OPENAPI-04 (one added operation with no
+  serializer); the registry of that capture is parsed-equal to this file,
+  so it is unchanged.
   Method: `curl` GET against a scratch Django server (scratch DB
   `pidash_1208_dj`); the fixture is `{...metadata..., "schemas": {...}}`.
   drf-spectacular's `SchemaGenerator.get_schema`

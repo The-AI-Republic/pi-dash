@@ -156,6 +156,22 @@ pub const POD_HAS_ACTIVE_RUNS_BODY: &str =
 /// Pod delete guard 3 — 409 (`pods.py:250-256`).
 pub const DEFAULT_POD_UNDELETABLE_BODY: &str = r#"{"error":"cannot delete the project's default pod; promote another pod to default first","code":"default_pod_undeletable"}"#;
 
+/// `pin_wait_budget_secs` not an int or a string spelling one — 400
+/// (`pods.py` PATCH, PDASHOSS01-272).
+pub const PIN_WAIT_BUDGET_NOT_INTEGER_BODY: &str =
+    r#"{"error":"pin_wait_budget_secs must be an integer number of seconds"}"#;
+/// `pin_wait_budget_secs < 0` — 400 (`pods.py` PATCH).
+pub const PIN_WAIT_BUDGET_NEGATIVE_BODY: &str =
+    r#"{"error":"pin_wait_budget_secs cannot be negative"}"#;
+/// `pin_wait_budget_secs` past the `integer` column — 400 (`pods.py`
+/// `MAX_PIN_WAIT_BUDGET_SECS`).
+pub const PIN_WAIT_BUDGET_TOO_LARGE_BODY: &str =
+    r#"{"error":"pin_wait_budget_secs must be at most 2147483647 seconds"}"#;
+/// `MAX_PIN_WAIT_BUDGET_SECS` (`pods.py`): the Postgres `integer` ceiling
+/// of `Pod.pin_wait_budget_secs`, so an oversized value is a 400, not a
+/// save-time `DataError` 500.
+const MAX_PIN_WAIT_BUDGET_SECS: i128 = 2_147_483_647;
+
 fn bad_request(body: &str) -> Response {
     json_response(StatusCode::BAD_REQUEST, body.to_owned())
 }
@@ -356,6 +372,75 @@ fn data_get<'a>(data: &'a JVal, key: &str) -> Result<Option<&'a JVal>, Response>
             Err(server_error())
         }
     }
+}
+
+/// CPython `int(text)` over base-10 text, `None` on `ValueError`: one
+/// optional sign, digits with single underscores only between digits
+/// (`1_0` → 10; `_1`, `1_`, `1__2` fail). Magnitudes saturate at
+/// `i128` — the only consumer bounds them to `[0, int4]` immediately.
+/// Surrounding whitespace is already stripped by the caller.
+///
+/// Known divergence (shared with `runner_runs::guards::py_int_saturated`
+/// and `app_issues::params`): CPython also accepts non-ASCII decimal
+/// digits (`int('１２')`); this reads ASCII digits only, so such a value
+/// answers 400 here where Django would accept it.
+fn py_int_text(text: &str) -> Option<i128> {
+    let (negative, core) = match text.strip_prefix(['+', '-']) {
+        Some(rest) => (text.starts_with('-'), rest),
+        None => (false, text),
+    };
+    let bytes = core.as_bytes();
+    let mut value: i128 = 0;
+    let mut any_digit = false;
+    let mut prev_was_digit = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'_' {
+            if !prev_was_digit || !bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
+                return None;
+            }
+            prev_was_digit = false;
+            continue;
+        }
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        any_digit = true;
+        prev_was_digit = true;
+        value = value
+            .saturating_mul(10)
+            .saturating_add(i128::from(b - b'0'));
+    }
+    if !any_digit {
+        return None;
+    }
+    Some(if negative { -value } else { value })
+}
+
+/// The `pin_wait_budget_secs` PATCH branch (`pods.py`, PDASHOSS01-272):
+/// `None`/`""` clears the override (`Ok(None)`); a bool, float, list or
+/// object is 400 (a bare `int()` would read `true` as one second and
+/// truncate `12.9`); an int, or a string spelling one after
+/// `str.strip()`, must land in `[0, 2147483647]`.
+fn parse_pin_wait_budget(raw: Option<&JVal>) -> Result<Option<i32>, &'static str> {
+    let budget = match raw {
+        None | Some(JVal::Null) => return Ok(None),
+        Some(JVal::Str(text)) if text.is_empty() => return Ok(None),
+        Some(JVal::Str(text)) => py_int_text(py_strip(&text.to_lossy_string())),
+        Some(JVal::Num(number)) if !number.is_float() => py_int_text(number.text()),
+        Some(JVal::Num(_) | JVal::Bool(_) | JVal::Array(_) | JVal::Object(_)) => None,
+    };
+    let Some(budget) = budget else {
+        return Err(PIN_WAIT_BUDGET_NOT_INTEGER_BODY);
+    };
+    if budget < 0 {
+        return Err(PIN_WAIT_BUDGET_NEGATIVE_BODY);
+    }
+    if budget > MAX_PIN_WAIT_BUDGET_SECS {
+        return Err(PIN_WAIT_BUDGET_TOO_LARGE_BODY);
+    }
+    Ok(Some(
+        i32::try_from(budget).expect("bounded to the int4 ceiling above"),
+    ))
 }
 
 /// `(request.data.get(key) or "").strip()` (`QUIRK-name-500`): falsy
@@ -763,6 +848,7 @@ struct PodRender {
     name: String,
     description: String,
     is_default: bool,
+    pin_wait_budget_secs: Option<i64>,
     workspace: String,
     project: String,
     project_identifier: String,
@@ -773,12 +859,18 @@ struct PodRender {
 }
 
 impl PodRender {
-    fn new(pod: &PodOwned, project_identifier: String, runner_count: i64) -> Self {
+    fn new(
+        pod: &PodOwned,
+        project_identifier: String,
+        runner_count: i64,
+        pin_wait_budget_secs: Option<i64>,
+    ) -> Self {
         Self {
             id: pod.id.to_string(),
             name: pod.name.clone(),
             description: pod.description.clone(),
             is_default: pod.is_default,
+            pin_wait_budget_secs,
             workspace: pod.workspace_id.to_string(),
             project: pod.project_id.to_string(),
             project_identifier,
@@ -795,6 +887,7 @@ impl PodRender {
             name: &self.name,
             description: &self.description,
             is_default: self.is_default,
+            pin_wait_budget_secs: self.pin_wait_budget_secs,
             workspace: &self.workspace,
             project: &self.project,
             project_identifier: &self.project_identifier,
@@ -827,7 +920,23 @@ async fn render_pod(
             .map(|facts| facts.identifier)
             .ok_or_else(server_error)?,
     };
-    PodRender::new(pod, identifier, runner_count).to_json()
+    // `pin_wait_budget_secs` (PDASHOSS01-272) is read on its own rather
+    // than widening the shared positional `pod` projection every P/R-series
+    // read decodes; same per-row N+1 shape as the runner count above.
+    let pin_wait_budget_secs: Option<i32> =
+        sqlx::query_scalar(pidash_services::runner_sessions::drain::POD_PIN_WAIT_BUDGET_SQL)
+            .bind(pod.id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| server_error())?
+            .flatten();
+    PodRender::new(
+        pod,
+        identifier,
+        runner_count,
+        pin_wait_budget_secs.map(i64::from),
+    )
+    .to_json()
 }
 
 /// Owned render buffer for one dev machine + its M3 annotations.
@@ -1827,6 +1936,8 @@ pub async fn pod_patch(
     let mut update_name = false;
     let mut update_description = false;
     let mut update_is_default = false;
+    let mut update_pin_wait_budget = false;
+    let mut pin_wait_budget: Option<i32> = None;
     match data_has(&data, "name") {
         Ok(true) => {
             let raw = match data_get(&data, "name") {
@@ -1874,6 +1985,23 @@ pub async fn pod_patch(
         Ok(false) => {}
         Err(response) => return response,
     }
+    match data_has(&data, "pin_wait_budget_secs") {
+        Ok(true) => {
+            let raw = match data_get(&data, "pin_wait_budget_secs") {
+                Ok(raw) => raw,
+                Err(response) => return response,
+            };
+            match parse_pin_wait_budget(raw) {
+                Ok(budget) => {
+                    pin_wait_budget = budget;
+                    update_pin_wait_budget = true;
+                }
+                Err(body) => return bad_request(body),
+            }
+        }
+        Ok(false) => {}
+        Err(response) => return response,
+    }
     match data_has(&data, "is_default") {
         Ok(true) => {
             let raw = match data_get(&data, "is_default") {
@@ -1909,7 +2037,7 @@ pub async fn pod_patch(
         Ok(false) => {}
         Err(response) => return response,
     }
-    if update_name || update_description || update_is_default {
+    if update_name || update_description || update_is_default || update_pin_wait_budget {
         if project_identifier.is_none() {
             // `Pod.save()` denorm check (`QUIRK-denorm-read`): the
             // project read the rename branch would have cached.
@@ -1920,8 +2048,12 @@ pub async fn pod_patch(
             project_identifier = Some(facts.identifier);
         }
         let now = now_micros();
-        let sql =
-            catalog_reads::pod_patch_update_sql(update_name, update_description, update_is_default);
+        let sql = catalog_reads::pod_patch_update_with_budget_sql(
+            update_name,
+            update_description,
+            update_is_default,
+            update_pin_wait_budget,
+        );
         let mut update = sqlx::query(&sql);
         if update_name {
             update = update.bind(&pod.name);
@@ -1931,6 +2063,9 @@ pub async fn pod_patch(
         }
         if update_is_default {
             update = update.bind(pod.is_default);
+        }
+        if update_pin_wait_budget {
+            update = update.bind(pin_wait_budget);
         }
         if update.bind(now).bind(pod.id).execute(&pool).await.is_err() {
             return server_error();
@@ -2587,12 +2722,71 @@ mod tests {
 
     #[test]
     fn pod_render_is_byte_exact() {
-        let body = PodRender::new(&fixed_pod(), "WEB".to_owned(), 2)
+        let body = PodRender::new(&fixed_pod(), "WEB".to_owned(), 2, None)
             .to_json()
             .unwrap();
         assert_eq!(
             body,
-            r#"{"id":"11111111-1111-1111-1111-111111111111","name":"WEB_beefy","description":"d","is_default":false,"workspace":"22222222-2222-2222-2222-222222222222","project":"33333333-3333-3333-3333-333333333333","project_identifier":"WEB","created_by":"44444444-4444-4444-4444-444444444444","runner_count":2,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
+            r#"{"id":"11111111-1111-1111-1111-111111111111","name":"WEB_beefy","description":"d","is_default":false,"pin_wait_budget_secs":null,"workspace":"22222222-2222-2222-2222-222222222222","project":"33333333-3333-3333-3333-333333333333","project_identifier":"WEB","created_by":"44444444-4444-4444-4444-444444444444","runner_count":2,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
+        );
+    }
+
+    #[test]
+    fn pod_render_carries_the_pin_wait_budget() {
+        let body = PodRender::new(&fixed_pod(), "WEB".to_owned(), 2, Some(120))
+            .to_json()
+            .unwrap();
+        assert!(
+            body.contains(r#""is_default":false,"pin_wait_budget_secs":120,"workspace""#),
+            "{body}"
+        );
+    }
+
+    fn budget(raw: &str) -> Result<Option<i32>, &'static str> {
+        let data = json::parse_json_text(&format!(r#"{{"v":{raw}}}"#)).unwrap();
+        parse_pin_wait_budget(data_get(&data, "v").ok().flatten())
+    }
+
+    #[test]
+    fn pin_wait_budget_accepts_ints_and_int_strings() {
+        assert_eq!(budget("120"), Ok(Some(120)));
+        assert_eq!(budget("0"), Ok(Some(0)));
+        assert_eq!(budget("-0"), Ok(Some(0)));
+        assert_eq!(budget(r#""120""#), Ok(Some(120)));
+        assert_eq!(budget(r#"" 12 ""#), Ok(Some(12)));
+        assert_eq!(budget(r#""+7""#), Ok(Some(7)));
+        assert_eq!(budget(r#""1_000""#), Ok(Some(1000)));
+        assert_eq!(budget("2147483647"), Ok(Some(i32::MAX)));
+    }
+
+    #[test]
+    fn pin_wait_budget_null_or_empty_clears_the_override() {
+        assert_eq!(budget("null"), Ok(None));
+        assert_eq!(budget(r#""""#), Ok(None));
+    }
+
+    #[test]
+    fn pin_wait_budget_rejects_bad_values() {
+        for raw in [
+            "true",
+            "false",
+            "12.9",
+            "12.0",
+            r#""12.9""#,
+            r#""soon""#,
+            r#"" ""#,
+            r#""1__0""#,
+            "[]",
+            "{}",
+        ] {
+            assert_eq!(budget(raw), Err(PIN_WAIT_BUDGET_NOT_INTEGER_BODY), "{raw}");
+        }
+        assert_eq!(budget("-1"), Err(PIN_WAIT_BUDGET_NEGATIVE_BODY));
+        assert_eq!(budget(r#""-5""#), Err(PIN_WAIT_BUDGET_NEGATIVE_BODY));
+        assert_eq!(budget("2147483648"), Err(PIN_WAIT_BUDGET_TOO_LARGE_BODY));
+        assert_eq!(
+            budget("99999999999999999999999999999999999999999999"),
+            Err(PIN_WAIT_BUDGET_TOO_LARGE_BODY)
         );
     }
 

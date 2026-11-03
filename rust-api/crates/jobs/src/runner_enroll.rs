@@ -1055,6 +1055,7 @@ mod tests {
                 min_runner_version: None,
                 agent_stall_threshold_secs: 300,
                 agent_observability_stale_secs: 600,
+                pin_wait_budget_secs: 600,
             },
             atomic_effects: false,
         }

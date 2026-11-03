@@ -356,7 +356,7 @@ mod tests {
         );
         let doc: serde_json::Value = serde_json::from_slice(&body).expect("json parses");
         assert_eq!(doc["openapi"], "3.0.3");
-        assert_eq!(doc["paths"].as_object().expect("paths").len(), 125);
+        assert_eq!(doc["paths"].as_object().expect("paths").len(), 126);
         assert_eq!(doc["info"]["title"], "The Pi Dash REST API");
     }
 

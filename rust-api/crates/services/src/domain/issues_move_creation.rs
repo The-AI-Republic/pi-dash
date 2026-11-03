@@ -715,6 +715,7 @@ fn twin_map_run_view(row: &QueryResult) -> Result<RunView, CreationError> {
         prompt: row.try_get("", "prompt").map_err(twin_db)?,
         prompt_manifest: row.try_get("", "prompt_manifest").map_err(twin_db)?,
         ended_at: row.try_get("", "ended_at").map_err(twin_db)?,
+        started_at: row.try_get("", "started_at").map_err(twin_db)?,
     })
 }
 

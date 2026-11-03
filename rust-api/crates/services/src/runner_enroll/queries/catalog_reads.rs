@@ -481,8 +481,27 @@ pub fn pod_patch_update_sql(
     update_description: bool,
     update_is_default: bool,
 ) -> String {
+    pod_patch_update_with_budget_sql(update_name, update_description, update_is_default, false)
+}
+
+/// [`pod_patch_update_sql`] plus the `pin_wait_budget_secs` branch
+/// (PDASHOSS01-272, `pods.py` PATCH). Django writes `update_fields` in
+/// model field order, and the field sits right after `is_default`, so
+/// its `SET` term lands between `is_default` and `updated_at`. Binds:
+/// one per set flag in that order (the budget binds `Option<i32>`, NULL
+/// clearing the override), then `updated_at`, then the pod id.
+///
+/// # Panics
+///
+/// Panics when all four flags are `false` (the source sends no `UPDATE`).
+pub fn pod_patch_update_with_budget_sql(
+    update_name: bool,
+    update_description: bool,
+    update_is_default: bool,
+    update_pin_wait_budget: bool,
+) -> String {
     assert!(
-        update_name || update_description || update_is_default,
+        update_name || update_description || update_is_default || update_pin_wait_budget,
         "pod_patch_update_sql: at least one field flag must be set \
          (the source sends no UPDATE when `updates` is empty)"
     );
@@ -498,6 +517,10 @@ pub fn pod_patch_update_sql(
     }
     if update_is_default {
         set.push(format!("\"is_default\" = ${next}"));
+        next += 1;
+    }
+    if update_pin_wait_budget {
+        set.push(format!("\"pin_wait_budget_secs\" = ${next}"));
         next += 1;
     }
     set.push(format!("\"updated_at\" = ${next}"));
@@ -1255,6 +1278,34 @@ mod tests {
         ] {
             assert_builder_contains(&pod_patch_update_sql(true, true, true), &fragment);
         }
+    }
+
+    #[test]
+    fn patch_update_with_budget_orders_the_budget_after_is_default() {
+        assert_eq!(
+            squashed(&pod_patch_update_with_budget_sql(false, false, false, true)),
+            squashed(
+                "UPDATE \"pod\" SET \"pin_wait_budget_secs\" = $1, \"updated_at\" = $2 \
+                 WHERE \"pod\".\"id\" = $3"
+            ),
+        );
+        assert_eq!(
+            squashed(&pod_patch_update_with_budget_sql(true, true, true, true)),
+            squashed(
+                "UPDATE \"pod\" SET \"name\" = $1, \"description\" = $2, \"is_default\" = $3, \
+                 \"pin_wait_budget_secs\" = $4, \"updated_at\" = $5 WHERE \"pod\".\"id\" = $6"
+            ),
+        );
+        assert_eq!(
+            pod_patch_update_with_budget_sql(true, false, true, false),
+            pod_patch_update_sql(true, false, true),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one field flag must be set")]
+    fn patch_update_with_budget_panics_when_updates_empty() {
+        let _ = pod_patch_update_with_budget_sql(false, false, false, false);
     }
 
     #[test]

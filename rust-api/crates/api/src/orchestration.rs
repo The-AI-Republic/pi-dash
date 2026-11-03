@@ -42,8 +42,8 @@ use pidash_services::domain::issues_move::MoveDrainError;
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_sessions::drain::{
-    drain_pod_log, next_for_runner_sql, plan_assignment, AssignmentFacts, DrainEffect,
-    ASSIGN_RUN_UPDATE_SQL, DRAIN_POD_BY_ID_LOOKUP_SQL, DRAIN_POD_IDLE_RUNNERS_SQL,
+    drain_pod_log, plan_assignment, AssignmentFacts, DrainEffect, ASSIGN_RUN_UPDATE_SQL,
+    DRAIN_POD_BY_ID_LOOKUP_SQL, DRAIN_POD_IDLE_RUNNERS_SQL,
 };
 use pidash_services::runner_sessions::guards::alive_threshold;
 use pidash_services::runner_sessions::pubsub::{
@@ -263,16 +263,17 @@ pub(crate) async fn drain_pod_by_id(
         let visibility: i32 = runner
             .try_get("visibility")
             .map_err(|error| MoveDrainError(error.to_string()))?;
-        let Some(next_sql) = next_for_runner_sql(&provisioning, visibility) else {
-            continue;
-        };
-        let run = sqlx::query(&next_sql)
-            .bind(pod_id)
-            .bind(runner_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|error| MoveDrainError(error.to_string()))?;
+        let run = pidash_services::runner_sessions::claim_next_assignable(
+            &mut tx,
+            pod_id,
+            runner_id,
+            owner_id,
+            &provisioning,
+            visibility,
+            pubsub.runner.pin_wait_budget_secs,
+        )
+        .await
+        .map_err(|error| MoveDrainError(error.to_string()))?;
         let Some(run) = run else {
             continue;
         };

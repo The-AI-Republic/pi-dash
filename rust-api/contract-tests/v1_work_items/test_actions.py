@@ -1,9 +1,12 @@
-"""Contract: work-item actions — move, re-tick, wait, run-ai, agent-run yield.
+"""Contract: work-item actions — move, re-tick, wait, run-ai, agent-run yield
+and agent-run release-pin.
 
 Shapes are the live Django wire format. ``run-ai`` returns 409 with a
 machine-readable ``reason`` when no runner can take the run (the bare
 contract environment has none); that 409 shape is itself the contract.
 """
+
+import uuid
 
 import pytest
 
@@ -194,4 +197,93 @@ def test_yield_anonymous_is_401(anon, world, seeder):
         f"/api/v1/workspaces/{world['workspace']['slug']}/agent-runs/{run['id']}/yield/",
         json={"outcome": "done"},
     )
+    assert response.status_code == 401
+
+
+# -- release-pin (PDASHOSS01-272) ------------------------------------------
+
+
+def _release_pin(client, world, run_id):
+    return client.post(
+        f"/api/v1/workspaces/{world['workspace']['slug']}/agent-runs/{run_id}/release-pin/"
+    )
+
+
+def _pinned_queued_run(world, seeder, db, *, status="queued", pinned=True):
+    pod = seeder.create_pod(world["workspace"]["id"], world["project"]["id"])
+    run = seeder.create_agent_run(
+        world["workspace"]["id"],
+        world["owner"]["id"],
+        pod["id"],
+        world["issue"]["id"],
+        status=status,
+    )
+    runner = None
+    if pinned:
+        # An offline runner: the post-commit pod drain assigns nothing.
+        runner = seeder.enroll_runner(
+            world["owner"]["id"],
+            world["workspace"]["id"],
+            pod["id"],
+            f"contract-enroll-{uuid.uuid4().hex}",
+        )
+        db.execute(
+            "UPDATE agent_run SET pinned_runner_id = %s WHERE id = %s",
+            (runner["id"], run["id"]),
+        )
+    return run, runner
+
+
+def test_release_pin_happy_path(api, world, seeder, db):
+    run, runner = _pinned_queued_run(world, seeder, db)
+    response = _release_pin(api, world, run["id"])
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "run_id": run["id"],
+        "work_item_id": world["issue"]["id"],
+        "previous_pinned_runner_id": runner["id"],
+    }
+    assert list(response.json()) == [
+        "ok",
+        "run_id",
+        "work_item_id",
+        "previous_pinned_runner_id",
+    ]
+    row = db.fetchone(
+        "SELECT pinned_runner_id, status FROM agent_run WHERE id = %s", (run["id"],)
+    )
+    assert row["pinned_runner_id"] is None
+    assert row["status"] == "queued"
+
+
+def test_release_pin_unpinned_is_409(api, world, seeder, db):
+    run, _ = _pinned_queued_run(world, seeder, db, pinned=False)
+    response = _release_pin(api, world, run["id"])
+    assert response.status_code == 409
+    assert response.json() == {"error": "run not pinned", "code": "not_pinned"}
+
+
+def test_release_pin_not_queued_is_409(api, world, seeder, db):
+    run, runner = _pinned_queued_run(world, seeder, db, status="running")
+    response = _release_pin(api, world, run["id"])
+    assert response.status_code == 409
+    assert response.json() == {"error": "run not queued", "code": "not_queued"}
+    row = db.fetchone("SELECT pinned_runner_id FROM agent_run WHERE id = %s", (run["id"],))
+    assert str(row["pinned_runner_id"]) == runner["id"]
+
+
+def test_release_pin_foreign_run_is_404(other_api, world, other_world):
+    """Tenant isolation: another tenant's run id resolves to not-found."""
+    response = other_api.post(
+        f"/api/v1/workspaces/{other_world['workspace']['slug']}"
+        f"/agent-runs/{world['issue']['id']}/release-pin/"
+    )
+    assert response.status_code == 404
+    assert response.json() == {"error": "run not found"}
+
+
+def test_release_pin_anonymous_is_401(anon, world, seeder, db):
+    run, _ = _pinned_queued_run(world, seeder, db, pinned=False)
+    response = _release_pin(anon, world, run["id"])
     assert response.status_code == 401

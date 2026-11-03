@@ -322,6 +322,9 @@ fn infra_entries(into: &mut HashMap<String, ConfigEntry>) {
         ("MIN_RUNNER_VERSION", V::Null),
         ("RUNNER_AGENT_STALL_THRESHOLD_SECS", V::from(360)),
         ("RUNNER_AGENT_OBSERVABILITY_STALE_SECS", V::from(90)),
+        // Pin wait budget (PDASHOSS01-272); per-pod override on
+        // `Pod.pin_wait_budget_secs`, 0 disables auto-release.
+        ("RUNNER_PIN_WAIT_BUDGET_SECS", V::from(600)),
         // Desktop-bundled managed runner.
         ("MANAGED_RUNNER_ENABLED", V::from("false")),
         ("MANAGED_RUNNER_MAX_PER_USER_PROJECT", V::from(1)),
