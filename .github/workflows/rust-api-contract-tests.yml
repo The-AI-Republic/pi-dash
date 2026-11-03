@@ -6,7 +6,7 @@ name: rust-api contract tests
 on:
   workflow_dispatch:
   push:
-    branches: [rust-dev]
+    branches: [main]
     paths:
       - "rust-api/**"
       - "apps/api/**"

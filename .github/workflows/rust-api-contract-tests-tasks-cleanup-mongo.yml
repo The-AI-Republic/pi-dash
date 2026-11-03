@@ -15,7 +15,7 @@ name: rust-api-contract-tests-tasks-cleanup-mongo
 
 on:
   push:
-    branches: [rust-dev]
+    branches: [main]
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api-contract-tests-tasks-cleanup-mongo.yml"
