@@ -3512,10 +3512,7 @@ fn rendered_run_from_pg(
         match (live_updated, observed) {
             (Some(updated), observed) if observed.is_none_or(|seen| seen == id) => {
                 let usage: Value = row.try_get("usage")?;
-                // The projection carries TWO `llm_model` columns (run at
-                // 12, live-state at 25): by-name reads take the run's, so
-                // the live one reads positionally.
-                let live_llm: Option<String> = row.try_get(25usize)?;
+                let live_llm: Option<String> = row.try_get("live_llm_model")?;
                 Some(RenderedLive {
                     observed_run_id: observed.map(|seen| seen.to_string()),
                     last_event_at: opt_moment("last_event_at")?,

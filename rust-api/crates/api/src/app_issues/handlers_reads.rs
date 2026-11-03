@@ -1819,15 +1819,11 @@ struct AgentRunOwned {
     live_updated_at: Option<String>,
 }
 
-/// The merged run statements select `runner.name` and two `llm_model`
-/// columns, which would collide under `row_to_json`; alias the duplicates
-/// (pinned by unit test).
+/// The merged run statements select `runner.name`, which `row_to_json`
+/// would report as `name`; alias it (pinned by unit test). The live-state
+/// `llm_model` is already `live_llm_model` in the statement itself.
 fn agent_run_sql_aliased(sql: &str) -> String {
     sql.replace("runner.name", "runner.name AS runner_name")
-        .replace(
-            "runner_live_state.llm_model",
-            "runner_live_state.llm_model AS live_llm_model",
-        )
 }
 
 fn render_iso_moment(row: &Map<String, Value>, key: &str) -> Option<String> {
