@@ -64,16 +64,27 @@ def run_count(issue: str) -> int:
 
 
 def wait_for_claim(issue: str, timeout: float = 45, what: str | None = None) -> dict:
-    """Wait until fire_tick stamped `last_tick_at`, then return the row.
+    """Wait until fire_tick's claim SETTLED, then return the row.
 
     `last_tick_at` is written inside the claim and is deliberately not rolled
     back when dispatch returns nothing (`agent_ticker.py:295-297`), so it is
     the one column that proves the ticking-state gate opened and the claim
-    ran — on both backends.
+    ran — on both backends. But the claim commit also charges `used + 1`,
+    while dispatch and the rollback run after it, outside the claim
+    transaction (`agent_ticker.py:283-330`; the Rust port has the same
+    shape). A reader that wakes on `last_tick_at` alone can observe the
+    pre-rollback row (`used == 1`) — this flaked the Rust replay
+    (PIDASHCONV-1665). The settled proof is `last_tick_at` set with `used`
+    rolled back to 0; the callers' assertions are unchanged.
     """
+
+    def _settled() -> bool:
+        row = ticker(issue)
+        return row["last_tick_at"] is not None and row["used"] == 0
+
     wait_for_condition(
-        lambda: ticker(issue)["last_tick_at"] is not None,
+        _settled,
         timeout=timeout,
-        what=what or "fire_tick claims the due ticker",
+        what=what or "fire_tick claim to settle (last_tick_at set, used rolled back)",
     )
     return ticker(issue)

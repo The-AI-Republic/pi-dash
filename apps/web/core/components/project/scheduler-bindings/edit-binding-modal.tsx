@@ -7,7 +7,7 @@
 import { useEffect } from "react";
 import { observer } from "mobx-react";
 import type { SubmitHandler } from "react-hook-form";
-import { useForm, useWatch } from "react-hook-form";
+import { useForm } from "react-hook-form";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
@@ -50,6 +50,7 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
     control,
     handleSubmit,
     reset,
+    watch,
     formState: { errors, isSubmitting },
   } = useForm<EditFormValues>({
     defaultValues: {
@@ -76,8 +77,12 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
     });
   }, [isOpen, binding, reset]);
 
-  const watchedDtstart = useWatch({ control, name: "dtstart" }) ?? "";
-  const watchedRrule = useWatch({ control, name: "rrule" }) ?? "";
+  // NB: this RHF version's useWatch does not pick up reset() values — it kept
+  // returning the initial defaults after the open-edge reset seeded the form
+  // from the binding. watch() subscribes correctly, so the humanizer anchor
+  // and the recurrence builder defaults track the real form state.
+  const watchedDtstart = watch("dtstart") ?? "";
+  const watchedRrule = watch("rrule") ?? "";
 
   const handleFormSubmit: SubmitHandler<EditFormValues> = async (values) => {
     if (!binding) return;

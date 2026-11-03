@@ -948,8 +948,10 @@ fn content_filter_message(state: &RunState) -> String {
 /// content-filter body. Reimplemented here because the D-11 copy is
 /// `pub(crate)` in `pidash_jobs` (foundation crates are read-only):
 /// non-ASCII becomes `\uXXXX` (surrogate pairs above the BMP), and the
-/// control characters use CPython's short escapes.
-fn ensure_ascii(text: &str) -> String {
+/// control characters use CPython's short escapes. Shared with the MCP
+/// result wrapper ([`super::live`] frames dict results through it), so
+/// there is one escaper for the turn path.
+pub(crate) fn ensure_ascii(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {

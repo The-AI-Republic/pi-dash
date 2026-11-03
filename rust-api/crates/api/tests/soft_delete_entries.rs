@@ -37,6 +37,7 @@ const ENQUEUED: &[(&str, &str)] = &[
     ("db", "issuesubscriber"),
     ("db", "issueview"),
     ("db", "issuevote"),
+    ("db", "issueworklog"),
     ("db", "label"),
     ("db", "loopjob"),
     ("db", "module"),
@@ -59,7 +60,7 @@ const ENQUEUED: &[(&str, &str)] = &[
 
 #[test]
 fn every_enqueued_model_name_resolves() {
-    assert_eq!(ENQUEUED.len(), 41);
+    assert_eq!(ENQUEUED.len(), 42);
     for (app_label, model_name) in ENQUEUED {
         assert!(
             entry_table_for(app_label, model_name).is_some(),

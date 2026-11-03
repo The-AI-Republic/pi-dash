@@ -6,10 +6,12 @@
 
 PIDASHCONV-1075: the email sign-in tail must replay Django's statement
 order — the project arm as two bulk statements (all ``workspace_members``
-rows committed before the ported ``project_id`` IntegrityError), the
-``last_login`` stamp after the invitation workflow, invite processing in
-``-created_at`` order, and the activation mail published before the
-``is_active`` save.
+rows first, then the ``project_members`` bulk carrying each invite's
+``project_id``), the ``last_login`` stamp after the invitation workflow,
+invite processing in ``-created_at`` order, and the activation mail
+published before the ``is_active`` save. PIDASHCONV-1686 retired the
+ported PB-1008 500: the project bulk sets ``project_id`` (Django main)
+and the join succeeds.
 
 Run like the rest of the suite (see ``conftest.py``), plus the broker
 URLs (``AMQP_URL`` redis, ``RABBITMQ_*``) the Django server publishes
@@ -274,16 +276,17 @@ def _seed_workspace_invite(db, workspace_id, email, *, role, created_days_ago):
     return iid
 
 
-def test_project_invites_commit_all_workspace_rows_before_ported_500(
+def test_project_invites_join_both_workspaces_and_projects(
     browser, db, user, invite_world
 ):
-    """Two accepted project invites: 500 on both, N rows kept, no stamp.
+    """Two accepted project invites: 302 on both, both row sets, stamped.
 
     Django commits the whole project-arm ``workspace_members`` bulk before
-    the ``project_members`` bulk raises the ported IntegrityError, and the
-    ``last_login`` stamp (fired from ``login()`` after ``authenticate()``)
-    never runs. ``save_user_data`` still runs first, so ``last_active``
-    is stamped while ``last_login`` stays NULL.
+    the ``project_members`` bulk, which carries each invite's
+    ``project_id`` (role clamped per row), and the ``last_login`` stamp
+    (fired from ``login()`` after ``authenticate()``) runs.
+    ``save_user_data`` still runs first, so ``last_active`` is stamped
+    too. FAILS on pre-fix Rust (500, partial writes).
     """
     email = user["email"]
     old_ws, new_ws = invite_world["workspaces"]
@@ -293,7 +296,7 @@ def test_project_invites_commit_all_workspace_rows_before_ported_500(
     _seed_project_invite(db, new_ws["id"], new_proj["id"], email, role=5, created_days_ago=1)
 
     res = browser().post("/auth/sign-in/", data={"email": email, "password": user["password"]})
-    assert res.status_code == 500, res.text[:300]
+    assert res.status_code == 302, res.text[:300]
 
     with db.connect() as conn:
         with conn.cursor() as cur:
@@ -303,25 +306,34 @@ def test_project_invites_commit_all_workspace_rows_before_ported_500(
                 (user["id"],),
             )
             members = cur.fetchall()
-            cur.execute("SELECT COUNT(*) FROM project_members WHERE member_id = %s", (user["id"],))
-            project_rows = cur.fetchone()[0]
+            cur.execute(
+                "SELECT project_id::text, workspace_id::text, role FROM project_members"
+                " WHERE member_id = %s ORDER BY workspace_id::text",
+                (user["id"],),
+            )
+            project_rows = cur.fetchall()
             cur.execute(
                 "SELECT last_login, last_active FROM users WHERE id = %s", (user["id"],)
             )
             last_login, last_active = cur.fetchone()
             cur.execute(
-                "SELECT COUNT(*) FROM project_member_invites WHERE email = %s AND accepted",
+                "SELECT COUNT(*) FROM project_member_invites"
+                " WHERE email = %s AND accepted AND deleted_at IS NULL",
                 (email,),
             )
-            invites_left = cur.fetchone()[0]
+            invites_live = cur.fetchone()[0]
     assert sorted((w, r) for w, r in members) == sorted(
         [(old_ws["id"], 15), (new_ws["id"], 5)]
     ), members
-    assert project_rows == 0
-    assert last_login is None
+    assert sorted((p, w, r) for p, w, r in project_rows) == sorted(
+        [(old_proj["id"], old_ws["id"], 15), (new_proj["id"], new_ws["id"], 5)]
+    ), project_rows
+    assert last_login is not None
     assert last_active is not None
-    # The invite deletes never run on the 500 path.
-    assert invites_left == 2
+    # No live accepted invite remains on either backend. (Django
+    # soft-deletes the rows while Rust hard-deletes them -- a hardness
+    # divergence outside this issue's write-sequence scope.)
+    assert invites_live == 0
 
 
 def test_workspace_invites_publish_track_event_newest_first(browser, db, user, invite_world):

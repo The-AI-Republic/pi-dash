@@ -238,6 +238,8 @@ describe("desktop agent lifecycle", () => {
     runtime.resumeAgentRuntime("user-a");
     await runtime.connectAgentProject("workspace-a", "project-1");
     accessExpired = true;
+    // An edition whose interceptor refreshes on a 401 only tears down once the refresh is refused.
+    refreshFailure = 401;
     await expect(runtime.connectAgentProject("workspace-a", "project-2")).rejects.toThrow();
     const signOuts = (invoke.mock.calls as unknown as [string, unknown][]).filter(
       ([command]) => command === "managed_sign_out"

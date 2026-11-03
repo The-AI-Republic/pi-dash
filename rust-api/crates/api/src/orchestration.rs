@@ -8,30 +8,25 @@
 //! twin that lives in `project_move_handoff` (the api-side twin of
 //! `jobs::LiveCreationStore`). The move domain service creates handoff
 //! runs inside its own transaction span; its
-//! [`crate::domain_hooks::AppMovePostCommitHook`] drains the collected
-//! [`CreationOutboxes`] through this module instead of copying the
-//! drain:
+//! [`crate::domain_hooks::AppMovePostCommitHook`] drains them through the
+//! public [`MoveHook`][pidash_jobs::hooks::MoveHook], which calls back
+//! into this module for the api-only legs:
 //!
 //! - [`SpanCreationDeps::from_state`] builds the runtime facts
 //!   (executor settings, admission cache, clock) from the request's
 //!   [`AppState`].
-//! - [`drain_creation_outboxes`] runs the outboxes after the caller's
-//!   span commits, in the `complete_project_move_handoff` order: terminal publish
-//!   pairs, dispatches, deferred admission consumes. A dispatch is
-//!   `dispatch_agent_run` per id; a [`DispatchDecision::PodDrain`]
-//!   drains through the caller's own pod-drain recipe (Python drains
-//!   the target pod inline, `dispatch.py:61-70` — the decision is
-//!   acted on, never dropped).
+//! - [`drain_terminal_effects`] runs finalized runs' terminal publish
+//!   pairs after the caller's span commits, inline with the ambient
+//!   user.
 //!
 //! The caller drains creation outboxes before its own post-commit
 //! work: the creation registers its `on_commit` entries first (the
 //! move's dispatch precedes its cancel send and pod drains,
 //! `issue_move.py:353-372`).
 
-use std::future::Future;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -43,8 +38,6 @@ use pidash_db::runner_sessions::models::runner_session;
 use pidash_db::runner_sessions::outbox as runner_outbox;
 use pidash_db::runner_sessions::outbox::OutboxError;
 use pidash_db::runner_sessions::RunnerSession;
-use pidash_jobs::dispatch::{dispatch_agent_run, DispatchDecision};
-use pidash_services::dispatch::{consume_admission_token, DeferredConsume};
 use pidash_services::domain::issues_move::MoveDrainError;
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::runner_runs::finalization as finalize_kernel;
@@ -91,87 +84,36 @@ impl SpanCreationDeps {
     }
 }
 
-/// The creation seam's post-commit outboxes: dispatch ids (collected
-/// by `dispatch_after_commit`), deferred admission consumes, and
-/// finalized-run ids awaiting their terminal publish pairs. The
-/// admission cache rides along so the deferred drain needs no
-/// rebuild.
-pub(crate) struct CreationOutboxes {
-    pub(crate) dispatches: Vec<Uuid>,
-    pub(crate) deferred: Vec<DeferredConsume>,
-    pub(crate) terminal_effects: Vec<Uuid>,
-    pub(crate) cache: RedisAdmissionCache,
-}
-
-/// Why the creation drain failed. The caller's span already
-/// committed — the caller answers 500 with its writes standing (the
-/// enqueue precedent).
-#[derive(Debug)]
-pub(crate) enum CreationDrainError<E> {
-    /// `dispatch_agent_run` failed.
-    Dispatch(sqlx::Error),
-    /// The caller's target-pod drain failed.
-    PodDrain(E),
-}
-
-/// Drain the creation outboxes after the caller's span commits, in
-/// the `complete_project_move_handoff` order: terminal publish pairs (isolated each,
-/// infallible), dispatches (`dispatch_agent_run` per id, failures
-/// propagate), deferred admission consumes (best-effort). A
-/// [`DispatchDecision::PodDrain`] drains through `drain_pod`, the
-/// caller's own D-14 pod-drain recipe. `terminal_created_by` is the
-/// ambient crum request user for the inline terminal effects.
-pub(crate) async fn drain_creation_outboxes<F, Fut, E>(
+/// Drain finalized runs' terminal publish pairs after the caller's
+/// span commits: one emit + inline apply per run, each isolated with
+/// its failure log (the old `drain_creation_outboxes` terminal leg;
+/// the dispatch + deferred legs moved to the public
+/// [`MoveHook`][pidash_jobs::hooks::MoveHook], OVL-16).
+/// `terminal_created_by` is the ambient crum request user for the
+/// inline terminal effects.
+pub(crate) async fn drain_terminal_effects(
     pool: &PgPool,
     state: &AppState,
-    outboxes: CreationOutboxes,
-    drain_pod: F,
+    run_ids: &[Uuid],
     terminal_created_by: Option<Uuid>,
-) -> Result<(), CreationDrainError<E>>
-where
-    F: Fn(Uuid) -> Fut,
-    Fut: Future<Output = Result<(), E>>,
-{
-    if !outboxes.terminal_effects.is_empty() {
-        let mut pairs = Vec::with_capacity(outboxes.terminal_effects.len() * 2);
-        for id in outboxes.terminal_effects {
-            pairs.extend(finalize_kernel::plan_publish_effects(id));
-        }
-        let ports = crate::runner_runs::LivePorts::new(pool.clone(), state);
-        pidash_jobs::orchestration::drain_publish_effects(pairs, |effect| {
-            crate::runner_runs::run_endpoints::drain_lifecycle_effects(
-                pool,
-                &ports,
-                vec![effect],
-                terminal_created_by,
-            )
-        })
-        .await;
+) {
+    if run_ids.is_empty() {
+        return;
     }
-    let cloud = state.settings().cloud_agent.clone();
-    let now = now_micros();
-    for id in outboxes.dispatches {
-        match dispatch_agent_run(pool, &cloud, id, now).await {
-            Ok(DispatchDecision::PodDrain { pod_id }) => {
-                drain_pod(pod_id)
-                    .await
-                    .map_err(CreationDrainError::PodDrain)?;
-            }
-            Ok(_) => {}
-            Err(error) => return Err(CreationDrainError::Dispatch(error)),
-        }
+    let mut pairs = Vec::with_capacity(run_ids.len() * 2);
+    for id in run_ids {
+        pairs.extend(finalize_kernel::plan_publish_effects(*id));
     }
-    for consume in &outboxes.deferred {
-        consume_admission_token(&outboxes.cache, consume);
-    }
-    Ok(())
-}
-
-/// `timezone.now()` truncated to microseconds (the `project_move_handoff`
-/// `now_micros` position).
-fn now_micros() -> DateTime<Utc> {
-    let now = Utc::now();
-    DateTime::from_timestamp_micros(now.timestamp_micros()).expect("micros in range")
+    let ports = crate::runner_runs::LivePorts::new(pool.clone(), state);
+    pidash_jobs::orchestration::drain_publish_effects(pairs, |effect| {
+        crate::runner_runs::run_endpoints::drain_lifecycle_effects(
+            pool,
+            &ports,
+            vec![effect],
+            terminal_created_by,
+        )
+    })
+    .await;
 }
 
 /// `int(time.time())` (the `project_move_handoff` `unix_now_secs` position).

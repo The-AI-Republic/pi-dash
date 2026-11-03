@@ -268,7 +268,11 @@ impl IpcServer {
                 Ok(Response::Doctor(report))
             }
             Request::RunnerReconnect => {
-                self.primary_state.force_reconnect();
+                self.spawn_ctx.kick_reconnect(None)?;
+                Ok(Response::Ack)
+            }
+            Request::Reconnect { runner } => {
+                self.spawn_ctx.kick_reconnect(runner.as_deref())?;
                 Ok(Response::Ack)
             }
             Request::RunnerDisconnect => {

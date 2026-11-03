@@ -1,0 +1,57 @@
+# The parity oracle as a production build: the old app (apps/web), compiled
+# once and served as static files by nginx. Opt-in through
+# PARITY_ORACLE_MODE=prod (see README.md); Dockerfile.oracle is the dev-server
+# variant.
+#
+# Build context is the repo root, but only the old app's own inputs are
+# copied in: apps/web and the workspace packages it depends on. apps/web_new
+# and the new packages (kit, api-client) are left out on purpose, so every
+# layer below is reused until the old app itself changes. That matters: the
+# install and build steps are minutes of CPU and over 1.5 GB of layers.
+#
+# apps/web/Dockerfile.web is not used because its turbo build generates type
+# declarations for the shared packages, which fails here (TS2742 in
+# packages/propel); like Dockerfile.oracle, this builds them with --no-dts.
+FROM node:22-alpine AS build
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PNPM_HOME/bin:$PATH"
+RUN apk add --no-cache libc6-compat && corepack enable
+WORKDIR /app
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json .npmrc ./
+COPY pi-symbol-light.svg pi-symbol-dark.svg ./
+COPY packages/constants packages/constants
+COPY packages/editor packages/editor
+COPY packages/hooks packages/hooks
+COPY packages/i18n packages/i18n
+COPY packages/propel packages/propel
+COPY packages/services packages/services
+COPY packages/shared-state packages/shared-state
+COPY packages/tailwind-config packages/tailwind-config
+COPY packages/types packages/types
+COPY packages/typescript-config packages/typescript-config
+COPY packages/ui packages/ui
+COPY packages/utils packages/utils
+COPY apps/web apps/web
+
+# The workspace is partial here, so the lockfile cannot be frozen.
+RUN pnpm install --no-frozen-lockfile
+RUN pnpm --filter "web^..." --filter "!web" exec sh -c 'if [ -f tsdown.config.ts ]; then tsdown --no-dts; else echo "skip: no tsdown build in $PWD"; fi'
+
+# Vite inlines these at build time. Empty base keeps API calls same-origin;
+# the stack's proxy routes them to Django. Paths match apps/web/Dockerfile.web.
+ENV VITE_API_BASE_URL=""
+ENV VITE_WEB_BASE_URL=""
+ENV VITE_ADMIN_BASE_URL=""
+ENV VITE_ADMIN_BASE_PATH="/god-mode"
+ENV VITE_SPACE_BASE_URL=""
+ENV VITE_SPACE_BASE_PATH="/spaces"
+ENV VITE_LIVE_BASE_URL=""
+ENV VITE_LIVE_BASE_PATH="/live"
+RUN pnpm --filter=web build
+
+FROM nginx:1.27-alpine
+COPY apps/web/nginx/nginx.conf /etc/nginx/nginx.conf
+COPY --from=build /app/apps/web/build/client /usr/share/nginx/html
+EXPOSE 3000
+CMD ["nginx", "-g", "daemon off;"]

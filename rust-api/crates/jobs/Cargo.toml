@@ -16,6 +16,10 @@ pidash-services = { path = "../services" }
 # Export uploads sign through the shared SigV4 crate (PIDASHCONV-1106),
 # never a local signer (same pin as pidash-api/db: no new downloads).
 pidash-storage = { path = "../storage" }
+# OVL-16 (PIDASHCONV-1660): `hooks::HookDeps::operation_deps` takes the
+# SeaORM connection the domain writes run on. Identical spec to
+# pidash-services (locked sea-orm 1.1.20 — no lock churn).
+sea-orm = { version = "~1.1.20", default-features = false, features = ["sqlx-postgres", "runtime-tokio", "macros", "with-uuid", "with-chrono", "with-json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 uuid = { version = "1", features = ["v4", "v7"] }

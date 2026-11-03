@@ -110,7 +110,7 @@ def test_creation_pins_to_the_creators_own_runner(project, create_user, openhub_
     assert fields["pinned_runner"] == bundled_runner
     assert fields["tool_plan"] == {}
     # No waiting marker on the happy path.
-    assert "error_code" not in fields
+    assert "error_details" not in fields
 
 
 @override_settings(**MANAGED_SETTINGS)
@@ -148,7 +148,7 @@ def test_automatic_run_queues_visibly_when_desktop_offline(
     bundled_runner.save(update_fields=["status"])
     fields = _fields(project, create_user, automatic=True)
     assert fields["pinned_runner"] == bundled_runner
-    assert fields["error_code"] == ManagedRunnerReason.NOT_CONNECTED
+    assert fields["error_details"] == {"code": ManagedRunnerReason.NOT_CONNECTED}
 
 
 @override_settings(**MANAGED_SETTINGS)

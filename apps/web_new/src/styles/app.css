@@ -1,0 +1,284 @@
+/* Copyright (c) Pi Dash contributors */
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* See the LICENSE file for details. */
+/* Import order matters: kit.css ships precompiled base utilities (it is
+   built with standalone tailwindcss), so it must come BEFORE the app's
+   own utilities — otherwise kit's duplicate base rules land after the
+   app's responsive variants and win by source order, breaking every
+   `hidden sm:/md:/lg:` pattern app-wide (NEWFRONT-295 gate). */
+@import "@pidash/kit/kit.css";
+@import "tailwindcss";
+@import "@pidash/kit/tokens.css";
+
+/* Section tabs mark the current view with the accent underline. The
+   utility keeps the token indirection in one place (the parity driver
+   reads this class name as the "current tab" signal). */
+@utility border-accent-strong {
+  border-color: var(--accent);
+}
+
+/* Stored rich-text content (shared/editor): the view surface and the
+   editing surface share one class so descriptions read the same
+   everywhere. Preflight strips element styles; these restore the
+   document semantics the editor extensions produce, in kit tokens. */
+@layer components {
+  .rich-text-content {
+    font-size: var(--text-base-size);
+    line-height: var(--text-base-height);
+    color: var(--text);
+    overflow-wrap: break-word;
+  }
+  .rich-text-content > :first-child {
+    margin-top: 0;
+  }
+  .rich-text-content > :last-child {
+    margin-bottom: 0;
+  }
+  .rich-text-content p {
+    margin-top: var(--space-4);
+    margin-bottom: var(--space-4);
+  }
+  .rich-text-content h1,
+  .rich-text-content h2,
+  .rich-text-content h3 {
+    font-weight: 600;
+    margin-top: var(--space-8);
+    margin-bottom: var(--space-4);
+  }
+  .rich-text-content h1 {
+    font-size: var(--text-h1-size);
+    line-height: var(--text-h1-height);
+  }
+  .rich-text-content h2 {
+    font-size: var(--text-h2-size);
+    line-height: var(--text-h2-height);
+  }
+  .rich-text-content h3 {
+    font-size: var(--text-h3-size);
+    line-height: var(--text-h3-height);
+  }
+  .rich-text-content ul,
+  .rich-text-content ol {
+    margin-top: var(--space-4);
+    margin-bottom: var(--space-4);
+    padding-left: var(--space-12);
+  }
+  .rich-text-content ul {
+    list-style-type: disc;
+  }
+  .rich-text-content ol {
+    list-style-type: decimal;
+  }
+  .rich-text-content li {
+    margin-top: var(--space-2);
+    margin-bottom: var(--space-2);
+  }
+  .rich-text-content li > ul,
+  .rich-text-content li > ol {
+    margin-top: var(--space-2);
+    margin-bottom: var(--space-2);
+  }
+  .rich-text-content a {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .rich-text-content blockquote {
+    margin: var(--space-4) 0;
+    padding-left: var(--space-8);
+    border-left: 2px solid var(--border);
+    color: var(--text-muted);
+  }
+  .rich-text-content pre {
+    margin-top: var(--space-4);
+    margin-bottom: var(--space-4);
+    padding: var(--space-8);
+    border-radius: var(--radius-control);
+    background-color: var(--subtle);
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+    font-size: var(--text-meta-size);
+    line-height: var(--text-meta-height);
+    overflow-x: auto;
+  }
+  .rich-text-content code {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+    font-size: 0.9em;
+  }
+  .rich-text-content pre code {
+    font-size: inherit;
+    background-color: transparent;
+    padding: 0;
+  }
+  .rich-text-content :not(pre) > code {
+    padding: 1px 4px;
+    border-radius: var(--radius-control);
+    background-color: var(--subtle);
+  }
+  .rich-text-content hr {
+    margin-top: var(--space-12);
+    margin-bottom: var(--space-12);
+    border-top: 1px solid var(--border);
+  }
+  .rich-text-content img {
+    max-width: 100%;
+    border-radius: var(--radius-control);
+  }
+  /* Stored page pictures: a stored element is block-level like an
+     ordinary image so it never sits inline with surrounding prose
+     (PAGE-034). */
+  .rich-text-content image-component {
+    display: block;
+    max-width: 100%;
+  }
+  /* A stored person mention: one inline chip naming the person, so the
+     read and editing surfaces both show who was mentioned (ISS-127). */
+  .rich-text-content .mention-chip,
+  .mention-chip {
+    display: inline;
+    border-radius: var(--radius-control);
+    background-color: var(--accent-subtle);
+    color: var(--accent);
+    padding: 0 var(--space-2);
+  }
+  /* Stored page callouts keep their own block distinction (PAGE-037). */
+  .rich-text-content aside[data-type="callout"] {
+    margin: var(--space-4) 0;
+    padding: var(--space-3) var(--space-4);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius-control);
+    background-color: var(--accent-subtle);
+  }
+  /* Community's embed slot and entity preview cards (PAGE-040/043). */
+  .rich-text-content .page-embed-upgrade,
+  .rich-text-content .page-entity-preview {
+    display: block;
+    margin: var(--space-3) 0;
+    padding: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    background-color: var(--subtle);
+  }
+  .rich-text-content .page-entity-preview {
+    display: inline-block;
+    margin: 0;
+    padding: 0 var(--space-2);
+    color: var(--accent);
+    cursor: pointer;
+  }
+  .rich-text-content table {
+    border-collapse: collapse;
+    margin-top: var(--space-4);
+    margin-bottom: var(--space-4);
+  }
+  .rich-text-content th,
+  .rich-text-content td {
+    border: 1px solid var(--border);
+    padding: var(--space-4) var(--space-8);
+    text-align: left;
+  }
+  /* Letter and wash marks applied from the toolbar (PAGE-036). The
+     stored attribute is the palette key; the token pair keeps the same
+     choice legible in every theme. */
+  .rich-text-content [data-text-color="gray"] {
+    color: var(--page-color-gray-text);
+  }
+  .rich-text-content [data-text-color="peach"] {
+    color: var(--page-color-peach-text);
+  }
+  .rich-text-content [data-text-color="pink"] {
+    color: var(--page-color-pink-text);
+  }
+  .rich-text-content [data-text-color="orange"] {
+    color: var(--page-color-orange-text);
+  }
+  .rich-text-content [data-text-color="green"] {
+    color: var(--page-color-green-text);
+  }
+  .rich-text-content [data-text-color="light-blue"] {
+    color: var(--page-color-light-blue-text);
+  }
+  .rich-text-content [data-text-color="dark-blue"] {
+    color: var(--page-color-dark-blue-text);
+  }
+  .rich-text-content [data-text-color="purple"] {
+    color: var(--page-color-purple-text);
+  }
+  .rich-text-content [data-background-color="gray"] {
+    background-color: var(--page-color-gray-wash);
+  }
+  .rich-text-content [data-background-color="peach"] {
+    background-color: var(--page-color-peach-wash);
+  }
+  .rich-text-content [data-background-color="pink"] {
+    background-color: var(--page-color-pink-wash);
+  }
+  .rich-text-content [data-background-color="orange"] {
+    background-color: var(--page-color-orange-wash);
+  }
+  .rich-text-content [data-background-color="green"] {
+    background-color: var(--page-color-green-wash);
+  }
+  .rich-text-content [data-background-color="light-blue"] {
+    background-color: var(--page-color-light-blue-wash);
+  }
+  .rich-text-content [data-background-color="dark-blue"] {
+    background-color: var(--page-color-dark-blue-wash);
+  }
+  .rich-text-content [data-background-color="purple"] {
+    background-color: var(--page-color-purple-wash);
+  }
+  /* The signed-in author's mention reads distinctly from everyone else's
+     while keeping the same chip shape (PAGE-041). */
+  .rich-text-content .mention-chip-current,
+  .mention-chip-current {
+    font-weight: 600;
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+}
+
+/* Page display preferences (NEWFRONT-848, PAGE-072). The four stored
+   choices live in local storage; these two utilities are the reflow they
+   drive. Type size sets the body's base scale and face swaps the family;
+   both reach the title (via .page-title-editor) and the body container so
+   one stored choice never leaves the two halves disagreeing. */
+@layer components {
+  /* Both sizes move the same inherited type tokens: the title reads
+     --text-h1-* through its heading utility, the body reads --text-base-*
+     through .rich-text-content, and headings inside the body read the
+     other --text-h* values. Compact stays smaller than the default/large
+     choice on every one of them, so the stored choice reflows the whole
+     page rather than only one half. */
+  .text-size-large-font {
+    --text-base-size: 1rem;
+    --text-base-height: 1.75rem;
+    --text-h1-size: 1.75rem;
+    --text-h1-height: 2.25rem;
+    --text-h2-size: 1.5rem;
+    --text-h2-height: 2rem;
+    --text-h3-size: 1.375rem;
+    --text-h3-height: 1.75rem;
+  }
+  .text-size-small-font {
+    --text-base-size: 0.8rem;
+    --text-base-height: 1.2rem;
+    --text-h1-size: 1.4rem;
+    --text-h1-height: 1.8rem;
+    --text-h2-size: 1.2rem;
+    --text-h2-height: 1.6rem;
+    --text-h3-size: 1.1rem;
+    --text-h3-height: 1.4rem;
+  }
+  .text-face-serif,
+  .text-face-serif .rich-text-content {
+    font-family: Georgia, "Times New Roman", serif;
+  }
+  .text-face-sans-serif,
+  .text-face-sans-serif .rich-text-content {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+  }
+  /* The full-width preference marks the bar's content row; the canvas
+     measure itself is applied inline from the same stored value. */
+  .page-toolbar-content.wide-layout {
+    width: 100%;
+  }
+}

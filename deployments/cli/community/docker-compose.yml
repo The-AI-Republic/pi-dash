@@ -55,7 +55,7 @@ x-app-env: &app-env
   DATABASE_URL: ${DATABASE_URL:-postgresql://pi-dash:pi-dash@pi-dash-db/pi-dash}
   SECRET_KEY: "${SECRET_KEY:?SECRET_KEY must be set in pi_dash.env; generate with openssl rand -hex 32}"
   AMQP_URL: ${AMQP_URL:-amqp://pi-dash:pi-dash@pi-dash-mq:5672/pi-dash}
-  API_KEY_RATE_LIMIT: ${API_KEY_RATE_LIMIT:-60/minute}
+  API_KEY_RATE_LIMIT: ${API_KEY_RATE_LIMIT:-120/minute}
   MINIO_ENDPOINT_SSL: ${MINIO_ENDPOINT_SSL:-0}
   LIVE_SERVER_SECRET_KEY: "${LIVE_SERVER_SECRET_KEY:?LIVE_SERVER_SECRET_KEY must be set in pi_dash.env; generate with openssl rand -hex 32}"
 
@@ -64,6 +64,16 @@ services:
     image: airepublic/pi-dash-frontend:${APP_RELEASE:-stable}
     deploy:
       replicas: ${WEB_REPLICAS:-1}
+      restart_policy:
+        condition: any
+    depends_on:
+      - api
+      - worker
+
+  web_new:
+    image: airepublic/pi-dash-web-new:${APP_RELEASE:-stable}
+    deploy:
+      replicas: ${WEB_NEW_REPLICAS:-1}
       restart_policy:
         condition: any
     depends_on:
@@ -237,6 +247,7 @@ services:
       - proxy_data:/data
     depends_on:
       - web
+      - web_new
       - api
       - space
       - admin

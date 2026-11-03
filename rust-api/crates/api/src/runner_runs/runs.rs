@@ -549,19 +549,17 @@ pub fn cloud_dup_stamp_sql() -> String {
 }
 
 /// Expected `SET` order for the cancel finalize (`finalize_agent_run`
-/// base five plus `runs.py:617-623` extras in dict order). The live
+/// base four plus `runs.py:617-623` extras in dict order). The live
 /// bind below is positional; a mismatch fails loudly instead of
 /// binding wrong (the L6a sweeps precedent).
-pub const CANCEL_FINALIZE_COLUMNS: [&str; 9] = [
+pub const CANCEL_FINALIZE_COLUMNS: [&str; 7] = [
     "status",
     "ended_at",
-    "queue_position",
     "terminal_hooks_applied_at",
     "terminal_capacity_released_at",
     "cancel_requested_at",
     "cancel_reason",
-    "error_code",
-    "error",
+    "error_details",
 ];
 
 // ---------------------------------------------------------------------------
@@ -586,7 +584,7 @@ impl From<sqlx::Error> for RowError {
     }
 }
 
-/// Decode the 41-column run image at `base..base+41` into the L2 row.
+/// Decode the 39-column run image at `base..base+39` into the L2 row.
 pub fn decode_run(row: &sqlx::postgres::PgRow, base: usize) -> Result<AgentRun, RowError> {
     use sqlx::Row;
     let status: String = row.try_get(base + 10)?;
@@ -604,7 +602,7 @@ pub fn decode_run(row: &sqlx::postgres::PgRow, base: usize) -> Result<AgentRun, 
     // are choices-only (no DB check), so the stored value may sit
     // outside the trigger enum (runner migration 0029) and every
     // read path must tolerate it.
-    let trigger: String = row.try_get(base + 20)?;
+    let trigger: String = row.try_get(base + 19)?;
     Ok(AgentRun {
         id: row.try_get(base)?,
         workspace_id: row.try_get(base + 1)?,
@@ -621,32 +619,30 @@ pub fn decode_run(row: &sqlx::postgres::PgRow, base: usize) -> Result<AgentRun, 
         dispatch_attempts: row.try_get(base + 12)?,
         cancel_requested_at: row.try_get(base + 13)?,
         cancel_reason: row.try_get(base + 14)?,
-        error_code: row.try_get(base + 15)?,
-        tool_plan: row.try_get(base + 16)?,
-        terminal_hooks_applied_at: row.try_get(base + 17)?,
-        terminal_capacity_released_at: row.try_get(base + 18)?,
-        prompt: row.try_get(base + 19)?,
+        tool_plan: row.try_get(base + 15)?,
+        terminal_hooks_applied_at: row.try_get(base + 16)?,
+        terminal_capacity_released_at: row.try_get(base + 17)?,
+        prompt: row.try_get(base + 18)?,
         trigger,
-        prompt_manifest: row.try_get(base + 21)?,
-        phase_kind: row.try_get(base + 22)?,
-        run_config: row.try_get(base + 23)?,
-        required_capabilities: row.try_get(base + 24)?,
-        thread_id: row.try_get(base + 25)?,
-        agent_metadata: row.try_get(base + 26)?,
-        lease_expires_at: row.try_get(base + 27)?,
-        done_payload: row.try_get(base + 28)?,
-        error: row.try_get(base + 29)?,
-        refusal_category: row.try_get(base + 30)?,
-        llm_model: row.try_get(base + 31)?,
-        usage: row.try_get(base + 32)?,
-        input_tokens: row.try_get(base + 33)?,
-        output_tokens: row.try_get(base + 34)?,
-        total_tokens: row.try_get(base + 35)?,
-        created_at: row.try_get(base + 36)?,
-        assigned_at: row.try_get(base + 37)?,
-        queue_position: row.try_get(base + 38)?,
-        started_at: row.try_get(base + 39)?,
-        ended_at: row.try_get(base + 40)?,
+        prompt_manifest: row.try_get(base + 20)?,
+        phase_kind: row.try_get(base + 21)?,
+        run_config: row.try_get(base + 22)?,
+        required_capabilities: row.try_get(base + 23)?,
+        thread_id: row.try_get(base + 24)?,
+        agent_metadata: row.try_get(base + 25)?,
+        lease_expires_at: row.try_get(base + 26)?,
+        done_payload: row.try_get(base + 27)?,
+        error_details: row.try_get(base + 28)?,
+        refusal_category: row.try_get(base + 29)?,
+        llm_model: row.try_get(base + 30)?,
+        usage: row.try_get(base + 31)?,
+        input_tokens: row.try_get(base + 32)?,
+        output_tokens: row.try_get(base + 33)?,
+        total_tokens: row.try_get(base + 34)?,
+        created_at: row.try_get(base + 35)?,
+        assigned_at: row.try_get(base + 36)?,
+        started_at: row.try_get(base + 37)?,
+        ended_at: row.try_get(base + 38)?,
     })
 }
 
@@ -1847,13 +1843,11 @@ async fn finalize_cancelled(
     sqlx::query(&finalization::finalize_update_sql(&values))
         .bind(AgentRunStatus::Cancelled.value())
         .bind(Utc::now())
-        .bind(None::<i16>)
         .bind(None::<DateTime<Utc>>)
         .bind(None::<DateTime<Utc>>)
         .bind(requested_at)
         .bind(reason)
-        .bind("cancelled")
-        .bind(reason)
+        .bind(finalization::error_details_patch(&values))
         .bind(locked.id)
         .execute(&mut **tx)
         .await
@@ -2282,7 +2276,7 @@ mod tests {
     fn run_select_list_covers_all_columns_once() {
         let list = run_select_list();
         assert_eq!(list.split(", ").count(), agent_run::COLUMNS.len());
-        assert_eq!(agent_run::COLUMNS.len(), 41);
+        assert_eq!(agent_run::COLUMNS.len(), 39);
         assert!(list.starts_with(r#""agent_run"."id""#));
         assert!(list.ends_with(r#""agent_run"."ended_at""#));
     }
@@ -2302,7 +2296,7 @@ mod tests {
         let columns: Vec<&str> = values.clauses.iter().map(|clause| clause.column).collect();
         assert_eq!(columns.as_slice(), CANCEL_FINALIZE_COLUMNS);
         let sql = finalization::finalize_update_sql(&values);
-        assert!(sql.ends_with(r#"WHERE "agent_run"."id" = $10"#), "{sql}");
+        assert!(sql.ends_with(r#"WHERE "agent_run"."id" = $8"#), "{sql}");
     }
 
     #[test]
@@ -2370,7 +2364,7 @@ mod tests {
         }
     }
 
-    /// Temp `agent_run` in [`agent_run::COLUMNS`] order (the 41-column
+    /// Temp `agent_run` in [`agent_run::COLUMNS`] order (the 39-column
     /// positional image [`decode_run`] reads).
     const LIVE_DDL: &str = "CREATE TEMPORARY TABLE agent_run (
         id UUID PRIMARY KEY, workspace_id UUID, owner_id UUID,
@@ -2379,16 +2373,18 @@ mod tests {
         scheduler_binding_id UUID, parent_run_id UUID, status TEXT,
         executor_kind TEXT, dispatch_attempts INTEGER,
         cancel_requested_at TIMESTAMPTZ, cancel_reason TEXT,
-        error_code TEXT, tool_plan JSONB,
+        tool_plan JSONB,
         terminal_hooks_applied_at TIMESTAMPTZ,
         terminal_capacity_released_at TIMESTAMPTZ, prompt TEXT,
         trigger TEXT, prompt_manifest JSONB, phase_kind TEXT,
         run_config JSONB, required_capabilities JSONB, thread_id TEXT,
         agent_metadata JSONB, lease_expires_at TIMESTAMPTZ,
-        done_payload JSONB, error TEXT, refusal_category TEXT,
+        done_payload JSONB, error_details JSONB,
+        refusal_category TEXT GENERATED ALWAYS AS
+            (COALESCE(error_details ->> 'refusal_category', '')) STORED,
         llm_model TEXT, usage JSONB, input_tokens BIGINT,
         output_tokens BIGINT, total_tokens BIGINT, created_at TIMESTAMPTZ,
-        assigned_at TIMESTAMPTZ, queue_position SMALLINT,
+        assigned_at TIMESTAMPTZ,
         started_at TIMESTAMPTZ, ended_at TIMESTAMPTZ)";
 
     /// Unknown stored trigger values decode verbatim instead of
@@ -2419,11 +2415,11 @@ mod tests {
             sqlx::query(
                 "INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id,
                  status, executor_kind, dispatch_attempts, cancel_reason,
-                 error_code, tool_plan, prompt, trigger, phase_kind,
+                 tool_plan, prompt, trigger, phase_kind,
                  run_config, required_capabilities, thread_id, agent_metadata,
-                 error, refusal_category, llm_model, usage, created_at)
-                 VALUES ($1, $2, $3, $4, 'running', 'local_runner', 0, '', '',
-                 '{}', '', $5, 'work', '{}', '{}', 't', '{}', '', '', '', '{}',
+                 error_details, llm_model, usage, created_at)
+                 VALUES ($1, $2, $3, $4, 'running', 'local_runner', 0, '',
+                 '{}', '', $5, 'work', '{}', '{}', 't', '{}', '{}', '', '{}',
                  now())",
             )
             .bind(id)

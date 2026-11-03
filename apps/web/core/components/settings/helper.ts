@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { GROUPED_WORKSPACE_SETTINGS, PROJECT_SETTINGS_FLAT_MAP } from "@pi-dash/constants";
+import { GROUPED_WORKSPACE_SETTINGS, PROFILE_SETTINGS, PROJECT_SETTINGS_FLAT_MAP } from "@pi-dash/constants";
 
 const hrefToLabelMap = (options: Record<string, Array<{ href: string; i18n_label: string; [key: string]: any }>>) =>
   Object.values(options)
@@ -32,6 +32,24 @@ export const pathnameToAccessKey = (pathname: string) => {
   const workspaceSlug = pathArray[0];
   const accessKey = pathArray.slice(1, 3).join("/");
   return { workspaceSlug, accessKey: `/${accessKey}` || "" };
+};
+
+// Account settings are keyed by tab (`/:workspaceSlug/settings/account/:tab`)
+// rather than by href, so they need their own key -> label lookup.
+const accountKeyToLabelMap = Object.values(PROFILE_SETTINGS).reduce(
+  (acc, setting) => {
+    acc[setting.key] = setting.i18n_label;
+    return acc;
+  },
+  {} as Record<string, string>
+);
+
+export const getAccountActivePath = (pathname: string) => {
+  const parts = pathname.split("/").filter(Boolean);
+  const accountIndex = parts.indexOf("account");
+  if (accountIndex === -1) return null;
+  const tab = parts[accountIndex + 1];
+  return tab ? accountKeyToLabelMap[tab] : null;
 };
 
 export const getWorkspaceActivePath = (pathname: string) => {

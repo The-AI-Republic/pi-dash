@@ -304,7 +304,7 @@ pub const ROUTES: &[RouteRow] = &[
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/",
         owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/{issue_id}/",
-        owned: &["DELETE"], proxied: &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
+        owned: &["GET", "DELETE"], proxied: &["POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/progress/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/transfer-issues/",
@@ -914,7 +914,7 @@ pub const ROUTES: &[RouteRow] = &[
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/project-members/{pk}/",
         owned: &["GET", "PATCH", "DELETE"], proxied: &["POST", "PUT", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/",
-        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+        owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/runs/",
@@ -972,7 +972,7 @@ pub const ROUTES: &[RouteRow] = &[
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/wait/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/schedulers/",
-        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+        owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/stickies.{format}/?",
         owned: &[], proxied: &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/stickies/",
@@ -1699,6 +1699,38 @@ mod tests {
     /// table's rust names. Residual: a registration outside these
     /// consts is invisible here (`Registry` has no iterator) — review
     /// catches it, and the parity diff flags the behavior change.
+    /// The mirror's `ToolCtx` needs a transition hook; handlers never run
+    /// here, so it is never called.
+    struct NoopTransitionHook;
+
+    impl pidash_services::domain::transition::IssueTransitionHook for NoopTransitionHook {
+        fn enqueue_completion_comment(
+            &self,
+            _issue_id: uuid::Uuid,
+            _prev_state_id: Option<uuid::Uuid>,
+            _current_state_id: Option<uuid::Uuid>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {})
+        }
+
+        fn fire(
+            &self,
+            _actor_id: uuid::Uuid,
+            _request: pidash_services::orchestration::entries::FireRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<pidash_services::orchestration::entries::FireOutcome, ()>,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async move {
+                Ok(pidash_services::orchestration::entries::FireOutcome::NoTransition)
+            })
+        }
+    }
+
     #[tokio::test]
     async fn mirror_registry_matches_tasks_table() {
         use pidash_jobs::tasks_cleanup;
@@ -1899,6 +1931,7 @@ mod tests {
             tools: crate::model_runtime::tools_exec::ToolCtx {
                 toolsets: std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
                 pool: pool.clone(),
+                orm: pidash_db::pool::sea_orm_connection(&pool),
                 cloud: execute_settings.cloud_agent.clone(),
                 managed: execute_settings.managed_runner.clone(),
                 http: reqwest::Client::new(),
@@ -1912,6 +1945,7 @@ mod tests {
                 // above; the worker builder builds this from REDIS_URL.
                 redis: None,
                 runner: execute_settings.runner.clone(),
+                transition_hook: std::sync::Arc::new(NoopTransitionHook),
             },
             keys: crate::model_runtime::keys::KeyResolver::from_env(
                 execute_settings.assistant.key_cache_ttl_secs,

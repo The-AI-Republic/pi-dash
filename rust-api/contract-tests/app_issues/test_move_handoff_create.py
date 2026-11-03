@@ -23,9 +23,9 @@ ISSUE_COLUMNS = (
 
 RUN_COLUMNS = (
     "id, status, prompt, run_config, required_capabilities, thread_id,"
-    " error, workspace_id, work_item_id, pod_id, created_by_id, llm_model,"
-    " refusal_category, trigger, executor_kind, dispatch_attempts,"
-    " cancel_reason, error_code, tool_plan, phase_kind, agent_metadata,"
+    " error_details, workspace_id, work_item_id, pod_id, created_by_id, llm_model,"
+    " trigger, executor_kind, dispatch_attempts,"
+    " cancel_reason, tool_plan, phase_kind, agent_metadata,"
     " usage, created_at"
 )
 
@@ -67,10 +67,10 @@ def _seed_handoff_world(cur, seed):
     )
     cur.execute(
         "INSERT INTO agent_run (%s) VALUES (%s)" % (
-            RUN_COLUMNS, ",".join(["%s"] * 23)),
+            RUN_COLUMNS, ",".join(["%s"] * 21)),
         (parent, "queued", "contract parent prompt", "{}", "{}",
-         "contract-thread", "", ws, hx, src_pod, admin, "contract-model",
-         "", "direct", "local_runner", 0, "", "", "{}", "work", "{}",
+         "contract-thread", "{}", ws, hx, src_pod, admin, "contract-model",
+         "direct", "local_runner", 0, "", "{}", "work", "{}",
          '{"input": 0, "output": 0, "total": 0}', NOW),
     )
     return {"src_pod": src_pod, "tgt_pod": tgt_pod, "hx": hx,
