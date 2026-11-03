@@ -2995,12 +2995,17 @@ pub async fn patch_project_inner(
             .fetch_one(&pre.pool)
             .await
             .map_err(|_| Denial::ServerError)?;
-    let plain: Option<sqlx::postgres::PgRow> =
-        sqlx::query(r#"SELECT * FROM "projects" WHERE "id" = $1 AND "deleted_at" IS NULL"#)
-            .bind(project_id)
-            .fetch_optional(&pre.pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    use pidash_services::read;
+    let mut rows = read::fetch_project_rows(&pre.pool, &[project_id])
+        .await
+        .map_err(|error| match error {
+            read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+            read::Error::Db(err) => {
+                let (site, source) = err.split();
+                db_error(source, site)
+            }
+        })?;
+    let plain = rows.pop();
     let Some(plain) = plain else {
         return Err(Denial::NotFoundError("Project does not exist".to_owned()));
     };

@@ -103,7 +103,9 @@ def wait_for_continuation(issue: str, timeout: float = 90) -> dict:
     )
     return fetchone(
         get_database_url(),
-        "SELECT id, parent_run_id, prompt, status, error, error_code"
+        "SELECT id, parent_run_id, prompt, status,"
+        " COALESCE(error_details ->> 'message', '') AS error,"
+        " COALESCE(error_details ->> 'code', '') AS error_code"
         " FROM agent_run WHERE work_item_id = %s ORDER BY created_at DESC LIMIT 1",
         (issue,),
     )

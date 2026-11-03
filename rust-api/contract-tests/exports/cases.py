@@ -483,6 +483,58 @@ def xlsx_cells(data: bytes) -> list[list[str]]:
     return rows
 
 
+def seed_label_fanout(seed, world: dict, count: int = 60) -> list[str]:
+    """Link ``count`` 15-char labels to the world's first issue.
+
+    A ``labels__id``-segmented export over this world has a header (and
+    data row) over 998 bytes, which must go quoted-printable on the wire
+    (PIDASHCONV-1691). Label/issue-link rows are covered by
+    ``cleanup_export_world``.
+    """
+    workspace_id = world["workspace"]
+    project_id = world["project"]
+    issue_id = world["issues"][0]
+    label_ids = []
+    for index in range(count):
+        label_id = _make_label(seed, workspace_id, project_id, f"qpseg-{index:09d}")
+        _link_label(seed, workspace_id, project_id, issue_id, label_id)
+        label_ids.append(label_id)
+    return label_ids
+
+
+def assert_quoted_printable_csv_mail(raw: str, slug: str) -> bytes:
+    """Wire pins for a wide analytic CSV mail (PIDASHCONV-1691).
+
+    The CSV attachment part is ``quoted-printable`` with QP-wrapped
+    payload lines (<= 76), no raw wire line exceeds the 998-byte SMTP
+    limit, and the decoded CSV still carries the > 998-byte line that
+    triggered the encoding (guarding against a vacuous pass where the
+    seeds never produced a long line). Returns the decoded CSV bytes.
+    """
+    from email import message_from_string
+
+    parsed = message_from_string(raw)
+    csv_parts = [
+        part
+        for part in parsed.walk()
+        if not part.is_multipart() and part.get_content_type() == "text/csv"
+    ]
+    assert len(csv_parts) == 1, f"expected one CSV part, got {len(csv_parts)}"
+    (part,) = csv_parts
+    assert part["Content-Transfer-Encoding"] == "quoted-printable", part.items()
+    assert part.get_filename() == f"{slug}-analytics.csv", part.get_filename()
+    encoded = part.get_payload(decode=False)
+    assert isinstance(encoded, str)
+    assert max(len(line) for line in encoded.splitlines()) <= 76, encoded[:200]
+    longest = max(len(line.encode("utf-8")) for line in raw.splitlines())
+    assert longest <= 998, f"raw wire line of {longest} bytes exceeds the SMTP limit"
+    decoded = part.get_payload(decode=True)
+    assert isinstance(decoded, bytes)
+    header = decoded.split(b"\r\n")[0]
+    assert len(header) > 998, f"seeds produced no long line (header {len(header)} bytes)"
+    return decoded
+
+
 def unique_tag(prefix: str) -> str:
     return f"{prefix}{uuid.uuid4().hex[:8]}"
 

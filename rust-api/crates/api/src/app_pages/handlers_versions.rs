@@ -126,7 +126,7 @@ fn duplicate_refetch_sql() -> &'static str {
     r#"SELECT p.id, p.name, p.owned_by_id, p.access, p.color, p.parent_id,
        p.is_locked, p.archived_at, p.workspace_id, p.created_at, p.updated_at,
        p.created_by_id, p.updated_by_id, p.view_props, p.logo_props,
-       p.description_html,
+       p.description_html, p.description_json,
        COALESCE((SELECT ARRAY_AGG(DISTINCT pp.project_id) FILTER (
                    WHERE NOT (pp.project_id = '00000000-0000-0000-0000-000000000001'
                        AND pp.project_id IS NOT NULL))
@@ -234,6 +234,7 @@ struct CopyRow {
     view_props: Value,
     logo_props: Value,
     description_html: String,
+    description_json: Value,
     project_ids: Vec<Uuid>,
 }
 
@@ -273,9 +274,11 @@ struct VersionDetailBody {
 }
 
 /// `PageDetailSerializer` over the duplicate re-fetch (`base.py:638-639`):
-/// the 18 observed keys — `is_favorite`/`label_ids`/`sub_pages_count`/
+/// the 19 observed keys — `is_favorite`/`label_ids`/`sub_pages_count`/
 /// `labels` `SkipField` out because the re-fetch annotates only
 /// `project_ids` (QUIRK-duplicate-shape); `parent_id` is a model attribute.
+/// `description_json` trails `description_html` (NEWFRONT-932, main
+/// `page.py:138,141`).
 #[derive(Debug, Serialize)]
 struct DuplicateBody {
     id: Uuid,
@@ -296,6 +299,7 @@ struct DuplicateBody {
     logo_props: Value,
     project_ids: Vec<Uuid>,
     description_html: String,
+    description_json: Value,
 }
 
 fn render_row(row: &VersionRow, tz: &Tz) -> VersionRowBody {
@@ -352,6 +356,7 @@ fn render_copy(row: &CopyRow, tz: &Tz) -> DuplicateBody {
         logo_props: row.logo_props.clone(),
         project_ids: row.project_ids.clone(),
         description_html: row.description_html.clone(),
+        description_json: row.description_json.clone(),
     }
 }
 
@@ -828,8 +833,9 @@ mod tests {
         assert_eq!(render_binary(b""), "");
     }
 
-    /// QUIRK-duplicate-shape: the 201 body carries exactly the 17 observed
-    /// keys — `is_favorite`/`label_ids`/`labels` `SkipField` out.
+    /// QUIRK-duplicate-shape: the 201 body carries exactly the 19 observed
+    /// keys — `is_favorite`/`label_ids`/`sub_pages_count`/`labels`
+    /// `SkipField` out — with `description_json` trailing `description_html`.
     #[test]
     fn duplicate_body_renders_byte_exact() {
         let row = CopyRow {
@@ -849,12 +855,13 @@ mod tests {
             view_props: serde_json::json!({"full_width": false}),
             logo_props: serde_json::json!({}),
             description_html: "<p>Hi</p>".to_owned(),
+            description_json: serde_json::json!({"type": "doc"}),
             project_ids: vec![fixed_uuid(6)],
         };
         let body = serde_json::to_string(&render_copy(&row, &Tz::UTC)).expect("serializes");
         assert_eq!(
             body,
-            r#"{"id":"11111111-1111-4111-8111-111111111105","name":"Probe page (Copy)","owned_by":"11111111-1111-4111-8111-111111111104","access":0,"color":"","parent":null,"parent_id":null,"is_locked":false,"archived_at":null,"workspace":"11111111-1111-4111-8111-111111111102","created_at":"2026-01-02T03:04:05.006007Z","updated_at":"2026-01-02T03:04:05.006007Z","created_by":"11111111-1111-4111-8111-111111111104","updated_by":"11111111-1111-4111-8111-111111111104","view_props":{"full_width":false},"logo_props":{},"project_ids":["11111111-1111-4111-8111-111111111106"],"description_html":"<p>Hi</p>"}"#
+            r#"{"id":"11111111-1111-4111-8111-111111111105","name":"Probe page (Copy)","owned_by":"11111111-1111-4111-8111-111111111104","access":0,"color":"","parent":null,"parent_id":null,"is_locked":false,"archived_at":null,"workspace":"11111111-1111-4111-8111-111111111102","created_at":"2026-01-02T03:04:05.006007Z","updated_at":"2026-01-02T03:04:05.006007Z","created_by":"11111111-1111-4111-8111-111111111104","updated_by":"11111111-1111-4111-8111-111111111104","view_props":{"full_width":false},"logo_props":{},"project_ids":["11111111-1111-4111-8111-111111111106"],"description_html":"<p>Hi</p>","description_json":{"type":"doc"}}"#
         );
         // A populated `archived_at` renders `YYYY-MM-DD`.
         let archived = CopyRow {
