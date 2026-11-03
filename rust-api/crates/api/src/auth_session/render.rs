@@ -58,12 +58,10 @@ pub fn redirect_location(
 /// `DisallowedRedirect` answer: the final `Location` is longer than
 /// `MAX_URL_REDIRECT_LENGTH` characters, so `HttpResponseRedirectBase`
 /// raises (`django/http/response.py:621-625`) and Django serves its
-/// stock 400 page (`django/views/defaults.py`, `ERROR_PAGE_TEMPLATE`;
-/// the project ships no `400.html` and no `handler400` override).
-/// Under `settings.test` (`DEBUG=True`) Django renders the technical
-/// traceback page instead, which no port reproduces: the contract
-/// suite pins the status only.
-pub const DISALLOWED_REDIRECT_400_BODY: &str = "\n<!doctype html>\n<html lang=\"en\">\n<head>\n  <title>Bad Request (400)</title>\n</head>\n<body>\n  <h1>Bad Request (400)</h1><p></p>\n</body>\n</html>\n";
+/// stock 400 page. Canonical bytes moved to
+/// `pidash_compat::response::DJANGO_BAD_REQUEST_400_BODY`
+/// (PIDASHCONV-1707); this re-export keeps the old path working.
+pub use pidash_compat::response::DJANGO_BAD_REQUEST_400_BODY as DISALLOWED_REDIRECT_400_BODY;
 
 /// 400 for an over-long redirect `Location` (see
 /// [`DISALLOWED_REDIRECT_400_BODY`]).
