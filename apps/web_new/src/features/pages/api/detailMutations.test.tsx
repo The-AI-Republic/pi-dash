@@ -4,6 +4,8 @@
 // See the LICENSE file for details.
 // Detail record write (parity/specs/pages.md §5.1): the title patch is a
 // record PATCH, and its echo updates the cached record and collection.
+// Title saves are serialised (NEWFRONT-358): a burst can never leave two
+// renames of one page on the wire, and a superseded name touches nothing.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
@@ -21,20 +23,39 @@ import { PAGE_MARK_FAILED_TITLE, PAGE_RENAME_FAILED_TITLE, usePageMark, usePageR
 
 let status = 200;
 let patches: { url: string; body: unknown }[] = [];
+/** When set, each rename PATCH waits for this test to release it. */
+let gate: { open: Array<() => void>; count: () => number } | null = null;
 
 beforeEach(() => {
   status = 200;
   patches = [];
+  gate = null;
   toaster.notifyError.mockReset();
   createAppClient("https://api.test", (async (url: string, init: { method: string; body?: string }) => {
     if (url.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
     if (init.method === "PATCH") {
       patches.push({ url, body: init.body === undefined ? null : JSON.parse(init.body) });
+      if (gate !== null) await new Promise<void>((resolve) => gate?.open.push(resolve));
       return jsonResponse(url, status, { id: PAGES_PAGE_ID, name: "Renamed" });
     }
     throw new Error(`unexpected request: ${url}`);
   }) as never);
 });
+
+/** Hold every rename PATCH open until the test releases it, in order. */
+function holdPatches(): void {
+  const open: Array<() => void> = [];
+  gate = { open, count: () => open.length };
+}
+
+/** Release the oldest held PATCH; it settles only after the transport answers. */
+async function releaseOldest(): Promise<void> {
+  const release = gate?.open.shift();
+  if (release === undefined) throw new Error("no held PATCH to release");
+  release();
+  // Let the transport answer and the queue start the next name.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 afterEach(() => {
   resetAppClient();
@@ -73,6 +94,48 @@ describe("usePageRename", () => {
     const { result } = renderHook(() => usePageRename("acme", PAGES_PROJECT_ID, PAGES_PAGE_ID), { wrapper });
     result.current.mutate("Renamed");
     await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(toaster.notifyError).toHaveBeenCalledWith(PAGE_RENAME_FAILED_TITLE);
+    const detail = client.getQueryData<PageDetail>(pageKeys.detail("acme", PAGES_PROJECT_ID, PAGES_PAGE_ID));
+    expect(detail?.name).toBe("Old name");
+  });
+
+  it("serialises a burst: one rename on the wire, the newest name last (NEWFRONT-358)", async () => {
+    holdPatches();
+    const { client, wrapper } = harness();
+    const { result } = renderHook(() => usePageRename("acme", PAGES_PROJECT_ID, PAGES_PAGE_ID), { wrapper });
+    result.current.mutate("Half");
+    await vi.waitFor(() => expect(patches.map((patch) => patch.body)).toEqual([{ name: "Half" }]));
+    // Two more names arrive while "Half" is still unanswered: only the last
+    // one waits; the middle name is dropped unsent.
+    result.current.mutate("Half typ");
+    result.current.mutate("Half typed title");
+    expect(gate?.count()).toBe(1);
+    await releaseOldest();
+    await vi.waitFor(() =>
+      expect(patches.map((patch) => patch.body)).toEqual([{ name: "Half" }, { name: "Half typed title" }])
+    );
+    expect(gate?.count()).toBe(1);
+    await releaseOldest();
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
+    const detail = client.getQueryData<PageDetail>(pageKeys.detail("acme", PAGES_PROJECT_ID, PAGES_PAGE_ID));
+    expect(detail?.name).toBe("Half typed title");
+    // The superseded prefix never reached a cache and raised no notice.
+    expect(toaster.notifyError).not.toHaveBeenCalled();
+  });
+
+  it("reports only the final refusal of a burst (NEWFRONT-358)", async () => {
+    holdPatches();
+    const { client, wrapper } = harness();
+    const { result } = renderHook(() => usePageRename("acme", PAGES_PROJECT_ID, PAGES_PAGE_ID), { wrapper });
+    result.current.mutate("A");
+    await vi.waitFor(() => expect(patches).toHaveLength(1));
+    result.current.mutate("AB");
+    status = 400;
+    await releaseOldest();
+    await vi.waitFor(() => expect(patches).toHaveLength(2));
+    await releaseOldest();
+    await vi.waitFor(() => expect(result.current.isError).toBe(true));
+    expect(toaster.notifyError).toHaveBeenCalledTimes(1);
     expect(toaster.notifyError).toHaveBeenCalledWith(PAGE_RENAME_FAILED_TITLE);
     const detail = client.getQueryData<PageDetail>(pageKeys.detail("acme", PAGES_PROJECT_ID, PAGES_PAGE_ID));
     expect(detail?.name).toBe("Old name");
