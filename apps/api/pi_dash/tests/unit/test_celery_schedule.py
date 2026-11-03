@@ -12,6 +12,10 @@ pytestmark = pytest.mark.unit
 
 def test_every_scheduled_task_is_registered_by_worker_loader():
     app.loader.import_default_modules()
+    # Finalize before snapshotting: the settings-backed entries (cloud_agent,
+    # managed_runner, ...) are added by an on_after_finalize hook, so reading
+    # beat_schedule earlier silently skips exactly the entries most at risk.
+    app.finalize()
     scheduled = {entry["task"] for entry in app.conf.beat_schedule.values()}
     assert not scheduled - set(app.tasks)
 
