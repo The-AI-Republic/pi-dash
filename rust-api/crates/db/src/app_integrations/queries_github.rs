@@ -837,17 +837,49 @@ pub fn user_installations_first_page_url() -> String {
     format!("{GITHUB_API_BASE}/user/installations?per_page=100")
 }
 
-/// Next-page extraction from the `Link` response header
-/// (`github_app_auth.py:142-147`): the first comma-part containing
-/// `rel="next"` that starts with `<`, unbracketed; `None` otherwise.
-pub fn next_installations_page(link_header: &str) -> Option<String> {
-    for part in link_header.split(',') {
-        let part = part.trim();
-        if part.contains("rel=\"next\"") && part.starts_with('<') {
-            return part.split('>').next().map(|s| s[1..].to_owned());
+/// `GithubClient._next_url` (`github_client.py:76-85`): the `next` URL
+/// from a `Link` header — `re.match(r'\s*<([^>]+)>;\s*rel="next"', part)`
+/// per comma part, as string ops (no regex dependency): leading
+/// whitespace allowed, `<url>` unbracketed, `>;` adjacent, spaces after
+/// `;` fine, trailing attributes allowed, empty URLs never match.
+///
+/// The canonical copy (PIDASHCONV-1625): the services, jobs and
+/// installations twins all delegate here, and OVL-10 calls it from the
+/// overlay. Pinned by `next_url_matrix_matches_python`.
+pub fn next_url(link: &str) -> Option<String> {
+    if link.is_empty() {
+        return None;
+    }
+    for part in link.split(',') {
+        let Some(rest) = part.trim_start().strip_prefix('<') else {
+            continue;
+        };
+        let Some(end) = rest.find('>') else {
+            continue;
+        };
+        let url = &rest[..end];
+        if url.is_empty() {
+            continue;
+        }
+        let after = &rest[end + 1..];
+        let Some(after) = after.strip_prefix(';') else {
+            continue;
+        };
+        if after.trim_start().starts_with("rel=\"next\"") {
+            return Some(url.to_owned());
         }
     }
     None
+}
+
+/// Next-page extraction from the `Link` response header
+/// (`github_app_auth.py:142-147`), via the [`next_url`] canonical:
+/// on the well-formed headers GitHub sends both agree; on malformed
+/// ones the canonical follows the strict `_next_url` regex (skips
+/// `>`-less parts and empty URLs, requires `>;` adjacency) where the
+/// app-auth loop was loose (PIDASHCONV-1625).
+pub fn next_installations_page(link_header: &str) -> Option<String> {
+    next_url(link_header)
 }
 
 /// Installation-token cache key
@@ -1057,6 +1089,70 @@ mod tests {
         assert_eq!(parse_github_datetime(None).expect("none"), None);
         assert_eq!(parse_github_datetime(Some("")).expect("empty"), None);
         assert!(parse_github_datetime(Some("not-a-date")).is_err());
+    }
+
+    #[test]
+    fn next_url_matrix_matches_python() {
+        // (header, expected next): the overlay matrix (PIDASHCONV-1625)
+        // plus multi-part cases pinning the killed divergences — a
+        // `>`-less part, an empty URL, and `>`-before-`;` spacing must
+        // be skipped, never poison the whole header.
+        let cases: &[(&str, Option<&str>)] = &[
+            ("", None),
+            (
+                r#"<https://api.github.com/x?page=2>; rel="next""#,
+                Some("https://api.github.com/x?page=2"),
+            ),
+            // Leading whitespace + trailing attributes allowed (re.match prefix).
+            (
+                "  <https://h/n>; rel=\"next\", <https://h/l>; rel=\"last\"",
+                Some("https://h/n"),
+            ),
+            (
+                "<https://h/p>; rel=\"prev\", <https://h/n>; rel=\"next\"; title=\"x\"",
+                Some("https://h/n"),
+            ),
+            // No next rel.
+            (r#"<https://h/l>; rel="last""#, None),
+            // Empty URL never matches ([^>]+ needs one char).
+            (r#"<>; rel="next""#, None),
+            // Space between > and ; never matches (>; adjacent in the regex).
+            (r#"<https://h/n> ; rel="next""#, None),
+            // Spaces after ; are fine.
+            (r#"<https://h/n>;   rel="next""#, Some("https://h/n")),
+            // Case-sensitive rel.
+            (r#"<https://h/n>; rel="Next""#, None),
+            // First next wins across parts.
+            (
+                "<https://h/1>; rel=\"next\", <https://h/2>; rel=\"next\"",
+                Some("https://h/1"),
+            ),
+            // A `>`-less part is skipped (git_sync's `?` returned None
+            // for the whole header here).
+            (
+                "<https://h/bad; rel=\"next\", <https://h/n>; rel=\"next\"",
+                Some("https://h/n"),
+            ),
+            // An empty URL is skipped (the services twin returned `""`).
+            (
+                "<>; rel=\"next\", <https://h/n>; rel=\"next\"",
+                Some("https://h/n"),
+            ),
+            // `>`-before-`;` spacing is skipped (the services and
+            // git_sync twins matched the first part).
+            (
+                "<https://h/e> ; rel=\"next\", <https://h/n>; rel=\"next\"",
+                Some("https://h/n"),
+            ),
+        ];
+        for (header, expected) in cases {
+            assert_eq!(next_url(header).as_deref(), *expected, "Link: {header:?}");
+            assert_eq!(
+                next_installations_page(header).as_deref(),
+                *expected,
+                "installations Link: {header:?}"
+            );
+        }
     }
 
     // -- live scratch-DB tests (env-gated, see super::tests) --------------

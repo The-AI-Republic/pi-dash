@@ -75,6 +75,8 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
 use super::gates::{decide_gate, gate_for, tenant_context, GateOutcome, ANON_BODY, FORBIDDEN_BODY};
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -133,9 +135,6 @@ pub const VALIDATION_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 /// (`db/models/project.py:213-217`) — `_rewrite_project_kwarg`'s
 /// `Http404("Project not found")`.
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
-/// `handle_exception`'s generic 500 branch — also the missing-cycle
-/// `AttributeError` (B1).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 /// Handler denials with byte-exact bodies.
 pub enum Denial {
@@ -173,15 +172,6 @@ impl IntoResponse for Denial {
         )
             .into_response()
     }
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    (
-        status,
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -724,7 +714,17 @@ async fn analytics_get(
     // `if cycle.progress_snapshot:` — truthiness of the stored dict.
     if let Value::Object(map) = &snapshot {
         if !map.is_empty() {
-            return Ok(json_response(StatusCode::OK, snapshot_envelope(map)));
+            // `distribution = cycle.progress_snapshot.get("distribution", {})`
+            // (`base.py:821-822`): the servable envelope is the snapshot's
+            // nested `distribution`, not the snapshot itself.
+            let distribution = match map.get("distribution") {
+                Some(Value::Object(inner)) => inner.clone(),
+                _ => Map::new(),
+            };
+            return Ok(json_response(
+                StatusCode::OK,
+                snapshot_envelope(&distribution),
+            ));
         }
     }
 

@@ -31,6 +31,10 @@ class ManagedRunnerReason:
     #: The desktop is connected but has not enrolled a runner for this project
     #: yet. The desktop resolves this silently by enrolling and retrying.
     NO_RUNNER_FOR_PROJECT = "no_managed_runner_for_project"
+    #: The desktop is connected but its runner for this project was paused by
+    #: an operator. Structural until resumed, so automatic runs are refused
+    #: rather than parked waiting for it.
+    RUNNER_PAUSED = "managed_runner_paused"
 
 
 class ManagedRunnerUnavailable(ValueError):

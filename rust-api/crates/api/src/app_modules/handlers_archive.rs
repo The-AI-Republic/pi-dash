@@ -516,7 +516,9 @@ async fn archived_list(
 
 /// Label estimate-distribution over the archive queryset
 /// (`archive.py:386-391`): identical to the main label estimate query
-/// except the ported bug — no `module_issues.deleted_at IS NULL` filter.
+/// except the ported bugs — no `module_issues.deleted_at IS NULL` filter,
+/// and no `deleted_at` guard on the label M2M joins (PB-2035, PB-0102
+/// class: Django groups through the relations unfiltered).
 async fn fetch_archive_label_estimate(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -526,24 +528,24 @@ async fn fetch_archive_label_estimate(
     let total = queries::estimate_sum_sql(None);
     let completed = queries::estimate_sum_sql(Some(true));
     let pending = queries::estimate_sum_sql(Some(false));
-    // Same joins, aliases, grouping and ordering as the main label
-    // estimate query — only the `module_issues.deleted_at IS NULL`
-    // predicate is gone (the `:386-391` ported bug).
+    // Same joins, grouping and ordering as the main label estimate
+    // query — only the `module_issues.deleted_at IS NULL` predicate is
+    // gone (the `:386-391` ported bug). The `issues` table stays
+    // unaliased: the shared guard/sum fragments reference its bare name,
+    // and Postgres hides the original name once a table is aliased.
     let sql = format!(
         "SELECT row_to_json(__r)::text AS __row FROM (
            SELECT labels.name AS label_name, labels.color AS color,
                   labels.id AS label_id, {total} AS total_estimates,
                   {completed} AS completed_estimates, {pending} AS pending_estimates
-           FROM issues i JOIN projects ON projects.id = i.project_id
-           JOIN workspaces ON workspaces.id = i.workspace_id
-           LEFT OUTER JOIN states ON states.id = i.state_id
-           JOIN module_issues ON module_issues.issue_id = i.id
-           LEFT JOIN estimate_points ON estimate_points.id = i.estimate_point_id
-           LEFT JOIN issue_labels ON issue_labels.issue_id = i.id
-           AND issue_labels.deleted_at IS NULL
+           FROM issues JOIN projects ON projects.id = issues.project_id
+           JOIN workspaces ON workspaces.id = issues.workspace_id
+           LEFT OUTER JOIN states ON states.id = issues.state_id
+           JOIN module_issues ON module_issues.issue_id = issues.id
+           LEFT JOIN estimate_points ON estimate_points.id = issues.estimate_point_id
+           LEFT JOIN issue_labels ON issue_labels.issue_id = issues.id
            LEFT JOIN labels ON labels.id = issue_labels.label_id
-           AND labels.deleted_at IS NULL
-           WHERE {} AND workspaces.slug = $1 AND i.project_id = $2
+           WHERE {} AND workspaces.slug = $1 AND issues.project_id = $2
            AND module_issues.module_id = $3
            GROUP BY labels.name, labels.color, labels.id
            ORDER BY labels.name) AS __r",
@@ -655,8 +657,16 @@ async fn archived_detail(
             queries::LABEL_ESTIMATE_ROW_KEYS,
             &labels,
         ));
-        if let Some(chart) =
-            archived_chart(&pool, &slug, &project_id, &module_id, row.as_ref(), true).await?
+        if let Some(chart) = archived_chart(
+            &pool,
+            &slug,
+            &project_id,
+            &module_id,
+            row.as_ref(),
+            true,
+            &timezone,
+        )
+        .await?
         {
             out.push_str(",\"completion_chart\":");
             out.push_str(&chart);
@@ -679,7 +689,17 @@ async fn archived_detail(
         &labels,
     ));
     out.push_str(",\"completion_chart\":");
-    match archived_chart(&pool, &slug, &project_id, &module_id, row.as_ref(), false).await? {
+    match archived_chart(
+        &pool,
+        &slug,
+        &project_id,
+        &module_id,
+        row.as_ref(),
+        false,
+        &timezone,
+    )
+    .await?
+    {
         Some(chart) => out.push_str(&chart),
         None => out.push_str("{}"),
     }
@@ -698,6 +718,7 @@ async fn archived_chart(
     module_id: &uuid::Uuid,
     row: Option<&Map<String, Value>>,
     estimate: bool,
+    timezone: &chrono_tz::Tz,
 ) -> Result<Option<String>, Denial> {
     let Some(row) = row else {
         return Ok(None);
@@ -731,6 +752,7 @@ async fn archived_chart(
         target,
         total_issues,
         estimate,
+        timezone,
     )
     .await?;
     Ok(Some(chart))

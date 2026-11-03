@@ -14,9 +14,10 @@ permission layer untouched:
 
 The same passthrough lets a soft-deleted project whose membership row is
 still active pass the permission layer and reach the view body, where
-``Project.objects.get(pk=project_id)`` (list/retrieve/summary) raises
-``DoesNotExist`` → 404 ``{"error":"The required object does not exist."}``;
-the favorite create never reads the project row, so it still answers 204.
+``Project.objects.get(pk=project_id)`` (list/retrieve/summary, and create
+via ``PageSerializer.create``) raises ``DoesNotExist`` → 404
+``{"error":"The required object does not exist."}``; the favorite create
+never reads the project row, so it still answers 204.
 """
 
 import uuid
@@ -87,6 +88,32 @@ def test_retrieve_soft_deleted_project_is_404(user_client, world, db):
     response = user_client.get(page_url(world, world["page"]["id"]))
     assert response.status_code == 404, response.text
     assert response.json() == OBJECT_NOT_FOUND_BODY
+
+
+def test_create_soft_deleted_project_is_404_and_writes_nothing(
+    user_client, world, db
+):
+    # PIDASHCONV-1412: PageSerializer.create reads the project row
+    # (Project.objects.get) before Page.objects.create, so a soft-deleted
+    # project 404s with no page, no project_pages row and no queued job.
+    _soft_delete_project(db, world["project"]["id"])
+    name = f"1412-ghost-{uuid.uuid4().hex[:8]}"
+    links_before = db.fetchone(
+        "SELECT count(*) AS c FROM project_pages WHERE project_id = %s",
+        (world["project"]["id"],),
+    )["c"]
+    response = user_client.post(page_url(world), json={"name": name})
+    assert response.status_code == 404, response.text
+    assert response.json() == OBJECT_NOT_FOUND_BODY
+    pages = db.fetchone(
+        "SELECT count(*) AS c FROM pages WHERE name = %s", (name,)
+    )["c"]
+    assert pages == 0
+    links_after = db.fetchone(
+        "SELECT count(*) AS c FROM project_pages WHERE project_id = %s",
+        (world["project"]["id"],),
+    )["c"]
+    assert links_after == links_before
 
 
 def test_favorite_soft_deleted_project_is_204(user_client, world, db):

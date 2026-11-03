@@ -81,10 +81,12 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::gates::{decide_gate, tenant_context, Gate, GateOutcome};
+use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
+use crate::v1_cycles_modules::json::{self, JsonFail};
 use pidash_auth::permissions::allow::AllowFacts;
+pub use pidash_compat::response::{json_ok as raw_json_response, SERVER_ERROR_BODY};
 use pidash_types::WorkspaceId;
 
 // ---------------------------------------------------------------------------
@@ -101,8 +103,6 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 /// propagated by DRF's exception handler as `NotFound(*exc.args)`
 /// (unresolvable project identifier).
 pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Project not found"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `ValidationError` branch
 /// (`app/views/base.py:125-128`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
@@ -217,15 +217,6 @@ impl IntoResponse for Denial {
 
 pub fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render pre-serialized JSON bytes as a 200 response body.
-pub fn raw_json_response(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
 }
 
 /// Render pre-serialized JSON bytes with an explicit status.
@@ -546,16 +537,15 @@ pub fn parse_object_body(headers: &HeaderMap, body: &[u8]) -> Result<Map<String,
         shared_body::NegotiatedBody::Empty => Ok(Map::new()),
         shared_body::NegotiatedBody::JsonText { text, surr } => {
             let value =
-                json_cpython::parse_request_data_spans(text.as_bytes(), &surr).map_err(|fail| {
-                    match fail {
-                        JsonFail::Message(detail) => Denial::BadDetail(format!(
-                            "{}{detail}",
-                            json_cpython::JSON_PARSE_PREFIX
-                        )),
+                json::parse_request_data_spans(text.as_bytes(), &surr).map_err(
+                    |fail| match fail {
+                        JsonFail::Message(detail) => {
+                            Denial::BadDetail(format!("{}{detail}", json::JSON_PARSE_PREFIX))
+                        }
                         JsonFail::Recursion => Denial::ServerError,
-                    }
-                })?;
-            match json_cpython::to_serde_publish(&value) {
+                    },
+                )?;
+            match json::to_serde_publish(&value) {
                 Value::Object(map) => Ok(map),
                 _ => Err(Denial::ServerError),
             }
@@ -900,9 +890,8 @@ pub async fn overlap_exists(
 // `transfer_cycle_issues`, `utils/cycle_transfer_issues.py:36-479`)
 // ---------------------------------------------------------------------------
 
-/// Celery wire name for `issue_activity` (bare `@shared_task` default;
-/// also pinned by the D-32 intake `services::app_intake::tasks`).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+/// Re-export of the canonical [`pidash_services::domain::activity::ISSUE_ACTIVITY_TASK`].
+pub use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 /// `type` kwarg of the transfer emit (`cycle_transfer_issues.py:463`).
 pub const TRANSFER_ACTIVITY_TYPE: &str = "cycle.activity.created";
 
@@ -920,9 +909,9 @@ pub async fn transfer_issues(
         return crate::edge::proxy(State(state), req).await;
     }
     let (parts, body) = req.into_parts();
-    let body = match axum::body::to_bytes(body, 2 * 1024 * 1024).await {
+    let body = match read_request_bytes(body).await {
         Ok(body) => body,
-        Err(_) => return Denial::ServerError.into_response(),
+        Err(response) => return response,
     };
     let actor = match actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1311,6 +1300,20 @@ pub struct EstimateRow {
 /// when `avatar_asset` is set, else the raw `avatar` field, else NULL.
 const AVATAR_URL_CASE: &str = "CASE WHEN u.avatar_asset_id IS NOT NULL THEN CONCAT('/api/assets/v2/static/', u.avatar_asset_id, '/') WHEN u.avatar_asset_id IS NULL THEN u.avatar ELSE NULL END";
 
+/// `IssueManager.issue_objects` scope (`issue.py:95-104`) shared by the
+/// transfer snapshot queries — the project is not archived and the issue
+/// is not deleted / archived / draft or in a triage-group state. Split
+/// into a join half and a where half because SQL joins precede the WHERE
+/// clause; each query inserts its own distribution joins between them.
+/// The triage predicate is `IS DISTINCT FROM` so issues with no state
+/// survive, matching `.exclude(state__group="triage")` (Django emits
+/// `NOT (states.group = 'triage' AND states.group IS NOT NULL)`).
+const TRANSFER_SCOPE_JOIN: &str =
+    "JOIN projects p ON p.id = i.project_id AND p.archived_at IS NULL \
+     LEFT JOIN states s ON s.id = i.state_id";
+const TRANSFER_SCOPE_WHERE: &str = "i.deleted_at IS NULL AND i.archived_at IS NULL \
+     AND i.is_draft = FALSE AND s.\"group\" IS DISTINCT FROM 'triage'";
+
 /// Assignee issue distribution (`:286-329`): this cycle's live bridges,
 /// tenant-scoped, grouped by assignee (`order_by("display_name")`;
 /// unassigned issues form the NULL group via the LEFT JOIN, exactly
@@ -1329,9 +1332,10 @@ pub async fn assignee_distribution(
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
+           {TRANSFER_SCOPE_JOIN}
            LEFT JOIN issue_assignees ia ON ia.issue_id = i.id
            LEFT JOIN users u ON u.id = ia.assignee_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
            GROUP BY u.display_name, u.id, u.avatar_asset_id, u.avatar
            ORDER BY u.display_name"#
     ))
@@ -1365,7 +1369,7 @@ pub async fn label_distribution(
     cycle_id: &Uuid,
 ) -> Result<Vec<DistributionRow>, Denial> {
     let rows: Vec<LabelRowTuple> =
-        sqlx::query_as(
+        sqlx::query_as(&format!(
             r#"SELECT l.name, l.color, l.id,
               COUNT(i.id) FILTER (WHERE i.archived_at IS NULL AND i.is_draft = FALSE),
               COUNT(i.id) FILTER (WHERE i.completed_at IS NOT NULL AND i.archived_at IS NULL AND i.is_draft = FALSE),
@@ -1373,12 +1377,13 @@ pub async fn label_distribution(
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
+           {TRANSFER_SCOPE_JOIN}
            LEFT JOIN issue_labels il ON il.issue_id = i.id
            LEFT JOIN labels l ON l.id = il.label_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
            GROUP BY l.name, l.color, l.id
-           ORDER BY l.name"#,
-    )
+           ORDER BY l.name"#
+    ))
     .bind(cycle_id)
     .bind(slug)
     .bind(project_id)
@@ -1454,9 +1459,10 @@ async fn estimate_distribution(
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
+           {TRANSFER_SCOPE_JOIN}
            {join}
            LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
            GROUP BY {group}
            ORDER BY {order}"#
         ))
@@ -1548,14 +1554,15 @@ pub async fn burndown_issues_value(
     end: Option<DateTime<Utc>>,
     timezone: &Tz,
 ) -> Result<Value, Denial> {
-    let rows: Vec<(Option<NaiveDate>, i64)> = sqlx::query_as(
+    let rows: Vec<(Option<NaiveDate>, i64)> = sqlx::query_as(&format!(
         r#"SELECT (i.completed_at AT TIME ZONE $4)::date AS day, COUNT(i.id)
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
-           GROUP BY day ORDER BY day"#,
-    )
+           {TRANSFER_SCOPE_JOIN}
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
+           GROUP BY day ORDER BY day"#
+    ))
     .bind(cycle_id)
     .bind(slug)
     .bind(project_id)
@@ -1589,15 +1596,16 @@ pub async fn burndown_points_value(
     end: Option<DateTime<Utc>>,
     timezone: &Tz,
 ) -> Result<Value, Denial> {
-    let total: Option<f64> = sqlx::query_scalar(
+    let total: Option<f64> = sqlx::query_scalar(&format!(
         r#"SELECT SUM(CAST(ep.value AS DOUBLE PRECISION))
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
+           {TRANSFER_SCOPE_JOIN}
            LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
-             AND ep.id IS NOT NULL"#,
-    )
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
+             AND ep.id IS NOT NULL"#
+    ))
     .bind(cycle_id)
     .bind(slug)
     .bind(project_id)
@@ -1605,16 +1613,17 @@ pub async fn burndown_points_value(
     .await
     .map_err(|_| Denial::ServerError)?
     .unwrap_or(None);
-    let rows: Vec<(Option<NaiveDate>, Option<f64>)> = sqlx::query_as(
+    let rows: Vec<(Option<NaiveDate>, Option<f64>)> = sqlx::query_as(&format!(
         r#"SELECT (i.completed_at AT TIME ZONE $4)::date AS day, SUM(CAST(ep.value AS DOUBLE PRECISION))
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
+           {TRANSFER_SCOPE_JOIN}
            LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
              AND ep.id IS NOT NULL
-           GROUP BY day ORDER BY day"#,
-    )
+           GROUP BY day ORDER BY day"#
+    ))
     .bind(cycle_id)
     .bind(slug)
     .bind(project_id)
@@ -2234,9 +2243,9 @@ pub async fn patch_user_properties(
         return crate::edge::proxy(State(state), req).await;
     }
     let (parts, body) = req.into_parts();
-    let body = match axum::body::to_bytes(body, 2 * 1024 * 1024).await {
+    let body = match read_request_bytes(body).await {
         Ok(body) => body,
-        Err(_) => return Denial::ServerError.into_response(),
+        Err(response) => return response,
     };
     let context =
         match user_properties_context(&state, slug, project_raw, cycle_raw, extension, "PATCH")

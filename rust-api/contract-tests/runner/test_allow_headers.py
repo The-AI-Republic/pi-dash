@@ -42,6 +42,7 @@ def test_runner_journey_allow_trace(settings, seeder, daemon_world, user_client,
     assert registered.headers["allow"] == ALLOW_POST
     runner_id = registered.json()["runner_id"]
     machine_token = registered.json()["machine_token"]
+    run_id = None
     try:
         with bearer_client(
             settings.base_url, machine_token, headers={"X-Runner-Id": runner_id}
@@ -112,6 +113,17 @@ def test_runner_journey_allow_trace(settings, seeder, daemon_world, user_client,
     finally:
         # Teardown the endpoint-minted rows (the machine_flow mirror).
         owner_id = daemon_world["owner"]["id"]
+        if run_id is not None:
+            seeder.db.execute(
+                "DELETE FROM run_message_dedupe WHERE run_id = %s", (run_id,)
+            )
+            seeder.db.execute(
+                "DELETE FROM agent_run_event WHERE agent_run_id = %s", (run_id,)
+            )
+            seeder.db.execute(
+                "DELETE FROM agent_run_approval WHERE agent_run_id = %s", (run_id,)
+            )
+            seeder.db.execute("DELETE FROM agent_run WHERE id = %s", (run_id,))
         seeder.db.execute("DELETE FROM runner_session WHERE runner_id = %s", (runner_id,))
         seeder.db.execute(
             "UPDATE agent_run SET runner_id = NULL, pinned_runner_id = NULL "

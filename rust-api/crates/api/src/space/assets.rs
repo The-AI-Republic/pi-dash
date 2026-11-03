@@ -94,6 +94,10 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::state::AppState;
+use pidash_compat::py::py_json_string;
+use pidash_compat::response::{
+    json_response as raw, json_value as json_status, no_content, server_error,
+};
 use pidash_services::space::guards;
 use pidash_services::space::queries::intake_assets as q;
 
@@ -159,35 +163,10 @@ const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 // Small responders
 // ---------------------------------------------------------------------------
 
-fn raw(status: StatusCode, body: &'static str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static response")
-}
-
-fn json_status(status: StatusCode, body: Value) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            serde_json::to_string(&body).expect("serializable response"),
-        ))
-        .expect("json response")
-}
-
 fn guard_err(err: guards::ErrorBody) -> Response {
     json_status(
         StatusCode::from_u16(err.status).expect("valid guard status"),
         err.body,
-    )
-}
-
-fn server_error() -> Response {
-    raw(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        crate::license::SERVER_ERROR_BODY,
     )
 }
 
@@ -199,10 +178,6 @@ fn does_not_exist() -> Response {
 
 fn page_not_found() -> Response {
     raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY)
-}
-
-fn no_content() -> Response {
-    StatusCode::NO_CONTENT.into_response()
 }
 
 fn pool(state: &AppState) -> Option<&sqlx::PgPool> {
@@ -2033,37 +2008,6 @@ fn presigned_post(
     Ok(serde_json::json!({"url": url, "fields": fields}))
 }
 
-/// CPython `json.dumps` string encoding (`ensure_ascii`): `"` and
-/// `\` escaped, C0 controls short/`\u00XX`, everything else non-ASCII
-/// as `\uXXXX` (surrogate pairs past the BMP).
-fn py_json_string(input: &str) -> String {
-    let mut out = String::with_capacity(input.len() + 2);
-    out.push('"');
-    for c in input.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c if (c as u32) < 0x7f => out.push(c),
-            c => {
-                let mut buf = [0u16; 2];
-                for unit in c.encode_utf16(&mut buf) {
-                    out.push_str(&format!("\\u{unit:04x}"));
-                }
-            }
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// Standard base64 with padding (policy documents).
 fn base64_encode(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -2360,14 +2304,6 @@ mod tests {
         )
         .expect("minio signs");
         assert_eq!(url, PRESIGNED_GET_GOLDEN);
-    }
-
-    #[test]
-    fn py_json_string_matches_cpython_escapes() {
-        assert_eq!(py_json_string("shot.png"), "\"shot.png\"");
-        assert_eq!(py_json_string("a\"b\\c"), "\"a\\\"b\\\\c\"");
-        assert_eq!(py_json_string("é"), "\"\\u00e9\"");
-        assert_eq!(py_json_string("𝄞"), "\"\\ud834\\udd1e\"");
     }
 
     #[test]

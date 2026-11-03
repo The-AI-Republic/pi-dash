@@ -21,6 +21,17 @@ test client: HTTP goes through httpx, seeding goes straight into
 Postgres via `psycopg`, and authenticated sessions come from the real
 sign-in endpoint (black box).
 
+## Oracle Python version
+
+Run the Django oracle on CPython **3.12.10** — the same interpreter as
+the production image (`apps/api/Dockerfile.api`). `html.parser`
+differs across 3.12 patch versions (PIDASHCONV-1693): distro 3.12.3
+builds and later 3.12.x carry the HTML5 rewrite, while 3.12.10 has the
+classic parser, and recorded fixtures pin the 3.12.10 behavior. CI
+pins `python-version: "3.12.10"` on every `rust-api-*` workflow; match
+it locally (e.g. a 3.12.10 venv or container) before recording or
+re-recording fixtures.
+
 ## Layout
 
 - `_harness/` — shared helpers. Extend, never fork: `env.py` (env
@@ -248,7 +259,7 @@ SECRET_KEY=<same SECRET_KEY as the server> \
 
 The suite stays under Django's default brakes so a clean checkout passes
 in one go: ~15 `device/start` calls (20/minute/IP), ~11 anonymous token
-polls (30/minute/IP), a handful of requests per API key (60/minute/key).
+polls (30/minute/IP), a handful of requests per API key (120/minute/key).
 Do not add start/token-poll calls casually; share fixtures instead.
 Re-running within the same minute can 429 — wait for the window to slide.
 
@@ -410,6 +421,19 @@ CELERY_BROKER_URL=redis://localhost:6379/0  # or AMQP_URL; redis scheme only
 pointing at the same broker the worker consumes, and the server must run
 with `CLOUD_AGENT_ENABLED=true` (dispatch execution branches and the
 queue scanner are kill-switched otherwise).
+
+Page-write suites (`v1_work_items`) additionally need the backend booted with
+`LIVE_BASE_URL` pointing at the stub live-document server the tests bind
+(`LIVE_DOC_STUB_BASE`, default `http://127.0.0.1:18096`):
+
+```sh
+LIVE_BASE_URL=http://127.0.0.1:18096  # on the backend under test (Django or Rust)
+```
+
+The stub (`_harness/sinks.py: LiveDocStub`) answers
+`POST /live/convert-document/` with a fixed usable document and is up only
+inside the create tests that hold it; with the stub down conversion fails,
+so the 503 contract tests keep passing unchanged.
 
 ## Backend under test (assistant domain)
 

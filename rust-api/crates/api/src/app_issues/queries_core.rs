@@ -14,7 +14,7 @@
 //!   `:489-495`, cycle/count/array annotations `:496-558`, reaction/link
 //!   prefetches `:559-570`, `is_subscribed` `:571-580`, guest 403 `:593-607`).
 //! - `app/views/issue/sub_issue.py:37-201` — `SubIssuesEndpoint.get`
-//!   (annotations `:38-131`, ordering `:133-138`, `.values(26)` `:140-168`).
+//!   (annotations `:38-131`, ordering `:133-138`, `.values(27)` `:140-171`).
 //! - `app/views/issue/relation.py:42-207` — `IssueRelationViewSet.list`
 //!   (relation scope `:42-50`, ten id-lists `:52-100`, target queryset
 //!   `:102-154`, eight buckets `:174-207`).
@@ -57,7 +57,7 @@
 //!    it. Ported with the extra column.
 //! 4. The relation bucket queries carry no `ORDER BY`: the direct-`ArrayAgg`
 //!    `GROUP BY` drops the model's default ordering. Ported without order.
-//! 5. Sub-issue `.values(26)` renders concrete columns in call order, then
+//! 5. Sub-issue `.values(27)` renders concrete columns in call order, then
 //!    annotations in `annotate()` order — so `module_ids` (called third)
 //!    selects after `label_ids`/`assignee_ids`. [`sub_issues_selects`]
 //!    keeps Django's render order.
@@ -388,11 +388,12 @@ pub fn guest_view_exists_sql(
 // Sub-issues (sub_issue.py:37-201)
 // ---------------------------------------------------------------------------
 
-/// The 26 `.values()` keys in RENDER order (`sub_issue.py:141-167`) — the wire
+/// The 27 `.values()` keys in RENDER order (`sub_issue.py:141-171`) — the wire
 /// key order handlers render. Django's `.values()` dicts follow the SELECT
-/// order, not the call order: concrete columns in call order, then annotations
-/// in `annotate()` order (see [`sub_issues_selects`]). `estimate_point` /
-/// `created_by` / `updated_by` select the `*_id` columns.
+/// order, not the call order: concrete columns in call order (`type_id`
+/// rides with them, after `parent_id`), then annotations in `annotate()`
+/// order (see [`sub_issues_selects`]). `estimate_point` / `created_by` /
+/// `updated_by` select the `*_id` columns.
 pub const SUB_ISSUES_KEYS: &[&str] = &[
     "id",
     "name",
@@ -406,6 +407,7 @@ pub const SUB_ISSUES_KEYS: &[&str] = &[
     "sequence_id",
     "project_id",
     "parent_id",
+    "type_id",
     "created_at",
     "updated_at",
     "created_by",
@@ -422,7 +424,7 @@ pub const SUB_ISSUES_KEYS: &[&str] = &[
     "state_group",
 ];
 
-/// Sub-issue `.values(26)` select list in Django's RENDER order: concrete
+/// Sub-issue `.values(27)` select list in Django's RENDER order: concrete
 /// columns in call order (with `AS` aliases where the key differs), then
 /// annotations in `annotate()` order (`cycle_id`, `link_count`,
 /// `attachment_count`, `sub_issues_count`, `label_ids`, `assignee_ids`,
@@ -435,11 +437,11 @@ pub fn sub_issues_selects() -> String {
     format!(
         "issue.id, issue.name, issue.state_id, issue.sort_order, issue.completed_at, \
         issue.estimate_point_id AS estimate_point, issue.priority, issue.start_date, \
-        issue.target_date, issue.sequence_id, issue.project_id, issue.parent_id, issue.created_at, \
-        issue.updated_at, issue.created_by_id AS created_by, issue.updated_by_id AS updated_by, \
-        issue.is_draft, issue.archived_at, {CYCLE_ID_SELECT}, {link}, {attachment}, {sub}, \
-        {LABEL_IDS_SELECT}, {ASSIGNEE_IDS_ACTIVE_SELECT}, {MODULE_IDS_SELECT}, \
-        state.\"group\" AS state_group"
+        issue.target_date, issue.sequence_id, issue.project_id, issue.parent_id, issue.type_id, \
+        issue.created_at, issue.updated_at, issue.created_by_id AS created_by, \
+        issue.updated_by_id AS updated_by, issue.is_draft, issue.archived_at, {CYCLE_ID_SELECT}, \
+        {link}, {attachment}, {sub}, {LABEL_IDS_SELECT}, {ASSIGNEE_IDS_ACTIVE_SELECT}, \
+        {MODULE_IDS_SELECT}, state.\"group\" AS state_group"
     )
 }
 
@@ -1001,16 +1003,23 @@ mod tests {
     // -- sub-issues ----------------------------------------------------------
 
     #[test]
-    fn sub_issues_keys_cover_all_26() {
-        assert_eq!(SUB_ISSUES_KEYS.len(), 26);
-        for key in ["estimate_point", "created_by", "updated_by", "state_group"] {
+    fn sub_issues_keys_cover_all_27() {
+        assert_eq!(SUB_ISSUES_KEYS.len(), 27);
+        for key in [
+            "estimate_point",
+            "created_by",
+            "updated_by",
+            "state_group",
+            "type_id",
+        ] {
             assert!(SUB_ISSUES_KEYS.contains(&key), "missing {key}");
         }
         // Wire order is RENDER order, not call order: Django's `.values()`
         // dicts follow the SELECT list (concrete columns first, then
         // annotations in `annotate()` order).
         let pos = |key: &str| SUB_ISSUES_KEYS.iter().position(|k| *k == key).unwrap();
-        assert!(pos("parent_id") < pos("created_at"));
+        assert!(pos("parent_id") < pos("type_id"));
+        assert!(pos("type_id") < pos("created_at"));
         assert!(pos("archived_at") < pos("cycle_id"));
         assert!(pos("cycle_id") < pos("link_count"));
         assert!(pos("link_count") < pos("attachment_count"));
@@ -1031,6 +1040,7 @@ mod tests {
         // Render order: ... parent_id, created_at ... (concrete), then
         // annotations in annotate() order — module_ids AFTER label/assignee.
         let parent = selects.find("issue.parent_id,").expect("parent");
+        let typed = selects.find("issue.type_id,").expect("type");
         let created = selects.find("issue.created_at,").expect("created");
         let cycle = selects.find("AS cycle_id").expect("cycle");
         let link = selects.find("AS link_count").expect("link");
@@ -1038,7 +1048,7 @@ mod tests {
         let assignee = selects.find("AS assignee_ids").expect("assignees");
         let module = selects.find("AS module_ids").expect("modules");
         let group = selects.find("AS state_group").expect("group");
-        assert!(parent < created && created < cycle);
+        assert!(parent < typed && typed < created && created < cycle);
         assert!(cycle < link && link < label && label < assignee && assignee < module);
         assert!(module < group);
         // Sub-issue counts coalesce to 0.

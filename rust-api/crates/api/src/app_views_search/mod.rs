@@ -43,10 +43,11 @@
 //! - B1 (`base.py:102-112`): workspace retrieve serializes `.first()`
 //!   unconditionally — unknown pk answers 200 with the serializer's
 //!   `get_initial()` body (not 404, and not JSON `null`).
-//! - B1b (`base.py:317-327`): project retrieve dereferences
-//!   `issue_view.owned_by` after `.first()`; unknown pk plus a guest
-//!   without `guest_view_all_features` raises (500), not 404 — other
-//!   callers get the same `get_initial()` 200 as B1.
+//! - B1b (retired by VIEW-022, `base.py:309-312` on main): project
+//!   retrieve used to dereference `issue_view.owned_by` after `.first()`;
+//!   unknown pk plus a guest without `guest_view_all_features` raised
+//!   (500), not 404 — other callers got the same `get_initial()` 200 as
+//!   B1. Unknown pk now 404s before the guest recheck.
 //! - B2 (`serializers/base.py:12-18`): `?fields=` is silently ignored on
 //!   both list views — full objects always render.
 //! - B4 (`base.py:404-411`): the favorite list queryset raises `FieldError`
@@ -64,36 +65,18 @@
 pub mod handlers_search;
 pub mod handlers_views;
 
-use std::collections::HashMap;
-
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use sqlx::{Postgres, Row};
 
 use crate::state::AppState;
+pub use pidash_compat::response::{json_ok as json_response, SERVER_ERROR_BODY};
 
 /// Merge the app-search route groups with the views route groups
 /// (PIDASHCONV-275); merges keep both sides.
 pub fn routes() -> Router<AppState> {
     handlers_search::routes().merge(handlers_views::routes())
-}
-
-/// A search path: the GET handler owns reads, everything else falls
-/// through to Django. OPTIONS proxies too: DRF answers metadata (401 anon
-/// / 200 authed) where axum would 405. `HEAD` proxies as well: Django
-/// defines no `head` and 405s after auth (axum would auto-serve it from
-/// `get`).
-pub fn owned(
-    get_handler: axum::routing::MethodRouter<AppState>,
-) -> axum::routing::MethodRouter<AppState> {
-    get_handler
-        .post(crate::edge::proxy)
-        .put(crate::edge::proxy)
-        .patch(crate::edge::proxy)
-        .delete(crate::edge::proxy)
-        .head(crate::edge::proxy)
-        .options(crate::edge::proxy)
 }
 
 /// Exact bytes of the DRF `IsAuthenticated` denial.
@@ -103,30 +86,13 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// a badly-formed UUID in a filter raises Django `ValidationError`, not
 /// DRF's parse error.
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// `handle_exception`'s generic 500 branch. Covers `ValueError` from the
-/// unguarded `int(count)` (B8), `AttributeError` from the unguarded
-/// `issue.parent` read (B5), and anything unclassified.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// DRF `exception_handler` maps `Http404(*args)` to `NotFound(*args)`, so
 /// the `_rewrite_project_kwarg` miss (`Project.resolve`, "Project not
 /// found") renders with the resolve message — verified against DRF 3.15.2
 /// (`rest_framework/views.py:81-82`), not the bare default.
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 
-/// One query value, repeated or not. `serde_html_form` (axum's `Query`
-/// backend) does not coerce a lone `?key=value` into a sequence, so the
-/// extractor uses this untagged shape and callers read first/last —
-/// mirroring Django's `QueryDict`, where repeats are legal and `.get`
-/// returns the last value.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every search handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
+pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
 /// All values for `key`, in order; `None` when absent.
 pub fn query_values(query: &QueryMap, key: &str) -> Option<Vec<String>> {
@@ -134,11 +100,6 @@ pub fn query_values(query: &QueryMap, key: &str) -> Option<Vec<String>> {
         OneOrMany::One(one) => vec![one.clone()],
         OneOrMany::Many(many) => many.clone(),
     })
-}
-
-/// Django `QueryDict.get`: the last value, or `None`.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query_values(query, key).and_then(|values| values.into_iter().last())
 }
 
 /// Handler failure with its exact status + body.
@@ -174,15 +135,6 @@ impl IntoResponse for Denial {
             .body(axum::body::Body::from(body))
             .expect("static denial response")
     }
-}
-
-/// Render a pre-shaped compact-JSON body (`JSONRenderer`, `COMPACT_JSON`).
-pub fn json_response(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("search response")
 }
 
 /// `request.user` from the Django session. No session, no key, or a

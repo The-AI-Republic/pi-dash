@@ -116,8 +116,17 @@ def _session_authenticates(request) -> bool:
     return bool(getattr(request, "user", None) and request.user.is_authenticated)
 
 
-def _runner_unavailable(runner: Runner) -> bool:
-    return runner.status in {RunnerStatus.OFFLINE, RunnerStatus.REVOKED}
+def _runner_unavailable_error(runner: Optional[Runner]) -> Optional[str]:
+    """Error code when ``runner`` can't take a chat turn, else None.
+
+    A paused runner is connected but takes no new work, chat included, so an
+    operator can drain it before maintenance.
+    """
+    if runner is None or runner.status in {RunnerStatus.OFFLINE, RunnerStatus.REVOKED}:
+        return "runner_unavailable"
+    if runner.paused_at is not None:
+        return "runner_paused"
+    return None
 
 
 def _approval_kind(raw: str) -> str:
@@ -179,11 +188,9 @@ class AgentChatSessionListEndpoint(APIView):
                 return Response({"error": "runner_not_found"}, status=status.HTTP_404_NOT_FOUND)
             if not can_use_runner(request.user, runner):
                 return Response({"error": "runner_not_found"}, status=status.HTTP_404_NOT_FOUND)
-            if _runner_unavailable(runner):
-                return Response(
-                    {"error": "runner_unavailable"},
-                    status=status.HTTP_409_CONFLICT,
-                )
+            unavailable = _runner_unavailable_error(runner)
+            if unavailable:
+                return Response({"error": unavailable}, status=status.HTTP_409_CONFLICT)
             existing = (
                 AgentChatSession.objects.filter(
                     created_by=request.user,
@@ -238,18 +245,17 @@ class AgentChatWarmEndpoint(APIView):
                     {"error": "chat_session_closed"},
                     status=status.HTTP_409_CONFLICT,
                 )
-            if runner is None or _runner_unavailable(runner):
-                return Response(
-                    {"error": "runner_unavailable"},
-                    status=status.HTTP_409_CONFLICT,
-                )
+            unavailable = _runner_unavailable_error(runner)
+            if unavailable:
+                return Response({"error": unavailable}, status=status.HTTP_409_CONFLICT)
             if session.active_message_id is not None or session.active_turn_id:
                 return Response({"ok": True, "skipped": "chat_turn_active"})
             # Chat is accepted concurrently with an issue run: the runner serves
             # chat in a dedicated worktree, isolated from the issue pool (design
             # make_chat_issue_parallel_working §3.4). "Busy" still gates ISSUE
             # assignment in the matcher, but no longer blocks chat. Offline /
-            # revoked runners are still rejected above via _runner_unavailable().
+            # revoked / paused runners are still rejected above via
+            # _runner_unavailable_error().
             chat_service.enqueue_chat_warm_after_commit(
                 runner.id,
                 chat_session_id=session.id,
@@ -300,16 +306,15 @@ class AgentChatMessageListEndpoint(APIView):
                     {"error": "chat_session_closed"},
                     status=status.HTTP_409_CONFLICT,
                 )
-            if runner is None or _runner_unavailable(runner):
-                return Response(
-                    {"error": "runner_unavailable"},
-                    status=status.HTTP_409_CONFLICT,
-                )
+            unavailable = _runner_unavailable_error(runner)
+            if unavailable:
+                return Response({"error": unavailable}, status=status.HTTP_409_CONFLICT)
             # Chat is accepted concurrently with an issue run: the runner serves
             # chat in a dedicated worktree, isolated from the issue pool (design
             # make_chat_issue_parallel_working §3.4). "Busy" still gates ISSUE
             # assignment in the matcher, but no longer blocks chat. Offline /
-            # revoked runners are still rejected above via _runner_unavailable().
+            # revoked / paused runners are still rejected above via
+            # _runner_unavailable_error().
             if session.active_message_id is not None or session.active_turn_id:
                 return Response(
                     {"error": "chat_turn_active"},

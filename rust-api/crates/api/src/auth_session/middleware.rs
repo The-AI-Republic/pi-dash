@@ -132,7 +132,7 @@ mod tests {
                 &serde_json::json!({
                     "_auth_user_id": user,
                     "_auth_user_backend": crate::license::MODEL_BACKEND,
-                    "_auth_user_hash": crate::license::make_session_auth_hash("", SECRET),
+                    "_auth_user_hash": pidash_compat::http::session_auth_hash("", SECRET),
                 }),
                 now as u64,
             )
@@ -173,7 +173,7 @@ mod tests {
         touch(
             &req,
             "_auth_user_hash",
-            &crate::license::make_session_auth_hash("", SECRET),
+            &pidash_compat::http::session_auth_hash("", SECRET),
         );
         Response::builder()
             .status(StatusCode::OK)

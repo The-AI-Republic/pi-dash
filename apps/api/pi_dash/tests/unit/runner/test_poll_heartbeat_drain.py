@@ -311,3 +311,28 @@ def test_poll_endpoint_is_csrf_exempt(db, enrolled_runner, runner_token, runner_
     # 200 = passed CSRF + auth + bookkeeping. A CSRF rejection would be 403
     # with a CSRF failure reason, which is exactly the regression we guard.
     assert resp.status_code == 200, resp.content
+
+
+@pytest.mark.unit
+def test_poll_keeps_operator_pause(db, api_client, enrolled_runner, runner_token, runner_session):
+    """A paused runner keeps heartbeating; its polls rewrite connectivity
+    ``status`` but must never clear the operator pause."""
+    paused_at = timezone.now() - timedelta(minutes=5)
+    Runner.objects.filter(pk=enrolled_runner.id).update(status=RunnerStatus.BUSY, paused_at=paused_at)
+
+    with (
+        patch("pi_dash.runner.views.sessions.session_service.reap_stale_busy_runs"),
+        _patched_poll_dependencies(),
+    ):
+        resp = _poll(
+            api_client,
+            enrolled_runner.id,
+            runner_session.id,
+            runner_token,
+            body={"status": {"status": "idle"}},
+        )
+
+    assert resp.status_code == 200, resp.data
+    enrolled_runner.refresh_from_db()
+    assert enrolled_runner.status == RunnerStatus.ONLINE
+    assert enrolled_runner.paused_at == paused_at

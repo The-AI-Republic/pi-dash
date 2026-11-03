@@ -10,12 +10,13 @@ queue/rollback behavior, and Django's filter-coercion edges.
 from __future__ import annotations
 
 import contextlib
+import os
 import uuid
 
 import pytest
 
 from _harness.auth import login_session
-from _harness.http import api_client
+from _harness.http import api_client, api_key_client, bearer_client
 from _harness.web import web_post
 
 WEB = "/api/runners"
@@ -23,16 +24,66 @@ DAEMON = "/api/v1/runner"
 
 pytestmark = pytest.mark.contract
 
+CLOUD_ENABLED = os.environ.get("CONTRACT_CLOUD_AGENT_ENABLED", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
 RUN_KEYS = {
     "id", "status", "executor_kind", "dispatch_attempts", "cancel_requested_at",
     "cancel_reason", "prompt", "thread_id", "agent_metadata", "runner",
     "work_item", "scheduler_binding", "scheduler_binding_detail",
     "pod", "pod_detail", "created_by", "owner", "created_at",
-    "assigned_at", "queue_position", "started_at", "ended_at", "done_payload",
+    "assigned_at", "started_at", "ended_at", "done_payload",
     "error", "error_code", "error_diagnostic", "refusal_category", "llm_model",
     "input_tokens", "output_tokens", "total_tokens", "usage", "tool_plan",
     "tool_calls",
 }
+
+
+@pytest.fixture(autouse=True)
+def _delete_created_runs(seeder):
+    """Remove every run in the test's workspaces afterwards.
+
+    POST create covers all three dispatch tails, so most tests in this
+    file leave server-created runs the seeder never tracked; the global
+    metrics gauges count them, breaking reused databases. Dependents go
+    first (the FKs are checked per statement under autocommit): child
+    rows, the binding/ticker run pointers, then children, then the rest.
+    """
+    yield
+    ws_ids = seeder.track._tracked_ids("workspaces")
+    if not ws_ids:
+        return
+    db = seeder.db
+    db.execute(
+        "UPDATE scheduler_bindings SET last_run_id = NULL WHERE last_run_id IN "
+        "(SELECT id FROM agent_run WHERE workspace_id = ANY(%s))",
+        (ws_ids,),
+    )
+    db.execute(
+        "UPDATE issue_agent_ticker SET resume_parent_run_id = NULL "
+        "WHERE resume_parent_run_id IN "
+        "(SELECT id FROM agent_run WHERE workspace_id = ANY(%s))",
+        (ws_ids,),
+    )
+    for table, column in (
+        ("run_message_dedupe", "run_id"),
+        ("agent_run_event", "agent_run_id"),
+        ("agent_run_approval", "agent_run_id"),
+        ("agent_run_tool_call", "agent_run_id"),
+    ):
+        db.execute(
+            f"DELETE FROM {table} WHERE {column} IN "
+            "(SELECT id FROM agent_run WHERE workspace_id = ANY(%s))",
+            (ws_ids,),
+        )
+    db.execute(
+        "DELETE FROM agent_run WHERE workspace_id = ANY(%s) AND parent_run_id IS NOT NULL",
+        (ws_ids,),
+    )
+    db.execute("DELETE FROM agent_run WHERE workspace_id = ANY(%s)", (ws_ids,))
 
 
 def test_web_runs_list_shape(user_client, daemon_run):
@@ -92,6 +143,46 @@ def test_web_run_detail_shape(user_client, daemon_run):
     assert "events" not in body
     assert body["scheduler_binding"] is None
     assert body["scheduler_binding_detail"] is None
+
+
+@pytest.mark.parametrize(
+    ("bag", "flat"),
+    [
+        # A clean run: the bag is empty and every key reads "" (never null).
+        ({}, {"error": "", "error_code": "", "refusal_category": ""}),
+        # A failed run as the backfill writes it (no category key).
+        (
+            {"code": "agent_error", "message": "RuntimeError: boom\nline 2"},
+            {"error": "RuntimeError: boom\nline 2", "error_code": "agent_error",
+             "refusal_category": ""},
+        ),
+        # A refusal: the category comes off the generated column.
+        (
+            {"code": "provider_refusal", "message": "declined", "refusal_category": "cyber"},
+            {"error": "declined", "error_code": "provider_refusal", "refusal_category": "cyber"},
+        ),
+    ],
+    ids=["clean", "failed", "refused"],
+)
+def test_web_run_detail_flattens_error_details(user_client, daemon_run, seeder, bag, flat):
+    """``error_details`` is storage only: run detail keeps the three flat
+    keys, plus the diagnostic derived from ``error`` (PDASHOSS01-187)."""
+    import json
+
+    seeder.db.execute(
+        "UPDATE agent_run SET error_details = %s::jsonb WHERE id = %s",
+        (json.dumps(bag), daemon_run["id"]),
+    )
+    assert seeder.db.fetchval(
+        "SELECT refusal_category FROM agent_run WHERE id = %s", (daemon_run["id"],)
+    ) == flat["refusal_category"]
+    body = user_client.get(f"{WEB}/runs/{daemon_run['id']}/").json()
+    assert {key: body[key] for key in flat} == flat
+    assert "error_details" not in body
+    if flat["error"]:
+        assert body["error_diagnostic"]["summary"]
+    else:
+        assert body["error_diagnostic"] is None
 
 
 def test_web_run_detail_include_events(user_client, machine_client, daemon_run, seeder):
@@ -579,6 +670,205 @@ def test_web_runs_create_runai_201(user_client, seeder, daemon_world, machine_fl
     assert row["trigger"] == "run_ai" and row["prompt_manifest"] is not None
 
 
+def _open_and_poll_runner_session(client, runner_id):
+    """Open a runner session and poll once so the runner is ONLINE + idle.
+
+    Session open alone leaves the runner `offline`; the poll flips it
+    `ONLINE` (`runner/views/sessions.py`) and refreshes the heartbeat,
+    which is what makes the matcher consider the runner for new work.
+    """
+    opened = client.post(f"{DAEMON}/runners/{runner_id}/sessions/", json={})
+    assert opened.status_code == 201, opened.text
+    poll_url = (
+        f"{DAEMON}/runners/{runner_id}/sessions/{opened.json()['session_id']}/poll"
+    )
+    payload = {"ack": [], "status": {"status": "idle"}}
+    polled = client.post(poll_url, json=payload)
+    for _ in range(2):
+        # Django's shared async-Redis client can 500 a poll under the dev
+        # server (`Event loop is closed`); retry like test_daemon_sessions.
+        if polled.status_code != 500:
+            break
+        polled = client.post(poll_url, json=payload)
+    assert polled.status_code == 200, polled.text
+
+
+@pytest.fixture()
+def online_runner_pair(settings, seeder, daemon_world, machine_flow, machine_client):
+    """Two online idle runners in the default pod (PIDASHCONV-1481).
+
+    `machine_flow`'s runner plus a second enrolled runner, each with a live
+    session. The matcher only drains to ONLINE, heartbeat-fresh, idle
+    runners, so each POST below finds a free runner.
+    """
+    _open_and_poll_runner_session(machine_client, machine_flow["runner_id"])
+    host_label = f"online-{seeder.tag}b"[:200]
+    with api_key_client(settings.base_url, daemon_world["api_token"]["token"]) as client:
+        created = client.post(
+            f"{DAEMON}/runners/",
+            json={
+                "project": daemon_world["project"]["identifier"],
+                "workspace_slug": daemon_world["workspace"]["slug"],
+                "host_label": host_label,
+            },
+        )
+    assert created.status_code == 201, created.text
+    second_id = created.json()["runner_id"]
+    with bearer_client(
+        settings.base_url, created.json()["machine_token"],
+        headers={"X-Runner-Id": second_id},
+    ) as client:
+        _open_and_poll_runner_session(client, second_id)
+    yield [machine_flow["runner_id"], second_id]
+    # Teardown mirrors machine_flow's finalizer (conftest.py) for the
+    # endpoint-created rows the seeder never tracked.
+    owner_id = daemon_world["owner"]["id"]
+    seeder.db.execute("DELETE FROM runner_session WHERE runner_id = %s", (second_id,))
+    seeder.db.execute(
+        "UPDATE agent_run SET runner_id = NULL, pinned_runner_id = NULL "
+        "WHERE runner_id = %s OR pinned_runner_id = %s",
+        (second_id, second_id),
+    )
+    seeder.db.execute("DELETE FROM agent_chat_session WHERE runner_id = %s", (second_id,))
+    seeder.db.execute(
+        "DELETE FROM machine_token WHERE user_id = %s AND host_label = %s",
+        (owner_id, host_label),
+    )
+    seeder.db.execute("DELETE FROM runner WHERE id = %s", (second_id,))
+    seeder.db.execute(
+        "DELETE FROM dev_machine WHERE owner_id = %s AND host_label = %s",
+        (owner_id, host_label),
+    )
+
+
+def test_web_runs_create_drains_pod_to_idle_runner(
+    user_client, seeder, daemon_world, online_runner_pair
+):
+    """run_ai + direct POSTs assign in-request with an idle online runner.
+
+    Django drains the pod in `on_commit(dispatch_agent_run)`, so each POST
+    assigns to an idle runner before the 201 (PIDASHCONV-1481). The row —
+    not the 201 body, which renders stale-queued for run_ai — pins this.
+    """
+    issue = _ticking_issue(seeder, daemon_world)
+    runai = web_post(
+        user_client, f"{WEB}/runs/", {"triggered_by": "run_ai", "work_item": issue["id"]}
+    )
+    assert runai.status_code == 201, runai.text
+    assert runai.headers["allow"] == "GET, POST, HEAD, OPTIONS"
+    first = seeder.db.fetchone(
+        "SELECT status, runner_id, owner_id, assigned_at FROM agent_run WHERE id = %s",
+        (runai.json()["id"],),
+    )
+    assert first["status"] == "assigned"
+    assert str(first["runner_id"]) in online_runner_pair
+    assert first["owner_id"] is not None and first["assigned_at"] is not None
+    direct = web_post(
+        user_client, f"{WEB}/runs/",
+        {"prompt": "hello assigned", "workspace": daemon_world["workspace"]["id"]},
+    )
+    assert direct.status_code == 201, direct.text
+    assert direct.headers["allow"] == "GET, POST, HEAD, OPTIONS"
+    second = seeder.db.fetchone(
+        "SELECT status, runner_id, owner_id, assigned_at FROM agent_run WHERE id = %s",
+        (direct.json()["id"],),
+    )
+    assert second["status"] == "assigned"
+    assert str(second["runner_id"]) in online_runner_pair
+    assert str(second["runner_id"]) != str(first["runner_id"])
+    assert second["owner_id"] is not None and second["assigned_at"] is not None
+
+
+def test_web_runs_create_runai_201_body_is_predispatch_with_idle_runner(
+    user_client, seeder, daemon_world, online_runner_pair
+):
+    """run_ai 201 renders the pre-dispatch run while the row assigns (PIDASHCONV-1482).
+
+    Django serializes the in-memory run with no ``refresh_from_db``
+    (``runs.py`` ``_post_run_ai``), so the body stays queued and runner-less
+    even though the on-commit dispatch assigned the row in-request.
+    """
+    issue = _ticking_issue(seeder, daemon_world)
+    response = web_post(
+        user_client, f"{WEB}/runs/", {"triggered_by": "run_ai", "work_item": issue["id"]}
+    )
+    assert response.status_code == 201, response.text
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
+    body = response.json()
+    assert RUN_KEYS <= set(body)
+    assert body["executor_kind"] == "local_runner"
+    assert body["status"] == "queued"
+    assert body["runner"] is None
+    assert body["owner"] is None
+    assert body["assigned_at"] is None
+    assert body["dispatch_attempts"] == 0
+    row = seeder.db.fetchone(
+        "SELECT status, runner_id, owner_id, assigned_at FROM agent_run WHERE id = %s",
+        (body["id"],),
+    )
+    assert row["status"] == "assigned"
+    assert str(row["runner_id"]) in online_runner_pair
+    assert row["owner_id"] is not None and row["assigned_at"] is not None
+
+
+def _seed_llm_config(seeder, user_id):
+    """BYOK marker row so ``user_has_llm_config`` passes (cf. dispatch/conftest.py)."""
+    seeder.db.execute(
+        """INSERT INTO assistant_user_llm_config
+           (provider_kind, base_url, model_name, api_key_encrypted,
+            last_verified_at, created_at, updated_at, user_id)
+           VALUES ('openai_compatible','https://llm.example.invalid/v1','contract-model',
+                   decode('deadbeef','hex'),NULL,now(),now(),%s)""",
+        (user_id,),
+    )
+    row_id = seeder.db.fetchval(
+        "SELECT id FROM assistant_user_llm_config WHERE user_id = %s", (user_id,)
+    )
+    seeder.track.add("assistant_user_llm_config", row_id)
+
+
+def test_web_runs_create_runai_201_body_is_predispatch_for_cloud(
+    user_client, seeder, daemon_world
+):
+    """Cloud run_ai 201 keeps dispatch_attempts 0 while the row leases to 1 (PIDASHCONV-1482).
+
+    Regime: servers booted with ``CLOUD_AGENT_ENABLED=true``
+    (``CONTRACT_CLOUD_AGENT_ENABLED=true``); skipped otherwise — CI runs the
+    kill-switches off, where a cloud-default project refuses the create.
+    """
+    if not CLOUD_ENABLED:
+        pytest.skip("needs CLOUD_AGENT_ENABLED=true servers (CONTRACT_CLOUD_AGENT_ENABLED)")
+    seeder.db.execute(
+        "UPDATE projects SET default_agent_executor = 'cloud_agent' WHERE id = %s",
+        (daemon_world["project"]["id"],),
+    )
+    _seed_llm_config(seeder, daemon_world["owner"]["id"])
+    # The cloud creator must hold a project role (check_project_role in
+    # _resolve_creator_for_trigger); the local path returns the actor bare.
+    seeder.create_project_member(
+        daemon_world["workspace"]["id"], daemon_world["project"]["id"],
+        daemon_world["owner"]["id"], role=15,
+    )
+    issue = _ticking_issue(seeder, daemon_world)
+    response = web_post(
+        user_client, f"{WEB}/runs/", {"triggered_by": "run_ai", "work_item": issue["id"]}
+    )
+    assert response.status_code == 201, response.text
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
+    body = response.json()
+    assert RUN_KEYS <= set(body)
+    assert body["executor_kind"] == "cloud_agent"
+    assert body["status"] == "queued"
+    assert body["dispatch_attempts"] == 0
+    row = seeder.db.fetchone(
+        "SELECT status, dispatch_attempts, lease_expires_at FROM agent_run WHERE id = %s",
+        (body["id"],),
+    )
+    assert row["status"] == "queued"
+    assert row["dispatch_attempts"] == 1
+    assert row["lease_expires_at"] is not None
+
+
 def test_web_runs_create_runai_queued_202(user_client, seeder, daemon_world):
     issue = _ticking_issue(seeder, daemon_world)
     seeder.create_agent_run(
@@ -796,13 +1086,13 @@ def _seed_scheduler_run(seeder, daemon_world, binding_id, *, status="completed")
            (id, workspace_id, created_by_id, pod_id, scheduler_binding_id,
             status, prompt, trigger, executor_kind, run_config,
             required_capabilities, thread_id, agent_metadata, tool_plan,
-            usage, dispatch_attempts, error, refusal_category, llm_model,
-            cancel_reason, error_code, phase_kind, created_at)
+            usage, dispatch_attempts, error_details, llm_model,
+            cancel_reason, phase_kind, created_at)
            VALUES (%s,%s,%s,%s,%s,
                    %s,'','scheduler','local_runner','{}',
                    '[]','{}','{}','{}',
-                   '{}',0,'','','',
-                   '','','',now())""",
+                   '{}',0,'{}','',
+                   '','',now())""",
         (
             run_id, daemon_world["workspace"]["id"], daemon_world["owner"]["id"],
             daemon_world["pod"]["id"], binding_id, status,

@@ -745,6 +745,20 @@ const DATETIME_INPUT_FORMATS: &[&str] = &[
     "%Y-%m-%d %H:%M:%S%.f%:z",
 ];
 
+/// A US (`%m/%d/%...`) datetime whose fraction runs past 6 digits:
+/// Django's `strptime` `%f` stops at 6 (`unconverted data remains`),
+/// while chrono's `%.f` would take up to 9 and truncate. Only `/`
+/// strings can take this shape (ISO never contains `/`, and
+/// `parse_datetime` never matches one), so a `/` plus a trailing
+/// 7-plus digit run is exactly the shape Django 400s.
+fn has_long_us_fraction(text: &str) -> bool {
+    let Some(dot) = text.rfind('.') else {
+        return false;
+    };
+    let fraction = &text[dot + 1..];
+    fraction.len() > 6 && fraction.bytes().all(|b| b.is_ascii_digit()) && text[..dot].contains('/')
+}
+
 /// Python's `fromisoformat` truncates >6-digit fractions to microseconds;
 /// Postgres `timestamptz` stores micros (rounding on bind), so truncate
 /// first to compare the instant Django compares.
@@ -788,6 +802,14 @@ fn parse_datetime_utc(
     // A lowercase `z` is never valid: Django's `parse_datetime` only
     // takes an uppercase `Z`, while chrono's `%z` would take either.
     if text.ends_with('z') {
+        return Err(FilterError::InvalidLookupValue(field.to_owned()));
+    }
+    // Python's `strptime` `%f` takes at most 6 digits, while chrono's
+    // `%.f` takes up to 9: a US datetime with a 7-9 digit fraction fails
+    // every `DATETIME_INPUT_FORMAT` in Django (400) but would parse here
+    // and truncate. Reject it before chrono sees it. (ISO shapes keep
+    // truncating, like `fromisoformat`.)
+    if has_long_us_fraction(text) {
         return Err(FilterError::InvalidLookupValue(field.to_owned()));
     }
     // ISO-8601 with an offset: the offset wins, like `parse_datetime` —
@@ -1517,6 +1539,40 @@ mod tests {
             &chrono_tz::UTC,
         )
         .unwrap();
+        assert_eq!(moment.timestamp_subsec_nanos(), 123_456_000);
+    }
+
+    #[test]
+    fn us_datetimes_reject_fractions_past_six_digits() {
+        // Django's `strptime` `%f` takes at most 6 digits, so US datetimes
+        // with 7-9 digit fractions fail every `DATETIME_INPUT_FORMAT`
+        // (400); chrono's `%.f` would take up to 9 and truncate.
+        for raw in [
+            "05/01/2026 08:00:00.1234567",
+            "05/01/2026 08:00:00.12345678",
+            "05/01/2026 08:00:00.123456789",
+            "05/01/26 08:00:00.1234567",
+        ] {
+            assert_eq!(
+                leaf("created_at", &Value::from(raw)),
+                Err(FilterError::InvalidLookupValue("created_at".to_owned())),
+                "{raw}"
+            );
+        }
+        // The same cleaning path 400s a `__range` bound.
+        assert_eq!(
+            leaf(
+                "created_at__range",
+                &Value::from("05/01/2026 08:00:00.1234567,05/02/2026 08:00:00"),
+            ),
+            Err(FilterError::InvalidLookupValue(
+                "created_at__range".to_owned()
+            ))
+        );
+        // The 6-digit boundary still cleans, to the exact microsecond.
+        let moment =
+            parse_datetime_utc("created_at", "05/01/2026 08:00:00.123456", &chrono_tz::UTC)
+                .unwrap();
         assert_eq!(moment.timestamp_subsec_nanos(), 123_456_000);
     }
 

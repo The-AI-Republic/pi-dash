@@ -6,7 +6,8 @@ DRF's defaults apply (``JSONParser``, ``FormParser``, ``MultiPartParser``):
 
 * An empty body parses to ``{}`` without touching a parser.
 * Malformed JSON is a ``ParseError`` -> 400 ``{"detail": "JSON parse
-  error - <CPython message>"}``.
+  error - <message>}`` (tier 3 since PIDASHCONV-1555: CPython text
+  on Django, serde text on Rust; cases assert status and envelope only).
 * ``application/x-www-form-urlencoded`` is parsed to a ``QueryDict`` and
   the view's ``request.data.get(...)`` reads it, so the view runs.
 * A content type no default parser matches is 415.
@@ -26,11 +27,9 @@ pytestmark = pytest.mark.contract
 
 GENERIC_500 = {"error": "Something went wrong please try again later"}
 
-# A truncated object; CPython's message is the same whatever the route.
+# A truncated object (tier 3: message text differs by backend).
 MALFORMED_JSON = b'{"start_date":'
-MALFORMED_DETAIL = (
-    "JSON parse error - Expecting value: line 1 column 15 (char 14)"
-)
+MALFORMED_PREFIX = "JSON parse error - "
 
 
 def _routes(tenant):
@@ -63,7 +62,8 @@ def test_malformed_json_is_400_detail(admin):
     for label, (method, url) in _routes(admin).items():
         r = _send(admin["client"], method, url, MALFORMED_JSON, "application/json")
         assert r.status_code == 400, (label, r.text[:500])
-        assert r.json() == {"detail": MALFORMED_DETAIL}, label
+        detail = r.json()["detail"]
+        assert detail.startswith(MALFORMED_PREFIX), (label, detail)
 
 
 def test_empty_body_is_served(admin):

@@ -198,45 +198,8 @@ pub fn lock_thread_sql() -> String {
     )
 }
 
-/// `append_event` insert shape (`events.py:94-101`): every concrete event
-/// column in model field order (the `BigAutoField` pk takes `DEFAULT`),
-/// values bound positionally. `kind` must pass through [`truncate_kind`]
-/// first; `payload` defaults to `{}` (`payload or {}`, `events.py:100`);
-/// `seq` is [`next_event_seq_sql`] under [`lock_thread_sql`]; the row
-/// publishes via [`publish_frame`] on transaction commit
-/// (`transaction.on_commit`, `events.py:102`).
-pub fn insert_event_sql() -> String {
-    let table = assistant_event::TABLE;
-    let columns = assistant_event::COLUMNS
-        .iter()
-        .filter(|column| **column != "id")
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\", \"");
-    let placeholders = (1..=assistant_event::COLUMNS.len() - 1)
-        .map(|index| format!("${index}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("INSERT INTO \"{table}\" (\"{columns}\") VALUES ({placeholders})")
-}
-
-/// `create_message` insert shape (`events.py:117-125`): every concrete
-/// message column in model field order, values bound positionally in
-/// [`assistant_message::COLUMNS`] order. Unlike [`insert_event_sql`], the pk
-/// is included: `AssistantMessage.id` is a `UUIDField` whose `uuid4` default
-/// runs Python-side (`models.py:126`), so there is no database default and
-/// the caller generates the id (`Uuid::new_v4`, as Django's `objects.create`
-/// sends its client-generated UUID) and binds it as `$1`. `status` defaults
-/// to `completed` (`MessageStatus.COMPLETED`, `events.py:113`).
-pub fn insert_message_sql() -> String {
-    let table = assistant_message::TABLE;
-    let columns = assistant_message::COLUMNS.join("\", \"");
-    let placeholders = (1..=assistant_message::COLUMNS.len())
-        .map(|index| format!("${index}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("INSERT INTO \"{table}\" (\"{columns}\") VALUES ({placeholders})")
-}
+// (`insert_event_sql`/`insert_message_sql` moved to
+// `pidash_services::domain::assistant::append_event`/`create_message_row`.)
 
 /// Inputs to [`message_envelope_json`]; same pre-rendered convention as
 /// [`EventParts`], except `payload_json` arrives rendered with the *DRF*
@@ -557,30 +520,14 @@ mod tests {
     }
 
     #[test]
-    fn lock_and_insert_shapes() {
-        // `append_event`/`create_message` shapes (`events.py:92-101,116-125`):
-        // full thread row locked under the seq allocation, every
-        // insert column bound positionally.
+    fn lock_shape() {
+        // Thread-row lock under the seq allocation (`events.py:92-93`).
+        // (The `append_event`/`create_message` pins moved to
+        // `pidash_services::domain::assistant` with their SQL.)
         let lock = lock_thread_sql();
         assert!(lock.starts_with("SELECT \"assistant_thread\"."));
         assert!(lock.contains("WHERE \"assistant_thread\".\"id\" = $1"));
         assert!(lock.ends_with("FOR UPDATE SKIP LOCKED"));
-        // Events omit the pk: `BigAutoField` takes `DEFAULT`.
-        let insert = insert_event_sql();
-        assert!(insert.starts_with("INSERT INTO \"assistant_event\" ("));
-        assert!(!insert.contains("\"id\""));
-        assert_eq!(
-            insert.matches('$').count(),
-            assistant_event::COLUMNS.len() - 1
-        );
-        // Messages bind the pk: no database default (`models.py:126`).
-        let insert = insert_message_sql();
-        assert!(insert.starts_with("INSERT INTO \"assistant_message\" ("));
-        assert!(insert.starts_with("INSERT INTO \"assistant_message\" (\"id\", "));
-        assert_eq!(
-            insert.matches('$').count(),
-            assistant_message::COLUMNS.len()
-        );
     }
 
     #[test]
@@ -764,55 +711,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn live_inserts_round_trip() {
-        let Some(pool) = scratch_pool().await else {
-            return;
-        };
-        let mut tx = live_tx(&pool).await;
-        let thread = live_uuid(1);
-        let turn = live_uuid(2);
-        let stamp = live_ts(1_700_000_000);
-        sqlx::query(&insert_event_sql())
-            .bind(thread)
-            .bind(Some(turn))
-            .bind(1_i64)
-            .bind("turn_started")
-            .bind(None::<uuid::Uuid>)
-            .bind(sqlx::types::Json(json!({"t": 1})))
-            .bind(stamp)
-            .execute(&mut *tx)
-            .await
-            .expect("event insert runs");
-        let message = live_uuid(3);
-        sqlx::query(&insert_message_sql())
-            .bind(message)
-            .bind(thread)
-            .bind(Some(turn))
-            .bind(1_i64)
-            .bind("user")
-            .bind("hi")
-            .bind(sqlx::types::Json(json!({})))
-            .bind("completed")
-            .bind(stamp)
-            .bind(None::<chrono::DateTime<chrono::Utc>>)
-            .execute(&mut *tx)
-            .await
-            .expect("message insert runs with an explicit id");
-        use sqlx::Row;
-        let row = sqlx::query("SELECT * FROM assistant_message WHERE id = $1")
-            .bind(message)
-            .fetch_one(&mut *tx)
-            .await
-            .expect("message row readable");
-        assert_eq!(row.try_get::<uuid::Uuid, _>("id").expect("id"), message);
-        assert_eq!(row.try_get::<i64, _>("seq").expect("seq"), 1);
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM assistant_event")
-            .fetch_one(&mut *tx)
-            .await
-            .expect("event count runs");
-        assert_eq!(count, 1);
-    }
+    // (live_inserts_round_trip moved to
+    // `pidash_services::domain::assistant`, which the db crate cannot
+    // depend on; its roundtrip covers both shapes.)
 
     #[tokio::test]
     async fn live_load_history_window() {

@@ -460,6 +460,80 @@ def test_invitations_create_empty_400(world):
     assert resp.json() == {"error": "Emails are required"}
 
 
+def test_invitations_create_bad_later_batch_writes_nothing(world, db):
+    # PIDASHCONV-1376: bulk_create(batch_size=10) runs inside one
+    # transaction, so a bad row in batch 2 rolls back batch 1: the
+    # whole request writes all invitations or none.
+    import uuid
+    client, _, ws, project = world.full_stack()
+    tag = uuid.uuid4().hex[:8]
+    emails = [
+        {"email": "atomic%s-%02d@example.com" % (tag, n), "role": 15}
+        for n in range(1, 11)
+    ]
+    emails.append({"email": "atomic%s-11@example.com" % tag, "role": None})
+    resp = client.post(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/invitations/",
+        json={"emails": emails})
+    assert resp.status_code == 400
+    assert resp.json() == {"error": "The payload is not valid"}
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM project_member_invites WHERE project_id=%s",
+            (str(project["id"]),))
+        assert cur.fetchone()["n"] == 0
+
+
+def test_invitations_create_bad_role_string_in_later_batch_writes_nothing(world, db):
+    # PIDASHCONV-1376: a role int() conversion failure in batch 2
+    # (ValueError -> 500) rolls back batch 1.
+    import uuid
+    client, _, ws, project = world.full_stack()
+    tag = uuid.uuid4().hex[:8]
+    emails = [
+        {"email": "atomic%s-%02d@example.com" % (tag, n), "role": 15}
+        for n in range(1, 11)
+    ]
+    emails.append({"email": "atomic%s-11@example.com" % tag, "role": "abc"})
+    resp = client.post(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/invitations/",
+        json={"emails": emails})
+    assert resp.status_code == 500
+    assert resp.json() == {"error": "Something went wrong please try again later"}
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM project_member_invites WHERE project_id=%s",
+            (str(project["id"]),))
+        assert cur.fetchone()["n"] == 0
+
+
+def test_invitations_create_batch1_db_error_beats_batch2_conversion_error(world, db):
+    # PIDASHCONV-1376: Django prepares each batch's values just before
+    # inserting that batch, so a batch-1 INSERT failure (400) wins over
+    # a batch-2 role conversion failure (500). There is no upfront
+    # validation of all roles; an implementation that validates every
+    # role before the first INSERT answers 500 here instead of 400.
+    import uuid
+    client, _, ws, project = world.full_stack()
+    tag = uuid.uuid4().hex[:8]
+    emails = [
+        {"email": "atomic%s-%02d@example.com" % (tag, n), "role": 15}
+        for n in range(1, 11)
+    ]
+    emails[4] = {"email": "atomic%s-05@example.com" % tag, "role": None}
+    emails.append({"email": "atomic%s-11@example.com" % tag, "role": "abc"})
+    resp = client.post(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/invitations/",
+        json={"emails": emails})
+    assert resp.status_code == 400
+    assert resp.json() == {"error": "The payload is not valid"}
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM project_member_invites WHERE project_id=%s",
+            (str(project["id"]),))
+        assert cur.fetchone()["n"] == 0
+
+
 def test_invitations_destroy_204(world, db):
     from _harness import seed as _seed
     client, _, ws, project = world.full_stack()
@@ -551,6 +625,38 @@ def test_join_declined_message(world):
     assert resp.json() == {"message": "Project Invitation was not accepted"}
 
 
+def test_join_accepted_string_false_accepts(world, db):
+    # PIDASHCONV-1377: Django stores "False" as false (BooleanField)
+    # but branches on the raw string's truthiness, so it accepts and
+    # creates the memberships (the workspace join keeps this too).
+    from _harness import seed as _seed
+    client, _, ws, project = world.full_stack()
+    newcomer = world.user("strfalse")
+    inv = _seed.project_invite(world.conn, project["id"], ws["id"],
+                               email=newcomer["email"])
+    newcomer_client = world.client(newcomer)
+    resp = newcomer_client.post(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/join/{inv['id']}/",
+        json={"email": newcomer["email"], "accepted": "False"})
+    assert resp.status_code == 200
+    assert resp.json() == {"message": "Project Invitation Accepted"}
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT accepted, responded_at FROM project_member_invites WHERE id=%s",
+            (str(inv["id"]),))
+        row = cur.fetchone()
+        assert row["accepted"] is False
+        assert row["responded_at"] is not None
+        cur.execute(
+            "SELECT is_active FROM workspace_members WHERE workspace_id=%s AND member_id=%s",
+            (str(ws["id"]), str(newcomer["id"])))
+        assert cur.fetchone()["is_active"] is True
+        cur.execute(
+            "SELECT role FROM project_members WHERE project_id=%s AND member_id=%s",
+            (str(project["id"]), str(newcomer["id"])))
+        assert cur.fetchone()["role"] == 15
+
+
 def test_join_wrong_email_403(world):
     from _harness import seed as _seed
     client, _, ws, project = world.full_stack()
@@ -626,13 +732,61 @@ def test_archive_unarchive_cycle(world, db):
         assert cur.fetchone()["archived_at"] is None
 
 
-def test_favorites_list_empty_is_500_known_bug(world):
-    # Known bug, pinned: the favorites list queryset/serializer raises, so
-    # the endpoint 500s even with no favorites. The Rust port must reproduce.
+FAVORITE_KEYS = ["id", "entity_type", "entity_identifier", "entity_data", "name",
+                 "is_folder", "sequence", "parent", "workspace_id", "project_id"]
+
+
+def test_favorites_list_empty(world):
+    # PDASHOSS01-293 (PB-0500 retired): the viewset now lists through
+    # UserFavoriteSerializer, so an empty list is 200 [] instead of 500.
     client, _, ws, _ = world.full_stack()
     resp = client.get(f"/api/workspaces/{ws['slug']}/user-favorite-projects/")
-    assert resp.status_code == 500
-    assert resp.json() == {"error": "Something went wrong please try again later"}
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_favorites_list_shape(world):
+    client, _, ws, project = world.full_stack()
+    url = f"/api/workspaces/{ws['slug']}/user-favorite-projects/"
+    assert client.post(url, json={"project": str(project["id"])}).status_code == 204
+    resp = client.get(url)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    fav = body[0]
+    assert list(fav.keys()) == FAVORITE_KEYS
+    assert fav["entity_type"] == "project"
+    assert fav["entity_identifier"] == str(project["id"])
+    assert fav["project_id"] == str(project["id"])
+    assert fav["workspace_id"] == str(ws["id"])
+    assert fav["name"] is None
+    assert fav["is_folder"] is False
+    assert fav["parent"] is None
+    assert fav["sequence"] == 65535.0
+    assert list(fav["entity_data"].keys()) == ["id", "name", "logo_props"]
+    assert fav["entity_data"]["id"] == str(project["id"])
+    assert fav["entity_data"]["name"] == project["name"]
+
+
+def test_favorites_list_only_callers_rows_newest_first(world, db):
+    client, user, ws, project = world.full_stack()
+    url = f"/api/workspaces/{ws['slug']}/user-favorite-projects/"
+    assert client.post(url, json={"project": str(project["id"])}).status_code == 204
+    # A second live row of the caller's (a folder, older) and a deleted
+    # row: the list keeps every live entity type, drops the deleted one.
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO user_favorites (id, workspace_id, project_id, user_id, entity_type,"
+            " entity_identifier, name, is_folder, sequence, parent_id, created_at, updated_at,"
+            " deleted_at) VALUES (gen_random_uuid(), %s, NULL, %s, 'folder', NULL, 'F', true,"
+            " 1, NULL, now() - interval '1 day', now(), NULL),"
+            " (gen_random_uuid(), %s, NULL, %s, 'folder', NULL, 'gone', true, 2, NULL,"
+            " now(), now(), now())",
+            (str(ws["id"]), str(user["id"]), str(ws["id"]), str(user["id"])))
+    db.commit()
+    body = client.get(url).json()
+    assert [(f["entity_type"], f["name"]) for f in body] == [("project", None), ("folder", "F")]
+    assert body[1]["entity_data"] is None
 
 
 def test_favorites_create_and_destroy(world, db):

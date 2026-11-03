@@ -74,7 +74,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Datelike, Utc};
@@ -98,6 +98,11 @@ use pidash_types::WorkspaceId;
 use super::gates;
 use crate::app_issues::{query_last, Denial, QueryMap};
 use crate::state::AppState;
+use pidash_compat::py::py_repr_string;
+use pidash_compat::response::{empty_response, json_response};
+use pidash_compat::validate::{
+    BLANK_MSG, INVALID_BOOL_MSG as BOOL_MSG, INVALID_STR_MSG, NULL_MSG, REQUIRED_MSG,
+};
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -238,22 +243,6 @@ fn gate_roles(gate: &gates::Gate) -> &[i32] {
 // ---------------------------------------------------------------------------
 
 type HandlerResult = Result<Response, Denial>;
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
-
-fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(Vec::new()))
-        .expect("empty response")
-}
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
@@ -616,11 +605,6 @@ fn push_field_msg(errors: &mut FieldErrors, field: &str, message: String) {
     errors.push((field.to_owned(), Value::Array(vec![Value::String(message)])));
 }
 
-const REQUIRED_MSG: &str = "This field is required.";
-const NULL_MSG: &str = "This field may not be null.";
-const BLANK_MSG: &str = "This field may not be blank.";
-const INVALID_STR_MSG: &str = "Not a valid string.";
-const BOOL_MSG: &str = "Must be a valid boolean.";
 const INT_MSG: &str = "A valid integer is required.";
 const FLOAT_MSG: &str = "A valid number is required.";
 const TOO_LARGE_MSG: &str = "String value too large.";
@@ -1703,31 +1687,6 @@ fn py_repr(value: &Value) -> String {
         Value::Array(_) | Value::Object(_) => py_str(value),
         _ => py_str(value),
     }
-}
-
-fn py_repr_string(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    let use_double = text.contains('\'') && !text.contains('"');
-    let quote = if use_double { '"' } else { '\'' };
-    out.push(quote);
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c == quote => {
-                out.push('\\');
-                out.push(c);
-            }
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\x{:02x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push(quote);
-    out
 }
 
 // ---------------------------------------------------------------------------

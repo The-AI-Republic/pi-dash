@@ -34,7 +34,6 @@
 //! against the `F-WIRE-MAIL` fixture below.
 
 pub mod auth_mail;
-pub(crate) mod bs_entities_generated;
 pub(crate) mod bs_normalize;
 pub mod email_notification;
 pub mod live;

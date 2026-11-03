@@ -1,0 +1,357 @@
+// @vitest-environment jsdom
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { edition } from "../../../core/edition/index.js";
+import { WORKFLOW_FLAG } from "../edition/flags.js";
+import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../edition/providers.js";
+import { armedBulkProperties, BulkToolbar } from "./BulkToolbar.js";
+
+const gateReadings = vi.hoisted(() => ({ optionGate: undefined as unknown, pickId: "state-1" }));
+
+vi.mock("../../../shared/pickers/index.js", () => ({
+  StatePicker: ({
+    onChange,
+    optionGate,
+  }: {
+    onChange: (id: string) => void;
+    optionGate?: (option: { id: string }) => { disabled: boolean; reason?: string } | null;
+  }) => {
+    gateReadings.optionGate = optionGate;
+    return (
+      <button type="button" onClick={() => onChange(gateReadings.pickId)}>
+        Pick state
+      </button>
+    );
+  },
+  PriorityPicker: ({ onChange }: { onChange: (value: string) => void }) => (
+    <button type="button" onClick={() => onChange("high")}>
+      Pick priority
+    </button>
+  ),
+  MemberPicker: ({ onChange }: { onChange: (ids: string[]) => void }) => (
+    <button type="button" onClick={() => onChange(["user-1"])}>
+      Pick member
+    </button>
+  ),
+  CyclePicker: ({ onChange }: { onChange: (id: string) => void }) => (
+    <button type="button" onClick={() => onChange("cycle-1")}>
+      Pick cycle
+    </button>
+  ),
+  ModulePicker: ({ onChange }: { onChange: (ids: string[]) => void }) => (
+    <button type="button" onClick={() => onChange(["module-1"])}>
+      Pick module
+    </button>
+  ),
+  EstimatePicker: ({ onChange }: { onChange: (id: string) => void }) => (
+    <button type="button" onClick={() => onChange("3")}>
+      Pick estimate
+    </button>
+  ),
+}));
+
+vi.mock("../labels/LabelPicker.js", () => ({
+  LabelPicker: ({ onChange }: { onChange: (ids: string[]) => void }) => (
+    <button type="button" onClick={() => onChange(["label-1"])}>
+      Pick label
+    </button>
+  ),
+}));
+
+vi.mock("../dropdowns/DatePicker.js", () => ({
+  DatePicker: ({ label, onChange }: { label: string; onChange: (iso: string) => void }) => (
+    <button type="button" onClick={() => onChange("2026-05-01")}>
+      Pick {label}
+    </button>
+  ),
+}));
+
+function setup(overrides: Partial<React.ComponentProps<typeof BulkToolbar>> = {}) {
+  const props = {
+    workspaceSlug: "acme",
+    projectId: "project-1",
+    count: 3,
+    hideCycle: false,
+    hideModule: false,
+    hideEstimate: false,
+    busy: false,
+    onClear: vi.fn(),
+    onUpdate: vi.fn(),
+    onDelete: vi.fn(),
+    onArchive: vi.fn(),
+    onSubscribe: vi.fn(),
+    ...overrides,
+  };
+  render(<BulkToolbar {...props} />);
+  return props;
+}
+
+afterEach(() => {
+  resetEditionIssuesProviders();
+  delete edition.flags[WORKFLOW_FLAG];
+  gateReadings.pickId = "state-1";
+});
+
+const ORIGINS = ["623e4567-e89b-12d3-a456-426614174010", "723e4567-e89b-12d3-a456-426614174011"];
+const TARGET = "923e4567-e89b-12d3-a456-426614174012";
+
+describe("BulkToolbar workflow gate (ISS-233)", () => {
+  async function armState(): Promise<void> {
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Edit properties" }));
+    await user.click(screen.getByRole("checkbox", { name: "State" }));
+  }
+
+  it("leaves the bulk state picker plain in the community build", async () => {
+    registerEditionIssuesProviders({
+      workflowRules: { refusal: () => ({ reason: "no rule should be asked" }) },
+    });
+    setup({ fromStateIds: ORIGINS });
+    await armState();
+    expect(gateReadings.optionGate).toBeUndefined();
+  });
+
+  it("keeps a target open only when every selected row may enter it", async () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerEditionIssuesProviders({
+      workflowRules: {
+        refusal: ({ fromStateId, toStateId }) =>
+          fromStateId === ORIGINS[1] && toStateId === TARGET ? { reason: "Blocked work cannot finish" } : null,
+      },
+    });
+    setup({ fromStateIds: ORIGINS });
+    await armState();
+    const gate = gateReadings.optionGate as (option: { id: string }) => { disabled: boolean; reason?: string };
+    expect(gate({ id: TARGET })).toEqual({ disabled: true, reason: "Blocked work cannot finish" });
+    expect(gate({ id: ORIGINS[0]! })).toEqual({ disabled: false });
+  });
+
+  it("refuses a target picked before the selection grew to a row the rules deny", async () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerEditionIssuesProviders({
+      workflowRules: {
+        refusal: ({ fromStateId, toStateId }) =>
+          fromStateId === ORIGINS[1] && toStateId === TARGET ? { reason: "Blocked work cannot finish" } : null,
+      },
+    });
+    gateReadings.pickId = TARGET;
+    const user = userEvent.setup();
+    const props = {
+      workspaceSlug: "acme",
+      projectId: "project-1",
+      count: 1,
+      hideCycle: false,
+      hideModule: false,
+      hideEstimate: false,
+      busy: false,
+      onClear: vi.fn(),
+      onUpdate: vi.fn(),
+      onDelete: vi.fn(),
+      onArchive: vi.fn(),
+      onSubscribe: vi.fn(),
+    };
+    const view = render(<BulkToolbar {...props} fromStateIds={[ORIGINS[0]!]} />);
+    await user.click(screen.getByRole("button", { name: "Edit properties" }));
+    await user.click(screen.getByRole("checkbox", { name: "State" }));
+    await user.click(screen.getByRole("button", { name: "Pick state" }));
+    // The selection widens after the target was chosen; the held value is
+    // no longer open to every row, so Apply must not post it.
+    view.rerender(<BulkToolbar {...props} count={2} fromStateIds={ORIGINS} />);
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    expect(props.onUpdate).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("Blocked work cannot finish");
+    expect(screen.getByRole("dialog", { name: "Edit selected work items" })).toBeInTheDocument();
+  });
+
+  it("clears a state refusal once the reader picks again or un-arms the field", async () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerEditionIssuesProviders({
+      workflowRules: {
+        refusal: ({ fromStateId, toStateId }) =>
+          fromStateId === ORIGINS[1] && toStateId === TARGET ? { reason: "Blocked work cannot finish" } : null,
+      },
+    });
+    gateReadings.pickId = TARGET;
+    const user = userEvent.setup();
+    const props = setup({ fromStateIds: ORIGINS });
+    await armState();
+    await user.click(screen.getByRole("button", { name: "Pick state" }));
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Blocked work cannot finish");
+    // A new pick replaces both the target and the sentence it carried.
+    gateReadings.pickId = "state-1";
+    await user.click(screen.getByRole("button", { name: "Pick state" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    expect(props.onUpdate).toHaveBeenCalledWith({ state_id: "state-1" });
+    // Turning the field off forgets the held target, so the next arm
+    // starts from a clean slate rather than a stale sentence.
+    gateReadings.pickId = TARGET;
+    await user.click(screen.getByRole("button", { name: "Edit properties" }));
+    await user.click(screen.getByRole("button", { name: "Pick state" }));
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "State" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("reads a selection with no origins as fully open", async () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerEditionIssuesProviders({ workflowRules: { refusal: () => ({ reason: "never" }) } });
+    setup();
+    await armState();
+    const gate = gateReadings.optionGate as (option: { id: string }) => { disabled: boolean };
+    expect(gate({ id: TARGET })).toEqual({ disabled: false });
+  });
+});
+
+describe("BulkToolbar", () => {
+  it("calls subscribe, archive and clear directly", async () => {
+    const user = userEvent.setup();
+    const props = setup();
+    await user.click(screen.getByRole("button", { name: /Subscribe/ }));
+    await user.click(screen.getByRole("button", { name: /Archive/ }));
+    await user.click(screen.getByRole("button", { name: "Clear selection" }));
+    expect(props.onSubscribe).toHaveBeenCalledTimes(1);
+    expect(props.onArchive).toHaveBeenCalledTimes(1);
+    expect(props.onClear).toHaveBeenCalledTimes(1);
+  });
+
+  it("confirms before deleting the selection", async () => {
+    const user = userEvent.setup();
+    const props = setup();
+    await user.click(screen.getByRole("button", { name: /Delete/ }));
+    expect(props.onDelete).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Delete selected work items?" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    expect(props.onDelete).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends only the armed update fields", async () => {
+    const user = userEvent.setup();
+    const props = setup();
+    await user.click(screen.getByRole("button", { name: "Edit properties" }));
+    await user.click(screen.getByRole("checkbox", { name: "State" }));
+    await user.click(screen.getByRole("button", { name: "Pick state" }));
+    await user.click(screen.getByRole("checkbox", { name: "Labels" }));
+    await user.click(screen.getByRole("button", { name: "Pick label" }));
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    expect(props.onUpdate).toHaveBeenCalledWith({ state_id: "state-1", label_ids: ["label-1"] });
+  });
+
+  it("arms cycle, module and estimate as one payload", async () => {
+    const user = userEvent.setup();
+    const props = setup();
+    await user.click(screen.getByRole("button", { name: "Edit properties" }));
+    for (const name of ["Cycle", "Modules", "Estimate"]) {
+      await user.click(screen.getByRole("checkbox", { name }));
+    }
+    await user.click(screen.getByRole("button", { name: "Pick cycle" }));
+    await user.click(screen.getByRole("button", { name: "Pick module" }));
+    await user.click(screen.getByRole("button", { name: "Pick estimate" }));
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    expect(props.onUpdate).toHaveBeenCalledWith({
+      cycle_id: "cycle-1",
+      module_ids: ["module-1"],
+      estimate_point: "3",
+    });
+  });
+
+  it("does not submit an armed state that has no value", async () => {
+    const user = userEvent.setup();
+    const props = setup();
+    await user.click(screen.getByRole("button", { name: "Edit properties" }));
+    await user.click(screen.getByRole("checkbox", { name: "State" }));
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    expect(props.onUpdate).not.toHaveBeenCalled();
+  });
+
+  it("refuses an empty form without calling update", async () => {
+    const user = userEvent.setup();
+    const props = setup();
+    await user.click(screen.getByRole("button", { name: "Edit properties" }));
+    expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled();
+    fireEvent.submit(screen.getByRole("button", { name: "Apply" }).closest("form") ?? document.body);
+    expect(props.onUpdate).not.toHaveBeenCalled();
+  });
+
+  it("hides cycle, module and estimate when their project flags are off", () => {
+    setup({ hideCycle: true, hideModule: true, hideEstimate: true });
+    fireEvent.click(screen.getByRole("button", { name: "Edit properties" }));
+    expect(screen.queryByRole("checkbox", { name: "Cycle" })).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: "Modules" })).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: "Estimate" })).toBeNull();
+    expect(screen.getByRole("checkbox", { name: "State" })).toBeInTheDocument();
+  });
+
+  it("labels multiple selections and pluralizes the delete confirmation", async () => {
+    const user = userEvent.setup();
+    setup({ count: 2 });
+    expect(screen.getByTestId("bulk-toolbar")).toHaveTextContent("2 selected");
+    await user.click(screen.getByRole("button", { name: /Delete/ }));
+    expect(screen.getByText("2 work items will be deleted.")).toBeInTheDocument();
+  });
+
+  it("uses singular copy for a one-item selection and delete", async () => {
+    const user = userEvent.setup();
+    setup({ count: 1 });
+    expect(screen.getByTestId("bulk-toolbar")).toHaveTextContent("1 selected");
+    await user.click(screen.getByRole("button", { name: /Delete/ }));
+    expect(screen.getByText("1 work item will be deleted.")).toBeInTheDocument();
+  });
+
+  it("disables every action while a bulk write is pending", () => {
+    setup({ busy: true });
+    for (const name of [/Edit properties/, /Subscribe/, /Archive/, /Delete/]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+    }
+  });
+
+  it("sends only the date fields when only they are armed", async () => {
+    const user = userEvent.setup();
+    const props = setup();
+    await user.click(screen.getByRole("button", { name: "Edit properties" }));
+    await user.click(screen.getByRole("checkbox", { name: "Start date" }));
+    await user.click(screen.getByRole("button", { name: "Pick Start date" }));
+    await user.click(screen.getByRole("checkbox", { name: "Due date" }));
+    await user.click(screen.getByRole("button", { name: "Pick Due date" }));
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    expect(props.onUpdate).toHaveBeenCalledWith({ start_date: "2026-05-01", target_date: "2026-05-01" });
+  });
+});
+
+describe("bulk toolbar helpers", () => {
+  it("builds a payload from armed fields only", () => {
+    expect(
+      armedBulkProperties(
+        {
+          state_id: false,
+          priority: true,
+          assignee_ids: true,
+          label_ids: false,
+          start_date: true,
+          target_date: false,
+          cycle_id: false,
+          module_ids: false,
+          estimate_point: false,
+        },
+        {
+          stateId: "state-1",
+          priority: "urgent",
+          assigneeIds: ["u1"],
+          labelIds: ["l1"],
+          startDate: null,
+          targetDate: "2026-06-01",
+          cycleId: "c1",
+          moduleIds: ["m1"],
+          estimatePoint: "2",
+        }
+      )
+    ).toEqual({ priority: "urgent", assignee_ids: ["u1"], start_date: null });
+  });
+});

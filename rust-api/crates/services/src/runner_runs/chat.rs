@@ -323,6 +323,43 @@ pub fn next_seq_after_max(current_max: Option<i32>) -> i32 {
     current_max.unwrap_or(0) + 1
 }
 
+/// `next_event_seq` (`chat.py:218-224`): one past the session event
+/// max. Executor-generic so endpoint transactions and the overlay
+/// share it. Moved from the api chat endpoints (OVL-06
+/// PIDASHCONV-1544); the endpoints are thin callers. Re-exported
+/// through `pidash-sdk::ops`.
+pub async fn next_event_seq<'e, E>(ex: E, session_id: Uuid) -> Result<i32, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let max: Option<i32> =
+        sqlx::query_scalar(r#"SELECT MAX("seq") FROM "agent_chat_event" WHERE "session_id" = $1"#)
+            .bind(session_id)
+            .fetch_optional(ex)
+            .await?
+            .flatten();
+    Ok(next_seq_after_max(max))
+}
+
+/// `next_message_seq` (`chat.py:227-233`): one past the session
+/// message max. Executor-generic so endpoint transactions and the
+/// overlay share it. Moved from the api chat endpoints (OVL-06
+/// PIDASHCONV-1544); the endpoints are thin callers. Re-exported
+/// through `pidash-sdk::ops`.
+pub async fn next_message_seq<'e, E>(ex: E, session_id: Uuid) -> Result<i32, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let max: Option<i32> = sqlx::query_scalar(
+        r#"SELECT MAX("seq") FROM "agent_chat_message" WHERE "session_id" = $1"#,
+    )
+    .bind(session_id)
+    .fetch_optional(ex)
+    .await?
+    .flatten();
+    Ok(next_seq_after_max(max))
+}
+
 // ---------------------------------------------------------------------------
 // `json.dumps` rendering (`serialize_event` / `publish_event`)
 // ---------------------------------------------------------------------------

@@ -804,6 +804,84 @@ def test_join_accept_unknown_email(user_api, world, space):
     assert count == 1
 
 
+@pytest.mark.parametrize("accepted", ["true", 2, [0]])
+def test_join_accepted_unparsable_bool(other_api, world, space, accepted):
+    # BooleanField.to_python rejects anything but True/False/1/0/"t"/"True"/
+    # "1"/"f"/"False"/"0": the save() raises ValidationError, so the join
+    # 400s and nothing is written (no responded_at, no member row).
+    inv = world["db"].make_invite(
+        space["id"], "other@example.com", token="tok-bad", created_by_id=world["user"]["id"]
+    )
+    res = other_api.post(
+        f"/api/workspaces/{space['slug']}/invitations/{inv['id']}/join/",
+        json={"token": "tok-bad", "accepted": accepted},
+    )
+    assert res.status_code == 400
+    assert res.json() == {"error": "Please provide valid detail"}
+    with world["db"].connect() as conn:
+        row = conn.execute(
+            "select accepted, responded_at from workspace_member_invites where id = %s;",
+            (inv["id"],),
+        ).fetchone()
+        members = conn.execute(
+            "select count(*) from workspace_members where workspace_id = %s and member_id = %s;",
+            (space["id"], world["other"]["id"]),
+        ).fetchone()[0]
+    assert row == (False, None)
+    assert members == 0
+
+
+def test_join_accepted_null(other_api, world, space):
+    # Explicit null survives to_python as None and hits the NOT NULL column:
+    # IntegrityError, so the join 400s and nothing is written.
+    inv = world["db"].make_invite(
+        space["id"], "other@example.com", token="tok-null", created_by_id=world["user"]["id"]
+    )
+    res = other_api.post(
+        f"/api/workspaces/{space['slug']}/invitations/{inv['id']}/join/",
+        json={"token": "tok-null", "accepted": None},
+    )
+    assert res.status_code == 400
+    assert res.json() == {"error": "The payload is not valid"}
+    with world["db"].connect() as conn:
+        row = conn.execute(
+            "select accepted, responded_at from workspace_member_invites where id = %s;",
+            (inv["id"],),
+        ).fetchone()
+        members = conn.execute(
+            "select count(*) from workspace_members where workspace_id = %s and member_id = %s;",
+            (space["id"], world["other"]["id"]),
+        ).fetchone()[0]
+    assert row == (False, None)
+    assert members == 0
+
+
+def test_join_accepted_zero_string_stores_false(other_api, world, space):
+    # "0" preps to False (stored) but the raw string is truthy, so the
+    # accept branch still runs: membership is created, invite consumed.
+    inv = world["db"].make_invite(
+        space["id"], "other@example.com", token="tok-0", created_by_id=world["user"]["id"]
+    )
+    res = other_api.post(
+        f"/api/workspaces/{space['slug']}/invitations/{inv['id']}/join/",
+        json={"token": "tok-0", "accepted": "0"},
+    )
+    assert res.status_code == 200
+    assert res.json() == {"message": "Workspace Invitation Accepted"}
+    with world["db"].connect() as conn:
+        row = conn.execute(
+            "select accepted, responded_at is null, deleted_at is null"
+            " from workspace_member_invites where id = %s;",
+            (inv["id"],),
+        ).fetchone()
+        member = conn.execute(
+            "select role, is_active from workspace_members where workspace_id = %s and member_id = %s;",
+            (space["id"], world["other"]["id"]),
+        ).fetchone()
+    assert row == (False, False, False)
+    assert member == (15, True)
+
+
 # --- users/me invitations ---
 
 
@@ -842,6 +920,68 @@ def test_accept_invitation_via_me(other_api, world, space):
         ).fetchone()[0]
     assert member == (15, True)
     assert deleted_at is not None
+
+
+def test_invite_and_join_request_lists_render_soft_deleted_assets(user_api, other_api, world, space):
+    # Forward FKs resolve through the unscoped _base_manager (no
+    # base_manager_name), so a soft-deleted logo/avatar asset still
+    # renders its static URL (PIDASHCONV-1374). Both flags mirror the
+    # asset re-PATCH path (asset_delete sets is_deleted + deleted_at).
+    db = world["db"]
+    with db.connect() as conn:
+        logo_id = str(uuid.uuid4())
+        conn.execute(
+            """INSERT INTO file_assets (id, attributes, asset, created_by_id, workspace_id,
+                user_id, entity_type, is_deleted, deleted_at, is_archived, is_uploaded,
+                size, storage_metadata, created_at, updated_at)
+               VALUES (%s, '{}', %s, %s, %s, %s, 'WORKSPACE_LOGO', true, now(), false,
+                true, 100, '{}', now(), now())""",
+            (logo_id, f"{space['id']}/logo.png", world["user"]["id"], space["id"], world["user"]["id"]),
+        )
+        conn.execute(
+            "UPDATE workspaces SET logo_asset_id = %s WHERE id = %s",
+            (logo_id, space["id"]),
+        )
+        avatar_id = str(uuid.uuid4())
+        conn.execute(
+            """INSERT INTO file_assets (id, attributes, asset, created_by_id, workspace_id,
+                user_id, entity_type, is_deleted, deleted_at, is_archived, is_uploaded,
+                size, storage_metadata, created_at, updated_at)
+               VALUES (%s, '{}', %s, %s, %s, %s, 'USER_AVATAR', true, now(), false,
+                true, 100, '{}', now(), now())""",
+            (
+                avatar_id,
+                f"user-{avatar_id}-avatar.png",
+                world["other"]["id"],
+                space["id"],
+                world["other"]["id"],
+            ),
+        )
+        conn.execute(
+            "UPDATE users SET avatar_asset_id = %s WHERE id = %s",
+            (avatar_id, world["other"]["id"]),
+        )
+        conn.commit()
+    db.make_invite(
+        space["id"], "other@example.com", token="tok-1374", created_by_id=world["user"]["id"]
+    )
+    db.make_join_request(
+        world["other"]["id"], "user@example.com", workspace_id=space["id"], message="hi"
+    )
+
+    want_logo = f"/api/assets/v2/static/{logo_id}/"
+    res = user_api.get(f"/api/workspaces/{space['slug']}/invitations/")
+    assert res.status_code == 200
+    assert res.json()[0]["workspace"]["logo_url"] == want_logo
+
+    res = other_api.get("/api/users/me/workspaces/invitations/")
+    assert res.status_code == 200
+    assert res.json()[0]["workspace"]["logo_url"] == want_logo
+
+    want_avatar = f"/api/assets/v2/static/{avatar_id}/"
+    res = other_api.get("/api/users/me/workspaces/join-requests/")
+    assert res.status_code == 200
+    assert res.json()[0]["requester"]["avatar_url"] == want_avatar
 
 
 # --- join requests ---

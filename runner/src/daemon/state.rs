@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::approval::ApprovalRouter;
 use crate::cloud::protocol::RunnerStatus;
-use crate::config::schema::Config;
+use crate::config::schema::{AgentWatchdogConfig, Config};
 use crate::daemon::observability::TokenUsage;
 use crate::ipc::protocol::{CurrentRunSummary, RunnerStatusSnapshot};
 
@@ -45,6 +45,13 @@ pub struct StateHandle {
     shutdown: Arc<tokio::sync::Notify>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct RetryStatus {
+    next_retry_at: Option<DateTime<Utc>>,
+    reason: Option<String>,
+    cloud_deleted_confirmations: u32,
+}
+
 struct Inner {
     cfg: Mutex<Config>,
     /// Cached from the first runner at construction time so
@@ -57,6 +64,8 @@ struct Inner {
     /// at runtime in v1, so reading from `Inner` saves a `Mutex<Config>` lock
     /// on every poll.
     agent_observability_v1: bool,
+    /// Cached at construction, like `agent_observability_v1`.
+    agent_watchdog: AgentWatchdogConfig,
     cloud_url: Mutex<String>,
     started_at: DateTime<Utc>,
     connected: Mutex<bool>,
@@ -70,6 +79,11 @@ struct Inner {
     /// to 0 on a successful open. A non-zero value on a disconnected runner
     /// is the difference between "briefly reconnecting" and "wedged".
     consecutive_bootstrap_failures: Mutex<u32>,
+    /// While disconnected: when the next session-open attempt is due, why
+    /// the last one failed, and how many consecutive `runner_gone` answers
+    /// have been counted toward the local purge (PDASHOSS01-306). All
+    /// cleared on a successful open.
+    retry: Mutex<RetryStatus>,
     current_run: Mutex<Option<CurrentRunSummary>>,
     /// Reported `RunnerStatus` is **derived** from two independent lanes so the
     /// assign (issue) lane and the chat lane can be active concurrently without
@@ -115,6 +129,33 @@ struct Inner {
     /// Collectively wiped on rid change in `set_current_run` so a freshly
     /// assigned run never inherits stale metrics.
     run_snapshot: Mutex<ObservabilitySnapshot>,
+    /// Activity-watchdog health of the in-flight run, reported on every poll
+    /// regardless of `agent_observability_v1` (it is lifecycle, not optional
+    /// telemetry). Wiped with `run_snapshot` on run-id change.
+    agent_health: Mutex<AgentHealthReport>,
+}
+
+/// Activity-watchdog health of the in-flight run, as the supervisor last
+/// stamped it. See `AgentWatchdogConfig` for the thresholds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentHealthReport {
+    /// When the agent last emitted an event. `None` until the run's
+    /// watchdog arms.
+    pub last_activity_at: Option<DateTime<Utc>>,
+    /// True once the run has gone `unhealthy_after_hours` without an agent
+    /// event; cleared by the next event.
+    pub unhealthy: bool,
+}
+
+impl AgentHealthReport {
+    /// Wire value for the poll status: `"unhealthy"` or `"healthy"`.
+    pub fn wire_label(&self) -> &'static str {
+        if self.unhealthy {
+            "unhealthy"
+        } else {
+            "healthy"
+        }
+    }
 }
 
 impl StateHandle {
@@ -129,6 +170,7 @@ impl StateHandle {
         };
         let cloud_url = cfg.daemon.cloud_url.clone();
         let agent_observability_v1 = cfg.daemon.agent_observability_v1;
+        let agent_watchdog = cfg.daemon.agent_watchdog;
         Self {
             inner: Arc::new(Inner {
                 cfg: Mutex::new(cfg),
@@ -136,12 +178,14 @@ impl StateHandle {
                 project_slug,
                 pod_id,
                 agent_observability_v1,
+                agent_watchdog,
                 cloud_url: Mutex::new(cloud_url),
                 started_at: Utc::now(),
                 connected: Mutex::new(false),
                 last_heartbeat: Mutex::new(None),
                 last_session_open: Mutex::new(None),
                 consecutive_bootstrap_failures: Mutex::new(0),
+                retry: Mutex::new(RetryStatus::default()),
                 current_run: Mutex::new(None),
                 run_status: Mutex::new(RunnerStatus::Idle),
                 chat_active: Mutex::new(false),
@@ -150,6 +194,7 @@ impl StateHandle {
                 update_advisory: Mutex::new((None, None)),
                 on_disk_version: Mutex::new(None),
                 run_snapshot: Mutex::new(ObservabilitySnapshot::default()),
+                agent_health: Mutex::new(AgentHealthReport::default()),
             }),
             tx_tick,
             rx_tick,
@@ -174,8 +219,26 @@ impl StateHandle {
         self.inner.agent_observability_v1
     }
 
+    /// Passive-kill watchdog thresholds. Cached at construction.
+    pub fn agent_watchdog(&self) -> AgentWatchdogConfig {
+        self.inner.agent_watchdog
+    }
+
+    /// Stamp the in-flight run's activity-watchdog health.
+    pub async fn set_agent_health(&self, report: AgentHealthReport) {
+        *self.inner.agent_health.lock().await = report;
+        self.tick();
+    }
+
+    pub async fn agent_health(&self) -> AgentHealthReport {
+        self.inner.agent_health.lock().await.clone()
+    }
+
+    /// Cut this runner's current reconnect wait short and retry with a
+    /// fresh backoff. `notify_one` stores a permit when nothing is waiting,
+    /// so a kick that lands mid-request still applies to the next wait.
     pub fn force_reconnect(&self) {
-        self.reconnect.notify_waiters();
+        self.reconnect.notify_one();
     }
 
     pub fn reconnect_notified(&self) -> Arc<tokio::sync::Notify> {
@@ -212,6 +275,44 @@ impl StateHandle {
     pub async fn note_session_open(&self) {
         *self.inner.last_session_open.lock().await = Some(Utc::now());
         *self.inner.consecutive_bootstrap_failures.lock().await = 0;
+        *self.inner.retry.lock().await = RetryStatus::default();
+        self.tick();
+    }
+
+    /// Record when the next session-open attempt is due and why the last
+    /// one failed, for `pidash status`.
+    pub async fn note_retry_scheduled(
+        &self,
+        next_retry_at: DateTime<Utc>,
+        reason: String,
+        cloud_deleted_confirmations: u32,
+    ) {
+        *self.inner.retry.lock().await = RetryStatus {
+            next_retry_at: Some(next_retry_at),
+            reason: Some(reason),
+            cloud_deleted_confirmations,
+        };
+        self.tick();
+    }
+
+    /// A long-poll on an established session failed transiently (cloud
+    /// outage, proxy error page, timeout). The session may still be valid,
+    /// but until a poll gets through the runner is not reachable, so show
+    /// it DISCONNECTED with when the next poll is due.
+    pub async fn note_poll_failure(&self, next_retry_at: DateTime<Utc>, reason: String) {
+        *self.inner.connected.lock().await = false;
+        *self.inner.retry.lock().await = RetryStatus {
+            next_retry_at: Some(next_retry_at),
+            reason: Some(reason),
+            cloud_deleted_confirmations: 0,
+        };
+        self.tick();
+    }
+
+    /// A long-poll got through again after [`Self::note_poll_failure`].
+    pub async fn note_poll_recovered(&self) {
+        *self.inner.connected.lock().await = true;
+        *self.inner.retry.lock().await = RetryStatus::default();
         self.tick();
     }
 
@@ -299,6 +400,7 @@ impl StateHandle {
     /// to call directly from tests.
     pub async fn reset_run_snapshot(&self) {
         *self.inner.run_snapshot.lock().await = ObservabilitySnapshot::default();
+        *self.inner.agent_health.lock().await = AgentHealthReport::default();
         self.tick();
     }
 
@@ -449,6 +551,7 @@ impl StateHandle {
         let last_session_open = *self.inner.last_session_open.lock().await;
         let consecutive_bootstrap_failures =
             *self.inner.consecutive_bootstrap_failures.lock().await;
+        let retry = self.inner.retry.lock().await.clone();
         let current_run = self.inner.current_run.lock().await.clone();
         let approvals_pending = self.approvals_pending_value().await;
         let observability = if self.inner.agent_observability_v1 {
@@ -468,6 +571,9 @@ impl StateHandle {
             last_heartbeat,
             last_session_open,
             consecutive_bootstrap_failures,
+            next_retry_at: if connected { None } else { retry.next_retry_at },
+            disconnect_reason: if connected { None } else { retry.reason },
+            cloud_deleted_confirmations: retry.cloud_deleted_confirmations,
             observability,
         }
     }
@@ -604,6 +710,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retry_status_shows_while_disconnected_and_clears_on_open() {
+        let state = empty_state();
+        let at = Utc::now() + chrono::Duration::hours(2);
+        state
+            .note_retry_scheduled(at, "server unreachable".into(), 0)
+            .await;
+        let snap = state.runner_snapshot().await;
+        assert_eq!(snap.next_retry_at, Some(at));
+        assert_eq!(snap.disconnect_reason.as_deref(), Some("server unreachable"));
+
+        state
+            .note_retry_scheduled(at, "deleted in cloud; confirming 4/10".into(), 4)
+            .await;
+        assert_eq!(state.runner_snapshot().await.cloud_deleted_confirmations, 4);
+
+        state.note_session_open().await;
+        let snap = state.runner_snapshot().await;
+        assert_eq!(snap.next_retry_at, None);
+        assert_eq!(snap.disconnect_reason, None);
+        assert_eq!(snap.cloud_deleted_confirmations, 0);
+    }
+
+    #[tokio::test]
     async fn update_advisory_round_trips_to_daemon_info() {
         let state = empty_state();
         // Default: no advisory seen yet -> daemon_info reports none.
@@ -671,6 +800,42 @@ mod tests {
         assert_eq!(snap.agent_subprocess_alive, Some(true));
         assert!(snap.last_event_at.is_some());
         assert_eq!(snap.last_event_kind.as_deref(), Some("raw"));
+    }
+
+    #[tokio::test]
+    async fn run_id_change_resets_agent_health() {
+        let state = empty_state();
+        state
+            .set_current_run(Some(summary(Uuid::new_v4(), "running")))
+            .await;
+        state
+            .set_agent_health(AgentHealthReport {
+                last_activity_at: Some(Utc::now()),
+                unhealthy: true,
+            })
+            .await;
+        assert_eq!(state.agent_health().await.wire_label(), "unhealthy");
+
+        // A new run must never inherit the previous run's unhealthy mark.
+        state
+            .set_current_run(Some(summary(Uuid::new_v4(), "running")))
+            .await;
+        assert_eq!(state.agent_health().await, AgentHealthReport::default());
+        assert_eq!(state.agent_health().await.wire_label(), "healthy");
+    }
+
+    #[tokio::test]
+    async fn agent_watchdog_is_cached_from_the_daemon_config() {
+        let mut daemon: crate::config::schema::DaemonConfig = Default::default();
+        daemon.agent_watchdog.kill_after_hours = 72;
+        let state = StateHandle::new(Config {
+            version: 2,
+            daemon,
+            runners: vec![],
+            cli: None,
+        });
+        assert_eq!(state.agent_watchdog().kill_after_hours, 72);
+        assert_eq!(state.agent_watchdog().unhealthy_after_hours, 24);
     }
 
     #[tokio::test]

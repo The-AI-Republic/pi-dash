@@ -1,5 +1,6 @@
 pub mod chat;
 pub mod client;
+pub mod probe;
 pub mod protocol;
 pub mod server;
 

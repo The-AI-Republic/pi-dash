@@ -78,9 +78,8 @@ use crate::worker::{Handler, Registry, Verdict};
 pub const RECENT_VISITED_TASK_NAME: &str =
     "pi_dash.bgtasks.recent_visited_task.recent_visited_task";
 
-/// `page_transaction` (`page_transaction_task.py:84`).
-pub const PAGE_TRANSACTION_TASK_NAME: &str =
-    "pi_dash.bgtasks.page_transaction_task.page_transaction";
+/// Re-export of the canonical [`pidash_services::domain::activity::PAGE_TRANSACTION_TASK`].
+pub use pidash_services::domain::activity::PAGE_TRANSACTION_TASK as PAGE_TRANSACTION_TASK_NAME;
 
 /// `recent_visited_task.delay(slug, entity_name, entity_identifier,
 /// user_id, project_id)`: the Django call sites pass everything as

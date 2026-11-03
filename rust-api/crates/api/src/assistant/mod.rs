@@ -65,6 +65,7 @@ pub mod transcribe;
 use axum::Router;
 
 use crate::state::AppState;
+pub use pidash_compat::response::{json_value as error_response, json_value as json_body};
 
 /// Owned D-06 assistant routes (cutover granularity: registered paths
 /// serve from Rust, everything else keeps proxying). Sibling handler
@@ -165,23 +166,6 @@ pub async fn request_actor(
     }
 }
 
-/// Render an exact JSON body with its status. Insertion order is
-/// preserved by the crate's `serde_json/preserve_order`, so DRF field
-/// order survives rendering.
-pub fn json_body(status: StatusCode, body: &serde_json::Value) -> Response {
-    let rendered = serde_json::to_string(body).expect("assistant body serializes");
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(rendered))
-        .expect("assistant response")
-}
-
-/// Alias for error envelopes (same rendering, distinct call sites).
-pub fn error_response(status: StatusCode, body: &serde_json::Value) -> Response {
-    json_body(status, body)
-}
-
 /// Render a caught `AssistantError` as its code/detail/status
 /// (`except AssistantError as exc → (exc.code, exc.detail,
 /// exc.http_status)`).
@@ -191,6 +175,6 @@ pub fn assistant_error_response(
     let status = StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::OK);
     json_body(
         status,
-        &serde_json::json!({"error": error.code(), "detail": error.detail()}),
+        serde_json::json!({"error": error.code(), "detail": error.detail()}),
     )
 }

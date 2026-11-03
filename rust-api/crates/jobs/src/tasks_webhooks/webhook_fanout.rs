@@ -60,9 +60,8 @@ use crate::tasks_webhooks::webhook_send::{webhook_send_task_kwargs, WEBHOOK_SEND
 /// `webhook_activity` (`:376`): full Celery name. A plain
 /// `@shared_task` — no bind, no autoretry, no backoff.
 pub const WEBHOOK_ACTIVITY_TASK_NAME: &str = "pi_dash.bgtasks.webhook_task.webhook_activity";
-/// `model_activity` (`:462`): full Celery name. A plain
-/// `@shared_task` — no bind, no autoretry, no backoff.
-pub const MODEL_ACTIVITY_TASK_NAME: &str = "pi_dash.bgtasks.webhook_task.model_activity";
+/// Re-export of the canonical [`pidash_services::domain::activity::MODEL_ACTIVITY_TASK`].
+pub use pidash_services::domain::activity::MODEL_ACTIVITY_TASK as MODEL_ACTIVITY_TASK_NAME;
 
 /// Both task names owned by this module.
 pub const WEBHOOK_FANOUT_TASK_NAMES: [&str; 2] =
@@ -1558,6 +1557,23 @@ mod tests {
         )
         .expect("origin defaults");
         assert_eq!(created_call(&minimal).current_site, None);
+        // Explicit JSON null — the wire shape the MCP move path queues
+        // (Django `.delay(origin=None)`) — maps the same way, never
+        // `Some("")`.
+        let null_origin = bind_model_activity(
+            &json!([]),
+            &json!({
+                "model_name": "issue",
+                "model_id": "iid-1",
+                "requested_data": {},
+                "current_instance": Value::Null,
+                "actor_id": "uid-9",
+                "slug": "ws-slug",
+                "origin": Value::Null,
+            }),
+        )
+        .expect("null origin binds");
+        assert_eq!(created_call(&null_origin).current_site, None);
     }
 
     #[test]

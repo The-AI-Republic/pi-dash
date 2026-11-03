@@ -21,7 +21,7 @@ from rest_framework.response import Response
 from pi_dash.app.views.base import BaseAPIView
 from pi_dash.assistant.models import TurnStatus
 from pi_dash.bgtasks._rrule import RRuleValidationError, validate_rrule_string
-from pi_dash.db.models import LoopJob, LoopTarget, SkipReason
+from pi_dash.db.models import LoopJob, LoopTarget, LoopUserPreference, SkipReason
 from pi_dash.license.api.permissions import InstanceAdminPermission
 
 _SLUG_RE = re.compile(r"^[a-z0-9-]{1,64}$")
@@ -169,7 +169,15 @@ class LoopJobDetailEndpoint(BaseAPIView):
         job = LoopJob.objects.filter(pk=pk, deleted_at__isnull=True).first()
         if job is None:
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
-        job.delete()  # soft delete; cascades to targets via SoftDeleteModel
+        # Synchronous soft-delete + cascade. SoftDeleteModel.delete() enqueues
+        # its cascade through celery, so a broker failure 500s the request even
+        # though the row was already soft-deleted; doing it here keeps the
+        # endpoint hermetic and closes the window where targets outlive the job.
+        now = timezone.now()
+        job.deleted_at = now
+        job.save()
+        LoopTarget.objects.filter(job=job).update(deleted_at=now)
+        LoopUserPreference.objects.filter(job=job).update(deleted_at=now)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

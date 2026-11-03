@@ -251,3 +251,50 @@ def test_pr_link_destroy_cascades_to_review(clients, seed):
         f"{_base(ws, pid)}/issues/{i1}/github-pull-requests/").json() == []
     assert admin.get(
         f"{_base(ws, pid)}/issues/{i1}/code-reviews/").json() == []
+
+
+def test_link_create_url_with_at_in_query_or_fragment_accepted(clients, seed):
+    # PIDASHCONV-1425: twin of the module-links case — an `@` past the
+    # netloc is not userinfo (urlsplit ends the authority at the first
+    # `/`, `?` or `#`).
+    admin = clients["admin"]
+    ws, pid, i2 = seed["ws_slug"], seed["project"], seed["issue2"]
+    cases = [
+        "https://example.com?email=user@gmail.com&ref=x",
+        "https://example.com#user@gmail.com",
+        "http://example.com:8080?x=a@b",
+    ]
+    created = []
+    try:
+        for url in cases:
+            resp = admin.post(
+                f"{_base(ws, pid)}/issues/{i2}/issue-links/",
+                json={"title": "tracked", "url": url},
+            )
+            assert resp.status_code == 201, (url, resp.text)
+            assert resp.json()["url"] == url, url
+            created.append(resp.json()["id"])
+    finally:
+        for link_id in created:
+            admin.delete(
+                f"{_base(ws, pid)}/issues/{i2}/issue-links/{link_id}/")
+
+
+def test_link_create_nfkc_lookalike_netloc_rejected(clients, seed):
+    # PIDASHCONV-1425: twin of the module-links case — urlsplit raises
+    # ValueError when NFKC maps a netloc char onto a delimiter, so
+    # Django rejects these (IssueLink.url is a TextField, so the body is
+    # the validate_url dict, not the URLField message).
+    admin = clients["admin"]
+    ws, pid, i2 = seed["ws_slug"], seed["project"], seed["issue2"]
+    cases = [
+        "https://example\uff0fevil.com",
+        "https://a.com\uff20b.com",
+    ]
+    for url in cases:
+        resp = admin.post(
+            f"{_base(ws, pid)}/issues/{i2}/issue-links/",
+            json={"title": "lookalike", "url": url},
+        )
+        assert resp.status_code == 400, (url, resp.text)
+        assert resp.json() == {"url": {"error": "Invalid URL format."}}, url

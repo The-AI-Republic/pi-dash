@@ -55,9 +55,7 @@ use uuid::Uuid;
 
 use pidash_db::config::RunnerSettings;
 use pidash_db::runner_sessions::machine_outbox::MachineOutboxError;
-use pidash_db::runner_sessions::models::runner_session::{
-    self as db_runner_session, runner_session_from_row,
-};
+use pidash_db::runner_sessions::models::runner_session::runner_session_from_row;
 use pidash_db::runner_sessions::outbox::{self as session_outbox, OutboxError};
 use pidash_db::runner_sessions::RunnerSession;
 
@@ -148,11 +146,7 @@ impl PubsubStore for PoolPubsubStore {
         session_id: Uuid,
         reason: &str,
     ) -> Result<(), OutboxError> {
-        sqlx::query(db_runner_session::REVOKE_SQL)
-            .bind(now_micros())
-            .bind(reason)
-            .bind(session_id)
-            .execute(&self.pool)
+        crate::domain::tokens::revoke_runner_session(&self.pool, session_id, now_micros(), reason)
             .await
             .map_err(OutboxError::Db)?;
         Ok(())

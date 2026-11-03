@@ -100,6 +100,8 @@ use pidash_services::user_settings::SettingsSchema;
 use crate::middleware::SessionHandle;
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
+use pidash_compat::py::py_json_string;
+pub use pidash_compat::response::{json_response, SERVER_ERROR_BODY};
 
 /// Register the owned D-24 user-extras routes. Unowned methods fall
 /// through to Django through the edge fallback (never a Rust 405).
@@ -181,8 +183,6 @@ pub const UNAUTHENTICATED_BODY: &str = super::gates::ANON_BODY;
 /// 404 bytes: `ObjectDoesNotExist` branch
 /// (`app/views/base.py:132-136`).
 pub const NOT_FOUND_BODY: &str = profile_q::OBJECT_NOT_FOUND_BODY;
-/// 500 bytes: generic branch (`app/views/base.py:145-149`).
-pub const SERVER_ERROR_BODY: &str = profile_q::SERVER_ERROR_BODY;
 
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
@@ -225,15 +225,6 @@ impl IntoResponse for HandlerError {
         let (status, body) = self.status_and_body();
         json_response(status, body)
     }
-}
-
-/// Render `body` (already exact JSON bytes) as a JSON response.
-pub fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
 }
 
 // ---------------------------------------------------------------------------
@@ -667,38 +658,6 @@ fn py_json_dumps(value: &serde_json::Value) -> String {
             out
         }
     }
-}
-
-/// CPython `json.dumps` string encoding (`ensure_ascii`): `"` and
-/// `\` escaped, C0 controls short/`\u00XX`, `0x7f` raw, everything
-/// else non-ASCII as `\uXXXX` (lowercase hex, surrogate pairs past
-/// the BMP).
-fn py_json_string(input: &str) -> String {
-    let mut out = String::with_capacity(input.len() + 2);
-    out.push('"');
-    for c in input.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c if (c as u32) < 0x7f => out.push(c),
-            c => {
-                let mut buf = [0u16; 2];
-                for unit in c.encode_utf16(&mut buf) {
-                    out.push_str(&format!("\\u{unit:04x}"));
-                }
-            }
-        }
-    }
-    out.push('"');
-    out
 }
 
 /// CPython `json.dumps` number encoding: ints verbatim (`-0` parses
@@ -1935,15 +1894,6 @@ fn local_today() -> NaiveDate {
     chrono::Local::now().date_naive()
 }
 
-/// Quote the bare zone literal the F-W24-11 graph builders spell
-/// (`AT TIME ZONE UTC`), which Postgres rejects (`column "utc" does
-/// not exist` — Django emits a quoted literal). A no-op once the
-/// builder fix (PIDASHCONV-709) lands: quoted `'UTC'` no longer
-/// matches the bare pattern.
-fn quote_utc_zone(sql: &str) -> String {
-    sql.replace("AT TIME ZONE UTC", "AT TIME ZONE 'UTC'")
-}
-
 /// `UserActivityGraphEndpoint.get` (`:524-539`): per-day activity
 /// counts for the caller over the trailing 6 months.
 async fn activity_graph(
@@ -1967,14 +1917,14 @@ async fn activity_graph_inner(
         .await?
         .ok_or(HandlerError::Unauthorized)?;
     let cutoff = profile_q::months_ago(local_today(), profile_q::ACTIVITY_GRAPH_MONTHS);
-    let rows: Vec<(NaiveDate, i64)> =
-        sqlx::query_as(&quote_utc_zone(&profile_q::activity_graph_sql()))
-            .bind(actor.id)
-            .bind(slug)
-            .bind(cutoff)
-            .fetch_all(pool)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
+    let rows: Vec<(NaiveDate, i64)> = sqlx::query_as(&profile_q::activity_graph_sql())
+        .bind(actor.id)
+        .bind(slug)
+        .bind(cutoff)
+        .bind(actor.tz_name.as_str())
+        .fetch_all(pool)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     let mut items = Vec::with_capacity(rows.len());
     for (created_date, activity_count) in rows {
         items.push(serde_json::json!({
@@ -2016,10 +1966,11 @@ async fn completed_graph_inner(
         .ok_or(HandlerError::Unauthorized)?;
     let month = profile_q::parse_month_param(query_last(raw_query, "month").as_deref())
         .map_err(|_| HandlerError::ServerError)?;
-    let rows: Vec<(i32, i64)> = sqlx::query_as(&quote_utc_zone(&profile_q::completed_graph_sql()))
+    let rows: Vec<(i32, i64)> = sqlx::query_as(&profile_q::completed_graph_sql())
         .bind(actor.id)
         .bind(slug)
         .bind(month)
+        .bind(actor.tz_name.as_str())
         .fetch_all(pool)
         .await
         .map_err(|_| HandlerError::ServerError)?;
@@ -2516,27 +2467,6 @@ mod tests {
         assert_eq!(profile_save_order()[29], "pk");
         assert!(save.contains("$30"));
         assert!(!save.contains("$31"));
-    }
-
-    #[test]
-    fn utc_zone_quoting_is_idempotent() {
-        let bare = "SELECT EXTRACT(WEEK FROM i.completed_at AT TIME ZONE UTC)";
-        let quoted = "SELECT EXTRACT(WEEK FROM i.completed_at AT TIME ZONE 'UTC')";
-        assert_eq!(quote_utc_zone(bare), quoted);
-        // A no-op once the builder fix lands.
-        assert_eq!(quote_utc_zone(quoted), quoted);
-        // Both graph builders execute after quoting.
-        for sql in [
-            profile_q::activity_graph_sql(),
-            profile_q::completed_graph_sql(),
-        ] {
-            let fixed = quote_utc_zone(&sql);
-            assert!(
-                !fixed.contains("AT TIME ZONE UTC"),
-                "bare zone survives: {fixed}"
-            );
-            assert!(fixed.contains("AT TIME ZONE 'UTC'"), "zone lost: {fixed}");
-        }
     }
 
     #[test]

@@ -5,12 +5,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc, oneshot, watch};
 
-use crate::agent::{AgentBridge, AgentCursor, BridgeEvent, RunPayload};
+use crate::agent::{AgentBridge, AgentCursor, BridgeEvent, RunPayload, within_startup_deadline};
 use crate::approval::policy::Policy;
 use crate::approval::router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource};
 use crate::cloud::http::{
     AckEntry, AttachBody, CredentialsHandle, HttpLoop, InboundEnvelope, MachineClient, PollStatus,
-    RunnerCloudClient, RunnerCredentials, SharedHttpTransport,
+    RunnerCloudClient, RunnerCredentials, SharedHttpTransport, TransportError,
 };
 use crate::cloud::protocol::{
     ClientMsg, FailureReason, RunnerStatus, ServerMsg, TokenUsage as WireTokenUsage, WIRE_VERSION,
@@ -19,11 +19,12 @@ use crate::cloud::protocol::{
 use crate::config::schema::{
     AgentKind, Config, Credentials, DaemonConfig, RunnerConfig, canonical_for_compare,
 };
+use crate::daemon::activity_watchdog::{ActivityWatchdog, WatchdogAction, describe_threshold};
 use crate::daemon::drain_journal;
 use crate::daemon::run_event_mirror::RunEventMirror;
 use crate::daemon::runner_instance::RunnerInstance;
 use crate::daemon::runner_out::RunnerOut;
-use crate::daemon::state::StateHandle;
+use crate::daemon::state::{AgentHealthReport, StateHandle};
 use crate::history::index::{RunSummary, RunsIndex};
 use crate::history::jsonl::{HistoryEntry, HistoryWriter};
 use crate::ipc::protocol::{CurrentRunSummary, version_lt};
@@ -239,6 +240,19 @@ impl Supervisor {
             }
         };
 
+        // Wake from sleep / network change: retry every cloud connection
+        // now instead of waiting out a backoff of up to 6 hours.
+        let triggers_handle = if opts.offline {
+            None
+        } else {
+            let kick_ctx = spawn_ctx.clone();
+            Some(crate::daemon::reconnect_triggers::spawn(move |trigger| {
+                if let Ok(n) = kick_ctx.kick_reconnect(None) {
+                    tracing::debug!(trigger, runners = n, "reconnect kicked");
+                }
+            }))
+        };
+
         let shutdown = state.shutdown_notified();
         let sig = crate::util::signal::shutdown();
         tokio::select! {
@@ -288,6 +302,9 @@ impl Supervisor {
             h.abort();
         }
         if let Some(h) = machine_handle {
+            h.abort();
+        }
+        if let Some(h) = triggers_handle {
             h.abort();
         }
         ipc_handle.abort();
@@ -358,6 +375,31 @@ impl RunnerSpawnCtx {
 
     pub(crate) fn cloud_url(&self) -> String {
         self.daemon.cloud_url.clone()
+    }
+
+    /// Cut reconnect waits short and restart the backoff schedule
+    /// (PDASHOSS01-306): for the runner named `runner`, or for every runner
+    /// plus the machine control session when `None`. Returns how many
+    /// runners were kicked; errors on an unknown runner name.
+    pub(crate) fn kick_reconnect(&self, runner: Option<&str>) -> Result<usize> {
+        let instances = self.instances.read().expect("runner registry poisoned");
+        match runner {
+            Some(name) => {
+                let inst = instances
+                    .values()
+                    .find(|i| i.name == name)
+                    .ok_or_else(|| anyhow::anyhow!("no configured runner named {name:?}"))?;
+                inst.state.force_reconnect();
+                Ok(1)
+            }
+            None => {
+                for inst in instances.values() {
+                    inst.state.force_reconnect();
+                }
+                self.daemon_state.force_reconnect();
+                Ok(instances.len())
+            }
+        }
     }
 
     /// Hot-add: bring a freshly configured runner up in-process.
@@ -472,6 +514,7 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
     let inst_remove_tx = inst.remove_tx.clone();
     let live_mailboxes = ctx.mailboxes.clone();
     let live_hello_runners = ctx.hello_runners.clone();
+    let live_instances = ctx.instances.clone();
     let daemon_paths = ctx.paths.clone();
     // The working dir reported to the cloud is this runner's single, exclusive
     // work dir.
@@ -490,6 +533,7 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
             remove_tx: inst_remove_tx,
             live_mailboxes,
             live_hello_runners,
+            live_instances,
             current_run: None,
             current_chat: None,
             local_chat_active: inst_chat_active,
@@ -521,18 +565,34 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
             attach_body_for_instance(inst, attach_working_dir),
         )
         .with_state(inst.state.clone())
-        .with_teardown_rx(inst.remove_tx.subscribe());
+        .with_teardown_rx(inst.remove_tx.subscribe())
+        .with_reconnect_kick(inst.state.reconnect_notified());
         let close_client = client.clone();
         let local_state = inst.state.clone();
         let daemon_state = ctx.daemon_state.clone();
+        let purge_mailbox = inst.mailbox_tx.clone();
+        let runner_name = inst.name.clone();
+        let runner_id = inst.runner_id;
         let http_handle = tokio::spawn(async move {
             if let Err(e) = http_loop.run().await {
-                if e.is_expected_teardown() {
-                    tracing::info!("http loop exited after runner teardown: {e:#}");
-                } else {
-                    tracing::error!("http loop exited: {e:#}");
-                }
                 local_state.set_connected(false).await;
+                if let TransportError::RunnerDeletedInCloud { confirmations } = e {
+                    purge_cloud_deleted_runner(
+                        &purge_mailbox,
+                        &runner_name,
+                        runner_id,
+                        confirmations,
+                    )
+                    .await;
+                    return;
+                }
+                if e.is_expected_teardown() {
+                    // Removed locally: no further requests for this runner,
+                    // not even a courtesy session close.
+                    tracing::info!("http loop exited after runner teardown: {e:#}");
+                    return;
+                }
+                tracing::error!("http loop exited: {e:#}");
                 let _ = tokio::time::timeout(Duration::from_secs(2), close_client.close_session())
                     .await;
                 if e.requires_daemon_restart() {
@@ -546,12 +606,53 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
         tasks.http_loop = Some(http_handle);
 
         let refresh_state = inst.state.clone();
+        let refresh_teardown = inst.remove_tx.subscribe();
         let refresh_handle = tokio::spawn(async move {
-            refresh_loop(client, refresh_state).await;
+            refresh_loop(client, refresh_state, refresh_teardown).await;
         });
         tasks.refresh = Some(refresh_handle);
     }
     tasks
+}
+
+/// The cloud confirmed (PDASHOSS01-306) that this runner was deleted while
+/// the daemon could not receive the RemoveRunner frame. Run the same local
+/// teardown the frame would have: hand the runner loop a synthesized
+/// `RemoveRunner`, which cancels any run or chat, stops the heartbeat,
+/// deletes the runner's data dir and strips its `[[runner]]` block. The
+/// HttpLoop has already exited, so nothing contacts the cloud for this id
+/// again.
+async fn purge_cloud_deleted_runner(
+    mailbox: &mpsc::Sender<InboundEnvelope>,
+    name: &str,
+    runner_id: uuid::Uuid,
+    confirmations: u32,
+) {
+    tracing::warn!(
+        "runner {name} ({runner_id}) was deleted in the cloud; removed locally after \
+         {confirmations} confirmations"
+    );
+    let envelope = crate::cloud::protocol::Envelope::for_runner(
+        runner_id,
+        ServerMsg::RemoveRunner {
+            runner_id,
+            reason: Some(format!(
+                "deleted in the cloud (confirmed {confirmations} times)"
+            )),
+        },
+    );
+    if let Err(e) = mailbox
+        .send(InboundEnvelope {
+            stream_id: None,
+            env: envelope,
+        })
+        .await
+    {
+        tracing::warn!(
+            "could not hand the local removal of {name} ({runner_id}) to its runner \
+             loop: {e}. Run `pidash runner remove {name} --local-only --yes` to clean it up."
+        );
+    }
 }
 
 /// On daemon shutdown, send `RunFailed{DaemonRestart}` for every
@@ -986,7 +1087,11 @@ fn attach_body_for_instance(
     }
 }
 
-async fn refresh_loop(client: RunnerCloudClient, state: StateHandle) {
+async fn refresh_loop(
+    client: RunnerCloudClient,
+    state: StateHandle,
+    mut teardown: tokio::sync::watch::Receiver<bool>,
+) {
     // Acquire the shutdown Notify ONCE and pin it across the whole loop
     // so a `notify_one()` that fires between iterations isn't dropped on
     // the floor. Re-acquiring per-iteration would race: each iteration
@@ -1010,6 +1115,8 @@ async fn refresh_loop(client: RunnerCloudClient, state: StateHandle) {
         tokio::select! {
             biased;
             _ = &mut shutdown_fut => return,
+            // A removed runner refreshes nothing.
+            _ = teardown.wait_for(|removed| *removed) => return,
             _ = tokio::time::sleep(sleep_for) => {}
         }
         if let Err(e) = client.refresh().await {
@@ -1085,6 +1192,9 @@ struct RunnerLoop {
     remove_tx: tokio::sync::watch::Sender<bool>,
     live_mailboxes: Arc<RwLock<HashMap<uuid::Uuid, mpsc::Sender<InboundEnvelope>>>>,
     live_hello_runners: Arc<RwLock<HelloRunnerMap>>,
+    /// The IPC registry. A removed runner is dropped from it so
+    /// `pidash status` stops listing it.
+    live_instances: Arc<std::sync::RwLock<HashMap<uuid::Uuid, RunnerInstance>>>,
     /// In-flight run, if any. Replaced on each Assign and cleared as soon as
     /// the worker task signals completion via `done_rx` — driven by
     /// `tokio::select!` so a new Assign isn't rejected while we wait for the
@@ -1773,18 +1883,21 @@ impl RunnerLoop {
                         .write()
                         .await
                         .remove(&self.runner_paths.runner_id);
+                    self.live_instances
+                        .write()
+                        .expect("runner registry poisoned")
+                        .remove(&self.runner_paths.runner_id);
                     // Best-effort cleanup of this runner's local data
                     // dir. The on-disk state is keyed by runner_id and
                     // is dead weight once the cloud-side row is gone.
+                    // The working directory (the user's checkout) is
+                    // never deleted — not even when it was configured
+                    // inside the data dir.
                     let runner_dir = self.runner_paths.base_dir().to_path_buf();
-                    if runner_dir.exists()
-                        && let Err(e) = std::fs::remove_dir_all(&runner_dir)
-                    {
-                        tracing::warn!(
-                            "failed to delete {:?}: {e:#} (file removal is best-effort)",
-                            runner_dir,
-                        );
-                    }
+                    remove_runner_data_dir(
+                        &runner_dir,
+                        &self.runner_config.workspace.working_dir,
+                    );
                     // Strip the matching `[[runner]]` block from
                     // config.toml under the host-wide config lock so a
                     // concurrent `pidash runner add` can't lose its
@@ -1852,6 +1965,32 @@ impl RunnerLoop {
         }
         self.state.set_connected(false).await;
         Ok(())
+    }
+}
+
+/// Delete a removed runner's data dir, keeping its working directory.
+/// Normally the two are disjoint (the default working dir lives under
+/// `data_dir/workspaces/`); if the working dir sits inside the data dir the
+/// data dir is left alone rather than risk the user's checkout.
+fn remove_runner_data_dir(runner_dir: &std::path::Path, working_dir: &std::path::Path) {
+    if !runner_dir.exists() {
+        return;
+    }
+    let runner_dir_cmp = canonical_for_compare(runner_dir);
+    let working_dir_cmp = canonical_for_compare(working_dir);
+    if working_dir_cmp.starts_with(&runner_dir_cmp) {
+        tracing::warn!(
+            "not deleting {:?}: it contains this runner's working directory {:?}",
+            runner_dir,
+            working_dir,
+        );
+        return;
+    }
+    if let Err(e) = std::fs::remove_dir_all(runner_dir) {
+        tracing::warn!(
+            "failed to delete {:?}: {e:#} (file removal is best-effort)",
+            runner_dir,
+        );
     }
 }
 
@@ -2231,7 +2370,7 @@ impl ChatWorker {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("chat bridge missing"))?;
         let warm_started = Instant::now();
-        let warmed_thread_id = bridge.warm(workspace_path).await?;
+        let warmed_thread_id = within_startup_deadline(bridge.warm(workspace_path)).await?;
         self.send_timing_event(
             chat_session_id,
             bridge_seq,
@@ -2277,6 +2416,7 @@ impl ChatWorker {
         bridge_seq: &mut u64,
         started_sent: &mut bool,
     ) -> Result<bool> {
+        let bridge_slot = bridge;
         let message_id = turn.message_id;
         self.send_timing_event(
             chat_session_id,
@@ -2300,8 +2440,8 @@ impl ChatWorker {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("chat workspace missing"))?;
 
-        if bridge.as_ref().is_some_and(bridge_has_exited) {
-            if let Some(bridge) = bridge.take() {
+        if bridge_slot.as_ref().is_some_and(bridge_has_exited) {
+            if let Some(bridge) = bridge_slot.take() {
                 bridge.shutdown(Duration::from_secs(1)).await.ok();
             }
             *started_sent = false;
@@ -2311,9 +2451,9 @@ impl ChatWorker {
             turn.local_session_id.as_deref(),
             turn.local_thread_id.as_deref(),
         );
-        if bridge.is_none() {
+        if bridge_slot.is_none() {
             let spawn_started = Instant::now();
-            *bridge = Some(
+            *bridge_slot = Some(
                 AgentBridge::spawn_from_config_with_resume(
                     &self.runner_config,
                     workspace_path,
@@ -2347,7 +2487,7 @@ impl ChatWorker {
             )
             .await;
         }
-        let bridge = bridge
+        let bridge = bridge_slot
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("chat bridge missing"))?;
         let payload = RunPayload {
@@ -2356,7 +2496,69 @@ impl ChatWorker {
             model: turn.model,
         };
         let turn_started_at = Instant::now();
-        let mut cursor = bridge.run(&payload, workspace_path).await?;
+        // Keep reading commands while the engine starts up so a Cancel/Close
+        // is honoured mid-handshake instead of queueing behind it.
+        let interrupt = {
+            let command_rx = &mut self.command_rx;
+            async move {
+                loop {
+                    match command_rx.recv().await {
+                        Some(ChatCommand::Warm(_)) => {
+                            tracing::debug!(
+                                %chat_session_id,
+                                "chat warm ignored while turn is starting"
+                            );
+                        }
+                        Some(ChatCommand::Message(_)) => {
+                            tracing::warn!(
+                                %chat_session_id,
+                                "chat runtime received a second message while a turn is starting"
+                            );
+                        }
+                        other => return other,
+                    }
+                }
+            }
+        };
+        let started = tokio::select! {
+            biased;
+            command = interrupt => Err(command),
+            r = within_startup_deadline(bridge.run(&payload, workspace_path)) => Ok(r),
+        };
+        let mut cursor = match started {
+            Ok(r) => r?,
+            Err(command) => {
+                // The handshake was abandoned mid-flight, so the bridge is in
+                // an unknown state: discard it and let the next turn respawn.
+                let close_after_turn = matches!(command, Some(ChatCommand::Close { .. }));
+                tracing::info!(?command, %chat_session_id, "chat turn interrupted during engine startup");
+                if let Some(bridge) = bridge_slot.take() {
+                    bridge.shutdown(Duration::from_secs(5)).await.ok();
+                }
+                *started_sent = false;
+                self.out
+                    .send(ClientMsg::ChatMessageCompleted {
+                        chat_session_id,
+                        message_id: turn.message_id,
+                        turn_id: None,
+                        assistant_message: None,
+                        status: "cancelled".into(),
+                        completed_at: Utc::now(),
+                    })
+                    .await
+                    .ok();
+                if close_after_turn {
+                    let _ = self
+                        .out
+                        .send(ClientMsg::ChatClosed {
+                            chat_session_id,
+                            closed_at: Utc::now(),
+                        })
+                        .await;
+                }
+                return Ok(close_after_turn);
+            }
+        };
         let turn_id = cursor.thread_id().to_string();
         self.send_timing_event(
             chat_session_id,
@@ -2926,6 +3128,11 @@ struct RunMetadata {
     model: Option<String>,
 }
 
+/// How often `pump_events` re-checks a pending approval. A run waiting on a
+/// human is never stalled, but the loop must notice the approval resolving even
+/// when no agent event follows it.
+const APPROVAL_WATCHDOG_RECHECK: Duration = Duration::from_secs(30);
+
 impl AssignWorker {
     async fn run_metadata(&self) -> RunMetadata {
         let snapshot = self.state.observability_snapshot().await;
@@ -3125,7 +3332,46 @@ impl AssignWorker {
             prompt,
             model: expected_codex_model,
         };
-        let mut cursor = match bridge.run_one_shot(&payload, &workspace_path).await {
+        // Race the startup handshake against cancel and shutdown: a cold
+        // engine may take up to `ENGINE_STARTUP_TIMEOUT` to answer, and a
+        // Cancel must not sit unobserved for that long. The `Notified` future
+        // is created before the race so a `notify_waiters()` that fires while
+        // startup is in flight is not missed.
+        let shutdown = self.state.shutdown_notified();
+        let shutdown_fut = shutdown.notified();
+        let started = tokio::select! {
+            biased;
+            _ = shutdown_fut => None,
+            _ = self.cancel.cancelled() => None,
+            r = within_startup_deadline(bridge.run_one_shot(&payload, &workspace_path)) => Some(r),
+        };
+        let Some(started) = started else {
+            // The handshake was abandoned mid-flight, so the bridge is
+            // discarded. On shutdown the daemon's drain reports the run as
+            // `DaemonRestart`; only an explicit cancel is reported here.
+            bridge.shutdown(Duration::from_secs(5)).await.ok();
+            let cancelled = self.cancel.is_cancelled();
+            hist.append(&HistoryEntry::Footer {
+                ts: Utc::now(),
+                final_status: "cancelled".to_string(),
+                done_payload: None,
+                error: None,
+            })
+            .await
+            .ok();
+            self.state.set_current_run(None).await;
+            if cancelled {
+                self.send(ClientMsg::RunCancelled {
+                    run_id,
+                    cancelled_at: Utc::now(),
+                    tokens: None,
+                    model: None,
+                })
+                .await;
+            }
+            return Ok(());
+        };
+        let mut cursor = match started {
             Ok(c) => c,
             Err(e) => {
                 let detail = self.build_failure_detail(&format!("{e:#}"), &bridge).await;
@@ -3217,16 +3463,18 @@ impl AssignWorker {
         hist: &mut HistoryWriter,
         workspace_root: &std::path::Path,
     ) -> Result<Outcome> {
-        // Stall watchdog: if the agent emits no frames for this long AND
-        // no approval is in flight (a human-wait is legitimate silence),
-        // give up and fail the run. Without this, an unrecognised wait —
-        // e.g. a future codex protocol change — leaves the runner blocked
-        // on stdout and the cloud showing "running" indefinitely.
-        //
-        // Threshold is per-agent because Codex emits continuous token-
-        // count events while Claude can be silent for the full
-        // duration of a single tool call (see `AgentKind::stall_timeout`).
-        let stall_timeout = self.runner_config.agent.kind.stall_timeout();
+        // Passive-kill activity watchdog (see `daemon::activity_watchdog`).
+        // A quiet agent is never killed for being quiet a while: it may be
+        // inside a long tool call. Only after `unhealthy_after` with no agent
+        // event is the run reported unhealthy, and only after `kill_after` is
+        // it failed. Provable deaths (stdout closing, terminal agent errors,
+        // turn end) are handled in the event branch below, not here.
+        let mut watchdog = ActivityWatchdog::new(
+            self.state.agent_watchdog(),
+            tokio::time::Instant::now(),
+            Utc::now(),
+        );
+        self.publish_agent_health(&watchdog).await;
 
         let shutdown = self.state.shutdown_notified();
         let cancel = self.cancel.clone();
@@ -3234,13 +3482,26 @@ impl AssignWorker {
         let mut run_events = RunEventMirror::new(cursor.run_id());
         let mut token_meter = crate::daemon::observability::RunTokenMeter::default();
         loop {
-            // Re-evaluate at every loop entry: an approval that opened on
-            // the previous iteration disarms the watchdog; one that just
-            // resolved re-arms it.
-            let stall_deadline = if self.approvals.list_pending().await.is_empty() {
-                Some(tokio::time::Instant::now() + stall_timeout)
+            // Re-evaluate at every loop entry. A pending approval is a
+            // human-wait, which is legitimate silence: it keeps the activity
+            // clock fresh, so the clock restarts when the approval resolves.
+            // While one is pending the deadline is only a short re-check, so
+            // an approval answered with no agent event after it still re-arms
+            // the watchdog instead of leaving the loop without a deadline.
+            let awaiting_approval = !self.approvals.list_pending().await.is_empty();
+            let watchdog_deadline = if !awaiting_approval {
+                watchdog.next_deadline().0
             } else {
-                None
+                if watchdog.on_activity(tokio::time::Instant::now(), Utc::now()) {
+                    self.note_agent_health_change(
+                        &watchdog,
+                        cursor.run_id(),
+                        &mut run_events,
+                        hist,
+                    )
+                    .await;
+                }
+                tokio::time::Instant::now() + APPROVAL_WATCHDOG_RECHECK
             };
             let run_event_flush_deadline = run_events.flush_deadline();
             tokio::select! {
@@ -3298,6 +3559,12 @@ impl AssignWorker {
                         }).await?;
                         return Ok(Outcome { status_label: "failed".into() });
                     };
+                    if watchdog.on_activity(tokio::time::Instant::now(), Utc::now()) {
+                        self.note_agent_health_change(&watchdog, cursor.run_id(), &mut run_events, hist)
+                            .await;
+                    } else {
+                        self.publish_agent_health(&watchdog).await;
+                    }
                     for ev in events {
                         if let Some(out) = self
                             .handle_bridge_event(
@@ -3314,14 +3581,17 @@ impl AssignWorker {
                         }
                     }
                 }
-                _ = async {
-                    match stall_deadline {
-                        Some(d) => tokio::time::sleep_until(d).await,
-                        None => std::future::pending::<()>().await,
+                _ = tokio::time::sleep_until(watchdog_deadline) => {
+                    if awaiting_approval {
+                        continue;
                     }
-                } => {
-                    let mins = stall_timeout.as_secs() / 60;
-                    let base = format!("agent stalled for {mins} minutes without new agent events");
+                    if watchdog.on_deadline() == WatchdogAction::MarkUnhealthy {
+                        self.note_agent_health_change(&watchdog, cursor.run_id(), &mut run_events, hist)
+                            .await;
+                        continue;
+                    }
+                    let idle = describe_threshold(watchdog.kill_after());
+                    let base = format!("agent stalled: no agent events for {idle}");
                     let detail = self.build_failure_detail(&base, bridge).await;
                     run_events.flush_before_lifecycle(&self.out).await;
                     let metadata = self.run_metadata().await;
@@ -3343,6 +3613,59 @@ impl AssignWorker {
                 }
             }
         }
+    }
+
+    /// Stamp the watchdog's view of the run on the daemon state, which the
+    /// poll status reports to the cloud.
+    async fn publish_agent_health(&self, watchdog: &ActivityWatchdog) {
+        self.state
+            .set_agent_health(AgentHealthReport {
+                last_activity_at: Some(watchdog.last_activity_at()),
+                unhealthy: watchdog.is_unhealthy(),
+            })
+            .await;
+    }
+
+    /// Report a healthy ↔ unhealthy transition everywhere an operator looks:
+    /// the poll status (cloud health field), the run's event timeline, the
+    /// local run history and the daemon log. The run keeps going either way.
+    async fn note_agent_health_change(
+        &self,
+        watchdog: &ActivityWatchdog,
+        run_id: uuid::Uuid,
+        run_events: &mut RunEventMirror,
+        hist: &mut HistoryWriter,
+    ) {
+        self.publish_agent_health(watchdog).await;
+        let last_activity_at = watchdog.last_activity_at();
+        let (health, detail) = if watchdog.is_unhealthy() {
+            let idle = describe_threshold(watchdog.unhealthy_after());
+            tracing::warn!(
+                %run_id,
+                %last_activity_at,
+                "agent run unhealthy: no agent events for {idle}; leaving it running"
+            );
+            ("unhealthy", format!("no agent events for {idle}"))
+        } else {
+            tracing::info!(%run_id, "agent run healthy again: agent events resumed");
+            ("healthy", "agent events resumed".to_string())
+        };
+        run_events.push_content(
+            "runner/agent_health".to_string(),
+            serde_json::json!({
+                "schema": "runner_agent_health_v1",
+                "health": health,
+                "last_activity_at": last_activity_at.to_rfc3339(),
+            }),
+        );
+        run_events.flush(&self.out).await;
+        hist.append(&HistoryEntry::Lifecycle {
+            ts: Utc::now(),
+            state: health.into(),
+            detail: Some(detail),
+        })
+        .await
+        .ok();
     }
 
     /// Build a `RunFailed.detail` string that includes whatever local
@@ -3433,6 +3756,43 @@ impl AssignWorker {
                         method.as_str(),
                         params,
                     ) {
+                        // PDASHOSS01-228: agent engines silently scrub inline
+                        // `VAR=value cmd` assignments for secret-looking
+                        // names, so the command runs against default values
+                        // (a migrate against the wrong database, in the
+                        // incident that motivated this). The runner only
+                        // observes the command — it cannot block it — so make
+                        // the failure mode loud: a warning in the runner log
+                        // and a non-compactable run event on the AgentRun
+                        // record. Names only; the values are secrets.
+                        let secret_names =
+                            crate::daemon::observability::inline_secret_env_names(&hint.command);
+                        if !secret_names.is_empty() {
+                            tracing::warn!(
+                                vars = ?secret_names,
+                                "agent command sets secret-like env vars inline \
+                                 (`VAR=value cmd`); agent engines may scrub these \
+                                 before the command runs, silently falling back to \
+                                 defaults — use `export VAR=…` on its own line"
+                            );
+                            if run_events.push_content(
+                                "runner/env_warning".to_string(),
+                                serde_json::json!({
+                                    "schema": "runner_env_warning_v1",
+                                    "vars": secret_names,
+                                    "text": format!(
+                                        "Command sets secret-like env vars inline ({}); \
+                                         the agent engine may scrub inline assignments \
+                                         before the command runs, silently falling back \
+                                         to default values. Use `export VAR=…` on its \
+                                         own line instead.",
+                                        secret_names.join(", ")
+                                    ),
+                                }),
+                            ) {
+                                run_events.flush(&self.out).await;
+                            }
+                        }
                         self.state
                             .note_exec_command(crate::daemon::state::ExecCommandSnapshot {
                                 command: hint.command,
@@ -3719,6 +4079,7 @@ mod tests {
             config_dir: root.join("config"),
             data_dir: root.join("data"),
             runtime_dir: root.join("runtime"),
+            machine_context_dir: root.join("config"),
         }
     }
 
@@ -3739,6 +4100,152 @@ mod tests {
             muse_code: MuseCodeSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         }
+    }
+
+    fn spawn_ctx_for(paths: &Paths, insts: &[&RunnerInstance]) -> RunnerSpawnCtx {
+        RunnerSpawnCtx {
+            transport: None,
+            shared_machine_token: None,
+            paths: paths.clone(),
+            daemon: DaemonConfig::default(),
+            mailboxes: Arc::new(RwLock::new(
+                insts
+                    .iter()
+                    .map(|i| (i.runner_id, i.mailbox_tx.clone()))
+                    .collect(),
+            )),
+            hello_runners: Arc::new(RwLock::new(
+                insts
+                    .iter()
+                    .map(|i| {
+                        (
+                            i.runner_id,
+                            (
+                                i.out.clone(),
+                                i.state.clone(),
+                                i.config.project_slug.clone(),
+                            ),
+                        )
+                    })
+                    .collect(),
+            )),
+            daemon_state: StateHandle::new(crate::config::schema::Config {
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![],
+                cli: None,
+            }),
+            instances: Arc::new(std::sync::RwLock::new(
+                insts.iter().map(|i| (i.runner_id, (*i).clone())).collect(),
+            )),
+            activation_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    /// PDASHOSS01-306: a runner the cloud confirmed deleted is torn down
+    /// locally exactly like a RemoveRunner frame — config block and data
+    /// dir gone, working dir untouched, loop stopped, not listed by IPC.
+    #[tokio::test]
+    async fn purge_of_cloud_deleted_runner_removes_it_locally() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        paths.ensure().unwrap();
+        let wd_gone = tmp.path().join("wd-gone");
+        std::fs::create_dir_all(&wd_gone).unwrap();
+        std::fs::write(wd_gone.join("user-file.txt"), "keep me").unwrap();
+        let gone_cfg = runner_config("gone", "WEB", wd_gone.clone());
+        let keep_cfg = runner_config("keep", "API", tmp.path().join("wd-keep"));
+        crate::config::file::write_config(
+            &paths,
+            &Config {
+                version: 2,
+                daemon: DaemonConfig::default(),
+                runners: vec![gone_cfg.clone(), keep_cfg.clone()],
+                cli: None,
+            },
+        )
+        .unwrap();
+
+        let inst = RunnerInstance::new_offline(gone_cfg, &paths, DaemonConfig::default());
+        inst.paths.ensure().unwrap();
+        let data_dir = inst.paths.base_dir().to_path_buf();
+        std::fs::write(data_dir.join("state.json"), "{}").unwrap();
+        assert!(data_dir.exists());
+
+        let ctx = spawn_ctx_for(&paths, &[&inst]);
+        let mut remove_rx = inst.remove_tx.subscribe();
+        let tasks = spawn_instance_tasks(&inst, &ctx).await;
+        let runner_loop = tasks.runner_loop.expect("runner loop spawned");
+
+        purge_cloud_deleted_runner(&inst.mailbox_tx, &inst.name, inst.runner_id, 10).await;
+
+        tokio::time::timeout(Duration::from_secs(5), runner_loop)
+            .await
+            .expect("runner loop must stop")
+            .unwrap();
+        assert!(*remove_rx.borrow_and_update(), "teardown latch set");
+        let cfg = crate::config::file::load_config(&paths).unwrap();
+        let names: Vec<_> = cfg.runners.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["keep"], "only the deleted runner's block is stripped");
+        assert!(!data_dir.exists(), "data dir deleted");
+        assert_eq!(
+            std::fs::read_to_string(wd_gone.join("user-file.txt")).unwrap(),
+            "keep me",
+            "working dir untouched"
+        );
+        assert!(
+            !ctx.instances.read().unwrap().contains_key(&inst.runner_id),
+            "no longer listed by `pidash status`"
+        );
+        assert!(!ctx.mailboxes.read().await.contains_key(&inst.runner_id));
+    }
+
+    #[test]
+    fn data_dir_removal_spares_a_working_dir_inside_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runner_dir = tmp.path().join("runners").join("r1");
+        let inside = runner_dir.join("checkout");
+        std::fs::create_dir_all(&inside).unwrap();
+        remove_runner_data_dir(&runner_dir, &inside);
+        assert!(inside.exists(), "working dir inside the data dir is kept");
+
+        let outside = tmp.path().join("workspaces").join("w1");
+        std::fs::create_dir_all(&outside).unwrap();
+        remove_runner_data_dir(&runner_dir, &outside);
+        assert!(!runner_dir.exists());
+        assert!(outside.exists());
+    }
+
+    #[tokio::test]
+    async fn kick_reconnect_targets_one_runner_or_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let a = RunnerInstance::new_offline(
+            runner_config("a", "WEB", tmp.path().join("wa")),
+            &paths,
+            DaemonConfig::default(),
+        );
+        let b = RunnerInstance::new_offline(
+            runner_config("b", "API", tmp.path().join("wb")),
+            &paths,
+            DaemonConfig::default(),
+        );
+        let ctx = spawn_ctx_for(&paths, &[&a, &b]);
+        async fn fired(inst: &RunnerInstance) -> bool {
+            let kick = inst.state.reconnect_notified();
+            tokio::time::timeout(Duration::from_millis(50), kick.notified())
+                .await
+                .is_ok()
+        }
+
+        assert!(ctx.kick_reconnect(Some("nope")).is_err());
+        assert_eq!(ctx.kick_reconnect(Some("a")).unwrap(), 1);
+        assert!(fired(&a).await, "named runner kicked");
+        assert!(!fired(&b).await, "other runner left alone");
+
+        assert_eq!(ctx.kick_reconnect(None).unwrap(), 2);
+        assert!(fired(&a).await, "all runners kicked");
+        assert!(fired(&b).await, "all runners kicked");
     }
 
     #[test]

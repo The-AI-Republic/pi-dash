@@ -21,7 +21,7 @@
 //! `pidash_services::v1_work_items::shape_social`, representative SQL in
 //! `queries_sub`, POST validation + S3 offline inputs in `tasks`, gates in
 //! [`super::perms`] over the F-06 kernel (`pidash_auth::permissions`),
-//! request bodies through `crate::v1_cycles_modules::{body, json_cpython}`,
+//! request bodies through `crate::v1_cycles_modules::{body, json}`,
 //! pagination through `crate::paginator`, task fan-out through
 //! `pidash_jobs::queue`. This module owns the HTTP shell: API-key auth, the
 //! slug→UUID rewrite, permission wiring, the write statements, the SigV4
@@ -71,8 +71,6 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use std::collections::HashMap;
-
 use axum::extract::{OriginalUri, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -86,6 +84,7 @@ use uuid::Uuid;
 
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
+use pidash_services::read;
 use pidash_services::v1_work_items::queries_sub;
 use pidash_services::v1_work_items::shape_issue::BASE_EXPANSION_NAMES;
 use pidash_services::v1_work_items::shape_social::{
@@ -100,6 +99,7 @@ use super::perms::{
     gate_for, user_has_issue_permission, V1WorkItemsRoute, ATTACHMENT_DELETE_DENIAL_BODY,
     ATTACHMENT_DOWNLOAD_DENIAL_BODY, ATTACHMENT_UPLOAD_DENIAL_BODY,
 };
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -108,8 +108,6 @@ use super::perms::{
 /// `handle_exception`'s `ObjectDoesNotExist` branch
 /// (`api/views/base.py:156-160`): every `.get()` miss on these endpoints.
 pub const RESOURCE_NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not exist."}"#;
-/// `handle_exception`'s generic branch (`api/views/base.py:166-170`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// Attachment POST nameless/sizeless 400 (`views/issue.py:2339-2343`).
 pub const INVALID_REQUEST_BODY: &str = r#"{"error":"Invalid request.","status":false}"#;
 /// Attachment POST bad-type 400 (`views/issue.py:2347-2351`).
@@ -224,14 +222,7 @@ fn json_string(value: &str) -> String {
 /// post-pass escapes U+2028/U+2029 (`rest_framework/renderers.py`); the
 /// `app_project` `escape_u2028` precedent, applied to every JSON body here.
 fn json_response(status: StatusCode, body: String) -> Response {
-    let body = body
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029");
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
+    pidash_compat::response::json_response(status, pidash_compat::response::escape_u2028(&body))
 }
 
 /// Map a database/driver failure to the generic 500 while logging the site
@@ -331,42 +322,7 @@ pub fn owned_attachment_detail(
 // Query params
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not (the `v1_projects` shape: axum's
-/// `Query` backend does not coerce a lone `?key=value` into a sequence, so
-/// callers read last like Django's `QueryDict`).
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None`.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
-    })
-}
-
-/// `self.fields` / `self.expand` (`api/views/base.py:212-220`): comma
-/// split, empties dropped, `None` when empty.
-pub fn fields_param(query: &QueryMap, key: &str) -> Option<Vec<String>> {
-    let raw = query_last(query, key).unwrap_or_default();
-    let fields: Vec<String> = raw
-        .split(',')
-        .filter(|f| !f.is_empty())
-        .map(str::to_owned)
-        .collect();
-    if fields.is_empty() {
-        None
-    } else {
-        Some(fields)
-    }
-}
+pub use pidash_compat::http::{fields_param, query_last, OneOrMany, QueryMap};
 
 // ---------------------------------------------------------------------------
 // Authentication
@@ -422,10 +378,8 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     // Best-effort: a failed stamp must not fail the request.
     if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
-        let _ = sqlx::query(r#"UPDATE "api_tokens" SET "last_used" = now() WHERE "token" = $1"#)
-            .bind(raw)
-            .execute(pool)
-            .await;
+        let _ =
+            pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, raw).await;
     }
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
@@ -512,19 +466,16 @@ async fn resolve_machine_token(
     if !member {
         // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
         // `last_used_at` is stamped on success only.
-        let _ = sqlx::query(
-            r#"UPDATE "machine_token" SET "revoked_at" = now() WHERE "token_hash" = $1"#,
-        )
-        .bind(&presented_hash)
-        .execute(pool)
-        .await;
+        let _ =
+            pidash_services::domain::tokens::revoke_machine_token_by_hash(pool, &presented_hash)
+                .await;
         return Err(Denial::InvalidToken);
     }
-    let _ =
-        sqlx::query(r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#)
-            .bind(&presented_hash)
-            .execute(pool)
-            .await;
+    let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
+        pool,
+        &presented_hash,
+    )
+    .await;
     Ok(user_id)
 }
 
@@ -1663,7 +1614,8 @@ async fn fetch_attachment(
 
 /// External-duplicate probe (`:2359-2378`): the `exists()` plus the
 /// `.first()` id in one round trip (same 409 outcome; the concurrent
-/// delete between the two Python queries is unobservable here).
+/// delete between the two Python queries is unobservable here). The
+/// `ORDER BY` mirrors `.first()` over the `-created_at` default ordering.
 async fn fetch_external_duplicate(
     pool: &PgPool,
     slug: &str,
@@ -1679,7 +1631,7 @@ async fn fetch_external_duplicate(
              AND fa."project_id" = $1 AND w."slug" = $2
              AND fa."external_source" = $3 AND fa."external_id" = $4
              AND fa."issue_id" = $5 AND fa."entity_type" = 'ISSUE_ATTACHMENT'
-           LIMIT 1"#,
+           ORDER BY fa."created_at" DESC LIMIT 1"#,
     )
     .bind(project_id)
     .bind(slug)
@@ -2042,15 +1994,16 @@ async fn file_asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>
         pool: &PgPool,
         workspace_id: Option<Uuid>,
     ) -> Result<Option<String>, Denial> {
-        match workspace_id {
-            Some(id) => sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
-                .bind(id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|error| db_error(error, "file-asset-slug"))
-                .map(|slug: Option<Option<String>>| slug.flatten()),
-            None => Ok(None),
-        }
+        read::workspace_slug(pool, workspace_id)
+            .await
+            .map_err(|error| match error {
+                // Unreachable: this read never 404s or fails mid-row.
+                read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+                read::Error::Db(err) => {
+                    let (site, source) = err.split();
+                    db_error(source, site)
+                }
+            })
     }
     match entity_type.as_deref() {
         Some("WORKSPACE_LOGO")
@@ -3957,9 +3910,7 @@ struct PostData {
 /// (Python calls `.get` on the parsed list — `AttributeError`).
 fn parse_post_data(headers: &HeaderMap, body: &[u8]) -> Result<PostData, Denial> {
     use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
-    use crate::v1_cycles_modules::json_cpython::{
-        parse_json_text_spans, to_serde_publish_map, JsonFail,
-    };
+    use crate::v1_cycles_modules::json::{parse_json_text_spans, to_serde_publish_map, JsonFail};
     match negotiate_body(headers, body, &POST_BODY_SPEC) {
         Err(BodyError::UnsupportedMediaType(detail)) => Err(Denial::UnsupportedMediaType(detail)),
         Err(BodyError::ParseDetail(detail)) => Err(Denial::BadDetail(detail)),
@@ -4045,9 +3996,8 @@ fn envelope(
 // ---------------------------------------------------------------------------
 
 async fn read_body(body: axum::body::Body) -> Result<Vec<u8>, Denial> {
-    axum::body::to_bytes(body, usize::MAX)
+    pidash_compat::http::read_body(body)
         .await
-        .map(|bytes| bytes.to_vec())
         .map_err(|error| db_error(error, "read-body"))
 }
 
@@ -6004,12 +5954,15 @@ mod tests {
             parse_post_data(&headers_len("text/plain", raw.len()), raw),
             Err(Denial::UnsupportedMediaType(_))
         ));
-        // Strict constants reject.
+        // Strict constants reject (tier 3: serde text, not the strict text).
         let raw = b"{\"size\": NaN}";
         let err =
             parse_post_data(&headers_len("application/json", raw.len()), raw).expect_err("nan");
         match err {
-            Denial::BadDetail(detail) => assert!(detail.contains("not JSON compliant"), "{detail}"),
+            Denial::BadDetail(detail) => assert!(
+                detail.starts_with("JSON parse error - "),
+                "envelope + serde text, got {detail:?}"
+            ),
             other => panic!("{other:?}"),
         }
         // Urlencoded forms parse to text.

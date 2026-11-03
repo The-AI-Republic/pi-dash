@@ -32,7 +32,8 @@ export interface IAssistantMessage {
   status: TAssistantMessageStatus;
   seq: number;
   turn_id: string | null;
-  payload: { links?: IAssistantLink[] } & Record<string, unknown>;
+  // `truncated` marks an assistant reply the model cut off at its output limit.
+  payload: { links?: IAssistantLink[]; truncated?: boolean } & Record<string, unknown>;
   created_at: string;
   completed_at: string | null;
 }

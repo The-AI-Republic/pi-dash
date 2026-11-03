@@ -455,11 +455,12 @@ pub const FAVORITE_SELECT_RELATED: &[&str] = &[
 /// `UserFavorite.Meta.ordering = ("-created_at",)`.
 pub const FAVORITE_ORDER_SQL: &str = "user_favorites.created_at DESC";
 
-/// `serializer_class` of `ProjectFavoritesViewSet` is `None` (inherited
-/// from `ModelViewSet`): the DRF-default list action raises
-/// `AssertionError` → generic 500 (fixture `favorites_serializer_class`;
-/// the 500 body is owned by FX-APROJ-08 / L8).
-pub const FAVORITE_SERIALIZER_CLASS: Option<&str> = None;
+/// `serializer_class` of `ProjectFavoritesViewSet`: `UserFavoriteSerializer`
+/// since the PDASHOSS01-293 Django fix (PB-0500 retired). Before it the
+/// viewset inherited `None` and the DRF-default list raised
+/// `AssertionError` → generic 500; fixture `favorites_serializer_class`
+/// is that pre-fix probe record.
+pub const FAVORITE_SERIALIZER_CLASS: Option<&str> = Some("UserFavoriteSerializer");
 
 // ---------------------------------------------------------------------------
 // Roles dict
@@ -1010,8 +1011,9 @@ mod tests {
     #[test]
     fn favorites_queryset() {
         let fx = fixture();
+        // Pre-fix probe record (`None`); the fixed viewset sets it.
         assert!(section(&fx, "favorites_serializer_class").is_null());
-        assert!(FAVORITE_SERIALIZER_CLASS.is_none());
+        assert_eq!(FAVORITE_SERIALIZER_CLASS, Some("UserFavoriteSerializer"));
         let sql = section_sql(&fx, "favorites_get_queryset");
         assert!(sql.contains("\"user_favorites\".\"user_id\" = "));
         assert!(sql.contains("\"workspaces\".\"slug\" = fx06w-6d98814a"));

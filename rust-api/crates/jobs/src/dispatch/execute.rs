@@ -3627,11 +3627,11 @@ mod tests {
             sqlx::query(
                 "INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id, status, \
                  executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, \
-                 error_code, tool_plan, prompt, trigger, phase_kind, run_config, \
+                 tool_plan, prompt, trigger, phase_kind, run_config, \
                  required_capabilities, thread_id, agent_metadata, lease_expires_at, \
-                 started_at, error, refusal_category, llm_model, usage, created_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, 0, $7, '', '', $8, $9, 'direct', '', '{}', \
-                 '[]', '', '{}', $10, $11, '', '', '', '{}', $12)",
+                 started_at, error_details, llm_model, usage, created_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, 0, $7, '', $8, $9, 'direct', '', '{}', \
+                 '[]', '', '{}', $10, $11, '{}', '', '{}', $12)",
             )
             .bind(id)
             .bind(graph.ws)
@@ -3730,9 +3730,28 @@ mod tests {
                     sqlx::QueryBuilder::new("UPDATE agent_run SET status = ");
                 builder.push_bind(call.new_status);
                 builder.push(", ended_at = now()");
-                Self::bind_text(&mut builder, &call.updates, "error_code");
-                Self::bind_text(&mut builder, &call.updates, "error");
-                Self::bind_text(&mut builder, &call.updates, "refusal_category");
+                // The folded trio lands in `error_details` the way the
+                // real finalize planner merges it (PDASHOSS01-187).
+                let mut patch = Map::new();
+                for flat in ["error_code", "error", "refusal_category"] {
+                    if let Some(value) = call.updates.get(flat) {
+                        let key = pidash_db::runner_runs::agent_run::folded_key(flat)
+                            .expect("folded name");
+                        let value = match value {
+                            Value::String(text) if !text.is_empty() => value.clone(),
+                            _ => Value::Null,
+                        };
+                        patch.insert(key.to_owned(), value);
+                    }
+                }
+                if !patch.is_empty() {
+                    let patch = Value::Object(patch);
+                    builder.push(", error_details = ((CASE WHEN jsonb_typeof(error_details) = 'object' THEN error_details ELSE '{}'::jsonb END) - ARRAY(SELECT jsonb_object_keys(");
+                    builder.push_bind(patch.clone());
+                    builder.push("::jsonb))) || jsonb_strip_nulls(");
+                    builder.push_bind(patch);
+                    builder.push("::jsonb)");
+                }
                 Self::bind_text(&mut builder, &call.updates, "llm_model");
                 Self::bind_text(&mut builder, &call.updates, "cancel_reason");
                 Self::bind_json(&mut builder, &call.updates, "done_payload");
@@ -4639,7 +4658,9 @@ mod tests {
             );
             assert!(seams.invocations.lock().unwrap().is_empty());
             let row: (String, String) =
-                sqlx::query_as("SELECT status, error_code FROM agent_run WHERE id = $1")
+                sqlx::query_as(
+                    "SELECT status, COALESCE(error_details ->> 'code', '') FROM agent_run WHERE id = $1",
+                )
                     .bind(run_id)
                     .fetch_one(&pool)
                     .await
@@ -4697,7 +4718,9 @@ mod tests {
             assert_eq!(calls[0].updates["error_code"], json!("dispatch_timeout"));
             assert_eq!(total, 1);
             let expired_row: (String, String) =
-                sqlx::query_as("SELECT status, error_code FROM agent_run WHERE id = $1")
+                sqlx::query_as(
+                    "SELECT status, COALESCE(error_details ->> 'code', '') FROM agent_run WHERE id = $1",
+                )
                     .bind(expired)
                     .fetch_one(&pool)
                     .await
@@ -4857,7 +4880,9 @@ mod tests {
                 json!("desktop_not_connected")
             );
             let row: (String, String) =
-                sqlx::query_as("SELECT status, error FROM agent_run WHERE id = $1")
+                sqlx::query_as(
+                    "SELECT status, COALESCE(error_details ->> 'message', '') FROM agent_run WHERE id = $1",
+                )
                     .bind(waiting)
                     .fetch_one(&pool)
                     .await

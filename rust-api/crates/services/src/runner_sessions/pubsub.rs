@@ -147,7 +147,7 @@ pub trait PubsubStore {
     /// One session-row revoke: `save(update_fields=["revoked_at",
     /// "revoked_reason"])` (`pubsub.py:101-103`). The implementation
     /// executes
-    /// [`REVOKE_SQL`](pidash_db::runner_sessions::models::runner_session::REVOKE_SQL)
+    /// [`revoke_runner_session`](crate::domain::tokens::revoke_runner_session)
     /// binding `Utc::now()` per row (Python calls `timezone.now()`
     /// inside the loop) and `reason` as `$2`.
     async fn revoke_runner_session(

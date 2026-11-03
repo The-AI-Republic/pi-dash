@@ -27,6 +27,7 @@
 pub mod creation_jobs;
 pub mod fire_tick_live;
 pub mod fire_tick_seam;
+pub mod handoff;
 pub(crate) mod live_inputs;
 pub mod runner_seams;
 pub mod scheduler_dispatch;
@@ -43,8 +44,12 @@ pub use fire_tick_seam::{
     re_tick_ticker, run_ai_for_human, shim_is_ticking_state, shim_tick_interval_seconds,
     wait_ticker, DispatchJobsError, DispatchOutcome, FireTickShim, StateView,
 };
+pub use handoff::{
+    complete_project_move_handoff_inline, drain_publish_effects, HandoffInlineDeps, HandoffStore,
+};
 pub use runner_seams::{
-    complete_project_move_handoff_live, disarm_on_terminal_signal, maybe_apply_deferred_pause_live,
-    DisarmError,
+    complete_project_move_handoff_live, disarm_on_terminal_signal, fire_pending_entry,
+    maybe_apply_deferred_pause_live, pending_entry_ticker_for, post_run_orchestration,
+    post_run_orchestration_in_tx, run_work_item_id, DisarmError,
 };
 pub use scheduler_dispatch::{dispatch_scheduler_run, live_scheduler_dispatch};

@@ -141,20 +141,37 @@ fn join_member_visibility(sel: &mut SelectStatement, table: &str) {
 /// soft-deleted workspace/project stay visible).
 /// Binds `$1 = workspace slug`, `$2 = project id`, `$3 = member (user) id`.
 fn state_scope_condition() -> Condition {
+    state_scope_condition_with(true)
+}
+
+/// [`state_scope_condition`] with the `project_members` soft-delete guard
+/// switchable: the v1 views scope it (`member_deleted_scope = true`,
+/// byte-identical SQL to before), while the MCP `list_states` queryset
+/// (`pi_dash_cloud/mcp/tools.py:777-789`) carries no such guard across
+/// its traversal (BUG-944-1, live-pinned by PIDASHCONV-944: only the
+/// base model's manager applies, so a soft-deleted membership row still
+/// authorizes the MCP read). The flag only drops that one predicate;
+/// every other clause, and the bind order, is shared.
+fn state_scope_condition_with(member_deleted_scope: bool) -> Condition {
     let states = Alias::new(state::TABLE.to_owned());
     let workspaces = Alias::new(WORKSPACE_TABLE.to_owned());
     let projects = Alias::new(PROJECT_TABLE.to_owned());
     let vis = Alias::new(VIS_TABLE.to_owned());
-    Condition::all()
+    let mut cond = Condition::all()
         .add(Expr::col((workspaces, Alias::new("slug"))).eq(Expr::cust("$1")))
-        .add(Expr::col((states.clone(), Alias::new("project_id"))).eq(Expr::cust("$2")))
-        // `project__project_projectmember__member=user,
-        // project__project_projectmember__is_active=True` (the project_id
-        // correlation is the `ON` clause in `join_member_visibility`;
-        // `project_members` rows also carry the soft-delete scope).
+        .add(Expr::col((states.clone(), Alias::new("project_id"))).eq(Expr::cust("$2")));
+    // `project__project_projectmember__member=user,
+    // project__project_projectmember__is_active=True` (the project_id
+    // correlation is the `ON` clause in `join_member_visibility`;
+    // `project_members` rows also carry the soft-delete scope on the v1
+    // path only — see the fn docs).
+    cond = cond
         .add(Expr::col((vis.clone(), Alias::new("member_id"))).eq(Expr::cust("$3")))
-        .add(Expr::col((vis.clone(), Alias::new("is_active"))).eq(true))
-        .add(Expr::col((vis, Alias::new("deleted_at"))).is_null())
+        .add(Expr::col((vis.clone(), Alias::new("is_active"))).eq(true));
+    if member_deleted_scope {
+        cond = cond.add(Expr::col((vis, Alias::new("deleted_at"))).is_null());
+    }
+    cond
         // View filter (`state.py:55,178`): the `is_triage` boolean column.
         .add(Expr::col((states.clone(), Alias::new("is_triage"))).eq(false))
         // Default-manager scope (`StateManager`, `db/models/state.py:82-83`).
@@ -169,6 +186,14 @@ fn state_scope_condition() -> Condition {
 /// `.distinct()` (`state.py:59,182`).
 /// Binds `$1 = workspace slug`, `$2 = project id`, `$3 = member (user) id`.
 pub fn state_list_sql() -> String {
+    state_list_sql_with(true)
+}
+
+/// [`state_list_sql`] with the `project_members` soft-delete guard
+/// switchable (flagged condition below): `true` is the v1
+/// scope, byte-identical SQL; `false` is the MCP `list_states` scope
+/// (`pi_dash_cloud/mcp/tools.py:777-789`, BUG-944-1). Same binds.
+pub fn state_list_sql_with(member_deleted_scope: bool) -> String {
     use sea_query::PostgresQueryBuilder;
     let mut sel = Query::select();
     sel.distinct();
@@ -177,7 +202,7 @@ pub fn state_list_sql() -> String {
     join_workspace(&mut sel, state::TABLE);
     join_project(&mut sel, state::TABLE);
     join_member_visibility(&mut sel, state::TABLE);
-    sel.cond_where(state_scope_condition());
+    sel.cond_where(state_scope_condition_with(member_deleted_scope));
     sel.to_string(PostgresQueryBuilder)
 }
 
@@ -192,7 +217,24 @@ pub async fn fetch_state_list<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    let rows: Vec<PgRow> = sqlx::query(&state_list_sql())
+    fetch_state_list_with(ex, workspace_slug, project_id, member_id, true).await
+}
+
+/// [`fetch_state_list`] over [`state_list_sql_with`]: `true` is the v1
+/// scope; `false` is the MCP `list_states` scope (BUG-944-1). Private:
+/// the MCP-facing read is the services layer's `fetch_state_columns`
+/// (raw rows + sequence order), which builds on [`state_list_sql_with`].
+async fn fetch_state_list_with<'e, E>(
+    ex: E,
+    workspace_slug: &str,
+    project_id: uuid::Uuid,
+    member_id: uuid::Uuid,
+    member_deleted_scope: bool,
+) -> Result<Vec<state::State>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let rows: Vec<PgRow> = sqlx::query(&state_list_sql_with(member_deleted_scope))
         .bind(workspace_slug)
         .bind(project_id)
         .bind(member_id)
@@ -711,6 +753,33 @@ mod tests {
         assert!(!sql.contains(r#""projects"."deleted_at""#), "{sql}");
         // No point/estimate filter leaks into the state scope.
         assert!(!sql.contains("estimate"), "{sql}");
+    }
+
+    #[test]
+    fn state_list_with_flag_preserves_v1_and_drops_member_guard_for_mcp() {
+        // PIDASHCONV-1661: `true` is byte-identical to the v1 scope;
+        // `false` drops only the membership deleted guard (the MCP
+        // `list_states` traversal scope, BUG-944-1).
+        assert_eq!(state_list_sql(), state_list_sql_with(true));
+        let mcp = state_list_sql_with(false);
+        assert_eq!(mcp.matches(r#""deleted_at" IS NULL"#).count(), 1, "{mcp}");
+        assert!(mcp.contains(r#""states"."deleted_at" IS NULL"#), "{mcp}");
+        assert!(!mcp.contains(r#""project_members"."deleted_at""#), "{mcp}");
+        // Everything else shared: same joins, binds, triage + archived
+        // guards, still distinct.
+        for needle in [
+            "SELECT DISTINCT",
+            r#"INNER JOIN "project_members""#,
+            r#""workspaces"."slug" = ($1)"#,
+            r#""states"."project_id" = ($2)"#,
+            r#""project_members"."member_id" = ($3)"#,
+            r#""project_members"."is_active" = TRUE"#,
+            r#""states"."is_triage" = FALSE"#,
+            r#""states"."group" <> 'triage'"#,
+            r#""projects"."archived_at" IS NULL"#,
+        ] {
+            assert!(mcp.contains(needle), "{needle}: {mcp}");
+        }
     }
 
     #[test]

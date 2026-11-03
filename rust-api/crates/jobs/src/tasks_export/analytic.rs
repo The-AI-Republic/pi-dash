@@ -40,6 +40,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use pidash_compat::filter::{isnull_column, strings_in_column, uuid_in_column};
 use pidash_db::issue_filters::{issue_filters_post, FilterValue, IssueFilter, PostVal};
 use pidash_services::app_analytics::queries as q;
 use pidash_services::tasks_cleanup::exports as ex;
@@ -351,55 +352,6 @@ pub fn relation_joins(fragment: &str) -> String {
     out
 }
 
-/// Columns for `__isnull` predicates (and bare `Null` values).
-fn isnull_column(path: &str) -> Option<&'static str> {
-    Some(match path {
-        "parent" => "\"issues\".\"parent_id\"",
-        "labels" => "\"label_issue\".\"label_id\"",
-        "assignees" => "\"issue_assignee\".\"assignee_id\"",
-        "created_by" => "\"issues\".\"created_by_id\"",
-        "issue_cycle__cycle_id" => "\"issue_cycle\".\"cycle_id\"",
-        "issue_module__module_id" => "\"issue_module\".\"module_id\"",
-        "label_issue__deleted_at" => "\"label_issue\".\"deleted_at\"",
-        "issue_assignee__deleted_at" => "\"issue_assignee\".\"deleted_at\"",
-        "issue_cycle__deleted_at" => "\"issue_cycle\".\"deleted_at\"",
-        "issue_module__deleted_at" => "\"issue_module\".\"deleted_at\"",
-        "issue_subscribers__deleted_at" => "\"issue_subscribers\".\"deleted_at\"",
-        "target_date" => "\"issues\".\"target_date\"",
-        "start_date" => "\"issues\".\"start_date\"",
-        _ => return None,
-    })
-}
-
-/// Columns for UUID `__in` predicates. `logged_by` has no model field:
-/// Django raises `FieldError` (the task dies, like the GET 500).
-fn uuid_in_column(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "state__in" => "\"issues\".\"state_id\"",
-        "parent__in" => "\"issues\".\"parent_id\"",
-        "labels__in" => "\"label_issue\".\"label_id\"",
-        "assignees__in" => "\"issue_assignee\".\"assignee_id\"",
-        "issue_mention__mention__id__in" => "\"issue_mention\".\"mention_id\"",
-        "created_by__in" => "\"issues\".\"created_by_id\"",
-        "project__in" => "\"issues\".\"project_id\"",
-        "issue_cycle__cycle_id__in" => "\"issue_cycle\".\"cycle_id\"",
-        "issue_module__module_id__in" => "\"issue_module\".\"module_id\"",
-        "issue_subscribers__subscriber_id__in" => "\"issue_subscribers\".\"subscriber_id\"",
-        _ => return None,
-    })
-}
-
-/// Columns for string `__in` predicates.
-fn strings_in_column(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "state__group__in" => "\"states\".\"group\"",
-        "estimate_point__in" => "\"issues\".\"estimate_point_id\"",
-        "priority__in" => "\"issues\".\"priority\"",
-        "issue_intake__status__in" => "\"issue_intake\".\"status\"",
-        _ => return None,
-    })
-}
-
 /// `(column, operator)` for `Day` predicates (`__gte` / `__lte`).
 fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
     let (term, operator) = name.rsplit_once("__")?;
@@ -692,10 +644,12 @@ pub fn plot_statement(
     segment: Option<&str>,
     fragment: &str,
 ) -> Result<String, String> {
+    // The export worker has no activated zone (`analytic_export_task` is a
+    // Celery task, no request), so Django buckets in `TIME_ZONE` (UTC).
     let built = if y_axis == "issue_count" {
-        q::base_plot_count_sql(x_axis, segment, fragment)
+        q::base_plot_count_sql(x_axis, segment, fragment, "UTC")
     } else {
-        q::base_plot_estimate_sql(x_axis, segment, fragment)
+        q::base_plot_estimate_sql(x_axis, segment, fragment, "UTC")
     };
     let statement = built.ok_or_else(|| "analytic_export_task: bad axis".to_owned())?;
     let joins = scope_joins(&statement, fragment, true);
@@ -1426,7 +1380,7 @@ mod tests {
         assert!(label_fragment.contains("\"issues\".\"deleted_at\" IS NULL"));
         // Scope legs: states for the manager scope, relation legs only
         // for referenced aliases.
-        let statement = q::base_plot_count_sql("priority", None, &fragment).expect("built");
+        let statement = q::base_plot_count_sql("priority", None, &fragment, "UTC").expect("built");
         let joins = scope_joins(&statement, &fragment, true);
         assert!(joins.contains("JOIN \"states\""));
         assert!(!joins.contains("issue_labels"));

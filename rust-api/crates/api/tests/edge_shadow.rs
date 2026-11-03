@@ -14,7 +14,10 @@
 //! metrics endpoint answers 404 without the shared token.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex, OnceLock,
+};
 
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
@@ -131,12 +134,22 @@ async fn stub_app() -> axum::Router {
         )
             .into_response()
     }
+    async fn stub_slow() -> Response {
+        // Side A for the 1306 probe: Django answers fast; the Rust side
+        // never answers, so the shadow dispatch must time out.
+        (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            STUB_BODY,
+        )
+            .into_response()
+    }
     axum::Router::new()
         .route("/", any(root))
         .route("/robots.txt", any(robots))
         .route("/api/v1/things", any(echo))
         .route(PROBE_PATH, any(stub_secret))
         .route("/encoded/", any(encoded))
+        .route(SLOW_PATH, any(stub_slow))
         .fallback((axum::http::StatusCode::NOT_FOUND, "stub 404"))
 }
 
@@ -257,10 +270,21 @@ async fn wait_for_metrics(
     base: &str,
     ready: impl Fn(&serde_json::Value) -> bool,
 ) -> serde_json::Value {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    wait_for_metrics_with_deadline(client, base, std::time::Duration::from_secs(5), ready).await
+}
+
+/// Same, with an explicit deadline. Timeout-path tests need longer than 5s:
+/// a shadow dispatch budget is 10s.
+async fn wait_for_metrics_with_deadline(
+    client: &reqwest::Client,
+    base: &str,
+    deadline: std::time::Duration,
+    ready: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let end = std::time::Instant::now() + deadline;
     loop {
         let snapshot = metrics(client, base).await;
-        if ready(&snapshot) || std::time::Instant::now() >= deadline {
+        if ready(&snapshot) || std::time::Instant::now() >= end {
             return snapshot;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -627,4 +651,87 @@ async fn metrics_endpoint_requires_token() {
         }),
         "{snapshot}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// PIDASHCONV-1306: a timed-out shadow aborts the Rust handler
+// ---------------------------------------------------------------------------
+
+/// Probe path for the timeout test. The stub answers fast (side A); the
+/// Rust side blocks past the shadow budget, so every shadow must time out.
+const SLOW_PATH: &str = "/slow-1306/";
+
+/// Live slow-handler dispatches, and the most ever alive at once. Only the
+/// 1306 test registers `slow_probe`, so no per-test marker is needed.
+static SLOW_LIVE: AtomicUsize = AtomicUsize::new(0);
+static SLOW_MAX: AtomicUsize = AtomicUsize::new(0);
+
+/// A flag-gated test double like [`secret_probe`], but side B blocks past
+/// the 10s shadow budget. The `LiveGuard` drops when the dispatch future is
+/// dropped — an abort — and only then: a detached task keeps sleeping and
+/// keeps its count.
+async fn slow_probe(State(state): State<AppState>, req: Request) -> Response {
+    if state.edge().flags().is_rust(pidash_api::Prefix::Web) {
+        struct LiveGuard;
+        impl Drop for LiveGuard {
+            fn drop(&mut self) {
+                SLOW_LIVE.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let live = SLOW_LIVE.fetch_add(1, Ordering::SeqCst) + 1;
+        SLOW_MAX.fetch_max(live, Ordering::SeqCst);
+        let _guard = LiveGuard;
+        // Far past the shadow budget: only an abort gets us out of here.
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            RUST_BODY,
+        )
+            .into_response()
+    } else {
+        pidash_api::edge::proxy(State(state), req).await
+    }
+}
+
+#[tokio::test]
+async fn shadow_timeout_aborts_rust_handler() {
+    SLOW_LIVE.store(0, Ordering::SeqCst);
+    SLOW_MAX.store(0, Ordering::SeqCst);
+    let (stub_base, _stub) = spawn(stub_app().await).await;
+    let config = ShadowConfig {
+        max_inflight: 1,
+        ..enabled()
+    };
+    let extra = axum::Router::new().route(SLOW_PATH, get(slow_probe));
+    let edge = spawn_edge(&stub_base, Some(config), extra).await;
+    let client = client();
+
+    // Two sequential shadows, each blocked past the 10s budget (~10s per
+    // iteration). Sequential on purpose: with max_inflight=1 a second live
+    // dispatch proves the first timeout leaked its handler instead of
+    // stopping it.
+    for i in 1..=2u64 {
+        let response = client
+            .get(format!("{}{SLOW_PATH}", edge.base))
+            .send()
+            .await
+            .expect("get slow");
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.bytes().await.expect("body").as_ref(), STUB_BODY);
+        let snapshot = wait_for_metrics_with_deadline(
+            &client,
+            &edge.base,
+            std::time::Duration::from_secs(20),
+            |snapshot| snapshot["totals"]["errored"] == i,
+        )
+        .await;
+        assert_eq!(snapshot["totals"]["errored"], i, "{snapshot}");
+    }
+
+    let snapshot = metrics(&client, &edge.base).await;
+    assert_eq!(snapshot["totals"]["skipped"], 0, "{snapshot}");
+    // The timed-out handler was cancelled: at most max_inflight=1 was ever
+    // alive at once, and none lingers now. Pre-fix both fail (2 alive).
+    assert_eq!(SLOW_MAX.load(Ordering::SeqCst), 1);
+    assert_eq!(SLOW_LIVE.load(Ordering::SeqCst), 0);
 }

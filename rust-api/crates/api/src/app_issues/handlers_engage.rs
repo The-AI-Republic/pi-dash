@@ -1,10 +1,12 @@
-//! Activity + comments + reactions + subscribers handlers (D-26 handlers-D).
+//! Activity + comments + reactions + subscribers + worklogs handlers
+//! (D-26 handlers-D, plus the PIDASHCONV-1676 worklog drift port).
 //!
 //! Ports `apps/api/pi_dash/app/views/issue/activity.py:24-86`
 //! (`IssueActivityEndpoint`), `comment.py:36-258` (`IssueCommentViewSet`,
-//! `CommentReactionViewSet`), `reaction.py:25-85` (`IssueReactionViewSet`)
-//! and `subscriber.py:16-104` (`IssueSubscriberViewSet`) — 5 units over the
-//! 10 routes in `app/urls/issue.py:172-235`.
+//! `CommentReactionViewSet`), `reaction.py:25-85` (`IssueReactionViewSet`),
+//! `subscriber.py:16-104` (`IssueSubscriberViewSet`) and
+//! `worklog.py:32-168` (`IssueWorklogViewSet`) — 6 units over the
+//! 12 routes in `app/urls/issue.py:172-256`.
 //!
 //! Fixture ids: FX-ISS-17 (`rust-api/fixtures/app_issues/handlers/`) pins
 //! every behavior below; FX-ISS-21 (`guards/`) pins the enqueue payloads.
@@ -37,10 +39,10 @@
 //!
 //! Ported bugs (translate, don't redesign — also listed in the PR):
 //!
-//! * The unfiltered history branch sorts raw model instances with
-//!   `instance["created_at"]` (`activity.py:81-84`) and raises `TypeError`
-//!   into the generic 500 — but only when at least one row exists; an
-//!   empty feed sorts to `[]` and answers 200. Both halves ported.
+//! * The unfiltered history branch (retired by PIDASHCONV-1680): Django
+//!   `b4defc50f` serializes each side and merges the dicts sorted by
+//!   `created_at`, so the old `instance["created_at"]` `TypeError` →
+//!   generic 500 is gone on both backends; the merged feed answers 200.
 //! * Duplicate issue reactions surface the generic `IntegrityError` body
 //!   (`{"error": "The payload is not valid"}`): unlike comment reactions,
 //!   the view catches nothing (`reaction.py:46-62`).
@@ -72,9 +74,19 @@ use chrono_tz::Tz;
 use serde_json::{Map, Value};
 use sqlx::Row;
 
+use crate::edge;
+use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
+use pidash_compat::datetime::{render_date, render_datetime_in, render_rfc3339_in};
+use pidash_compat::db::is_integrity_error;
+use pidash_compat::py::{py_float_repr_probed, py_str_value, python_dumps};
+use pidash_compat::response::{empty_response, json_response};
+use pidash_compat::validate::uuid_from_json_int;
 use pidash_db::app_pages::strip::ml_strip_tags;
+use pidash_db::entity::comment_hooks::description_stripped_for;
+use pidash_services::domain::comments as comment_domain;
+use pidash_services::v1_projects::tasks::model_activity_kwargs;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -114,23 +126,32 @@ pub const COMMENT_REACTIONS_PATH: &str =
 /// `CommentReactionViewSet` destroy (`app/urls/issue.py:232-236`).
 pub const COMMENT_REACTION_PATH: &str =
     "/api/workspaces/{slug}/projects/{project_id}/comments/{comment_id}/reactions/{reaction_code}/";
+/// `IssueWorklogViewSet` collection (`app/urls/issue.py:241-244`).
+pub const WORKLOGS_PATH: &str =
+    "/api/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/worklogs/";
+/// `IssueWorklogViewSet` detail (`app/urls/issue.py:245-256`).
+pub const WORKLOG_PATH: &str =
+    "/api/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/worklogs/{pk}/";
 
-/// Register the ten engage routes. Owned methods serve from Rust; every
-/// other method on these paths falls through to Django (its
+/// Register the twelve engage routes. Owned methods serve from Rust;
+/// every other method on these paths falls through to Django (its
 /// 405-after-auth, `HEAD`, and metadata responses live there).
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route(HISTORY_PATH, owned(axum::routing::get(history), &["GET"]))
+        .route(
+            HISTORY_PATH,
+            edge::owned(axum::routing::get(history), &["GET"]),
+        )
         .route(
             COMMENTS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(comment_list).post(comment_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             COMMENT_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(comment_retrieve)
                     .put(comment_update)
                     .patch(comment_partial_update)
@@ -140,18 +161,18 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             SUBSCRIBERS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(subscriber_list).post(subscriber_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             SUBSCRIBER_PATH,
-            owned(axum::routing::delete(subscriber_destroy), &["DELETE"]),
+            edge::owned(axum::routing::delete(subscriber_destroy), &["DELETE"]),
         )
         .route(
             SUBSCRIBE_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(subscription_status)
                     .post(subscribe)
                     .delete(unsubscribe),
@@ -160,58 +181,42 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             REACTIONS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(issue_reaction_list).post(issue_reaction_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             REACTION_PATH,
-            owned(axum::routing::delete(issue_reaction_destroy), &["DELETE"]),
+            edge::owned(axum::routing::delete(issue_reaction_destroy), &["DELETE"]),
         )
         .route(
             COMMENT_REACTIONS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(comment_reaction_list).post(comment_reaction_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             COMMENT_REACTION_PATH,
-            owned(axum::routing::delete(comment_reaction_destroy), &["DELETE"]),
+            edge::owned(axum::routing::delete(comment_reaction_destroy), &["DELETE"]),
         )
-}
-
-/// An engage path: the owned methods serve from Rust, everything else
-/// falls through to Django (the social-handler cutover shape). `HEAD`
-/// and `TRACE` proxy explicitly: axum's implicit `HEAD`-from-`GET` and
-/// its empty 405 would otherwise diverge from Django (the plain
-/// `APIView` history route 405s `HEAD` as JSON after auth, while the
-/// viewset routes map `head` onto `get` — `viewsets.py:105-106` — and
-/// `TRACE` 405s as JSON everywhere).
-fn owned(
-    methods: axum::routing::MethodRouter<AppState>,
-    owned: &[&str],
-) -> axum::routing::MethodRouter<AppState> {
-    let mut router = methods;
-    for other in [
-        "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE",
-    ] {
-        if owned.contains(&other) {
-            continue;
-        }
-        router = match other {
-            "GET" => router.get(crate::edge::proxy),
-            "POST" => router.post(crate::edge::proxy),
-            "PUT" => router.put(crate::edge::proxy),
-            "PATCH" => router.patch(crate::edge::proxy),
-            "DELETE" => router.delete(crate::edge::proxy),
-            "HEAD" => router.head(crate::edge::proxy),
-            "TRACE" => router.trace(crate::edge::proxy),
-            _ => router.options(crate::edge::proxy),
-        };
-    }
-    router
+        .route(
+            WORKLOGS_PATH,
+            edge::owned(
+                axum::routing::get(worklog_list).post(worklog_create),
+                &["GET", "POST"],
+            ),
+        )
+        .route(
+            WORKLOG_PATH,
+            edge::owned(
+                axum::routing::get(worklog_retrieve)
+                    .patch(worklog_partial_update)
+                    .delete(worklog_destroy),
+                &["GET", "PATCH", "DELETE"],
+            ),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -227,10 +232,14 @@ pub(crate) enum Denial {
     Forbidden,
     /// 403, DRF `PermissionDenied` (class-permission denials).
     ForbiddenDetail,
+    /// 403, `{"error": ...}` (view-inline refusals like `_can_log`).
+    ForbiddenError(String),
     /// 404, `ObjectDoesNotExist` branch (bare `.get()` misses).
     NotFound,
     /// 404, `get_object_or_404` over comments (retrieve / PUT misses).
     NotFoundDetail,
+    /// 404, `get_object_or_404` over worklogs (retrieve misses).
+    NotFoundWorklog,
     /// 404, `{"detail": "Project not found"}` (project-kwarg rewrite miss).
     ProjectNotFound,
     /// 400, `{"detail": ...}` (JSON `ParseError`).
@@ -243,8 +252,8 @@ pub(crate) enum Denial {
     BadJson(Value),
     /// 415, `UnsupportedMediaType` (content negotiation).
     UnsupportedMediaType(String),
-    /// 413, `RequestBodySizeLimitMiddleware` past 5 MiB.
-    RequestTooLarge,
+    /// 502, truncated request-body read (the shared bad-gateway shape).
+    TruncatedBody,
     /// 500, generic branch.
     ServerError,
 }
@@ -256,6 +265,11 @@ const VIEWSET_FORBIDDEN_BODY: &str =
 /// the model (`django/shortcuts.py`), rendered under lowercase
 /// `detail` — verified against live Django.
 const COMMENT_NOT_FOUND_BODY: &str = r#"{"detail":"No IssueComment matches the given query."}"#;
+
+/// DRF `get_object_or_404` over worklogs: same `Http404` shape as the
+/// comment twin, naming this model — verified against live Django
+/// (PIDASHCONV-1676 byte probe).
+const WORKLOG_NOT_FOUND_BODY: &str = r#"{"detail":"No IssueWorklog matches the given query."}"#;
 
 impl Denial {
     fn status_and_body(&self) -> (StatusCode, String) {
@@ -271,6 +285,7 @@ impl Denial {
             Denial::ForbiddenDetail => (StatusCode::FORBIDDEN, VIEWSET_FORBIDDEN_BODY.to_owned()),
             Denial::NotFound => (StatusCode::NOT_FOUND, super::NOT_FOUND_BODY.to_owned()),
             Denial::NotFoundDetail => (StatusCode::NOT_FOUND, COMMENT_NOT_FOUND_BODY.to_owned()),
+            Denial::NotFoundWorklog => (StatusCode::NOT_FOUND, WORKLOG_NOT_FOUND_BODY.to_owned()),
             Denial::ProjectNotFound => (
                 StatusCode::NOT_FOUND,
                 super::PROJECT_NOT_FOUND_BODY.to_owned(),
@@ -278,6 +293,10 @@ impl Denial {
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
                 format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            Denial::ForbiddenError(message) => (
+                StatusCode::FORBIDDEN,
+                format!("{{\"error\":{}}}", json_string(message)),
             ),
             Denial::BadError(message) => (
                 StatusCode::BAD_REQUEST,
@@ -295,9 +314,9 @@ impl Denial {
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
-            Denial::RequestTooLarge => (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                r#"{"error":"REQUEST_BODY_TOO_LARGE","detail":"The size of the request body exceeds the maximum allowed size."}"#.to_owned(),
+            Denial::TruncatedBody => (
+                StatusCode::BAD_GATEWAY,
+                crate::edge::BAD_GATEWAY_BODY.to_owned(),
             ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -325,24 +344,6 @@ fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
-/// Render `body` (already exact JSON bytes) with an explicit status.
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("engage json response")
-}
-
-/// DRF's 204: empty body with the JSON content type.
-fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::empty())
-        .expect("engage empty response")
-}
-
 fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
     state
         .pools()
@@ -361,11 +362,6 @@ fn integrity_denial(error: sqlx::Error) -> Denial {
     }
     let _ = error;
     Denial::ServerError
-}
-
-/// True when the failure is an integrity violation (SQLSTATE class 23).
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if db.code().is_some_and(|code| code.starts_with("23")))
 }
 
 // ---------------------------------------------------------------------------
@@ -794,35 +790,21 @@ fn cell_opt_date(
 /// `iso-8601` format: ISO-8601 in the request's zone with `+00:00`
 /// rewritten to `Z` (serializer kernel rule).
 fn render_dt(dt: &chrono::DateTime<chrono::Utc>, tz: &Tz) -> String {
-    crate::serializer::render_datetime_in(&dt.fixed_offset(), tz)
+    render_datetime_in(dt, tz)
 }
 
 fn render_dt_opt(dt: Option<chrono::DateTime<chrono::Utc>>, tz: &Tz) -> Option<String> {
     dt.map(|dt| render_dt(&dt, tz))
 }
 
-/// Render a `row_to_json` timestamptz string (RFC 3339) the same way.
-fn render_dt_str(raw: &str, tz: &Tz) -> Result<String, Denial> {
-    let dt = chrono::DateTime::parse_from_rfc3339(raw).map_err(|_| Denial::ServerError)?;
-    Ok(crate::serializer::render_datetime_in(&dt, tz))
-}
-
 fn render_dt_str_opt(raw: Option<String>, tz: &Tz) -> Result<Option<String>, Denial> {
-    raw.map(|text| render_dt_str(&text, tz)).transpose()
-}
-
-/// DRF `DateField` wire format.
-fn render_date(date: &chrono::NaiveDate) -> String {
-    date.format("%Y-%m-%d").to_string()
+    raw.map(|text| render_rfc3339_in(&text, tz).map_err(|_| Denial::ServerError))
+        .transpose()
 }
 
 // ---------------------------------------------------------------------------
 // Request bodies (DRF JSON parsing)
 // ---------------------------------------------------------------------------
-
-/// Django's `DATA_UPLOAD_MAX_MEMORY_SIZE` (5 MiB): past it the
-/// `RequestBodySizeLimitMiddleware` answers 413 before the view runs.
-const MAX_BODY: usize = 5_242_880;
 
 /// Engage form semantics for the shared body negotiator: the two
 /// `ArrayField`s arrive as arrays; `access`/`speaker_type` (not
@@ -836,7 +818,7 @@ const ENGAGE_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
 /// Read the request body the way DRF does: content negotiation (JSON /
 /// form / multipart, 415 otherwise), empty → `{}`, malformed JSON →
 /// `ParseError` 400, non-object JSON → the `non_field_errors` 400.
-/// Past 5 MiB → the middleware 413.
+/// Over-limit bodies never reach here (`BodyLimitLayer` 413'd them).
 ///
 /// Form notes: `comment_json` form strings are JSON-*parsed* (DRF
 /// `JSONString` — `""` → "Value must be valid JSON."); blank form
@@ -855,9 +837,9 @@ struct RequestBody {
 
 async fn read_body(req: axum::extract::Request) -> Result<RequestBody, Denial> {
     let (parts, body) = req.into_parts();
-    let bytes = axum::body::to_bytes(body, MAX_BODY)
+    let bytes = read_request_bytes(body)
         .await
-        .map_err(|_| Denial::RequestTooLarge)?;
+        .map_err(|_| Denial::TruncatedBody)?;
     match shared_body::negotiate_body(&parts.headers, &bytes, &ENGAGE_BODY_SPEC) {
         Ok(shared_body::NegotiatedBody::Empty) => Ok(RequestBody {
             map: Map::new(),
@@ -1134,81 +1116,6 @@ fn json_type_name(value: &Value) -> &'static str {
 // `json.dumps` with CPython defaults (Celery `requested_data` payloads)
 // ---------------------------------------------------------------------------
 
-/// `json.dumps(value)`: `separators=(', ', ': ')`, `ensure_ascii=True`,
-/// insertion-ordered keys. Same implementation as the social handlers'
-/// `python_dumps` (convergent copy; that module's is private).
-fn python_dumps(value: &serde_json::Value) -> String {
-    let mut out = String::new();
-    python_dump_into(&mut out, value);
-    out
-}
-
-fn python_dump_into(out: &mut String, value: &serde_json::Value) {
-    match value {
-        serde_json::Value::Null => out.push_str("null"),
-        serde_json::Value::Bool(true) => out.push_str("true"),
-        serde_json::Value::Bool(false) => out.push_str("false"),
-        serde_json::Value::Number(number) => out.push_str(&number.to_string()),
-        serde_json::Value::String(text) => python_dump_str(out, text),
-        serde_json::Value::Array(items) => {
-            out.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_into(out, item);
-            }
-            out.push(']');
-        }
-        serde_json::Value::Object(map) => {
-            out.push('{');
-            for (index, (key, item)) in map.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_str(out, key);
-                out.push_str(": ");
-                python_dump_into(out, item);
-            }
-            out.push('}');
-        }
-    }
-}
-
-/// CPython `py_encode_basestring_ascii`.
-fn python_dump_str(out: &mut String, text: &str) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            ch if (ch as u32) < 0x20 || (ch as u32) == 0x7F => {
-                out.push_str(&format!("\\u{:04x}", ch as u32));
-            }
-            ch if (ch as u32) > 0x7E => {
-                let code = ch as u32;
-                if code > 0xFFFF {
-                    let v = code - 0x10000;
-                    out.push_str(&format!(
-                        "\\u{:04x}\\u{:04x}",
-                        0xD800 + (v >> 10),
-                        0xDC00 + (v & 0x3FF)
-                    ));
-                } else {
-                    out.push_str(&format!("\\u{code:04x}"));
-                }
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
-}
-
 // Comment `save()` computes `comment_stripped` through
 // `pi_dash.utils.html_processor.strip_tags` (`MLStripper`,
 // `db/models/issue.py:606`; `""` stays `""`) — the shared
@@ -1217,209 +1124,6 @@ fn python_dump_str(out: &mut String, text: &str) {
 // ---------------------------------------------------------------------------
 // CPython value semantics (`str` / `repr` / `==` / float rendering)
 // ---------------------------------------------------------------------------
-
-/// CPython `repr(float)`: the shortest spelling that round-trips,
-/// `.0` for integral plain values, `e±XX` exponents with a sign and
-/// at least two digits, exponent form outside `[1e-4, 1e16)`.
-/// Verified live: `77.0` → `"77.0"`, `1e16` → `"1e+16"`,
-/// `1e-5` → `"1e-05"` — plus a 116-value CPython oracle unit test.
-///
-/// Render precisions 1..=19 and take the first that parses back to
-/// `value` (greedy right-trimming from a long rendering is unsound:
-/// intermediate prefixes can round to a neighbor while a shorter one
-/// hits — e.g. `1.5e-07`), then lay out per the CPython magnitude
-/// rule.
-fn py_float_repr(value: f64) -> String {
-    if value.is_nan() {
-        return "nan".to_owned();
-    }
-    if value.is_infinite() {
-        return if value > 0.0 {
-            "inf".to_owned()
-        } else {
-            "-inf".to_owned()
-        };
-    }
-    if value == 0.0 {
-        return if value.is_sign_negative() {
-            "-0.0".to_owned()
-        } else {
-            "0.0".to_owned()
-        };
-    }
-    for precision in 1..=19usize {
-        let rendered = format!("{value:.dec$e}", dec = precision - 1);
-        if rendered.parse::<f64>().ok() == Some(value) {
-            return layout_py_float(&rendered, value);
-        }
-    }
-    // Unreachable in practice (17 significant digits always identify
-    // an f64); fall back to the longest rendering laid out.
-    layout_py_float(&format!("{value:.18e}"), value)
-}
-
-/// Lay out a `d.dddde±xx` rendering per the CPython magnitude rule
-/// (plain inside `[1e-4, 1e16)`, exponent outside).
-fn layout_py_float(rendered: &str, value: f64) -> String {
-    let (mantissa, exp) = match rendered.split_once(['e', 'E']) {
-        Some((mantissa, exp)) => (mantissa, exp.parse::<i32>().unwrap_or(0)),
-        None => (rendered, 0),
-    };
-    let negative = mantissa.starts_with('-');
-    let digits: String = mantissa.chars().filter(|ch| ch.is_ascii_digit()).collect();
-    let digits = digits.trim_start_matches('0');
-    let digits = digits.trim_end_matches('0');
-    let digits = if digits.is_empty() { "0" } else { digits };
-    // Decimal exponent of `0.digits × 10^E`.
-    let point_at = mantissa
-        .find('.')
-        .map(|pos| pos - usize::from(negative))
-        .unwrap_or_else(|| mantissa.len() - usize::from(negative));
-    let exp10 = exp + point_at as i32;
-    let abs = value.abs();
-    let mut out = String::new();
-    if negative {
-        out.push('-');
-    }
-    if (1e-4..1e16).contains(&abs) {
-        // Plain layout.
-        if exp10 <= 0 {
-            out.push_str("0.");
-            out.push_str(&"0".repeat((-exp10) as usize));
-            out.push_str(digits);
-        } else if exp10 as usize >= digits.len() {
-            out.push_str(digits);
-            out.push_str(&"0".repeat(exp10 as usize - digits.len()));
-            out.push_str(".0");
-        } else {
-            let at = exp10 as usize;
-            out.push_str(&digits[..at]);
-            out.push('.');
-            out.push_str(&digits[at..]);
-        }
-        return out;
-    }
-    // Exponent layout: `d[.ddd]e±XX`.
-    let head: String = digits.chars().take(1).collect();
-    let tail: String = digits.chars().skip(1).collect();
-    out.push_str(&head);
-    if !tail.is_empty() {
-        out.push('.');
-        out.push_str(&tail);
-    }
-    let exp = exp10 - 1;
-    out.push('e');
-    out.push(if exp < 0 { '-' } else { '+' });
-    let mag = exp.abs().to_string();
-    if mag.len() < 2 {
-        out.push('0');
-    }
-    out.push_str(&mag);
-    out
-}
-
-/// CPython `str()` over a parsed JSON value: `None` / `True` / `False`,
-/// decimal ints, [`py_float_repr`] floats, raw strings, and — for
-/// containers — brackets with `repr()` elements (verified live:
-/// `"['INTERNAL']"`, `"{'a': 1}"`).
-fn py_str_value(value: &Value) -> String {
-    match value {
-        Value::Null => "None".to_owned(),
-        Value::Bool(true) => "True".to_owned(),
-        Value::Bool(false) => "False".to_owned(),
-        Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                int.to_string()
-            } else if let Some(uint) = number.as_u64() {
-                uint.to_string()
-            } else if number.is_f64() {
-                match number.as_f64() {
-                    Some(float) => py_float_repr(float),
-                    None => number.to_string(),
-                }
-            } else {
-                // Arbitrary-precision integers past `u64`: full digits,
-                // like CPython `str(int)` (never the lossy `as_f64`).
-                number.to_string()
-            }
-        }
-        Value::String(text) => text.clone(),
-        Value::Array(items) => {
-            let inner: Vec<String> = items.iter().map(py_repr_value).collect();
-            format!("[{}]", inner.join(", "))
-        }
-        Value::Object(map) => {
-            let inner: Vec<String> = map
-                .iter()
-                .map(|(key, item)| format!("{}: {}", py_repr_string(key), py_repr_value(item)))
-                .collect();
-            format!("{{{}}}", inner.join(", "))
-        }
-    }
-}
-
-/// CPython `repr()` over a parsed JSON value (container elements and dict
-/// keys use this; see [`py_str_value`]).
-fn py_repr_value(value: &Value) -> String {
-    match value {
-        Value::String(text) => py_repr_string(text),
-        Value::Array(items) => {
-            let inner: Vec<String> = items.iter().map(py_repr_value).collect();
-            format!("[{}]", inner.join(", "))
-        }
-        Value::Object(map) => {
-            let inner: Vec<String> = map
-                .iter()
-                .map(|(key, item)| format!("{}: {}", py_repr_string(key), py_repr_value(item)))
-                .collect();
-            format!("{{{}}}", inner.join(", "))
-        }
-        other => py_str_value(other),
-    }
-}
-
-/// CPython `repr()` of a string: single quotes unless the text holds a
-/// single quote but no double quote (then double quotes), with the
-/// short escapes plus `\xhh` / `\uhhhh` / `\Uhhhhhhhh` for
-/// non-printables (controls, DEL, C1, non-space whitespace; format and
-/// unassigned codepoints stay literal — an accepted approximation, only
-/// reachable inside choice/UUID error text).
-fn py_repr_string(text: &str) -> String {
-    let use_double = text.contains('\'') && !text.contains('"');
-    let quote = if use_double { '"' } else { '\'' };
-    let mut out = String::with_capacity(text.len() + 2);
-    out.push(quote);
-    for ch in text.chars() {
-        if ch == quote {
-            out.push('\\');
-            out.push(ch);
-            continue;
-        }
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            ch if ch.is_control()
-                || (ch as u32) == 0x7f
-                || ((ch as u32) >= 0x80 && (ch as u32) < 0xa0)
-                || (ch.is_whitespace() && ch != ' ') =>
-            {
-                let code = ch as u32;
-                if code < 0x100 {
-                    out.push_str(&format!("\\x{code:02x}"));
-                } else if code < 0x10000 {
-                    out.push_str(&format!("\\u{code:04x}"));
-                } else {
-                    out.push_str(&format!("\\U{code:08x}"));
-                }
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push(quote);
-    out
-}
 
 /// CPython `==` over parsed JSON values (the sync-lock and
 /// `_changes_on_save` comparisons): `True == 1`, `1 == 1.0`, objects
@@ -1465,14 +1169,14 @@ fn json_number_to_f64(number: &serde_json::Number) -> Option<f64> {
         .or_else(|| number.as_f64())
 }
 
-/// Rewrite every float in a parsed body to its [`py_float_repr`]
+/// Rewrite every float in a parsed body to its [`py_float_repr_probed`]
 /// literal (kept as a `Number`, so ints stay ints and dumps/responses
 /// render the CPython spelling: `1e16` in, `1e+16` out).
 fn normalize_parse_floats(value: &mut Value) {
     match value {
         Value::Number(number) if number.is_f64() => {
             if let Some(float) = number.as_f64() {
-                let literal = py_float_repr(float);
+                let literal = py_float_repr_probed(float);
                 if let Ok(Value::Number(replacement)) = serde_json::from_str::<Value>(&literal) {
                     *number = replacement;
                 }
@@ -1497,11 +1201,8 @@ fn normalize_parse_floats(value: &mut Value) {
 // Tasks: best-effort publishing through the queue
 // ---------------------------------------------------------------------------
 
-/// `issue_activity` Celery wire name (bare `@shared_task` default:
-/// `bgtasks/issue_activities_task.py:1503-1504`).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
-/// `model_activity` Celery wire name (`bgtasks/webhook_task.py:463-464`).
-pub const MODEL_ACTIVITY_TASK: &str = "pi_dash.bgtasks.webhook_task.model_activity";
+/// Re-exports of the canonical [`pidash_services::domain::activity`] task names.
+pub use pidash_services::domain::activity::{ISSUE_ACTIVITY_TASK, MODEL_ACTIVITY_TASK};
 
 /// Enqueue a worker message for the worker to forward to the broker
 /// (Python-owned task). Best-effort: without a queue the response still
@@ -1542,13 +1243,15 @@ async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &str, pk: &uuid::Uuid) 
 }
 
 /// `base_host(request, is_app=True)` (`utils/host.py:17-67`): the app
-/// origin for task kwargs, never the inbound host.
+/// origin for task kwargs, never the inbound host. Empty strings fall
+/// through like Python's `or` (PIDASHCONV-1587).
 fn app_origin(state: &AppState) -> String {
-    if let Some(url) = state.settings().urls.app_base_url.clone() {
-        return url;
+    let urls = &state.settings().urls;
+    if let Some(url) = urls.app_base_url.as_deref().filter(|s| !s.is_empty()) {
+        return url.to_owned();
     }
-    if let Some(url) = state.settings().urls.web_url.clone() {
-        return url;
+    if let Some(url) = urls.web_url.as_deref().filter(|s| !s.is_empty()) {
+        return url.to_owned();
     }
     "http://localhost".to_owned()
 }
@@ -2708,33 +2411,6 @@ fn check_uuid(
     }
 }
 
-/// `uuid.UUID(int=…)` over a JSON integer: non-negatives below 2¹²⁸
-/// only (negatives and huge values raise `ValueError`).
-fn uuid_from_json_int(number: &serde_json::Number) -> Option<uuid::Uuid> {
-    if let Some(int) = number.as_i64() {
-        if int < 0 {
-            return None;
-        }
-        return Some(uuid::Uuid::from_u128(int as u128));
-    }
-    if let Some(uint) = number.as_u64() {
-        // `u64` always fits the 128-bit space.
-        let _ = uint;
-        return number
-            .to_string()
-            .parse::<u128>()
-            .ok()
-            .map(uuid::Uuid::from_u128);
-    }
-    // Arbitrary-precision integers past `u64`: `UUID(int=…)` accepts
-    // anything below 2¹²⁸.
-    number
-        .to_string()
-        .parse::<u128>()
-        .ok()
-        .map(uuid::Uuid::from_u128)
-}
-
 /// `uuid.UUID(hex=…)` over a string: dashed, plain-hex, braced, and
 /// `urn:uuid:` spellings (all four probed live through the PK path).
 fn uuid_from_json_hex(text: &str) -> Option<uuid::Uuid> {
@@ -3771,8 +3447,10 @@ async fn render_comment_reaction_map(
         deleted_at: render_dt_str_opt(opt_str(map, "deleted_at")?, tz)?,
         workspace: req_str(map, "workspace_id")?,
         project: req_str(map, "project_id")?,
-        created_at: render_dt_str(&req_str(map, "created_at")?, tz)?,
-        updated_at: render_dt_str(&req_str(map, "updated_at")?, tz)?,
+        created_at: render_rfc3339_in(&req_str(map, "created_at")?, tz)
+            .map_err(|_| Denial::ServerError)?,
+        updated_at: render_rfc3339_in(&req_str(map, "updated_at")?, tz)
+            .map_err(|_| Denial::ServerError)?,
         created_by: opt_str(map, "created_by_id")?.or(opt_str(map, "created_by")?),
         updated_by: opt_str(map, "updated_by_id")?.or(opt_str(map, "updated_by")?),
     })
@@ -4385,6 +4063,17 @@ async fn history(
     }
 }
 
+/// The merged read's sort key: Django subscripts each serialized dict
+/// (`entry["created_at"]`), so a missing key raises into the generic
+/// 500 — unreachable here (both renderers always emit it), mapped to
+/// `ServerError` all the same.
+fn rendered_created_at(value: &Value) -> Result<&str, Denial> {
+    value
+        .get("created_at")
+        .and_then(Value::as_str)
+        .ok_or(Denial::ServerError)
+}
+
 async fn history_inner(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -4484,10 +4173,12 @@ async fn history_inner(
             serde_json::to_string(&out).map_err(|_| Denial::ServerError)
         }
         _ => {
-            // The default branch sorts RAW instances with
-            // `instance["created_at"]`: a `TypeError` → generic 500 on the
-            // first row — but an empty feed sorts to `[]` and answers
-            // 200. Evaluation order is activities first, then comments.
+            // The merged read (`activity.py:88-103`): serialize each
+            // side with its own renderer first, then merge the plain
+            // values and sort stably by the rendered `created_at` —
+            // ties keep chain order, activities first. The intake
+            // prefetch rides every branch now, so the merged read
+            // carries it too.
             let mut binder = Binder::new();
             let mut sql = history_activities_sql(&mut binder, slug, *issue_id, *user_id, None);
             if let Some(ts) = created_after {
@@ -4498,8 +4189,18 @@ async fn history_inner(
                 );
             }
             let activities = fetch_positional_rows(pool, &sql, binder.values()).await?;
+            let mut intake: Option<IntakeOwned> = None;
             if !activities.is_empty() {
-                return Err(Denial::ServerError);
+                let mut binder = Binder::new();
+                let sql = history_intake_prefetch_sql(&mut binder, &[*issue_id]);
+                let intake_rows = fetch_positional_rows(pool, &sql, binder.values()).await?;
+                if let Some(row) = intake_rows.first() {
+                    intake = Some(IntakeOwned {
+                        source: cell_opt_string(row, 1)?,
+                        source_email: cell_opt_string(row, 2)?,
+                        extra: cell_json(row, 3)?,
+                    });
+                }
             }
             let mut binder = Binder::new();
             let mut sql = history_comments_sql(&mut binder, slug, *issue_id, *user_id, None);
@@ -4511,10 +4212,45 @@ async fn history_inner(
                 );
             }
             let comments = fetch_positional_rows(pool, &sql, binder.values()).await?;
+            let mut grouped: HashMap<uuid::Uuid, Vec<CommentReactionView>> = HashMap::new();
             if !comments.is_empty() {
-                return Err(Denial::ServerError);
+                let mut ids = Vec::with_capacity(comments.len());
+                for row in &comments {
+                    ids.push(cell_uuid(row, C_ID)?);
+                }
+                let mut binder = Binder::new();
+                let sql = history_reactions_prefetch_sql(&mut binder, &ids);
+                let prefetched = fetch_positional_rows(pool, &sql, binder.values()).await?;
+                for row in &prefetched {
+                    let view = render_prefetched_reaction(row, tz)?;
+                    grouped
+                        .entry(cell_uuid(row, R_COMMENT_ID)?)
+                        .or_default()
+                        .push(view);
+                }
             }
-            Ok("[]".to_owned())
+            // Chain order is activities first, then comments, and
+            // `sort_by` is stable — equal `created_at` strings keep
+            // that order, exactly `sorted(chain(...), key=...)`.
+            let mut merged: Vec<(String, Value)> =
+                Vec::with_capacity(activities.len() + comments.len());
+            for row in &activities {
+                let intake = intake.as_ref().map(|owned| IntakeOwned {
+                    source: owned.source.clone(),
+                    source_email: owned.source_email.clone(),
+                    extra: owned.extra.clone(),
+                });
+                let rendered = render_history_activity(pool, row, tz, intake).await?;
+                merged.push((rendered_created_at(&rendered)?.to_owned(), rendered));
+            }
+            for row in &comments {
+                let reactions = grouped.remove(&cell_uuid(row, C_ID)?).unwrap_or_default();
+                let rendered = render_history_comment(pool, row, tz, reactions).await?;
+                merged.push((rendered_created_at(&rendered)?.to_owned(), rendered));
+            }
+            merged.sort_by(|left, right| left.0.cmp(&right.0));
+            let out: Vec<Value> = merged.into_iter().map(|(_, value)| value).collect();
+            serde_json::to_string(&out).map_err(|_| Denial::ServerError)
         }
     }
 }
@@ -4556,90 +4292,6 @@ fn splice_and(sql: &str, predicate: &str) -> String {
         Some(idx) => format!("{} AND {} {}", &sql[..idx], predicate, &sql[idx..]),
         None => format!("{sql} WHERE {predicate}"),
     }
-}
-
-/// Insert a `descriptions` row: the comment-save side effect
-/// (`db/models/issue.py:613-617`). Audit comes from the comment save
-/// (`created_by` is the acting user on create, the comment's original
-/// creator on an update-mint; `updated_by` is set only on the latter);
-/// `stripped` arrives already resolved (`None` when the html is empty —
-/// `Description.save` recomputes it).
-#[allow(clippy::too_many_arguments)]
-async fn insert_description(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    workspace_id: &uuid::Uuid,
-    project_id: &uuid::Uuid,
-    created_by: Option<&uuid::Uuid>,
-    updated_by: Option<&uuid::Uuid>,
-    json: &Value,
-    html: &str,
-    stripped: Option<&str>,
-    now: &chrono::DateTime<chrono::Utc>,
-) -> Result<uuid::Uuid, Denial> {
-    let id = uuid::Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            workspace_id, project_id, description_json, description_html, description_binary, description_stripped)
-           VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, NULL, $10)"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(now)
-    .bind(created_by)
-    .bind(updated_by)
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(json)
-    .bind(html)
-    .bind(stripped)
-    .execute(&mut **tx)
-    .await
-    .map_err(integrity_denial)?;
-    Ok(id)
-}
-
-/// Insert an `issue_comments` row: every concrete column, Django's
-/// `objects.create` shape.
-#[allow(clippy::too_many_arguments)]
-async fn insert_comment(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    base: &CommentBaseOwned,
-) -> Result<(), Denial> {
-    sqlx::query(
-        r#"INSERT INTO issue_comments (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            project_id, workspace_id, comment_stripped, comment_json, comment_html, description_id,
-            attachments, labels, issue_id, actor_id, access, external_source, external_id,
-            speaker_type, speaker_label, speaker_agent_run_id, edited_at, parent_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)"#,
-    )
-    .bind(base.id)
-    .bind(base.created_at)
-    .bind(base.updated_at)
-    .bind(base.created_by)
-    .bind(base.updated_by)
-    .bind(base.deleted_at)
-    .bind(base.project_id)
-    .bind(base.workspace_id)
-    .bind(&base.stripped)
-    .bind(&base.json)
-    .bind(&base.html)
-    .bind(base.description_id)
-    .bind(&base.attachments)
-    .bind(&base.labels)
-    .bind(base.issue_id)
-    .bind(base.actor_id)
-    .bind(&base.access)
-    .bind(base.external_source.as_deref())
-    .bind(base.external_id.as_deref())
-    .bind(&base.speaker_type)
-    .bind(&base.speaker_label)
-    .bind(base.speaker_run_id)
-    .bind(base.edited_at)
-    .bind(base.parent_id)
-    .execute(&mut **tx)
-    .await
-    .map_err(integrity_denial)?;
-    Ok(())
 }
 
 /// The `IssueComment.save()` update path (`issue.py:598-647`): recompute
@@ -4684,43 +4336,55 @@ async fn save_comment_update(
     let stripped_changed = stripped != stored.stripped;
     let description_id = if description_id.is_none() {
         // Unlinked (or cleared): mint a fresh Description over the new
-        // triple, `None`-when-empty stripped included.
-        let stripped_for_desc = if html.is_empty() {
-            None
-        } else {
-            Some(stripped.as_str())
+        // triple. `Description.objects.create` runs `Description.save`,
+        // which recomputes the stripped text with Django's own
+        // `strip_tags` (entities verbatim, `None`-when-empty —
+        // `description.py:23-29`), discarding the ML value the
+        // comment save passes (PIDASHCONV-1581 item 1).
+        let desc_stripped = description_stripped_for(Some(html.as_str()));
+        let desc = comment_domain::DescriptionValues {
+            id: uuid::Uuid::new_v4(),
+            created_at: *now,
+            updated_at: *now,
+            created_by: stored.created_by,
+            updated_by: Some(*user_id),
+            workspace_id: stored.workspace_id,
+            project_id: stored.project_id,
+            json: &json,
+            html: &html,
+            stripped: desc_stripped.as_deref(),
         };
-        Some(
-            insert_description(
-                tx,
-                &stored.workspace_id,
-                &stored.project_id,
-                stored.created_by.as_ref(),
-                Some(user_id),
-                &json,
-                &html,
-                stripped_for_desc,
-                now,
-            )
-            .await?,
-        )
-    } else {
-        if html_changed || json_changed || stripped_changed {
-            // Queryset `update` bypasses `Description.save`: the values
-            // land verbatim (no `None`-when-empty recompute).
-            sqlx::query(
-                r#"UPDATE descriptions SET description_html = $1, description_stripped = $2,
-                   description_json = $3, updated_by_id = $4, updated_at = $5 WHERE id = $6"#,
-            )
-            .bind(&html)
-            .bind(&stripped)
-            .bind(&json)
-            .bind(user_id)
-            .bind(now)
-            .bind(description_id)
-            .execute(&mut **tx)
+        comment_domain::insert_description_values(&mut **tx, &desc)
             .await
-            .map_err(|_| Denial::ServerError)?;
+            .map_err(integrity_denial)?;
+        Some(desc.id)
+    } else {
+        // Queryset `update` bypasses `Description.save`: the values
+        // land verbatim (no `None`-when-empty recompute) — but only
+        // the changed subset syncs (`issue.py:637-646`, PIDASHCONV-1581
+        // item 2), so an unchanged field keeps the description row's
+        // own value even after a re-link.
+        if let Some(desc_id) = description_id {
+            if html_changed || json_changed || stripped_changed {
+                if html_changed {
+                    comment_domain::sync_description_html(&mut **tx, desc_id, &html)
+                        .await
+                        .map_err(|_| Denial::ServerError)?;
+                }
+                if stripped_changed {
+                    comment_domain::sync_description_stripped(&mut **tx, desc_id, &stripped)
+                        .await
+                        .map_err(|_| Denial::ServerError)?;
+                }
+                if json_changed {
+                    comment_domain::sync_description_json(&mut **tx, desc_id, &json)
+                        .await
+                        .map_err(|_| Denial::ServerError)?;
+                }
+                comment_domain::touch_synced_description(&mut **tx, desc_id, Some(*user_id), *now)
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
+            }
         }
         description_id
     };
@@ -4750,34 +4414,30 @@ async fn save_comment_update(
         edited_at: edited_at.unwrap_or(stored.edited_at),
         parent_id: parent.unwrap_or(stored.parent_id),
     };
-    sqlx::query(
-        r#"UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, deleted_at = $3,
-           comment_stripped = $4, comment_json = $5, comment_html = $6, description_id = $7,
-           attachments = $8, labels = $9, actor_id = $10, access = $11,
-           external_source = $12, external_id = $13, speaker_type = $14, speaker_label = $15,
-           speaker_agent_run_id = $16, edited_at = $17, parent_id = $18
-           WHERE id = $19"#,
+    comment_domain::save_app_comment_update(
+        &mut **tx,
+        &comment_domain::AppCommentUpdate {
+            id: base.id,
+            updated_at: base.updated_at,
+            updated_by: base.updated_by,
+            deleted_at: base.deleted_at,
+            stripped: &base.stripped,
+            json: &base.json,
+            html: &base.html,
+            description_id: base.description_id,
+            attachments: &base.attachments,
+            labels: &base.labels,
+            actor_id: base.actor_id,
+            access: &base.access,
+            external_source: base.external_source.as_deref(),
+            external_id: base.external_id.as_deref(),
+            speaker_type: &base.speaker_type,
+            speaker_label: &base.speaker_label,
+            speaker_agent_run_id: base.speaker_run_id,
+            edited_at: base.edited_at,
+            parent_id: base.parent_id,
+        },
     )
-    .bind(base.updated_at)
-    .bind(base.updated_by)
-    .bind(base.deleted_at)
-    .bind(&base.stripped)
-    .bind(&base.json)
-    .bind(&base.html)
-    .bind(base.description_id)
-    .bind(&base.attachments)
-    .bind(&base.labels)
-    .bind(base.actor_id)
-    .bind(&base.access)
-    .bind(base.external_source.as_deref())
-    .bind(base.external_id.as_deref())
-    .bind(&base.speaker_type)
-    .bind(&base.speaker_label)
-    .bind(base.speaker_run_id)
-    .bind(base.edited_at)
-    .bind(base.parent_id)
-    .bind(base.id)
-    .execute(&mut **tx)
     .await
     .map_err(integrity_denial)?;
     Ok(base)
@@ -5079,43 +4739,70 @@ async fn comment_create(
         Ok(tx) => tx,
         Err(_) => return Denial::ServerError.into_response(),
     };
-    if let Err(error) = insert_comment(&mut tx, &base).await {
-        return error.into_response();
+    // Domain twins, in Django order. The description stripped value
+    // is the `Description.save` recompute (Django's own `strip_tags`,
+    // entities verbatim, `None`-when-empty — `description.py:23-29`),
+    // not the comment's ML text (PIDASHCONV-1581 item 1).
+    // `deleted_at` binds validated client input, as before.
+    let desc_stripped = description_stripped_for(Some(base.html.as_str()));
+    let rows = comment_domain::CommentRows {
+        id: base.id,
+        description_id: uuid::Uuid::new_v4(),
+        created_at: base.created_at,
+        updated_at: base.updated_at,
+        desc_created_at: now,
+        desc_updated_at: now,
+        workspace_id: base.workspace_id,
+        project_id: base.project_id,
+        issue_id: base.issue_id,
+        actor_id: base.actor_id,
+        created_by: base.created_by,
+        updated_by: base.updated_by,
+        deleted_at: base.deleted_at,
+        html: &base.html,
+        json: &base.json,
+        stripped: &base.stripped,
+        desc_stripped: desc_stripped.as_deref(),
+        access: &base.access,
+        speaker_type: &base.speaker_type,
+        speaker_label: &base.speaker_label,
+        speaker_agent_run_id: base.speaker_run_id,
+        external_id: base.external_id.as_deref(),
+        external_source: base.external_source.as_deref(),
+        parent_id: base.parent_id,
+        attachments: &base.attachments,
+        labels: &base.labels,
+        edited_at: base.edited_at,
+    };
+    if let Err(error) = comment_domain::insert_comment_row(&mut *tx, &rows).await {
+        return integrity_denial(error).into_response();
     }
-    let stripped_for_desc = if base.html.is_empty() {
-        None
-    } else {
-        Some(base.stripped.as_str())
+    let desc = comment_domain::DescriptionValues {
+        id: rows.description_id,
+        created_at: now,
+        updated_at: now,
+        created_by: Some(user_id),
+        updated_by: None,
+        workspace_id,
+        project_id,
+        json: &base.json,
+        html: &base.html,
+        stripped: rows.desc_stripped,
     };
-    let description_id = match insert_description(
-        &mut tx,
-        &workspace_id,
-        &project_id,
-        Some(&user_id),
-        None,
-        &base.json,
-        &base.html,
-        stripped_for_desc,
-        &now,
-    )
-    .await
-    {
-        Ok(id) => id,
-        Err(error) => return error.into_response(),
-    };
+    if let Err(error) = comment_domain::insert_description_values(&mut *tx, &desc).await {
+        return integrity_denial(error).into_response();
+    }
     // `update_fields=["description_id"]` writes that column only: the
     // `auto_now` stamp is skipped (in memory AND in the row — Django's
     // well-known `update_fields` gotcha), while `BaseModel.save` still
     // assigns `updated_by` on the in-memory instance.
-    if sqlx::query("UPDATE issue_comments SET description_id = $1 WHERE id = $2")
-        .bind(description_id)
-        .bind(base.id)
-        .execute(&mut *tx)
+    if comment_domain::link_comment_description(&mut *tx, base.id, rows.description_id)
         .await
         .is_err()
     {
         return Denial::ServerError.into_response();
     }
+    let description_id = rows.description_id;
     if tx.commit().await.is_err() {
         return Denial::ServerError.into_response();
     }
@@ -5150,23 +4837,23 @@ async fn comment_create(
     activity.insert("notification".to_owned(), Value::Bool(true));
     activity.insert("origin".to_owned(), Value::String(origin.clone()));
     enqueue_kwargs(&pool, ISSUE_ACTIVITY_TASK, activity).await;
-    let mut model = Map::new();
-    model.insert(
-        "model_name".to_owned(),
-        Value::String("issue_comment".to_owned()),
-    );
-    model.insert("model_id".to_owned(), Value::String(base.id.to_string()));
     // Task bytes render the raw QueryDict (PIDASHCONV-763): form list
     // fields dump as last-wins scalars. In place — validation is done
     // and `body` moves into the payload below.
     if is_html {
         shared_body::project_list_scalars(&mut body, ENGAGE_BODY_SPEC.list_fields);
     }
-    model.insert("requested_data".to_owned(), Value::Object(body));
-    model.insert("current_instance".to_owned(), Value::Null);
-    model.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
-    model.insert("slug".to_owned(), Value::String(slug));
-    model.insert("origin".to_owned(), Value::String(origin));
+    // Shared `model_activity` kernel (PIDASHCONV-1623): the same seven
+    // keys in the same order (`current_instance` is `None` on create).
+    let model = model_activity_kwargs(
+        "issue_comment",
+        &base.id.to_string(),
+        Value::Object(body),
+        None,
+        &user_id.to_string(),
+        &slug,
+        Some(&origin),
+    );
     enqueue_kwargs(&pool, MODEL_ACTIVITY_TASK, model).await;
     match serde_json::to_string(&rendered) {
         Ok(text) => json_response(StatusCode::CREATED, text),
@@ -5505,25 +5192,23 @@ async fn comment_partial_update(
     activity.insert("notification".to_owned(), Value::Bool(true));
     activity.insert("origin".to_owned(), Value::String(origin.clone()));
     enqueue_kwargs(&pool, ISSUE_ACTIVITY_TASK, activity).await;
-    let mut model = Map::new();
-    model.insert(
-        "model_name".to_owned(),
-        Value::String("issue_comment".to_owned()),
-    );
-    model.insert("model_id".to_owned(), Value::String(pk.to_string()));
     // Same QueryDict projection as `requested_data` above (PIDASHCONV-763).
     // In place — validation is done and `body` moves below.
     if is_html {
         shared_body::project_list_scalars(&mut body, ENGAGE_BODY_SPEC.list_fields);
     }
-    model.insert("requested_data".to_owned(), Value::Object(body));
-    model.insert(
-        "current_instance".to_owned(),
-        Value::String(current_instance),
+    // Shared `model_activity` kernel (PIDASHCONV-1623): the same seven
+    // keys in the same order (the before-image snapshot string rides
+    // `current_instance` on update).
+    let model = model_activity_kwargs(
+        "issue_comment",
+        &pk.to_string(),
+        Value::Object(body),
+        Some(&current_instance),
+        &user_id.to_string(),
+        &slug,
+        Some(&origin),
     );
-    model.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
-    model.insert("slug".to_owned(), Value::String(slug));
-    model.insert("origin".to_owned(), Value::String(origin));
     enqueue_kwargs(&pool, MODEL_ACTIVITY_TASK, model).await;
     match render_base_comment(&pool, &base, &tenant.timezone, None).await {
         Ok(value) => match serde_json::to_string(&value) {
@@ -6853,10 +6538,1036 @@ async fn subscription_status(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Worklogs
+// ---------------------------------------------------------------------------
+
+/// An owned `issue_worklogs` row: every column the
+/// `IssueWorklogSerializer` reads (`serializers/worklog.py:11-28` —
+/// `__all__` plus the `actor_detail` nest).
+struct WorklogBaseOwned {
+    id: uuid::Uuid,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    minutes: i32,
+    logged_on: chrono::NaiveDate,
+    note: String,
+    created_by: Option<uuid::Uuid>,
+    updated_by: Option<uuid::Uuid>,
+    project_id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+    issue_id: uuid::Uuid,
+    actor_id: Option<uuid::Uuid>,
+}
+
+impl WorklogBaseOwned {
+    fn from_map(map: &Map<String, Value>) -> Result<Self, Denial> {
+        let uuid = |key: &str| -> Result<uuid::Uuid, Denial> {
+            req_str(map, key)?
+                .parse::<uuid::Uuid>()
+                .map_err(|_| Denial::ServerError)
+        };
+        let opt_uuid = |key: &str| -> Result<Option<uuid::Uuid>, Denial> {
+            opt_str(map, key)?
+                .map(|raw| raw.parse::<uuid::Uuid>())
+                .transpose()
+                .map_err(|_| Denial::ServerError)
+        };
+        let dt = |key: &str| -> Result<chrono::DateTime<chrono::Utc>, Denial> {
+            let raw = req_str(map, key)?;
+            chrono::DateTime::parse_from_rfc3339(&raw)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|_| Denial::ServerError)
+        };
+        let opt_dt = |key: &str| -> Result<Option<chrono::DateTime<chrono::Utc>>, Denial> {
+            opt_str(map, key)?
+                .map(|raw| {
+                    chrono::DateTime::parse_from_rfc3339(&raw)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                })
+                .transpose()
+                .map_err(|_| Denial::ServerError)
+        };
+        let minutes = match map.get("minutes") {
+            Some(Value::Number(number)) => number
+                .as_i64()
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or(Denial::ServerError)?,
+            _ => return Err(Denial::ServerError),
+        };
+        let logged_on = chrono::NaiveDate::parse_from_str(&req_str(map, "logged_on")?, "%Y-%m-%d")
+            .map_err(|_| Denial::ServerError)?;
+        Ok(Self {
+            id: uuid("id")?,
+            created_at: dt("created_at")?,
+            updated_at: dt("updated_at")?,
+            deleted_at: opt_dt("deleted_at")?,
+            minutes,
+            logged_on,
+            note: req_str(map, "note")?,
+            created_by: opt_uuid("created_by_id")?.or(opt_uuid("created_by")?),
+            updated_by: opt_uuid("updated_by_id")?.or(opt_uuid("updated_by")?),
+            project_id: uuid("project_id")?,
+            workspace_id: uuid("workspace_id")?,
+            issue_id: uuid("issue_id")?,
+            actor_id: opt_uuid("actor_id")?.or(opt_uuid("actor")?),
+        })
+    }
+}
+
+/// The `IssueWorklogSerializer` shape in field order: the two declared
+/// fields (`id`, `actor_detail`) first, then the model columns
+/// (`worklog.py:11-28`, order verified against live Django).
+#[derive(Debug, serde::Serialize)]
+struct WorklogView {
+    id: String,
+    actor_detail: Option<Value>,
+    created_at: String,
+    updated_at: String,
+    deleted_at: Option<String>,
+    minutes: i32,
+    logged_on: String,
+    note: String,
+    created_by: Option<String>,
+    updated_by: Option<String>,
+    project: String,
+    workspace: String,
+    issue: String,
+    actor: Option<String>,
+}
+
+fn assemble_worklog_view(
+    base: &WorklogBaseOwned,
+    actor_detail: Option<Value>,
+    tz: &Tz,
+) -> WorklogView {
+    WorklogView {
+        id: base.id.to_string(),
+        actor_detail,
+        created_at: render_dt(&base.created_at, tz),
+        updated_at: render_dt(&base.updated_at, tz),
+        deleted_at: render_dt_opt(base.deleted_at, tz),
+        minutes: base.minutes,
+        logged_on: render_date(&base.logged_on),
+        note: base.note.clone(),
+        created_by: base.created_by.map(|id| id.to_string()),
+        updated_by: base.updated_by.map(|id| id.to_string()),
+        project: base.project_id.to_string(),
+        workspace: base.workspace_id.to_string(),
+        issue: base.issue_id.to_string(),
+        actor: base.actor_id.map(|id| id.to_string()),
+    }
+}
+
+/// Render one entry: the actor nest loads lazily (no actor join on any
+/// worklog statement), exactly like the serializer over a fresh
+/// instance. A null actor renders `"actor_detail": null` (DRF renders
+/// the nested serializer `None`).
+async fn render_worklog(
+    pool: &sqlx::PgPool,
+    base: &WorklogBaseOwned,
+    tz: &Tz,
+) -> Result<Value, Denial> {
+    let actor_detail = match base.actor_id {
+        None => None,
+        Some(id) => Some(
+            fetch_user_lite(pool, &id)
+                .await
+                .map(|row| user_lite_value(&row))??,
+        ),
+    };
+    let view = assemble_worklog_view(base, actor_detail, tz);
+    serde_json::to_value(&view).map_err(|_| Denial::ServerError)
+}
+
+/// Python `int(text, 10)` over ASCII digits: surrounding `str.strip()`,
+/// an optional sign, digits with single `_` separators between digits
+/// only. Saturates past `i64` (the min/max arms below keep their
+/// verdicts — any saturating magnitude is out of range either way).
+/// Non-ASCII decimal digits are rejected (Tier 3: `int()` accepts
+/// them; no Pi Dash client sends them).
+fn parse_worklog_int(text: &str) -> Option<i64> {
+    let text = text.trim_matches(is_py_strip_ws);
+    let (negative, digits) = match text.strip_prefix(['+', '-']) {
+        Some(rest) => (text.starts_with('-'), rest),
+        None => (false, text),
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut cleaned = String::with_capacity(digits.len());
+    let mut prev_underscore = true;
+    for ch in digits.chars() {
+        if ch == '_' {
+            if prev_underscore {
+                return None;
+            }
+            prev_underscore = true;
+            continue;
+        }
+        if !ch.is_ascii_digit() {
+            return None;
+        }
+        prev_underscore = false;
+        cleaned.push(ch);
+    }
+    if prev_underscore {
+        return None;
+    }
+    // Past i128 the verdict is already fixed: positive overflows the
+    // max arm, negative overflows the min arm.
+    let magnitude: i128 = match cleaned.parse() {
+        Ok(magnitude) => magnitude,
+        Err(_) => return Some(if negative { i64::MIN } else { i64::MAX }),
+    };
+    let signed = if negative { -magnitude } else { magnitude };
+    Some(signed.clamp(i64::MIN as i128, i64::MAX as i128) as i64)
+}
+
+/// Python `re` `\s` (for the `re_decimal` tail below): Rust
+/// `White_Space` plus U+001C-U+001F, like [`is_py_strip_ws`] (the
+/// remaining exotic Unicode spaces are Tier 3).
+fn is_re_space(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+}
+
+/// DRF `IntegerField` input for `minutes` (`fields.py:910-918`):
+/// `int(re_decimal.sub('', str(data)))` where `re_decimal` strips one
+/// trailing `.0*` + whitespace suffix — then the model
+/// `MinValueValidator(1)` and the field max 2147483647. Every arm below
+/// is probed against live Django: `" 90 "` / `90.0` / `"90.0"` /
+/// `"90."` / `"+90"` / `"1_0"` pass; `1.5` / `"9.5"` / `true` / `[1]` /
+/// `""` / `"_1"` / `"1__0"` fail invalid; `0` / `-30` / `-2**40` fail
+/// with only the min-1 message (no lower field bound rides along);
+/// `2**40` fails with only the max message; >1000-char strings fail
+/// "String value too large."
+fn check_worklog_minutes(
+    errors: &mut Map<String, Value>,
+    body: &Map<String, Value>,
+) -> Presence<i32> {
+    const MAX_STRING_LENGTH: usize = 1000;
+    let value = match body.get("minutes") {
+        None => return Presence::Missing,
+        Some(Value::Null) => {
+            push_error(errors, "minutes", "This field may not be null.".to_owned());
+            return Presence::Missing;
+        }
+        Some(value) => value,
+    };
+    let text: String = match value {
+        Value::String(text) => {
+            // `len(data)` counts code points, like Python (`fields.py:911`).
+            if text.chars().count() > MAX_STRING_LENGTH {
+                push_error(errors, "minutes", "String value too large.".to_owned());
+                return Presence::Missing;
+            }
+            text.clone()
+        }
+        Value::Number(number) => py_str_value(&Value::Number(number.clone())),
+        _ => {
+            push_error(errors, "minutes", "A valid integer is required.".to_owned());
+            return Presence::Missing;
+        }
+    };
+    // `re_decimal = re.compile(r'\.0*\s*$')`: only a trailing `.0*`
+    // suffix strips (the `$` anchors; only the last dot can match to
+    // the end).
+    let mut core = text.as_str();
+    if let Some(dot) = core.rfind('.') {
+        let (head, tail) = core.split_at(dot);
+        let zeros = tail[1..].trim_start_matches('0');
+        if zeros.trim_matches(is_re_space).is_empty() {
+            core = head;
+        }
+    }
+    let number = match parse_worklog_int(core) {
+        Some(number) => number,
+        None => {
+            push_error(errors, "minutes", "A valid integer is required.".to_owned());
+            return Presence::Missing;
+        }
+    };
+    if number < 1 {
+        push_error(
+            errors,
+            "minutes",
+            "Ensure this value is greater than or equal to 1.".to_owned(),
+        );
+        return Presence::Missing;
+    }
+    if number > 2_147_483_647 {
+        push_error(
+            errors,
+            "minutes",
+            "Ensure this value is less than or equal to 2147483647.".to_owned(),
+        );
+        return Presence::Missing;
+    }
+    Presence::Value(number as i32)
+}
+
+/// Python 3.12 `date.fromisoformat` as Django's `parse_date` meets it
+/// (`dateparse.py:67-78`): extended `YYYY-MM-DD`, basic `YYYYMMDD` and
+/// week `YYYY-Www-D` / `YYYYWwwD` — all strict, all verified against
+/// live Django, which rejects ordinal dates, padded input and year 0
+/// (`datetime.date` starts at year 1; chrono would accept year 0, so
+/// every arm below guards it explicitly).
+fn worklog_fromisodate(text: &str) -> Option<chrono::NaiveDate> {
+    let bytes = text.as_bytes();
+    // Extended `YYYY-MM-DD`.
+    if bytes.len() == 10 && bytes[4] == b'-' && bytes[7] == b'-' {
+        let year: i32 = text[0..4].parse().ok()?;
+        let month: u32 = text[5..7].parse().ok()?;
+        let day: u32 = text[8..10].parse().ok()?;
+        if year < 1 {
+            return None;
+        }
+        return chrono::NaiveDate::from_ymd_opt(year, month, day);
+    }
+    // Week `YYYY-Www-D`.
+    if bytes.len() == 10 && bytes[4] == b'-' && bytes[5] == b'W' && bytes[8] == b'-' {
+        let year: i32 = text[0..4].parse().ok()?;
+        let week: u32 = text[6..8].parse().ok()?;
+        let weekday: u32 = text[9..10].parse().ok()?;
+        if year < 1 {
+            return None;
+        }
+        let weekday = u8::try_from(weekday)
+            .ok()?
+            .checked_sub(1)
+            .and_then(|w| chrono::Weekday::try_from(w).ok())?;
+        return chrono::NaiveDate::from_isoywd_opt(year, week, weekday);
+    }
+    // Basic `YYYYMMDD` / week `YYYYWwwD`.
+    if bytes.len() == 8 && bytes.iter().all(|b| b.is_ascii_digit()) {
+        let year: i32 = text[0..4].parse().ok()?;
+        let month: u32 = text[4..6].parse().ok()?;
+        let day: u32 = text[6..8].parse().ok()?;
+        if year < 1 {
+            return None;
+        }
+        return chrono::NaiveDate::from_ymd_opt(year, month, day);
+    }
+    if bytes.len() == 8 && bytes[4] == b'W' {
+        let year: i32 = text[0..4].parse().ok()?;
+        let week: u32 = text[5..7].parse().ok()?;
+        let weekday: u32 = text[7..8].parse().ok()?;
+        if !text[0..4].bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if year < 1 {
+            return None;
+        }
+        let weekday = u8::try_from(weekday)
+            .ok()?
+            .checked_sub(1)
+            .and_then(|w| chrono::Weekday::try_from(w).ok())?;
+        return chrono::NaiveDate::from_isoywd_opt(year, week, weekday);
+    }
+    None
+}
+
+/// Django `date_re` fallback (`dateparse.py:13,76-78`):
+/// `(\d{4})-(\d{1,2})-(\d{1,2})$`, where `$` also matches just before
+/// ONE trailing newline (probed: `"2026-10-20\n"` passes,
+/// `"2026-10-20\r"` / `"\n2026-10-20"` fail). Well formatted but
+/// impossible dates fail too.
+fn worklog_date_re(text: &str) -> Option<chrono::NaiveDate> {
+    let core = text.strip_suffix('\n').unwrap_or(text);
+    let mut parts = core.split('-');
+    let (year, month, day) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    if year.len() != 4 || month.is_empty() || month.len() > 2 || day.is_empty() || day.len() > 2 {
+        return None;
+    }
+    if !year.bytes().all(|b| b.is_ascii_digit())
+        || !month.bytes().all(|b| b.is_ascii_digit())
+        || !day.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let year: i32 = year.parse().ok()?;
+    if year < 1 {
+        return None;
+    }
+    chrono::NaiveDate::from_ymd_opt(year, month.parse().ok()?, day.parse().ok()?)
+}
+
+/// DRF `DateField` input for `logged_on` (`fields.py:1231-1258` over
+/// `DATE_INPUT_FORMATS = [iso-8601]`): Django `parse_date` or the
+/// invalid message. Non-strings always miss; the parsed date renders
+/// back zero-padded (`"2026-1-5"` stores as `2026-01-05`).
+fn check_worklog_date(
+    errors: &mut Map<String, Value>,
+    body: &Map<String, Value>,
+) -> Presence<chrono::NaiveDate> {
+    const INVALID: &str = "Date has wrong format. Use one of these formats instead: YYYY-MM-DD.";
+    match body.get("logged_on") {
+        None => Presence::Missing,
+        Some(Value::Null) => {
+            push_error(
+                errors,
+                "logged_on",
+                "This field may not be null.".to_owned(),
+            );
+            Presence::Missing
+        }
+        Some(Value::String(text)) => {
+            match worklog_fromisodate(text).or_else(|| worklog_date_re(text)) {
+                Some(date) => Presence::Value(date),
+                None => {
+                    push_error(errors, "logged_on", INVALID.to_owned());
+                    Presence::Missing
+                }
+            }
+        }
+        _ => {
+            push_error(errors, "logged_on", INVALID.to_owned());
+            Presence::Missing
+        }
+    }
+}
+
+/// The validated worklog write triple: `minutes` + `logged_on`
+/// (required on create, skipped-when-missing on partial) and `note`
+/// (blankable, defaulting to `""` on create).
+#[derive(Debug, PartialEq)]
+struct WorklogAttrs {
+    minutes: Option<i32>,
+    logged_on: Option<chrono::NaiveDate>,
+    note: Option<String>,
+}
+
+/// Validate one worklog write body in serializer field order
+/// (`minutes`, `logged_on`, `note` — the error dict keeps it): every
+/// other input key is read-only or unknown, both ignored by DRF.
+/// `partial` selects create (missing → required errors + `""` note
+/// default) vs partial-update (missing → untouched) semantics.
+fn validate_worklog_input(body: &Map<String, Value>, partial: bool) -> Result<WorklogAttrs, Value> {
+    let mut errors = Map::new();
+    let minutes = match check_worklog_minutes(&mut errors, body) {
+        Presence::Value(minutes) => Some(minutes),
+        _ => {
+            if !partial && !body.contains_key("minutes") {
+                push_error(&mut errors, "minutes", "This field is required.".to_owned());
+            }
+            None
+        }
+    };
+    let logged_on = match check_worklog_date(&mut errors, body) {
+        Presence::Value(date) => Some(date),
+        _ => {
+            if !partial && !body.contains_key("logged_on") {
+                push_error(
+                    &mut errors,
+                    "logged_on",
+                    "This field is required.".to_owned(),
+                );
+            }
+            None
+        }
+    };
+    let note = match check_text(&mut errors, body, "note", None, false, true) {
+        Presence::Value(note) => Some(note),
+        Presence::Null => None,
+        Presence::Missing => {
+            if partial || !errors.is_empty() {
+                None
+            } else {
+                Some(String::new())
+            }
+        }
+    };
+    if errors.is_empty() {
+        Ok(WorklogAttrs {
+            minutes,
+            logged_on,
+            note,
+        })
+    } else {
+        Err(Value::Object(errors))
+    }
+}
+
+/// The `IssueWorklogViewSet.get_queryset` scope (`worklog.py:45-63`):
+/// tenant + issue filters, live project membership, unarchived
+/// project, newest first. Single-table select (the serializer reads no
+/// joined nest but the lazily-loaded actor), so the joined scope still
+/// decodes through the row maps. The member join excludes soft-deleted
+/// rows (the reverse-FK traversal uses the default manager).
+const WORKLOG_LIST_SQL: &str = "SELECT DISTINCT issue_worklogs.* FROM issue_worklogs INNER JOIN workspaces ON issue_worklogs.workspace_id = workspaces.id INNER JOIN projects ON issue_worklogs.project_id = projects.id INNER JOIN project_members ON projects.id = project_members.project_id WHERE issue_worklogs.deleted_at IS NULL AND workspaces.slug = $1 AND issue_worklogs.project_id = $2 AND issue_worklogs.issue_id = $3 AND project_members.member_id = $4 AND project_members.is_active AND project_members.deleted_at IS NULL AND projects.archived_at IS NULL ORDER BY issue_worklogs.created_at DESC";
+
+/// `IssueWorklogViewSet.list` (`worklog.py:45-63` over DRF's default):
+/// class `IsAuthenticated` only — outsiders list `[]`, every active
+/// project member reads, bare array, newest first.
+async fn worklog_list(
+    State(state): State<AppState>,
+    Path((slug, project_raw, issue_raw)): Path<(String, String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
+) -> Response {
+    let issue_id = match path_uuid(&issue_raw) {
+        Ok(id) => id,
+        Err(_) => return crate::edge::proxy(State(state), req).await,
+    };
+    let ctx = match read_context(&state, &slug, &project_raw, issue_id, extension).await {
+        Ok(ctx) => ctx,
+        Err(error) => return error.into_response(),
+    };
+    let rows = match fetch_all_objects(
+        &ctx.pool,
+        WORKLOG_LIST_SQL,
+        &[
+            SqlParam::Text(&ctx.slug),
+            SqlParam::Uuid(ctx.project_id),
+            SqlParam::Uuid(ctx.issue_id),
+            SqlParam::Uuid(ctx.user_id),
+        ],
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => return error.into_response(),
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let base = match row
+            .as_object()
+            .ok_or(Denial::ServerError)
+            .and_then(WorklogBaseOwned::from_map)
+        {
+            Ok(base) => base,
+            Err(error) => return error.into_response(),
+        };
+        match render_worklog(&ctx.pool, &base, &ctx.timezone).await {
+            Ok(value) => out.push(value),
+            Err(error) => return error.into_response(),
+        }
+    }
+    match serde_json::to_string(&out) {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(_) => Denial::ServerError.into_response(),
+    }
+}
+
+/// `IssueWorklogViewSet.retrieve`: `get_object` over the list queryset;
+/// a miss is the model-naming `Http404` detail body.
+async fn worklog_retrieve(
+    State(state): State<AppState>,
+    Path((slug, project_raw, issue_raw, pk_raw)): Path<(String, String, String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
+) -> Response {
+    let (issue_id, pk) = match (path_uuid(&issue_raw), path_uuid(&pk_raw)) {
+        (Ok(issue_id), Ok(pk)) => (issue_id, pk),
+        _ => return crate::edge::proxy(State(state), req).await,
+    };
+    let ctx = match read_context(&state, &slug, &project_raw, issue_id, extension).await {
+        Ok(ctx) => ctx,
+        Err(error) => return error.into_response(),
+    };
+    let sql = WORKLOG_LIST_SQL.replacen(
+        "ORDER BY issue_worklogs.created_at DESC",
+        "AND issue_worklogs.id = $5 ORDER BY issue_worklogs.created_at DESC",
+        1,
+    );
+    let rows = match fetch_all_objects(
+        &ctx.pool,
+        &sql,
+        &[
+            SqlParam::Text(&ctx.slug),
+            SqlParam::Uuid(ctx.project_id),
+            SqlParam::Uuid(ctx.issue_id),
+            SqlParam::Uuid(ctx.user_id),
+            SqlParam::Uuid(pk),
+        ],
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => return error.into_response(),
+    };
+    let Some(row) = rows.first() else {
+        return Denial::NotFoundWorklog.into_response();
+    };
+    let base = match row
+        .as_object()
+        .ok_or(Denial::ServerError)
+        .and_then(WorklogBaseOwned::from_map)
+    {
+        Ok(base) => base,
+        Err(error) => return error.into_response(),
+    };
+    match render_worklog(&ctx.pool, &base, &ctx.timezone).await {
+        Ok(value) => match serde_json::to_string(&value) {
+            Ok(body) => json_response(StatusCode::OK, body),
+            Err(_) => Denial::ServerError.into_response(),
+        },
+        Err(error) => error.into_response(),
+    }
+}
+
+/// `IssueWorklogViewSet._can_log` (`worklog.py:65-93`): any live
+/// project membership exists, and the caller is a project ADMIN, a
+/// workspace ADMIN, or a live assignee of the issue.
+async fn worklog_can_log(
+    pool: &sqlx::PgPool,
+    membership: &Membership,
+    issue_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> Result<bool, Denial> {
+    if membership.project_role.is_none() {
+        return Ok(false);
+    }
+    if membership.project_role == Some(20) || membership.workspace_role == Some(20) {
+        return Ok(true);
+    }
+    let assigned: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM issue_assignees WHERE issue_id = $1 AND assignee_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(issue_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(assigned.is_some())
+}
+
+/// The scoped `.get()` behind `partial_update` / `destroy`
+/// (`worklog.py:132,154`): default manager (soft-deleted rows miss),
+/// tenant-scoped, pk included.
+async fn fetch_scoped_worklog(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    issue_id: &uuid::Uuid,
+    pk: &uuid::Uuid,
+) -> Result<Option<WorklogBaseOwned>, Denial> {
+    let row = fetch_optional_object(
+        pool,
+        "SELECT issue_worklogs.* FROM issue_worklogs INNER JOIN workspaces ON (issue_worklogs.workspace_id = workspaces.id) WHERE (issue_worklogs.deleted_at IS NULL AND workspaces.slug = $1 AND issue_worklogs.project_id = $2 AND issue_worklogs.issue_id = $3 AND issue_worklogs.id = $4) LIMIT 1",
+        &[
+            SqlParam::Text(slug),
+            SqlParam::Uuid(*project_id),
+            SqlParam::Uuid(*issue_id),
+            SqlParam::Uuid(*pk),
+        ],
+    )
+    .await?;
+    row.map(|value| WorklogBaseOwned::from_map(obj(&value)?))
+        .transpose()
+}
+
+/// `IssueWorklogViewSet.create` (`worklog.py:95-128`): ADMIN + MEMBER
+/// gate, live-issue lookup, intake refusal, `_can_log`, validation,
+/// save (workspace backfilled from the project, actor forced to the
+/// caller), one `worklog.activity.created` enqueue — and no
+/// `model_activity` (the view imports only `issue_activity`).
+async fn worklog_create(
+    State(state): State<AppState>,
+    Path((slug, project_raw, issue_raw)): Path<(String, String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
+) -> Response {
+    let issue_id = match path_uuid(&issue_raw) {
+        Ok(id) => id,
+        Err(_) => return crate::edge::proxy(State(state), req).await,
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(error) => return error.into_response(),
+    };
+    let user_id = match actor_user_id(&pool, extension).await {
+        Ok(id) => id,
+        Err(error) => return error.into_response(),
+    };
+    let project_id = match resolve_project_id(&pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(error) => return error.into_response(),
+    };
+    let membership = match fetch_membership(&pool, &slug, &project_id, &user_id).await {
+        Ok(membership) => membership,
+        Err(error) => return error.into_response(),
+    };
+    if let Err(error) = check_allow(&membership, &[20, 15]) {
+        return error.into_response();
+    }
+    // `Issue.objects.get(pk=issue_id, project_id=project_id)`: default
+    // manager (soft-deleted rows miss), unscoped by workspace slug.
+    let issue: Option<(uuid::Uuid,)> = match sqlx::query_as(
+        "SELECT id FROM issues WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(issue_id)
+    .bind(project_id)
+    .fetch_optional(&pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if issue.is_none() {
+        return Denial::NotFound.into_response();
+    }
+    // The intake refusal precedes `_can_log` (`worklog.py:98-112`).
+    let intake: Option<(i32,)> = match sqlx::query_as(
+        "SELECT 1 FROM intake_issues INNER JOIN workspaces ON intake_issues.workspace_id = workspaces.id WHERE intake_issues.issue_id = $1 AND intake_issues.status IN (-2, 0) AND workspaces.slug = $2 AND intake_issues.project_id = $3 AND intake_issues.deleted_at IS NULL",
+    )
+    .bind(issue_id)
+    .bind(&slug)
+    .bind(project_id)
+    .fetch_optional(&pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if intake.is_some() {
+        return Denial::BadError("Time cannot be logged on an intake item.".to_owned())
+            .into_response();
+    }
+    match worklog_can_log(&pool, &membership, &issue_id, &user_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return Denial::ForbiddenError(
+                "Only admins and assignees can log time on this work item.".to_owned(),
+            )
+            .into_response();
+        }
+        Err(error) => return error.into_response(),
+    }
+    let tenant = match tenant_context(&pool, &user_id).await {
+        Ok(tenant) => tenant,
+        Err(error) => return error.into_response(),
+    };
+    let request_body = match read_body(req).await {
+        Ok(request_body) => request_body,
+        Err(error) => return error.into_response(),
+    };
+    let RequestBody { map: body, .. } = request_body;
+    let attrs = match validate_worklog_input(&body, false) {
+        Ok(attrs) => attrs,
+        Err(errors) => return Denial::BadJson(errors).into_response(),
+    };
+    // `serializer.save(project_id=..., issue_id=..., actor=user)`:
+    // `ProjectBaseModel.save` backfills the workspace from the project
+    // (lazy forward-FK read — soft-deleted projects count) and
+    // `BaseModel.save` stamps `created_by`, leaving `updated_by` null.
+    let workspace_id = match fetch_project_workspace_unguarded(&pool, &project_id).await {
+        Ok(id) => id,
+        Err(error) => return error.into_response(),
+    };
+    // Full create: validation guarantees both (missing pushed
+    // required errors above).
+    let (Some(minutes), Some(logged_on)) = (attrs.minutes, attrs.logged_on) else {
+        return Denial::ServerError.into_response();
+    };
+    let now = chrono::Utc::now();
+    let base = WorklogBaseOwned {
+        id: uuid::Uuid::new_v4(),
+        created_at: now,
+        updated_at: now,
+        deleted_at: None,
+        minutes,
+        logged_on,
+        note: attrs.note.unwrap_or_default(),
+        created_by: Some(user_id),
+        updated_by: None,
+        project_id,
+        workspace_id,
+        issue_id,
+        actor_id: Some(user_id),
+    };
+    if let Err(error) = sqlx::query(
+        r#"INSERT INTO issue_worklogs (id, created_at, updated_at, deleted_at, minutes,
+            logged_on, note, created_by_id, updated_by_id, project_id, workspace_id,
+            issue_id, actor_id)
+           VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, NULL, $8, $9, $10, $11)"#,
+    )
+    .bind(base.id)
+    .bind(base.created_at)
+    .bind(base.updated_at)
+    .bind(base.minutes)
+    .bind(base.logged_on)
+    .bind(&base.note)
+    .bind(base.created_by)
+    .bind(base.project_id)
+    .bind(base.workspace_id)
+    .bind(base.issue_id)
+    .bind(base.actor_id)
+    .execute(&pool)
+    .await
+    {
+        return integrity_denial(error).into_response();
+    }
+    let rendered = match render_worklog(&pool, &base, &tenant.timezone).await {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
+    };
+    let epoch = chrono::Utc::now().timestamp();
+    let mut activity = Map::new();
+    activity.insert(
+        "type".to_owned(),
+        Value::String("worklog.activity.created".to_owned()),
+    );
+    // `requested_data` is the full serialized response
+    // (`json.dumps(serializer.data)`), `current_instance` is null.
+    activity.insert(
+        "requested_data".to_owned(),
+        Value::String(python_dumps(&rendered)),
+    );
+    activity.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
+    activity.insert("issue_id".to_owned(), Value::String(issue_id.to_string()));
+    activity.insert(
+        "project_id".to_owned(),
+        Value::String(project_id.to_string()),
+    );
+    activity.insert("current_instance".to_owned(), Value::Null);
+    activity.insert("epoch".to_owned(), Value::Number(epoch.into()));
+    activity.insert("notification".to_owned(), Value::Bool(true));
+    activity.insert("origin".to_owned(), Value::String(app_origin(&state)));
+    enqueue_kwargs(&pool, ISSUE_ACTIVITY_TASK, activity).await;
+    match serde_json::to_string(&rendered) {
+        Ok(text) => json_response(StatusCode::CREATED, text),
+        Err(_) => Denial::ServerError.into_response(),
+    }
+}
+
+/// `IssueWorklogViewSet.partial_update` (`worklog.py:130-150`): ADMIN +
+/// creator gate, scoped lookup, partial validation (missing fields stay
+/// untouched, an empty body still stamps `updated_at`/`updated_by`
+/// through the save), one `worklog.activity.updated` enqueue carrying
+/// the raw body and the before-image render.
+async fn worklog_partial_update(
+    State(state): State<AppState>,
+    Path((slug, project_raw, issue_raw, pk_raw)): Path<(String, String, String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
+) -> Response {
+    let (issue_id, pk) = match (path_uuid(&issue_raw), path_uuid(&pk_raw)) {
+        (Ok(issue_id), Ok(pk)) => (issue_id, pk),
+        _ => return crate::edge::proxy(State(state), req).await,
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(error) => return error.into_response(),
+    };
+    let user_id = match actor_user_id(&pool, extension).await {
+        Ok(id) => id,
+        Err(error) => return error.into_response(),
+    };
+    let project_id = match resolve_project_id(&pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(error) => return error.into_response(),
+    };
+    if let Err(error) =
+        check_admin_creator(&pool, &slug, &project_id, &user_id, "issue_worklogs", &pk).await
+    {
+        return error.into_response();
+    }
+    let stored = match fetch_scoped_worklog(&pool, &slug, &project_id, &issue_id, &pk).await {
+        Ok(Some(base)) => base,
+        Ok(None) => return Denial::NotFound.into_response(),
+        Err(error) => return error.into_response(),
+    };
+    let tenant = match tenant_context(&pool, &user_id).await {
+        Ok(tenant) => tenant,
+        Err(error) => return error.into_response(),
+    };
+    let request_body = match read_body(req).await {
+        Ok(request_body) => request_body,
+        Err(error) => return error.into_response(),
+    };
+    let RequestBody { map: body, is_html } = request_body;
+    // Task bytes render the raw QueryDict (PIDASHCONV-763): form list
+    // fields dump as last-wins scalars. A projected COPY — validation
+    // below keeps the arrays.
+    let requested_data = if is_html {
+        let mut projected = body.clone();
+        shared_body::project_list_scalars(&mut projected, ENGAGE_BODY_SPEC.list_fields);
+        python_dumps(&Value::Object(projected))
+    } else {
+        python_dumps(&Value::Object(body.clone()))
+    };
+    let current_rendered = match render_worklog(&pool, &stored, &tenant.timezone).await {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
+    };
+    let current_instance = python_dumps(&current_rendered);
+    let attrs = match validate_worklog_input(&body, true) {
+        Ok(attrs) => attrs,
+        Err(errors) => return Denial::BadJson(errors).into_response(),
+    };
+    let now = chrono::Utc::now();
+    let base = WorklogBaseOwned {
+        minutes: attrs.minutes.unwrap_or(stored.minutes),
+        logged_on: attrs.logged_on.unwrap_or(stored.logged_on),
+        note: attrs.note.unwrap_or_else(|| stored.note.clone()),
+        updated_at: now,
+        updated_by: Some(user_id),
+        ..stored
+    };
+    if let Err(error) = sqlx::query(
+        "UPDATE issue_worklogs SET minutes = $1, logged_on = $2, note = $3, updated_at = $4, updated_by_id = $5 WHERE id = $6",
+    )
+    .bind(base.minutes)
+    .bind(base.logged_on)
+    .bind(&base.note)
+    .bind(base.updated_at)
+    .bind(base.updated_by)
+    .bind(base.id)
+    .execute(&pool)
+    .await
+    {
+        return integrity_denial(error).into_response();
+    }
+    let epoch = chrono::Utc::now().timestamp();
+    let origin = app_origin(&state);
+    let mut activity = Map::new();
+    activity.insert(
+        "type".to_owned(),
+        Value::String("worklog.activity.updated".to_owned()),
+    );
+    activity.insert(
+        "requested_data".to_owned(),
+        Value::String(requested_data.clone()),
+    );
+    activity.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
+    activity.insert("issue_id".to_owned(), Value::String(issue_id.to_string()));
+    activity.insert(
+        "project_id".to_owned(),
+        Value::String(project_id.to_string()),
+    );
+    activity.insert(
+        "current_instance".to_owned(),
+        Value::String(current_instance.clone()),
+    );
+    activity.insert("epoch".to_owned(), Value::Number(epoch.into()));
+    activity.insert("notification".to_owned(), Value::Bool(true));
+    activity.insert("origin".to_owned(), Value::String(origin));
+    enqueue_kwargs(&pool, ISSUE_ACTIVITY_TASK, activity).await;
+    match render_worklog(&pool, &base, &tenant.timezone).await {
+        Ok(value) => match serde_json::to_string(&value) {
+            Ok(text) => json_response(StatusCode::OK, text),
+            Err(_) => Denial::ServerError.into_response(),
+        },
+        Err(error) => error.into_response(),
+    }
+}
+
+/// `IssueWorklogViewSet.destroy` (`worklog.py:152-168`): ADMIN +
+/// creator gate, soft delete (the `SoftDeleteModel` default — the row
+/// stays with `deleted_at` stamped, firing
+/// `soft_delete_related_objects` before the `worklog.activity.deleted`
+/// enqueue, which carries `{"worklog_id": pk}` and the before-image).
+async fn worklog_destroy(
+    State(state): State<AppState>,
+    Path((slug, project_raw, issue_raw, pk_raw)): Path<(String, String, String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
+) -> Response {
+    let (issue_id, pk) = match (path_uuid(&issue_raw), path_uuid(&pk_raw)) {
+        (Ok(issue_id), Ok(pk)) => (issue_id, pk),
+        _ => return crate::edge::proxy(State(state), req).await,
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(error) => return error.into_response(),
+    };
+    let user_id = match actor_user_id(&pool, extension).await {
+        Ok(id) => id,
+        Err(error) => return error.into_response(),
+    };
+    let project_id = match resolve_project_id(&pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(error) => return error.into_response(),
+    };
+    if let Err(error) =
+        check_admin_creator(&pool, &slug, &project_id, &user_id, "issue_worklogs", &pk).await
+    {
+        return error.into_response();
+    }
+    let stored = match fetch_scoped_worklog(&pool, &slug, &project_id, &issue_id, &pk).await {
+        Ok(Some(base)) => base,
+        Ok(None) => return Denial::NotFound.into_response(),
+        Err(error) => return error.into_response(),
+    };
+    // The request body is never read on this path (not even for
+    // errors); drop `req` without parsing.
+    let _ = req;
+    let tenant = match tenant_context(&pool, &user_id).await {
+        Ok(tenant) => tenant,
+        Err(error) => return error.into_response(),
+    };
+    let current_rendered = match render_worklog(&pool, &stored, &tenant.timezone).await {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
+    };
+    let now = chrono::Utc::now();
+    if let Err(error) = soft_delete_row(&pool, "issue_worklogs", &stored.id, &user_id, &now).await {
+        return error.into_response();
+    }
+    let mut requested = Map::new();
+    requested.insert("worklog_id".to_owned(), Value::String(pk.to_string()));
+    let epoch = chrono::Utc::now().timestamp();
+    let mut activity = Map::new();
+    activity.insert(
+        "type".to_owned(),
+        Value::String("worklog.activity.deleted".to_owned()),
+    );
+    activity.insert(
+        "requested_data".to_owned(),
+        Value::String(python_dumps(&Value::Object(requested))),
+    );
+    activity.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
+    activity.insert("issue_id".to_owned(), Value::String(issue_id.to_string()));
+    activity.insert(
+        "project_id".to_owned(),
+        Value::String(project_id.to_string()),
+    );
+    activity.insert(
+        "current_instance".to_owned(),
+        Value::String(python_dumps(&current_rendered)),
+    );
+    activity.insert("epoch".to_owned(), Value::Number(epoch.into()));
+    activity.insert("notification".to_owned(), Value::Bool(true));
+    activity.insert("origin".to_owned(), Value::String(app_origin(&state)));
+    // Order mirrors `worklog.py:156-167`: `worklog.delete()` (which
+    // fires `soft_delete_related_objects` from `db/mixins.py:78`) runs
+    // BEFORE the `issue_activity.delay`.
+    enqueue_soft_delete(&pool, "issueworklog", &stored.id).await;
+    enqueue_kwargs(&pool, ISSUE_ACTIVITY_TASK, activity).await;
+    empty_response(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1587): an empty `APP_BASE_URL` falls through to
+    /// `WEB_URL`. (The localhost fallback for unset-everywhere is a
+    /// separate, deliberate-looking deviation — out of scope.)
+    #[test]
+    fn app_origin_falls_through_empty_strings() {
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(app_origin(&state), web);
+        let state = origin_state(Some("https://app.example.invalid"), Some(web));
+        assert_eq!(app_origin(&state), "https://app.example.invalid");
+        let state = origin_state(Some(""), Some(""));
+        assert_eq!(app_origin(&state), "http://localhost");
+    }
 
     /// The positional offsets transcribe the builder select lists; pin
     /// the column counts so drift fails loudly.
@@ -6935,19 +7646,6 @@ mod tests {
     }
 
     #[test]
-    fn python_dumps_matches_cpython() {
-        let value = json!({"b": [1, "x\ny"], "a": Value::Null, "u": "caf\u{e9}"});
-        assert_eq!(
-            python_dumps(&value),
-            r#"{"b": [1, "x\ny"], "a": null, "u": "caf\u00e9"}"#
-        );
-        assert_eq!(
-            python_dumps(&json!({"comment_id": "abc"})),
-            r#"{"comment_id": "abc"}"#
-        );
-    }
-
-    #[test]
     fn parse_body_shapes_match_drf() {
         assert!(parse_body(b"").unwrap().is_empty());
         let map = parse_body(br#"{"reaction": "+1"}"#).unwrap();
@@ -6971,17 +7669,10 @@ mod tests {
         }
     }
 
+    // The `str`/`repr` asserts moved to `pidash_compat::py` with
+    // `py_str_value` (PIDASHCONV-1623); the equality asserts stay.
     #[test]
-    fn py_value_semantics_match_cpython() {
-        assert_eq!(py_str_value(&Value::Null), "None");
-        assert_eq!(py_str_value(&json!(true)), "True");
-        assert_eq!(py_str_value(&json!(77)), "77");
-        assert_eq!(py_str_value(&json!("internal")), "internal");
-        assert_eq!(py_str_value(&json!(["INTERNAL"])), "['INTERNAL']");
-        assert_eq!(py_str_value(&json!({"a": 1})), "{'a': 1}");
-        assert_eq!(py_repr_value(&json!("don't")), "\"don't\"");
-        assert_eq!(py_repr_value(&json!("say \"hi\"")), "'say \"hi\"'");
-        assert_eq!(py_repr_value(&json!("a\nb")), "'a\\nb'");
+    fn py_json_eq_matches_cpython() {
         assert!(py_json_eq(&json!(true), &json!(1)));
         assert!(py_json_eq(&json!(1), &json!(1.0)));
         assert!(py_json_eq(
@@ -7072,136 +7763,6 @@ mod tests {
         ] {
             assert!(!is_valid_url(bad), "{bad}");
         }
-    }
-
-    #[test]
-    fn py_float_repr_matches_cpython_oracle() {
-        // CPython `repr` over edge + random f64s (seed 654): parsing
-        // each spelling must reproduce it exactly.
-        for text in [
-            "0.0",
-            "-0.0",
-            "1.0",
-            "-1.0",
-            "0.1",
-            "-0.1",
-            "0.5",
-            "4.5",
-            "77.0",
-            "1e+16",
-            "-1e+16",
-            "1000000000000000.0",
-            "9999999999999998.0",
-            "0.0001",
-            "9.9999e-05",
-            "1e-05",
-            "1.5e-07",
-            "1.23",
-            "123.456",
-            "1.1",
-            "2.2",
-            "0.3",
-            "1e+300",
-            "1.7976931348623157e+308",
-            "5e-324",
-            "2.2250738585072014e-308",
-            "1e+21",
-            "123456789.12345679",
-            "0.00010000000001",
-            "3.141592653589793",
-            "100.0",
-            "1000000.0",
-            "1000000.0",
-            "1234567890000000.0",
-            "1.0000000000000002",
-            "2.0000000000000004",
-            "3.1969326087014466e+19",
-            "-648.4462954478394",
-            "2.7257935151841477e+19",
-            "579.4076537460154",
-            "8.527238532839549e+19",
-            "-913.3955515106092",
-            "8.896161802149298e+19",
-            "-715.3670336061672",
-            "3.588060462234755e+19",
-            "435.64988671404353",
-            "7.755666951748308e+19",
-            "-689.2765889623878",
-            "-4.330334504373883e+19",
-            "-816.9972547462557",
-            "-7.212821885073056e+19",
-            "-1679.6052986552581",
-            "3.2445178360908284e+19",
-            "-204.03326175159876",
-            "-8.659247373857653e+18",
-            "1208.8390033969868",
-            "-4.647260496917678e+19",
-            "2331.221077226743",
-            "8.5327628826864e+19",
-            "1001.189002479752",
-            "-8.234019824386068e+19",
-            "-495.73367760484905",
-            "9.352414724532316e+19",
-            "346.0259035320625",
-            "-7.1336788737953415e+19",
-            "-956.186083621841",
-            "-7.678412411071945e+19",
-            "743.1470832768787",
-            "-2.5012238015527862e+19",
-            "-151.39194187298384",
-            "5.543620478186435e+19",
-            "-402.4753197702496",
-            "-9.86234000471552e+19",
-            "-1687.6484285668644",
-            "-1.2613779274247045e+19",
-            "295.5344355622931",
-            "-4.708884174573601e+18",
-            "143.2457353449458",
-            "9.272274689849475e+19",
-            "782.9417038372993",
-            "-2.365484285927129e+19",
-            "213.25467548742972",
-            "-4.4287013372000076e+19",
-            "-75.27500601863878",
-            "7.3002688662026355e+19",
-            "-617.7363223782181",
-            "2.8132118711075865e+19",
-            "642.045311657188",
-            "-4.9760184971786445e+19",
-            "-493.23593034675645",
-            "-5.92865673699603e+19",
-            "1271.787532431871",
-            "8.862838211447603e+18",
-            "-102.63510865808792",
-            "2.4099300144340025e+19",
-            "-2281.3345229971756",
-            "-5.346252045636608e+19",
-            "2132.4041415069833",
-            "-6.090543569457227e+19",
-            "1863.0368182127777",
-            "6.0170257457244996e+19",
-            "-182.18689918793999",
-            "6.525439356052767e+17",
-            "-1362.5914219885572",
-            "5.1796889258414604e+19",
-            "-319.24195464384303",
-            "-8.253703237953189e+19",
-            "287.06500363070336",
-            "-2.591301605754159e+19",
-            "1392.893079979731",
-            "2.655060505738576e+18",
-            "2036.4351785039644",
-            "7.427269069333139e+19",
-            "1347.4365990857013",
-            "-8.434791962696217e+19",
-            "-186.0700574057584",
-        ] {
-            let value: f64 = text.parse().unwrap();
-            assert_eq!(py_float_repr(value), text, "{text}");
-        }
-        assert_eq!(py_float_repr(f64::NAN), "nan");
-        assert_eq!(py_float_repr(f64::INFINITY), "inf");
-        assert_eq!(py_float_repr(f64::NEG_INFINITY), "-inf");
     }
 
     #[test]
@@ -7960,6 +8521,314 @@ mod tests {
         assert_eq!(map["labels"], json!("b"));
         assert_eq!(map["attachments"], json!("f2"));
         assert_eq!(map["reaction"], json!("hooray"));
+    }
+}
+
+#[cfg(test)]
+mod worklog_tests {
+    use super::{
+        assemble_worklog_view, check_worklog_date, check_worklog_minutes, validate_worklog_input,
+        Presence, WorklogBaseOwned, WORKLOG_NOT_FOUND_BODY,
+    };
+    use chrono_tz::Tz;
+    use serde_json::{json, Map, Value};
+
+    fn body(value: Value) -> Map<String, Value> {
+        value.as_object().expect("object").clone()
+    }
+
+    fn minutes_of(payload: Value) -> Result<Option<i32>, Value> {
+        let body = body(payload);
+        let mut errors = Map::new();
+        let out = match check_worklog_minutes(&mut errors, &body) {
+            Presence::Value(minutes) => Some(minutes),
+            _ => None,
+        };
+        if errors.is_empty() {
+            Ok(out)
+        } else {
+            Err(Value::Object(errors))
+        }
+    }
+
+    // Every arm probed against live Django (PIDASHCONV-1676).
+    #[test]
+    fn minutes_grammar_matches_drf() {
+        for (input, want) in [
+            (json!(90), 90),
+            (json!("90"), 90),
+            (json!(" 90 "), 90),
+            (json!(90.0), 90),
+            (json!("90.0"), 90),
+            (json!("90."), 90),
+            (json!("+90"), 90),
+            (json!("1_0"), 10),
+        ] {
+            assert_eq!(
+                minutes_of(json!({"minutes": input.clone(), "logged_on": "2026-10-20"})),
+                Ok(Some(want)),
+                "input {input}"
+            );
+        }
+        for input in [
+            json!(1.5),
+            json!("9.5"),
+            json!(true),
+            json!([1]),
+            json!(""),
+            json!("   "),
+            json!("_1"),
+            json!("1__0"),
+            json!("0x10"),
+            json!({"n": 1}),
+        ] {
+            assert_eq!(
+                minutes_of(json!({"minutes": input.clone(), "logged_on": "2026-10-20"})),
+                Err(json!({"minutes": ["A valid integer is required."]})),
+                "input {input}"
+            );
+        }
+        assert_eq!(
+            minutes_of(json!({"minutes": Value::Null, "logged_on": "2026-10-20"})),
+            Err(json!({"minutes": ["This field may not be null."]}))
+        );
+        assert_eq!(minutes_of(json!({"logged_on": "2026-10-20"})), Ok(None));
+        assert_eq!(
+            minutes_of(json!({"minutes": "9".repeat(1001), "logged_on": "2026-10-20"})),
+            Err(json!({"minutes": ["String value too large."]}))
+        );
+        // `len(data)` counts code points, not bytes (`fields.py:911`):
+        // 600 non-ASCII chars (1200 bytes) fall through to `int()`,
+        // which fails them as invalid — only past 1000 *chars* does
+        // the length guard fire.
+        assert_eq!(
+            minutes_of(json!({"minutes": "é".repeat(600), "logged_on": "2026-10-20"})),
+            Err(json!({"minutes": ["A valid integer is required."]}))
+        );
+        assert_eq!(
+            minutes_of(json!({"minutes": "é".repeat(1000), "logged_on": "2026-10-20"})),
+            Err(json!({"minutes": ["A valid integer is required."]}))
+        );
+        assert_eq!(
+            minutes_of(json!({"minutes": "é".repeat(1001), "logged_on": "2026-10-20"})),
+            Err(json!({"minutes": ["String value too large."]}))
+        );
+    }
+
+    #[test]
+    fn minutes_bounds_match_drf() {
+        for input in [json!(0), json!(-30), json!(-(2_i64.pow(40))), json!("-0")] {
+            assert_eq!(
+                minutes_of(json!({"minutes": input.clone(), "logged_on": "2026-10-20"})),
+                Err(json!({"minutes": ["Ensure this value is greater than or equal to 1."]})),
+                "input {input}"
+            );
+        }
+        for input in [json!(2_i64.pow(40)), json!("9".repeat(1000))] {
+            assert_eq!(
+                minutes_of(json!({"minutes": input.clone(), "logged_on": "2026-10-20"})),
+                Err(json!({"minutes": ["Ensure this value is less than or equal to 2147483647."]})),
+                "input {input}"
+            );
+        }
+        assert_eq!(
+            minutes_of(json!({"minutes": 2_147_483_647, "logged_on": "2026-10-20"})),
+            Ok(Some(2_147_483_647))
+        );
+        assert_eq!(
+            minutes_of(json!({"minutes": 1, "logged_on": "2026-10-20"})),
+            Ok(Some(1))
+        );
+    }
+
+    fn date_of(payload: Value) -> Result<Option<String>, Value> {
+        let body = body(payload);
+        let mut errors = Map::new();
+        let out = match check_worklog_date(&mut errors, &body) {
+            Presence::Value(date) => Some(date.format("%Y-%m-%d").to_string()),
+            _ => None,
+        };
+        if errors.is_empty() {
+            Ok(out)
+        } else {
+            Err(Value::Object(errors))
+        }
+    }
+
+    #[test]
+    fn date_grammar_matches_django_parse_date() {
+        for (input, want) in [
+            ("2026-10-20", "2026-10-20"),
+            ("2026-1-5", "2026-01-05"),
+            ("20261020", "2026-10-20"),
+            ("2026-W42-3", "2026-10-14"),
+            ("2026W423", "2026-10-14"),
+            ("2026-10-20\n", "2026-10-20"),
+        ] {
+            assert_eq!(
+                date_of(json!({"minutes": 30, "logged_on": input})),
+                Ok(Some(want.to_owned())),
+                "input {input:?}"
+            );
+        }
+        let invalid = json!({"logged_on": ["Date has wrong format. Use one of these formats instead: YYYY-MM-DD."]});
+        for input in [
+            json!("soon"),
+            json!("2026-13-01"),
+            json!("2026-02-30"),
+            json!("10/20/2026"),
+            json!("2026-10-20T00:00:00Z"),
+            json!("2026-10-20T00:00"),
+            json!(20261020),
+            json!(true),
+            json!("2026-293"),
+            json!("2026293"),
+            json!("0000-01-01"),
+            json!(" 2026-10-20"),
+            json!("2026-10-20 "),
+            json!("2026-10-20\r"),
+        ] {
+            assert_eq!(
+                date_of(json!({"minutes": 30, "logged_on": input.clone()})),
+                Err(invalid.clone()),
+                "input {input}"
+            );
+        }
+        assert_eq!(
+            date_of(json!({"minutes": 30, "logged_on": Value::Null})),
+            Err(json!({"logged_on": ["This field may not be null."]}))
+        );
+        assert_eq!(date_of(json!({"minutes": 30})), Ok(None));
+    }
+
+    #[test]
+    fn worklog_input_create_requires_and_defaults() {
+        // `{}` fails both required fields in serializer order.
+        assert_eq!(
+            validate_worklog_input(&body(json!({})), false),
+            Err(json!({
+                "minutes": ["This field is required."],
+                "logged_on": ["This field is required."],
+            }))
+        );
+        // Read-only and unknown keys are ignored; the note defaults.
+        let attrs = validate_worklog_input(
+            &body(json!({"minutes": 30, "logged_on": "2026-10-20"})),
+            false,
+        )
+        .expect("valid");
+        assert_eq!(attrs.minutes, Some(30));
+        assert_eq!(
+            attrs.logged_on,
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 10, 20).expect("date"))
+        );
+        assert_eq!(attrs.note, Some(String::new()));
+        let attrs = validate_worklog_input(
+            &body(json!({
+                "minutes": 30,
+                "logged_on": "2026-10-20",
+                "note": 5,
+                "actor": "00000000-0000-4000-8000-000000000000",
+                "id": "00000000-0000-4000-8000-000000000001",
+                "zzz": 1,
+            })),
+            false,
+        )
+        .expect("valid");
+        assert_eq!(attrs.note, Some("5".to_owned()));
+    }
+
+    #[test]
+    fn worklog_input_partial_skips_missing() {
+        let attrs = validate_worklog_input(&body(json!({})), true).expect("valid");
+        assert_eq!(attrs.minutes, None);
+        assert_eq!(attrs.logged_on, None);
+        assert_eq!(attrs.note, None);
+        let attrs = validate_worklog_input(&body(json!({"note": "x"})), true).expect("valid");
+        assert_eq!(attrs.note, Some("x".to_owned()));
+        assert!(validate_worklog_input(&body(json!({"minutes": 0})), true).is_err());
+    }
+
+    fn sample_base() -> WorklogBaseOwned {
+        WorklogBaseOwned {
+            id: "11111111-1111-4111-8111-111111111111"
+                .parse()
+                .expect("uuid"),
+            created_at: chrono::DateTime::parse_from_rfc3339("2026-10-20T00:00:00Z")
+                .expect("dt")
+                .with_timezone(&chrono::Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339("2026-10-21T00:00:00Z")
+                .expect("dt")
+                .with_timezone(&chrono::Utc),
+            deleted_at: None,
+            minutes: 90,
+            logged_on: chrono::NaiveDate::from_ymd_opt(2026, 10, 20).expect("date"),
+            note: "Deep work".to_owned(),
+            created_by: Some(
+                "22222222-2222-4222-8222-222222222222"
+                    .parse()
+                    .expect("uuid"),
+            ),
+            updated_by: None,
+            project_id: "33333333-3333-4333-8333-333333333333"
+                .parse()
+                .expect("uuid"),
+            workspace_id: "44444444-4444-4444-8444-444444444444"
+                .parse()
+                .expect("uuid"),
+            issue_id: "55555555-5555-4555-8555-555555555555"
+                .parse()
+                .expect("uuid"),
+            actor_id: Some(
+                "22222222-2222-4222-8222-222222222222"
+                    .parse()
+                    .expect("uuid"),
+            ),
+        }
+    }
+
+    #[test]
+    fn worklog_view_key_order_matches_drf() {
+        let tz: Tz = "UTC".parse().expect("tz");
+        let view = assemble_worklog_view(&sample_base(), None, &tz);
+        let value = serde_json::to_value(&view).expect("value");
+        let keys: Vec<&str> = value
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "id",
+                "actor_detail",
+                "created_at",
+                "updated_at",
+                "deleted_at",
+                "minutes",
+                "logged_on",
+                "note",
+                "created_by",
+                "updated_by",
+                "project",
+                "workspace",
+                "issue",
+                "actor",
+            ]
+        );
+        assert_eq!(value["minutes"], json!(90));
+        assert_eq!(value["logged_on"], json!("2026-10-20"));
+        assert_eq!(value["actor_detail"], Value::Null);
+        assert_eq!(value["created_at"], json!("2026-10-20T00:00:00Z"));
+    }
+
+    #[test]
+    fn worklog_not_found_body_names_the_model() {
+        assert_eq!(
+            WORKLOG_NOT_FOUND_BODY,
+            r#"{"detail":"No IssueWorklog matches the given query."}"#
+        );
     }
 }
 

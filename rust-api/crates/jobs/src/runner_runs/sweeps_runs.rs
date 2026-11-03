@@ -91,9 +91,9 @@ use uuid::Uuid;
 use pidash_db::runner_enroll::columns::enums::{RUNNER_STATUS_OFFLINE, RUNNER_STATUS_ONLINE};
 use pidash_db::runner_runs::{agent_run, approval};
 use pidash_services::runner_runs::finalization::{
-    finalize_error_code, finalize_update_sql, lock_run_for_finalize_sql, plan_finalize_values,
-    plan_terminal_event, terminal_event_exists_sql, terminal_event_insert_sql,
-    terminal_event_max_seq_sql, TERMINAL_EFFECTS_TASK,
+    error_details_patch, finalize_error_code, finalize_update_sql, lock_run_for_finalize_sql,
+    plan_finalize_values, plan_terminal_event, terminal_event_exists_sql,
+    terminal_event_insert_sql, terminal_event_max_seq_sql, TERMINAL_EFFECTS_TASK,
 };
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::{AgentRunStatus, ApprovalStatus, TERMINAL_RUN_STATUSES};
@@ -276,20 +276,10 @@ pub fn idle_sessions_select() -> String {
         .to_owned()
 }
 
-/// Idle-session revoke (`tasks.py:133`): `SET` in `update()` call order.
-/// Binds: `$1` now, `$2` `idle_timeout`, `$3..` session ids.
-/// The driver returns early on an empty set, so the live layer never
-/// builds this with zero ids.
-pub fn revoke_sessions_update(session_count: usize) -> String {
-    let placeholders = (0..session_count)
-        .map(|i| format!("${}", i + 3))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \
-         \"runner_session\".\"id\" IN ({placeholders})"
-    )
-}
+// NOTE: the idle-session revoke builder lived here; the statement moved
+// to `pidash_services::domain::tokens::revoke_runner_sessions_by_ids`
+// (PIDASHCONV-1520), whose tests carry the pins (including the
+// empty-set early return).
 
 /// Active `(runner_id, session_id)` pairs (`tasks.py:171`), in
 /// `values_list` order. No binds.
@@ -802,19 +792,17 @@ impl LiveSweepsRunsStore {
     }
 }
 
-/// Expected `SET` column order for the expiry finalize: the five L4 base
+/// Expected `SET` column order for the expiry finalize: the four L4 base
 /// clauses plus the three extras in `tasks.py:76-80` order. The live
 /// bind below is positional; a mismatch fails loudly instead of binding
 /// wrong. No `done_payload` clause, so the merge step is a no-op here.
-const EXPIRY_FINALIZE_COLUMNS: [&str; 8] = [
+const EXPIRY_FINALIZE_COLUMNS: [&str; 6] = [
     "status",
     "ended_at",
-    "queue_position",
     "terminal_hooks_applied_at",
     "terminal_capacity_released_at",
-    "error_code",
-    "error",
     "cancel_reason",
+    "error_details",
 ];
 
 impl SweepsRunsStore for LiveSweepsRunsStore {
@@ -929,12 +917,10 @@ impl SweepsRunsStore for LiveSweepsRunsStore {
         sqlx::query(&finalize_update_sql(&values))
             .bind(AgentRunStatus::Cancelled.value())
             .bind(now)
-            .bind(None::<i16>)
             .bind(None::<DateTime<Utc>>)
             .bind(None::<DateTime<Utc>>)
             .bind(CANCEL_REASON_APPROVAL_TIMEOUT)
-            .bind(APPROVAL_TIMEOUT_ERROR)
-            .bind(CANCEL_REASON_APPROVAL_TIMEOUT)
+            .bind(error_details_patch(&values))
             .bind(run_id)
             .execute(&mut *tx)
             .await?;
@@ -1007,16 +993,14 @@ impl SweepsRunsStore for LiveSweepsRunsStore {
         session_ids: &[Uuid],
         now: DateTime<Utc>,
     ) -> Result<u64, SweepsError> {
-        if session_ids.is_empty() {
-            return Ok(0);
-        }
-        let revoke_sql = revoke_sessions_update(session_ids.len());
-        let mut revoke = sqlx::query(&revoke_sql).bind(now).bind(REVOKED_REASON_IDLE);
-        for sid in session_ids {
-            revoke = revoke.bind(*sid);
-        }
-        let result = revoke.execute(&self.pool).await?;
-        Ok(result.rows_affected())
+        pidash_services::domain::tokens::revoke_runner_sessions_by_ids(
+            &self.pool,
+            session_ids,
+            now,
+            REVOKED_REASON_IDLE,
+        )
+        .await
+        .map_err(SweepsError::from)
     }
 
     async fn active_session_pairs(&self) -> Result<Vec<(Uuid, Uuid)>, SweepsError> {
@@ -1516,16 +1500,8 @@ mod tests {
              (\"runner_session\".\"last_seen_at\" < $1 AND \"runner_session\".\"revoked_at\" IS NULL) \
              ORDER BY \"runner_session\".\"created_at\" DESC"
         );
-        assert_eq!(
-            revoke_sessions_update(1),
-            "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \
-             \"runner_session\".\"id\" IN ($3)"
-        );
-        assert_eq!(
-            revoke_sessions_update(3),
-            "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \
-             \"runner_session\".\"id\" IN ($3, $4, $5)"
-        );
+        // (The revoke-update pins moved with the statement to
+        // `pidash_services::domain::tokens`.)
     }
 
     #[test]
@@ -1547,7 +1523,7 @@ mod tests {
     #[test]
     fn approval_lock_sql_byte_exact() {
         // All 52 columns spelled out: the 11 approval columns in L2
-        // order, then the 41 agent_run columns in L2 order.
+        // order, then the 40 agent_run columns in L2 order.
         let expected = "SELECT \"agent_run_approval\".\"id\", \"agent_run_approval\".\"agent_run_id\", \
              \"agent_run_approval\".\"kind\", \"agent_run_approval\".\"payload\", \
              \"agent_run_approval\".\"reason\", \"agent_run_approval\".\"status\", \
@@ -1559,17 +1535,17 @@ mod tests {
              \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \
              \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \
              \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \
-             \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \
+             \"agent_run\".\"cancel_reason\", \"agent_run\".\"tool_plan\", \
              \"agent_run\".\"terminal_hooks_applied_at\", \
              \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \
              \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \
              \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \
              \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \
-             \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \
+             \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error_details\", \
              \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \
              \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \
              \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \
-             \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \
+             \"agent_run\".\"assigned_at\", \
              \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run_approval\" INNER JOIN \
              \"agent_run\" ON (\"agent_run_approval\".\"agent_run_id\" = \"agent_run\".\"id\") WHERE \
              (\"agent_run_approval\".\"id\" = $1 AND \"agent_run_approval\".\"status\" = $2) ORDER BY \

@@ -105,5 +105,30 @@ def test_retick_rolls_back_when_dispatch_fails(api_client):
     tick = _ticker(issue)
     assert tick["granted"] == 0
     assert tick["used"] == 10
-    assert db.fetchone(get_database_url(), 
+    assert db.fetchone(get_database_url(),
         "SELECT count(*) AS n FROM agent_run WHERE work_item_id=%s", (issue,))["n"] == 0
+
+
+def test_wait_activity_stamps_api_user_as_creator(api_client):
+    """The newest agent_wait activity after an API-key /wait/ carries the
+    calling user as created_by (Django stamps crum in BaseModel.save),
+    updated_by NULL, and the caller as actor."""
+    w, client = api_client
+    issue = world.make_issue(w, "waitaudit", "In Progress")
+    world.set_ticker(issue, used=1)
+
+    r = client.post_wait(w.workspace_slug, w.project_id, issue)
+    assert r.status_code == 200, r.text
+    assert r.json()["applied"] is True
+
+    row = db.fetchone(
+        get_database_url(),
+        "SELECT created_by_id, updated_by_id, actor_id FROM issue_activities"
+        " WHERE issue_id=%s AND field='agent_wait'"
+        " ORDER BY created_at DESC LIMIT 1",
+        (issue,),
+    )
+    assert row is not None
+    assert str(row["created_by_id"]) == w.user_id
+    assert row["updated_by_id"] is None
+    assert str(row["actor_id"]) == w.user_id

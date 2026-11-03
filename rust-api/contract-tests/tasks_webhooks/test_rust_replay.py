@@ -245,6 +245,56 @@ def test_rust_webhook_send_chunked_keepalive_returns_at_terminal_chunk(
     assert len(_log_diff_rows(db_conn, before)) == 1
 
 
+#: PIDASHCONV-1673: same bound as the oracle
+#: ``test_webhook_send_chunked_streaming_completes_within_bound`` — the
+#: sink streams 64 MiB in 8k paced 8 KiB chunks (~2 s of pacing).
+#: The old client, which re-decoded the whole buffered body after every
+#: socket read, took 142 s here (debug worker); the incremental
+#: decoder finishes in ~9 s end to end.
+STREAM_DELIVERY_BOUND_SECONDS = 60.0
+
+
+def test_rust_webhook_send_chunked_streaming_completes_within_bound(
+    db_conn, chunked_stream_sink
+):
+    """Rust side: streamed chunked body decodes in linear time.
+
+    Replays ``test_webhook_send_chunked_streaming_completes_within_bound``:
+    the delivery must complete inside the bound with the full 64 MiB body
+    logged, no retry, no requeue.
+    """
+    hook = _seed_hook_at(db_conn, chunked_stream_sink.url)
+    chunked_stream_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    baseline = rust_queue.queue_depth()
+    started = time.monotonic()
+    celery_id = rust_queue.publish(
+        WEBHOOK_SEND, kwargs=_send_kwargs(hook, "rust-replay-chunked-stream")
+    )
+    deliveries = chunked_stream_sink.wait_for_count(1, what="streamed webhook POST")
+    assert len(deliveries) == 1
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="streamed webhook_logs row",
+        timeout=STREAM_DELIVERY_BOUND_SECONDS,
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < STREAM_DELIVERY_BOUND_SECONDS, (
+        f"streamed delivery took {elapsed:.1f}s "
+        f"(bound {STREAM_DELIVERY_BOUND_SECONDS:.0f}s)"
+    )
+    assert str(row["response_status"]) == "200"
+    assert row["retry_count"] == 0
+    assert len(row["response_body"]) == chunked_stream_sink.total_bytes
+    assert set(row["response_body"]) == {"x"}
+    rust_queue.wait_for_settled(celery_id, what="streamed send acked")
+    rust_queue.wait_for_queue_drain(baseline=baseline, what="streamed queue drained")
+    time.sleep(1)
+    assert len(chunked_stream_sink.snapshot()) == 1, "event was redelivered"
+    assert not rust_queue.row_present(celery_id), "streamed send was requeued"
+    assert len(_log_diff_rows(db_conn, before)) == 1
+
+
 def test_rust_webhook_failure_executes_locally(db_conn, webhook_sink):
     """First-attempt failure, Rust side: same 500 row, no retry (PIDASHCONV-1105).
 
@@ -507,6 +557,76 @@ def test_rust_webhook_activity_executes_locally(db_conn, webhook_sink):
     )
     assert row["event_type"] == "issue"
     assert str(row["response_status"]) == "200"
+
+
+def _running_activity_count(conn):
+    """Rows stuck ``running`` for the fan-out task (PIDASHCONV-1388).
+
+    The queue claim only takes ``queued`` rows, so a panicking fan-out
+    leaves its row ``running`` for good instead of settling (ack
+    deletes). Any count here is the stuck-job signature.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM rust_job_queue WHERE task = %s AND status = 'running'",
+            (WEBHOOK_ACTIVITY,),
+        )
+        return cur.fetchone()[0]
+
+
+def test_rust_project_chain_executes_locally(db_conn, broker_url, webhook_sink):
+    """Project chain, Rust side: no INT2 panic, JSON descriptions carried (PIDASHCONV-1388).
+
+    Mirrors ``test_project_chain_fans_out_with_network_and_description_html``
+    (same seed, same created-path payload): ``model_activity`` enqueues
+    ``webhook_activity`` into ``rust_job_queue``, which must decode the
+    ``projects`` row — ``network`` is INT2 (sqlx does not widen it into
+    ``i32``) and the descriptions are jsonb — and enqueue the send. The
+    sink POST plus the ``webhook_logs`` row prove every link ran with
+    the Django worker stopped, and the stuck-row count proves the
+    fan-out settled instead of dying ``running``.
+    """
+    owner = seed_helpers.user(db_conn, "rustprojchain-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustprojchain", owner["id"])
+    project = seed_helpers.project(
+        db_conn,
+        workspace["id"],
+        network=2,
+        description_text={"ops": "text"},
+        description_html={"a": 1},
+    )
+    url = f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
+    seed_helpers.webhook(db_conn, workspace["id"], url, project=True)
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    celery_id = rust_queue.publish(
+        MODEL_ACTIVITY,
+        args=[
+            "project",
+            str(project["id"]),
+            {},
+            None,
+            str(owner["id"]),
+            workspace["slug"],
+            "example.com",
+        ],
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{MODEL_ACTIVITY} executed for project")
+    (delivery,) = webhook_sink.wait_for_count(1, what="project chained webhook POST")
+    assert delivery["body"] == ""
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="project chained webhook_logs row",
+    )
+    assert row["event_type"] == "project"
+    # The chain passes verb="created" as the action, which the send task's
+    # POST/PATCH/PUT/DELETE map leaves untouched (unlike a direct send with
+    # action="POST", which logs "create").
+    assert row["request_method"] == "created"
+    assert "'network': 2" in row["request_body"]
+    assert "'description_text': {'ops': 'text'}" in row["request_body"]
+    assert "'description_html': {'a': 1}" in row["request_body"]
+    assert _running_activity_count(db_conn) == 0, "fan-out job left running"
 
 
 def _soft_delete(conn, table, row_id):
@@ -1616,6 +1736,115 @@ def test_rust_issue_activity_closed_to_writes_state_row_and_notifies(db_conn):
     assert len(_added_rows(db_conn, "email_notification_logs", before)) == 1
 
 
+def _seed_triage_state_world(db_conn, slug):
+    """Issue + triage state + Todo state + one notified subscriber (PIDASHCONV-1278).
+
+    Mirrors the oracle seed in ``test_webhook_tasks.py``: the
+    subscriber is an active project member with a preferences row, so
+    ``notifications`` writes exactly one ``notifications`` row for
+    them.
+    """
+    chain = seed_helpers.issue_chain(db_conn, slug)
+    owner, workspace, project, issue = (
+        chain["owner"],
+        chain["workspace"],
+        chain["project"],
+        chain["issue"],
+    )
+    triage_state = seed_helpers.state(
+        db_conn,
+        project["id"],
+        workspace["id"],
+        name="Triage",
+        group="triage",
+        is_triage=True,
+    )
+    todo_state = seed_helpers.state(
+        db_conn, project["id"], workspace["id"], name="Todo", group="unstarted"
+    )
+    sub = seed_helpers.user(db_conn, f"{slug}-subscriber")
+    seed_helpers.project_member(db_conn, project["id"], workspace["id"], sub["id"])
+    seed_helpers.issue_subscriber(
+        db_conn, project["id"], workspace["id"], issue["id"], sub["id"]
+    )
+    seed_helpers.notification_preference(db_conn, sub["id"])
+    return {
+        "owner": owner,
+        "workspace": workspace,
+        "project": project,
+        "issue": issue,
+        "triage_state": triage_state,
+        "todo_state": todo_state,
+        "subscriber": sub,
+    }
+
+
+def test_rust_issue_activity_triage_state_resolves_to_null(db_conn):
+    """triage → Todo, Rust side: the triage side of the state row is NULL (PIDASHCONV-1278).
+
+    Mirrors ``test_issue_activity_triage_state_resolves_to_null``
+    (same triage → Todo payload): the Rust worker must exclude
+    ``group="triage"`` from the states snapshot
+    (``activity_dispatch.rs``), like Django's ``StateManager``, so
+    ``track_state`` stores ``old_value``/``old_identifier`` NULL.
+    Settlement plus the row diffs is the proof: with the Django
+    worker stopped, a forward could never produce local rows.
+    """
+    world = _seed_triage_state_world(db_conn, "rusttriagestate")
+    issue, owner, project = world["issue"], world["owner"], world["project"]
+    triage_state, todo_state = world["triage_state"], world["todo_state"]
+    sub = world["subscriber"]
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities", "notifications", "email_notification_logs"])
+
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "issue.activity.updated",
+            "requested_data": json.dumps({"state_id": str(todo_state["id"])}),
+            "current_instance": json.dumps({"state_id": str(triage_state["id"])}),
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+            "subscriber": False,
+            "notification": True,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="triage-state issue_activities row",
+    )
+    assert row["field"] == "state"
+    assert row["verb"] == "updated"
+    assert row["comment"] == "updated the state to"
+    assert row["old_value"] is None
+    assert row["old_identifier"] is None
+    assert row["new_value"] == todo_state["name"]
+    assert row["new_identifier"] == str(todo_state["id"])
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+
+    (note,) = wait_for(
+        lambda: _added_rows(db_conn, "notifications", before) or None,
+        what="triage-state notifications row",
+    )
+    assert note["receiver_id"] == str(sub["id"])
+    assert note["entity_identifier"] == str(issue["id"])
+    assert note["sender"] == "in_app:issue_activities:subscribed"
+    assert note["title"] == "updated the state to"
+    assert note["triggered_by_id"] == str(owner["id"])
+    activity_block = note["data"]["issue_activity"]
+    assert activity_block["old_value"] == "None"
+    assert activity_block["old_identifier"] is None
+    assert activity_block["new_value"] == todo_state["name"]
+    assert activity_block["new_identifier"] == str(todo_state["id"])
+    assert len(_added_rows(db_conn, "email_notification_logs", before)) == 1
+
+
 @pytest.mark.parametrize(
     "family",
     [socket.AF_INET, socket.AF_INET6],
@@ -1752,4 +1981,63 @@ def test_rust_crawl_link_skips_soft_deleted_link(db_conn):
     )
     after = snapshot(db_conn, ["issue_links"])["issue_links"][str(link["id"])]
     assert after == before
+
+
+def test_rust_crawl_link_resolves_idna_hostname(db_conn):
+    """Crawl, Rust side: a non-ASCII hostname resolves via IDNA (PIDASHCONV-1672).
+
+    Mirrors ``test_crawl_link_resolves_idna_hostname`` (same payload):
+    the unicode URL and its punycode twin must crawl the same page —
+    both titles non-empty and equal. Pre-fix Rust fails DNS for the
+    unicode host ("Hostname could not be resolved") and stores a null
+    title, so this fails on pre-fix rust-dev. Settlement plus the
+    metadata diff is the proof: with the Django worker stopped, a
+    forward could never produce a local row change.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "rustreplaycrawlidna")
+    issue, project, workspace = chain["issue"], chain["project"], chain["workspace"]
+    urls = ["https://münchen.de/", "https://xn--mnchen-3ya.de/"]
+    links = [
+        insert_row(
+            db_conn,
+            "issue_links",
+            {
+                "title": f"IDNA probe {i}",
+                "url": url,
+                "issue_id": str(issue["id"]),
+                "project_id": str(project["id"]),
+                "workspace_id": str(workspace["id"]),
+                "created_by_id": str(chain["owner"]["id"]),
+                "updated_by_id": str(chain["owner"]["id"]),
+                "metadata": {},
+            },
+        )
+        for i, url in enumerate(urls)
+    ]
+    celery_ids = [
+        rust_queue.publish(
+            CRAWL_LINK_TITLE,
+            args=[str(link["id"]), url],
+        )
+        for link, url in zip(links, urls)
+    ]
+    for celery_id in celery_ids:
+        rust_queue.wait_for_settled(celery_id, what=f"{CRAWL_LINK_TITLE} executed")
+
+    def _crawled(link_id):
+        row = snapshot(db_conn, ["issue_links"])["issue_links"].get(str(link_id))
+        return row if row and row["metadata"] != {} else None
+
+    crawled = [
+        wait_for(
+            lambda lid=str(link["id"]): _crawled(lid),
+            what=f"IDNA issue_links metadata for {url}",
+        )
+        for link, url in zip(links, urls)
+    ]
+    for row, url in zip(crawled, urls):
+        assert row["metadata"]["url"] == url
+    titles = [row["metadata"]["title"] for row in crawled]
+    assert all(titles), f"expected both IDNA titles non-empty: {titles!r}"
+    assert titles[0] == titles[1], f"unicode/punycode titles differ: {titles!r}"
 

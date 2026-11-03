@@ -38,9 +38,13 @@ import re
 import subprocess
 import sys
 import uuid
+from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from _harness.db import connect  # noqa: E402
 from _harness.seed import Seed  # noqa: E402
 
 WEAK_PASSWORD = "password123"  # zxcvbn 0 on both estimators
@@ -1101,3 +1105,144 @@ class TestCreateDummyData:
                 'SELECT COUNT(*) FROM "projects" WHERE "workspace_id" = %s'
                 ' AND "deleted_at" IS NULL', (ws[0],))
             assert cur.fetchone()[0] == 1  # first task run persisted
+
+
+# post_save hooks on the create_dummy_data path (PIDASHCONV-1268)
+# ---------------------------------------------------------------------------
+#
+# Dual-leg: the Django oracle (manage.py against ORACLE_DATABASE_URL) pins
+# the rows the two post_save receivers write — builtin scheduler seeding
+# (scheduler/signals.py) and the default pod (runner/signals.py) — and the
+# Rust binary (DATABASE_URL) must write the same rows. Fails on rust-dev
+# before the fix (no schedulers, no pods on the Rust leg); passes on both
+# backends after. Runner convention follows test_prompting.py: env is
+# resolved at import time for paths only, connections open per test.
+
+REPO_ROOT_1268 = Path(__file__).resolve().parents[3]
+DJANGO_PYTHON_1268 = os.environ.get("DJANGO_PYTHON", sys.executable)
+MANAGE_PY_1268 = Path(os.environ.get(
+    "MANAGE_PY", REPO_ROOT_1268 / "apps/api/manage.py"))
+DJANGO_SETTINGS_1268 = os.environ.get(
+    "DJANGO_SETTINGS_MODULE", "pi_dash.settings.test")
+DJANGO_API_DIR_1268 = os.environ.get(
+    "DJANGO_API_DIR", str(REPO_ROOT_1268 / "apps/api"))
+
+EXPECTED_BUILTIN_SCHEDULERS = [
+    ("fable-security-audit", "builtin", None),
+    ("security-audit", "builtin", None),
+]
+DEFAULT_POD_DESCRIPTION = "Auto-created default pod. Add tier pods anytime."
+
+
+def require_oracle_url():
+    value = os.environ.get("ORACLE_DATABASE_URL")
+    if not value:
+        raise pytest.UsageError(
+            "post_save hook tests need ORACLE_DATABASE_URL "
+            "(a second Django-migrated scratch database)"
+        )
+    return value
+
+
+@pytest.fixture()
+def oracle_db():
+    conn = connect(require_oracle_url())
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def run_manage(stdin):
+    """Run manage.py create_dummy_data against the oracle DB (piped stdin)."""
+    if not MANAGE_PY_1268.is_file():
+        raise pytest.UsageError(f"manage.py not found at {MANAGE_PY_1268}")
+    env = dict(os.environ)
+    env["DATABASE_URL"] = require_oracle_url()
+    env["DJANGO_SETTINGS_MODULE"] = DJANGO_SETTINGS_1268
+    env["PYTHONPATH"] = DJANGO_API_DIR_1268 + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return subprocess.run(
+        [DJANGO_PYTHON_1268, str(MANAGE_PY_1268), "create_dummy_data"],
+        input=stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        timeout=300,
+    )
+
+
+def fetch_schedulers(conn, workspace_id):
+    with conn.cursor() as cur:
+        cur.execute(
+            'SELECT "slug", "source", "created_by_id" FROM "schedulers"'
+            ' WHERE "workspace_id" = %s AND "deleted_at" IS NULL'
+            " ORDER BY 1",
+            (workspace_id,),
+        )
+        return [
+            (slug, source, None if created_by is None else str(created_by))
+            for slug, source, created_by in cur.fetchall()
+        ]
+
+
+def fetch_project_pods(conn, workspace_id):
+    """{project identifier: [(name, is_default, description, created_by)]}."""
+    with conn.cursor() as cur:
+        cur.execute(
+            'SELECT "id", "identifier" FROM "projects"'
+            ' WHERE "workspace_id" = %s AND "deleted_at" IS NULL',
+            (workspace_id,),
+        )
+        projects = cur.fetchall()
+        out = {}
+        for project_id, identifier in projects:
+            cur.execute(
+                'SELECT "name", "is_default", "description", "created_by_id"'
+                ' FROM "pod" WHERE "project_id" = %s AND "deleted_at" IS NULL',
+                (project_id,),
+            )
+            out[identifier] = [
+                (name, is_default, description,
+                 None if created_by is None else str(created_by))
+                for name, is_default, description, created_by in cur.fetchall()
+            ]
+        return out
+
+
+def assert_post_save_rows(conn, slug, *, project_count):
+    ws = fetch_workspace(conn, slug)
+    assert ws is not None
+    assert fetch_schedulers(conn, ws[0]) == EXPECTED_BUILTIN_SCHEDULERS
+    pods = fetch_project_pods(conn, ws[0])
+    assert len(pods) == project_count
+    for identifier, rows in pods.items():
+        assert rows == [
+            (f"{identifier}_pod_1", True, DEFAULT_POD_DESCRIPTION, None)
+        ]
+
+
+class TestCreateDummyDataPostSaveHooks:
+    def test_builtin_schedulers_and_default_pod_both_backends(
+            self, rust_bin, db, oracle_db):
+        oracle_creator = Seed(oracle_db).user()
+        oracle_slug = tag("ws-hooks")
+        oracle_stdin = (
+            f"WS Hooks\n{oracle_slug}\n{oracle_creator['email']}\n\n2\n"
+            + "0\n0\n0\n0\n0\n" * 2
+        ).encode()
+        oracle = run_manage(oracle_stdin)
+        assert oracle.returncode == 0, oracle.stderr[-2000:]
+        assert_post_save_rows(oracle_db, oracle_slug, project_count=2)
+
+        rust_creator = Seed(db).user()
+        rust_slug = tag("ws-hooks")
+        rust_stdin = (
+            f"WS Hooks\n{rust_slug}\n{rust_creator['email']}\n\n2\n"
+            + "0\n0\n0\n0\n0\n" * 2
+        ).encode()
+        rust = run_ops(rust_bin, "create_dummy_data", stdin=rust_stdin)
+        assert rust.returncode == 0
+        assert rust.stdout.endswith(b"Data is pushed to the queue\n")
+        assert rust.stderr == b""
+        assert_post_save_rows(db, rust_slug, project_count=2)

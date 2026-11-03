@@ -73,7 +73,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::Router;
 use chrono_tz::Tz;
@@ -85,6 +85,8 @@ use pidash_services::app_modules::{queries, shape, tasks};
 use super::gates;
 use crate::app_issues::Denial;
 use crate::state::AppState;
+pub(crate) use pidash_compat::response::{empty_response, json_response};
+use pidash_compat::validate::push_pairs_error as push_error;
 
 /// Collection path in `app/urls/module.py:19-23` form.
 pub const MODULES_PATH: &str = "/api/workspaces/{slug}/projects/{project_id}/modules/";
@@ -166,22 +168,6 @@ fn gate_for_destroy() -> &'static gates::Gate {
 // ---------------------------------------------------------------------------
 
 pub(crate) type HandlerResult = Result<Response, Denial>;
-
-pub(crate) fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
-
-pub(crate) fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(Vec::new()))
-        .expect("empty response")
-}
 
 /// `request.user` from the Django session: missing session, missing key,
 /// or a non-UUID id is anonymous → 401.
@@ -393,13 +379,16 @@ pub(crate) async fn actor_timezone(
     name.parse().map_err(|_| Denial::ServerError)
 }
 
-/// `origin=base_host(request, is_app=True)`: `WEB_URL or APP_BASE_URL`.
+/// `base_host(request, is_app=True)` (`utils/host.py:17-66`):
+/// `APP_BASE_URL` wins when set, else `WEB_URL`; unset is
+/// `ImproperlyConfigured` → 500. Empty strings fall through like
+/// Python's `or` (PIDASHCONV-1597).
 fn request_origin(state: &AppState) -> Result<String, Denial> {
-    state
-        .settings()
-        .urls
-        .app_base_url
+    let urls = &state.settings().urls;
+    urls.app_base_url
         .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.web_url.clone().filter(|s| !s.is_empty()))
         .ok_or(Denial::ServerError)
 }
 // ---------------------------------------------------------------------------
@@ -709,18 +698,6 @@ struct WriteInput {
 /// or an index-keyed object for per-item list errors (`module.py`
 /// `member_ids` children render `{0: [...]}`).
 type FieldErrors = Vec<(String, Value)>;
-
-fn push_error(errors: &mut FieldErrors, field: &str, message: String) {
-    let message = Value::String(message);
-    match errors.iter_mut().find(|(name, _)| name == field) {
-        Some((_, Value::Array(list))) => list.push(message),
-        Some((_, node)) => {
-            let first = std::mem::replace(node, Value::Null);
-            *node = Value::Array(vec![first, message]);
-        }
-        None => errors.push((field.to_owned(), Value::Array(vec![message]))),
-    }
-}
 
 /// Per-item list error (`ListField` children): `{"0": ["..."]}`.
 fn push_index_error(errors: &mut FieldErrors, field: &str, index: usize, message: String) {
@@ -1605,6 +1582,10 @@ pub(crate) async fn fetch_estimate_type(
 /// Shared `FROM/WHERE` for the distribution queries: live module bridges
 /// of this project/workspace under the `IssueManager` base
 /// (`base.py:431-436,493-498,539-544,592-597`).
+/// Ported bug (PB-2035, PB-0102 class): the M2M joins carry no
+/// `deleted_at` guard, because Django groups through the `assignees` /
+/// `labels` relations whose ORM joins never filter soft-deleted through
+/// rows — removed assignees/labels still distribute.
 fn distribution_from_where(assignee_join: bool, label_join: bool) -> String {
     let mut sql = String::from(
         "FROM issues \
@@ -1617,16 +1598,13 @@ fn distribution_from_where(assignee_join: bool, label_join: bool) -> String {
     if assignee_join {
         sql.push_str(
             "LEFT JOIN issue_assignees ON issue_assignees.issue_id = issues.id \
-             AND issue_assignees.deleted_at IS NULL \
              LEFT JOIN users AS assignees ON assignees.id = issue_assignees.assignee_id ",
         );
     }
     if label_join {
         sql.push_str(
             "LEFT JOIN issue_labels ON issue_labels.issue_id = issues.id \
-             AND issue_labels.deleted_at IS NULL \
-             LEFT JOIN labels ON labels.id = issue_labels.label_id \
-             AND labels.deleted_at IS NULL ",
+             LEFT JOIN labels ON labels.id = issue_labels.label_id ",
         );
     }
     sql.push_str("WHERE ");
@@ -1819,6 +1797,9 @@ pub(crate) fn render_distribution_array(keys: &[&str], rows: &[Map<String, Value
 /// `burndown_plot` module branch (`utils/analytics_plot.py:198-264`,
 /// `plot_type="points"` or `"issues"`): per-day remaining over the
 /// module's date range, future days `null`.
+/// Completions truncate in the actor's active zone (`TimezoneMixin`
+/// activates `user_timezone`; `TruncDate` follows it), bound as `$4`;
+/// "today" stays the UTC day (`timezone.now().date()`).
 /// Shared with sibling handler issue 407 (archived detail).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn fetch_burndown_chart(
@@ -1830,6 +1811,7 @@ pub(crate) async fn fetch_burndown_chart(
     target: chrono::NaiveDate,
     total_issues: i64,
     points: bool,
+    timezone: &Tz,
 ) -> Result<String, Denial> {
     let days = (target - start).num_days();
     let mut chart = String::from("{");
@@ -1837,8 +1819,8 @@ pub(crate) async fn fetch_burndown_chart(
         chart.push('}');
         return Ok(chart);
     }
-    // Per-day completed inputs, truncated in UTC (`TIME_ZONE "UTC"`,
-    // the D-27 `burndown_*_sql` precedent).
+    // Per-day completed inputs, truncated in the actor's zone (bound
+    // `$4`; the cycle PIDASHCONV-1184 precedent).
     let scope_where = distribution_from_where(false, false);
     // Points total sums ALL live module-issue estimates, not just the
     // completed ones (`analytics_plot.py:212-214` — no completed filter
@@ -1861,7 +1843,7 @@ pub(crate) async fn fetch_burndown_chart(
     };
     let rows: Vec<(Option<chrono::NaiveDate>, Option<f64>, Option<i64>)> = if points {
         sqlx::query_as(&format!(
-            "SELECT (issues.completed_at AT TIME ZONE 'UTC')::date AS d, \
+            "SELECT (issues.completed_at AT TIME ZONE $4)::date AS d, \
              CAST(estimate_points.value AS FLOAT) AS v, NULL::bigint AS n \
              {scope_where} AND estimate_points.id IS NOT NULL AND issues.completed_at IS NOT NULL \
              ORDER BY issues.completed_at"
@@ -1869,18 +1851,20 @@ pub(crate) async fn fetch_burndown_chart(
         .bind(slug)
         .bind(project_id)
         .bind(module_id)
+        .bind(timezone.name())
         .fetch_all(pool)
         .await
         .map_err(|_| Denial::ServerError)?
     } else {
         sqlx::query_as(&format!(
-            "SELECT (issues.completed_at AT TIME ZONE 'UTC')::date AS d, NULL::float AS v, \
+            "SELECT (issues.completed_at AT TIME ZONE $4)::date AS d, NULL::float AS v, \
              COUNT(*) AS n {scope_where} AND issues.completed_at IS NOT NULL \
              GROUP BY d ORDER BY d"
         ))
         .bind(slug)
         .bind(project_id)
         .bind(module_id)
+        .bind(timezone.name())
         .fetch_all(pool)
         .await
         .map_err(|_| Denial::ServerError)?
@@ -2038,6 +2022,7 @@ async fn module_retrieve(
                     target,
                     total_issues,
                     true,
+                    &timezone,
                 )
                 .await?;
                 out.push_str(",\"completion_chart\":");
@@ -2085,6 +2070,7 @@ async fn module_retrieve(
                 target,
                 total_issues,
                 false,
+                &timezone,
             )
             .await?;
             out.push_str(&chart);
@@ -2704,6 +2690,35 @@ async fn module_destroy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` (`utils/host.py:17-66`):
+    /// `APP_BASE_URL` wins when truthy, else `WEB_URL`; unset is
+    /// `ImproperlyConfigured` → 500. Empty strings fall through like
+    /// Python's `or` (PIDASHCONV-1597, PIDASHCONV-1648).
+    #[test]
+    fn request_origin_falls_through_empty_strings() {
+        let app = "https://app.example.invalid";
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(app), Some(web));
+        assert_eq!(request_origin(&state).expect("app base wins"), app);
+        let state = origin_state(None, Some(web));
+        assert_eq!(request_origin(&state).expect("falls through"), web);
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(request_origin(&state).expect("empty falls through"), web);
+        let state = origin_state(Some(app), Some(""));
+        assert_eq!(request_origin(&state).expect("app wins"), app);
+        let state = origin_state(Some(""), Some(""));
+        assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
+        let state = origin_state(None, None);
+        assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
+    }
 
     #[test]
     fn soft_delete_message_matches_the_mixin_call() {

@@ -290,9 +290,11 @@ def _upsert_call_block(path: Path, anchor: str) -> tuple[str, str]:
     "source,anchor",
     [
         (GITHUB_RS, "account_queries::create_update_account"),
+        # ORM-07 moved the account kernel to domain::identity; the gitea
+        # call site references it by full path (github via its alias).
         (
             GITEA_RS,
-            "pidash_db::auth_oauth::queries::account::create_update_account",
+            "pidash_services::domain::identity::account::create_update_account",
         ),
     ],
     ids=["github", "gitea"],

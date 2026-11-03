@@ -1,0 +1,447 @@
+// @vitest-environment jsdom
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// The list body: the hero slot leads, upcoming and completed groups
+// carry their counts and collapse independently, search narrows live,
+// the filter predicate reaches the hero slot with the groups,
+// narrowing to zero falls to the no-match view for the cause, and the
+// peeked cycle renders the quick look over the list.
+
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  Outlet,
+  RouterProvider,
+} from "@tanstack/react-router";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import type { CycleRow as CycleRowData } from "@pidash/api-client";
+import * as React from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
+import { resetCycleSearchStore } from "../api/searchStore.js";
+import { CYCLES_PROJECT_ID, jsonResponse, makeCycleRow, makeProjectRow } from "../testing.js";
+import { CyclesListBody, type CyclesListBodyProps } from "./CyclesListBody.js";
+
+interface HeroProbeProps {
+  workspaceSlug: string;
+  projectId: string;
+  projectTimeZone: string;
+  directory: ReadonlyMap<string, unknown>;
+  canMutate: boolean;
+  onPeek: (cycleId: string) => void;
+  currentProject: { id: string; name: string; identifier: string };
+  cycleFilter?: ((cycle: CycleRowData) => boolean) | undefined;
+}
+
+const heroSeen = vi.hoisted(() => ({ cycleFilter: undefined as unknown }));
+
+vi.mock("./ActiveCycleHero.js", () => ({
+  ActiveCycleHero: (props: HeroProbeProps) => {
+    heroSeen.cycleFilter = props.cycleFilter;
+    return (
+      <div
+        data-testid="default-hero"
+        data-workspace={props.workspaceSlug}
+        data-project={props.projectId}
+        data-timezone={props.projectTimeZone}
+        data-can-mutate={String(props.canMutate)}
+        data-current-project={JSON.stringify(props.currentProject)}
+        data-directory={JSON.stringify([...props.directory.keys()])}
+      >
+        <button type="button" onClick={() => props.onPeek("323e4567-e89b-12d3-a456-426614174101")}>
+          peek the hero row
+        </button>
+      </div>
+    );
+  },
+}));
+
+const CURRENT_ID = "323e4567-e89b-12d3-a456-426614174101";
+const UPCOMING_ID = "323e4567-e89b-12d3-a456-426614174102";
+const DRAFT_ID = "323e4567-e89b-12d3-a456-426614174103";
+const DONE_ID = "323e4567-e89b-12d3-a456-426614174104";
+const CREATOR_ID = "123e4567-e89b-12d3-a456-426614174010";
+
+const LIST_PATH = `/api/workspaces/acme/projects/${CYCLES_PROJECT_ID}/cycles/`;
+const PROJECT_PATH = `/api/workspaces/acme/projects/${CYCLES_PROJECT_ID}/`;
+const MEMBERS_PATH = "/api/workspaces/acme/members/";
+
+interface Harness {
+  cycles: CycleRowData[];
+  roles: Record<string, number>;
+  members: unknown[];
+}
+
+let harness: Harness;
+
+function upcomingRow(): CycleRowData {
+  return makeCycleRow({
+    id: UPCOMING_ID,
+    name: "November push",
+    status: "upcoming",
+    total_issues: 2,
+    completed_issues: 0,
+    cancelled_issues: 0,
+    created_by: CREATOR_ID,
+  });
+}
+
+function seedCycles(): CycleRowData[] {
+  return [
+    makeCycleRow({ id: CURRENT_ID, name: "Current cycle", status: "current", created_by: CREATOR_ID }),
+    upcomingRow(),
+    makeCycleRow({
+      id: DRAFT_ID,
+      name: "Draft cycle",
+      status: "draft",
+      start_date: null,
+      end_date: null,
+      created_by: CREATOR_ID,
+    }),
+    makeCycleRow({ id: DONE_ID, name: "Done cycle", status: "completed", created_by: CREATOR_ID }),
+  ];
+}
+
+beforeEach(() => {
+  document.body.innerHTML = `<div id="${FULL_SCREEN_PORTAL_ID}"></div>`;
+  heroSeen.cycleFilter = undefined;
+  harness = {
+    cycles: seedCycles(),
+    roles: { [CYCLES_PROJECT_ID]: 20 },
+    members: [
+      {
+        id: "223e4567-e89b-12d3-a456-426614174021",
+        member: {
+          id: CREATOR_ID,
+          first_name: "Ada",
+          last_name: "Lovelace",
+          avatar: "",
+          avatar_url: null,
+          display_name: "Ada Lovelace",
+          is_bot: false,
+        },
+        role: 20,
+        is_active: true,
+      },
+    ],
+  };
+  createAppClient("https://api.test", (async (url: string) => {
+    if (url.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
+    if (url.endsWith(LIST_PATH)) return jsonResponse(url, 200, harness.cycles);
+    if (url.includes(LIST_PATH)) {
+      const row = harness.cycles.find((cycle) => url.includes(`/cycles/${cycle.id}/`));
+      if (row === undefined) return jsonResponse(url, 404, { detail: "missing" });
+      return jsonResponse(url, 200, row);
+    }
+    if (url.endsWith(PROJECT_PATH)) {
+      return jsonResponse(url, 200, makeProjectRow({ timezone: "UTC" }));
+    }
+    if (url.endsWith("/project-roles/")) return jsonResponse(url, 200, harness.roles);
+    if (url.endsWith(MEMBERS_PATH)) return jsonResponse(url, 200, harness.members);
+    throw new Error(`unexpected request: ${url}`);
+  }) as never);
+});
+
+afterEach(() => {
+  resetAppClient();
+  resetCycleSearchStore();
+  vi.unstubAllGlobals();
+});
+
+/** Narrow viewports for the CYC-048 layout menu tests. */
+function stubNarrowViewport(): void {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: true,
+    media: query,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+  }));
+}
+
+function renderBody(props: Partial<CyclesListBodyProps> = {}): void {
+  const rootRoute = createRootRoute({ component: () => <Outlet /> });
+  const wsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/$ws", component: () => <Outlet /> });
+  const listRoute = createRoute({
+    getParentRoute: () => wsRoute,
+    path: "projects/$projectId/cycles",
+    component: () => (
+      <CyclesListBody
+        workspaceSlug="acme"
+        projectId={CYCLES_PROJECT_ID}
+        peekCycleId={null}
+        onPeekChange={() => undefined}
+        {...props}
+      />
+    ),
+  });
+  const detailRoute = createRoute({
+    getParentRoute: () => wsRoute,
+    path: "projects/$projectId/cycles/$cycleId",
+    component: () => <p>detail</p>,
+  });
+  const router = createRouter({
+    routeTree: rootRoute.addChildren([wsRoute.addChildren([listRoute, detailRoute])]),
+    history: createMemoryHistory({ initialEntries: [`/acme/projects/${CYCLES_PROJECT_ID}/cycles`] }),
+    defaultPreload: false,
+  });
+  render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>
+  );
+}
+
+describe("CyclesListBody", () => {
+  it("leads with the hero slot, then counted groups without the current cycle", async () => {
+    renderBody({ hero: <div data-testid="cycles-hero">hero</div> });
+    expect(await screen.findByText("November push")).toBeInTheDocument();
+    expect(screen.getByTestId("cycles-hero")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Upcoming cycle 2" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "Completed cycle 1" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("November push")).toBeInTheDocument();
+    expect(screen.getByText("Draft cycle")).toBeInTheDocument();
+    expect(screen.queryByText("Current cycle")).not.toBeInTheDocument();
+    expect(screen.queryByText("Done cycle")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("img", { name: "Ada Lovelace" })).toHaveLength(2);
+    expect(screen.getAllByTestId("cycle-favorite-marker")).toHaveLength(2);
+  });
+
+  it("collapses each group independently and keeps the counts", async () => {
+    renderBody();
+    await screen.findByText("November push");
+    fireEvent.click(screen.getByRole("button", { name: "Upcoming cycle 2" }));
+    expect(screen.queryByText("November push")).not.toBeInTheDocument();
+    expect(screen.queryByText("Draft cycle")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Upcoming cycle 2" })).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(screen.getByRole("button", { name: "Completed cycle 1" }));
+    expect(screen.getByText("Done cycle")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Completed cycle 1" }));
+    expect(screen.queryByText("Done cycle")).not.toBeInTheDocument();
+  });
+
+  it("narrows rows live as the query types", async () => {
+    renderBody();
+    await screen.findByText("November push");
+    fireEvent.click(screen.getByTestId("cycles-search-toggle"));
+    fireEvent.change(screen.getByPlaceholderText("Search"), { target: { value: "november" } });
+    expect(screen.getByText("November push")).toBeInTheDocument();
+    expect(screen.queryByText("Draft cycle")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Upcoming cycle 1" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Completed cycle 0" })).toBeInTheDocument();
+  });
+
+  it("falls to the search no-match view and clears back to the rows", async () => {
+    renderBody();
+    await screen.findByText("November push");
+    fireEvent.click(screen.getByTestId("cycles-search-toggle"));
+    fireEvent.change(screen.getByPlaceholderText("Search"), { target: { value: "zzz-no-such-orbit" } });
+    expect(await screen.findByRole("heading", { name: "No matching cycles" })).toBeInTheDocument();
+    expect(screen.getByText("Remove the search criteria to see all cycles")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Upcoming cycle/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(screen.getByText("November push")).toBeInTheDocument();
+  });
+
+  it("falls to the filters no-match view when the slice C predicate hides all rows", async () => {
+    const onClearFilters = vi.fn();
+    renderBody({ cycleFilter: () => false, onClearFilters });
+    expect(await screen.findByText("Remove the filters to see all cycles")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear all filters" }));
+    expect(onClearFilters).toHaveBeenCalledTimes(1);
+  });
+
+  it("names search when both search and filters hide the rows", async () => {
+    renderBody({ cycleFilter: (cycle) => cycle.status !== "completed" });
+    await screen.findByText("November push");
+    fireEvent.click(screen.getByTestId("cycles-search-toggle"));
+    fireEvent.change(screen.getByPlaceholderText("Search"), { target: { value: "zzz-no-such-orbit" } });
+    expect(screen.getByText("Remove the search criteria to see all cycles")).toBeInTheDocument();
+  });
+
+  it("applies the filter predicate alongside the query", async () => {
+    renderBody({ cycleFilter: (cycle) => cycle.status !== "draft" });
+    expect(await screen.findByText("November push")).toBeInTheDocument();
+    expect(screen.queryByText("Draft cycle")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Upcoming cycle 1" })).toBeInTheDocument();
+  });
+
+  it("hands the filter predicate to the default hero slot", async () => {
+    const predicate = (cycle: CycleRowData): boolean => cycle.status !== "draft";
+    renderBody({ cycleFilter: predicate });
+    expect(await screen.findByTestId("default-hero")).toBeInTheDocument();
+    expect(heroSeen.cycleFilter).toBe(predicate);
+  });
+
+  it("opens the peek from the eye and closes it back to the list", async () => {
+    const onPeekChange = vi.fn();
+    renderBody({ onPeekChange });
+    await screen.findByText("November push");
+    fireEvent.click(screen.getByRole("button", { name: "Quick look at November push" }));
+    expect(onPeekChange).toHaveBeenCalledWith(UPCOMING_ID);
+  });
+
+  it("toggles the peek shut from the eye of the peeked row", async () => {
+    const onPeekChange = vi.fn();
+    renderBody({ onPeekChange, peekCycleId: UPCOMING_ID });
+    await screen.findByTestId("cycles-list-body");
+    expect(await screen.findByTestId("cycle-preview")).toBeInTheDocument();
+    expect(await screen.findByTestId("cycle-peek-body")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Quick look at November push" }));
+    expect(onPeekChange).toHaveBeenCalledWith(null);
+    fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
+    expect(onPeekChange).toHaveBeenCalledWith(null);
+  });
+
+  it("peeks an unknown id through the detail read behind the error view", async () => {
+    renderBody({ peekCycleId: "00000000-0000-0000-0000-000000000000" });
+    await screen.findByTestId("cycles-list-body");
+    expect(await screen.findByTestId("cycle-preview")).toBeInTheDocument();
+    expect(await screen.findByTestId("cycle-peek-error")).toBeInTheDocument();
+  });
+
+  it("renders the filter and header slots", async () => {
+    renderBody({
+      filterControl: <div data-testid="cycles-filters">filters</div>,
+      headerActions: <div data-testid="cycles-actions">actions</div>,
+    });
+    await screen.findByTestId("cycles-list-body");
+    expect(screen.getByTestId("cycles-filters")).toBeInTheDocument();
+    expect(screen.getByTestId("cycles-actions")).toBeInTheDocument();
+  });
+
+  it("renders the chips slot between the toolbar and the hero", async () => {
+    renderBody({
+      hero: <div data-testid="cycles-hero">hero</div>,
+      chips: <div data-testid="cycles-chips">chips</div>,
+    });
+    await screen.findByTestId("cycles-list-body");
+    const chips = screen.getByTestId("cycles-chips");
+    const follows = (before: HTMLElement, after: HTMLElement): boolean =>
+      (before.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+    expect(follows(screen.getByTestId("cycles-search-toggle"), chips)).toBe(true);
+    expect(follows(chips, screen.getByTestId("cycles-hero"))).toBe(true);
+  });
+
+  it("hides the star for guests", async () => {
+    harness.roles = { [CYCLES_PROJECT_ID]: 5 };
+    renderBody();
+    await screen.findByText("November push");
+    expect(screen.queryByTestId("cycle-favorite-marker")).not.toBeInTheDocument();
+  });
+
+  it("renders zero-count headers with no rows and no no-match view", async () => {
+    harness.cycles = [];
+    renderBody();
+    await screen.findByTestId("cycles-list-body");
+    expect(screen.getByRole("button", { name: "Upcoming cycle 0" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Completed cycle 0" })).toBeInTheDocument();
+    expect(screen.queryByTestId("cycles-no-match")).not.toBeInTheDocument();
+  });
+
+  it("keeps both empty group headers when only the current cycle is loaded", async () => {
+    harness.cycles = [seedCycles()[0]!];
+    renderBody();
+    expect(await screen.findByRole("button", { name: "Upcoming cycle 0" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Completed cycle 0" })).toBeInTheDocument();
+    expect(screen.queryByTestId("cycles-no-match")).not.toBeInTheDocument();
+  });
+
+  it("mounts the default hero with the body's computed row values", async () => {
+    const onPeekChange = vi.fn();
+    renderBody({ onPeekChange });
+    await screen.findByText("November push");
+    const hero = screen.getByTestId("default-hero");
+    expect(hero).toHaveAttribute("data-workspace", "acme");
+    expect(hero).toHaveAttribute("data-project", CYCLES_PROJECT_ID);
+    expect(hero).toHaveAttribute("data-timezone", "UTC");
+    expect(hero).toHaveAttribute("data-can-mutate", "true");
+    expect(hero.dataset.currentProject).toBe(
+      JSON.stringify({ id: CYCLES_PROJECT_ID, name: "Website relaunch", identifier: "WEB" })
+    );
+    expect(hero.dataset.directory).toBe(JSON.stringify([CREATOR_ID]));
+    fireEvent.click(screen.getByRole("button", { name: "peek the hero row" }));
+    expect(onPeekChange).toHaveBeenCalledWith("323e4567-e89b-12d3-a456-426614174101");
+  });
+
+  it("passes a read-only hero to guests", async () => {
+    harness.roles = { [CYCLES_PROJECT_ID]: 5 };
+    renderBody();
+    await screen.findByText("November push");
+    expect(screen.getByTestId("default-hero")).toHaveAttribute("data-can-mutate", "false");
+  });
+
+  it("keeps list search and filters for guests", async () => {
+    harness.roles = { [CYCLES_PROJECT_ID]: 5 };
+    renderBody({ filterControl: <div data-testid="cycles-filters">filters</div> });
+    await screen.findByText("November push");
+    expect(screen.getByTestId("cycles-search-toggle")).toBeInTheDocument();
+    expect(screen.getByTestId("cycles-filters")).toBeInTheDocument();
+  });
+
+  it("hides the layout menu on wide viewports", async () => {
+    renderBody();
+    await screen.findByText("November push");
+    expect(screen.queryByTestId("cycles-list-layout-menu")).not.toBeInTheDocument();
+  });
+
+  it("switches the rows to the gallery on narrow screens and back", async () => {
+    stubNarrowViewport();
+    renderBody();
+    await screen.findByText("November push");
+    fireEvent.click(screen.getByTestId("cycles-list-layout-trigger"));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["List layout", "Gallery layout"]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Gallery layout" }));
+    // Gallery keeps every row, the hero, and the groups.
+    expect(screen.getByTestId("cycles-list-layout-trigger")).toHaveTextContent("Gallery layout");
+    expect(screen.getByText("November push")).toBeInTheDocument();
+    expect(screen.getByText("Draft cycle")).toBeInTheDocument();
+    expect(screen.getByTestId("default-hero")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Upcoming cycle 2" })).toBeInTheDocument();
+    expect(screen.getByTestId("cycle-group-upcoming-gallery")).toBeInTheDocument();
+    const cards = screen.getAllByTestId("cycle-row");
+    expect(cards.length).toBeGreaterThan(0);
+    for (const card of cards) expect(card.className).toContain("rounded-");
+    fireEvent.click(screen.getByTestId("cycles-list-layout-trigger"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "List layout" }));
+    expect(screen.getByTestId("cycles-list-layout-trigger")).toHaveTextContent("List layout");
+    expect(screen.queryByTestId("cycle-group-upcoming-gallery")).not.toBeInTheDocument();
+    expect(screen.getByText("November push")).toBeInTheDocument();
+  });
+
+  it("returns to list rows when a gallery choice is followed by widening the viewport", async () => {
+    const media = {
+      matches: true,
+      listeners: [] as Array<(event: { matches: boolean }) => void>,
+    };
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      get matches() {
+        return media.matches;
+      },
+      media: query,
+      addEventListener: (_type: string, listener: (event: { matches: boolean }) => void) => {
+        media.listeners.push(listener);
+      },
+      removeEventListener: (_type: string, listener: (event: { matches: boolean }) => void) => {
+        media.listeners = media.listeners.filter((entry) => entry !== listener);
+      },
+    }));
+    renderBody();
+    await screen.findByText("November push");
+    fireEvent.click(screen.getByTestId("cycles-list-layout-trigger"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Gallery layout" }));
+    expect(screen.getByTestId("cycle-group-upcoming-gallery")).toBeInTheDocument();
+    act(() => {
+      media.matches = false;
+      for (const listener of media.listeners) listener({ matches: false });
+    });
+    expect(screen.queryByTestId("cycles-list-layout-menu")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("cycle-group-upcoming-gallery")).not.toBeInTheDocument();
+    for (const row of screen.getAllByTestId("cycle-row")) expect(row.className).not.toContain("rounded-");
+  });
+});

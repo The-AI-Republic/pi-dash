@@ -9,8 +9,11 @@ unauthenticated cases are part of the suite's denied-permission tripwire.
 """
 
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+
+from _harness.http import api_client
 
 pytestmark = pytest.mark.contract
 
@@ -91,6 +94,26 @@ def test_create_rejects_bad_priority(user_client, world):
     assert response.json() == {"error": "Invalid priority"}
 
 
+def test_create_null_description_json_is_400(user_client, world, db):
+    # PIDASHCONV-1637: an explicit null reaches Issue.objects.create as
+    # None (views/intake.py:147); description_json is NOT NULL
+    # (db/models/issue.py:138), so the insert raises IntegrityError and
+    # BaseViewSet.handle_exception answers 400 (views/base.py:74-78)
+    # with no issue/intake rows written. The triage State row IS
+    # written first (:133-142 runs before the failing insert), so only
+    # the issue and intake_issues tables are counted here.
+    before_issues = db.fetchone("SELECT count(*) AS c FROM issues")["c"]
+    before_intakes = db.fetchone("SELECT count(*) AS c FROM intake_issues")["c"]
+    response = user_client.post(
+        _list_url(world), json={"issue": {"name": "x", "description_json": None}}
+    )
+    assert response.status_code == 400
+    assert response.json() == {"error": "The payload is not valid"}
+    after_issues = db.fetchone("SELECT count(*) AS c FROM issues")["c"]
+    after_intakes = db.fetchone("SELECT count(*) AS c FROM intake_issues")["c"]
+    assert (after_issues, after_intakes) == (before_issues, before_intakes)
+
+
 def test_create_requires_auth(anon_client, world):
     response = anon_client.post(_list_url(world), json={"issue": {"name": "anon idea"}})
     assert response.status_code in (401, 403)
@@ -134,6 +157,32 @@ def test_retrieve_patch_delete_by_creator(user_client, world, seeder, db):
 
     deleted = user_client.delete(_detail_url(world, bridge["id"]))
     assert deleted.status_code == 204
+
+
+def test_patch_textless_html_stores_empty_stripped(user_client, world, seeder, db):
+    # PIDASHCONV-1264: PATCHing description_html with no text (the editor's
+    # normal "cleared" value "<p></p>") stores "" — not NULL — in
+    # issues.description_stripped (Issue.save update branch,
+    # db/models/issue.py:344-349: None only when the input html itself is
+    # ""/None, else strip_tags verbatim).
+    issue = seeder.create_issue(world["workspace"]["id"], world["project"]["id"], world["state"]["id"])
+    db.execute("UPDATE issues SET created_by_id=%s WHERE id=%s", (world["owner"]["id"], issue["id"]))
+    bridge = seeder.create_intake_issue(
+        world["workspace"]["id"], world["project"]["id"], world["intake"]["id"], issue["id"]
+    )
+    db.execute(
+        "UPDATE intake_issues SET created_by_id=%s WHERE id=%s", (world["owner"]["id"], bridge["id"])
+    )
+    patched = user_client.patch(
+        _detail_url(world, bridge["id"]),
+        json={"issue": {"description_html": "<p></p>"}},
+    )
+    assert patched.status_code == 200
+    body = patched.json()
+    assert body["description_html"] == "<p></p>"
+    assert body["description_stripped"] == ""
+    row = db.fetchone("SELECT description_stripped FROM issues WHERE id=%s", (body["id"],))
+    assert row["description_stripped"] == ""
 
 
 def test_patch_by_other_user_is_rejected(other_client, world, seeder, db):
@@ -291,3 +340,67 @@ def test_intake_assignees_newest_first(user_client, world, seeder, db):
     assert got.status_code == 200
     assert got.json()["assignees"] == [newer["id"], older["id"]]
     assert [d["id"] for d in got.json()["assignee_details"]] == [newer["id"], older["id"]]
+
+
+def test_concurrent_creates_get_distinct_sequence_ids(user_client, world, seeder, db, settings):
+    # PIDASHCONV-1265: Issue.save takes a per-project advisory lock and
+    # assigns MAX(sequence)+1 inside one transaction
+    # (db/models/issue.py:313-343), so N concurrent intake creates must
+    # yield N distinct sequence_ids. The triage state is pre-seeded so
+    # every create takes the reuse path — the triage get-or-create race
+    # is separate Django behavior, out of scope here.
+    seeder.create_state(
+        world["workspace"]["id"], world["project"]["id"], name="Triage", group="triage"
+    )
+    url = _list_url(world)
+    cookies = dict(user_client.cookies)
+    count = 20
+
+    def _one(n):
+        with api_client(settings.base_url) as client:
+            client.cookies.update(cookies)
+            response = client.post(url, json={"issue": {"name": f"race idea {n}"}})
+            assert response.status_code == 200, response.text[:200]
+            return response.json()["sequence_id"]
+
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        sequence_ids = list(pool.map(_one, range(count)))
+    assert len(set(sequence_ids)) == count, f"shared sequence_ids: {sorted(sequence_ids)}"
+    # The world's seeded issue bypasses Issue.save (no issue_sequences
+    # row), so the dupe scan covers only the created rows.
+    dupes = db.fetchall(
+        "SELECT sequence_id, count(*) AS c FROM issues WHERE project_id=%s AND id != %s"
+        " GROUP BY 1 HAVING count(*) > 1",
+        (world["project"]["id"], world["issue"]["id"]),
+    )
+    assert dupes == []
+
+
+def test_create_triage_autocreate_ignores_deleted_and_triage_sequences(
+    user_client, world, seeder, db
+):
+    # PIDASHCONV-1638: the auto-created Triage row's sequence comes from
+    # State.save, which reads MAX(sequence) over State.objects — live,
+    # non-triage project states (db/models/state.py:79-83,131-139) — plus
+    # 15000. Soft-deleted rows (any group) and triage-group rows must not
+    # inflate it: live max 50000 here, so Triage lands on 65000 even with
+    # a deleted backlog state at 100000 and a deleted triage state (the
+    # highest row) at 200000.
+    db.execute("UPDATE states SET sequence=50000 WHERE id=%s", (world["state"]["id"],))
+    dead = seeder.create_state(
+        world["workspace"]["id"], world["project"]["id"], name="Deleted", group="backlog"
+    )
+    db.execute("UPDATE states SET sequence=100000, deleted_at=now() WHERE id=%s", (dead["id"],))
+    dead_triage = seeder.create_state(
+        world["workspace"]["id"], world["project"]["id"], name="Old triage", group="triage"
+    )
+    db.execute(
+        "UPDATE states SET sequence=200000, deleted_at=now() WHERE id=%s", (dead_triage["id"],)
+    )
+    response = user_client.post(_list_url(world), json={"issue": {"name": "triage scope idea"}})
+    assert response.status_code == 200
+    row = db.fetchone(
+        'SELECT sequence FROM states WHERE project_id=%s AND "group"=%s AND deleted_at IS NULL',
+        (world["project"]["id"], "triage"),
+    )
+    assert float(row["sequence"]) == 65000.0

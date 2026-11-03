@@ -13,4 +13,15 @@
 #   app_intake: intake-issue CREATE publishes issue_description_version_task;
 #     the versions tests poll until the rows exist (proven locally: 45/45
 #     with a worker each side, versions tests time out without one).
+#   orchestration: orchestration/test_dispatch_drain.py publishes fire_tick,
+#     fire_scheduler_binding and fail_runs_on_offline_runners in Celery wire
+#     format and waits for the worker to consume them (PIDASHCONV-1579);
+#     the three worker-driven tests time out after 60s with no consumer.
+#     The file branches on PIDASH_CONTRACT_BACKEND (django: redis broker,
+#     rust: rust_job_queue), which the workflow sets per half.
+#   runner: runner/test_runner_agent_health.py publishes
+#     runner.reconcile_stalled_runs and waits for the sweep to reap the
+#     control run (PIDASHCONV-1579); same BACKEND-branched publish shape.
 app_intake
+orchestration
+runner

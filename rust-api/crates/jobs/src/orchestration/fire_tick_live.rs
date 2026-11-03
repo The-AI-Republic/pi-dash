@@ -22,9 +22,10 @@ use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
 use pidash_db::orchestration::runs::{active_run_sql, latest_prior_run_sql};
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
+use pidash_services::runner_sessions::live_drains::{drain_pod_by_id, DrainError};
 
 use super::creation_jobs::StoreDeps;
 use super::fire_tick_seam::{
@@ -35,17 +36,21 @@ use super::live_inputs::{
     creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
 };
 use crate::admission::RedisAdmissionCache;
+use crate::dispatch::DispatchDecision;
 use crate::tasks_ticker::fire_tick::{FireTickSeam, ProjectTickCols};
 
 /// Live [`FireTickSeam`]: pool + dispatch settings + the injected
-/// toolsets and assistant seams. One value serves every fire; per-fire
-/// inputs (presence, llm-gate verdicts, cache, `now`) are built inside
-/// the async methods, and the ticking state is passed in from the
-/// claim read (live, never cached).
+/// toolsets and assistant seams, plus the shared Redis client and
+/// runner settings the continuation drain needs. One value serves
+/// every fire; per-fire inputs (presence, llm-gate verdicts, cache,
+/// `now`) are built inside the async methods, and the ticking state
+/// is passed in from the claim read (live, never cached).
 pub struct LiveFireTickSeam {
     pool: PgPool,
     cloud: CloudAgentSettings,
     managed: ManagedRunnerSettings,
+    redis: Option<redis::Client>,
+    runner: RunnerSettings,
     toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     assistant_seam: Arc<dyn AssistantModelSeam>,
 }
@@ -55,6 +60,8 @@ impl LiveFireTickSeam {
         pool: PgPool,
         cloud: CloudAgentSettings,
         managed: ManagedRunnerSettings,
+        redis: Option<redis::Client>,
+        runner: RunnerSettings,
         toolsets: Arc<dyn CloudAgentToolsetsSeam>,
         assistant_seam: Arc<dyn AssistantModelSeam>,
     ) -> Self {
@@ -62,6 +69,8 @@ impl LiveFireTickSeam {
             pool,
             cloud,
             managed,
+            redis,
+            runner,
             toolsets,
             assistant_seam,
         }
@@ -114,6 +123,8 @@ impl FireTickSeam for LiveFireTickSeam {
         let pool = self.pool.clone();
         let cloud = self.cloud.clone();
         let managed = self.managed.clone();
+        let redis = self.redis.clone();
+        let runner = self.runner.clone();
         let toolsets = self.toolsets.clone();
         let assistant_seam = self.assistant_seam.clone();
         let matcher = JobsMatcher::new(pool.clone());
@@ -149,6 +160,20 @@ impl FireTickSeam for LiveFireTickSeam {
                 DispatchJobsError::Db(db) => db,
                 other => sqlx::Error::Protocol(other.to_string()),
             })?;
+            // The driver's `dispatch_agent_run` only *returns* the
+            // decision (`dispatch.py:61-70` drains the pod inline), so a
+            // `PodDrain` must be acted on here or the continuation stays
+            // QUEUED (PIDASHCONV-1494).
+            for (_, decision) in &outcome.dispatch_decisions {
+                if let DispatchDecision::PodDrain { pod_id } = decision {
+                    drain_pod_by_id(&pool, redis.as_ref(), &runner, *pod_id)
+                        .await
+                        .map_err(|error| match error {
+                            DrainError::Db(db) => db,
+                            other => sqlx::Error::Protocol(other.to_string()),
+                        })?;
+                }
+            }
             emit_logs(&outcome.outcome.logs);
             Ok(outcome.outcome.run_id)
         })
@@ -194,6 +219,8 @@ mod tests {
             pool,
             settings.cloud_agent,
             settings.managed_runner,
+            None,
+            settings.runner,
             Arc::new(NoExtraToolsets),
             Arc::new(DefaultSeam),
         )

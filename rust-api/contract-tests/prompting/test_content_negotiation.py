@@ -3,16 +3,21 @@
 Django's prompting views read ``request.data``, so DRF's default parsers
 (JSON, Form, MultiPart) decide how the body is decoded: form input works,
 an unsupported media type is 415, and a malformed JSON body is DRF's 400
-with CPython's message.  For POST, ``SessionAuthentication.enforce_csrf``
+(tier 3 since PIDASHCONV-1555: the message is CPython's on Django and
+serde's on Rust; cases assert status and envelope only).  For POST, ``SessionAuthentication.enforce_csrf``
 reads ``request.POST`` and so parses the body between the CSRF-cookie
 check and the token comparison; the parse error therefore wins over a
 missing header and over every view gate (workspace, membership, kind).
 """
 
 MALFORMED_JSON = b"["
-MALFORMED_DETAIL = {
-    "detail": "JSON parse error - Expecting value: line 1 column 2 (char 1)"
-}
+MALFORMED_PREFIX = "JSON parse error - "
+
+
+def _assert_malformed_envelope(res):
+    assert res.status_code == 400, res.text
+    detail = res.json()["detail"]
+    assert detail.startswith(MALFORMED_PREFIX), detail
 
 
 def _detail_url(slug, section_key="implementation"):
@@ -64,8 +69,7 @@ def test_preview_parses_body_before_missing_csrf_header(api, tenant_a, write_a):
         headers={**headers, "Content-Type": "application/json"},
         content=MALFORMED_JSON,
     )
-    assert r.status_code == 400, r.text
-    assert r.json() == MALFORMED_DETAIL
+    _assert_malformed_envelope(r)
 
 
 def test_preview_form_body_supplies_csrf_token(api, tenant_a, issue_a, write_a):
@@ -96,8 +100,7 @@ def test_preview_parses_body_before_unknown_workspace(api, write_a):
         headers={**write_a, "Content-Type": "application/json"},
         content=MALFORMED_JSON,
     )
-    assert r.status_code == 400, r.text
-    assert r.json() == MALFORMED_DETAIL
+    _assert_malformed_envelope(r)
 
 
 def test_preview_parses_body_before_membership_gate(api, tenant_a, write_b):
@@ -106,8 +109,7 @@ def test_preview_parses_body_before_membership_gate(api, tenant_a, write_b):
         headers={**write_b, "Content-Type": "application/json"},
         content=MALFORMED_JSON,
     )
-    assert r.status_code == 400, r.text
-    assert r.json() == MALFORMED_DETAIL
+    _assert_malformed_envelope(r)
 
 
 def test_preview_parses_body_before_unknown_kind(api, tenant_a, write_a):
@@ -116,5 +118,4 @@ def test_preview_parses_body_before_unknown_kind(api, tenant_a, write_a):
         headers={**write_a, "Content-Type": "application/json"},
         content=MALFORMED_JSON,
     )
-    assert r.status_code == 400, r.text
-    assert r.json() == MALFORMED_DETAIL
+    _assert_malformed_envelope(r)

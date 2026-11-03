@@ -1,0 +1,39 @@
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// Oracle scenario (NEWFRONT-122): worklog surfaces stay absent in OSS.
+// Row: ISS-206 (worklog absent).
+import { test, expect } from "../fixtures";
+import { serverCreateIssueFull, serverCleanupIssueWithSession, signInSession } from "../helpers/api";
+import { specTags, specTitle } from "../helpers/tags";
+
+test(
+  specTitle(["ISS-206"], "no worklog surfaces render in the OSS build"),
+  { tag: specTags(["ISS-206"]) },
+  async ({ driver, seed, page }) => {
+    // The probe name must not contain the forbidden token: the detail page
+    // renders the issue title as body text, so a "worklog" name would match
+    // the absence assertion below on the title alone (gate fix).
+    const tag = `NF122 time-entry ${Date.now()}`;
+    const session = await signInSession(seed.email, seed.password);
+    const issue = await serverCreateIssueFull(seed.workspaceSlug, seed.projectId, `${tag} issue`, session);
+    try {
+      await driver.openEntry();
+      await driver.signInWithPassword(seed.email, seed.password);
+      await driver.openIssueDetail(seed.workspaceSlug, seed.projectId, issue.id);
+
+      await test.step("no worklog button in the activity header", async () => {
+        expect(await driver.worklogCreateVisible()).toBe(false);
+      });
+
+      await test.step("no worklog rows, summary or filter category", async () => {
+        const bodyText = await page.locator("body").innerText();
+        expect(bodyText).not.toMatch(/work\s?log/i);
+        const options = await driver.activityFilterOptions();
+        expect(options.map((o) => o.label)).toEqual(["Updates", "Comments", "State", "Assignee"]);
+      });
+    } finally {
+      await serverCleanupIssueWithSession(seed.workspaceSlug, seed.projectId, issue.id, session);
+    }
+  }
+);

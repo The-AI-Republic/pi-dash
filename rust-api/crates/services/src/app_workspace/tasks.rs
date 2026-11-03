@@ -159,10 +159,10 @@ pub const TRACK_EVENT_TASK: &str = "pi_dash.bgtasks.event_tracking_task.track_ev
 pub const WORKSPACE_INVITATION_TASK: &str =
     "pi_dash.bgtasks.workspace_invitation_task.workspace_invitation";
 
-/// Celery wire name for `issue_activity` (bare `@shared_task` default;
-/// pinned equal to the D-28 const — same string, cross-asserted in the
-/// tests below since both live in this crate).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+/// Re-export of the canonical [`crate::domain::activity::ISSUE_ACTIVITY_TASK`]
+/// (the D-28 owners re-export the same const, so the pin is by
+/// construction now).
+pub use crate::domain::activity::ISSUE_ACTIVITY_TASK;
 
 /// Celery wire name for `user_deactivation_email` (bare `@shared_task`
 /// default; also pinned by the jobs crate at
@@ -1006,12 +1006,10 @@ mod tests {
             SEND_EMAIL_UPDATE_CONFIRMATION_TASK,
             "pi_dash.bgtasks.user_email_update_task.send_email_update_confirmation"
         );
-        // Same string the D-28 owners pin (same crate — asserted, not
-        // duplicated by value).
-        assert_eq!(
-            ISSUE_ACTIVITY_TASK,
-            crate::app_modules::tasks::ISSUE_ACTIVITY_TASK
-        );
+        // `ISSUE_ACTIVITY_TASK` is the shared domain const now (the D-28
+        // owners re-export the same one — asserted by the literal pin
+        // above, not by a const-to-const comparison); the kwarg orders
+        // stay per-view and are still pinned equal here.
         assert_eq!(
             ISSUE_ACTIVITY_KWARG_ORDER,
             crate::app_modules::tasks::ISSUE_ACTIVITY_KWARG_ORDER

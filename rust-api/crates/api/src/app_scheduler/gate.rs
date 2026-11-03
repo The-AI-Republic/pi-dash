@@ -76,7 +76,7 @@
 //!   project-membership row (kernel branch, `base.py:63-78`); a
 //!   workspace admin without one 403s on PROJECT routes.
 
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono_tz::Tz;
 
@@ -89,6 +89,8 @@ use pidash_db::config::Settings;
 use pidash_types::WorkspaceId;
 
 use crate::state::AppState;
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 /// Exact bytes of the DRF `IsAuthenticated` denial (401): what anonymous
 /// callers on every scheduler route receive before any gate runs.
@@ -102,10 +104,6 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// occurrences route has no flag check (ported quirk) and never renders
 /// this body.
 pub const DISABLED_BODY: &str = r#"{"error":"Project scheduler is disabled on this instance"}"#;
-/// `BaseAPIView.handle_exception`'s generic 500 branch
-/// (`app/views/base.py:211-250`): database failures and unreachable
-/// caller bugs render here.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 // ---------------------------------------------------------------------------
 // Gate table: which decorator each route+method carries
@@ -346,14 +344,6 @@ pub enum Denial {
     /// Database failure, missing pool, or an unreachable caller bug
     /// (Project gate without a project id): 500 [`SERVER_ERROR_BODY`].
     ServerError,
-}
-
-fn json_response(status: StatusCode, body: &'static str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static scheduler-gate response")
 }
 
 impl IntoResponse for Denial {

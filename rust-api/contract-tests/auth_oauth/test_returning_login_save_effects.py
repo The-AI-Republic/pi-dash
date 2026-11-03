@@ -45,7 +45,9 @@ from _harness.http import forge_session_data  # noqa: E402
 from _harness.sinks import RoutingStub  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-GOOGLE_RS = REPO_ROOT / "rust-api/crates/api/src/auth_oauth/oauth_google.rs"
+# ORM-07 moved google's save UPDATE into the shared login-stamps
+# renderer; the pin follows the effects there (PIDASHCONV-1525).
+IDENTITY_RS = REPO_ROOT / "rust-api/crates/services/src/domain/identity.rs"
 
 GITEA_KEYS = ("GITEA_CLIENT_ID", "GITEA_CLIENT_SECRET", "GITEA_HOST")
 SESSION_HOST = "http://oauth-state.test"
@@ -242,32 +244,39 @@ def test_app_gitea_returning_login_applies_save_effects(base_url: str):
 
 
 def _google_save_update_sql() -> str:
-    """The google ``save_user_data`` UPDATE statement, backslashes stripped.
+    """The google ``save_user_data`` UPDATE effects, backslashes stripped.
 
     Harness helper for the shape pin below; asserts its own premises so a
-    refactor that moves the statement fails loudly instead of matching
-    some other UPDATE.
+    refactor that moves the renderer fails loudly instead of matching
+    some other UPDATE. ORM-07 renders the statement in
+    ``login_stamps_sql`` (one shared renderer for every login path; the
+    google call site selects backfill/staff/updated_at), so the pin reads
+    the renderer body rather than a per-provider statement.
     """
-    source = GOOGLE_RS.read_text()
-    fn_at = source.find("pub async fn save_user_data")
-    assert fn_at != -1, "harness: save_user_data moved or was renamed"
-    update_at = source.find("UPDATE", fn_at)
-    assert update_at != -1, "harness: no UPDATE inside save_user_data"
-    where_at = source.find("WHERE", update_at)
-    assert where_at != -1, "harness: no WHERE inside save_user_data"
-    # The statement is the only UPDATE..WHERE span in the function.
-    assert source.find("UPDATE", update_at + 1) == -1 or source.find(
-        "UPDATE", update_at + 1
-    ) > source.find("\n}\n", where_at), "harness: second UPDATE in save_user_data"
-    return source[update_at:where_at].replace("\\", "")
+    source = IDENTITY_RS.read_text()
+    fn_at = source.find("fn login_stamps_sql")
+    assert fn_at != -1, "harness: login_stamps_sql moved or was renamed"
+    end_at = source.find("\n}\n", fn_at)
+    assert end_at != -1, "harness: could not delimit login_stamps_sql"
+    # The renderer is defined once; the UPDATE skeleton plus the effect
+    # fragments all live in its body.
+    assert source.find("fn login_stamps_sql", fn_at + 1) == -1, (
+        "harness: second login_stamps_sql definition"
+    )
+    body = source[fn_at:end_at]
+    assert "UPDATE" in body and "WHERE" in body, (
+        "harness: no UPDATE..WHERE skeleton in login_stamps_sql"
+    )
+    return body.replace("\\", "")
 
 
 def test_google_save_update_applies_save_effects():
     """Regression pin: the google save UPDATE carries the User.save() effects.
 
     Google logins cannot run over HTTP on either backend (hardcoded
-    ``https://`` URLs, no stub seam), so this file pins the statement text
-    instead (the PIDASHCONV-1084 pattern): the UPDATE must refresh
+    ``https://`` URLs, no stub seam), so this file pins the UPDATE effects
+    instead (the PIDASHCONV-1084 pattern; ORM-07 renders them in the
+    shared ``login_stamps_sql``): the UPDATE must refresh
     ``updated_at``, backfill a blank ``display_name`` from the email local
     part, and sync ``is_staff`` from ``is_superuser``. FAILS on pre-fix
     code; runs identically in both backend runs. Behavior is pinned by the

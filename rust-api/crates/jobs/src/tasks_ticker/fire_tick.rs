@@ -82,6 +82,7 @@ use pidash_db::tasks_ticker::models::{
 use crate::queue::JobRow;
 use crate::worker::{HandlerError, Registry, Verdict};
 use crate::Error;
+use pidash_compat::py::py_bool;
 
 pub use super::scan::FIRE_TICK_TASK;
 
@@ -198,16 +199,6 @@ pub trait FireTickSeam: Send + Sync {
         triggered_by: &str,
         actor: Option<Uuid>,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Uuid>, sqlx::Error>> + Send + '_>>;
-}
-
-/// Render a bool the way Python `%s` does (`True`/`False`): the dispatch
-/// log line keeps the exact field text (`agent_ticker.py:336-344`).
-pub fn py_bool(value: bool) -> &'static str {
-    if value {
-        "True"
-    } else {
-        "False"
-    }
 }
 
 /// Mirror of `ticker.effective_max_ticks()` (`issue_agent_ticker.py:205-214`):
@@ -1263,12 +1254,6 @@ mod tests {
         assert!(!ticket.enabled);
         assert_eq!(ticket.disarm_reason, "");
         assert_eq!(ticket.claim_trigger, TRIGGER_RUN_AI);
-    }
-
-    #[test]
-    fn log_bools_match_python_capitalisation() {
-        assert_eq!(py_bool(true), "True");
-        assert_eq!(py_bool(false), "False");
     }
 
     // Task name + payload are wire-identical to the Celery v2

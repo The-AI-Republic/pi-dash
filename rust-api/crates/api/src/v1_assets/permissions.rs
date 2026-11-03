@@ -257,9 +257,9 @@ pub fn throttle_for(api_key: Option<&str>, service_token_found: bool) -> Throttl
 pub const API_KEY_THROTTLE_SCOPE: &str = "api_key";
 /// DRF `scope` of `ServiceTokenRateThrottle` (`api/rate_limit.py:54`).
 pub const SERVICE_TOKEN_THROTTLE_SCOPE: &str = "service_token";
-/// Default rate of `ApiKeyRateThrottle`: `60/minute`, overridable via the
+/// Default rate of `ApiKeyRateThrottle`: `120/minute`, overridable via the
 /// `API_KEY_RATE_LIMIT` env var (`api/rate_limit.py:14`).
-pub const API_KEY_THROTTLE_REQUESTS_PER_MINUTE: u32 = 60;
+pub const API_KEY_THROTTLE_REQUESTS_PER_MINUTE: u32 = 120;
 /// Name of the env var overriding the API-key rate (`rate_limit.py:14`).
 pub const API_KEY_RATE_LIMIT_ENV: &str = "API_KEY_RATE_LIMIT";
 /// Rate of `ServiceTokenRateThrottle`: `300/minute` (`rate_limit.py:55`).
@@ -659,7 +659,7 @@ mod tests {
     fn throttle_rates_headers_and_auth_strings() {
         assert_eq!(API_KEY_THROTTLE_SCOPE, "api_key");
         assert_eq!(SERVICE_TOKEN_THROTTLE_SCOPE, "service_token");
-        assert_eq!(API_KEY_THROTTLE_REQUESTS_PER_MINUTE, 60);
+        assert_eq!(API_KEY_THROTTLE_REQUESTS_PER_MINUTE, 120);
         assert_eq!(API_KEY_RATE_LIMIT_ENV, "API_KEY_RATE_LIMIT");
         assert_eq!(SERVICE_TOKEN_THROTTLE_REQUESTS_PER_MINUTE, 300);
         assert_eq!(THROTTLE_WINDOW_SECS, 60);

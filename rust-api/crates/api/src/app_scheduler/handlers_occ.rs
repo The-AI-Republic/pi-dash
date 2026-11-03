@@ -54,7 +54,7 @@
 //!   truthy non-iterables (numbers/bools) — model-violating data either way.
 
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
@@ -71,6 +71,7 @@ use super::gate::{self, Gate};
 use crate::app_issues::{query_last, QueryMap};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::response::json_response;
 
 // ---------------------------------------------------------------------------
 // Exact bodies
@@ -99,14 +100,6 @@ pub enum Denial {
     ObjectNotFound,
     /// Database failure: 500 [`gate::SERVER_ERROR_BODY`].
     ServerError,
-}
-
-fn json_response(status: StatusCode, body: &str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body.to_owned()))
-        .expect("occurrences-handler response")
 }
 
 impl IntoResponse for Denial {
