@@ -1,0 +1,426 @@
+// @vitest-environment jsdom
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import type { IssueListItem } from "@pidash/api-client";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import {
+  CALENDAR_BLOCK_PREVIEW_DELAY_MS,
+  CALENDAR_DRAG_THRESHOLD_PX,
+  CalendarBlock,
+  blockIdentifier,
+} from "./CalendarBlock.js";
+
+const ISSUE_ID = "323e4567-e89b-12d3-a456-426614174002";
+const STATE_ID = "423e4567-e89b-12d3-a456-426614174003";
+
+function row(overrides: Partial<IssueListItem> = {}): IssueListItem {
+  return {
+    id: ISSUE_ID,
+    name: "Fix login",
+    state_id: STATE_ID,
+    sort_order: 1,
+    completed_at: null,
+    priority: "none",
+    sequence_id: 42,
+    project_id: "223e4567-e89b-12d3-a456-426614174001",
+    parent_id: null,
+    cycle_id: null,
+    module_ids: [],
+    label_ids: [],
+    assignee_ids: [],
+    sub_issues_count: null,
+    attachment_count: null,
+    link_count: null,
+    created_at: "2026-10-01T00:00:00Z",
+    updated_at: "2026-10-01T00:00:00Z",
+    created_by: null,
+    updated_by: null,
+    is_draft: false,
+    archived_at: null,
+    ...overrides,
+  };
+}
+
+function renderBlock(
+  issue = row(),
+  highlighted = false,
+  overrides: Partial<React.ComponentProps<typeof CalendarBlock>> = {}
+) {
+  const handlers = {
+    onOpen: vi.fn(),
+    onEdit: vi.fn(),
+    onDelete: vi.fn(),
+    onDragStart: vi.fn(),
+  };
+  render(
+    <CalendarBlock
+      issue={issue}
+      workspaceSlug="acme"
+      projectIdentifier="WEB"
+      stateColor="#00ff00"
+      highlighted={highlighted}
+      draggable
+      quickActions
+      {...handlers}
+      {...overrides}
+    />
+  );
+  return handlers;
+}
+
+function pointerEvent(type: string, clientX: number, clientY: number): MouseEvent {
+  return new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY });
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+describe("CalendarBlock", () => {
+  it("shows the identifier, title, state edge, and deep-links on click", async () => {
+    const handlers = renderBlock();
+    const user = userEvent.setup();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    expect(link).toHaveAttribute("id", `issue-${ISSUE_ID}`);
+    expect(link).toHaveAttribute("href", "/acme/browse/WEB-42");
+    expect(link).toHaveTextContent("WEB-42");
+    expect(link).toHaveTextContent("Fix login");
+    expect(link.querySelector("span[aria-hidden='true']")).toHaveStyle({ backgroundColor: "#00ff00" });
+    expect(blockIdentifier("WEB", row())).toBe("WEB-42");
+    await user.click(link);
+    expect(handlers.onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: ISSUE_ID }));
+  });
+
+  it("opens peek when the identifier itself is clicked", async () => {
+    const handlers = renderBlock();
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("calendar-block-identifier"));
+    expect(handlers.onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: ISSUE_ID }));
+  });
+
+  it("reveals the preview after the hover delay and closes on leave", () => {
+    vi.useFakeTimers();
+    renderBlock();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent.pointerEnter(link);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Fix login");
+    fireEvent.pointerLeave(link);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+  });
+
+  it("shows the shared preview card on hover: key, state, title, priority and dates (ISS-133)", () => {
+    vi.useFakeTimers();
+    renderBlock(row({ priority: "urgent", start_date: "2026-10-01", target_date: "2026-10-20" }), false, {
+      stateName: "In progress",
+      stateGroup: "started",
+    });
+    fireEvent.pointerEnter(screen.getByRole("link", { name: "WEB-42" }));
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    const tooltip = screen.getByRole("tooltip");
+    expect(tooltip).toHaveAttribute("data-calendar-preview", "true");
+    const card = screen.getByTestId("work-item-preview");
+    expect(tooltip).toContainElement(card);
+    expect(card).toHaveTextContent("WEB-42");
+    expect(screen.getByTestId("preview-card-state")).toHaveTextContent("In progress");
+    expect(card).toHaveTextContent("Fix login");
+    expect(screen.getByTestId("preview-card-dates")).toHaveTextContent("Oct 01, 2026 - Oct 20, 2026");
+    expect(screen.getByTestId("preview-card-priority").querySelector("svg.lucide-circle-alert")).not.toBeNull();
+  });
+
+  it("marks the hover-preview priority with its level glyph (ISS-133)", () => {
+    vi.useFakeTimers();
+    renderBlock(row({ priority: "high" }));
+    fireEvent.pointerEnter(screen.getByRole("link", { name: "WEB-42" }));
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    const priority = screen.getByTestId("preview-card-priority");
+    expect(priority.querySelector("svg.lucide-signal-high")).not.toBeNull();
+    expect(priority.querySelector("svg.lucide-chevron-up")).toBeNull();
+  });
+
+  it("renders a priority glyph even when the priority is none (ISS-133)", () => {
+    vi.useFakeTimers();
+    renderBlock(row({ priority: "none" }));
+    fireEvent.pointerEnter(screen.getByRole("link", { name: "WEB-42" }));
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    expect(screen.getByTestId("preview-card-priority").querySelector("svg.lucide-ban")).not.toBeNull();
+  });
+
+  it("highlights an overdue due date and keeps a future range plain (ISS-133)", () => {
+    vi.useFakeTimers();
+    renderBlock(row({ target_date: "2000-01-03" }), false, { stateName: "Doing", stateGroup: "started" });
+    fireEvent.pointerEnter(screen.getByRole("link", { name: "WEB-42" }));
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    const overdue = screen.getByTestId("preview-card-dates");
+    expect(overdue).toHaveTextContent("Jan 03, 2000");
+    expect(overdue).toHaveAttribute("data-overdue", "true");
+    expect(overdue.className).toContain("text-(--danger)");
+    cleanup();
+    renderBlock(row({ start_date: "2999-02-01", target_date: "2999-02-02" }), false, {
+      stateName: "Doing",
+      stateGroup: "started",
+    });
+    fireEvent.pointerEnter(screen.getByRole("link", { name: "WEB-42" }));
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    const plain = screen.getByTestId("preview-card-dates");
+    expect(plain).toHaveTextContent("Feb 01, 2999 - Feb 02, 2999");
+    expect(plain).not.toHaveAttribute("data-overdue");
+    expect(plain.className).toContain("text-(--text-muted)");
+  });
+
+  it("shows the state name in the preview even when its group is unknown (ISS-133)", () => {
+    vi.useFakeTimers();
+    renderBlock(row(), false, { stateName: "Doing", stateGroup: null });
+    fireEvent.pointerEnter(screen.getByRole("link", { name: "WEB-42" }));
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    expect(screen.getByTestId("preview-card-state")).toHaveTextContent("Doing");
+  });
+
+  it("opens Edit and Delete from the hover quick actions", async () => {
+    const handlers = renderBlock();
+    fireEvent.click(screen.getByRole("button", { name: "Quick actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Edit" }));
+    expect(handlers.onEdit).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Quick actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(handlers.onDelete).toHaveBeenCalledOnce();
+  });
+
+  it("opens the actions menu from the trigger without following the peek link", () => {
+    const handlers = renderBlock();
+    // The parity driver clicks the inner affordance, not the button itself.
+    const target = screen
+      .getByRole("button", { name: "Quick actions" })
+      .querySelector("div.cursor-pointer") as HTMLElement;
+    // A canceled click returns false: the peek-link navigation must not run.
+    expect(fireEvent.click(target)).toBe(false);
+    expect(handlers.onOpen).not.toHaveBeenCalled();
+    expect(screen.getByRole("menuitem", { name: "Edit" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Delete" })).toBeInTheDocument();
+  });
+
+  it("dismisses the actions menu on Escape and still opens peek afterwards", async () => {
+    // Mouse opens via fireEvent (kit Menu.test.tsx: user-event's instant
+    // pointer sequence trips Base UI's 200ms mouseup guard under jsdom);
+    // Escape follows the keyboard path like the kit's own dismissal test.
+    const handlers = renderBlock();
+    const user = userEvent.setup();
+    fireEvent.click(screen.getByRole("button", { name: "Quick actions" }));
+    expect(screen.getByRole("menuitem", { name: "Edit" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menuitem", { name: "Edit" })).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("link", { name: "WEB-42" }));
+    expect(handlers.onOpen).toHaveBeenCalledOnce();
+  });
+
+  it("renders a temp block as an inert pulsing row", async () => {
+    const issue = row({ id: "temp-abc", name: "Draft" });
+    const handlers = renderBlock(issue);
+    const link = screen.getByRole("link", { name: "Draft, saving" });
+    expect(link).toHaveAttribute("data-temprow", "true");
+    expect(link).toHaveAttribute("href", "/acme/browse/WEB-42");
+    expect(link).toHaveAttribute("aria-disabled", "true");
+    expect(screen.queryByRole("button", { name: "Quick actions" })).not.toBeInTheDocument();
+    fireEvent.pointerDown(link, { clientX: 10, clientY: 10 });
+    fireEvent(document, pointerEvent("pointermove", 40, 40));
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
+    fireEvent.pointerEnter(link);
+    fireEvent.focus(link);
+    fireEvent.click(link);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    expect(handlers.onOpen).not.toHaveBeenCalled();
+  });
+
+  it("marks a highlighted temp row and refuses to drag it", () => {
+    const issue = row({ id: "temp-abc", name: "Draft" });
+    const handlers = renderBlock(issue, true);
+    const link = screen.getByRole("link", { name: "Draft, saving" });
+    expect(link).toHaveClass("highlight");
+    expect(link).toHaveAttribute("data-temprow", "true");
+    expect(link.querySelector(".animate-pulse")).not.toBeNull();
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(link, pointerEvent("pointermove", 10 + CALENDAR_DRAG_THRESHOLD_PX, 10));
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
+  });
+
+  it("keeps tracking a drag after the pointer leaves the block", () => {
+    const handlers = renderBlock();
+    fireEvent(screen.getByRole("link", { name: "WEB-42" }), pointerEvent("pointerdown", 10, 10));
+    fireEvent(document, pointerEvent("pointermove", 10 + CALENDAR_DRAG_THRESHOLD_PX, 10));
+    expect(handlers.onDragStart).toHaveBeenCalledWith(expect.objectContaining({ id: ISSUE_ID }), expect.anything());
+  });
+
+  it("stops document tracking after pointer release", () => {
+    const handlers = renderBlock();
+    fireEvent(screen.getByRole("link", { name: "WEB-42" }), pointerEvent("pointerdown", 10, 10));
+    fireEvent(document, pointerEvent("pointerup", 10, 10));
+    fireEvent(document, pointerEvent("pointermove", 80, 80));
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
+  });
+
+  it("does not start a drag for a click without movement", () => {
+    const handlers = renderBlock();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(link, pointerEvent("pointermove", 11, 11));
+    fireEvent(link, pointerEvent("pointerup", 11, 11));
+    fireEvent.click(link);
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
+    expect(handlers.onOpen).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a click that follows a drag from opening peek", () => {
+    const handlers = renderBlock();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(link, pointerEvent("pointermove", 30, 30));
+    fireEvent(link, pointerEvent("pointerup", 30, 30));
+    fireEvent.click(link);
+    expect(handlers.onDragStart).toHaveBeenCalledOnce();
+    expect(handlers.onOpen).not.toHaveBeenCalled();
+  });
+
+  it("cancels a native link drag and stops tracking it", () => {
+    const handlers = renderBlock();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    const nativeDrag = new Event("dragstart", { bubbles: true, cancelable: true });
+    fireEvent(link, nativeDrag);
+    expect(nativeDrag.defaultPrevented).toBe(true);
+    fireEvent(document, pointerEvent("pointermove", 40, 10));
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
+
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(document, pointerEvent("pointermove", 40, 10));
+    expect(handlers.onDragStart).toHaveBeenCalledOnce();
+    fireEvent(link, new Event("dragend", { bubbles: true }));
+    fireEvent.click(link);
+    expect(handlers.onOpen).toHaveBeenCalledOnce();
+  });
+
+  it("does not start a drag when the block is not draggable", () => {
+    const handlers = renderBlock(row(), false, { draggable: false });
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(link, pointerEvent("pointermove", 40, 40));
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
+  });
+
+  it("hides quick actions for read-only viewers", () => {
+    renderBlock(row(), false, { quickActions: false });
+    expect(screen.queryByRole("button", { name: "Quick actions" })).not.toBeInTheDocument();
+  });
+
+  it("omits the state edge colour and handles focus previews", () => {
+    renderBlock(row({ state_id: null }));
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent.focus(link);
+    expect(screen.getByRole("tooltip")).toBeInTheDocument();
+    fireEvent.blur(link);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+  });
+
+  it("flips the preview above and to the end near the viewport edge", () => {
+    const rect = { top: 700, bottom: 760, left: 800, right: 900 } as DOMRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(rect);
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 800 });
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1000 });
+    renderBlock();
+    fireEvent.focus(screen.getByRole("link", { name: "WEB-42" }));
+    expect(screen.getByRole("tooltip")).toHaveAttribute("data-placement", "top-end");
+    expect(screen.getByRole("tooltip")).toHaveClass("bottom-full", "right-0");
+  });
+
+  it("stops tracking when the pointer is cancelled", () => {
+    const handlers = renderBlock();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(link, pointerEvent("pointercancel", 10, 10));
+    fireEvent(document, pointerEvent("pointermove", 80, 80));
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
+  });
+
+  it("ignores document movement without an active press", () => {
+    const handlers = renderBlock();
+    fireEvent(document, pointerEvent("pointermove", 80, 80));
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
+  });
+
+  it("releases its document listeners on unmount", () => {
+    const handlers = renderBlock();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    cleanup();
+    fireEvent(document, pointerEvent("pointermove", 80, 80));
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
+  });
+
+  it("draws no state colour when the state is unknown", () => {
+    renderBlock(row({ state_id: null }), false, { stateColor: null, stateName: null, stateGroup: null });
+    const edge = screen.getByRole("link", { name: "WEB-42" }).querySelector("span[aria-hidden='true']") as HTMLElement;
+    expect(edge.style.backgroundColor).toBe("");
+  });
+
+  it("dismisses the hover preview when a drag starts and keeps it shut mid-drag (ISS-024)", () => {
+    vi.useFakeTimers();
+    const handlers = renderBlock();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent.pointerEnter(link);
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    expect(screen.getByRole("tooltip")).toBeInTheDocument();
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(document, pointerEvent("pointermove", 10 + CALENDAR_DRAG_THRESHOLD_PX, 10));
+    expect(handlers.onDragStart).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    // A re-hover mid-drag must not pop the card back open over the drop target.
+    fireEvent.pointerEnter(link);
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+  });
+
+  it("drops a pending hover preview when the press becomes a drag (ISS-024)", () => {
+    vi.useFakeTimers();
+    const handlers = renderBlock();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent.pointerEnter(link);
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(document, pointerEvent("pointermove", 10 + CALENDAR_DRAG_THRESHOLD_PX, 10));
+    expect(handlers.onDragStart).toHaveBeenCalledOnce();
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+  });
+
+  it("reopens the preview on a later hover after a cross-tile drag ends (ISS-024)", () => {
+    vi.useFakeTimers();
+    renderBlock();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(document, pointerEvent("pointermove", 10 + CALENDAR_DRAG_THRESHOLD_PX, 10));
+    // The release lands on the destination tile, so neither pointerup nor
+    // click reaches this block; only the document sees drag end.
+    fireEvent(document, pointerEvent("pointerup", 300, 300));
+    fireEvent.pointerLeave(link);
+    fireEvent.pointerEnter(link);
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    expect(screen.getByRole("tooltip")).toBeInTheDocument();
+  });
+
+  it("reopens the preview on a later hover after a same-tile release (ISS-024)", () => {
+    vi.useFakeTimers();
+    renderBlock();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(document, pointerEvent("pointermove", 10 + CALENDAR_DRAG_THRESHOLD_PX, 10));
+    fireEvent(link, pointerEvent("pointerup", 10, 10));
+    fireEvent.pointerLeave(link);
+    fireEvent.pointerEnter(link);
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    expect(screen.getByRole("tooltip")).toBeInTheDocument();
+  });
+});

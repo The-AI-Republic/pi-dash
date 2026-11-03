@@ -64,6 +64,10 @@ class IssueView(WorkspaceBaseModel):
     display_properties = models.JSONField(default=get_default_display_properties)
     rich_filters = models.JSONField(default=dict)
     access = models.PositiveSmallIntegerField(default=1, choices=((0, "Private"), (1, "Public")))
+    # Publish anchor (VIEW-020): the opaque public token the cloud publish
+    # flow proposes. Null means unpublished; several unpublished views share
+    # null, so only concrete tokens are unique.
+    anchor = models.CharField(max_length=255, null=True, unique=True, db_index=True)
     sort_order = models.FloatField(default=65535)
     logo_props = models.JSONField(default=dict)
     owned_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="views")

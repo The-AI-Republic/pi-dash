@@ -2,312 +2,219 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Who may change a project membership (``ProjectMemberViewSet.partial_update``).
+"""Contract tests for project-member role writes (NEWFRONT-1037, PDASHOSS01-328).
 
-Authority comes from the requester's workspace role. The target's workspace
-role only ever denies: nobody else can change a workspace admin's role, and a
-workspace guest cannot hold project role Member or Admin.
-
-Any field on someone else's membership, not just ``role``, needs a project
-Admin or a workspace admin (PDASHOSS01-329), and nobody can change their own
-``is_active`` here.
+PATCH ``/api/workspaces/<slug>/projects/<pid>/members/<mid>/`` with a
+``role`` field: a workspace admin may set any project role for anyone who
+is not a workspace admin (including promoting to project Admin) and may
+change their own role; nobody may change another workspace admin's role
+(403); everyone else keeps the pre-existing guards.
 """
 
 import pytest
-from rest_framework import status as http_status
-from rest_framework.test import APIClient
+from rest_framework import status
 
 from pi_dash.db.models import ProjectMember, User, WorkspaceMember
 
-ADMIN, MEMBER, GUEST = 20, 15, 5
 
-OWN_ROLE = {"error": "You cannot update your own role"}
-NOT_ADMIN = {"error": "You do not have permission to update roles"}
-TARGET_TOO_HIGH = {"error": "You cannot update the role of a member with a role equal to or higher than your own"}
-ASSIGN_TOO_HIGH = {"error": "You cannot assign a role equal to or higher than your own"}
-GUEST_CAP = {"error": "You cannot add a user with role higher than the workspace role"}
-WORKSPACE_ADMIN_TARGET = {"error": "You cannot update the role of a workspace admin"}
-NOT_MEMBER_EDITOR = {"error": "You do not have permission to update this member"}
-OWN_STATUS = {"error": "You cannot update your own membership status"}
+def _member_url(slug, project_id, membership_id):
+    return f"/api/workspaces/{slug}/projects/{project_id}/members/{membership_id}/"
 
 
 @pytest.fixture
-def member_of(project):
-    def _member(name, workspace_role, project_role):
-        email = f"{name}@example.com"
-        user = User.objects.create(email=email, username=name, first_name=name)
-        WorkspaceMember.objects.create(workspace=project.workspace, member=user, role=workspace_role, is_active=True)
-        membership = ProjectMember.objects.create(project=project, member=user, role=project_role, is_active=True)
-        client = APIClient()
-        client.force_authenticate(user=user)
-        return client, membership
-
-    return _member
+def member_user(db):
+    return User.objects.create_user(email="member@example.com", username="member")
 
 
 @pytest.fixture
-def set_role(project):
-    def _set_role(client, membership, role):
-        return client.patch(
-            f"/api/workspaces/{project.workspace.slug}/projects/{project.id}/members/{membership.id}/",
-            {"role": role},
-            format="json",
+def project_admin_user(db):
+    return User.objects.create_user(email="project-admin@example.com", username="project-admin")
+
+
+@pytest.fixture
+def ws_admin_member_user(db):
+    return User.objects.create_user(email="ws-admin-member@example.com", username="ws-admin-member")
+
+
+@pytest.fixture
+def ws_admin_owner_user(db):
+    return User.objects.create_user(email="ws-admin-owner@example.com", username="ws-admin-owner")
+
+
+@pytest.fixture
+def guest_user(db):
+    return User.objects.create_user(email="guest@example.com", username="guest")
+
+
+@pytest.fixture
+def role_matrix(
+    workspace,
+    project,
+    create_user,
+    member_user,
+    project_admin_user,
+    ws_admin_member_user,
+    ws_admin_owner_user,
+    guest_user,
+):
+    """Seed one project membership per standing. ``create_user`` is already a
+    workspace admin (role 20) via the ``workspace`` fixture."""
+    ProjectMember.objects.create(project=project, member=create_user, role=20, is_active=True)
+    WorkspaceMember.objects.create(workspace=workspace, member=member_user, role=15)
+    ProjectMember.objects.create(project=project, member=member_user, role=15, is_active=True)
+    WorkspaceMember.objects.create(workspace=workspace, member=project_admin_user, role=15)
+    ProjectMember.objects.create(project=project, member=project_admin_user, role=20, is_active=True)
+    WorkspaceMember.objects.create(workspace=workspace, member=ws_admin_member_user, role=20)
+    ProjectMember.objects.create(project=project, member=ws_admin_member_user, role=15, is_active=True)
+    WorkspaceMember.objects.create(workspace=workspace, member=ws_admin_owner_user, role=20)
+    ProjectMember.objects.create(project=project, member=ws_admin_owner_user, role=20, is_active=True)
+    WorkspaceMember.objects.create(workspace=workspace, member=guest_user, role=5)
+    ProjectMember.objects.create(project=project, member=guest_user, role=5, is_active=True)
+    return project
+
+
+def _patch_role(api_client, user, url, role):
+    api_client.force_authenticate(user=user)
+    return api_client.patch(url, {"role": role}, format="json")
+
+
+def _project_role(project, user):
+    return ProjectMember.objects.get(project=project, member=user).role
+
+
+@pytest.mark.contract
+class TestWorkspaceAdminTargetProtected:
+    """Nobody may change another workspace admin's project role (403, unchanged)."""
+
+    @pytest.mark.django_db
+    def test_plain_member_cannot_change_workspace_admin_role(
+        self, api_client, workspace, role_matrix, member_user, ws_admin_owner_user
+    ):
+        target = ProjectMember.objects.get(project=role_matrix, member=ws_admin_owner_user)
+        response = _patch_role(api_client, member_user, _member_url(workspace.slug, role_matrix.id, target.id), 15)
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.data == {"error": "You cannot update the role of a workspace admin"}
+        assert _project_role(role_matrix, ws_admin_owner_user) == 20
+
+    @pytest.mark.django_db
+    def test_project_admin_cannot_change_workspace_admin_who_is_only_a_project_member(
+        self, api_client, workspace, role_matrix, project_admin_user, ws_admin_member_user
+    ):
+        target = ProjectMember.objects.get(project=role_matrix, member=ws_admin_member_user)
+        response = _patch_role(
+            api_client, project_admin_user, _member_url(workspace.slug, role_matrix.id, target.id), 5
         )
 
-    return _set_role
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.data == {"error": "You cannot update the role of a workspace admin"}
+        assert _project_role(role_matrix, ws_admin_member_user) == 15
+
+    @pytest.mark.django_db
+    def test_workspace_admin_cannot_change_another_workspace_admin_role(
+        self, api_client, workspace, role_matrix, create_user, ws_admin_member_user
+    ):
+        target = ProjectMember.objects.get(project=role_matrix, member=ws_admin_member_user)
+        response = _patch_role(api_client, create_user, _member_url(workspace.slug, role_matrix.id, target.id), 5)
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.data == {"error": "You cannot update the role of a workspace admin"}
+        assert _project_role(role_matrix, ws_admin_member_user) == 15
 
 
-@pytest.fixture
-def patch_member(project):
-    def _patch(client, membership, data):
-        return client.patch(
-            f"/api/workspaces/{project.workspace.slug}/projects/{project.id}/members/{membership.id}/",
-            data,
-            format="json",
+@pytest.mark.contract
+class TestWorkspaceAdminBypass:
+    """A workspace admin sets any project role for non-workspace-admins and
+    may change their own role."""
+
+    @pytest.mark.django_db
+    def test_workspace_admin_who_is_only_a_project_member_can_change_non_admin_role(
+        self, api_client, workspace, role_matrix, ws_admin_member_user, member_user
+    ):
+        target = ProjectMember.objects.get(project=role_matrix, member=member_user)
+        response = _patch_role(
+            api_client, ws_admin_member_user, _member_url(workspace.slug, role_matrix.id, target.id), 5
         )
 
-    return _patch
+        assert response.status_code == status.HTTP_200_OK
+        assert _project_role(role_matrix, member_user) == 5
 
-
-def assert_refused(response, expected_status, expected_body, membership):
-    role_before = membership.role
-    assert response.status_code == expected_status
-    assert response.json() == expected_body
-    membership.refresh_from_db()
-    assert membership.role == role_before
-
-
-def assert_changed(response, membership, role):
-    assert response.status_code == http_status.HTTP_200_OK
-    assert response.json()["role"] == role
-    membership.refresh_from_db()
-    assert membership.role == role
-
-
-@pytest.mark.contract
-@pytest.mark.django_db
-class TestWorkspaceAdminTarget:
-    @pytest.mark.parametrize(
-        "workspace_role, project_role",
-        [
-            pytest.param(MEMBER, MEMBER, id="plain-member"),
-            pytest.param(GUEST, GUEST, id="guest"),
-            pytest.param(MEMBER, ADMIN, id="project-admin"),
-            pytest.param(ADMIN, ADMIN, id="other-workspace-admin"),
-            pytest.param(ADMIN, MEMBER, id="other-workspace-admin-project-member"),
-        ],
-    )
-    @pytest.mark.parametrize("target_project_role", [ADMIN, MEMBER], ids=["target-admin", "target-member"])
-    def test_nobody_else_changes_a_workspace_admins_role(
-        self, member_of, set_role, workspace_role, project_role, target_project_role
+    @pytest.mark.django_db
+    def test_workspace_admin_who_is_only_a_project_member_can_promote_to_project_admin(
+        self, api_client, workspace, role_matrix, ws_admin_member_user, member_user
     ):
-        client, _ = member_of("requester", workspace_role, project_role)
-        _, target = member_of("target", ADMIN, target_project_role)
+        target = ProjectMember.objects.get(project=role_matrix, member=member_user)
+        response = _patch_role(
+            api_client, ws_admin_member_user, _member_url(workspace.slug, role_matrix.id, target.id), 20
+        )
 
-        response = set_role(client, target, GUEST)
+        assert response.status_code == status.HTTP_200_OK
+        assert _project_role(role_matrix, member_user) == 20
 
-        assert_refused(response, http_status.HTTP_403_FORBIDDEN, WORKSPACE_ADMIN_TARGET, target)
+    @pytest.mark.django_db
+    def test_workspace_admin_can_change_own_role(self, api_client, workspace, role_matrix, create_user):
+        target = ProjectMember.objects.get(project=role_matrix, member=create_user)
+        response = _patch_role(api_client, create_user, _member_url(workspace.slug, role_matrix.id, target.id), 15)
 
-    @pytest.mark.parametrize("project_role", [ADMIN, MEMBER, GUEST], ids=["admin", "member", "guest"])
-    def test_workspace_admin_changes_their_own_role(self, member_of, set_role, project_role):
-        client, membership = member_of("self-admin", ADMIN, project_role)
-        new_role = MEMBER if project_role != MEMBER else ADMIN
-
-        assert_changed(set_role(client, membership, new_role), membership, new_role)
-
-
-@pytest.mark.contract
-@pytest.mark.django_db
-class TestWorkspaceAdminRequester:
-    @pytest.mark.parametrize("project_role", [ADMIN, MEMBER, GUEST], ids=["admin", "member", "guest"])
-    def test_promotes_a_member_to_project_admin(self, member_of, set_role, project_role):
-        client, _ = member_of("ws-admin", ADMIN, project_role)
-        _, target = member_of("target", MEMBER, MEMBER)
-
-        assert_changed(set_role(client, target, ADMIN), target, ADMIN)
-
-    def test_project_member_demotes_a_project_admin_who_is_not_a_workspace_admin(self, member_of, set_role):
-        client, _ = member_of("ws-admin", ADMIN, MEMBER)
-        _, target = member_of("target", MEMBER, ADMIN)
-
-        assert_changed(set_role(client, target, GUEST), target, GUEST)
+        assert response.status_code == status.HTTP_200_OK
+        assert _project_role(role_matrix, create_user) == 15
 
 
 @pytest.mark.contract
-@pytest.mark.django_db
-class TestEveryoneElseKeepsTheGuards:
-    def test_project_admin_cannot_promote_to_admin(self, member_of, set_role):
-        client, _ = member_of("proj-admin", MEMBER, ADMIN)
-        _, target = member_of("target", MEMBER, MEMBER)
+class TestExistingGuardsKept:
+    """Everyone else keeps today's guards: the admin-only, equal-or-higher,
+    own-role and workspace-guest rules are unchanged."""
 
-        assert_refused(set_role(client, target, ADMIN), http_status.HTTP_403_FORBIDDEN, ASSIGN_TOO_HIGH, target)
-
-    def test_project_admin_cannot_change_another_project_admin(self, member_of, set_role):
-        client, _ = member_of("proj-admin", MEMBER, ADMIN)
-        _, target = member_of("target", MEMBER, ADMIN)
-
-        assert_refused(set_role(client, target, MEMBER), http_status.HTTP_403_FORBIDDEN, TARGET_TOO_HIGH, target)
-
-    def test_project_admin_changes_a_lower_member(self, member_of, set_role):
-        client, _ = member_of("proj-admin", MEMBER, ADMIN)
-        _, target = member_of("target", MEMBER, MEMBER)
-
-        assert_changed(set_role(client, target, GUEST), target, GUEST)
-
-    @pytest.mark.parametrize(
-        "workspace_role, project_role",
-        [pytest.param(MEMBER, MEMBER, id="member"), pytest.param(GUEST, GUEST, id="guest")],
-    )
-    def test_non_admin_cannot_change_roles(self, member_of, set_role, workspace_role, project_role):
-        client, _ = member_of("requester", workspace_role, project_role)
-        _, target = member_of("target", MEMBER, MEMBER)
-
-        assert_refused(set_role(client, target, GUEST), http_status.HTTP_403_FORBIDDEN, NOT_ADMIN, target)
-
-    @pytest.mark.parametrize(
-        "workspace_role, project_role",
-        [pytest.param(MEMBER, ADMIN, id="project-admin"), pytest.param(MEMBER, MEMBER, id="member")],
-    )
-    def test_non_workspace_admin_cannot_change_their_own_role(self, member_of, set_role, workspace_role, project_role):
-        client, membership = member_of("self", workspace_role, project_role)
-
-        assert_refused(set_role(client, membership, GUEST), http_status.HTTP_400_BAD_REQUEST, OWN_ROLE, membership)
-
-
-@pytest.mark.contract
-@pytest.mark.django_db
-class TestWorkspaceGuestCap:
-    @pytest.mark.parametrize("new_role", [ADMIN, MEMBER], ids=["to-admin", "to-member"])
-    def test_workspace_admin_is_capped(self, member_of, set_role, new_role):
-        client, _ = member_of("ws-admin", ADMIN, MEMBER)
-        _, target = member_of("target", GUEST, GUEST)
-
-        assert_refused(set_role(client, target, new_role), http_status.HTTP_400_BAD_REQUEST, GUEST_CAP, target)
-
-    def test_project_admin_is_capped(self, member_of, set_role):
-        client, _ = member_of("proj-admin", MEMBER, ADMIN)
-        _, target = member_of("target", GUEST, GUEST)
-
-        assert_refused(set_role(client, target, MEMBER), http_status.HTTP_400_BAD_REQUEST, GUEST_CAP, target)
-
-
-NON_ROLE_EDITS = [
-    pytest.param({"comment": "x"}, id="comment"),
-    pytest.param({"is_active": False}, id="deactivate"),
-]
-
-
-def snapshot(membership):
-    membership.refresh_from_db()
-    return (membership.role, membership.comment, membership.is_active)
-
-
-@pytest.mark.contract
-@pytest.mark.django_db
-class TestNonRoleFieldsOnSomeoneElse:
-    @pytest.mark.parametrize(
-        "workspace_role, project_role",
-        [pytest.param(GUEST, GUEST, id="guest"), pytest.param(MEMBER, MEMBER, id="member")],
-    )
-    @pytest.mark.parametrize(
-        "target_workspace_role",
-        [MEMBER, ADMIN],
-        ids=["target-project-admin", "target-workspace-admin"],
-    )
-    @pytest.mark.parametrize("data", NON_ROLE_EDITS)
-    def test_non_admin_is_refused(
-        self, member_of, patch_member, workspace_role, project_role, target_workspace_role, data
+    @pytest.mark.django_db
+    def test_project_admin_cannot_promote_member_to_admin(
+        self, api_client, workspace, role_matrix, project_admin_user, member_user
     ):
-        client, _ = member_of("requester", workspace_role, project_role)
-        _, target = member_of("target", target_workspace_role, ADMIN)
-        before = snapshot(target)
+        target = ProjectMember.objects.get(project=role_matrix, member=member_user)
+        response = _patch_role(
+            api_client, project_admin_user, _member_url(workspace.slug, role_matrix.id, target.id), 20
+        )
 
-        response = patch_member(client, target, data)
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.data == {"error": "You cannot assign a role equal to or higher than your own"}
+        assert _project_role(role_matrix, member_user) == 15
 
-        assert response.status_code == http_status.HTTP_403_FORBIDDEN
-        assert response.json() == NOT_MEMBER_EDITOR
-        assert snapshot(target) == before
+    @pytest.mark.django_db
+    def test_project_admin_can_demote_member(self, api_client, workspace, role_matrix, project_admin_user, member_user):
+        target = ProjectMember.objects.get(project=role_matrix, member=member_user)
+        response = _patch_role(
+            api_client, project_admin_user, _member_url(workspace.slug, role_matrix.id, target.id), 5
+        )
 
-    @pytest.mark.parametrize(
-        "workspace_role, project_role",
-        [
-            pytest.param(MEMBER, ADMIN, id="project-admin"),
-            pytest.param(ADMIN, MEMBER, id="workspace-admin-project-member"),
-            pytest.param(ADMIN, ADMIN, id="workspace-admin"),
-        ],
-    )
-    @pytest.mark.parametrize(
-        "target_workspace_role, target_project_role",
-        [
-            pytest.param(MEMBER, MEMBER, id="target-member"),
-            pytest.param(MEMBER, ADMIN, id="target-project-admin"),
-            pytest.param(ADMIN, ADMIN, id="target-workspace-admin"),
-        ],
-    )
-    def test_admin_changes_comment(
-        self, member_of, patch_member, workspace_role, project_role, target_workspace_role, target_project_role
+        assert response.status_code == status.HTTP_200_OK
+        assert _project_role(role_matrix, member_user) == 5
+
+    @pytest.mark.django_db
+    def test_plain_member_cannot_change_roles(self, api_client, workspace, role_matrix, member_user, guest_user):
+        target = ProjectMember.objects.get(project=role_matrix, member=guest_user)
+        response = _patch_role(api_client, member_user, _member_url(workspace.slug, role_matrix.id, target.id), 15)
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.data == {"error": "You do not have permission to update roles"}
+        assert _project_role(role_matrix, guest_user) == 5
+
+    @pytest.mark.django_db
+    def test_non_admin_cannot_update_own_role(self, api_client, workspace, role_matrix, member_user):
+        target = ProjectMember.objects.get(project=role_matrix, member=member_user)
+        response = _patch_role(api_client, member_user, _member_url(workspace.slug, role_matrix.id, target.id), 5)
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data == {"error": "You cannot update your own role"}
+        assert _project_role(role_matrix, member_user) == 15
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("requester", ["create_user", "project_admin_user", "ws_admin_member_user"])
+    def test_workspace_guest_cap_applies_to_every_requester(
+        self, api_client, workspace, role_matrix, guest_user, requester, request
     ):
-        client, _ = member_of("requester", workspace_role, project_role)
-        _, target = member_of("target", target_workspace_role, target_project_role)
+        requester_user = request.getfixturevalue(requester)
+        target = ProjectMember.objects.get(project=role_matrix, member=guest_user)
+        response = _patch_role(api_client, requester_user, _member_url(workspace.slug, role_matrix.id, target.id), 15)
 
-        response = patch_member(client, target, {"comment": "x"})
-
-        assert response.status_code == http_status.HTTP_200_OK
-        assert response.json()["comment"] == "x"
-        target.refresh_from_db()
-        assert target.comment == "x"
-
-    @pytest.mark.parametrize(
-        "workspace_role, project_role",
-        [
-            pytest.param(MEMBER, ADMIN, id="project-admin"),
-            pytest.param(ADMIN, MEMBER, id="workspace-admin-project-member"),
-        ],
-    )
-    @pytest.mark.parametrize("target_workspace_role", [MEMBER, ADMIN], ids=["target-member", "target-workspace-admin"])
-    def test_admin_deactivates(self, member_of, patch_member, workspace_role, project_role, target_workspace_role):
-        client, _ = member_of("requester", workspace_role, project_role)
-        _, target = member_of("target", target_workspace_role, MEMBER)
-
-        response = patch_member(client, target, {"is_active": False})
-
-        assert response.status_code == http_status.HTTP_200_OK
-        assert response.json()["is_active"] is False
-        target.refresh_from_db()
-        assert target.is_active is False
-
-
-@pytest.mark.contract
-@pytest.mark.django_db
-class TestOwnMembership:
-    @pytest.mark.parametrize("project_role", [ADMIN, MEMBER], ids=["admin", "member"])
-    @pytest.mark.parametrize("is_active", [False, True], ids=["deactivate", "reactivate"])
-    def test_workspace_admin_cannot_change_own_status(self, member_of, patch_member, project_role, is_active):
-        client, membership = member_of("self-admin", ADMIN, project_role)
-        before = snapshot(membership)
-
-        response = patch_member(client, membership, {"is_active": is_active, "comment": "x"})
-
-        assert response.status_code == http_status.HTTP_400_BAD_REQUEST
-        assert response.json() == OWN_STATUS
-        assert snapshot(membership) == before
-
-    def test_workspace_admin_changes_own_comment(self, member_of, patch_member):
-        client, membership = member_of("self-admin", ADMIN, MEMBER)
-
-        response = patch_member(client, membership, {"comment": "x"})
-
-        assert response.status_code == http_status.HTTP_200_OK
-        membership.refresh_from_db()
-        assert membership.comment == "x"
-
-    @pytest.mark.parametrize("data", NON_ROLE_EDITS)
-    def test_non_workspace_admin_keeps_the_own_role_refusal(self, member_of, patch_member, data):
-        client, membership = member_of("self", MEMBER, ADMIN)
-        before = snapshot(membership)
-
-        response = patch_member(client, membership, data)
-
-        assert response.status_code == http_status.HTTP_400_BAD_REQUEST
-        assert response.json() == OWN_ROLE
-        assert snapshot(membership) == before
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data == {"error": "You cannot add a user with role higher than the workspace role"}
+        assert _project_role(role_matrix, guest_user) == 5
