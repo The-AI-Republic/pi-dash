@@ -66,6 +66,7 @@ jobs:
       gh_buildx_endpoint: ${{ steps.set_env_variables.outputs.BUILDX_ENDPOINT }}
 
       dh_img_web: ${{ steps.set_env_variables.outputs.DH_IMG_WEB }}
+      dh_img_web_new: ${{ steps.set_env_variables.outputs.DH_IMG_WEB_NEW }}
       dh_img_space: ${{ steps.set_env_variables.outputs.DH_IMG_SPACE }}
       dh_img_admin: ${{ steps.set_env_variables.outputs.DH_IMG_ADMIN }}
       dh_img_live: ${{ steps.set_env_variables.outputs.DH_IMG_LIVE }}
@@ -120,6 +121,7 @@ jobs:
           echo "TARGET_BRANCH=$BR_NAME" >> $GITHUB_OUTPUT
 
           echo "DH_IMG_WEB=pi-dash-frontend" >> $GITHUB_OUTPUT
+          echo "DH_IMG_WEB_NEW=pi-dash-web-new" >> $GITHUB_OUTPUT
           echo "DH_IMG_SPACE=pi-dash-space" >> $GITHUB_OUTPUT
           echo "DH_IMG_ADMIN=pi-dash-admin" >> $GITHUB_OUTPUT
           echo "DH_IMG_LIVE=pi-dash-live" >> $GITHUB_OUTPUT
@@ -208,6 +210,30 @@ jobs:
           docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_web }}
           build-context: .
           dockerfile-path: ./apps/web/Dockerfile.web
+          buildx-driver: ${{ needs.branch_build_setup.outputs.gh_buildx_driver }}
+          buildx-version: ${{ needs.branch_build_setup.outputs.gh_buildx_version }}
+          buildx-platforms: ${{ needs.branch_build_setup.outputs.gh_buildx_platforms }}
+          buildx-endpoint: ${{ needs.branch_build_setup.outputs.gh_buildx_endpoint }}
+
+  branch_build_push_web_new:
+    name: Build-Push Web-New Docker Image
+    runs-on: ubuntu-22.04
+    needs: [branch_build_setup]
+    steps:
+      - name: Checkout Files
+        uses: actions/checkout@v6
+      - name: Web-New Build and Push
+        uses: ./.github/actions/build-push
+        with:
+          build-release: ${{ needs.branch_build_setup.outputs.build_release }}
+          build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
+          release-version: ${{ needs.branch_build_setup.outputs.release_version }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+          docker-image-owner: airepublic
+          docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_web_new }}
+          build-context: .
+          dockerfile-path: ./apps/web_new/Dockerfile.web-new
           buildx-driver: ${{ needs.branch_build_setup.outputs.gh_buildx_driver }}
           buildx-version: ${{ needs.branch_build_setup.outputs.gh_buildx_version }}
           buildx-platforms: ${{ needs.branch_build_setup.outputs.gh_buildx_platforms }}
@@ -317,6 +343,7 @@ jobs:
       - branch_build_setup
       - branch_build_push_admin
       - branch_build_push_web
+      - branch_build_push_web_new
       - branch_build_push_space
       - branch_build_push_live
       - branch_build_push_api
@@ -372,6 +399,7 @@ jobs:
       - branch_build_setup
       - branch_build_push_admin
       - branch_build_push_web
+      - branch_build_push_web_new
       - branch_build_push_space
       - branch_build_push_live
       - branch_build_push_api
@@ -413,6 +441,7 @@ jobs:
         branch_build_setup,
         branch_build_push_admin,
         branch_build_push_web,
+        branch_build_push_web_new,
         branch_build_push_space,
         branch_build_push_live,
         branch_build_push_api,
