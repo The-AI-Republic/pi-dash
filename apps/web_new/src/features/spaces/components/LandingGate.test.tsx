@@ -225,7 +225,7 @@ describe("LandingGate", () => {
     const anonymous = { status: 401, body: { detail: "no session" } };
     renderGate({ nextPath: "/issues/anchor-1?board=kanban" }, transportFor(anonymous, withProvider));
     await screen.findByTestId("space-auth-card");
-    expect(providerHref("google")).toBe("/auth/google/?next_path=%2Fissues%2Fanchor-1%3Fboard%3Dkanban");
+    expect(providerHref("google")).toBe("/auth/spaces/google/?next_path=%2Fissues%2Fanchor-1%3Fboard%3Dkanban");
   });
 
   it("drops a hostile return path before it reaches the card", async () => {
@@ -237,7 +237,7 @@ describe("LandingGate", () => {
       )
     );
     await screen.findByTestId("space-auth-card");
-    expect(providerHref("google")).toBe("/auth/google/");
+    expect(providerHref("google")).toBe("/auth/spaces/google/");
   });
 
   it("renders the card with every method off when the bootstrap is missing", async () => {

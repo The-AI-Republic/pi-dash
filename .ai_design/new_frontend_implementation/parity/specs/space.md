@@ -1385,15 +1385,17 @@ each button carries a full, translated invitation naming the provider and
 following the mode (a provider-continue phrase; the design owns the words);
 beside the password step the same buttons render compact (icon-only, with an
 accessible name). Activating a button starts the provider flow at the
-**workspace provider path** `/auth/<provider>/` (`google`, `github`, `gitlab`,
-`gitea`), carrying the encoded `next_path` — this is parity: the old card
-navigates there (`apps/space/hooks/oauth/core.tsx`) and the green oracle
-asserts `/auth/google/`. The server also exposes spaces-specific initiate
-endpoints under `/auth/spaces/<provider>/`; the space card does **not** call
-them, and no slice switches to them without a new decision and a re-tagged
-scenario. Callback URLs are the server's own redirects. Completing a provider flow is unprovable on the
+space-scoped path `/auth/spaces/<provider>/` (`google`, `github`, `gitlab`,
+`gitea`), carrying the encoded `next_path`, so the callback returns the
+visitor to the public board position instead of the workspace app. The old
+card navigates to the workspace path `/auth/<provider>/` instead
+(`apps/space/hooks/oauth/core.tsx`) — that is the old bug NEWFRONT-821, and
+the green oracle still asserts the old path on its leg. Callback URLs are
+the server's own redirects. Completing a provider flow is unprovable on the
 seeded stack (no credentials): the oracle proves presence, compact shape and
-flow start, and the gate extends only if a provider is configured. Provider
+flow start, the web_new leg plus the `bug: NEWFRONT-821` intent scenario
+prove the spaces path and the carried return address, and the gate extends
+only if a provider is configured. Provider
 errors that arrive as codes (`*_NOT_CONFIGURED`, `*_OAUTH_PROVIDER_ERROR`,
 GitHub org membership) render through the same banner as SPC-063.
 
@@ -1631,7 +1633,7 @@ create/confirm/link calls above stay exactly as described.
 | Code submit | native `POST /auth/spaces/magic-sign-in/` \| `.../magic-sign-up/` | form: `csrfmiddlewaretoken`, `code`, `email`, `next_path` | redirect to validated return path, or to the spaces base with `error_code` | 060 |
 | Password submit | native `POST /auth/spaces/sign-in/` \| `.../sign-up/` | form: `csrfmiddlewaretoken`, `email`, `password` (+ confirmation), `next_path` | redirect as above | 061 |
 | Session end (sign-out) | native `POST /auth/spaces/sign-out/` | form: `csrfmiddlewaretoken`, `next_path` | redirect to return path; session destroyed | 014 |
-| Providers | `GET /auth/{google,github,gitlab,gitea}/` (the workspace flow start the old space card uses; server callbacks at `.../callback/`). The spaces-specific `GET /auth/spaces/{provider}/` endpoints exist but are **not called** by this area (parity: oracle asserts `/auth/google/`) | `next_path` | redirect to provider | 062 |
+| Providers | `GET /auth/spaces/{google,github,gitlab,gitea}/` (the space-scoped flow start; server callbacks at `.../callback/`). The old space card starts the workspace flow `GET /auth/{provider}/` instead — old bug NEWFRONT-821; the oracle still asserts `/auth/google/` on its leg | `next_path` | redirect to provider | 062 |
 
 Auth error codes the card models (from the server's catalog; the card maps
 the number to a step and a translated banner, never shows the number):
