@@ -18,7 +18,7 @@
 //! * [`activity_dispatch`] — `bgtasks/issue_activities_task.py`
 //!   `issue_activity` dispatcher (PIDASHCONV-198): Celery task name,
 //!   `(args, kwargs)` binding, uuid guard, redis origin, issue touch,
-//!   27-type mapper, `bulk_create`, notifications enqueue, and the
+//!   30-type mapper, `bulk_create`, notifications enqueue, and the
 //!   [`Registry`][crate::worker::Registry] wiring. The pure row builders
 //!   live in `pidash-services` (`tasks_webhooks::activity_misc`).
 //! * [`automation`] — `bgtasks/issue_automation_task.py`

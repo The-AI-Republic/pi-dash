@@ -248,7 +248,7 @@ pub fn markdown_to_html(body: Option<&str>) -> String {
 }
 
 /// Extra tags beyond the sanitizer defaults
-/// (`content_validator.py:72-78`): editor node/tag names.
+/// (`content_validator.py:72-81`): editor node/tag names.
 fn sanitizer_tags() -> HashSet<&'static str> {
     let mut tags: HashSet<&'static str> = ammonia::Builder::default()
         .clone_tags()
@@ -258,10 +258,12 @@ fn sanitizer_tags() -> HashSet<&'static str> {
     tags.insert("label");
     tags.insert("input");
     tags.insert("image-component");
+    tags.insert("issue-embed-component");
+    tags.insert("entity-reference-component");
     tags
 }
 
-/// Generic (`*`) attributes (`content_validator.py:83-113`).
+/// Generic (`*`) attributes (`content_validator.py:86-116`).
 fn sanitizer_generic_attributes() -> HashSet<&'static str> {
     [
         "class",
@@ -294,7 +296,7 @@ fn sanitizer_generic_attributes() -> HashSet<&'static str> {
     .collect()
 }
 
-/// Per-tag attributes (`content_validator.py:114-157`). The `*` entry is
+/// Per-tag attributes (`content_validator.py:117-178`). The `*` entry is
 /// kept out of this map: it is installed as the generic set instead (nh3
 /// reads the `"*"` key as generic attributes).
 fn sanitizer_tag_attributes() -> HashMap<&'static str, HashSet<&'static str>> {
@@ -336,6 +338,33 @@ fn sanitizer_tag_attributes() -> HashMap<&'static str, HashSet<&'static str>> {
             .into_iter()
             .collect(),
     );
+    // content_validator.py:143-149.
+    map.insert(
+        "issue-embed-component",
+        [
+            "id",
+            "entity_identifier",
+            "project_identifier",
+            "workspace_identifier",
+            "entity_name",
+        ]
+        .into_iter()
+        .collect(),
+    );
+    // content_validator.py:150-157.
+    map.insert(
+        "entity-reference-component",
+        [
+            "entity_name",
+            "entity_identifier",
+            "project_identifier",
+            "workspace_identifier",
+            "project_id",
+            "data-label",
+        ]
+        .into_iter()
+        .collect(),
+    );
     map.insert(
         "th",
         ["colspan", "rowspan", "colwidth", "background", "style"]
@@ -368,13 +397,13 @@ fn sanitizer_tag_attributes() -> HashMap<&'static str, HashSet<&'static str>> {
     map
 }
 
-/// Allowed URL schemes (`content_validator.py:159`).
+/// Allowed URL schemes (`content_validator.py:180`).
 fn sanitizer_url_schemes() -> HashSet<&'static str> {
     ["http", "https", "mailto", "tel"].into_iter().collect()
 }
 
 /// Sanitize rendered HTML (`validate_html_content`,
-/// `content_validator.py:211-243`): `nh3.clean` with the transcribed
+/// `content_validator.py:232-264`): `nh3.clean` with the transcribed
 /// allowlist. nh3 is Python bindings for ammonia, so the same engine with
 /// the same configuration renders byte-identical output (pinned by the
 /// golden vectors in `tests`, generated from `nh3==0.2.18` per
@@ -3039,6 +3068,9 @@ mod tests {
             "label",
             "input",
             "image-component",
+            // PIDASHCONV-1689: page body nodes (content_validator.py:79-80).
+            "issue-embed-component",
+            "entity-reference-component",
             "p",
             "br",
             "a",
@@ -3053,6 +3085,40 @@ mod tests {
         assert_eq!(per_tag["a"], HashSet::from(["href", "target"]));
         assert!(per_tag["img"].contains("alt"));
         assert!(per_tag["mention-component"].contains("entity_name"));
+        // PIDASHCONV-1689: page body node attribute sets
+        // (content_validator.py:143-157).
+        assert_eq!(
+            per_tag["issue-embed-component"],
+            HashSet::from([
+                "id",
+                "entity_identifier",
+                "project_identifier",
+                "workspace_identifier",
+                "entity_name",
+            ])
+        );
+        assert_eq!(
+            per_tag["entity-reference-component"],
+            HashSet::from([
+                "entity_name",
+                "entity_identifier",
+                "project_identifier",
+                "workspace_identifier",
+                "project_id",
+                "data-label",
+            ])
+        );
+        // The configured cleaner keeps the nodes (output captured from
+        // `validate_html_content` on Django main).
+        assert_eq!(
+            sanitize_html(
+                "<p><issue-embed-component entity_identifier=\"i1\" project_identifier=\"P\"></issue-embed-component></p>"
+            ),
+            Some(
+                "<p><issue-embed-component entity_identifier=\"i1\" project_identifier=\"P\"></issue-embed-component></p>"
+                    .to_owned()
+            )
+        );
         assert_eq!(
             sanitizer_url_schemes(),
             HashSet::from(["http", "https", "mailto", "tel"])

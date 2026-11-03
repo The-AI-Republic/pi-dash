@@ -15,7 +15,7 @@ name: rust-api contract tests — app project
 
 on:
   push:
-    branches: [rust-dev]
+    branches: [main]
     paths:
       - "rust-api/**"
       - "apps/api/**"
@@ -71,7 +71,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
 
       - name: Install system deps for psycopg-c
         run: sudo apt-get update -y && sudo apt-get install -y libpq-dev

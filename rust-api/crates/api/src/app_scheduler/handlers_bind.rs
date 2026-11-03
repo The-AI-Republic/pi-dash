@@ -1738,7 +1738,12 @@ async fn validate_binding_fields(
     timezone: &Tz,
 ) -> Result<BindingAttrs, Denial> {
     let partial = instance.is_some();
-    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &rrule_validator;
+    // Field-level `validate_rrule` anchors on the request time: Django
+    // passes no dtstart, so the validator stamps `now(utc)` itself
+    // (`scheduler.py:245`, `_rrule.py:238`).
+    let field_anchor = Utc::now();
+    let field_validator = move |value: &str| rrule_validator(value, field_anchor);
+    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &field_validator;
     let mut attrs = BindingAttrs::default();
     // (field, error) in `_writable_fields` order: scheduler, project,
     // dtstart, tzid, rrule, rdates, exdates, extra_context, enabled,
@@ -2075,7 +2080,13 @@ async fn enforce_unique_patch(
 /// the pod-must-belong-to-project check with the view-supplied URL project
 /// as context.
 fn validate_install_cross(install: &InstallAttrs, url_project: &Uuid) -> Result<(), Denial> {
-    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &rrule_validator;
+    // The cross-field re-check anchors on the binding's dtstart
+    // (`scheduler.py:297`, `_rrule.py:238`): `dtstart or now(utc)`.
+    // Field validation already passed here, so dtstart is always `Some`
+    // on install; the fallback mirrors Django's shape regardless.
+    let cross_anchor = install.attrs.dtstart.unwrap_or_else(Utc::now);
+    let cross_validator = move |value: &str| rrule_validator(value, cross_anchor);
+    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &cross_validator;
     if let Err(message) =
         shape::validate_cross_rrule(install.attrs.rrule.as_deref(), None, rrule_validator)
     {
@@ -2131,7 +2142,11 @@ fn validate_patch_cross(
             return Err(single_field_denial("project", &message));
         }
     }
-    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &rrule_validator;
+    // Same anchor as install: attrs-first, instance-second — `dtstart`
+    // is `NOT NULL`, so no `now` fallback is reachable here.
+    let cross_anchor = attrs.dtstart.unwrap_or(current.dtstart);
+    let cross_validator = move |value: &str| rrule_validator(value, cross_anchor);
+    let rrule_validator: &(dyn Fn(&str) -> Result<(), String> + Send + Sync) = &cross_validator;
     if let Err(message) = shape::validate_cross_rrule(
         attrs.rrule.as_deref(),
         Some(current.rrule.as_str()),
@@ -3277,9 +3292,12 @@ fn render_saved_binding(
 /// `rrule_validator` over
 /// `pidash_jobs::tasks_ticker::rrule::validate_rrule_string`: only the
 /// message string crosses the seam (all Python uses is `str(e)`), into
-/// shape validation (field-level + the cross-field re-check).
-fn rrule_validator(value: &str) -> Result<(), String> {
-    pidash_jobs::tasks_ticker::rrule::validate_rrule_string(value)
+/// shape validation (field-level + the cross-field re-check). `anchor` is
+/// Django's `dtstart or now(utc)` (`_rrule.py:238`): the request time for
+/// field validation, the binding's dtstart for the cross-field re-check.
+/// Call sites bind it into the `Fn(&str)` closure the seam takes.
+fn rrule_validator(value: &str, anchor: DateTime<Utc>) -> Result<(), String> {
+    pidash_jobs::tasks_ticker::rrule::validate_rrule_string(value, anchor)
         .map_err(|error| error.message().to_owned())
 }
 
@@ -4133,11 +4151,12 @@ mod tests {
 
     #[test]
     fn rrule_closure_reports_jobs_messages() {
-        assert_eq!(rrule_validator("FREQ=DAILY"), Ok(()));
-        assert_eq!(rrule_validator(""), Ok(()));
+        let anchor = utc(2026, 5, 4, 11, 7, 0);
+        assert_eq!(rrule_validator("FREQ=DAILY", anchor), Ok(()));
+        assert_eq!(rrule_validator("", anchor), Ok(()));
         // F36-03 pins, through the seam (only the message crosses).
         assert_eq!(
-            rrule_validator("FREQ=NEVER"),
+            rrule_validator("FREQ=NEVER", anchor),
             Err("invalid RRULE: invalid 'FREQ': NEVER".to_owned())
         );
         // NOTE: the F36-03 `rrule_field_level` SECONDLY pin
@@ -4145,7 +4164,7 @@ mod tests {
         // the source — `bgtasks/_rrule.py` raises its own message below
         // (verified against the Python source; the jobs port matches it).
         assert_eq!(
-            rrule_validator("FREQ=SECONDLY"),
+            rrule_validator("FREQ=SECONDLY", anchor),
             Err(
                 "FREQ=SECONDLY is not allowed (allowed: ['DAILY', 'HOURLY', 'MINUTELY', 'MONTHLY', 'WEEKLY', 'YEARLY'])"
                     .to_owned()
@@ -4155,8 +4174,21 @@ mod tests {
         // dateutil's unpack `ValueError` wrapped in `invalid RRULE:`
         // (verified against dateutil 2.8.2; the jobs port matches it).
         assert_eq!(
-            rrule_validator("garbage"),
+            rrule_validator("garbage", anchor),
             Err("invalid RRULE: not enough values to unpack (expected 2, got 1)".to_owned())
+        );
+        // PIDASHCONV-1706: the bound anchor feeds the verdict — the
+        // byset check reads the anchor's minute (7 here).
+        assert_eq!(
+            rrule_validator("FREQ=MINUTELY;INTERVAL=2;BYMINUTE=0", anchor),
+            Err("invalid RRULE: Invalid rrule byxxx generates an empty set.".to_owned())
+        );
+        assert_eq!(
+            rrule_validator(
+                "FREQ=MINUTELY;INTERVAL=2;BYMINUTE=0",
+                utc(2026, 5, 4, 11, 6, 0)
+            ),
+            Ok(())
         );
     }
 

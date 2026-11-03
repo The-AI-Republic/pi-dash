@@ -70,6 +70,16 @@ services:
       - api
       - worker
 
+  web_new:
+    image: airepublic/pi-dash-web-new:${APP_RELEASE:-stable}
+    deploy:
+      replicas: ${WEB_NEW_REPLICAS:-1}
+      restart_policy:
+        condition: any
+    depends_on:
+      - api
+      - worker
+
   space:
     image: airepublic/pi-dash-space:${APP_RELEASE:-stable}
     deploy:
@@ -237,6 +247,7 @@ services:
       - proxy_data:/data
     depends_on:
       - web
+      - web_new
       - api
       - space
       - admin
