@@ -7,7 +7,6 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { observer } from "mobx-react";
 // pi dash imports
-import { LIVE_BASE_PATH, LIVE_BASE_URL } from "@pi-dash/constants";
 import { CollaborativeDocumentEditorWithRef } from "@pi-dash/editor";
 import type {
   CollaborationState,
@@ -32,6 +31,8 @@ import { useWorkspace } from "@/hooks/store/use-workspace";
 import { useUser } from "@/hooks/store/user";
 import { usePageFilters } from "@/hooks/use-page-filters";
 import { useParseEditorContent } from "@/hooks/use-parse-editor-content";
+// utils
+import { liveCollaborationUrl } from "@/utils/live-collaboration-url";
 // pi dash web imports
 import type { TCustomEventHandlers } from "@/hooks/use-realtime-page-events";
 import { useRealtimePageEvents } from "@/hooks/use-realtime-page-events";
@@ -190,18 +191,7 @@ export const PageEditorBody = observer(function PageEditorBody(props: Props) {
   const realtimeConfig: TRealtimeConfig | undefined = useMemo(() => {
     // Construct the WebSocket Collaboration URL
     try {
-      const LIVE_SERVER_BASE_URL = LIVE_BASE_URL?.trim() || window.location.origin;
-      const WS_LIVE_URL = new URL(LIVE_SERVER_BASE_URL);
-      const isSecureEnvironment = window.location.protocol === "https:";
-      WS_LIVE_URL.protocol = isSecureEnvironment ? "wss" : "ws";
-      WS_LIVE_URL.pathname = `${LIVE_BASE_PATH}/collaboration`;
-
-      // Append query parameters to the URL
-      Object.entries(webhookConnectionParams)
-        .filter(([_, value]) => value !== undefined && value !== null)
-        .forEach(([key, value]) => {
-          WS_LIVE_URL.searchParams.set(key, String(value));
-        });
+      const WS_LIVE_URL = liveCollaborationUrl(webhookConnectionParams);
 
       // Construct realtime config
       return {
@@ -244,8 +234,10 @@ export const PageEditorBody = observer(function PageEditorBody(props: Props) {
           <div className="page-summary-container absolute top-[64px] right-0 z-[5] h-full">
             <div className="sticky top-[72px]">
               <div className="group/page-toc relative px-page-x">
+                {/* oxlint-disable-next-line jsx-a11y/click-events-have-key-events -- the outline's own links are the keyboard path; this only widens the pointer target. */}
                 <div
                   className="max-h-[50vh] !cursor-pointer overflow-hidden"
+                  // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- a <button> cannot wrap the outline's links.
                   role="button"
                   aria-label={t("Open outline")}
                   onClick={handleOpenNavigationPane}
@@ -281,7 +273,7 @@ export const PageEditorBody = observer(function PageEditorBody(props: Props) {
                 if (!res) throw new Error("Failed in fetching mentions");
                 return res;
               },
-              renderComponent: (props) => <EditorMentionsRoot {...props} />,
+              renderComponent: (mentionProps) => <EditorMentionsRoot {...mentionProps} />,
               getMentionedEntityDetails: (id: string) => ({ display_name: getUserDetails(id)?.display_name ?? "" }),
             }}
             updatePageProperties={updatePageProperties}
