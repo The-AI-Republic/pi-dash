@@ -179,7 +179,7 @@ describe("ProjectSettingsSidebar", () => {
     expect(await screen.findByTestId("project-logo-icon")).toBeInTheDocument();
   });
 
-  it("marks the canonical slash form and nothing else", () => {
+  it("marks the tab in either slash form and nothing else", () => {
     const active = renderSidebar(ROLE_ADMIN, `${ROOT}/members/`);
     expect(screen.getByTestId("project-settings-tab-members")).toHaveAttribute("aria-current", "page");
     expect(screen.getByTestId("project-settings-tab-members")).toHaveClass("bg-layer-transparent-selected");
@@ -188,8 +188,16 @@ describe("ProjectSettingsSidebar", () => {
     expect(screen.getByTestId("project-settings-tab-general")).not.toHaveClass("bg-layer-transparent-selected");
     active.unmount();
 
-    renderSidebar(ROLE_ADMIN, `${ROOT}/members`);
+    const slashless = renderSidebar(ROLE_ADMIN, `${ROOT}/members`);
+    expect(screen.getByTestId("project-settings-tab-members")).toHaveAttribute("aria-current", "page");
+    expect(screen.getByTestId("project-settings-tab-members")).toHaveClass("bg-layer-transparent-selected");
+    expect(screen.getByTestId("project-settings-tab-members")).toHaveAttribute("data-active", "true");
+    expect(screen.getByTestId("project-settings-tab-general")).toHaveAttribute("data-active", "false");
+    slashless.unmount();
+
+    renderSidebar(ROLE_ADMIN, ROOT);
+    expect(screen.getByTestId("project-settings-tab-general")).toHaveAttribute("aria-current", "page");
+    expect(screen.getByTestId("project-settings-tab-general")).toHaveAttribute("data-active", "true");
     expect(screen.getByTestId("project-settings-tab-members")).toHaveAttribute("data-active", "false");
-    expect(screen.getByTestId("project-settings-tab-members")).not.toHaveAttribute("aria-current");
   });
 });
