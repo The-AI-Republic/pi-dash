@@ -140,8 +140,8 @@ describe("space auth contracts", () => {
     expect(SPACE_AUTH_ERROR_CODES.INVALID_EMAIL).toBe(5005);
     expect(SPACE_AUTH_ERROR_CODES.USER_ALREADY_EXIST).toBe(5030);
     expect(SPACE_AUTH_ERROR_CODES.OAUTH_NOT_CONFIGURED).toBe(5104);
-    // Deliberate exclusions (parity/specs/space.md §5.4).
-    expect(SPACE_AUTH_ERROR_CODES).not.toHaveProperty("RATE_LIMIT_EXCEEDED");
+    expect(SPACE_AUTH_ERROR_CODES.RATE_LIMIT_EXCEEDED).toBe(5900);
+    // Deliberate exclusion (parity/specs/space.md §5.4).
     expect(SPACE_AUTH_ERROR_CODES).not.toHaveProperty("GITEA_NOT_CONFIGURED");
   });
 });

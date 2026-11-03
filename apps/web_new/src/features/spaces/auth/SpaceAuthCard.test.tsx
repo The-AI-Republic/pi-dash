@@ -272,13 +272,16 @@ describe("method routing", () => {
     expect(screen.getByTestId("space-auth-banner")).toHaveTextContent("That email address doesn't look right.");
   });
 
-  it("stays silent on a throttled check", async () => {
+  it("banners a throttled check in place and keeps the address", async () => {
     const services = fakeServices();
     services.checkEmail = () => Promise.reject(new ApiError({ code: "5900", message: "throttled" }));
     renderCard({}, services);
     submitEmail("ada@example.com");
-    await waitForEmailSettled();
-    expect(screen.queryByTestId("space-auth-banner")).toBeNull();
+    await screen.findByTestId("space-auth-banner");
+    expect(card()).toHaveAttribute("data-step", "email");
+    expect(screen.getByTestId("space-auth-banner")).toHaveTextContent(
+      "Too many attempts. Wait a moment and try again."
+    );
     expect(emailField()).toHaveValue("ada@example.com");
   });
 
@@ -311,11 +314,6 @@ describe("method routing", () => {
     expect(screen.queryByTestId("space-auth-banner")).toBeNull();
   });
 });
-
-async function waitForEmailSettled(): Promise<void> {
-  await screen.findByRole("button", { name: "Next" });
-  expect(emailSubmit()).toBeEnabled();
-}
 
 describe("code step", () => {
   async function renderCodeStep(
@@ -446,6 +444,24 @@ describe("code step", () => {
     expect(screen.getByTestId("space-auth-banner")).toHaveTextContent(
       "That code has expired. Send another code and try again."
     );
+  });
+
+  it("banners a throttled resend on the code step and keeps the address", async () => {
+    const services = fakeServices();
+    let calls = 0;
+    services.generateCode = async (email) => {
+      calls += 1;
+      services.generated.push(email);
+      if (calls > 1) throw new ApiError({ code: "5900", message: "throttled" });
+    };
+    await renderCodeStep({}, services);
+    fireEvent.click(screen.getByTestId("space-auth-resend"));
+    await screen.findByTestId("space-auth-banner");
+    expect(card()).toHaveAttribute("data-step", "code");
+    expect(screen.getByTestId("space-auth-banner")).toHaveTextContent(
+      "Too many attempts. Wait a moment and try again."
+    );
+    expect(screen.getByLabelText("Email address")).toHaveValue("ada@example.com");
   });
 
   it("shows progress on submit", async () => {
@@ -727,6 +743,7 @@ describe("failure banner and coded links", () => {
     ["5040", "email", "sign-up", "Enter your email address and password to create an account."],
     ["5020", "password", "sign-up", "That password isn't valid. Try again."],
     ["5115", "email", "sign-up", "Google couldn't sign you in. Try again."],
+    ["5900", "email", "sign-up", "Too many attempts. Wait a moment and try again."],
   ])("lands error %s on the %s step in %s", (code, step, mode, message) => {
     renderCard({ initialErrorCode: code });
     expect(card()).toHaveAttribute("data-step", step);
@@ -734,7 +751,7 @@ describe("failure banner and coded links", () => {
     expect(screen.getByTestId("space-auth-banner")).toHaveTextContent(message);
   });
 
-  it.each([["5900"], ["5112"], ["9999"]])("stays silent on %s", (code) => {
+  it.each([["5112"], ["9999"]])("stays silent on %s", (code) => {
     renderCard({ initialErrorCode: code });
     expect(card()).toHaveAttribute("data-step", "email");
     expect(screen.queryByTestId("space-auth-banner")).toBeNull();
