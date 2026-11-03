@@ -1766,6 +1766,7 @@
     "member_list/retrieve-guest pass fields= to the role serializer; it is ignored (DynamicBaseSerializer bug) so the full 6-key shape renders (see FX-APROJ-02).",
     "Self-patch guard (member.py:222) fires for ANY field, not just role: patching your own comment 400s (see patch_self_comment_400).",
     "The role guards bypass reads the REQUESTER's workspace role (PDASHOSS01-328); the target's only denies: a workspace admin target answers patch_ws_admin_target_403 to anyone else, and the workspace-guest 400 caps every requester. Live cases: contract-tests/app_project/test_member_role.py.",
+    "Any field on someone else's membership needs a project Admin or a workspace admin (PDASHOSS01-329): anyone else answers 403 {\"error\": \"You do not have permission to update this member\"} after the role guards, so patch_other_comment_200 holds only for an admin requester; an own-membership body naming is_active answers 400 {\"error\": \"You cannot update your own membership status\"}. Live cases: contract-tests/app_project/test_member_role.py.",
     "destroy by a project non-admin 403s at the [ADMIN] decorator; the in-view higher-role check (member.py:290) is reachable via the ws-admin override and returns 400 (not 403)."
   ],
   "invites": {

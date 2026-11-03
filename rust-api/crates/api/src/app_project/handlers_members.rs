@@ -61,6 +61,10 @@
 //!   [`member_role_fields_alias`]).
 //! * BUG-self-patch (`member.py:222`): the "cannot update your own role"
 //!   400 fires for ANY field, not just `role`.
+//! * Member PATCH authorization (PDASHOSS01-329): after the role guards,
+//!   any field on someone else's membership needs a project Admin or a
+//!   workspace admin (403), and an own-membership body naming `is_active`
+//!   answers 400. A non-dict body's serializer 400 waits for both.
 //! * QUIRK-destroy-400 (`member.py:290-294`): the in-view higher-role check
 //!   answers 400, not 403 (reachable via the ws-admin gate override).
 //! * QUIRK-no-txn: `bulk_update` and the two `bulk_create`s are three
@@ -2911,10 +2915,14 @@ async fn member_partial_update_inner(
     // First `request.data` touch: parse (and 415/400) errors land here,
     // after the lookups (`member.py:235`).
     let data = negotiate_data(headers, body)?;
-    // `"role" in request.data` on non-dict bodies: `in` over lists and
-    // strings, `TypeError` (500) everywhere else.
+    // `"role" in request.data` (and `"is_active"` below) on non-dict
+    // bodies: `in` over lists and strings, `TypeError` (500) everywhere
+    // else. A non-dict body's serializer 400 is deferred until the view's
+    // own guards have run (`member.py:235-293`).
     let role_present;
     let role_value: Option<JVal>;
+    let is_active_present;
+    let mut non_dict: Option<&str> = None;
     match &data.value {
         JVal::Object(object) => {
             // Uploads win the text-then-files merge; `int()` on the
@@ -2926,27 +2934,29 @@ async fn member_partial_update_inner(
             } else {
                 object.get("role").cloned()
             };
+            is_active_present =
+                object.contains_key("is_active") || data.files.contains_key("is_active");
         }
         JVal::Array(items) => {
-            let contains = items
-                .iter()
-                .any(|item| matches!(item, JVal::Str(text) if text.eq_str("role")));
-            if !contains {
-                return Err(non_dict_body("list"));
-            }
+            let contains = |key: &str| {
+                items
+                    .iter()
+                    .any(|item| matches!(item, JVal::Str(text) if text.eq_str(key)))
+            };
             // `"role" in [...]` is true: the 403 matrix runs before the
             // `.get` AttributeError 500 (`member.py:235-257`), so fall
             // through with a missing value.
-            role_present = true;
+            role_present = contains("role");
             role_value = None;
+            is_active_present = contains("is_active");
+            non_dict = Some("list");
         }
         JVal::Str(text) => {
-            if !text.contains_str("role") {
-                return Err(non_dict_body("str"));
-            }
             // Substring `"role"`: same 403-then-500 order as lists.
-            role_present = true;
+            role_present = text.contains_str("role");
             role_value = None;
+            is_active_present = text.contains_str("is_active");
+            non_dict = Some("str");
         }
         JVal::Num(_) | JVal::Bool(_) | JVal::Null => return Err(Denial::ServerError),
     }
@@ -2983,7 +2993,26 @@ async fn member_partial_update_inner(
             ));
         }
     }
-    // The serializer stage (`member.py:273-278`).
+    let is_own_membership = target_member_id == user_id;
+    // Any field on someone else's membership needs a project Admin or a
+    // workspace admin (PDASHOSS01-329).
+    if !is_own_membership
+        && requester_role < pidash_auth::permissions::ROLE_ADMIN
+        && !is_requester_workspace_admin
+    {
+        return Err(forbidden_error(
+            "You do not have permission to update this member",
+        ));
+    }
+    // Nobody changes their own active status here; leaving a project has
+    // its own endpoint.
+    if is_own_membership && is_active_present {
+        return Err(body_error("You cannot update your own membership status"));
+    }
+    if let Some(datatype) = non_dict {
+        return Err(non_dict_body(datatype));
+    }
+    // The serializer stage (`member.py:295-300`).
     let JVal::Object(object) = &data.value else {
         return Err(Denial::ServerError);
     };
