@@ -25,8 +25,9 @@
 //!    cookie uses the session expiry age. Attributes are always `Path=/`,
 //!    `SameSite=Lax`, the configured domain, and `Secure`/`HttpOnly` only
 //!    when truthy — see [`pidash_auth::session::render_set_cookie`].
-//! 4. A failed save raises `SessionInterrupted` in Django (a 500); here the
-//!    layer answers `500` with an empty body.
+//! 4. A save that misses its row raises `SessionInterrupted` in Django
+//!    (a 400 with the stock bad-request page); the layer answers the
+//!    same page. Every other store failure is an empty `500`.
 //!
 //! Request side, the layer mirrors Django `get_user` once for every route:
 //! the backend must be `ModelBackend`, the `users` row must exist and be
@@ -63,15 +64,30 @@ use pidash_auth::signing::{Signer, SESSION_SIGNING_SALT};
 use crate::license::{verify_session_hash, MODEL_BACKEND};
 use pidash_compat::response::empty_response_no_content_type;
 
-/// What went wrong talking to the session table. A load/save failure maps
-/// to Django's 500 (`SessionInterrupted` on save races), never to a
-/// session-state change.
+/// What went wrong talking to the session table. An existing-key save
+/// that misses its row is Django's `UpdateError` (`SessionInterrupted`
+/// → 400); every other failure is an empty 500, never a session-state
+/// change.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoreError(pub String);
+pub enum StoreError {
+    /// Existing-key `UPDATE` matched 0 rows, or the update itself
+    /// failed: Django's `UpdateError` (`db.py` `except DatabaseError`
+    /// with `must_create=False`), answered as `SessionInterrupted`.
+    UpdateMiss,
+    /// Any other store failure (loads, probes, deletes, inserts, row
+    /// signing).
+    Other(String),
+}
 
 impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "session store failed: {}", self.0)
+        match self {
+            StoreError::UpdateMiss => write!(
+                f,
+                "session store failed: existing-key session update missed (Django UpdateError)"
+            ),
+            StoreError::Other(message) => write!(f, "session store failed: {message}"),
+        }
     }
 }
 
@@ -116,10 +132,11 @@ pub trait SessionStore: Clone + Send + Sync + 'static {
     fn load(&self, key: String) -> BoxFuture<Option<StoredSession>>;
     /// Persist `row`; returns the key it is stored under (freshly issued
     /// when `row.key` is `None`, like `_get_new_session_key`). An existing
-    /// key whose row is gone errors — Django's `UpdateError` on the
-    /// `force_update` miss (`SessionInterrupted` → 500) — on the Postgres
-    /// store; the memory store upserts (test double, like Django's
-    /// non-db backends, which have no update-miss failure).
+    /// key whose row is gone errors with [`StoreError::UpdateMiss`] —
+    /// Django's `UpdateError` on the `force_update` miss
+    /// (`SessionInterrupted` → 400) — on the Postgres store; the memory
+    /// store upserts (test double, like Django's non-db backends, which
+    /// have no update-miss failure).
     fn save(&self, row: SessionRow) -> BoxFuture<String>;
     /// Load the user behind `_auth_user_id` for Django's `get_user` check.
     /// `None` means the user is missing or the id is not a UUID; Django
@@ -252,7 +269,7 @@ impl SessionStore for PgSessionStore {
                 .bind(&key)
                 .fetch_optional(&pool)
                 .await
-                .map_err(|e| StoreError(e.to_string()))?;
+                .map_err(|e| StoreError::Other(e.to_string()))?;
             Ok(row.map(|(session_data, expire_date_unix)| StoredSession {
                 session_data,
                 expire_date_unix,
@@ -267,8 +284,10 @@ impl SessionStore for PgSessionStore {
                 // Django's `save()` with an existing key is `force_update`:
                 // the row must be there. A 0-row update means the session
                 // vanished mid-request (concurrent flush) — `UpdateError`
-                // (`SessionInterrupted` → 500) in Django, never a fresh
-                // insert (PIDASHCONV-1304).
+                // (`SessionInterrupted` → 400) in Django, never a fresh
+                // insert (PIDASHCONV-1304). Any database error on this
+                // update is `UpdateError` too (`db.py` `except
+                // DatabaseError` with `must_create=False`).
                 let updated = sqlx::query(Self::UPDATE_SQL)
                     .bind(&key)
                     .bind(&row.session_data)
@@ -277,14 +296,12 @@ impl SessionStore for PgSessionStore {
                     .bind(&row.device_info)
                     .execute(&pool)
                     .await
-                    .map_err(|e| StoreError(e.to_string()))?
+                    .map_err(|_| StoreError::UpdateMiss)?
                     .rows_affected();
                 if updated > 0 {
                     return Ok(key);
                 }
-                return Err(StoreError(
-                    "session row missing for existing key (Django UpdateError)".to_string(),
-                ));
+                return Err(StoreError::UpdateMiss);
             }
             insert_new(&pool, &row).await
         })
@@ -302,7 +319,7 @@ impl SessionStore for PgSessionStore {
                 .bind(id)
                 .fetch_optional(&pool)
                 .await
-                .map_err(|e| StoreError(e.to_string()))?;
+                .map_err(|e| StoreError::Other(e.to_string()))?;
             Ok(row.map(|(password, is_active)| SessionUser {
                 password,
                 is_active,
@@ -317,7 +334,7 @@ impl SessionStore for PgSessionStore {
                 .bind(key)
                 .execute(&pool)
                 .await
-                .map_err(|e| StoreError(e.to_string()))?;
+                .map_err(|e| StoreError::Other(e.to_string()))?;
             Ok(())
         })
     }
@@ -335,7 +352,7 @@ async fn insert_new(pool: &sqlx::PgPool, row: &SessionRow) -> Result<String, Sto
             .bind(&row.device_info)
             .execute(pool)
             .await
-            .map_err(|e| StoreError(e.to_string()))?
+            .map_err(|e| StoreError::Other(e.to_string()))?
             .rows_affected();
         if inserted > 0 {
             return Ok(key);
@@ -839,7 +856,7 @@ where
                 return Ok(response);
             }
             let session = handle.snapshot();
-            if apply_response_rules(
+            match apply_response_rules(
                 &config,
                 &store,
                 &cookie_name,
@@ -848,20 +865,31 @@ where
                 &mut response,
             )
             .await
-            .is_err()
             {
-                return Ok(server_error());
+                Ok(()) => Ok(response),
+                // The save lost its row to a concurrent sign-out:
+                // Django's `SessionInterrupted`.
+                Err(StoreError::UpdateMiss) => Ok(session_interrupted()),
+                Err(StoreError::Other(_)) => Ok(server_error()),
             }
-            Ok(response)
         })
     }
 }
 
-/// Empty-500 for store failures (`SessionInterrupted` → 500 in Django).
-/// The shape stays minimal on purpose — the F-07 error renderer owns API
-/// error bodies, and Django's own 500 page is deployment-specific.
+/// Empty-500 for generic store failures. The shape stays minimal on
+/// purpose — the F-07 error renderer owns API error bodies, and
+/// Django's own 500 page is deployment-specific. The update-miss kind
+/// answers [`session_interrupted`] instead.
 fn server_error() -> Response<Body> {
     empty_response_no_content_type(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Django's `SessionInterrupted` answer: the stock 400 page (no
+/// `400.html` and no `handler400` override in the project). The
+/// exception fires before `set_cookie`, so no session cookie rides
+/// along.
+fn session_interrupted() -> Response<Body> {
+    pidash_compat::response::bad_request_page()
 }
 
 async fn apply_response_rules<Store: SessionStore>(
@@ -904,7 +932,7 @@ async fn apply_response_rules<Store: SessionStore>(
     let signer = Signer::new(&config.secret_key, SESSION_SIGNING_SALT);
     let session_data = signer
         .sign_object(&session.to_json(), now.max(0) as u64)
-        .map_err(|e| StoreError(e.to_string()))?;
+        .map_err(|e| StoreError::Other(e.to_string()))?;
     let row = SessionRow {
         key: session.key.clone(),
         session_data,
@@ -1059,7 +1087,7 @@ mod tests {
 
         fn load_user(&self, user_id: String) -> BoxFuture<Option<SessionUser>> {
             if self.fail_probe {
-                return Box::pin(async move { Err(StoreError("probe down".to_string())) });
+                return Box::pin(async move { Err(StoreError::Other("probe down".to_string())) });
             }
             let missing = self.missing.clone();
             let inactive = self.inactive;
@@ -1969,6 +1997,107 @@ mod tests {
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    /// Scripted save outcome: the deterministic concurrent-sign-out
+    /// double (PIDASHCONV-1707). `save` fails with the scripted error
+    /// without touching rows; everything else delegates to memory.
+    #[derive(Debug, Clone)]
+    struct ScriptedSaveStore {
+        inner: MemorySessionStore,
+        save_error: Option<StoreError>,
+    }
+
+    impl SessionStore for ScriptedSaveStore {
+        fn load(&self, key: String) -> BoxFuture<Option<StoredSession>> {
+            self.inner.load(key)
+        }
+
+        fn save(&self, row: SessionRow) -> BoxFuture<String> {
+            let error = self.save_error.clone();
+            let inner = self.inner.clone();
+            Box::pin(async move {
+                if let Some(error) = error {
+                    return Err(error);
+                }
+                inner.save(row).await
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn update_miss_answers_django_400_page() {
+        // The save lost its row to a concurrent sign-out: Django raises
+        // `SessionInterrupted`, a 400 with the stock bad-request page
+        // and no session cookie (PIDASHCONV-1707).
+        let store = ScriptedSaveStore {
+            inner: MemorySessionStore::new(),
+            save_error: Some(StoreError::UpdateMiss),
+        };
+        seed_session(&store.inner, "racelostkey1", "user-1").await;
+        let inner = axum::Router::new().route("/api/x/", axum::routing::any(set_user));
+        let response = SessionLayer::new(config_for(Some(store)))
+            .layer(inner)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/x/")
+                    .header(header::COOKIE, "session-id=racelostkey1")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        assert!(set_cookies(&response).is_empty());
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("body")
+            .to_bytes();
+        assert_eq!(
+            &body[..],
+            pidash_compat::response::DJANGO_BAD_REQUEST_400_BODY.as_bytes()
+        );
+    }
+
+    #[tokio::test]
+    async fn other_save_error_still_answers_empty_500() {
+        // Any other save failure stays an empty 500 with no
+        // content-type (PIDASHCONV-1707).
+        let store = ScriptedSaveStore {
+            inner: MemorySessionStore::new(),
+            save_error: Some(StoreError::Other("disk on fire".to_string())),
+        };
+        seed_session(&store.inner, "savefailkey1", "user-1").await;
+        let inner = axum::Router::new().route("/api/x/", axum::routing::any(set_user));
+        let response = SessionLayer::new(config_for(Some(store)))
+            .layer(inner)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/x/")
+                    .header(header::COOKIE, "session-id=savefailkey1")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            !response.headers().contains_key(header::CONTENT_TYPE),
+            "{:?}",
+            response.headers().get(header::CONTENT_TYPE)
+        );
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("body")
+            .to_bytes();
+        assert!(body.is_empty());
+    }
+
     /// Save-counting store: proves the layer never persists for
     /// responses whose session decision is already made downstream.
     #[derive(Debug, Clone)]
@@ -2146,7 +2275,7 @@ mod tests {
     async fn pg_save_missing_key_fails_like_django_update_error() {
         // `PgSessionStore::save` with an existing key whose row vanished
         // is Django's `force_update` miss: `UpdateError`
-        // (`SessionInterrupted` → 500), never a fresh insert
+        // (`SessionInterrupted` → 400), never a fresh insert
         // (PIDASHCONV-1304). Live-db, gated like the handoff tests.
         let Ok(url) = std::env::var("DATABASE_URL") else {
             eprintln!("skipping live-db test: DATABASE_URL is not set");
@@ -2172,7 +2301,24 @@ mod tests {
                 .await
                 .expect("count");
         assert_eq!(before, 0);
-        assert!(store.save(row(Some(missing.clone()))).await.is_err());
+        assert_eq!(
+            store.save(row(Some(missing.clone()))).await,
+            Err(StoreError::UpdateMiss)
+        );
+        // A database error on the existing-key UPDATE is `UpdateError`
+        // too (`db.py` `except DatabaseError`, `must_create=False`):
+        // pin it with a closed pool.
+        let closed_pool = sqlx::PgPool::connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        closed_pool.close().await;
+        let closed = PgSessionStore::new(closed_pool);
+        assert_eq!(
+            closed
+                .save(row(Some("pidash1707-closed".to_string())))
+                .await,
+            Err(StoreError::UpdateMiss)
+        );
         let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE session_key = $1")
             .bind(&missing)
             .fetch_one(&pool)
