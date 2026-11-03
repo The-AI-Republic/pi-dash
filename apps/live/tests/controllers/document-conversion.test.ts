@@ -46,6 +46,75 @@ describe("convertHTMLDocumentToAllFormats", () => {
     expect(result.description_html).toContain('class="language-python"');
   });
 
+  it("keeps page body nodes with their identifiers (document)", () => {
+    const html =
+      '<p>see <entity-reference-component entity_name="issue" entity_identifier="ISS-2" ' +
+      'project_identifier="P" workspace_identifier="acme" project_id="p-1" data-label="Fix login">' +
+      "</entity-reference-component></p>" +
+      '<issue-embed-component id="emb-1" entity_identifier="ISS-2" project_identifier="P" ' +
+      'workspace_identifier="acme" entity_name="issue"></issue-embed-component>';
+    const result = convertHTMLDocumentToAllFormats({ document_html: html, variant: "document" });
+
+    expect(result.description_json).toMatchObject({
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: "see " },
+            {
+              type: "entity-reference-component",
+              attrs: {
+                entity_name: "issue",
+                entity_identifier: "ISS-2",
+                project_identifier: "P",
+                workspace_identifier: "acme",
+                project_id: "p-1",
+                "data-label": "Fix login",
+              },
+            },
+          ],
+        },
+        {
+          type: "issue-embed-component",
+          attrs: {
+            id: "emb-1",
+            entity_identifier: "ISS-2",
+            project_identifier: "P",
+            workspace_identifier: "acme",
+            entity_name: "issue",
+          },
+        },
+      ],
+    });
+    for (const needle of [
+      "<entity-reference-component",
+      'data-label="Fix login"',
+      'project_id="p-1"',
+      "<issue-embed-component",
+      'id="emb-1"',
+    ]) {
+      expect(result.description_html).toContain(needle);
+    }
+    // The collaboration binary carries the nodes too: the document schema decodes both back out of it.
+    const synced = docHTML(docFromBinary(decode(result.description_binary)));
+    expect(synced).toContain("<entity-reference-component");
+    expect(synced).toContain('data-label="Fix login"');
+    expect(synced).toContain("<issue-embed-component");
+    expect(synced).toContain('id="emb-1"');
+  });
+
+  it("keeps a bare entity reference node with no attributes (document)", () => {
+    const result = convertHTMLDocumentToAllFormats({
+      document_html: "<p><entity-reference-component></entity-reference-component></p>",
+      variant: "document",
+    });
+
+    expect(result.description_json).toMatchObject({
+      content: [{ type: "paragraph", content: [{ type: "entity-reference-component" }] }],
+    });
+    expect(result.description_html).toContain("<entity-reference-component");
+  });
+
   it.each(["rich", "document"] as const)("without a base binary keeps the existing output (%s)", (variant) => {
     const result = convertHTMLDocumentToAllFormats({ document_html: V1_HTML, variant });
 
@@ -175,5 +244,102 @@ describe("DocumentController.convertDocument", () => {
     const { status, body } = await call({ description_html: V1_HTML, variant: "document", description_binary: value });
     expect(status).toBe(400);
     expect(body.context.validationErrors[0].path).toBe("description_binary");
+  });
+});
+
+describe("text alignment projection (NEWFRONT-931)", () => {
+  it.each(["rich", "document"] as const)("round-trips paragraph alignment (%s)", (variant) => {
+    const result = convertHTMLDocumentToAllFormats({
+      document_html: '<p style="text-align: center;">Centered</p>',
+      variant,
+    });
+
+    expect(result.description_json).toMatchObject({
+      content: [{ type: "paragraph", attrs: { textAlign: "center" } }],
+    });
+    expect(result.description_html).toContain('style="text-align: center;"');
+    // The collaboration binary carries the alignment too: the page save path re-renders from it.
+    expect(docHTML(docFromBinary(decode(result.description_binary)))).toContain('style="text-align: center;"');
+  });
+
+  it("round-trips heading alignment (document)", () => {
+    const result = convertHTMLDocumentToAllFormats({
+      document_html: '<h2 style="text-align: right;">Head</h2>',
+      variant: "document",
+    });
+
+    expect(result.description_json).toMatchObject({
+      content: [{ type: "heading", attrs: { textAlign: "right", level: 2 } }],
+    });
+    expect(result.description_html).toContain('style="text-align: right;"');
+  });
+
+  it("keeps alignment nested in a list item (document)", () => {
+    const result = convertHTMLDocumentToAllFormats({
+      document_html: '<ul><li><p style="text-align: center;">Nested</p></li></ul>',
+      variant: "document",
+    });
+
+    expect(result.description_json).toMatchObject({
+      content: [
+        {
+          type: "bulletList",
+          content: [{ type: "listItem", content: [{ type: "paragraph", attrs: { textAlign: "center" } }] }],
+        },
+      ],
+    });
+    expect(result.description_html).toContain('style="text-align: center;"');
+  });
+
+  it("keeps the non-palette custom colour style fallback (document)", () => {
+    const result = convertHTMLDocumentToAllFormats({
+      document_html: '<p><span data-text-color="#ff0000">red</span></p>',
+      variant: "document",
+    });
+
+    expect(result.description_html).toContain('data-text-color="#ff0000"');
+    expect(result.description_html).toContain('style="color: #ff0000;"');
+  });
+});
+
+describe("server HTML emitter", () => {
+  it("serializes unaligned content byte-for-byte (document)", () => {
+    const input = [
+      "<h1>Title head</h1>",
+      "<p>a&lt;b&gt;&amp;&quot;q&quot; \u00a0end\u00adhy</p>", // \u00a0 = nbsp -> &nbsp;, \u00ad = shy -> &shy;
+      "<p>it's a &lt;tag&gt;</p>", // ' is emitted as &apos;
+      "<p></p>",
+      "<p>one<br>two</p>",
+      '<p><a href="https://x.test/?a=1&amp;b=2">go</a></p>',
+      "<p><strong>b</strong> <em>i</em> <u>u</u> <s>s</s> <code>c</code></p>",
+      '<ul data-type="taskList"><li data-type="taskItem" data-checked="true"><label><input type="checkbox" checked="checked"><span></span></label><div><p>done task</p></div></li><li data-type="taskItem"><label><input type="checkbox"><span></span></label><div><p>open task</p></div></li></ul>',
+      '<p>cap</p><img src="https://x.test/i.png" alt="pic">',
+      "<table><tbody><tr><td><p>cell</p></td></tr></tbody></table>",
+      "<table><tbody><tr><th><p>head</p></th></tr></tbody></table>",
+      "<blockquote><p>quoted</p></blockquote>",
+      '<pre><code class="language-python">print(1)</code></pre>',
+      "<ol><li><p>one</p></li><li><p>two</p></li></ol>",
+      "<ul><li><p>nested plain</p></li></ul>",
+      "<p>up</p><hr><p>down</p>",
+    ].join("");
+
+    expect(convertHTMLDocumentToAllFormats({ document_html: input, variant: "document" }).description_html).toBe(
+      '<h1 class="editor-heading-block">Title head</h1>' +
+        '<p class="editor-paragraph-block">a&lt;b&gt;&amp;&quot;q&quot; &nbsp;end&shy;hy</p>' +
+        '<p class="editor-paragraph-block">it&apos;s a &lt;tag&gt;</p>' +
+        '<p class="editor-paragraph-block"></p>' +
+        '<p class="editor-paragraph-block">one<br>two</p>' +
+        '<p class="editor-paragraph-block"><a target="_blank" rel="noopener noreferrer nofollow" class="text-accent-secondary underline underline-offset-[3px] hover:text-accent-primary transition-colors cursor-pointer" href="https://x.test/?a=1&amp;b=2">go</a></p>' +
+        '<p class="editor-paragraph-block"><strong>b</strong> <em>i</em> <u>u</u> <s>s</s> <code class="rounded-sm bg-layer-3 px-[6px] py-[1.5px] font-code font-medium text-(--extended-color-orange-600) border-[0.5px] border-subtle" spellcheck="false">c</code></p>' +
+        '<ul class="not-prose pl-2 space-y-2" data-type="taskList"><li class="flex" data-checked data-type="taskItem"><label><input type="checkbox" checked="checked"><span></span></label><div><p class="editor-paragraph-block">done task</p></div></li><li class="flex" data-type="taskItem"><label><input type="checkbox"><span></span></label><div><p class="editor-paragraph-block">open task</p></div></li></ul>' +
+        '<p class="editor-paragraph-block">cap</p><img src="https://x.test/i.png" alt="pic" width="35%" alignment="left">' +
+        '<table><tbody><tr><td colspan="1" rowspan="1" colwidth="150"><p class="editor-paragraph-block">cell</p></td></tr></tbody></table>' +
+        '<table><tbody><tr><th colspan="1" rowspan="1" colwidth="150" background="none"><p class="editor-paragraph-block">head</p></th></tr></tbody></table>' +
+        '<blockquote><p class="editor-paragraph-block">quoted</p></blockquote>' +
+        '<pre><code class="language-python">print(1)</code></pre>' +
+        '<ol class="list-decimal pl-7 space-y-(--list-spacing-y)"><li class="not-prose space-y-2"><p class="editor-paragraph-block">one</p></li><li class="not-prose space-y-2"><p class="editor-paragraph-block">two</p></li></ol>' +
+        '<ul class="list-disc pl-7 space-y-(--list-spacing-y)"><li class="not-prose space-y-2"><p class="editor-paragraph-block">nested plain</p></li></ul>' +
+        '<p class="editor-paragraph-block">up</p><div class="py-4 border-strong-1" data-type="horizontalRule"><div></div></div><p class="editor-paragraph-block">down</p>'
+    );
   });
 });
