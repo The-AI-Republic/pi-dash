@@ -22,9 +22,12 @@ HTTP success test here: its net is the kernel-level harness
 (``google_kernel_*`` live tests in ``oauth_google.rs`` driving
 ``process_invitations`` directly) plus the error-branch pins below.
 
-Scope notes: the success world seeds workspace invites ONLY — accepted
-project invites 500 first on both backends (the ported PB-1008 bug), so
-they can never be part of a green success path. Provider and
+Scope notes: PIDASHCONV-1686 retired the ported PB-1008 bug (Django
+main sets ``project_id`` on the ``ProjectMember`` bulk), so accepted
+project invites join on the success path instead of 500ing first: the
+gitea success world below stays workspace-only (the two-workspace module
+covers gitea project joins), while the gitlab success test seeds one
+accepted project invite and pins its join plus soft-delete. Provider and
 ``ENABLE_SIGNUP`` ``instance_configurations`` rows are inserted
 function-scoped and deleted in teardown, so the suite's boot-time
 ``oauth_unconfigured`` hermeticity holds for every other module (tests run
@@ -90,9 +93,9 @@ def _delete_gitea_config(database_url):
     _delete_config(database_url, GITEA_KEYS)
 
 
-def _delete_world(store, emails, workspace_ids):
+def _delete_world(store, emails, workspace_ids, project_ids=()):
     """Best-effort world teardown (accounts/profiles/members/invites →
-    workspaces → users); tolerates partially seeded worlds."""
+    projects → workspaces → users); tolerates partially seeded worlds."""
     with store.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -111,7 +114,16 @@ def _delete_world(store, emails, workspace_ids):
                 (emails,),
             )
             cur.execute(
+                "DELETE FROM project_members WHERE member_id IN"
+                " (SELECT id FROM users WHERE email = ANY(%s))",
+                (emails,),
+            )
+            cur.execute(
                 "DELETE FROM workspace_member_invites WHERE email = ANY(%s)",
+                (emails,),
+            )
+            cur.execute(
+                "DELETE FROM project_member_invites WHERE email = ANY(%s)",
                 (emails,),
             )
             # Django's post_save receiver auto-creates these for the
@@ -121,6 +133,8 @@ def _delete_world(store, emails, workspace_ids):
                 " (SELECT id FROM users WHERE email = ANY(%s))",
                 (emails,),
             )
+            for project_id in project_ids:
+                cur.execute("DELETE FROM projects WHERE id = %s", (project_id,))
             for workspace_id in workspace_ids:
                 cur.execute("DELETE FROM workspaces WHERE id = %s", (workspace_id,))
             cur.execute("DELETE FROM users WHERE email = ANY(%s)", (emails,))
@@ -446,6 +460,130 @@ def test_app_gitea_login_soft_deletes_consumed_invites(
         (email,),
     )["n"]
     assert projects == 0, "no project invites seeded, none consumed"
+
+
+def test_app_gitlab_login_joins_project_invite(base_url: str):
+    """Full app-gitlab login with an accepted project invite: 302 + join.
+
+    Runs against both backends (PIDASHCONV-1686, PB-1008 retired). The
+    callback creates the user, lands the workspace-member row (role
+    clamped to 5/15) and the project-member row carrying the invite's
+    ``project_id``, and soft-deletes the invite. FAILS on pre-fix Rust
+    (500, partial writes).
+    """
+    database_url = config.database_url()
+    store = Database(database_url)
+    tag = uuid.uuid4().hex[:8]
+    owner_email = f"gl1686-own-{tag}@example.test"
+    email = f"gl1686-{tag}@example.test"
+    emails = [email, owner_email]
+    owner = store.make_user(owner_email)
+    workspace = store.make_workspace(f"gl1686-{tag}", f"gl1686-{tag}", owner["id"])
+    project = store.make_project(workspace["id"], f"l6{tag}"[-8:])
+    iid = str(uuid.uuid4())
+    db.execute(
+        database_url,
+        "INSERT INTO project_member_invites (id, created_at, updated_at,"
+        " project_id, workspace_id, email, accepted, token, role)"
+        " VALUES (%s, now(), now(), %s, %s, %s, true, %s, %s)",
+        (iid, project["id"], workspace["id"], email, f"tok-{iid[:8]}", 20),
+    )
+    routes = {
+        ("POST", "/oauth/token"): (
+            200,
+            {"access_token": f"stub-at-{tag}", "token_type": "bearer"},
+        ),
+        ("GET", "/api/v4/user"): (
+            200,
+            {
+                "id": 424242,
+                "email": email,
+                "name": "Contract User",
+                "username": f"gl1686-{tag}",
+                "avatar_url": None,
+            },
+        ),
+    }
+    with RoutingStub(routes) as stub:
+        _delete_config(database_url, GITLAB_KEYS)
+        try:
+            store.make_config(
+                "GITLAB_CLIENT_ID", "contract-id", category="AUTHENTICATION"
+            )
+            store.make_config(
+                "GITLAB_CLIENT_SECRET", "contract-secret", category="AUTHENTICATION"
+            )
+            store.make_config("GITLAB_HOST", stub.url, category="AUTHENTICATION")
+        except Exception:
+            _delete_config(database_url, GITLAB_KEYS)
+            _delete_world(store, emails, [workspace["id"]], [project["id"]])
+            raise
+        try:
+            state = f"gl1686-state-{tag}"
+            session_key = _forge_oauth_session(database_url, state)
+            try:
+                authed = httpx.Client(
+                    base_url=base_url,
+                    cookies={SESSION_COOKIE: session_key},
+                    timeout=30,
+                    follow_redirects=False,
+                )
+                try:
+                    resp = authed.get(
+                        "/auth/gitlab/callback/",
+                        params={"code": "contract-stub-code", "state": state},
+                    )
+                finally:
+                    authed.close()
+            finally:
+                _delete_session(database_url, session_key)
+            user = db.fetchone(
+                database_url, "SELECT id FROM users WHERE email = %s", (email,)
+            )
+            members = (
+                db.fetchall(
+                    database_url,
+                    "SELECT workspace_id::text AS ws, role FROM workspace_members"
+                    " WHERE member_id = %s",
+                    (user["id"],),
+                )
+                if user is not None
+                else []
+            )
+            project_rows = (
+                db.fetchall(
+                    database_url,
+                    "SELECT project_id::text AS pj, workspace_id::text AS ws, role"
+                    " FROM project_members WHERE member_id = %s",
+                    (user["id"],),
+                )
+                if user is not None
+                else []
+            )
+            invite = db.fetchone(
+                database_url,
+                "SELECT accepted, deleted_at FROM project_member_invites WHERE id = %s",
+                (iid,),
+            )
+            hits = {(r["method"], urlsplit(r["path"]).path) for r in stub.requests}
+        finally:
+            _delete_config(database_url, GITLAB_KEYS)
+            _delete_world(store, emails, [workspace["id"]], [project["id"]])
+
+    assert resp.status_code == 302, (
+        f"expected 302, got {resp.status_code}: {resp.text[:300]}"
+    )
+    assert ("POST", "/oauth/token") in hits, stub.requests
+    assert ("GET", "/api/v4/user") in hits, stub.requests
+    assert user is not None, "callback created the user"
+    assert [(m["ws"], m["role"]) for m in members] == [(workspace["id"], 15)], (
+        f"invite workspace joined (role 20 clamps to 15): {members}"
+    )
+    assert [(m["pj"], m["ws"], m["role"]) for m in project_rows] == [
+        (project["id"], workspace["id"], 15)
+    ], f"invite project joined with its project_id: {project_rows}"
+    assert invite is not None and invite["accepted"] is True, invite
+    assert invite["deleted_at"] is not None, "consumed invite soft-deletes"
 
 
 @pytest.mark.parametrize(

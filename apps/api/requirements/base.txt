@@ -18,6 +18,8 @@ django-redis==5.4.0
 django-cors-headers==4.3.1
 # celery
 celery==5.4.0
+# kombu 5.7 needs redis-py >= 6.4; keep it in step with redis above.
+kombu==5.6.2
 django_celery_beat==2.6.0
 django-celery-results==2.5.1
 # cron parsing for project schedulers (.ai_design/project_scheduler/)

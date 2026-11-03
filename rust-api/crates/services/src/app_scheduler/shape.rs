@@ -39,11 +39,12 @@
 //!   `rrule_validator: &dyn Fn(&str) -> Result<(), String>` closure; only
 //!   the message string crosses the seam (all Python uses is `str(e)`).
 //!   The bindings handlers pass a closure over
-//!   `pidash_jobs::tasks_ticker::rrule::validate_rrule_string`. Python's
-//!   `dtstart` anchor parameter is dropped: it only seeds the `dateutil`
-//!   parser (`bgtasks/_rrule.py:218-245`) and the verdict checks never
-//!   touch it, so field- and cross-field validation call the injected
-//!   validator the same way.
+//!   `pidash_jobs::tasks_ticker::rrule::validate_rrule_string` with
+//!   Django's `dtstart or now(utc)` anchor bound in
+//!   (`bgtasks/_rrule.py:238`): the request time for field validation,
+//!   the binding's dtstart for the cross-field re-check. The anchor
+//!   feeds the verdict (the byset reachability check reads the anchor's
+//!   hour/minute/second), so the two call sites bind different anchors.
 //! - The pod-must-belong-to-project check takes the pod's `project_id` as
 //!   a parameter (pure function); the queries layer supplies the row.
 //!
@@ -1228,11 +1229,11 @@ pub fn validate_locked_field(
 
 /// The cross-field rrule+dtstart re-check (`scheduler.py:235-249`):
 /// resolve attrs-first, instance-second (default `""`), and re-validate a
-/// non-empty rrule. The `dtstart` resolution exists in Python only as the
-/// validator's anchor argument, which cannot change the verdict
-/// (`bgtasks/_rrule.py:218-245`: the anchor only seeds the `dateutil`
-/// parser), so the injected validator is called exactly as in
-/// field-level validation — no `dtstart` parameter.
+/// non-empty rrule. Python resolves `dtstart` the same way and passes it
+/// as the validator's anchor (`_rrule.py:238`), which feeds the verdict
+/// (the byset reachability check reads the anchor's hour/minute/second);
+/// the handlers bind that anchor into the injected validator, so this
+/// keeps the field-level call shape — no `dtstart` parameter.
 ///
 /// Failures render as `{"rrule": [message]}`.
 pub fn validate_cross_rrule(

@@ -50,11 +50,12 @@
 //!   unconditionally — unknown pk answers 200 `null`, not 404. The gate
 //!   half is [`workspace_view_retrieve_undecorated`]; the null body owns to
 //!   the handler.
-//! * B1b (`view/base.py:317-327`): project retrieve dereferences
-//!   `issue_view.owned_by` after `.first()`; unknown pk plus a guest
-//!   without `guest_view_all_features` raises `AttributeError` → 500, not
-//!   404. [`project_view_retrieve_guest_gate`] pins the crash order via
-//!   [`ProjectViewLookup::Missing`].
+//! * B1b (retired by VIEW-022, `view/base.py:309-312` on main): project
+//!   retrieve used to dereference `issue_view.owned_by` after `.first()`;
+//!   unknown pk plus a guest without `guest_view_all_features` raised
+//!   `AttributeError` → 500, not 404. The row miss now 404s before the
+//!   guest recheck ([`project_view_not_found`]), so the gate only ever
+//!   sees a found row.
 //! * B4 (`view/base.py:404-411`): the favorite list queryset raises
 //!   `FieldError` before any row; owned by the query layer
 //!   ([`favorite_list_sql`](super::queries_views::favorite_list_sql)).
@@ -146,13 +147,11 @@ pub fn view_not_found() -> ErrorBody {
     ErrorBody::new(404, json!({"error": "The required object does not exist."}))
 }
 
-/// `handle_exception` generic branch (`app/views/base.py:148-152`):
-/// `AttributeError` (B1b), serializer crashes, anything unclassified.
-pub fn server_error() -> ErrorBody {
-    ErrorBody::new(
-        500,
-        json!({"error": "Something went wrong please try again later"}),
-    )
+/// Missing row on the project retrieve read path (`view/base.py:309-312`
+/// on main, VIEW-022): unknown pk 404s before the project fetch and the
+/// guest recheck, on every allowed role.
+pub fn project_view_not_found() -> ErrorBody {
+    ErrorBody::new(404, json!({"error": "View not found"}))
 }
 
 // ---------------------------------------------------------------------------
@@ -387,36 +386,17 @@ pub fn project_view_retrieve_gate(m: &Membership) -> Result<(), ErrorBody> {
     allow_project(&[ADMIN, MEMBER, GUEST], m)
 }
 
-/// What the `retrieve` row lookup found: `.get_queryset().filter(...).
-/// first()` — `None` on unknown pk, no 404.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProjectViewLookup {
-    /// Row present; carries whether the caller owns it.
-    Found {
-        /// `view.owned_by == request.user`.
-        is_owner: bool,
-    },
-    /// No row (unknown pk).
-    Missing,
-}
-
-/// `retrieve` guest recheck (`:317-331`): a GUEST without
+/// `retrieve` guest recheck (`:320-334` on main): a GUEST without
 /// `guest_view_all_features` reading another user's view 403s with the
-/// source-verbatim body. B1b: the `owned_by` dereference runs before any
-/// `None` guard, so a missing row under that branch raises
-/// `AttributeError` → 500 — the crash order is the port. Missing rows
-/// outside the branch serialize `None` → 200 `null` (handler-owned).
+/// source-verbatim body. The row miss 404s before this runs
+/// ([`project_view_not_found`]), so the gate only ever sees a found row.
 pub fn project_view_retrieve_guest_gate(
     m: &Membership,
     guest_view_all_features: bool,
-    lookup: ProjectViewLookup,
+    is_owner: bool,
 ) -> Result<(), ErrorBody> {
-    if m.project_role == Some(GUEST) && !guest_view_all_features {
-        return match lookup {
-            ProjectViewLookup::Found { is_owner: true } => Ok(()),
-            ProjectViewLookup::Found { is_owner: false } => Err(not_allowed_to_view()),
-            ProjectViewLookup::Missing => Err(server_error()),
-        };
+    if m.project_role == Some(GUEST) && !guest_view_all_features && !is_owner {
+        return Err(not_allowed_to_view());
     }
     Ok(())
 }
@@ -597,9 +577,10 @@ mod tests {
         );
         assert_eq!(view_not_found().status, 404);
         assert_eq!(
-            serde_json::to_string(&server_error().body).unwrap(),
-            r#"{"error":"Something went wrong please try again later"}"#
+            serde_json::to_string(&project_view_not_found().body).unwrap(),
+            r#"{"error":"View not found"}"#
         );
+        assert_eq!(project_view_not_found().status, 404);
     }
 
     #[test]
@@ -825,37 +806,20 @@ mod tests {
     }
 
     #[test]
-    fn project_retrieve_guest_recheck_and_b1b_crash_order() {
-        // Fixture gate `IssueViewViewSet.retrieve` (base.py:308) +
-        // `guest_scoping_in_body.project_views` (base.py:317-331).
+    fn project_retrieve_guest_recheck() {
+        // Fixture gate `IssueViewViewSet.retrieve` (base.py:308 on main) +
+        // `guest_scoping_in_body.project_views` (base.py:320-334 on main).
+        // The row miss 404s before the recheck (VIEW-022), so the gate
+        // only ever sees a found row.
         assert!(project_view_retrieve_gate(&tenant(GUEST, MEMBER)).is_ok());
         let guest = tenant(GUEST, MEMBER);
-        assert!(project_view_retrieve_guest_gate(
-            &guest,
-            false,
-            ProjectViewLookup::Found { is_owner: true }
-        )
-        .is_ok());
-        let denied = project_view_retrieve_guest_gate(
-            &guest,
-            false,
-            ProjectViewLookup::Found { is_owner: false },
-        )
-        .expect_err("guest 403");
+        assert!(project_view_retrieve_guest_gate(&guest, false, true).is_ok());
+        let denied = project_view_retrieve_guest_gate(&guest, false, false).expect_err("guest 403");
         assert_body(denied, 403, not_allowed_to_view().body);
-        // B1b: missing row under the guest branch → AttributeError → 500.
-        assert_eq!(
-            project_view_retrieve_guest_gate(&guest, false, ProjectViewLookup::Missing)
-                .expect_err("B1b 500")
-                .status,
-            500
-        );
         // Flag on, or a higher role: no recheck at all.
-        assert!(project_view_retrieve_guest_gate(&guest, true, ProjectViewLookup::Missing).is_ok());
+        assert!(project_view_retrieve_guest_gate(&guest, true, false).is_ok());
         let member = tenant(MEMBER, MEMBER);
-        assert!(
-            project_view_retrieve_guest_gate(&member, false, ProjectViewLookup::Missing).is_ok()
-        );
+        assert!(project_view_retrieve_guest_gate(&member, false, false).is_ok());
     }
 
     #[test]

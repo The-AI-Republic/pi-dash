@@ -339,15 +339,17 @@ pub fn extract_asset_ids(html: &str, tag: &str) -> Vec<String> {
         .collect()
 }
 
-/// Port of `replace_asset_ids` (`copy_s3_object.py:42-52`): rewrite `src`
-/// wherever it equals a pair's old id, in pair order per tag (so chained
-/// pairs rewrite twice, exactly like the nested loop). Only the matched
-/// value bytes change, so on canonical editor HTML the result equals
-/// `str(soup)` byte for byte.
+/// Port of the `src` rewrite inside `replace_asset_ids`
+/// (`copy_s3_object.py:42-52`): rewrite `src` wherever it equals a pair's
+/// old id, in pair order per tag (so chained pairs rewrite twice, exactly
+/// like the nested loop). Only the matched value bytes change: unlike
+/// Django's `str(soup)` return, the rest of the document is NOT
+/// re-serialized here. The copy task applies the `str(soup)`
+/// normalization in the jobs layer before saving (PIDASHCONV-1699).
 pub fn replace_asset_ids(html: &str, tag: &str, pairs: &[AssetIdPair]) -> String {
     if pairs.is_empty() {
-        // No pair can match; still parse so behavior on broken input stays
-        // total. The output equals the input (nothing to rewrite).
+        // No pair can match: return the input unchanged. (Django still
+        // re-serializes here; the jobs layer normalizes after this call.)
         return html.to_string();
     }
     let hits = find_open_tags(html, tag);
@@ -543,7 +545,10 @@ pub fn original_assets_sql(project_is_null: bool) -> String {
 /// `FileAsset.objects.create(...)` (`copy_s3_object.py:94-108`): every
 /// concrete column, Django field order. Unset FKs, `entity_identifier`
 /// (never assigned by the task) and `updated_by` insert as `NULL`;
-/// `is_deleted`/`is_archived`/`is_uploaded` as `FALSE`.
+/// `is_deleted`/`is_archived`/`is_uploaded` as `FALSE`. `created_by`
+/// binds `NULL` too: `create()` passes the requester to the model
+/// constructor, not as the `save()` keyword, so the worker `save()`
+/// blanks it (`db/models/base.py:23-33`, PIDASHCONV-1698).
 pub const DUPLICATE_INSERT_SQL: &str = "INSERT INTO \"file_assets\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"attributes\", \"asset\", \"user_id\", \"workspace_id\", \"draft_issue_id\", \"project_id\", \"issue_id\", \"comment_id\", \"page_id\", \"entity_type\", \"entity_identifier\", \"is_deleted\", \"is_archived\", \"external_id\", \"external_source\", \"size\", \"is_uploaded\", \"storage_metadata\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)";
 
 /// `filter(pk__in=new ids).update(is_uploaded=True)`
@@ -551,27 +556,32 @@ pub const DUPLICATE_INSERT_SQL: &str = "INSERT INTO \"file_assets\" (\"id\", \"c
 /// only — `updated_at` is untouched.
 pub const MARK_UPLOADED_SQL: &str = "UPDATE \"file_assets\" SET \"is_uploaded\" = TRUE WHERE (\"deleted_at\" IS NULL AND \"id\" = ANY($1))";
 
-/// `entity.save()` after the description rewrite: full save, so the only
-/// observable changes are the new HTML and the `auto_now` bump.
+/// `entity.save()` after the description rewrite: full save with no crum
+/// user in a worker, so `BaseModel.save` blanks both audit columns
+/// (`db/models/base.py:23-33`) and the save persists the NULLs — the
+/// observable changes are the new HTML, the NULLed audit and the
+/// `auto_now` bump (PIDASHCONV-1698).
 pub fn description_save_sql(entity: CopyEntity) -> String {
     format!(
-        "UPDATE \"{}\" SET \"description_html\" = $1, \"updated_at\" = $2 WHERE \"id\" = $3",
+        "UPDATE \"{}\" SET \"description_html\" = $1, \"created_by_id\" = NULL, \"updated_by_id\" = NULL, \"updated_at\" = $2 WHERE \"id\" = $3",
         entity.table()
     )
 }
 
 /// The second save when the live service answered: `description_json` is
 /// never `NULL` (the `or {}` fallback); the binary column is written only
-/// when the response carried it.
+/// when the response carried it. Full save like the first, so the audit
+/// columns NULL again (already NULL from the first save outside a
+/// concurrent-writer race; PIDASHCONV-1698).
 pub fn description_docs_save_sql(entity: CopyEntity, with_binary: bool) -> String {
     if with_binary {
         format!(
-            "UPDATE \"{}\" SET \"description_json\" = $1, \"description_binary\" = $2, \"updated_at\" = $3 WHERE \"id\" = $4",
+            "UPDATE \"{}\" SET \"description_json\" = $1, \"description_binary\" = $2, \"created_by_id\" = NULL, \"updated_by_id\" = NULL, \"updated_at\" = $3 WHERE \"id\" = $4",
             entity.table()
         )
     } else {
         format!(
-            "UPDATE \"{}\" SET \"description_json\" = $1, \"updated_at\" = $2 WHERE \"id\" = $3",
+            "UPDATE \"{}\" SET \"description_json\" = $1, \"created_by_id\" = NULL, \"updated_by_id\" = NULL, \"updated_at\" = $2 WHERE \"id\" = $3",
             entity.table()
         )
     }
@@ -935,5 +945,24 @@ mod tests {
         let without_bin = description_docs_save_sql(CopyEntity::Issue, false);
         assert!(!without_bin.contains("description_binary"));
         assert!(without_bin.contains("description_json"));
+    }
+
+    #[test]
+    fn copy_saves_null_worker_audit_columns() {
+        // Both `entity.save()` calls are full saves with no crum user in
+        // a worker, so `BaseModel.save` blanks both audit columns
+        // (`db/models/base.py:23-33`) and the saves persist the NULLs
+        // (PIDASHCONV-1698).
+        for sql in [
+            description_save_sql(CopyEntity::Page),
+            description_save_sql(CopyEntity::Issue),
+            description_docs_save_sql(CopyEntity::Page, true),
+            description_docs_save_sql(CopyEntity::Page, false),
+            description_docs_save_sql(CopyEntity::Issue, true),
+            description_docs_save_sql(CopyEntity::Issue, false),
+        ] {
+            assert!(sql.contains("\"created_by_id\" = NULL"), "{sql}");
+            assert!(sql.contains("\"updated_by_id\" = NULL"), "{sql}");
+        }
     }
 }

@@ -14,8 +14,8 @@
 //!   24h `stats` rollup appended.
 //! - `PATCH jobs/<uuid>/` — [`guards::validate_writes`] (`partial=true`),
 //!   rename-conflict 409, save, full payload.
-//! - `DELETE jobs/<uuid>/` — soft delete the job row, then enqueue
-//!   `soft_delete_related_objects` for the worker cascade, 204 empty.
+//! - `DELETE jobs/<uuid>/` — stamp the job, its targets and its user
+//!   preferences with one timestamp in a single transaction, 204 empty.
 //! - `GET jobs/<uuid>/targets/` — 404 when the job is missing;
 //!   `skip_reason`/`workspace`/`status` filters; `page`/`per=50` envelope
 //!   `{"page","results"}` with the `_row` shape.
@@ -950,45 +950,12 @@ async fn patch_job(
     Ok(json_response(StatusCode::OK, body))
 }
 
-/// `soft_delete_related_objects.delay("db", "loopjob", pk, using=None)`
-/// (`db/mixins.py:77-78`): three positional args, `using` stays a null
-/// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
-/// call sends it with `using=None`. `LoopJob` lives in the `db` app
-/// (`db/models/loop.py`), so the label is `"db"` and the model is
-/// `"loopjob"`.
-fn soft_delete_message(pk: &Uuid) -> pidash_jobs::TaskMessage {
-    let mut kwargs = Map::new();
-    kwargs.insert("using".to_owned(), Value::Null);
-    pidash_jobs::TaskMessage::new(
-        pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
-        vec![
-            Value::String("db".to_owned()),
-            Value::String("loopjob".to_owned()),
-            Value::String(pk.to_string()),
-        ],
-        kwargs,
-    )
-}
-
-/// Best-effort publish of [`soft_delete_message`]: without the queue
-/// the response still stands.
-async fn enqueue_soft_delete(pool: &PgPool, pk: &Uuid) {
-    let message = soft_delete_message(pk);
-    let job = pidash_jobs::queue::NewJob::new(
-        message.task.clone(),
-        Value::Array(message.args.clone()),
-        Value::Object(message.kwargs.clone()),
-    );
-    if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
-        tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; response stands");
-    }
-}
-
-/// `DELETE /api/instances/loop/jobs/<uuid>/` (`admin_views.py:168-173`):
-/// 404 when missing/deleted, else soft delete the job row and enqueue
-/// `soft_delete_related_objects` for the worker-side cascade
-/// (`db/mixins.py:72-78`: stamp via `save()`, then `.delay(...)`).
-/// 204 empty.
+/// `DELETE /api/instances/loop/jobs/<uuid>/` (`admin_views.py:168-181`):
+/// 404 when missing/deleted, else stamp the job, its targets and its
+/// user preferences with one timestamp in a single transaction, 204
+/// empty. Since NEWFRONT-957 Python does the cascade synchronously in
+/// the view instead of `SoftDeleteModel.delete()`'s celery enqueue, so
+/// nothing is published here: the worker is never involved.
 async fn delete_job(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
@@ -1013,25 +980,41 @@ async fn delete_job(
     let actor = authed_user(&state, pool, extension).await?;
     require_instance_admin(pool, &actor).await?;
 
-    // `job.delete()`: stamp the job row (`save()` moves `updated_at`
-    // via `auto_now` and `updated_by` via CRUM in `BaseModel.save()`),
-    // then enqueue the cascade for the worker. The related
-    // `loop_targets` / `loop_user_preferences` rows are NOT touched
-    // here: with a real broker Django defers that sweep to
-    // `soft_delete_related_objects`, and the port must match.
+    // `now = timezone.now()` once, then the job `save()` (which moves
+    // `updated_at` via `auto_now` and `updated_by` via CRUM) plus the
+    // two `.update(deleted_at=now)` sweeps. `QuerySet.update` writes
+    // only `deleted_at` — no `auto_now`, no CRUM — and runs through
+    // the `SoftDeletionManager`, so already-deleted rows keep their
+    // old stamp (`db/mixins.py:57-58`).
+    let now = Utc::now();
+    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
     let marked = sqlx::query(
         "UPDATE loop_jobs SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3 AND deleted_at IS NULL",
     )
-    .bind(Utc::now())
+    .bind(now)
     .bind(actor)
     .bind(job_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|_| Denial::ServerError)?;
     if marked.rows_affected() == 0 {
         return Err(Denial::NotFound);
     }
-    enqueue_soft_delete(pool, &job_id).await;
+    sqlx::query("UPDATE loop_targets SET deleted_at = $1 WHERE job_id = $2 AND deleted_at IS NULL")
+        .bind(now)
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    sqlx::query(
+        "UPDATE loop_user_preferences SET deleted_at = $1 WHERE job_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(now)
+    .bind(job_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    tx.commit().await.map_err(|_| Denial::ServerError)?;
 
     Ok(Response::builder()
         .status(StatusCode::NO_CONTENT)
@@ -1558,28 +1541,5 @@ mod tests {
         ] {
             assert!(!is_canonical_uuid(&raw), "{raw}");
         }
-    }
-
-    #[test]
-    fn soft_delete_message_matches_the_mixin_call() {
-        // `db/mixins.py:77-78`: `.delay(label, name, pk, using=using)`
-        // with `using=None` — three positional args, `using` stays a
-        // null kwarg (never a positional `"default"`).
-        let pk = uuid::Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
-        let message = soft_delete_message(&pk);
-        assert_eq!(
-            message.task,
-            "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
-        );
-        assert_eq!(
-            message.args,
-            vec![
-                Value::String("db".to_owned()),
-                Value::String("loopjob".to_owned()),
-                Value::String(pk.to_string()),
-            ]
-        );
-        assert_eq!(message.kwargs.len(), 1);
-        assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
     }
 }
