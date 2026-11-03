@@ -37,13 +37,12 @@
 //! never collide with the i16 arms, and the app bulk builders (mixed
 //! `RoleBind` types per row, like the originals) moved verbatim.
 //!
-//! Ported bugs preserved verbatim: the signup project arms' missing
-//! `project_id` (PB-1008) binds an explicit `NULL`, which raises the
-//! same 23502 with the same message as the omitted column; the v1
-//! lead guard, the dual-now member bulks and the per-arm role clamps
-//! stay at the callers; the `project_identifiers` insert and the
-//! `model_activity`/pod effects are not covered-table writes and stay
-//! caller-sequenced.
+//! Ported bugs preserved verbatim: PB-1008 retired by PIDASHCONV-1686
+//! (Django main sets `project_id` on the `ProjectMember` bulk and the
+//! signup arms bind the invite's id); the v1 lead guard, the dual-now
+//! member bulks and the per-arm role clamps stay at the callers; the
+//! `project_identifiers` insert and the `model_activity`/pod effects
+//! are not covered-table writes and stay caller-sequenced.
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -1021,9 +1020,10 @@ pub mod members {
     /// 65535 literal on every path; `is_active` is always `TRUE`.
     pub struct NewProjectMember<'a> {
         pub workspace_id: Uuid,
-        /// Always `Some` except the signup project arms (PB-1008),
-        /// which bind an explicit `NULL` and raise the same 23502 the
-        /// omitted column raises (identical message, identical effect).
+        /// Always `Some` from current callers: the signup arms bind the
+        /// invite's `project_id` (PB-1008 retired by PIDASHCONV-1686).
+        /// `None` still binds `NULL` and raises 23502 — covered only by
+        /// the unit probe, no production caller passes it.
         pub project_id: Option<Uuid>,
         /// `None` on the invite path's unknown-email arm (a bare
         /// `NULL` into the non-null column, like the original bind).
@@ -1176,6 +1176,8 @@ pub mod members {
     /// callers pass the same instant twice.
     pub struct BulkRow {
         pub workspace_id: Uuid,
+        /// Always `Some` from current callers (PB-1008 retired by
+        /// PIDASHCONV-1686; the signup bulks bind the invite's id).
         pub project_id: Option<Uuid>,
         pub user_id: Uuid,
         pub role: RoleBind,
@@ -3582,7 +3584,9 @@ mod tests {
 
     /// `add` inserts the full row; the ignore arm replays the signup
     /// per-row `ON CONFLICT DO NOTHING`; `db_now` stamps from the
-    /// database clock; a `None` project is the PB-1008 23502.
+    /// database clock; a `None` project still raises 23502 (writer
+    /// probe — PB-1008 retired by PIDASHCONV-1686, no production
+    /// caller passes `None`).
     #[tokio::test]
     async fn live_member_add_variants() {
         let Some(pool) = scratch_pool().await else {
@@ -3640,8 +3644,8 @@ mod tests {
                 .await
                 .expect("read back");
         assert!(stamped > now, "db clock stamps, got {stamped}");
-        // PB-1008: the missing project binds an explicit NULL into the
-        // NOT NULL column — the same 23502 the omitted column raises.
+        // Retired-bug probe (PB-1008, PIDASHCONV-1686): `None` still
+        // binds NULL into the NOT NULL column and raises 23502.
         let null_project = NewProjectMember {
             project_id: None,
             user_id: Some(Uuid::new_v4()),

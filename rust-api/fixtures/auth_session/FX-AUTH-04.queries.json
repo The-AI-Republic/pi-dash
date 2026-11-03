@@ -119,7 +119,7 @@
   "invite_deletes": "workspace_member_invites.delete() + project_member_invites.delete() (both 1->0 observed)"
  },
  "ported_bugs": [
-  "BUG-CRITICAL (verified on real Postgres): ProjectMember bulk_create omits project_id (workspace_project_join.py:76-87) -> IntegrityError 'null value in column project_id violates not-null constraint' despite ignore_conflicts=True. On sqlite the row is silently skipped (pm 0->0 observed). Any signup carrying an accepted project invite crashes on Postgres.",
+  "RETIRED by PIDASHCONV-1686 (spec twin updated by PIDASHCONV-1694): ProjectMember bulk_create sets project_id (workspace_project_join.py:76-87, Django main NEWFRONT-151) — the join succeeds and the invite is consumed. Was BUG-CRITICAL (verified on real Postgres): the bulk omitted project_id -> IntegrityError 'null value in column project_id violates not-null constraint' despite ignore_conflicts=True. On sqlite the row was silently skipped (pm 0->0 observed; workflow_write_sequence.after below is that recorded probe).",
   "BUG (verified by code + sqlite): complete_login_or_signup sets is_signup=bool(existing_user) \u2014 inverted: new-user signup reports is_signup=False, existing-user login reports True (adapter/base.py:299; probe signup_autoset/login_existing_callback)."
  ]
 }
