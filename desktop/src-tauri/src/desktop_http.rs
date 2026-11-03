@@ -43,9 +43,10 @@ impl DesktopHttp {
         let _ = rustls::crypto::ring::default_provider().install_default();
         Ok(Self {
             api_url,
-            client: Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()?,
+            client: crate::system_proxy::configure(
+                Client::builder().redirect(reqwest::redirect::Policy::none()),
+            )
+            .build()?,
             generation: Mutex::new(0),
             inflight: Default::default(),
         })
