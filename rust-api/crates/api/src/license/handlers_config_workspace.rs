@@ -1,0 +1,4145 @@
+//! Configuration + workspace handlers (D-01, PIDASHCONV-123).
+//!
+//! Ports `license/api/views/configuration.py` (all three endpoints) and
+//! `license/api/views/workspace.py` (both endpoints):
+//!
+//! - `GET /api/instances/configurations/` — `InstanceConfigurationEndpoint.get`
+//!   (`configuration.py:35-39`): admin gate, every row (`-created_at`),
+//!   `InstanceConfigurationSerializer` (decrypt + `source`/`is_managed`).
+//! - `PATCH /api/instances/configurations/` — `.patch`
+//!   (`configuration.py:43-60`): `filter(key__in=body keys)`; unknown keys
+//!   ignored, never created; `""` for `None` else `str(raw).strip()`;
+//!   `encrypt_data` when `is_encrypted`; `bulk_update(["value"],
+//!   batch_size=100)`; the re-serialized rows answer.
+//! - `DELETE /api/instances/configurations/disable-email-feature/` —
+//!   `DisableEmailFeatureEndpoint.delete` (`configuration.py:67-86`): one
+//!   conditional `UPDATE` over the six keys (`ENABLE_SMTP` becomes `"0"`,
+//!   the rest `""`); any failure is 400
+//!   `{"error": "Failed to disable email configuration"}`.
+//! - `POST /api/instances/email-credentials-check/` —
+//!   `EmailCredentialCheckEndpoint.post` (`configuration.py:102-224`):
+//!   `receiver_email`-required 400; `get_email_configuration`;
+//!   candidate-or-stored grading with a generic-400 bad port; send
+//!   through `settings.EMAIL_BACKEND` — SMTP is
+//!   the live conversation with the 9-branch error matrix where a
+//!   non-empty array/object receiver is the generic 400 Django's SMTP
+//!   `sanitize_address` raises for (nothing sent); console/locmem validate
+//!   headers and succeed without network; dummy succeeds bare; unknown
+//!   dotted paths 500 like `import_string` failing. Plus the
+//!   generic-`Exception` fallthrough, every message string verbatim.
+//! - `GET /api/instances/workspace-slug-check/` —
+//!   `InstanceWorkSpaceAvailabilityCheckEndpoint.get`
+//!   (`workspace.py:22-32`): admin gate; missing/empty slug is 400;
+//!   `slug__iexact` exists **or** restricted-list membership answers
+//!   `{status: false}`, otherwise `{status: true}`.
+//! - `GET /api/instances/workspaces/` — `InstanceWorkSpaceEndpoint.get`
+//!   (`workspace.py:40-69`): admin gate; `Count` annotations
+//!   (`total_projects`, `total_members` with `member__is_bot=False`,
+//!   `is_active=True`); optional `name__icontains` search; `paginate`
+//!   (`default_per_page=10`, `max_per_page=10`, 12-key envelope).
+//! - `POST /api/instances/workspaces/` — `.post` (`workspace.py:71-110`):
+//!   `name`+`slug`-required 400; 80/48 length 400; serializer validation
+//!   (any failure raises a DRF `ValidationError` through
+//!   `is_valid(raise_exception=True)`, which the base `handle_exception`
+//!   delegates to DRF first, so the response is the raw detail dict — the
+//!   trailing per-field-list return is dead code); `save(owner=request.user)`
+//!   plus a
+//!   `WorkspaceMember(role=20)` row; a unique violation (whose DETAIL line
+//!   carries `"already exists"`, so Django's substring branch fires) is
+//!   409, anything else falls off the `except` block (500, BUG-3).
+//!
+//! Layering (all foundation use is read-only): row SQL + pure transforms in
+//! `pidash_db::license::queries`; shapes in `pidash_types::license`;
+//! `get_email_configuration` + Fernet in `pidash_services::license`;
+//! the admin gate decision in `pidash_auth::license`; cursor/envelope math
+//! and datetime rendering in the F-07 kernels (`crate::paginator`,
+//! `crate::serializer`). This module owns the HTTP shell, the session gate
+//! (via `super`), the SMTP conversation, and the workspace write path.
+//!
+//! Ported bugs and deliberate warts (also listed in the PR):
+//!
+//! - BUG-2 (fixed upstream by NEWFRONT-524): `int(EMAIL_PORT)` used to
+//!   run outside the `try` (rust-dev `configuration.py:111`), so garbage
+//!   raised `ValueError` into the base 500. Django main wraps
+//!   `int(str(...).strip())` in its own `try` (`configuration.py:152-158`)
+//!   and answers the fallthrough 400 instead; the port below follows main.
+//! - BUG-3 (`workspace.py:105-110`): an `IntegrityError` whose string
+//!   lacks `"already exists"` (any non-unique violation: every 23505
+//!   carries a `Key (...) already exists.` DETAIL line through the
+//!   driver's `str`) falls off the `except` block, so the view returns
+//!   `None` and Django answers 500. Unique violations take the 409
+//!   branch, ported as written (PIDASHCONV-1100).
+//! - The trailing `return Response([...serializer.errors...], 400)`
+//!   (`workspace.py:100-103`) is dead code: `is_valid(raise_exception=True)`
+//!   raises a DRF `ValidationError` on any field error, which the base
+//!   `handle_exception` delegates to DRF first, so the response is the raw
+//!   detail dict (ported as `detail_response`).
+//! - The restricted-slug check is a case-sensitive `in`
+//!   (`workspace.py:31`); `"API"` is available, `"api"` is not.
+//! - `disable-email` overwrites an encrypted `EMAIL_HOST_PASSWORD` with `""`
+//!   in the clear (`is_encrypted` untouched).
+//! - POST performs no view-level stripping (unlike PATCH's explicit
+//!   `str(raw).strip()`); DRF `CharField` trimming still applies and is
+//!   ported per field.
+//! - Response caching (`cache_response` 2h on the GETs, `invalidate_cache`
+//!   on the writes) has no Rust counterpart: the contract suites cannot
+//!   observe it, and an uninvalidated cache would only risk stale reads.
+//! - The workspace list performs per-row owner/asset lookups, like Django's
+//!   N+1 (no `select_related("owner")` on the list path); the emitted row
+//!   SQL matches the fixtures exactly.
+//! - SMTP trust anchors are Mozilla roots (`webpki-roots`), while
+//!   `smtplib` uses the system store; `AUTH` follows smtplib's preferred
+//!   order (`CRAM-MD5`, `PLAIN`, `LOGIN`, with `LOGIN` initial-response).
+//! - `str(float)` for PATCH values uses shortest-round-trip rendering,
+//!   which matches CPython `repr` except for very large/small exponents.
+
+use axum::extract::{Query, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{delete, get, post};
+use axum::Router;
+use chrono_tz::Tz;
+use serde_json::Value;
+use std::collections::HashMap;
+
+use super::form_body::{
+    parse_form_body, parse_multipart_body, select_body_kind, BodyFail, BodyField, BodyKind,
+    ParsedBody,
+};
+use super::{
+    file_asset_url, json_response, owned, query_last, require_admin, Actor, AssetUrl, Denial,
+    QueryMap,
+};
+use crate::state::AppState;
+use crate::v1_cycles_modules::json::{self, JsonFail};
+use pidash_compat::db::is_unique_violation;
+
+/// Register the five configuration/workspace paths. Sibling license paths
+/// stay unmatched and proxy to Django; unowned methods on these paths
+/// proxy too (Django's 405-after-auth and metadata responses).
+pub fn config_workspace_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/instances/configurations/",
+            owned(
+                get(get_configurations).patch(patch_configurations),
+                &["GET", "PATCH"],
+            ),
+        )
+        .route(
+            "/api/instances/configurations/disable-email-feature/",
+            owned(delete(disable_email_feature), &["DELETE"]),
+        )
+        .route(
+            "/api/instances/email-credentials-check/",
+            owned(post(email_credential_check), &["POST"]),
+        )
+        .route(
+            "/api/instances/workspace-slug-check/",
+            owned(get(workspace_slug_check), &["GET"]),
+        )
+        .route(
+            "/api/instances/workspaces/",
+            owned(
+                get(list_workspaces).post(create_workspace),
+                &["GET", "POST"],
+            ),
+        )
+}
+
+fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
+    state
+        .pools()
+        .map(|pools| pools.primary().clone())
+        .ok_or(Denial::ServerError)
+}
+
+// ---------------------------------------------------------------------------
+// InstanceConfigurationEndpoint
+// ---------------------------------------------------------------------------
+
+/// `GET configurations/` (`configuration.py:35-39`).
+async fn get_configurations(
+    State(state): State<AppState>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+) -> Response {
+    let actor = match require_admin(&state, extension).await {
+        Ok(actor) => actor,
+        Err(denial) => return denial.into_response(),
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    // `InstanceConfiguration.objects.all()` (`Meta.ordering -created_at`).
+    let sql = format!(
+        "SELECT {} FROM \"instance_configurations\" \
+         WHERE \"instance_configurations\".\"deleted_at\" IS NULL \
+         ORDER BY \"instance_configurations\".\"created_at\" DESC",
+        pidash_db::license::queries::CONFIG_COLUMNS.join(", ")
+    );
+    let rows: Vec<sqlx::postgres::PgRow> = match sqlx::query(&sql).fetch_all(&pool).await {
+        Ok(rows) => rows,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let keyring =
+        pidash_services::license::encryption::Keyring::from_secret(&state.settings().secret_key);
+    let registry = pidash_db::config::registry::global();
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let mapped = match pidash_db::license::queries::map_config_row(row) {
+            Ok(mapped) => mapped,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        out.push(rendered_config_value(&mapped, &keyring, registry, &actor));
+    }
+    json_response(&out)
+}
+
+/// Owned rendering scratch: datetimes in the request zone (`TimezoneMixin`),
+/// UUIDs as strings, `NULL` staying `null`.
+struct RenderedConfig {
+    id: String,
+    created_at: String,
+    updated_at: String,
+    deleted_at: Option<String>,
+    key: String,
+    value: Option<String>,
+    category: String,
+    is_encrypted: bool,
+    created_by: Option<String>,
+    updated_by: Option<String>,
+}
+
+impl RenderedConfig {
+    fn from_row(
+        row: &pidash_db::license::models::instance_configuration::InstanceConfiguration,
+        actor: &Actor,
+    ) -> Self {
+        Self {
+            id: row.id.to_string(),
+            created_at: crate::serializer::render_datetime_in(&row.created_at, &actor.timezone),
+            updated_at: crate::serializer::render_datetime_in(&row.updated_at, &actor.timezone),
+            deleted_at: row
+                .deleted_at
+                .as_ref()
+                .map(|dt| crate::serializer::render_datetime_in(dt, &actor.timezone)),
+            key: row.key.clone(),
+            value: row.value.clone(),
+            category: row.category.clone(),
+            is_encrypted: row.is_encrypted,
+            created_by: row.created_by_id.map(|id| id.to_string()),
+            updated_by: row.updated_by_id.map(|id| id.to_string()),
+        }
+    }
+}
+
+/// Serialize one configuration row to an owned `Value` (struct field order
+/// is the wire order: `id` first via `PrimaryKeyRelatedField`, model
+/// `_meta` order, then appended `source` / `is_managed`).
+fn rendered_config_value(
+    row: &pidash_db::license::models::instance_configuration::InstanceConfiguration,
+    keyring: &pidash_services::license::encryption::Keyring,
+    registry: &pidash_db::config::registry::ConfigRegistry,
+    actor: &Actor,
+) -> Value {
+    let rendered = RenderedConfig::from_row(row, actor);
+    let decrypt =
+        |stored: &str| pidash_services::license::encryption::decrypt_data(keyring, Some(stored));
+    let source_of = |key: &str| {
+        registry.get(key).map(|entry| match entry.source {
+            pidash_db::config::registry::ConfigSource::Env => "env",
+            pidash_db::config::registry::ConfigSource::Db => "db",
+        })
+    };
+    let view_row = pidash_types::license::serializers_core::InstanceConfigurationRow {
+        id: &rendered.id,
+        created_at: &rendered.created_at,
+        updated_at: &rendered.updated_at,
+        deleted_at: rendered.deleted_at.as_deref(),
+        key: &rendered.key,
+        value: rendered.value.as_deref(),
+        category: &rendered.category,
+        is_encrypted: rendered.is_encrypted,
+        created_by: rendered.created_by.as_deref(),
+        updated_by: rendered.updated_by.as_deref(),
+    };
+    let view = pidash_types::license::serializers_core::instance_configuration_to_representation(
+        &view_row, &decrypt, &source_of,
+    );
+    serde_json::to_value(&view).expect("config view serializes")
+}
+
+// ---------------------------------------------------------------------------
+// InstanceConfigurationEndpoint.patch + DisableEmailFeatureEndpoint
+// ---------------------------------------------------------------------------
+
+/// `PATCH configurations/` (`configuration.py:43-60`).
+async fn patch_configurations(
+    State(state): State<AppState>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let actor = match require_admin(&state, extension).await {
+        Ok(actor) => actor,
+        Err(denial) => return denial.into_response(),
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    // `request.data.keys()`: a non-object body has no `.keys()`
+    // (`AttributeError` -> base 500). File parts merge into the keys.
+    let data = match decode_json_body(&headers, &body, state.settings().file_size_limit) {
+        Ok(data) => data,
+        Err(denial) => return denial.into_response(),
+    };
+    if data.object().is_none() {
+        return Denial::ServerError.into_response();
+    }
+    // `filter(key__in=request.data.keys())`: unknown keys are never
+    // fetched and never created. An empty key set short-circuits to `[]`
+    // (Django raises `EmptyResultSet` and skips the database).
+    let keys: Vec<&str> = data.keys();
+    let rows = match pidash_db::license::queries::fetch_config_by_keys(&pool, &keys).await {
+        Ok(rows) => rows,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let keyring =
+        pidash_services::license::encryption::Keyring::from_secret(&state.settings().secret_key);
+    // Per-row transform (`configuration.py:48-54`): `""` when the request
+    // value is `None`, else `str(raw).strip()`; encrypted rows store
+    // `encrypt_data(value)`.
+    let mut pairs: Vec<(uuid::Uuid, String)> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let raw = data.field(&row.key);
+        let normalized = py_str_value(raw);
+        let stored = if row.is_encrypted {
+            pidash_services::license::encryption::encrypt_data(&keyring, Some(&normalized))
+        } else {
+            normalized
+        };
+        pairs.push((row.id, stored));
+    }
+    if !pairs.is_empty() {
+        // `bulk_update(rows, ["value"], batch_size=100)`: one `UPDATE ...
+        // CASE` per batch (`configuration.py:56-57`).
+        for chunk in pairs.chunks(pidash_db::license::queries::CONFIG_BULK_UPDATE_BATCH_SIZE) {
+            let refs: Vec<(uuid::Uuid, &str)> = chunk
+                .iter()
+                .map(|(id, value)| (*id, value.as_str()))
+                .collect();
+            match pidash_db::license::queries::apply_config_batch(&pool, &refs).await {
+                Ok(_) => {}
+                Err(sqlx::Error::Database(_)) => {
+                    return Denial::BadError("The payload is not valid".to_owned()).into_response()
+                }
+                Err(_) => return Denial::ServerError.into_response(),
+            }
+        }
+    }
+    // The response re-serializes the fetched rows with the new values
+    // (the queryset instances were mutated in place).
+    let registry = pidash_db::config::registry::global();
+    let updated: HashMap<&str, &str> = pairs
+        .iter()
+        .map(|(id, value)| {
+            let key = rows
+                .iter()
+                .find(|row| row.id == *id)
+                .map(|row| row.key.as_str())
+                .unwrap_or("");
+            (key, value.as_str())
+        })
+        .collect();
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let mut row = row.clone();
+        if let Some(value) = updated.get(row.key.as_str()) {
+            row.value = Some((*value).to_owned());
+        }
+        out.push(rendered_config_value(&row, &keyring, registry, &actor));
+    }
+    json_response(&out)
+}
+
+/// Python `str()` over a body value, then `.strip()`
+/// (`configuration.py:49`): `None` becomes `""` (handled by the missing
+/// arm — a missing key and an explicit `null` are identical here);
+/// strings pass through; `True`/`False`/`None` render capitalized;
+/// numbers render plainly; arrays/objects render as Python `repr`;
+/// an uploaded file renders as its name (probed).
+fn py_str_value(found: BodyField<'_>) -> String {
+    let raw = match found {
+        BodyField::File(file) => return file.filename.trim().to_owned(),
+        BodyField::Json(value) => Some(value),
+        BodyField::Missing => None,
+    };
+    match raw {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(s)) => s.trim().to_owned(),
+        Some(Value::Bool(true)) => "True".to_owned(),
+        Some(Value::Bool(false)) => "False".to_owned(),
+        Some(Value::Number(n)) => py_number_str(n).trim().to_owned(),
+        Some(value @ (Value::Array(_) | Value::Object(_))) => py_repr(value).trim().to_owned(),
+    }
+}
+
+/// Python `str()` of a JSON number: int tokens verbatim (Python ints
+/// never lose precision, however large), `paginator::py_float_str`
+/// for true floats. Int-vs-float follows the token shape (no `.`/`e` is
+/// an int), which `arbitrary_precision` preserves; range-sniffing with
+/// `as_i64`/`as_u64` would route huge ints through lossy `f64`.
+fn py_number_str(n: &serde_json::Number) -> String {
+    let token = n.to_string();
+    if token.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') {
+        // `str(float)` is `repr(float)` for floats.
+        crate::paginator::py_float_str(n.as_f64().unwrap_or(f64::NAN))
+    } else {
+        token
+    }
+}
+
+/// Python `repr()` over a JSON value: single quotes, `True`/`False`/`None`,
+/// `": "`/`", "` separators, nested recursively.
+pub fn py_repr(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_owned(),
+        Value::Bool(true) => "True".to_owned(),
+        Value::Bool(false) => "False".to_owned(),
+        Value::String(s) => py_repr_str(s),
+        Value::Number(n) => py_number_str(n),
+        Value::Array(items) => {
+            let inner: Vec<String> = items.iter().map(py_repr).collect();
+            format!("[{}]", inner.join(", "))
+        }
+        Value::Object(map) => {
+            let inner: Vec<String> = map
+                .iter()
+                .map(|(k, v)| format!("{}: {}", py_repr_str(k), py_repr(v)))
+                .collect();
+            format!("{{{}}}", inner.join(", "))
+        }
+    }
+}
+
+/// Python `repr()` of a string: double quotes when the value holds a
+/// single quote (and no double quote), single quotes otherwise; both
+/// arms escape backslashes, `\n`/`\r`/`\t`, the active quote, and the
+/// control range (`\x00`-`\x1f`, `\x7f`) as `\xNN`. (Twin of the
+/// instance handler's `py_repr_str`.)
+fn py_repr_str(s: &str) -> String {
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push(quote);
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch == quote => {
+                out.push('\\');
+                out.push(ch);
+            }
+            ch if ch < '\u{20}' || ch == '\u{7f}' => {
+                out.push_str(&format!("\\x{:02x}", ch as u32));
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push(quote);
+    out
+}
+
+/// Decode a write body like DRF `_parse` + `JSONParser`: an empty body is
+/// `{}` without parsing; a non-JSON content-type with a body is 415 with
+/// the verbatim header in the detail; otherwise JSON-parse, 400 on failure.
+/// The base match lowercases like Django's `parse_header_parameters`, so
+/// `Application/JSON`, charset params, and the `*/*`, `application/*`,
+/// and `*/json` wildcards all serve. JSON bodies parse through the shared
+/// JSON layer (`json`, PIDASHCONV-1128), so malformed JSON is a 400 with
+/// serde's text (tier 3 since PIDASHCONV-1555; the strict-constant,
+/// int-limit and depth-cap texts are gone); codec errors keep CPython's
+/// text; depth failures are 400s, never Django's JSON 500.
+fn decode_json_body(
+    headers: &HeaderMap,
+    body: &[u8],
+    memory_limit: i64,
+) -> Result<ParsedBody, Denial> {
+    if body.is_empty() {
+        return Ok(ParsedBody::json(Value::Object(serde_json::Map::new())));
+    }
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    match select_body_kind(content_type) {
+        Some(BodyKind::Json) => match json::parse_request_bytes(body) {
+            Ok(jval) => Ok(ParsedBody::json(json::to_serde_publish(&jval))),
+            Err(JsonFail::Message(detail)) => Err(Denial::BadDetail(format!(
+                "{}{detail}",
+                json::JSON_PARSE_PREFIX
+            ))),
+            Err(JsonFail::Recursion) => Err(Denial::ServerError),
+        },
+        Some(BodyKind::Form) => match parse_form_body(body) {
+            Ok(pairs) => Ok(ParsedBody::form(pairs)),
+            // Cap errors escape every license view into the base
+            // `handle_exception` (generic 500) — the POST-only 400 page
+            // seen locally is the Debug Toolbar re-parsing the body in
+            // middleware (DEBUG-only; prod has no toolbar).
+            Err(_) => Err(Denial::ServerError),
+        },
+        Some(BodyKind::Multipart) => match parse_multipart_body(content_type, body, memory_limit) {
+            Ok(pairs) => Ok(ParsedBody::form(pairs)),
+            Err(BodyFail::Parse(message)) => Err(Denial::BadDetail(message)),
+            Err(BodyFail::Fatal) | Err(BodyFail::TooMany) => Err(Denial::ServerError),
+        },
+        None => Err(Denial::UnsupportedMediaType(format!(
+            "Unsupported media type \"{content_type}\" in request."
+        ))),
+    }
+}
+
+/// `DELETE configurations/disable-email-feature/`
+/// (`configuration.py:67-86`).
+async fn disable_email_feature(
+    State(state): State<AppState>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+) -> Response {
+    if let Err(denial) = require_admin(&state, extension).await {
+        return denial.into_response();
+    }
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    // One conditional `UPDATE`: `ENABLE_SMTP` becomes `"0"`, the other
+    // five keys become `""`. Rows for missing keys are not created.
+    // Any failure is 400 with the exact message (`:82-86`).
+    match pidash_db::license::queries::disable_email_config(&pool).await {
+        Ok(_) => Response::builder()
+            .status(StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::empty())
+            .expect("empty 200 response"),
+        Err(_) => {
+            Denial::BadError("Failed to disable email configuration".to_owned()).into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EmailCredentialCheckEndpoint
+// ---------------------------------------------------------------------------
+
+/// `POST email-credentials-check/` (`configuration.py:102-224`).
+async fn email_credential_check(
+    State(state): State<AppState>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    // The endpoint declares no `permission_classes`, so it inherits the
+    // base default (`InstanceAdminPermission`).
+    if let Err(denial) = require_admin(&state, extension).await {
+        return denial.into_response();
+    }
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    // `request.data.get(...)`: a non-object body has no `.get`
+    // (`AttributeError` -> base 500).
+    let data = match decode_json_body(&headers, &body, state.settings().file_size_limit) {
+        Ok(data) => data,
+        Err(denial) => return denial.into_response(),
+    };
+    if data.object().is_none() {
+        return Denial::ServerError.into_response();
+    }
+    // `receiver_email = request.data.get("receiver_email", False)`:
+    // anything falsy answers 400 (`configuration.py:116-121`).
+    let receiver = data.field("receiver_email");
+    if !json_truthy(receiver) {
+        return Denial::BadError("Receiver email is required".to_owned()).into_response();
+    }
+    let recipient = json_recipient(receiver);
+    // `get_email_configuration()` runs outside the `try`
+    // (`configuration.py:124-131`): a store failure escapes to the base
+    // 500, exactly like a DB error in Python.
+    let keyring =
+        pidash_services::license::encryption::Keyring::from_secret(&state.settings().secret_key);
+    let registry = pidash_db::config::registry::global();
+    let store = pidash_db::config::PgConfigStore::new(pool.clone());
+    let values =
+        match pidash_services::license::config::get_email_configuration(&store, &keyring, registry)
+            .await
+        {
+            Ok(values) => values,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+    let mut values = values.into_iter();
+    let stored_host = values.next().and_then(config_string);
+    let stored_username = values.next().and_then(config_string);
+    let stored_password = values.next().and_then(config_string);
+    let stored_port = values.next();
+    let stored_use_tls = values.next();
+    let stored_use_ssl = values.next();
+    let stored_from = values.next().and_then(config_string);
+    // `candidate(...)` (`configuration.py:133-143`): a present body
+    // field grades as given (strings stripped); a missing or null
+    // field falls back to the stored configuration. Only the
+    // password treats a blank string as stored: stored secrets read
+    // back blank, so blank means "unchanged".
+    let host = candidate_string(&data, "EMAIL_HOST", stored_host, false);
+    let username = candidate_string(&data, "EMAIL_HOST_USER", stored_username, false);
+    let password = candidate_string(&data, "EMAIL_HOST_PASSWORD", stored_password, true);
+    let from_email = candidate_string(&data, "EMAIL_FROM", stored_from, false);
+    let use_tls = candidate_flag(&data, "EMAIL_USE_TLS", stored_use_tls.as_ref());
+    let use_ssl = candidate_flag(&data, "EMAIL_USE_SSL", stored_use_ssl.as_ref());
+    // `port = int(str(candidate("EMAIL_PORT", ...)).strip())`
+    // (`configuration.py:152-158`): unparseable is the generic 400,
+    // for candidate and stored values alike. A missing stored value
+    // answers the base 500, like the tuple unpack it mirrors
+    // (`configuration.py:124-131`, outside the `try`).
+    let port = match candidate_present(data.field("EMAIL_PORT")) {
+        Some(present) => match parse_py_int(&py_str_value(present)) {
+            Some(port) => port,
+            None => {
+                return Denial::BadError(smtp::MailError::Failed.message().to_owned())
+                    .into_response()
+            }
+        },
+        None => match stored_port.as_ref() {
+            Some(value) => match parse_email_port(value) {
+                Some(port) => port,
+                None => {
+                    return Denial::BadError(smtp::MailError::Failed.message().to_owned())
+                        .into_response()
+                }
+            },
+            None => return Denial::ServerError.into_response(),
+        },
+    };
+    // `to=[receiver_email]` (`configuration.py:174-181`): Django joins the
+    // single value with `str()` into the `To` header. Only the SMTP backend
+    // additionally parses it with `sanitize_address` (`smtp.py:_send`); the
+    // non-dialing backends never parse it, so a container repr is just a
+    // header string there.
+    let header = [json_recipient_header(receiver)];
+    // `get_connection()` resolves the send through `settings.EMAIL_BACKEND`
+    // (`configuration.py:161`): only the SMTP backend dials out.
+    // Console/locmem validate headers and succeed without touching the
+    // network; dummy succeeds without even validating; an unknown dotted
+    // path fails `import_string` outside the view's `try` and answers the
+    // base 500 (PIDASHCONV-1126).
+    let backend = state.settings().email_backend.as_str();
+    if backend != smtp::SMTP_BACKEND {
+        let stub = match backend {
+            smtp::CONSOLE_BACKEND => Some(smtp::send_console(from_email.as_deref(), &header)),
+            smtp::LOCMEM_BACKEND => Some(smtp::send_locmem(from_email.as_deref(), &header)),
+            smtp::DUMMY_BACKEND => Some(Ok(())),
+            _ => None,
+        };
+        return match stub {
+            Some(Ok(())) => {
+                json_response(serde_json::json!({"message": "Email successfully sent."}))
+            }
+            Some(Err(err)) => Denial::BadError(err.message().to_owned()).into_response(),
+            None => Denial::ServerError.into_response(),
+        };
+    }
+    // SMTP `_send` parses the recipient with `sanitize_address`: an
+    // array/object repr (`"['a@x.test', 'b@x.test']"`) never parses as a
+    // mailbox, so `send()` raises inside the view's `try` and the generic
+    // 400 is answered with nothing delivered (`configuration.py:220-224`).
+    let Some(recipient) = recipient else {
+        return Denial::BadError(smtp::MailError::Failed.message().to_owned()).into_response();
+    };
+    let recipients = [recipient];
+    match smtp::send_test_email(smtp::EmailConfig {
+        host: host.as_deref().unwrap_or(""),
+        port,
+        username: username.as_deref(),
+        password: password.as_deref(),
+        use_tls,
+        use_ssl,
+        from_email: from_email.as_deref(),
+        recipients: &recipients,
+    })
+    .await
+    {
+        Ok(()) => json_response(serde_json::json!({"message": "Email successfully sent."})),
+        Err(err) => Denial::BadError(err.message().to_owned()).into_response(),
+    }
+}
+
+/// Python truthiness over a JSON body value (`not receiver_email`).
+/// Python truthiness over a body value. An uploaded file is always
+/// truthy (`bool(name)` — file parts always have names).
+fn json_truthy(found: BodyField<'_>) -> bool {
+    let value = match found {
+        BodyField::File(_) => return true,
+        BodyField::Json(value) => Some(value),
+        BodyField::Missing => None,
+    };
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => {
+            if let Some(i) = n.as_i64() {
+                i != 0
+            } else if let Some(u) = n.as_u64() {
+                u != 0
+            } else {
+                n.as_f64().is_some_and(|f| f != 0.0)
+            }
+        }
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Array(items)) => !items.is_empty(),
+        Some(Value::Object(map)) => !map.is_empty(),
+    }
+}
+
+/// `msg = ...; to=[receiver_email]` (`configuration.py:174-181`): Django
+/// `force_str`s the single value and parses it as one mailbox
+/// (`sanitize_address`), so a string or scalar is one recipient and an
+/// uploaded file is its name (`str(file)`, probed). `None` is the shape
+/// that never parses as a mailbox — an array or object repr — which the
+/// caller answers with the generic 400 and no send (`Missing` is falsy, so
+/// the required-email 400 returns before this function is reached).
+fn json_recipient(found: BodyField<'_>) -> Option<String> {
+    match found {
+        BodyField::File(file) => Some(file.filename.clone()),
+        BodyField::Json(Value::Array(_) | Value::Object(_)) => None,
+        BodyField::Json(value) => Some(json_scalar_string(value)),
+        BodyField::Missing => None,
+    }
+}
+
+/// The `To` header value Django builds for `to=[receiver_email]`
+/// (`configuration.py:174-181`): `str()` of the single value, so a string
+/// is itself, an array/object its `repr()`, an uploaded file its name. The
+/// non-dialing backends only validate this for newlines, never parse it as
+/// a mailbox, so a container repr is a plain header string there.
+fn json_recipient_header(found: BodyField<'_>) -> String {
+    match found {
+        BodyField::File(file) => file.filename.clone(),
+        BodyField::Json(value) => json_scalar_string(value),
+        BodyField::Missing => String::new(),
+    }
+}
+
+fn json_scalar_string(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Null => "None".to_owned(),
+        Value::Bool(true) => "True".to_owned(),
+        Value::Bool(false) => "False".to_owned(),
+        Value::Number(n) => py_number_str(n),
+        Value::Array(_) | Value::Object(_) => py_repr(value),
+    }
+}
+
+/// A resolved email value: DB rows arrive as strings; the call-time
+/// defaults can be `Int` (`EMAIL_PORT` 587), `Bool`, or `Null`.
+fn config_string(value: pidash_db::config::ConfigValue) -> Option<String> {
+    use pidash_db::config::ConfigValue;
+    match value {
+        ConfigValue::Str(s) => Some(s),
+        ConfigValue::Int(i) => Some(i.to_string()),
+        ConfigValue::Float(f) => Some(crate::paginator::py_float_str(f)),
+        ConfigValue::Bool(true) => Some("True".to_owned()),
+        ConfigValue::Bool(false) => Some("False".to_owned()),
+        ConfigValue::Null => None,
+    }
+}
+
+/// Django `candidate()` presence (`configuration.py:133-143`): a
+/// missing or null field falls back to stored (`None`); anything
+/// else present — a string, a scalar, a container, an uploaded
+/// file — grades as given.
+fn candidate_present(field: BodyField<'_>) -> Option<BodyField<'_>> {
+    match field {
+        BodyField::Missing | BodyField::Json(Value::Null) => None,
+        present => Some(present),
+    }
+}
+
+/// Django `candidate()` for a string-graded field
+/// (`configuration.py:133-143`): missing/null fall back to stored;
+/// a present string grades stripped (and, for the password only, a
+/// blank grades as stored); any other present value grades as
+/// given. Non-string values are `str()`-coerced (tier 3: Django
+/// hands the object itself to the connection/message constructors,
+/// which no admin-form client sends; both land in a 400 branch).
+fn candidate_string(
+    data: &ParsedBody,
+    key: &str,
+    stored: Option<String>,
+    blank_means_stored: bool,
+) -> Option<String> {
+    match data.field(key) {
+        BodyField::Missing | BodyField::Json(Value::Null) => stored,
+        BodyField::Json(Value::String(s)) => {
+            let trimmed = s.trim();
+            if blank_means_stored && trimmed.is_empty() {
+                stored
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }
+        BodyField::Json(value) => Some(json_scalar_string(value)),
+        BodyField::File(file) => Some(file.filename.clone()),
+    }
+}
+
+/// Django `_flag_is_enabled(candidate(...))`
+/// (`configuration.py:89-99,166-167`): a present JSON boolean
+/// passes through; any other present value compares
+/// `str(value).strip() == "1"`; missing/null fall back to the
+/// stored value under the same rule.
+fn candidate_flag(
+    data: &ParsedBody,
+    key: &str,
+    stored: Option<&pidash_db::config::ConfigValue>,
+) -> bool {
+    match candidate_present(data.field(key)) {
+        Some(BodyField::Json(Value::Bool(enabled))) => *enabled,
+        Some(present) => py_str_value(present) == "1",
+        None => stored.is_some_and(flag_is_enabled_stored),
+    }
+}
+
+/// `_flag_is_enabled` over a stored value
+/// (`configuration.py:89-99`): booleans pass through, anything
+/// else compares `str(value).strip() == "1"`.
+fn flag_is_enabled_stored(value: &pidash_db::config::ConfigValue) -> bool {
+    use pidash_db::config::ConfigValue;
+    match value {
+        ConfigValue::Bool(enabled) => *enabled,
+        _ => config_py_str(value).trim() == "1",
+    }
+}
+
+/// `int(str(value).strip())` over a stored port
+/// (`configuration.py:153`): the stored side of the
+/// candidate-or-stored port. `str()` renders ints plainly, floats
+/// as `repr` (never int-parseable), `True`/`False` capitalized
+/// (never parseable) and `None` as `"None"` (likewise), so only
+/// strings and ints can resolve; anything else is `None` and the
+/// caller answers the generic 400.
+/// Returns the raw integer; range is checked by the SMTP layer, where an
+/// out-of-range port raises `OverflowError` into the generic fallthrough.
+pub fn parse_email_port(value: &pidash_db::config::ConfigValue) -> Option<i64> {
+    parse_py_int(&config_py_str(value))
+}
+
+/// Python `str()` over a stored email value for the port/flag
+/// coercions (`configuration.py:89-99,153`): DB/env rows are
+/// strings; the port default can be the int 587; a missing host
+/// default is `None`. `str()` renders ints plainly, floats as
+/// `repr`, `True`/`False` capitalized, `None` as `"None"`.
+fn config_py_str(value: &pidash_db::config::ConfigValue) -> String {
+    use pidash_db::config::ConfigValue;
+    match value {
+        ConfigValue::Str(s) => s.clone(),
+        ConfigValue::Int(i) => i.to_string(),
+        ConfigValue::Float(f) => crate::paginator::py_float_str(*f),
+        ConfigValue::Bool(true) => "True".to_owned(),
+        ConfigValue::Bool(false) => "False".to_owned(),
+        ConfigValue::Null => "None".to_owned(),
+    }
+}
+
+/// Python `int(str)`: strips surrounding whitespace, takes an optional
+/// `+`/`-`, allows `_` separators between digits, then requires decimal
+/// digits. Overflow saturates: Python keeps arbitrary precision and fails
+/// later (`OverflowError` at connect, inside the `try`), so a saturated
+/// extreme preserves the fallthrough outcome.
+pub fn parse_py_int(text: &str) -> Option<i64> {
+    let stripped = text.trim_matches(|c: char| c.is_ascii_whitespace());
+    let (negative, digits) = match stripped.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, stripped.strip_prefix('+').unwrap_or(stripped)),
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut value: i64 = 0;
+    let mut saturated = false;
+    let mut prev_underscore = true;
+    for ch in digits.chars() {
+        if ch == '_' {
+            if prev_underscore {
+                return None;
+            }
+            prev_underscore = true;
+            continue;
+        }
+        let digit = ch.to_digit(10)? as i64;
+        prev_underscore = false;
+        match value.checked_mul(10).and_then(|v| v.checked_add(digit)) {
+            Some(next) => value = next,
+            None => saturated = true,
+        }
+    }
+    if prev_underscore {
+        return None;
+    }
+    if saturated {
+        return Some(if negative { i64::MIN } else { i64::MAX });
+    }
+    Some(if negative { -value } else { value })
+}
+
+// ---------------------------------------------------------------------------
+// SMTP test-send (EmailCredentialCheckEndpoint)
+// ---------------------------------------------------------------------------
+
+/// The send behind `email-credentials-check`, through `settings.EMAIL_BACKEND`
+/// the way `get_connection()` resolves it (`configuration.py:161-224`).
+/// The SMTP backend is the genuine conversation, speaking SMTP the way
+/// `smtplib` + Django's `EmailBackend` do: connect (+implicit TLS),
+/// greeting, EHLO/HELO, STARTTLS, AUTH, `MAIL`, `RCPT`, `DATA`, `QUIT`.
+/// Every failure maps to the exact Python exception branch and its message
+/// string; nothing here fabricates a send. Console/locmem/dummy never dial
+/// out (`send_console` / `send_locmem`); unknown dotted paths fail
+/// `import_string` outside the view's `try` and answer the base 500.
+mod smtp {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    /// `settings.EMAIL_BACKEND` builtins the handler serves. `filebased`
+    /// is deliberately absent: it needs an `EMAIL_FILE_PATH` setting Rust
+    /// does not carry, so it falls into the unknown-path 500 — which is
+    /// also what Django answers when `EMAIL_FILE_PATH` is unset.
+    pub const SMTP_BACKEND: &str = "django.core.mail.backends.smtp.EmailBackend";
+    pub const CONSOLE_BACKEND: &str = "django.core.mail.backends.console.EmailBackend";
+    pub const LOCMEM_BACKEND: &str = "django.core.mail.backends.locmem.EmailBackend";
+    pub const DUMMY_BACKEND: &str = "django.core.mail.backends.dummy.EmailBackend";
+
+    /// Fixed probe content (`configuration.py:170-171`).
+    const SUBJECT: &str = "Email Notification from Pi Dash";
+    const BODY: &str = "This is a sample email notification sent from Pi Dash application.";
+    /// Django's global default (`DEFAULT_FROM_EMAIL`): the project does not
+    /// override it, so a `NULL` `EMAIL_FROM` row falls back here
+    /// (`EmailMessage.from_email` → `settings.DEFAULT_FROM_EMAIL`).
+    const DEFAULT_FROM_EMAIL: &str = "webmaster@localhost";
+    /// Django's `EMAIL_HOST`/`EMAIL_PORT` globals: the project overrides
+    /// neither (`settings/common.py`), so a falsy host dials `localhost`
+    /// and port 0 dials 25 (`smtp.py:33-34`).
+    const DEFAULT_SMTP_HOST: &str = "localhost";
+    const DEFAULT_SMTP_PORT: i64 = 25;
+
+    /// `self.host = host or settings.EMAIL_HOST` (`smtp.py:33`): `None`
+    /// arrives as `""` (see the `EmailConfig` construction), and both
+    /// fall back to `localhost`.
+    fn resolve_host(host: &str) -> &str {
+        if host.is_empty() {
+            DEFAULT_SMTP_HOST
+        } else {
+            host
+        }
+    }
+
+    /// `self.port = port or settings.EMAIL_PORT` (`smtp.py:34`): only 0
+    /// is falsy, so only 0 falls back to 25; negatives and huge ports
+    /// keep failing at connect, exactly like Python's `OverflowError`.
+    fn resolve_port(port: i64) -> i64 {
+        if port == 0 {
+            DEFAULT_SMTP_PORT
+        } else {
+            port
+        }
+    }
+
+    /// `self.from_email = from_email or settings.DEFAULT_FROM_EMAIL`
+    /// (`message.py:239`): `None` and `""` both fall back.
+    fn resolve_from(from_email: Option<&str>) -> &str {
+        match from_email {
+            Some(from) if !from.is_empty() => from,
+            _ => DEFAULT_FROM_EMAIL,
+        }
+    }
+    /// `local_hostname`: Django sends the cached FQDN; only the bytes on
+    /// the wire differ, never any response, so a fixed name is used.
+    const LOCAL_HOSTNAME: &str = "localhost";
+    /// `smtplib._MAXLINE`: overlong reply lines are a protocol error.
+    const MAX_LINE: usize = 8192 + 1;
+
+    pub struct EmailConfig<'a> {
+        pub host: &'a str,
+        pub port: i64,
+        pub username: Option<&'a str>,
+        pub password: Option<&'a str>,
+        pub use_tls: bool,
+        pub use_ssl: bool,
+        pub from_email: Option<&'a str>,
+        pub recipients: &'a [String],
+    }
+
+    /// One Python exception branch of `configuration.py:183-224`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum MailError {
+        BadHeader,
+        Auth,
+        Connect,
+        SenderRefused,
+        ServerDisconnected,
+        RecipientsRefused,
+        Timeout,
+        Network,
+        Failed,
+    }
+
+    impl MailError {
+        /// The exact response string for each branch.
+        pub fn message(self) -> &'static str {
+            match self {
+                MailError::BadHeader => "Invalid email header.",
+                MailError::Auth => "Invalid credentials provided",
+                MailError::Connect => "Could not connect with the SMTP server.",
+                MailError::SenderRefused => "From address is invalid.",
+                MailError::ServerDisconnected => "SMTP server disconnected unexpectedly.",
+                MailError::RecipientsRefused => "All recipient addresses were refused.",
+                MailError::Timeout => "Timeout error while trying to connect to the SMTP server.",
+                MailError::Network => {
+                    "Network connection error. Please check your internet connection."
+                }
+                MailError::Failed => "Could not send email. Please check your configuration",
+            }
+        }
+    }
+
+    /// `socket` errors at connect/write scope (`OSError` propagating out of
+    /// `smtplib`, not absorbed): refused/reset-class errors are builtin
+    /// `ConnectionError` (`Network ...`); timeouts are builtin
+    /// `TimeoutError`; DNS and everything else falls through.
+    fn map_io(err: std::io::Error) -> MailError {
+        use std::io::ErrorKind;
+        match err.kind() {
+            ErrorKind::TimedOut => MailError::Timeout,
+            ErrorKind::ConnectionRefused
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::BrokenPipe
+            | ErrorKind::NotConnected => MailError::Network,
+            ErrorKind::UnexpectedEof => MailError::ServerDisconnected,
+            _ => MailError::Failed,
+        }
+    }
+
+    /// Reply reads (`getreply`): any `OSError` while reading — timeouts
+    /// included — is `SMTPServerDisconnected`, and EOF is too. Only writes
+    /// propagate raw socket errors.
+    fn map_read(err: std::io::Error) -> MailError {
+        let _ = err;
+        MailError::ServerDisconnected
+    }
+
+    // The `BufReader` lives on the connection for its whole lifetime: a
+    // fresh buffer per line would swallow already-read reply bytes and
+    // stall the conversation on every multiline reply.
+    enum Io {
+        Plain(tokio::io::BufReader<TcpStream>),
+        Tls(Box<tokio::io::BufReader<tokio_rustls::client::TlsStream<TcpStream>>>),
+    }
+
+    impl Io {
+        async fn read_reply(&mut self) -> Result<(i32, String), MailError> {
+            let mut text = String::new();
+            let mut code = -1;
+            loop {
+                let mut line = String::new();
+                let n = match self {
+                    Io::Plain(buf) => buf.read_line(&mut line).await,
+                    Io::Tls(buf) => buf.read_line(&mut line).await,
+                }
+                .map_err(map_read)?;
+                if n == 0 {
+                    return Err(MailError::ServerDisconnected);
+                }
+                if line.len() > MAX_LINE {
+                    // `SMTPResponseException(500, "Line too long.")`.
+                    return Err(MailError::Failed);
+                }
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                // `get`, not indexing: non-ASCII reply bytes would panic on
+                // a non-char-boundary and escape the fallthrough as a 500.
+                if let Some(prefix) = trimmed.get(..3) {
+                    if let Ok(parsed) = prefix.parse::<i32>() {
+                        code = parsed;
+                    }
+                    text.push_str(trimmed.get(4..).unwrap_or(""));
+                }
+                // Multiline replies continue while the 4th byte is `-`.
+                if !(trimmed.len() > 3 && trimmed.as_bytes()[3] == b'-') {
+                    break;
+                }
+                text.push('\n');
+            }
+            Ok((code, text))
+        }
+
+        async fn write_str(&mut self, command: &str) -> Result<(), MailError> {
+            let bytes = format!("{command}\r\n");
+            match self {
+                Io::Plain(buf) => buf.get_mut().write_all(bytes.as_bytes()).await,
+                Io::Tls(buf) => buf.get_mut().write_all(bytes.as_bytes()).await,
+            }
+            .map_err(map_io)?;
+            match self {
+                Io::Plain(buf) => buf.get_mut().flush().await,
+                Io::Tls(buf) => buf.get_mut().flush().await,
+            }
+            .map_err(map_io)
+        }
+
+        async fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), MailError> {
+            match self {
+                Io::Plain(buf) => buf.get_mut().write_all(bytes).await,
+                Io::Tls(buf) => buf.get_mut().write_all(bytes).await,
+            }
+            .map_err(map_io)?;
+            match self {
+                Io::Plain(buf) => buf.get_mut().flush().await,
+                Io::Tls(buf) => buf.get_mut().flush().await,
+            }
+            .map_err(map_io)
+        }
+    }
+
+    /// `EmailMessage.message()` header validation: any header value
+    /// containing a newline raises `BadHeaderError`. Subject and body are
+    /// constants; `from_email` and the recipients come from config/input.
+    /// This runs after the envelope sanitize on the SMTP path (`_send`
+    /// order, `smtp.py:144-150`): a newline the envelope rejects is the
+    /// envelope `ValueError` (generic 400), and only a newline the
+    /// envelope accepts (smuggled inside a stripped comment) reaches here.
+    fn check_headers(from: &str, recipients: &[String]) -> Result<(), MailError> {
+        if [SUBJECT, from].iter().any(|h| h.contains(['\r', '\n'])) {
+            return Err(MailError::BadHeader);
+        }
+        if recipients.iter().any(|r| r.contains(['\r', '\n'])) {
+            return Err(MailError::BadHeader);
+        }
+        Ok(())
+    }
+
+    /// `console.EmailBackend.send_messages`: the message renders (via
+    /// `message.message()`, which is also where header validation runs),
+    /// then the rendered message plus the 79-dash separator goes to
+    /// stdout, flushed per message. A failed write propagates
+    /// (`fail_silently=False`) into the generic fallthrough, and so does
+    /// a render failure past the newline check (an unparsable address is
+    /// the `ValueError` the view answers generically).
+    pub fn send_console(from_email: Option<&str>, recipients: &[String]) -> Result<(), MailError> {
+        let from = resolve_from(from_email);
+        check_headers(from, recipients)?;
+        // The render is shared with the DATA path (same accepted
+        // approximation: exact bytes unobservable past the server), with
+        // the email policy's `\n` endings the console backend writes.
+        let rendered = message_bytes(from, recipients).map_err(|_| MailError::Failed)?;
+        let text = String::from_utf8_lossy(&rendered).replace("\r\n", "\n");
+        use std::io::Write as _;
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "{text}")
+            .and_then(|()| writeln!(out, "{}", "-".repeat(79)))
+            .and_then(|()| out.flush())
+            .map_err(|_| MailError::Failed)
+    }
+
+    /// `locmem.EmailBackend.send_messages`: the message renders (via
+    /// `message.message()`), then success — the outbox append is
+    /// in-process with no HTTP-observable effect, so there is nothing
+    /// further to mirror. A render failure past the newline check is the
+    /// `ValueError` the view answers generically.
+    pub fn send_locmem(from_email: Option<&str>, recipients: &[String]) -> Result<(), MailError> {
+        let from = resolve_from(from_email);
+        check_headers(from, recipients)?;
+        message_bytes(from, recipients)
+            .map(|_| ())
+            .map_err(|_| MailError::Failed)
+    }
+
+    fn base64_encode(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let mut word = 0u32;
+            for (i, byte) in chunk.iter().enumerate() {
+                word |= (*byte as u32) << (16 - 8 * i);
+            }
+            let pad = 3 - chunk.len();
+            for i in 0..4 - pad {
+                out.push(ALPHABET[((word >> (18 - 6 * i)) & 63) as usize] as char);
+            }
+            for _ in 0..pad {
+                out.push('=');
+            }
+        }
+        out
+    }
+
+    fn tls_config() -> Result<rustls::ClientConfig, rustls::Error> {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        Ok(rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth())
+    }
+
+    /// TLS handshake errors are `ssl.SSLError` in Python — the generic
+    /// fallthrough — except timeouts, which stay `TimeoutError`.
+    fn map_handshake(err: std::io::Error) -> MailError {
+        if err.kind() == std::io::ErrorKind::TimedOut {
+            MailError::Timeout
+        } else {
+            MailError::Failed
+        }
+    }
+
+    async fn upgrade_tls(stream: TcpStream, host: &str) -> Result<Io, MailError> {
+        use std::str::FromStr;
+        let name = if let Ok(addr) = std::net::IpAddr::from_str(host) {
+            rustls::pki_types::ServerName::IpAddress(addr.into())
+        } else {
+            rustls::pki_types::ServerName::try_from(host.to_owned())
+                .map_err(|_| MailError::Failed)?
+        };
+        let config = std::sync::Arc::new(tls_config().map_err(|_| MailError::Failed)?);
+        let connector = tokio_rustls::TlsConnector::from(config);
+        let tls = connector
+            .connect(name, stream)
+            .await
+            .map_err(map_handshake)?;
+        Ok(Io::Tls(Box::new(tokio::io::BufReader::new(tls))))
+    }
+
+    /// `EHLO`, falling back to `HELO` (`ehlo_or_helo_if_needed`): both
+    /// failing is `SMTPHeloError`, inside the `try`, so the generic
+    /// fallthrough. Returns the extension lines on EHLO success.
+    async fn ehlo(io: &mut Io) -> Result<Vec<String>, MailError> {
+        io.write_str(&format!("EHLO {LOCAL_HOSTNAME}")).await?;
+        let (code, text) = io.read_reply().await?;
+        if code == 250 {
+            return Ok(text.lines().map(str::to_owned).collect());
+        }
+        io.write_str(&format!("HELO {LOCAL_HOSTNAME}")).await?;
+        let (code, _) = io.read_reply().await?;
+        if code == 250 {
+            return Ok(Vec::new());
+        }
+        Err(MailError::Failed)
+    }
+
+    fn extensions(lines: &[String]) -> (bool, bool, Vec<String>) {
+        let mut starttls = false;
+        let mut auth: Vec<String> = Vec::new();
+        for line in lines {
+            let mut parts = line.split_whitespace();
+            match parts.next().map(str::to_uppercase).as_deref() {
+                Some("STARTTLS") => starttls = true,
+                Some("AUTH") => auth.extend(parts.map(|m| m.to_owned())),
+                _ => {}
+            }
+        }
+        (starttls, !auth.is_empty(), auth)
+    }
+
+    /// One base64 challenge/response round (`auth_cram_md5`): `user + " "
+    /// + HMAC-MD5(password, challenge).hexdigest()`.
+    fn cram_md5_response(username: &str, password: &str, challenge: &[u8]) -> String {
+        use hmac::Mac;
+        let mut mac = hmac::Hmac::<md5::Md5>::new_from_slice(password.as_bytes())
+            .expect("HMAC accepts any key length");
+        mac.update(challenge);
+        let digest = mac.finalize().into_bytes();
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        base64_encode(format!("{username} {hex}").as_bytes())
+    }
+
+    fn base64_decode(text: &str) -> Result<Vec<u8>, MailError> {
+        // `base64.decodebytes`: strict alphabet, `=` padding only at the
+        // end; anything else is `binascii.Error` — the fallthrough.
+        let clean: String = text.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+        if clean.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !clean.len().is_multiple_of(4) {
+            return Err(MailError::Failed);
+        }
+        let mut out = Vec::with_capacity(clean.len() / 4 * 3);
+        let bytes = clean.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let mut word = 0u32;
+            let mut pad = 0;
+            for (j, byte) in bytes[i..i + 4].iter().enumerate() {
+                let sextet = match byte {
+                    b'A'..=b'Z' => byte - b'A',
+                    b'a'..=b'z' => byte - b'a' + 26,
+                    b'0'..=b'9' => byte - b'0' + 52,
+                    b'+' => 62,
+                    b'/' => 63,
+                    b'=' => {
+                        pad += 1;
+                        0
+                    }
+                    _ => return Err(MailError::Failed),
+                };
+                if pad > 0 && *byte != b'=' {
+                    return Err(MailError::Failed);
+                }
+                word |= (sextet as u32) << (18 - 6 * j);
+            }
+            if pad > 2 || (pad > 0 && i + 4 != bytes.len()) {
+                return Err(MailError::Failed);
+            }
+            out.push((word >> 16) as u8);
+            if pad < 2 {
+                out.push((word >> 8) as u8);
+            }
+            if pad < 1 {
+                out.push(word as u8);
+            }
+            i += 4;
+        }
+        Ok(out)
+    }
+
+    /// `auth()`: one mechanism attempt. The initial response goes out with
+    /// the `AUTH` command when the mechanism provides one (`CRAM-MD5`
+    /// sends a bare command); every 334 challenge is answered until the
+    /// server accepts (235/503), refuses (anything else, an
+    /// `SMTPAuthenticationError`), or loops past `_MAXCHALLENGE`
+    /// (`SMTPException`, the fallthrough).
+    async fn auth_attempt<F>(
+        io: &mut Io,
+        mechanism: &str,
+        initial: Option<String>,
+        respond: F,
+    ) -> Result<(), MailError>
+    where
+        // Plain `&dyn Fn` would poison the future's `Send` (and axum's
+        // `Handler` bound with it); the generic keeps it `Send`.
+        F: Fn(&[u8]) -> String + Send,
+    {
+        const MAX_CHALLENGE: u32 = 5; // `smtplib._MAXCHALLENGE`
+        let command = match &initial {
+            Some(response) => format!("AUTH {mechanism} {response}"),
+            None => format!("AUTH {mechanism}"),
+        };
+        io.write_str(&command).await?;
+        let mut challenges = u32::from(initial.is_some());
+        loop {
+            let (code, text) = io.read_reply().await?;
+            if code == 235 || code == 503 {
+                return Ok(());
+            }
+            if code != 334 {
+                // Any refusal, including 535-class, is
+                // `SMTPAuthenticationError`.
+                return Err(MailError::Auth);
+            }
+            challenges += 1;
+            if challenges > MAX_CHALLENGE {
+                return Err(MailError::Failed);
+            }
+            // `base64.decodebytes(resp)`: only the first line carries the
+            // challenge; multiline 334s do not occur on the wire.
+            let first = text.lines().next().unwrap_or("");
+            let challenge = base64_decode(first)?;
+            io.write_str(&respond(&challenge)).await?;
+        }
+    }
+
+    /// `login(user, password)`: advertised methods tried in smtplib's
+    /// preferred order (`CRAM-MD5`, `PLAIN`, `LOGIN`); an
+    /// `SMTPAuthenticationError` falls through to the next method and only
+    /// the last one propagates — every other error aborts immediately. No
+    /// advertised method at all is `SMTPException("No suitable ...")`.
+    async fn login(
+        io: &mut Io,
+        methods: &[String],
+        username: &str,
+        password: &str,
+    ) -> Result<(), MailError> {
+        let upper: Vec<String> = methods.iter().map(|m| m.to_uppercase()).collect();
+        let plain_initial = base64_encode(format!("\0{username}\0{password}").as_bytes());
+        let login_initial = base64_encode(username.as_bytes());
+        let login_password = base64_encode(password.as_bytes());
+        let mut order: Vec<&str> = Vec::new();
+        for method in ["CRAM-MD5", "PLAIN", "LOGIN"] {
+            if upper.iter().any(|m| m == method) {
+                order.push(method);
+            }
+        }
+        if order.is_empty() {
+            return Err(MailError::Failed);
+        }
+        let mut last = MailError::Failed;
+        for method in order {
+            let result = match method {
+                // `auth_cram_md5(None)` is `None`: no initial response.
+                "CRAM-MD5" => {
+                    auth_attempt(io, method, None, |challenge| {
+                        cram_md5_response(username, password, challenge)
+                    })
+                    .await
+                }
+                // `auth_plain` ignores the challenge: the initial response
+                // goes out again.
+                "PLAIN" => {
+                    auth_attempt(io, method, Some(plain_initial.clone()), |_| {
+                        plain_initial.clone()
+                    })
+                    .await
+                }
+                // `auth_login(None)` answers the username up front; every
+                // challenge (the count is already past the username round)
+                // answers the password.
+                _ => {
+                    auth_attempt(io, method, Some(login_initial.clone()), |_| {
+                        login_password.clone()
+                    })
+                    .await
+                }
+            };
+            match result {
+                Ok(()) => return Ok(()),
+                Err(MailError::Auth) => last = MailError::Auth,
+                Err(other) => return Err(other),
+            }
+        }
+        Err(last)
+    }
+
+    fn message_bytes(from: &str, recipients: &[String]) -> Result<Vec<u8>, String> {
+        // `message.as_bytes(linesep="\r\n")`: headers plus the plain body.
+        // Exact bytes are unobservable past the server; the headers carry
+        // the validated values. `From`/`To`/`Subject` render through the
+        // shared tasks_mail encoder (PIDASHCONV-1286), never a second port:
+        // RFC 2047 words plus IDNA plus the generator refold. Every caller
+        // ran `check_headers` first, so a failure here is an unparsable
+        // address (the `ValueError` the view answers generically).
+        let to = recipients.join(", ");
+        let from = pidash_jobs::tasks_mail::mail_send::address_header("From", from)?;
+        let to = pidash_jobs::tasks_mail::mail_send::address_header("To", &to)?;
+        let subject = pidash_jobs::tasks_mail::mail_send::subject_header(SUBJECT)?;
+        let now = chrono::Utc::now();
+        let date = now.format("%a, %d %b %Y %H:%M:%S +0000").to_string();
+        let mut out = format!("{from}\r\n{to}\r\n{subject}\r\nDate: {date}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"utf-8\"\r\nContent-Transfer-Encoding: 7bit\r\n\r\n{BODY}\r\n");
+        // Dot-stuffing (`smtplib.data` quotes leading periods).
+        let mut stuffed = String::with_capacity(out.len());
+        for line in out.split_inclusive('\n') {
+            if line.starts_with('.') {
+                stuffed.push('.');
+            }
+            stuffed.push_str(line);
+        }
+        out = stuffed;
+        Ok(out.into_bytes())
+    }
+
+    pub async fn send_test_email(cfg: EmailConfig<'_>) -> Result<(), MailError> {
+        // `EmailBackend.__init__` (`smtp.py:33-34`): falsy host/port fall
+        // back to the globals before anything dials.
+        let host = resolve_host(cfg.host);
+        // `port=int(...)` already ran; a range failure is `OverflowError`
+        // at connect, inside the `try` — the generic fallthrough.
+        let port: u16 = u16::try_from(resolve_port(cfg.port)).map_err(|_| MailError::Failed)?;
+        // `SMTP(host, port)` / `SMTP_SSL(host, port)`: refused/reset-class
+        // errors are builtin `ConnectionError`, timeouts `TimeoutError`,
+        // DNS and the rest fall through.
+        let stream = TcpStream::connect((host, port)).await.map_err(map_io)?;
+        let mut io = if cfg.use_ssl {
+            // `SMTP_SSL`: the TLS handshake error is `ssl.SSLError`,
+            // inside the `try` — the generic fallthrough.
+            upgrade_tls(stream, host).await?
+        } else {
+            Io::Plain(tokio::io::BufReader::new(stream))
+        };
+        // Greeting: EOF is `SMTPServerDisconnected`, anything but 220 is
+        // `SMTPConnectError`.
+        let (code, _) = io.read_reply().await?;
+        if code != 220 {
+            return Err(MailError::Connect);
+        }
+        let mut lines = ehlo(&mut io).await?;
+        if !cfg.use_ssl && cfg.use_tls {
+            // `starttls()`: unadvertised is `SMTPException`; a non-220 is
+            // `SMTPException`; the handshake error is `ssl.SSLError` —
+            // all inside the `try`.
+            let (advertised, _, _) = extensions(&lines);
+            if !advertised {
+                return Err(MailError::Failed);
+            }
+            io.write_str("STARTTLS").await?;
+            let (code, _) = io.read_reply().await?;
+            if code != 220 {
+                return Err(MailError::Failed);
+            }
+            let Io::Plain(buffered) = io else {
+                return Err(MailError::Failed);
+            };
+            // The buffer is drained here (every reply was consumed), so
+            // reclaiming the stream loses nothing past STARTTLS.
+            io = upgrade_tls(buffered.into_inner(), host).await?;
+            lines = ehlo(&mut io).await?;
+        }
+        // `login()` when both are set (`if self.username and self.password`).
+        let has_creds = cfg.username.is_some_and(|u| !u.is_empty())
+            && cfg.password.is_some_and(|p| !p.is_empty());
+        if has_creds {
+            let (_, has_auth, methods) = extensions(&lines);
+            if !has_auth {
+                // `SMTPNotSupportedError("SMTP AUTH extension not ...")`.
+                return Err(MailError::Failed);
+            }
+            login(
+                &mut io,
+                &methods,
+                cfg.username.unwrap_or(""),
+                cfg.password.unwrap_or(""),
+            )
+            .await?;
+        }
+        // `_send` (`smtp.py:141-159`), after the transport is up: the
+        // envelope sanitizes first through the shared tasks_mail encoder
+        // (PIDASHCONV-1286, never a second port) — an unparsable address
+        // is the `ValueError` the view answers generically — then the
+        // headers validate (`BadHeaderError`), then the message renders.
+        let from = resolve_from(cfg.from_email);
+        let envelope_from = pidash_jobs::tasks_mail::mail_send::envelope_address(from)
+            .map_err(|_| MailError::Failed)?;
+        let mut envelope_rcpts = Vec::with_capacity(cfg.recipients.len());
+        for recipient in cfg.recipients {
+            envelope_rcpts.push(
+                pidash_jobs::tasks_mail::mail_send::envelope_address(recipient)
+                    .map_err(|_| MailError::Failed)?,
+            );
+        }
+        check_headers(from, cfg.recipients)?;
+        // `sendmail`: `MAIL` refusal (any code, 421 included) is
+        // `SMTPSenderRefused`.
+        io.write_str(&format!("MAIL FROM:{envelope_from}")).await?;
+        let (code, _) = io.read_reply().await?;
+        if code != 250 {
+            return Err(MailError::SenderRefused);
+        }
+        // `RCPT`: 250/251 accepted; anything else recorded; 421 aborts the
+        // loop immediately; all-refused is `SMTPRecipientsRefused`.
+        let mut refused = 0usize;
+        for envelope_rcpt in &envelope_rcpts {
+            io.write_str(&format!("RCPT TO:{envelope_rcpt}")).await?;
+            let (code, _) = io.read_reply().await?;
+            if code == 250 || code == 251 {
+                continue;
+            }
+            refused += 1;
+            if code == 421 {
+                return Err(MailError::RecipientsRefused);
+            }
+        }
+        if refused == cfg.recipients.len() {
+            return Err(MailError::RecipientsRefused);
+        }
+        // `DATA`: non-354 is `SMTPDataError` (fallthrough); a non-250 end
+        // is too.
+        io.write_str("DATA").await?;
+        let (code, _) = io.read_reply().await?;
+        if code != 354 {
+            return Err(MailError::Failed);
+        }
+        let content = message_bytes(from, cfg.recipients).map_err(|_| MailError::Failed)?;
+        io.write_bytes(&content).await?;
+        io.write_bytes(b"\r\n.\r\n").await?;
+        let (code, _) = io.read_reply().await?;
+        if code != 250 {
+            return Err(MailError::Failed);
+        }
+        // `close()` after a successful send: `quit()` errors other than
+        // disconnect/SSL propagate; disconnect-shaped ones are swallowed.
+        io.write_str("QUIT").await?;
+        match io.read_reply().await {
+            Ok((221, _)) => Ok(()),
+            Ok(_) => Err(MailError::Failed),
+            Err(MailError::ServerDisconnected) => Ok(()),
+            Err(MailError::Failed) => Ok(()),
+            Err(other) => Err(other),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn messages_match_python_exactly() {
+            assert_eq!(MailError::BadHeader.message(), "Invalid email header.");
+            assert_eq!(MailError::Auth.message(), "Invalid credentials provided");
+            assert_eq!(
+                MailError::Connect.message(),
+                "Could not connect with the SMTP server."
+            );
+            assert_eq!(
+                MailError::SenderRefused.message(),
+                "From address is invalid."
+            );
+            assert_eq!(
+                MailError::ServerDisconnected.message(),
+                "SMTP server disconnected unexpectedly."
+            );
+            assert_eq!(
+                MailError::RecipientsRefused.message(),
+                "All recipient addresses were refused."
+            );
+            assert_eq!(
+                MailError::Timeout.message(),
+                "Timeout error while trying to connect to the SMTP server."
+            );
+            assert_eq!(
+                MailError::Network.message(),
+                "Network connection error. Please check your internet connection."
+            );
+            assert_eq!(
+                MailError::Failed.message(),
+                "Could not send email. Please check your configuration"
+            );
+        }
+
+        /// PIDASHCONV-1126: console/locmem validate headers and succeed
+        /// with no network; dummy succeeds without even validating.
+        #[test]
+        fn stub_backends_match_django() {
+            let to = ["probe@example.com".to_owned()];
+            assert_eq!(send_console(Some("noreply@example.com"), &to), Ok(()));
+            assert_eq!(send_locmem(Some("noreply@example.com"), &to), Ok(()));
+            assert_eq!(send_locmem(None, &to), Ok(()));
+            let bad_to = ["a@b.com\nBcc: x@example.com".to_owned()];
+            assert_eq!(
+                send_console(Some("noreply@example.com"), &bad_to),
+                Err(MailError::BadHeader)
+            );
+            assert_eq!(
+                send_locmem(Some("noreply@example.com"), &bad_to),
+                Err(MailError::BadHeader)
+            );
+            assert_eq!(
+                send_locmem(Some("from@example.com\nX: y"), &to),
+                Err(MailError::BadHeader)
+            );
+        }
+
+        /// PIDASHCONV-1366: Django's framework fallbacks. `host or
+        /// settings.EMAIL_HOST` / `port or settings.EMAIL_PORT`
+        /// (`smtp.py:33-34`) and `from_email or settings.DEFAULT_FROM_EMAIL`
+        /// (`message.py:239`); the project overrides none of the globals
+        /// (`settings/common.py`), so `localhost` / 25 /
+        /// `webmaster@localhost`. Only `""`/`None` (host, from) and 0
+        /// (port) are falsy — a blank space or a negative port stays.
+        #[test]
+        fn fallback_resolvers_match_django_falsiness() {
+            assert_eq!(resolve_host(""), DEFAULT_SMTP_HOST);
+            assert_eq!(resolve_host("mail.example.com"), "mail.example.com");
+            assert_eq!(resolve_host(" "), " ");
+            assert_eq!(resolve_port(0), DEFAULT_SMTP_PORT);
+            assert_eq!(resolve_port(587), 587);
+            assert_eq!(resolve_port(-1), -1);
+            assert_eq!(resolve_from(None), DEFAULT_FROM_EMAIL);
+            assert_eq!(resolve_from(Some("")), DEFAULT_FROM_EMAIL);
+            assert_eq!(
+                resolve_from(Some("noreply@example.com")),
+                "noreply@example.com"
+            );
+        }
+
+        /// PIDASHCONV-1445: the private `quote_address` is gone — the
+        /// envelope goes through the shared tasks_mail encoder
+        /// (`sanitize_address` + `quoteaddr`, `smtp.py:144-149`). Same
+        /// display-stripping expectations as before, plus the IDNA and
+        /// failure shapes the old pass-through never had.
+        #[test]
+        fn envelope_sanitizes_like_django_send() {
+            let envelope = pidash_jobs::tasks_mail::mail_send::envelope_address;
+            assert_eq!(
+                envelope("Team Pi Dash <team@airepublic.com>").expect("valid"),
+                "<team@airepublic.com>"
+            );
+            assert_eq!(
+                envelope("plain@example.com").expect("valid"),
+                "<plain@example.com>"
+            );
+            assert_eq!(
+                envelope("<bracketed@example.com>").expect("valid"),
+                "<bracketed@example.com>"
+            );
+            assert_eq!(
+                envelope("Équipe Pi Dash <team@x.com>").expect("valid"),
+                "<team@x.com>"
+            );
+            assert_eq!(
+                envelope("invite@münchen.de").expect("valid"),
+                "<invite@xn--mnchen-3ya.de>"
+            );
+            assert!(envelope("['a@x.test', 'b@x.test']").is_err());
+        }
+
+        /// PIDASHCONV-1445: the DATA headers go through the shared
+        /// tasks_mail encoder (`forbid_multi_line_headers`,
+        /// `message.py:55-76`): a non-ASCII From display name is RFC
+        /// 2047-encoded, an IDN To domain is punycoded, and the fixed
+        /// ASCII Subject renders verbatim. Pre-fix all three went out
+        /// as raw UTF-8.
+        #[test]
+        fn message_bytes_encodes_headers_like_django() {
+            let to = ["invite@münchen.de".to_owned()];
+            let bytes =
+                message_bytes("Équipe Pi Dash <team@x.com>", &to).expect("encodable headers");
+            let text = String::from_utf8(bytes).expect("DATA must stay valid UTF-8");
+            assert!(
+                text.contains("From: =?utf-8?q?=C3=89quipe_Pi_Dash?= <team@x.com>"),
+                "From display name not RFC 2047-encoded:\n{text}"
+            );
+            assert!(
+                text.contains("To: invite@xn--mnchen-3ya.de"),
+                "To domain not punycoded:\n{text}"
+            );
+            assert!(
+                text.contains("Subject: Email Notification from Pi Dash"),
+                "Subject changed:\n{text}"
+            );
+        }
+
+        /// PIDASHCONV-1445: the envelope goes through the shared
+        /// tasks_mail encoder (`smtp.py:_send` sanitize + `quoteaddr`,
+        /// `smtp.py:144-149`): IDN domains are punycoded and the From
+        /// display name never reaches the wire. Pre-fix the envelope
+        /// carried raw UTF-8 domains.
+        #[tokio::test]
+        async fn send_test_email_encodes_envelope_like_django() {
+            let to = ["invite@münchen.de".to_owned()];
+            let (addr, server) = run_fake_smtp(FakeSmtp {
+                extensions: vec![],
+                expect_user: String::new(),
+                expect_password: String::new(),
+                reject_plain: false,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(EmailConfig {
+                host: "127.0.0.1",
+                port: i64::from(addr.port()),
+                username: None,
+                password: None,
+                use_tls: false,
+                use_ssl: false,
+                from_email: Some("Équipe Pi Dash <team@münchen.de>"),
+                recipients: &to,
+            })
+            .await;
+            assert_eq!(result, Ok(()));
+            let transcript = server.await.unwrap();
+            assert!(
+                transcript
+                    .iter()
+                    .any(|l| l == "C: MAIL FROM:<team@xn--mnchen-3ya.de>"),
+                "MAIL FROM not sanitized: {transcript:?}"
+            );
+            assert!(
+                transcript
+                    .iter()
+                    .any(|l| l == "C: RCPT TO:<invite@xn--mnchen-3ya.de>"),
+                "RCPT TO not punycoded: {transcript:?}"
+            );
+        }
+
+        /// PIDASHCONV-1445: `_send` sanitizes the envelope before the
+        /// message renders (`smtp.py:144-150`), so a newline recipient
+        /// is the envelope `ValueError` (generic 400), not
+        /// `BadHeaderError`. Pre-fix the header check ran first and
+        /// answered `BadHeader`.
+        #[tokio::test]
+        async fn send_test_email_envelope_before_headers_like_django_send() {
+            let to = ["a@b.com\nBcc: x@example.com".to_owned()];
+            let (addr, server) = run_fake_smtp(FakeSmtp {
+                extensions: vec![],
+                expect_user: String::new(),
+                expect_password: String::new(),
+                reject_plain: false,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(EmailConfig {
+                host: "127.0.0.1",
+                port: i64::from(addr.port()),
+                username: None,
+                password: None,
+                use_tls: false,
+                use_ssl: false,
+                from_email: Some("noreply@example.com"),
+                recipients: &to,
+            })
+            .await;
+            assert_eq!(result, Err(MailError::Failed));
+            drop(server);
+        }
+
+        /// PIDASHCONV-1445: a newline smuggled inside a comment passes
+        /// the envelope sanitize (comments strip, `message.py:82-104`)
+        /// and still fails the header render (`BadHeaderError`,
+        /// `message.py:58-62`). Guards the envelope-first reorder.
+        #[tokio::test]
+        async fn send_test_email_comment_smuggled_newline_is_bad_header() {
+            let to = ["a@b.com (note\nline)".to_owned()];
+            let (addr, server) = run_fake_smtp(FakeSmtp {
+                extensions: vec![],
+                expect_user: String::new(),
+                expect_password: String::new(),
+                reject_plain: false,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(EmailConfig {
+                host: "127.0.0.1",
+                port: i64::from(addr.port()),
+                username: None,
+                password: None,
+                use_tls: false,
+                use_ssl: false,
+                from_email: Some("noreply@example.com"),
+                recipients: &to,
+            })
+            .await;
+            assert_eq!(result, Err(MailError::BadHeader));
+            drop(server);
+        }
+
+        /// PIDASHCONV-1445: the stub backends render the message too
+        /// (`message.message()`), so a non-ASCII unparsable From is the
+        /// render `ValueError` (generic 400) there as well — probed on
+        /// Django 4.2.30, where `message()` raises instead of returning.
+        #[test]
+        fn stub_backends_reject_unparsable_non_ascii_from() {
+            let to = ["probe@example.com".to_owned()];
+            assert_eq!(send_console(Some("José"), &to), Err(MailError::Failed));
+            assert_eq!(send_locmem(Some("José"), &to), Err(MailError::Failed));
+        }
+
+        /// Multiline replies arrive in one TCP segment: the reader keeps
+        /// one buffer for the whole connection, or bytes already read
+        /// are lost and the second line stalls forever.
+        #[tokio::test]
+        async fn multiline_reply_reads_past_first_line() {
+            use tokio::io::AsyncWriteExt;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (mut server, _) = listener.accept().await.unwrap();
+                // One write: the whole reply lands in the reader's buffer
+                // at once, exactly like a real EHLO answer.
+                server
+                    .write_all(b"250-stub greets you\r\n250-AUTH LOGIN PLAIN\r\n250 OK\r\n")
+                    .await
+                    .unwrap();
+                // Hold the connection open until the reader is done.
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            });
+            let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let mut io = Io::Plain(tokio::io::BufReader::new(stream));
+            let (code, text) =
+                tokio::time::timeout(std::time::Duration::from_secs(3), io.read_reply())
+                    .await
+                    .expect("multiline reply must not stall")
+                    .unwrap();
+            assert_eq!(code, 250);
+            assert!(text.contains("AUTH LOGIN PLAIN"), "got: {text:?}");
+            assert!(text.contains("OK"), "got: {text:?}");
+        }
+
+        /// Scripted fake SMTP server: one connection, a fixed extension
+        /// list, credential checking, and a transcript of client lines.
+        struct FakeSmtp {
+            extensions: Vec<String>,
+            expect_user: String,
+            expect_password: String,
+            /// When true the server answers 535 to `AUTH PLAIN` even for
+            /// right credentials (a PLAIN-blind relay that still does
+            /// LOGIN, like the scratch stub).
+            reject_plain: bool,
+            rcpt_code: i32,
+        }
+
+        async fn run_fake_smtp(
+            fake: FakeSmtp,
+        ) -> (std::net::SocketAddr, tokio::task::JoinHandle<Vec<String>>) {
+            use tokio::io::AsyncBufReadExt;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let handle = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut reader = tokio::io::BufReader::new(reader);
+                let mut transcript = Vec::new();
+                async fn send(
+                    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+                    transcript: &mut Vec<String>,
+                    line: &str,
+                ) {
+                    use tokio::io::AsyncWriteExt;
+                    writer.write_all(line.as_bytes()).await.unwrap();
+                    writer.write_all(b"\r\n").await.unwrap();
+                    transcript.push(format!("S: {line}"));
+                }
+                async fn recv(
+                    reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+                    transcript: &mut Vec<String>,
+                ) -> String {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    let line = line.trim_end_matches(['\r', '\n']).to_owned();
+                    transcript.push(format!("C: {line}"));
+                    line
+                }
+                send(&mut writer, &mut transcript, "220 fake ESMTP ready").await;
+                let mut authenticated = false;
+                loop {
+                    let line = recv(&mut reader, &mut transcript).await;
+                    let up = line.to_uppercase();
+                    if up.starts_with("EHLO") || up.starts_with("HELO") {
+                        send(&mut writer, &mut transcript, "250-fake greets you").await;
+                        for ext in &fake.extensions {
+                            send(&mut writer, &mut transcript, &format!("250-{ext}")).await;
+                        }
+                        send(&mut writer, &mut transcript, "250 OK").await;
+                    } else if up.starts_with("AUTH PLAIN") {
+                        let mut ok = false;
+                        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+                        let initial = parts
+                            .get(1)
+                            .and_then(|rest| rest.split_whitespace().nth(1))
+                            .map(str::to_owned);
+                        let response = match initial {
+                            Some(init) => init,
+                            None => {
+                                send(&mut writer, &mut transcript, "334 ").await;
+                                let challenge = recv(&mut reader, &mut transcript).await;
+                                challenge
+                            }
+                        };
+                        if !fake.reject_plain {
+                            if let Ok(decoded) = base64_decode(&response) {
+                                let want =
+                                    format!("\0{}\0{}", fake.expect_user, fake.expect_password);
+                                ok = decoded == want.as_bytes();
+                            }
+                        }
+                        authenticated = ok;
+                        send(
+                            &mut writer,
+                            &mut transcript,
+                            if ok {
+                                "235 authenticated"
+                            } else {
+                                "535 bad credentials"
+                            },
+                        )
+                        .await;
+                    } else if up.starts_with("AUTH LOGIN") {
+                        let mut ok = false;
+                        let initial = line.split_whitespace().nth(2).map(str::to_owned);
+                        let user_b64 = match initial {
+                            Some(init) => init,
+                            None => {
+                                send(&mut writer, &mut transcript, "334 VXNlcm5hbWU6").await;
+                                recv(&mut reader, &mut transcript).await
+                            }
+                        };
+                        if base64_decode(&user_b64).unwrap_or_default()
+                            == fake.expect_user.as_bytes()
+                        {
+                            send(&mut writer, &mut transcript, "334 UGFzc3dvcmQ6").await;
+                            let pass = recv(&mut reader, &mut transcript).await;
+                            if base64_decode(&pass).unwrap_or_default()
+                                == fake.expect_password.as_bytes()
+                            {
+                                ok = true;
+                            }
+                        } else {
+                            send(&mut writer, &mut transcript, "535 bad credentials").await;
+                            continue;
+                        }
+                        authenticated = ok;
+                        send(
+                            &mut writer,
+                            &mut transcript,
+                            if ok {
+                                "235 authenticated"
+                            } else {
+                                "535 bad credentials"
+                            },
+                        )
+                        .await;
+                    } else if up.starts_with("MAIL FROM") {
+                        send(&mut writer, &mut transcript, "250 OK").await;
+                    } else if up.starts_with("RCPT TO") {
+                        send(
+                            &mut writer,
+                            &mut transcript,
+                            if fake.rcpt_code == 250 {
+                                "250 OK".to_owned()
+                            } else {
+                                format!("{} refused", fake.rcpt_code)
+                            }
+                            .as_str(),
+                        )
+                        .await;
+                    } else if up == "DATA" {
+                        send(&mut writer, &mut transcript, "354 go ahead").await;
+                        loop {
+                            let data = recv(&mut reader, &mut transcript).await;
+                            if data == "." {
+                                break;
+                            }
+                        }
+                        send(&mut writer, &mut transcript, "250 queued").await;
+                    } else if up == "QUIT" {
+                        send(&mut writer, &mut transcript, "221 bye").await;
+                        break;
+                    } else if up == "RSET" || up == "NOOP" {
+                        send(&mut writer, &mut transcript, "250 OK").await;
+                    } else {
+                        send(&mut writer, &mut transcript, "502 unimplemented").await;
+                    }
+                }
+                let _ = authenticated;
+                transcript
+            });
+            (addr, handle)
+        }
+
+        fn test_config<'a>(
+            port: i64,
+            username: Option<&'a str>,
+            password: Option<&'a str>,
+            recipients: &'a [String],
+        ) -> EmailConfig<'a> {
+            EmailConfig {
+                host: "127.0.0.1",
+                port,
+                username,
+                password,
+                use_tls: false,
+                use_ssl: false,
+                from_email: Some("noreply@example.com"),
+                recipients,
+            }
+        }
+
+        #[tokio::test]
+        async fn conversation_login_success() {
+            let to = ["probe@example.com".to_owned()];
+            let (addr, server) = run_fake_smtp(FakeSmtp {
+                extensions: vec!["AUTH LOGIN".to_owned()],
+                expect_user: "mailer".to_owned(),
+                expect_password: "s3cret".to_owned(),
+                reject_plain: false,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(test_config(
+                addr.port() as i64,
+                Some("mailer"),
+                Some("s3cret"),
+                &to,
+            ))
+            .await;
+            assert_eq!(result, Ok(()));
+            let transcript = server.await.unwrap();
+            // `auth_login(None)` answers the username up front.
+            assert!(
+                transcript.iter().any(|l| l == "C: AUTH LOGIN bWFpbGVy"),
+                "transcript: {transcript:?}"
+            );
+            assert!(
+                transcript.iter().any(|l| l == "C: czNjcmV0"),
+                "transcript: {transcript:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn conversation_plain_falls_back_to_login() {
+            // The scratch stub shape: PLAIN advertised but unimplemented,
+            // LOGIN working. smtplib tries PLAIN first, eats the 535-class
+            // refusal, and succeeds over LOGIN.
+            let to = ["probe@example.com".to_owned()];
+            let (addr, server) = run_fake_smtp(FakeSmtp {
+                extensions: vec!["AUTH LOGIN PLAIN".to_owned()],
+                expect_user: "mailer".to_owned(),
+                expect_password: "s3cret".to_owned(),
+                reject_plain: true,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(test_config(
+                addr.port() as i64,
+                Some("mailer"),
+                Some("s3cret"),
+                &to,
+            ))
+            .await;
+            assert_eq!(result, Ok(()));
+            let transcript = server.await.unwrap();
+            assert!(
+                transcript.iter().any(|l| l.starts_with("C: AUTH PLAIN ")),
+                "transcript: {transcript:?}"
+            );
+            assert!(
+                transcript.iter().any(|l| l.starts_with("C: AUTH LOGIN")),
+                "transcript: {transcript:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn conversation_bad_password_is_auth_error() {
+            let to = ["probe@example.com".to_owned()];
+            let (addr, _server) = run_fake_smtp(FakeSmtp {
+                extensions: vec!["AUTH LOGIN PLAIN".to_owned()],
+                expect_user: "mailer".to_owned(),
+                expect_password: "right".to_owned(),
+                reject_plain: false,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(test_config(
+                addr.port() as i64,
+                Some("mailer"),
+                Some("wrong"),
+                &to,
+            ))
+            .await;
+            assert_eq!(result, Err(MailError::Auth));
+        }
+
+        #[tokio::test]
+        async fn conversation_refused_recipient() {
+            let to = ["nobody@example.com".to_owned()];
+            let (addr, _server) = run_fake_smtp(FakeSmtp {
+                extensions: vec!["AUTH LOGIN".to_owned()],
+                expect_user: "mailer".to_owned(),
+                expect_password: "s3cret".to_owned(),
+                reject_plain: false,
+                rcpt_code: 550,
+            })
+            .await;
+            let result = send_test_email(test_config(
+                addr.port() as i64,
+                Some("mailer"),
+                Some("s3cret"),
+                &to,
+            ))
+            .await;
+            assert_eq!(result, Err(MailError::RecipientsRefused));
+        }
+
+        /// PIDASHCONV-1366: an empty host dials `localhost` (`smtp.py:33`),
+        /// so a local sink answers and the send succeeds. Pre-fix this
+        /// failed resolving `""` (`MailError::Failed`).
+        #[tokio::test]
+        async fn empty_host_falls_back_to_localhost() {
+            let to = ["probe@example.com".to_owned()];
+            let (addr, server) = run_fake_smtp(FakeSmtp {
+                extensions: vec![],
+                expect_user: String::new(),
+                expect_password: String::new(),
+                reject_plain: false,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(EmailConfig {
+                host: "",
+                port: i64::from(addr.port()),
+                username: None,
+                password: None,
+                use_tls: false,
+                use_ssl: false,
+                from_email: Some("noreply@example.com"),
+                recipients: &to,
+            })
+            .await;
+            assert_eq!(result, Ok(()));
+            server.await.unwrap();
+        }
+
+        /// PIDASHCONV-1366: an empty from address sends as
+        /// `webmaster@localhost` (`message.py:239`). Pre-fix the envelope
+        /// was `MAIL FROM:<>` with an empty `From:` header.
+        #[tokio::test]
+        async fn empty_from_uses_default_sender() {
+            let to = ["probe@example.com".to_owned()];
+            let (addr, server) = run_fake_smtp(FakeSmtp {
+                extensions: vec![],
+                expect_user: String::new(),
+                expect_password: String::new(),
+                reject_plain: false,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(EmailConfig {
+                host: "127.0.0.1",
+                port: i64::from(addr.port()),
+                username: None,
+                password: None,
+                use_tls: false,
+                use_ssl: false,
+                from_email: Some(""),
+                recipients: &to,
+            })
+            .await;
+            assert_eq!(result, Ok(()));
+            let transcript = server.await.unwrap();
+            assert!(
+                transcript
+                    .iter()
+                    .any(|l| l == "C: MAIL FROM:<webmaster@localhost>"),
+                "transcript: {transcript:?}"
+            );
+        }
+
+        #[test]
+        fn io_kinds_map_like_builtin_exceptions() {
+            use std::io::ErrorKind;
+            assert_eq!(map_io(ErrorKind::TimedOut.into()), MailError::Timeout);
+            for kind in [
+                ErrorKind::ConnectionRefused,
+                ErrorKind::ConnectionReset,
+                ErrorKind::ConnectionAborted,
+                ErrorKind::BrokenPipe,
+            ] {
+                assert_eq!(map_io(kind.into()), MailError::Network);
+            }
+            assert_eq!(map_io(ErrorKind::HostUnreachable.into()), MailError::Failed);
+            // Reply reads absorb everything into disconnects (`getreply`).
+            assert_eq!(
+                map_read(ErrorKind::TimedOut.into()),
+                MailError::ServerDisconnected
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InstanceWorkSpaceAvailabilityCheckEndpoint + InstanceWorkSpaceEndpoint
+// ---------------------------------------------------------------------------
+
+/// `GET workspace-slug-check/` (`workspace.py:19-32`).
+async fn workspace_slug_check(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+) -> Response {
+    if let Err(denial) = require_admin(&state, extension).await {
+        return denial.into_response();
+    }
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    // `slug = request.GET.get("slug", False)`; missing or empty is 400
+    // (`workspace.py:23-29`).
+    let slug = query_last(&query, "slug").unwrap_or_default();
+    if slug.is_empty() {
+        return Denial::BadError("Workspace Slug is required".to_owned()).into_response();
+    }
+    // `filter(slug__iexact=slug).exists() or slug in
+    // RESTRICTED_WORKSPACE_SLUGS`: the membership test is a case-sensitive
+    // Python `in` on the list. A store failure escapes to the base 500
+    // (no `try` in the view).
+    let exists = match slug_exists(&pool, &slug).await {
+        Ok(exists) => exists,
+        Err(denial) => return denial.into_response(),
+    };
+    let restricted = pidash_types::license::serializers_workspace::RESTRICTED_WORKSPACE_SLUGS
+        .contains(&slug.as_str());
+    json_response(serde_json::json!({"status": !(exists || restricted)}))
+}
+
+async fn slug_exists(pool: &sqlx::PgPool, slug: &str) -> Result<bool, Denial> {
+    // A `NUL` byte can never match a stored slug (every stored slug
+    // passed the regex at creation), and the driver cannot bind one —
+    // Django's probes answer `False` here, so short-circuit identically.
+    if slug.contains('\0') {
+        return Ok(false);
+    }
+    let row: Option<(i32,)> = sqlx::query_as(
+        r#"SELECT 1 FROM "workspaces"
+           WHERE "workspaces"."deleted_at" IS NULL
+             AND UPPER("workspaces"."slug"::text) = UPPER($1)"#,
+    )
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(row.is_some())
+}
+
+/// `GET workspaces/` (`workspace.py:40-69`).
+async fn list_workspaces(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+) -> Response {
+    let actor = match require_admin(&state, extension).await {
+        Ok(actor) => actor,
+        Err(denial) => return denial.into_response(),
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    // `paginate(..., default_per_page=10, max_per_page=10)`; per-page and
+    // cursor failures are DRF `ParseError` 400s with `detail` bodies.
+    let per_page = match crate::paginator::parse_per_page(
+        query_last(&query, "per_page").as_deref(),
+        pidash_db::license::queries::WORKSPACE_DEFAULT_PER_PAGE,
+        pidash_db::license::queries::WORKSPACE_MAX_PER_PAGE,
+    ) {
+        Ok(n) => n,
+        Err(err) => return Denial::BadDetail(err.detail()).into_response(),
+    };
+    if per_page <= 0 {
+        // `max_hits` divides by the limit (`ZeroDivisionError` at 0);
+        // negative limits slice with a negative bound (`ValueError`).
+        // Both escape the view into the base 500.
+        return Denial::ServerError.into_response();
+    }
+    let default_cursor = format!("{per_page}:0:0");
+    let cursor_raw = query_last(&query, "cursor").unwrap_or(default_cursor);
+    let cursor = match crate::paginator::Cursor::from_string(&cursor_raw) {
+        Ok(cursor) => cursor,
+        Err(err) => return Denial::BadDetail(err.detail()).into_response(),
+    };
+    let page = cursor.offset;
+    let offset = page.saturating_mul(per_page);
+    if offset < 0 {
+        // `BadPaginationError("Pagination offset cannot be negative")`.
+        return Denial::BadDetail("Error in parsing".to_owned()).into_response();
+    }
+    // `search = request.query_params.get("search", None)`; empty means no
+    // filter (`if search:`, `workspace.py:59-61`).
+    let search = match query_last(&query, "search") {
+        Some(term) if !term.is_empty() => Some(term),
+        _ => None,
+    };
+    // `total_count` is the filtered `COUNT(*)` (a second query, exactly
+    // like `queryset.count()` in `get_result`).
+    let total: i64 = match workspace_total_count(&pool, search.as_deref()).await {
+        Ok(total) => total,
+        Err(denial) => return denial.into_response(),
+    };
+    let (rows, has_more) = match pidash_db::license::queries::fetch_workspace_page(
+        &pool,
+        search.as_deref(),
+        page,
+        per_page,
+    )
+    .await
+    {
+        Ok(page) => page,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let total_pages = match crate::paginator::max_hits(total, per_page) {
+        Ok(pages) => pages,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let next = crate::paginator::next_cursor(per_page, page, has_more).to_string();
+    let prev = crate::paginator::prev_cursor(per_page, page).to_string();
+    let mut results = Vec::with_capacity(rows.len());
+    for row in &rows {
+        match render_workspace_row(&pool, row, &actor).await {
+            Ok(value) => results.push(value),
+            Err(denial) => return denial.into_response(),
+        }
+    }
+    let envelope = crate::paginator::PageResponse {
+        grouped_by: None,
+        sub_grouped_by: None,
+        total_count: total,
+        next_cursor: next,
+        prev_cursor: prev,
+        next_page_results: has_more,
+        prev_page_results: page > 0,
+        count: results.len(),
+        total_pages,
+        total_results: total,
+        extra_stats: None,
+        results,
+    };
+    json_response(envelope.to_json_value())
+}
+
+async fn workspace_total_count(pool: &sqlx::PgPool, search: Option<&str>) -> Result<i64, Denial> {
+    let (sql, param): (String, Option<String>) = match search {
+        Some(term) => (
+            "SELECT COUNT(*) FROM \"workspaces\" WHERE (\"workspaces\".\"deleted_at\" IS NULL AND UPPER(\"workspaces\".\"name\"::text) LIKE UPPER($1))".to_owned(),
+            Some(pidash_db::license::queries::icontains_param(term)),
+        ),
+        None => (
+            "SELECT COUNT(*) FROM \"workspaces\" WHERE \"workspaces\".\"deleted_at\" IS NULL".to_owned(),
+            None,
+        ),
+    };
+    let mut query = sqlx::query_as::<_, (i64,)>(&sql);
+    if let Some(param) = param {
+        query = query.bind(param);
+    }
+    query
+        .fetch_one(pool)
+        .await
+        .map(|row| row.0)
+        .map_err(|_| Denial::ServerError)
+}
+
+/// One annotated list row through `WorkspaceSerializer` (read path):
+/// `owner` nests the row's user, `logo_url` is the model property,
+/// `total_projects`/`total_members` come from the annotations.
+async fn render_workspace_row(
+    pool: &sqlx::PgPool,
+    row: &pidash_db::license::queries::WorkspaceListRow,
+    actor: &Actor,
+) -> Result<Value, Denial> {
+    let owner: Option<(uuid::Uuid, Option<String>, String, String)> =
+        sqlx::query_as(r#"SELECT id, email, first_name, last_name FROM users WHERE id = $1"#)
+            .bind(row.owner_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    let Some((owner_id, owner_email, first_name, last_name)) = owner else {
+        // The FK is non-nullable; a missing owner row cannot render.
+        return Err(Denial::ServerError);
+    };
+    let resolved_logo_url =
+        workspace_logo_url(pool, row.logo_asset_id, row.logo.as_deref()).await?;
+    let skip_logo_url = matches!(resolved_logo_url, AssetUrl::Skip);
+    let logo_url = match resolved_logo_url {
+        AssetUrl::Present(url) => url,
+        AssetUrl::Skip => None,
+    };
+    let view = pidash_types::license::serializers_workspace::Workspace {
+        id: row.id.to_string(),
+        owner: pidash_types::license::serializers_workspace::UserLite {
+            id: owner_id.to_string(),
+            email: owner_email,
+            first_name,
+            last_name,
+        },
+        logo_url,
+        total_projects: Some(Some(row.total_projects)),
+        total_members: Some(Some(row.total_members)),
+        created_at: crate::serializer::render_datetime_in(&row.created_at, &actor.timezone),
+        updated_at: crate::serializer::render_datetime_in(&row.updated_at, &actor.timezone),
+        deleted_at: row
+            .deleted_at
+            .as_ref()
+            .map(|dt| crate::serializer::render_datetime_in(dt, &actor.timezone)),
+        name: row.name.clone(),
+        logo: row.logo.clone(),
+        slug: row.slug.clone(),
+        organization_size: row.organization_size.clone(),
+        timezone: row.timezone.clone(),
+        background_color: row.background_color.clone(),
+        created_by: row.created_by_id.map(|id| id.to_string()),
+        updated_by: row.updated_by_id.map(|id| id.to_string()),
+        logo_asset: row.logo_asset_id.map(|id| id.to_string()),
+    };
+    let mut body = serde_json::to_value(&view).map_err(|_| Denial::ServerError)?;
+    if skip_logo_url {
+        // DRF `SkipField`: the key is omitted, not nulled.
+        if let Some(object) = body.as_object_mut() {
+            object.remove("logo_url");
+        }
+    }
+    Ok(body)
+}
+
+/// `Workspace.logo_url` (`db/models/workspace.py:145-154`): the
+/// `logo_asset` row resolved *unscoped* — the forward-FK descriptor reads
+/// through `_base_manager`, so a soft-deleted asset still renders — feeds
+/// [`file_asset_url`]; only a NULL FK falls back to `logo` when set, else
+/// `None`. A dangling FK (row gone; FK-unreachable in practice) raises
+/// `RelatedObjectDoesNotExist`, which DRF's `get_attribute` catches as
+/// `ObjectDoesNotExist` and renders as null.
+async fn workspace_logo_url(
+    pool: &sqlx::PgPool,
+    logo_asset_id: Option<uuid::Uuid>,
+    logo: Option<&str>,
+) -> Result<AssetUrl, Denial> {
+    let fallback = || AssetUrl::Present(logo.filter(|logo| !logo.is_empty()).map(str::to_owned));
+    let Some(asset_id) = logo_asset_id else {
+        return Ok(fallback());
+    };
+    // `(id, entity_type, workspace_id, project_id, issue_id)`, unscoped.
+    type AssetRow = (
+        uuid::Uuid,
+        Option<String>,
+        Option<uuid::Uuid>,
+        Option<uuid::Uuid>,
+        Option<uuid::Uuid>,
+    );
+    let asset: Option<AssetRow> =
+        sqlx::query_as(r#"SELECT id, entity_type, workspace_id, project_id, issue_id FROM file_assets WHERE id = $1"#)
+            .bind(asset_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    let Some((id, entity_type, workspace_id, project_id, issue_id)) = asset else {
+        return Ok(AssetUrl::Present(None));
+    };
+    let slug = match workspace_id {
+        None => None,
+        Some(workspace_id) => asset_workspace_slug(pool, workspace_id).await?,
+    };
+    Ok(file_asset_url(
+        &id,
+        entity_type.as_deref(),
+        workspace_id.as_ref(),
+        project_id.as_ref(),
+        issue_id.as_ref(),
+        slug.as_deref(),
+    ))
+}
+
+async fn asset_workspace_slug(
+    pool: &sqlx::PgPool,
+    workspace_id: uuid::Uuid,
+) -> Result<Option<String>, Denial> {
+    // Unscoped, like the forward-FK descriptor; a missing row is the
+    // `RelatedObjectDoesNotExist` path (null at the caller).
+    let row: Option<(String,)> = sqlx::query_as(r#"SELECT slug FROM workspaces WHERE id = $1"#)
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(|row| row.0))
+}
+
+// ---------------------------------------------------------------------------
+// InstanceWorkSpaceEndpoint.post
+// ---------------------------------------------------------------------------
+
+/// Field-validated workspace input (`WorkspaceSerializer` write path,
+/// `workspace.py:73-98`). `is_valid(raise_exception=True)` raises a DRF
+/// `ValidationError` on any field error; the app-base `handle_exception`
+/// delegates to DRF first (`super().handle_exception(exc)`), so the
+/// response is the raw detail dict — every failing field in serializer
+/// field order, every message in validator order — which makes the
+/// trailing per-field-list return (`workspace.py:100-103`) dead code.
+struct ValidatedWorkspace {
+    name: String,
+    logo: Option<String>,
+    logo_asset: Option<uuid::Uuid>,
+    slug: String,
+    organization_size: Option<String>,
+    timezone: String,
+    background_color: String,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// One serializer error dict: `(field, messages)` in field order.
+type FieldErrors = Vec<(String, Vec<String>)>;
+
+fn field_error(errors: &mut FieldErrors, field: &str, message: &str) {
+    if let Some(entry) = errors.iter_mut().find(|(name, _)| name == field) {
+        entry.1.push(message.to_owned());
+    } else {
+        errors.push((field.to_owned(), vec![message.to_owned()]));
+    }
+}
+
+fn detail_response(errors: &FieldErrors) -> Response {
+    let mut map = serde_json::Map::with_capacity(errors.len());
+    for (field, messages) in errors {
+        map.insert(
+            field.clone(),
+            Value::Array(messages.iter().map(|m| Value::String(m.clone())).collect()),
+        );
+    }
+    Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(
+            serde_json::to_string(&map).expect("detail dict serializes"),
+        ))
+        .expect("400 detail response")
+}
+
+/// `POST workspaces/` (`workspace.py:71-110`).
+async fn create_workspace(
+    State(state): State<AppState>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let actor = match require_admin(&state, extension).await {
+        Ok(actor) => actor,
+        Err(denial) => return denial.into_response(),
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    // `request.data.get(...)`: a non-object body has no `.get`
+    // (`AttributeError` -> base 500).
+    let data = match decode_json_body(&headers, &body, state.settings().file_size_limit) {
+        Ok(data) => data,
+        Err(denial) => return denial.into_response(),
+    };
+    if data.object().is_none() {
+        return Denial::ServerError.into_response();
+    }
+    // `if not name or not slug` (`workspace.py:78-82`).
+    let name_raw = data.field("name");
+    let slug_raw = data.field("slug");
+    if !json_truthy(name_raw) || !json_truthy(slug_raw) {
+        return Denial::BadError("Both name and slug are required".to_owned()).into_response();
+    }
+    // `len(name) > 80 or len(slug) > 48` (`workspace.py:84-88`).
+    // `len()` over a non-sized value (`int`, `bool`, `float`) raises
+    // `TypeError` into the base 500; lists/dicts take `len()` normally.
+    let name_len = match json_len(name_raw) {
+        Some(len) => len,
+        None => return Denial::ServerError.into_response(),
+    };
+    let slug_len = match json_len(slug_raw) {
+        Some(len) => len,
+        None => return Denial::ServerError.into_response(),
+    };
+    if name_len > 80 || slug_len > 48 {
+        return Denial::BadError("The maximum length for name is 80 and for slug is 48".to_owned())
+            .into_response();
+    }
+    // Serializer validation (`is_valid(raise_exception=True)`): a DRF
+    // `ValidationError` answers the raw detail dict.
+    let validated = match validate_workspace_input(&pool, &data, actor.timezone).await {
+        Ok(validated) => validated,
+        Err(ValidationFailure::Detail(errors)) => return detail_response(&errors),
+        Err(ValidationFailure::Store) => return Denial::ServerError.into_response(),
+    };
+    // `serializer.save(owner=request.user)`: `created_by` is stamped from
+    // the request user (`BaseModel.save` via crum); `updated_by` stays
+    // `None` on insert.
+    let workspace_id = uuid::Uuid::new_v4();
+    let created_at = chrono::Utc::now();
+    let updated_at = chrono::Utc::now();
+    let insert = pidash_services::domain::workspaces::create(
+        &pool,
+        &pidash_services::domain::workspaces::NewWorkspace {
+            id: workspace_id,
+            name: &validated.name,
+            slug: &validated.slug,
+            owner_id: actor.id,
+            created_by: Some(actor.id),
+            logo: validated.logo.as_deref(),
+            logo_asset_id: validated.logo_asset,
+            organization_size: validated.organization_size.as_deref(),
+            timezone: &validated.timezone,
+            background_color: &validated.background_color,
+            deleted_at: validated.deleted_at,
+            created_at,
+            updated_at,
+            seed_created_by: Some(actor.id),
+        },
+    )
+    .await;
+    match insert {
+        Ok(_) => {}
+        Err(err) => {
+            // `except IntegrityError: if "already exists" in str(e)` —
+            // the driver's string carries the `Key (...) already exists.`
+            // DETAIL on every unique violation, so 23505 is the 409
+            // branch and anything else falls through to 500 (BUG-3).
+            if is_unique_violation(&err) {
+                return Denial::Conflict(
+                    "slug".to_owned(),
+                    "The workspace with the slug already exists".to_owned(),
+                )
+                .into_response();
+            }
+            return Denial::ServerError.into_response();
+        }
+    }
+    // `WorkspaceMember.objects.create(workspace_id, member=user, role=20,
+    // company_role=...)`: model `JSONField` defaults apply Python-side.
+    let company_role = company_role_value(data.field("company_role"));
+    let member_now = chrono::Utc::now();
+    let member_view_props = default_view_props();
+    let member_issue_props = default_issue_props();
+    let member_result = pidash_services::domain::workspaces::members::add(
+        &pool,
+        &pidash_services::domain::workspaces::members::NewMember {
+            workspace_id,
+            user_id: Some(actor.id),
+            role: 20,
+            company_role: company_role.as_deref(),
+            created_by: Some(actor.id),
+            view_props: &member_view_props,
+            default_props: &member_view_props,
+            issue_props: &member_issue_props,
+            now: member_now,
+            ignore_conflicts: false,
+            db_now: false,
+        },
+    )
+    .await;
+    if let Err(err) = member_result {
+        // Same `except IntegrityError` as the workspace row: a unique
+        // violation answers the slug 409 as written, anything else
+        // falls off the block into the base 500.
+        if is_unique_violation(&err) {
+            return Denial::Conflict(
+                "slug".to_owned(),
+                "The workspace with the slug already exists".to_owned(),
+            )
+            .into_response();
+        }
+        return Denial::ServerError.into_response();
+    }
+    // `Response(serializer.data, 201)`: annotations are absent on a fresh
+    // row, so `total_projects`/`total_members` are skipped, exactly like
+    // DRF's `SkipField`. `logo_url` renders through the model property,
+    // resolving the just-validated `logo_asset` like the list path.
+    let resolved_logo_url =
+        match workspace_logo_url(&pool, validated.logo_asset, validated.logo.as_deref()).await {
+            Ok(resolved) => resolved,
+            Err(denial) => return denial.into_response(),
+        };
+    let skip_logo_url = matches!(resolved_logo_url, AssetUrl::Skip);
+    let logo_url = match resolved_logo_url {
+        AssetUrl::Present(url) => url,
+        AssetUrl::Skip => None,
+    };
+    let view = pidash_types::license::serializers_workspace::Workspace {
+        id: workspace_id.to_string(),
+        owner: pidash_types::license::serializers_workspace::UserLite {
+            id: actor.id.to_string(),
+            email: actor.email.clone(),
+            first_name: actor.first_name.clone(),
+            last_name: actor.last_name.clone(),
+        },
+        logo_url,
+        total_projects: None,
+        total_members: None,
+        created_at: crate::serializer::render_datetime_in(&created_at, &actor.timezone),
+        updated_at: crate::serializer::render_datetime_in(&updated_at, &actor.timezone),
+        deleted_at: validated
+            .deleted_at
+            .as_ref()
+            .map(|stamp| crate::serializer::render_datetime_in(stamp, &actor.timezone)),
+        name: validated.name,
+        logo: validated.logo,
+        slug: validated.slug,
+        organization_size: validated.organization_size,
+        timezone: validated.timezone,
+        background_color: validated.background_color,
+        created_by: Some(actor.id.to_string()),
+        updated_by: None,
+        logo_asset: validated.logo_asset.map(|id| id.to_string()),
+    };
+    // `to_value` keeps declaration order (`preserve_order`), so this matches
+    // the direct serialization byte for byte when nothing is skipped.
+    let mut body_value = serde_json::to_value(&view).expect("workspace view serializes");
+    if skip_logo_url {
+        // DRF `SkipField`: the key is omitted, not nulled.
+        if let Some(object) = body_value.as_object_mut() {
+            object.remove("logo_url");
+        }
+    }
+    let body = serde_json::to_string(&body_value).expect("workspace view serializes");
+    Response::builder()
+        .status(StatusCode::CREATED)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(body))
+        .expect("201 workspace response")
+}
+
+/// Python `len()` over a JSON body value (`workspace.py:84`): strings
+/// count code points, arrays/objects count items, everything else raises
+/// `TypeError`.
+/// `len()` over a body value: strings count chars, containers count
+/// members, anything else (`int`, `bool`, `float`, missing) raises
+/// `TypeError` (`None`). An uploaded file takes `len()` normally — its
+/// size in bytes (probed).
+fn json_len(found: BodyField<'_>) -> Option<usize> {
+    let value = match found {
+        BodyField::File(file) => return Some(file.size),
+        BodyField::Json(value) => Some(value),
+        BodyField::Missing => None,
+    };
+    match value {
+        Some(Value::String(s)) => Some(s.chars().count()),
+        Some(Value::Array(items)) => Some(items.len()),
+        Some(Value::Object(map)) => Some(map.len()),
+        _ => None,
+    }
+}
+
+/// `request.data.get("company_role", "")` into `CharField`: missing
+/// keys store `""`, strings store verbatim (no serializer strips a
+/// non-field), `None` stores `NULL`; everything else goes through
+/// `CharField.to_python`, which is `str(value)` (`fields/__init__.py`):
+/// `True` -> `"True"`, numbers plainly, composites as Python `repr`
+/// (`str([1]) == "[1]"`) — never a 500.
+fn company_role_value(found: BodyField<'_>) -> Option<String> {
+    let raw = match found {
+        // The ORM stringifies the file for the `text` column (probed).
+        BodyField::File(file) => return Some(file.filename.clone()),
+        BodyField::Json(value) => Some(value),
+        BodyField::Missing => None,
+    };
+    match raw {
+        None => Some(String::new()),
+        Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Bool(true)) => Some("True".to_owned()),
+        Some(Value::Bool(false)) => Some("False".to_owned()),
+        Some(Value::Number(n)) => Some(py_number_str(n)),
+        Some(value @ (Value::Array(_) | Value::Object(_))) => Some(py_repr(value)),
+    }
+}
+
+/// `get_default_props()` (`db/models/workspace.py:22-60`): the
+/// `view_props`/`default_props` content stamped Python-side on create.
+fn default_view_props() -> Value {
+    serde_json::json!({
+        "filters": {
+            "priority": null,
+            "state": null,
+            "state_group": null,
+            "assignees": null,
+            "created_by": null,
+            "labels": null,
+            "start_date": null,
+            "target_date": null,
+            "subscriber": null
+        },
+        "display_filters": {
+            "group_by": null,
+            "order_by": "-created_at",
+            "type": null,
+            "sub_issue": true,
+            "show_empty_groups": true,
+            "layout": "list",
+            "calendar_date_range": ""
+        },
+        "display_properties": {
+            "assignee": true,
+            "attachment_count": true,
+            "created_on": true,
+            "due_date": true,
+            "estimate": true,
+            "key": true,
+            "labels": true,
+            "link": true,
+            "priority": true,
+            "start_date": true,
+            "state": true,
+            "sub_issue_count": true,
+            "updated_on": true
+        }
+    })
+}
+
+/// `get_issue_props()` (`db/models/workspace.py:110-111`).
+fn default_issue_props() -> Value {
+    serde_json::json!({
+        "subscribed": true,
+        "assigned": true,
+        "created": true,
+        "all_issues": true
+    })
+}
+
+/// `"#" + random.choices(string.hexdigits, k=6)`
+/// (`utils/color.py:9-13`): mixed-case hex, randomness unobservable past
+/// the response. A splitmix64 stream seeded from the clock; no new
+/// dependencies for six hex digits.
+fn random_background_color() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9e3779b97f4a7c15);
+    let mut state =
+        nanos.wrapping_add((std::process::id() as u64).wrapping_mul(0x9e3779b97f4a7c15));
+    const HEXDIGITS: &[u8; 22] = b"0123456789abcdefABCDEF";
+    let mut hex = String::with_capacity(6);
+    for _ in 0..6 {
+        state = splitmix64(state);
+        let digit = HEXDIGITS[(state >> 33) as usize % HEXDIGITS.len()];
+        hex.push(digit as char);
+    }
+    format!("#{hex}")
+}
+
+fn splitmix64(mut state: u64) -> u64 {
+    state = state.wrapping_add(0x9e3779b97f4a7c15);
+    let mut z = state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    z ^ (z >> 31)
+}
+
+/// `TIMEZONE_CHOICES` (`db/models/workspace.py:139`, `pytz.common_timezones`): DRF rejects anything outside this list with `"<v>" is not a valid choice.`.
+pub const WORKSPACE_TIMEZONES: &[&str] = &[
+    "Africa/Abidjan",
+    "Africa/Accra",
+    "Africa/Addis_Ababa",
+    "Africa/Algiers",
+    "Africa/Asmara",
+    "Africa/Bamako",
+    "Africa/Bangui",
+    "Africa/Banjul",
+    "Africa/Bissau",
+    "Africa/Blantyre",
+    "Africa/Brazzaville",
+    "Africa/Bujumbura",
+    "Africa/Cairo",
+    "Africa/Casablanca",
+    "Africa/Ceuta",
+    "Africa/Conakry",
+    "Africa/Dakar",
+    "Africa/Dar_es_Salaam",
+    "Africa/Djibouti",
+    "Africa/Douala",
+    "Africa/El_Aaiun",
+    "Africa/Freetown",
+    "Africa/Gaborone",
+    "Africa/Harare",
+    "Africa/Johannesburg",
+    "Africa/Juba",
+    "Africa/Kampala",
+    "Africa/Khartoum",
+    "Africa/Kigali",
+    "Africa/Kinshasa",
+    "Africa/Lagos",
+    "Africa/Libreville",
+    "Africa/Lome",
+    "Africa/Luanda",
+    "Africa/Lubumbashi",
+    "Africa/Lusaka",
+    "Africa/Malabo",
+    "Africa/Maputo",
+    "Africa/Maseru",
+    "Africa/Mbabane",
+    "Africa/Mogadishu",
+    "Africa/Monrovia",
+    "Africa/Nairobi",
+    "Africa/Ndjamena",
+    "Africa/Niamey",
+    "Africa/Nouakchott",
+    "Africa/Ouagadougou",
+    "Africa/Porto-Novo",
+    "Africa/Sao_Tome",
+    "Africa/Tripoli",
+    "Africa/Tunis",
+    "Africa/Windhoek",
+    "America/Adak",
+    "America/Anchorage",
+    "America/Anguilla",
+    "America/Antigua",
+    "America/Araguaina",
+    "America/Argentina/Buenos_Aires",
+    "America/Argentina/Catamarca",
+    "America/Argentina/Cordoba",
+    "America/Argentina/Jujuy",
+    "America/Argentina/La_Rioja",
+    "America/Argentina/Mendoza",
+    "America/Argentina/Rio_Gallegos",
+    "America/Argentina/Salta",
+    "America/Argentina/San_Juan",
+    "America/Argentina/San_Luis",
+    "America/Argentina/Tucuman",
+    "America/Argentina/Ushuaia",
+    "America/Aruba",
+    "America/Asuncion",
+    "America/Atikokan",
+    "America/Bahia",
+    "America/Bahia_Banderas",
+    "America/Barbados",
+    "America/Belem",
+    "America/Belize",
+    "America/Blanc-Sablon",
+    "America/Boa_Vista",
+    "America/Bogota",
+    "America/Boise",
+    "America/Cambridge_Bay",
+    "America/Campo_Grande",
+    "America/Cancun",
+    "America/Caracas",
+    "America/Cayenne",
+    "America/Cayman",
+    "America/Chicago",
+    "America/Chihuahua",
+    "America/Ciudad_Juarez",
+    "America/Costa_Rica",
+    "America/Creston",
+    "America/Cuiaba",
+    "America/Curacao",
+    "America/Danmarkshavn",
+    "America/Dawson",
+    "America/Dawson_Creek",
+    "America/Denver",
+    "America/Detroit",
+    "America/Dominica",
+    "America/Edmonton",
+    "America/Eirunepe",
+    "America/El_Salvador",
+    "America/Fort_Nelson",
+    "America/Fortaleza",
+    "America/Glace_Bay",
+    "America/Goose_Bay",
+    "America/Grand_Turk",
+    "America/Grenada",
+    "America/Guadeloupe",
+    "America/Guatemala",
+    "America/Guayaquil",
+    "America/Guyana",
+    "America/Halifax",
+    "America/Havana",
+    "America/Hermosillo",
+    "America/Indiana/Indianapolis",
+    "America/Indiana/Knox",
+    "America/Indiana/Marengo",
+    "America/Indiana/Petersburg",
+    "America/Indiana/Tell_City",
+    "America/Indiana/Vevay",
+    "America/Indiana/Vincennes",
+    "America/Indiana/Winamac",
+    "America/Inuvik",
+    "America/Iqaluit",
+    "America/Jamaica",
+    "America/Juneau",
+    "America/Kentucky/Louisville",
+    "America/Kentucky/Monticello",
+    "America/Kralendijk",
+    "America/La_Paz",
+    "America/Lima",
+    "America/Los_Angeles",
+    "America/Lower_Princes",
+    "America/Maceio",
+    "America/Managua",
+    "America/Manaus",
+    "America/Marigot",
+    "America/Martinique",
+    "America/Matamoros",
+    "America/Mazatlan",
+    "America/Menominee",
+    "America/Merida",
+    "America/Metlakatla",
+    "America/Mexico_City",
+    "America/Miquelon",
+    "America/Moncton",
+    "America/Monterrey",
+    "America/Montevideo",
+    "America/Montserrat",
+    "America/Nassau",
+    "America/New_York",
+    "America/Nome",
+    "America/Noronha",
+    "America/North_Dakota/Beulah",
+    "America/North_Dakota/Center",
+    "America/North_Dakota/New_Salem",
+    "America/Nuuk",
+    "America/Ojinaga",
+    "America/Panama",
+    "America/Paramaribo",
+    "America/Phoenix",
+    "America/Port-au-Prince",
+    "America/Port_of_Spain",
+    "America/Porto_Velho",
+    "America/Puerto_Rico",
+    "America/Punta_Arenas",
+    "America/Rankin_Inlet",
+    "America/Recife",
+    "America/Regina",
+    "America/Resolute",
+    "America/Rio_Branco",
+    "America/Santarem",
+    "America/Santiago",
+    "America/Santo_Domingo",
+    "America/Sao_Paulo",
+    "America/Scoresbysund",
+    "America/Sitka",
+    "America/St_Barthelemy",
+    "America/St_Johns",
+    "America/St_Kitts",
+    "America/St_Lucia",
+    "America/St_Thomas",
+    "America/St_Vincent",
+    "America/Swift_Current",
+    "America/Tegucigalpa",
+    "America/Thule",
+    "America/Tijuana",
+    "America/Toronto",
+    "America/Tortola",
+    "America/Vancouver",
+    "America/Whitehorse",
+    "America/Winnipeg",
+    "America/Yakutat",
+    "Antarctica/Casey",
+    "Antarctica/Davis",
+    "Antarctica/DumontDUrville",
+    "Antarctica/Macquarie",
+    "Antarctica/Mawson",
+    "Antarctica/McMurdo",
+    "Antarctica/Palmer",
+    "Antarctica/Rothera",
+    "Antarctica/Syowa",
+    "Antarctica/Troll",
+    "Antarctica/Vostok",
+    "Arctic/Longyearbyen",
+    "Asia/Aden",
+    "Asia/Almaty",
+    "Asia/Amman",
+    "Asia/Anadyr",
+    "Asia/Aqtau",
+    "Asia/Aqtobe",
+    "Asia/Ashgabat",
+    "Asia/Atyrau",
+    "Asia/Baghdad",
+    "Asia/Bahrain",
+    "Asia/Baku",
+    "Asia/Bangkok",
+    "Asia/Barnaul",
+    "Asia/Beirut",
+    "Asia/Bishkek",
+    "Asia/Brunei",
+    "Asia/Chita",
+    "Asia/Choibalsan",
+    "Asia/Colombo",
+    "Asia/Damascus",
+    "Asia/Dhaka",
+    "Asia/Dili",
+    "Asia/Dubai",
+    "Asia/Dushanbe",
+    "Asia/Famagusta",
+    "Asia/Gaza",
+    "Asia/Hebron",
+    "Asia/Ho_Chi_Minh",
+    "Asia/Hong_Kong",
+    "Asia/Hovd",
+    "Asia/Irkutsk",
+    "Asia/Jakarta",
+    "Asia/Jayapura",
+    "Asia/Jerusalem",
+    "Asia/Kabul",
+    "Asia/Kamchatka",
+    "Asia/Karachi",
+    "Asia/Kathmandu",
+    "Asia/Khandyga",
+    "Asia/Kolkata",
+    "Asia/Krasnoyarsk",
+    "Asia/Kuala_Lumpur",
+    "Asia/Kuching",
+    "Asia/Kuwait",
+    "Asia/Macau",
+    "Asia/Magadan",
+    "Asia/Makassar",
+    "Asia/Manila",
+    "Asia/Muscat",
+    "Asia/Nicosia",
+    "Asia/Novokuznetsk",
+    "Asia/Novosibirsk",
+    "Asia/Omsk",
+    "Asia/Oral",
+    "Asia/Phnom_Penh",
+    "Asia/Pontianak",
+    "Asia/Pyongyang",
+    "Asia/Qatar",
+    "Asia/Qostanay",
+    "Asia/Qyzylorda",
+    "Asia/Riyadh",
+    "Asia/Sakhalin",
+    "Asia/Samarkand",
+    "Asia/Seoul",
+    "Asia/Shanghai",
+    "Asia/Singapore",
+    "Asia/Srednekolymsk",
+    "Asia/Taipei",
+    "Asia/Tashkent",
+    "Asia/Tbilisi",
+    "Asia/Tehran",
+    "Asia/Thimphu",
+    "Asia/Tokyo",
+    "Asia/Tomsk",
+    "Asia/Ulaanbaatar",
+    "Asia/Urumqi",
+    "Asia/Ust-Nera",
+    "Asia/Vientiane",
+    "Asia/Vladivostok",
+    "Asia/Yakutsk",
+    "Asia/Yangon",
+    "Asia/Yekaterinburg",
+    "Asia/Yerevan",
+    "Atlantic/Azores",
+    "Atlantic/Bermuda",
+    "Atlantic/Canary",
+    "Atlantic/Cape_Verde",
+    "Atlantic/Faroe",
+    "Atlantic/Madeira",
+    "Atlantic/Reykjavik",
+    "Atlantic/South_Georgia",
+    "Atlantic/St_Helena",
+    "Atlantic/Stanley",
+    "Australia/Adelaide",
+    "Australia/Brisbane",
+    "Australia/Broken_Hill",
+    "Australia/Darwin",
+    "Australia/Eucla",
+    "Australia/Hobart",
+    "Australia/Lindeman",
+    "Australia/Lord_Howe",
+    "Australia/Melbourne",
+    "Australia/Perth",
+    "Australia/Sydney",
+    "Canada/Atlantic",
+    "Canada/Central",
+    "Canada/Eastern",
+    "Canada/Mountain",
+    "Canada/Newfoundland",
+    "Canada/Pacific",
+    "Europe/Amsterdam",
+    "Europe/Andorra",
+    "Europe/Astrakhan",
+    "Europe/Athens",
+    "Europe/Belgrade",
+    "Europe/Berlin",
+    "Europe/Bratislava",
+    "Europe/Brussels",
+    "Europe/Bucharest",
+    "Europe/Budapest",
+    "Europe/Busingen",
+    "Europe/Chisinau",
+    "Europe/Copenhagen",
+    "Europe/Dublin",
+    "Europe/Gibraltar",
+    "Europe/Guernsey",
+    "Europe/Helsinki",
+    "Europe/Isle_of_Man",
+    "Europe/Istanbul",
+    "Europe/Jersey",
+    "Europe/Kaliningrad",
+    "Europe/Kirov",
+    "Europe/Kyiv",
+    "Europe/Lisbon",
+    "Europe/Ljubljana",
+    "Europe/London",
+    "Europe/Luxembourg",
+    "Europe/Madrid",
+    "Europe/Malta",
+    "Europe/Mariehamn",
+    "Europe/Minsk",
+    "Europe/Monaco",
+    "Europe/Moscow",
+    "Europe/Oslo",
+    "Europe/Paris",
+    "Europe/Podgorica",
+    "Europe/Prague",
+    "Europe/Riga",
+    "Europe/Rome",
+    "Europe/Samara",
+    "Europe/San_Marino",
+    "Europe/Sarajevo",
+    "Europe/Saratov",
+    "Europe/Simferopol",
+    "Europe/Skopje",
+    "Europe/Sofia",
+    "Europe/Stockholm",
+    "Europe/Tallinn",
+    "Europe/Tirane",
+    "Europe/Ulyanovsk",
+    "Europe/Vaduz",
+    "Europe/Vatican",
+    "Europe/Vienna",
+    "Europe/Vilnius",
+    "Europe/Volgograd",
+    "Europe/Warsaw",
+    "Europe/Zagreb",
+    "Europe/Zurich",
+    "GMT",
+    "Indian/Antananarivo",
+    "Indian/Chagos",
+    "Indian/Christmas",
+    "Indian/Cocos",
+    "Indian/Comoro",
+    "Indian/Kerguelen",
+    "Indian/Mahe",
+    "Indian/Maldives",
+    "Indian/Mauritius",
+    "Indian/Mayotte",
+    "Indian/Reunion",
+    "Pacific/Apia",
+    "Pacific/Auckland",
+    "Pacific/Bougainville",
+    "Pacific/Chatham",
+    "Pacific/Chuuk",
+    "Pacific/Easter",
+    "Pacific/Efate",
+    "Pacific/Fakaofo",
+    "Pacific/Fiji",
+    "Pacific/Funafuti",
+    "Pacific/Galapagos",
+    "Pacific/Gambier",
+    "Pacific/Guadalcanal",
+    "Pacific/Guam",
+    "Pacific/Honolulu",
+    "Pacific/Kanton",
+    "Pacific/Kiritimati",
+    "Pacific/Kosrae",
+    "Pacific/Kwajalein",
+    "Pacific/Majuro",
+    "Pacific/Marquesas",
+    "Pacific/Midway",
+    "Pacific/Nauru",
+    "Pacific/Niue",
+    "Pacific/Norfolk",
+    "Pacific/Noumea",
+    "Pacific/Pago_Pago",
+    "Pacific/Palau",
+    "Pacific/Pitcairn",
+    "Pacific/Pohnpei",
+    "Pacific/Port_Moresby",
+    "Pacific/Rarotonga",
+    "Pacific/Saipan",
+    "Pacific/Tahiti",
+    "Pacific/Tarawa",
+    "Pacific/Tongatapu",
+    "Pacific/Wake",
+    "Pacific/Wallis",
+    "US/Alaska",
+    "US/Arizona",
+    "US/Central",
+    "US/Eastern",
+    "US/Hawaii",
+    "US/Mountain",
+    "US/Pacific",
+    "UTC",
+];
+
+/// Field validation for `POST workspaces/`. Read-only keys and unknown
+/// keys are ignored (read-only fields never enter `_writable_fields`);
+/// `CharField` values trim (`trim_whitespace`) and reject `\0`
+/// (`ProhibitNullCharactersValidator`); failures collapse to the
+/// app-base `ValidationError` body (the trailing per-field return is dead
+/// code). Store failures (the `iexact` probe) are the base 500.
+/// Field validation for `POST workspaces/`, in serializer field order
+/// (`deleted_at`, `name`, `logo`, `logo_asset`, `slug`,
+/// `organization_size`, `timezone`, `background_color`). Read-only and
+/// unknown input keys are ignored. Failures accumulate per field in
+/// validator order and answer the raw detail dict; a store failure
+/// escapes to the base 500.
+/// Validation failure: field detail (400) or a store failure (500).
+enum ValidationFailure {
+    Detail(FieldErrors),
+    Store,
+}
+
+impl From<Denial> for ValidationFailure {
+    fn from(_: Denial) -> Self {
+        ValidationFailure::Store
+    }
+}
+
+async fn validate_workspace_input(
+    pool: &sqlx::PgPool,
+    body: &ParsedBody,
+    request_tz: Tz,
+) -> Result<ValidatedWorkspace, ValidationFailure> {
+    let mut errors: FieldErrors = Vec::new();
+    // `deleted_at` first: DRF validates writable fields in model order
+    // and the audit column precedes the workspace fields
+    // (`db/mixins.py:85`, `serializers/workspace.py:15-41`). Missing and
+    // explicit-`null` both store `NULL` (`required=False` from
+    // `null=True`; `allow_null`).
+    let deleted_at = match body.field("deleted_at") {
+        BodyField::Missing | BodyField::Json(Value::Null) => None,
+        // HTML-form `get_value` on `allow_null`: `''` arrives as `None`
+        // (probed) — unlike JSON `""`, which fails datetime parsing.
+        BodyField::Json(Value::String(text)) if body.is_form() && text.is_empty() => None,
+        BodyField::Json(value) => match super::parse_deleted_at(value, request_tz) {
+            Ok(stamp) => stamp,
+            Err(message) => {
+                field_error(&mut errors, "deleted_at", message);
+                None
+            }
+        },
+        // Files are never datetimes (probed).
+        BodyField::File(_) => {
+            field_error(
+                &mut errors,
+                "deleted_at",
+                crate::app_project::handlers_project::INVALID_DATETIME_MESSAGE,
+            );
+            None
+        }
+    };
+    // `name`: length pre-checked by the view; the field rejects
+    // non-strings (`CharField.invalid`) and blanks/controls.
+    let name = match body.field("name") {
+        BodyField::Json(Value::String(name)) => {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                field_error(&mut errors, "name", "This field may not be blank.");
+                None
+            } else if trimmed.contains('\0') {
+                field_error(&mut errors, "name", "Null characters are not allowed.");
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }
+        _ => {
+            field_error(&mut errors, "name", "Not a valid string.");
+            None
+        }
+    };
+    // `logo`: blankable/nullable text; numerics coerce via `str()`.
+    let logo = match body.field("logo") {
+        BodyField::Missing | BodyField::Json(Value::Null) => None,
+        BodyField::File(_)
+        | BodyField::Json(Value::Bool(_))
+        | BodyField::Json(Value::Array(_))
+        | BodyField::Json(Value::Object(_)) => {
+            field_error(&mut errors, "logo", "Not a valid string.");
+            None
+        }
+        BodyField::Json(Value::Number(n)) => coerced_text(n, "logo", &mut errors),
+        BodyField::Json(Value::String(s)) => trimmed_text(s, "logo", &mut errors, true),
+    };
+    // `logo_asset`: writable `PrimaryKeyRelatedField` over live rows.
+    // The exact empty string clears: `RelatedField.run_validation`
+    // forces `""` to `None` on every path, JSON included
+    // (`relations.py:151-155`), and `allow_null` (from `null=True`)
+    // stores NULL. Only the exact `""`: `" "` still fails below as an
+    // invalid UUID. HTML-form `''` on the nullable FK arrives as `None`
+    // too (probed, same branch as instance `created_by`).
+    let logo_asset = match body.field("logo_asset") {
+        BodyField::Missing | BodyField::Json(Value::Null) => None,
+        BodyField::Json(Value::String(text)) if text.is_empty() => None,
+        BodyField::Json(Value::Bool(_)) => {
+            field_error(
+                &mut errors,
+                "logo_asset",
+                "Incorrect type. Expected pk value, received bool.",
+            );
+            None
+        }
+        BodyField::Json(Value::Number(n)) => asset_by_number(pool, n, &mut errors).await?,
+        BodyField::Json(Value::String(raw)) => asset_by_pk(pool, raw, &mut errors).await?,
+        // The lookup stringifies the file into the message (probed).
+        BodyField::File(file) => asset_by_pk(pool, &file.filename, &mut errors).await?,
+        BodyField::Json(value @ (Value::Array(_) | Value::Object(_))) => {
+            let raw = py_repr(value);
+            asset_by_pk(pool, &raw, &mut errors).await?
+        }
+    };
+    // `slug`: model validators (`slug_validator`, then the `unique=True`
+    // `UniqueValidator` carrying the model's message), then DRF's
+    // (`MaxLength` preempted by the view, null characters, regex), then
+    // the serializer `validate_slug` (`iexact`).
+    let slug = match body.field("slug") {
+        BodyField::Json(Value::String(slug)) => {
+            if slug.trim().is_empty() {
+                field_error(&mut errors, "slug", "This field may not be blank.");
+                None
+            } else {
+                let trimmed = slug.trim().to_owned();
+                let mut valid = true;
+                if pidash_types::license::serializers_workspace::RESTRICTED_WORKSPACE_SLUGS
+                    .contains(&trimmed.as_str())
+                {
+                    field_error(&mut errors, "slug", "Slug is not valid");
+                    valid = false;
+                }
+                if unique_slug_taken(pool, &trimmed).await? {
+                    field_error(
+                        &mut errors,
+                        "slug",
+                        "Workspace with this slug already exists.",
+                    );
+                    valid = false;
+                }
+                if trimmed.contains('\0') {
+                    field_error(&mut errors, "slug", "Null characters are not allowed.");
+                    valid = false;
+                }
+                if !slug_syntax_ok(&trimmed) {
+                    field_error(
+                        &mut errors,
+                        "slug",
+                        "Enter a valid \"slug\" consisting of letters, numbers, underscores or hyphens.",
+                    );
+                    valid = false;
+                }
+                if valid {
+                    if slug_exists(pool, &trimmed).await? {
+                        field_error(&mut errors, "slug", "Slug is already in use");
+                        None
+                    } else {
+                        Some(trimmed)
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+        _ => {
+            // `SlugField.invalid` carries the regex message, not
+            // `CharField`'s: non-strings fail typing as invalid slugs.
+            field_error(
+                &mut errors,
+                "slug",
+                "Enter a valid \"slug\" consisting of letters, numbers, underscores or hyphens.",
+            );
+            None
+        }
+    };
+    // `organization_size`: blankable/nullable, 20 chars.
+    let organization_size = match body.field("organization_size") {
+        BodyField::Missing | BodyField::Json(Value::Null) => None,
+        BodyField::File(_)
+        | BodyField::Json(Value::Bool(_))
+        | BodyField::Json(Value::Array(_))
+        | BodyField::Json(Value::Object(_)) => {
+            field_error(&mut errors, "organization_size", "Not a valid string.");
+            None
+        }
+        BodyField::Json(Value::Number(n)) => coerced_text(n, "organization_size", &mut errors),
+        BodyField::Json(Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.contains('\0') {
+                field_error(
+                    &mut errors,
+                    "organization_size",
+                    "Null characters are not allowed.",
+                );
+                None
+            } else if trimmed.chars().count() > 20 {
+                field_error(
+                    &mut errors,
+                    "organization_size",
+                    "Ensure this field has no more than 20 characters.",
+                );
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }
+    };
+    // `timezone`: a `ChoiceField` — no trimming, no blank gate, no
+    // null-character check; anything outside `TIMEZONE_CHOICES` (compared
+    // as `str(value)`) fails, `None` fails null.
+    let timezone = match body.field("timezone") {
+        BodyField::Missing => Some("UTC".to_owned()),
+        // HTML-form `get_value`: `''` on the defaulted field skips to
+        // the default (probed) — unlike JSON `""`, which is an invalid
+        // choice.
+        BodyField::Json(Value::String(text)) if body.is_form() && text.is_empty() => {
+            Some("UTC".to_owned())
+        }
+        BodyField::Json(Value::Null) => {
+            field_error(&mut errors, "timezone", "This field may not be null.");
+            None
+        }
+        BodyField::Json(value) => check_timezone_value(&json_scalar_string(value), &mut errors),
+        // The choice check stringifies the file (probed).
+        BodyField::File(file) => check_timezone_value(&file.filename, &mut errors),
+    };
+    // `background_color`: default `get_random_color()` when absent.
+    let background_color = match body.field("background_color") {
+        BodyField::Missing => Some(random_background_color()),
+        // HTML-form `get_value`: `''` on the defaulted field skips to
+        // the default (probed) — unlike JSON `""`, which fails blank.
+        BodyField::Json(Value::String(text)) if body.is_form() && text.is_empty() => {
+            Some(random_background_color())
+        }
+        BodyField::Json(Value::Null) => {
+            field_error(
+                &mut errors,
+                "background_color",
+                "This field may not be null.",
+            );
+            None
+        }
+        BodyField::File(_)
+        | BodyField::Json(Value::Bool(_))
+        | BodyField::Json(Value::Array(_))
+        | BodyField::Json(Value::Object(_)) => {
+            field_error(&mut errors, "background_color", "Not a valid string.");
+            None
+        }
+        BodyField::Json(Value::Number(n)) => coerced_text(n, "background_color", &mut errors),
+        BodyField::Json(Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                field_error(
+                    &mut errors,
+                    "background_color",
+                    "This field may not be blank.",
+                );
+                None
+            } else if trimmed.contains('\0') {
+                field_error(
+                    &mut errors,
+                    "background_color",
+                    "Null characters are not allowed.",
+                );
+                None
+            } else if trimmed.chars().count() > 255 {
+                field_error(
+                    &mut errors,
+                    "background_color",
+                    "Ensure this field has no more than 255 characters.",
+                );
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }
+    };
+    if !errors.is_empty() {
+        return Err(ValidationFailure::Detail(errors));
+    }
+    Ok(ValidatedWorkspace {
+        name: name.expect("valid"),
+        logo,
+        logo_asset,
+        slug: slug.expect("valid"),
+        organization_size,
+        timezone: timezone.expect("valid"),
+        background_color: background_color.expect("valid"),
+        deleted_at,
+    })
+}
+
+/// `CharField.to_internal_value` numerics: `str(data)` then trimmed;
+/// controls rejected after.
+fn coerced_text(n: &serde_json::Number, field: &str, errors: &mut FieldErrors) -> Option<String> {
+    trimmed_text(&py_number_str(n), field, errors, false)
+}
+
+/// `ChoiceField` membership over the stringified input: anything
+/// outside `TIMEZONE_CHOICES` fails (compared as `str(value)`).
+fn check_timezone_value(text: &str, errors: &mut FieldErrors) -> Option<String> {
+    if !WORKSPACE_TIMEZONES.contains(&text) {
+        field_error(
+            errors,
+            "timezone",
+            &format!("\"{text}\" is not a valid choice."),
+        );
+        None
+    } else {
+        Some(text.to_owned())
+    }
+}
+
+/// Trimmed text with the null-character gate. `allow_blank` decides
+/// whether `""` stores or fails.
+fn trimmed_text(
+    s: &str,
+    field: &str,
+    errors: &mut FieldErrors,
+    allow_blank: bool,
+) -> Option<String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() && !allow_blank {
+        field_error(errors, field, "This field may not be blank.");
+        return None;
+    }
+    if trimmed.contains('\0') {
+        field_error(errors, field, "Null characters are not allowed.");
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
+/// The `unique=True` `UniqueValidator` (`field_mapping.py`): exact match
+/// over the default (live-rows) manager, carrying the model's message.
+async fn unique_slug_taken(pool: &sqlx::PgPool, slug: &str) -> Result<bool, Denial> {
+    // Same `NUL` short-circuit as `slug_exists`.
+    if slug.contains('\0') {
+        return Ok(false);
+    }
+    let row: Option<(i32,)> = sqlx::query_as(
+        r#"SELECT 1 FROM "workspaces"
+           WHERE "workspaces"."deleted_at" IS NULL AND "workspaces"."slug" = $1"#,
+    )
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(row.is_some())
+}
+
+/// `PrimaryKeyRelatedField` over a numeric: `uuid.UUID(int=i)` is
+/// well-formed for `i` in `[0, 2**128)` (existence probe carrying the
+/// canonical decimal) and fails with the invalid message otherwise;
+/// floats fail the same way carrying `str(value)`. Int-vs-float follows
+/// the token shape, so huge ints never detour through `f64`.
+async fn asset_by_number(
+    pool: &sqlx::PgPool,
+    n: &serde_json::Number,
+    errors: &mut FieldErrors,
+) -> Result<Option<uuid::Uuid>, Denial> {
+    let token = n.to_string();
+    if !token.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') {
+        // Int token: `i128` covers the negatives, `u128` the large
+        // positives; anything wider is out of `UUID(int=…)` range and
+        // fails carrying the token itself (already canonical decimal).
+        if let Ok(v) = token.parse::<i128>() {
+            if v >= 0 {
+                return asset_by_id(
+                    pool,
+                    uuid::Uuid::from_u128(v as u128),
+                    &v.to_string(),
+                    errors,
+                )
+                .await;
+            }
+            return asset_by_pk(pool, &v.to_string(), errors).await;
+        }
+        if let Ok(v) = token.parse::<u128>() {
+            return asset_by_id(pool, uuid::Uuid::from_u128(v), &v.to_string(), errors).await;
+        }
+        return asset_by_pk(pool, &token, errors).await;
+    }
+    // Floats fail `UUID()` with the invalid message carrying `str(value)`.
+    let raw = py_number_str(n);
+    asset_by_pk(pool, &raw, errors).await
+}
+
+async fn asset_by_pk(
+    pool: &sqlx::PgPool,
+    raw: &str,
+    errors: &mut FieldErrors,
+) -> Result<Option<uuid::Uuid>, Denial> {
+    match raw.parse::<uuid::Uuid>() {
+        Ok(id) => asset_by_id(pool, id, raw, errors).await,
+        Err(_) => {
+            field_error(
+                errors,
+                "logo_asset",
+                &format!("\u{201c}{raw}\u{201d} is not a valid UUID."),
+            );
+            Ok(None)
+        }
+    }
+}
+
+async fn asset_by_id(
+    pool: &sqlx::PgPool,
+    id: uuid::Uuid,
+    raw: &str,
+    errors: &mut FieldErrors,
+) -> Result<Option<uuid::Uuid>, Denial> {
+    let exists: Option<(i32,)> =
+        sqlx::query_as(r#"SELECT 1 FROM file_assets WHERE id = $1 AND deleted_at IS NULL"#)
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    if exists.is_none() {
+        field_error(
+            errors,
+            "logo_asset",
+            &format!("Invalid pk \"{raw}\" - object does not exist."),
+        );
+        return Ok(None);
+    }
+    Ok(Some(id))
+}
+
+/// `SlugField` regex `^[-a-zA-Z0-9_]+$` (`fields.py:806`): Python `$`
+/// also matches just before one trailing newline, so exactly one trailing
+/// `\n` is tolerated and anything else non-alphanumeric fails.
+pub fn slug_syntax_ok(slug: &str) -> bool {
+    let body = slug.strip_suffix('\n').unwrap_or(slug);
+    !body.is_empty()
+        && body
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+#[cfg(test)]
+mod handler_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// `to=[receiver_email]` (`configuration.py:174-181`): a string or
+    /// scalar is one recipient, an array or object repr is not a mailbox
+    /// and the handler answers Django's generic 400 without a send.
+    #[test]
+    fn email_recipient_shapes_match_django() {
+        assert_eq!(
+            json_recipient(BodyField::Json(&json!("a@x.test"))),
+            Some("a@x.test".to_owned())
+        );
+        assert_eq!(
+            json_recipient(BodyField::Json(&json!(5))),
+            Some("5".to_owned())
+        );
+        assert_eq!(
+            json_recipient(BodyField::Json(&json!(true))),
+            Some("True".to_owned())
+        );
+        assert_eq!(
+            json_recipient(BodyField::Json(&json!(1.5))),
+            Some("1.5".to_owned())
+        );
+        assert_eq!(json_recipient(BodyField::Json(&json!(["a@x.test"]))), None);
+        assert_eq!(
+            json_recipient(BodyField::Json(&json!({"email": "a@x.test"}))),
+            None
+        );
+        assert_eq!(
+            smtp::MailError::Failed.message(),
+            "Could not send email. Please check your configuration"
+        );
+    }
+
+    #[test]
+    fn py_str_coercion_matches_python() {
+        assert_eq!(py_str_value(BodyField::Missing), "");
+        assert_eq!(py_str_value(BodyField::Json(&json!(null))), "");
+        assert_eq!(
+            py_str_value(BodyField::Json(&json!("  padded  "))),
+            "padded"
+        );
+        assert_eq!(py_str_value(BodyField::Json(&json!(true))), "True");
+        assert_eq!(py_str_value(BodyField::Json(&json!(false))), "False");
+        assert_eq!(py_str_value(BodyField::Json(&json!(587))), "587");
+        assert_eq!(py_str_value(BodyField::Json(&json!(-4))), "-4");
+        assert_eq!(py_str_value(BodyField::Json(&json!(1.5))), "1.5");
+        assert_eq!(
+            py_str_value(BodyField::Json(&json!([1, true, null]))),
+            "[1, True, None]"
+        );
+        assert_eq!(py_str_value(BodyField::Json(&json!({"a": 1}))), "{'a': 1}");
+    }
+
+    #[test]
+    fn py_repr_quoting_matches_python() {
+        assert_eq!(py_repr(&json!("it's")), "\"it's\"");
+        assert_eq!(py_repr(&json!("plain")), "'plain'");
+        assert_eq!(py_repr(&json!("a\nb")), "'a\\nb'");
+        assert_eq!(
+            py_repr(&json!({"k": "v", "n": null})),
+            "{'k': 'v', 'n': None}"
+        );
+    }
+
+    #[test]
+    fn int_parsing_matches_python() {
+        assert_eq!(parse_py_int("587"), Some(587));
+        assert_eq!(parse_py_int("  587  "), Some(587));
+        assert_eq!(parse_py_int("+587"), Some(587));
+        assert_eq!(parse_py_int("-0"), Some(0));
+        assert_eq!(parse_py_int("5_8_7"), Some(587));
+        assert_eq!(parse_py_int(""), None);
+        assert_eq!(parse_py_int("587.0"), None);
+        assert_eq!(parse_py_int("abc"), None);
+        assert_eq!(parse_py_int("_587"), None);
+        assert_eq!(parse_py_int("587_"), None);
+        assert_eq!(parse_py_int("5__87"), None);
+        assert_eq!(parse_py_int("0x10"), None);
+        // Arbitrary precision saturates into the fallthrough, like
+        // `OverflowError` at connect in Python.
+        assert_eq!(parse_py_int("99999999999999999999999"), Some(i64::MAX));
+        assert_eq!(parse_py_int("-99999999999999999999999"), Some(i64::MIN));
+    }
+
+    #[test]
+    fn port_resolution_matches_python() {
+        // `int(str(value).strip())` (`configuration.py:153`): only
+        // strings and ints resolve. `str(True)` is `"True"`,
+        // `str(587.9)` is `"587.9"`, `str(None)` is `"None"` — none
+        // int-parseable, so all three are the generic 400 now (the old
+        // direct-`int()` answers died with BUG-2).
+        use pidash_db::config::ConfigValue;
+        assert_eq!(parse_email_port(&ConfigValue::Int(587)), Some(587));
+        assert_eq!(
+            parse_email_port(&ConfigValue::Str("587".to_owned())),
+            Some(587)
+        );
+        assert_eq!(
+            parse_email_port(&ConfigValue::Str("  2525  ".to_owned())),
+            Some(2525)
+        );
+        assert_eq!(parse_email_port(&ConfigValue::Bool(true)), None);
+        assert_eq!(parse_email_port(&ConfigValue::Bool(false)), None);
+        assert_eq!(parse_email_port(&ConfigValue::Float(587.9)), None);
+        assert_eq!(parse_email_port(&ConfigValue::Null), None);
+        assert_eq!(
+            parse_email_port(&ConfigValue::Str("garbage".to_owned())),
+            None
+        );
+    }
+
+    #[test]
+    fn candidate_strings_fall_back_per_field() {
+        // `candidate()` (`configuration.py:133-143`): missing/null fall
+        // back per field; present strings grade stripped; only the
+        // password treats blank as stored.
+        use serde_json::json;
+        let stored = || Some("stored".to_owned());
+        let body = ParsedBody::json(json!({"EMAIL_HOST": "  candidate  ", "EMAIL_PORT": null}));
+        assert_eq!(
+            candidate_string(&body, "EMAIL_HOST", stored(), false),
+            Some("candidate".to_owned())
+        );
+        assert_eq!(
+            candidate_string(&body, "EMAIL_HOST_USER", stored(), false),
+            stored()
+        );
+        assert_eq!(
+            candidate_string(&body, "EMAIL_PORT", stored(), false),
+            stored()
+        );
+        // An empty non-password grades as given, not stored.
+        let body = ParsedBody::json(json!({"EMAIL_HOST": ""}));
+        assert_eq!(
+            candidate_string(&body, "EMAIL_HOST", stored(), false),
+            Some(String::new())
+        );
+        // A blank password (even whitespace) means stored.
+        for blank in ["", "   "] {
+            let body = ParsedBody::json(json!({"EMAIL_HOST_PASSWORD": blank}));
+            assert_eq!(
+                candidate_string(&body, "EMAIL_HOST_PASSWORD", stored(), true),
+                stored(),
+                "blank password {blank:?}"
+            );
+        }
+        let body = ParsedBody::json(json!({"EMAIL_HOST_PASSWORD": "candidate-secret"}));
+        assert_eq!(
+            candidate_string(&body, "EMAIL_HOST_PASSWORD", stored(), true),
+            Some("candidate-secret".to_owned())
+        );
+    }
+
+    #[test]
+    fn candidate_flags_match_python() {
+        // `_flag_is_enabled` (`configuration.py:89-99`): booleans pass
+        // through, anything else compares `str(value).strip() == "1"`.
+        // Cases mirror the Django coercion table in
+        // `test_email_credentials_check.py::test_flag_and_port_coercions`.
+        use pidash_db::config::ConfigValue;
+        use serde_json::json;
+        let stored_on = ConfigValue::Str("1".to_owned());
+        let stored_off = ConfigValue::Str("0".to_owned());
+        let flag = |body: &ParsedBody, stored: Option<&ConfigValue>| {
+            candidate_flag(body, "EMAIL_USE_TLS", stored)
+        };
+        // JSON booleans pass through, ignoring stored.
+        assert!(flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": true})),
+            Some(&stored_off)
+        ));
+        assert!(!flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": false})),
+            Some(&stored_on)
+        ));
+        // Ints compare as `str()`.
+        assert!(flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": 1})),
+            Some(&stored_off)
+        ));
+        assert!(!flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": 0})),
+            Some(&stored_on)
+        ));
+        // Strings strip, then compare; non-canonical spellings are off.
+        assert!(flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": "1"})),
+            Some(&stored_off)
+        ));
+        assert!(!flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": "0"})),
+            Some(&stored_on)
+        ));
+        assert!(!flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": "true"})),
+            Some(&stored_on)
+        ));
+        assert!(!flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": "True"})),
+            Some(&stored_on)
+        ));
+        assert!(flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": " 1 "})),
+            Some(&stored_off)
+        ));
+        // Missing/null fall back to stored under the same rule.
+        assert!(flag(&ParsedBody::json(json!({})), Some(&stored_on)));
+        assert!(flag(
+            &ParsedBody::json(json!({"EMAIL_USE_TLS": null})),
+            Some(&stored_on)
+        ));
+        assert!(!flag(&ParsedBody::json(json!({})), Some(&stored_off)));
+        assert!(!flag(
+            &ParsedBody::json(json!({})),
+            Some(&ConfigValue::Str("true".to_owned()))
+        ));
+        assert!(flag(
+            &ParsedBody::json(json!({})),
+            Some(&ConfigValue::Int(1))
+        ));
+        assert!(flag(
+            &ParsedBody::json(json!({})),
+            Some(&ConfigValue::Bool(true))
+        ));
+        assert!(!flag(&ParsedBody::json(json!({})), None));
+    }
+
+    #[test]
+    fn candidate_port_coercions_match_python() {
+        // `int(str(candidate).strip())` (`configuration.py:153`): ints
+        // and int-strings (padded included) resolve; bools, floats and
+        // containers render unparseable and answer the generic 400.
+        use serde_json::json;
+        let port = |value: serde_json::Value| parse_py_int(&py_str_value(BodyField::Json(&value)));
+        assert_eq!(port(json!(1025)), Some(1025));
+        assert_eq!(port(json!("1026")), Some(1026));
+        assert_eq!(port(json!(" 1027 ")), Some(1027));
+        assert_eq!(port(json!(true)), None);
+        assert_eq!(port(json!(587.9)), None);
+        assert_eq!(port(json!(["587"])), None);
+        assert_eq!(port(json!("not-a-port")), None);
+    }
+
+    #[test]
+    fn truthiness_matches_python() {
+        assert!(!json_truthy(BodyField::Missing));
+        assert!(!json_truthy(BodyField::Json(&json!(null))));
+        assert!(!json_truthy(BodyField::Json(&json!(false))));
+        assert!(!json_truthy(BodyField::Json(&json!(0))));
+        assert!(!json_truthy(BodyField::Json(&json!(""))));
+        assert!(!json_truthy(BodyField::Json(&json!([]))));
+        assert!(!json_truthy(BodyField::Json(&json!({}))));
+        assert!(json_truthy(BodyField::Json(&json!("x"))));
+        assert!(json_truthy(BodyField::Json(&json!(1))));
+        assert!(json_truthy(BodyField::Json(&json!([0]))));
+    }
+
+    #[test]
+    fn decode_caps_answer_server_error_on_every_endpoint() {
+        use axum::http::header;
+        let headers_for = |content_type: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+            headers
+        };
+        // Upload caps escape every license view into the base
+        // `handle_exception` (generic 500) — the POST-only 400 page seen
+        // locally is the Debug Toolbar re-parsing the body in middleware
+        // (DEBUG-only; prod has no toolbar — probed with DEBUG=False).
+        let over = (0..1001)
+            .map(|i| format!("u{i}=v"))
+            .collect::<Vec<_>>()
+            .join("&");
+        assert!(matches!(
+            decode_json_body(
+                &headers_for("application/x-www-form-urlencoded"),
+                over.as_bytes(),
+                5_242_880
+            ),
+            Err(Denial::ServerError)
+        ));
+    }
+
+    #[test]
+    fn slug_syntax_matches_drf_regex() {
+        assert!(slug_syntax_ok("acme-works_2"));
+        assert!(!slug_syntax_ok("has space"));
+        assert!(!slug_syntax_ok("bang!"));
+        assert!(!slug_syntax_ok(""));
+        // Python `$` tolerates exactly one trailing newline.
+        assert!(slug_syntax_ok("acme\n"));
+        assert!(!slug_syntax_ok("acme\n\n"));
+        assert!(!slug_syntax_ok("ac\nme"));
+    }
+
+    #[test]
+    fn timezone_allowlist_matches_pytz() {
+        assert_eq!(WORKSPACE_TIMEZONES.len(), 433);
+        assert!(WORKSPACE_TIMEZONES.contains(&"UTC"));
+        assert!(WORKSPACE_TIMEZONES.contains(&"America/New_York"));
+        assert!(!WORKSPACE_TIMEZONES.contains(&"Mars/Olympus"));
+    }
+
+    #[test]
+    fn json_len_matches_python_len() {
+        assert_eq!(json_len(BodyField::Json(&json!("abc"))), Some(3));
+        assert_eq!(json_len(BodyField::Json(&json!("é"))), Some(1));
+        assert_eq!(json_len(BodyField::Json(&json!([1, 2]))), Some(2));
+        assert_eq!(json_len(BodyField::Json(&json!({"a": 1}))), Some(1));
+        assert_eq!(json_len(BodyField::Json(&json!(5))), None);
+        assert_eq!(json_len(BodyField::Json(&json!(true))), None);
+        assert_eq!(json_len(BodyField::Missing), None);
+    }
+
+    #[test]
+    fn company_role_coercion_matches_str() {
+        assert_eq!(company_role_value(BodyField::Missing), Some(String::new()));
+        assert_eq!(company_role_value(BodyField::Json(&json!(null))), None);
+        assert_eq!(
+            company_role_value(BodyField::Json(&json!("Ops"))),
+            Some("Ops".to_owned())
+        );
+        assert_eq!(
+            company_role_value(BodyField::Json(&json!(true))),
+            Some("True".to_owned())
+        );
+        assert_eq!(
+            company_role_value(BodyField::Json(&json!(false))),
+            Some("False".to_owned())
+        );
+        assert_eq!(
+            company_role_value(BodyField::Json(&json!(5))),
+            Some("5".to_owned())
+        );
+        assert_eq!(
+            company_role_value(BodyField::Json(&json!([1]))),
+            Some("[1]".to_owned())
+        );
+        assert_eq!(
+            company_role_value(BodyField::Json(&json!({"a": 1}))),
+            Some("{'a': 1}".to_owned())
+        );
+        let file = super::super::form_body::FormFile {
+            filename: "resume.pdf".to_owned(),
+            size: 12,
+        };
+        assert_eq!(
+            company_role_value(BodyField::File(&file)),
+            Some("resume.pdf".to_owned())
+        );
+    }
+
+    #[test]
+    fn routes_cover_all_five_paths() {
+        // Registration is the cutover granularity: every owned path must
+        // resolve, and nothing else may be claimed.
+        let _ = config_workspace_routes();
+    }
+}

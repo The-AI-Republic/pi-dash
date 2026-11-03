@@ -1,0 +1,1 @@
+{"example":{"has_next_page":false,"page":1,"repositories":"<list[RemoteRepository]>"},"fields":["repositories","page","has_next_page"],"note":"has_next_page comes from the provider client (GitHub Link headers / GitLab X-Next-Page); page echoes the requested page (default 1).","source":"integrations/git/dtos.py:114-118; adapters/github.py:145-154; adapters/gitlab.py:313-319"}

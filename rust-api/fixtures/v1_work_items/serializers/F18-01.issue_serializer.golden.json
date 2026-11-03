@@ -1,0 +1,657 @@
+{
+  "$schema_note": "Static behaviour record. No code is executed by this file.",
+  "fixture": "F18-01",
+  "_method": "Django shell probes (pi_dash.settings.test) against scratch Postgres pidash_conv659 (127.0.0.1:55438), seeded workspace/project/user/state/labels/issues. Serializer is_valid()/save()/data called directly with context {project_id, workspace_id, default_assignee_id}. IDs/datetimes are live values (volatile); key sets, key order, statuses and error bodies are the pins.",
+  "_source": "apps/api/pi_dash/api/serializers/issue.py:54-108 (_same_uuid, normalize_description_input), :109-496 (IssueSerializer)",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "units": {
+    "same_uuid": {
+      "source": "serializers/issue.py:54-67",
+      "goldens": {
+        "canonical_vs_upper": true,
+        "canonical_vs_unhyphenated": true,
+        "canonical_vs_other": false,
+        "non_uuid_equal": true,
+        "non_uuid_unequal": false,
+        "uuid_vs_non_uuid": false,
+        "none_vs_none": true
+      }
+    },
+    "normalize_description_input": {
+      "source": "serializers/issue.py:68-108",
+      "goldens": {
+        "neither_key": {
+          "in_keys": [
+            "name"
+          ],
+          "out": {
+            "name": "x"
+          },
+          "from_markdown": false,
+          "same_object": true
+        },
+        "markdown": {
+          "out_keys": [
+            "description_html",
+            "name"
+          ],
+          "description_html": "<h1>Hi</h1><ul><li><p>a</p></li><li><p>[ ] t</p></li></ul>",
+          "from_markdown": true
+        },
+        "legacy_description": {
+          "out_keys": [
+            "description_html"
+          ],
+          "description_html": "<p>legacy <em>body</em></p>",
+          "from_markdown": true
+        },
+        "legacy_plus_html": {
+          "out": {
+            "description_html": "<p>kept</p>"
+          },
+          "from_markdown": false
+        },
+        "html_only": {
+          "out": {
+            "description_html": "<p>raw</p>"
+          },
+          "from_markdown": false
+        },
+        "non_string_markdown": {
+          "raised": true,
+          "errors": {
+            "description_markdown": [
+              {
+                "message": "Must be a string.",
+                "code": "invalid"
+              }
+            ]
+          }
+        },
+        "oversize_markdown": {
+          "raised": true,
+          "errors": {
+            "description_markdown": [
+              {
+                "message": "HTML content exceeds maximum size limit (10MB)",
+                "code": "invalid"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "to_internal_value": {
+      "source": "serializers/issue.py:177-180",
+      "goldens": {
+        "validated_has_description_html": true,
+        "validated_has_description_markdown": false,
+        "description_html": "<p><strong>bold</strong></p>",
+        "flag": true
+      }
+    },
+    "validate": {
+      "source": "serializers/issue.py:182-288",
+      "goldens": {
+        "ok_minimal": {
+          "valid": true,
+          "validated_keys": [
+            "assignees",
+            "labels",
+            "name",
+            "priority"
+          ],
+          "validated": {
+            "name": "Probe issue",
+            "priority": "none",
+            "assignees": "None",
+            "labels": "None"
+          }
+        },
+        "ok_full": {
+          "valid": true,
+          "validated_keys": [
+            "assignees",
+            "description_html",
+            "labels",
+            "name",
+            "priority",
+            "start_date",
+            "state",
+            "target_date"
+          ],
+          "validated": {
+            "assignees": "['79c81d76-5a93-4d3d-894d-5935576834b6']",
+            "labels": "['c833c492-fa3d-49f5-85a4-0ef810642731']",
+            "name": "Full probe",
+            "description_html": "<p>hello</p>",
+            "priority": "high",
+            "start_date": "2026-01-01",
+            "target_date": "2026-02-01",
+            "state": "<State:97b22834-b823-4109-a527-b39aa310ceae>"
+          }
+        },
+        "start_after_target": {
+          "valid": false,
+          "errors": {
+            "non_field_errors": [
+              {
+                "message": "Start date cannot exceed target date",
+                "code": "invalid"
+              }
+            ]
+          }
+        },
+        "invalid_html": {
+          "valid": true,
+          "validated_keys": [
+            "assignees",
+            "description_html",
+            "labels",
+            "name"
+          ],
+          "validated": {
+            "name": "t",
+            "description_html": "<p>unclosed</p>",
+            "assignees": "None",
+            "labels": "None"
+          }
+        },
+        "invalid_html_garbage": {
+          "valid": true,
+          "validated_keys": [
+            "assignees",
+            "description_html",
+            "labels",
+            "name"
+          ],
+          "validated": {
+            "name": "t",
+            "description_html": "<span>&lt;&lt;&gt;&gt;</span>",
+            "assignees": "None",
+            "labels": "None"
+          }
+        },
+        "html_too_big": {
+          "valid": true,
+          "validated_keys": [
+            "assignees",
+            "description_html",
+            "labels",
+            "name"
+          ],
+          "validated": {
+            "name": "t",
+            "description_html": "<p></p>",
+            "assignees": "None",
+            "labels": "None"
+          }
+        },
+        "bad_binary": {
+          "valid": true,
+          "validated_keys": [
+            "assignees",
+            "labels",
+            "name"
+          ],
+          "validated": {
+            "name": "t",
+            "assignees": "None",
+            "labels": "None"
+          }
+        },
+        "assignee_filtering": {
+          "valid": true,
+          "validated_keys": [
+            "assignees",
+            "labels",
+            "name"
+          ],
+          "validated": {
+            "assignees": "['79c81d76-5a93-4d3d-894d-5935576834b6']",
+            "name": "t",
+            "labels": "None"
+          }
+        },
+        "label_filtering": {
+          "valid": false,
+          "errors": {
+            "labels": [
+              {
+                "message": "{1: [ErrorDetail(string='Invalid pk \"69709953-4e54-43bc-a056-fe31a4817e85\" - object does not exist.', code='does_not_exist')]}",
+                "code": null
+              }
+            ]
+          }
+        },
+        "state_wrong_project": {
+          "valid": false,
+          "errors": {
+            "non_field_errors": [
+              {
+                "message": "State is not valid please pass a valid state_id",
+                "code": "invalid"
+              }
+            ]
+          }
+        },
+        "parent_wrong_project": {
+          "valid": true,
+          "validated_keys": [
+            "assignees",
+            "labels",
+            "name",
+            "parent"
+          ],
+          "validated": {
+            "name": "t",
+            "parent": "<Issue:a7509d00-345f-47fb-bee3-6bcf7d3339e2>",
+            "assignees": "None",
+            "labels": "None"
+          },
+          "note": "Key name is a misnomer (review fix): this probe passed a same-project parent, so it is valid \u2014 same as parent_same_project_ok. The wrong-project error string is pinned by parent_other_project."
+        },
+        "parent_same_project_ok": {
+          "valid": true,
+          "validated_keys": [
+            "assignees",
+            "labels",
+            "name",
+            "parent"
+          ],
+          "validated": {
+            "name": "t",
+            "parent": "<Issue:a7509d00-345f-47fb-bee3-6bcf7d3339e2>",
+            "assignees": "None",
+            "labels": "None"
+          }
+        },
+        "parent_other_project": {
+          "valid": false,
+          "errors": {
+            "non_field_errors": [
+              {
+                "message": "Parent is not valid issue_id please pass a valid issue_id",
+                "code": "invalid"
+              }
+            ]
+          }
+        },
+        "estimate_point_other_project": {
+          "valid": false,
+          "errors": {
+            "estimate_point": [
+              {
+                "message": "Invalid pk \"8978b811-24f0-4d75-88e5-c9b5ccd656d6\" - object does not exist.",
+                "code": "does_not_exist"
+              }
+            ]
+          }
+        },
+        "html_empty_string": {
+          "valid": false,
+          "errors": {
+            "non_field_errors": [
+              {
+                "message": "Invalid HTML passed",
+                "code": "invalid"
+              }
+            ]
+          }
+        },
+        "html_single_giant_text_node": {
+          "note": "A single 10MB text node does NOT reach the size error: the lxml round-trip (serializers/issue.py:224-226) drops it (libxml2 huge-text behaviour) and validated description_html becomes '<p></p>'. Recorded live.",
+          "input_len": 10485767,
+          "validated": "<p></p>",
+          "source": "replication probe: html.tostring(html.fromstring(big)) == '<p></p>'"
+        },
+        "html_over_10mb_surviving_roundtrip": {
+          "valid": false,
+          "errors": {
+            "error": [
+              {
+                "message": "html content is not valid",
+                "code": "invalid"
+              }
+            ]
+          },
+          "note": "Input '<p>x</p>'*1500000 (12MB); round-trip keeps 12000011 chars, then the 10MB cap fires.",
+          "source": "serializers/issue.py:232-235"
+        },
+        "description_binary_is_read_only": {
+          "field": "ModelField(allow_null=True, model_field=<django.db.models.fields.BinaryField: description_binary>, read_only=True)",
+          "probes": {
+            "base64_input": {
+              "valid": true,
+              "validated": {
+                "name": "'t'"
+              }
+            },
+            "garbage_input": {
+              "valid": true,
+              "validated": {
+                "name": "'t'"
+              }
+            }
+          },
+          "note": "DRF maps BinaryField to read-only ModelField, so input is silently dropped and validate() lines 240-243 (validate_binary_data) are unreachable via this serializer. Port as-is: field read-only, branch dead.",
+          "source": "serializers/issue.py:240-243 (unreachable); DRF BinaryField mapping"
+        },
+        "label_cross_project_filter": {
+          "valid": true,
+          "validated": {
+            "labels": "<SoftDeletionQuerySet [UUID('c833c492-fa3d-49f5-85a4-0ef810642731')]>",
+            "name": "'t'"
+          }
+        },
+        "estimate_point_other_project_exists": {
+          "valid": false,
+          "errors": {
+            "non_field_errors": [
+              {
+                "message": "Estimate point is not valid please pass a valid estimate_point_id",
+                "code": "invalid"
+              }
+            ]
+          }
+        },
+        "estimate_point_same_project_ok": {
+          "valid": true,
+          "validated": {
+            "name": "'t'",
+            "estimate_point": "<EstimatePoint: est <1> <S>>"
+          }
+        }
+      }
+    },
+    "validate_assigned_pod": {
+      "source": "serializers/issue.py:190-216; Pod pi_dash/runner/models.py:52-160; has_active_run db/models/issue.py:232-250",
+      "goldens": {
+        "pod_ok": {
+          "valid": true,
+          "validated": {
+            "name": "'t'",
+            "assigned_pod": "<Pod: conv659-pod (project=d715be3d-234f-46ef-89a3-97f0c7c04b7e)>"
+          }
+        },
+        "pod_wrong_project": {
+          "valid": false,
+          "errors": {
+            "assigned_pod": [
+              {
+                "message": "pod is in a different project",
+                "code": "invalid"
+              }
+            ]
+          }
+        },
+        "pod_nonexistent": {
+          "valid": false,
+          "errors": {
+            "assigned_pod": [
+              {
+                "message": "Invalid pk \"00000000-0000-0000-0000-000000000000\" - object does not exist.",
+                "code": "does_not_exist"
+              }
+            ]
+          }
+        },
+        "has_active_run_queued": true,
+        "pod_same_value_active_run": {
+          "valid": true,
+          "errors": {}
+        },
+        "pod_reassign_active_run": {
+          "valid": false,
+          "errors": {
+            "assigned_pod": [
+              {
+                "message": "cannot reassign pod while the issue has an active run",
+                "code": "invalid"
+              }
+            ]
+          }
+        },
+        "pod_reassign_after_done": {
+          "valid": true,
+          "errors": {}
+        }
+      }
+    },
+    "serializer_field_names": {
+      "source": "serializers/issue.py:118-159 (declared + Meta)",
+      "fields_in_order": [
+        "id",
+        "assignees",
+        "labels",
+        "type_id",
+        "url",
+        "description_markdown",
+        "created_at",
+        "updated_at",
+        "deleted_at",
+        "point",
+        "name",
+        "description_html",
+        "description_binary",
+        "priority",
+        "complexity_score",
+        "start_date",
+        "target_date",
+        "sequence_id",
+        "sort_order",
+        "completed_at",
+        "archived_at",
+        "is_draft",
+        "external_source",
+        "external_id",
+        "git_work_branch",
+        "created_via",
+        "agent_executor",
+        "created_by",
+        "updated_by",
+        "project",
+        "workspace",
+        "parent",
+        "state",
+        "estimate_point",
+        "type",
+        "assigned_pod"
+      ]
+    },
+    "create": {
+      "source": "serializers/issue.py:290-371; type default :300-303; Issue.save sequence/sort (see F18-05 notes)",
+      "goldens": {
+        "create_explicit": {
+          "before": {
+            "issues": 5,
+            "assignees": 0,
+            "labels": 0
+          },
+          "after": {
+            "issues": 6,
+            "assignees": 1,
+            "labels": 2
+          },
+          "issue_row": {
+            "name": "Created probe",
+            "priority": "high",
+            "description_html": "<h1>Title</h1><p>body <em>text</em></p>",
+            "sequence_id": "3",
+            "sort_order": "95535.0",
+            "is_draft": "False",
+            "workspace_id": "92989e99-51c6-4725-8069-45784951694f",
+            "project_id": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+            "type_id": "None"
+          },
+          "assignee_rows": [
+            "79c81d76-5a93-4d3d-894d-5935576834b6"
+          ],
+          "label_rows": [
+            "c833c492-fa3d-49f5-85a4-0ef810642731",
+            "b4d98934-9159-4ac9-9e58-8a5b7b152ec3"
+          ]
+        },
+        "create_default_assignee": {
+          "assignee_rows": [
+            "79c81d76-5a93-4d3d-894d-5935576834b6"
+          ]
+        },
+        "create_invalid_default_assignee": {
+          "assignee_rows": []
+        }
+      },
+      "notes": [
+        "sequence_id auto-assigned (3 = max+1 in project); sort_order 95535.0 assigned by save().",
+        "type_id None: no default ProjectIssueType row exists for the seeded project, so the :302 lookup returns None and create passes type=None."
+      ]
+    },
+    "update": {
+      "source": "serializers/issue.py:373-427",
+      "goldens": {
+        "update_replace": {
+          "name": "Renamed probe",
+          "priority": "low",
+          "assignee_rows": [],
+          "label_rows": [
+            "b4d98934-9159-4ac9-9e58-8a5b7b152ec3"
+          ],
+          "updated_at_bumped": true
+        },
+        "update_scalars_only": {
+          "label_rows": [
+            "b4d98934-9159-4ac9-9e58-8a5b7b152ec3"
+          ]
+        }
+      },
+      "notes": [
+        "assignees=[] deletes all rows and recreates none; omitted keys leave relations untouched.",
+        "updated_at is bumped even for relation-only changes (:426)."
+      ]
+    },
+    "get_url": {
+      "source": "serializers/issue.py:429-434; utils/host.py:70-97",
+      "goldens": {
+        "configured": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-3",
+        "unconfigured": null
+      }
+    },
+    "to_representation": {
+      "source": "serializers/issue.py:436-494; relations_summary pi_dash/orchestration/blockers.py; grouped_relations pi_dash/orchestration/relations.py",
+      "goldens": {
+        "single_keys_in_order": [
+          "id",
+          "type_id",
+          "url",
+          "created_at",
+          "updated_at",
+          "deleted_at",
+          "point",
+          "name",
+          "description_html",
+          "description_binary",
+          "priority",
+          "complexity_score",
+          "start_date",
+          "target_date",
+          "sequence_id",
+          "sort_order",
+          "completed_at",
+          "archived_at",
+          "is_draft",
+          "external_source",
+          "external_id",
+          "git_work_branch",
+          "created_via",
+          "agent_executor",
+          "created_by",
+          "updated_by",
+          "project",
+          "workspace",
+          "parent",
+          "state",
+          "estimate_point",
+          "type",
+          "assigned_pod",
+          "assignees",
+          "labels",
+          "relations_summary",
+          "has_open_blockers"
+        ],
+        "scalars": {
+          "name": "Renamed again",
+          "priority": "low",
+          "description_html": "<h1>Title</h1><p>body <em>text</em></p>",
+          "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-3",
+          "assignees": [],
+          "labels": [
+            "b4d98934-9159-4ac9-9e58-8a5b7b152ec3"
+          ]
+        },
+        "blocker_keys": {
+          "relations_summary": {
+            "blocked_by": [],
+            "blocking": []
+          },
+          "has_open_blockers": false
+        },
+        "has_relations_without_viewer": false,
+        "list_blocker_keys_present": [],
+        "list_vs_single_key_diff": [
+          "has_open_blockers",
+          "relations_summary"
+        ],
+        "expand_assignees_labels": {
+          "assignees": [],
+          "labels": [
+            {
+              "id": "b4d98934-9159-4ac9-9e58-8a5b7b152ec3",
+              "created_at": "2026-10-02T23:17:12.023611Z",
+              "updated_at": "2026-10-02T23:17:12.023611Z",
+              "deleted_at": null,
+              "name": "feature",
+              "description": "",
+              "color": "",
+              "sort_order": 65535.0,
+              "external_source": null,
+              "external_id": null,
+              "created_by": null,
+              "updated_by": null,
+              "workspace": "92989e99-51c6-4725-8069-45784951694f",
+              "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+              "parent": null
+            }
+          ]
+        },
+        "fields_subset_keys": [
+          "id",
+          "name"
+        ],
+        "fields_with_blocker_key": [
+          "id",
+          "name",
+          "relations_summary"
+        ],
+        "relations_with_viewer": {
+          "blocked_by": [],
+          "blocking": [],
+          "relates_to": [],
+          "duplicate": [],
+          "start_before": [],
+          "start_after": [],
+          "finish_before": [],
+          "finish_after": [],
+          "implemented_by": [],
+          "implements": []
+        },
+        "relations_tail_keys": [
+          "labels",
+          "relations_summary",
+          "has_open_blockers",
+          "relations"
+        ],
+        "url_omitted_when_unconfigured": true
+      }
+    }
+  }
+}

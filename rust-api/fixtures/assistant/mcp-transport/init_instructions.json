@@ -1,0 +1,55 @@
+{
+  "trace": "apps/api/pi_dash/assistant/runtime/mcp.py + pydantic-ai-slim==1.107.0/fastmcp==3.4.4/mcp==1.30.0",
+  "ported_from": "d656243d3700dd5ff749f1bfeb2bc74c918a33ba",
+  "case": "init_instructions",
+  "synthetic": "No Python probe: InitializeResult.instructions is a verbatim passthrough (MCPToolset stores init_result.instructions; get_instructions wraps it when include_instructions=True).",
+  "stack": {
+    "pydantic_ai_slim": "1.107.0",
+    "fastmcp": "3.4.4",
+    "mcp": "1.30.0",
+    "python": "3.12"
+  },
+  "toolset": {
+    "timeout": 10.0,
+    "read_timeout": 300.0,
+    "prefix": "mcp_probe",
+    "auth": true,
+    "server_name": "probe",
+    "url_path": "/mcp",
+    "include_instructions": true
+  },
+  "flow": [
+    "enter",
+    "list",
+    "call"
+  ],
+  "call": {
+    "tool": "mcp_probe_echo",
+    "args": {
+      "text": "hi"
+    },
+    "fabricate": false
+  },
+  "stub": {
+    "framing": "json",
+    "instructions": "Use echo first, then add."
+  },
+  "wire": "see streamable_json_happy (identical but for the instructions field in the initialize result)",
+  "expect": {
+    "tools": "see streamable_json_happy",
+    "call": {
+      "result": {
+        "kind": "text",
+        "value": "echo:hi"
+      }
+    },
+    "instructions": "Use echo first, then add.",
+    "failures": {
+      "after_enter": null,
+      "after_list": null,
+      "after_call": null,
+      "at_exit": null
+    },
+    "delete_seen": true
+  }
+}

@@ -1,0 +1,147 @@
+[
+  {
+    "project_name": "CT80 EXCAP-JS",
+    "project_identifier": "EXCAP-JS",
+    "parent": "",
+    "identifier": "EXCAP-JS-14",
+    "sequence_id": 14,
+    "name": "Draft cap-json",
+    "state_name": "Todo",
+    "priority": "none",
+    "complexity_score": 0,
+    "assignees": [],
+    "subscribers": [],
+    "created_by_name": "",
+    "start_date": null,
+    "target_date": null,
+    "completed_at": null,
+    "created_at": "2026-03-04T10:00:00Z",
+    "updated_at": "2026-03-04T10:00:00Z",
+    "archived_at": null,
+    "estimate": "",
+    "labels": [],
+    "cycles": [],
+    "modules": [],
+    "links": [],
+    "relations": [],
+    "comments": [],
+    "is_draft": true
+  },
+  {
+    "project_name": "CT80 EXCAP-JS",
+    "project_identifier": "EXCAP-JS",
+    "parent": "",
+    "identifier": "EXCAP-JS-13",
+    "sequence_id": 13,
+    "name": "Triage cap-json",
+    "state_name": "Triage",
+    "priority": "none",
+    "complexity_score": 0,
+    "assignees": [],
+    "subscribers": [],
+    "created_by_name": "",
+    "start_date": null,
+    "target_date": null,
+    "completed_at": null,
+    "created_at": "2026-03-03T10:00:00Z",
+    "updated_at": "2026-03-03T10:00:00Z",
+    "archived_at": null,
+    "estimate": "",
+    "labels": [],
+    "cycles": [],
+    "modules": [],
+    "links": [],
+    "relations": [],
+    "comments": [],
+    "is_draft": false
+  },
+  {
+    "project_name": "CT80 EXCAP-JS",
+    "project_identifier": "EXCAP-JS",
+    "parent": "EXCAP-JS-11",
+    "identifier": "EXCAP-JS-12",
+    "sequence_id": 12,
+    "name": "Child cap-json",
+    "state_name": "Todo",
+    "priority": "none",
+    "complexity_score": 0,
+    "assignees": [],
+    "subscribers": [],
+    "created_by_name": "",
+    "start_date": null,
+    "target_date": null,
+    "completed_at": null,
+    "created_at": "2026-03-02T10:00:00Z",
+    "updated_at": "2026-03-02T10:00:00Z",
+    "archived_at": null,
+    "estimate": "",
+    "labels": [],
+    "cycles": [],
+    "modules": [],
+    "links": [],
+    "relations": [
+      {
+        "type": "blocked_by",
+        "issue": "EXCAP-JS-11",
+        "direction": "incoming"
+      }
+    ],
+    "comments": [],
+    "is_draft": false
+  },
+  {
+    "project_name": "CT80 EXCAP-JS",
+    "project_identifier": "EXCAP-JS",
+    "parent": "",
+    "identifier": "EXCAP-JS-11",
+    "sequence_id": 11,
+    "name": "Export me cap-json",
+    "state_name": "Todo",
+    "priority": "high",
+    "complexity_score": 0,
+    "assignees": [
+      "Contract Test"
+    ],
+    "subscribers": [
+      "Contract Test"
+    ],
+    "created_by_name": "",
+    "start_date": "2026-04-01",
+    "target_date": null,
+    "completed_at": null,
+    "created_at": "2026-03-01T10:00:00Z",
+    "updated_at": "2026-03-01T10:00:00Z",
+    "archived_at": null,
+    "estimate": "5",
+    "labels": [
+      "bug-cap-json"
+    ],
+    "cycles": [
+      "Sprint cap-json"
+    ],
+    "modules": [
+      "Mod cap-json"
+    ],
+    "links": [
+      {
+        "url": "https://example.com/cap-json",
+        "title": "Spec cap-json"
+      }
+    ],
+    "relations": [
+      {
+        "type": "blocked_by",
+        "issue": "EXCAP-JS-12",
+        "direction": "outgoing"
+      }
+    ],
+    "comments": [
+      {
+        "comment": "note cap-json",
+        "created_by": "Contract Test",
+        "created_at": "2026-03-01 10:00:00"
+      }
+    ],
+    "is_draft": false
+  }
+]

@@ -1,0 +1,3407 @@
+//! Space social handlers: comments, issue reactions, comment reactions, votes.
+//!
+//! Port of the four viewsets in `apps/api/pi_dash/space/views/issue.py`
+//! (`IssueCommentPublicViewSet` `:214-339`, `IssueReactionPublicViewSet`
+//! `:342-427`, `CommentReactionPublicViewSet` `:430-519`,
+//! `IssueVotePublicViewSet` `:522-591`) with route strings from
+//! `space/urls/issue.py` (6 of the 8 entries; the two
+//! `IssueRetrievePublicEndpoint` routes belong to PIDASHCONV-175).
+//!
+//! Layering: SQL text for the list halves comes from
+//! `pidash_services::space::queries::social`, anchor/enabled mapping from
+//! `pidash_services::space::guards`, activity payloads from `pidash_jobs::space`.
+//! This module owns the HTTP shell (routes, session auth, row fetching,
+//! serializer rendering, writes) plus the reads no query builder covers
+//! (single-row gets, inserts, soft-delete updates, member get-or-create,
+//! sync-lock probes, description side effects — see below).
+//!
+//! Reads go through `row_to_json` (the `project_meta` pattern): Postgres
+//! renders every column and the handlers shape typed values from the JSON
+//! object, so key order and scalar bytes stay under handler control.
+//! Datetimes re-render through the serializer kernel in the request's zone
+//! (authenticated → the user's zone, anonymous → `deactivate()` → UTC,
+//! `views/base.py:37-42`).
+//!
+//! Method matrix (`views/base.py:48`, `views/issue.py:220-226`): comment
+//! list/retrieve are `AllowAny`; every other action on all four viewsets
+//! requires a session (`IsAuthenticated`), answered before the board is
+//! even read. Reaction and vote lists require auth too (no permission
+//! override on those viewsets — `guards::Route::{IssueReactions,
+//! CommentReactions, Votes}`, BUG-reaction-list-auth).
+//!
+//! Response shapes (app serializers, `app/serializers/issue.py:900-989`):
+//! `__all__` renders pk, declared fields (`id` from `BaseSerializer`, then
+//! the subclass declarations) in creation order, concrete model fields,
+//! then forward relations (DRF `get_default_field_names`); explicit
+//! `Meta.fields` lists render in list order. `is_member` is a read-only
+//! annotation that only exists on the list queryset, so create/partial_update
+//! responses omit the key (DRF `SkipField`), while list/retrieve include it.
+//!
+//! Write side effects, in Python order (invisible over HTTP, kept anyway):
+//! comment create saves, delays `comment.activity.created` with the
+//! validated-output dump, then runs the member get-or-create; reaction
+//! create saves, runs the member effect, then delays; vote create
+//! get-or-creates, runs the member effect, assigns `vote`, saves, delays.
+//! Destroys delay with the pre-delete snapshot *before* the soft delete.
+//!
+//! Ported bugs (translate, don't redesign; also listed in the PR):
+//!
+//! * BUG-reaction-list-dead (`views/issue.py:348-351`): the issue-reaction
+//!   board lookup filters on `slug`/`project_id` kwargs the routes never
+//!   supply, so the list always serves `[]`. Ported by executing the dead
+//!   board get (`queries::issue_reaction_dead_board_get_sql`) and serving
+//!   the empty list on the inevitable miss.
+//! * BUG-vote-anchor-as-slug (`views/issue.py:528-530`): the vote board
+//!   lookup passes the anchor value to the `workspace__slug` field. Ported
+//!   as-is (`queries::vote_dead_board_get_sql`); on a miss the list serves
+//!   `[]`, on a (pathological slug-collision) hit the would-be filter
+//!   (`queries::vote_list_sql`) runs.
+//! * QUIRK-anonymous-member (`views/issue.py:241-250`): `request.user.id`
+//!   is evaluated even for anonymous lists. The queries layer binds `$3`
+//!   as-is; anonymous binds NULL there (a NULL `$2` project likewise never
+//!   matches under `=`, like the queries-layer text).
+//! * BUG-comment-reaction-project (`views/issue.py:481`): the
+//!   comment-reaction create activity carries `project_id=str(None)` — the
+//!   literal string `"None"` — because the routes supply no `project_id`
+//!   kwarg. Ported via `jobs::space::comment_reaction_created` with
+//!   `"None"`.
+//! * QUIRK-vote-always-201 (`views/issue.py:543-571`): vote create answers
+//!   201 even when the row already existed, assigns `vote` with no
+//!   validation, and never checks `is_votes_enabled`
+//!   (`guards::vote_write_gated` pins the last half).
+//!
+//! Faithful corners:
+//!
+//! * Instance `.delete()` (all four destroys, plus the comment
+//!   save paths through `ProjectBaseModel`) is a soft delete plus a
+//!   `soft_delete_related_objects.delay("db", "<model>", pk, "default")`
+//!   publish (`db/mixins.py:69-78`), enqueued best-effort like the
+//!   activity messages (the intake-handler precedent).
+//! * `ProjectBaseModel.save` forces `workspace` from `project.workspace`
+//!   (`db/models/project.py:309-311`): written rows resolve the workspace
+//!   through the project row, never from the board or the request.
+//! * `IssueComment.save` recomputes `comment_stripped` from `comment_html`
+//!   on every save and mirrors tracked-field changes into a `descriptions`
+//!   row (`db/models/issue.py:601-644`); explicit `comment_stripped` input
+//!   is overwritten the same way.
+//! * Retrieve of a missing comment answers DRF's `Http404` body
+//!   (`{"detail":"Not found."}`) via `get_object_or_404`, while
+//!   update/destroy misses answer the `handle_exception`
+//!   `ObjectDoesNotExist` envelope — the two 404 bodies differ on purpose.
+//! * `request.data.get("vote", 1)` keeps any JSON number that fits an
+//!   `int4`; anything else fails like Postgres does (500 envelope), an
+//!   explicit null violates the column (400 payload body), and a missing
+//!   key means `1`.
+
+use axum::extract::{Extension, Path, Request, State};
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Router;
+use serde::Serialize;
+use serde_json::Value;
+use sqlx::Row;
+
+use crate::middleware::body_limit::read_request_bytes;
+use crate::middleware::SessionHandle;
+use crate::state::AppState;
+use pidash_compat::datetime::render_rfc3339_in;
+use pidash_compat::py::{py_num_str, python_dumps};
+use pidash_compat::response::json_response;
+use pidash_compat::validate::push_error;
+use pidash_db::app_pages::strip::ml_strip_tags;
+use pidash_services::domain::comments as comment_domain;
+use pidash_services::read::{self, ActorDetailView, CommentReactionView, CommentRow, CommentView};
+use pidash_services::space::{guards, queries};
+
+// ---------------------------------------------------------------------------
+// Routes
+// ---------------------------------------------------------------------------
+
+/// Register the seven social route entries under `api/public/` (the six
+/// `urls/issue.py` paths this issue owns; the retrieve endpoint's two
+/// paths belong to PIDASHCONV-175 and stay unmatched here).
+///
+/// Owned methods serve from Rust; every other method on these paths falls
+/// through to Django (its 405-after-auth and metadata responses live
+/// there). `HEAD` rides axum's `get` handling like Django's `GET`-backed
+/// `HEAD`; non-UUID path segments match no Django route either, so those
+/// proxy and Django's own 404 stays the contract.
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/public/anchor/{anchor}/issues/{issue_id}/comments/",
+            owned(
+                axum::routing::get(comment_list).post(comment_create),
+                &["GET", "POST"],
+            ),
+        )
+        .route(
+            "/api/public/anchor/{anchor}/issues/{issue_id}/comments/{pk}/",
+            owned(
+                axum::routing::get(comment_retrieve)
+                    .patch(comment_partial_update)
+                    .delete(comment_destroy),
+                &["GET", "PATCH", "DELETE"],
+            ),
+        )
+        .route(
+            "/api/public/anchor/{anchor}/issues/{issue_id}/reactions/",
+            owned(
+                axum::routing::get(issue_reaction_list).post(issue_reaction_create),
+                &["GET", "POST"],
+            ),
+        )
+        .route(
+            "/api/public/anchor/{anchor}/issues/{issue_id}/reactions/{reaction_code}/",
+            owned(axum::routing::delete(issue_reaction_destroy), &["DELETE"]),
+        )
+        .route(
+            "/api/public/anchor/{anchor}/comments/{comment_id}/reactions/",
+            owned(
+                axum::routing::get(comment_reaction_list).post(comment_reaction_create),
+                &["GET", "POST"],
+            ),
+        )
+        .route(
+            "/api/public/anchor/{anchor}/comments/{comment_id}/reactions/{reaction_code}/",
+            owned(axum::routing::delete(comment_reaction_destroy), &["DELETE"]),
+        )
+        .route(
+            "/api/public/anchor/{anchor}/issues/{issue_id}/votes/",
+            owned(
+                axum::routing::get(vote_list)
+                    .post(vote_create)
+                    .delete(vote_destroy),
+                &["GET", "POST", "DELETE"],
+            ),
+        )
+}
+
+/// A social path: the owned methods serve from Rust, everything else falls
+/// through to Django. Same cutover shape as the intake handlers.
+fn owned(
+    methods: axum::routing::MethodRouter<AppState>,
+    owned: &[&str],
+) -> axum::routing::MethodRouter<AppState> {
+    let mut router = methods;
+    for other in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
+        if owned.contains(&other) {
+            continue;
+        }
+        router = match other {
+            "GET" => router.get(crate::edge::proxy),
+            "POST" => router.post(crate::edge::proxy),
+            "PUT" => router.put(crate::edge::proxy),
+            "PATCH" => router.patch(crate::edge::proxy),
+            "DELETE" => router.delete(crate::edge::proxy),
+            "HEAD" => router.head(crate::edge::proxy),
+            _ => router.options(crate::edge::proxy),
+        };
+    }
+    router
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// Handler failure: the exact status + body Python answers.
+#[derive(Debug)]
+enum HandlerError {
+    /// 401 `{"detail":"Authentication credentials were not provided."}` —
+    /// anonymous on a guarded action.
+    Unauthorized,
+    /// 404 `{"error":"The required object does not exist."}` — bare
+    /// `.get()` misses (board on writes, actor-scoped comment/reaction/vote
+    /// gets) via `handle_exception`.
+    NotFound,
+    /// 404 `{"detail":"Not found."}` — DRF's `Http404` body for retrieve
+    /// misses through `get_object_or_404`.
+    NotFoundDetail,
+    /// A guards-layer error body (enabled-flag 400s, validation envelope).
+    Guard(guards::ErrorBody),
+    /// 400 serializer-errors body (`{"field": [...]}`).
+    BadJson(Value),
+    /// 400 `{"detail": ...}` (malformed JSON bodies).
+    BadDetail(String),
+    /// 502, truncated request-body read (the shared bad-gateway shape).
+    TruncatedBody,
+    /// 500 `{"error":"Something went wrong please try again later"}` —
+    /// the fallback envelope.
+    ServerError,
+}
+
+impl HandlerError {
+    fn status_and_body(&self) -> (StatusCode, String) {
+        match self {
+            HandlerError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                r#"{"detail":"Authentication credentials were not provided."}"#.to_owned(),
+            ),
+            HandlerError::NotFound => (
+                StatusCode::NOT_FOUND,
+                r#"{"error":"The required object does not exist."}"#.to_owned(),
+            ),
+            HandlerError::NotFoundDetail => (
+                StatusCode::NOT_FOUND,
+                r#"{"detail":"Not found."}"#.to_owned(),
+            ),
+            HandlerError::Guard(error) => (
+                StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                serde_json::to_string(&error.body).unwrap_or_else(|_| {
+                    r#"{"error":"Something went wrong please try again later"}"#.to_owned()
+                }),
+            ),
+            HandlerError::BadJson(body) => (
+                StatusCode::BAD_REQUEST,
+                serde_json::to_string(body).unwrap_or_else(|_| {
+                    r#"{"error":"Something went wrong please try again later"}"#.to_owned()
+                }),
+            ),
+            HandlerError::BadDetail(message) => (
+                StatusCode::BAD_REQUEST,
+                format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            HandlerError::TruncatedBody => (
+                StatusCode::BAD_GATEWAY,
+                crate::edge::BAD_GATEWAY_BODY.to_owned(),
+            ),
+            HandlerError::ServerError => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"Something went wrong please try again later"}"#.to_owned(),
+            ),
+        }
+    }
+}
+
+impl IntoResponse for HandlerError {
+    fn into_response(self) -> Response {
+        if matches!(self, HandlerError::ServerError) {
+            // `log_exception(e)` (`views/base.py:182`).
+            tracing::warn!("space social handler: internal error");
+        }
+        let (status, body) = self.status_and_body();
+        Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body))
+            .expect("handler error response")
+    }
+}
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).expect("json string")
+}
+
+fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, HandlerError> {
+    state
+        .pools()
+        .map(|pools| pools.primary())
+        .ok_or(HandlerError::ServerError)
+}
+
+/// Map a write failure the way `handle_exception` does: unique and
+/// foreign-key violations are the `IntegrityError` 400, anything else the
+/// fallback 500.
+fn integrity_error(error: sqlx::Error) -> HandlerError {
+    if let sqlx::Error::Database(db) = &error {
+        let code = db.code().unwrap_or_default();
+        if code == "23503" || code == "23505" {
+            return HandlerError::Guard(guards::handle_exception(
+                guards::ExceptionKind::IntegrityError,
+            ));
+        }
+    }
+    let _ = error;
+    HandlerError::ServerError
+}
+
+// ---------------------------------------------------------------------------
+// row_to_json fetching + field access (the project_meta shape)
+// ---------------------------------------------------------------------------
+
+/// One bound `$N` parameter. UUID columns bind typed `Uuid`; text columns
+/// (`anchor`) bind as text; the anonymous member probe binds NULL.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SqlParam<'a> {
+    Text(&'a str),
+    Uuid(uuid::Uuid),
+    Null,
+}
+
+/// Parse a UUID-typed bind. Callers pass path segments Django's `<uuid:>`
+/// converter already validated, or ids read back from the database —
+/// anything else is a 500 like Python's `ValidationError` → fallback.
+fn uuid_param(raw: &str) -> Result<SqlParam<'_>, HandlerError> {
+    uuid::Uuid::parse_str(raw)
+        .map(SqlParam::Uuid)
+        .map_err(|_| HandlerError::ServerError)
+}
+
+/// Fetch zero or one row of `inner` as a JSON object.
+async fn fetch_optional_object(
+    pool: &sqlx::PgPool,
+    inner: &str,
+    params: &[SqlParam<'_>],
+) -> Result<Option<Value>, HandlerError> {
+    let sql = format!("SELECT row_to_json(__r)::text AS __row FROM ({inner}) AS __r");
+    let mut query = sqlx::query(&sql);
+    for param in params {
+        query = match param {
+            SqlParam::Text(text) => query.bind(*text),
+            SqlParam::Uuid(id) => query.bind(*id),
+            SqlParam::Null => query.bind(Option::<uuid::Uuid>::None),
+        };
+    }
+    let row: Option<sqlx::postgres::PgRow> = query
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    match row {
+        None => Ok(None),
+        Some(row) => {
+            let text: String = row
+                .try_get("__row")
+                .map_err(|_| HandlerError::ServerError)?;
+            let value: Value =
+                serde_json::from_str(&text).map_err(|_| HandlerError::ServerError)?;
+            match value {
+                Value::Object(_) => Ok(Some(value)),
+                _ => Err(HandlerError::ServerError),
+            }
+        }
+    }
+}
+
+/// Fetch every row of `inner` as JSON objects.
+async fn fetch_all_objects(
+    pool: &sqlx::PgPool,
+    inner: &str,
+    params: &[SqlParam<'_>],
+) -> Result<Vec<Value>, HandlerError> {
+    let sql = format!("SELECT row_to_json(__r)::text AS __row FROM ({inner}) AS __r");
+    let mut query = sqlx::query(&sql);
+    for param in params {
+        query = match param {
+            SqlParam::Text(text) => query.bind(*text),
+            SqlParam::Uuid(id) => query.bind(*id),
+            SqlParam::Null => query.bind(Option::<uuid::Uuid>::None),
+        };
+    }
+    let rows: Vec<sqlx::postgres::PgRow> = query
+        .fetch_all(pool)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let text: String = row
+            .try_get("__row")
+            .map_err(|_| HandlerError::ServerError)?;
+        let value: Value = serde_json::from_str(&text).map_err(|_| HandlerError::ServerError)?;
+        match value {
+            Value::Object(_) => out.push(value),
+            _ => return Err(HandlerError::ServerError),
+        }
+    }
+    Ok(out)
+}
+
+fn obj(value: &Value) -> Result<&serde_json::Map<String, Value>, HandlerError> {
+    value.as_object().ok_or(HandlerError::ServerError)
+}
+
+fn req_str(obj: &serde_json::Map<String, Value>, key: &str) -> Result<String, HandlerError> {
+    match obj.get(key) {
+        Some(Value::String(s)) => Ok(s.clone()),
+        _ => Err(HandlerError::ServerError),
+    }
+}
+
+fn opt_str(
+    obj: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<String>, HandlerError> {
+    match obj.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        _ => Err(HandlerError::ServerError),
+    }
+}
+
+fn req_bool(obj: &serde_json::Map<String, Value>, key: &str) -> Result<bool, HandlerError> {
+    match obj.get(key) {
+        Some(Value::Bool(b)) => Ok(*b),
+        _ => Err(HandlerError::ServerError),
+    }
+}
+
+fn render_dt_opt(raw: Option<String>, tz: &chrono_tz::Tz) -> Result<Option<String>, HandlerError> {
+    raw.map(|text| render_rfc3339_in(&text, tz).map_err(|_| HandlerError::ServerError))
+        .transpose()
+}
+
+// ---------------------------------------------------------------------------
+// Request context: auth + anchor board (TimezoneMixin + permission layer)
+// ---------------------------------------------------------------------------
+
+/// Authenticated actor plus time zone. Anonymous is `None` and proceeds on
+/// `AllowAny` actions only (anonymous renders in UTC, `views/base.py:42`);
+/// guarded actions 401 through [`require_actor`].
+struct Actor {
+    id: uuid::Uuid,
+    timezone: chrono_tz::Tz,
+}
+
+/// `request.user` through Django-session auth (the intake-handler shape:
+/// the shared license resolver, which also verifies the session hash).
+async fn request_actor(
+    state: &AppState,
+    extension: Option<Extension<SessionHandle>>,
+) -> Result<Option<Actor>, HandlerError> {
+    let pool = pool_of(state)?;
+    let resolved =
+        crate::license::resolve_actor(pool, state.settings().secret_key.as_bytes(), extension)
+            .await
+            .map_err(|_| HandlerError::ServerError)?;
+    Ok(resolved.map(|actor| Actor {
+        id: actor.id,
+        timezone: actor.timezone,
+    }))
+}
+
+/// `IsAuthenticated` (`views/base.py:48`): anonymous answers the DRF
+/// `NotAuthenticated` body before anything else runs.
+fn require_actor(actor: Option<Actor>) -> Result<Actor, HandlerError> {
+    actor.ok_or(HandlerError::Unauthorized)
+}
+
+/// The request's zone for datetime rendering: the actor's zone when
+/// authenticated, UTC when anonymous.
+fn request_tz(actor: Option<&Actor>) -> chrono_tz::Tz {
+    actor.map(|actor| actor.timezone).unwrap_or(chrono_tz::UTC)
+}
+
+/// The board columns the social actions read.
+struct BoardRow {
+    workspace_id: String,
+    project_id: Option<String>,
+    is_comments_enabled: bool,
+    is_reactions_enabled: bool,
+}
+
+impl BoardRow {
+    fn from_value(value: &Value) -> Result<Self, HandlerError> {
+        let o = obj(value)?;
+        Ok(Self {
+            workspace_id: req_str(o, "workspace_id")?,
+            project_id: opt_str(o, "project_id")?,
+            is_comments_enabled: req_bool(o, "is_comments_enabled")?,
+            is_reactions_enabled: req_bool(o, "is_reactions_enabled")?,
+        })
+    }
+}
+
+/// `str(project_deploy_board.project_id)`: the activity payloads render a
+/// null project as the literal `"None"`, like Python.
+fn board_project_str(board: &BoardRow) -> String {
+    board
+        .project_id
+        .clone()
+        .unwrap_or_else(|| "None".to_owned())
+}
+
+/// Resolve `DeployBoard.objects.get(anchor, entity_name="project")`
+/// (`queries::social_board_get_sql`). A miss raises through to the
+/// `ObjectDoesNotExist` envelope on writes (`AnchorLookup::GetRaises`);
+/// list querysets catch it and serve `[]` instead.
+async fn fetch_board(pool: &sqlx::PgPool, anchor: &str) -> Result<Option<BoardRow>, HandlerError> {
+    let row = fetch_optional_object(
+        pool,
+        &queries::social::social_board_get_sql(),
+        &[SqlParam::Text(anchor)],
+    )
+    .await?;
+    row.map(|value| BoardRow::from_value(&value)).transpose()
+}
+
+/// `ProjectBaseModel.save` forces `workspace` from `project.workspace`
+/// (`db/models/project.py:309-311`): written rows resolve the workspace
+/// through the project row. Forward FK reads use `_base_manager`, which
+/// carries no `deleted_at` filter (no model sets `base_manager_name`),
+/// so a soft-deleted project still resolves (PIDASHCONV-1260).
+async fn project_workspace_id(
+    pool: &sqlx::PgPool,
+    project_id: &uuid::Uuid,
+) -> Result<uuid::Uuid, HandlerError> {
+    let row: Option<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT workspace_id FROM projects WHERE id = $1")
+            .bind(project_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| HandlerError::ServerError)?;
+    row.map(|row| row.0).ok_or(HandlerError::ServerError)
+}
+
+// ---------------------------------------------------------------------------
+// `json.dumps` with CPython defaults (Celery `requested_data` payloads)
+// ---------------------------------------------------------------------------
+
+/// The `Description` mirror row's stripped text on `create()`: `Description.save`
+/// RECOMPUTES it with Django's own `strip_tags` (`db/models/description.py:22-29`),
+/// which keeps entities verbatim — unlike the comment column's entity-decoding
+/// MLStripper (`utils/html_processor.py`). Empty HTML stores NULL. (PATCH syncs
+/// the decoded form via queryset `update()`, which runs no `save()`.)
+fn description_stripped_for_create(comment_html: &str) -> Option<String> {
+    if comment_html.is_empty() {
+        None
+    } else {
+        Some(super::sanitize::strip_tags(comment_html))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tasks: issue_activity publishing through the queue
+// ---------------------------------------------------------------------------
+
+/// Enqueue a worker message for the worker to forward to the broker
+/// (Python-owned task). Best-effort after commit: without it the response
+/// still stands (the intake-handler precedent).
+async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::TaskMessage) {
+    let job = pidash_jobs::queue::NewJob::new(
+        message.task.clone(),
+        serde_json::Value::Array(message.args.clone()),
+        serde_json::Value::Object(message.kwargs.clone()),
+    );
+    if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
+        tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; response stands");
+    }
+}
+
+/// `soft_delete_related_objects.delay("db", <model>, pk, using=None)`
+/// (`db/mixins.py:78`): three positional args, `using` stays a null
+/// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
+/// call sends it. Fires on every instance `.delete()` in these views.
+fn soft_delete_message(model: &str, pk: &uuid::Uuid) -> pidash_jobs::TaskMessage {
+    let mut kwargs = serde_json::Map::new();
+    kwargs.insert("using".to_owned(), serde_json::Value::Null);
+    pidash_jobs::TaskMessage::new(
+        pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
+        vec![
+            serde_json::Value::String("db".to_owned()),
+            serde_json::Value::String(model.to_owned()),
+            serde_json::Value::String(pk.to_string()),
+        ],
+        kwargs,
+    )
+}
+
+async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &str, pk: &uuid::Uuid) {
+    enqueue_message(pool, soft_delete_message(model, pk)).await;
+}
+
+/// The member side effect shared by the comment / reaction / vote creates:
+/// non-members are tracked via `ProjectPublicMember.get_or_create`
+/// (`views/issue.py:283-291` and siblings) using the jobs-layer SQL.
+async fn ensure_public_member(
+    pool: &sqlx::PgPool,
+    project_id: &uuid::Uuid,
+    workspace_id: &uuid::Uuid,
+    member_id: &uuid::Uuid,
+) -> Result<(), HandlerError> {
+    let member: Option<(i32,)> = sqlx::query_as(pidash_jobs::space::MEMBER_EXISTS_SQL)
+        .bind(project_id)
+        .bind(member_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    if member.is_some() {
+        return Ok(());
+    }
+    let existing: Option<(uuid::Uuid,)> = sqlx::query_as(pidash_jobs::space::PUBLIC_MEMBER_GET_SQL)
+        .bind(project_id)
+        .bind(member_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    if existing.is_none() {
+        // `created_by` is the request user (`member_id` at every call
+        // site); `updated_by` stays NULL on create (`BaseModel.save`,
+        // `db/models/base.py:23-43`).
+        sqlx::query(pidash_jobs::space::PUBLIC_MEMBER_INSERT_SQL)
+            .bind(uuid::Uuid::new_v4())
+            .bind(project_id)
+            .bind(workspace_id)
+            .bind(member_id)
+            .bind(member_id)
+            .execute(pool)
+            .await
+            .map_err(|_| HandlerError::ServerError)?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Comment rendering (the public read service owns the row types, the
+// views and the renderers; the wrappers map every failure to the 500
+// the moved code raised).
+// ---------------------------------------------------------------------------
+
+/// Render one user row as `actor_detail` via the public read service.
+async fn render_actor_detail(
+    pool: &sqlx::PgPool,
+    user_id: &str,
+) -> Result<ActorDetailView, HandlerError> {
+    read::render_actor_detail(pool, user_id)
+        .await
+        .map_err(|_| HandlerError::ServerError)
+}
+
+/// Render one comment row with its nests via the public read service.
+async fn render_comment(
+    pool: &sqlx::PgPool,
+    row: &CommentRow,
+    tz: &chrono_tz::Tz,
+    include_member: bool,
+) -> Result<CommentView, HandlerError> {
+    read::render_comment(pool, row, tz, include_member)
+        .await
+        .map_err(|_| HandlerError::ServerError)
+}
+
+/// Render one reaction row via the public read service.
+async fn render_comment_reaction_row(
+    pool: &sqlx::PgPool,
+    row: &Value,
+    tz: &chrono_tz::Tz,
+) -> Result<CommentReactionView, HandlerError> {
+    read::render_comment_reaction_row(pool, row, tz)
+        .await
+        .map_err(|_| HandlerError::ServerError)
+}
+
+/// The synced-comment lock via the public read service.
+async fn comment_is_synced(
+    pool: &sqlx::PgPool,
+    external_source: Option<&str>,
+    comment_id: &str,
+) -> Result<bool, HandlerError> {
+    read::comment_is_synced(pool, external_source, comment_id)
+        .await
+        .map_err(|_| HandlerError::ServerError)
+}
+// ---------------------------------------------------------------------------
+// Query strings (Django QueryDict.get: last value wins)
+// ---------------------------------------------------------------------------
+
+use pidash_compat::http::{query_last, QueryMap};
+
+// ---------------------------------------------------------------------------
+// Request bodies (DRF JSON parsing)
+// ---------------------------------------------------------------------------
+
+/// Read the request body the way DRF does for JSON posts: unbounded past
+/// the serve-wide `BodyLimitLayer`; empty → `{}`; malformed → `ParseError`
+/// 400; non-object JSON → the attribute errors the view code hits
+/// (500 envelope).
+async fn read_body(req: Request) -> Result<Value, HandlerError> {
+    let bytes = read_request_bytes(req.into_body())
+        .await
+        .map_err(|_| HandlerError::TruncatedBody)?;
+    parse_body(&bytes)
+}
+
+fn parse_body(raw: &[u8]) -> Result<Value, HandlerError> {
+    if raw.is_empty() {
+        return Ok(Value::Object(Default::default()));
+    }
+    match serde_json::from_slice::<Value>(raw) {
+        Ok(Value::Object(map)) => Ok(Value::Object(map)),
+        Ok(_) => Err(HandlerError::ServerError),
+        Err(error) => Err(HandlerError::BadDetail(format!(
+            "JSON parse error - {error}"
+        ))),
+    }
+}
+
+/// Proxy to Django (its own 404 stays the contract) for path segments
+/// Django's `<uuid:>` converter would never route to these views.
+async fn proxy(state: &AppState, req: Request) -> Response {
+    crate::edge::proxy(State(state.clone()), req).await
+}
+
+// ---------------------------------------------------------------------------
+// Validation (serializer `is_valid`, error bodies are `serializer.errors`)
+// ---------------------------------------------------------------------------
+
+type FieldErrors = serde_json::Map<String, Value>;
+
+fn field_errors(errors: FieldErrors) -> Result<(), HandlerError> {
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(HandlerError::BadJson(Value::Object(errors)))
+    }
+}
+
+/// Optional text input: wrong types fail, null fails on non-nullable
+/// fields, over-long fails on max-length fields.
+fn check_text(
+    errors: &mut FieldErrors,
+    body: &serde_json::Map<String, Value>,
+    field: &str,
+    max_length: Option<usize>,
+) -> Option<String> {
+    match body.get(field) {
+        None => None,
+        Some(Value::Null) => {
+            push_error(errors, field, "This field may not be null.".to_owned());
+            None
+        }
+        Some(Value::String(text)) => {
+            // DRF `CharField(trim_whitespace=True)`: strip first, then
+            // count characters — same tail as app_issues `check_text_tail`.
+            let stripped = text.trim();
+            if let Some(max) = max_length {
+                if stripped.chars().count() > max {
+                    push_error(
+                        errors,
+                        field,
+                        format!("Ensure this field has no more than {max} characters."),
+                    );
+                }
+            }
+            Some(stripped.to_owned())
+        }
+        _ => {
+            push_error(errors, field, "Not a valid string.".to_owned());
+            None
+        }
+    }
+}
+
+/// Required text input (the reaction name): missing, null, blank and
+/// wrong-typed inputs each fail their own way. DRF `CharField` over the
+/// reaction `TextField` (`db/models/issue.py:733,760`): strip first, then
+/// the blank check, and coerce basic numerics via `str(data)`.
+fn check_required_text(
+    errors: &mut FieldErrors,
+    body: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Option<String> {
+    match body.get(field) {
+        None => {
+            push_error(errors, field, "This field is required.".to_owned());
+            None
+        }
+        Some(Value::Null) => {
+            push_error(errors, field, "This field may not be null.".to_owned());
+            None
+        }
+        Some(Value::String(text)) => {
+            // DRF `CharField(trim_whitespace=True)`: strip first, then
+            // the blank check — same tail as `check_text` above.
+            let stripped = text.trim();
+            if stripped.is_empty() {
+                push_error(errors, field, "This field may not be blank.".to_owned());
+                None
+            } else {
+                Some(stripped.to_owned())
+            }
+        }
+        Some(Value::Number(number)) => {
+            // DRF `CharField.to_internal_value` coerces ints/floats via
+            // `str(data)`; bools and composites still fail below.
+            Some(py_num_str(number))
+        }
+        _ => {
+            push_error(errors, field, "Not a valid string.".to_owned());
+            None
+        }
+    }
+}
+
+/// Parse a UUID column carried over from the old row (merged updates).
+fn parse_old_uuid(value: &Option<String>) -> Result<Option<uuid::Uuid>, HandlerError> {
+    value
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|_| HandlerError::ServerError)
+}
+
+/// Optional datetime input (`edited_at`, nullable): absent leaves the
+/// column alone, explicit null clears it, otherwise the text must parse.
+fn check_nullable_datetime(
+    errors: &mut FieldErrors,
+    body: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Option<Option<String>> {
+    match body.get(field) {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(text)) => {
+            if parse_input_datetime(text).is_none() {
+                push_error(
+                    errors,
+                    field,
+                    "Datetime has wrong format. Use one of these formats instead: YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM|Z].".to_owned(),
+                );
+                None
+            } else {
+                Some(Some(text.clone()))
+            }
+        }
+        _ => {
+            push_error(errors, field, "Not a valid string.".to_owned());
+            None
+        }
+    }
+}
+
+/// Optional nullable text input (`external_source`, `external_id`):
+/// absent leaves the column alone, explicit null clears it.
+fn check_nullable_text(
+    errors: &mut FieldErrors,
+    body: &serde_json::Map<String, Value>,
+    field: &str,
+    max_length: usize,
+) -> Option<Option<String>> {
+    match body.get(field) {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(text)) => {
+            // DRF `CharField(trim_whitespace=True)`: strip first, then
+            // count characters — same tail as app_issues `check_text_tail`.
+            let stripped = text.trim();
+            if stripped.chars().count() > max_length {
+                push_error(
+                    errors,
+                    field,
+                    format!("Ensure this field has no more than {max_length} characters."),
+                );
+                None
+            } else {
+                Some(Some(stripped.to_owned()))
+            }
+        }
+        _ => {
+            push_error(errors, field, "Not a valid string.".to_owned());
+            None
+        }
+    }
+}
+
+/// Optional nullable UUID input (`speaker_agent_run_id`).
+fn check_nullable_uuid(
+    errors: &mut FieldErrors,
+    body: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Option<Option<uuid::Uuid>> {
+    match body.get(field) {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(text)) => match uuid::Uuid::parse_str(text) {
+            Ok(id) => Some(Some(id)),
+            Err(_) => {
+                push_error(errors, field, format!("\"{text}\" is not a valid UUID."));
+                None
+            }
+        },
+        _ => {
+            push_error(errors, field, "Not a valid string.".to_owned());
+            None
+        }
+    }
+}
+
+/// Optional choice input (`access`, `speaker_type`).
+fn check_choice(
+    errors: &mut FieldErrors,
+    body: &serde_json::Map<String, Value>,
+    field: &str,
+    choices: &[&str],
+) -> Option<String> {
+    match body.get(field) {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => {
+            if choices.contains(&text.as_str()) {
+                Some(text.clone())
+            } else {
+                push_error(errors, field, format!("\"{text}\" is not a valid choice."));
+                None
+            }
+        }
+        _ => {
+            push_error(errors, field, "Not a valid string.".to_owned());
+            None
+        }
+    }
+}
+
+/// Parse an input datetime the way DRF `DateTimeField` does: offset-aware
+/// RFC-3339, a naive `YYYY-MM-DDThh:mm:ss` read in UTC, or the
+/// `strptime(value, 'iso-8601')` fallthrough literal (naive 1900-01-01
+/// read in UTC).
+fn parse_input_datetime(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(text) {
+        return Some(dt.with_timezone(&chrono::Utc));
+    }
+    chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S"))
+        .ok()
+        .map(|naive| naive.and_utc())
+        .or_else(|| {
+            // DRF's `strptime(value, 'iso-8601')` fallthrough
+            // (`to_internal_value` runs it when `parse_datetime` returns
+            // `None` — PIDASHCONV-773): the literal matches
+            // case-insensitively. Exact match: padding fails on both
+            // sides (probed); ASCII-only (765 unicode-gap family).
+            text.eq_ignore_ascii_case("iso-8601").then(|| {
+                let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+                    .and_then(|date| date.and_hms_opt(0, 0, 0))
+                    .expect("1900-01-01 valid");
+                naive.and_utc()
+            })
+        })
+}
+
+/// Optional string-array input (`attachments`, `labels`). Both columns are
+/// non-nullable, so explicit null fails like DRF.
+fn check_string_list(
+    errors: &mut FieldErrors,
+    body: &serde_json::Map<String, Value>,
+    field: &str,
+    max_items: usize,
+    item_max_length: Option<usize>,
+) -> Option<Vec<String>> {
+    match body.get(field) {
+        None => None,
+        Some(Value::Null) => {
+            push_error(errors, field, "This field may not be null.".to_owned());
+            None
+        }
+        Some(Value::Array(items)) => {
+            if items.len() > max_items {
+                push_error(
+                    errors,
+                    field,
+                    format!("Ensure this field has no more than {max_items} elements."),
+                );
+                return None;
+            }
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::String(text) => {
+                        // List items are DRF child `CharField`s: strip, then
+                        // count characters (app_issues `check_text_tail`).
+                        let stripped = text.trim();
+                        if let Some(max) = item_max_length {
+                            if stripped.chars().count() > max {
+                                push_error(
+                                    errors,
+                                    field,
+                                    format!("Ensure this field has no more than {max} characters."),
+                                );
+                                return None;
+                            }
+                        }
+                        out.push(stripped.to_owned());
+                    }
+                    _ => {
+                        push_error(errors, field, "Not a valid string.".to_owned());
+                        return None;
+                    }
+                }
+            }
+            Some(out)
+        }
+        _ => {
+            push_error(
+                errors,
+                field,
+                "Expected a list of items but got a different type.".to_owned(),
+            );
+            None
+        }
+    }
+}
+
+/// Attachment URLs (`ArrayField(URLField())`): Django's `URLValidator`
+/// needs a known scheme and a host; anything else fails.
+fn check_attachments(
+    errors: &mut FieldErrors,
+    body: &serde_json::Map<String, Value>,
+) -> Option<Vec<String>> {
+    let items = check_string_list(errors, body, "attachments", 10, None)?;
+    for item in &items {
+        if !looks_like_url(item) {
+            push_error(errors, "attachments", "Enter a valid URL.".to_owned());
+            return None;
+        }
+    }
+    Some(items)
+}
+
+fn looks_like_url(value: &str) -> bool {
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return false;
+    };
+    if !matches!(scheme, "http" | "https" | "ftp" | "ftps") {
+        return false;
+    }
+    let host = rest.split('/').next().unwrap_or("");
+    !host.is_empty()
+}
+
+/// `SELECT` for the `PrimaryKeyRelatedField` liveness probe behind
+/// [`check_nullable_fk`]. Soft-deletable tables probe through the manager's
+/// `deleted_at IS NULL` filter; `users` has no such column (`User` is never
+/// soft-deleted, like [`user_detail_sql`]), so its probe is unguarded.
+fn nullable_fk_sql(table: &str) -> String {
+    if table == "users" {
+        format!("SELECT id FROM {table} WHERE id = $1")
+    } else {
+        format!("SELECT id FROM {table} WHERE id = $1 AND deleted_at IS NULL")
+    }
+}
+
+/// A writable nullable FK input (`actor`, `parent`, `description`): absent
+/// leaves the column alone, explicit null clears it, otherwise the value
+/// must name a live row, like `PrimaryKeyRelatedField`.
+async fn check_nullable_fk(
+    pool: &sqlx::PgPool,
+    errors: &mut FieldErrors,
+    body: &serde_json::Map<String, Value>,
+    field: &str,
+    table: &str,
+) -> Result<Option<Option<uuid::Uuid>>, HandlerError> {
+    let Some(inner) = check_nullable_uuid(errors, body, field) else {
+        // Absent, or invalid (errors non-empty, so the caller aborts).
+        return Ok(None);
+    };
+    let Some(id) = inner else {
+        return Ok(Some(None));
+    };
+    let sql = nullable_fk_sql(table);
+    let row: Option<(uuid::Uuid,)> = sqlx::query_as(&sql)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    if row.is_none() {
+        push_error(
+            errors,
+            field,
+            format!("Invalid pk \"{id}\" - object does not exist."),
+        );
+        return Ok(None);
+    }
+    Ok(Some(Some(id)))
+}
+
+/// Validated comment input shared by create (full) and partial_update
+/// (subset: only provided keys validate, like `partial=True`).
+/// Validated comment input. Nullable columns are three-state
+/// (`Option<Option<T>>`): absent leaves the column alone, explicit null
+/// clears it — the `partial=True` semantics for nullable fields.
+struct CommentInput {
+    comment_html: Option<String>,
+    comment_json: Option<Value>,
+    comment_stripped: Option<String>,
+    attachments: Option<Vec<String>>,
+    labels: Option<Vec<String>>,
+    access: Option<String>,
+    external_source: Option<Option<String>>,
+    external_id: Option<Option<String>>,
+    speaker_type: Option<String>,
+    speaker_label: Option<String>,
+    speaker_agent_run_id: Option<Option<uuid::Uuid>>,
+    edited_at: Option<Option<String>>,
+    parent_id: Option<Option<uuid::Uuid>>,
+    description_id: Option<Option<uuid::Uuid>>,
+}
+
+/// Validate one comment body. Read-only keys (`workspace`, `project`,
+/// `issue`, audit stamps, `id`) are ignored like DRF ignores them.
+async fn validate_comment(
+    pool: &sqlx::PgPool,
+    body: &serde_json::Map<String, Value>,
+) -> Result<CommentInput, HandlerError> {
+    let mut errors = FieldErrors::new();
+    let comment_html = check_text(&mut errors, body, "comment_html", None);
+    let comment_json = match body.get("comment_json") {
+        None => None,
+        Some(Value::Null) => {
+            push_error(
+                &mut errors,
+                "comment_json",
+                "This field may not be null.".to_owned(),
+            );
+            None
+        }
+        Some(value) => Some(value.clone()),
+    };
+    let comment_stripped = check_text(&mut errors, body, "comment_stripped", None);
+    let attachments = check_attachments(&mut errors, body);
+    let labels = check_string_list(&mut errors, body, "labels", 8, Some(32));
+    let access = check_choice(&mut errors, body, "access", &["INTERNAL", "EXTERNAL"]);
+    let external_source = check_nullable_text(&mut errors, body, "external_source", 255);
+    let external_id = check_nullable_text(&mut errors, body, "external_id", 255);
+    let speaker_type = check_choice(
+        &mut errors,
+        body,
+        "speaker_type",
+        &["human", "agent", "system", "integration"],
+    );
+    let speaker_label = check_text(&mut errors, body, "speaker_label", Some(128));
+    let speaker_agent_run_id = check_nullable_uuid(&mut errors, body, "speaker_agent_run_id");
+    let edited_at = check_nullable_datetime(&mut errors, body, "edited_at");
+    let parent_id = check_nullable_fk(pool, &mut errors, body, "parent", "issue_comments").await?;
+    // `actor` is writable but `save(actor=request.user)` overwrites it:
+    // validated for existence, then discarded.
+    check_nullable_fk(pool, &mut errors, body, "actor", "users").await?;
+    let description_id =
+        check_nullable_fk(pool, &mut errors, body, "description", "descriptions").await?;
+    field_errors(errors)?;
+    Ok(CommentInput {
+        comment_html,
+        comment_json,
+        comment_stripped,
+        attachments,
+        labels,
+        access,
+        external_source,
+        external_id,
+        speaker_type,
+        speaker_label,
+        speaker_agent_run_id,
+        edited_at,
+        parent_id,
+        description_id,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Comments: list / retrieve
+// ---------------------------------------------------------------------------
+
+/// `IssueCommentPublicViewSet.list` (`views/issue.py:228-255`): `AllowAny`.
+/// Board miss or disabled board serves `[]` (the queryset's `.none()`
+/// branches — no 404 here). `filterset_fields` (`:218`) scope exact
+/// `issue__id` / `workspace__id` matches; anything else is ignored.
+async fn comment_list(
+    State(state): State<AppState>,
+    Path((anchor, issue_id)): Path<(String, String)>,
+    axum::extract::Query(query): axum::extract::Query<QueryMap>,
+    extension: Option<Extension<SessionHandle>>,
+) -> Response {
+    let issue = match uuid::Uuid::parse_str(&issue_id) {
+        Ok(issue) => issue,
+        Err(_) => {
+            let req = Request::builder()
+                .uri(format!(
+                    "/api/public/anchor/{anchor}/issues/{issue_id}/comments/"
+                ))
+                .body(axum::body::Body::empty())
+                .expect("proxy request");
+            return proxy(&state, req).await;
+        }
+    };
+    match comment_list_inner(&state, &anchor, &issue, &query, extension).await {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn comment_list_inner(
+    state: &AppState,
+    anchor: &str,
+    issue_id: &uuid::Uuid,
+    query: &QueryMap,
+    extension: Option<Extension<SessionHandle>>,
+) -> Result<String, HandlerError> {
+    let pool = pool_of(state)?;
+    let actor = request_actor(state, extension).await?;
+    let Some(board) = fetch_board(pool, anchor).await? else {
+        return Ok("[]".to_owned());
+    };
+    if !board.is_comments_enabled {
+        return Ok("[]".to_owned());
+    }
+    let (sql, params) = comment_list_query(
+        &board,
+        actor.as_ref().map(|actor| actor.id),
+        issue_id,
+        query,
+    )?;
+    let rows = fetch_all_objects(pool, &sql, &params).await?;
+    let tz = request_tz(actor.as_ref());
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let rendered = render_comment(
+            pool,
+            &CommentRow::from_value(row).map_err(|_| HandlerError::ServerError)?,
+            &tz,
+            true,
+        )
+        .await?;
+        out.push(serde_json::to_value(&rendered).map_err(|_| HandlerError::ServerError)?);
+    }
+    serde_json::to_string(&out).map_err(|_| HandlerError::ServerError)
+}
+
+/// Build the C1 list query (`queries::comment_list_sql`) with the
+/// `filter_queryset` conjunct. `$1` workspace, `$2` project, `$3` the
+/// actor (NULL anonymous — QUIRK-anonymous-member), `$4` the issue, then
+/// one `$N` per exact filter.
+fn comment_list_query<'a>(
+    board: &'a BoardRow,
+    actor_id: Option<uuid::Uuid>,
+    issue_id: &'a uuid::Uuid,
+    query: &QueryMap,
+) -> Result<(String, Vec<SqlParam<'a>>), HandlerError> {
+    let workspace_id =
+        uuid::Uuid::parse_str(&board.workspace_id).map_err(|_| HandlerError::ServerError)?;
+    let project_id = board
+        .project_id
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|_| HandlerError::ServerError)?;
+    // Anonymous binds NULL for the member probe (QUIRK-anonymous-member);
+    // a NULL `$2` never matches under `=`, like the queries-layer text.
+    let mut params = vec![
+        SqlParam::Uuid(workspace_id),
+        project_id.map(SqlParam::Uuid).unwrap_or(SqlParam::Null),
+        actor_id.map(SqlParam::Uuid).unwrap_or(SqlParam::Null),
+        SqlParam::Uuid(*issue_id),
+    ];
+    let mut predicates = Vec::new();
+    if let Some(raw) = query_last(query, "issue__id") {
+        let id = uuid::Uuid::parse_str(&raw).map_err(|_| {
+            HandlerError::Guard(guards::handle_exception(
+                guards::ExceptionKind::ValidationError,
+            ))
+        })?;
+        params.push(SqlParam::Uuid(id));
+        predicates.push(format!(
+            "\"issue_comments\".\"issue_id\" = ${}",
+            params.len()
+        ));
+    }
+    if let Some(raw) = query_last(query, "workspace__id") {
+        let id = uuid::Uuid::parse_str(&raw).map_err(|_| {
+            HandlerError::Guard(guards::handle_exception(
+                guards::ExceptionKind::ValidationError,
+            ))
+        })?;
+        params.push(SqlParam::Uuid(id));
+        predicates.push(format!(
+            "\"issue_comments\".\"workspace_id\" = ${}",
+            params.len()
+        ));
+    }
+    let extra = if predicates.is_empty() {
+        None
+    } else {
+        Some(predicates.join(" AND "))
+    };
+    Ok((queries::social::comment_list_sql(extra.as_deref()), params))
+}
+
+/// `IssueCommentPublicViewSet.retrieve`: the same queryset plus the pk
+/// lookup; a miss is DRF's `Http404` detail body.
+async fn comment_retrieve(
+    State(state): State<AppState>,
+    Path((anchor, issue_id, pk)): Path<(String, String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    if uuid::Uuid::parse_str(&issue_id).is_err() || uuid::Uuid::parse_str(&pk).is_err() {
+        return proxy(&state, req).await;
+    }
+    match comment_retrieve_inner(&state, &anchor, &issue_id, &pk, extension).await {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn comment_retrieve_inner(
+    state: &AppState,
+    anchor: &str,
+    issue_id: &str,
+    pk: &str,
+    extension: Option<Extension<SessionHandle>>,
+) -> Result<String, HandlerError> {
+    let pool = pool_of(state)?;
+    let actor = request_actor(state, extension).await?;
+    let Some(board) = fetch_board(pool, anchor).await? else {
+        return Err(HandlerError::NotFoundDetail);
+    };
+    if !board.is_comments_enabled {
+        return Err(HandlerError::NotFoundDetail);
+    }
+    let issue = uuid_param(issue_id)?;
+    let id = uuid_param(pk)?;
+    let workspace = uuid_param(&board.workspace_id)?;
+    let project = board
+        .project_id
+        .as_deref()
+        .map(uuid_param)
+        .transpose()?
+        .unwrap_or(SqlParam::Null);
+    let user = actor
+        .as_ref()
+        .map(|actor| SqlParam::Uuid(actor.id))
+        .unwrap_or(SqlParam::Null);
+    let extra = "\"issue_comments\".\"id\" = $5".to_owned();
+    let rows = fetch_all_objects(
+        pool,
+        &queries::social::comment_list_sql(Some(&extra)),
+        &[workspace, project, user, issue, id],
+    )
+    .await?;
+    let row = rows.first().ok_or(HandlerError::NotFoundDetail)?;
+    let tz = request_tz(actor.as_ref());
+    let rendered = render_comment(
+        pool,
+        &CommentRow::from_value(row).map_err(|_| HandlerError::ServerError)?,
+        &tz,
+        true,
+    )
+    .await?;
+    serde_json::to_string(&rendered).map_err(|_| HandlerError::ServerError)
+}
+
+// ---------------------------------------------------------------------------
+// Comments: create / partial_update / destroy
+// ---------------------------------------------------------------------------
+
+/// `IssueCommentPublicViewSet.create` (`views/issue.py:257-294`):
+/// the board must exist (bare `.get`) and allow comments; the response is
+/// the validated output, always 201.
+async fn comment_create(
+    State(state): State<AppState>,
+    Path((anchor, issue_id)): Path<(String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    if uuid::Uuid::parse_str(&issue_id).is_err() {
+        return proxy(&state, req).await;
+    }
+    let body = match read_body(req).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    match comment_create_inner(&state, &anchor, &issue_id, &body, extension).await {
+        Ok(body) => json_response(StatusCode::CREATED, body),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn comment_create_inner(
+    state: &AppState,
+    anchor: &str,
+    issue_id: &str,
+    body: &Value,
+    extension: Option<Extension<SessionHandle>>,
+) -> Result<String, HandlerError> {
+    let pool = pool_of(state)?;
+    let actor = require_actor(request_actor(state, extension).await?)?;
+    let board = fetch_board(pool, anchor)
+        .await?
+        .ok_or(HandlerError::NotFound)?;
+    if !board.is_comments_enabled {
+        return Err(HandlerError::Guard(guards::comments_not_enabled()));
+    }
+    let project_id = board
+        .project_id
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|_| HandlerError::ServerError)?
+        .ok_or_else(|| {
+            HandlerError::Guard(guards::handle_exception(
+                guards::ExceptionKind::IntegrityError,
+            ))
+        })?;
+    let input = validate_comment(pool, body.as_object().ok_or(HandlerError::ServerError)?).await?;
+    let workspace_id = project_workspace_id(pool, &project_id).await?;
+    let now = chrono::Utc::now();
+    let comment_id = uuid::Uuid::new_v4();
+    // `IssueComment.save`: `comment_stripped` is recomputed from
+    // `comment_html` with MLStripper (`db/models/issue.py:601` over
+    // `utils/html_processor.py`); absent html defaults to `"<p></p>"`
+    // (model default).
+    let html = input
+        .comment_html
+        .clone()
+        .unwrap_or_else(|| "<p></p>".to_owned());
+    let stripped = if html.is_empty() {
+        String::new()
+    } else {
+        ml_strip_tags(&html)
+    };
+    let comment_json = input
+        .comment_json
+        .clone()
+        .unwrap_or_else(|| Value::Object(Default::default()));
+    // `attachments`/`labels` are Postgres `varchar[]` (`ArrayField`,
+    // `db/models/issue.py:563-566`), not jsonb: they bind as string lists
+    // (sqlx encodes `&[String]` as an array), never as JSON values.
+    let attachments = input.attachments.clone().unwrap_or_default();
+    let labels = input.labels.clone().unwrap_or_default();
+    // `IssueComment.save` runs the comment insert, the `Description` mirror
+    // insert and the link update inside one `transaction.atomic()` block
+    // (`db/models/issue.py:598-627`): a mid-save failure leaves no rows.
+    let issue = uuid::Uuid::parse_str(issue_id).map_err(|_| HandlerError::ServerError)?;
+    let edited_at: Option<chrono::DateTime<chrono::Utc>> = input
+        .edited_at
+        .clone()
+        .flatten()
+        .map(|text| parse_input_datetime(&text).ok_or(HandlerError::ServerError))
+        .transpose()?;
+    // Domain twins, in Django order; one `now()` feeds all four stamps.
+    // `access` is always `EXTERNAL`. The old link carried `AND
+    // deleted_at IS NULL`: provably a no-op (the row was inserted
+    // uncommitted in this transaction, so no concurrent delete can land
+    // first), dropped with the shared twin.
+    let external_source = input.external_source.clone().flatten();
+    let external_id = input.external_id.clone().flatten();
+    let desc_stripped = description_stripped_for_create(&html);
+    let rows = comment_domain::CommentRows {
+        id: comment_id,
+        description_id: uuid::Uuid::new_v4(),
+        created_at: now,
+        updated_at: now,
+        desc_created_at: now,
+        desc_updated_at: now,
+        workspace_id,
+        project_id,
+        issue_id: issue,
+        actor_id: Some(actor.id),
+        created_by: Some(actor.id),
+        updated_by: None,
+        deleted_at: None,
+        html: &html,
+        json: &comment_json,
+        stripped: &stripped,
+        desc_stripped: desc_stripped.as_deref(),
+        access: "EXTERNAL",
+        speaker_type: input.speaker_type.as_deref().unwrap_or("human"),
+        speaker_label: input.speaker_label.as_deref().unwrap_or(""),
+        speaker_agent_run_id: input.speaker_agent_run_id.flatten(),
+        external_id: external_id.as_deref(),
+        external_source: external_source.as_deref(),
+        parent_id: input.parent_id.flatten(),
+        attachments: &attachments,
+        labels: &labels,
+        edited_at,
+    };
+    let mut tx = pool.begin().await.map_err(|_| HandlerError::ServerError)?;
+    comment_domain::insert_comment_row(&mut *tx, &rows)
+        .await
+        .map_err(integrity_error)?;
+    comment_domain::insert_description_row(&mut *tx, &rows)
+        .await
+        .map_err(integrity_error)?;
+    comment_domain::link_comment_description(&mut *tx, rows.id, rows.description_id)
+        .await
+        .map_err(integrity_error)?;
+    // The `issue_id` FK is `DEFERRABLE INITIALLY DEFERRED`, so a comment
+    // on a missing issue only fails here at commit — map it the same way
+    // as the inserts (`handle_exception`, `views/base.py:74-78`).
+    tx.commit().await.map_err(integrity_error)?;
+    let row = fetch_comment_by_id(pool, &comment_id)
+        .await?
+        .ok_or(HandlerError::ServerError)?;
+    // `BaseModel.save` still assigns `updated_by` on the in-memory instance
+    // before the `update_fields` save, and the view returns `serializer.data`
+    // from that instance — so the 201 carries the actor while the row keeps
+    // NULL (`handlers_engage.rs:5120-5124` renders the same split).
+    let mut created = CommentRow::from_value(&row).map_err(|_| HandlerError::ServerError)?;
+    created.updated_by = Some(actor.id.to_string());
+    let tz = request_tz(Some(&actor));
+    let rendered = render_comment(pool, &created, &tz, false).await?;
+    let value = serde_json::to_value(&rendered).map_err(|_| HandlerError::ServerError)?;
+    // Python order: delay first (`:274-282`), member tracking after
+    // (`:283-291`).
+    let publish = pidash_jobs::space::comment_created(
+        python_dumps(&value),
+        actor.id.to_string(),
+        issue_id.to_owned(),
+        project_id.to_string(),
+        now.timestamp(),
+    );
+    enqueue_message(pool, publish.message()).await;
+    ensure_public_member(pool, &project_id, &workspace_id, &actor.id).await?;
+    serde_json::to_string(&value).map_err(|_| HandlerError::ServerError)
+}
+
+/// Decode a `row_to_json` array back into the string list for `varchar[]`
+/// writes (`attachments`/`labels`). A null renders as the empty list (the
+/// model default); anything but strings is a 500 like the read side.
+fn string_list(value: &Value) -> Result<Vec<String>, HandlerError> {
+    match value {
+        Value::Null => Ok(Vec::new()),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::String(text) => Ok(text.clone()),
+                _ => Err(HandlerError::ServerError),
+            })
+            .collect(),
+        _ => Err(HandlerError::ServerError),
+    }
+}
+
+async fn fetch_comment_by_id(
+    pool: &sqlx::PgPool,
+    comment_id: &uuid::Uuid,
+) -> Result<Option<Value>, HandlerError> {
+    fetch_optional_object(
+        pool,
+        "SELECT \"issue_comments\".* FROM \"issue_comments\" WHERE (\"issue_comments\".\"deleted_at\" IS NULL AND \"issue_comments\".\"id\" = $1)",
+        &[SqlParam::Uuid(*comment_id)],
+    )
+    .await
+}
+
+/// `IssueCommentPublicViewSet.partial_update` (`views/issue.py:296-318`):
+/// actor-scoped get (a foreign comment is a 404, not a 403); the synced
+/// lock rejects changed locked fields; the activity carries the raw input
+/// dump plus the after image (`save()` mutates the serialized instance).
+async fn comment_partial_update(
+    State(state): State<AppState>,
+    Path((anchor, issue_id, pk)): Path<(String, String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    if uuid::Uuid::parse_str(&issue_id).is_err() || uuid::Uuid::parse_str(&pk).is_err() {
+        return proxy(&state, req).await;
+    }
+    let body = match read_body(req).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    match comment_partial_update_inner(&state, &anchor, &issue_id, &pk, &body, extension).await {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn comment_partial_update_inner(
+    state: &AppState,
+    anchor: &str,
+    issue_id: &str,
+    pk: &str,
+    body: &Value,
+    extension: Option<Extension<SessionHandle>>,
+) -> Result<String, HandlerError> {
+    let pool = pool_of(state)?;
+    let actor = require_actor(request_actor(state, extension).await?)?;
+    let board = fetch_board(pool, anchor)
+        .await?
+        .ok_or(HandlerError::NotFound)?;
+    if !board.is_comments_enabled {
+        return Err(HandlerError::Guard(guards::comments_not_enabled()));
+    }
+    let comment_id = uuid::Uuid::parse_str(pk).map_err(|_| HandlerError::ServerError)?;
+    let old_row = fetch_optional_object(
+        pool,
+        "SELECT \"issue_comments\".* FROM \"issue_comments\" WHERE (\"issue_comments\".\"deleted_at\" IS NULL AND \"issue_comments\".\"id\" = $1 AND \"issue_comments\".\"actor_id\" = $2)",
+        &[SqlParam::Uuid(comment_id), SqlParam::Uuid(actor.id)],
+    )
+    .await?
+    .ok_or(HandlerError::NotFound)?;
+    let old = CommentRow::from_value(&old_row).map_err(|_| HandlerError::ServerError)?;
+    let input = validate_comment(pool, body.as_object().ok_or(HandlerError::ServerError)?).await?;
+    // The synced lock (`IssueCommentSerializer.validate`, `:977-989`):
+    // changed locked fields fail per field.
+    if comment_is_synced(pool, old.external_source.as_deref(), &old.id).await? {
+        let mut errors = FieldErrors::new();
+        let locked = [
+            (
+                "comment_html",
+                input
+                    .comment_html
+                    .as_ref()
+                    .map(|text| Value::String(text.clone())),
+            ),
+            ("comment_json", input.comment_json.clone()),
+            (
+                "comment_stripped",
+                input
+                    .comment_stripped
+                    .as_ref()
+                    .map(|text| Value::String(text.clone())),
+            ),
+        ];
+        for (field, new) in locked {
+            if let Some(new) = new {
+                let current = match field {
+                    "comment_html" => old
+                        .comment_html
+                        .clone()
+                        .map(Value::String)
+                        .unwrap_or(Value::Null),
+                    "comment_json" => old.comment_json.clone(),
+                    _ => old
+                        .comment_stripped
+                        .clone()
+                        .map(Value::String)
+                        .unwrap_or(Value::Null),
+                };
+                if new != current {
+                    push_error(
+                        &mut errors,
+                        field,
+                        "This comment is synced from a Git provider and is read-only. Unbind the project's repository to edit.".to_owned(),
+                    );
+                }
+            }
+        }
+        field_errors(errors)?;
+    }
+    // `save()` recomputes `comment_stripped` from `comment_html`, so an
+    // explicit `comment_stripped` without new html is overwritten back.
+    let html = input.comment_html.clone().or(old.comment_html.clone());
+    let stripped = match &html {
+        Some(text) if !text.is_empty() => ml_strip_tags(text),
+        _ => String::new(),
+    };
+    let now = chrono::Utc::now();
+    apply_comment_update(
+        pool,
+        &comment_id,
+        &actor.id,
+        &now,
+        &old,
+        &input,
+        &html,
+        &stripped,
+    )
+    .await?;
+    let row = fetch_comment_by_id(pool, &comment_id)
+        .await?
+        .ok_or(HandlerError::ServerError)?;
+    let tz = request_tz(Some(&actor));
+    let rendered = render_comment(
+        pool,
+        &CommentRow::from_value(&row).map_err(|_| HandlerError::ServerError)?,
+        &tz,
+        false,
+    )
+    .await?;
+    let value = serde_json::to_value(&rendered).map_err(|_| HandlerError::ServerError)?;
+    // `requested_data` is the raw input dump; `current_instance` is the
+    // after image: `save()` at `:307` mutates the in-memory instance, so
+    // Django serializes that SAME instance (already rendered as `value`).
+    let publish = pidash_jobs::space::comment_updated(
+        python_dumps(body),
+        actor.id.to_string(),
+        issue_id.to_owned(),
+        board_project_str(&board),
+        python_dumps(&value),
+        now.timestamp(),
+    );
+    enqueue_message(pool, publish.message()).await;
+    serde_json::to_string(&value).map_err(|_| HandlerError::ServerError)
+}
+
+/// Write the provided columns plus the audit touch. Django's `save()`
+/// writes every column; only provided values can differ, so updating the
+/// provided subset plus `updated_at`/`updated_by` is the same row.
+#[allow(clippy::too_many_arguments)]
+async fn apply_comment_update(
+    pool: &sqlx::PgPool,
+    comment_id: &uuid::Uuid,
+    actor_id: &uuid::Uuid,
+    now: &chrono::DateTime<chrono::Utc>,
+    old: &CommentRow,
+    input: &CommentInput,
+    html: &Option<String>,
+    stripped: &str,
+) -> Result<(), HandlerError> {
+    // Absent keys keep the old column (Django writes the instance back
+    // with only provided attributes changed); explicit nulls clear
+    // nullable columns. Merging first makes the UPDATE a plain full-row
+    // write like `save()`.
+    let edited_at: Option<chrono::DateTime<chrono::Utc>> = match input.edited_at.clone() {
+        None => old
+            .edited_at
+            .clone()
+            .map(|text| parse_input_datetime(&text).ok_or(HandlerError::ServerError))
+            .transpose()?,
+        Some(inner) => inner
+            .map(|text| parse_input_datetime(&text).ok_or(HandlerError::ServerError))
+            .transpose()?,
+    };
+    let external_source = input
+        .external_source
+        .clone()
+        .unwrap_or(old.external_source.clone());
+    let external_id = input.external_id.clone().unwrap_or(old.external_id.clone());
+    let speaker_agent_run_id = input
+        .speaker_agent_run_id
+        .unwrap_or(parse_old_uuid(&old.speaker_agent_run_id)?);
+    let parent_id = input.parent_id.unwrap_or(parse_old_uuid(&old.parent_id)?);
+    let description_id = input
+        .description_id
+        .unwrap_or(parse_old_uuid(&old.description_id)?);
+    let access = input.access.clone().or(old.access.clone());
+    let speaker_type = input.speaker_type.clone().or(old.speaker_type.clone());
+    let speaker_label = input.speaker_label.clone().or(old.speaker_label.clone());
+    let comment_json = input
+        .comment_json
+        .clone()
+        .unwrap_or_else(|| old.comment_json.clone());
+    // `varchar[]` binds (see `insert_comment`): fresh input binds as-is,
+    // otherwise the stored JSON array decodes back into the string list.
+    let attachments = match input.attachments.clone() {
+        Some(items) => items,
+        None => string_list(&old.attachments)?,
+    };
+    let labels = match input.labels.clone() {
+        Some(items) => items,
+        None => string_list(&old.labels)?,
+    };
+    // `save()` recomputes `comment_stripped` from the current
+    // `comment_html` on every save (`issue.py:606`), so the strip of the
+    // resulting html always wins — even when the PATCH omits html and the
+    // stored value is stale (pre-1258/1581 rows, other writers).
+    let stripped_value = stripped.to_owned();
+    let old_html = old.comment_html.clone().unwrap_or_default();
+    let new_html = html.clone().unwrap_or(old_html.clone());
+    let html_value = html.clone().or(old.comment_html.clone());
+    comment_domain::save_space_comment_update(
+        pool,
+        &comment_domain::SpaceCommentUpdate {
+            id: *comment_id,
+            updated_at: *now,
+            updated_by: *actor_id,
+            stripped: &stripped_value,
+            json: &comment_json,
+            html: html_value.as_deref(),
+            attachments: attachments.as_slice(),
+            labels: labels.as_slice(),
+            access: access.as_deref(),
+            external_source: external_source.as_deref(),
+            external_id: external_id.as_deref(),
+            speaker_type: speaker_type.as_deref(),
+            speaker_label: speaker_label.as_deref(),
+            speaker_agent_run_id,
+            edited_at,
+            parent_id,
+            description_id,
+        },
+    )
+    .await
+    .map_err(integrity_error)?;
+    // Mirror tracked-field changes into the description row (`save()`'s
+    // change mapping, `:625-641`); untouched when the link is gone.
+    let stripped_changed = stripped_value != old.comment_stripped.clone().unwrap_or_default();
+    let html_changed = new_html != old_html;
+    let json_changed = comment_json != old.comment_json;
+    if old.description_id.is_none() {
+        // A missing link creates + links a Description even on update
+        // (`IssueComment.save`, `:618-621`): the tracked text is the new
+        // row, and the link is a second save stamping `updated_by`/
+        // `updated_at` again. The create passes the comment's audit
+        // columns as defaults, but `BaseModel.save` overrides them
+        // (`base.py:21-41`): `created_by` is the requesting user and
+        // `updated_by` is NULL.
+        let workspace_id = old
+            .workspace_id
+            .as_deref()
+            .map(uuid::Uuid::parse_str)
+            .transpose()
+            .map_err(|_| HandlerError::ServerError)?
+            .ok_or(HandlerError::ServerError)?;
+        let project_id = old
+            .project_id
+            .as_deref()
+            .map(uuid::Uuid::parse_str)
+            .transpose()
+            .map_err(|_| HandlerError::ServerError)?
+            .ok_or(HandlerError::ServerError)?;
+        // A relinked Description is a fresh `create()`, so its stripped
+        // text is the `Description.save` recompute, not the ML value.
+        let desc_stripped = description_stripped_for_create(&new_html);
+        let desc = comment_domain::DescriptionValues {
+            id: uuid::Uuid::new_v4(),
+            created_at: *now,
+            updated_at: *now,
+            created_by: Some(*actor_id),
+            updated_by: None,
+            workspace_id,
+            project_id,
+            json: &comment_json,
+            html: &new_html,
+            stripped: desc_stripped.as_deref(),
+        };
+        comment_domain::insert_description_values(pool, &desc)
+            .await
+            .map_err(|_| HandlerError::ServerError)?;
+        let description_id = desc.id;
+        let relinked_at = chrono::Utc::now();
+        comment_domain::relink_space_comment_description(
+            pool,
+            *comment_id,
+            description_id,
+            *actor_id,
+            relinked_at,
+        )
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    } else if stripped_changed || html_changed || json_changed {
+        // Queryset `update` bypasses `Description.save` (values land
+        // verbatim), but only the changed subset syncs
+        // (`issue.py:637-646`, PIDASHCONV-1581 item 2) — an unchanged
+        // field keeps the description row's own value.
+        let description_id = uuid::Uuid::parse_str(old.description_id.as_deref().unwrap_or(""))
+            .map_err(|_| HandlerError::ServerError)?;
+        if html_changed {
+            comment_domain::sync_description_html(pool, description_id, &new_html)
+                .await
+                .map_err(|_| HandlerError::ServerError)?;
+        }
+        if stripped_changed {
+            comment_domain::sync_description_stripped(pool, description_id, &stripped_value)
+                .await
+                .map_err(|_| HandlerError::ServerError)?;
+        }
+        if json_changed {
+            comment_domain::sync_description_json(pool, description_id, &comment_json)
+                .await
+                .map_err(|_| HandlerError::ServerError)?;
+        }
+        comment_domain::touch_synced_description(pool, description_id, Some(*actor_id), *now)
+            .await
+            .map_err(|_| HandlerError::ServerError)?;
+    }
+    Ok(())
+}
+
+/// `IssueCommentPublicViewSet.destroy` (`views/issue.py:320-339`): the
+/// activity delays with the pre-delete snapshot *before* the soft delete.
+async fn comment_destroy(
+    State(state): State<AppState>,
+    Path((anchor, issue_id, pk)): Path<(String, String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    if uuid::Uuid::parse_str(&issue_id).is_err() || uuid::Uuid::parse_str(&pk).is_err() {
+        return proxy(&state, req).await;
+    }
+    match comment_destroy_inner(&state, &anchor, &issue_id, &pk, extension).await {
+        Ok(()) => Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(axum::body::Body::empty())
+            .expect("empty 204"),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn comment_destroy_inner(
+    state: &AppState,
+    anchor: &str,
+    issue_id: &str,
+    pk: &str,
+    extension: Option<Extension<SessionHandle>>,
+) -> Result<(), HandlerError> {
+    let pool = pool_of(state)?;
+    let actor = require_actor(request_actor(state, extension).await?)?;
+    let board = fetch_board(pool, anchor)
+        .await?
+        .ok_or(HandlerError::NotFound)?;
+    if !board.is_comments_enabled {
+        return Err(HandlerError::Guard(guards::comments_not_enabled()));
+    }
+    let comment_id = uuid::Uuid::parse_str(pk).map_err(|_| HandlerError::ServerError)?;
+    let old_row = fetch_optional_object(
+        pool,
+        "SELECT \"issue_comments\".* FROM \"issue_comments\" WHERE (\"issue_comments\".\"deleted_at\" IS NULL AND \"issue_comments\".\"id\" = $1 AND \"issue_comments\".\"actor_id\" = $2)",
+        &[SqlParam::Uuid(comment_id), SqlParam::Uuid(actor.id)],
+    )
+    .await?
+    .ok_or(HandlerError::NotFound)?;
+    let old = CommentRow::from_value(&old_row).map_err(|_| HandlerError::ServerError)?;
+    let tz = request_tz(Some(&actor));
+    let old_view = render_comment(pool, &old, &tz, false).await?;
+    let old_value = serde_json::to_value(&old_view).map_err(|_| HandlerError::ServerError)?;
+    let now = chrono::Utc::now();
+    let mut requested = serde_json::Map::new();
+    requested.insert("comment_id".to_owned(), Value::String(pk.to_owned()));
+    let publish = pidash_jobs::space::comment_deleted(
+        python_dumps(&Value::Object(requested)),
+        actor.id.to_string(),
+        issue_id.to_owned(),
+        board_project_str(&board),
+        python_dumps(&old_value),
+        now.timestamp(),
+    );
+    enqueue_message(pool, publish.message()).await;
+    // `comment.delete()` (`db/mixins.py:72-77`): `deleted_at` plus a full
+    // `save()` (`updated_at`, CRUM `updated_by`).
+    comment_domain::soft_delete_space_comment(pool, comment_id, actor.id, now)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    enqueue_soft_delete(pool, "issuecomment", &comment_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Issue reactions
+// ---------------------------------------------------------------------------
+
+/// App `IssueReactionSerializer` (`app/serializers/issue.py:900-908`):
+/// `Meta.fields = "__all__"`: pk, declared `actor_detail`, concrete model
+/// fields, then forward relations (`get_default_field_names`, like
+/// [`CommentView`]).
+#[derive(Debug, Serialize)]
+struct IssueReactionView {
+    id: String,
+    actor_detail: ActorDetailView,
+    created_at: String,
+    updated_at: String,
+    deleted_at: Option<String>,
+    reaction: String,
+    created_by: Option<String>,
+    updated_by: Option<String>,
+    project: Option<String>,
+    workspace: Option<String>,
+    actor: String,
+    issue: String,
+}
+
+async fn render_issue_reaction(
+    pool: &sqlx::PgPool,
+    row: &Value,
+    tz: &chrono_tz::Tz,
+) -> Result<IssueReactionView, HandlerError> {
+    let o = obj(row)?;
+    let actor_id = req_str(o, "actor_id")?;
+    Ok(IssueReactionView {
+        id: req_str(o, "id")?,
+        actor_detail: render_actor_detail(pool, &actor_id).await?,
+        created_at: render_rfc3339_in(&req_str(o, "created_at")?, tz)
+            .map_err(|_| HandlerError::ServerError)?,
+        updated_at: render_rfc3339_in(&req_str(o, "updated_at")?, tz)
+            .map_err(|_| HandlerError::ServerError)?,
+        created_by: opt_str(o, "created_by_id")?
+            .or_else(|| opt_str(o, "created_by").unwrap_or(None)),
+        updated_by: opt_str(o, "updated_by_id")?
+            .or_else(|| opt_str(o, "updated_by").unwrap_or(None)),
+        deleted_at: render_dt_opt(opt_str(o, "deleted_at")?, tz)?,
+        project: opt_str(o, "project_id")?,
+        workspace: opt_str(o, "workspace_id")?,
+        actor: actor_id,
+        issue: req_str(o, "issue_id")?,
+        reaction: req_str(o, "reaction")?,
+    })
+}
+
+/// `IssueReactionPublicViewSet.list`: the board lookup filters on kwargs
+/// the routes never supply (BUG-reaction-list-dead), so the dead board get
+/// always misses and the list serves `[]`. Auth still applies first.
+async fn issue_reaction_list(
+    State(state): State<AppState>,
+    Path((anchor, issue_id)): Path<(String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    if uuid::Uuid::parse_str(&issue_id).is_err() {
+        return proxy(&state, req).await;
+    }
+    let _ = anchor;
+    match issue_reaction_list_inner(&state, &issue_id, extension).await {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn issue_reaction_list_inner(
+    state: &AppState,
+    issue_id: &str,
+    extension: Option<Extension<SessionHandle>>,
+) -> Result<String, HandlerError> {
+    let pool = pool_of(state)?;
+    let actor = require_actor(request_actor(state, extension).await?)?;
+    let tz = request_tz(Some(&actor));
+    let boards = fetch_all_objects(
+        pool,
+        &queries::social::issue_reaction_dead_board_get_sql(),
+        &[],
+    )
+    .await?;
+    let board = match boards.len() {
+        0 => return Ok("[]".to_owned()),
+        1 => &boards[0],
+        _ => return Err(HandlerError::ServerError),
+    };
+    let _ = board;
+    let rows = fetch_all_objects(
+        pool,
+        &queries::social::issue_reaction_dead_list_sql(),
+        &[uuid_param(issue_id)?],
+    )
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let rendered = render_issue_reaction(pool, row, &tz).await?;
+        out.push(serde_json::to_value(&rendered).map_err(|_| HandlerError::ServerError)?);
+    }
+    serde_json::to_string(&out).map_err(|_| HandlerError::ServerError)
+}
+
+/// `IssueReactionPublicViewSet.create` (`views/issue.py:366-401`).
+async fn issue_reaction_create(
+    State(state): State<AppState>,
+    Path((anchor, issue_id)): Path<(String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    if uuid::Uuid::parse_str(&issue_id).is_err() {
+        return proxy(&state, req).await;
+    }
+    let body = match read_body(req).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    match issue_reaction_create_inner(&state, &anchor, &issue_id, &body, extension).await {
+        Ok(body) => json_response(StatusCode::CREATED, body),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn issue_reaction_create_inner(
+    state: &AppState,
+    anchor: &str,
+    issue_id: &str,
+    body: &Value,
+    extension: Option<Extension<SessionHandle>>,
+) -> Result<String, HandlerError> {
+    let pool = pool_of(state)?;
+    let actor = require_actor(request_actor(state, extension).await?)?;
+    let board = fetch_board(pool, anchor)
+        .await?
+        .ok_or(HandlerError::NotFound)?;
+    if !board.is_reactions_enabled {
+        return Err(HandlerError::Guard(guards::issue_reactions_not_enabled()));
+    }
+    let project_id = board
+        .project_id
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|_| HandlerError::ServerError)?
+        .ok_or_else(|| {
+            HandlerError::Guard(guards::handle_exception(
+                guards::ExceptionKind::IntegrityError,
+            ))
+        })?;
+    let mut errors = FieldErrors::new();
+    let reaction = check_required_text(
+        &mut errors,
+        body.as_object().ok_or(HandlerError::ServerError)?,
+        "reaction",
+    );
+    field_errors(errors)?;
+    let reaction = reaction.ok_or(HandlerError::ServerError)?;
+    let workspace_id = project_workspace_id(pool, &project_id).await?;
+    let issue = uuid::Uuid::parse_str(issue_id).map_err(|_| HandlerError::ServerError)?;
+    let now = chrono::Utc::now();
+    let reaction_id = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO issue_reactions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, actor_id, issue_id, reaction) VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $3, $6, $7)")
+        .bind(reaction_id)
+        .bind(now)
+        .bind(actor.id)
+        .bind(workspace_id)
+        .bind(project_id)
+        .bind(issue)
+        .bind(&reaction)
+        .execute(pool)
+        .await
+        .map_err(integrity_error)?;
+    // Python order: member tracking (`:382-390`), then the delay
+    // (`:391-399`).
+    ensure_public_member(pool, &project_id, &workspace_id, &actor.id).await?;
+    let row = fetch_optional_object(
+        pool,
+        "SELECT \"issue_reactions\".* FROM \"issue_reactions\" WHERE (\"issue_reactions\".\"deleted_at\" IS NULL AND \"issue_reactions\".\"id\" = $1)",
+        &[SqlParam::Uuid(reaction_id)],
+    )
+    .await?
+    .ok_or(HandlerError::ServerError)?;
+    let tz = request_tz(Some(&actor));
+    let rendered = render_issue_reaction(pool, &row, &tz).await?;
+    let value = serde_json::to_value(&rendered).map_err(|_| HandlerError::ServerError)?;
+    let publish = pidash_jobs::space::issue_reaction_created(
+        python_dumps(body),
+        actor.id.to_string(),
+        issue_id.to_owned(),
+        project_id.to_string(),
+        now.timestamp(),
+    );
+    enqueue_message(pool, publish.message()).await;
+    serde_json::to_string(&value).map_err(|_| HandlerError::ServerError)
+}
+
+/// `IssueReactionPublicViewSet.destroy` (`views/issue.py:403-427`):
+/// scoped by workspace + issue + code + actor; the delay carries no
+/// `requested_data`.
+async fn issue_reaction_destroy(
+    State(state): State<AppState>,
+    Path((anchor, issue_id, reaction_code)): Path<(String, String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    if uuid::Uuid::parse_str(&issue_id).is_err() {
+        return proxy(&state, req).await;
+    }
+    match issue_reaction_destroy_inner(&state, &anchor, &issue_id, &reaction_code, extension).await
+    {
+        Ok(()) => Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(axum::body::Body::empty())
+            .expect("empty 204"),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn issue_reaction_destroy_inner(
+    state: &AppState,
+    anchor: &str,
+    issue_id: &str,
+    reaction_code: &str,
+    extension: Option<Extension<SessionHandle>>,
+) -> Result<(), HandlerError> {
+    let pool = pool_of(state)?;
+    let actor = require_actor(request_actor(state, extension).await?)?;
+    let board = fetch_board(pool, anchor)
+        .await?
+        .ok_or(HandlerError::NotFound)?;
+    if !board.is_reactions_enabled {
+        return Err(HandlerError::Guard(guards::issue_reactions_not_enabled()));
+    }
+    let workspace_id =
+        uuid::Uuid::parse_str(&board.workspace_id).map_err(|_| HandlerError::ServerError)?;
+    let issue = uuid::Uuid::parse_str(issue_id).map_err(|_| HandlerError::ServerError)?;
+    let row = fetch_optional_object(
+        pool,
+        "SELECT \"issue_reactions\".* FROM \"issue_reactions\" WHERE (\"issue_reactions\".\"deleted_at\" IS NULL AND \"issue_reactions\".\"workspace_id\" = $1 AND \"issue_reactions\".\"issue_id\" = $2 AND \"issue_reactions\".\"reaction\" = $3 AND \"issue_reactions\".\"actor_id\" = $4)",
+        &[
+            SqlParam::Uuid(workspace_id),
+            SqlParam::Uuid(issue),
+            SqlParam::Text(reaction_code),
+            SqlParam::Uuid(actor.id),
+        ],
+    )
+    .await?
+    .ok_or(HandlerError::NotFound)?;
+    let o = obj(&row)?;
+    let reaction_id = req_str(o, "id")?;
+    let now = chrono::Utc::now();
+    let mut current = serde_json::Map::new();
+    current.insert(
+        "reaction".to_owned(),
+        Value::String(reaction_code.to_owned()),
+    );
+    current.insert("identifier".to_owned(), Value::String(reaction_id.clone()));
+    let publish = pidash_jobs::space::issue_reaction_deleted(
+        actor.id.to_string(),
+        issue_id.to_owned(),
+        board_project_str(&board),
+        python_dumps(&Value::Object(current)),
+        now.timestamp(),
+    );
+    enqueue_message(pool, publish.message()).await;
+    let id = uuid::Uuid::parse_str(&reaction_id).map_err(|_| HandlerError::ServerError)?;
+    // `issue_reaction.delete()` (`db/mixins.py:72-77`): `deleted_at` plus a
+    // full `save()` (`updated_at`, CRUM `updated_by`).
+    sqlx::query(
+        "UPDATE issue_reactions SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(actor.id)
+    .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    enqueue_soft_delete(pool, "issuereaction", &id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Comment reactions
+// ---------------------------------------------------------------------------
+
+/// `CommentReactionPublicViewSet.list` (`views/issue.py:434-449`): live
+/// path — auth first, then board miss or disabled serves `[]`.
+async fn comment_reaction_list(
+    State(state): State<AppState>,
+    Path((anchor, comment_id)): Path<(String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    if uuid::Uuid::parse_str(&comment_id).is_err() {
+        return proxy(&state, req).await;
+    }
+    match comment_reaction_list_inner(&state, &anchor, &comment_id, extension).await {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn comment_reaction_list_inner(
+    state: &AppState,
+    anchor: &str,
+    comment_id: &str,
+    extension: Option<Extension<SessionHandle>>,
+) -> Result<String, HandlerError> {
+    let pool = pool_of(state)?;
+    let actor = require_actor(request_actor(state, extension).await?)?;
+    let tz = request_tz(Some(&actor));
+    let Some(board) = fetch_board(pool, anchor).await? else {
+        return Ok("[]".to_owned());
+    };
+    if !board.is_reactions_enabled {
+        return Ok("[]".to_owned());
+    }
+    let workspace_id =
+        uuid::Uuid::parse_str(&board.workspace_id).map_err(|_| HandlerError::ServerError)?;
+    let project_id = board
+        .project_id
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|_| HandlerError::ServerError)?
+        .ok_or(HandlerError::ServerError)?;
+    let comment = uuid::Uuid::parse_str(comment_id).map_err(|_| HandlerError::ServerError)?;
+    let rows = fetch_all_objects(
+        pool,
+        &queries::social::comment_reaction_list_sql(),
+        &[
+            SqlParam::Uuid(workspace_id),
+            SqlParam::Uuid(project_id),
+            SqlParam::Uuid(comment),
+        ],
+    )
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        out.push(render_comment_reaction_row(pool, row, &tz).await?);
+    }
+    serde_json::to_string(&out).map_err(|_| HandlerError::ServerError)
+}
+
+/// `CommentReactionPublicViewSet.create` (`views/issue.py:451-486`).
+async fn comment_reaction_create(
+    State(state): State<AppState>,
+    Path((anchor, comment_id)): Path<(String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    if uuid::Uuid::parse_str(&comment_id).is_err() {
+        return proxy(&state, req).await;
+    }
+    let body = match read_body(req).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    match comment_reaction_create_inner(&state, &anchor, &comment_id, &body, extension).await {
+        Ok(body) => json_response(StatusCode::CREATED, body),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn comment_reaction_create_inner(
+    state: &AppState,
+    anchor: &str,
+    comment_id: &str,
+    body: &Value,
+    extension: Option<Extension<SessionHandle>>,
+) -> Result<String, HandlerError> {
+    let pool = pool_of(state)?;
+    let actor = require_actor(request_actor(state, extension).await?)?;
+    let board = fetch_board(pool, anchor)
+        .await?
+        .ok_or(HandlerError::NotFound)?;
+    if !board.is_reactions_enabled {
+        return Err(HandlerError::Guard(guards::comment_reactions_not_enabled()));
+    }
+    let project_id = board
+        .project_id
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|_| HandlerError::ServerError)?
+        .ok_or_else(|| {
+            HandlerError::Guard(guards::handle_exception(
+                guards::ExceptionKind::IntegrityError,
+            ))
+        })?;
+    let mut errors = FieldErrors::new();
+    let reaction = check_required_text(
+        &mut errors,
+        body.as_object().ok_or(HandlerError::ServerError)?,
+        "reaction",
+    );
+    field_errors(errors)?;
+    let reaction = reaction.ok_or(HandlerError::ServerError)?;
+    let workspace_id = project_workspace_id(pool, &project_id).await?;
+    let comment = uuid::Uuid::parse_str(comment_id).map_err(|_| HandlerError::ServerError)?;
+    let now = chrono::Utc::now();
+    let reaction_id = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO comment_reactions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, actor_id, comment_id, reaction) VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $3, $6, $7)")
+        .bind(reaction_id)
+        .bind(now)
+        .bind(actor.id)
+        .bind(workspace_id)
+        .bind(project_id)
+        .bind(comment)
+        .bind(&reaction)
+        .execute(pool)
+        .await
+        .map_err(integrity_error)?;
+    ensure_public_member(pool, &project_id, &workspace_id, &actor.id).await?;
+    let row = fetch_optional_object(
+        pool,
+        "SELECT \"comment_reactions\".* FROM \"comment_reactions\" WHERE (\"comment_reactions\".\"deleted_at\" IS NULL AND \"comment_reactions\".\"id\" = $1)",
+        &[SqlParam::Uuid(reaction_id)],
+    )
+    .await?
+    .ok_or(HandlerError::ServerError)?;
+    let tz = request_tz(Some(&actor));
+    let rendered = render_comment_reaction_row(pool, &row, &tz).await?;
+    let value = serde_json::to_value(&rendered).map_err(|_| HandlerError::ServerError)?;
+    // BUG-comment-reaction-project: `project_id` is the literal `"None"`.
+    let publish = pidash_jobs::space::comment_reaction_created(
+        python_dumps(body),
+        actor.id.to_string(),
+        "None".to_owned(),
+        now.timestamp(),
+    );
+    enqueue_message(pool, publish.message()).await;
+    serde_json::to_string(&value).map_err(|_| HandlerError::ServerError)
+}
+
+/// `CommentReactionPublicViewSet.destroy` (`views/issue.py:488-519`).
+async fn comment_reaction_destroy(
+    State(state): State<AppState>,
+    Path((anchor, comment_id, reaction_code)): Path<(String, String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    if uuid::Uuid::parse_str(&comment_id).is_err() {
+        return proxy(&state, req).await;
+    }
+    match comment_reaction_destroy_inner(&state, &anchor, &comment_id, &reaction_code, extension)
+        .await
+    {
+        Ok(()) => Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(axum::body::Body::empty())
+            .expect("empty 204"),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn comment_reaction_destroy_inner(
+    state: &AppState,
+    anchor: &str,
+    comment_id: &str,
+    reaction_code: &str,
+    extension: Option<Extension<SessionHandle>>,
+) -> Result<(), HandlerError> {
+    let pool = pool_of(state)?;
+    let actor = require_actor(request_actor(state, extension).await?)?;
+    let board = fetch_board(pool, anchor)
+        .await?
+        .ok_or(HandlerError::NotFound)?;
+    if !board.is_reactions_enabled {
+        return Err(HandlerError::Guard(guards::comment_reactions_not_enabled()));
+    }
+    // `filter(project_id=None)` renders `IS NULL` (project_meta rule).
+    let project_id = board
+        .project_id
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|_| HandlerError::ServerError)?;
+    let workspace_id =
+        uuid::Uuid::parse_str(&board.workspace_id).map_err(|_| HandlerError::ServerError)?;
+    let comment = uuid::Uuid::parse_str(comment_id).map_err(|_| HandlerError::ServerError)?;
+    let (sql, params) = match project_id {
+        Some(project) => (
+            "SELECT \"comment_reactions\".* FROM \"comment_reactions\" WHERE (\"comment_reactions\".\"deleted_at\" IS NULL AND \"comment_reactions\".\"project_id\" = $1 AND \"comment_reactions\".\"workspace_id\" = $2 AND \"comment_reactions\".\"comment_id\" = $3 AND \"comment_reactions\".\"reaction\" = $4 AND \"comment_reactions\".\"actor_id\" = $5)".to_owned(),
+            vec![
+                SqlParam::Uuid(project),
+                SqlParam::Uuid(workspace_id),
+                SqlParam::Uuid(comment),
+                SqlParam::Text(reaction_code),
+                SqlParam::Uuid(actor.id),
+            ],
+        ),
+        None => (
+            "SELECT \"comment_reactions\".* FROM \"comment_reactions\" WHERE (\"comment_reactions\".\"deleted_at\" IS NULL AND \"comment_reactions\".\"project_id\" IS NULL AND \"comment_reactions\".\"workspace_id\" = $1 AND \"comment_reactions\".\"comment_id\" = $2 AND \"comment_reactions\".\"reaction\" = $3 AND \"comment_reactions\".\"actor_id\" = $4)".to_owned(),
+            vec![
+                SqlParam::Uuid(workspace_id),
+                SqlParam::Uuid(comment),
+                SqlParam::Text(reaction_code),
+                SqlParam::Uuid(actor.id),
+            ],
+        ),
+    };
+    let row = fetch_optional_object(pool, &sql, &params)
+        .await?
+        .ok_or(HandlerError::NotFound)?;
+    let o = obj(&row)?;
+    let reaction_id = req_str(o, "id")?;
+    let now = chrono::Utc::now();
+    let mut current = serde_json::Map::new();
+    current.insert(
+        "reaction".to_owned(),
+        Value::String(reaction_code.to_owned()),
+    );
+    current.insert("identifier".to_owned(), Value::String(reaction_id.clone()));
+    current.insert(
+        "comment_id".to_owned(),
+        Value::String(comment_id.to_owned()),
+    );
+    let publish = pidash_jobs::space::comment_reaction_deleted(
+        actor.id.to_string(),
+        board_project_str(&board),
+        python_dumps(&Value::Object(current)),
+        now.timestamp(),
+    );
+    enqueue_message(pool, publish.message()).await;
+    let id = uuid::Uuid::parse_str(&reaction_id).map_err(|_| HandlerError::ServerError)?;
+    // `comment_reaction.delete()` (`db/mixins.py:72-77`): `deleted_at` plus
+    // a full `save()` (`updated_at`, CRUM `updated_by`).
+    sqlx::query(
+        "UPDATE comment_reactions SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(actor.id)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|_| HandlerError::ServerError)?;
+    enqueue_soft_delete(pool, "commentreaction", &id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Votes
+// ---------------------------------------------------------------------------
+
+/// App `IssueVoteSerializer` (`app/serializers/issue.py:939-946`), in
+/// `Meta.fields` order.
+#[derive(Debug, Serialize)]
+struct IssueVoteView {
+    issue: String,
+    vote: i32,
+    workspace: Option<String>,
+    project: Option<String>,
+    actor: String,
+    actor_detail: ActorDetailView,
+}
+
+async fn render_issue_vote(
+    pool: &sqlx::PgPool,
+    issue_id: &str,
+    vote: i32,
+    workspace_id: Option<&str>,
+    project_id: Option<&str>,
+    actor_id: &str,
+) -> Result<IssueVoteView, HandlerError> {
+    Ok(IssueVoteView {
+        issue: issue_id.to_owned(),
+        vote,
+        workspace: workspace_id.map(str::to_owned),
+        project: project_id.map(str::to_owned),
+        actor: actor_id.to_owned(),
+        actor_detail: render_actor_detail(pool, actor_id).await?,
+    })
+}
+
+/// `request.data.get("vote", 1)`: missing means `1`; numbers must fit an
+/// `int4` like the column; anything else fails the way Postgres fails the
+/// `save()` (500 envelope); explicit null violates the column (400).
+fn parse_vote(body: &serde_json::Map<String, Value>) -> Result<i32, HandlerError> {
+    match body.get("vote") {
+        None => Ok(1),
+        Some(Value::Null) => Err(HandlerError::Guard(guards::handle_exception(
+            guards::ExceptionKind::IntegrityError,
+        ))),
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .and_then(|v| i32::try_from(v).ok())
+            .ok_or(HandlerError::ServerError),
+        Some(Value::String(text)) => text
+            .parse::<i64>()
+            .ok()
+            .and_then(|v| i32::try_from(v).ok())
+            .ok_or(HandlerError::ServerError),
+        _ => Err(HandlerError::ServerError),
+    }
+}
+
+/// `IssueVotePublicViewSet.list`: the board lookup passes the anchor as
+/// the workspace slug (BUG-vote-anchor-as-slug). A miss serves `[]`; a
+/// (pathological slug-collision) hit runs the would-be filter.
+async fn vote_list(
+    State(state): State<AppState>,
+    Path((anchor, issue_id)): Path<(String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    if uuid::Uuid::parse_str(&issue_id).is_err() {
+        return proxy(&state, req).await;
+    }
+    match vote_list_inner(&state, &anchor, &issue_id, extension).await {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn vote_list_inner(
+    state: &AppState,
+    anchor: &str,
+    issue_id: &str,
+    extension: Option<Extension<SessionHandle>>,
+) -> Result<String, HandlerError> {
+    let pool = pool_of(state)?;
+    // Auth applies even though the dead list never needs the id.
+    let _actor = require_actor(request_actor(state, extension).await?)?;
+    let boards = fetch_all_objects(
+        pool,
+        &queries::social::vote_dead_board_get_sql(),
+        &[SqlParam::Text(anchor)],
+    )
+    .await?;
+    let board = match boards.len() {
+        0 => return Ok("[]".to_owned()),
+        1 => &boards[0],
+        _ => return Err(HandlerError::ServerError),
+    };
+    let o = obj(board)?;
+    let workspace_id = req_str(o, "workspace_id")?;
+    let project_id = opt_str(o, "project_id")?;
+    let issue = uuid_param(issue_id)?;
+    let workspace = uuid_param(&workspace_id)?;
+    let project = project_id
+        .as_deref()
+        .map(uuid_param)
+        .transpose()?
+        .unwrap_or(SqlParam::Null);
+    let rows = fetch_all_objects(
+        pool,
+        &queries::social::vote_list_sql(),
+        &[issue, workspace, project],
+    )
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let r = obj(row)?;
+        let vote_value = match r.get("vote") {
+            Some(Value::Number(n)) => n.as_i64().and_then(|v| i32::try_from(v).ok()),
+            _ => None,
+        }
+        .ok_or(HandlerError::ServerError)?;
+        let rendered = render_issue_vote(
+            pool,
+            &req_str(r, "issue_id")?,
+            vote_value,
+            opt_str(r, "workspace_id")?.as_deref(),
+            opt_str(r, "project_id")?.as_deref(),
+            &req_str(r, "actor_id")?,
+        )
+        .await?;
+        out.push(serde_json::to_value(&rendered).map_err(|_| HandlerError::ServerError)?);
+    }
+    serde_json::to_string(&out).map_err(|_| HandlerError::ServerError)
+}
+
+/// `IssueVotePublicViewSet.create` (`views/issue.py:543-571`):
+/// `get_or_create` on `(actor, project, issue)`, then `vote` is assigned
+/// unvalidated and the row answers 201 whether created or updated.
+async fn vote_create(
+    State(state): State<AppState>,
+    Path((anchor, issue_id)): Path<(String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    if uuid::Uuid::parse_str(&issue_id).is_err() {
+        return proxy(&state, req).await;
+    }
+    let body = match read_body(req).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    match vote_create_inner(&state, &anchor, &issue_id, &body, extension).await {
+        Ok(body) => json_response(StatusCode::CREATED, body),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn vote_create_inner(
+    state: &AppState,
+    anchor: &str,
+    issue_id: &str,
+    body: &Value,
+    extension: Option<Extension<SessionHandle>>,
+) -> Result<String, HandlerError> {
+    let pool = pool_of(state)?;
+    let actor = require_actor(request_actor(state, extension).await?)?;
+    // QUIRK-vote-always-201: no `is_votes_enabled` check on this path
+    // (`guards::vote_write_gated` pins the absence).
+    let board = fetch_board(pool, anchor)
+        .await?
+        .ok_or(HandlerError::NotFound)?;
+    let project_id = board
+        .project_id
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|_| HandlerError::ServerError)?
+        .ok_or_else(|| {
+            HandlerError::Guard(guards::handle_exception(
+                guards::ExceptionKind::IntegrityError,
+            ))
+        })?;
+    let vote = parse_vote(body.as_object().ok_or(HandlerError::ServerError)?)?;
+    let issue = uuid::Uuid::parse_str(issue_id).map_err(|_| HandlerError::ServerError)?;
+    let now = chrono::Utc::now();
+    let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT id FROM issue_votes WHERE issue_id = $1 AND actor_id = $2 AND project_id = $3 AND deleted_at IS NULL LIMIT 1",
+    )
+    .bind(issue)
+    .bind(actor.id)
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| HandlerError::ServerError)?;
+    match existing {
+        Some((id,)) => {
+            sqlx::query("UPDATE issue_votes SET vote = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL")
+                .bind(vote)
+                .bind(now)
+                .bind(actor.id)
+                .bind(id)
+                .execute(pool)
+                .await
+                .map_err(integrity_error)?;
+            id
+        }
+        None => {
+            let workspace_id = project_workspace_id(pool, &project_id).await?;
+            let id = uuid::Uuid::new_v4();
+            // `get_or_create` saves (actor/project/issue), then the
+            // assignment saves again with `updated_by` set: one insert
+            // with both audit columns is the same row.
+            sqlx::query("INSERT INTO issue_votes (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, issue_id, actor_id, vote) VALUES ($1, $2, $2, $3, $3, NULL, $4, $5, $6, $3, $7)")
+                .bind(id)
+                .bind(now)
+                .bind(actor.id)
+                .bind(workspace_id)
+                .bind(project_id)
+                .bind(issue)
+                .bind(vote)
+                .execute(pool)
+                .await
+                .map_err(integrity_error)?;
+            id
+        }
+    };
+    // Python order: member tracking (`:551-555`), then assignment+save
+    // (`:559-560`), then the delay (`:561-569`). The assignment is folded
+    // into the writes above; the observable order is member-then-delay.
+    let workspace_id = project_workspace_id(pool, &project_id).await?;
+    ensure_public_member(pool, &project_id, &workspace_id, &actor.id).await?;
+    let rendered = render_issue_vote(
+        pool,
+        issue_id,
+        vote,
+        Some(&workspace_id.to_string()),
+        Some(&project_id.to_string()),
+        &actor.id.to_string(),
+    )
+    .await?;
+    let value = serde_json::to_value(&rendered).map_err(|_| HandlerError::ServerError)?;
+    let publish = pidash_jobs::space::issue_vote_created(
+        python_dumps(body),
+        actor.id.to_string(),
+        issue_id.to_owned(),
+        project_id.to_string(),
+        now.timestamp(),
+    );
+    enqueue_message(pool, publish.message()).await;
+    serde_json::to_string(&value).map_err(|_| HandlerError::ServerError)
+}
+
+/// `IssueVotePublicViewSet.destroy` (`views/issue.py:573-591`).
+async fn vote_destroy(
+    State(state): State<AppState>,
+    Path((anchor, issue_id)): Path<(String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    if uuid::Uuid::parse_str(&issue_id).is_err() {
+        return proxy(&state, req).await;
+    }
+    match vote_destroy_inner(&state, &anchor, &issue_id, extension).await {
+        Ok(()) => Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(axum::body::Body::empty())
+            .expect("empty 204"),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn vote_destroy_inner(
+    state: &AppState,
+    anchor: &str,
+    issue_id: &str,
+    extension: Option<Extension<SessionHandle>>,
+) -> Result<(), HandlerError> {
+    let pool = pool_of(state)?;
+    let actor = require_actor(request_actor(state, extension).await?)?;
+    let board = fetch_board(pool, anchor)
+        .await?
+        .ok_or(HandlerError::NotFound)?;
+    // `filter(project_id=None)` renders `IS NULL` (project_meta rule).
+    let project_id = board
+        .project_id
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|_| HandlerError::ServerError)?;
+    let workspace_id =
+        uuid::Uuid::parse_str(&board.workspace_id).map_err(|_| HandlerError::ServerError)?;
+    let issue = uuid::Uuid::parse_str(issue_id).map_err(|_| HandlerError::ServerError)?;
+    let (sql, params) = match project_id {
+        Some(project) => (
+            "SELECT \"issue_votes\".* FROM \"issue_votes\" WHERE (\"issue_votes\".\"deleted_at\" IS NULL AND \"issue_votes\".\"issue_id\" = $1 AND \"issue_votes\".\"actor_id\" = $2 AND \"issue_votes\".\"project_id\" = $3 AND \"issue_votes\".\"workspace_id\" = $4)".to_owned(),
+            vec![
+                SqlParam::Uuid(issue),
+                SqlParam::Uuid(actor.id),
+                SqlParam::Uuid(project),
+                SqlParam::Uuid(workspace_id),
+            ],
+        ),
+        None => (
+            "SELECT \"issue_votes\".* FROM \"issue_votes\" WHERE (\"issue_votes\".\"deleted_at\" IS NULL AND \"issue_votes\".\"issue_id\" = $1 AND \"issue_votes\".\"actor_id\" = $2 AND \"issue_votes\".\"project_id\" IS NULL AND \"issue_votes\".\"workspace_id\" = $3)".to_owned(),
+            vec![
+                SqlParam::Uuid(issue),
+                SqlParam::Uuid(actor.id),
+                SqlParam::Uuid(workspace_id),
+            ],
+        ),
+    };
+    let row = fetch_optional_object(pool, &sql, &params)
+        .await?
+        .ok_or(HandlerError::NotFound)?;
+    let o = obj(&row)?;
+    let vote_id = req_str(o, "id")?;
+    let vote_value = match o.get("vote") {
+        Some(Value::Number(n)) => n.as_i64().ok_or(HandlerError::ServerError)?,
+        _ => return Err(HandlerError::ServerError),
+    };
+    let now = chrono::Utc::now();
+    // `current_instance` stringifies the vote (`str(issue_vote.vote)`).
+    let mut current = serde_json::Map::new();
+    current.insert("vote".to_owned(), Value::String(vote_value.to_string()));
+    current.insert("identifier".to_owned(), Value::String(vote_id.clone()));
+    let publish = pidash_jobs::space::issue_vote_deleted(
+        actor.id.to_string(),
+        issue_id.to_owned(),
+        board_project_str(&board),
+        python_dumps(&Value::Object(current)),
+        now.timestamp(),
+    );
+    enqueue_message(pool, publish.message()).await;
+    let id = uuid::Uuid::parse_str(&vote_id).map_err(|_| HandlerError::ServerError)?;
+    // `issue_vote.delete()` (`db/mixins.py:72-77`): `deleted_at` plus a full
+    // `save()` (`updated_at`, CRUM `updated_by`).
+    sqlx::query(
+        "UPDATE issue_votes SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(actor.id)
+    .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    enqueue_soft_delete(pool, "issuevote", &id).await;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pidash_compat::http::OneOrMany;
+    use pidash_services::read::{IssueFlatView, ProjectLiteView, WorkspaceLiteView};
+    use tower::ServiceExt;
+
+    #[test]
+    fn soft_delete_message_shape() {
+        let id = uuid::Uuid::nil();
+        let message = soft_delete_message("issuecomment", &id);
+        assert_eq!(
+            message.task,
+            pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                Value::String("db".to_owned()),
+                Value::String("issuecomment".to_owned()),
+                Value::String(id.to_string()),
+            ]
+        );
+        assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+        assert_eq!(message.kwargs.len(), 1);
+    }
+
+    fn actor_detail_fixture() -> ActorDetailView {
+        ActorDetailView {
+            id: "a1".to_owned(),
+            first_name: "Ada".to_owned(),
+            last_name: "L".to_owned(),
+            avatar: None,
+            avatar_url: None,
+            is_bot: false,
+            display_name: "Ada".to_owned(),
+        }
+    }
+
+    fn object_keys(value: &Value) -> Vec<String> {
+        value.as_object().expect("object").keys().cloned().collect()
+    }
+
+    #[test]
+    fn input_datetime_iso8601_literal_fallback() {
+        // PIDASHCONV-773: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01, read as UTC (probed live both backends).
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            let parsed = parse_input_datetime(text).expect(text);
+            assert_eq!(parsed.to_rfc3339(), "1900-01-01T00:00:00+00:00", "{text:?}");
+        }
+        // Near-misses stay invalid (exact match, both sides probed).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            assert!(parse_input_datetime(text).is_none(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn error_bodies_match_python() {
+        let (status, body) = HandlerError::Unauthorized.status_and_body();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body,
+            r#"{"detail":"Authentication credentials were not provided."}"#
+        );
+        let (status, body) = HandlerError::NotFound.status_and_body();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, r#"{"error":"The required object does not exist."}"#);
+        let (status, body) = HandlerError::NotFoundDetail.status_and_body();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, r#"{"detail":"Not found."}"#);
+        let (status, body) = HandlerError::Guard(guards::comments_not_enabled()).status_and_body();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            r#"{"error":"Comments are not enabled for this project"}"#
+        );
+        let (status, body) =
+            HandlerError::Guard(guards::issue_reactions_not_enabled()).status_and_body();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            r#"{"error":"Reactions are not enabled for this project board"}"#
+        );
+        let (status, body) =
+            HandlerError::Guard(guards::comment_reactions_not_enabled()).status_and_body();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            r#"{"error":"Reactions are not enabled for this board"}"#
+        );
+        let (status, _) = HandlerError::ServerError.status_and_body();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn comment_key_order_matches_drf_all_fields() {
+        let view = CommentView {
+            id: "c".to_owned(),
+            actor_detail: Some(actor_detail_fixture()),
+            issue_detail: IssueFlatView {
+                id: "i".to_owned(),
+                name: "n".to_owned(),
+                description_json: Value::Object(Default::default()),
+                description_html: None,
+                priority: "none".to_owned(),
+                complexity_score: Value::Null,
+                start_date: None,
+                target_date: None,
+                sequence_id: 1,
+                sort_order: Value::Number(serde_json::Number::from_f64(65535.0).expect("f64")),
+                is_draft: false,
+            },
+            project_detail: ProjectLiteView {
+                id: "p".to_owned(),
+                identifier: "CT1".to_owned(),
+                name: "n".to_owned(),
+                cover_image: None,
+                cover_image_url: None,
+                logo_props: Value::Object(Default::default()),
+                description: None,
+                is_default: false,
+            },
+            workspace_detail: WorkspaceLiteView {
+                name: "w".to_owned(),
+                slug: "s".to_owned(),
+                id: "wid".to_owned(),
+                logo_url: None,
+            },
+            comment_reactions: Vec::new(),
+            is_member: Some(false),
+            is_synced: false,
+            created_at: "2026-09-28T00:00:00Z".to_owned(),
+            updated_at: "2026-09-28T00:00:00Z".to_owned(),
+            created_by: None,
+            updated_by: None,
+            deleted_at: None,
+            project: Some("p".to_owned()),
+            workspace: Some("w".to_owned()),
+            comment_stripped: Some(String::new()),
+            comment_json: Value::Object(Default::default()),
+            comment_html: Some("<p></p>".to_owned()),
+            description: None,
+            attachments: Value::Array(Vec::new()),
+            labels: Value::Array(Vec::new()),
+            issue: Some("i".to_owned()),
+            actor: Some("a1".to_owned()),
+            access: Some("EXTERNAL".to_owned()),
+            external_source: None,
+            external_id: None,
+            speaker_type: Some("human".to_owned()),
+            speaker_label: Some(String::new()),
+            speaker_agent_run_id: None,
+            edited_at: None,
+            parent: None,
+        };
+        let value = serde_json::to_value(&view).expect("serializes");
+        assert_eq!(
+            object_keys(&value),
+            [
+                "id",
+                "actor_detail",
+                "issue_detail",
+                "project_detail",
+                "workspace_detail",
+                "comment_reactions",
+                "is_member",
+                "is_synced",
+                "created_at",
+                "updated_at",
+                "deleted_at",
+                "comment_stripped",
+                "comment_json",
+                "comment_html",
+                "attachments",
+                "labels",
+                "access",
+                "external_source",
+                "external_id",
+                "speaker_type",
+                "speaker_label",
+                "speaker_agent_run_id",
+                "edited_at",
+                "created_by",
+                "updated_by",
+                "project",
+                "workspace",
+                "description",
+                "issue",
+                "actor",
+                "parent",
+            ]
+            .map(str::to_owned)
+            .to_vec()
+        );
+        // Create/update responses skip `is_member` (DRF `SkipField`).
+        let mut plain = serde_json::to_value(&CommentView {
+            is_member: None,
+            ..view_like_without_member()
+        })
+        .expect("serializes");
+        assert!(plain
+            .as_object_mut()
+            .expect("object")
+            .remove("is_member")
+            .is_none());
+    }
+
+    fn view_like_without_member() -> CommentView {
+        CommentView {
+            id: "c".to_owned(),
+            actor_detail: None,
+            issue_detail: IssueFlatView {
+                id: "i".to_owned(),
+                name: "n".to_owned(),
+                description_json: Value::Object(Default::default()),
+                description_html: None,
+                priority: "none".to_owned(),
+                complexity_score: Value::Null,
+                start_date: None,
+                target_date: None,
+                sequence_id: 1,
+                sort_order: Value::Number(serde_json::Number::from(1)),
+                is_draft: false,
+            },
+            project_detail: ProjectLiteView {
+                id: "p".to_owned(),
+                identifier: "CT1".to_owned(),
+                name: "n".to_owned(),
+                cover_image: None,
+                cover_image_url: None,
+                logo_props: Value::Object(Default::default()),
+                description: None,
+                is_default: false,
+            },
+            workspace_detail: WorkspaceLiteView {
+                name: "w".to_owned(),
+                slug: "s".to_owned(),
+                id: "wid".to_owned(),
+                logo_url: None,
+            },
+            comment_reactions: Vec::new(),
+            is_member: None,
+            is_synced: false,
+            created_at: "2026-09-28T00:00:00Z".to_owned(),
+            updated_at: "2026-09-28T00:00:00Z".to_owned(),
+            created_by: None,
+            updated_by: None,
+            deleted_at: None,
+            project: None,
+            workspace: None,
+            comment_stripped: None,
+            comment_json: Value::Null,
+            comment_html: None,
+            description: None,
+            attachments: Value::Null,
+            labels: Value::Null,
+            issue: None,
+            actor: None,
+            access: None,
+            external_source: None,
+            external_id: None,
+            speaker_type: None,
+            speaker_label: None,
+            speaker_agent_run_id: None,
+            edited_at: None,
+            parent: None,
+        }
+    }
+
+    #[test]
+    fn reaction_and_vote_key_orders_match_meta_lists() {
+        let reaction = IssueReactionView {
+            id: "r".to_owned(),
+            actor_detail: actor_detail_fixture(),
+            created_at: "2026-09-28T00:00:00Z".to_owned(),
+            updated_at: "2026-09-28T00:00:00Z".to_owned(),
+            deleted_at: None,
+            reaction: "rocket".to_owned(),
+            created_by: None,
+            updated_by: None,
+            project: Some("p".to_owned()),
+            workspace: Some("w".to_owned()),
+            actor: "a1".to_owned(),
+            issue: "i".to_owned(),
+        };
+        assert_eq!(
+            object_keys(&serde_json::to_value(&reaction).expect("serializes")),
+            [
+                "id",
+                "actor_detail",
+                "created_at",
+                "updated_at",
+                "deleted_at",
+                "reaction",
+                "created_by",
+                "updated_by",
+                "project",
+                "workspace",
+                "actor",
+                "issue",
+            ]
+            .map(str::to_owned)
+            .to_vec()
+        );
+        let vote = IssueVoteView {
+            issue: "i".to_owned(),
+            vote: 1,
+            workspace: Some("w".to_owned()),
+            project: Some("p".to_owned()),
+            actor: "a1".to_owned(),
+            actor_detail: actor_detail_fixture(),
+        };
+        assert_eq!(
+            object_keys(&serde_json::to_value(&vote).expect("serializes")),
+            [
+                "issue",
+                "vote",
+                "workspace",
+                "project",
+                "actor",
+                "actor_detail"
+            ]
+            .map(str::to_owned)
+            .to_vec()
+        );
+        let comment_reaction = CommentReactionView {
+            id: "r".to_owned(),
+            actor: "a1".to_owned(),
+            comment: "c".to_owned(),
+            reaction: "eyes".to_owned(),
+            display_name: "Ada".to_owned(),
+            deleted_at: None,
+            workspace: Some("w".to_owned()),
+            project: Some("p".to_owned()),
+            created_at: "2026-09-28T00:00:00Z".to_owned(),
+            updated_at: "2026-09-28T00:00:00Z".to_owned(),
+            created_by: None,
+            updated_by: None,
+        };
+        assert_eq!(
+            object_keys(&serde_json::to_value(&comment_reaction).expect("serializes")),
+            [
+                "id",
+                "actor",
+                "comment",
+                "reaction",
+                "display_name",
+                "deleted_at",
+                "workspace",
+                "project",
+                "created_at",
+                "updated_at",
+                "created_by",
+                "updated_by",
+            ]
+            .map(str::to_owned)
+            .to_vec()
+        );
+    }
+
+    #[test]
+    fn description_mirror_keeps_entities_verbatim() {
+        // `Description.save` recomputes with Django's own `strip_tags`
+        // (`db/models/description.py:22-29`): entities verbatim, a bare `<`
+        // kept as text, empty HTML stores NULL.
+        assert_eq!(description_stripped_for_create(""), None);
+        assert_eq!(
+            description_stripped_for_create("<p>hi</p>"),
+            Some("hi".to_owned())
+        );
+        assert_eq!(
+            description_stripped_for_create("<p>Tom &amp; Jerry</p>"),
+            Some("Tom &amp; Jerry".to_owned())
+        );
+        assert_eq!(
+            description_stripped_for_create("<p>I <3 this</p>"),
+            Some("I <3 this".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_vote_matches_request_data_get() {
+        let empty = serde_json::Map::new();
+        assert!(matches!(parse_vote(&empty), Ok(1)));
+        let body: serde_json::Map<String, Value> =
+            serde_json::from_value(serde_json::json!({"vote": -1})).expect("map");
+        assert!(matches!(parse_vote(&body), Ok(-1)));
+        let body: serde_json::Map<String, Value> =
+            serde_json::from_value(serde_json::json!({"vote": null})).expect("map");
+        assert!(matches!(parse_vote(&body), Err(HandlerError::Guard(_))));
+        let body: serde_json::Map<String, Value> =
+            serde_json::from_value(serde_json::json!({"vote": true})).expect("map");
+        assert!(matches!(parse_vote(&body), Err(HandlerError::ServerError)));
+        let body: serde_json::Map<String, Value> =
+            serde_json::from_value(serde_json::json!({"vote": 2147483648_u64})).expect("map");
+        assert!(matches!(parse_vote(&body), Err(HandlerError::ServerError)));
+    }
+
+    #[test]
+    fn parse_body_matches_drf() {
+        assert!(matches!(parse_body(b""), Ok(Value::Object(_))));
+        assert!(matches!(parse_body(b"[1]"), Err(HandlerError::ServerError)));
+        assert!(matches!(
+            parse_body(b"{oops"),
+            Err(HandlerError::BadDetail(_))
+        ));
+    }
+
+    #[test]
+    fn comment_list_query_numbers_extra_binds() {
+        let board = BoardRow {
+            workspace_id: "3d914201-e7b6-449b-b92f-3ab0bd4f330d".to_owned(),
+            project_id: Some("62d604a8-db82-44de-9e8c-a3e4a0f28371".to_owned()),
+            is_comments_enabled: true,
+            is_reactions_enabled: true,
+        };
+        let issue = uuid::Uuid::parse_str("62d604a8-db82-44de-9e8c-a3e4a0f28371").expect("uuid");
+        let query: QueryMap = [
+            ("issue__id".to_owned(), OneOrMany::One(issue.to_string())),
+            ("unknown".to_owned(), OneOrMany::One("x".to_owned())),
+        ]
+        .into_iter()
+        .collect();
+        let (sql, params) = comment_list_query(&board, None, &issue, &query).expect("query");
+        assert!(sql.contains("\"issue_comments\".\"issue_id\" = $5"));
+        assert!(!sql.contains("unknown"));
+        assert_eq!(params.len(), 5);
+        assert_eq!(params[2], SqlParam::Null);
+    }
+
+    #[test]
+    fn user_reads_carry_no_soft_delete_guard() {
+        // `User` has no `deleted_at` column (`db/models/user.py:56`), so
+        // every `users` read must filter on the id alone; PIDASHCONV-237
+        // regressed all seven social paths with a guard the schema rejects.
+        // (`user_detail_sql` / `display_name_sql` moved to the read
+        // service with their own pins; see `read::comment` tests.)
+        assert_eq!(
+            nullable_fk_sql("users"),
+            "SELECT id FROM users WHERE id = $1"
+        );
+        // Soft-deletable tables keep the manager's filter.
+        for table in ["issue_comments", "descriptions"] {
+            assert_eq!(
+                nullable_fk_sql(table),
+                format!("SELECT id FROM {table} WHERE id = $1 AND deleted_at IS NULL")
+            );
+        }
+    }
+
+    #[test]
+    fn varchar_arrays_decode_to_string_lists() {
+        // `attachments`/`labels` are `varchar[]`, bound as string lists;
+        // the stored JSON array decodes back the same way on update.
+        assert_eq!(
+            string_list(&Value::Null).expect("null"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            string_list(&serde_json::json!(["a", "b"])).expect("array"),
+            vec!["a".to_owned(), "b".to_owned()]
+        );
+        assert!(string_list(&serde_json::json!([1])).is_err());
+    }
+
+    fn test_router() -> Router {
+        // Unreachable upstream (port 1 is never bound): proxied methods
+        // fail closed with 502. `AppState::new` would point at Django's
+        // dev port, where a live server answers with its own statuses.
+        crate::routes::with_routes(
+            AppState::with_edge(
+                "0.1.0",
+                crate::edge::EdgeHandle::for_tests("http://127.0.0.1:1"),
+            ),
+            routes(),
+        )
+    }
+
+    async fn any_status(app: Router, method: &str, path: &str) -> StatusCode {
+        let builder = match method {
+            "POST" => axum::http::Request::post(path),
+            "PATCH" => axum::http::Request::patch(path),
+            "DELETE" => axum::http::Request::delete(path),
+            _ => axum::http::Request::get(path),
+        };
+        let response = app
+            .oneshot(builder.body(axum::body::Body::empty()).expect("request"))
+            .await
+            .expect("serve");
+        response.status()
+    }
+
+    #[tokio::test]
+    async fn owned_paths_reach_handlers_without_pools() {
+        // No pools → every owned method runs its handler and answers the
+        // 500 fallback (proving Rust owns the path); an unowned sibling
+        // path proxies and fails closed with 502 (proving the cutover
+        // boundary).
+        let app = test_router();
+        for (method, path) in [
+            ("GET", "/api/public/anchor/abc/issues/62d604a8-db82-44de-9e8c-a3e4a0f28371/comments/"),
+            ("POST", "/api/public/anchor/abc/issues/62d604a8-db82-44de-9e8c-a3e4a0f28371/comments/"),
+            ("GET", "/api/public/anchor/abc/issues/62d604a8-db82-44de-9e8c-a3e4a0f28371/comments/62d604a8-db82-44de-9e8c-a3e4a0f28371/"),
+            ("PATCH", "/api/public/anchor/abc/issues/62d604a8-db82-44de-9e8c-a3e4a0f28371/comments/62d604a8-db82-44de-9e8c-a3e4a0f28371/"),
+            ("DELETE", "/api/public/anchor/abc/issues/62d604a8-db82-44de-9e8c-a3e4a0f28371/comments/62d604a8-db82-44de-9e8c-a3e4a0f28371/"),
+            ("GET", "/api/public/anchor/abc/issues/62d604a8-db82-44de-9e8c-a3e4a0f28371/reactions/"),
+            ("POST", "/api/public/anchor/abc/issues/62d604a8-db82-44de-9e8c-a3e4a0f28371/reactions/"),
+            ("DELETE", "/api/public/anchor/abc/issues/62d604a8-db82-44de-9e8c-a3e4a0f28371/reactions/rocket/"),
+            ("GET", "/api/public/anchor/abc/comments/62d604a8-db82-44de-9e8c-a3e4a0f28371/reactions/"),
+            ("POST", "/api/public/anchor/abc/comments/62d604a8-db82-44de-9e8c-a3e4a0f28371/reactions/"),
+            ("DELETE", "/api/public/anchor/abc/comments/62d604a8-db82-44de-9e8c-a3e4a0f28371/reactions/eyes/"),
+            ("GET", "/api/public/anchor/abc/issues/62d604a8-db82-44de-9e8c-a3e4a0f28371/votes/"),
+            ("POST", "/api/public/anchor/abc/issues/62d604a8-db82-44de-9e8c-a3e4a0f28371/votes/"),
+            ("DELETE", "/api/public/anchor/abc/issues/62d604a8-db82-44de-9e8c-a3e4a0f28371/votes/"),
+        ] {
+            let status = any_status(app.clone(), method, path).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{method} {path}");
+        }
+        // Sibling retrieve path is Rust-owned too (PIDASHCONV-175
+        // `space::issues`, this branch): without pools its handler
+        // answers the 500 fallback, not the 502 proxy closed.
+        let status = any_status(
+            app,
+            "GET",
+            "/api/public/anchor/abc/issues/62d604a8-db82-44de-9e8c-a3e4a0f28371/",
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn non_owned_methods_proxy() {
+        // PUT on an owned path is Django's; without an upstream the proxy
+        // fails closed, never a Rust 405.
+        let app = test_router();
+        let response = app
+            .oneshot(
+                axum::http::Request::put(
+                    "/api/public/anchor/abc/issues/62d604a8-db82-44de-9e8c-a3e4a0f28371/comments/",
+                )
+                .body(axum::body::Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+}

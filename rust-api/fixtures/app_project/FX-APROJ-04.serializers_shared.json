@@ -1,0 +1,139 @@
+{
+  "_trace": "apps/api/pi_dash/app/serializers/estimate.py:44-50 (WorkspaceEstimateSerializer, consumed by D-24 app/views/workspace/estimate.py:32); apps/api/pi_dash/app/serializers/project.py:249-256 (ProjectMemberLiteSerializer, consumed by D-26 app/views/issue/subscriber.py:56), :243-246 (ProjectIdentifierSerializer), :269-273 (ProjectPublicMemberSerializer). No ProjectDetailSerializer goldens here (split-review clarification).",
+  "_method": "Django shell probes (pi_dash.settings.test) against scratch Postgres pidash_562_fixtures; ORM + serializer + queryset code executed directly. Django 4.2.30, djangorestframework 3.15.2. Rendered from live rows. ProjectMemberLite shown both as the D-26 consumer calls it (no annotation \u2192 is_subscribed SkipField'd) and with an annotation.",
+  "workspace_estimate": {
+    "keys": [
+      "id",
+      "points",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+      "name",
+      "description",
+      "type",
+      "last_used",
+      "created_by",
+      "updated_by",
+      "project",
+      "workspace"
+    ],
+    "data": {
+      "id": "8abc7daa-8714-49c0-a429-638f15a2c214",
+      "points": [
+        {
+          "id": "67b19688-40c5-47e0-b470-d5b25fbb467c",
+          "created_at": "2026-10-02T22:13:45.025804Z",
+          "updated_at": "2026-10-02T22:13:45.025810Z",
+          "deleted_at": null,
+          "key": 1,
+          "description": "one",
+          "value": "1",
+          "created_by": null,
+          "updated_by": null,
+          "project": "8ddb0885-215e-4ae3-a772-bfa2b42d4295",
+          "workspace": "eec47df5-8eb2-4aae-9093-320975d58cd3",
+          "estimate": "8abc7daa-8714-49c0-a429-638f15a2c214"
+        }
+      ],
+      "created_at": "2026-10-02T22:13:45.023126Z",
+      "updated_at": "2026-10-02T22:13:45.023134Z",
+      "deleted_at": null,
+      "name": "E4e33a3a3",
+      "description": "",
+      "type": "points",
+      "last_used": false,
+      "created_by": null,
+      "updated_by": null,
+      "project": "8ddb0885-215e-4ae3-a772-bfa2b42d4295",
+      "workspace": "eec47df5-8eb2-4aae-9093-320975d58cd3"
+    }
+  },
+  "member_lite_as_d26_calls_it": {
+    "keys": [
+      "member",
+      "id"
+    ],
+    "data": {
+      "member": {
+        "id": "86ce5cd4-f3fe-4d07-909f-2be168a0fab6",
+        "first_name": "Fix",
+        "last_name": "Ture",
+        "avatar": "",
+        "avatar_url": null,
+        "is_bot": false,
+        "display_name": "fx02-4e33a3a3"
+      },
+      "id": "544cdab3-8768-4ade-8f31-459e2ffab297"
+    }
+  },
+  "member_lite_annotated": {
+    "keys": [
+      "member",
+      "id",
+      "is_subscribed"
+    ],
+    "data": {
+      "member": {
+        "id": "cb00ca85-77f9-4150-9365-30c0e5f06ed7",
+        "first_name": "",
+        "last_name": "",
+        "avatar": "",
+        "avatar_url": null,
+        "is_bot": false,
+        "display_name": "fxs-86fed31d"
+      },
+      "id": "9459eea3-faa1-4775-8a86-69c82266ba17",
+      "is_subscribed": true
+    }
+  },
+  "project_identifier": {
+    "keys": [
+      "id",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+      "name",
+      "created_by",
+      "updated_by",
+      "workspace",
+      "project"
+    ],
+    "data": {
+      "id": 4,
+      "created_at": "2026-10-02T22:14:20.181576Z",
+      "updated_at": "2026-10-02T22:14:20.181585Z",
+      "deleted_at": null,
+      "name": "P86FED31",
+      "created_by": null,
+      "updated_by": null,
+      "workspace": "2696dba8-7284-490a-b877-d2315acdac14",
+      "project": "05ea0bca-e678-4db9-a3af-0ebff8515d7f"
+    }
+  },
+  "project_identifier_pk_type": "int",
+  "project_identifier_note": "ProjectIdentifier extends AuditModel (no UUID pk): auto BigAutoField id.",
+  "project_public_member": {
+    "keys": [
+      "id",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+      "created_by",
+      "updated_by",
+      "project",
+      "workspace",
+      "member"
+    ],
+    "data": {
+      "id": "623ea426-5894-4f34-872e-8b5f546588b0",
+      "created_at": "2026-10-02T22:13:45.050622Z",
+      "updated_at": "2026-10-02T22:13:45.050628Z",
+      "deleted_at": null,
+      "created_by": null,
+      "updated_by": null,
+      "project": "8ddb0885-215e-4ae3-a772-bfa2b42d4295",
+      "workspace": "eec47df5-8eb2-4aae-9093-320975d58cd3",
+      "member": "86ce5cd4-f3fe-4d07-909f-2be168a0fab6"
+    }
+  }
+}

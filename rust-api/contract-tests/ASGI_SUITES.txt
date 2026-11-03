@@ -1,0 +1,25 @@
+# Suites whose Django runs need an async (ASGI) server (PIDASHCONV-821).
+#
+# The matrix serves Django with `runserver` (sync WSGI) by default: it is
+# what the suites' READMEs document and what the existing Django workflows
+# use. The suites listed here are the exception: they stream SSE/event
+# responses whose views return async iterators, and runserver can never
+# serve those — Django logs "StreamingHttpResponse must consume
+# asynchronous iterators in order to serve them synchronously" and the
+# client hangs waiting for headers until its timeout (proven in CI run
+# 38064376679: assistant 4/4 SSE tests + runner web-chat replay, all
+# ReadTimeout in stream open with that warning in the server log).
+#
+# For these suites the workflow serves Django with
+# `python -m uvicorn pi_dash.asgi:application` instead — same Django app,
+# same responses, but the stream flushes incrementally. Both Django
+# starts (the oracle run and the Rust-upstream restart) use uvicorn; the
+# Rust run is unaffected (pidash-api is async natively).
+#
+#   assistant: documented requirement — contract-tests/README.md
+#     "Backend under test (assistant domain)" runs uvicorn on 8891.
+#   runner: same hang signature on GET .../chat/sessions/.../events/
+#     (async-iterator warning + >30s header timeout); its README still
+#     shows runserver illustratively ("e.g."), CI proves uvicorn needed.
+assistant
+runner

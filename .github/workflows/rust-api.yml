@@ -1,0 +1,93 @@
+name: rust-api
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  pull_request:
+    branches: [main]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  quarantine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fail when the PR touches anything outside rust-api/ and the allowlist
+        run: |
+          SHA="${{ github.sha }}"
+          # Maintainer main->rust-dev sync merges touch the whole tree by design
+          # (PIDASHCONV-1088). A sync merge is a merge commit whose second parent
+          # is on origin/main: pass it without diffing. actions/checkout fetches
+          # only the triggering ref, so fetch main first; if the fetch fails the
+          # reachability check below fails closed into the strict diff.
+          git fetch --quiet --no-tags origin main:refs/remotes/origin/main || true
+          set -- $(git rev-list --parents -1 "$SHA")
+          if [ "$#" -eq 3 ] && git merge-base --is-ancestor "$3" origin/main 2>/dev/null; then
+            echo "Sync merge ($1 merges $3 from origin/main); quarantine passes."
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+          CHANGED=$(git diff --name-only "$BASE" "${{ github.sha }}" || true)
+          echo "$CHANGED"
+          BAD=$(echo "$CHANGED" | grep -v -e '^rust-api/' -e '^\.github/workflows/rust-api.*\.yml$' -e '^Cargo\.toml$' -e '^$' || true)
+          if [ -n "$BAD" ]; then
+            echo "::error::Files outside rust-api/ and the allowlist:"
+            echo "$BAD"
+            exit 1
+          fi
+          # The only root-level file a rust-api PR may touch is Cargo.toml,
+          # and only for the one-line rust-api exclude.
+          if echo "$CHANGED" | grep -q -e '^Cargo\.toml$'; then
+            if ! git diff "$BASE" "${{ github.sha }}" -- Cargo.toml | grep -q '+.*"rust-api"'; then
+              echo "::error::Cargo.toml changed without the rust-api exclude line"
+              exit 1
+            fi
+          fi
+
+  check:
+    runs-on: ubuntu-latest
+    # The db-crate pubsub roundtrip test (PIDASHCONV-267) needs a live server
+    # on 127.0.0.1:6379; same image and health check as the contract jobs.
+    services:
+      redis:
+        image: valkey/valkey:7.2.11-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: rust-api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-api
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace

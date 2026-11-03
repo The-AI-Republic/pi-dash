@@ -1,0 +1,148 @@
+{
+  "trace": "apps/api/pi_dash/assistant/serializers.py:37-75 (UserLLMConfigSerializer)",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "serializer": "UserLLMConfigSerializer",
+  "source": "apps/api/pi_dash/assistant/serializers.py:37",
+  "meta": {
+    "fields": [
+      "provider_kind",
+      "base_url",
+      "model_name",
+      "api_key",
+      "has_api_key",
+      "last_verified_at"
+    ],
+    "read_only": [
+      "has_api_key",
+      "last_verified_at"
+    ],
+    "write_only": [
+      "api_key"
+    ],
+    "note": "api_key never appears in output; API only reports has_api_key"
+  },
+  "fields": {
+    "provider_kind": {
+      "write_only": false,
+      "read_only": false,
+      "required": false,
+      "allow_blank": false,
+      "max_length": null
+    },
+    "base_url": {
+      "write_only": false,
+      "read_only": false,
+      "required": false,
+      "allow_blank": true,
+      "max_length": 500
+    },
+    "model_name": {
+      "write_only": false,
+      "read_only": false,
+      "required": false,
+      "allow_blank": true,
+      "max_length": 255
+    },
+    "api_key": {
+      "write_only": true,
+      "read_only": false,
+      "required": false,
+      "allow_blank": true,
+      "max_length": 512
+    },
+    "has_api_key": {
+      "write_only": false,
+      "read_only": true,
+      "required": false,
+      "allow_blank": null,
+      "max_length": null
+    },
+    "last_verified_at": {
+      "write_only": false,
+      "read_only": true,
+      "required": false,
+      "allow_blank": null,
+      "max_length": null
+    }
+  },
+  "cases": [
+    {
+      "name": "model_name stripped",
+      "source": "apps/api/pi_dash/assistant/serializers.py:46-50",
+      "input": {
+        "model_name": "  gpt-4o  "
+      },
+      "output": {
+        "model_name": "gpt-4o"
+      }
+    },
+    {
+      "name": "model_name blank rejected",
+      "source": "apps/api/pi_dash/assistant/serializers.py:46-50",
+      "input": {
+        "model_name": "   "
+      },
+      "error": {
+        "raised": "ValidationError",
+        "detail": [
+          "A model name is required."
+        ]
+      }
+    },
+    {
+      "name": "base_url trailing slash stripped",
+      "source": "apps/api/pi_dash/assistant/serializers.py:52-61",
+      "input": {
+        "base_url": "https://api.openai.com/v1/"
+      },
+      "output": {
+        "base_url": "https://api.openai.com/v1"
+      }
+    },
+    {
+      "name": "base_url empty passes through",
+      "source": "apps/api/pi_dash/assistant/serializers.py:52-61",
+      "input": {
+        "base_url": ""
+      },
+      "output": {
+        "base_url": ""
+      }
+    },
+    {
+      "name": "base_url non-http rejected",
+      "source": "apps/api/pi_dash/assistant/serializers.py:52-61",
+      "input": {
+        "base_url": "ftp://x"
+      },
+      "error": [
+        "base_url must be an http(s) URL."
+      ]
+    },
+    {
+      "name": "base_url with credentials rejected",
+      "source": "apps/api/pi_dash/assistant/serializers.py:52-61",
+      "input": {
+        "base_url": "https://user:pw@host/v1"
+      },
+      "error": [
+        "base_url must not contain credentials."
+      ]
+    },
+    {
+      "name": "short api_key rejected",
+      "source": "apps/api/pi_dash/assistant/serializers.py:63-66",
+      "input": {
+        "api_key": "short"
+      },
+      "error": [
+        "API key looks too short."
+      ]
+    },
+    {
+      "name": "openai_compatible requires base_url",
+      "source": "apps/api/pi_dash/assistant/serializers.py:68-75",
+      "note": "provider defaults to openai_compatible from instance; empty base_url -> {'base_url': 'base_url is required for OpenAI-compatible providers.'}"
+    }
+  ]
+}

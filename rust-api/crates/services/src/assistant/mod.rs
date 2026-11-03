@@ -1,0 +1,52 @@
+//! Assistant domain guards (D-06, stage 5).
+//!
+//! Ports the DB-free guard half of `apps/api/pi_dash/assistant/`:
+//!
+//! * [`crypto`] — `crypto.py:1-233` (PIDASHCONV-248).
+//! * [`ssrf`] — `ssrf.py:1-43` (PIDASHCONV-248).
+//! * [`markdown`] — `runtime/markdown.py:1-38` (PIDASHCONV-248).
+//! * [`llm`] — `runtime/llm.py:1-115` (PIDASHCONV-250).
+//! * [`title`] — `runtime/title.py:1-147` (PIDASHCONV-250).
+//! * [`agent`] — `runtime/deps.py`, `runtime/agent.py`,
+//!   `runtime/instructions.py` (PIDASHCONV-250).
+//! * [`mcp`] — `runtime/mcp.py:1-309` (PIDASHCONV-251).
+//! * [`seams`] — `ee/assistant/model_provider.py` + `stt_provider.py`
+//!   (PIDASHCONV-251).
+//! * [`tools_scoping`] — `tools/_scoping.py:1-103` (PIDASHCONV-252).
+//! * [`tools_results`] — `tools/_results.py:1-69` (PIDASHCONV-252).
+//! * [`tools_comments`] — `tools/comments.py:1-77` (PIDASHCONV-252).
+//! * [`tools_projects`] — `tools/projects.py:1-65` (PIDASHCONV-252).
+//! * [`tools_runs`] — `tools/runs.py:1-96` (PIDASHCONV-252).
+//! * [`tools_issues`] — `tools/issues.py:1-490` (PIDASHCONV-253).
+//! * [`tools_github`] — `tools/github.py:1-165` (PIDASHCONV-253).
+//!
+//! Public runtime services (OVL-07, stage 8): the config/probe/retry
+//! halves of `assistant/views/llm_config.py` and the provider send
+//! loops, moved out of the `api`/`jobs` crates so the cloud overlay
+//! calls them instead of copying them:
+//!
+//! * [`config`] — the `assistant_user_llm_config` row service
+//!   (`get_config` / `put_config` / `delete_config`).
+//! * [`probe`] — the provider connection probe (`probe_provider`,
+//!   `classify_probe`).
+//! * [`retry`] — the canonical provider retry policy
+//!   (`should_retry_status`, `sleep_for_retry`, `retry_after_seconds`).
+
+pub mod agent;
+pub mod config;
+pub mod crypto;
+pub mod llm;
+pub mod markdown;
+pub mod mcp;
+pub mod probe;
+pub mod retry;
+pub mod seams;
+pub mod ssrf;
+pub mod title;
+pub mod tools_comments;
+pub mod tools_github;
+pub mod tools_issues;
+pub mod tools_projects;
+pub mod tools_results;
+pub mod tools_runs;
+pub mod tools_scoping;

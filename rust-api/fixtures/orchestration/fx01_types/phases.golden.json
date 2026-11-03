@@ -1,0 +1,288 @@
+{
+  "state_groups": [
+    "backlog",
+    "unstarted",
+    "started",
+    "review",
+    "test",
+    "completed",
+    "cancelled",
+    "triage"
+  ],
+  "KIND_CODING_TASK": "coding-task",
+  "DEFAULT_CADENCE_KEY": "impl",
+  "CADENCE_FIELDS": {
+    "impl": {
+      "project_interval": "agent_default_interval_seconds",
+      "default_interval": 10800
+    },
+    "review": {
+      "project_interval": "agent_review_default_interval_seconds",
+      "default_interval": 10800
+    },
+    "test": {
+      "project_interval": "agent_test_default_interval_seconds",
+      "default_interval": 10800
+    }
+  },
+  "PHASES": {
+    "started": {
+      "state_name": "In Progress",
+      "template_name": "coding-task",
+      "cadence_key": "impl",
+      "fresh_session_on_entry": false,
+      "disarm_on_completed": true,
+      "auto_pause_on_cap": true
+    },
+    "review": {
+      "state_name": "In Review",
+      "template_name": "review",
+      "cadence_key": "review",
+      "fresh_session_on_entry": true,
+      "disarm_on_completed": true,
+      "auto_pause_on_cap": false
+    },
+    "test": {
+      "state_name": "In Test",
+      "template_name": "test",
+      "cadence_key": "test",
+      "fresh_session_on_entry": true,
+      "disarm_on_completed": true,
+      "auto_pause_on_cap": false
+    }
+  },
+  "cadence_fields_by_group": {
+    "started": {
+      "project_interval": "agent_default_interval_seconds",
+      "default_interval": 10800
+    },
+    "review": {
+      "project_interval": "agent_review_default_interval_seconds",
+      "default_interval": 10800
+    },
+    "test": {
+      "project_interval": "agent_test_default_interval_seconds",
+      "default_interval": 10800
+    }
+  },
+  "ticking_state_names_by_group": {
+    "started": "In Progress",
+    "review": "In Review",
+    "test": "In Test"
+  },
+  "vectors": [
+    {
+      "input": null,
+      "case": "none-state",
+      "is_ticking_state": false,
+      "phase_config_for": null,
+      "template_name_for": "coding-task",
+      "cadence_fields_for": {
+        "project_interval": "agent_default_interval_seconds",
+        "default_interval": 10800
+      },
+      "auto_pauses_on_cap": false
+    },
+    {
+      "input": {
+        "group": "review",
+        "name": "In Review"
+      },
+      "case": "registered:review",
+      "is_ticking_state": true,
+      "phase_config_for": {
+        "state_name": "In Review",
+        "template_name": "review",
+        "cadence_key": "review",
+        "fresh_session_on_entry": true,
+        "disarm_on_completed": true,
+        "auto_pause_on_cap": false
+      },
+      "template_name_for": "review",
+      "cadence_fields_for": {
+        "project_interval": "agent_review_default_interval_seconds",
+        "default_interval": 10800
+      },
+      "auto_pauses_on_cap": false
+    },
+    {
+      "input": {
+        "group": "review",
+        "name": "Custom In Review"
+      },
+      "case": "custom-name-in-ticking-group:review",
+      "is_ticking_state": false,
+      "phase_config_for": null,
+      "template_name_for": "coding-task",
+      "cadence_fields_for": {
+        "project_interval": "agent_default_interval_seconds",
+        "default_interval": 10800
+      },
+      "auto_pauses_on_cap": false
+    },
+    {
+      "input": {
+        "group": "started",
+        "name": "In Progress"
+      },
+      "case": "registered:started",
+      "is_ticking_state": true,
+      "phase_config_for": {
+        "state_name": "In Progress",
+        "template_name": "coding-task",
+        "cadence_key": "impl",
+        "fresh_session_on_entry": false,
+        "disarm_on_completed": true,
+        "auto_pause_on_cap": true
+      },
+      "template_name_for": "coding-task",
+      "cadence_fields_for": {
+        "project_interval": "agent_default_interval_seconds",
+        "default_interval": 10800
+      },
+      "auto_pauses_on_cap": true
+    },
+    {
+      "input": {
+        "group": "started",
+        "name": "Custom In Progress"
+      },
+      "case": "custom-name-in-ticking-group:started",
+      "is_ticking_state": false,
+      "phase_config_for": null,
+      "template_name_for": "coding-task",
+      "cadence_fields_for": {
+        "project_interval": "agent_default_interval_seconds",
+        "default_interval": 10800
+      },
+      "auto_pauses_on_cap": false
+    },
+    {
+      "input": {
+        "group": "test",
+        "name": "In Test"
+      },
+      "case": "registered:test",
+      "is_ticking_state": true,
+      "phase_config_for": {
+        "state_name": "In Test",
+        "template_name": "test",
+        "cadence_key": "test",
+        "fresh_session_on_entry": true,
+        "disarm_on_completed": true,
+        "auto_pause_on_cap": false
+      },
+      "template_name_for": "test",
+      "cadence_fields_for": {
+        "project_interval": "agent_test_default_interval_seconds",
+        "default_interval": 10800
+      },
+      "auto_pauses_on_cap": false
+    },
+    {
+      "input": {
+        "group": "test",
+        "name": "Custom In Test"
+      },
+      "case": "custom-name-in-ticking-group:test",
+      "is_ticking_state": false,
+      "phase_config_for": null,
+      "template_name_for": "coding-task",
+      "cadence_fields_for": {
+        "project_interval": "agent_default_interval_seconds",
+        "default_interval": 10800
+      },
+      "auto_pauses_on_cap": false
+    },
+    {
+      "input": {
+        "group": "backlog",
+        "name": "Some Backlog"
+      },
+      "case": "non-ticking-group:backlog",
+      "is_ticking_state": false,
+      "phase_config_for": null,
+      "template_name_for": "coding-task",
+      "cadence_fields_for": {
+        "project_interval": "agent_default_interval_seconds",
+        "default_interval": 10800
+      },
+      "auto_pauses_on_cap": false
+    },
+    {
+      "input": {
+        "group": "unstarted",
+        "name": "Some Unstarted"
+      },
+      "case": "non-ticking-group:unstarted",
+      "is_ticking_state": false,
+      "phase_config_for": null,
+      "template_name_for": "coding-task",
+      "cadence_fields_for": {
+        "project_interval": "agent_default_interval_seconds",
+        "default_interval": 10800
+      },
+      "auto_pauses_on_cap": false
+    },
+    {
+      "input": {
+        "group": "completed",
+        "name": "Some Completed"
+      },
+      "case": "non-ticking-group:completed",
+      "is_ticking_state": false,
+      "phase_config_for": null,
+      "template_name_for": "coding-task",
+      "cadence_fields_for": {
+        "project_interval": "agent_default_interval_seconds",
+        "default_interval": 10800
+      },
+      "auto_pauses_on_cap": false
+    },
+    {
+      "input": {
+        "group": "cancelled",
+        "name": "Some Cancelled"
+      },
+      "case": "non-ticking-group:cancelled",
+      "is_ticking_state": false,
+      "phase_config_for": null,
+      "template_name_for": "coding-task",
+      "cadence_fields_for": {
+        "project_interval": "agent_default_interval_seconds",
+        "default_interval": 10800
+      },
+      "auto_pauses_on_cap": false
+    },
+    {
+      "input": {
+        "group": "triage",
+        "name": "Some Triage"
+      },
+      "case": "non-ticking-group:triage",
+      "is_ticking_state": false,
+      "phase_config_for": null,
+      "template_name_for": "coding-task",
+      "cadence_fields_for": {
+        "project_interval": "agent_default_interval_seconds",
+        "default_interval": 10800
+      },
+      "auto_pauses_on_cap": false
+    },
+    {
+      "input": {
+        "group": "no-such-group",
+        "name": "Whatever"
+      },
+      "case": "unknown-group",
+      "is_ticking_state": false,
+      "phase_config_for": null,
+      "template_name_for": "coding-task",
+      "cadence_fields_for": {
+        "project_interval": "agent_default_interval_seconds",
+        "default_interval": 10800
+      },
+      "auto_pauses_on_cap": false
+    }
+  ]
+}

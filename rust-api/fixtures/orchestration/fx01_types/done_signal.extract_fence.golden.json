@@ -1,0 +1,57 @@
+[
+  {
+    "case": "empty-string",
+    "input": "",
+    "output": null
+  },
+  {
+    "case": "none-input",
+    "input": null,
+    "output": null
+  },
+  {
+    "case": "no-fence",
+    "input": "just some agent chatter, no fence at all",
+    "output": null
+  },
+  {
+    "case": "single-fence",
+    "input": "```pi-dash-done\n{\"status\": \"noop\"}\n```",
+    "output": "{\"status\": \"noop\"}"
+  },
+  {
+    "case": "last-fence-wins",
+    "input": "first:\n```pi-dash-done\n{\"status\": \"noop\"}\n```\nsecond:\n```pi-dash-done\n{\"status\": \"done\"}\n```",
+    "output": "{\"status\": \"done\"}"
+  },
+  {
+    "case": "whitespace-open-fence",
+    "input": "```pi-dash-done   \n{\"status\": \"noop\"}\n```",
+    "output": "{\"status\": \"noop\"}"
+  },
+  {
+    "case": "whitespace-close-fence",
+    "input": "```pi-dash-done\n{\"status\": \"noop\"}\n```  ",
+    "output": "{\"status\": \"noop\"}"
+  },
+  {
+    "case": "tab-close-fence",
+    "input": "```pi-dash-done\n{\"status\": \"noop\"}\n```\t",
+    "output": "{\"status\": \"noop\"}"
+  },
+  {
+    "case": "unclosed-fence",
+    "input": "```pi-dash-done\n{\"status\": \"noop\"}\n",
+    "output": null
+  },
+  {
+    "case": "triple-backtick-inside-json-string",
+    "input": "```pi-dash-done\n{\"status\": \"noop\", \"summary\": \"uses ``` code spans\"}\n```",
+    "output": "{\"status\": \"noop\", \"summary\": \"uses ``` code spans\"}"
+  },
+  {
+    "case": "body-is-blank",
+    "input": "```pi-dash-done\n   \n```",
+    "output": ""
+  }
+]

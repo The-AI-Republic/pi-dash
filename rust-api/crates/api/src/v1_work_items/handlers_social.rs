@@ -1,0 +1,5794 @@
+//! Link + comment handlers (D-18 handlers B, PIDASHCONV-674).
+//!
+//! Ports `apps/api/pi_dash/api/views/issue.py` (4 units):
+//!
+//! * `IssueLinkListCreateAPIEndpoint.get` (`:1593-1604`) — paginated link
+//!   list, `fields=`/`expand=` from the query string.
+//! * `IssueLinkListCreateAPIEndpoint.post` (`:1626-1650`) — create +
+//!   `created_by` override + crawl/activity fan-out.
+//! * `IssueLinkDetailAPIEndpoint.get` (`:1697-1714`) — one link (the
+//!   `pk is None` list branch is unreachable on the wire: the route always
+//!   binds `pk`).
+//! * `IssueLinkDetailAPIEndpoint.patch` (`:1737-1761`) — Show-serializer
+//!   partial update (NOT the Update serializer) + crawl/activity fan-out.
+//! * `IssueLinkDetailAPIEndpoint.delete` (`:1775-1793`) — soft-delete +
+//!   activity fan-out + related-objects sweep enqueue.
+//! * `IssueCommentListCreateAPIEndpoint.get` (`:1851-1862`) — paginated
+//!   comment list with the `is_member` annotation.
+//! * `IssueCommentListCreateAPIEndpoint.post` (`:1885-1949`) — external
+//!   dup guard + create + overrides + activity/webhook fan-out.
+//! * `IssueCommentDetailAPIEndpoint.get` (`:2003-2010`) — one comment.
+//! * `IssueCommentDetailAPIEndpoint.patch` (`:2034-2089`) — external dup
+//!   guard + Create-serializer partial update + fan-out.
+//! * `IssueCommentDetailAPIEndpoint.delete` (`:2103-2121`) — soft-delete +
+//!   activity fan-out + related-objects sweep enqueue.
+//!
+//! Registered by [`super::routes`] at the eight
+//! `apps/api/pi_dash/api/urls/work_item.py:60-77,154-171` paths (four
+//! `work-items/` routes plus their deprecated `issues/` twins, which share
+//! the view classes and therefore the handlers).
+//!
+//! Layering (all foundation use is read-only): shapes in
+//! `pidash_services::v1_work_items::shape_links` / `shape_social`,
+//! representative SQL in `queries_sub`, POST validation in the shapes,
+//! task kwargs in `tasks`, gates in [`super::perms`] over the F-06 kernel
+//! (`pidash_auth::permissions`), request bodies through
+//! `crate::v1_cycles_modules::{body, json}`, pagination through
+//! `crate::paginator`, task fan-out through `pidash_jobs::queue`. This
+//! module owns the HTTP shell: API-key auth, the slug→UUID rewrite,
+//! permission wiring, the write statements, the read-shape rendering and
+//! the paginated envelope.
+//!
+//! Request order (preserved, not redesigned): UUID-segment shape (proxy when
+//! Django's `<uuid:>` converter would not match — before auth, as URL
+//! resolving precedes it), API-key authentication (anonymous 401s before any
+//! pool or database access), the slug→UUID rewrite
+//! (`api/views/base.py:51-98`, skipped for anonymous callers),
+//! `check_permissions`, timezone activation (unknown zones 400 —
+//! `ZoneInfoNotFoundError` subclasses `KeyError`), then the handler body.
+//! Bodies parse only after the gate: the views touch `request.data` inside
+//! the handler, never in `initial()`.
+//!
+//! Ported bugs (also listed in the PR):
+//!
+//! * BUG-1 (`views/issue.py:1743,1781,2040,2109`): patch/delete use a direct
+//!   `objects.get(slug, project, issue, pk)` that bypasses the queryset's
+//!   member/archived guards — any project member (past the gate) can
+//!   patch/delete any issue's links/comments.
+//! * BUG-2 (`views/issue.py:1746`): link PATCH runs the full Show serializer
+//!   with `partial=True`, NOT `IssueLinkUpdateSerializer` — no URL-format
+//!   check, no duplicate guard, and `deleted_at` is writable (soft-delete
+//!   via PATCH).
+//! * BUG-3 (`views/issue.py:1923-1924`): comment create assigns `actor_id`
+//!   from the `created_by` override but saves only
+//!   `update_fields=["created_at","created_by"]` — the DB keeps the
+//!   requester while the response renders the override.
+//! * BUG-4 (`views/issue.py:1567,1672,1826,1982`): `.order_by()` reads
+//!   `self.kwargs` (URL kwargs — never `order_by`), so `?order_by=` is
+//!   ignored and every list orders `-created_at`.
+//! * BUG-5 (`views/issue.py:1648,1947,1759,2087`): write responses render
+//!   the in-memory instance, so `updated_by` shows the actor while the DB
+//!   row keeps NULL (the override saves only its own columns).
+//! * BUG-6 (`views/issue.py:1702-1711`): link detail GET keeps a `pk is None`
+//!   list branch that no route can reach.
+//!
+//! Deliberate edges (all unpinned — no fixture or contract case sends them):
+//!
+//! * Multipart/file inputs are ignored (no file field exists here); Python
+//!   would 400 them as non-strings.
+//! * `expand=` on rows whose parent (workspace/project/issue/actor) is
+//!   soft-deleted renders null; Python follows the default manager and may
+//!   404 instead. Same edge as the reviewed sibling
+//!   (`handlers_activity.rs`, PIDASHCONV-675).
+//! * Extreme-magnitude floats render with serde's exponent spelling where
+//!   CPython spells `1e+16` — same accepted edge as every merged shape
+//!   module.
+//!
+//! Fixture: `F18-11` (`rust-api/fixtures/v1_work_items/handlers/` —
+//! `link_list`, `link_detail`, `link_create`, `link_patch`,
+//! `link_create_bad_url`, `link_delete`, `comment_list`, `comment_detail`,
+//! `comment_create`, `comment_patch`, `comment_delete`, plus the deprecated
+//! twins).
+//!
+//! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
+
+use axum::extract::{OriginalUri, Path, Query, Request, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc, Weekday};
+use chrono_tz::Tz;
+use serde_json::{Map, Value};
+use sqlx::{PgPool, Row};
+use uuid::Uuid;
+
+use pidash_auth::permissions::project;
+use pidash_auth::scope::TenantScope;
+use std::sync::Arc;
+
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::comments as comment_domain;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{WriteActor, WriteCtx, WriteScope};
+use pidash_services::operations;
+use pidash_services::read;
+use pidash_services::v1_work_items::shape_issue::BASE_EXPANSION_NAMES;
+use pidash_services::v1_work_items::shape_links::{
+    render_link, validate_link_create, LinkRow, LinkShowInput, LinkWriteError,
+};
+use pidash_services::v1_work_items::shape_social::{
+    render_comment, CommentRepresentationInput, CommentRow,
+};
+use pidash_services::v1_work_items::tasks as work_tasks;
+use pidash_services::v1_work_items::{filter_fields, python_number_str, FieldSpec};
+
+use crate::domain_hooks::AppTaskEnqueueHook;
+use crate::issue_transition::AppTransitionHook;
+use crate::state::AppState;
+
+use super::perms::{decide, gate_for, V1WorkItemsRoute};
+pub use pidash_compat::response::SERVER_ERROR_BODY;
+
+// ---------------------------------------------------------------------------
+// Responses
+// ---------------------------------------------------------------------------
+
+/// `handle_exception`'s `ObjectDoesNotExist` branch
+/// (`api/views/base.py:154-158`): every `.get()` miss on these endpoints.
+pub const RESOURCE_NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not exist."}"#;
+/// `handle_exception`'s `IntegrityError` branch
+/// (`api/views/base.py:142-147`): FK violations on the `created_by`
+/// override saves.
+pub const PAYLOAD_NOT_VALID_BODY: &str = r#"{"error":"The payload is not valid"}"#;
+/// `handle_exception`'s `ValidationError` branch
+/// (`api/views/base.py:149-153`): unparseable `created_by`/`created_at`
+/// overrides and `deleted_at` input.
+pub const VALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
+/// Link create duplicate 400 (`serializers/issue.py:617-620`): the guard
+/// raises `ValidationError({"error": ...})` out of `save()`, and DRF
+/// renders the dict as-is — a STRING value, not the list form that
+/// `is_valid()` errors take (verified live). NOTE: this stays inline
+/// rather than calling `shape_links::duplicate_url_body` (byte-identical
+/// since PIDASHCONV-755 fixed it to the string form); a later touch may
+/// switch the handler to the helper.
+pub const LINK_DUP_BODY: &str = r#"{"error":"URL already exists for this Issue"}"#;
+/// The related-objects sweep enqueued by `SoftDeleteModel.delete()`
+/// (`db/mixins.py:72-78` over `bgtasks/deletion_task.py:18`).
+pub const SOFT_DELETE_TASK: &str = "pi_dash.bgtasks.deletion_task.soft_delete_related_objects";
+
+/// Handler failure with its exact status + body.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Denial {
+    /// 401, DRF `NotAuthenticated` (no `X-Api-Key` header).
+    Unauthorized,
+    /// 403, invalid/expired/inactive API or machine token.
+    InvalidToken,
+    /// 403, the DRF-default `PermissionDenied` body (no D-18 guard class
+    /// sets `message`).
+    Forbidden,
+    /// 404, `{"detail":"Project not found"}` (identifier rewrite miss —
+    /// `Project.resolve` raises `Http404`, `db/models/project.py:213-217`).
+    ProjectNotFound,
+    /// 400, `{"detail": ...}` (DRF `ParseError`: malformed JSON, bad
+    /// `per_page`/`cursor`).
+    BadDetail(String),
+    /// 400, `{"error": ...}` (view-inline: unknown timezones).
+    BadError(String),
+    /// 400, serializer `errors` dict (pre-rendered bytes, field order).
+    FieldErrors(String),
+    /// 415, `{"detail": ...}` (DRF `UnsupportedMediaType`).
+    UnsupportedMediaType(String),
+    /// 404, view-inline `{"error": ...}` with the full body.
+    NotFound(String),
+    /// 409, view-inline body (external duplicate).
+    Conflict(String),
+    /// 500, generic branch.
+    ServerError,
+}
+
+impl Denial {
+    fn status_and_body(&self) -> (StatusCode, String) {
+        match self {
+            Denial::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                super::perms::UNAUTHENTICATED_BODY.to_owned(),
+            ),
+            Denial::InvalidToken => (
+                StatusCode::FORBIDDEN,
+                r#"{"detail":"Given API token is not valid"}"#.to_owned(),
+            ),
+            Denial::Forbidden => (
+                StatusCode::FORBIDDEN,
+                super::perms::CLASS_DENIAL_BODY.to_owned(),
+            ),
+            Denial::ProjectNotFound => (
+                StatusCode::NOT_FOUND,
+                r#"{"detail":"Project not found"}"#.to_owned(),
+            ),
+            Denial::BadDetail(message) => (
+                StatusCode::BAD_REQUEST,
+                format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            Denial::BadError(message) => (
+                StatusCode::BAD_REQUEST,
+                format!("{{\"error\":{}}}", json_string(message)),
+            ),
+            Denial::FieldErrors(body) => (StatusCode::BAD_REQUEST, body.clone()),
+            Denial::UnsupportedMediaType(message) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            Denial::NotFound(body) => (StatusCode::NOT_FOUND, body.clone()),
+            Denial::Conflict(body) => (StatusCode::CONFLICT, body.clone()),
+            Denial::ServerError => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                SERVER_ERROR_BODY.to_owned(),
+            ),
+        }
+    }
+}
+
+impl IntoResponse for Denial {
+    fn into_response(self) -> Response {
+        let (status, body) = self.status_and_body();
+        json_response(status, body)
+    }
+}
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).expect("json string")
+}
+
+/// Render a JSON response with exact bytes and status. DRF's `JSONRenderer`
+/// post-pass escapes U+2028/U+2029 (`rest_framework/renderers.py`); the
+/// `app_project` `escape_u2028` precedent, applied to every JSON body here.
+fn json_response(status: StatusCode, body: String) -> Response {
+    pidash_compat::response::json_response(status, pidash_compat::response::escape_u2028(&body))
+}
+
+/// Render a 201 JSON response with exact bytes.
+fn json_created(body: String) -> Response {
+    json_response(StatusCode::CREATED, body)
+}
+
+/// Map an operation failure onto the `Denial` arms the moved handlers
+/// used (OVL-14, PIDASHCONV-1649). The comment operations never return
+/// the issues-missing/move-only variants (`NotFound`, `NotFoundBody`,
+/// `ProjectNotFound`, `Rejection`), so those arms 500 instead of
+/// rendering a body this module cannot spell.
+impl From<operations::Error> for Denial {
+    fn from(error: operations::Error) -> Self {
+        match error {
+            operations::Error::BadError(message) => Denial::BadError(message),
+            operations::Error::FieldErrors(body) => Denial::FieldErrors(body),
+            operations::Error::Conflict(body) => Denial::Conflict(body),
+            operations::Error::ServerError => Denial::ServerError,
+            operations::Error::NotFound
+            | operations::Error::NotFoundBody(_)
+            | operations::Error::ProjectNotFound
+            | operations::Error::Rejection { .. } => Denial::ServerError,
+        }
+    }
+}
+
+/// Wrap an operation outcome in the v1 response.
+fn op_response(outcome: operations::Outcome) -> Result<Response, Denial> {
+    let status = StatusCode::from_u16(outcome.status).map_err(|_| Denial::ServerError)?;
+    Ok(json_response(status, outcome.body))
+}
+
+/// The actor/scope context the comment operations run with.
+fn domain_write_ctx(pre: &Preamble, project_id: &Uuid) -> WriteCtx {
+    WriteCtx::new(WriteActor {
+        user_id: pre.actor.id,
+        timezone: pre.actor.timezone.clone(),
+    })
+    .with_scope(WriteScope {
+        workspace_id: pre.workspace_id,
+        project_id: Some(*project_id),
+    })
+}
+
+/// Map a database/driver failure to the generic 500 while logging the site
+/// and error for operators (no secrets: messages never include tokens).
+fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
+    tracing::warn!(%error, site, "v1_work_items social database failure");
+    Denial::ServerError
+}
+
+/// `timezone.now()` truncated to microseconds: Python datetimes carry no
+/// nanos, and `timestamptz` stores micros — an untruncated `Utc::now()`
+/// would render nanos in the response while the DB row reads back micros.
+fn now_utc() -> DateTime<Utc> {
+    trunc_micros(Utc::now())
+}
+
+/// Truncate an instant to microsecond precision (see [`now_utc`]).
+fn trunc_micros(dt: DateTime<Utc>) -> DateTime<Utc> {
+    let nanos = dt.timestamp_subsec_nanos();
+    dt - chrono::Duration::nanoseconds(i64::from(nanos % 1000))
+}
+
+fn pool_of(state: &AppState) -> Result<PgPool, Denial> {
+    state
+        .pools()
+        .map(|pools| pools.primary().clone())
+        .ok_or(Denial::ServerError)
+}
+
+/// Best-effort post-write task fan-out (the `.delay()` calls): without a
+/// queue table the response still stands (the `v1_projects`
+/// `enqueue_best_effort` precedent).
+async fn enqueue_best_effort(
+    pool: &PgPool,
+    task: &str,
+    args: Vec<Value>,
+    kwargs: Map<String, Value>,
+) {
+    let message = pidash_jobs::TaskMessage::new(task, args, kwargs);
+    let job = pidash_jobs::queue::NewJob::new(
+        message.task.clone(),
+        Value::Array(message.args.clone()),
+        Value::Object(message.kwargs.clone()),
+    );
+    if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
+        tracing::warn!(%error, task, "task enqueue failed; response stands");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cutover wiring
+// ---------------------------------------------------------------------------
+
+/// Route registration is the cutover granularity (the pilot `owned()`
+/// pattern shared with `v1_projects`): the owned methods serve from Rust,
+/// every other method on the path proxies to Django so its 405-after-auth
+/// and metadata responses are preserved byte for byte.
+fn owned(
+    router: axum::routing::MethodRouter<AppState>,
+    methods: &[&str],
+) -> axum::routing::MethodRouter<AppState> {
+    let mut router = router;
+    for method in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
+        if !methods.contains(&method) {
+            router = match method {
+                "GET" => router.get(crate::edge::proxy),
+                "POST" => router.post(crate::edge::proxy),
+                "PUT" => router.put(crate::edge::proxy),
+                "PATCH" => router.patch(crate::edge::proxy),
+                "DELETE" => router.delete(crate::edge::proxy),
+                "HEAD" => router.head(crate::edge::proxy),
+                _ => router.options(crate::edge::proxy),
+            };
+        }
+    }
+    // DRF runs `initial()` (auth → permissions) before its method check, so
+    // exotic methods (TRACE et al.) answer 401/403/405 JSON. The fallback
+    // proxies them with the original request (the `app_issues` precedent).
+    router.fallback(crate::edge::proxy)
+}
+
+/// The link list paths own GET + POST (`urls/work_item.py:60-63`,
+/// `:154-157`, `as_view(http_method_names=["get", "post"])`).
+pub fn owned_link_list(
+    router: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
+    owned(router, &["GET", "POST"])
+}
+
+/// The link detail paths own GET + PATCH + DELETE
+/// (`urls/work_item.py:64-67`, `:158-162`,
+/// `as_view(http_method_names=["get", "patch", "delete"])`).
+pub fn owned_link_detail(
+    router: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
+    owned(router, &["GET", "PATCH", "DELETE"])
+}
+
+/// The comment list paths own GET + POST (`urls/work_item.py:68-72`,
+/// `:163-167`).
+pub fn owned_comment_list(
+    router: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
+    owned(router, &["GET", "POST"])
+}
+
+/// The comment detail paths own GET + PATCH + DELETE
+/// (`urls/work_item.py:73-77`, `:168-172`).
+pub fn owned_comment_detail(
+    router: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
+    owned(router, &["GET", "PATCH", "DELETE"])
+}
+
+// ---------------------------------------------------------------------------
+// Query params
+// ---------------------------------------------------------------------------
+
+pub use pidash_compat::http::{fields_param, query_last, OneOrMany, QueryMap};
+
+// ---------------------------------------------------------------------------
+// Authentication
+// ---------------------------------------------------------------------------
+
+/// Decoded `api_tokens` row for [`resolve_api_token`].
+type ApiTokenLookup = (
+    String,
+    bool,
+    Option<chrono::DateTime<chrono::Utc>>,
+    uuid::Uuid,
+);
+
+/// Decoded `machine_token` row for [`resolve_machine_token`].
+type MachineTokenLookup = (
+    String,
+    uuid::Uuid,
+    Option<uuid::Uuid>,
+    uuid::Uuid,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<bool>,
+);
+
+/// The authenticated actor: user id plus the stored time zone name, loaded
+/// but NOT parsed — parsing happens after the gate in
+/// [`activate_timezone`] (the PIDASHCONV-737 fixed preamble).
+pub struct Actor {
+    pub id: uuid::Uuid,
+    pub timezone: Option<String>,
+}
+
+/// `APIKeyAuthentication` (`api/middleware/api_authentication.py:19-88`):
+/// the `X-Api-Key` header carries either an `api_tokens` token or an
+/// `mt_`-prefixed machine token. No header means anonymous (`authenticate`
+/// returns `None`); the permission layer then 401s before any view code.
+pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Result<Actor, Denial> {
+    let raw = headers
+        .get(pidash_auth::token::API_KEY_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if raw.is_empty() {
+        return Err(Denial::Unauthorized);
+    }
+    let user_id = match pidash_auth::token::classify_token(raw) {
+        None => return Err(Denial::Unauthorized),
+        Some(pidash_auth::token::TokenKind::Api) => resolve_api_token(pool, raw).await?,
+        Some(pidash_auth::token::TokenKind::Machine) => {
+            resolve_machine_token(pool, raw, secret_key).await?
+        }
+    };
+    let timezone = load_timezone_name(pool, &user_id).await?;
+    // `api_tokens.last_used` is stamped on every validated call
+    // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
+    // Best-effort: a failed stamp must not fail the request.
+    if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
+        let _ =
+            pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, raw).await;
+    }
+    // The token loggers stamp this id on the `process_logs` payload
+    // (Django reads `request.user` post-view; PIDASHCONV-937).
+    crate::middleware::publish_logger_user_id(&user_id.to_string());
+    Ok(Actor {
+        id: user_id,
+        timezone,
+    })
+}
+
+/// The `api_tokens` columns the validator reads (`db/models/api.py:35-57`).
+/// The `deleted_at IS NULL` conjunct is the `SoftDeletionManager` scope
+/// (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
+/// rows, so a soft-deleted token 403s instead of authenticating.
+async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid, Denial> {
+    let row: Option<ApiTokenLookup> = sqlx::query_as(
+        r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1 AND "deleted_at" IS NULL"#,
+    )
+    .bind(presented)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_error(error, "api-token-lookup"))?;
+    let Some((token, is_active, expired_at, user_id)) = row else {
+        return Err(Denial::InvalidToken);
+    };
+    let now_unix = chrono::Utc::now().timestamp();
+    let row = pidash_auth::token::ApiTokenRow {
+        token,
+        is_active,
+        expired_at_unix: expired_at.map(|dt| dt.timestamp()),
+    };
+    pidash_auth::token::validate_api_token(Some(&row), presented, now_unix)
+        .map_err(|_| Denial::InvalidToken)?;
+    // No `users.is_active` check: `validate_api_token` returns
+    // `api_token.user` unchecked, and neither DRF `IsAuthenticated` nor
+    // the project permission classes consult it — Django serves a
+    // deactivated user's token when membership passes. Port the wart.
+    Ok(user_id)
+}
+
+/// The machine-token path (`api_authentication.py:47-70`, table
+/// `machine_token`): HMAC lookup, revoke checks, dev-machine check, then
+/// the workspace-membership check (revoke-then-deny like Python).
+async fn resolve_machine_token(
+    pool: &PgPool,
+    presented: &str,
+    secret_key: &[u8],
+) -> Result<uuid::Uuid, Denial> {
+    let presented_hash = pidash_auth::token::hash_token(presented, secret_key);
+    let row: Option<MachineTokenLookup> = sqlx::query_as(
+        r#"SELECT mt."token_hash", mt."user_id", mt."dev_machine_id", mt."workspace_id", mt."revoked_at",
+                  dm."revoked_at" IS NOT NULL AS "dev_revoked"
+           FROM "machine_token" mt LEFT OUTER JOIN "dev_machine" dm ON dm."id" = mt."dev_machine_id"
+           WHERE mt."token_hash" = $1"#,
+    )
+    .bind(&presented_hash)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_error(error, "machine-token-lookup"))?;
+    let Some((token_hash, user_id, _dev_machine_id, workspace_id, revoked_at, dev_revoked)) = row
+    else {
+        return Err(Denial::InvalidToken);
+    };
+    let static_row = pidash_auth::token::MachineTokenRow {
+        token_hash,
+        revoked_at_unix: revoked_at.map(|dt| dt.timestamp()),
+        dev_machine_revoked: dev_revoked.unwrap_or(false),
+    };
+    // Hash match is implied by the lookup; the kernel still checks the
+    // revocation arms.
+    pidash_auth::token::validate_machine_token_static(Some(&static_row), &presented_hash)
+        .map_err(|_| Denial::InvalidToken)?;
+    // `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`);
+    // a `false` revokes the token, then denies.
+    let member: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS(SELECT 1 FROM "workspace_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "is_active" AND "deleted_at" IS NULL)"#,
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_error(error, "machine-token-member"))?
+    .unwrap_or(false);
+    if !member {
+        // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
+        // `last_used_at` is stamped on success only.
+        let _ =
+            pidash_services::domain::tokens::revoke_machine_token_by_hash(pool, &presented_hash)
+                .await;
+        return Err(Denial::InvalidToken);
+    }
+    let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
+        pool,
+        &presented_hash,
+    )
+    .await;
+    Ok(user_id)
+}
+
+/// The request time zone (`TimezoneMixin.initial`): the user's stored zone
+/// name, loaded but NOT parsed — parsing happens after the gate in
+/// [`activate_timezone`].
+async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<String>, Denial> {
+    let name: Option<Option<String>> =
+        sqlx::query_scalar(r#"SELECT "user_timezone" FROM "users" WHERE "id" = $1"#)
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| db_error(error, "request-timezone"))?;
+    Ok(name.unwrap_or(None))
+}
+
+/// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
+/// after `super().initial()`). A missing zone defaults to UTC; an unknown
+/// zone name 400s: `zoneinfo.ZoneInfo` raises `ZoneInfoNotFoundError`,
+/// which subclasses `KeyError`, so `handle_exception` answers the
+/// `KeyError` branch (`api/views/base.py:160-164`). An EMPTY zone 500s:
+/// `ZoneInfo('')` raises `ValueError` (not `KeyError`), which falls
+/// through to the generic 500 (`api/views/base.py:166-171`).
+fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
+    match timezone {
+        None => Ok(chrono_tz::UTC),
+        Some("") => Err(Denial::ServerError),
+        Some(zone) => zone
+            .parse()
+            .map_err(|_| Denial::BadError("The required key does not exist.".to_owned())),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Identifier rewrite + permissions
+// ---------------------------------------------------------------------------
+
+/// Request preamble: pool, actor and optional workspace id. An unknown slug
+/// yields `None`: every gate then denies 403, exactly like the
+/// slug-filtered membership checks missing in Python.
+pub struct Preamble {
+    pub pool: PgPool,
+    pub actor: Actor,
+    pub workspace_id: Option<uuid::Uuid>,
+}
+
+pub async fn preamble(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+) -> Result<Preamble, Denial> {
+    // Anonymous callers 401 before any pool or database access
+    // (`APIKeyAuthentication.authenticate` returns `None` without a key).
+    if headers
+        .get(pidash_auth::token::API_KEY_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .is_empty()
+    {
+        return Err(Denial::Unauthorized);
+    }
+    let pool = pool_of(state)?;
+    let actor = actor(&pool, headers, state.settings().secret_key.as_bytes()).await?;
+    let workspace_id: Option<uuid::Uuid> =
+        sqlx::query_scalar(r#"SELECT "id" FROM "workspaces" WHERE "slug" = $1"#)
+            .bind(slug)
+            .fetch_optional(&pool)
+            .await
+            .map_err(|error| db_error(error, "preamble-workspace"))?
+            .flatten();
+    Ok(Preamble {
+        pool,
+        actor,
+        workspace_id,
+    })
+}
+
+/// `_rewrite_project_kwarg` (`api/views/base.py:51-98`): a slug-or-UUID
+/// `project_id` becomes the canonical project UUID before permission
+/// checks. UUID-looking input passes through unverified (the view body
+/// 404/403s it as before); identifier misses answer the
+/// `{"detail":"Project not found"}` 404. Reuses the `v1_projects`
+/// `Project.resolve` port — the rewrite is shared view code, never
+/// re-ported per domain.
+pub async fn rewrite_project_id(
+    pool: &PgPool,
+    workspace_slug: &str,
+    raw: &str,
+) -> Result<uuid::Uuid, Denial> {
+    use pidash_db::v1_projects::models::project::{classify_lookup, ProjectLookup};
+    use pidash_db::v1_projects::queries_projmem as q;
+    let scope = q::TenantScope {
+        workspace_slug,
+        actor_id: uuid::Uuid::nil(),
+    };
+    match classify_lookup(raw) {
+        ProjectLookup::Pk(id) => Ok(id),
+        ProjectLookup::Identifier(_) => q::fetch_project_id(pool, &scope, raw)
+            .await
+            .map_err(|error| db_error(error, "rewrite-project"))?
+            .ok_or(Denial::ProjectNotFound),
+    }
+}
+
+/// Fetch the project-permission facts (`app/permissions/project.py`): active
+/// project membership plus the Admin/Member role arms, workspace- and
+/// project-scoped. Shared by the Entity (links) and Lite (comments) gates;
+/// [`decide`] applies the per-route arm.
+async fn entity_facts(
+    pool: &PgPool,
+    workspace_id: &uuid::Uuid,
+    workspace_slug: &str,
+    user_id: &uuid::Uuid,
+    project_id: &uuid::Uuid,
+) -> Result<project::ProjectFacts, Denial> {
+    // `role` is `smallint`: sqlx does not widen `INT2` into `i32` on
+    // decode, so read `i16` and compare as integers. `deleted_at IS NULL`
+    // is the `SoftDeletionManager` scope (`db/mixins.py:56-58`).
+    let roles: Vec<i16> = sqlx::query_scalar(
+        r#"SELECT "role" FROM "project_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "project_id" = $3 AND "is_active" AND "deleted_at" IS NULL"#,
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| db_error(error, "entity-roles"))?;
+    Ok(project::ProjectFacts {
+        workspace: pidash_types::WorkspaceId::from(workspace_slug.to_owned()),
+        project_id: pidash_types::ProjectId::from(project_id.to_string()),
+        authenticated: true,
+        is_workspace_member: false,
+        has_workspace_admin_or_member: false,
+        is_workspace_admin: false,
+        is_project_member: !roles.is_empty(),
+        is_project_admin: roles.contains(&20),
+        has_project_admin_or_member: roles.iter().any(|r| *r == 20 || *r == 15),
+        has_identifier_membership: false,
+        has_project_identifier: false,
+    })
+}
+
+/// Run the route's gate; deny 403 on failure. The link routes carry
+/// `ProjectEntityPermission`, the comment routes `ProjectLitePermission`
+/// (see [`gate_for`]).
+async fn require_gate(
+    pool: &PgPool,
+    workspace_id: &uuid::Uuid,
+    workspace_slug: &str,
+    user_id: &uuid::Uuid,
+    project_id: &uuid::Uuid,
+    route: V1WorkItemsRoute,
+    method: &str,
+) -> Result<(), Denial> {
+    let gate = gate_for(route, method);
+    let facts = entity_facts(pool, workspace_id, workspace_slug, user_id, project_id).await?;
+    let scope = TenantScope::new(pidash_types::WorkspaceId::from(workspace_slug.to_owned()));
+    if decide(gate, method, &scope, &facts) {
+        Ok(())
+    } else {
+        Err(Denial::Forbidden)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lookups
+// ---------------------------------------------------------------------------
+
+fn row_uuid(row: &sqlx::postgres::PgRow, column: &str) -> Result<Uuid, Denial> {
+    row.try_get(column).map_err(|_| Denial::ServerError)
+}
+
+fn row_uuid_opt(row: &sqlx::postgres::PgRow, column: &str) -> Result<Option<Uuid>, Denial> {
+    row.try_get(column).map_err(|_| Denial::ServerError)
+}
+
+fn row_string(row: &sqlx::postgres::PgRow, column: &str) -> Result<String, Denial> {
+    row.try_get(column).map_err(|_| Denial::ServerError)
+}
+
+fn row_string_opt(row: &sqlx::postgres::PgRow, column: &str) -> Result<Option<String>, Denial> {
+    row.try_get(column).map_err(|_| Denial::ServerError)
+}
+
+fn row_datetime(row: &sqlx::postgres::PgRow, column: &str) -> Result<DateTime<Utc>, Denial> {
+    row.try_get(column).map_err(|_| Denial::ServerError)
+}
+
+fn row_datetime_opt(
+    row: &sqlx::postgres::PgRow,
+    column: &str,
+) -> Result<Option<DateTime<Utc>>, Denial> {
+    row.try_get(column).map_err(|_| Denial::ServerError)
+}
+
+/// Link list/detail rows (`:1557-1569`, `:1662-1675`): the recorded F18-07
+/// predicates — live rows for this issue/project/slug, an active
+/// membership of the caller on the project (no `deleted_at` scope on the
+/// join span — fixture-verbatim), a live project. Order is always
+/// `-created_at`: `.order_by()` reads `self.kwargs`, which never carries
+/// `order_by`, so `?order_by=` is ignored (BUG-4).
+async fn fetch_link_rows(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+    user_id: &Uuid,
+) -> Result<Vec<sqlx::postgres::PgRow>, Denial> {
+    sqlx::query(
+        r#"SELECT DISTINCT l.* FROM "issue_links" l
+           WHERE l."deleted_at" IS NULL
+             AND l."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
+             AND l."project_id" = $2 AND l."issue_id" = $3
+             AND EXISTS (SELECT 1 FROM "project_members" pm
+                         WHERE pm."project_id" = l."project_id" AND pm."member_id" = $4 AND pm."is_active")
+             AND EXISTS (SELECT 1 FROM "projects" p
+                         WHERE p."id" = l."project_id" AND p."archived_at" IS NULL)
+           ORDER BY l."created_at" DESC"#,
+    )
+    .bind(slug)
+    .bind(project_id)
+    .bind(issue_id)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| db_error(error, "link-list"))
+}
+
+/// Link detail row (`:1712`): the list chain plus `id=pk`.
+async fn fetch_link_detail(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+    user_id: &Uuid,
+    pk: &Uuid,
+) -> Result<Option<sqlx::postgres::PgRow>, Denial> {
+    sqlx::query(
+        r#"SELECT DISTINCT l.* FROM "issue_links" l
+           WHERE l."deleted_at" IS NULL
+             AND l."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
+             AND l."project_id" = $2 AND l."issue_id" = $3
+             AND EXISTS (SELECT 1 FROM "project_members" pm
+                         WHERE pm."project_id" = l."project_id" AND pm."member_id" = $4 AND pm."is_active")
+             AND EXISTS (SELECT 1 FROM "projects" p
+                         WHERE p."id" = l."project_id" AND p."archived_at" IS NULL)
+             AND l."id" = $5
+           ORDER BY l."created_at" DESC"#,
+    )
+    .bind(slug)
+    .bind(project_id)
+    .bind(issue_id)
+    .bind(user_id)
+    .bind(pk)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_error(error, "link-detail"))
+}
+
+/// Link patch/delete direct lookup (`:1743`, `:1781`): live + slug +
+/// project + issue + pk — BUG-1 bypasses the member/archived guards.
+async fn fetch_link_direct(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+    pk: &Uuid,
+) -> Result<Option<sqlx::postgres::PgRow>, Denial> {
+    sqlx::query(
+        r#"SELECT l.* FROM "issue_links" l
+           WHERE l."deleted_at" IS NULL
+             AND l."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
+             AND l."project_id" = $2 AND l."issue_id" = $3 AND l."id" = $4"#,
+    )
+    .bind(slug)
+    .bind(project_id)
+    .bind(issue_id)
+    .bind(pk)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_error(error, "link-direct"))
+}
+
+/// Link create duplicate guard (`serializers/issue.py:618`): a live row
+/// with this URL on this issue. The manager scope applies, so soft-deleted
+/// rows do not block re-adding.
+async fn link_url_exists(pool: &PgPool, url: &str, issue_id: &Uuid) -> Result<bool, Denial> {
+    sqlx::query_scalar(
+        r#"SELECT EXISTS(SELECT 1 FROM "issue_links" WHERE "deleted_at" IS NULL AND "url" = $1 AND "issue_id" = $2)"#,
+    )
+    .bind(url)
+    .bind(issue_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| db_error(error, "link-dup"))
+}
+
+/// Comment list rows (`:1805-1828`) via the public read service.
+async fn fetch_comment_rows(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+    user_id: &Uuid,
+) -> Result<Vec<sqlx::postgres::PgRow>, Denial> {
+    read::fetch_comment_list_rows(pool, slug, project_id, issue_id, user_id)
+        .await
+        .map_err(|error| match error {
+            read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+            read::Error::Db(err) => {
+                let (site, source) = err.split();
+                db_error(source, site)
+            }
+        })
+}
+
+/// Comment detail row (`:2008`): the list chain (annotation included) plus
+/// `id=pk`.
+async fn fetch_comment_detail(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+    user_id: &Uuid,
+    pk: &Uuid,
+) -> Result<Option<sqlx::postgres::PgRow>, Denial> {
+    sqlx::query(
+        r#"SELECT DISTINCT c.*, EXISTS (
+             SELECT 1 FROM "project_members" pm
+             WHERE pm."deleted_at" IS NULL AND pm."is_active"
+               AND pm."member_id" = $4 AND pm."project_id" = $2
+               AND pm."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
+           ) AS "is_member"
+           FROM "issue_comments" c
+           WHERE c."deleted_at" IS NULL
+             AND c."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
+             AND c."project_id" = $2 AND c."issue_id" = $3
+             AND EXISTS (SELECT 1 FROM "project_members" pm
+                         WHERE pm."project_id" = c."project_id" AND pm."member_id" = $4 AND pm."is_active")
+             AND EXISTS (SELECT 1 FROM "projects" p
+                         WHERE p."id" = c."project_id" AND p."archived_at" IS NULL)
+             AND c."id" = $5
+           ORDER BY c."created_at" DESC"#,
+    )
+    .bind(slug)
+    .bind(project_id)
+    .bind(issue_id)
+    .bind(user_id)
+    .bind(pk)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_error(error, "comment-detail"))
+}
+
+/// Comment patch/delete direct lookup (`:2040`, `:2109`): live + slug +
+/// project + issue + pk — BUG-1 bypasses the guards and the annotation.
+async fn fetch_comment_direct(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+    pk: &Uuid,
+) -> Result<Option<sqlx::postgres::PgRow>, Denial> {
+    sqlx::query(
+        r#"SELECT c.* FROM "issue_comments" c
+           WHERE c."deleted_at" IS NULL
+             AND c."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
+             AND c."project_id" = $2 AND c."issue_id" = $3 AND c."id" = $4"#,
+    )
+    .bind(slug)
+    .bind(project_id)
+    .bind(issue_id)
+    .bind(pk)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_error(error, "comment-direct"))
+}
+
+// ---------------------------------------------------------------------------
+// Decode + render
+// ---------------------------------------------------------------------------
+
+/// One decoded link row: owned strings the [`LinkRow`] borrows.
+struct DecodedLink {
+    id: String,
+    created_at: String,
+    updated_at: String,
+    deleted_at: Option<String>,
+    title: Option<String>,
+    url: String,
+    metadata: Value,
+    created_by: Option<String>,
+    updated_by: Option<String>,
+    project: String,
+    workspace: String,
+    issue: String,
+}
+
+fn decode_link(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedLink, Denial> {
+    let metadata: Value = row.try_get("metadata").map_err(|_| Denial::ServerError)?;
+    Ok(DecodedLink {
+        id: row_uuid(row, "id")?.to_string(),
+        created_at: crate::serializer::render_datetime_in(&row_datetime(row, "created_at")?, tz),
+        updated_at: crate::serializer::render_datetime_in(&row_datetime(row, "updated_at")?, tz),
+        deleted_at: row_datetime_opt(row, "deleted_at")?
+            .map(|dt| crate::serializer::render_datetime_in(&dt, tz)),
+        title: row_string_opt(row, "title")?,
+        url: row_string(row, "url")?,
+        metadata,
+        created_by: row_uuid_opt(row, "created_by_id")?.map(|id| id.to_string()),
+        updated_by: row_uuid_opt(row, "updated_by_id")?.map(|id| id.to_string()),
+        project: row_uuid(row, "project_id")?.to_string(),
+        workspace: row_uuid(row, "workspace_id")?.to_string(),
+        issue: row_uuid(row, "issue_id")?.to_string(),
+    })
+}
+
+fn render_link_value(
+    decoded: &DecodedLink,
+    field_specs: Option<&[FieldSpec]>,
+    expand_refs: &[&str],
+    expansions: &[(&str, Option<Value>)],
+) -> Result<Value, Denial> {
+    let row = LinkRow {
+        id: &decoded.id,
+        created_at: &decoded.created_at,
+        updated_at: &decoded.updated_at,
+        deleted_at: decoded.deleted_at.as_deref(),
+        title: decoded.title.as_deref(),
+        url: &decoded.url,
+        metadata: &decoded.metadata,
+        created_by: decoded.created_by.as_deref(),
+        updated_by: decoded.updated_by.as_deref(),
+        project: &decoded.project,
+        workspace: &decoded.workspace,
+        issue: &decoded.issue,
+    };
+    let out = render_link(&LinkShowInput {
+        row: &row,
+        fields: field_specs,
+        expand: expand_refs,
+        expansions,
+    })
+    .map_err(|_| Denial::ServerError)?;
+    Ok(Value::Object(out))
+}
+
+/// The link-create activity `requested_data`
+/// (`json.dumps(serializer.data)` at `:1641`): the 3-field create read
+/// shape (`Meta.fields`, `serializers/issue.py:590`), in field order.
+fn link_create_data(title: Option<&str>, url: &str, issue_id: &str) -> Value {
+    let mut map = Map::with_capacity(3);
+    map.insert(
+        "title".to_owned(),
+        title
+            .map(|text| Value::String(text.to_owned()))
+            .unwrap_or(Value::Null),
+    );
+    map.insert("url".to_owned(), Value::String(url.to_owned()));
+    map.insert("issue_id".to_owned(), Value::String(issue_id.to_owned()));
+    Value::Object(map)
+}
+
+/// One decoded comment row: owned strings the [`CommentRow`] borrows.
+struct DecodedComment {
+    id: String,
+    is_member: Option<bool>,
+    created_at: String,
+    updated_at: String,
+    deleted_at: Option<String>,
+    comment_html: String,
+    attachments: Vec<Option<String>>,
+    labels: Vec<Option<String>>,
+    access: String,
+    external_source: Option<String>,
+    external_id: Option<String>,
+    speaker_type: String,
+    speaker_label: String,
+    speaker_agent_run_id: Option<String>,
+    edited_at: Option<String>,
+    created_by: Option<String>,
+    updated_by: Option<String>,
+    project: String,
+    workspace: String,
+    description: Option<String>,
+    issue: String,
+    actor: Option<String>,
+    parent: Option<String>,
+}
+
+fn decode_comment(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedComment, Denial> {
+    let attachments: Vec<Option<String>> = row
+        .try_get("attachments")
+        .map_err(|_| Denial::ServerError)?;
+    let labels: Vec<Option<String>> = row.try_get("labels").map_err(|_| Denial::ServerError)?;
+    let is_member: Option<bool> = row.try_get("is_member").unwrap_or(None);
+    Ok(DecodedComment {
+        id: row_uuid(row, "id")?.to_string(),
+        is_member,
+        created_at: crate::serializer::render_datetime_in(&row_datetime(row, "created_at")?, tz),
+        updated_at: crate::serializer::render_datetime_in(&row_datetime(row, "updated_at")?, tz),
+        deleted_at: row_datetime_opt(row, "deleted_at")?
+            .map(|dt| crate::serializer::render_datetime_in(&dt, tz)),
+        comment_html: row_string(row, "comment_html")?,
+        attachments,
+        labels,
+        access: row_string(row, "access")?,
+        external_source: row_string_opt(row, "external_source")?,
+        external_id: row_string_opt(row, "external_id")?,
+        speaker_type: row_string(row, "speaker_type")?,
+        speaker_label: row_string(row, "speaker_label")?,
+        speaker_agent_run_id: row_uuid_opt(row, "speaker_agent_run_id")?.map(|id| id.to_string()),
+        edited_at: row_datetime_opt(row, "edited_at")?
+            .map(|dt| crate::serializer::render_datetime_in(&dt, tz)),
+        created_by: row_uuid_opt(row, "created_by_id")?.map(|id| id.to_string()),
+        updated_by: row_uuid_opt(row, "updated_by_id")?.map(|id| id.to_string()),
+        project: row_uuid(row, "project_id")?.to_string(),
+        workspace: row_uuid(row, "workspace_id")?.to_string(),
+        description: row_uuid_opt(row, "description_id")?.map(|id| id.to_string()),
+        issue: row_uuid(row, "issue_id")?.to_string(),
+        actor: row_uuid_opt(row, "actor_id")?.map(|id| id.to_string()),
+        parent: row_uuid_opt(row, "parent_id")?.map(|id| id.to_string()),
+    })
+}
+
+fn render_comment_value(
+    decoded: &DecodedComment,
+    url: Option<String>,
+    field_specs: Option<&[FieldSpec]>,
+    expand_refs: &[&str],
+    expansions: &[(&str, Option<Value>)],
+) -> Result<Value, Denial> {
+    let attachments: Vec<Option<&str>> = decoded
+        .attachments
+        .iter()
+        .map(|item| item.as_deref())
+        .collect();
+    let labels: Vec<Option<&str>> = decoded.labels.iter().map(|item| item.as_deref()).collect();
+    let row = CommentRow {
+        id: &decoded.id,
+        is_member: decoded.is_member,
+        url,
+        created_at: &decoded.created_at,
+        updated_at: &decoded.updated_at,
+        deleted_at: decoded.deleted_at.as_deref(),
+        comment_html: &decoded.comment_html,
+        attachments: &attachments,
+        labels: &labels,
+        access: &decoded.access,
+        external_source: decoded.external_source.as_deref(),
+        external_id: decoded.external_id.as_deref(),
+        speaker_type: &decoded.speaker_type,
+        speaker_label: &decoded.speaker_label,
+        speaker_agent_run_id: decoded.speaker_agent_run_id.as_deref(),
+        edited_at: decoded.edited_at.as_deref(),
+        created_by: decoded.created_by.as_deref(),
+        updated_by: decoded.updated_by.as_deref(),
+        project: &decoded.project,
+        workspace: &decoded.workspace,
+        description: decoded.description.as_deref(),
+        issue: &decoded.issue,
+        actor: decoded.actor.as_deref(),
+        parent: decoded.parent.as_deref(),
+    };
+    let out = render_comment(&CommentRepresentationInput {
+        row: &row,
+        fields: field_specs,
+        expand: expand_refs,
+        expansions,
+    })
+    .map_err(|_| Denial::ServerError)?;
+    Ok(Value::Object(out))
+}
+
+/// `IssueCommentSerializer.get_url` via the public read service
+/// (`serializers/issue.py:994-999`).
+async fn comment_url(
+    pool: &PgPool,
+    workspace_id: &Uuid,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+    web_base: Option<&str>,
+) -> Result<Option<String>, Denial> {
+    read::comment_url(pool, workspace_id, project_id, issue_id, web_base)
+        .await
+        .map_err(|error| match error {
+            // Unreachable: this read never 404s or fails mid-row.
+            read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+            read::Error::Db(err) => {
+                let (site, source) = err.split();
+                db_error(source, site)
+            }
+        })
+}
+
+// ---------------------------------------------------------------------------
+// Expansion
+// ---------------------------------------------------------------------------
+
+/// Decoded `file_assets` row for [`file_asset_url`].
+type AssetUrlLookup = (Option<String>, Option<Uuid>, Option<Uuid>, Option<Uuid>);
+
+/// `FileAsset.asset_url` (`db/models/asset.py:80-100`) for an asset id:
+/// static types render `/api/assets/v2/static/<id>/`, attachments and
+/// description assets join their workspace slug. A missing row (or slug)
+/// renders null like `getattr` on a dead FK (the `v1_projects`
+/// `file_asset_url` precedent).
+async fn file_asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>, Denial> {
+    let row: Option<AssetUrlLookup> =
+        sqlx::query_as(
+            r#"SELECT fa."entity_type", fa."workspace_id", fa."project_id", fa."issue_id" FROM "file_assets" fa WHERE fa."id" = $1"#,
+        )
+        .bind(asset_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| db_error(error, "file-asset-url"))?;
+    let Some((entity_type, workspace_id, project_id, issue_id)) = row else {
+        return Ok(None);
+    };
+    async fn workspace_slug(
+        pool: &PgPool,
+        workspace_id: Option<Uuid>,
+    ) -> Result<Option<String>, Denial> {
+        read::workspace_slug(pool, workspace_id)
+            .await
+            .map_err(|error| match error {
+                // Unreachable: this read never 404s or fails mid-row.
+                read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+                read::Error::Db(err) => {
+                    let (site, source) = err.split();
+                    db_error(source, site)
+                }
+            })
+    }
+    match entity_type.as_deref() {
+        Some("WORKSPACE_LOGO")
+        | Some("USER_AVATAR")
+        | Some("USER_COVER")
+        | Some("PROJECT_COVER") => Ok(Some(format!("/api/assets/v2/static/{asset_id}/"))),
+        Some("ISSUE_ATTACHMENT") => {
+            let slug = workspace_slug(pool, workspace_id).await?;
+            Ok(slug.map(|s| {
+                format!(
+                    "/api/assets/v2/workspaces/{s}/projects/{}/issues/{}/attachments/{asset_id}/",
+                    project_id.map(|v| v.to_string()).unwrap_or_default(),
+                    issue_id.map(|v| v.to_string()).unwrap_or_default(),
+                )
+            }))
+        }
+        Some("ISSUE_DESCRIPTION")
+        | Some("COMMENT_DESCRIPTION")
+        | Some("PAGE_DESCRIPTION")
+        | Some("DRAFT_ISSUE_DESCRIPTION") => {
+            let slug = workspace_slug(pool, workspace_id).await?;
+            Ok(slug.map(|s| {
+                format!(
+                    "/api/assets/v2/workspaces/{s}/projects/{}/{asset_id}/",
+                    project_id.map(|v| v.to_string()).unwrap_or_default(),
+                )
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `expand=workspace`: `WorkspaceLiteSerializer` (`workspace.py:10-21`):
+/// `{"name", "slug", "id"}` in field order. A missing row renders null
+/// (the `v1_projects` `expand_workspace` precedent).
+async fn expand_workspace(pool: &PgPool, workspace_id: &Uuid) -> Result<Value, Denial> {
+    let row: Option<(String, String)> =
+        sqlx::query_as(r#"SELECT "name", "slug" FROM "workspaces" WHERE "id" = $1"#)
+            .bind(workspace_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| db_error(error, "expand-workspace"))?;
+    Ok(match row {
+        Some((name, slug)) => {
+            let mut map = Map::with_capacity(3);
+            map.insert("name".to_owned(), Value::String(name));
+            map.insert("slug".to_owned(), Value::String(slug));
+            map.insert("id".to_owned(), Value::String(workspace_id.to_string()));
+            Value::Object(map)
+        }
+        None => Value::Null,
+    })
+}
+
+/// Decoded user row for [`expand_actor`]: names, nullable `email`,
+/// `COALESCE`d avatar, optional avatar asset.
+type ExpandUserLookup = (String, String, Option<String>, String, Option<Uuid>);
+
+/// `expand=actor`: `UserLiteSerializer` (`user.py:13-38`) via the D-19
+/// `user_lite_to_representation` kernel. A missing row renders null.
+async fn expand_actor(pool: &PgPool, user_id: &Uuid) -> Result<Value, Denial> {
+    let row: Option<ExpandUserLookup> = sqlx::query_as(
+        r#"SELECT "first_name", "last_name", "email", COALESCE("avatar", ''), "avatar_asset_id" FROM "users" WHERE "id" = $1"#,
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_error(error, "expand-actor"))?;
+    let Some((first_name, last_name, email, avatar, avatar_asset)) = row else {
+        return Ok(Value::Null);
+    };
+    let avatar_url = match avatar_asset {
+        Some(id) => file_asset_url(pool, &id).await?,
+        None => None,
+    };
+    let avatar_url = pidash_services::v1_projects::ser_collab::resolve_avatar_url(
+        avatar_asset.is_some(),
+        avatar_url.as_deref(),
+        &avatar,
+    );
+    let display_name: Option<String> =
+        sqlx::query_scalar(r#"SELECT "display_name" FROM "users" WHERE "id" = $1"#)
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| db_error(error, "expand-actor-name"))?
+            .flatten();
+    let id = user_id.to_string();
+    let display_name = display_name.unwrap_or_default();
+    let row = pidash_services::v1_projects::ser_collab::UserLiteRow {
+        id: &id,
+        first_name: &first_name,
+        last_name: &last_name,
+        email: email.as_deref(),
+        avatar: &avatar,
+        avatar_url,
+        display_name: &display_name,
+    };
+    let view = pidash_services::v1_projects::ser_collab::user_lite_to_representation(&row);
+    serde_json::to_value(&view).map_err(|_| Denial::ServerError)
+}
+
+/// `expand=parent`: `IssueLiteSerializer` over the parent COMMENT
+/// (`serializers/issue.py:505-508`): `id`, `sequence_id` (skipped —
+/// comments have none), `project_id`, in field order. No live scope:
+/// Django renders soft-deleted parents (verified live). A hard-missing
+/// row is unreachable (`CASCADE`) and renders `{}` via `None`.
+async fn expand_parent_comment(pool: &PgPool, parent_id: &Uuid) -> Result<Option<Value>, Denial> {
+    let row: Option<(Uuid, Uuid)> =
+        sqlx::query_as(r#"SELECT "id", "project_id" FROM "issue_comments" WHERE "id" = $1"#)
+            .bind(parent_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| db_error(error, "expand-parent"))?;
+    match row {
+        Some((id, project_id)) => {
+            let mut map = Map::with_capacity(2);
+            map.insert("id".to_owned(), Value::String(id.to_string()));
+            map.insert(
+                "project_id".to_owned(),
+                Value::String(project_id.to_string()),
+            );
+            Ok(Some(Value::Object(map)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// `expand=project`: `ProjectLiteSerializer` (`project.py:354-377`): `id`,
+/// `identifier`, `name`, `cover_image`, `icon_prop`, `emoji`,
+/// `description`, `is_default`, `cover_image_url` in field order. A
+/// missing row renders null.
+async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Value, Denial> {
+    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
+        r#"SELECT "id", "identifier", "name", "cover_image", "icon_prop", "emoji", "description", "is_default", "cover_image_asset_id" FROM "projects" WHERE "id" = $1"#,
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_error(error, "expand-project"))?;
+    let Some(row) = row else {
+        return Ok(Value::Null);
+    };
+    let cover_asset: Option<Uuid> = row_uuid_opt(&row, "cover_image_asset_id")?;
+    let cover_text: Option<String> = row_string_opt(&row, "cover_image")?;
+    // `Project.cover_image_url` (`db/models/project.py:176-185`): the
+    // asset URL wins, then the stored text, else null.
+    let cover_url = match cover_asset {
+        Some(id) => file_asset_url(pool, &id).await?,
+        None => None,
+    };
+    let cover_url = cover_url.or_else(|| cover_text.clone().filter(|text| !text.is_empty()));
+    let icon_prop: Option<Value> = row.try_get("icon_prop").map_err(|_| Denial::ServerError)?;
+    let mut map = Map::with_capacity(9);
+    map.insert(
+        "id".to_owned(),
+        Value::String(row_uuid(&row, "id")?.to_string()),
+    );
+    map.insert(
+        "identifier".to_owned(),
+        Value::String(row_string(&row, "identifier")?),
+    );
+    map.insert("name".to_owned(), Value::String(row_string(&row, "name")?));
+    map.insert(
+        "cover_image".to_owned(),
+        cover_text.map(Value::String).unwrap_or(Value::Null),
+    );
+    map.insert("icon_prop".to_owned(), icon_prop.unwrap_or(Value::Null));
+    map.insert(
+        "emoji".to_owned(),
+        row_string_opt(&row, "emoji")?
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    map.insert(
+        "description".to_owned(),
+        Value::String(row_string(&row, "description")?),
+    );
+    map.insert(
+        "is_default".to_owned(),
+        Value::Bool(row.try_get("is_default").map_err(|_| Denial::ServerError)?),
+    );
+    map.insert(
+        "cover_image_url".to_owned(),
+        cover_url.map(Value::String).unwrap_or(Value::Null),
+    );
+    Ok(Value::Object(map))
+}
+
+/// `expand=issue`: the full `IssueSerializer` (`serializers/issue.py:436-494`
+/// over `render_issue`): assignee/label id lists in queryset
+/// (`-created_at`) order, the blocker summary (single payloads always
+/// query), no viewer relations (the nested construction carries no
+/// context). A missing row renders null.
+async fn expand_issue(
+    pool: &PgPool,
+    workspace_slug: &str,
+    issue_id: &Uuid,
+    tz: &Tz,
+    web_base_url: Option<&str>,
+) -> Result<Value, Denial> {
+    use pidash_services::v1_work_items::shape_issue as shape;
+    // Unscoped: `select_related("issue")` joins the issue row without the
+    // soft-deletion scope, so a soft-deleted issue still renders (with its
+    // `deleted_at`) instead of collapsing to null (PIDASHCONV-789#4,
+    // live-probed).
+    let row: Option<sqlx::postgres::PgRow> =
+        sqlx::query(r#"SELECT * FROM "issues" WHERE "id" = $1"#)
+            .bind(issue_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| db_error(error, "expand-issue"))?;
+    let Some(row) = row else {
+        return Ok(Value::Null);
+    };
+    let id = row_uuid(&row, "id")?.to_string();
+    let created_at = crate::serializer::render_datetime_in(&row_datetime(&row, "created_at")?, tz);
+    let updated_at = crate::serializer::render_datetime_in(&row_datetime(&row, "updated_at")?, tz);
+    let deleted_at = row_datetime_opt(&row, "deleted_at")?
+        .map(|dt| crate::serializer::render_datetime_in(&dt, tz));
+    let completed_at = row_datetime_opt(&row, "completed_at")?
+        .map(|dt| crate::serializer::render_datetime_in(&dt, tz));
+    let archived_at = row_datetime_opt(&row, "archived_at")?
+        .map(|dt| crate::serializer::render_datetime_in(&dt, tz));
+    let point: Option<i32> = row.try_get("point").map_err(|_| Denial::ServerError)?;
+    let name = row_string(&row, "name")?;
+    let description_html: Option<String> = row
+        .try_get("description_html")
+        .map_err(|_| Denial::ServerError)?;
+    let description_binary: Option<Vec<u8>> = row
+        .try_get("description_binary")
+        .map_err(|_| Denial::ServerError)?;
+    let priority = row_string(&row, "priority")?;
+    let complexity_score: i32 = row
+        .try_get("complexity_score")
+        .map_err(|_| Denial::ServerError)?;
+    let start_date: Option<chrono::NaiveDate> =
+        row.try_get("start_date").map_err(|_| Denial::ServerError)?;
+    let target_date: Option<chrono::NaiveDate> = row
+        .try_get("target_date")
+        .map_err(|_| Denial::ServerError)?;
+    let sequence_id: i32 = row
+        .try_get("sequence_id")
+        .map_err(|_| Denial::ServerError)?;
+    let sort_order: f64 = row.try_get("sort_order").map_err(|_| Denial::ServerError)?;
+    let is_draft: bool = row.try_get("is_draft").map_err(|_| Denial::ServerError)?;
+    let external_source = row_string_opt(&row, "external_source")?;
+    let external_id = row_string_opt(&row, "external_id")?;
+    let git_work_branch: Option<String> = row
+        .try_get("git_work_branch")
+        .map_err(|_| Denial::ServerError)?;
+    let created_via = row_string_opt(&row, "created_via")?;
+    let agent_executor = row_string_opt(&row, "agent_executor")?;
+    let created_by = row_uuid_opt(&row, "created_by_id")?.map(|id| id.to_string());
+    let updated_by = row_uuid_opt(&row, "updated_by_id")?.map(|id| id.to_string());
+    let project = row_uuid_opt(&row, "project_id")?.map(|id| id.to_string());
+    let workspace = row_uuid_opt(&row, "workspace_id")?.map(|id| id.to_string());
+    let parent = row_uuid_opt(&row, "parent_id")?.map(|id| id.to_string());
+    let state = row_uuid_opt(&row, "state_id")?.map(|id| id.to_string());
+    let estimate_point = row_uuid_opt(&row, "estimate_point_id")?.map(|id| id.to_string());
+    let assigned_pod = row_uuid_opt(&row, "assigned_pod_id")?.map(|id| id.to_string());
+    let type_id = row_uuid_opt(&row, "type_id")?.map(|id| id.to_string());
+    // `get_url` (`serializers/issue.py:423-434`): present and absolute, or
+    // the key is omitted — never null, never relative.
+    let url = match (web_base_url, project.as_deref(), sequence_id) {
+        (Some(base), Some(_), _) => {
+            let identifier: Option<String> =
+                sqlx::query_scalar(r#"SELECT "identifier" FROM "projects" WHERE "id" = $1"#)
+                    .bind(row_uuid_opt(&row, "project_id")?.expect("project"))
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(|error| db_error(error, "expand-issue-url"))?
+                    .flatten();
+            match identifier {
+                Some(identifier) => shape::issue_url(
+                    Some(base),
+                    Some(workspace_slug),
+                    Some(&identifier),
+                    Some(i64::from(sequence_id)),
+                ),
+                None => None,
+            }
+        }
+        _ => None,
+    };
+    let start_date = start_date.map(|d| d.to_string());
+    let target_date = target_date.map(|d| d.to_string());
+    let issue_row = shape::IssueRow {
+        id: &id,
+        type_id: type_id.as_deref(),
+        url,
+        created_at: &created_at,
+        updated_at: &updated_at,
+        deleted_at: deleted_at.as_deref(),
+        point: point.map(i64::from),
+        name: &name,
+        description_html: description_html.as_deref().unwrap_or(""),
+        description_binary: description_binary.as_deref(),
+        priority: &priority,
+        complexity_score: i64::from(complexity_score),
+        start_date: start_date.as_deref(),
+        target_date: target_date.as_deref(),
+        sequence_id: i64::from(sequence_id),
+        sort_order,
+        completed_at: completed_at.as_deref(),
+        archived_at: archived_at.as_deref(),
+        is_draft,
+        external_source: external_source.as_deref(),
+        external_id: external_id.as_deref(),
+        git_work_branch: git_work_branch.as_deref().unwrap_or(""),
+        created_via: created_via.as_deref(),
+        agent_executor: agent_executor.as_deref(),
+        created_by: created_by.as_deref(),
+        updated_by: updated_by.as_deref(),
+        project: project.as_deref().unwrap_or(""),
+        workspace: workspace.as_deref().unwrap_or(""),
+        parent: parent.as_deref(),
+        state: state.as_deref(),
+        estimate_point: estimate_point.as_deref(),
+        assigned_pod: assigned_pod.as_deref(),
+    };
+    let assignee_ids = fetch_assignee_ids(pool, issue_id).await?;
+    let assignee_refs: Vec<&str> = assignee_ids.iter().map(String::as_str).collect();
+    let label_ids = fetch_label_ids(pool, issue_id).await?;
+    let label_refs: Vec<&str> = label_ids.iter().map(String::as_str).collect();
+    let rows = fetch_blocker_rows(pool, issue_id).await?;
+    let blocked_by: Vec<shape::SummaryItem<'_>> = rows
+        .blocked_by
+        .iter()
+        .map(|(identifier, state, group)| shape::SummaryItem {
+            identifier: identifier.clone(),
+            state: state.as_deref(),
+            state_group: group.as_deref(),
+        })
+        .collect();
+    let blocking: Vec<shape::SummaryItem<'_>> = rows
+        .blocking
+        .iter()
+        .map(|(identifier, state, group)| shape::SummaryItem {
+            identifier: identifier.clone(),
+            state: state.as_deref(),
+            state_group: group.as_deref(),
+        })
+        .collect();
+    let blockers = shape::BlockerSummary {
+        blocked_by,
+        blocking,
+        has_open_blockers: rows.has_open_blockers,
+    };
+    let out = shape::render_issue(&shape::RepresentationInput {
+        row: &issue_row,
+        fields: None,
+        expand: &[],
+        is_list: false,
+        assignee_ids: &assignee_refs,
+        assignee_rows: &[],
+        label_ids: &label_refs,
+        expanded_labels: &[],
+        blockers: Some(&blockers),
+        relations: None,
+        expansions: &[],
+    })
+    .map_err(|_| Denial::ServerError)?;
+    Ok(Value::Object(out))
+}
+
+/// `IssueAssignee` ids in queryset (`-created_at`) order
+/// (`serializers/issue.py:453-456`).
+async fn fetch_assignee_ids(pool: &PgPool, issue_id: &Uuid) -> Result<Vec<String>, Denial> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"SELECT "assignee_id" FROM "issue_assignees" WHERE "issue_id" = $1 AND "deleted_at" IS NULL ORDER BY "created_at" DESC"#,
+    )
+    .bind(issue_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| db_error(error, "expand-assignees"))?;
+    Ok(ids.iter().map(Uuid::to_string).collect())
+}
+
+/// `IssueLabel` ids in queryset (`-created_at`) order
+/// (`serializers/issue.py:466-468`).
+async fn fetch_label_ids(pool: &PgPool, issue_id: &Uuid) -> Result<Vec<String>, Denial> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"SELECT "label_id" FROM "issue_labels" WHERE "issue_id" = $1 AND "deleted_at" IS NULL ORDER BY "created_at" DESC"#,
+    )
+    .bind(issue_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| db_error(error, "expand-labels"))?;
+    Ok(ids.iter().map(Uuid::to_string).collect())
+}
+
+/// One blocker-target row: id, project identifier, sequence, state name,
+/// state group.
+type BlockerTargetRow = (Uuid, String, i32, Option<String>, Option<String>);
+
+/// Sort key per `_summary_list`: resolved flag, identifier, sequence,
+/// then the rendered triple.
+type SummarySortKey = (i64, String, i64, Option<String>, Option<String>);
+
+/// Owned `relations_summary` rows: `(identifier, state, state_group)`
+/// per direction plus the uncapped open flag. The shape borrows these;
+/// the caller holds them across the render.
+struct BlockerRows {
+    blocked_by: Vec<(String, Option<String>, Option<String>)>,
+    blocking: Vec<(String, Option<String>, Option<String>)>,
+    has_open_blockers: bool,
+}
+
+/// `relations_summary` (`orchestration/blockers.py:186-198`): per-direction
+/// `{identifier, state, state_group}` lists, open first, capped at 100
+/// (`SUMMARY_LIMIT`), plus the uncapped `has_open_blockers`.
+async fn fetch_blocker_rows(pool: &PgPool, issue_id: &Uuid) -> Result<BlockerRows, Denial> {
+    async fn direction(
+        pool: &PgPool,
+        issue_id: &Uuid,
+        blocked_by: bool,
+    ) -> Result<Vec<(String, Option<String>, Option<String>)>, Denial> {
+        let mut seen = std::collections::HashSet::new();
+        let mut items: Vec<SummarySortKey> = Vec::new();
+        for relation_type in ["blocked_by", "blocking"] {
+            let (anchor_col, target_col) = if blocked_by {
+                match relation_type {
+                    "blocked_by" => ("issue_id", "related_issue_id"),
+                    _ => ("related_issue_id", "issue_id"),
+                }
+            } else {
+                match relation_type {
+                    "blocked_by" => ("related_issue_id", "issue_id"),
+                    _ => ("issue_id", "related_issue_id"),
+                }
+            };
+            let rows: Vec<BlockerTargetRow> = sqlx::query_as(&format!(
+                r#"SELECT t."id", p."identifier", t."sequence_id", s."name", s."group"
+                   FROM "issue_relations" r
+                   INNER JOIN "issues" t ON t."id" = r."{target_col}"
+                   INNER JOIN "states" s ON s."id" = t."state_id"
+                   INNER JOIN "projects" p ON p."id" = t."project_id"
+                   WHERE r."deleted_at" IS NULL AND r."issue_id" <> r."related_issue_id"
+                     AND r."{anchor_col}" = $1 AND r."relation_type" = $2
+                     AND t."deleted_at" IS NULL AND t."archived_at" IS NULL AND t."is_draft" = FALSE
+                     AND t."workspace_id" = r."workspace_id"
+                     AND s."group" <> 'triage' AND p."archived_at" IS NULL"#,
+            ))
+            .bind(issue_id)
+            .bind(relation_type)
+            .fetch_all(pool)
+            .await
+            .map_err(|error| db_error(error, "expand-blockers"))?;
+            for (id, identifier, sequence_id, state, group) in rows {
+                if seen.insert(id) {
+                    let resolved =
+                        i64::from(matches!(group.as_deref(), Some("completed" | "cancelled")));
+                    items.push((resolved, identifier, i64::from(sequence_id), state, group));
+                }
+            }
+        }
+        items.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
+        items.truncate(100);
+        Ok(items
+            .into_iter()
+            .map(|(_, identifier, sequence_id, state, group)| {
+                (format!("{identifier}-{sequence_id}"), state, group)
+            })
+            .collect())
+    }
+    let blocked_by = direction(pool, issue_id, true).await?;
+    let blocking = direction(pool, issue_id, false).await?;
+    let has_open_blockers: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS(
+             SELECT 1 FROM "issue_relations" r
+             INNER JOIN "issues" t ON t."id" = CASE WHEN r."relation_type" = 'blocked_by' THEN r."related_issue_id" ELSE r."issue_id" END
+             INNER JOIN "states" s ON s."id" = t."state_id"
+             INNER JOIN "projects" p ON p."id" = t."project_id"
+             WHERE r."deleted_at" IS NULL AND r."issue_id" <> r."related_issue_id"
+               AND t."deleted_at" IS NULL AND t."archived_at" IS NULL AND t."is_draft" = FALSE
+               AND t."workspace_id" = r."workspace_id"
+               AND s."group" <> 'triage' AND p."archived_at" IS NULL
+               AND (
+                 (r."issue_id" = $1 AND r."relation_type" = 'blocked_by')
+                 OR (r."related_issue_id" = $1 AND r."relation_type" = 'blocking')
+               )
+               AND s."group" NOT IN ('completed', 'cancelled')
+           )"#,
+    )
+    .bind(issue_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| db_error(error, "expand-open-blockers"))?;
+    Ok(BlockerRows {
+        blocked_by,
+        blocking,
+        has_open_blockers,
+    })
+}
+
+/// Caller expansion values for one link row: every `expand` name in the
+/// kept fields with a map hit (`project`, `workspace`, `issue`).
+/// `IssueLink` carries no `actor` field. Null FKs supply `None` (the shape
+/// renders `{}`); dead rows render null.
+async fn link_expansions<'a>(
+    pool: &PgPool,
+    decoded: &DecodedLink,
+    slug: &str,
+    tz: &Tz,
+    web_base: Option<&str>,
+    expand_refs: &[&'a str],
+    kept: &[String],
+) -> Result<Vec<(&'a str, Option<Value>)>, Denial> {
+    let mut expansions: Vec<(&'a str, Option<Value>)> = Vec::new();
+    for name in expand_refs {
+        if !kept.iter().any(|kept| kept == name) {
+            continue;
+        }
+        if !BASE_EXPANSION_NAMES.contains(name) {
+            continue;
+        }
+        let value = match *name {
+            "project" => {
+                let id = decoded
+                    .project
+                    .parse::<Uuid>()
+                    .map_err(|_| Denial::ServerError)?;
+                Some(expand_project(pool, &id).await?)
+            }
+            "workspace" => {
+                let id = decoded
+                    .workspace
+                    .parse::<Uuid>()
+                    .map_err(|_| Denial::ServerError)?;
+                Some(expand_workspace(pool, &id).await?)
+            }
+            "issue" => {
+                let id = decoded
+                    .issue
+                    .parse::<Uuid>()
+                    .map_err(|_| Denial::ServerError)?;
+                Some(expand_issue(pool, slug, &id, tz, web_base).await?)
+            }
+            // `created_by`/`updated_by` map to `UserLiteSerializer`
+            // (`serializers/base.py:95-96`); null FKs supply `None` (the
+            // shape renders `{}`).
+            "created_by" => match decoded.created_by.as_deref() {
+                Some(raw) => {
+                    let id = raw.parse::<Uuid>().map_err(|_| Denial::ServerError)?;
+                    Some(expand_actor(pool, &id).await?)
+                }
+                None => None,
+            },
+            "updated_by" => match decoded.updated_by.as_deref() {
+                Some(raw) => {
+                    let id = raw.parse::<Uuid>().map_err(|_| Denial::ServerError)?;
+                    Some(expand_actor(pool, &id).await?)
+                }
+                None => None,
+            },
+            _ => continue,
+        };
+        expansions.push((*name, value));
+    }
+    Ok(expansions)
+}
+
+/// Caller expansion values for one comment row: every `expand` name in the
+/// kept fields with a map hit (`project`, `workspace`, `issue`, `actor`,
+/// `created_by`, `updated_by`, `parent`). Null FKs supply `None` (the
+/// shape renders `{}`); dead rows render null. Anything else is the
+/// shape's passthrough/null rule.
+async fn comment_expansions<'a>(
+    pool: &PgPool,
+    decoded: &DecodedComment,
+    slug: &str,
+    tz: &Tz,
+    web_base: Option<&str>,
+    expand_refs: &[&'a str],
+    kept: &[String],
+) -> Result<Vec<(&'a str, Option<Value>)>, Denial> {
+    let mut expansions: Vec<(&'a str, Option<Value>)> = Vec::new();
+    for name in expand_refs {
+        if !kept.iter().any(|kept| kept == name) {
+            continue;
+        }
+        if !BASE_EXPANSION_NAMES.contains(name) {
+            continue;
+        }
+        let value = match *name {
+            "project" => {
+                let id = decoded
+                    .project
+                    .parse::<Uuid>()
+                    .map_err(|_| Denial::ServerError)?;
+                Some(expand_project(pool, &id).await?)
+            }
+            "workspace" => {
+                let id = decoded
+                    .workspace
+                    .parse::<Uuid>()
+                    .map_err(|_| Denial::ServerError)?;
+                Some(expand_workspace(pool, &id).await?)
+            }
+            "issue" => {
+                let id = decoded
+                    .issue
+                    .parse::<Uuid>()
+                    .map_err(|_| Denial::ServerError)?;
+                Some(expand_issue(pool, slug, &id, tz, web_base).await?)
+            }
+            "actor" => match decoded.actor.as_deref() {
+                Some(raw) => {
+                    let id = raw.parse::<Uuid>().map_err(|_| Denial::ServerError)?;
+                    Some(expand_actor(pool, &id).await?)
+                }
+                None => None,
+            },
+            "created_by" => match decoded.created_by.as_deref() {
+                Some(raw) => {
+                    let id = raw.parse::<Uuid>().map_err(|_| Denial::ServerError)?;
+                    Some(expand_actor(pool, &id).await?)
+                }
+                None => None,
+            },
+            "updated_by" => match decoded.updated_by.as_deref() {
+                Some(raw) => {
+                    let id = raw.parse::<Uuid>().map_err(|_| Denial::ServerError)?;
+                    Some(expand_actor(pool, &id).await?)
+                }
+                None => None,
+            },
+            // `parent` maps to `IssueLiteSerializer` over the parent
+            // COMMENT (`base.py:104`): `id`/`sequence_id`/`project_id`,
+            // with `sequence_id` skipped (comments have none). Null
+            // parents supply `None` (the shape renders `{}`).
+            "parent" => match decoded.parent.as_deref() {
+                Some(raw) => {
+                    let id = raw.parse::<Uuid>().map_err(|_| Denial::ServerError)?;
+                    expand_parent_comment(pool, &id).await?
+                }
+                None => None,
+            },
+            _ => continue,
+        };
+        expansions.push((*name, value));
+    }
+    Ok(expansions)
+}
+
+// ---------------------------------------------------------------------------
+// Request bodies
+// ---------------------------------------------------------------------------
+
+/// The write body spec: `labels` arrives as an array (DRF
+/// `ListField.get_value` → `getlist`); no blank-skipping — a present-empty
+/// form value stays `""` and each endpoint's validation applies the
+/// `get_value` rule (`fields.py:407-429`) for its own fields.
+const WRITE_BODY_SPEC: crate::v1_cycles_modules::body::BodySpec =
+    crate::v1_cycles_modules::body::BodySpec {
+        list_fields: &["labels"],
+        skip_blank_fields: &[],
+    };
+
+/// A parsed write body: the JSON value plus whether it arrived as an HTML
+/// form (JSON-string fields and blank arms differ per
+/// `JSONField.get_value` / `Field.get_value`).
+struct WriteBody {
+    value: Value,
+    from_form: bool,
+}
+
+/// Parse a link/comment write body: content-type dispatch (415 for the
+/// rest), empty bodies to `{}`, JSON through the CPython parser, forms
+/// through the HTML-input kernel. Uploads are ignored (no file field
+/// exists here — an unpinned edge; Python would 400 them as non-strings).
+fn parse_write_body(headers: &HeaderMap, body: &[u8]) -> Result<WriteBody, Denial> {
+    use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
+    use crate::v1_cycles_modules::json::{
+        parse_json_text_spans, to_serde_publish, to_serde_publish_map, JsonFail,
+    };
+    match negotiate_body(headers, body, &WRITE_BODY_SPEC) {
+        Err(BodyError::UnsupportedMediaType(detail)) => Err(Denial::UnsupportedMediaType(detail)),
+        Err(BodyError::ParseDetail(detail)) => Err(Denial::BadDetail(detail)),
+        Err(BodyError::ServerError) => Err(Denial::ServerError),
+        Ok(NegotiatedBody::Empty) => Ok(WriteBody {
+            value: Value::Object(Map::new()),
+            from_form: false,
+        }),
+        Ok(NegotiatedBody::Form { map, .. }) => Ok(WriteBody {
+            value: Value::Object(map),
+            from_form: true,
+        }),
+        Ok(NegotiatedBody::JsonText { text, surr }) => match parse_json_text_spans(&text, &surr) {
+            Err(JsonFail::Message(detail)) => {
+                Err(Denial::BadDetail(format!("JSON parse error - {detail}")))
+            }
+            Err(JsonFail::Recursion) => Err(Denial::ServerError),
+            Ok(value) => {
+                if value.is_object() {
+                    let object = value.into_object().expect("checked object");
+                    Ok(WriteBody {
+                        value: Value::Object(to_serde_publish_map(&object)),
+                        from_form: false,
+                    })
+                } else {
+                    Ok(WriteBody {
+                        value: to_serde_publish(&value),
+                        from_form: false,
+                    })
+                }
+            }
+        },
+    }
+}
+
+/// The non-object body for the link PATCH path: DRF answers the same
+/// `non_field_errors` shape as the create serializer, so reuse its exact
+/// bytes (null → `No data provided`, else the JSON type name).
+fn patch_not_a_dict_body(value: &Value) -> String {
+    match validate_link_create(value) {
+        Err(LinkWriteError::NotADict(body)) => body,
+        // `value` is never an object here; the create rules never run.
+        _ => unreachable!("patch non-object body always takes the NotADict arm"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Link PATCH validation (Show serializer, partial)
+// ---------------------------------------------------------------------------
+
+/// Validated link PATCH writes: `None` = key absent (untouched).
+#[derive(Debug)]
+struct ValidatedLinkPatch {
+    title: Option<Option<String>>,
+    url: Option<String>,
+    metadata: Option<Value>,
+    deleted_at: Option<Option<DateTime<Utc>>>,
+}
+
+/// DRF `CharField` failure message, in check order (blank → null →
+/// invalid → max_length → null-characters; `fields.py` `CharField` +
+/// `ProhibitNullCharactersValidator`). `max_length` is `None` for the
+/// `TextField`-backed `url`.
+fn char_field_errors(
+    value: &Value,
+    allow_blank: bool,
+    allow_null: bool,
+    max_length: Option<usize>,
+) -> Vec<String> {
+    // `run_validation` strips before the blank check
+    // (`data == '' or (trim_whitespace and str(data).strip() == '')`).
+    if let Value::String(text) = value {
+        if (text.is_empty() || crate::runner_runs::runs::py_strip(text).is_empty()) && !allow_blank
+        {
+            return vec!["This field may not be blank.".to_owned()];
+        }
+    } else if value.is_null() {
+        if !allow_null {
+            return vec!["This field may not be null.".to_owned()];
+        }
+        return Vec::new();
+    }
+    match value {
+        Value::String(text) => {
+            let stripped = crate::runner_runs::runs::py_strip(text);
+            // `run_validators` extends ONE list across all validators, in
+            // append order: `MaxLengthValidator` before
+            // `ProhibitNullCharactersValidator`.
+            let mut out = Vec::new();
+            if let Some(max) = max_length {
+                // `MaxLengthValidator`: `len()` counts code points.
+                if stripped.chars().count() > max {
+                    out.push(format!(
+                        "Ensure this field has no more than {max} characters."
+                    ));
+                }
+            }
+            if stripped.contains('\0') {
+                out.push("Null characters are not allowed.".to_owned());
+            }
+            out
+        }
+        Value::Bool(_) => vec!["Not a valid string.".to_owned()],
+        Value::Number(number) => {
+            let text = python_number_str(number);
+            if let Some(max) = max_length {
+                if text.chars().count() > max {
+                    return vec![format!(
+                        "Ensure this field has no more than {max} characters."
+                    )];
+                }
+            }
+            Vec::new()
+        }
+        _ => vec!["Not a valid string.".to_owned()],
+    }
+}
+
+/// Coerce a validated string input (`str(data)` + strip; numbers stringify).
+fn char_field_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => crate::runner_runs::runs::py_strip(text).to_owned(),
+        Value::Number(number) => python_number_str(number),
+        _ => String::new(),
+    }
+}
+
+/// Port of `IssueLinkSerializer` partial validation
+/// (`serializers/issue.py:649-669`, BUG-2): writable keys are `deleted_at`
+/// (nullable datetime), `title` (255-char, blank/null ok), `url` (non-blank
+/// text, NO `validate_url`), `metadata` (any JSON, non-null). Read-only and
+/// unknown keys are silently ignored. Errors combine in model-field order
+/// (`deleted_at`, `title`, `url`, `metadata`). No `validate()` override and
+/// no duplicate guard run here.
+fn validate_link_patch(
+    map: &Map<String, Value>,
+    from_form: bool,
+    tz: &Tz,
+) -> Result<ValidatedLinkPatch, String> {
+    let mut errors: Vec<(String, String)> = Vec::new();
+    let mut title: Option<Option<String>> = None;
+    let mut url: Option<String> = None;
+    let mut metadata: Option<Value> = None;
+    let mut deleted_at: Option<Option<DateTime<Utc>>> = None;
+    // `deleted_at`: `DateTimeField(null=True)` — `None` input clears.
+    if let Some(raw) = map.get("deleted_at") {
+        let raw = if from_form && raw == &Value::String(String::new()) {
+            // `get_value`: blank + `allow_null`, no `allow_blank` → None.
+            &Value::Null
+        } else {
+            raw
+        };
+        if raw.is_null() {
+            deleted_at = Some(None);
+        } else if let Value::String(text) = raw {
+            match parse_django_datetime(text, tz) {
+                Ok(dt) => deleted_at = Some(Some(dt)),
+                Err(ParseDatetimeError::Invalid) => errors.push((
+                    "deleted_at".to_owned(),
+                    "Datetime has wrong format. Use one of these formats instead: YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM|Z]."
+                        .to_owned(),
+                )),
+                Err(ParseDatetimeError::Nonexistent) => errors.push((
+                    "deleted_at".to_owned(),
+                    format!("Invalid datetime for the timezone \"{tz}\"."),
+                )),
+                Err(ParseDatetimeError::Overflow) => errors.push((
+                    "deleted_at".to_owned(),
+                    "Datetime value out of range.".to_owned(),
+                )),
+                // Unreachable: the serializer path converts aware values to
+                // UTC before Postgres ever sees an offset.
+                Err(ParseDatetimeError::Unstorable) => errors.push((
+                    "deleted_at".to_owned(),
+                    "Datetime has wrong format. Use one of these formats instead: YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM|Z]."
+                        .to_owned(),
+                )),
+            }
+        } else {
+            errors.push((
+                "deleted_at".to_owned(),
+                "Datetime has wrong format. Use one of these formats instead: YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM|Z]."
+                    .to_owned(),
+            ));
+        }
+    }
+    // `title`: `CharField(max_length=255, null=True, blank=True)`.
+    if let Some(raw) = map.get("title") {
+        if raw.is_null() {
+            title = Some(None);
+        } else {
+            let field_errors = char_field_errors(raw, true, true, Some(255));
+            if field_errors.is_empty() {
+                title = Some(Some(char_field_value(raw)));
+            } else {
+                for message in field_errors {
+                    errors.push(("title".to_owned(), message));
+                }
+            }
+        }
+    }
+    // `url`: `TextField()` — non-blank, non-null, unbounded, NO format
+    // check on this path (BUG-2). `get_value` uses the STATIC `required`
+    // flag (`partial` does not change it), so a blank form value still
+    // 400s (verified live).
+    if let Some(raw) = map.get("url") {
+        let field_errors = char_field_errors(raw, false, false, None);
+        if field_errors.is_empty() {
+            url = Some(char_field_value(raw));
+        } else {
+            for message in field_errors {
+                errors.push(("url".to_owned(), message));
+            }
+        }
+    }
+    // `metadata`: `JSONField(default=dict)` — any JSON value, non-null.
+    if let Some(raw) = map.get("metadata") {
+        let parsed: Option<Value>;
+        let raw = if from_form {
+            // `JSONField.get_value`: HTML input arrives as a JSON string.
+            match raw {
+                Value::String(text) => match serde_json::from_str(text) {
+                    Ok(value) => {
+                        parsed = Some(value);
+                        parsed.as_ref().expect("parsed")
+                    }
+                    Err(_) => {
+                        errors.push((
+                            "metadata".to_owned(),
+                            "Value must be valid JSON.".to_owned(),
+                        ));
+                        &Value::Null
+                    }
+                },
+                other => other,
+            }
+        } else {
+            raw
+        };
+        if errors.last().map(|(field, _)| field.as_str()) == Some("metadata") {
+            // Parse failure already recorded; skip the null arm.
+        } else if raw.is_null() {
+            errors.push((
+                "metadata".to_owned(),
+                "This field may not be null.".to_owned(),
+            ));
+        } else {
+            metadata = Some(raw.clone());
+        }
+    }
+    if errors.is_empty() {
+        Ok(ValidatedLinkPatch {
+            title,
+            url,
+            metadata,
+            deleted_at,
+        })
+    } else {
+        Err(field_errors_body(&errors))
+    }
+}
+
+/// Render `{"field": ["message", ...]}` in first-seen field order.
+fn field_errors_body(errors: &[(String, String)]) -> String {
+    let mut map: Map<String, Value> = Map::new();
+    for (field, message) in errors {
+        map.entry(field.clone())
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("error list")
+            .push(Value::String(message.clone()));
+    }
+    serde_json::to_string(&map).expect("error body")
+}
+
+/// Django `parse_datetime` (`django/utils/dateparse.py`, Django 4.2.30) over
+/// the default `DATETIME_INPUT_FORMATS` (`iso-8601`): CPython 3.12
+/// `datetime.fromisoformat` first, the `datetime_re` fallback second.
+/// Naive values attach the request time zone (`enforce_timezone` under
+/// `USE_TZ`); aware values convert to UTC, and values the conversion pushes
+/// outside years `0001..9999` take the `overflow` arm. Returns the instant.
+#[derive(Debug, PartialEq, Eq)]
+enum ParseDatetimeError {
+    Invalid,
+    Nonexistent,
+    /// DRF `enforce_timezone`: `astimezone` overflow → `Datetime value out
+    /// of range.` Serializer path only.
+    Overflow,
+    /// Postgres rejects the offset (fractional seconds, or `|offset| ≥ 16h`)
+    /// with a `DataError` 500; the model path passes offsets through
+    /// untouched. Model path only.
+    Unstorable,
+}
+
+/// A parsed UTC offset with the sign applied to both parts. CPython drops
+/// a tz fraction when the whole part is zero, so `micros` is zero whenever
+/// `seconds` is zero.
+struct ParsedOffset {
+    seconds: i64,
+    micros: i64,
+}
+
+impl ParsedOffset {
+    fn total_micros(&self) -> i64 {
+        self.seconds * 1_000_000 + self.micros
+    }
+}
+
+/// Python `re` `\s` (unicode): Rust's `White_Space` plus U+001C-U+001F.
+fn is_py_space(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+
+/// Exactly two ASCII digits at `i`.
+fn two_digits(b: &[u8], i: usize) -> Option<u32> {
+    if i + 2 <= b.len() && b[i].is_ascii_digit() && b[i + 1].is_ascii_digit() {
+        Some(u32::from(b[i] - b'0') * 10 + u32::from(b[i + 1] - b'0'))
+    } else {
+        None
+    }
+}
+
+fn is_two_digits(b: &[u8], i: usize) -> bool {
+    two_digits(b, i).is_some()
+}
+
+/// Fraction digits (any length) as microseconds: first six, right-padded.
+fn frac_value(digits: &[u8]) -> u32 {
+    let mut value: u32 = 0;
+    for (n, d) in digits.iter().take(6).enumerate() {
+        value += u32::from(d - b'0') * 10_u32.pow(5 - n as u32);
+    }
+    value
+}
+
+/// Starts of the Unicode `Decimal_Number` runs Python `\d` matches on
+/// `str`: 68 runs of 10, values 0-9 in order (probed: `re` match over
+/// U+0000-U+10FFFF, zero diff vs `unicodedata` Nd; Unicode 15.0.0,
+/// CPython 3.12). Neither `char::is_numeric` (wider: Nl/No, e.g. `½`)
+/// nor `char::to_digit(10)` (ASCII-only) matches.
+const ND_RUN_STARTS: [u32; 68] = [
+    0x00030, // U+0030 DIGIT 0-9
+    0x00660, // U+0660 ARABIC-INDIC DIGIT 0-9
+    0x006F0, // U+06F0 EXTENDED ARABIC-INDIC DIGIT 0-9
+    0x007C0, // U+07C0 NKO DIGIT 0-9
+    0x00966, // U+0966 DEVANAGARI DIGIT 0-9
+    0x009E6, // U+09E6 BENGALI DIGIT 0-9
+    0x00A66, // U+0A66 GURMUKHI DIGIT 0-9
+    0x00AE6, // U+0AE6 GUJARATI DIGIT 0-9
+    0x00B66, // U+0B66 ORIYA DIGIT 0-9
+    0x00BE6, // U+0BE6 TAMIL DIGIT 0-9
+    0x00C66, // U+0C66 TELUGU DIGIT 0-9
+    0x00CE6, // U+0CE6 KANNADA DIGIT 0-9
+    0x00D66, // U+0D66 MALAYALAM DIGIT 0-9
+    0x00DE6, // U+0DE6 SINHALA LITH DIGIT 0-9
+    0x00E50, // U+0E50 THAI DIGIT 0-9
+    0x00ED0, // U+0ED0 LAO DIGIT 0-9
+    0x00F20, // U+0F20 TIBETAN DIGIT 0-9
+    0x01040, // U+1040 MYANMAR DIGIT 0-9
+    0x01090, // U+1090 MYANMAR SHAN DIGIT 0-9
+    0x017E0, // U+17E0 KHMER DIGIT 0-9
+    0x01810, // U+1810 MONGOLIAN DIGIT 0-9
+    0x01946, // U+1946 LIMBU DIGIT 0-9
+    0x019D0, // U+19D0 NEW TAI LUE DIGIT 0-9
+    0x01A80, // U+1A80 TAI THAM HORA DIGIT 0-9
+    0x01A90, // U+1A90 TAI THAM THAM DIGIT 0-9
+    0x01B50, // U+1B50 BALINESE DIGIT 0-9
+    0x01BB0, // U+1BB0 SUNDANESE DIGIT 0-9
+    0x01C40, // U+1C40 LEPCHA DIGIT 0-9
+    0x01C50, // U+1C50 OL CHIKI DIGIT 0-9
+    0x0A620, // U+A620 VAI DIGIT 0-9
+    0x0A8D0, // U+A8D0 SAURASHTRA DIGIT 0-9
+    0x0A900, // U+A900 KAYAH LI DIGIT 0-9
+    0x0A9D0, // U+A9D0 JAVANESE DIGIT 0-9
+    0x0A9F0, // U+A9F0 MYANMAR TAI LAING DIGIT 0-9
+    0x0AA50, // U+AA50 CHAM DIGIT 0-9
+    0x0ABF0, // U+ABF0 MEETEI MAYEK DIGIT 0-9
+    0x0FF10, // U+FF10 FULLWIDTH DIGIT 0-9
+    0x104A0, // U+104A0 OSMANYA DIGIT 0-9
+    0x10D30, // U+10D30 HANIFI ROHINGYA DIGIT 0-9
+    0x11066, // U+11066 BRAHMI DIGIT 0-9
+    0x110F0, // U+110F0 SORA SOMPENG DIGIT 0-9
+    0x11136, // U+11136 CHAKMA DIGIT 0-9
+    0x111D0, // U+111D0 SHARADA DIGIT 0-9
+    0x112F0, // U+112F0 KHUDAWADI DIGIT 0-9
+    0x11450, // U+11450 NEWA DIGIT 0-9
+    0x114D0, // U+114D0 TIRHUTA DIGIT 0-9
+    0x11650, // U+11650 MODI DIGIT 0-9
+    0x116C0, // U+116C0 TAKRI DIGIT 0-9
+    0x11730, // U+11730 AHOM DIGIT 0-9
+    0x118E0, // U+118E0 WARANG CITI DIGIT 0-9
+    0x11950, // U+11950 DIVES AKURU DIGIT 0-9
+    0x11C50, // U+11C50 BHAIKSUKI DIGIT 0-9
+    0x11D50, // U+11D50 MASARAM GONDI DIGIT 0-9
+    0x11DA0, // U+11DA0 GUNJALA GONDI DIGIT 0-9
+    0x11F50, // U+11F50 KAWI DIGIT 0-9
+    0x16A60, // U+16A60 MRO DIGIT 0-9
+    0x16AC0, // U+16AC0 TANGSA DIGIT 0-9
+    0x16B50, // U+16B50 PAHAWH HMONG DIGIT 0-9
+    0x1D7CE, // U+1D7CE MATHEMATICAL BOLD DIGIT 0-9
+    0x1D7D8, // U+1D7D8 MATHEMATICAL DOUBLE-STRUCK DIGIT 0-9
+    0x1D7E2, // U+1D7E2 MATHEMATICAL SANS-SERIF DIGIT 0-9
+    0x1D7EC, // U+1D7EC MATHEMATICAL SANS-SERIF BOLD DIGIT 0-9
+    0x1D7F6, // U+1D7F6 MATHEMATICAL MONOSPACE DIGIT 0-9
+    0x1E140, // U+1E140 NYIAKENG PUACHUE HMONG DIGIT 0-9
+    0x1E2F0, // U+1E2F0 WANCHO DIGIT 0-9
+    0x1E4F0, // U+1E4F0 NAG MUNDARI DIGIT 0-9
+    0x1E950, // U+1E950 ADLAM DIGIT 0-9
+    0x1FBF0, // U+1FBF0 SEGMENTED DIGIT 0-9
+];
+
+/// Python `\d` decimal value of `c` (`unicodedata.decimal`).
+fn nd_value(c: char) -> Option<u32> {
+    let n = c as u32;
+    let i = ND_RUN_STARTS.partition_point(|&s| s <= n);
+    if i == 0 {
+        return None;
+    }
+    let v = n - ND_RUN_STARTS[i - 1];
+    if v < 10 {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+/// One `Nd` char at byte index `i`: its decimal value plus the next
+/// index. `None` past the end, off a char boundary, or not a digit.
+fn nd_char(text: &str, i: usize) -> Option<(u32, usize)> {
+    let c = text.get(i..)?.chars().next()?;
+    nd_value(c).map(|v| (v, i + c.len_utf8()))
+}
+
+/// Exactly two `Nd` chars at `i` (regex-arm `two_digits`).
+fn nd_two(text: &str, i: usize) -> Option<(u32, usize)> {
+    let (a, j) = nd_char(text, i)?;
+    let (b, k) = nd_char(text, j)?;
+    Some((a * 10 + b, k))
+}
+
+/// One or two `Nd` chars at `i`, plus the next index.
+fn nd_one_two(text: &str, i: usize) -> Option<(u32, usize)> {
+    let (a, j) = nd_char(text, i)?;
+    match nd_char(text, j) {
+        Some((b, k)) => Some((a * 10 + b, k)),
+        None => Some((a, j)),
+    }
+}
+
+/// Fraction `Nd` chars as microseconds: first six values, right-padded
+/// (the `ljust(6, "0")` in `parse_datetime`). The slice holds only `Nd`
+/// chars (scanned with `nd_char` by the caller).
+fn nd_frac_value(digits: &str) -> u32 {
+    let mut value: u32 = 0;
+    for (n, c) in digits.chars().take(6).enumerate() {
+        if let Some(v) = nd_value(c) {
+            value += v * 10_u32.pow(5 - n as u32);
+        }
+    }
+    value
+}
+
+/// Four-digit year `0001..9999` at the start.
+fn parse_iso_year(b: &[u8]) -> Option<i32> {
+    if b.len() < 4 || !b[0..4].iter().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let year = i32::from(b[0] - b'0') * 1000
+        + i32::from(b[1] - b'0') * 100
+        + i32::from(b[2] - b'0') * 10
+        + i32::from(b[3] - b'0');
+    if year < 1 {
+        None
+    } else {
+        Some(year)
+    }
+}
+
+/// Week dates resolving outside years `0001..9999` are rejected; a missing
+/// day is Monday.
+fn resolve_iso_week(year: i32, week: u32, day: Option<u32>) -> Option<NaiveDate> {
+    let day = day.unwrap_or(1);
+    if !(1..=7).contains(&day) {
+        return None;
+    }
+    let weekday = Weekday::try_from((day - 1) as u8).ok()?;
+    let date = NaiveDate::from_isoywd_opt(year, week, weekday)?;
+    if date.year() < 1 || date.year() > 9999 {
+        return None;
+    }
+    Some(date)
+}
+
+/// After a date: end of input is midnight, else one separator char of any
+/// kind, then the time and optional zone.
+fn parse_rest_after_date(
+    text: &str,
+    b: &[u8],
+    date: NaiveDate,
+    mut i: usize,
+) -> Option<(NaiveDateTime, Option<ParsedOffset>)> {
+    if i == b.len() {
+        return Some((date.and_hms_opt(0, 0, 0)?, None));
+    }
+    let sep = text[i..].chars().next()?;
+    i += sep.len_utf8();
+    let (time, j) = parse_iso_time(b, text, i)?;
+    let naive = NaiveDateTime::new(date, time);
+    if j == b.len() {
+        return Some((naive, None));
+    }
+    let (offset, k) = parse_iso_tz(b, j)?;
+    if k != b.len() {
+        return None;
+    }
+    Some((naive, Some(offset)))
+}
+
+/// `HH[MM[SS]]` / `HH:MM[:SS]` (all two-digit, ranges checked) plus the
+/// optional fraction: one ASCII separator char (never a tz starter), then
+/// any number of ASCII digits. Digits need `[.,]` — or `:` after extended
+/// seconds; any other separator must be empty with a tz after it
+/// (`HH:`/`HH:MM:`/`HHMM:`/`HHMMSS:` all take `+tz`). A `:` not followed by
+/// two digits is that separator, not a component colon. Basic seconds
+/// instead take a 2+ digit run itself as the fraction, separator-less.
+/// Returns the time and how far the time scan ran (end of input or a tz
+/// starter).
+fn parse_iso_time(b: &[u8], text: &str, i: usize) -> Option<(NaiveTime, usize)> {
+    let hh = two_digits(b, i)?;
+    if hh > 23 {
+        return None;
+    }
+    let mut j = i + 2;
+    let (mm, ss, basic, has_ss, allow_colon_frac) =
+        if b.get(j) == Some(&b':') && is_two_digits(b, j + 1) {
+            let mm = two_digits(b, j + 1)?;
+            if mm > 59 {
+                return None;
+            }
+            j += 3;
+            if b.get(j) == Some(&b':') && is_two_digits(b, j + 1) {
+                let ss = two_digits(b, j + 1)?;
+                if ss > 59 {
+                    return None;
+                }
+                j += 3;
+                (mm, ss, false, true, true)
+            } else {
+                // Extended minutes with basic seconds is not a form; a lone
+                // `:` is the fraction separator below.
+                if is_two_digits(b, j) {
+                    return None;
+                }
+                (mm, 0, false, false, false)
+            }
+        } else if b.get(j) == Some(&b':') {
+            // Hour-only `HH:` — the colon is the fraction separator below.
+            (0, 0, false, false, false)
+        } else {
+            let mut mm = 0;
+            let mut ss = 0;
+            let mut has_ss = false;
+            if let Some(v) = two_digits(b, j) {
+                if v > 59 {
+                    return None;
+                }
+                mm = v;
+                j += 2;
+                if let Some(v) = two_digits(b, j) {
+                    if v > 59 {
+                        return None;
+                    }
+                    ss = v;
+                    j += 2;
+                    has_ss = true;
+                }
+            }
+            (mm, ss, true, has_ss, false)
+        };
+    // A 2+ digit run is only a fraction after basic seconds (the run
+    // itself, no separator); anywhere else digits cannot start one.
+    let run = digit_run_len(b, j);
+    if run >= 2 {
+        if !(basic && has_ss) {
+            return None;
+        }
+        let micros = frac_value(&b[j..j + run]);
+        let k = end_or_tz(text, b, j + run)?;
+        let time = NaiveTime::from_hms_micro_opt(hh, mm, ss, micros)?;
+        return Some((time, k));
+    }
+    let (micros, k) = parse_time_frac(text, b, j, allow_colon_frac)?;
+    let time = NaiveTime::from_hms_micro_opt(hh, mm, ss, micros)?;
+    Some((time, k))
+}
+
+/// Length of the ASCII digit run at `j`.
+fn digit_run_len(b: &[u8], j: usize) -> usize {
+    let mut k = j;
+    while k < b.len() && b[k].is_ascii_digit() {
+        k += 1;
+    }
+    k - j
+}
+
+/// End of input or a tz starter at `k` (the fraction before it may be
+/// empty); anything else fails the arm.
+fn end_or_tz(text: &str, b: &[u8], k: usize) -> Option<usize> {
+    if k == b.len() {
+        return Some(k);
+    }
+    match text[k..].chars().next() {
+        Some(c) if c == 'Z' || c == '+' || c == '-' => Some(k),
+        _ => None,
+    }
+}
+
+fn parse_time_frac(text: &str, b: &[u8], j: usize, allow_colon: bool) -> Option<(u32, usize)> {
+    let Some(ch) = text[j..].chars().next() else {
+        return Some((0, j));
+    };
+    if ch == 'Z' || ch == '+' || ch == '-' {
+        return Some((0, j));
+    }
+    if !ch.is_ascii() {
+        return None;
+    }
+    let mut k = j + ch.len_utf8();
+    let start = k;
+    while k < b.len() && b[k].is_ascii_digit() {
+        k += 1;
+    }
+    if k != start && ch != '.' && ch != ',' && !(ch == ':' && allow_colon) {
+        return None;
+    }
+    if k == b.len() {
+        if k == start {
+            return None;
+        }
+        return Some((frac_value(&b[start..k]), k));
+    }
+    match text[k..].chars().next() {
+        Some(c) if c == 'Z' || c == '+' || c == '-' => Some((frac_value(&b[start..k]), k)),
+        _ => None,
+    }
+}
+
+/// `Z` or `±HH[MM[SS]]` / `±HH:MM[:SS]` (two-digit components, no range
+/// check beyond the 24h total) plus an optional `[.,:]` fraction of any
+/// length. Returns the offset and how far the tz scan ran.
+fn parse_iso_tz(b: &[u8], j: usize) -> Option<(ParsedOffset, usize)> {
+    if b.get(j) == Some(&b'Z') {
+        return Some((
+            ParsedOffset {
+                seconds: 0,
+                micros: 0,
+            },
+            j + 1,
+        ));
+    }
+    let sign = match b.get(j) {
+        Some(b'+') => 1,
+        Some(b'-') => -1,
+        _ => return None,
+    };
+    let hh = i64::from(two_digits(b, j + 1)?);
+    let mut k = j + 3;
+    let (mm, ss) = if b.get(k) == Some(&b':') {
+        let mm = i64::from(two_digits(b, k + 1)?);
+        k += 3;
+        if b.get(k) == Some(&b':') {
+            let ss = i64::from(two_digits(b, k + 1)?);
+            k += 3;
+            (mm, ss)
+        } else {
+            if is_two_digits(b, k) {
+                return None;
+            }
+            (mm, 0)
+        }
+    } else {
+        let mut mm = 0;
+        let mut ss = 0;
+        if let Some(v) = two_digits(b, k) {
+            mm = i64::from(v);
+            k += 2;
+            if let Some(v) = two_digits(b, k) {
+                ss = i64::from(v);
+                k += 2;
+            }
+        }
+        if b.get(k) == Some(&b':') {
+            return None;
+        }
+        (mm, ss)
+    };
+    let mut frac_us: i64 = 0;
+    if k < b.len() && matches!(b[k], b'.' | b',' | b':') {
+        let start = k + 1;
+        let mut e = start;
+        while e < b.len() && b[e].is_ascii_digit() {
+            e += 1;
+        }
+        if e == start {
+            return None;
+        }
+        frac_us = i64::from(frac_value(&b[start..e]));
+        k = e;
+    }
+    let whole = hh * 3600 + mm * 60 + ss;
+    if whole >= 86400 {
+        return None;
+    }
+    if whole == 0 {
+        Some((
+            ParsedOffset {
+                seconds: 0,
+                micros: 0,
+            },
+            k,
+        ))
+    } else {
+        Some((
+            ParsedOffset {
+                seconds: sign * whole,
+                micros: sign * frac_us,
+            },
+            k,
+        ))
+    }
+}
+
+/// CPython `datetime.fromisoformat` (3.12): ASCII dates (calendar or week,
+/// extended or basic), one separator char of any kind, ASCII times
+/// (extended or basic, fractions welcome), ASCII zones.
+fn parse_fromisoformat_arm(text: &str) -> Option<(NaiveDateTime, Option<ParsedOffset>)> {
+    let b = text.as_bytes();
+    let year = parse_iso_year(b)?;
+    match b.get(4).copied() {
+        // Extended week `YYYY-Www`: `-D` counts when no digit follows it.
+        Some(b'-') if b.get(5) == Some(&b'W') => {
+            if b.len() < 8 || !b[6].is_ascii_digit() || !b[7].is_ascii_digit() {
+                return None;
+            }
+            let week = u32::from(b[6] - b'0') * 10 + u32::from(b[7] - b'0');
+            let (day, i) = if b.get(8) == Some(&b'-')
+                && b.get(9).is_some_and(|c| c.is_ascii_digit())
+                && !b.get(10).is_some_and(|c| c.is_ascii_digit())
+            {
+                (Some(u32::from(b[9] - b'0')), 10)
+            } else {
+                (None, 8)
+            };
+            let date = resolve_iso_week(year, week, day)?;
+            parse_rest_after_date(text, b, date, i)
+        }
+        // Extended calendar `YYYY-MM-DD` (fixed length).
+        Some(b'-') => {
+            if b.len() < 10
+                || !b[5].is_ascii_digit()
+                || !b[6].is_ascii_digit()
+                || b[7] != b'-'
+                || !b[8].is_ascii_digit()
+                || !b[9].is_ascii_digit()
+            {
+                return None;
+            }
+            let month = u32::from(b[5] - b'0') * 10 + u32::from(b[6] - b'0');
+            let day = u32::from(b[8] - b'0') * 10 + u32::from(b[9] - b'0');
+            let date = NaiveDate::from_ymd_opt(year, month, day)?;
+            parse_rest_after_date(text, b, date, 10)
+        }
+        // Basic week `YYYYWww[D]`: the day split goes first, Monday on
+        // any failure (a digit separator reads either way).
+        Some(b'W') => {
+            if b.len() < 7 || !b[5].is_ascii_digit() || !b[6].is_ascii_digit() {
+                return None;
+            }
+            let week = u32::from(b[5] - b'0') * 10 + u32::from(b[6] - b'0');
+            if b.get(7).is_some_and(|c| c.is_ascii_digit()) {
+                let day = u32::from(b[7] - b'0');
+                if let Some(date) = resolve_iso_week(year, week, Some(day)) {
+                    if let Some(parsed) = parse_rest_after_date(text, b, date, 8) {
+                        return Some(parsed);
+                    }
+                }
+            }
+            let date = resolve_iso_week(year, week, None)?;
+            parse_rest_after_date(text, b, date, 7)
+        }
+        // Basic calendar `YYYYMMDD`, not followed by a digit.
+        Some(c) if c.is_ascii_digit() => {
+            if b.len() < 8 || !b[4..8].iter().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            if b.len() > 8 && b[8].is_ascii_digit() {
+                return None;
+            }
+            let month = u32::from(b[4] - b'0') * 10 + u32::from(b[5] - b'0');
+            let day = u32::from(b[6] - b'0') * 10 + u32::from(b[7] - b'0');
+            let date = NaiveDate::from_ymd_opt(year, month, day)?;
+            parse_rest_after_date(text, b, date, 8)
+        }
+        _ => None,
+    }
+}
+
+/// `YYYY-M-D` (1-2 digit month/day, Unicode decimal digits like the
+/// regex `\d`) plus the next index.
+fn parse_dashed_date(text: &str, b: &[u8]) -> Option<(i32, u32, u32, usize)> {
+    let (d0, i0) = nd_char(text, 0)?;
+    let (d1, i1) = nd_char(text, i0)?;
+    let (d2, i2) = nd_char(text, i1)?;
+    let (d3, i3) = nd_char(text, i2)?;
+    if b.get(i3) != Some(&b'-') {
+        return None;
+    }
+    let year = d0 as i32 * 1000 + d1 as i32 * 100 + d2 as i32 * 10 + d3 as i32;
+    if year < 1 {
+        return None;
+    }
+    let (month, i) = nd_one_two(text, i3 + 1)?;
+    if b.get(i) != Some(&b'-') {
+        return None;
+    }
+    let (day, j) = nd_one_two(text, i + 1)?;
+    Some((year, month, day, j))
+}
+
+/// The `datetime_re` fallback: non-padded `YYYY-M-D[T ]H:M[:S[.f]]`
+/// (Unicode decimal digits like the regex `\d`), Python whitespace
+/// before an optional `Z`/short offset, then end or one `\n`.
+fn parse_regex_arm(text: &str) -> Option<(NaiveDateTime, Option<ParsedOffset>)> {
+    let b = text.as_bytes();
+    let (year, month, day, j) = parse_dashed_date(text, b)?;
+    if b.get(j) != Some(&b'T') && b.get(j) != Some(&b' ') {
+        return None;
+    }
+    let (hh, k) = nd_one_two(text, j + 1)?;
+    if b.get(k) != Some(&b':') {
+        return None;
+    }
+    let (mm, mut l) = nd_one_two(text, k + 1)?;
+    let mut ss = 0;
+    let mut micros = 0;
+    if b.get(l) == Some(&b':') {
+        let (s, n) = nd_one_two(text, l + 1)?;
+        ss = s;
+        l = n;
+        if b.get(l) == Some(&b'.') || b.get(l) == Some(&b',') {
+            let start = l + 1;
+            let mut e = start;
+            let mut count = 0;
+            while let Some((_, next)) = nd_char(text, e) {
+                e = next;
+                count += 1;
+            }
+            if count == 0 || count > 12 {
+                return None;
+            }
+            micros = nd_frac_value(&text[start..e]);
+            l = e;
+        }
+    }
+    // `\s*`: all Python whitespace, then an optional short zone.
+    let mut p = l;
+    while p < b.len() {
+        let ch = text[p..].chars().next()?;
+        if !is_py_space(ch) {
+            break;
+        }
+        p += ch.len_utf8();
+    }
+    let mut offset: Option<ParsedOffset> = None;
+    if p < b.len() {
+        if b[p] == b'Z' {
+            offset = Some(ParsedOffset {
+                seconds: 0,
+                micros: 0,
+            });
+            p += 1;
+        } else if b[p] == b'+' || b[p] == b'-' {
+            let sign: i64 = if b[p] == b'+' { 1 } else { -1 };
+            let (oh, q) = nd_two(text, p + 1)?;
+            let oh = i64::from(oh);
+            p = q;
+            let mut om = 0;
+            if b.get(p) == Some(&b':') {
+                let (v, q) = nd_two(text, p + 1)?;
+                om = i64::from(v);
+                p = q;
+            } else if let Some((v, q)) = nd_two(text, p) {
+                om = i64::from(v);
+                p = q;
+            }
+            let total_min = sign * (oh * 60 + om);
+            if total_min.abs() > 1439 {
+                return None;
+            }
+            offset = Some(ParsedOffset {
+                seconds: total_min * 60,
+                micros: 0,
+            });
+        }
+    }
+    // `$`: end of input, or one trailing newline.
+    if p != b.len() && !(p + 1 == b.len() && b[p] == b'\n') {
+        return None;
+    }
+    let date = NaiveDate::from_ymd_opt(year, month, day)?;
+    let time = NaiveTime::from_hms_micro_opt(hh, mm, ss, micros)?;
+    Some((NaiveDateTime::new(date, time), offset))
+}
+
+/// Both `parse_datetime` arms: `fromisoformat`, then `datetime_re`.
+fn parse_iso8601_core(text: &str) -> Option<(NaiveDateTime, Option<ParsedOffset>)> {
+    parse_fromisoformat_arm(text).or_else(|| parse_regex_arm(text))
+}
+
+/// The model-field `parse_date` fallback (`YYYY-M-D`, Unicode decimal
+/// digits like the regex `\d`): midnight, naive. Serializer callers
+/// never reach it.
+fn parse_datere_arm(text: &str) -> Option<NaiveDateTime> {
+    let b = text.as_bytes();
+    let (year, month, day, p) = parse_dashed_date(text, b)?;
+    if p != b.len() && !(p + 1 == b.len() && b[p] == b'\n') {
+        return None;
+    }
+    let date = NaiveDate::from_ymd_opt(year, month, day)?;
+    date.and_hms_opt(0, 0, 0)
+}
+
+/// DRF `DateTimeField.to_internal_value` over `DATETIME_INPUT_FORMATS =
+/// ['iso-8601']`: `parse_datetime`, then the `strptime(value, 'iso-8601')`
+/// fallback, then `enforce_timezone`.
+fn parse_django_datetime(text: &str, tz: &Tz) -> Result<DateTime<Utc>, ParseDatetimeError> {
+    let (naive, offset) = parse_iso8601_core(text)
+        .or_else(|| {
+            // `strptime` compiles the literal format with `re.IGNORECASE`,
+            // so the input `iso-8601` in any letter case yields naive
+            // 1900-01-01. Exact match: padding fails on both sides (probed).
+            // Python's fold also accepts İ/ı/ſ letter variants; the port is
+            // ASCII-only (same family as the 765 unicode gap).
+            text.eq_ignore_ascii_case("iso-8601").then(|| {
+                let naive = NaiveDate::from_ymd_opt(1900, 1, 1)
+                    .and_then(|date| date.and_hms_opt(0, 0, 0))
+                    .expect("1900-01-01 valid");
+                (naive, None)
+            })
+        })
+        .ok_or(ParseDatetimeError::Invalid)?;
+    match offset {
+        Some(off) => {
+            let utc = naive.and_utc() - chrono::Duration::microseconds(off.total_micros());
+            // DRF `enforce_timezone` converts into the field zone, and
+            // `astimezone` overflow there is the `overflow` 400.
+            if !(1..=9999).contains(&utc.with_timezone(tz).date_naive().year()) {
+                return Err(ParseDatetimeError::Overflow);
+            }
+            Ok(trunc_micros(utc))
+        }
+        None => match tz.from_local_datetime(&naive) {
+            chrono::LocalResult::Single(aware) => Ok(trunc_micros(aware.with_timezone(&Utc))),
+            chrono::LocalResult::Ambiguous(early, _) => Ok(trunc_micros(early.with_timezone(&Utc))),
+            chrono::LocalResult::None => Err(ParseDatetimeError::Nonexistent),
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+/// Map a paginator failure: parse errors answer the `ParseError` 400,
+/// evaluation failures the generic 500 (the `v1_projects` mapping).
+fn page_denial(error: crate::paginator::PageError) -> Denial {
+    use crate::paginator::PageError as E;
+    match error {
+        E::InvalidPerPage
+        | E::PerPageTooLarge(_)
+        | E::InvalidCursor
+        | E::OffsetTooLarge
+        | E::NegativeOffset => Denial::BadDetail(error.detail()),
+        E::ZeroLimit | E::NegativeSlice | E::NonFiniteCursor | E::MissingOrderKey => {
+            Denial::ServerError
+        }
+    }
+}
+
+/// The 12-key `BasePaginator.paginate` envelope
+/// (`utils/paginator.py:714-731`), keys in order via the kernel.
+fn envelope(
+    total_count: i64,
+    per_page: i64,
+    next: &crate::paginator::Cursor,
+    prev: &crate::paginator::Cursor,
+    results: Value,
+) -> Result<Response, Denial> {
+    use crate::paginator::{max_hits, PageResponse};
+    let total_pages = max_hits(total_count, per_page).map_err(page_denial)?;
+    let page = PageResponse {
+        grouped_by: None,
+        sub_grouped_by: None,
+        total_count,
+        next_cursor: next.to_string(),
+        prev_cursor: prev.to_string(),
+        next_page_results: next.has_results_or_false(),
+        prev_page_results: prev.has_results_or_false(),
+        count: results.as_array().map(|a| a.len()).unwrap_or(0),
+        total_pages,
+        total_results: total_count,
+        extra_stats: None,
+        results,
+    };
+    let body = serde_json::to_string(&page).map_err(|_| Denial::ServerError)?;
+    Ok(json_response(StatusCode::OK, body))
+}
+
+/// Slice evaluated rows into the requested window: the paginator's
+/// `[offset, stop)` over `queryset[offset:stop]`, the backwards-walk
+/// mismatch 500, and the `[:limit]` trim.
+fn window_rows<'a, T>(
+    rows: &'a [T],
+    per_page: i64,
+    cursor: &crate::paginator::Cursor,
+) -> Result<(&'a [T], bool), Denial> {
+    let window = crate::paginator::offset_window(
+        per_page,
+        cursor.offset,
+        cursor.value,
+        cursor.is_prev,
+        None,
+    )
+    .map_err(page_denial)?;
+    // `results[:limit]` runs on the lazy queryset, whose negative indexing
+    // raises `ValueError` into the 500 — after the offset checks above
+    // (a negative offset still 400s first).
+    if per_page < 0 {
+        return Err(page_denial(crate::paginator::PageError::NegativeSlice));
+    }
+    let start = (window.offset as usize).min(rows.len());
+    let stop = (window.stop as usize).min(rows.len());
+    let window_rows = &rows[start..stop];
+    // Backwards walk with a mismatched cursor value reads nothing
+    // (`results[-(limit+1):]` on the lazy queryset raises into the 500).
+    if !cursor.value.equals_limit(per_page) && cursor.is_prev {
+        return Err(Denial::ServerError);
+    }
+    let has_more = window_rows.len() as i64 > per_page;
+    let trim = (per_page as usize).min(window_rows.len());
+    Ok((&window_rows[..trim], has_more))
+}
+
+/// Split `fields=`/`expand=` into shape specs plus the kept field list
+/// (for expansion gating).
+type FieldSelection = (Option<Vec<FieldSpec>>, Vec<String>, Vec<String>);
+
+fn field_selection(query: &QueryMap, available: &[&str]) -> Result<FieldSelection, Denial> {
+    let fields = fields_param(query, "fields");
+    let specs: Vec<FieldSpec> = fields
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|name| FieldSpec::Include(name.clone()))
+        .collect();
+    let field_specs = if fields.is_some() { Some(specs) } else { None };
+    let kept = filter_fields(available, field_specs.as_deref()).map_err(|_| Denial::ServerError)?;
+    let expand = fields_param(query, "expand").unwrap_or_default();
+    Ok((field_specs, kept, expand))
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+async fn read_body(body: axum::body::Body) -> Result<Vec<u8>, Denial> {
+    pidash_compat::http::read_body(body)
+        .await
+        .map_err(|error| db_error(error, "read-body"))
+}
+
+/// Rebuild the request against the ORIGINAL path for the proxy
+/// (Django's `<uuid:>` converter would not match — before auth runs, as URL
+/// resolving precedes it). The URI must be the request's own: Django's 404
+/// page echoes the path, so rebuilding the `work-items` spelling for a
+/// deprecated `issues/` twin answers the wrong bytes.
+fn proxy_request<'a>(
+    state: &'a AppState,
+    method: &'a str,
+    uri: String,
+) -> impl std::future::Future<Output = Response> + 'a {
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(axum::body::Body::empty())
+        .expect("proxy request");
+    crate::edge::proxy(State(state.clone()), req)
+}
+
+/// `GET .../links/` (`views/issue.py:1593-1604`).
+pub async fn get_link_list(
+    State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
+    Path((slug, project_id, issue_id)): Path<(String, String, String)>,
+    Query(query): Query<QueryMap>,
+    headers: HeaderMap,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&issue_id) {
+        return proxy_request(&state, "GET", original.to_string()).await;
+    }
+    let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
+    match link_list_inner(&state, &headers, &slug, &project_id, &issue_id, &query).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn link_list_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    issue_id: &Uuid,
+    query: &QueryMap,
+) -> Result<Response, Denial> {
+    use pidash_services::v1_work_items::shape_links::LINK_SHOW_FIELDS;
+    let pre = preamble(state, headers, slug).await?;
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    // Old (`issues/`) and new (`work-items/`) twins share the view class
+    // and gate; either route variant decides identically.
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        &project_id,
+        V1WorkItemsRoute::LinkList,
+        "GET",
+    )
+    .await?;
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    let per_page =
+        crate::paginator::parse_per_page(query_last(query, "per_page").as_deref(), 1000, 1000)
+            .map_err(page_denial)?;
+    let cursor_raw = query_last(query, "cursor").unwrap_or_else(|| format!("{per_page}:0:0"));
+    let cursor = crate::paginator::Cursor::from_string(&cursor_raw).map_err(page_denial)?;
+    let rows = fetch_link_rows(&pre.pool, slug, &project_id, issue_id, &pre.actor.id).await?;
+    let total_count = rows.len() as i64;
+    let (page_rows, has_more) = window_rows(&rows, per_page, &cursor)?;
+    let (field_specs, kept, expand) = field_selection(query, LINK_SHOW_FIELDS)?;
+    let expand_refs: Vec<&str> = expand.iter().map(String::as_str).collect();
+    let web_base = pidash_services::v1_work_items::shape_issue::web_base_url(
+        state.settings().urls.web_url.as_deref(),
+        state.settings().urls.app_base_url.as_deref(),
+    );
+    let mut rendered: Vec<Value> = Vec::with_capacity(page_rows.len());
+    for row in page_rows {
+        let decoded = decode_link(row, &tz)?;
+        let expansions = link_expansions(
+            &pre.pool,
+            &decoded,
+            slug,
+            &tz,
+            web_base.as_deref(),
+            &expand_refs,
+            &kept,
+        )
+        .await?;
+        rendered.push(render_link_value(
+            &decoded,
+            field_specs.as_deref(),
+            &expand_refs,
+            &expansions,
+        )?);
+    }
+    let next = crate::paginator::next_cursor(per_page, cursor.offset, has_more);
+    let prev = crate::paginator::prev_cursor(per_page, cursor.offset);
+    envelope(total_count, per_page, &next, &prev, Value::Array(rendered))
+}
+
+/// `POST .../links/` (`views/issue.py:1626-1650`).
+pub async fn post_link(
+    State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
+    Path((slug, project_id, issue_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&issue_id) {
+        return proxy_request(&state, "POST", original.to_string()).await;
+    }
+    let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
+    let raw = match read_body(body).await {
+        Ok(raw) => raw,
+        Err(denial) => return denial.into_response(),
+    };
+    match link_post_inner(&state, &headers, &slug, &project_id, &issue_id, &raw).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn link_post_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    issue_id: &Uuid,
+    raw_body: &[u8],
+) -> Result<Response, Denial> {
+    let pre = preamble(state, headers, slug).await?;
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        &project_id,
+        V1WorkItemsRoute::LinkList,
+        "POST",
+    )
+    .await?;
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    let parsed = parse_write_body(headers, raw_body)?;
+    let validated = validate_link_create(&parsed.value)
+        .map_err(|error| Denial::FieldErrors(error.body().to_owned()))?;
+    if link_url_exists(&pre.pool, &validated.url, issue_id).await? {
+        // `create()` raises `{"error": ...}` out of `save()` — DRF renders
+        // the dict as-is (STRING value) with the 400
+        // (`serializers/issue.py:617-620`, verified live).
+        return Err(Denial::FieldErrors(LINK_DUP_BODY.to_owned()));
+    }
+    // `ProjectBaseModel.save` sets the workspace from the project.
+    let link_workspace: Option<Uuid> =
+        sqlx::query_scalar(r#"SELECT "workspace_id" FROM "projects" WHERE "id" = $1"#)
+            .bind(project_id)
+            .fetch_optional(&pre.pool)
+            .await
+            .map_err(|error| db_error(error, "link-post-workspace"))?
+            .flatten();
+    let Some(link_workspace) = link_workspace else {
+        // Unreachable past the gate (membership implies the project), but
+        // Python would `IntegrityError` the create here.
+        return Err(Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned()));
+    };
+    let link_id = Uuid::new_v4();
+    // Two `now()` calls like the two `auto_now`/`auto_now_add` pre_saves.
+    let created_at = now_utc();
+    let updated_at = now_utc();
+    let title = validated.title.unwrap_or(None);
+    sqlx::query(
+        r#"INSERT INTO "issue_links" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
+            "project_id", "workspace_id", "issue_id", "title", "url", "metadata")
+           VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10)"#,
+    )
+    .bind(link_id)
+    .bind(created_at)
+    .bind(updated_at)
+    .bind(pre.actor.id)
+    .bind(project_id)
+    .bind(link_workspace)
+    .bind(issue_id)
+    .bind(title.as_deref())
+    .bind(&validated.url)
+    .bind(serde_json::json!({}))
+    .execute(&pre.pool)
+    .await
+    .map_err(|error| {
+        // No issue lookup precedes the create: a bogus `issue_id`
+        // violates the FK, and `handle_exception` answers the
+        // `IntegrityError` 400 (`api/views/base.py:142-147`).
+        if is_fk_violation(&error) {
+            Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
+        } else {
+            db_error(error, "link-post-insert")
+        }
+    })?;
+    // The `created_by` override (`:1637-1638`): `data.get("created_by",
+    // user.id)`, saved with `update_fields=["created_by"]` — `updated_at`
+    // is NOT re-stamped (Django skips `auto_now` outside `update_fields`).
+    let created_by = override_user_id(parsed.value.get("created_by"), &pre.actor.id)?;
+    if let Err(error) =
+        sqlx::query(r#"UPDATE "issue_links" SET "created_by_id" = $1 WHERE "id" = $2"#)
+            .bind(created_by)
+            .bind(link_id)
+            .execute(&pre.pool)
+            .await
+    {
+        if is_fk_violation(&error) {
+            return Err(Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned()));
+        }
+        return Err(db_error(error, "link-post-override"));
+    }
+    // Fan-out in source order: crawl (`:1635`), then activity (`:1639`).
+    let crawl_args = work_tasks::crawl_link_title_args(&link_id.to_string(), &validated.url);
+    enqueue_best_effort(
+        &pre.pool,
+        work_tasks::CRAWL_LINK_TITLE_TASK,
+        crawl_args,
+        Map::new(),
+    )
+    .await;
+    let requested = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(
+        &link_create_data(title.as_deref(), &validated.url, &issue_id.to_string()),
+    );
+    // `actor_id=str(link.created_by_id)` — `"None"` when the override
+    // nulled it (port the wart).
+    let actor_text = created_by
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "None".to_owned());
+    let kwargs = work_tasks::link_create_activity_kwargs(
+        &requested,
+        &issue_id.to_string(),
+        &project_id.to_string(),
+        &actor_text,
+        Utc::now().timestamp(),
+    );
+    enqueue_best_effort(&pre.pool, work_tasks::ISSUE_ACTIVITY_TASK, vec![], kwargs).await;
+    // The response renders the in-memory instance (BUG-5): override
+    // `created_by`, in-memory `updated_by`, first-save timestamps.
+    let decoded = DecodedLink {
+        id: link_id.to_string(),
+        created_at: crate::serializer::render_datetime_in(&created_at, &tz),
+        updated_at: crate::serializer::render_datetime_in(&updated_at, &tz),
+        deleted_at: None,
+        title,
+        url: validated.url,
+        metadata: serde_json::json!({}),
+        created_by: created_by.map(|id| id.to_string()),
+        updated_by: Some(pre.actor.id.to_string()),
+        project: project_id.to_string(),
+        workspace: link_workspace.to_string(),
+        issue: issue_id.to_string(),
+    };
+    let body = render_link_value(&decoded, None, &[], &[])?;
+    Ok(json_created(
+        serde_json::to_string(&body).map_err(|_| Denial::ServerError)?,
+    ))
+}
+
+/// The `request.data.get("created_by", user.id)` override: absent → the
+/// actor, explicit null → NULL (clears), a UUID string → that user.
+/// `UUIDField.to_python` coerces ints AND bools via `uuid.UUID(int=…)` —
+/// in-range values proceed to the save (usually the FK-violation 400);
+/// negative ints fail with `ValueError`. Floats and anything else fail
+/// `get_prep_value` → the `ValidationError` 400 (Django wraps the
+/// `UUID(hex=…)` `AttributeError`). All verified live.
+fn override_user_id(raw: Option<&Value>, actor: &Uuid) -> Result<Option<Uuid>, Denial> {
+    match raw {
+        None => Ok(Some(*actor)),
+        Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => text
+            .parse::<Uuid>()
+            .map(Some)
+            .map_err(|_| Denial::FieldErrors(VALID_DETAIL_BODY.to_owned())),
+        Some(Value::Bool(flag)) => Ok(Some(Uuid::from_u128(u128::from(*flag as u8)))),
+        Some(Value::Number(number)) => {
+            if let Some(int) = number.as_u64() {
+                Ok(Some(Uuid::from_u128(u128::from(int))))
+            } else {
+                Err(Denial::FieldErrors(VALID_DETAIL_BODY.to_owned()))
+            }
+        }
+        Some(_) => Err(Denial::FieldErrors(VALID_DETAIL_BODY.to_owned())),
+    }
+}
+
+/// Whether a sqlx failure is a foreign-key violation (`IntegrityError` →
+/// `{"error": "The payload is not valid"}`).
+fn is_fk_violation(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(db) => db.code().as_deref() == Some("23503"),
+        _ => false,
+    }
+}
+
+/// The related-objects sweep payload (`SoftDeleteModel.delete()` calls
+/// `.delay(app_label, model_name, pk, using=None)`): positionals
+/// `("db", model, pk)`, kwargs `{"using": null}`.
+fn soft_delete_sweep(model_name: &str, pk: &str) -> (Vec<Value>, Map<String, Value>) {
+    let mut kwargs = Map::with_capacity(1);
+    kwargs.insert("using".to_owned(), Value::Null);
+    (
+        vec![
+            Value::String("db".to_owned()),
+            Value::String(model_name.to_owned()),
+            Value::String(pk.to_owned()),
+        ],
+        kwargs,
+    )
+}
+
+/// `GET .../links/<pk>/` (`views/issue.py:1697-1714`). The `pk is None`
+/// list branch (BUG-6) is unreachable: the route always binds `pk`.
+pub async fn get_link_detail(
+    State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
+    Path((slug, project_id, issue_id, pk)): Path<(String, String, String, String)>,
+    Query(query): Query<QueryMap>,
+    headers: HeaderMap,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&issue_id)
+        || !crate::runner_runs::is_uuid_path_segment(&pk)
+    {
+        return proxy_request(&state, "GET", original.to_string()).await;
+    }
+    let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
+    let pk = pk.parse::<Uuid>().expect("checked segment");
+    match link_detail_inner(&state, &headers, &slug, &project_id, &issue_id, &pk, &query).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn link_detail_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    issue_id: &Uuid,
+    pk: &Uuid,
+    query: &QueryMap,
+) -> Result<Response, Denial> {
+    use pidash_services::v1_work_items::shape_links::LINK_SHOW_FIELDS;
+    let pre = preamble(state, headers, slug).await?;
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        &project_id,
+        V1WorkItemsRoute::LinkDetail,
+        "GET",
+    )
+    .await?;
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    let Some(row) =
+        fetch_link_detail(&pre.pool, slug, &project_id, issue_id, &pre.actor.id, pk).await?
+    else {
+        return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
+    };
+    let (field_specs, kept, expand) = field_selection(query, LINK_SHOW_FIELDS)?;
+    let expand_refs: Vec<&str> = expand.iter().map(String::as_str).collect();
+    let web_base = pidash_services::v1_work_items::shape_issue::web_base_url(
+        state.settings().urls.web_url.as_deref(),
+        state.settings().urls.app_base_url.as_deref(),
+    );
+    let decoded = decode_link(&row, &tz)?;
+    let expansions = link_expansions(
+        &pre.pool,
+        &decoded,
+        slug,
+        &tz,
+        web_base.as_deref(),
+        &expand_refs,
+        &kept,
+    )
+    .await?;
+    let body = render_link_value(&decoded, field_specs.as_deref(), &expand_refs, &expansions)?;
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::to_string(&body).map_err(|_| Denial::ServerError)?,
+    ))
+}
+
+/// `PATCH .../links/<pk>/` (`views/issue.py:1737-1761`).
+pub async fn patch_link(
+    State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
+    Path((slug, project_id, issue_id, pk)): Path<(String, String, String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&issue_id)
+        || !crate::runner_runs::is_uuid_path_segment(&pk)
+    {
+        return proxy_request(&state, "PATCH", original.to_string()).await;
+    }
+    let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
+    let pk = pk.parse::<Uuid>().expect("checked segment");
+    let raw = match read_body(body).await {
+        Ok(raw) => raw,
+        Err(denial) => return denial.into_response(),
+    };
+    match link_patch_inner(&state, &headers, &slug, &project_id, &issue_id, &pk, &raw).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn link_patch_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    issue_id: &Uuid,
+    pk: &Uuid,
+    raw_body: &[u8],
+) -> Result<Response, Denial> {
+    let pre = preamble(state, headers, slug).await?;
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        &project_id,
+        V1WorkItemsRoute::LinkDetail,
+        "PATCH",
+    )
+    .await?;
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    let Some(before) = fetch_link_direct(&pre.pool, slug, &project_id, issue_id, pk).await? else {
+        return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
+    };
+    let parsed = parse_write_body(headers, raw_body)?;
+    let requested = operations::requested_data_text(&parsed.value, parsed.from_form);
+    let before_decoded = decode_link(&before, &tz)?;
+    let current = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&render_link_value(
+        &before_decoded,
+        None,
+        &[],
+        &[],
+    )?);
+    let Some(map) = parsed.value.as_object() else {
+        return Err(Denial::FieldErrors(patch_not_a_dict_body(&parsed.value)));
+    };
+    let validated = validate_link_patch(map, parsed.from_form, &tz).map_err(Denial::FieldErrors)?;
+    // `serializer.save()` — full `save()`, so `updated_at`/`updated_by`
+    // move even with zero validated fields.
+    let now = now_utc();
+    let new_url = validated
+        .url
+        .clone()
+        .unwrap_or_else(|| before_decoded.url.clone());
+    let new_title = validated
+        .title
+        .clone()
+        .unwrap_or_else(|| before_decoded.title.clone());
+    let new_metadata = validated
+        .metadata
+        .clone()
+        .unwrap_or_else(|| before_decoded.metadata.clone());
+    let new_deleted_at = validated.deleted_at.unwrap_or_else(|| {
+        before
+            .try_get::<Option<DateTime<Utc>>, _>("deleted_at")
+            .unwrap_or(None)
+    });
+    sqlx::query(
+        r#"UPDATE "issue_links" SET "title" = $1, "url" = $2, "metadata" = $3, "deleted_at" = $4,
+            "updated_at" = $5, "updated_by_id" = $6 WHERE "id" = $7"#,
+    )
+    .bind(new_title.as_deref())
+    .bind(&new_url)
+    .bind(&new_metadata)
+    .bind(new_deleted_at)
+    .bind(now)
+    .bind(pre.actor.id)
+    .bind(pk)
+    .execute(&pre.pool)
+    .await
+    .map_err(|error| db_error(error, "link-patch-update"))?;
+    // Crawl uses the post-save `serializer.data` id/url (`:1749`).
+    let crawl_args = work_tasks::crawl_link_title_args(&pk.to_string(), &new_url);
+    enqueue_best_effort(
+        &pre.pool,
+        work_tasks::CRAWL_LINK_TITLE_TASK,
+        crawl_args,
+        Map::new(),
+    )
+    .await;
+    let kwargs = work_tasks::issue_activity_kwargs(
+        work_tasks::ACTIVITY_LINK_UPDATED,
+        Some(&requested),
+        &pre.actor.id.to_string(),
+        &issue_id.to_string(),
+        &project_id.to_string(),
+        Some(&current),
+        Utc::now().timestamp(),
+    );
+    enqueue_best_effort(&pre.pool, work_tasks::ISSUE_ACTIVITY_TASK, vec![], kwargs).await;
+    // The response re-renders the in-memory instance (`:1759`) — a refetch
+    // would MISS when the patch set `deleted_at` (the direct lookup is
+    // live-scoped), while Python still answers 200.
+    let decoded = DecodedLink {
+        id: before_decoded.id.clone(),
+        created_at: before_decoded.created_at.clone(),
+        updated_at: crate::serializer::render_datetime_in(&now, &tz),
+        deleted_at: new_deleted_at.map(|dt| crate::serializer::render_datetime_in(&dt, &tz)),
+        title: new_title,
+        url: new_url,
+        metadata: new_metadata,
+        created_by: before_decoded.created_by.clone(),
+        updated_by: Some(pre.actor.id.to_string()),
+        project: before_decoded.project.clone(),
+        workspace: before_decoded.workspace.clone(),
+        issue: before_decoded.issue.clone(),
+    };
+    let body = render_link_value(&decoded, None, &[], &[])?;
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::to_string(&body).map_err(|_| Denial::ServerError)?,
+    ))
+}
+
+/// `DELETE .../links/<pk>/` (`views/issue.py:1775-1793`).
+pub async fn delete_link(
+    State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
+    Path((slug, project_id, issue_id, pk)): Path<(String, String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&issue_id)
+        || !crate::runner_runs::is_uuid_path_segment(&pk)
+    {
+        return proxy_request(&state, "DELETE", original.to_string()).await;
+    }
+    let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
+    let pk = pk.parse::<Uuid>().expect("checked segment");
+    match link_delete_inner(&state, &headers, &slug, &project_id, &issue_id, &pk).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn link_delete_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    issue_id: &Uuid,
+    pk: &Uuid,
+) -> Result<Response, Denial> {
+    let pre = preamble(state, headers, slug).await?;
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        &project_id,
+        V1WorkItemsRoute::LinkDetail,
+        "DELETE",
+    )
+    .await?;
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    let Some(before) = fetch_link_direct(&pre.pool, slug, &project_id, issue_id, pk).await? else {
+        return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
+    };
+    let before_decoded = decode_link(&before, &tz)?;
+    let current = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&render_link_value(
+        &before_decoded,
+        None,
+        &[],
+        &[],
+    )?);
+    // The activity fans out BEFORE the write (`:1783-1792`).
+    let mut requested_map = Map::with_capacity(1);
+    requested_map.insert("link_id".to_owned(), Value::String(pk.to_string()));
+    let requested =
+        pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&Value::Object(requested_map));
+    let kwargs = work_tasks::issue_activity_kwargs(
+        work_tasks::ACTIVITY_LINK_DELETED,
+        Some(&requested),
+        &pre.actor.id.to_string(),
+        &issue_id.to_string(),
+        &project_id.to_string(),
+        Some(&current),
+        Utc::now().timestamp(),
+    );
+    enqueue_best_effort(&pre.pool, work_tasks::ISSUE_ACTIVITY_TASK, vec![], kwargs).await;
+    // `SoftDeleteModel.delete()`: `deleted_at` + full `save()` (so
+    // `updated_at`/`updated_by` move) plus the related-objects sweep.
+    // Two `now()` calls like `delete()`: `deleted_at` stamps first,
+    // `updated_at` re-stamps on the `save()`.
+    let deleted_at = now_utc();
+    let updated_at = now_utc();
+    sqlx::query(
+        r#"UPDATE "issue_links" SET "deleted_at" = $1, "updated_at" = $2, "updated_by_id" = $3 WHERE "id" = $4"#,
+    )
+    .bind(deleted_at)
+    .bind(updated_at)
+    .bind(pre.actor.id)
+    .bind(pk)
+    .execute(&pre.pool)
+    .await
+    .map_err(|error| db_error(error, "link-delete"))?;
+    let (sweep_args, sweep_kwargs) = soft_delete_sweep("issuelink", &pk.to_string());
+    enqueue_best_effort(&pre.pool, SOFT_DELETE_TASK, sweep_args, sweep_kwargs).await;
+    Ok(Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(axum::body::Body::empty())
+        .expect("empty response"))
+}
+
+// ---------------------------------------------------------------------------
+// Comment input helpers
+// ---------------------------------------------------------------------------
+
+/// `base_host(request, is_app=True)` (`utils/host.py:17-60`): the app base
+/// URL when set, else the web origin; a missing pair raises
+/// `ImproperlyConfigured` into the 500.
+fn app_origin(urls: &pidash_db::config::UrlSettings) -> Result<String, Denial> {
+    if let Some(url) = urls.app_base_url.as_deref().filter(|s| !s.is_empty()) {
+        return Ok(url.to_owned());
+    }
+    if let Some(url) = urls.web_url.as_deref().filter(|s| !s.is_empty()) {
+        return Ok(url.to_owned());
+    }
+    Err(Denial::ServerError)
+}
+
+/// `GET .../comments/` (`views/issue.py:1851-1862`).
+pub async fn get_comment_list(
+    State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
+    Path((slug, project_id, issue_id)): Path<(String, String, String)>,
+    Query(query): Query<QueryMap>,
+    headers: HeaderMap,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&issue_id) {
+        return proxy_request(&state, "GET", original.to_string()).await;
+    }
+    let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
+    match comment_list_inner(&state, &headers, &slug, &project_id, &issue_id, &query).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn comment_list_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    issue_id: &Uuid,
+    query: &QueryMap,
+) -> Result<Response, Denial> {
+    use pidash_services::v1_work_items::shape_social::COMMENT_READ_FIELDS;
+    let pre = preamble(state, headers, slug).await?;
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        &project_id,
+        V1WorkItemsRoute::CommentList,
+        "GET",
+    )
+    .await?;
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    let per_page =
+        crate::paginator::parse_per_page(query_last(query, "per_page").as_deref(), 1000, 1000)
+            .map_err(page_denial)?;
+    let cursor_raw = query_last(query, "cursor").unwrap_or_else(|| format!("{per_page}:0:0"));
+    let cursor = crate::paginator::Cursor::from_string(&cursor_raw).map_err(page_denial)?;
+    let rows = fetch_comment_rows(&pre.pool, slug, &project_id, issue_id, &pre.actor.id).await?;
+    let total_count = rows.len() as i64;
+    let (page_rows, has_more) = window_rows(&rows, per_page, &cursor)?;
+    let (field_specs, kept, expand) = field_selection(query, COMMENT_READ_FIELDS)?;
+    let expand_refs: Vec<&str> = expand.iter().map(String::as_str).collect();
+    let web_base = pidash_services::v1_work_items::shape_issue::web_base_url(
+        state.settings().urls.web_url.as_deref(),
+        state.settings().urls.app_base_url.as_deref(),
+    );
+    // One issue per list: a single `get_url` for every row.
+    let list_url = comment_url(
+        &pre.pool,
+        &workspace_id,
+        &project_id,
+        issue_id,
+        web_base.as_deref(),
+    )
+    .await?;
+    let mut rendered: Vec<Value> = Vec::with_capacity(page_rows.len());
+    for row in page_rows {
+        let decoded = decode_comment(row, &tz)?;
+        let expansions = comment_expansions(
+            &pre.pool,
+            &decoded,
+            slug,
+            &tz,
+            web_base.as_deref(),
+            &expand_refs,
+            &kept,
+        )
+        .await?;
+        rendered.push(render_comment_value(
+            &decoded,
+            list_url.clone(),
+            field_specs.as_deref(),
+            &expand_refs,
+            &expansions,
+        )?);
+    }
+    let next = crate::paginator::next_cursor(per_page, cursor.offset, has_more);
+    let prev = crate::paginator::prev_cursor(per_page, cursor.offset);
+    envelope(total_count, per_page, &next, &prev, Value::Array(rendered))
+}
+
+/// `GET .../comments/<pk>/` (`views/issue.py:2003-2010`).
+pub async fn get_comment_detail(
+    State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
+    Path((slug, project_id, issue_id, pk)): Path<(String, String, String, String)>,
+    Query(query): Query<QueryMap>,
+    headers: HeaderMap,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&issue_id)
+        || !crate::runner_runs::is_uuid_path_segment(&pk)
+    {
+        return proxy_request(&state, "GET", original.to_string()).await;
+    }
+    let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
+    let pk = pk.parse::<Uuid>().expect("checked segment");
+    match comment_detail_inner(&state, &headers, &slug, &project_id, &issue_id, &pk, &query).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn comment_detail_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    issue_id: &Uuid,
+    pk: &Uuid,
+    query: &QueryMap,
+) -> Result<Response, Denial> {
+    use pidash_services::v1_work_items::shape_social::COMMENT_READ_FIELDS;
+    let pre = preamble(state, headers, slug).await?;
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        &project_id,
+        V1WorkItemsRoute::CommentDetail,
+        "GET",
+    )
+    .await?;
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    let Some(row) =
+        fetch_comment_detail(&pre.pool, slug, &project_id, issue_id, &pre.actor.id, pk).await?
+    else {
+        return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
+    };
+    let (field_specs, kept, expand) = field_selection(query, COMMENT_READ_FIELDS)?;
+    let expand_refs: Vec<&str> = expand.iter().map(String::as_str).collect();
+    let web_base = pidash_services::v1_work_items::shape_issue::web_base_url(
+        state.settings().urls.web_url.as_deref(),
+        state.settings().urls.app_base_url.as_deref(),
+    );
+    let decoded = decode_comment(&row, &tz)?;
+    let url = comment_url(
+        &pre.pool,
+        &workspace_id,
+        &project_id,
+        issue_id,
+        web_base.as_deref(),
+    )
+    .await?;
+    let expansions = comment_expansions(
+        &pre.pool,
+        &decoded,
+        slug,
+        &tz,
+        web_base.as_deref(),
+        &expand_refs,
+        &kept,
+    )
+    .await?;
+    let body = render_comment_value(
+        &decoded,
+        url,
+        field_specs.as_deref(),
+        &expand_refs,
+        &expansions,
+    )?;
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::to_string(&body).map_err(|_| Denial::ServerError)?,
+    ))
+}
+
+/// `POST .../comments/` (`views/issue.py:1885-1949`).
+pub async fn post_comment(
+    State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
+    Path((slug, project_id, issue_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&issue_id) {
+        return proxy_request(&state, "POST", original.to_string()).await;
+    }
+    let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
+    let raw = match read_body(body).await {
+        Ok(raw) => raw,
+        Err(denial) => return denial.into_response(),
+    };
+    match comment_post_inner(&state, &headers, &slug, &project_id, &issue_id, &raw).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn comment_post_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    issue_id: &Uuid,
+    raw_body: &[u8],
+) -> Result<Response, Denial> {
+    let pre = preamble(state, headers, slug).await?;
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        &project_id,
+        V1WorkItemsRoute::CommentList,
+        "POST",
+    )
+    .await?;
+    // `TimezoneMixin.initial` precedes the view body: an unknown stored
+    // zone 400s here, before body parsing below.
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    let parsed_body = parse_write_body(headers, raw_body)?;
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = domain_write_ctx(&pre, &project_id);
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(state, &pre.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pre.pool));
+    let deps = operations::Deps {
+        pool: pre.pool.clone(),
+        orm: orm.clone(),
+        transition,
+        enqueue,
+    };
+    let write = operations::comments::CommentWrite {
+        slug,
+        project_id,
+        issue_id: *issue_id,
+        body: &parsed_body.value,
+        from_form: parsed_body.from_form,
+        origin: app_origin(&state.settings().urls).ok(),
+        web_base: pidash_services::v1_work_items::shape_issue::web_base_url(
+            state.settings().urls.web_url.as_deref(),
+            state.settings().urls.app_base_url.as_deref(),
+        ),
+    };
+    // The `created_at` override parser stays handler-side (its
+    // `parse_datetime` cascade lives here); the operation calls it after
+    // the save, where the view applies the override.
+    let resolve_created_at = move |raw: Option<&Value>| {
+        override_created_at(raw, &tz).map_err(|denial| match denial {
+            Denial::FieldErrors(body) => operations::Error::FieldErrors(body),
+            _ => operations::Error::ServerError,
+        })
+    };
+    let outcome = operations::comments::create(
+        &deps,
+        &ctx,
+        &write,
+        &resolve_created_at,
+        operations::comments::CommentCreateOptions {
+            emit_activity: true,
+            emit_model_activity: true,
+        },
+    )
+    .await?;
+    op_response(outcome)
+}
+
+/// The `created_at` override (`:1921`): absent → `now()`; a datetime
+/// string stores its instant (naive values bypass serializer handling —
+/// direct assignment — so Postgres reads them in the session zone, UTC),
+/// while the RESPONSE renders the raw input VERBATIM: the in-memory
+/// attribute keeps the assigned string and DRF returns strings untouched.
+/// Returns `(db_value, response_text)`. Explicit null violates NOT NULL →
+/// `IntegrityError` 400; unparseable strings → `ValidationError` 400;
+/// offsets Postgres rejects (fractional seconds, `≥ 16h`) → `DataError`
+/// 500; non-string scalars reach `parse_datetime` raw, whose
+/// `fromisoformat` raises an UNCAUGHT `TypeError` (only `ValueError` is
+/// caught) → 500.
+fn override_created_at(raw: Option<&Value>, tz: &Tz) -> Result<(DateTime<Utc>, String), Denial> {
+    match raw {
+        None => {
+            let now = now_utc();
+            Ok((now, crate::serializer::render_datetime_in(&now, tz)))
+        }
+        Some(Value::Null) => Err(Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())),
+        Some(Value::String(text)) => {
+            let naive = parse_naive_or_aware(text).map_err(|error| match error {
+                ParseDatetimeError::Unstorable => Denial::ServerError,
+                _ => Denial::FieldErrors(VALID_DETAIL_BODY.to_owned()),
+            })?;
+            let db = match naive {
+                NaiveOrAware::Aware(instant) => instant,
+                NaiveOrAware::Naive(local) => trunc_micros(local.and_utc()),
+            };
+            Ok((db, text.clone()))
+        }
+        Some(_) => Err(Denial::ServerError),
+    }
+}
+
+/// A parsed override datetime before zone handling.
+#[derive(Debug, PartialEq)]
+enum NaiveOrAware {
+    Naive(chrono::NaiveDateTime),
+    Aware(DateTime<Utc>),
+}
+
+/// Split an override datetime string into naive wall time vs instant: the
+/// `parse_datetime` grammar plus the model-field `parse_date` fallback.
+/// Postgres-bound offsets (`|offset| ≥ 16h`, fractional seconds) fail as
+/// `Unstorable`: the ORM passes the offset through and Postgres answers
+/// `DataError` 500.
+fn parse_naive_or_aware(text: &str) -> Result<NaiveOrAware, ParseDatetimeError> {
+    let (naive, offset) = parse_iso8601_core(text)
+        .or_else(|| parse_datere_arm(text).map(|midnight| (midnight, None)))
+        .ok_or(ParseDatetimeError::Invalid)?;
+    match offset {
+        Some(off) if off.seconds == 0 && off.micros == 0 => {
+            Ok(NaiveOrAware::Aware(trunc_micros(naive.and_utc())))
+        }
+        Some(off) if off.micros != 0 || off.seconds.abs() >= 57_600 => {
+            Err(ParseDatetimeError::Unstorable)
+        }
+        Some(off) => {
+            let utc = naive.and_utc() - chrono::Duration::seconds(off.seconds);
+            Ok(NaiveOrAware::Aware(trunc_micros(utc)))
+        }
+        None => Ok(NaiveOrAware::Naive(naive)),
+    }
+}
+
+/// `PATCH .../comments/<pk>/` (`views/issue.py:2034-2089`).
+pub async fn patch_comment(
+    State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
+    Path((slug, project_id, issue_id, pk)): Path<(String, String, String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&issue_id)
+        || !crate::runner_runs::is_uuid_path_segment(&pk)
+    {
+        return proxy_request(&state, "PATCH", original.to_string()).await;
+    }
+    let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
+    let pk = pk.parse::<Uuid>().expect("checked segment");
+    let raw = match read_body(body).await {
+        Ok(raw) => raw,
+        Err(denial) => return denial.into_response(),
+    };
+    match comment_patch_inner(&state, &headers, &slug, &project_id, &issue_id, &pk, &raw).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn comment_patch_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    issue_id: &Uuid,
+    pk: &Uuid,
+    raw_body: &[u8],
+) -> Result<Response, Denial> {
+    let pre = preamble(state, headers, slug).await?;
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        &project_id,
+        V1WorkItemsRoute::CommentDetail,
+        "PATCH",
+    )
+    .await?;
+    // `TimezoneMixin.initial` precedes the view body: an unknown stored
+    // zone 400s here, before the comment fetch 404s below.
+    activate_timezone(pre.actor.timezone.as_deref())?;
+    // The row fetch precedes body parsing (`:2036-2038`), so a missing
+    // comment 404s before a malformed body 400s.
+    let Some(before) = fetch_comment_direct(&pre.pool, slug, &project_id, issue_id, pk).await?
+    else {
+        return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
+    };
+    let parsed_body = parse_write_body(headers, raw_body)?;
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = domain_write_ctx(&pre, &project_id);
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(state, &pre.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pre.pool));
+    let deps = operations::Deps {
+        pool: pre.pool.clone(),
+        orm: orm.clone(),
+        transition,
+        enqueue,
+    };
+    let write = operations::comments::CommentUpdate {
+        slug,
+        project_id,
+        workspace_id,
+        issue_id: *issue_id,
+        pk: *pk,
+        before: &before,
+        body: &parsed_body.value,
+        from_form: parsed_body.from_form,
+        origin: app_origin(&state.settings().urls).ok(),
+        web_base: pidash_services::v1_work_items::shape_issue::web_base_url(
+            state.settings().urls.web_url.as_deref(),
+            state.settings().urls.app_base_url.as_deref(),
+        ),
+    };
+    let outcome = operations::comments::update(
+        &deps,
+        &ctx,
+        &write,
+        operations::comments::CommentUpdateOptions {
+            emit_activity: true,
+            emit_model_activity: true,
+        },
+    )
+    .await?;
+    op_response(outcome)
+}
+
+/// `DELETE .../comments/<pk>/` (`views/issue.py:2103-2121`).
+pub async fn delete_comment(
+    State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
+    Path((slug, project_id, issue_id, pk)): Path<(String, String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&issue_id)
+        || !crate::runner_runs::is_uuid_path_segment(&pk)
+    {
+        return proxy_request(&state, "DELETE", original.to_string()).await;
+    }
+    let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
+    let pk = pk.parse::<Uuid>().expect("checked segment");
+    match comment_delete_inner(&state, &headers, &slug, &project_id, &issue_id, &pk).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn comment_delete_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    issue_id: &Uuid,
+    pk: &Uuid,
+) -> Result<Response, Denial> {
+    let pre = preamble(state, headers, slug).await?;
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        &project_id,
+        V1WorkItemsRoute::CommentDetail,
+        "DELETE",
+    )
+    .await?;
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    let Some(before) = fetch_comment_direct(&pre.pool, slug, &project_id, issue_id, pk).await?
+    else {
+        return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
+    };
+    let before_decoded = decode_comment(&before, &tz)?;
+    let web_base = pidash_services::v1_work_items::shape_issue::web_base_url(
+        state.settings().urls.web_url.as_deref(),
+        state.settings().urls.app_base_url.as_deref(),
+    );
+    let before_url = comment_url(
+        &pre.pool,
+        &workspace_id,
+        &project_id,
+        issue_id,
+        web_base.as_deref(),
+    )
+    .await?;
+    let current = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(
+        &render_comment_value(&before_decoded, before_url, None, &[], &[])?,
+    );
+    // `SoftDeleteModel.delete()`: `deleted_at` + full `save()` (so
+    // `updated_at`/`updated_by` move) plus the related-objects sweep.
+    // Python deletes FIRST, then enqueues (`:2111-2120`).
+    // Two `now()` calls like `delete()`: `deleted_at` stamps first,
+    // `updated_at` re-stamps on the `save()`.
+    let deleted_at = now_utc();
+    let updated_at = now_utc();
+    comment_domain::soft_delete_v1_comment(&pre.pool, *pk, pre.actor.id, deleted_at, updated_at)
+        .await
+        .map_err(|error| db_error(error, "comment-delete"))?;
+    // `delete()` emits the sweep before the view enqueues the activity
+    // (`:2111-2120`): write, sweep, activity.
+    let (sweep_args, sweep_kwargs) = soft_delete_sweep("issuecomment", &pk.to_string());
+    enqueue_best_effort(&pre.pool, SOFT_DELETE_TASK, sweep_args, sweep_kwargs).await;
+    let mut requested_map = Map::with_capacity(1);
+    requested_map.insert("comment_id".to_owned(), Value::String(pk.to_string()));
+    let requested =
+        pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&Value::Object(requested_map));
+    let kwargs = work_tasks::issue_activity_kwargs(
+        work_tasks::ACTIVITY_COMMENT_DELETED,
+        Some(&requested),
+        &pre.actor.id.to_string(),
+        &issue_id.to_string(),
+        &project_id.to_string(),
+        Some(&current),
+        Utc::now().timestamp(),
+    );
+    enqueue_best_effort(&pre.pool, work_tasks::ISSUE_ACTIVITY_TASK, vec![], kwargs).await;
+    Ok(Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(axum::body::Body::empty())
+        .expect("empty response"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const F18_11: &str =
+        include_str!("../../../../fixtures/v1_work_items/handlers/F18-11.work_items.json");
+
+    fn calls() -> Map<String, Value> {
+        let fixture: Value = serde_json::from_str(F18_11).expect("fixture parses");
+        fixture
+            .get("calls")
+            .and_then(Value::as_object)
+            .cloned()
+            .expect("calls map")
+    }
+
+    fn call(name: &str) -> Value {
+        calls().get(name).cloned().unwrap_or(Value::Null)
+    }
+
+    fn str_field(body: &Value, key: &str) -> String {
+        body.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    fn opt_str_field(body: &Value, key: &str) -> Option<String> {
+        body.get(key).and_then(|v| match v {
+            Value::Null => None,
+            Value::String(text) => Some(text.clone()),
+            _ => None,
+        })
+    }
+
+    fn decoded_link(body: &Value) -> DecodedLink {
+        DecodedLink {
+            id: str_field(body, "id"),
+            created_at: str_field(body, "created_at"),
+            updated_at: str_field(body, "updated_at"),
+            deleted_at: opt_str_field(body, "deleted_at"),
+            title: opt_str_field(body, "title"),
+            url: str_field(body, "url"),
+            metadata: body.get("metadata").cloned().unwrap_or(Value::Null),
+            created_by: opt_str_field(body, "created_by"),
+            updated_by: opt_str_field(body, "updated_by"),
+            project: str_field(body, "project"),
+            workspace: str_field(body, "workspace"),
+            issue: str_field(body, "issue"),
+        }
+    }
+
+    fn decoded_comment(body: &Value, is_member: Option<bool>) -> DecodedComment {
+        let attachments = body
+            .get("attachments")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|item| item.as_str().map(str::to_owned))
+            .collect();
+        let labels = body
+            .get("labels")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|item| item.as_str().map(str::to_owned))
+            .collect();
+        DecodedComment {
+            id: str_field(body, "id"),
+            is_member,
+            created_at: str_field(body, "created_at"),
+            updated_at: str_field(body, "updated_at"),
+            deleted_at: opt_str_field(body, "deleted_at"),
+            comment_html: str_field(body, "comment_html"),
+            attachments,
+            labels,
+            access: str_field(body, "access"),
+            external_source: opt_str_field(body, "external_source"),
+            external_id: opt_str_field(body, "external_id"),
+            speaker_type: str_field(body, "speaker_type"),
+            speaker_label: str_field(body, "speaker_label"),
+            speaker_agent_run_id: opt_str_field(body, "speaker_agent_run_id"),
+            edited_at: opt_str_field(body, "edited_at"),
+            created_by: opt_str_field(body, "created_by"),
+            updated_by: opt_str_field(body, "updated_by"),
+            project: str_field(body, "project"),
+            workspace: str_field(body, "workspace"),
+            description: opt_str_field(body, "description"),
+            issue: str_field(body, "issue"),
+            actor: opt_str_field(body, "actor"),
+            parent: opt_str_field(body, "parent"),
+        }
+    }
+
+    fn keys_in_order(map: &Map<String, Value>) -> Vec<String> {
+        map.keys().cloned().collect()
+    }
+
+    // --- F18-11 replays: status + body byte-identical per route ---
+
+    #[tokio::test]
+    async fn replay_link_list_envelope_and_rows() {
+        let record = call("link_list");
+        assert_eq!(record.get("status").and_then(Value::as_u64), Some(200));
+        let recorded = record.get("envelope").expect("envelope");
+        let expected_keys = [
+            "grouped_by",
+            "sub_grouped_by",
+            "total_count",
+            "next_cursor",
+            "prev_cursor",
+            "next_page_results",
+            "prev_page_results",
+            "count",
+            "total_pages",
+            "total_results",
+            "extra_stats",
+        ];
+        assert_eq!(
+            keys_in_order(recorded.as_object().expect("object")),
+            expected_keys
+                .iter()
+                .map(|key| key.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            recorded.get("next_cursor").and_then(Value::as_str),
+            Some("1000:1:0")
+        );
+        assert_eq!(
+            recorded.get("prev_cursor").and_then(Value::as_str),
+            Some("1000:-1:1")
+        );
+        // Both full rows round-trip byte-identically through the row
+        // mapping + shape (volatile values ride in from the fixture).
+        let full = record
+            .get("results_full")
+            .and_then(Value::as_array)
+            .expect("results_full");
+        assert_eq!(full.len(), 2);
+        for row in full {
+            let rendered = render_link_value(&decoded_link(row), None, &[], &[]).expect("render");
+            assert_eq!(
+                serde_json::to_string(&rendered).expect("json"),
+                serde_json::to_string(row).expect("json"),
+            );
+        }
+        // The envelope builder reproduces the recorded envelope for the
+        // same inputs (all rows ride in here, so `count` matches too).
+        let rendered_rows: Vec<Value> = full
+            .iter()
+            .map(|row| render_link_value(&decoded_link(row), None, &[], &[]).expect("render"))
+            .collect();
+        let next = crate::paginator::next_cursor(1000, 0, false);
+        let prev = crate::paginator::prev_cursor(1000, 0);
+        let response =
+            envelope(2, 1000, &next, &prev, Value::Array(rendered_rows)).expect("envelope");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let mine: Value = serde_json::from_slice(&bytes).expect("envelope parses");
+        for key in expected_keys {
+            assert_eq!(mine.get(key), recorded.get(key), "{key}");
+        }
+        let mut recorded_full = recorded.clone();
+        recorded_full.as_object_mut().expect("object").insert(
+            "results".to_owned(),
+            record.get("results_full").cloned().unwrap_or(Value::Null),
+        );
+        assert_eq!(
+            serde_json::to_string(&mine).expect("json"),
+            serde_json::to_string(&recorded_full).expect("json"),
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_comment_list_envelope_and_rows() {
+        let record = call("comment_list");
+        assert_eq!(record.get("status").and_then(Value::as_u64), Some(200));
+        let recorded = record.get("envelope").expect("envelope");
+        let full = record
+            .get("results_full")
+            .and_then(Value::as_array)
+            .expect("results_full");
+        assert_eq!(full.len(), 2);
+        for row in full {
+            let is_member = row.get("is_member").and_then(Value::as_bool);
+            let url = opt_str_field(row, "url");
+            let rendered =
+                render_comment_value(&decoded_comment(row, is_member), url, None, &[], &[])
+                    .expect("render");
+            assert_eq!(
+                serde_json::to_string(&rendered).expect("json"),
+                serde_json::to_string(row).expect("json"),
+            );
+        }
+        let rendered_rows: Vec<Value> = full
+            .iter()
+            .map(|row| {
+                let is_member = row.get("is_member").and_then(Value::as_bool);
+                let url = opt_str_field(row, "url");
+                render_comment_value(&decoded_comment(row, is_member), url, None, &[], &[])
+                    .expect("render")
+            })
+            .collect();
+        let next = crate::paginator::next_cursor(1000, 0, false);
+        let prev = crate::paginator::prev_cursor(1000, 0);
+        let response =
+            envelope(2, 1000, &next, &prev, Value::Array(rendered_rows)).expect("envelope");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let mine: Value = serde_json::from_slice(&bytes).expect("envelope parses");
+        let mut recorded_full = recorded.clone();
+        recorded_full.as_object_mut().expect("object").insert(
+            "results".to_owned(),
+            record.get("results_full").cloned().unwrap_or(Value::Null),
+        );
+        assert_eq!(
+            serde_json::to_string(&mine).expect("json"),
+            serde_json::to_string(&recorded_full).expect("json"),
+        );
+    }
+
+    #[test]
+    fn replay_link_detail_body() {
+        let record = call("link_detail");
+        assert_eq!(record.get("status").and_then(Value::as_u64), Some(200));
+        let body = record.get("body").expect("body");
+        let rendered = render_link_value(&decoded_link(body), None, &[], &[]).expect("render");
+        assert_eq!(
+            serde_json::to_string(&rendered).expect("json"),
+            serde_json::to_string(body).expect("json"),
+        );
+    }
+
+    #[test]
+    fn replay_comment_detail_body() {
+        let record = call("comment_detail");
+        assert_eq!(record.get("status").and_then(Value::as_u64), Some(200));
+        let body = record.get("body").expect("body");
+        let is_member = body.get("is_member").and_then(Value::as_bool);
+        let url = opt_str_field(body, "url");
+        let rendered = render_comment_value(&decoded_comment(body, is_member), url, None, &[], &[])
+            .expect("render");
+        assert_eq!(
+            serde_json::to_string(&rendered).expect("json"),
+            serde_json::to_string(body).expect("json"),
+        );
+    }
+
+    #[test]
+    fn replay_link_create_body() {
+        let record = call("link_create");
+        assert_eq!(record.get("status").and_then(Value::as_u64), Some(201));
+        let body = record.get("body").expect("body");
+        let rendered = render_link_value(&decoded_link(body), None, &[], &[]).expect("render");
+        assert_eq!(
+            serde_json::to_string(&rendered).expect("json"),
+            serde_json::to_string(body).expect("json"),
+        );
+        // The activity `requested_data` is the 3-key create read shape.
+        let data = link_create_data(
+            body.get("title").and_then(Value::as_str),
+            body.get("url").and_then(Value::as_str).expect("url"),
+            body.get("issue").and_then(Value::as_str).expect("issue"),
+        );
+        assert_eq!(
+            pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&data),
+            format!(
+                "{{\"title\": {}, \"url\": {}, \"issue_id\": {}}}",
+                serde_json::to_string(body.get("title").expect("title")).expect("json"),
+                serde_json::to_string(body.get("url").expect("url")).expect("json"),
+                serde_json::to_string(body.get("issue").expect("issue")).expect("json"),
+            ),
+        );
+    }
+
+    #[test]
+    fn replay_comment_create_body() {
+        let record = call("comment_create");
+        assert_eq!(record.get("status").and_then(Value::as_u64), Some(201));
+        let body = record.get("body").expect("body");
+        // Write responses render the un-annotated instance: no `is_member`.
+        assert!(body.get("is_member").is_none());
+        let url = opt_str_field(body, "url");
+        let rendered = render_comment_value(&decoded_comment(body, None), url, None, &[], &[])
+            .expect("render");
+        assert_eq!(
+            serde_json::to_string(&rendered).expect("json"),
+            serde_json::to_string(body).expect("json"),
+        );
+    }
+
+    #[test]
+    fn replay_link_patch_body() {
+        let record = call("link_patch");
+        assert_eq!(record.get("status").and_then(Value::as_u64), Some(200));
+        let body = record.get("body").expect("body");
+        assert_eq!(body.get("title").and_then(Value::as_str), Some("t2"));
+        let rendered = render_link_value(&decoded_link(body), None, &[], &[]).expect("render");
+        assert_eq!(
+            serde_json::to_string(&rendered).expect("json"),
+            serde_json::to_string(body).expect("json"),
+        );
+    }
+
+    #[test]
+    fn replay_comment_patch_body() {
+        let record = call("comment_patch");
+        assert_eq!(record.get("status").and_then(Value::as_u64), Some(200));
+        let body = record.get("body").expect("body");
+        assert!(body.get("is_member").is_none());
+        let url = opt_str_field(body, "url");
+        let rendered = render_comment_value(&decoded_comment(body, None), url, None, &[], &[])
+            .expect("render");
+        assert_eq!(
+            serde_json::to_string(&rendered).expect("json"),
+            serde_json::to_string(body).expect("json"),
+        );
+    }
+
+    #[test]
+    fn replay_link_create_bad_url() {
+        let record = call("link_create_bad_url");
+        assert_eq!(record.get("status").and_then(Value::as_u64), Some(400));
+        let request = record.get("request").expect("request");
+        let error = validate_link_create(request).expect_err("bad url fails");
+        assert_eq!(
+            error.body(),
+            &serde_json::to_string(record.get("body").expect("body")).expect("json"),
+        );
+    }
+
+    #[test]
+    fn replay_delete_statuses() {
+        for name in ["link_delete", "comment_delete"] {
+            let record = call(name);
+            assert_eq!(
+                record.get("status").and_then(Value::as_u64),
+                Some(204),
+                "{name}"
+            );
+            assert_eq!(
+                record.get("body"),
+                Some(&serde_json::json!({"<non-json>": ""})),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_deprecated_twins_same_body() {
+        let fixture: Value = serde_json::from_str(F18_11).expect("fixture parses");
+        let twins = fixture
+            .get("deprecated_twins")
+            .and_then(Value::as_object)
+            .expect("twins");
+        for name in ["link_list", "comment_list", "link_detail", "comment_detail"] {
+            assert_eq!(
+                twins.get(name).and_then(|t| t.get("same_body")),
+                Some(&Value::Bool(true)),
+                "{name}"
+            );
+        }
+    }
+
+    // --- Denials: exact statuses + bodies ---
+
+    #[test]
+    fn denial_statuses_and_bodies() {
+        assert_eq!(
+            Denial::Unauthorized.status_and_body(),
+            (
+                StatusCode::UNAUTHORIZED,
+                r#"{"detail":"Authentication credentials were not provided."}"#.to_owned()
+            )
+        );
+        assert_eq!(
+            Denial::InvalidToken.status_and_body(),
+            (
+                StatusCode::FORBIDDEN,
+                r#"{"detail":"Given API token is not valid"}"#.to_owned()
+            )
+        );
+        assert_eq!(
+            Denial::Forbidden.status_and_body(),
+            (
+                StatusCode::FORBIDDEN,
+                r#"{"detail":"You do not have permission to perform this action."}"#.to_owned()
+            )
+        );
+        assert_eq!(
+            Denial::ProjectNotFound.status_and_body(),
+            (
+                StatusCode::NOT_FOUND,
+                r#"{"detail":"Project not found"}"#.to_owned()
+            )
+        );
+        assert_eq!(
+            Denial::BadDetail("JSON parse error - x".to_owned()).status_and_body(),
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"detail":"JSON parse error - x"}"#.to_owned()
+            )
+        );
+        assert_eq!(
+            Denial::BadError("The required key does not exist.".to_owned()).status_and_body(),
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"error":"The required key does not exist."}"#.to_owned()
+            )
+        );
+        assert_eq!(
+            Denial::UnsupportedMediaType("Unsupported media type".to_owned()).status_and_body(),
+            (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                r#"{"detail":"Unsupported media type"}"#.to_owned()
+            )
+        );
+        assert_eq!(
+            Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()).status_and_body(),
+            (StatusCode::NOT_FOUND, RESOURCE_NOT_FOUND_BODY.to_owned())
+        );
+        assert_eq!(
+            Denial::Conflict("dup".to_owned()).status_and_body().0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            Denial::ServerError.status_and_body(),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                SERVER_ERROR_BODY.to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn sweep_payload_shape() {
+        let (args, kwargs) = soft_delete_sweep("issuelink", "abc");
+        assert_eq!(
+            args,
+            vec![
+                Value::String("db".to_owned()),
+                Value::String("issuelink".to_owned()),
+                Value::String("abc".to_owned()),
+            ]
+        );
+        assert_eq!(kwargs.get("using"), Some(&Value::Null));
+        assert_eq!(kwargs.len(), 1);
+        assert_eq!(
+            SOFT_DELETE_TASK,
+            "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_response_escapes_u2028() {
+        let response = json_response(StatusCode::OK, "  ".to_owned());
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(bytes.as_ref(), b"\\u2028\\u2029");
+    }
+
+    // --- Link PATCH validation (Show partial) ---
+
+    fn utc_tz() -> Tz {
+        "UTC".parse().expect("utc")
+    }
+
+    fn patch_map(pairs: &[(&str, Value)]) -> Map<String, Value> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn link_patch_accepts_unvalidated_url() {
+        // BUG-2: no `validate_url` on this path.
+        let map = patch_map(&[("url", Value::String("not-a-url".to_owned()))]);
+        let validated = validate_link_patch(&map, false, &utc_tz()).expect("valid");
+        assert_eq!(validated.url.as_deref(), Some("not-a-url"));
+        assert!(validated.title.is_none());
+    }
+
+    #[test]
+    fn link_patch_trims_and_stringifies() {
+        let map = patch_map(&[
+            ("title", Value::String("  padded  ".to_owned())),
+            ("url", Value::from(123)),
+        ]);
+        let validated = validate_link_patch(&map, false, &utc_tz()).expect("valid");
+        assert_eq!(validated.title, Some(Some("padded".to_owned())));
+        assert_eq!(validated.url.as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn link_patch_ignores_readonly_and_unknown() {
+        let map = patch_map(&[
+            ("id", Value::String("x".to_owned())),
+            ("issue", Value::String("y".to_owned())),
+            ("created_by", Value::String("z".to_owned())),
+            ("nope", Value::from(1)),
+        ]);
+        let validated = validate_link_patch(&map, false, &utc_tz()).expect("valid");
+        assert!(validated.title.is_none());
+        assert!(validated.url.is_none());
+        assert!(validated.metadata.is_none());
+        assert!(validated.deleted_at.is_none());
+    }
+
+    #[test]
+    fn link_patch_null_title_and_deleted_at() {
+        let map = patch_map(&[("title", Value::Null), ("deleted_at", Value::Null)]);
+        let validated = validate_link_patch(&map, false, &utc_tz()).expect("valid");
+        assert_eq!(validated.title, Some(None));
+        assert_eq!(validated.deleted_at, Some(None));
+    }
+
+    #[test]
+    fn link_patch_deleted_at_parses() {
+        let map = patch_map(&[(
+            "deleted_at",
+            Value::String("2026-10-01T10:00:00Z".to_owned()),
+        )]);
+        let validated = validate_link_patch(&map, false, &utc_tz()).expect("valid");
+        let dt = validated.deleted_at.expect("set").expect("instant");
+        assert_eq!(dt.to_rfc3339(), "2026-10-01T10:00:00+00:00");
+    }
+
+    #[test]
+    fn link_patch_errors_in_model_field_order() {
+        // `deleted_at`, `title`, `url`, `metadata` — however the keys arrive.
+        let map = patch_map(&[
+            ("metadata", Value::Null),
+            ("url", Value::String(String::new())),
+            ("title", Value::String("x".repeat(300))),
+            ("deleted_at", Value::String("garbage".to_owned())),
+        ]);
+        let body = validate_link_patch(&map, false, &utc_tz()).expect_err("errors");
+        let parsed: Value = serde_json::from_str(&body).expect("parses");
+        assert_eq!(
+            keys_in_order(parsed.as_object().expect("object")),
+            ["deleted_at", "title", "url", "metadata"]
+                .iter()
+                .map(|key| key.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            body,
+            "{\"deleted_at\":[\"Datetime has wrong format. Use one of these formats instead: YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM|Z].\"],\"title\":[\"Ensure this field has no more than 255 characters.\"],\"url\":[\"This field may not be blank.\"],\"metadata\":[\"This field may not be null.\"]}",
+        );
+    }
+
+    #[test]
+    fn link_patch_type_errors() {
+        let map = patch_map(&[
+            ("title", Value::Bool(true)),
+            ("url", Value::Array(vec![])),
+            ("deleted_at", Value::from(1)),
+        ]);
+        let body = validate_link_patch(&map, false, &utc_tz()).expect_err("errors");
+        assert_eq!(
+            body,
+            "{\"deleted_at\":[\"Datetime has wrong format. Use one of these formats instead: YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM|Z].\"],\"title\":[\"Not a valid string.\"],\"url\":[\"Not a valid string.\"]}",
+        );
+    }
+
+    #[test]
+    fn link_patch_nul_rejected() {
+        let map = patch_map(&[("title", Value::String("a\0b".to_owned()))]);
+        let body = validate_link_patch(&map, false, &utc_tz()).expect_err("errors");
+        assert_eq!(body, "{\"title\":[\"Null characters are not allowed.\"]}");
+    }
+
+    #[test]
+    fn link_patch_non_object_bodies() {
+        assert_eq!(
+            patch_not_a_dict_body(&Value::Array(vec![Value::from(1)])),
+            "{\"non_field_errors\":[\"Invalid data. Expected a dictionary, but got list.\"]}",
+        );
+        assert_eq!(
+            patch_not_a_dict_body(&Value::Null),
+            "{\"non_field_errors\":[\"No data provided\"]}",
+        );
+    }
+
+    #[test]
+    fn link_patch_form_arms() {
+        // Blank `deleted_at` becomes null; `metadata` arrives as a JSON
+        // string; blank `url` still 400s (`get_value` uses the static
+        // `required` flag — verified live).
+        let map = patch_map(&[
+            ("deleted_at", Value::String(String::new())),
+            ("metadata", Value::String("{\"a\":1}".to_owned())),
+        ]);
+        let validated = validate_link_patch(&map, true, &utc_tz()).expect("valid");
+        assert!(validated.url.is_none());
+        assert_eq!(validated.deleted_at, Some(None));
+        assert_eq!(validated.metadata, Some(serde_json::json!({"a": 1})));
+        let blank = patch_map(&[("url", Value::String(String::new()))]);
+        assert_eq!(
+            validate_link_patch(&blank, true, &utc_tz()).expect_err("errors"),
+            "{\"url\":[\"This field may not be blank.\"]}",
+        );
+        let bad = patch_map(&[("metadata", Value::String("{oops".to_owned()))]);
+        assert_eq!(
+            validate_link_patch(&bad, true, &utc_tz()).expect_err("errors"),
+            "{\"metadata\":[\"Value must be valid JSON.\"]}",
+        );
+    }
+
+    // --- Datetime + override + guard helpers ---
+
+    #[test]
+    fn django_datetime_grammar() {
+        let utc = utc_tz();
+        let instant = |text: &str| {
+            parse_django_datetime(text, &utc)
+                .expect("parses")
+                .to_rfc3339()
+        };
+        assert_eq!(instant("2026-10-01T10:00:00Z"), "2026-10-01T10:00:00+00:00");
+        assert_eq!(
+            instant("2026-10-01T12:00:00+02:00"),
+            "2026-10-01T10:00:00+00:00"
+        );
+        assert_eq!(instant("2026-10-01 10:00"), "2026-10-01T10:00:00+00:00");
+        assert_eq!(instant("2026-10-01"), "2026-10-01T00:00:00+00:00");
+        assert_eq!(
+            instant("2026-10-01T10:00:00.123456Z"),
+            "2026-10-01T10:00:00.123456+00:00"
+        );
+        assert_eq!(
+            parse_django_datetime("garbage", &utc),
+            Err(ParseDatetimeError::Invalid)
+        );
+        assert_eq!(
+            parse_django_datetime("", &utc),
+            Err(ParseDatetimeError::Invalid)
+        );
+        assert_eq!(
+            parse_django_datetime("2026-13-01", &utc),
+            Err(ParseDatetimeError::Invalid)
+        );
+        // A nonexistent wall time (spring-forward gap) takes the
+        // `make_aware` arm, not the format arm.
+        let eastern: Tz = "America/New_York".parse().expect("tz");
+        assert_eq!(
+            parse_django_datetime("2024-03-10T02:30:00", &eastern),
+            Err(ParseDatetimeError::Nonexistent)
+        );
+        // An ambiguous wall time (fall-back fold) takes the earlier side.
+        assert_eq!(
+            parse_django_datetime("2024-11-03T01:30:00", &eastern)
+                .expect("parses")
+                .to_rfc3339(),
+            "2024-11-03T05:30:00+00:00"
+        );
+        // Naive values attach the REQUEST zone on serializer paths.
+        assert_eq!(
+            parse_django_datetime("2026-10-01T10:00:00", &eastern)
+                .expect("parses")
+                .to_rfc3339(),
+            "2026-10-01T14:00:00+00:00"
+        );
+    }
+
+    #[test]
+    fn django_datetime_grammar_gaps() {
+        // PIDASHCONV-756: every arm probed live against Django 4.2.30 /
+        // CPython 3.12 (`parse_datetime` + DRF `DateTimeField`), then pinned
+        // here. Serializer path (`parse_django_datetime`, UTC request zone).
+        let utc = utc_tz();
+        let instant = |text: &str| {
+            parse_django_datetime(text, &utc)
+                .expect("parses")
+                .to_rfc3339()
+        };
+        // Accept with exact instants (hour-only, week/basic dates, comma
+        // fractions, seconds-bearing offsets, any-char separators, basic
+        // times, `+` as separator rather than zone, truncation, kept and
+        // dropped tz fractions, regex-arm ws/`$`-quirk/non-padded forms).
+        assert_eq!(instant("2024-01-01T12"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("2024-W01-1"), "2024-01-01T00:00:00+00:00");
+        assert_eq!(instant("20240101"), "2024-01-01T00:00:00+00:00");
+        assert_eq!(
+            instant("2024-01-01 12:00:00,123"),
+            "2024-01-01T12:00:00.123+00:00"
+        );
+        assert_eq!(
+            instant("2024-01-01T12:00:00+00:00:00"),
+            "2024-01-01T12:00:00+00:00"
+        );
+        assert_eq!(
+            instant("2024-01-01T12:00:00+00:00:01"),
+            "2024-01-01T11:59:59+00:00"
+        );
+        assert_eq!(instant("2024-01-01T12:00 "), "2024-01-01T12:00:00+00:00");
+        assert_eq!(
+            instant("2024-01-01T12:00:00+00:00\n"),
+            "2024-01-01T12:00:00+00:00"
+        );
+        assert_eq!(instant("2024-01-01X12:00"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("2024-01-01T120000"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("2024-01-01T1200"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("2024-01-01+00:00"), "2024-01-01T00:00:00+00:00");
+        assert_eq!(instant("2024-01-01+05:00"), "2024-01-01T05:00:00+00:00");
+        assert_eq!(
+            instant("2024-01-01T12:00:00.123456789012345"),
+            "2024-01-01T12:00:00.123456+00:00"
+        );
+        assert_eq!(instant("2024-01-01T12.5"), "2024-01-01T12:00:00.500+00:00");
+        assert_eq!(
+            instant("2024-01-01T12:00:00+23:59"),
+            "2023-12-31T12:01:00+00:00"
+        );
+        assert_eq!(
+            instant("2024-01-01T12:00:00+05.5"),
+            "2024-01-01T06:59:59.500+00:00"
+        );
+        assert_eq!(
+            instant("2024-01-01T12:00:00+01:02:03:04"),
+            "2024-01-01T10:57:56.960+00:00"
+        );
+        assert_eq!(instant("2024-01-01T12:00Z"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("2024-01-01T12:00 Z"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("2024-01-01T1:2"), "2024-01-01T01:02:00+00:00");
+        assert_eq!(
+            instant("2024-01-01T12:00:00.+00:00"),
+            "2024-01-01T12:00:00+00:00"
+        );
+        assert_eq!(
+            instant("2024-01-01T12:00:00X+00:00"),
+            "2024-01-01T12:00:00+00:00"
+        );
+        assert_eq!(
+            instant("2024-01-01T12:00:00+00:00:00.5"),
+            "2024-01-01T12:00:00+00:00"
+        );
+        assert_eq!(instant("2024W011"), "2024-01-01T00:00:00+00:00");
+        assert_eq!(instant("2024-W01"), "2024-01-01T00:00:00+00:00");
+        assert_eq!(instant("2020-W53-7"), "2021-01-03T00:00:00+00:00");
+        assert_eq!(
+            instant("0001-01-01T00:00:01+00:00:01"),
+            "0001-01-01T00:00:00+00:00"
+        );
+        // No length cap: Django takes fractions of any length.
+        let long = format!("2024-01-01T12:00:00.{}7", "1".repeat(90));
+        assert_eq!(instant(&long), "2024-01-01T12:00:00.111111+00:00");
+        // Reject: lowercase z, surrounding whitespace (except the regex-arm
+        // trailing run with no zone), year zero, bad components, bad zones,
+        // bad weeks, ordinals, mixed basic/extended forms, week digit traps,
+        // over-long regex-arm fractions. No `parse_date` fallback here.
+        for text in [
+            "2024-01-01T12:00:00z",
+            " 2024-01-01T12:00:00",
+            "2024-01-01T12:00Z ",
+            "2024-01-01 ",
+            "2024-01-01T12 ",
+            "0000-01-01T00:00",
+            "2024-01-01T24:00",
+            "2024-01-01T12:60",
+            "2024-13-01T00:00",
+            "2024-01-01T12:00:00+24:00",
+            "2024-01-01T12:00:00+23:59:60",
+            "2024-01-01T12:00:00+99:99",
+            "2024-W53-1",
+            "9999-W52-7",
+            "2024-001",
+            "2024-01-01T1",
+            "2024-01-01T123",
+            "2024-01-01T123:45",
+            "2024-01-01T12:3456",
+            "2024-01-01T12:00:00+00:0000",
+            "2024-01-01T12:00:00+05X5",
+            "2024-01-01T12:00:00.5X+00:00",
+            "2024W0112:00",
+            "2024-W0112:00",
+            "2024010112:00",
+            "2024-01-01T1:2+00:00:00",
+            "2024-01-01T1:2:3.1234567890123",
+            "2024-1-1",
+            "2024-01-01\n",
+            "garbage",
+            "",
+        ] {
+            assert_eq!(
+                parse_django_datetime(text, &utc),
+                Err(ParseDatetimeError::Invalid),
+                "{text:?}"
+            );
+        }
+        // Aware values converting outside years `0001..9999` take the
+        // `overflow` arm, measured in the request zone like DRF.
+        for text in [
+            "9999-12-31T23:00:00-14:00",
+            "0001-01-01T00:30:00+14:00",
+            "0001-01-01T00:00:00+00:01",
+        ] {
+            assert_eq!(
+                parse_django_datetime(text, &utc),
+                Err(ParseDatetimeError::Overflow),
+                "{text:?}"
+            );
+        }
+        let auckland: Tz = "Pacific/Auckland".parse().expect("tz");
+        assert_eq!(
+            parse_django_datetime("9999-12-31T12:00:00+00:00", &auckland),
+            Err(ParseDatetimeError::Overflow)
+        );
+        assert!(parse_django_datetime("9999-12-31T12:00:00+00:00", &utc).is_ok());
+        let eastern: Tz = "America/New_York".parse().expect("tz");
+        assert_eq!(
+            parse_django_datetime("0001-01-01T00:00:00+00:00", &eastern),
+            Err(ParseDatetimeError::Overflow)
+        );
+    }
+
+    #[test]
+    fn naive_or_aware_grammar_gaps() {
+        // PIDASHCONV-756, model path: the shared grammar plus the
+        // `parse_date` fallback, no overflow (Postgres stores out-of-range
+        // instants fine), and `Unstorable` for offsets Postgres rejects.
+        let naive = |text: &str| match parse_naive_or_aware(text).expect("parses") {
+            NaiveOrAware::Naive(dt) => dt.to_string(),
+            NaiveOrAware::Aware(_) => panic!("naive expected for {text:?}"),
+        };
+        let aware = |text: &str| match parse_naive_or_aware(text).expect("parses") {
+            NaiveOrAware::Aware(dt) => dt.to_rfc3339(),
+            NaiveOrAware::Naive(_) => panic!("aware expected for {text:?}"),
+        };
+        assert_eq!(naive("2024-01-01T12"), "2024-01-01 12:00:00");
+        assert_eq!(naive("2024-W01-1"), "2024-01-01 00:00:00");
+        assert_eq!(naive("2024-01-01+05:00"), "2024-01-01 05:00:00");
+        assert_eq!(naive("2024-1-1"), "2024-01-01 00:00:00");
+        assert_eq!(naive("2024-01-01\n"), "2024-01-01 00:00:00");
+        assert_eq!(
+            aware("2024-01-01T12:00:00+00:00:01"),
+            "2024-01-01T11:59:59+00:00"
+        );
+        assert_eq!(
+            aware("2024-01-01T12:00:00+15:59:59"),
+            "2023-12-31T20:00:01+00:00"
+        );
+        assert_eq!(
+            aware("2024-01-01T12:00:00+00:00:00.5"),
+            "2024-01-01T12:00:00+00:00"
+        );
+        // Year-10000 instants are fine here (no conversion happens).
+        assert_eq!(
+            aware("9999-12-31T23:00:00-14:00"),
+            "+10000-01-01T13:00:00+00:00"
+        );
+        // Fractional and ≥16h offsets: Postgres `DataError` 500s live.
+        for text in [
+            "2024-01-01T12:00:00+05.5",
+            "2024-01-01T12:00:00+23:59",
+            "2024-01-01T12:00:00+16:00",
+            "2024-01-01T12:00:00-16:00",
+            "2024-01-01T12:00:00-00:01.5",
+            "2024-01-01T12:00:00+01:02:03:04",
+        ] {
+            assert_eq!(
+                parse_naive_or_aware(text),
+                Err(ParseDatetimeError::Unstorable),
+                "{text:?}"
+            );
+        }
+        for text in [
+            "2024-01-01T12:00:00z",
+            " 2024-01-01T12:00:00",
+            "0000-01-01T00:00",
+            "2024-01-01T12:00:00+24:00",
+            "garbage",
+        ] {
+            assert_eq!(
+                parse_naive_or_aware(text),
+                Err(ParseDatetimeError::Invalid),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn django_datetime_unicode_digits() {
+        // PIDASHCONV-765: the `datetime_re`/`date_re` arms take Python
+        // `\d` (Unicode `Decimal_Number`, any script, mixed scripts fold
+        // per-char like `int()`); the `fromisoformat` arm stays
+        // ASCII-only, and non-decimal numerics (Nl/No) never parse.
+        // Probed against Django 4.2.30 / CPython 3.12, then pinned here.
+        let utc = utc_tz();
+        let instant = |text: &str| {
+            parse_django_datetime(text, &utc)
+                .expect("parses")
+                .to_rfc3339()
+        };
+        // Accept with exact instants: Arabic-Indic, Devanagari, mixed
+        // scripts, non-padded, Nd fractions/zones, fullwidth (Nd, not
+        // ASCII), mathematical double-struck (the joined 1D7CE-1D7FF run).
+        assert_eq!(instant("٢٠٢٤-٠١-٠١T١٢:٠٠"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("२०२४-०१-०१T१२:००"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("2024-٠١-٠١T12:٠٠"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(instant("٢٠٢٤-١-١T١:٢"), "2024-01-01T01:02:00+00:00");
+        assert_eq!(
+            instant("2024-01-01T12:00:00.١٢٣"),
+            "2024-01-01T12:00:00.123+00:00"
+        );
+        assert_eq!(
+            instant("٢٠٢٤-٠١-٠١T١٢:٠٠:٠٠,٥٠٠٠٠٠"),
+            "2024-01-01T12:00:00.500+00:00"
+        );
+        assert_eq!(
+            instant("٢٠٢٤-٠١-٠١T١٢:٠٠+٠٥:٣٠"),
+            "2024-01-01T06:30:00+00:00"
+        );
+        assert_eq!(
+            instant("٢٠٢٤-٠١-٠١T١٢:٠٠+٠٥٣٠"),
+            "2024-01-01T06:30:00+00:00"
+        );
+        assert_eq!(
+            instant("２０２４-０１-０１T１２:００"),
+            "2024-01-01T12:00:00+00:00"
+        );
+        assert_eq!(instant("𝟚𝟘𝟚𝟜-01-01T12:00"), "2024-01-01T12:00:00+00:00");
+        // Date-only never parses on serializer paths (no `parse_date`
+        // fallback); Nl/No numerics and basic-track Nd dates never parse.
+        for text in [
+            "٢٠٢٤-٠١-٠١",
+            "½024-01-01T12:00",
+            "2024-01-01T12:00:0½",
+            "2024-0Ⅻ-01T12:00",
+            "٢٠٢٤٠١٠١",
+        ] {
+            assert_eq!(
+                parse_django_datetime(text, &utc),
+                Err(ParseDatetimeError::Invalid),
+                "{text:?}"
+            );
+        }
+        // Model path: the same grammar plus the `parse_date` fallback.
+        let naive = |text: &str| match parse_naive_or_aware(text).expect("parses") {
+            NaiveOrAware::Naive(dt) => dt.to_string(),
+            NaiveOrAware::Aware(_) => panic!("naive expected for {text:?}"),
+        };
+        let aware = |text: &str| match parse_naive_or_aware(text).expect("parses") {
+            NaiveOrAware::Aware(dt) => dt.to_rfc3339(),
+            NaiveOrAware::Naive(_) => panic!("aware expected for {text:?}"),
+        };
+        assert_eq!(naive("٢٠٢٤-٠١-٠١T١٢:٠٠"), "2024-01-01 12:00:00");
+        assert_eq!(naive("٢٠٢٤-٠١-٠١"), "2024-01-01 00:00:00");
+        assert_eq!(aware("٢٠٢٤-٠١-٠١T١٢:٠٠+٠٠:٠٠"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(aware("٢٠٢٤-٠١-٠١T١٢:٠٠+٠٥٣٠"), "2024-01-01T06:30:00+00:00");
+        for text in ["٢٠٢٤٠١٠١", "½024-01-01T12:00"] {
+            assert_eq!(
+                parse_naive_or_aware(text),
+                Err(ParseDatetimeError::Invalid),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn link_patch_deleted_at_overflow_message() {
+        // The DRF `overflow` 400 renders its own message (verified live).
+        let map = patch_map(&[(
+            "deleted_at",
+            Value::String("9999-12-31T23:00:00-14:00".to_owned()),
+        )]);
+        assert_eq!(
+            validate_link_patch(&map, false, &utc_tz()).expect_err("errors"),
+            "{\"deleted_at\":[\"Datetime value out of range.\"]}",
+        );
+    }
+
+    #[test]
+    fn link_patch_deleted_at_iso8601_literal_fallback() {
+        // PIDASHCONV-772: DRF `to_internal_value` falls through to
+        // `strptime(value, 'iso-8601')` when `parse_datetime` returns None;
+        // the literal matches case-insensitively and yields naive
+        // 1900-01-01 in the request zone (probed live both backends).
+        let utc = utc_tz();
+        for text in [
+            "iso-8601", "ISO-8601", "Iso-8601", "iSo-8601", "isO-8601", "ISo-8601", "IsO-8601",
+            "iSO-8601",
+        ] {
+            assert_eq!(
+                parse_django_datetime(text, &utc)
+                    .expect("parses")
+                    .to_rfc3339(),
+                "1900-01-01T00:00:00+00:00",
+                "{text:?}"
+            );
+            let map = patch_map(&[("deleted_at", Value::String(text.to_owned()))]);
+            let validated = validate_link_patch(&map, false, &utc).expect("valid");
+            assert_eq!(
+                validated
+                    .deleted_at
+                    .expect("set")
+                    .expect("some")
+                    .to_rfc3339(),
+                "1900-01-01T00:00:00+00:00",
+                "{text:?}"
+            );
+        }
+        // Near-misses stay invalid (exact match, both sides probed).
+        for text in [
+            "iso8601",
+            "xiso-8601",
+            "iso-8601x",
+            " iso-8601",
+            "iso-8601 ",
+            "iso-8601\n",
+            "\tiso-8601",
+        ] {
+            assert_eq!(
+                parse_django_datetime(text, &utc),
+                Err(ParseDatetimeError::Invalid),
+                "{text:?}"
+            );
+        }
+        // Model path has no `strptime` step: still invalid there.
+        assert_eq!(
+            parse_naive_or_aware("iso-8601"),
+            Err(ParseDatetimeError::Invalid)
+        );
+    }
+
+    #[test]
+    fn override_created_at_unstorable_arms() {
+        // Offsets Postgres rejects 500, exactly like Django live.
+        for text in ["2024-01-01T12:00:00+05.5", "2024-01-01T12:00:00+23:59"] {
+            let raw = Value::String(text.to_owned());
+            assert!(
+                matches!(
+                    override_created_at(Some(&raw), &utc_tz()),
+                    Err(Denial::ServerError)
+                ),
+                "{text:?}"
+            );
+        }
+        // Newly accepted shapes still echo verbatim on success.
+        let raw = Value::String("2024-01-01T12".to_owned());
+        let (db, echo) = override_created_at(Some(&raw), &utc_tz()).expect("ok");
+        assert_eq!(echo, "2024-01-01T12");
+        assert_eq!(db.to_rfc3339(), "2024-01-01T12:00:00+00:00");
+    }
+
+    #[test]
+    fn time_fraction_separator_rules() {
+        // PIDASHCONV-756 review (F1/F2/F3): CPython `fromisoformat`
+        // fraction rule, pinned against the 187-case differential oracle
+        // (pinned Django 4.2.30 / py3.12). Digits after the time need
+        // `[.,]` — or `:` only after extended seconds; any other ASCII
+        // separator must be empty with a tz after it; a `:` not followed
+        // by two digits is that separator; non-ASCII separators never
+        // count. Both parsers share the time scan, so both pin every arm.
+        let utc = utc_tz();
+        let instant = |text: &str| {
+            parse_django_datetime(text, &utc)
+                .expect("parses")
+                .to_rfc3339()
+        };
+        let naive = |text: &str| match parse_naive_or_aware(text).expect("parses") {
+            NaiveOrAware::Naive(dt) => dt.to_string(),
+            NaiveOrAware::Aware(_) => panic!("naive expected for {text:?}"),
+        };
+        let aware = |text: &str| match parse_naive_or_aware(text).expect("parses") {
+            NaiveOrAware::Aware(dt) => dt.to_rfc3339(),
+            NaiveOrAware::Naive(_) => panic!("aware expected for {text:?}"),
+        };
+        // F2 accepts: a lone `:` is the fraction separator at every time
+        // position, empty with a tz after it.
+        for text in [
+            "2024-01-01T12:+00:00",
+            "2024-01-01T12:00:+00:00",
+            "2024-01-01T1200:+00:00",
+            "2024-01-01T120000:+00:00",
+            "2024-01-01T12:00:00:+00:00",
+        ] {
+            assert_eq!(instant(text), "2024-01-01T12:00:00+00:00", "{text:?}");
+            assert_eq!(aware(text), "2024-01-01T12:00:00+00:00", "{text:?}");
+        }
+        // F1 counter-cases: `[.,]` fractions and `:` after extended
+        // seconds keep working, with exact instants.
+        assert_eq!(instant("2024-01-01T12,5"), "2024-01-01T12:00:00.500+00:00");
+        assert_eq!(naive("2024-01-01T12,5"), "2024-01-01 12:00:00.500");
+        assert_eq!(
+            instant("2024-01-01T12:00,5"),
+            "2024-01-01T12:00:00.500+00:00"
+        );
+        assert_eq!(naive("2024-01-01T12:00,5"), "2024-01-01 12:00:00.500");
+        assert_eq!(
+            instant("2024-01-01T1200,25+00:00"),
+            "2024-01-01T12:00:00.250+00:00"
+        );
+        assert_eq!(
+            aware("2024-01-01T1200,25+00:00"),
+            "2024-01-01T12:00:00.250+00:00"
+        );
+        assert_eq!(
+            instant("2024-01-01T12:00:00:12"),
+            "2024-01-01T12:00:00.120+00:00"
+        );
+        assert_eq!(naive("2024-01-01T12:00:00:12"), "2024-01-01 12:00:00.120");
+        // F3 counter-case: `é` as the date/time separator stays accepted
+        // (only the fraction separator rejects non-ASCII).
+        assert_eq!(instant("2024-01-01é12:00"), "2024-01-01T12:00:00+00:00");
+        assert_eq!(naive("2024-01-01é12:00"), "2024-01-01 12:00:00");
+        // Regex-arm interplay: the fromisoformat arm rejects these, but
+        // the `\d{1,2}` regex arm accepts — overall accept must survive.
+        assert_eq!(instant("2024-01-01T12:3"), "2024-01-01T12:03:00+00:00");
+        assert_eq!(naive("2024-01-01T12:3"), "2024-01-01 12:03:00");
+        assert_eq!(instant("2024-01-01T12:00:1"), "2024-01-01T12:00:01+00:00");
+        assert_eq!(naive("2024-01-01T12:00:1"), "2024-01-01 12:00:01");
+        assert_eq!(instant("2024-01-01T12:34:5"), "2024-01-01T12:34:05+00:00");
+        assert_eq!(naive("2024-01-01T12:34:5"), "2024-01-01 12:34:05");
+        assert_eq!(
+            instant("2024-01-01T12:3+00:00"),
+            "2024-01-01T12:03:00+00:00"
+        );
+        assert_eq!(aware("2024-01-01T12:3+00:00"), "2024-01-01T12:03:00+00:00");
+        // F1 rejects: separator + digits needs `[.,]`.
+        // F2 nearby rejects: colon-with-digits where no seconds exist,
+        // extended-MM + basic-SS, empty fraction with no tz after it.
+        // F3 reject: multibyte fraction separator, even empty with a tz.
+        for text in [
+            "2024-01-01T12X30",
+            "2024-01-01T12:00X30",
+            "2024-01-01T120000X30",
+            "2024-01-01T12_30",
+            "2024-01-01T12:00:00é12",
+            "2024-01-01T1200:12",
+            "2024-01-01T1200:12+00:00",
+            "2024-01-01T120000:5+00:00",
+            "2024-01-01T12:3456",
+            "2024-01-01T12:",
+            "2024-01-01T12:00:00:",
+            "2024-01-01T12:00:00é+00:00",
+        ] {
+            assert_eq!(
+                parse_django_datetime(text, &utc),
+                Err(ParseDatetimeError::Invalid),
+                "drf {text:?}"
+            );
+            assert_eq!(
+                parse_naive_or_aware(text),
+                Err(ParseDatetimeError::Invalid),
+                "model {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn created_by_override_arms() {
+        let actor = Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("uuid");
+        assert_eq!(override_user_id(None, &actor).expect("ok"), Some(actor));
+        assert_eq!(
+            override_user_id(Some(&Value::Null), &actor).expect("ok"),
+            None
+        );
+        let other = "22222222-2222-4222-8222-222222222222";
+        assert_eq!(
+            override_user_id(Some(&Value::String(other.to_owned())), &actor).expect("ok"),
+            Some(Uuid::parse_str(other).expect("uuid"))
+        );
+        assert_eq!(
+            override_user_id(Some(&Value::String("garbage".to_owned())), &actor)
+                .expect_err("errors"),
+            Denial::FieldErrors(VALID_DETAIL_BODY.to_owned())
+        );
+        // Ints coerce via `UUID(int=…)` and proceed to the save (live
+        // Django FK-violates into the payload 400); corrected from the
+        // valid-detail pin by live probe in review.
+        assert_eq!(
+            override_user_id(Some(&Value::from(7)), &actor).expect("int"),
+            Some(Uuid::from_u128(7))
+        );
+    }
+
+    #[test]
+    fn created_at_override_arms() {
+        let utc = utc_tz();
+        // Absent → now (both legs near-identical).
+        let (db, text) = override_created_at(None, &utc).expect("now");
+        assert!((Utc::now() - db).num_seconds().abs() < 60);
+        assert!(text.ends_with('Z'));
+        // Aware strings pass through as instants.
+        let (db, text) = override_created_at(
+            Some(&Value::String("2026-10-01T10:00:00Z".to_owned())),
+            &utc,
+        )
+        .expect("ok");
+        assert_eq!(db.to_rfc3339(), "2026-10-01T10:00:00+00:00");
+        assert_eq!(text, "2026-10-01T10:00:00Z");
+        // A date-only override also echoes verbatim.
+        let (db, text) =
+            override_created_at(Some(&Value::String("2024-05-01".to_owned())), &utc).expect("ok");
+        assert_eq!(db.to_rfc3339(), "2024-05-01T00:00:00+00:00");
+        assert_eq!(text, "2024-05-01");
+        // Naive strings store UTC but echo verbatim (live Django truth).
+        let eastern: Tz = "America/New_York".parse().expect("tz");
+        let (db, text) = override_created_at(
+            Some(&Value::String("2026-10-01T10:00:00".to_owned())),
+            &eastern,
+        )
+        .expect("ok");
+        assert_eq!(db.to_rfc3339(), "2026-10-01T10:00:00+00:00");
+        assert_eq!(text, "2026-10-01T10:00:00");
+        // Null violates NOT NULL; garbage fails `to_python`.
+        assert_eq!(
+            override_created_at(Some(&Value::Null), &utc).expect_err("errors"),
+            Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
+        );
+        assert_eq!(
+            override_created_at(Some(&Value::String("garbage".to_owned())), &utc)
+                .expect_err("errors"),
+            Denial::FieldErrors(VALID_DETAIL_BODY.to_owned())
+        );
+    }
+
+    #[test]
+    fn query_helpers() {
+        let mut query = QueryMap::new();
+        query.insert("fields".to_owned(), OneOrMany::One("id,,url".to_owned()));
+        query.insert(
+            "cursor".to_owned(),
+            OneOrMany::Many(vec!["a".to_owned(), "b".to_owned()]),
+        );
+        assert_eq!(
+            fields_param(&query, "fields"),
+            Some(vec!["id".to_owned(), "url".to_owned()])
+        );
+        assert_eq!(fields_param(&query, "missing"), None);
+        assert_eq!(fields_param(&query, "cursor"), Some(vec!["b".to_owned()]));
+        assert_eq!(query_last(&query, "cursor").as_deref(), Some("b"));
+        assert_eq!(query_last(&query, "missing"), None);
+    }
+
+    #[test]
+    fn pagination_helpers() {
+        use crate::paginator::{Cursor, PageError};
+        // First page: everything under the limit, no next page.
+        let rows = vec![1, 2];
+        let cursor = Cursor::from_string("1000:0:0").expect("cursor");
+        let (page, has_more) = window_rows(&rows, 1000, &cursor).expect("window");
+        assert_eq!(page, &[1, 2]);
+        assert!(!has_more);
+        // Over-limit windows trim with `has_more`.
+        let rows = vec![1, 2, 3];
+        let (page, has_more) = window_rows(&rows, 2, &cursor).expect("window");
+        assert_eq!(page, &[1, 2]);
+        assert!(has_more);
+        // A backwards walk with a mismatched cursor value 500s.
+        let cursor = Cursor::from_string("5:0:1").expect("cursor");
+        assert!(matches!(
+            window_rows(&rows, 2, &cursor),
+            Err(Denial::ServerError)
+        ));
+        // Paginator failures map: parse arms 400, evaluation arms 500.
+        assert!(matches!(
+            page_denial(PageError::InvalidCursor),
+            Denial::BadDetail(_)
+        ));
+        assert!(matches!(
+            page_denial(PageError::ZeroLimit),
+            Denial::ServerError
+        ));
+    }
+
+    // --- Review regressions (live Django truth, review run) ---
+
+    #[test]
+    fn link_patch_title_collects_all_validator_errors() {
+        // 256 chars + NUL → BOTH errors: DRF `run_validators` extends one
+        // list across MaxLength then ProhibitNull (verified live).
+        let title = "T".repeat(255) + "\0";
+        let map = patch_map(&[("title", Value::String(title))]);
+        let body = validate_link_patch(&map, false, &utc_tz()).expect_err("errors");
+        assert_eq!(
+            body,
+            "{\"title\":[\"Ensure this field has no more than 255 characters.\",\"Null characters are not allowed.\"]}"
+        );
+    }
+
+    #[test]
+    fn char_field_uses_python_strip() {
+        // `str.strip()` removes U+001C-U+001F; Rust `trim()` does not.
+        let map = patch_map(&[("url", Value::String("\u{1c}".to_owned()))]);
+        let body = validate_link_patch(&map, false, &utc_tz()).expect_err("blank");
+        assert_eq!(body, "{\"url\":[\"This field may not be blank.\"]}");
+        assert_eq!(
+            char_field_value(&Value::String("\u{1c}x\u{1f}".to_owned())),
+            "x"
+        );
+    }
+
+    #[test]
+    fn override_created_at_scalar_arms() {
+        // Non-string scalars reach `parse_datetime` raw: `fromisoformat`
+        // raises an UNCAUGHT `TypeError` → 500 (verified live).
+        for raw in [
+            Value::from(5),
+            Value::from(true),
+            Value::Array(vec![Value::from(1)]),
+            Value::Object(Map::new()),
+        ] {
+            assert!(
+                matches!(
+                    override_created_at(Some(&raw), &utc_tz()),
+                    Err(Denial::ServerError)
+                ),
+                "{raw:?}"
+            );
+        }
+        // Null violates NOT NULL → 400; garbage strings → 400; absent → now.
+        assert!(matches!(
+            override_created_at(Some(&Value::Null), &utc_tz()),
+            Err(Denial::FieldErrors(body)) if body == PAYLOAD_NOT_VALID_BODY
+        ));
+        assert!(matches!(
+            override_created_at(Some(&Value::String("garbage".to_owned())), &utc_tz()),
+            Err(Denial::FieldErrors(body)) if body == VALID_DETAIL_BODY
+        ));
+        assert!(override_created_at(None, &utc_tz()).is_ok());
+    }
+
+    #[test]
+    fn override_user_id_int_bool_arms() {
+        // `UUIDField.to_python` coerces ints AND bools via `UUID(int=…)`
+        // (verified live); the save then FK-violates into the 400.
+        let actor = Uuid::nil();
+        assert_eq!(
+            override_user_id(Some(&Value::from(7)), &actor).expect("int"),
+            Some(Uuid::from_u128(7))
+        );
+        assert_eq!(
+            override_user_id(Some(&Value::from(true)), &actor).expect("bool"),
+            Some(Uuid::from_u128(1))
+        );
+        assert_eq!(
+            override_user_id(Some(&Value::from(false)), &actor).expect("bool"),
+            Some(Uuid::from_u128(0))
+        );
+        // Negative ints (`ValueError`) and floats (`ValidationError`, the
+        // `UUID(hex=…)` `AttributeError` wrapped) → valid-detail 400.
+        for raw in [Value::from(-7), Value::from(7.5), Value::from(7.0)] {
+            assert!(
+                matches!(
+                    override_user_id(Some(&raw), &actor),
+                    Err(Denial::FieldErrors(body)) if body == VALID_DETAIL_BODY
+                ),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn window_rows_negative_limit_500s() {
+        use crate::paginator::Cursor;
+        let rows = vec![1];
+        // `results[:-1]` on the lazy queryset → 500 (verified live).
+        let cursor = Cursor::from_string("-1:0:0").expect("cursor");
+        assert!(matches!(
+            window_rows(&rows, -1, &cursor),
+            Err(Denial::ServerError)
+        ));
+        // A negative OFFSET still 400s first (`BadPaginationError`).
+        let cursor = Cursor::from_string("-1:1:0").expect("cursor");
+        assert!(matches!(
+            window_rows(&rows, -1, &cursor),
+            Err(Denial::BadDetail(_))
+        ));
+        // Zero limit still trims (the envelope `max_hits` 500s later).
+        let cursor = Cursor::from_string("0:0:0").expect("cursor");
+        let (page, _) = window_rows(&rows, 0, &cursor).expect("window");
+        assert!(page.is_empty());
+    }
+
+    #[test]
+    fn fk_violation_arms() {
+        #[derive(Debug)]
+        struct FakeDbError {
+            code: &'static str,
+        }
+        impl std::fmt::Display for FakeDbError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "fake {}", self.code)
+            }
+        }
+        impl std::error::Error for FakeDbError {}
+        impl sqlx::error::DatabaseError for FakeDbError {
+            fn message(&self) -> &str {
+                "fake"
+            }
+            fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+                Some(self.code.into())
+            }
+            fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+                self
+            }
+            fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+                self
+            }
+            fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+                self
+            }
+            fn kind(&self) -> sqlx::error::ErrorKind {
+                sqlx::error::ErrorKind::ForeignKeyViolation
+            }
+        }
+        let fk = sqlx::Error::Database(Box::new(FakeDbError { code: "23503" }));
+        assert!(is_fk_violation(&fk));
+        let other = sqlx::Error::Database(Box::new(FakeDbError { code: "23505" }));
+        assert!(!is_fk_violation(&other));
+        assert!(!is_fk_violation(&sqlx::Error::RowNotFound));
+    }
+
+    #[tokio::test]
+    async fn link_expansions_cover_audit_fields() {
+        // `expand=created_by|updated_by` supply values (null FKs → `{}` via
+        // `None`); without them the shape 500s on `MissingExpansion`.
+        let pool = PgPool::connect_lazy("postgres://127.0.0.1:1/nonexistent").expect("lazy pool");
+        let decoded = DecodedLink {
+            id: "id".to_owned(),
+            created_at: "ts".to_owned(),
+            updated_at: "ts".to_owned(),
+            deleted_at: None,
+            title: None,
+            url: "https://example.com".to_owned(),
+            metadata: Value::Object(Map::new()),
+            created_by: None,
+            updated_by: None,
+            project: "p".to_owned(),
+            workspace: "w".to_owned(),
+            issue: "i".to_owned(),
+        };
+        let kept = ["created_by".to_owned(), "updated_by".to_owned()];
+        let expansions = link_expansions(
+            &pool,
+            &decoded,
+            "slug",
+            &utc_tz(),
+            None,
+            &["created_by", "updated_by"],
+            &kept,
+        )
+        .await
+        .expect("expansions");
+        assert_eq!(expansions, vec![("created_by", None), ("updated_by", None)]);
+        let value = render_link_value(&decoded, None, &["created_by", "updated_by"], &expansions)
+            .expect("renders");
+        assert_eq!(value.get("created_by"), Some(&Value::Object(Map::new())));
+        assert_eq!(value.get("updated_by"), Some(&Value::Object(Map::new())));
+    }
+
+    #[tokio::test]
+    async fn comment_expansions_cover_parent() {
+        // `expand=parent` with a null parent supplies `None` (renders `{}`).
+        let pool = PgPool::connect_lazy("postgres://127.0.0.1:1/nonexistent").expect("lazy pool");
+        let decoded = DecodedComment {
+            id: "id".to_owned(),
+            is_member: None,
+            created_at: "ts".to_owned(),
+            updated_at: "ts".to_owned(),
+            deleted_at: None,
+            comment_html: "<p></p>".to_owned(),
+            attachments: Vec::new(),
+            labels: Vec::new(),
+            access: "INTERNAL".to_owned(),
+            external_source: None,
+            external_id: None,
+            speaker_type: "human".to_owned(),
+            speaker_label: String::new(),
+            speaker_agent_run_id: None,
+            edited_at: None,
+            created_by: None,
+            updated_by: None,
+            project: "p".to_owned(),
+            workspace: "w".to_owned(),
+            description: None,
+            issue: "i".to_owned(),
+            actor: None,
+            parent: None,
+        };
+        let kept = ["parent".to_owned()];
+        let expansions =
+            comment_expansions(&pool, &decoded, "slug", &utc_tz(), None, &["parent"], &kept)
+                .await
+                .expect("expansions");
+        assert_eq!(expansions, vec![("parent", None)]);
+        let value =
+            render_comment_value(&decoded, None, None, &["parent"], &expansions).expect("renders");
+        assert_eq!(value.get("parent"), Some(&Value::Object(Map::new())));
+    }
+
+    #[test]
+    fn char_field_float_inputs_use_python_spelling() {
+        // `str(1e100)` is `1e+100`: stored values, the 255 check and the
+        // guard compares all see the Python spelling (PIDASHCONV-758).
+        // `serde` keeps non-canonical layouts verbatim (`1.5e+3`, `1e-7`,
+        // `0.00001`); only the shared helper spells them like Python.
+        let float: Value = serde_json::from_str("1e100").expect("parses");
+        assert_eq!(char_field_value(&float), "1e+100");
+        assert!(char_field_errors(&float, true, true, Some(255)).is_empty());
+        let tiny: Value = serde_json::from_str("0.00001").expect("parses");
+        assert_eq!(char_field_value(&tiny), "1e-05");
+        let sci: Value = serde_json::from_str("1.5e3").expect("parses");
+        assert_eq!(char_field_value(&sci), "1500.0");
+        let fixed: Value = serde_json::from_str("100.0").expect("parses");
+        assert_eq!(char_field_value(&fixed), "100.0");
+        let map = patch_map(&[("title", float)]);
+        let patch = validate_link_patch(&map, false, &utc_tz()).expect("float title coerces");
+        assert_eq!(patch.title, Some(Some("1e+100".to_owned())));
+    }
+
+    #[test]
+    fn char_field_big_int_renders_full_digits() {
+        // Python ints are unbounded: `str(10**30)` is the full digits.
+        let big: Value = serde_json::from_str("123456789012345678901234567890").expect("parses");
+        assert_eq!(char_field_value(&big), "123456789012345678901234567890");
+    }
+
+    #[test]
+    fn char_field_number_edge_literals_match_python() {
+        // `arbitrary_precision` is always on in this crate: `-0` is int
+        // `0`, and overflow floats spell `inf` like Python's `float()`.
+        let negzero: Value = serde_json::from_str("-0").expect("parses");
+        assert_eq!(char_field_value(&negzero), "0");
+        let huge: Value = serde_json::from_str("1e999").expect("parses");
+        assert_eq!(char_field_value(&huge), "inf");
+        let neghuge: Value = serde_json::from_str("-1e999").expect("parses");
+        assert_eq!(char_field_value(&neghuge), "-inf");
+    }
+
+    #[test]
+    fn form_write_body_requested_data_keeps_first_seen_order() {
+        // PIDASHCONV-757: link PATCH / comment writes dump the parsed body
+        // with `django_dumps` into the activity `requested_data`. Form keys
+        // must keep QueryDict first-seen order, never alphabetical.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            "application/x-www-form-urlencoded".parse().unwrap(),
+        );
+        let raw = b"url=https://example.com/x&title=hello";
+        headers.insert("content-length", raw.len().to_string().parse().unwrap());
+        let parsed = parse_write_body(&headers, raw).expect("form parses");
+        assert!(parsed.from_form);
+        let dumped = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&parsed.value);
+        assert_eq!(
+            dumped,
+            r#"{"url": "https://example.com/x", "title": "hello"}"#
+        );
+    }
+
+    #[test]
+    fn form_list_fields_dump_as_querydict_scalars() {
+        // Task payloads render the raw QueryDict (PIDASHCONV-763):
+        // form list fields dump as last-wins scalars, while the parsed
+        // map keeps the arrays for validation. JSON dumps untouched.
+        let parse = |ct: &str, raw: &[u8]| {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", ct.parse().unwrap());
+            headers.insert("content-length", raw.len().to_string().parse().unwrap());
+            parse_write_body(&headers, raw).expect("parses")
+        };
+        let ct = "application/x-www-form-urlencoded";
+        // Repeats collapse to the last scalar; validation keeps the array.
+        let parsed = parse(ct, b"labels=a&labels=b");
+        assert!(parsed.from_form);
+        assert_eq!(parsed.value["labels"], serde_json::json!(["a", "b"]));
+        assert_eq!(
+            operations::requested_data_text(&parsed.value, parsed.from_form),
+            r#"{"labels": "b"}"#
+        );
+        assert_eq!(
+            operations::requested_data_value(&parsed.value, parsed.from_form),
+            serde_json::json!({"labels": "b"})
+        );
+        // A single value is a scalar too, not a one-item array.
+        let parsed = parse(ct, b"labels=x");
+        assert_eq!(
+            operations::requested_data_text(&parsed.value, parsed.from_form),
+            r#"{"labels": "x"}"#
+        );
+        // Other keys pass through (order-agnostic: key order itself is
+        // PIDASHCONV-757's property, pinned by that issue's own tests).
+        let parsed = parse(ct, b"url=u&labels=a&labels=b");
+        let dumped: Value = serde_json::from_str(&operations::requested_data_text(
+            &parsed.value,
+            parsed.from_form,
+        ))
+        .expect("json");
+        assert_eq!(dumped, serde_json::json!({"url": "u", "labels": "b"}));
+        // JSON bodies dump untouched — arrays are real data there.
+        let parsed = parse("application/json", br#"{"labels": ["a", "b"], "url": "u"}"#);
+        assert!(!parsed.from_form);
+        assert_eq!(
+            operations::requested_data_text(&parsed.value, parsed.from_form),
+            r#"{"labels": ["a", "b"], "url": "u"}"#
+        );
+        assert_eq!(
+            operations::requested_data_value(&parsed.value, parsed.from_form),
+            serde_json::json!({"labels": ["a", "b"], "url": "u"})
+        );
+    }
+
+    #[test]
+    fn upload_integer_float_grammar_matches_python() {
+        // `int()` sees the VALUE's layout, not the JSON literal's
+        // (PIDASHCONV-766): `1e3` is 1000.0 (`str` is `1000.0`) so it
+        // validates, while `10000000000000000.0` is 1e16 (`str` is
+        // `1e+16`) so it fails. `arbitrary_precision` is always on in
+        // this crate, so the literals keep their spelling here (the
+        // services crate parses them to `f64`-backed numbers and cannot
+        // tell the difference) — live-probed against DRF `IntegerField`.
+        use pidash_services::v1_work_items::shape_social::{
+            validate_upload_write, UploadWriteInput,
+        };
+        fn upload_size(body: &Value) -> Result<i64, String> {
+            validate_upload_write(&UploadWriteInput { body })
+                .map(|ok| ok.size)
+                .map_err(|err| err.body().to_owned())
+        }
+        for (raw, want) in [
+            (r#"{"name": "a.png", "size": 1e3}"#, 1000),
+            (r#"{"name": "a.png", "size": 1000.0}"#, 1000),
+            (r#"{"name": "a.png", "size": 123.0}"#, 123),
+            (r#"{"name": "a.png", "size": 1E3}"#, 1000),
+            (r#"{"name": "a.png", "size": -1e3}"#, -1000),
+            (r#"{"name": "a.png", "size": 1e15}"#, 1_000_000_000_000_000),
+            (r#"{"name": "a.png", "size": -12.0}"#, -12),
+            (r#"{"name": "a.png", "size": 2.5e3}"#, 2500),
+        ] {
+            let body: Value = serde_json::from_str(raw).expect("parses");
+            assert_eq!(upload_size(&body), Ok(want), "input {raw}");
+        }
+        for raw in [
+            r#"{"name": "a.png", "size": 10000000000000000.0}"#,
+            r#"{"name": "a.png", "size": -10000000000000000.0}"#,
+            r#"{"name": "a.png", "size": 1.50}"#,
+            r#"{"name": "a.png", "size": 1.5}"#,
+            r#"{"name": "a.png", "size": 1e-3}"#,
+            r#"{"name": "a.png", "size": 0.1}"#,
+            r#"{"name": "a.png", "size": 1e999}"#,
+        ] {
+            let body: Value = serde_json::from_str(raw).expect("parses");
+            assert_eq!(
+                upload_size(&body),
+                Err(r#"{"size":["A valid integer is required."]}"#.to_owned()),
+                "input {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn activate_timezone_empty_zone_500s() {
+        // `ZoneInfo('')` raises `ValueError` (not `KeyError`), so an
+        // empty stored zone is the generic 500 while an unknown zone is
+        // the `KeyError`-branch 400 (PIDASHCONV-747, live-probed).
+        assert!(matches!(
+            activate_timezone(Some("")),
+            Err(Denial::ServerError)
+        ));
+        assert!(matches!(
+            activate_timezone(Some("Not/AZone")),
+            Err(Denial::BadError(_))
+        ));
+        assert_eq!(activate_timezone(None).expect("none"), chrono_tz::UTC);
+        assert_eq!(activate_timezone(Some("UTC")).expect("utc"), chrono_tz::UTC);
+    }
+}

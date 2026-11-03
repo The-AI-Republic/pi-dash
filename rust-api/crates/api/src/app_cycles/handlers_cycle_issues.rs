@@ -1,0 +1,2318 @@
+//! Cycle-issue + shared request plumbing handlers (D-27, stage 5, PIDASHCONV-323).
+//!
+//! Ports `apps/api/pi_dash/app/views/cycle/issue.py`:
+//!
+//! - `CycleIssueViewSet.list` (`:131-240`): the issue-list pipeline scoped to
+//!   one cycle (`cycle_issue_queryset`, `:108-129`, including the guest
+//!   `created_by` scoping) — legacy `issue_filters(params, 'GET')`,
+//!   `ComplexFilterBackend` + `IssueFilterSet` (`:43-44, :119`), the
+//!   `apply_annotations` columns (`:77-106`), `order_issue_queryset`
+//!   (`:130-134`), the grouped / sub-grouped / plain paginators
+//!   (`:136-221`) with `issue_on_results` shaping.
+//! - `CycleIssueViewSet.retrieve` (`:242-254`): one flat list row for a
+//!   work item in the cycle (same scope, no filters), else the 404
+//!   `ObjectDoesNotExist` body.
+//! - `CycleIssueViewSet.create` (`:264-338`): `issues` required,
+//!   completed-cycle refusal (`:232-236`), move-vs-`bulk_create`
+//!   (`:239-279`, batches 10 / 100), `issue_activity` publish (`:281-295`),
+//!   201 `{"message": "success"}` (`:297`).
+//! - `CycleIssueViewSet.destroy` (`:299-324`): `issue_activity` publish
+//!   first (`:305-319`), bridge soft delete (`:320`), 204 (`:324`).
+//!
+//! Fixture ids: F-C27-01 (serializer shapes), F-C27-05 (queryset +
+//! create/destroy envelopes), F-C27-07 (MEMBER gates via `super::gates`),
+//! F-C27-10 (favorites scope reference).
+//!
+//! Layering: SQL builders live in
+//! [`pidash_services::app_cycles::queries`]; gates in [`super::gates`]
+//! over the F-06 kernel; the list pipeline composes the shared kernels —
+//! `pidash_db::{filter, filterset, issue_filters}`, the D-26
+//! `crate::app_issues` list helpers, `pidash_services::app_issues`
+//! ordering/params/shape, and `crate::paginator`. Cycle-specific SQL
+//! (scope preamble, join selection, annotation/legacy/group glue) lives
+//! here because it names this endpoint's bridge scope; the D-26 helpers
+//! are referenced, never re-ported.
+//!
+//! # Ported bugs (translate, don't redesign — also listed in the PR)
+//!
+//! * `destroy` on a missing bridge still answers 204: `filter().delete()`
+//!   on an empty set with no existence check (`:301-320`).
+//! * `update` / `partial_update` on the detail path pass the MEMBER gate
+//!   and then run the `ModelViewSet` defaults, which die with a 500
+//!   (contract `test_cycle_issue_detail_writes_broken_upstream`). Those
+//!   methods proxy to Django, which reproduces the gate and the 500.
+//! * Non-UUID path segments: Django's `<uuid:>` converter rejects them at
+//!   URL resolve (HTML 404, unreachable through the JSON edge); here they
+//!   answer the `ValidationError` 400, the same body the kernels render
+//!   for badly-formed UUIDs inside filters.
+
+use std::collections::HashMap;
+
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::Response;
+use axum::Router;
+use serde_json::{Map, Value};
+use sqlx::{Postgres, Row};
+
+use crate::app_cycles::gates;
+use crate::app_issues::{
+    complex_filter, fetch_count, fetch_json_rows, filters_timezone, group_values, legacy_sql,
+    multi_map, order_key, page_denial, query_last, render_condition, shape_row, Binder, Denial,
+    FilteredSet, QueryMap,
+};
+use crate::middleware::body_limit::read_request_bytes;
+use crate::state::AppState;
+use crate::v1_cycles_modules::body as shared_body;
+use crate::v1_cycles_modules::json::{self, JsonFail};
+use pidash_auth::permissions::allow::AllowFacts;
+pub(crate) use pidash_compat::response::{empty_response, json_response};
+
+/// `GET` + `POST` on the collection path; `GET` + `DELETE` on the detail
+/// path. Every other method falls through to Django: the detail
+/// update/partial_update are MEMBER-gated `ModelViewSet` defaults (500
+/// upstream), which the proxy reproduces.
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/",
+            axum::routing::get(cycle_issue_list)
+                .post(cycle_issue_create)
+                .put(crate::edge::proxy)
+                .patch(crate::edge::proxy)
+                .delete(crate::edge::proxy)
+                .head(crate::edge::proxy)
+                .options(crate::edge::proxy),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/{issue_id}/",
+            axum::routing::delete(cycle_issue_destroy)
+                .get(cycle_issue_retrieve)
+                .put(crate::edge::proxy)
+                .patch(crate::edge::proxy)
+                .post(crate::edge::proxy)
+                .head(crate::edge::proxy)
+                .options(crate::edge::proxy),
+        )
+}
+
+/// Collection path in `app/urls/cycle.py:40-44` form (route order check).
+pub const CYCLE_ISSUES_PATH: &str =
+    "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/";
+/// Detail path in `app/urls/cycle.py:45-53` form.
+pub const CYCLE_ISSUE_PATH: &str =
+    "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/{issue_id}/";
+
+/// Re-export of the canonical [`pidash_services::domain::activity::ISSUE_ACTIVITY_TASK`].
+pub use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
+
+/// Group-clash message (`issue.py:146-150`); renders as
+/// [`cycle_queries::GROUP_CLASH_BODY`] through `Denial::BadError`.
+pub const GROUP_CLASH_MESSAGE: &str = "Group by and sub group by cannot have same parameters";
+
+// ---------------------------------------------------------------------------
+// Shared request plumbing (also used by `handlers_favorites`)
+// ---------------------------------------------------------------------------
+
+pub(crate) type HandlerResult = Result<Response, Denial>;
+
+#[cfg(test)]
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).expect("json string")
+}
+
+/// The two cycle write handlers read `request.data` as a raw mapping
+/// (`request.data.get("cycle")` in `base.py:578`, `request.data.get(
+/// "issues", [])` in `issue.py:223`) rather than through a serializer, so
+/// no key is a DRF `ListField` (`getlist`) and no blank-input rule
+/// applies — every form key keeps its last value verbatim.
+const CYCLE_WRITE_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
+    list_fields: &[],
+    skip_blank_fields: &[],
+};
+
+/// Decode a `POST` body the way DRF's default parsers do, after the
+/// request has passed auth and the role gate (DRF parses lazily, when the
+/// view first reads `request.data`, so body errors never preempt a 401 /
+/// 403). Shared by [`cycle_issue_create`] and
+/// `handlers_favorites::favorite_create`; the same pipeline
+/// `app_issues/handlers_core.rs` uses.
+///
+/// - Zero-length body (per the Content-Length header, `Request._load_stream`)
+///   is `{}` whatever the content type is.
+/// - The content type selects JSON / form / multipart in
+///   `select_parser` order; an unsupported or missing content type is the
+///   415 `{"detail": "Unsupported media type ..."}`.
+/// - JSON text decodes through the shared layer (`json`), so a syntax
+///   error carries serde's text in the `{"detail": "JSON parse error - ..."}`
+///   envelope (tier 3 since PIDASHCONV-1555).
+/// - Form and multipart bodies become the `request.data` scalar map.
+/// - A non-object JSON body has no `.get` in the view (`AttributeError` →
+///   the generic 500).
+pub(crate) fn decode_request_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, Denial> {
+    let negotiated =
+        shared_body::negotiate_body(headers, body, &CYCLE_WRITE_BODY_SPEC).map_err(|error| {
+            match error {
+                shared_body::BodyError::UnsupportedMediaType(message) => {
+                    Denial::UnsupportedMediaType(message)
+                }
+                shared_body::BodyError::ParseDetail(message) => Denial::BadDetail(message),
+                shared_body::BodyError::ServerError => Denial::ServerError,
+            }
+        })?;
+    match negotiated {
+        shared_body::NegotiatedBody::Empty => Ok(Value::Object(Map::new())),
+        shared_body::NegotiatedBody::JsonText { text, .. } => {
+            match json::parse_request_data(text.as_bytes()) {
+                Ok(parsed) => {
+                    let value = json::to_serde_publish(&parsed);
+                    if value.is_object() {
+                        Ok(value)
+                    } else {
+                        // `None.get(...)` / `[1].get(...)` raise
+                        // `AttributeError` out of the view → generic 500.
+                        Err(Denial::ServerError)
+                    }
+                }
+                Err(JsonFail::Message(detail)) => Err(Denial::BadDetail(format!(
+                    "{}{detail}",
+                    json::JSON_PARSE_PREFIX
+                ))),
+                Err(JsonFail::Recursion) => Err(Denial::ServerError),
+            }
+        }
+        shared_body::NegotiatedBody::Form { map, .. } => Ok(Value::Object(map)),
+    }
+}
+
+/// `request.user` from the Django session (`app_issues` actor rule):
+/// missing session, missing key, or a non-UUID id is anonymous → 401.
+pub(crate) fn actor_user_id(
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+) -> Result<uuid::Uuid, Denial> {
+    let handle = extension.ok_or(Denial::Unauthorized)?.0;
+    let mut session = handle.snapshot();
+    session
+        .get("_auth_user_id")
+        .and_then(|value| value.as_str())
+        .and_then(|raw| raw.parse::<uuid::Uuid>().ok())
+        .ok_or(Denial::Unauthorized)
+}
+
+/// Python `str.strip()` membership (`db/models/project.py:210`): Rust
+/// `White_Space` plus U+001C-U+001F (verified by exhaustively diffing
+/// `str.strip` against `char::is_whitespace` over all code points —
+/// those four are the only differences).
+fn is_py_strip_ws(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+}
+
+/// Normalize a non-UUID identifier for the equality lookup
+/// (`db/models/project.py:210`): `str(value).strip().upper()`.
+fn normalize_resolve_identifier(raw: &str) -> String {
+    raw.trim_matches(is_py_strip_ws).to_uppercase()
+}
+
+/// `_rewrite_project_kwarg` (`app/views/base.py:49-80`): authenticated
+/// callers only (anonymous already 401'd); UUIDs pass through unchecked;
+/// other identifiers resolve `UPPER(identifier)` in the workspace, else
+/// `Http404("Project not found")` (`db/models/project.py:192-219`).
+pub(crate) async fn resolve_project_id(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    raw: &str,
+) -> Result<uuid::Uuid, Denial> {
+    if let Ok(id) = raw.parse::<uuid::Uuid>() {
+        return Ok(id);
+    }
+    let upper = normalize_resolve_identifier(raw);
+    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
+        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
+           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
+    )
+    .bind(slug)
+    .bind(upper)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+}
+
+/// Badly-formed UUIDs in filters/paths render the `ValidationError` branch
+/// (`app/views/base.py:110-152`): 400 `{"error": "Please provide valid
+/// detail"}`.
+pub(crate) const INVALID_DETAIL_MSG: &str = "Please provide valid detail";
+
+pub(crate) fn parse_uuid_or_invalid(raw: &str) -> Result<uuid::Uuid, Denial> {
+    raw.parse::<uuid::Uuid>()
+        .map_err(|_| Denial::BadError(INVALID_DETAIL_MSG.to_owned()))
+}
+
+/// Membership facts for one `(user, slug, project)` over the same rows the
+/// decorator reads (`app/permissions/base.py:19-86`): active project and
+/// workspace memberships scoped by slug/project, soft-deleted rows excluded.
+/// The role facts are computed against `[ADMIN, MEMBER]`; gates with
+/// another role list use [`fetch_allow_facts_for`].
+pub(crate) async fn fetch_allow_facts(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> Result<AllowFacts, Denial> {
+    use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
+    fetch_allow_facts_for(pool, slug, project_id, user_id, &[ROLE_ADMIN, ROLE_MEMBER]).await
+}
+
+/// [`fetch_allow_facts`] with the role facts computed against `allowed`
+/// (the gate's own role list).
+pub(crate) async fn fetch_allow_facts_for(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+    allowed: &[i32],
+) -> Result<AllowFacts, Denial> {
+    let project_role: Option<(i16,)> = sqlx::query_as(
+        r#"SELECT pm.role FROM project_members pm
+           JOIN workspaces w ON w.id = pm.workspace_id
+           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
+           AND pm.is_active AND pm.deleted_at IS NULL"#,
+    )
+    .bind(user_id)
+    .bind(project_id)
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    let workspace_role: Option<(i16,)> = sqlx::query_as(
+        r#"SELECT wm.role FROM workspace_members wm
+           JOIN workspaces w ON w.id = wm.workspace_id
+           WHERE wm.member_id = $1 AND w.slug = $2
+           AND wm.is_active AND wm.deleted_at IS NULL"#,
+    )
+    .bind(user_id)
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    use pidash_auth::permissions::ROLE_ADMIN;
+    Ok(AllowFacts {
+        workspace: pidash_types::WorkspaceId::from(slug),
+        authenticated: true,
+        is_workspace_member: workspace_role.is_some(),
+        has_allowed_workspace_role: workspace_role
+            .map(|(role,)| allowed.contains(&i32::from(role)))
+            .unwrap_or(false),
+        is_creator: false,
+        has_allowed_project_role: project_role
+            .map(|(role,)| allowed.contains(&i32::from(role)))
+            .unwrap_or(false),
+        is_project_member: project_role.is_some(),
+        is_workspace_admin: workspace_role
+            .map(|(role,)| i32::from(role) == ROLE_ADMIN)
+            .unwrap_or(false),
+    })
+}
+
+/// Run one `super::gates` row: anonymous already 401'd; `Allow` runs the
+/// body, `Deny` answers the decorator 403.
+pub(crate) fn check_gate(gate: &gates::Gate, slug: &str, facts: &AllowFacts) -> Result<(), Denial> {
+    match gates::decide_gate(gate, &gates::tenant_context(slug), facts) {
+        gates::GateOutcome::Allow => Ok(()),
+        gates::GateOutcome::Deny => Err(Denial::Forbidden),
+        gates::GateOutcome::Unauthenticated => Err(Denial::Unauthorized),
+    }
+}
+
+pub(crate) fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
+    state
+        .pools()
+        .map(|pools| pools.primary().clone())
+        .ok_or(Denial::ServerError)
+}
+
+/// Best-effort deferred publish of an `issue_activity.delay(...)` call
+/// (handlers_views precedent): enqueue failures never change the response.
+pub(crate) async fn enqueue_activity(pool: &sqlx::PgPool, kwargs: serde_json::Map<String, Value>) {
+    let message = pidash_jobs::TaskMessage::new(ISSUE_ACTIVITY_TASK, vec![], kwargs);
+    let job = pidash_jobs::queue::NewJob::new(
+        message.task.clone(),
+        serde_json::Value::Array(message.args.clone()),
+        serde_json::Value::Object(message.kwargs.clone()),
+    );
+    if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
+        tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; response stands");
+    }
+}
+
+/// Common preamble for the cycle-issue actions: session auth, project
+/// rewrite, the route's role gate. Returns `(pool, user_id, project_id)`.
+async fn cycle_issue_context(
+    state: &AppState,
+    slug: &str,
+    project_raw: &str,
+    gate: &gates::Gate,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+) -> Result<(sqlx::PgPool, uuid::Uuid, uuid::Uuid), Denial> {
+    let pool = pool_of(state)?;
+    let user_id = actor_user_id(extension)?;
+    let project_id = resolve_project_id(&pool, slug, project_raw).await?;
+    let roles = match gate {
+        gates::Gate::Project { roles } | gates::Gate::ProjectCreator { roles } => *roles,
+        gates::Gate::Authenticated => &[],
+    };
+    let facts = fetch_allow_facts_for(&pool, slug, &project_id, &user_id, roles).await?;
+    check_gate(gate, slug, &facts)?;
+    Ok((pool, user_id, project_id))
+}
+
+/// The guest half of `cycle_issue_queryset` (`issue.py:116-127`): an active
+/// GUEST project membership on a project without `guest_view_all_features`
+/// sees only the work items it created. Returns the creator to scope to.
+async fn guest_creator_scope(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> Result<Option<uuid::Uuid>, Denial> {
+    let (scoped,): (bool,) = sqlx::query_as(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM project_members pm
+             JOIN workspaces w ON w.id = pm.workspace_id
+             WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
+               AND pm.role = 5 AND pm.is_active AND pm.deleted_at IS NULL
+           ) AND NOT EXISTS (
+             SELECT 1 FROM projects p
+             JOIN workspaces w ON w.id = p.workspace_id
+             WHERE p.id = $2 AND w.slug = $3
+               AND p.guest_view_all_features AND p.deleted_at IS NULL
+           )"#,
+    )
+    .bind(user_id)
+    .bind(project_id)
+    .bind(slug)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(scoped.then_some(*user_id))
+}
+
+/// Row scope on top of the cycle bridge: the guest creator restriction
+/// and, for retrieve, the one work item asked for.
+#[derive(Default)]
+struct RowScope {
+    created_by: Option<uuid::Uuid>,
+    issue_id: Option<uuid::Uuid>,
+}
+
+fn gate_for_list() -> &'static gates::Gate {
+    &gates::gate_for(
+        "GET",
+        "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/",
+    )
+    .expect("cycle-issues list gate")
+    .gate
+}
+
+fn gate_for_retrieve() -> &'static gates::Gate {
+    &gates::gate_for(
+        "GET",
+        "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/<uuid>/",
+    )
+    .expect("cycle-issues retrieve gate")
+    .gate
+}
+
+fn gate_for_create() -> &'static gates::Gate {
+    &gates::gate_for(
+        "POST",
+        "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/",
+    )
+    .expect("cycle-issues create gate")
+    .gate
+}
+
+fn gate_for_destroy() -> &'static gates::Gate {
+    &gates::gate_for(
+        "DELETE",
+        "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/<uuid>/",
+    )
+    .expect("cycle-issues destroy gate")
+    .gate
+}
+
+// ---------------------------------------------------------------------------
+// List
+// ---------------------------------------------------------------------------
+
+/// `issue_on_results` flat field order (`utils/grouper.py:95-143`) as Django
+/// emits it over the wire: `.values(*required_fields)` renders the concrete
+/// model fields first, then the `state__group` lookup, then the annotations
+/// in annotation order (`apply_annotations`, then the grouper's array
+/// subqueries) — not the `required_fields` argument order, which lists
+/// `cycle_id` / `sub_issues_count` after `parent_id` and `attachment_count`
+/// before `link_count` (pinned live). A canonical m2m group swaps its
+/// lookup into the join-lookup slot after `state__group` (group swap first,
+/// then the sub swap); the multi-grouper re-appends the replaced id-list
+/// keys last.
+fn flat_row_fields(group_by: Option<&str>, sub_group_by: Option<&str>) -> Vec<String> {
+    let mut fields = vec![
+        "id",
+        "name",
+        "state_id",
+        "sort_order",
+        "completed_at",
+        "estimate_point",
+        "priority",
+        "start_date",
+        "target_date",
+        "sequence_id",
+        "project_id",
+        "parent_id",
+        "created_at",
+        "updated_at",
+        "created_by",
+        "updated_by",
+        "is_draft",
+        "archived_at",
+        "state__group",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    let mut arrays = vec!["assignee_ids", "label_ids", "module_ids"];
+    let mapper = [
+        ("labels__id", "label_ids"),
+        ("assignees__id", "assignee_ids"),
+        ("issue_module__module_id", "module_ids"),
+    ];
+    let mut lookups = Vec::new();
+    for group in [group_by, sub_group_by].into_iter().flatten() {
+        if let Some((_, array)) = mapper.iter().find(|(key, _)| *key == group) {
+            if let Some(position) = arrays.iter().position(|name| name == array) {
+                arrays.remove(position);
+                lookups.push(group.to_owned());
+            }
+        }
+    }
+    fields.extend(lookups);
+    fields.extend(
+        [
+            "cycle_id",
+            "link_count",
+            "attachment_count",
+            "sub_issues_count",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    fields.extend(arrays.into_iter().map(str::to_owned));
+    fields
+}
+
+/// Scalar selects for the list rows: the D-26 `annotation_selects` set
+/// (`app_issues`, from `apply_annotations` + the grouper array
+/// subqueries) — `cycle_id` / `link_count` / `attachment_count` /
+/// manager-guarded `sub_issues_count` plus the three `Coalesce` arrays.
+/// The three counts use plain `COUNT`, not `NULLIF`: the cycle view
+/// annotates with the scalar `Func(F("id"), function="Count")` shape
+/// (`issue.py:84-104`), whose subquery always returns one row, so an
+/// empty match renders `0` (the `scalar_counts = true` case in
+/// `app_issues`). `NULLIF` belongs only to the grouped
+/// `Subquery(...values().annotate(count=Count()))` shape.
+/// `skip_array` drops one array for its m2m group path (the grouper rule).
+fn cycle_row_selects(skip_array: Option<&str>) -> String {
+    let mut selects = String::from(
+        r#"issue.id, issue.name, issue.state_id, issue.sort_order, issue.completed_at,
+        issue.estimate_point_id AS estimate_point, issue.priority, issue.start_date,
+        issue.target_date, issue.sequence_id, issue.project_id, issue.parent_id,
+        (SELECT ci.cycle_id FROM cycle_issues ci
+          WHERE ci.issue_id = issue.id AND ci.deleted_at IS NULL LIMIT 1) AS cycle_id,
+        (SELECT COUNT(*) FROM issue_links il
+          WHERE il.issue_id = issue.id AND il.deleted_at IS NULL) AS link_count,
+        (SELECT COUNT(*) FROM file_assets fa
+          WHERE fa.issue_id = issue.id AND fa.entity_type = 'ISSUE_ATTACHMENT'
+            AND fa.deleted_at IS NULL) AS attachment_count,
+        (SELECT COUNT(*) FROM issues c
+           LEFT JOIN states cs ON cs.id = c.state_id AND cs.deleted_at IS NULL
+           JOIN projects cp ON cp.id = c.project_id
+          WHERE c.parent_id = issue.id AND c.deleted_at IS NULL
+            AND (cs."group" IS NULL OR NOT (cs."group" = 'triage'))
+            AND c.archived_at IS NULL AND cp.archived_at IS NULL AND c.is_draft = FALSE
+        ) AS sub_issues_count,
+        issue.created_at, issue.updated_at, issue.created_by_id AS created_by,
+        issue.updated_by_id AS updated_by, issue.is_draft, issue.archived_at,
+        state."group" AS "state__group""#,
+    );
+    if skip_array != Some("label_ids") {
+        selects.push_str(
+            r#",
+        (SELECT COALESCE(ARRAY_AGG(DISTINCT il.label_id), '{}'::uuid[])
+           FROM issue_labels il
+          WHERE il.issue_id = issue.id AND il.deleted_at IS NULL) AS label_ids"#,
+        );
+    }
+    if skip_array != Some("assignee_ids") {
+        selects.push_str(
+            r#",
+        (SELECT COALESCE(ARRAY_AGG(DISTINCT ia.assignee_id), '{}'::uuid[])
+           FROM issue_assignees ia
+          WHERE ia.issue_id = issue.id AND ia.deleted_at IS NULL) AS assignee_ids"#,
+        );
+    }
+    if skip_array != Some("module_ids") {
+        selects.push_str(
+            r#",
+        (SELECT COALESCE(ARRAY_AGG(DISTINCT mi.module_id), '{}'::uuid[])
+           FROM module_issues mi JOIN modules m ON m.id = mi.module_id
+          WHERE mi.issue_id = issue.id AND mi.deleted_at IS NULL
+            AND m.archived_at IS NULL AND m.deleted_at IS NULL) AS module_ids"#,
+        );
+    }
+    selects
+}
+
+/// Relation joins the cycle list can use: same alias contract as the D-26
+/// list (`issue_assignee`, `issue_cycle`, `issue_module`, `issue_mention`,
+/// `label_issue`, `issue_subscribers`, `issue_intake`).
+const RELATION_JOINS: &[(&str, &str)] = &[
+    ("issue_assignees", "issue_assignee"),
+    ("cycle_issues", "issue_cycle"),
+    ("module_issues", "issue_module"),
+    ("issue_mentions", "issue_mention"),
+    ("issue_labels", "label_issue"),
+    ("issue_subscribers", "issue_subscribers"),
+];
+
+/// True when the filter SQL references the relation `alias`, quoted
+/// (`"alias".`, complex filters and the group guards below) or unquoted
+/// (`alias.`, legacy predicates, which never quote the alias).
+fn alias_mentioned(where_sql: &str, alias: &str) -> bool {
+    if where_sql.contains(&format!("\"{alias}\".")) {
+        return true;
+    }
+    alias_unquoted_offsets(where_sql, alias).next().is_some()
+}
+
+/// Byte offsets of unquoted `alias.` references. The alias must start on
+/// an identifier boundary so a longer name never matches.
+fn alias_unquoted_offsets<'a>(where_sql: &'a str, alias: &str) -> impl Iterator<Item = usize> + 'a {
+    let needle = format!("{alias}.");
+    let mut offsets = Vec::new();
+    let mut base = 0;
+    while let Some(at) = where_sql[base..].find(&needle) {
+        let absolute = base + at;
+        let boundary = absolute == 0 || {
+            let prev = where_sql.as_bytes()[absolute - 1];
+            !prev.is_ascii_alphanumeric() && prev != b'_'
+        };
+        if boundary {
+            offsets.push(absolute);
+        }
+        base = absolute + 1;
+    }
+    offsets.into_iter()
+}
+
+/// True when the identifier after an alias reference is followed by an
+/// `IS NULL` / `IS NOT NULL` test.
+fn is_null_test(after: &str) -> bool {
+    let ident_len = after
+        .chars()
+        .take_while(|char| char.is_alphanumeric() || *char == '_' || *char == '"')
+        .map(|char| char.len_utf8())
+        .sum::<usize>();
+    let tail = after[ident_len..].trim_start();
+    tail.starts_with("IS NULL") || tail.starts_with("IS NOT NULL")
+}
+
+/// True when every reference to `alias` in the filter SQL — quoted or
+/// unquoted — is an `IS NULL` / `IS NOT NULL` test (the `__isnull`
+/// predicates take the LEFT join).
+fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
+    let marker = format!("\"{alias}\".");
+    let mut rest = where_sql;
+    while let Some(start) = rest.find(&marker) {
+        if !is_null_test(&rest[start + marker.len()..]) {
+            return false;
+        }
+        rest = &rest[start + marker.len()..];
+    }
+    for absolute in alias_unquoted_offsets(where_sql, alias) {
+        if !is_null_test(&where_sql[absolute + alias.len() + 1..]) {
+            return false;
+        }
+    }
+    true
+}
+
+/// M2M group keys force a join on that relation (`GROUP_FILTER_MAPPER` in
+/// `utils/grouper.py:41-49` for the canonical keys; the annotation-context
+/// join for the short aliases `labels` / `assignees`, which Django resolves
+/// to the same through-table columns with no deleted guard). The join is
+/// always LEFT — INNER is only for positive filter references.
+fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &str) -> bool {
+    let raws: &[&str] = match alias {
+        "issue_assignee" => &["assignees__id", "assignees"],
+        "label_issue" => &["labels__id", "labels"],
+        "issue_module" => &["issue_module__module_id"],
+        _ => return false,
+    };
+    raws.iter()
+        .any(|raw| group_by == Some(*raw) || sub_group_by == Some(*raw))
+}
+
+/// The SQL expression a group field partitions by (D-26 `group_expression`
+/// over the shared `issue` / `state` aliases). Django resolves `group_by`
+/// as a raw ORM path, so the short aliases partition by the same columns
+/// as their canonical forms: `state` is the `state_id` FK column and
+/// `labels` / `assignees` resolve to the through-table columns with a
+/// plain annotation-context LEFT join (pinned from the generated SQL).
+fn group_expression(field: &str) -> Result<String, Denial> {
+    Ok(match field {
+        "labels__id" | "labels" => "label_issue.label_id".to_owned(),
+        "assignees__id" | "assignees" => "issue_assignee.assignee_id".to_owned(),
+        "issue_module__module_id" => "issue_module.module_id".to_owned(),
+        "state_id" | "state" => "issue.state_id".to_owned(),
+        "priority" => "issue.priority".to_owned(),
+        "cycle_id" => "(SELECT ci.cycle_id FROM cycle_issues ci WHERE ci.issue_id = issue.id AND ci.deleted_at IS NULL LIMIT 1)".to_owned(),
+        "project_id" => "issue.project_id".to_owned(),
+        "state__group" => "state.\"group\"".to_owned(),
+        "target_date" => "issue.target_date".to_owned(),
+        "start_date" => "issue.start_date".to_owned(),
+        "created_by" => "issue.created_by_id".to_owned(),
+        _ => return Err(Denial::ServerError),
+    })
+}
+
+/// The array annotation the grouper skips for an m2m group field.
+fn skip_array_for(group_by: &str) -> Option<&'static str> {
+    match group_by {
+        "labels__id" => Some("label_ids"),
+        "assignees__id" => Some("assignee_ids"),
+        "issue_module__module_id" => Some("module_ids"),
+        _ => None,
+    }
+}
+
+/// Extra select carrying the raw m2m group key per joined row.
+fn group_member_select(group_by: &str) -> &'static str {
+    match group_by {
+        "labels__id" => ", label_issue.label_id AS \"labels__id\"",
+        "assignees__id" => ", issue_assignee.assignee_id AS \"assignees__id\"",
+        "issue_module__module_id" => ", issue_module.module_id AS \"issue_module__module_id\"",
+        _ => "",
+    }
+}
+
+/// Bind a `sea_query::Value` vec to raw SQL, over this endpoint's
+/// placeholders. The mapping is the canonical `pidash_compat::db`
+/// binder (OVL-04); this wrapper only maps its error to the local 500.
+fn bind_values<'a>(
+    sql: &'a str,
+    values: Vec<sea_query::Value>,
+) -> Result<sqlx::query::Query<'a, Postgres, sqlx::postgres::PgArguments>, Denial> {
+    pidash_compat::db::bind_all(sql, values).map_err(|_| Denial::ServerError)
+}
+
+/// Filtered `FROM … WHERE` for the cycle-issue list (`issue.py:111-128`):
+/// the `Issue.issue_objects` manager (`deleted_at`, triage-state,
+/// archived, project-archived, draft exclusions) + the cycle bridge scope
+/// (`issue_cycle__cycle_id`, bridge live) + tenant (workspace slug,
+/// project, active membership — the `get_queryset` `:61-68` filters, kept
+/// although the gate already enforces them) + the `ComplexFilterBackend`
+/// tree + the legacy `issue_filters(params, 'GET')` predicates, narrowed
+/// by `scope` (guest creator, retrieve's work item).
+#[allow(clippy::too_many_arguments)]
+fn cycle_filtered_set(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+    cycle_id: &uuid::Uuid,
+    scope: &RowScope,
+    query: &QueryMap,
+    group_by: Option<&str>,
+    sub_group_by: Option<&str>,
+    tz: &chrono_tz::Tz,
+) -> Result<FilteredSet, Denial> {
+    let mut binder = Binder::new();
+    let slug_holder = binder.bind_string(slug.to_owned());
+    let project_holder = binder.bind_uuid(*project_id);
+    let user_holder = binder.bind_uuid(*user_id);
+    let cycle_holder = binder.bind_uuid(*cycle_id);
+    let mut fragments = vec![format!(
+        r#"workspaces.slug = {slug_holder} AND issue.project_id = {project_holder}
+        AND issue.deleted_at IS NULL
+        AND (state."group" IS NULL OR NOT (state."group" = 'triage'))
+        AND issue.archived_at IS NULL AND project.archived_at IS NULL
+        AND issue.is_draft = FALSE
+        AND bridge.cycle_id = {cycle_holder} AND bridge.deleted_at IS NULL
+        AND EXISTS (SELECT 1 FROM project_members pm
+                     WHERE pm.member_id = {user_holder} AND pm.project_id = {project_holder}
+                       AND pm.is_active AND pm.deleted_at IS NULL)"#
+    )];
+    if let Some(creator) = scope.created_by {
+        let holder = binder.bind_uuid(creator);
+        fragments.push(format!("issue.created_by_id = {holder}"));
+    }
+    if let Some(issue_id) = scope.issue_id {
+        let holder = binder.bind_uuid(issue_id);
+        fragments.push(format!("issue.id = {holder}"));
+    }
+    if let Some(cond) = complex_filter(query, tz)? {
+        let (fragment, values) = render_condition(&cond);
+        fragments.push(binder.splice(&fragment, values));
+    }
+    let flat: HashMap<String, String> = query
+        .keys()
+        .filter_map(|key| query_last(query, key).map(|last| (key.clone(), last)))
+        .collect();
+    let today = chrono::Utc::now().date_naive();
+    let legacy = pidash_db::issue_filters::issue_filters_get(&flat, "", today)
+        .map_err(|_| Denial::ServerError)?;
+    let mut legacy_sql_text = String::new();
+    for (name, value) in legacy.predicates() {
+        // UTC keeps this slice's current truncation; its own actor-zone
+        // fix follows the app_issues pattern separately.
+        let fragment = legacy_sql(&mut binder, name, value, &chrono_tz::UTC)?;
+        if legacy_sql_text.is_empty() {
+            legacy_sql_text = fragment;
+        } else {
+            legacy_sql_text = format!("{legacy_sql_text} AND {fragment}");
+        }
+    }
+    if !legacy_sql_text.is_empty() {
+        fragments.push(legacy_sql_text);
+    }
+    // `GROUP_FILTER_MAPPER` (`utils/grouper.py:41-49`): a canonical m2m
+    // group key — group or sub — filters its join's `deleted_at`. The
+    // predicate sits in WHERE over the LEFT join, so issues whose links
+    // are all soft-deleted drop out while linkless issues stay NULL (the
+    // short aliases carry no guard). Quoted so the nullable scan below
+    // sees the `IS NULL` test.
+    for key in [group_by, sub_group_by].into_iter().flatten() {
+        let alias = match key {
+            "labels__id" => "label_issue",
+            "assignees__id" => "issue_assignee",
+            "issue_module__module_id" => "issue_module",
+            _ => continue,
+        };
+        fragments.push(format!("\"{alias}\".\"deleted_at\" IS NULL"));
+    }
+    let where_sql = fragments.join(" AND ");
+    let mut joins = String::from(" JOIN cycle_issues AS bridge ON bridge.issue_id = issue.id");
+    let mut referenced = vec!["bridge"];
+    for (table, alias) in RELATION_JOINS {
+        let mentioned = alias_mentioned(&where_sql, alias);
+        let nullable_only = mentioned && alias_nullable_only(&where_sql, alias);
+        // INNER only for positive filter references (Django's `filter()`
+        // join); group-forced and `__isnull`-only references take LEFT
+        // (Django's annotation join). Unreferenced relations are not
+        // joined at all — Django never scaffolds them, and an unreferenced
+        // LEFT JOIN fans the grouped window out (window functions evaluate
+        // before DISTINCT, so the duplicate row numbers survive it).
+        let inner = mentioned && !nullable_only;
+        if !(mentioned || group_join_alias(group_by, sub_group_by, alias)) {
+            continue;
+        }
+        referenced.push(*alias);
+        let kind = if inner { "INNER JOIN" } else { "LEFT JOIN" };
+        joins.push_str(&format!(
+            " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
+        ));
+    }
+    // The intake join exists only when a filter references it (the grouped
+    // totals splice their own copy when it does not — see below).
+    let intake_used = alias_mentioned(&where_sql, "issue_intake");
+    if intake_used {
+        let kind = if alias_nullable_only(&where_sql, "issue_intake") {
+            "LEFT JOIN"
+        } else {
+            "INNER JOIN"
+        };
+        joins.push_str(&format!(
+            " {kind} intake_issues AS issue_intake ON issue_intake.issue_id = issue.id"
+        ));
+        referenced.push("issue_intake");
+    }
+    let from_where = format!(
+        r#"FROM issues AS issue
+        JOIN projects AS project ON project.id = issue.project_id
+        JOIN workspaces ON workspaces.id = issue.workspace_id
+        LEFT JOIN states AS state ON state.id = issue.state_id AND state.deleted_at IS NULL
+        {joins}
+        WHERE {where_sql}"#
+    );
+    Ok(FilteredSet {
+        from_where,
+        values: binder.values(),
+        referenced,
+    })
+}
+
+/// `CycleIssueViewSet.list` (`issue.py:131-240`).
+async fn cycle_issue_list(
+    State(state): State<AppState>,
+    Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
+    Query(query): Query<QueryMap>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
+) -> HandlerResult {
+    if super::is_noncanonical_uuid(&cycle_raw) {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    }
+    let (pool, user_id, project_id) =
+        cycle_issue_context(&state, &slug, &project_raw, gate_for_list(), extension).await?;
+    let cycle_id = parse_uuid_or_invalid(&cycle_raw)?;
+    // Group clash is checked in-view before `paginate` parses per_page
+    // (`issue.py:136-150`): 400 `{"error": "Group by and sub group by
+    // cannot have same parameters"}` — the message half of the shared
+    // [`cycle_queries::GROUP_CLASH_BODY`] (pinned equal in tests).
+    if let (Some(group), Some(sub)) = (
+        query_last(&query, "group_by"),
+        query_last(&query, "sub_group_by"),
+    ) {
+        if !group.is_empty() && group == sub {
+            return Err(Denial::BadError(GROUP_CLASH_MESSAGE.to_owned()));
+        }
+    }
+    let params = pidash_services::app_issues::params::ListParams::parse_with(
+        &multi_map(&query),
+        pidash_services::app_issues::params::ParseOptions {
+            require_issues: false,
+            strict_per_page: true,
+        },
+    )
+    .map_err(|error| {
+        if error.key == "detail" {
+            Denial::BadDetail(error.message)
+        } else {
+            Denial::BadError(error.message)
+        }
+    })?;
+    if let Some(mismatch) = params.group_mismatch() {
+        return Err(Denial::BadError(mismatch.message));
+    }
+    let group_by = params.group_by.as_deref();
+    let sub_group_by = params.sub_group_by.as_deref();
+    let scope = RowScope {
+        created_by: guest_creator_scope(&pool, &slug, &project_id, &user_id).await?,
+        issue_id: None,
+    };
+    let timezone = filters_timezone(&pool, &user_id, &query).await?;
+    let filtered = cycle_filtered_set(
+        &slug,
+        &project_id,
+        &user_id,
+        &cycle_id,
+        &scope,
+        &query,
+        group_by,
+        sub_group_by,
+        &timezone,
+    )?;
+    // `order_issue_queryset` (`:130-134`), default `-created_at`. The
+    // cycle list annotates the plain `Func(Count)` form (empty counts
+    // render `0`), so its count keys order `0`-style. The traversal
+    // resolves over the filtered `bridge` base join (pinned live: no
+    // extra fan-out); only a filter-driven `issue_cycle` join — one the
+    // `WHERE` actually references, so Django has it too — wins over the
+    // base (pinned live: Django reuses the filter's scope, not the
+    // base's).
+    let order_spec = pidash_services::app_issues::ordering::order_sql(
+        &params.order_by,
+        "state.\"group\"",
+        |name| format!("min_{}", name.replace("__", "_")),
+    );
+    let cycle_bridge = if filtered.from_where.contains("\"issue_cycle\".") {
+        "issue_cycle"
+    } else {
+        "bridge"
+    };
+    let key = order_key(
+        &order_spec.out_param,
+        &params.order_by,
+        Some(cycle_bridge),
+        false,
+    )?;
+    let direction = if key.descending { "DESC" } else { "ASC" };
+    // Total count: the flat branch counts the pre-annotation `deepcopy`
+    // (`:125`) distinctly; the grouped branch answers `queryset.count()`
+    // over the windowed joined rows (pinned live: fan-out links count,
+    // never distinct).
+    let total_sql = if group_by.is_some() {
+        format!(
+            "SELECT COUNT(*) {}",
+            crate::app_issues::with_order_joins(&filtered.from_where, &key.joins)
+        )
+    } else {
+        format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where)
+    };
+    let total_count = fetch_count(&pool, &total_sql, filtered.values.clone()).await?;
+    let per_page = params.per_page;
+    let cursor = crate::paginator::Cursor::from_string(&params.cursor_raw).map_err(page_denial)?;
+    if group_by.is_some() {
+        return cycle_grouped_response(
+            &pool,
+            &slug,
+            &project_id,
+            &filtered,
+            group_by.unwrap_or_default(),
+            sub_group_by.map(str::to_owned),
+            &key.expr,
+            direction,
+            per_page,
+            cursor,
+            total_count,
+            &key.joins,
+        )
+        .await;
+    }
+    cycle_flat_response(
+        &pool, &filtered, &key.expr, direction, per_page, cursor, &key.joins,
+    )
+    .await
+}
+
+/// `CycleIssueViewSet.retrieve` (`issue.py:242-254`): the list's flat row
+/// (`issue_on_results`, ungrouped) for one work item in the cycle — the
+/// same bridge, manager, tenant and guest scope as the list, no filters —
+/// or the 404 `{"error": "The required object does not exist."}`.
+async fn cycle_issue_retrieve(
+    State(state): State<AppState>,
+    Path((slug, project_raw, cycle_raw, issue_raw)): Path<(String, String, String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
+) -> HandlerResult {
+    if super::is_noncanonical_uuid(&cycle_raw) || super::is_noncanonical_uuid(&issue_raw) {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    }
+    let (pool, user_id, project_id) =
+        cycle_issue_context(&state, &slug, &project_raw, gate_for_retrieve(), extension).await?;
+    let cycle_id = parse_uuid_or_invalid(&cycle_raw)?;
+    let issue_id = parse_uuid_or_invalid(&issue_raw)?;
+    let scope = RowScope {
+        created_by: guest_creator_scope(&pool, &slug, &project_id, &user_id).await?,
+        issue_id: Some(issue_id),
+    };
+    let filtered = cycle_filtered_set(
+        &slug,
+        &project_id,
+        &user_id,
+        &cycle_id,
+        &scope,
+        &empty_query_map(),
+        None,
+        None,
+        &chrono_tz::UTC,
+    )?;
+    let sql = format!(
+        "SELECT DISTINCT {} {} LIMIT 1",
+        cycle_row_selects(None),
+        filtered.from_where
+    );
+    let rows = fetch_json_rows(&pool, &sql, filtered.values).await?;
+    let row = rows.first().ok_or(Denial::NotFound)?;
+    Ok(json_response(
+        StatusCode::OK,
+        shape_row(row, &flat_row_fields(None, None), &chrono_tz::UTC, false),
+    ))
+}
+
+fn empty_query_map() -> QueryMap {
+    QueryMap::new()
+}
+
+/// Plain `paginate` branch (`issue.py:232-240`): distinct rows, the
+/// rewritten order key `NULLS LAST` plus `-created_at`, offset window.
+async fn cycle_flat_response(
+    pool: &sqlx::PgPool,
+    filtered: &FilteredSet,
+    key_expr: &str,
+    direction: &str,
+    per_page: i64,
+    cursor: crate::paginator::Cursor,
+    order_joins: &str,
+) -> HandlerResult {
+    use crate::paginator::{
+        apply_offset_window, max_hits, next_cursor, offset_window, prev_cursor,
+    };
+    use pidash_services::app_issues::shape::envelope;
+    let limit = per_page.min(1000);
+    let window = offset_window(limit, cursor.offset, cursor.value, cursor.is_prev, None)
+        .map_err(page_denial)?;
+    let selects = cycle_row_selects(None);
+    // The cycle-name traversal join rides on the row query only (scoped
+    // to the filtered `bridge`, so no extra fan-out here); the totals
+    // below stay distinct-issue counts.
+    let row_where = crate::app_issues::with_order_joins(&filtered.from_where, order_joins);
+    let inner = format!(
+        "SELECT DISTINCT {selects}, ({key_expr}) AS __order_key {row_where} ORDER BY __order_key {direction} NULLS LAST, issue.created_at DESC LIMIT {} OFFSET {}",
+        window.stop - window.offset,
+        window.offset
+    );
+    let rows = fetch_json_rows(pool, &inner, filtered.values.clone()).await?;
+    let has_more = rows.len() as i64 > limit;
+    let page: Vec<Map<String, Value>> = apply_offset_window(&rows, limit)
+        .map_err(page_denial)?
+        .into_iter()
+        .collect();
+    let total_count = {
+        let sql = format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where);
+        fetch_count(pool, &sql, filtered.values.clone()).await?
+    };
+    let next = next_cursor(limit, window.page, has_more);
+    let prev = prev_cursor(limit, window.page);
+    let timezone = chrono_tz::UTC;
+    let fields = flat_row_fields(None, None);
+    let shaped: Vec<String> = page
+        .iter()
+        .map(|row| shape_row(row, &fields, &timezone, false))
+        .collect();
+    Ok(json_response(
+        StatusCode::OK,
+        envelope(
+            None,
+            None,
+            total_count,
+            &next.to_string(),
+            &prev.to_string(),
+            next.has_results_or_false(),
+            prev.has_results_or_false(),
+            shaped.len(),
+            max_hits(total_count, limit).map_err(page_denial)?,
+            total_count,
+            &format!("[{}]", shaped.join(",")),
+        ),
+    ))
+}
+
+/// The grouped totals' `FROM` fragment: `count_filter` references
+/// `issue_intake`, so the totals query carries the intake LEFT join when
+/// no filter already joined it (Django adds the same demoted-LEFT join
+/// for the `Count(filter=...)`).
+fn totals_from_where(filtered: &FilteredSet) -> String {
+    if filtered.referenced.contains(&"issue_intake") {
+        return filtered.from_where.clone();
+    }
+    crate::app_issues::with_order_joins(
+        &filtered.from_where,
+        "LEFT JOIN intake_issues AS issue_intake ON issue_intake.issue_id = issue.id",
+    )
+}
+
+/// Map a kernel grouping failure: an undeclared group cell is Python's
+/// `KeyError` → 400 (`app/views/base.py:139-144`); a malformed row or
+/// seeded structure is a 500.
+fn group_denial(error: crate::paginator::GroupError) -> Denial {
+    use crate::paginator::GroupError as E;
+    match error {
+        E::UnknownGroup(_) => Denial::BadError("The required key does not exist.".to_owned()),
+        E::MissingId | E::MissingGroupField(_) | E::MalformedCells => Denial::ServerError,
+    }
+}
+
+/// `(group, filtered count)` pairs for the totals dict
+/// (`GroupedOffsetPaginator.__get_total_queryset`, `paginator.py:299-303`).
+async fn cycle_group_total_pairs(
+    pool: &sqlx::PgPool,
+    filtered: &FilteredSet,
+    group_expr: &str,
+    count_filter: &str,
+) -> Result<Vec<(String, i64)>, Denial> {
+    let sql = format!(
+        "SELECT COALESCE(({group_expr})::text, 'None') AS bucket, COUNT(DISTINCT issue.id) FILTER (WHERE {strip_and}) AS n {} GROUP BY 1",
+        totals_from_where(filtered),
+        strip_and = count_filter.strip_prefix("AND ").unwrap_or(count_filter),
+    );
+    let rows = bind_values(&sql, filtered.values.clone())?
+        .fetch_all(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let bucket: String = row.try_get("bucket").map_err(|_| Denial::ServerError)?;
+        let count: i64 = row.try_get("n").map_err(|_| Denial::ServerError)?;
+        out.push((bucket, count));
+    }
+    Ok(out)
+}
+
+/// `(group, sub, count)` pairs for the nested sub-totals.
+async fn cycle_sub_total_pairs(
+    pool: &sqlx::PgPool,
+    filtered: &FilteredSet,
+    group_expr: &str,
+    sub_expr: &str,
+    count_filter: &str,
+) -> Result<Vec<(String, String, i64)>, Denial> {
+    let sql = format!(
+        "SELECT COALESCE(({group_expr})::text, 'None') AS bucket, COALESCE(({sub_expr})::text, 'None') AS sub, COUNT(DISTINCT issue.id) FILTER (WHERE {strip_and}) AS n {} GROUP BY 1, 2",
+        totals_from_where(filtered),
+        strip_and = count_filter.strip_prefix("AND ").unwrap_or(count_filter),
+    );
+    let rows = bind_values(&sql, filtered.values.clone())?
+        .fetch_all(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let bucket: String = row.try_get("bucket").map_err(|_| Denial::ServerError)?;
+        let sub: String = row.try_get("sub").map_err(|_| Denial::ServerError)?;
+        let count: i64 = row.try_get("n").map_err(|_| Denial::ServerError)?;
+        out.push((bucket, sub, count));
+    }
+    Ok(out)
+}
+
+/// Shape one row into an ordered map for the groupers (datetimes as
+/// stored — no `user_timezone_converter` on the grouped path).
+fn cycle_shape_map(row: &Map<String, Value>, fields: &[String]) -> Map<String, Value> {
+    let timezone = chrono_tz::UTC;
+    let mut out = Map::new();
+    for field in fields {
+        let value = row.get(field).unwrap_or(&Value::Null);
+        out.insert(
+            field.clone(),
+            cycle_shape_json_value(field, value, &timezone),
+        );
+    }
+    // Group raw keys ride along for the grouper.
+    for (key, value) in row {
+        if (key == "labels__id" || key == "assignees__id" || key == "issue_module__module_id")
+            && !out.contains_key(key)
+        {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    out
+}
+
+fn cycle_shape_json_value(field: &str, value: &Value, timezone: &chrono_tz::Tz) -> Value {
+    let _ = timezone;
+    match field {
+        "completed_at" => match value {
+            Value::String(text) => match chrono::DateTime::parse_from_rfc3339(text) {
+                Ok(aware) => Value::String(crate::serializer::render_datetime(
+                    &aware.with_timezone(&chrono::Utc),
+                )),
+                Err(_) => value.clone(),
+            },
+            _ => value.clone(),
+        },
+        "sort_order" => match value {
+            Value::Number(number) => {
+                let float = number.as_f64().unwrap_or(f64::NAN);
+                Value::String(crate::paginator::py_float_str(float))
+            }
+            _ => value.clone(),
+        },
+        _ => value.clone(),
+    }
+}
+
+/// Grouped / sub-grouped branch (`issue.py:136-212`): window-function
+/// pagination over the group partition, totals with the intake /
+/// archived / draft `count_filter`, buckets from `issue_group_values`.
+#[allow(clippy::too_many_arguments)]
+async fn cycle_grouped_response(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    filtered: &FilteredSet,
+    group_by: &str,
+    sub_group_by: Option<String>,
+    key_expr: &str,
+    direction: &str,
+    per_page: i64,
+    cursor: crate::paginator::Cursor,
+    total_count: i64,
+    order_joins: &str,
+) -> HandlerResult {
+    use crate::paginator::{
+        grouped_max_hits, grouped_window, next_cursor, prev_cursor, process_grouped_results,
+        process_sub_grouped_results, sub_field_dict, sub_total_dicts, total_dict,
+    };
+    use pidash_services::app_issues::shape::envelope;
+    let limit = per_page.min(1000);
+    let window = grouped_window(limit, cursor.offset, cursor.value, None).map_err(page_denial)?;
+    let group_expr = group_expression(group_by)?;
+    let selects = cycle_row_selects(skip_array_for(group_by));
+    // Both m2m member keys ride on the rows: Django's `.values()` carries
+    // the group and sub swaps, and the sub multi-grouper indexes the sub
+    // key directly. Short aliases select nothing — their rows lack the key
+    // and the groupers read them as `None`, like Django's `.get`.
+    let member_select = match &sub_group_by {
+        Some(sub) => format!(
+            "{}{}",
+            group_member_select(group_by),
+            group_member_select(sub)
+        ),
+        None => group_member_select(group_by).to_owned(),
+    };
+    let sub_expr = match &sub_group_by {
+        Some(sub) => Some(group_expression(sub)?),
+        None => None,
+    };
+    let partition = match &sub_expr {
+        Some(sub) => format!("{group_expr}, {sub}"),
+        None => group_expr.clone(),
+    };
+    // The cycle-name traversal join rides on the row query (scoped to the
+    // filtered `bridge`, so no extra fan-out here). No DISTINCT: Django
+    // windows the plain joined rows, so fan-out links all count.
+    let row_where = crate::app_issues::with_order_joins(&filtered.from_where, order_joins);
+    let inner = format!(
+        "SELECT * FROM (SELECT {selects}{member_select}, ({key_expr}) AS __order_key,
+         ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY ({key_expr}) {direction} NULLS LAST, issue.created_at DESC) AS __rn
+         {row_where}) __w
+         WHERE __w.__rn > {offset} AND __w.__rn <= {stop}
+         ORDER BY __w.__order_key {direction} NULLS LAST, __w.created_at DESC",
+        offset = window.offset,
+        stop = window.stop,
+    );
+    let rows = fetch_json_rows(pool, &inner, filtered.values.clone()).await?;
+    let has_more = rows.iter().any(|row| {
+        row.get("__rn")
+            .and_then(|value| value.as_i64())
+            .map(|rn| rn >= window.stop)
+            .unwrap_or(false)
+    });
+    let page: Vec<Map<String, Value>> = rows
+        .into_iter()
+        .filter(|row| {
+            row.get("__rn")
+                .and_then(|value| value.as_i64())
+                .map(|rn| rn < window.stop)
+                .unwrap_or(false)
+        })
+        .collect();
+    let window_empty = page.is_empty();
+    let window_len = page.len();
+    // `count_filter` for grouped pagination (`issue.py:176-183`).
+    let count_filter =
+        "((issue_intake.status = ANY('{1,-1,2}')) OR issue_intake.id IS NULL) AND issue.archived_at IS NULL AND issue.is_draft = FALSE";
+    let group_totals = cycle_group_total_pairs(pool, filtered, &group_expr, count_filter).await?;
+    if !window_empty && group_totals.is_empty() {
+        // `...order_by("-count")[0]` on an empty group list: IndexError.
+        return Err(Denial::ServerError);
+    }
+    let totals = total_dict(&group_totals);
+    let next = next_cursor(limit, window.page, has_more);
+    let prev = prev_cursor(limit, window.page);
+    let fields = flat_row_fields(Some(group_by), sub_group_by.as_deref());
+    let shaped: Vec<Map<String, Value>> = page
+        .iter()
+        .map(|row| cycle_shape_map(row, &fields))
+        .collect();
+    let group_fields = group_values(pool, group_by, slug, project_id, filtered).await?;
+    let results_value = match &sub_expr {
+        Some(_) => {
+            let sub_pairs = cycle_sub_total_pairs(
+                pool,
+                filtered,
+                &group_expr,
+                sub_expr.as_deref().unwrap_or_default(),
+                count_filter,
+            )
+            .await?;
+            let (group_totals_map, sub_totals_map) = sub_total_dicts(&group_totals, &sub_pairs);
+            let _ = group_totals_map;
+            let seeded = sub_field_dict(&group_fields, &totals, &sub_totals_map)
+                .map_err(|_| Denial::ServerError)?;
+            let Value::Object(cells) = seeded else {
+                return Err(Denial::ServerError);
+            };
+            process_sub_grouped_results(
+                &shaped,
+                group_by,
+                &sub_group_by.clone().unwrap_or_default(),
+                cells,
+            )
+            .map_err(group_denial)?
+        }
+        None => process_grouped_results(&shaped, group_by, &group_fields, &totals)
+            .map_err(group_denial)?,
+    };
+    let results_json = serde_json::to_string(&results_value).map_err(|_| Denial::ServerError)?;
+    let top_group = group_totals
+        .iter()
+        .map(|(_, count)| *count)
+        .max()
+        .unwrap_or(0);
+    Ok(json_response(
+        StatusCode::OK,
+        envelope(
+            Some(group_by),
+            sub_group_by.as_deref(),
+            total_count,
+            &next.to_string(),
+            &prev.to_string(),
+            next.has_results_or_false(),
+            prev.has_results_or_false(),
+            window_len,
+            grouped_max_hits(window_empty, top_group, limit).map_err(page_denial)?,
+            total_count,
+            &results_json,
+        ),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Create
+// ---------------------------------------------------------------------------
+
+/// 400 `{"error": "Issues are required"}` (`issue.py:227-228`).
+pub const ISSUES_REQUIRED_BODY: &str = r#"{"error":"Issues are required"}"#;
+/// 400 completed-cycle refusal (`issue.py:232-236`).
+pub const CYCLE_COMPLETED_BODY: &str =
+    r#"{"error":"The Cycle has already been completed so no new issues can be added"}"#;
+/// 201 success envelope (`issue.py:297`).
+pub const CYCLE_ISSUE_CREATE_BODY: &str = r#"{"message":"success"}"#;
+
+/// Completed-cycle check (`issue.py:232`): `if cycle.end_date is not None
+/// and cycle.end_date < timezone.now()`. The `is not None` guard
+/// short-circuits, so a dateless (`NULL`) cycle is never completed and the
+/// create falls through to 201.
+fn cycle_is_completed(
+    end: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    matches!(end, Some(end) if end < now)
+}
+
+/// Python truthiness over a decoded JSON value for `if not issues:`
+/// (`issue.py:227`): `null`, `false`, `0`/`0.0`, `""`, `[]` and `{}` are
+/// falsy; every other value — non-empty strings/arrays/objects, non-zero
+/// numbers, `true` — is truthy.
+fn is_falsy_json(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Bool(flag) => !flag,
+        Value::Number(number) => number.as_f64().map(|n| n == 0.0).unwrap_or(false),
+        Value::String(text) => text.is_empty(),
+        Value::Array(items) => items.is_empty(),
+        Value::Object(fields) => fields.is_empty(),
+    }
+}
+
+/// Classify the decoded `issues` member (`issue.py:223-242`).
+///
+/// Falsy values answer 400 `{"error": "Issues are required"}`. Of the
+/// truthy values, arrays yield one [`IssueInput`] per item — a `null` item
+/// flows into the `NOT NULL` `bulk_create` and dies with `IntegrityError`
+/// → 400 `The payload is not valid`, and a float/negative/out-of-range
+/// item fails the UUID coercion in the `__in` filter → 400 invalid detail
+/// — while a non-empty string iterates its chars and a non-empty object
+/// iterates its keys through that same `__in` coercion → 400 invalid
+/// detail, and truthy numbers/bools are not iterable → `TypeError` →
+/// generic 500.
+fn extract_issue_inputs(issues: &Value) -> Result<Vec<IssueInput>, Denial> {
+    if is_falsy_json(issues) {
+        return Err(Denial::BadError("Issues are required".to_owned()));
+    }
+    match issues {
+        Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    // A string stays raw for the set difference and is
+                    // parsed as hex here, but the error is only raised at
+                    // the `__in` filter below (`issue.py:239`).
+                    Value::String(text) => out.push(IssueInput {
+                        raw_key: text.clone(),
+                        parsed: text.parse::<uuid::Uuid>().map_err(|_| ()),
+                    }),
+                    // `input_form = "int" if isinstance(value, int) else
+                    // "hex"`: a JSON bool is a Python `int` (`True == 1`).
+                    Value::Bool(flag) => out.push(IssueInput {
+                        raw_key: if *flag { "true" } else { "false" }.to_owned(),
+                        parsed: Ok(uuid::Uuid::from_u128(u128::from(*flag))),
+                    }),
+                    Value::Number(number) => out.push(IssueInput {
+                        raw_key: number.to_string(),
+                        parsed: number.as_u128().map(uuid::Uuid::from_u128).ok_or(()),
+                    }),
+                    Value::Null => {
+                        return Err(Denial::BadError("The payload is not valid".to_owned()));
+                    }
+                    _ => return Err(Denial::BadError(INVALID_DETAIL_MSG.to_owned())),
+                }
+            }
+            Ok(out)
+        }
+        Value::String(_) | Value::Object(_) => Err(Denial::BadError(INVALID_DETAIL_MSG.to_owned())),
+        _ => Err(Denial::ServerError),
+    }
+}
+
+/// One member of the decoded `issues` array: the raw Python value, used for
+/// `set(issues) - set(existing_issues)` (`issue.py:242`, which compares raw
+/// values, not coerced ids), and the deferred `UUIDField.to_python` result
+/// consumed by the `issue_id__in` filter (`issue.py:239`).
+struct IssueInput {
+    /// Raw-value identity: a string is itself; a coerced scalar keeps its
+    /// digits (`true`/`false` for bools) so it never matches the canonical
+    /// UUID strings in `existing_issues`.
+    raw_key: String,
+    /// `Ok` when the `UUIDField` coerces the raw value; `Err` for a
+    /// `ValidationError` (float, negative or out-of-range int). The error
+    /// surfaces at the filter, after the cycle lookup + end-date check.
+    parsed: Result<uuid::Uuid, ()>,
+}
+
+/// `UUIDField.to_python` (`django/db/models/fields/__init__.py`): a string
+/// parses as hex; a bool, or a non-negative int below `2**128`, becomes
+/// `uuid.UUID(int=v)`; anything else raises `ValidationError`
+/// (`Denial::BadError` with the invalid-detail body).
+pub(crate) fn coerce_uuid_field(value: &Value) -> Result<uuid::Uuid, Denial> {
+    match value {
+        Value::Bool(flag) => Ok(uuid::Uuid::from_u128(u128::from(*flag))),
+        Value::Number(number) => number
+            .as_u128()
+            .map(uuid::Uuid::from_u128)
+            .ok_or_else(|| Denial::BadError(INVALID_DETAIL_MSG.to_owned())),
+        Value::String(raw) => parse_uuid_or_invalid(raw),
+        _ => Err(Denial::BadError(INVALID_DETAIL_MSG.to_owned())),
+    }
+}
+
+/// Surface a deferred [`IssueInput::parsed`] failure as the `__in` filter's
+/// `ValidationError` → 400 invalid detail.
+fn coerced_input(input: &IssueInput) -> Result<uuid::Uuid, Denial> {
+    input
+        .parsed
+        .map_err(|_| Denial::BadError(INVALID_DETAIL_MSG.to_owned()))
+}
+
+/// `CycleIssueViewSet.create` (`issue.py:223-297`).
+async fn cycle_issue_create(
+    State(state): State<AppState>,
+    Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
+) -> HandlerResult {
+    if super::is_noncanonical_uuid(&cycle_raw) {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    }
+    let (pool, user_id, project_id) =
+        cycle_issue_context(&state, &slug, &project_raw, gate_for_create(), extension).await?;
+    let cycle_id = parse_uuid_or_invalid(&cycle_raw)?;
+    // `request.data.get("issues", [])` (`:223`): decoded after the gate
+    // (DRF parses lazily), so body errors never preempt auth/gate. A
+    // non-object body has no `.get` (AttributeError → 500); objects fall
+    // through to the truthiness check below.
+    let (parts, body) = req.into_parts();
+    let bytes = read_request_bytes(body)
+        .await
+        .map_err(|_| Denial::TruncatedBody)?;
+    let data = decode_request_body(&parts.headers, &bytes)?;
+    let issues_value = match data.as_object() {
+        Some(_) => data.get("issues").cloned().unwrap_or(Value::Null),
+        None => return Err(Denial::ServerError),
+    };
+    let issue_inputs = extract_issue_inputs(&issues_value)?;
+    // `Cycle.objects.get(workspace__slug, project_id, pk)` (`:230`).
+    let cycle: Option<(
+        uuid::Uuid,
+        uuid::Uuid,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> = sqlx::query_as(
+        r#"SELECT c.id, c.workspace_id, c.end_date FROM cycles c
+               JOIN workspaces w ON w.id = c.workspace_id
+               WHERE c.id = $1 AND c.project_id = $2 AND w.slug = $3
+               AND c.deleted_at IS NULL"#,
+    )
+    .bind(cycle_id)
+    .bind(project_id)
+    .bind(&slug)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    let (_, workspace_id, end_date) = cycle.ok_or(Denial::NotFound)?;
+    // Completed-cycle refusal (`:232-236`).
+    if cycle_is_completed(end_date, chrono::Utc::now()) {
+        return Ok(json_response(
+            StatusCode::BAD_REQUEST,
+            CYCLE_COMPLETED_BODY.to_owned(),
+        ));
+    }
+    // UUID coercion happens at the `__in` filter (`:239`), after the
+    // cycle lookup and the end-date check above. A float, negative or
+    // out-of-range int raises `ValidationError` here, exactly like the
+    // filter.
+    let mut issue_ids = Vec::with_capacity(issue_inputs.len());
+    for input in &issue_inputs {
+        issue_ids.push(coerced_input(input)?);
+    }
+    // Bridges already created for these issues in *other* cycles (`:239`).
+    let existing: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
+        r#"SELECT issue_id, cycle_id FROM cycle_issues
+           WHERE cycle_id != $1 AND issue_id = ANY($2) AND deleted_at IS NULL"#,
+    )
+    .bind(cycle_id)
+    .bind(&issue_ids)
+    .fetch_all(&pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    // `existing_issues = [str(...) for ...]` + `set(issues) -
+    // set(existing_issues)` (`:241-242`): the comparison is on the RAW
+    // input strings, so a non-canonical UUID spelling of an already
+    // bridged issue counts as new (and then violates the partial unique
+    // constraint → 400, exactly like `bulk_create` does).
+    let existing_strings: std::collections::HashSet<String> = existing
+        .iter()
+        .map(|(issue_id, _)| issue_id.to_string())
+        .collect();
+    let mut seen_new = std::collections::HashSet::new();
+    let mut new_ids: Vec<uuid::Uuid> = Vec::new();
+    for input in &issue_inputs {
+        if !existing_strings.contains(&input.raw_key) && seen_new.insert(input.raw_key.clone()) {
+            new_ids.push(coerced_input(input)?);
+        }
+    }
+    // `bulk_create(..., batch_size=10)` (`:244-257`); batching is
+    // unobservable, one multi-row INSERT with RETURNING for the activity
+    // payload below.
+    let mut created: Vec<(
+        uuid::Uuid,
+        uuid::Uuid,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+    )> = Vec::new();
+    if !new_ids.is_empty() {
+        let now = chrono::Utc::now();
+        let rows: Vec<(
+            uuid::Uuid,
+            uuid::Uuid,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        )> = sqlx::query_as(
+            r#"INSERT INTO cycle_issues
+                   (id, project_id, workspace_id, created_by_id, updated_by_id, cycle_id, issue_id, created_at, updated_at)
+                   SELECT gen_random_uuid(), $1, $2, $3, $3, $4, unnest($5::uuid[]), $6, $6
+                   RETURNING id, issue_id, created_at, updated_at"#,
+        )
+            .bind(project_id)
+            .bind(workspace_id)
+            .bind(user_id)
+            .bind(cycle_id)
+            .bind(&new_ids)
+            .bind(now)
+            .fetch_all(&pool)
+            .await
+            .map_err(|error| match error {
+                // `bulk_create` on a foreign key (`issue_id`) that no
+                // `issues` row owns raises `IntegrityError` → 400 payload
+                // not valid (`:244-257` through `handle_exception`); the
+                // partial-unique bridge constraint maps the same way.
+                sqlx::Error::Database(db)
+                    if matches!(db.code().as_deref(), Some("23505" | "23503")) =>
+                {
+                    Denial::BadError("The payload is not valid".to_owned())
+                }
+                _ => Denial::ServerError,
+            })?;
+        created = rows;
+    }
+    // Moved bridges: `bulk_update(["cycle_id"], batch_size=100)` (`:279`).
+    // `bulk_update(["cycle_id"])` builds its UPDATE from the listed fields
+    // only and never calls `save()`/`pre_save()`, so the `auto_now`
+    // `updated_at` is untouched — only `cycle_id` changes.
+    let mut moved: Vec<(uuid::Uuid, uuid::Uuid)> = Vec::new();
+    if !existing.is_empty() {
+        let moved_ids: Vec<uuid::Uuid> = existing.iter().map(|(issue_id, _)| *issue_id).collect();
+        sqlx::query(
+            r#"UPDATE cycle_issues SET cycle_id = $1
+               WHERE issue_id = ANY($2) AND cycle_id != $1 AND deleted_at IS NULL"#,
+        )
+        .bind(cycle_id)
+        .bind(&moved_ids)
+        .execute(&pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+        for (issue_id, old_cycle_id) in &existing {
+            moved.push((*old_cycle_id, *issue_id));
+        }
+    }
+    // `issue_activity.delay(type="cycle.activity.created", ...)` (`:281-295`).
+    let origin = super::activity_origin(&state).ok_or(Denial::ServerError)?;
+    let updated_activity: Vec<Value> = moved
+        .iter()
+        .map(|(old_cycle_id, issue_id)| {
+            serde_json::json!({
+                "old_cycle_id": old_cycle_id.to_string(),
+                "new_cycle_id": cycle_id.to_string(),
+                "issue_id": issue_id.to_string(),
+            })
+        })
+        .collect();
+    let created_activity: Vec<Value> = created
+        .iter()
+        .map(|(id, issue_id, created_at, updated_at)| {
+            serde_json::json!({
+                "model": "db.cycleissue",
+                "pk": id.to_string(),
+                "fields": {
+                    "created_at": render_activity_datetime(created_at),
+                    "updated_at": render_activity_datetime(updated_at),
+                    "deleted_at": Value::Null,
+                    "created_by": user_id.to_string(),
+                    "updated_by": user_id.to_string(),
+                    "project": project_id.to_string(),
+                    "workspace": workspace_id.to_string(),
+                    "cycle": cycle_id.to_string(),
+                    "issue": issue_id.to_string(),
+                },
+            })
+        })
+        .collect();
+    let mut kwargs = Map::new();
+    kwargs.insert(
+        "type".to_owned(),
+        Value::String("cycle.activity.created".to_owned()),
+    );
+    kwargs.insert(
+        "requested_data".to_owned(),
+        Value::String(serde_json::json!({"cycles_list": issues_value}).to_string()),
+    );
+    kwargs.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
+    kwargs.insert("issue_id".to_owned(), Value::Null);
+    kwargs.insert(
+        "project_id".to_owned(),
+        Value::String(project_id.to_string()),
+    );
+    kwargs.insert(
+        "current_instance".to_owned(),
+        Value::String(
+            serde_json::json!({
+                "updated_cycle_issues": updated_activity,
+                // `serializers.serialize("json", created_records)` (`:288`)
+                // embeds a *string*; the consumer `json.loads`es it
+                // (`bgtasks/issue_activities_task.py:771`), so an array
+                // here would poison the `cycle.activity.created` task.
+                "created_cycle_issues": Value::String(
+                    serde_json::to_string(&created_activity).expect("activity payload"),
+                ),
+            })
+            .to_string(),
+        ),
+    );
+    kwargs.insert(
+        "epoch".to_owned(),
+        Value::Number(chrono::Utc::now().timestamp().into()),
+    );
+    kwargs.insert("notification".to_owned(), Value::Bool(true));
+    kwargs.insert("origin".to_owned(), Value::String(origin));
+    enqueue_activity(&pool, kwargs).await;
+    Ok(json_response(
+        StatusCode::CREATED,
+        CYCLE_ISSUE_CREATE_BODY.to_owned(),
+    ))
+}
+
+/// Django serializer datetime rendering for the activity payload.
+fn render_activity_datetime(value: &chrono::DateTime<chrono::Utc>) -> String {
+    value.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Destroy
+// ---------------------------------------------------------------------------
+
+/// `CycleIssueViewSet.destroy` (`issue.py:299-324`): the activity publish
+/// fires before the delete and unconditionally; the bridge
+/// `filter().delete()` is a soft delete; a missing bridge still 204s.
+async fn cycle_issue_destroy(
+    State(state): State<AppState>,
+    Path((slug, project_raw, cycle_raw, issue_raw)): Path<(String, String, String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
+) -> HandlerResult {
+    if super::is_noncanonical_uuid(&cycle_raw) || super::is_noncanonical_uuid(&issue_raw) {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    }
+    let (pool, user_id, project_id) =
+        cycle_issue_context(&state, &slug, &project_raw, gate_for_destroy(), extension).await?;
+    let cycle_id = parse_uuid_or_invalid(&cycle_raw)?;
+    let issue_id = parse_uuid_or_invalid(&issue_raw)?;
+    let origin = super::activity_origin(&state).ok_or(Denial::ServerError)?;
+    let mut kwargs = Map::new();
+    kwargs.insert(
+        "type".to_owned(),
+        Value::String("cycle.activity.deleted".to_owned()),
+    );
+    kwargs.insert(
+        "requested_data".to_owned(),
+        Value::String(
+            serde_json::json!({
+                "cycle_id": cycle_id.to_string(),
+                "issues": [issue_id.to_string()],
+            })
+            .to_string(),
+        ),
+    );
+    kwargs.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
+    kwargs.insert("issue_id".to_owned(), Value::String(issue_id.to_string()));
+    kwargs.insert(
+        "project_id".to_owned(),
+        Value::String(project_id.to_string()),
+    );
+    kwargs.insert("current_instance".to_owned(), Value::Null);
+    kwargs.insert(
+        "epoch".to_owned(),
+        Value::Number(chrono::Utc::now().timestamp().into()),
+    );
+    kwargs.insert("notification".to_owned(), Value::Bool(true));
+    kwargs.insert("origin".to_owned(), Value::String(origin));
+    enqueue_activity(&pool, kwargs).await;
+    sqlx::query(
+        r#"UPDATE cycle_issues SET deleted_at = now()
+           WHERE issue_id = $1 AND project_id = $2 AND cycle_id = $3
+             AND workspace_id IN (SELECT id FROM workspaces WHERE slug = $4)
+             AND deleted_at IS NULL"#,
+    )
+    .bind(issue_id)
+    .bind(project_id)
+    .bind(cycle_id)
+    .bind(&slug)
+    .execute(&pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(empty_response(StatusCode::NO_CONTENT))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_issues::OneOrMany;
+    use pidash_services::app_cycles::queries as cycle_queries;
+
+    fn empty_query() -> QueryMap {
+        HashMap::new()
+    }
+
+    #[test]
+    fn gates_cover_the_owned_actions() {
+        let list = gates::gate_for(
+            "GET",
+            "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/",
+        )
+        .expect("list gate");
+        assert_eq!(list.source, "issue.py:132 (CycleIssueViewSet.list)");
+        let create = gates::gate_for(
+            "POST",
+            "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/",
+        )
+        .expect("create gate");
+        assert_eq!(create.source, "issue.py:264 (CycleIssueViewSet.create)");
+        let destroy = gates::gate_for(
+            "DELETE",
+            "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/<uuid>/",
+        )
+        .expect("destroy gate");
+        assert_eq!(destroy.source, "issue.py:340 (CycleIssueViewSet.destroy)");
+        let retrieve = gates::gate_for(
+            "GET",
+            "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/<uuid>/",
+        )
+        .expect("retrieve gate");
+        assert_eq!(retrieve.source, "issue.py:242 (CycleIssueViewSet.retrieve)");
+        for row in [list, retrieve] {
+            assert!(matches!(
+                row.gate,
+                gates::Gate::Project { roles } if roles.contains(&pidash_auth::permissions::ROLE_GUEST)
+            ));
+        }
+        for row in [list, create, destroy] {
+            assert!(matches!(row.gate, gates::Gate::Project { .. }));
+        }
+    }
+
+    #[test]
+    fn clash_body_matches_the_shared_const() {
+        assert_eq!(
+            cycle_queries::GROUP_CLASH_BODY,
+            format!("{{\"error\":{}}}", json_string(GROUP_CLASH_MESSAGE))
+        );
+    }
+
+    #[test]
+    fn fixture_bodies_are_byte_exact() {
+        // F-C27-05 create/destroy envelopes.
+        assert_eq!(ISSUES_REQUIRED_BODY, r#"{"error":"Issues are required"}"#);
+        assert_eq!(
+            CYCLE_COMPLETED_BODY,
+            r#"{"error":"The Cycle has already been completed so no new issues can be added"}"#
+        );
+        assert_eq!(CYCLE_ISSUE_CREATE_BODY, r#"{"message":"success"}"#);
+        assert_eq!(INVALID_DETAIL_MSG, "Please provide valid detail");
+    }
+
+    /// Render a classifier outcome as `(status, body)` for exact comparison.
+    fn outcome_strings(result: Result<Vec<IssueInput>, Denial>) -> (u16, String) {
+        match result {
+            Ok(inputs) => (
+                201,
+                inputs
+                    .iter()
+                    .map(|input| input.raw_key.clone())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            Err(Denial::BadError(message)) => {
+                (400, format!("{{\"error\":{}}}", json_string(&message)))
+            }
+            Err(Denial::ServerError) => (500, "server-error".to_owned()),
+            Err(other) => panic!("unexpected denial: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn null_end_date_never_completes_the_cycle() {
+        // `if cycle.end_date is not None and ...` (issue.py:232): the
+        // guard short-circuits, so a dateless cycle always proceeds.
+        use chrono::TimeZone;
+        let now = chrono::Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        assert!(!cycle_is_completed(None, now));
+        assert!(cycle_is_completed(
+            Some(chrono::Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap()),
+            now
+        ));
+        assert!(!cycle_is_completed(
+            Some(chrono::Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap()),
+            now
+        ));
+    }
+
+    #[test]
+    fn issues_member_follows_python_truthiness() {
+        // `if not issues:` (issue.py:227): every falsy JSON value answers
+        // 400 `{"error": "Issues are required"}`.
+        for raw in ["null", "false", "0", "0.0", r#""""#, "[]", "{}"] {
+            let value: Value = serde_json::from_str(raw).expect("fixture");
+            assert_eq!(
+                outcome_strings(extract_issue_inputs(&value)),
+                (400, ISSUES_REQUIRED_BODY.to_owned()),
+                "falsy input {raw}"
+            );
+        }
+        // Missing member defaults to `[]` (`.get("issues", [])`), also falsy.
+        let missing: Value = serde_json::from_str(r#"{"other": 1}"#).expect("fixture");
+        assert_eq!(
+            outcome_strings(extract_issue_inputs(
+                &missing.get("issues").cloned().unwrap_or(Value::Null)
+            )),
+            (400, ISSUES_REQUIRED_BODY.to_owned()),
+            "missing member"
+        );
+        // Truthy non-array iterables reach the `__in` UUID coercion → 400
+        // invalid detail (strings iterate chars, objects iterate keys).
+        for raw in [r#""abc""#, r#"{"a": 1}"#] {
+            let value: Value = serde_json::from_str(raw).expect("fixture");
+            assert!(
+                matches!(extract_issue_inputs(&value), Err(Denial::BadError(_))),
+                "truthy iterable {raw}"
+            );
+            let (_, body) = outcome_strings(extract_issue_inputs(&value));
+            assert_eq!(
+                body,
+                format!("{{\"error\":{}}}", json_string(INVALID_DETAIL_MSG)),
+                "invalid-detail body for {raw}"
+            );
+        }
+        // Truthy numbers/bools are not iterable → TypeError → generic 500.
+        for raw in ["1", "1.5", "true"] {
+            let value: Value = serde_json::from_str(raw).expect("fixture");
+            assert!(
+                matches!(extract_issue_inputs(&value), Err(Denial::ServerError)),
+                "truthy scalar {raw}"
+            );
+        }
+        // A `null` item matches nothing in `__in` then violates the NOT
+        // NULL `bulk_create` → IntegrityError → 400 payload-not-valid;
+        // other non-string items fail the `__in` coercion → 400 detail.
+        let null_item: Value = serde_json::from_str("[null]").expect("fixture");
+        assert_eq!(
+            outcome_strings(extract_issue_inputs(&null_item)),
+            (400, r#"{"error":"The payload is not valid"}"#.to_owned()),
+            "[null]"
+        );
+        // Well-formed arrays pass through as raw strings (UUID coercion
+        // happens later, after the cycle lookup + end-date check).
+        let good: Value = serde_json::from_str(r#"["a", "b"]"#).expect("fixture");
+        assert_eq!(
+            extract_issue_inputs(&good)
+                .expect("strings")
+                .iter()
+                .map(|input| input.raw_key.clone())
+                .collect::<Vec<_>>(),
+            vec!["a".to_owned(), "b".to_owned()]
+        );
+    }
+
+    #[test]
+    fn issue_items_coerce_int_and_bool_ids_like_the_uuid_field() {
+        // `UUIDField.to_python` (`input_form = "int"` for a Python int/bool):
+        // `[5]`/`[true]`/`[false]` coerce and then miss the `__in` filter.
+        let inputs = |raw: &str| {
+            let value: Value = serde_json::from_str(raw).expect("fixture");
+            extract_issue_inputs(&value).expect("array")
+        };
+        let int_items = inputs("[5]");
+        assert_eq!(int_items[0].raw_key, "5");
+        assert_eq!(int_items[0].parsed.expect("int"), uuid::Uuid::from_u128(5));
+        let true_items = inputs("[true]");
+        assert_eq!(true_items[0].raw_key, "true");
+        assert_eq!(
+            true_items[0].parsed.expect("true"),
+            uuid::Uuid::from_u128(1)
+        );
+        let false_items = inputs("[false]");
+        assert_eq!(false_items[0].raw_key, "false");
+        assert_eq!(
+            false_items[0].parsed.expect("false"),
+            uuid::Uuid::from_u128(0)
+        );
+        // A non-canonical raw key never matches an existing canonical UUID
+        // string, so `[5]` counts as new exactly like `set([5]) -
+        // set(["00000000-...-0005"])` in the view.
+        assert_ne!(int_items[0].raw_key, uuid::Uuid::from_u128(5).to_string());
+        // Floats, negatives and out-of-range ints stay invalid detail
+        // (deferred to the `__in` filter, hence `Err` not a rejection).
+        for raw in ["[5.5]", "[-1]", "[340282366920938463463374607431768211456]"] {
+            let items = inputs(raw);
+            assert!(items[0].parsed.is_err(), "{raw}");
+        }
+        // The largest in-range int coerces; one past does not.
+        let max = inputs("[340282366920938463463374607431768211455]");
+        assert_eq!(
+            max[0].parsed.expect("max"),
+            uuid::Uuid::from_u128(u128::MAX)
+        );
+    }
+
+    #[test]
+    fn flat_fields_follow_issue_on_results_order() {
+        let fields = flat_row_fields(None, None);
+        let names: Vec<&str> = fields.iter().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            vec![
+                "id",
+                "name",
+                "state_id",
+                "sort_order",
+                "completed_at",
+                "estimate_point",
+                "priority",
+                "start_date",
+                "target_date",
+                "sequence_id",
+                "project_id",
+                "parent_id",
+                "created_at",
+                "updated_at",
+                "created_by",
+                "updated_by",
+                "is_draft",
+                "archived_at",
+                "state__group",
+                "cycle_id",
+                "link_count",
+                "attachment_count",
+                "sub_issues_count",
+                "assignee_ids",
+                "label_ids",
+                "module_ids",
+            ]
+        );
+        // M2M group swap: the grouped array leaves, the raw lookup joins
+        // the join-lookup slot after `state__group`.
+        let grouped = flat_row_fields(Some("assignees__id"), None);
+        assert!(!grouped.contains(&"assignee_ids".to_owned()));
+        assert!(grouped.contains(&"assignees__id".to_owned()));
+        assert_eq!(grouped.len(), names.len());
+        let names: Vec<&str> = grouped.iter().map(String::as_str).collect();
+        let at = names
+            .iter()
+            .position(|name| *name == "state__group")
+            .expect("lookup slot");
+        assert_eq!(names[at + 1], "assignees__id");
+    }
+
+    #[test]
+    fn row_selects_carry_the_four_annotations_and_skip_one_array() {
+        let selects = cycle_row_selects(None);
+        for alias in [
+            "AS cycle_id",
+            "AS link_count",
+            "AS attachment_count",
+            "AS sub_issues_count",
+            "AS label_ids",
+            "AS assignee_ids",
+            "AS module_ids",
+        ] {
+            assert!(selects.contains(alias), "missing {alias}");
+        }
+        // Scalar `Func(... "Count")` shape (`issue.py:84-104`): plain
+        // `COUNT`, never `NULLIF`, so empty renders `0` (PIDASHCONV-1416).
+        assert!(
+            !selects.contains("NULLIF"),
+            "cycle counts must not NULLIF: {selects}"
+        );
+        for alias in [
+            "AS link_count",
+            "AS attachment_count",
+            "AS sub_issues_count",
+        ] {
+            let head = selects.split(alias).next().expect("alias");
+            assert!(
+                head.rsplit("(SELECT ")
+                    .next()
+                    .is_some_and(|frag| frag.trim_start().starts_with("COUNT(*)")),
+                "missing plain COUNT for {alias}"
+            );
+        }
+        assert!(!cycle_row_selects(Some("label_ids")).contains("AS label_ids"));
+        assert!(!cycle_row_selects(Some("assignee_ids")).contains("AS assignee_ids"));
+        assert!(!cycle_row_selects(Some("module_ids")).contains("AS module_ids"));
+    }
+
+    #[test]
+    fn filtered_set_names_the_bridge_scope_and_manager_guards() {
+        let project = uuid::Uuid::new_v4();
+        let user = uuid::Uuid::new_v4();
+        let cycle = uuid::Uuid::new_v4();
+        let filtered = cycle_filtered_set(
+            "acme",
+            &project,
+            &user,
+            &cycle,
+            &RowScope::default(),
+            &empty_query(),
+            None,
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
+        for needle in [
+            "JOIN cycle_issues AS bridge ON bridge.issue_id = issue.id",
+            "bridge.cycle_id = ",
+            "bridge.deleted_at IS NULL",
+            "issue.deleted_at IS NULL",
+            "NOT (state.\"group\" = 'triage')",
+            "issue.archived_at IS NULL",
+            "project.archived_at IS NULL",
+            "issue.is_draft = FALSE",
+            "workspaces.slug = ",
+            "issue.project_id = ",
+            "project_members pm",
+        ] {
+            assert!(filtered.from_where.contains(needle), "missing {needle}");
+        }
+        assert_eq!(filtered.values.len(), 4);
+        assert!(filtered.referenced.contains(&"bridge"));
+    }
+
+    #[test]
+    fn filtered_set_applies_the_row_scope() {
+        let project = uuid::Uuid::new_v4();
+        let user = uuid::Uuid::new_v4();
+        let cycle = uuid::Uuid::new_v4();
+        let scope = RowScope {
+            created_by: Some(user),
+            issue_id: Some(uuid::Uuid::new_v4()),
+        };
+        let filtered = cycle_filtered_set(
+            "acme",
+            &project,
+            &user,
+            &cycle,
+            &scope,
+            &empty_query(),
+            None,
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
+        assert!(filtered.from_where.contains("issue.created_by_id = "));
+        assert!(filtered.from_where.contains("issue.id = "));
+        assert_eq!(filtered.values.len(), 6);
+    }
+
+    #[test]
+    fn group_expressions_cover_the_groupable_fields() {
+        for field in [
+            "labels__id",
+            "assignees__id",
+            "issue_module__module_id",
+            "state_id",
+            "state",
+            "labels",
+            "assignees",
+            "priority",
+            "cycle_id",
+            "project_id",
+            "state__group",
+            "target_date",
+            "start_date",
+            "created_by",
+        ] {
+            group_expression(field).expect("groupable");
+        }
+        assert!(group_expression("bogus").is_err());
+    }
+
+    #[test]
+    fn flat_row_fields_follow_the_wire_order() {
+        // The m2m swaps land in the join-lookup slot after `state__group`,
+        // group swap first; the replaced arrays stay out (the multi-grouper
+        // re-appends them last at placement time).
+        let swapped = flat_row_fields(Some("labels__id"), Some("assignees__id"));
+        let tail = &swapped[18..];
+        assert_eq!(
+            tail,
+            [
+                "state__group",
+                "labels__id",
+                "assignees__id",
+                "cycle_id",
+                "link_count",
+                "attachment_count",
+                "sub_issues_count",
+                "module_ids",
+            ]
+        );
+        // Short aliases swap nothing.
+        assert_eq!(
+            flat_row_fields(Some("labels"), Some("state")),
+            flat_row_fields(None, None)
+        );
+    }
+
+    #[test]
+    fn group_guards_filter_canonical_m2m_joins_only() {
+        // `GROUP_FILTER_MAPPER`: canonical m2m keys add the deleted guard
+        // over a LEFT join; short aliases join unguarded.
+        let guarded = cycle_filtered_set(
+            "slug",
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &RowScope::default(),
+            &empty_query(),
+            Some("labels__id"),
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
+        assert!(
+            guarded
+                .from_where
+                .contains("\"label_issue\".\"deleted_at\" IS NULL"),
+            "canonical guard missing: {}",
+            guarded.from_where
+        );
+        assert!(
+            guarded.from_where.contains(
+                "LEFT JOIN issue_labels AS label_issue ON label_issue.issue_id = issue.id"
+            ),
+            "canonical join must be LEFT: {}",
+            guarded.from_where
+        );
+        let short = cycle_filtered_set(
+            "slug",
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &RowScope::default(),
+            &empty_query(),
+            Some("labels"),
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
+        assert!(
+            !short
+                .from_where
+                .contains("\"label_issue\".\"deleted_at\" IS NULL"),
+            "short alias must be unguarded: {}",
+            short.from_where
+        );
+        assert!(
+            short.from_where.contains(
+                "LEFT JOIN issue_labels AS label_issue ON label_issue.issue_id = issue.id"
+            ),
+            "short join must be LEFT: {}",
+            short.from_where
+        );
+        // Unreferenced relations are not joined at all.
+        let plain = cycle_filtered_set(
+            "slug",
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &RowScope::default(),
+            &empty_query(),
+            Some("priority"),
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
+        for needle in [
+            "AS label_issue",
+            "AS issue_assignee",
+            "AS issue_module",
+            "AS issue_intake",
+        ] {
+            assert!(
+                !plain.from_where.contains(needle),
+                "unreferenced {needle} must be absent: {}",
+                plain.from_where
+            );
+        }
+    }
+
+    #[test]
+    fn routes_expose_the_four_cycle_issue_paths() {
+        assert!(CYCLE_ISSUES_PATH.contains("cycles/{cycle_id}/cycle-issues/"));
+        assert!(CYCLE_ISSUE_PATH.contains("cycle-issues/{issue_id}/"));
+        assert_eq!(
+            ISSUE_ACTIVITY_TASK,
+            "pi_dash.bgtasks.issue_activities_task.issue_activity"
+        );
+    }
+
+    #[test]
+    fn invalid_uuids_render_the_validation_body() {
+        assert!(parse_uuid_or_invalid("not-a-uuid").is_err());
+        assert!(parse_uuid_or_invalid("123e4567-e89b-12d3-a456-426614174000").is_ok());
+        // `OneOrMany` import stays the query-map contract witness.
+        let _ = OneOrMany::One("x".to_owned());
+    }
+}
+
+#[cfg(test)]
+mod pidashconv_736_tests {
+    use super::normalize_resolve_identifier;
+
+    #[test]
+    fn resolve_identifier_strips_py_whitespace() {
+        assert_eq!(normalize_resolve_identifier("  eng "), "ENG");
+        // Python `str.strip()` also strips U+001C-U+001F (PIDASHCONV-736):
+        // `%1C`-padded identifiers must resolve, not 404.
+        for sep in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let padded = format!("{sep}eng{sep}");
+            assert_eq!(
+                normalize_resolve_identifier(&padded),
+                "ENG",
+                "U+{:04X} padding must strip like Python",
+                sep as u32
+            );
+        }
+        // TAB and U+0085 padding already matched Django; pin the behavior.
+        assert_eq!(normalize_resolve_identifier("\teng\t"), "ENG");
+        assert_eq!(normalize_resolve_identifier("\u{85}eng\u{85}"), "ENG");
+    }
+}

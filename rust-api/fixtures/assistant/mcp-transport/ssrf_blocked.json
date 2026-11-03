@@ -1,0 +1,37 @@
+{
+  "trace": "apps/api/pi_dash/assistant/runtime/mcp.py:267-269 (url_blocked skip) + ssrf.py",
+  "ported_from": "d656243d3700dd5ff749f1bfeb2bc74c918a33ba",
+  "case": "ssrf_blocked",
+  "stack": {
+    "pydantic_ai_slim": "1.107.0",
+    "fastmcp": "3.4.4",
+    "mcp": "1.30.0",
+    "python": "3.12"
+  },
+  "toolset": {
+    "timeout": 10.0,
+    "read_timeout": 5.0,
+    "prefix": "mcp_probe",
+    "auth": false,
+    "server_name": "probe",
+    "url": "http://127.0.0.1:9/mcp",
+    "block_private_urls": true
+  },
+  "flow": [
+    "plan"
+  ],
+  "call": null,
+  "stub": {
+    "serve": false
+  },
+  "wire": [],
+  "expect": {
+    "skipped": [
+      {
+        "name": "probe",
+        "reason": "url_blocked"
+      }
+    ],
+    "requests": 0
+  }
+}

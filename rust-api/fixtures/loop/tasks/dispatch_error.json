@@ -1,0 +1,7 @@
+{
+ "last_skip_reason": "dispatch_error",
+ "last_skipped_at_set": true,
+ "method": "Forced _ensure_thread to raise (mock) on pidash_loop_fx; ran fire_loop_target().",
+ "returned": false,
+ "source": "apps/api/pi_dash/loop/dispatch.py:122-131 (broad except -> DISPATCH_ERROR) via bgtasks/loop.py:226"
+}

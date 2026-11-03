@@ -1,0 +1,2319 @@
+#![forbid(unsafe_code)]
+// Fallible helpers bottom out in the uncaught-exception 500, so they carry
+// `Response` as the error (same precedent as the assistant handlers).
+#![allow(clippy::result_large_err)]
+
+//! Magic-link handlers (stage 5, PIDASHCONV-431).
+//!
+//! Python: `apps/api/pi_dash/authentication/views/app/magic.py`
+//! (`MagicGenerateEndpoint`, `MagicSignInEndpoint`, `MagicSignUpEndpoint`),
+//! `views/space/magic.py` (the space twins), `urls.py` (`magic-generate/`,
+//! `magic-sign-in/`, `magic-sign-up/` + `spaces/` variants).
+//!
+//! Six owned routes, POST only; every other method proxies to Django:
+//!
+//! * `POST /auth/magic-generate/` and `POST /auth/spaces/magic-generate/`
+//!   (DRF `APIView`, JSON `{"email"}` → 200 `{"key"}`).
+//! * `POST /auth/magic-sign-in/`, `/auth/magic-sign-up/` and the `spaces/`
+//!   twins (plain Django `View`, form `email`/`code`/`next_path` → 302).
+//!
+//! The provider decisions live in the services kernel
+//! (`pidash_services::auth_session::magic`, PIDASHCONV-431) over the redis
+//! builders in `pidash_services::auth_session::tasks` (PIDASHCONV-405);
+//! error codes, redirect bytes, `base_host`, and the redirection-path
+//! selector in `pidash_services::auth_session::shapes` (PIDASHCONV-340);
+//! the throttle math in `...::guards` (PIDASHCONV-393); SQL shapes in
+//! `...::queries` (PIDASHCONV-382). This module is the wiring: HTTP parsing,
+//! Redis/DB I/O, session issuance, and publishing.
+//!
+//! Fixture oracle: `rust-api/fixtures/auth_session/FX-AUTH-08
+//! .handlers_magic_password.json` `magic_generate` / `magic_signin` /
+//! `magic_signup` (+ `handler_quirks[0]`), and FX-AUTH-09 `magic_link` for
+//! the publish. The `#[cfg(test)]` suite replays the pure vectors
+//! (redirect bytes, throttle keys, form parsing); the live vectors run in
+//! `rust-api/contract-tests/auth_magic/`.
+//!
+//! # Ported quirks (translate, don't redesign)
+//!
+//! * QUIRK-generate-500 (`magic.py:45-51`, FX-AUTH-08 `handler_quirks[0]`):
+//!   `validate_email` raising `ValidationError` is *not* caught (the
+//!   `except` covers `AuthenticationException` only), so an empty or
+//!   malformed email answers 500, not 400. Non-string payloads
+//!   (`None.strip()` / `(123).strip()`) fail the same way.
+//! * QUIRK-strip-noop + QUIRK-attempt-gate + QUIRK-signup-flag: see the
+//!   services kernel docs; each is kept.
+//! * QUIRK-login-ip (`utils/ip_address.py:8-14`): the first
+//!   `X-Forwarded-For` entry is taken unstripped, else `REMOTE_ADDR` (which
+//!   may be absent → NULL stamp columns → 500 on NOT NULL, same as Django's
+//!   `IntegrityError`).
+//! * QUIRK-no-transaction: no `transaction.atomic` anywhere, so a later
+//!   statement failure still leaves the earlier writes committed.
+//! * QUIRK-csrf-rotate: `login()` rotates the CSRF secret, so success sets
+//!   a fresh 32-char `csrftoken` cookie (`rotate_token` stores the raw
+//!   secret; Django defaults: 1-year age, `/`, `Lax`;
+//!   secure/domain/httponly from settings).
+
+use axum::body::Body;
+use axum::extract::{ConnectInfo, State};
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
+use axum::Router;
+
+use pidash_services::auth_session::guards::{
+    allow_request, parse_rate, throttle_cache_key, throttle_denied_json,
+    AUTHENTICATION_THROTTLE_RATE, AUTHENTICATION_THROTTLE_SCOPE, DEFAULT_ANON_RATE,
+    DEFAULT_ANON_SCOPE,
+};
+use pidash_services::auth_session::magic::{
+    exhausted_error, gate_error, init_gate, initiate_decision, parse_stored, payload_email,
+    strip_magic_prefix, token_from_u32, verify_decision, verify_error, InitGate, InitiateOutcome,
+    VerifyOutcome, TOKEN_REJECTION_LIMIT,
+};
+use pidash_services::domain::identity;
+use pidash_services::domain::workspaces::members;
+
+/// Unwrap a `Result`, answering the uncaught-exception 500 on any error
+/// (every fallible I/O on these paths propagates in Python).
+macro_rules! or_500 {
+    ($expr:expr) => {
+        match $expr {
+            Ok(value) => value,
+            Err(_) => return server_error(),
+        }
+    };
+}
+use pidash_db::config::encryption::Keyring;
+use pidash_services::auth_session::queries::{
+    user_by_email_sql, user_email_exists_sql, USER_TABLE,
+};
+use pidash_services::auth_session::shapes::{
+    allowed_hosts_for, base_host, error_code, error_dict_json, error_pairs, get_safe_redirect_url,
+    redirection_path_str, select_redirection_path, url_has_allowed_host_and_scheme,
+    validate_next_path, HostSettings, ParamValue,
+};
+use pidash_services::auth_session::tasks::{
+    empty_kwargs, magic_redis_key, magic_redis_value_first, magic_redis_value_retry,
+    MAGIC_REDIS_EXPIRY_SECS,
+};
+
+use crate::auth_session::render::{disallowed_redirect, render_csrf_failure};
+use crate::auth_session::throttle_ident;
+use crate::license::handlers_auth_forms::{email_is_valid, LOGIN_BACKEND};
+use crate::middleware::SessionHandle;
+use crate::state::AppState;
+use pidash_auth::csrf as csrf_kernel;
+use pidash_auth::session as session_kernel;
+use pidash_compat::response::empty_response_no_content_type;
+
+/// `POST /auth/magic-generate/`.
+pub const APP_GENERATE_PATH: &str = "/auth/magic-generate/";
+/// `POST /auth/magic-sign-in/`.
+pub const APP_SIGN_IN_PATH: &str = "/auth/magic-sign-in/";
+/// `POST /auth/magic-sign-up/`.
+pub const APP_SIGN_UP_PATH: &str = "/auth/magic-sign-up/";
+/// `POST /auth/spaces/magic-generate/`.
+pub const SPACE_GENERATE_PATH: &str = "/auth/spaces/magic-generate/";
+/// `POST /auth/spaces/magic-sign-in/`.
+pub const SPACE_SIGN_IN_PATH: &str = "/auth/spaces/magic-sign-in/";
+/// `POST /auth/spaces/magic-sign-up/`.
+pub const SPACE_SIGN_UP_PATH: &str = "/auth/spaces/magic-sign-up/";
+
+/// Register the six owned magic routes. Sibling D-16 handler issues (422
+/// email, 434 password/CSRF) extend `auth_session::routes` with their own
+/// routers; merges keep both sides.
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route(APP_GENERATE_PATH, owned_post(post(generate_app)))
+        .route(APP_SIGN_IN_PATH, owned_post(post(sign_in_app)))
+        .route(APP_SIGN_UP_PATH, owned_post(post(sign_up_app)))
+        .route(SPACE_GENERATE_PATH, owned_post(post(generate_space)))
+        .route(SPACE_SIGN_IN_PATH, owned_post(post(sign_in_space)))
+        .route(SPACE_SIGN_UP_PATH, owned_post(post(sign_up_space)))
+}
+
+/// An owned POST path: writes serve from Rust, everything else falls
+/// through to Django. OPTIONS proxies too: DRF answers 200 metadata on
+/// the generate routes (and Django answers 200 `Allow` on sign-in/up)
+/// where axum would 405. `HEAD` rides axum's `get` handling, like the
+/// email/password siblings (PIDASHCONV-829).
+fn owned_post(
+    post_handler: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
+    post_handler
+        .get(crate::edge::proxy)
+        .put(crate::edge::proxy)
+        .patch(crate::edge::proxy)
+        .delete(crate::edge::proxy)
+        .options(crate::edge::proxy)
+}
+
+// ---------------------------------------------------------------------------
+// Responses
+// ---------------------------------------------------------------------------
+
+const JSON_CONTENT_TYPE: &str = "application/json";
+const REDIRECT_CONTENT_TYPE: &str = "text/html; charset=utf-8";
+
+/// `Response({"key": ...}, 200)`: compact JSON, DRF renderer bytes.
+fn ok_key(key: &str) -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
+        serde_json::json!({"key": key}).to_string(),
+    )
+        .into_response()
+}
+
+/// `Response(exc.get_error_dict(), 400)`: byte-exact error dict.
+fn json_400(code: i32, message: &str, payload: &[(&str, ParamValue)]) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
+        error_dict_json(&error_pairs(code, message, payload)),
+    )
+        .into_response()
+}
+
+/// `HttpResponseRedirect(url)`: 302 with `Location`, empty body.
+/// Django percent-encodes the URL first (`iri_to_uri`,
+/// `django/http/response.py:620`), so the raw `next_path` never reaches
+/// the wire. Past `MAX_URL_REDIRECT_LENGTH` characters the final
+/// `Location` answers 400 (`DisallowedRedirect`).
+fn redirect_302(location: String) -> Response {
+    let too_long =
+        location.chars().count() > pidash_services::auth_session::MAX_URL_REDIRECT_LENGTH;
+    let encoded = pidash_compat::http::iri_to_uri(&location);
+    let Some(location) = crate::response_headers::header_value(&encoded) else {
+        return server_error();
+    };
+    if too_long {
+        return disallowed_redirect();
+    }
+    Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, location)
+        .header(header::CONTENT_TYPE, REDIRECT_CONTENT_TYPE)
+        .body(Body::empty())
+        .expect("static 302 response")
+}
+
+/// Uncaught-exception 500 (`ValidationError`, redis/SQL failures outside
+/// the bramched handling): empty body, like the F-08 session layer's
+/// `server_error`.
+fn server_error() -> Response {
+    empty_response_no_content_type(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Throttle denial: the `auth_exception_handler` rewrite of DRF's
+/// `Throttled` (`exception.py:26-31`), 429 + the 5900 dict.
+fn throttled() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
+        throttle_denied_json(),
+    )
+        .into_response()
+}
+
+/// Malformed JSON body on a JSON post: DRF `ParseError`
+/// (`{"detail": "JSON parse error - ..."}`).
+fn malformed_json(error: serde_json::Error) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
+        serde_json::json!({"detail": format!("JSON parse error - {error}")}).to_string(),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Request parsing
+// ---------------------------------------------------------------------------
+
+/// `request.data.get("email", "")` for the generate views, which accept
+/// both JSON and form posts (`request.data` covers both). Returns the
+/// normalised email, or `None` when the payload cannot supply a string —
+/// every `None` case 500s in Python (`AttributeError` on `.strip()` or the
+/// uncaught `ValidationError`).
+fn parse_generate_email(content_type: &str, body: &[u8], is_json: bool) -> Option<String> {
+    if is_json {
+        if body.is_empty() {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+        let email = value.as_object()?.get("email")?.as_str()?;
+        Some(normalise_email(email))
+    } else {
+        let pairs = form_pairs(Some(content_type), body);
+        let email = pairs.iter().rev().find(|(k, _)| k == "email")?;
+        Some(normalise_email(&email.1))
+    }
+}
+
+/// Media types with a DRF default parser on generate besides JSON:
+/// urlencoded (`FormParser`) and multipart (`MultiPartParser`). Used
+/// for the 415 branch; JSON is tested separately by the caller's
+/// `is_json` check.
+fn is_form_content_type(content_type: &str) -> bool {
+    if crate::auth_session::multipart::is_multipart(content_type) {
+        return true;
+    }
+    content_type.split(';').next().is_some_and(|mime| {
+        mime.trim()
+            .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+    })
+}
+
+/// `request.POST` as ordered pairs: multipart fields when the body is
+/// framed multipart, else the urlencoded parse for form posts
+/// (PIDASHCONV-1079). Any other content type leaves `POST` empty in
+/// Django, so the pairs are empty there (PIDASHCONV-1077).
+fn form_pairs(content_type: Option<&str>, body: &[u8]) -> Vec<(String, String)> {
+    let content_type = content_type.unwrap_or("");
+    if let Some(pairs) = crate::auth_session::multipart::parse_fields(content_type, body) {
+        return pairs;
+    }
+    let mime = content_type.split(';').next().map(str::trim).unwrap_or("");
+    let is_form = mime.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        || mime.eq_ignore_ascii_case("multipart/form-data");
+    if !is_form {
+        return Vec::new();
+    }
+    serde_urlencoded::from_bytes(body).unwrap_or_default()
+}
+
+/// `request.data.get("email", "").strip().lower()`: Python `strip` trims
+/// Unicode whitespace and `lower` is the simple case mapping — `trim` +
+/// `to_lowercase` (same as the license kernel's `normalize_email`).
+fn normalise_email(raw: &str) -> String {
+    raw.trim().to_lowercase()
+}
+
+/// One form-POST field: `request.POST.get(key, "")`, last value wins (like
+/// Django's `QueryDict.get`).
+fn form_field(pairs: &[(String, String)], key: &str) -> String {
+    pairs
+        .iter()
+        .rev()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default()
+}
+
+/// The sign-in/up form triple: `code`/`email` stripped (+ lowered for
+/// email), `next_path` raw-or-absent (`request.POST.get("next_path")` is
+/// `None` when missing — Python passes that `None` straight into
+/// `get_safe_redirect_url` / `validate_next_path`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SignForm {
+    code: String,
+    email: String,
+    next_path: Option<String>,
+}
+
+fn parse_sign_form(content_type: &str, body: &[u8]) -> SignForm {
+    let pairs = form_pairs(Some(content_type), body);
+    SignForm {
+        code: form_field(&pairs, "code").trim().to_owned(),
+        email: normalise_email(&form_field(&pairs, "email")),
+        next_path: pairs
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "next_path")
+            .map(|(_, v)| v.clone()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CSRF gate (mirrors `email.rs`: `CsrfViewMiddleware` for the plain form
+// sign Views, `SessionAuthentication.enforce_csrf` for the DRF generate
+// views). Private copy per module (the password sibling keeps its own
+// too); only the page render is shared.
+// ---------------------------------------------------------------------------
+
+/// Why the CSRF gate rejected (Django `REASON_*`; the failure page
+/// never renders the reason, so these are log labels only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CsrfDenial {
+    NoCookie,
+    BadToken,
+}
+
+use pidash_compat::http::{
+    csrf_failure_json, csrf_failure_response, csrf_token_source, hex_encode, session_auth_hash,
+    TokenSource,
+};
+
+/// `_check_token` + `_does_token_match` over one token: the format
+/// gate first (`has incorrect length` / `has invalid characters`),
+/// then the unmask-and-compare, rendered exactly like
+/// `_bad_token_message`.
+fn csrf_check_token(secret: &str, token: &str, source: TokenSource) -> Result<(), String> {
+    if let Err(error) = csrf_kernel::check_token_format(token) {
+        return Err(format!(
+            "CSRF token from {} {}.",
+            source.describe(),
+            error.reason()
+        ));
+    }
+    if csrf_kernel::tokens_match(token, secret) {
+        Ok(())
+    } else {
+        Err(format!("CSRF token from {} incorrect.", source.describe()))
+    }
+}
+
+/// Django's `_get_secret` (`csrf.py:230-256`) over the cookie value:
+/// the cookie must pass the format gate, and a 64-char cookie is
+/// unmasked first ("Django versions before 4.0 masked the secret before
+/// storing", so without this step a client sending such a cookie back
+/// as the header would never verify).
+fn csrf_cookie_secret(cookie: &str) -> Result<String, String> {
+    if let Err(error) = csrf_kernel::check_token_format(cookie) {
+        return Err(format!("CSRF cookie {}.", error.reason()));
+    }
+    if cookie.len() == csrf_kernel::CSRF_TOKEN_LENGTH {
+        csrf_kernel::unmask_token(cookie)
+            .map_err(|error| format!("CSRF cookie {}.", error.reason()))
+    } else {
+        Ok(cookie.to_owned())
+    }
+}
+
+/// Mirror `CsrfViewMiddleware.process_view` for the sign endpoints: the
+/// `csrftoken` cookie must be present and the request token must
+/// check out. The failure page never renders the reason either way.
+fn csrf_gate(
+    csrf_cookie: Option<&str>,
+    header_token: Option<&str>,
+    pairs: &[(String, String)],
+) -> Result<(), CsrfDenial> {
+    let Some(cookie) = csrf_cookie else {
+        return Err(CsrfDenial::NoCookie);
+    };
+    let secret = csrf_cookie_secret(cookie).map_err(|_| CsrfDenial::BadToken)?;
+    let Some((token, source)) = csrf_token_source(pairs, header_token) else {
+        return Err(CsrfDenial::BadToken);
+    };
+    csrf_check_token(&secret, &token, source).map_err(|_| CsrfDenial::BadToken)
+}
+
+// ---------------------------------------------------------------------------
+// Redis (the `redis_instance()` side of the provider)
+// ---------------------------------------------------------------------------
+
+/// Minimal command surface the magic closure needs: `GET`, `SET .. EX`,
+/// `DEL`, and `KEYS`-then-`DEL` (the cache-invalidate shape). The shared
+/// foundation handle (`RedisHandle`) exposes only `SET .. EX` / `GET` /
+/// `SUBSCRIBE`, so this module holds its own short-lived multiplexed
+/// client off the same `REDIS_URL` — `None` when the URL is unset, in
+/// which case every magic flow 500s exactly like a dead `redis_instance()`.
+///
+/// Every connection carries Django's `redis_instance()` bounds
+/// (`pi_dash/settings/redis.py:70-71`): `REDIS_SOCKET_CONNECT_TIMEOUT`
+/// (2s) on establishment — which includes the `CLIENT SETINFO` setup
+/// round-trip, so a stalled server fails here rather than hanging — and
+/// `REDIS_SOCKET_TIMEOUT` (5s) per command. Relying on the `redis` crate
+/// defaults instead (1s / 500ms) 500s slow-but-healthy stalls Django
+/// rides through (PIDASHCONV-1080).
+#[derive(Debug, Clone)]
+struct Cache {
+    client: redis::Client,
+    connect_timeout: std::time::Duration,
+    response_timeout: std::time::Duration,
+}
+
+/// Django's `REDIS_SOCKET_CONNECT_TIMEOUT` default
+/// (`pi_dash/settings/common.py:238`), used when the resolved setting is
+/// not a positive finite float (the `Duration` conversion would panic).
+const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Django's `REDIS_SOCKET_TIMEOUT` default
+/// (`pi_dash/settings/common.py:239`), same fallback.
+const DEFAULT_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn timeout_duration(setting_secs: f64, fallback: std::time::Duration) -> std::time::Duration {
+    if setting_secs.is_finite() && setting_secs > 0.0 {
+        // `try_from` (not `from_secs_f64`): a huge finite setting would
+        // otherwise panic on `u64` overflow instead of falling back.
+        std::time::Duration::try_from_secs_f64(setting_secs).unwrap_or(fallback)
+    } else {
+        fallback
+    }
+}
+
+impl Cache {
+    fn from_state(state: &AppState) -> Option<Self> {
+        let redis = &state.settings().redis;
+        let url = redis.url.as_deref().filter(|u| !u.is_empty())?;
+        pidash_db::redis::open_client(url).ok().map(|client| Self {
+            client,
+            connect_timeout: timeout_duration(
+                redis.socket_connect_timeout_secs,
+                DEFAULT_CONNECT_TIMEOUT,
+            ),
+            response_timeout: timeout_duration(redis.socket_timeout_secs, DEFAULT_RESPONSE_TIMEOUT),
+        })
+    }
+
+    fn connection_config(&self) -> redis::AsyncConnectionConfig {
+        redis::AsyncConnectionConfig::new()
+            .set_connection_timeout(Some(self.connect_timeout))
+            .set_response_timeout(Some(self.response_timeout))
+    }
+
+    async fn get(&self, key: &str) -> Result<Option<String>, redis::RedisError> {
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection_with_config(&self.connection_config())
+            .await?;
+        redis::AsyncCommands::get(&mut conn, key).await
+    }
+
+    async fn set_ex(
+        &self,
+        key: &str,
+        value: &str,
+        expiry_secs: u64,
+    ) -> Result<(), redis::RedisError> {
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection_with_config(&self.connection_config())
+            .await?;
+        redis::AsyncCommands::set_ex::<_, _, ()>(&mut conn, key, value, expiry_secs).await
+    }
+
+    async fn del(&self, key: &str) -> Result<(), redis::RedisError> {
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection_with_config(&self.connection_config())
+            .await?;
+        redis::AsyncCommands::del::<_, ()>(&mut conn, key).await
+    }
+
+    /// `cache.keys(pattern)` + `delete_many`: Django's `cache.keys` is the
+    /// Redis `KEYS` command (django-redis), so the pattern match is one
+    /// `KEYS` here too — never a scan-then-filter subset.
+    async fn del_pattern(&self, pattern: &str) -> Result<(), redis::RedisError> {
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection_with_config(&self.connection_config())
+            .await?;
+        let keys: Vec<String> = redis::AsyncCommands::keys(&mut conn, pattern).await?;
+        if !keys.is_empty() {
+            redis::AsyncCommands::del::<_, ()>(&mut conn, keys).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Evaluate the generate throttle *before* the handler body (DRF
+/// `initial()` order: `check_throttles` precedes `post()`). App uses the
+/// `AuthenticationThrottle` scope, space the default `Anon` scope (both
+/// 30/minute). Histories are compact-JSON float arrays; a miss, an
+/// unreadable value, or a failed re-cache fails open to allow (the merged
+/// assistant-throttle precedent — cutover traffic owns these keys, and a
+/// blip must never 500 an auth endpoint).
+async fn check_generate_throttle(
+    cache: Option<&Cache>,
+    headers: &axum::http::HeaderMap,
+    peer: Option<String>,
+    app: bool,
+) -> bool {
+    let (rate, scope) = if app {
+        (AUTHENTICATION_THROTTLE_RATE, AUTHENTICATION_THROTTLE_SCOPE)
+    } else {
+        (DEFAULT_ANON_RATE, DEFAULT_ANON_SCOPE)
+    };
+    let (num_requests, duration_secs) = match parse_rate(Some(rate)) {
+        Some(parsed) => parsed,
+        None => return true,
+    };
+    let Some(cache) = cache else { return true };
+    let key = throttle_cache_key(scope, &throttle_ident(headers, peer));
+    let now = now_secs_f64();
+    let history: Vec<f64> = match cache.get(&key).await {
+        Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let decision = allow_request(&history, num_requests, duration_secs, now);
+    if !decision.allowed {
+        return false;
+    }
+    if let Err(error) = cache
+        .set_ex(
+            &key,
+            &serde_json::to_string(&decision.history).expect("float vec serializes"),
+            duration_secs,
+        )
+        .await
+    {
+        tracing::debug!(%error, key = key.as_str(), "magic.throttle: re-cache failed; allowance stands");
+    }
+    true
+}
+
+fn now_secs_f64() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Whether the request is already authenticated as an existing active
+/// user: `AnonRateThrottle.get_cache_key` returns `None` then
+/// (`throttling.py:173-179`), so the generate throttle does not apply.
+/// `AuthenticationMiddleware.get_user` resolves `_auth_user_id` to the row
+/// with no hash check and no soft-delete filter (`UserManager` is plain);
+/// anything else counts as anonymous and stays throttled.
+async fn generate_session_user_active(
+    pool: &sqlx::PgPool,
+    extension: &Option<axum::Extension<SessionHandle>>,
+) -> bool {
+    let uid: Option<String> = extension.as_ref().and_then(|e| {
+        e.0.lock()
+            .get("_auth_user_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+    });
+    let Some(uid) = uid else { return false };
+    let Ok(id) = uuid::Uuid::parse_str(&uid) else {
+        return false;
+    };
+    matches!(
+        sqlx::query_as::<_, (bool,)>(
+            "SELECT \"is_active\" FROM \"users\" WHERE \"users\".\"id\" = $1"
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await,
+        Ok(Some((true,)))
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Instance gate + configuration values
+// ---------------------------------------------------------------------------
+
+/// `Instance.objects.first()` + `is_setup_done` gate
+/// (`views/app/magic.py:40-46`): `None` or not-setup-done answers
+/// `INSTANCE_NOT_CONFIGURED`. The projection carries the gate column of
+/// [`pidash_services::auth_session::queries::instance_first_sql`].
+async fn instance_setup_done(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
+    let row: Option<(bool,)> = sqlx::query_as(
+        "SELECT \"instances\".\"is_setup_done\" FROM \"instances\" \
+         WHERE \"instances\".\"deleted_at\" IS NULL ORDER BY \"instances\".\"created_at\" DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(done,)| done).unwrap_or(false))
+}
+
+/// One `instance_configurations` read with the caller's env default — the
+/// `get_configuration_value` shape for a db-sourced key
+/// (`license/utils/instance_value.py:28-54`): the stored row wins when
+/// present (decrypted when `is_encrypted`), otherwise the default (the
+/// `os.environ.get(...)` the view passes in). Soft-deleted rows are
+/// invisible (the default manager).
+async fn config_value(
+    pool: &sqlx::PgPool,
+    secret_key: &str,
+    key: &str,
+    env_default: Option<String>,
+) -> Result<Option<String>, sqlx::Error> {
+    let row: Option<(Option<String>, bool)> = sqlx::query_as(
+        "SELECT value, is_encrypted FROM instance_configurations \
+         WHERE key = $1 AND deleted_at IS NULL",
+    )
+    .bind(key)
+    .fetch_optional(pool)
+    .await?;
+    match row {
+        Some((Some(value), true)) => Ok(Some(Keyring::from_secret(secret_key).decrypt(&value))),
+        Some((Some(value), false)) => Ok(Some(value)),
+        Some((None, _)) => Ok(env_default),
+        None => Ok(env_default),
+    }
+}
+
+fn env_default(name: &str, fallback: Option<&str>) -> Option<String> {
+    match std::env::var(name) {
+        Ok(value) => Some(value),
+        Err(_) => fallback.map(str::to_owned),
+    }
+}
+
+/// Resolve the two `MagicCodeProvider.__init__` inputs: `EMAIL_HOST`
+/// (caller default `os.environ.get("EMAIL_HOST")`) and
+/// `ENABLE_MAGIC_LINK_LOGIN` (caller default
+/// `os.environ.get("ENABLE_MAGIC_LINK_LOGIN", "1")`).
+async fn provider_config(
+    pool: &sqlx::PgPool,
+    secret_key: &str,
+) -> Result<(Option<String>, String), sqlx::Error> {
+    let email_host = config_value(
+        pool,
+        secret_key,
+        "EMAIL_HOST",
+        env_default("EMAIL_HOST", None),
+    )
+    .await?;
+    let magic_enabled = config_value(
+        pool,
+        secret_key,
+        "ENABLE_MAGIC_LINK_LOGIN",
+        env_default("ENABLE_MAGIC_LINK_LOGIN", Some("1")),
+    )
+    .await?
+    .unwrap_or_else(|| "1".to_owned());
+    Ok((email_host, magic_enabled))
+}
+
+// ---------------------------------------------------------------------------
+// Hosts + error redirects
+// ---------------------------------------------------------------------------
+
+/// `HostSettings` over the resolved F-03 URLs (`WEB_URL`, `APP_*`,
+/// `ADMIN_*`, `SPACE_*`).
+fn host_settings(settings: &pidash_db::config::Settings) -> HostSettings<'_> {
+    let urls = &settings.urls;
+    HostSettings {
+        web_url: urls.web_url.as_deref(),
+        app_base_url: urls.app_base_url.as_deref(),
+        admin_base_url: urls.admin_base_url.as_deref(),
+        space_base_url: urls.space_base_url.as_deref(),
+        admin_base_path: Some(urls.admin_base_path.as_str()),
+        space_base_path: Some(urls.space_base_path.as_str()),
+    }
+}
+
+/// Error redirect: `HttpResponseRedirect(get_safe_redirect_url(base,
+/// next_path, exc.get_error_dict()))` — the error dict in insertion order
+/// (`error_code`, `error_message`, then the `email` payload).
+fn redirect_error(
+    base: &str,
+    next_path: Option<&str>,
+    code: i32,
+    slug: &str,
+    email: Option<&str>,
+    allowed_hosts: &[&str],
+) -> Response {
+    let mut params: Vec<(&str, ParamValue)> = vec![
+        ("error_code", ParamValue::Int(i64::from(code))),
+        ("error_message", ParamValue::Str(slug.to_owned())),
+    ];
+    if let Some(address) = email {
+        params.push(("email", ParamValue::Str(address.to_owned())));
+    }
+    redirect_302(get_safe_redirect_url(
+        base,
+        next_path.unwrap_or(""),
+        &params,
+        allowed_hosts,
+    ))
+}
+
+/// Space success redirect (`space/magic.py:98-103,156-161`):
+/// `validate_next_path` joined onto the stripped base, falling back to the
+/// base when the composed URL is not allowed.
+fn space_success(base: &str, next_path: Option<&str>, allowed_hosts: &[&str]) -> Response {
+    let validated = validate_next_path(next_path.unwrap_or(""));
+    let url = format!("{}{validated}", base.trim_end_matches('/'));
+    if url_has_allowed_host_and_scheme(&url, allowed_hosts) {
+        redirect_302(url)
+    } else {
+        redirect_302(base.to_owned())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Publishing
+// ---------------------------------------------------------------------------
+
+/// Enqueue a worker message for the worker to forward to the broker
+/// (Python-owned task), exactly like the intake handlers: a propagation
+/// failure 500s, mirroring the uncaught `.delay()` at the call site.
+async fn enqueue_message(
+    pool: &sqlx::PgPool,
+    message: pidash_jobs::TaskMessage,
+) -> Result<(), sqlx::Error> {
+    let job = pidash_jobs::queue::NewJob::new(
+        message.task.clone(),
+        serde_json::Value::Array(message.args.clone()),
+        serde_json::Value::Object(message.kwargs.clone()),
+    );
+    pidash_jobs::queue::enqueue(pool, &job).await.map(|_| ())
+}
+
+/// `magic_link.delay(email, key, token)` (`views/app/magic.py:54`,
+/// `views/space/magic.py:50`; FX-AUTH-09).
+async fn enqueue_magic_link(pool: &sqlx::PgPool, email: &str, key: &str, token: &str) -> Response {
+    let emit = pidash_services::auth_session::tasks::MagicLinkEmit {
+        email: email.to_owned(),
+        key: key.to_owned(),
+        token: token.to_owned(),
+    };
+    let message = pidash_jobs::TaskMessage::new(emit.task_name(), emit.args(), empty_kwargs());
+    match enqueue_message(pool, message).await {
+        Ok(()) => ok_key(key),
+        Err(_) => server_error(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Users
+// ---------------------------------------------------------------------------
+
+/// The `users` columns the magic closure reads and writes.
+struct DbUser {
+    id: uuid::Uuid,
+    email: String,
+    password: String,
+    is_password_autoset: bool,
+    is_active: bool,
+}
+
+/// `User.objects.filter(email=).first()` (`adapter/base.py:297`, the
+/// views): exact match, `Meta.ordering = ("-created_at",)` — the full
+/// select from [`user_by_email_sql`], decoded by column name.
+async fn fetch_user(pool: &sqlx::PgPool, email: &str) -> Result<Option<DbUser>, sqlx::Error> {
+    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&user_by_email_sql(USER_TABLE, "$1"))
+        .bind(email)
+        .fetch_optional(pool)
+        .await?;
+    let Some(row) = row else { return Ok(None) };
+    use sqlx::Row;
+    Ok(Some(DbUser {
+        id: row.try_get("id")?,
+        email: row
+            .try_get::<Option<String>, _>("email")?
+            .unwrap_or_default(),
+        password: row.try_get("password")?,
+        is_password_autoset: row.try_get("is_password_autoset")?,
+        is_active: row.try_get("is_active")?,
+    }))
+}
+
+/// `User.objects.filter(email=).exists()` (the magic-code paths
+/// `magic_code.py:70,122,136`): same WHERE arm under `SELECT (1)`.
+async fn user_exists(pool: &sqlx::PgPool, email: &str) -> Result<bool, sqlx::Error> {
+    let row: Option<(i32,)> = sqlx::query_as(&user_email_exists_sql(USER_TABLE, "$1"))
+        .bind(email)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.is_some())
+}
+
+/// Draw `n` characters from Django's `get_random_string` alphabet
+/// (`ascii_letters + digits`, 62 symbols) off UUID4 bytes with rejection
+/// sampling (256 = 4 × 62 + 8: bytes ≥ 248 redraw, so the map is uniform).
+fn django_random_string(n: usize) -> String {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut out = String::with_capacity(n);
+    let mut rand = uuid::Uuid::new_v4().into_bytes();
+    let mut at = 0;
+    while out.len() < n {
+        if at == rand.len() {
+            rand = uuid::Uuid::new_v4().into_bytes();
+            at = 0;
+        }
+        let byte = rand[at];
+        at += 1;
+        if byte < 248 {
+            out.push(ALPHABET[(byte % 62) as usize] as char);
+        }
+    }
+    out
+}
+
+/// `secrets.randbelow(900000) + 100000` off UUID4 bytes, through the
+/// kernel's unbiased map ([`token_from_u32`]).
+fn generate_token() -> String {
+    loop {
+        let bytes = uuid::Uuid::new_v4().into_bytes();
+        let draw = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        if draw >= TOKEN_REJECTION_LIMIT {
+            continue;
+        }
+        if let Some(token) = token_from_u32(draw) {
+            return token;
+        }
+    }
+}
+
+/// `set_password(uuid4().hex)` (`adapter/base.py:308-310`): PBKDF2-SHA256
+/// with a fresh 22-alphanumeric salt (`BasePasswordHasher.salt()`) at the
+/// pinned Django 4.2 iteration count. Returns `(password_hash,
+/// raw_password)` — the raw value is discarded by the caller (it is never
+/// stored).
+fn autoset_password() -> (String, String) {
+    let raw = uuid::Uuid::new_v4().simple().to_string();
+    let salt = django_random_string(22);
+    let hash = pidash_auth::password::hash_password(
+        &raw,
+        &salt,
+        pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS,
+    );
+    (hash, raw)
+}
+
+// NOTE: the new-user INSERT, the `create_user_notification` post_save
+// insert and the signup profile row moved to
+// `domain::identity::create_user` (PIDASHCONV-1525), which runs the
+// entity insert (the `after_save` hook fires) plus the service-level
+// profile row. The signup arm below calls it directly.
+
+/// `get_random_color` (`utils/color.py:9`): `#` + six hex digits.
+fn profile_background_color() -> String {
+    format!("#{}", hex_encode(&uuid::Uuid::new_v4().into_bytes()[..3]))
+}
+
+/// `save_user_data` (`adapter/base.py:220-234`): the login stamp UPDATE
+/// plus the `user_activation_email.delay(base_host, user.id)` branch,
+/// which fires *before* the save while the user is still inactive
+/// (QUIRK-activation-order). The `token_updated_at` write rotates
+/// `users.token` (`User.save`, `user.py:169-171`).
+async fn save_user_data(
+    pool: &sqlx::PgPool,
+    now: chrono::DateTime<chrono::Utc>,
+    user: &DbUser,
+    login_ip: Option<&str>,
+    login_uagent: Option<&str>,
+    base_plain: &str,
+) -> Result<(), Response> {
+    if !user.is_active {
+        let emit = pidash_services::auth_session::tasks::UserActivationEmailEmit {
+            current_site: base_plain.to_owned(),
+            user_id: user.id.to_string(),
+        };
+        let message = pidash_jobs::TaskMessage::new(emit.task_name(), emit.args(), empty_kwargs());
+        if enqueue_message(pool, message).await.is_err() {
+            return Err(server_error());
+        }
+    }
+    let rotated = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let updated = identity::save_user_data(
+        pool,
+        user.id,
+        &identity::LoginStamps {
+            medium: Some("magic-code"),
+            login_ip,
+            login_uagent,
+            avatar: None,
+            avatar_asset_id: None,
+            display_name: None,
+            is_staff: None,
+            touch_updated_at: true,
+            rotated_token: &rotated,
+            now,
+        },
+    )
+    .await;
+    match updated {
+        Ok(()) => Ok(()),
+        Err(_) => Err(server_error()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Profiles + redirection path
+// ---------------------------------------------------------------------------
+
+/// `Profile.objects.get_or_create(user=user)`: the live row's
+/// `is_onboarded` + `last_workspace_id`, creating the default row first
+/// when missing. `Profile` extends `TimeAuditModel` (`user.py:200`), not
+/// the full `BaseModel`: no `deleted_at` soft-delete column, so the
+/// domain lookup carries no filter either.
+async fn get_or_create_profile(
+    pool: &sqlx::PgPool,
+    now: chrono::DateTime<chrono::Utc>,
+    user_id: &uuid::Uuid,
+) -> Result<(bool, Option<uuid::Uuid>), sqlx::Error> {
+    let path =
+        identity::get_or_create_profile(pool, *user_id, now, &profile_background_color()).await?;
+    Ok((path.is_onboarded, path.last_workspace_id))
+}
+
+/// `get_redirection_path` (`utils/redirection_path.py:8-46`): the pure
+/// branch order lives in [`select_redirection_path`]; this runs the reads.
+/// Short-circuits on a missing/unonboarded profile — no workspace query
+/// fires then, exactly like the Python early return.
+async fn redirection_path(
+    pool: &sqlx::PgPool,
+    user: &DbUser,
+    is_onboarded: bool,
+    last_workspace_id: Option<uuid::Uuid>,
+) -> Result<String, sqlx::Error> {
+    if !is_onboarded {
+        return Ok(
+            redirection_path_str(&select_redirection_path(false, None, None, false)).to_owned(),
+        );
+    }
+    let mut last_slug: Option<String> = None;
+    if let Some(workspace_id) = last_workspace_id {
+        last_slug = sqlx::query_scalar(
+            "SELECT \"workspaces\".\"slug\" FROM \"workspaces\" \
+             WHERE \"workspaces\".\"id\" = $1 AND \"workspaces\".\"deleted_at\" IS NULL \
+             AND EXISTS (SELECT 1 FROM \"workspace_members\" WHERE \"workspace_members\".\"workspace_id\" = \
+             \"workspaces\".\"id\" AND \"workspace_members\".\"member_id\" = $2 \
+             AND \"workspace_members\".\"is_active\" = TRUE \
+             AND \"workspace_members\".\"deleted_at\" IS NULL) LIMIT 1",
+        )
+        .bind(workspace_id)
+        .bind(user.id)
+        .fetch_optional(pool)
+        .await?;
+    }
+    let fallback_slug: Option<String> = sqlx::query_scalar(
+        "SELECT \"workspaces\".\"slug\" FROM \"workspaces\" \
+         JOIN \"workspace_members\" ON \"workspace_members\".\"workspace_id\" = \"workspaces\".\"id\" \
+         WHERE \"workspace_members\".\"member_id\" = $1 \
+         AND \"workspace_members\".\"is_active\" = TRUE \
+         AND \"workspaces\".\"deleted_at\" IS NULL AND \"workspace_members\".\"deleted_at\" IS NULL \
+         ORDER BY \"workspaces\".\"created_at\" ASC LIMIT 1",
+    )
+    .bind(user.id)
+    .fetch_optional(pool)
+    .await?;
+    // `get_redirection_path` (`redirection_path.py:36`): unfiltered
+    // `.filter(email=)` under the soft-delete manager — unaccepted
+    // invites count too (unlike the join arm above, which takes
+    // `accepted=True`).
+    let invite_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM \"workspace_member_invites\" \
+         WHERE \"email\" = $1 AND \"deleted_at\" IS NULL",
+    )
+    .bind(&user.email)
+    .fetch_one(pool)
+    .await?;
+    let target = select_redirection_path(
+        true,
+        last_slug.as_deref(),
+        fallback_slug.as_deref(),
+        invite_count.0 > 0,
+    );
+    Ok(redirection_path_str(&target).to_owned())
+}
+
+// ---------------------------------------------------------------------------
+// `post_user_auth_workflow` (app success only)
+// ---------------------------------------------------------------------------
+
+/// Invite row for the workspace arm: id/role plus the workspace slug for
+/// the invalidate call and the track event.
+struct WorkspaceInvite {
+    workspace_id: uuid::Uuid,
+    role: i16,
+    slug: String,
+}
+
+/// Invite row for the project arm.
+struct ProjectInvite {
+    workspace_id: uuid::Uuid,
+    project_id: uuid::Uuid,
+    role: i16,
+    created_by_id: Option<uuid::Uuid>,
+}
+
+/// `process_workspace_project_invitations`
+/// (`utils/workspace_project_join.py:20-91`): workspace joins +
+/// per-workspace cache invalidation and `track_event`, then the project
+/// arm (workspace membership with the mapped role, then the `ProjectMember`
+/// write *as written* — with each invite's `project_id`, Django main;
+/// PB-1008 retired), then both invite sets are soft-deleted. No
+/// transaction anywhere: earlier writes stand when a later one raises
+/// (QUIRK-no-transaction).
+async fn process_workspace_project_invitations(
+    pool: &sqlx::PgPool,
+    cache: &Cache,
+    now: chrono::DateTime<chrono::Utc>,
+    user: &DbUser,
+) -> Result<(), Response> {
+    let map_err = |_: sqlx::Error| server_error();
+    let invites: Vec<(uuid::Uuid, i16, String)> = sqlx::query_as(
+        "SELECT \"workspace_member_invites\".\"workspace_id\", \
+         \"workspace_member_invites\".\"role\", \"workspaces\".\"slug\" \
+         FROM \"workspace_member_invites\" JOIN \"workspaces\" \
+         ON \"workspaces\".\"id\" = \"workspace_member_invites\".\"workspace_id\" \
+         WHERE \"workspace_member_invites\".\"email\" = $1 \
+         AND \"workspace_member_invites\".\"accepted\" = TRUE \
+         AND \"workspace_member_invites\".\"deleted_at\" IS NULL",
+    )
+    .bind(&user.email)
+    .fetch_all(pool)
+    .await
+    .map_err(map_err)?;
+    let invites: Vec<WorkspaceInvite> = invites
+        .into_iter()
+        .map(|(workspace_id, role, slug)| WorkspaceInvite {
+            workspace_id,
+            role,
+            slug,
+        })
+        .collect();
+
+    if !invites.is_empty() {
+        // The interpolated defaults reparse from the same fixed text
+        // (jsonb storage normalizes key order either way, so the
+        // committed bytes match the old inline literals).
+        let view_props: serde_json::Value =
+            serde_json::from_str(workspace_default_props()).map_err(|_| server_error())?;
+        let issue_props: serde_json::Value =
+            serde_json::from_str(workspace_issue_props()).map_err(|_| server_error())?;
+        let rows: Vec<members::BulkMember> = invites
+            .iter()
+            .map(|invite| members::BulkMember {
+                workspace_id: invite.workspace_id,
+                user_id: user.id,
+                role: invite.role,
+                created_by: None,
+            })
+            .collect();
+        members::bulk_add(pool, &rows, &view_props, &issue_props, now)
+            .await
+            .map_err(map_err)?;
+
+        for invite in &invites {
+            // `invalidate_cache_directly(path, url_params=False, user=False,
+            // multiple=True)`: `cache.keys("*<path>*")` + delete.
+            let pattern = format!("*/api/workspaces/{}/members/*", invite.slug);
+            cache
+                .del_pattern(&pattern)
+                .await
+                .map_err(|_| server_error())?;
+            // `track_event.delay(user_id=, event_name=, slug=,
+            // event_properties=)` — keyword args (kwargs, not positional).
+            let joined_at = if now.timestamp_subsec_micros() == 0 {
+                now.format("%Y-%m-%dT%H:%M:%S%:z").to_string()
+            } else {
+                now.format("%Y-%m-%dT%H:%M:%S%.6f%:z").to_string()
+            };
+            let call = pidash_services::auth_session::queries::workspace_join_track_event_call(
+                &user.id.to_string(),
+                &invite.workspace_id.to_string(),
+                &invite.slug,
+                i32::from(invite.role),
+                &joined_at,
+            );
+            let kwargs = call.as_object().cloned().unwrap_or_default();
+            let message = pidash_jobs::TaskMessage::new(
+                "pi_dash.bgtasks.event_tracking_task.track_event",
+                Vec::new(),
+                kwargs,
+            );
+            enqueue_message(pool, message)
+                .await
+                .map_err(|_| server_error())?;
+        }
+    }
+
+    let project_invites: Vec<(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)> = sqlx::query_as(
+        "SELECT \"workspace_id\", \"project_id\", \"role\", \"created_by_id\" \
+             FROM \"project_member_invites\" \
+             WHERE \"email\" = $1 AND \"accepted\" = TRUE AND \"deleted_at\" IS NULL",
+    )
+    .bind(&user.email)
+    .fetch_all(pool)
+    .await
+    .map_err(map_err)?;
+    let project_invites: Vec<ProjectInvite> = project_invites
+        .into_iter()
+        .map(
+            |(workspace_id, project_id, role, created_by_id)| ProjectInvite {
+                workspace_id,
+                project_id,
+                role,
+                created_by_id,
+            },
+        )
+        .collect();
+
+    if !project_invites.is_empty() {
+        let view_props: serde_json::Value =
+            serde_json::from_str(workspace_default_props()).map_err(|_| server_error())?;
+        let issue_props: serde_json::Value =
+            serde_json::from_str(workspace_issue_props()).map_err(|_| server_error())?;
+        let rows: Vec<members::BulkMember> = project_invites
+            .iter()
+            .map(|invite| members::BulkMember {
+                workspace_id: invite.workspace_id,
+                user_id: user.id,
+                role: map_invite_role(invite.role),
+                created_by: invite.created_by_id,
+            })
+            .collect();
+        members::bulk_add(pool, &rows, &view_props, &issue_props, now)
+            .await
+            .map_err(map_err)?;
+
+        // `workspace_project_join.py:76-87` sets `project_id` on every
+        // `ProjectMember` row (Django main; PB-1008 retired), so the
+        // join succeeds and the invites are consumed.
+        let props: serde_json::Value =
+            serde_json::from_str(project_default_props()).map_err(|_| server_error())?;
+        let prefs: serde_json::Value =
+            serde_json::from_str(project_default_preferences()).map_err(|_| server_error())?;
+        let bulk: Vec<pidash_services::domain::projects::members::BulkRow> = project_invites
+            .iter()
+            .map(
+                |invite| pidash_services::domain::projects::members::BulkRow {
+                    workspace_id: invite.workspace_id,
+                    project_id: Some(invite.project_id),
+                    user_id: user.id,
+                    role: pidash_services::domain::projects::members::RoleBind::Int(i64::from(
+                        map_invite_role(invite.role),
+                    )),
+                    created_by: invite.created_by_id,
+                    created_at: now,
+                    updated_at: now,
+                },
+            )
+            .collect();
+        // The project bulk runs after every workspace row committed above
+        // (no transaction).
+        pidash_services::domain::projects::members::bulk_add(pool, &bulk, &props, &prefs, false)
+            .await
+            .map_err(map_err)?;
+    }
+
+    // Both querysets are (soft-)deleted after the joins (`:90-91`): the
+    // default manager's `delete()` stamps `deleted_at`.
+    sqlx::query(
+        "UPDATE \"workspace_member_invites\" SET \"deleted_at\" = $1 \
+         WHERE \"email\" = $2 AND \"accepted\" = TRUE AND \"deleted_at\" IS NULL",
+    )
+    .bind(now)
+    .bind(&user.email)
+    .execute(pool)
+    .await
+    .map_err(map_err)?;
+    sqlx::query(
+        "UPDATE \"project_member_invites\" SET \"deleted_at\" = $1 \
+         WHERE \"email\" = $2 AND \"accepted\" = TRUE AND \"deleted_at\" IS NULL",
+    )
+    .bind(now)
+    .bind(&user.email)
+    .execute(pool)
+    .await
+    .map_err(map_err)?;
+    Ok(())
+}
+
+/// Role mapping for the project-invite arm (`:66,80`):
+/// `role if role in [5, 15] else 15`.
+fn map_invite_role(role: i16) -> i16 {
+    if role == 5 || role == 15 {
+        role
+    } else {
+        15
+    }
+}
+
+/// `get_default_props` (`workspace.py:22-52`, with `display_properties`).
+fn workspace_default_props() -> &'static str {
+    "{\"filters\": {\"priority\": null, \"state\": null, \"state_group\": null, \
+      \"assignees\": null, \"created_by\": null, \"labels\": null, \"start_date\": null, \
+      \"target_date\": null, \"subscriber\": null}, \
+      \"display_filters\": {\"group_by\": null, \"order_by\": \"-created_at\", \"type\": null, \
+      \"sub_issue\": true, \"show_empty_groups\": true, \"layout\": \"list\", \
+      \"calendar_date_range\": \"\"}, \
+      \"display_properties\": {\"assignee\": true, \"attachment_count\": true, \
+      \"created_on\": true, \"due_date\": true, \"estimate\": true, \"key\": true, \
+      \"labels\": true, \"link\": true, \"priority\": true, \"start_date\": true, \
+      \"state\": true, \"sub_issue_count\": true, \"updated_on\": true}}"
+}
+
+/// `get_issue_props` (`workspace.py:110-111`).
+fn workspace_issue_props() -> &'static str {
+    "{\"subscribed\": true, \"assigned\": true, \"created\": true, \"all_issues\": true}"
+}
+
+/// `get_default_props` (`project.py:43-62`, without `display_properties`).
+fn project_default_props() -> &'static str {
+    "{\"filters\": {\"priority\": null, \"state\": null, \"state_group\": null, \
+      \"assignees\": null, \"created_by\": null, \"labels\": null, \"start_date\": null, \
+      \"target_date\": null, \"subscriber\": null}, \
+      \"display_filters\": {\"group_by\": null, \"order_by\": \"-created_at\", \"type\": null, \
+      \"sub_issue\": true, \"show_empty_groups\": true, \"layout\": \"list\", \
+      \"calendar_date_range\": \"\"}}"
+}
+
+/// `get_default_preferences` (`project.py:68-69`).
+fn project_default_preferences() -> &'static str {
+    "{\"pages\": {\"block_display\": true}, \
+      \"navigation\": {\"default_tab\": \"work_items\", \"hide_in_more_menu\": []}}"
+}
+
+// ---------------------------------------------------------------------------
+// Session issuance (`user_login` + `django.contrib.auth.login`)
+// ---------------------------------------------------------------------------
+
+/// `csrftoken` cookie name (no project override → Django default).
+const CSRF_COOKIE_NAME: &str = "csrftoken";
+/// `CSRF_COOKIE_AGE` (no project override → Django default, 1 year).
+const CSRF_COOKIE_MAX_AGE: i64 = 31_449_600;
+
+/// Inputs to [`login_user`], bundled so the helper stays under the
+/// argument-count lint.
+struct LoginRequest<'a> {
+    pool: &'a sqlx::PgPool,
+    extension: &'a Option<axum::Extension<SessionHandle>>,
+    settings: &'a pidash_db::config::Settings,
+    user: &'a DbUser,
+    user_agent: &'a str,
+    login_ip: Option<String>,
+    domain: &'a str,
+    now: chrono::DateTime<chrono::Utc>,
+}
+
+/// `user_login(request, user, ...)` (`utils/login.py:14-28`):
+/// `login()` writes `_auth_user_id` / `_auth_user_backend` /
+/// `_auth_user_hash` (cycling the key when another user — or nobody — was
+/// on the session, i.e. `flush()` + `cycle_key()`), the `user_logged_in`
+/// signal stamps `users.last_login`, and `device_info` lands in the
+/// session. The tower layer persists the mutated session and sets the
+/// `session-id` cookie; the fresh 32-char `csrftoken` cookie below mirrors
+/// the `rotate_token` half of `login()`.
+async fn login_user(request: LoginRequest<'_>) -> Result<String, Response> {
+    let LoginRequest {
+        pool,
+        extension,
+        settings,
+        user,
+        user_agent,
+        login_ip,
+        domain,
+        now,
+    } = request;
+    let Some(handle) = extension.as_ref().map(|e| e.0.clone()) else {
+        return Err(server_error());
+    };
+    let session_hash = session_auth_hash(&user.password, settings.secret_key.as_bytes());
+    let user_id = user.id.to_string();
+    // Every lock below is statement-scoped: the guard never crosses an
+    // `.await`, per the session layer's contract ("neither the layer nor
+    // handlers await while locked") — holding it across the delete below
+    // would also poison the future's `Send` bound.
+    let current: Option<String> = handle
+        .lock()
+        .get("_auth_user_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    if current.as_deref() != Some(user_id.as_str()) {
+        // `flush()` when the session belonged to somebody else (or
+        // nobody): drop the key (the layer issues a fresh one, like
+        // `cycle_key`) and delete the abandoned row when there was one.
+        let old: Option<String> = handle.lock().key.clone();
+        handle.lock().clear();
+        if let Some(old) = old {
+            let deleted: Result<_, sqlx::Error> =
+                sqlx::query("DELETE FROM \"sessions\" WHERE \"session_key\" = $1")
+                    .bind(&old)
+                    .execute(pool)
+                    .await;
+            if deleted.is_err() {
+                return Err(server_error());
+            }
+        }
+    }
+    {
+        let mut session = handle.lock();
+        session.set(
+            "_auth_user_id".to_owned(),
+            serde_json::Value::String(user.id.to_string()),
+        );
+        session.set(
+            "_auth_user_backend".to_owned(),
+            serde_json::Value::String(LOGIN_BACKEND.to_owned()),
+        );
+        session.set(
+            "_auth_user_hash".to_owned(),
+            serde_json::Value::String(session_hash),
+        );
+        session.set(
+            "device_info".to_owned(),
+            serde_json::json!({
+                "user_agent": user_agent,
+                "ip_address": login_ip,
+                "domain": domain,
+            }),
+        );
+    }
+    // `user_logged_in` → `update_last_login` (`auth/models.py`): the
+    // signal save, inside `login()` before the session persists.
+    if identity::stamp_last_login(pool, user.id, now)
+        .await
+        .is_err()
+    {
+        return Err(server_error());
+    }
+    // `rotate_token` half: a fresh secret with Django's cookie attributes
+    // (secure/domain from settings, httponly per the project override,
+    // `/` + `Lax` defaults). The cookie carries the raw 32-char secret
+    // (`_add_new_csrf_cookie`); only bodies and headers carry masked tokens.
+    let secret = pidash_auth::csrf::new_secret();
+    let set_cookie = pidash_auth::session::render_set_cookie(&pidash_auth::session::SetCookie {
+        name: CSRF_COOKIE_NAME.to_owned(),
+        value: secret,
+        expires: Some(pidash_auth::session::http_date(
+            now.timestamp() + CSRF_COOKIE_MAX_AGE,
+        )),
+        max_age: Some(CSRF_COOKIE_MAX_AGE),
+        domain: settings.session.cookie_domain.clone(),
+        path: "/".to_owned(),
+        secure: settings.session.cookie_secure,
+        httponly: true,
+        samesite: "Lax".to_owned(),
+    });
+    Ok(set_cookie)
+}
+
+/// Push one `Set-Cookie` without disturbing the layer's own (Django's
+/// login response carries both the session and the rotated CSRF cookie).
+fn push_cookie(response: &mut Response, value: String) {
+    if let Ok(value) = axum::http::HeaderValue::from_str(&value) {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generate
+// ---------------------------------------------------------------------------
+
+/// `MagicGenerateEndpoint.post` / `MagicGenerateSpaceEndpoint.post`: the
+/// throttle runs first (DRF `initial()` order), then the instance gate,
+/// then email validation (uncaught → 500), then the provider gates, then
+/// `initiate()` + `magic_link.delay`.
+async fn generate(
+    state: AppState,
+    headers: axum::http::HeaderMap,
+    peer: ConnectInfo<std::net::SocketAddr>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    body: Vec<u8>,
+    app: bool,
+) -> Response {
+    let Some(pool) = state.pools().map(|pools| pools.primary().clone()) else {
+        return server_error();
+    };
+    let cache = Cache::from_state(&state);
+    let authenticated = generate_session_user_active(&pool, &extension).await;
+    // `SessionAuthentication.authenticate` (`authentication.py:124-148`):
+    // anonymous callers return `None` before the CSRF check; callers with
+    // an active session user without a valid token get the 403. Runs
+    // before the throttle (DRF `initial()` order: auth → throttle), so a
+    // CSRF failure leaves the throttle history untouched.
+    if authenticated {
+        let cookie_header = headers
+            .get(header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let csrf_cookie = session_kernel::cookie_value(cookie_header, CSRF_COOKIE_NAME);
+        let header_token = headers.get("x-csrftoken").and_then(|v| v.to_str().ok());
+        let content_type = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok());
+        let pairs = form_pairs(content_type, &body);
+        let Some(cookie) = csrf_cookie.as_deref() else {
+            return csrf_failure_json("CSRF cookie not set.");
+        };
+        let secret = match csrf_cookie_secret(cookie) {
+            Ok(secret) => secret,
+            Err(reason) => return csrf_failure_json(&reason),
+        };
+        let Some((token, source)) = csrf_token_source(&pairs, header_token) else {
+            return csrf_failure_json("CSRF token missing.");
+        };
+        if let Err(reason) = csrf_check_token(&secret, &token, source) {
+            return csrf_failure_json(&reason);
+        }
+    }
+    if !authenticated
+        && !check_generate_throttle(cache.as_ref(), &headers, Some(peer.0.ip().to_string()), app)
+            .await
+    {
+        return throttled();
+    }
+    if !or_500!(instance_setup_done(&pool).await) {
+        let slug = "INSTANCE_NOT_CONFIGURED";
+        let code = error_code(slug).unwrap_or(5000);
+        return json_400(code, slug, &[]);
+    }
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let is_json = content_type.contains("json");
+    if !body.is_empty() && !is_json && !is_form_content_type(content_type) {
+        // DRF `_parse` (`request.py:325-355`): a non-empty body no
+        // parser handles is `UnsupportedMediaType`, echoed verbatim.
+        // Empty bodies parse to `{}` without a parser, so they keep
+        // the ported 500 quirk below (PIDASHCONV-1351).
+        return crate::auth_session::email::unsupported_media_type_response(content_type);
+    }
+    let email = if is_json && !body.is_empty() {
+        match serde_json::from_slice::<serde_json::Value>(&body) {
+            Ok(value) => match value.as_object().and_then(|o| o.get("email")) {
+                Some(serde_json::Value::String(s)) => Some(normalise_email(s)),
+                _ => return server_error(),
+            },
+            Err(error) => return malformed_json(error),
+        }
+    } else if is_json {
+        // DRF: empty JSON body parses to `{}` → `.get("email", "")` → 500.
+        return server_error();
+    } else {
+        match parse_generate_email(content_type, &body, false) {
+            Some(email) => Some(email),
+            None => return server_error(),
+        }
+    };
+    let Some(email) = email else {
+        return server_error();
+    };
+    if !email_is_valid(&email) {
+        // QUIRK-generate-500: `validate_email` raises `ValidationError`,
+        // uncaught by the view.
+        return server_error();
+    }
+    let secret = state.settings().secret_key.clone();
+    let (email_host, magic_enabled) = match provider_config(&pool, &secret).await {
+        Ok(config) => config,
+        Err(_) => return server_error(),
+    };
+    match init_gate(email_host.as_deref(), &magic_enabled) {
+        InitGate::Ok => {}
+        gate => {
+            let (slug, code) = gate_error(gate).expect("gate carries an error");
+            return json_400(code, slug, &[("email", ParamValue::Str(email.clone()))]);
+        }
+    }
+    let Some(cache) = cache else {
+        return server_error();
+    };
+    let key = magic_redis_key(&email);
+    let stored = match cache.get(&key).await {
+        Ok(None) => None,
+        Ok(Some(raw)) => match parse_stored(&raw) {
+            Some(stored) => Some(stored),
+            None => return server_error(),
+        },
+        Err(_) => return server_error(),
+    };
+    let exists = match user_exists(&pool, strip_magic_prefix(&key)).await {
+        Ok(exists) => exists,
+        Err(_) => return server_error(),
+    };
+    let attempt = match initiate_decision(stored.as_ref(), exists) {
+        InitiateOutcome::Emit { attempt } => attempt,
+        InitiateOutcome::Exhausted { branch } => {
+            let (slug, code) = exhausted_error(branch);
+            // The payload takes the bare email: the sign-up arm raises
+            // with `self.key` (`:80`), and the `magic_` prefix is added
+            // separately at `:60`.
+            return json_400(
+                code,
+                slug,
+                &[(
+                    "email",
+                    ParamValue::Str(payload_email(branch, &email).to_owned()),
+                )],
+            );
+        }
+    };
+    let token = generate_token();
+    let value = if attempt == 0 {
+        magic_redis_value_first(&email, &token)
+    } else {
+        let stored_attempt = stored.map(|s| s.current_attempt).unwrap_or(0);
+        magic_redis_value_retry(&email, &token, stored_attempt)
+    };
+    if cache
+        .set_ex(&key, &value, MAGIC_REDIS_EXPIRY_SECS)
+        .await
+        .is_err()
+    {
+        return server_error();
+    }
+    enqueue_magic_link(&pool, &email, &key, &token).await
+}
+
+async fn generate_app(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    peer: ConnectInfo<std::net::SocketAddr>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    body: axum::body::Bytes,
+) -> Response {
+    generate(state, headers, peer, extension, body.to_vec(), true).await
+}
+
+async fn generate_space(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    peer: ConnectInfo<std::net::SocketAddr>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    body: axum::body::Bytes,
+) -> Response {
+    generate(state, headers, peer, extension, body.to_vec(), false).await
+}
+
+// ---------------------------------------------------------------------------
+// Sign-in / sign-up
+// ---------------------------------------------------------------------------
+
+/// Which closure runs: the pre-login user check and the success redirect
+/// differ (`USER_DOES_NOT_EXIST` vs `USER_ALREADY_EXIST`; the sign-up
+/// variant creates the user).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    SignIn,
+    SignUp,
+}
+
+/// `MagicSignInEndpoint.post` / `MagicSignUpEndpoint.post` and the space
+/// twins: form POST → 302 always. Plain Django `View`s: no DRF permission
+/// or throttle layer. The provider `__init__` gates and every
+/// `AuthenticationException` become error redirects; only success logs in.
+async fn sign(
+    state: AppState,
+    headers: axum::http::HeaderMap,
+    peer: ConnectInfo<std::net::SocketAddr>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    body: Vec<u8>,
+    app: bool,
+    flow: Flow,
+) -> Response {
+    let settings = state.settings().clone();
+    let hosts = host_settings(&settings);
+    let base = if app {
+        base_host(&hosts, false, false, true)
+    } else {
+        base_host(&hosts, false, true, false)
+    };
+    let allowed: Vec<&str> = allowed_hosts_for(
+        hosts.web_url,
+        hosts.app_base_url,
+        hosts.admin_base_url,
+        hosts.space_base_url,
+    );
+    // `CsrfViewMiddleware` first: the middleware rejects before the view
+    // runs, so a failure has no side effects (no REQUIRED redirect, no
+    // login). `root_url` is the flag-less `base_host(request)`.
+    let root = base_host(&hosts, false, false, false);
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok());
+    {
+        let cookie_header = headers
+            .get(header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let csrf_cookie = session_kernel::cookie_value(cookie_header, CSRF_COOKIE_NAME);
+        let header_token = headers.get("x-csrftoken").and_then(|v| v.to_str().ok());
+        if csrf_gate(
+            csrf_cookie.as_deref(),
+            header_token,
+            &form_pairs(content_type, &body),
+        )
+        .is_err()
+        {
+            return csrf_failure_response(render_csrf_failure(&root));
+        }
+    }
+    let form = parse_sign_form(content_type.unwrap_or(""), &body);
+    let required_slug = match flow {
+        Flow::SignIn => "MAGIC_SIGN_IN_EMAIL_CODE_REQUIRED",
+        Flow::SignUp => "MAGIC_SIGN_UP_EMAIL_CODE_REQUIRED",
+    };
+    if form.code.is_empty() || form.email.is_empty() {
+        let code = error_code(required_slug).expect("required slug has a code");
+        return redirect_error(
+            &base,
+            form.next_path.as_deref(),
+            code,
+            required_slug,
+            None,
+            &allowed,
+        );
+    }
+    let Some(pool) = state.pools().map(|pools| pools.primary().clone()) else {
+        return server_error();
+    };
+    let Some(cache) = Cache::from_state(&state) else {
+        return server_error();
+    };
+    let existing = or_500!(fetch_user(&pool, &form.email).await);
+    match (flow, existing.as_ref()) {
+        (Flow::SignIn, None) => {
+            let slug = "USER_DOES_NOT_EXIST";
+            let code = error_code(slug).expect("slug has a code");
+            return redirect_error(&base, form.next_path.as_deref(), code, slug, None, &allowed);
+        }
+        (Flow::SignUp, Some(_)) => {
+            let slug = "USER_ALREADY_EXIST";
+            let code = error_code(slug).expect("slug has a code");
+            return redirect_error(&base, form.next_path.as_deref(), code, slug, None, &allowed);
+        }
+        _ => {}
+    }
+    // `MagicCodeProvider(request, key, code, callback)` gates: SMTP then
+    // disabled — as redirects here, not 400s.
+    let secret = settings.secret_key.clone();
+    let (email_host, magic_enabled) = match provider_config(&pool, &secret).await {
+        Ok(config) => config,
+        Err(_) => return server_error(),
+    };
+    // The sign views construct the provider with the prefixed key
+    // (`key=f"magic_{email}"`), and the `__init__` gates raise with
+    // `payload={"email": str(key)}` (`magic_code.py:36-48`) — so the
+    // gate redirects carry `magic_<email>`, not the bare address.
+    let key = magic_redis_key(&form.email);
+    if let Some((slug, code)) = gate_error(init_gate(email_host.as_deref(), &magic_enabled)) {
+        return redirect_error(
+            &base,
+            form.next_path.as_deref(),
+            code,
+            slug,
+            Some(&key),
+            &allowed,
+        );
+    }
+    let stored = match cache.get(&key).await {
+        Ok(None) => None,
+        Ok(Some(raw)) => match parse_stored(&raw) {
+            Some(stored) => Some(stored),
+            None => return server_error(),
+        },
+        Err(_) => return server_error(),
+    };
+    let user_exists_bit = existing.is_some();
+    match verify_decision(stored.as_ref(), &form.code, user_exists_bit) {
+        VerifyOutcome::Ok { .. } => {}
+        outcome => {
+            let (slug, code) = verify_error(&outcome).expect("non-ok carries an error");
+            return redirect_error(
+                &base,
+                form.next_path.as_deref(),
+                code,
+                slug,
+                Some(strip_magic_prefix(&key)),
+                &allowed,
+            );
+        }
+    }
+    // Code match: the token is deleted before the login continues.
+    if cache.del(&key).await.is_err() {
+        return server_error();
+    }
+    let peer_ip = Some(peer.0.ip().to_string());
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    let login_ip = crate::license::handlers_auth_forms::client_ip(
+        headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
+        peer_ip.as_deref(),
+    );
+    let now = chrono::Utc::now();
+    // `complete_login_or_signup`: the sign-up variant creates the user
+    // (after the `__check_signup` gate); the sign-in variant keeps the row.
+    let user = match (flow, existing) {
+        (Flow::SignIn, Some(user)) => user,
+        (Flow::SignUp, None) => {
+            if or_500!(signup_disabled(&pool, &secret, &form.email).await) {
+                let slug = "SIGNUP_DISABLED";
+                let code = error_code(slug).expect("slug has a code");
+                return redirect_error(
+                    &base,
+                    form.next_path.as_deref(),
+                    code,
+                    slug,
+                    Some(&form.email),
+                    &allowed,
+                );
+            }
+            let username = uuid::Uuid::new_v4().simple().to_string();
+            let (password_hash, _) = autoset_password();
+            let display_name = form
+                .email
+                .split('@')
+                .next()
+                .unwrap_or(&form.email)
+                .to_owned();
+            // `User(...)` + first `save()` with the `post_save`
+            // preferences row and the adapter profile row, all inside
+            // `domain::identity::create_user`.
+            let Some(orm) = state.orm() else {
+                return server_error();
+            };
+            let id = identity::create_user(
+                orm,
+                &identity::NewUser {
+                    id: None,
+                    email: &form.email,
+                    username,
+                    password_hash: password_hash.clone(),
+                    first_name: "",
+                    last_name: "",
+                    display_name,
+                    avatar: "",
+                    is_email_verified: true,
+                    is_password_autoset: true,
+                    last_active: Some(now),
+                    login_ip: login_ip.as_deref(),
+                    login_uagent: headers
+                        .get(header::USER_AGENT)
+                        .and_then(|v| v.to_str().ok()),
+                    is_bot: false,
+                    now,
+                    profile: Some(identity::NewProfile {
+                        company_name: "",
+                        background_color: profile_background_color(),
+                    }),
+                },
+            )
+            .await;
+            let id = or_500!(id);
+            DbUser {
+                id,
+                email: form.email.clone(),
+                password: password_hash,
+                is_password_autoset: true,
+                is_active: true,
+            }
+        }
+        _ => return server_error(),
+    };
+    let base_plain = base_host(&hosts, false, false, false);
+    match save_user_data(
+        &pool,
+        now,
+        &user,
+        login_ip.as_deref(),
+        headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok()),
+        &base_plain,
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(response) => return response,
+    }
+    // `callback=post_user_auth_workflow` on the app variants only (the
+    // space providers are constructed without one).
+    if app {
+        match process_workspace_project_invitations(&pool, &cache, now, &user).await {
+            Ok(()) => {}
+            Err(response) => return response,
+        }
+    }
+    let domain = if app {
+        base_host(&hosts, false, false, true)
+    } else {
+        base_host(&hosts, false, true, false)
+    };
+    let csrf_cookie = match login_user(LoginRequest {
+        pool: &pool,
+        extension: &extension,
+        settings: &settings,
+        user: &user,
+        user_agent: &user_agent,
+        login_ip,
+        domain: &domain,
+        now,
+    })
+    .await
+    {
+        Ok(cookie) => cookie,
+        Err(response) => return response,
+    };
+    let mut response = if app {
+        let path = match flow {
+            Flow::SignIn => {
+                let (is_onboarded, last_workspace_id) =
+                    or_500!(get_or_create_profile(&pool, now, &user.id).await);
+                if user.is_password_autoset && is_onboarded {
+                    "/".to_owned()
+                } else if let Some(next) = form.next_path.filter(|n| !n.is_empty()) {
+                    next
+                } else {
+                    or_500!(redirection_path(&pool, &user, is_onboarded, last_workspace_id).await)
+                }
+            }
+            Flow::SignUp => match form.next_path.filter(|n| !n.is_empty()) {
+                Some(next) => next,
+                None => {
+                    // Fresh profile, never onboarded: short-circuits to
+                    // `onboarding` with no workspace reads.
+                    or_500!(redirection_path(&pool, &user, false, None).await)
+                }
+            },
+        };
+        redirect_302(get_safe_redirect_url(&base, &path, &[], &allowed))
+    } else {
+        space_success(&base, form.next_path.as_deref(), &allowed)
+    };
+    push_cookie(&mut response, csrf_cookie);
+    response
+}
+
+/// `__check_signup` (`adapter/base.py:102-120`): `SIGNUP_DISABLED` unless
+/// an invite exists. `ENABLE_SIGNUP` resolves like the other db-sourced
+/// keys (caller default `os.environ.get("ENABLE_SIGNUP", "1")`).
+async fn signup_disabled(
+    pool: &sqlx::PgPool,
+    secret_key: &str,
+    email: &str,
+) -> Result<bool, sqlx::Error> {
+    let enabled = config_value(
+        pool,
+        secret_key,
+        "ENABLE_SIGNUP",
+        env_default("ENABLE_SIGNUP", Some("1")),
+    )
+    .await?
+    .unwrap_or_else(|| "1".to_owned());
+    if enabled != "0" {
+        return Ok(false);
+    }
+    let invite: Option<(i32,)> = sqlx::query_as(
+        "SELECT (1) FROM \"workspace_member_invites\" WHERE \"email\" = $1 \
+         AND \"deleted_at\" IS NULL LIMIT 1",
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await?;
+    Ok(invite.is_none())
+}
+
+async fn sign_in_app(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    peer: ConnectInfo<std::net::SocketAddr>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    body: axum::body::Bytes,
+) -> Response {
+    sign(
+        state,
+        headers,
+        peer,
+        extension,
+        body.to_vec(),
+        true,
+        Flow::SignIn,
+    )
+    .await
+}
+
+async fn sign_up_app(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    peer: ConnectInfo<std::net::SocketAddr>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    body: axum::body::Bytes,
+) -> Response {
+    sign(
+        state,
+        headers,
+        peer,
+        extension,
+        body.to_vec(),
+        true,
+        Flow::SignUp,
+    )
+    .await
+}
+
+async fn sign_in_space(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    peer: ConnectInfo<std::net::SocketAddr>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    body: axum::body::Bytes,
+) -> Response {
+    sign(
+        state,
+        headers,
+        peer,
+        extension,
+        body.to_vec(),
+        false,
+        Flow::SignIn,
+    )
+    .await
+}
+
+async fn sign_up_space(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    peer: ConnectInfo<std::net::SocketAddr>,
+    extension: Option<axum::Extension<SessionHandle>>,
+    body: axum::body::Bytes,
+) -> Response {
+    sign(
+        state,
+        headers,
+        peer,
+        extension,
+        body.to_vec(),
+        false,
+        Flow::SignUp,
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(redirect_302(long).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            redirect_302("http://app.test/?next_path=/x".to_owned()).status(),
+            StatusCode::FOUND
+        );
+    }
+
+    fn test_hosts() -> (String, String, Vec<String>) {
+        // Contract layout: app base http://localhost:3000, spaces base
+        // http://localhost:8000/spaces/ (conftest + FX-AUTH-08 vectors).
+        (
+            "http://localhost:3000".to_owned(),
+            "http://localhost:8000/spaces/".to_owned(),
+            vec!["localhost:3000".to_owned(), "localhost:8000".to_owned()],
+        )
+    }
+
+    #[test]
+    fn timeout_fallbacks_match_django_defaults() {
+        // `redis.py:70-71` / `common.py:238-239`: 2s connect, 5s socket.
+        // Non-positive/non-finite/overflowing settings fall back instead
+        // of panicking the `Duration` conversion.
+        assert_eq!(
+            timeout_duration(2.0, DEFAULT_CONNECT_TIMEOUT),
+            std::time::Duration::from_secs(2)
+        );
+        assert_eq!(
+            timeout_duration(0.25, DEFAULT_RESPONSE_TIMEOUT),
+            std::time::Duration::from_millis(250)
+        );
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e300] {
+            assert_eq!(
+                timeout_duration(bad, DEFAULT_CONNECT_TIMEOUT),
+                DEFAULT_CONNECT_TIMEOUT
+            );
+            assert_eq!(
+                timeout_duration(bad, DEFAULT_RESPONSE_TIMEOUT),
+                DEFAULT_RESPONSE_TIMEOUT
+            );
+        }
+    }
+
+    #[test]
+    fn route_paths_match_django_urls() {
+        // `authentication/urls.py:61-78`.
+        assert_eq!(APP_GENERATE_PATH, "/auth/magic-generate/");
+        assert_eq!(APP_SIGN_IN_PATH, "/auth/magic-sign-in/");
+        assert_eq!(APP_SIGN_UP_PATH, "/auth/magic-sign-up/");
+        assert_eq!(SPACE_GENERATE_PATH, "/auth/spaces/magic-generate/");
+        assert_eq!(SPACE_SIGN_IN_PATH, "/auth/spaces/magic-sign-in/");
+        assert_eq!(SPACE_SIGN_UP_PATH, "/auth/spaces/magic-sign-up/");
+    }
+
+    #[test]
+    fn generate_key_body_matches_fixture() {
+        // FX-AUTH-08 `magic_generate.app_ok`: 200 `{"key": "magic_h@x.com"}`.
+        let body = serde_json::json!({"key": "magic_h@x.com"}).to_string();
+        assert_eq!(body, "{\"key\":\"magic_h@x.com\"}");
+    }
+
+    #[test]
+    fn signin_error_redirects_match_fixture() {
+        // FX-AUTH-08 `magic_signin`: required (5085), no-user (5060).
+        let (app_base, _, allowed) = test_hosts();
+        let allowed: Vec<&str> = allowed.iter().map(String::as_str).collect();
+        let required = get_safe_redirect_url(
+            &app_base,
+            "",
+            &[
+                ("error_code", ParamValue::Int(5085)),
+                (
+                    "error_message",
+                    ParamValue::Str("MAGIC_SIGN_IN_EMAIL_CODE_REQUIRED".to_owned()),
+                ),
+            ],
+            &allowed,
+        );
+        assert_eq!(
+            required,
+            "http://localhost:3000/?error_code=5085&error_message=MAGIC_SIGN_IN_EMAIL_CODE_REQUIRED"
+        );
+        let no_user = get_safe_redirect_url(
+            &app_base,
+            "",
+            &[
+                ("error_code", ParamValue::Int(5060)),
+                (
+                    "error_message",
+                    ParamValue::Str("USER_DOES_NOT_EXIST".to_owned()),
+                ),
+            ],
+            &allowed,
+        );
+        assert_eq!(
+            no_user,
+            "http://localhost:3000/?error_code=5060&error_message=USER_DOES_NOT_EXIST"
+        );
+    }
+
+    #[test]
+    fn signup_error_redirect_matches_fixture() {
+        // FX-AUTH-08 `magic_signup.app_exists`: 5030 USER_ALREADY_EXIST.
+        let (app_base, _, allowed) = test_hosts();
+        let allowed: Vec<&str> = allowed.iter().map(String::as_str).collect();
+        let exists = get_safe_redirect_url(
+            &app_base,
+            "",
+            &[
+                ("error_code", ParamValue::Int(5030)),
+                (
+                    "error_message",
+                    ParamValue::Str("USER_ALREADY_EXIST".to_owned()),
+                ),
+            ],
+            &allowed,
+        );
+        assert_eq!(
+            exists,
+            "http://localhost:3000/?error_code=5030&error_message=USER_ALREADY_EXIST"
+        );
+    }
+
+    #[test]
+    fn space_required_redirect_matches_fixture() {
+        // FX-AUTH-08 `magic_signin.space_required`: spaces base + params.
+        let (_, space_base, allowed) = test_hosts();
+        let allowed: Vec<&str> = allowed.iter().map(String::as_str).collect();
+        let required = get_safe_redirect_url(
+            &space_base,
+            "",
+            &[
+                ("error_code", ParamValue::Int(5085)),
+                (
+                    "error_message",
+                    ParamValue::Str("MAGIC_SIGN_IN_EMAIL_CODE_REQUIRED".to_owned()),
+                ),
+            ],
+            &allowed,
+        );
+        assert_eq!(
+            required,
+            "http://localhost:8000/spaces/?error_code=5085&error_message=MAGIC_SIGN_IN_EMAIL_CODE_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn space_success_joins_next_path() {
+        // Oracle `test_next_path_handling_differs`: spaces joins
+        // `/workspaces` onto the base path.
+        let (_, space_base, allowed) = test_hosts();
+        let allowed: Vec<&str> = allowed.iter().map(String::as_str).collect();
+        let validated = validate_next_path("/workspaces");
+        let url = format!("{}{validated}", space_base.trim_end_matches('/'));
+        assert!(url_has_allowed_host_and_scheme(&url, &allowed));
+        assert_eq!(url, "http://localhost:8000/spaces/workspaces");
+    }
+
+    #[test]
+    fn app_success_echoes_next_path_param() {
+        // Oracle `test_success_with_next_path`: app echoes `next_path` as a
+        // query parameter with no `error_code`.
+        let (app_base, _, allowed) = test_hosts();
+        let allowed: Vec<&str> = allowed.iter().map(String::as_str).collect();
+        let url = get_safe_redirect_url(&app_base, "/workspaces", &[], &allowed);
+        assert_eq!(url, "http://localhost:3000/?next_path=/workspaces");
+    }
+
+    #[test]
+    fn generate_400_bodies_match_fixture() {
+        // FX-AUTH-08 `app_no_user` shape + the exhausted payloads: exact
+        // key order `error_code, error_message, email`.
+        let body = error_dict_json(&error_pairs(5060, "USER_DOES_NOT_EXIST", &[]));
+        assert_eq!(
+            body,
+            "{\"error_code\":5060,\"error_message\":\"USER_DOES_NOT_EXIST\"}"
+        );
+        let body = error_dict_json(&error_pairs(
+            5102,
+            "EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_UP",
+            &[("email", ParamValue::Str("brandnew@x.com".to_owned()))],
+        ));
+        assert_eq!(
+            body,
+            "{\"error_code\":5102,\"error_message\":\"EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_UP\",\"email\":\"brandnew@x.com\"}"
+        );
+        let body = error_dict_json(&error_pairs(5000, "INSTANCE_NOT_CONFIGURED", &[]));
+        assert_eq!(
+            body,
+            "{\"error_code\":5000,\"error_message\":\"INSTANCE_NOT_CONFIGURED\"}"
+        );
+    }
+
+    #[test]
+    fn form_parsing_matches_django_post() {
+        // `request.POST.get(...)`: last value wins, missing → `""`,
+        // email stripped + lowered, code stripped, `next_path` raw.
+        let form = parse_sign_form(
+            "application/x-www-form-urlencoded",
+            b"email=U%40X.com&code=+123456+&next_path=%2Fworkspaces&code=999",
+        );
+        assert_eq!(form.email, "u@x.com");
+        assert_eq!(form.code, "999");
+        assert_eq!(form.next_path.as_deref(), Some("/workspaces"));
+        let empty = parse_sign_form("application/x-www-form-urlencoded", b"");
+        assert_eq!(
+            empty,
+            SignForm {
+                code: String::new(),
+                email: String::new(),
+                next_path: None
+            }
+        );
+        // Multipart posts read the same triple (PIDASHCONV-1079).
+        let multipart = parse_sign_form(
+            "multipart/form-data; boundary=b",
+            b"--b\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\nU@x.com\r\n--b\r\nContent-Disposition: form-data; name=\"code\"\r\n\r\n42\r\n--b--\r\n",
+        );
+        assert_eq!(multipart.email, "u@x.com");
+        assert_eq!(multipart.code, "42");
+        assert_eq!(multipart.next_path, None);
+        // A `filename=""` part is a field in Django, not a file.
+        let empty_filename = parse_sign_form(
+            "multipart/form-data; boundary=b",
+            b"--b\r\nContent-Disposition: form-data; name=\"email\"; filename=\"\"\r\n\r\na@x.com\r\n--b--\r\n",
+        );
+        assert_eq!(empty_filename.email, "a@x.com");
+    }
+
+    #[test]
+    fn generate_email_parsing_matches_request_data() {
+        // JSON object with a string email; anything else supplies no email
+        // (→ 500 downstream, QUIRK-generate-500).
+        assert_eq!(
+            parse_generate_email("", br#"{"email": " H@x.com "}"#, true),
+            Some("h@x.com".to_owned())
+        );
+        assert_eq!(parse_generate_email("", br#"{"email": null}"#, true), None);
+        assert_eq!(parse_generate_email("", br#"{"email": 123}"#, true), None);
+        assert_eq!(parse_generate_email("", br#"{}"#, true), None);
+        assert_eq!(parse_generate_email("", b"not json", true), None);
+        assert_eq!(
+            parse_generate_email(
+                "application/x-www-form-urlencoded",
+                b"email=f%40x.com",
+                false
+            ),
+            Some("f@x.com".to_owned())
+        );
+        assert_eq!(
+            parse_generate_email("application/x-www-form-urlencoded", b"", false),
+            None
+        );
+        // Multipart posts read the same field (PIDASHCONV-1079).
+        let multipart =
+            b"--b\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\nF@x.com\r\n--b--\r\n";
+        assert_eq!(
+            parse_generate_email("multipart/form-data; boundary=b", multipart, false),
+            Some("f@x.com".to_owned())
+        );
+        // Truncated multipart falls back to the urlencoded parse.
+        assert_eq!(
+            parse_generate_email("multipart/form-data; boundary=b", b"email=f%40x.com", false),
+            Some("f@x.com".to_owned())
+        );
+        // The 415 branch (PIDASHCONV-1351): only JSON-ish, urlencoded
+        // and multipart bodies parse; anything else with a non-empty
+        // body is `UnsupportedMediaType`.
+        assert!(is_form_content_type("application/x-www-form-urlencoded"));
+        assert!(is_form_content_type(
+            "application/x-www-form-urlencoded; charset=UTF-8"
+        ));
+        assert!(is_form_content_type("multipart/form-data; boundary=b"));
+        assert!(!is_form_content_type("text/plain;charset=UTF-8"));
+        assert!(!is_form_content_type("application/xml"));
+        assert!(!is_form_content_type(""));
+    }
+
+    #[test]
+    fn throttle_idents_match_drf() {
+        // `get_ident`: XFF with all whitespace stripped, else the peer.
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
+        assert_eq!(
+            throttle_ident(&headers, Some("9.9.9.9".to_owned())),
+            "1.2.3.4,5.6.7.8"
+        );
+        let headers = axum::http::HeaderMap::new();
+        assert_eq!(
+            throttle_ident(&headers, Some("9.9.9.9".to_owned())),
+            "9.9.9.9"
+        );
+        assert_eq!(throttle_ident(&headers, None), "None");
+        // Scopes: app `authentication`, space `anon` (guards table).
+        assert_eq!(AUTHENTICATION_THROTTLE_SCOPE, "authentication");
+        assert_eq!(DEFAULT_ANON_SCOPE, "anon");
+        assert_eq!(
+            throttle_cache_key(AUTHENTICATION_THROTTLE_SCOPE, "9.9.9.9"),
+            "throttle_authentication_9.9.9.9"
+        );
+    }
+
+    #[test]
+    fn generated_tokens_have_provider_shape() {
+        for _ in 0..25 {
+            let token = generate_token();
+            assert_eq!(token.len(), 6);
+            assert!(token.bytes().all(|b| b.is_ascii_digit()));
+            assert!(pidash_services::auth_session::magic::token_shape_ok(&token));
+        }
+        let salt = django_random_string(22);
+        assert_eq!(salt.len(), 22);
+        assert!(salt.bytes().all(|b| b.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn session_auth_hash_matches_django_vectors() {
+        // `AbstractBaseUser._get_session_auth_hash` (Django 4.2.30
+        // `contrib/auth/base_user.py:145-152`): `salted_hmac(key_salt,
+        // password, secret, algorithm="sha256").hexdigest()`, verified
+        // against the installed framework with the explicit algorithm:
+        // password `pbkdf2_sha256$1500000 testsalt$abc`, secret `topsecret`.
+        assert_eq!(
+            session_auth_hash("pbkdf2_sha256$1500000 testsalt$abc", b"topsecret"),
+            "bb53f993bcd2ae8f77ad3394548a134c57d07047c08bc40bfd8f960b64302d7b"
+        );
+        let hash = session_auth_hash("pbkdf2_sha256$1500000$salt$hash", b"secret");
+        assert_eq!(hash.len(), 64);
+        assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_ne!(
+            hash,
+            session_auth_hash("pbkdf2_sha256$1500000$salt$hash", b"other")
+        );
+    }
+
+    #[test]
+    fn invite_role_mapping_matches_python() {
+        assert_eq!(map_invite_role(5), 5);
+        assert_eq!(map_invite_role(15), 15);
+        assert_eq!(map_invite_role(20), 15);
+    }
+}

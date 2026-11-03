@@ -1,0 +1,10 @@
+{
+ "method": "Seeded completed+failed+skipped targets on pidash_loop_fx, ran LoopJobDetailEndpoint GET, recorded stats.",
+ "source": "apps/api/pi_dash/loop/admin_views.py:137-149",
+ "stats": {
+  "completed": 1,
+  "failed": 0,
+  "skipped": 1,
+  "target_count": 3
+ }
+}

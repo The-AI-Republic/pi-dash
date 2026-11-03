@@ -1,0 +1,17 @@
+{
+ "after": {
+  "cursor_advanced_past_now": true,
+  "last_run_id": "3b23ab68-1bb0-4760-98a5-0d313639c4bc",
+  "next_run_at": "2026-09-29T03:56:09+00:00",
+  "thread_kind": "loop"
+ },
+ "before": {
+  "last_run_id": null,
+  "next_run_at": "2026-09-28T04:27:09.899776+00:00"
+ },
+ "method": "Ran fire_loop_target() on pidash_loop_fx; run_assistant_turn mocked at pi_dash.loop.dispatch (call counted).",
+ "returned": true,
+ "run_assistant_turn_delay_calls": 1,
+ "source": "apps/api/pi_dash/bgtasks/loop.py:184-226 (SFU claim :196-201, future-cursor race :206-207, cursor advance :210-213, recheck :215-222, dispatch :226)",
+ "user_message_is_prompt": "do the thing"
+}

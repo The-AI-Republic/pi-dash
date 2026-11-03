@@ -1,0 +1,145 @@
+{
+  "trace": "apps/api/pi_dash/assistant/runtime/mcp.py + pydantic-ai-slim==1.107.0/fastmcp==3.4.4/mcp==1.30.0",
+  "ported_from": "d656243d3700dd5ff749f1bfeb2bc74c918a33ba",
+  "case": "bad_then_call",
+  "stack": {
+    "pydantic_ai_slim": "1.107.0",
+    "fastmcp": "3.4.4",
+    "mcp": "1.30.0",
+    "python": "3.12"
+  },
+  "toolset": {
+    "timeout": 10.0,
+    "read_timeout": 0.5,
+    "prefix": "mcp_probe",
+    "auth": false,
+    "server_name": "probe",
+    "url_path": "/mcp"
+  },
+  "flow": [
+    "enter",
+    "list",
+    "call"
+  ],
+  "call": {
+    "tool": "mcp_probe_echo",
+    "args": {
+      "text": "hi"
+    },
+    "fabricate": true
+  },
+  "stub": {
+    "framing": "json",
+    "raw": {
+      "tools/list": {
+        "status": 200,
+        "content_type": "text/plain",
+        "body": "hi"
+      }
+    }
+  },
+  "wire": [
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json"
+      },
+      "body": "{\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"mcp\",\"version\":\"0.1.0\"}},\"jsonrpc\":\"2.0\",\"id\":0}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"notifications/initialized\",\"jsonrpc\":\"2.0\"}"
+    },
+    {
+      "method": "GET",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": ""
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"jsonrpc\":\"2.0\",\"id\":1}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/call\",\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"hi\"},\"_meta\":{\"progressToken\":2}},\"jsonrpc\":\"2.0\",\"id\":2}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"jsonrpc\":\"2.0\",\"id\":3}"
+    },
+    {
+      "method": "GET",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": ""
+    },
+    {
+      "method": "DELETE",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": ""
+    }
+  ],
+  "expect": {
+    "tools": {},
+    "call": {
+      "absorbed": {
+        "class": "McpError",
+        "text": "Tool server 'probe' was unavailable for this call (McpError)."
+      }
+    },
+    "failures": {
+      "after_enter": null,
+      "after_list": "McpError",
+      "after_call": "McpError",
+      "at_exit": "McpError"
+    },
+    "delete_seen": true
+  }
+}

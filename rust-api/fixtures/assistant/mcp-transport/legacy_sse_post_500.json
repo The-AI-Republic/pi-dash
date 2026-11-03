@@ -1,0 +1,59 @@
+{
+  "trace": "apps/api/pi_dash/assistant/runtime/mcp.py + pydantic-ai-slim==1.107.0/fastmcp==3.4.4/mcp==1.30.0",
+  "ported_from": "d656243d3700dd5ff749f1bfeb2bc74c918a33ba",
+  "case": "legacy_sse_post_500",
+  "stack": {
+    "pydantic_ai_slim": "1.107.0",
+    "fastmcp": "3.4.4",
+    "mcp": "1.30.0",
+    "python": "3.12"
+  },
+  "toolset": {
+    "timeout": 2.0,
+    "read_timeout": 1.0,
+    "prefix": "mcp_probe",
+    "auth": false,
+    "server_name": "probe",
+    "url_path": "/sse"
+  },
+  "flow": [
+    "enter",
+    "list"
+  ],
+  "call": null,
+  "stub": {
+    "framing": "json",
+    "sse_post_status": 500
+  },
+  "wire": [
+    {
+      "method": "GET",
+      "path": "/sse",
+      "headers": {
+        "accept": "text/event-stream",
+        "cache-control": "no-store"
+      },
+      "body": ""
+    },
+    {
+      "method": "POST",
+      "path": "/messages?sessionId=legacy-1",
+      "headers": {
+        "accept": "*/*",
+        "content-type": "application/json"
+      },
+      "body": "{\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"mcp\",\"version\":\"0.1.0\"}},\"jsonrpc\":\"2.0\",\"id\":0}"
+    }
+  ],
+  "expect": {
+    "tools": {},
+    "call": null,
+    "failures": {
+      "after_enter": "McpError",
+      "after_list": "McpError",
+      "after_call": null,
+      "at_exit": "McpError"
+    },
+    "delete_seen": false
+  }
+}

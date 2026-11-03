@@ -1,0 +1,613 @@
+[
+  {
+    "module": "issues",
+    "name": "search_issues",
+    "description": "Full-text search issues you can access. Returns up to 20 results per page.",
+    "parameters_json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "limit": {
+          "default": 20,
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "strict": null
+  },
+  {
+    "module": "issues",
+    "name": "list_issues",
+    "description": "List issues in one project, newest activity first, up to 20 per page.\nOptional filters, each comma-separated (values OR together, filters AND\ntogether): state (names or ids), state_group (backlog, unstarted, started,\nreview, test, completed, cancelled), parent_issue_id (issue id or PROJ-123\nidentifier, or \"null\" for top-level issues only), labels (names or ids),\npriority (urgent, high, medium, low, none).",
+    "parameters_json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {
+          "type": "string"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "state_group": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "parent_issue_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "labels": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "limit": {
+          "default": 20,
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "project_id"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "strict": null
+  },
+  {
+    "module": "issues",
+    "name": "list_my_issues",
+    "description": "List issues you're involved in. scope: 'all', 'assigned', or 'created'.",
+    "parameters_json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "default": "all",
+          "type": "string"
+        },
+        "limit": {
+          "default": 20,
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "return_schema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "strict": null
+  },
+  {
+    "module": "issues",
+    "name": "get_issue",
+    "description": "Get one issue in detail, including its most recent comments.",
+    "parameters_json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "issue_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "issue_id"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "strict": null
+  },
+  {
+    "module": "issues",
+    "name": "create_issue",
+    "description": "Create an issue. Requires Member or Admin role. Pass parent_issue_id to\nlink it as a sub-issue of another issue in the same project. (Assignees/labels:\nset them afterwards in the UI — not yet supported by this tool.)",
+    "parameters_json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description_md": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "state_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "parent_issue_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "project_id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "strict": null
+  },
+  {
+    "module": "issues",
+    "name": "update_issue",
+    "description": "Update an issue's name, description, state, or priority. Requires write access.\nChanging the state may dispatch a coding run if it moves the issue into a\ndelegated/ticking state (same as moving it in the UI). Pass parent_issue_id to\nre-parent the issue (must be another issue in the same project); pass null to\nunlink it from its current parent; omit it to leave the parent unchanged.",
+    "parameters_json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "issue_id": {
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "description_md": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "state_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "parent_issue_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "__unset__"
+        }
+      },
+      "required": [
+        "issue_id"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "strict": null
+  },
+  {
+    "module": "issues",
+    "name": "relate_issues",
+    "description": "Record a relation from ``issue`` to each of ``related_issues`` (identifiers\nlike PROJ-12, or UUIDs). relation_type is read from ``issue``'s side: one of\nblocked_by, blocking, relates_to, duplicate, start_before, start_after,\nfinish_before, finish_after, implemented_by, implements. Use blocked_by when\n``issue`` cannot finish until the related issues do. Idempotent: pairs that\nalready have this relation come back under ``unchanged``; pairs that already\nhave a different relation come back under ``conflicts`` and are not changed.\nRequires write access to ``issue``'s project.",
+    "parameters_json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "issue": {
+          "type": "string"
+        },
+        "relation_type": {
+          "type": "string"
+        },
+        "related_issues": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "issue",
+        "relation_type",
+        "related_issues"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "strict": null
+  },
+  {
+    "module": "issues",
+    "name": "unrelate_issues",
+    "description": "Remove the ``relation_type`` relation between ``issue`` and each of\n``related_issues``. Only that exact relation is removed; pairs without it come\nback under ``not_related`` (not an error). Requires write access.",
+    "parameters_json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "issue": {
+          "type": "string"
+        },
+        "relation_type": {
+          "type": "string"
+        },
+        "related_issues": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "issue",
+        "relation_type",
+        "related_issues"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "strict": null
+  },
+  {
+    "module": "issues",
+    "name": "list_issue_relations",
+    "description": "List every relation of an issue (identifier or UUID), grouped by type from\nits side (blocked_by, blocking, relates_to, ...), each with identifier, name\nand state. Check ``blocked_by`` states before starting dependent work.",
+    "parameters_json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "issue": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "issue"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "strict": null
+  },
+  {
+    "module": "projects",
+    "name": "list_projects",
+    "description": "List the projects in the current workspace that you can access.",
+    "parameters_json_schema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "return_schema": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "strict": null
+  },
+  {
+    "module": "projects",
+    "name": "list_states",
+    "description": "List the workflow states (e.g. Backlog, In Progress, Done) for a project.",
+    "parameters_json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "strict": null
+  },
+  {
+    "module": "projects",
+    "name": "list_labels",
+    "description": "List the labels available in a project.",
+    "parameters_json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "strict": null
+  },
+  {
+    "module": "projects",
+    "name": "list_project_members",
+    "description": "List the members of a project (id, name, role).",
+    "parameters_json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "strict": null
+  },
+  {
+    "module": "comments",
+    "name": "create_comment",
+    "description": "Add a comment to an issue.\n\nSet ``fold`` for low-value status/noop updates that should stay available\nto humans but remain collapsed and be omitted from future agent prompts.",
+    "parameters_json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "issue_id": {
+          "type": "string"
+        },
+        "body_md": {
+          "type": "string"
+        },
+        "fold": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "issue_id",
+        "body_md"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "strict": null
+  },
+  {
+    "module": "runs",
+    "name": "get_run_status",
+    "description": "Get the status of coding agent runs for an issue.",
+    "parameters_json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "issue_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "issue_id"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "strict": null
+  },
+  {
+    "module": "runs",
+    "name": "dispatch_coding_run",
+    "description": "Start a coding agent run on an issue by moving it into a delegated state.\nRequires write access. Identical to dragging the issue into that state in the UI.",
+    "parameters_json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "issue_id": {
+          "type": "string"
+        },
+        "target_state_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "issue_id"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "strict": null
+  },
+  {
+    "module": "github",
+    "name": "get_pull_request_status",
+    "description": "Check whether a GitHub pull request or GitLab merge request is merged.\n\nPass a full PR/MR URL. Returns ``{\"state\": \"merged\"|\"open\"|\"closed\"|\"unknown\", ...}``.\nAn unsupported URL, rate limit, or network error returns ``unknown``.",
+    "parameters_json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "strict": null
+  }
+]

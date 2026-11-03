@@ -1,0 +1,39 @@
+{
+  "PORT_BUG_1": "email_notification_ids is appended for EVERY row of the receiver (:72) but fanned out per issue (:80): each send task receives the receiver's ids across ALL its issues, not the single issue's ids. Port verbatim.",
+  "_fixture": "F-STACK",
+  "_method": "source-derived record (DB-touching path; live before/after covered by oracle test_stack_fans_out_and_marks_processed). ORM call chain transcribed verbatim.",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_sources": [
+    "apps/api/pi_dash/bgtasks/email_notification_task.py:46-84",
+    "apps/api/pi_dash/db/models/notification.py:121-148 (EmailNotificationLog columns)"
+  ],
+  "fanout": {
+    "call": "send_email_notification.delay",
+    "kwargs": [
+      "issue_id (entity_identifier, UUID object, not str)",
+      "notification_data (per-issue {actor: [data]} map)",
+      "receiver_id (str)",
+      "email_notification_ids (list of UUIDs)"
+    ]
+  },
+  "final_update": "EmailNotificationLog.objects.filter(pk__in=processed_notifications).update(processed_at=timezone.now()) (:84; runs unconditionally, no-op when empty)",
+  "grouping": "payload.setdefault(entity_identifier_UUID, {}).setdefault(str(triggered_by_id), []).append(data)",
+  "input_columns": [
+    "id",
+    "receiver_id",
+    "triggered_by_id",
+    "entity_identifier (UUID obj)",
+    "entity_name",
+    "data (dict)",
+    "processed_at",
+    "sent_at",
+    "entity",
+    "old_value",
+    "new_value",
+    "created_at",
+    "updated_at"
+  ],
+  "input_query": "EmailNotificationLog.objects.filter(processed_at__isnull=True).order_by(\"receiver\").values()",
+  "no_try": "stack_email_notification has no try/except: any exception propagates to Celery (retry path), unlike send_email_notification which swallows to log_exception",
+  "receivers": "list(set([str(n.get(\"receiver_id\")) for n in email_notifications]))"
+}

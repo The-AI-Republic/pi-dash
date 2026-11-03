@@ -1,0 +1,37 @@
+{
+ "method": "Ran _hourly_floor_ok() under settings.test (no DB).",
+ "notes": [
+  "FREQ= prefix match is case-sensitive: 'freq=minutely' passes the floor (quirk; full _validate_writes would still reject it via dateutil)."
+ ],
+ "source": "apps/api/pi_dash/loop/admin_views.py:62-69",
+ "vectors": [
+  {
+   "ok": true,
+   "rrule": "FREQ=DAILY"
+  },
+  {
+   "ok": true,
+   "rrule": "FREQ=HOURLY"
+  },
+  {
+   "ok": true,
+   "rrule": "FREQ=WEEKLY"
+  },
+  {
+   "ok": false,
+   "rrule": "FREQ=MINUTELY"
+  },
+  {
+   "ok": false,
+   "rrule": "FREQ=SECONDLY"
+  },
+  {
+   "ok": true,
+   "rrule": ""
+  },
+  {
+   "ok": true,
+   "rrule": "freq=minutely"
+  }
+ ]
+}

@@ -1,0 +1,902 @@
+[
+ {
+  "id": "f18-11-pin",
+  "input": "<h1>Title</h1><p>para with <strong>bold</strong></p><ul><li>a</li><li>b</li></ul>",
+  "output": "# Title\n\npara with **bold**\n\n- a\n- b"
+ },
+ {
+  "id": "empty",
+  "input": "",
+  "output": ""
+ },
+ {
+  "id": "whitespace",
+  "input": "   \n\t  ",
+  "output": ""
+ },
+ {
+  "id": "plain",
+  "input": "just text",
+  "output": "just text"
+ },
+ {
+  "id": "h1",
+  "input": "<h1>Hello</h1>",
+  "output": "# Hello"
+ },
+ {
+  "id": "h2",
+  "input": "<h2>Sub</h2>",
+  "output": "## Sub"
+ },
+ {
+  "id": "h3",
+  "input": "<h3>Deep</h3>",
+  "output": "### Deep"
+ },
+ {
+  "id": "h4",
+  "input": "<h4>h4</h4>",
+  "output": "#### h4"
+ },
+ {
+  "id": "h5",
+  "input": "<h5>h5</h5>",
+  "output": "##### h5"
+ },
+ {
+  "id": "h6",
+  "input": "<h6>h6</h6>",
+  "output": "###### h6"
+ },
+ {
+  "id": "h-nested-inline",
+  "input": "<h2>a <strong>b</strong> <em>c</em></h2>",
+  "output": "## a **b** *c*"
+ },
+ {
+  "id": "h-multiline",
+  "input": "<h1>line1\nline2</h1>",
+  "output": "# line1 line2"
+ },
+ {
+  "id": "p",
+  "input": "<p>hello world</p>",
+  "output": "hello world"
+ },
+ {
+  "id": "p-multi",
+  "input": "<p>one</p><p>two</p>",
+  "output": "one\n\ntwo"
+ },
+ {
+  "id": "p-nested-blocks",
+  "input": "<div><p>a</p><p>b</p></div>",
+  "output": "a\n\nb"
+ },
+ {
+  "id": "strong",
+  "input": "<p>a <strong>b</strong> c</p>",
+  "output": "a **b** c"
+ },
+ {
+  "id": "b",
+  "input": "<p>a <b>b</b> c</p>",
+  "output": "a **b** c"
+ },
+ {
+  "id": "em",
+  "input": "<p>a <em>b</em> c</p>",
+  "output": "a *b* c"
+ },
+ {
+  "id": "i",
+  "input": "<p>a <i>b</i> c</p>",
+  "output": "a *b* c"
+ },
+ {
+  "id": "del",
+  "input": "<p>a <del>b</del> c</p>",
+  "output": "a ~~b~~ c"
+ },
+ {
+  "id": "s",
+  "input": "<p>a <s>b</s> c</p>",
+  "output": "a ~~b~~ c"
+ },
+ {
+  "id": "code-inline",
+  "input": "<p>a <code>b</code> c</p>",
+  "output": "a `b` c"
+ },
+ {
+  "id": "kbd",
+  "input": "<p>a <kbd>b</kbd> c</p>",
+  "output": "a `b` c"
+ },
+ {
+  "id": "samp",
+  "input": "<p>a <samp>b</samp> c</p>",
+  "output": "a `b` c"
+ },
+ {
+  "id": "sub",
+  "input": "<p>a<sub>b</sub>c</p>",
+  "output": "abc"
+ },
+ {
+  "id": "sup",
+  "input": "<p>a<sup>b</sup>c</p>",
+  "output": "abc"
+ },
+ {
+  "id": "chomp-lead",
+  "input": "<p><strong> foo</strong></p>",
+  "output": "**foo**"
+ },
+ {
+  "id": "chomp-trail",
+  "input": "<p><strong>foo </strong></p>",
+  "output": "**foo**"
+ },
+ {
+  "id": "chomp-both",
+  "input": "<p>x <em> y </em> z</p>",
+  "output": "x  *y*  z"
+ },
+ {
+  "id": "inline-empty",
+  "input": "<p>a<strong></strong>b</p>",
+  "output": "ab"
+ },
+ {
+  "id": "inline-space-only",
+  "input": "<p>a<strong> </strong>b</p>",
+  "output": "ab"
+ },
+ {
+  "id": "nested-inline",
+  "input": "<p><strong>a <em>b</em> c</strong></p>",
+  "output": "**a *b* c**"
+ },
+ {
+  "id": "a-basic",
+  "input": "<p><a href=\"http://e.com/x\">text</a></p>",
+  "output": "[text](http://e.com/x)"
+ },
+ {
+  "id": "a-title",
+  "input": "<p><a href=\"http://e.com/x\" title=\"ti&quot;tle\">text</a></p>",
+  "output": "[text](http://e.com/x \"ti\\\"tle\")"
+ },
+ {
+  "id": "a-autolink",
+  "input": "<p><a href=\"http://e.com/x\">http://e.com/x</a></p>",
+  "output": "<http://e.com/x>"
+ },
+ {
+  "id": "a-nohref",
+  "input": "<p><a>text</a></p>",
+  "output": "text"
+ },
+ {
+  "id": "a-emptyhref",
+  "input": "<p><a href=\"\">text</a></p>",
+  "output": "text"
+ },
+ {
+  "id": "a-emptytext",
+  "input": "<p><a href=\"http://e.com/x\"></a></p>",
+  "output": ""
+ },
+ {
+  "id": "a-nested",
+  "input": "<p><a href=\"http://e.com/x\"><strong>t</strong></a></p>",
+  "output": "[**t**](http://e.com/x)"
+ },
+ {
+  "id": "img",
+  "input": "<p><img src=\"http://e.com/i.png\" alt=\"alt\" title=\"ti\"></p>",
+  "output": "![alt](http://e.com/i.png \"ti\")"
+ },
+ {
+  "id": "img-noalt",
+  "input": "<p><img src=\"http://e.com/i.png\"></p>",
+  "output": "![](http://e.com/i.png)"
+ },
+ {
+  "id": "img-in-heading",
+  "input": "<h1><img src=\"s\" alt=\"a\"></h1>",
+  "output": "# a"
+ },
+ {
+  "id": "img-in-cell",
+  "input": "<table><tr><td><img src=\"s\" alt=\"a\"></td></tr></table>",
+  "output": "|  |\n| --- |\n| a |"
+ },
+ {
+  "id": "br",
+  "input": "<p>a<br>b</p>",
+  "output": "a  \nb"
+ },
+ {
+  "id": "br-self",
+  "input": "<p>a<br/>b</p>",
+  "output": "a  \nb"
+ },
+ {
+  "id": "br-in-heading",
+  "input": "<h1>a<br>b</h1>",
+  "output": "# a b"
+ },
+ {
+  "id": "ul",
+  "input": "<ul><li>a</li><li>b</li></ul>",
+  "output": "- a\n- b"
+ },
+ {
+  "id": "ol",
+  "input": "<ol><li>a</li><li>b</li></ol>",
+  "output": "1. a\n2. b"
+ },
+ {
+  "id": "ol-start",
+  "input": "<ol start=\"5\"><li>a</li><li>b</li></ol>",
+  "output": "5. a\n6. b"
+ },
+ {
+  "id": "ol-start-pad",
+  "input": "<ol start=\"003\"><li>a</li></ol>",
+  "output": "3. a"
+ },
+ {
+  "id": "ol-start-bad",
+  "input": "<ol start=\"x\"><li>a</li></ol>",
+  "output": "1. a"
+ },
+ {
+  "id": "ol-start-empty",
+  "input": "<ol start=\"\"><li>a</li></ol>",
+  "output": "1. a"
+ },
+ {
+  "id": "ol-start-space",
+  "input": "<ol start=\" 3\"><li>a</li></ol>",
+  "output": "1. a"
+ },
+ {
+  "id": "ol-start-neg",
+  "input": "<ol start=\"-2\"><li>a</li></ol>",
+  "output": "1. a"
+ },
+ {
+  "id": "ol-start-huge",
+  "input": "<ol start=\"99999999999999999999999\"><li>a</li></ol>",
+  "output": "99999999999999999999999. a"
+ },
+ {
+  "id": "ol-start-unicode",
+  "input": "<ol start=\"²\"><li>a</li></ol>",
+  "output": "a"
+ },
+ {
+  "id": "nested-list",
+  "input": "<ul><li>a<ul><li>b<ul><li>c</li></ul></li></ul></li></ul>",
+  "output": "- a\n  - b\n    - c"
+ },
+ {
+  "id": "nested-ol",
+  "input": "<ol><li>a<ol><li>b</li></ol></li></ol>",
+  "output": "1. a\n   1. b"
+ },
+ {
+  "id": "li-empty",
+  "input": "<ul><li></li><li>a</li></ul>",
+  "output": "- a"
+ },
+ {
+  "id": "li-multiline",
+  "input": "<ul><li>line1\nline2</li></ul>",
+  "output": "- line1\n  line2"
+ },
+ {
+  "id": "li-blocks",
+  "input": "<ul><li><p>a</p><p>b</p></li></ul>",
+  "output": "- a\n\n  b"
+ },
+ {
+  "id": "list-then-p",
+  "input": "<ul><li>a</li></ul><p>after</p>",
+  "output": "- a\n\nafter"
+ },
+ {
+  "id": "list-then-list",
+  "input": "<ul><li>a</li></ul><ul><li>b</li></ul>",
+  "output": "- a\n\n- b"
+ },
+ {
+  "id": "task-all",
+  "input": "<ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"true\"><label><input type=\"checkbox\"><span></span></label><div><p>done</p></div></li><li data-type=\"taskItem\" data-checked=\"false\"><label><input type=\"checkbox\"><span></span></label><div><p>todo</p></div></li></ul>",
+  "output": "- [x] done\n- [ ] todo"
+ },
+ {
+  "id": "task-checked-bare",
+  "input": "<ul><li data-type=\"taskItem\" data-checked><p>x</p></li></ul>",
+  "output": "- [x] x"
+ },
+ {
+  "id": "task-checked-empty",
+  "input": "<ul><li data-type=\"taskItem\" data-checked=\"\"><p>x</p></li></ul>",
+  "output": "- [x] x"
+ },
+ {
+  "id": "task-checked-TRUE",
+  "input": "<ul><li data-type=\"taskItem\" data-checked=\"TRUE\"><p>x</p></li></ul>",
+  "output": "- [x] x"
+ },
+ {
+  "id": "task-checked-1",
+  "input": "<ul><li data-type=\"taskItem\" data-checked=\"1\"><p>x</p></li></ul>",
+  "output": "- [ ] x"
+ },
+ {
+  "id": "task-unchecked-missing",
+  "input": "<ul><li data-type=\"taskItem\"><p>x</p></li></ul>",
+  "output": "- [ ] x"
+ },
+ {
+  "id": "task-nested",
+  "input": "<ul><li data-type=\"taskItem\" data-checked=\"true\"><p>a</p><ul><li data-type=\"taskItem\" data-checked=\"false\"><p>b</p></li></ul></li></ul>",
+  "output": "- [x] a\n\n  - [ ] b"
+ },
+ {
+  "id": "input-alone",
+  "input": "<p>a<input>b</p>",
+  "output": "ab"
+ },
+ {
+  "id": "hr",
+  "input": "<p>a</p><hr><p>b</p>",
+  "output": "a\n\n---\n\nb"
+ },
+ {
+  "id": "hr-div",
+  "input": "<div data-type=\"horizontalRule\"></div>",
+  "output": "---"
+ },
+ {
+  "id": "hr-div-between",
+  "input": "<p>a</p><div data-type=\"horizontalRule\"></div><p>b</p>",
+  "output": "a\n\n---\n\nb"
+ },
+ {
+  "id": "div",
+  "input": "<div>hello</div>",
+  "output": "hello"
+ },
+ {
+  "id": "div-nested",
+  "input": "<div><div>a</div><div>b</div></div>",
+  "output": "a\n\nb"
+ },
+ {
+  "id": "div-empty",
+  "input": "<div></div>",
+  "output": ""
+ },
+ {
+  "id": "article",
+  "input": "<article>a</article>",
+  "output": "a"
+ },
+ {
+  "id": "section",
+  "input": "<section>a</section>",
+  "output": "a"
+ },
+ {
+  "id": "blockquote",
+  "input": "<blockquote><p>quoted</p></blockquote>",
+  "output": "> quoted"
+ },
+ {
+  "id": "blockquote-nested",
+  "input": "<blockquote><blockquote><p>deep</p></blockquote></blockquote>",
+  "output": "> > deep"
+ },
+ {
+  "id": "blockquote-empty",
+  "input": "<blockquote></blockquote>",
+  "output": ""
+ },
+ {
+  "id": "blockquote-in-li",
+  "input": "<ul><li><blockquote><p>q</p></blockquote></li></ul>",
+  "output": "- > q"
+ },
+ {
+  "id": "pre",
+  "input": "<pre>code here</pre>",
+  "output": "```\ncode here\n```"
+ },
+ {
+  "id": "pre-code",
+  "input": "<pre><code>code here</code></pre>",
+  "output": "```\ncode here\n```"
+ },
+ {
+  "id": "pre-lang",
+  "input": "<pre><code class=\"language-python\">print(1)</code></pre>",
+  "output": "```python\nprint(1)\n```"
+ },
+ {
+  "id": "pre-lang-multi",
+  "input": "<pre><code class=\"foo language-rust bar\">x</code></pre>",
+  "output": "```rust\nx\n```"
+ },
+ {
+  "id": "pre-no-lang-class",
+  "input": "<pre><code class=\"hl\">x</code></pre>",
+  "output": "```\nx\n```"
+ },
+ {
+  "id": "pre-multiline",
+  "input": "<pre><code>line1\nline2\n</code></pre>",
+  "output": "```\nline1\nline2\n\n```"
+ },
+ {
+  "id": "pre-inline-child",
+  "input": "<pre>a <strong>b</strong> c</pre>",
+  "output": "```\na b c\n```"
+ },
+ {
+  "id": "table-basic",
+  "input": "<table><thead><tr><th>h1</th><th>h2</th></tr></thead><tbody><tr><td>a</td><td>b</td></tr></tbody></table>",
+  "output": "| h1 | h2 |\n| --- | --- |\n| a | b |"
+ },
+ {
+  "id": "table-no-sections",
+  "input": "<table><tr><td>a</td><td>b</td></tr></table>",
+  "output": "|  |  |\n| --- | --- |\n| a | b |"
+ },
+ {
+  "id": "table-td-first",
+  "input": "<table><tbody><tr><td>a</td></tr></tbody></table>",
+  "output": "|  |\n| --- |\n| a |"
+ },
+ {
+  "id": "table-colspan",
+  "input": "<table><tr><th colspan=\"2\">h</th></tr><tr><td>a</td><td>b</td></tr></table>",
+  "output": "| h | |\n| --- | --- |\n| a | b |"
+ },
+ {
+  "id": "table-colspan-bad",
+  "input": "<table><tr><td colspan=\"x\">a</td></tr></table>",
+  "output": "|  |\n| --- |\n| a |"
+ },
+ {
+  "id": "table-colspan-unicode",
+  "input": "<table><tr><td colspan=\"²\">a</td></tr></table>",
+  "output": "a"
+ },
+ {
+  "id": "table-cell-nl",
+  "input": "<table><tr><td>line1\nline2</td></tr></table>",
+  "output": "|  |\n| --- |\n| line1 line2 |"
+ },
+ {
+  "id": "table-caption-tbody",
+  "input": "<table><caption>cap</caption><tbody><tr><td>a</td></tr></tbody></table>",
+  "output": "cap\n\n|  |\n| --- |\n| a |"
+ },
+ {
+  "id": "colgroup-tbody",
+  "input": "<table><colgroup><col></colgroup><tbody><tr><td>a</td></tr></tbody></table>",
+  "output": "|  |\n| --- |\n| a |"
+ },
+ {
+  "id": "table-figcaption",
+  "input": "<figure><figcaption>cap</figcaption><table><tr><td>a</td></tr></table></figure>",
+  "output": "cap\n\n|  |\n| --- |\n| a |"
+ },
+ {
+  "id": "table-nested-tags",
+  "input": "<table><tr><th>a <strong>b</strong></th></tr></table>",
+  "output": "| a **b** |\n| --- |"
+ },
+ {
+  "id": "mention-full",
+  "input": "<mention-component entity_name=\"user_mention\" entity_identifier=\"1234\"></mention-component>",
+  "output": "@user_mention:1234"
+ },
+ {
+  "id": "mention-id-only",
+  "input": "<mention-component id=\"a1b2\"></mention-component>",
+  "output": "@mention:a1b2"
+ },
+ {
+  "id": "mention-bare",
+  "input": "<mention-component></mention-component>",
+  "output": "@mention"
+ },
+ {
+  "id": "mention-space-id",
+  "input": "<mention-component entity_identifier=\"  \"></mention-component>",
+  "output": "@mention"
+ },
+ {
+  "id": "image-src",
+  "input": "<image-component src=\"http://e.com/i.png\"></image-component>",
+  "output": "![](http://e.com/i.png)"
+ },
+ {
+  "id": "image-id",
+  "input": "<image-component id=\"asset9\"></image-component>",
+  "output": "[image asset9]"
+ },
+ {
+  "id": "image-bare",
+  "input": "<image-component></image-component>",
+  "output": "[image]"
+ },
+ {
+  "id": "embed-full",
+  "input": "<issue_embed_component entity_identifier=\"e1\" project_identifier=\"p2\" workspace_identifier=\"w3\"></issue_embed_component>",
+  "output": "[work item e1](/w3/projects/p2/issues/e1)"
+ },
+ {
+  "id": "embed-dash",
+  "input": "<issue-embed-component entity_identifier=\"e1\" project_identifier=\"p2\" workspace_identifier=\"w3\"></issue-embed-component>",
+  "output": "[work item e1](/w3/projects/p2/issues/e1)"
+ },
+ {
+  "id": "embed-nolink",
+  "input": "<issue_embed_component entity_identifier=\"e1\"></issue_embed_component>",
+  "output": "[work item e1]"
+ },
+ {
+  "id": "embed-bare",
+  "input": "<issue_embed_component></issue_embed_component>",
+  "output": "[work item]"
+ },
+ {
+  "id": "label-plain",
+  "input": "<p><label>lab</label></p>",
+  "output": "lab"
+ },
+ {
+  "id": "span",
+  "input": "<p>a<span>b</span>c</p>",
+  "output": "abc"
+ },
+ {
+  "id": "unknown-tag",
+  "input": "<p>a<weird-tag>b</weird-tag>c</p>",
+  "output": "abc"
+ },
+ {
+  "id": "script",
+  "input": "<p>a</p><script>alert(1)</script><p>b</p>",
+  "output": "a\n\nb"
+ },
+ {
+  "id": "style",
+  "input": "<style>.x{color:red}</style><p>b</p>",
+  "output": "b"
+ },
+ {
+  "id": "comment",
+  "input": "<p>a</p><!-- hidden --><p>b</p>",
+  "output": "a\n\nb"
+ },
+ {
+  "id": "entities",
+  "input": "<p>a &amp; b &lt;c&gt; &quot;q&quot; &#65; &#x42; &copy; &bogus;</p>",
+  "output": "a & b <c> \"q\" A B © &bogus"
+ },
+ {
+  "id": "entity-attr",
+  "input": "<p><a href=\"http://e.com/?a=1&amp;b=2\">t</a></p>",
+  "output": "[t](http://e.com/?a=1&b=2)"
+ },
+ {
+  "id": "ws-between-blocks",
+  "input": "<p>a</p>   \n  <p>b</p>",
+  "output": "a\n\nb"
+ },
+ {
+  "id": "ws-in-p",
+  "input": "<p>  padded  </p>",
+  "output": "padded"
+ },
+ {
+  "id": "ws-tabs",
+  "input": "<p>a\t\tb</p>",
+  "output": "a b"
+ },
+ {
+  "id": "upper-tags",
+  "input": "<P>a <STRONG>b</STRONG></P>",
+  "output": "a **b**"
+ },
+ {
+  "id": "upper-attr",
+  "input": "<P><A HREF=\"http://e.com/x\">t</A></P>",
+  "output": "[t](http://e.com/x)"
+ },
+ {
+  "id": "unclosed-p",
+  "input": "<p>a<p>b",
+  "output": "a\n\nb"
+ },
+ {
+  "id": "unclosed-b",
+  "input": "<p>a <strong>b</p>",
+  "output": "a **b**"
+ },
+ {
+  "id": "stray-close",
+  "input": "<p>a</p></div><p>b</p>",
+  "output": "a\n\nb"
+ },
+ {
+  "id": "bare-text-tags",
+  "input": "a<br>b",
+  "output": "a  \nb"
+ },
+ {
+  "id": "video-src",
+  "input": "<p><video src=\"http://e.com/v.mp4\">vid</video></p>",
+  "output": "[vid](http://e.com/v.mp4)"
+ },
+ {
+  "id": "video-source",
+  "input": "<p><video><source src=\"http://e.com/v.mp4\"></video></p>",
+  "output": "[](http://e.com/v.mp4)"
+ },
+ {
+  "id": "video-poster",
+  "input": "<p><video poster=\"http://e.com/p.png\">vid</video></p>",
+  "output": "![vid](http://e.com/p.png)"
+ },
+ {
+  "id": "video-both",
+  "input": "<p><video src=\"http://e.com/v.mp4\" poster=\"http://e.com/p.png\">vid</video></p>",
+  "output": "[![vid](http://e.com/p.png)](http://e.com/v.mp4)"
+ },
+ {
+  "id": "video-none",
+  "input": "<p><video>vid</video></p>",
+  "output": "vid"
+ },
+ {
+  "id": "dl",
+  "input": "<dl><dt>term</dt><dd>def</dd></dl>",
+  "output": "term\n:   def"
+ },
+ {
+  "id": "dt-multi",
+  "input": "<dl><dt>t1</dt><dt>t2</dt><dd>d</dd></dl>",
+  "output": "t1\n\nt2\n:   d"
+ },
+ {
+  "id": "dt-empty",
+  "input": "<dl><dt></dt></dl>",
+  "output": ""
+ },
+ {
+  "id": "dd-empty",
+  "input": "<dl><dd></dd></dl>",
+  "output": ""
+ },
+ {
+  "id": "a-in-heading",
+  "input": "<h1><a href=\"http://e.com\">t</a></h1>",
+  "output": "# [t](http://e.com)"
+ },
+ {
+  "id": "code-in-pre-nolang",
+  "input": "<pre><code>x</code></pre>",
+  "output": "```\nx\n```"
+ },
+ {
+  "id": "deep-20",
+  "input": "<div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div>x</div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div>",
+  "output": "x"
+ },
+ {
+  "id": "deep-400",
+  "input": "<div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div><div>x</div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div></div>",
+  "output": "x"
+ },
+ {
+  "id": "unicode",
+  "input": "<p>héllo 世界 😀</p>",
+  "output": "héllo 世界 😀"
+ },
+ {
+  "id": "nbsp",
+  "input": "<p>a&nbsp;b</p>",
+  "output": "a b"
+ },
+ {
+  "id": "doctype",
+  "input": "<!DOCTYPE html><p>a</p>",
+  "output": "a"
+ },
+ {
+  "id": "html-wrap",
+  "input": "<html><body><p>a</p></body></html>",
+  "output": "a"
+ },
+ {
+  "id": "li-task-nobullet",
+  "input": "<li data-type=\"taskItem\" data-checked=\"true\"><p>x</p></li>",
+  "output": "- [x] x"
+ },
+ {
+  "id": "li-in-ol-task",
+  "input": "<ol><li data-type=\"taskItem\" data-checked=\"true\"><p>x</p></li></ol>",
+  "output": "1. x"
+ },
+ {
+  "id": "checkbox-outside",
+  "input": "<p><input type=\"checkbox\" checked=\"checked\"></p>",
+  "output": ""
+ },
+ {
+  "id": "select-opt",
+  "input": "<p><select><option>a</option></select></p>",
+  "output": "a"
+ },
+ {
+  "id": "form-btn",
+  "input": "<p><button>go</button></p>",
+  "output": "go"
+ },
+ {
+  "id": "title-tag",
+  "input": "<head><title>t</title></head><p>a</p>",
+  "output": "t\n\na"
+ },
+ {
+  "id": "meta-link",
+  "input": "<head><meta name=\"x\"><link rel=\"y\"></head><p>a</p>",
+  "output": "a"
+ },
+ {
+  "id": "data-attrs",
+  "input": "<p data-type=\"x\" data-checked=\"y\">a</p>",
+  "output": "a"
+ },
+ {
+  "id": "single-quote-attr",
+  "input": "<p><a href='http://e.com/x'>t</a></p>",
+  "output": "[t](http://e.com/x)"
+ },
+ {
+  "id": "unquoted-attr",
+  "input": "<p><a href=http://e.com/x>t</a></p>",
+  "output": "[t](http://e.com/x)"
+ },
+ {
+  "id": "boolean-attr",
+  "input": "<p><a href>t</a></p>",
+  "output": "t"
+ },
+ {
+  "id": "h1-in-div",
+  "input": "<div><h1>t</h1></div>",
+  "output": "# t"
+ },
+ {
+  "id": "p-in-li-nested",
+  "input": "<ul><li><p>a</p><ul><li>b</li></ul></li></ul>",
+  "output": "- a\n\n  - b"
+ },
+ {
+  "id": "listing",
+  "input": "<listing>  x</listing>",
+  "output": "x"
+ },
+ {
+  "id": "plaintext",
+  "input": "<plaintext>x<b>y",
+  "output": "x<b>y"
+ },
+ {
+  "id": "misnested",
+  "input": "<b><i>x</b></i>",
+  "output": "***x***"
+ },
+ {
+  "id": "template",
+  "input": "<template><p>x</p></template>",
+  "output": "x"
+ },
+ {
+  "id": "a-div",
+  "input": "<a href=\"u\"><div>x</div></a>",
+  "output": "[x](u)"
+ },
+ {
+  "id": "p-tail",
+  "input": "<p>a</p><p>b</p>tail",
+  "output": "a\n\nb\n\ntail"
+ },
+ {
+  "id": "comment-mid-text",
+  "input": "text<!--c-->more",
+  "output": "textmore"
+ },
+ {
+  "id": "frameset",
+  "input": "<frameset><frame></frameset>",
+  "output": ""
+ },
+ {
+  "id": "pi-php",
+  "input": "<?php echo 1 ?>",
+  "output": "php echo 1 ?"
+ },
+ {
+  "id": "pi-foo",
+  "input": "<?foo?>",
+  "output": "foo?"
+ },
+ {
+  "id": "deep-490",
+  "input": "<strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong>x</strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong>",
+  "output": "********************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************x********************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************"
+ },
+ {
+  "id": "deep-500",
+  "input": "<strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong>x</strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong>",
+  "output": "x"
+ },
+ {
+  "id": "ol-start-huge2",
+  "input": "<ol start=\"99999999999999999999999999999999999999999999999999\"><li>a</li></ol>",
+  "output": "99999999999999999999999999999999999999999999999999. a"
+ },
+ {
+  "id": "ol-start-arabic",
+  "input": "<ol start=\"٣٤\"><li>a</li></ol>",
+  "output": "34. a"
+ },
+ {
+  "id": "ol-start-roman",
+  "input": "<ol start=\"Ⅷ\"><li>a</li></ol>",
+  "output": "a"
+ },
+ {
+  "id": "select-alone",
+  "input": "<select><option>a</option></select>",
+  "output": "a"
+ },
+ {
+  "id": "noscript",
+  "input": "<noscript><p>x</p></noscript>",
+  "output": "x"
+ },
+ {
+  "id": "noembed",
+  "input": "<noembed><b>x</b></noembed>",
+  "output": "<b>x</b>"
+ },
+ {
+  "id": "button-div",
+  "input": "<button><div>x</div></button>",
+  "output": "x"
+ },
+ {
+  "id": "option-alone",
+  "input": "<option>alone</option>",
+  "output": "alone"
+ },
+ {
+  "id": "none",
+  "input": null,
+  "output": ""
+ }
+]

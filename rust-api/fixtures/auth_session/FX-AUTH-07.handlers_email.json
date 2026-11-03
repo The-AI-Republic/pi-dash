@@ -1,0 +1,140 @@
+{
+ "_fixture": "FX-AUTH-07",
+ "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+ "_sources": [
+  "apps/api/pi_dash/authentication/views/app/check.py:34-103 (EmailCheckEndpoint branches)",
+  "apps/api/pi_dash/authentication/views/space/check.py:34-101 (space twin)",
+  "apps/api/pi_dash/authentication/views/app/email.py:26-132 (SignInAuthEndpoint branches)",
+  "apps/api/pi_dash/authentication/views/app/email.py:135-238 (SignUpAuthEndpoint branches)",
+  "apps/api/pi_dash/authentication/views/space/email.py:25-107 (space sign-in incl. validate_next_path success branch)",
+  "apps/api/pi_dash/authentication/views/space/email.py:110-191 (space sign-up)",
+  "apps/api/pi_dash/authentication/views/app/signout.py:16-28 (sign-out + logout_ip/time writes)",
+  "apps/api/pi_dash/authentication/views/space/signout.py:17-33 (space sign-out + next_path)",
+  "apps/api/pi_dash/authentication/utils/login.py:14-28 (user_login: session device_info + save)",
+  "apps/api/pi_dash/authentication/urls.py:51-57 (sign-in/up/out routes), :118-120 (email-check routes)"
+ ],
+ "_method": "executed /tmp/fx279venv/bin/python /tmp/probe_fx78.py (+fx78d): real view callables via Django RequestFactory + DRF APIRequestFactory, sqlite Instance/Users, real providers/adapters, real user_login writing real session rows, real get_safe_redirect_url. Probe settings WEB_URL=http://localhost:8000 APP_BASE_URL=http://localhost:3000.",
+ "email_check": {
+  "existing_credential": {
+   "status": 200,
+   "body": {
+    "existing": true,
+    "status": "CREDENTIAL"
+   }
+  },
+  "new_magic": {
+   "status": 200,
+   "body": {
+    "existing": false,
+    "status": "MAGIC_CODE"
+   }
+  },
+  "missing": {
+   "status": 400,
+   "body": {
+    "error_code": 5010,
+    "error_message": "EMAIL_REQUIRED"
+   }
+  },
+  "invalid": {
+   "status": 400,
+   "body": {
+    "error_code": 5005,
+    "error_message": "INVALID_EMAIL"
+   }
+  },
+  "existing_magic_autoset": {
+   "status": 200,
+   "body": {
+    "existing": true,
+    "status": "MAGIC_CODE"
+   }
+  },
+  "new_no_smtp": {
+   "status": 200,
+   "body": {
+    "existing": false,
+    "status": "CREDENTIAL"
+   }
+  }
+ },
+ "signin_app": {
+  "ok": {
+   "status": 302,
+   "location": "http://localhost:3000"
+  },
+  "bad_password": {
+   "status": 302,
+   "location": "http://localhost:3000?error_code=5065&error_message=AUTHENTICATION_FAILED_SIGN_IN&email=h%40x.com"
+  },
+  "missing": {
+   "status": 302,
+   "location": "http://localhost:3000?error_code=5070&error_message=REQUIRED_EMAIL_PASSWORD_SIGN_IN&email="
+  },
+  "no_user": {
+   "status": 302,
+   "location": "http://localhost:3000?error_code=5060&error_message=USER_DOES_NOT_EXIST&email=nouser%40x.com"
+  },
+  "no_email_key": {
+   "status": 302,
+   "location": "http://localhost:3000?error_code=5070&error_message=REQUIRED_EMAIL_PASSWORD_SIGN_IN&email=False"
+  }
+ },
+ "signup_app": {
+  "ok": {
+   "status": 302,
+   "location": "http://localhost:3000",
+   "created": true
+  },
+  "exists": {
+   "status": 302,
+   "location": "http://localhost:3000?error_code=5030&error_message=USER_ALREADY_EXIST&email=h%40x.com"
+  }
+ },
+ "signin_space": {
+  "ok": {
+   "status": 302,
+   "location": "http://localhost:8000/spaces"
+  },
+  "bad": {
+   "status": 302,
+   "location": "http://localhost:8000/spaces/?error_code=5065&error_message=AUTHENTICATION_FAILED_SIGN_IN&email=h%40x.com"
+  }
+ },
+ "signup_space": {
+  "ok": {
+   "status": 302,
+   "location": "http://localhost:8000/spaces",
+   "created": true
+  }
+ },
+ "signout": {
+  "app": {
+   "status": 302,
+   "location": "http://localhost:3000",
+   "logout_ip": "127.0.0.1",
+   "logout_time_set": true
+  },
+  "space": {
+   "status": 302,
+   "location": "http://localhost:8000/spaces/?next_path=/onboarding"
+  },
+  "anonymous": {
+   "status": 302,
+   "location": "http://localhost:3000"
+  }
+ },
+ "session_row_after_signin": {
+  "user_id_set": true,
+  "device_info": {
+   "user_agent": "UA/1.0",
+   "ip_address": "2.2.2.2",
+   "domain": "http://localhost:3000"
+  }
+ },
+ "handler_quirks": [
+  "missing-email sign-in posts payload email='False' (str(False)) when the key is absent.",
+  "space success redirects use validate_next_path + allowed-host check with bare-base fallback (observed bare '.../spaces' on success).",
+  "anonymous sign-out follows the except branch to the same redirect (exception swallowed)."
+ ]
+}

@@ -1,0 +1,139 @@
+{
+  "_trace": "orchestration/service.py:84-103 + :106-107; rows seeded via AgentRun.objects.create + created_at override",
+  "_method": "live rows on pidash_524_scratch; T0=2026-10-03T12:00:00Z; one issue per active status (partial unique index agent_run_one_active_per_work_item forbids two actives on one issue, so multi-row newest-first ordering is unreachable \u2014 the ORDER BY + LIMIT 1 is recorded in SQL)",
+  "now": "2026-10-03T12:00:00+00:00",
+  "seeds": [
+    {
+      "label": "queued",
+      "issue": "issue_queued",
+      "run_id": "11111111-2222-3333-4444-000000004001",
+      "status": "queued",
+      "created_at": "2026-10-03T11:54:00+00:00"
+    },
+    {
+      "label": "assigned",
+      "issue": "issue_assigned",
+      "run_id": "11111111-2222-3333-4444-000000004002",
+      "status": "assigned",
+      "created_at": "2026-10-03T11:55:00+00:00"
+    },
+    {
+      "label": "waiting_for_worktree",
+      "issue": "issue_waiting_for_worktree",
+      "run_id": "11111111-2222-3333-4444-000000004003",
+      "status": "waiting_for_worktree",
+      "created_at": "2026-10-03T11:56:00+00:00"
+    },
+    {
+      "label": "running",
+      "issue": "issue_running",
+      "run_id": "11111111-2222-3333-4444-000000004004",
+      "status": "running",
+      "created_at": "2026-10-03T11:57:00+00:00"
+    },
+    {
+      "label": "cancel_requested",
+      "issue": "issue_cancel_requested",
+      "run_id": "11111111-2222-3333-4444-000000004005",
+      "status": "cancel_requested",
+      "created_at": "2026-10-03T11:58:00+00:00"
+    },
+    {
+      "label": "awaiting_approval",
+      "issue": "issue_awaiting_approval",
+      "run_id": "11111111-2222-3333-4444-000000004006",
+      "status": "awaiting_approval",
+      "created_at": "2026-10-03T11:59:00+00:00"
+    },
+    {
+      "label": "awaiting_reauth",
+      "issue": "issue_awaiting_reauth",
+      "run_id": "11111111-2222-3333-4444-000000004007",
+      "status": "awaiting_reauth",
+      "created_at": "2026-10-03T12:00:00+00:00"
+    },
+    {
+      "label": "queued-under-terminal",
+      "issue": "issue_term",
+      "run_id": "11111111-2222-3333-4444-000000004010",
+      "status": "queued",
+      "created_at": "2026-10-03T09:00:00+00:00"
+    },
+    {
+      "label": "failed-old",
+      "issue": "issue_term",
+      "run_id": "11111111-2222-3333-4444-000000004011",
+      "status": "failed",
+      "created_at": "2026-10-03T08:00:00+00:00"
+    },
+    {
+      "label": "completed-newest",
+      "issue": "issue_term",
+      "run_id": "11111111-2222-3333-4444-000000004012",
+      "status": "completed",
+      "created_at": "2026-10-03T12:00:00+00:00"
+    },
+    {
+      "label": "paused-only",
+      "issue": "issue_paused",
+      "run_id": "11111111-2222-3333-4444-000000004013",
+      "status": "paused_awaiting_input",
+      "created_at": "2026-10-03T12:00:00+00:00"
+    }
+  ],
+  "results": {
+    "per_status_active": {
+      "queued": {
+        "run_id": "11111111-2222-3333-4444-000000004001",
+        "match": true
+      },
+      "assigned": {
+        "run_id": "11111111-2222-3333-4444-000000004002",
+        "match": true
+      },
+      "waiting_for_worktree": {
+        "run_id": "11111111-2222-3333-4444-000000004003",
+        "match": true
+      },
+      "running": {
+        "run_id": "11111111-2222-3333-4444-000000004004",
+        "match": true
+      },
+      "cancel_requested": {
+        "run_id": "11111111-2222-3333-4444-000000004005",
+        "match": true
+      },
+      "awaiting_approval": {
+        "run_id": "11111111-2222-3333-4444-000000004006",
+        "match": true
+      },
+      "awaiting_reauth": {
+        "run_id": "11111111-2222-3333-4444-000000004007",
+        "match": true
+      }
+    },
+    "terminal_newest_issue": {
+      "active": {
+        "run_id": "11111111-2222-3333-4444-000000004010",
+        "status": "queued",
+        "label": "queued-under-terminal"
+      },
+      "latest": {
+        "run_id": "11111111-2222-3333-4444-000000004012",
+        "status": "completed",
+        "label": "completed-newest"
+      }
+    },
+    "paused_only_issue": {
+      "active": null,
+      "latest": {
+        "run_id": "11111111-2222-3333-4444-000000004013",
+        "status": "paused_awaiting_input"
+      }
+    },
+    "empty_issue": {
+      "active": null,
+      "latest": null
+    }
+  }
+}

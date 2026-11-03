@@ -1,0 +1,28 @@
+{
+ "method": "Exercised through the real views on pidash_loop_fx: member GET -> 403 {'detail': ...} (handlers/admin_crud non_admin_get); anonymous -> False (:14-15) by code reading.",
+ "source": "apps/api/pi_dash/license/api/permissions/instance.py:12-18; applied loop/admin_views.py:109,128,177",
+ "vectors": [
+  {
+   "output": {
+    "body": {
+     "detail": "You do not have permission to perform this action."
+    },
+    "status": 403
+   },
+   "user": "member (no InstanceAdmin row)"
+  },
+  {
+   "output": {
+    "status": 200
+   },
+   "user": "instance admin role=20"
+  },
+  {
+   "note": "permission :14-15 returns False before any DB read.",
+   "output": {
+    "allowed": false
+   },
+   "user": "anonymous"
+  }
+ ]
+}

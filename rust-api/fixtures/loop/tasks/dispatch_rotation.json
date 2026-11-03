@@ -1,0 +1,10 @@
+{
+ "messages_before": 171,
+ "method": "Seeded a LOOP thread with 171 messages on pidash_loop_fx; ran fire_loop_target().",
+ "new_thread_title": "Pub name",
+ "old_archived": true,
+ "returned": true,
+ "rotated": true,
+ "rotation_threshold": 170,
+ "source": "apps/api/pi_dash/loop/dispatch.py:39-71 (threshold = MAX_THREAD_MESSAGES(assistant/errors.py:106 =200) - LOOP_ROTATION_HEADROOM(30) = 170); fresh thread title = job.public_name[:255] (:64); old archived (:68)"
+}

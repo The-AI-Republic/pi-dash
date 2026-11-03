@@ -1,0 +1,550 @@
+{
+  "$schema_note": "Static behaviour record. No code is executed by this file.",
+  "fixture": "F18-03",
+  "_method": "Django shell probes (pi_dash.settings.test) on scratch pidash_conv659; read shapes from live rows, write shapes via is_valid(). IDs/datetimes volatile; keys/errors pinned.",
+  "_source": "apps/api/pi_dash/api/serializers/issue.py:907-1203",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "units": {
+    "IssueAttachmentSerializer": {
+      "source": "serializers/issue.py:907-925",
+      "render_keys": [
+        "id",
+        "created_at",
+        "updated_at",
+        "deleted_at",
+        "attributes",
+        "asset",
+        "entity_type",
+        "entity_identifier",
+        "is_deleted",
+        "is_archived",
+        "external_id",
+        "external_source",
+        "size",
+        "is_uploaded",
+        "storage_metadata",
+        "created_by",
+        "updated_by",
+        "user",
+        "workspace",
+        "draft_issue",
+        "project",
+        "issue",
+        "comment",
+        "page"
+      ],
+      "render": {
+        "id": "aeb3d7ac-0a45-4f7e-bedc-c74afa9c7832",
+        "created_at": "2026-10-02T23:26:34.768434Z",
+        "updated_at": "2026-10-02T23:26:34.768434Z",
+        "deleted_at": "None",
+        "attributes": "{}",
+        "asset": "contract-asset",
+        "entity_type": "ISSUE_ATTACHMENT",
+        "entity_identifier": "None",
+        "is_deleted": "False",
+        "is_archived": "False",
+        "external_id": "None",
+        "external_source": "None",
+        "size": "10.0",
+        "is_uploaded": "True",
+        "storage_metadata": "None",
+        "created_by": "None",
+        "updated_by": "None",
+        "user": "None",
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "draft_issue": "None",
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+        "comment": "None",
+        "page": "None"
+      }
+    },
+    "IssueAttachmentUploadSerializer": {
+      "source": "serializers/issue.py:1119-1136",
+      "ok": {
+        "valid": true,
+        "validated": {
+          "name": "'a.png'",
+          "type": "'image/png'",
+          "size": "123"
+        }
+      },
+      "minimal": {
+        "valid": true,
+        "validated": {
+          "name": "'a.png'",
+          "size": "123"
+        }
+      },
+      "missing_name": {
+        "valid": false,
+        "errors": {
+          "name": [
+            {
+              "message": "This field is required.",
+              "code": "required"
+            }
+          ]
+        }
+      },
+      "missing_size": {
+        "valid": false,
+        "errors": {
+          "size": [
+            {
+              "message": "This field is required.",
+              "code": "required"
+            }
+          ]
+        }
+      },
+      "bad_size": {
+        "valid": false,
+        "errors": {
+          "size": [
+            {
+              "message": "A valid integer is required.",
+              "code": "invalid"
+            }
+          ]
+        }
+      }
+    },
+    "IssueCommentCreateSerializer": {
+      "source": "serializers/issue.py:928-962",
+      "fields": [
+        "comment_json",
+        "comment_html",
+        "access",
+        "external_source",
+        "external_id",
+        "labels",
+        "speaker_type",
+        "speaker_label",
+        "speaker_agent_run_id"
+      ],
+      "ok": {
+        "valid": true,
+        "validated": {
+          "comment_json": "{'a': 1}",
+          "comment_html": "'<p>hi</p>'",
+          "access": "'EXTERNAL'"
+        }
+      },
+      "empty_ok": {
+        "valid": true,
+        "validated": {}
+      }
+    },
+    "IssueCommentSerializer": {
+      "source": "serializers/issue.py:965-1019; get_url :994-999; to_representation :1001-1006; validate :1008-1017",
+      "render_keys": [
+        "id",
+        "url",
+        "created_at",
+        "updated_at",
+        "deleted_at",
+        "comment_html",
+        "attachments",
+        "labels",
+        "access",
+        "external_source",
+        "external_id",
+        "speaker_type",
+        "speaker_label",
+        "speaker_agent_run_id",
+        "edited_at",
+        "created_by",
+        "updated_by",
+        "project",
+        "workspace",
+        "description",
+        "issue",
+        "actor",
+        "parent"
+      ],
+      "render": {
+        "id": "6353d7bf-012d-45ba-82a1-d2ff209af168",
+        "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-1",
+        "created_at": "2026-10-02T23:17:12.036469Z",
+        "updated_at": "2026-10-02T23:17:12.036469Z",
+        "deleted_at": "None",
+        "comment_html": "<p>test comment</p>",
+        "attachments": "[]",
+        "labels": "[]",
+        "access": "EXTERNAL",
+        "external_source": "None",
+        "external_id": "None",
+        "speaker_type": "human",
+        "speaker_label": "",
+        "speaker_agent_run_id": "None",
+        "edited_at": "None",
+        "created_by": "None",
+        "updated_by": "None",
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "description": "None",
+        "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+        "actor": "79c81d76-5a93-4d3d-894d-5935576834b6",
+        "parent": "None"
+      },
+      "validate_html_ok": {
+        "valid": true,
+        "validated": {
+          "comment_html": "'<p>x</p>'"
+        }
+      },
+      "validate_html_empty": {
+        "valid": false,
+        "errors": {
+          "non_field_errors": [
+            {
+              "message": "Invalid HTML passed",
+              "code": "invalid"
+            }
+          ]
+        }
+      },
+      "get_url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-1",
+      "url_omitted_when_unconfigured": true
+    },
+    "IssueActivitySerializer": {
+      "source": "serializers/issue.py:1020-1030",
+      "render_keys": [
+        "id",
+        "created_at",
+        "updated_at",
+        "deleted_at",
+        "verb",
+        "field",
+        "old_value",
+        "new_value",
+        "comment",
+        "attachments",
+        "old_identifier",
+        "new_identifier",
+        "epoch",
+        "project",
+        "workspace",
+        "issue",
+        "issue_comment",
+        "actor"
+      ],
+      "render": {
+        "id": "302c2985-c06f-4b7d-96fa-4684295230be",
+        "created_at": "2026-10-02T23:26:34.777796Z",
+        "updated_at": "2026-10-02T23:26:34.777796Z",
+        "deleted_at": "None",
+        "verb": "created",
+        "field": "None",
+        "old_value": "None",
+        "new_value": "None",
+        "comment": "contract activity",
+        "attachments": "[]",
+        "old_identifier": "None",
+        "new_identifier": "None",
+        "epoch": "None",
+        "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "workspace": "92989e99-51c6-4725-8069-45784951694f",
+        "issue": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+        "issue_comment": "None",
+        "actor": "None"
+      }
+    },
+    "IssueExpandSerializer": {
+      "source": "serializers/issue.py:1074-1117; get_labels :1090-1095; get_assignees :1097-1101",
+      "render_keys": [
+        "id",
+        "labels",
+        "assignees",
+        "state",
+        "description",
+        "created_at",
+        "updated_at",
+        "deleted_at",
+        "point",
+        "name",
+        "description_json",
+        "description_html",
+        "description_stripped",
+        "description_binary",
+        "priority",
+        "complexity_score",
+        "start_date",
+        "target_date",
+        "sequence_id",
+        "sort_order",
+        "completed_at",
+        "archived_at",
+        "is_draft",
+        "external_source",
+        "external_id",
+        "git_work_branch",
+        "created_via",
+        "agent_executor",
+        "created_by",
+        "updated_by",
+        "project",
+        "workspace",
+        "parent",
+        "estimate_point",
+        "type",
+        "assigned_pod"
+      ],
+      "labels_plain": [
+        "c833c492-fa3d-49f5-85a4-0ef810642731"
+      ],
+      "assignees_plain": [
+        "79c81d76-5a93-4d3d-894d-5935576834b6"
+      ],
+      "cycle_unlinked": "<KEY ABSENT>",
+      "module_unlinked": "<KEY ABSENT>",
+      "note_unlinked": "With no CycleIssue/ModuleIssue row, the cycle/module keys are absent from the payload (DRF drops failed source traversals).",
+      "state_shape": {
+        "id": "97b22834-b823-4109-a527-b39aa310ceae",
+        "name": "Todo",
+        "color": "#ff0000",
+        "group": "unstarted"
+      },
+      "description_key": {},
+      "has_workpad": false,
+      "labels_expanded": [
+        {
+          "id": "c833c492-fa3d-49f5-85a4-0ef810642731",
+          "name": "bug",
+          "color": ""
+        }
+      ],
+      "assignees_expanded": [
+        {
+          "id": "79c81d76-5a93-4d3d-894d-5935576834b6",
+          "first_name": "",
+          "last_name": "",
+          "email": "conv659-owner@example.com",
+          "avatar": "",
+          "avatar_url": null,
+          "display_name": ""
+        }
+      ],
+      "cycle_linked": "<KEY ABSENT>",
+      "module_linked": "<KEY ABSENT>"
+    },
+    "CycleIssueSerializer": {
+      "source": "serializers/issue.py:1033-1045",
+      "declared_fields": [
+        "id",
+        "cycle"
+      ],
+      "meta_fields": [
+        "cycle"
+      ],
+      "has_meta_model": false,
+      "live_bug": {
+        "raises": "AssertionError: Class CycleIssueSerializer missing \"Meta.model\" attribute"
+      },
+      "intended_nested_shape_keys": [
+        "id",
+        "created_at",
+        "updated_at",
+        "deleted_at",
+        "name",
+        "description",
+        "start_date",
+        "end_date",
+        "view_props",
+        "sort_order",
+        "external_source",
+        "external_id",
+        "progress_snapshot",
+        "archived_at",
+        "logo_props",
+        "timezone",
+        "version",
+        "created_by",
+        "updated_by",
+        "project",
+        "workspace",
+        "owned_by"
+      ],
+      "note": "PORTED BUG: missing Meta.model makes every render raise AssertionError (cycle views using it 500). Rust port renders the DECLARED shape {cycle: <CycleSerializer>} \u2014 see intended_nested_shape_keys."
+    },
+    "ModuleIssueSerializer": {
+      "source": "serializers/issue.py:1047-1059",
+      "declared_fields": [
+        "id",
+        "module"
+      ],
+      "meta_fields": [
+        "module"
+      ],
+      "has_meta_model": false,
+      "live_bug": {
+        "raises": "AssertionError: Class ModuleIssueSerializer missing \"Meta.model\" attribute"
+      },
+      "intended_nested_shape_keys": [
+        "id",
+        "created_at",
+        "updated_at",
+        "deleted_at",
+        "name",
+        "description",
+        "description_text",
+        "description_html",
+        "start_date",
+        "target_date",
+        "status",
+        "view_props",
+        "sort_order",
+        "external_source",
+        "external_id",
+        "archived_at",
+        "logo_props",
+        "created_by",
+        "updated_by",
+        "project",
+        "workspace",
+        "lead",
+        "members"
+      ]
+    },
+    "LabelLiteSerializer": {
+      "source": "serializers/issue.py:1061-1072 (consumed by PIDASHCONV-661)",
+      "render_keys": [
+        "id",
+        "name",
+        "color"
+      ],
+      "render": {
+        "id": "c833c492-fa3d-49f5-85a4-0ef810642731",
+        "name": "bug",
+        "color": ""
+      }
+    },
+    "IssueSearchSerializer": {
+      "source": "serializers/issue.py:1139-1153",
+      "render": {
+        "id": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+        "name": "First issue",
+        "sequence_id": "1",
+        "project__identifier": "CT1",
+        "project_id": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+        "workspace__slug": "ws-x"
+      },
+      "missing_field": {
+        "valid": false,
+        "errors": {
+          "name": [
+            {
+              "message": "This field is required.",
+              "code": "required"
+            }
+          ],
+          "sequence_id": [
+            {
+              "message": "This field is required.",
+              "code": "required"
+            }
+          ],
+          "project__identifier": [
+            {
+              "message": "This field is required.",
+              "code": "required"
+            }
+          ],
+          "project_id": [
+            {
+              "message": "This field is required.",
+              "code": "required"
+            }
+          ],
+          "workspace__slug": [
+            {
+              "message": "This field is required.",
+              "code": "required"
+            }
+          ]
+        }
+      }
+    },
+    "IssueAdvancedSearchResultSerializer": {
+      "source": "serializers/issue.py:1155-1198",
+      "render": {
+        "id": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+        "sequence_id": 1,
+        "identifier": "CT1-1",
+        "name": "First issue",
+        "snippet": "around the match",
+        "state": {
+          "name": "Todo",
+          "group": "unstarted"
+        },
+        "project": {
+          "id": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "identifier": "CT1",
+          "name": "P"
+        },
+        "workspace_slug": "ws-x",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+        "completed_at": null,
+        "rank": 0.75,
+        "url": "http://x/ws-x/browse/CT1-1"
+      },
+      "render_no_url": {
+        "id": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+        "sequence_id": 1,
+        "identifier": "CT1-1",
+        "name": "First issue",
+        "snippet": "around the match",
+        "state": {
+          "name": "Todo",
+          "group": "unstarted"
+        },
+        "project": {
+          "id": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+          "identifier": "CT1",
+          "name": "P"
+        },
+        "workspace_slug": "ws-x",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+        "completed_at": null,
+        "rank": 0.75,
+        "url": null
+      },
+      "null_state": null
+    },
+    "IssueAdvancedSearchResponseSerializer": {
+      "source": "serializers/issue.py:1200-1203",
+      "render": {
+        "query": "match",
+        "count": 1,
+        "results": [
+          {
+            "id": "a7509d00-345f-47fb-bee3-6bcf7d3339e2",
+            "sequence_id": 1,
+            "identifier": "CT1-1",
+            "name": "First issue",
+            "snippet": "around the match",
+            "state": {
+              "name": "Todo",
+              "group": "unstarted"
+            },
+            "project": {
+              "id": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
+              "identifier": "CT1",
+              "name": "P"
+            },
+            "workspace_slug": "ws-x",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-02T00:00:00Z",
+            "completed_at": null,
+            "rank": 0.75,
+            "url": "http://x/ws-x/browse/CT1-1"
+          }
+        ]
+      }
+    }
+  }
+}
