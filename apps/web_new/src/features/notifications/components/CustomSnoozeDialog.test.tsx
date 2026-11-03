@@ -9,7 +9,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   CUSTOM_SNOOZE_CANCEL,
@@ -72,6 +72,18 @@ async function pickTime(user: ReturnType<typeof userEvent.setup>, meridiem: "AM"
   await user.click(within(panel).getByRole("button", { name: new RegExp(`^${meridiem}$`) }));
   await user.click(within(panel).getByRole("option", { name: slot }));
 }
+
+// The day calendar opens on today's month, so pin the clock to the
+// file's October afternoon: only Date is faked, and real timers keep
+// user-event interaction working.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(AFTERNOON);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("CustomSnoozeDialog", () => {
   it("resets the pick when reopened and keeps a picked time while it stays offered", async () => {

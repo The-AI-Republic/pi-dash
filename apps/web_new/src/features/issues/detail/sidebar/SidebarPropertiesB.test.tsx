@@ -283,12 +283,26 @@ function renderRows(
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   resetAppClient();
   resetEditionIssuesProviders();
   delete edition.flags[DETAIL_BADGES_FLAG];
   vi.clearAllMocks();
 });
+
+/** Freeze the clock only; real timers keep the async queries working. */
+function freezeClock(at: Date): void {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(at);
+}
+
+/**
+ * Mid-October noon, local time: the calendar opens on today's month when
+ * the picked date is empty, so the October picks below need an October
+ * clock no matter when the suite runs.
+ */
+const OCTOBER_CLOCK = new Date(2026, 9, 15, 12, 0, 0, 0);
 
 beforeEach(() => {
   createAppClient("https://api.test");
@@ -324,6 +338,7 @@ describe("SidebarPropertiesB rows", () => {
   });
 
   it("patches the start date with the picked day and bounds the calendar by the due date", async () => {
+    freezeClock(OCTOBER_CLOCK);
     const { client, queryClient, writes } = harness();
     renderRows(client, queryClient, { issue: issueFixture({ target_date: "2026-10-20" }) });
     fireEvent.click(screen.getByRole("button", { name: "Start date" }));
@@ -342,6 +357,7 @@ describe("SidebarPropertiesB rows", () => {
   });
 
   it("bounds the due calendar by the start date", async () => {
+    freezeClock(OCTOBER_CLOCK);
     const { client, queryClient, writes } = harness();
     renderRows(client, queryClient, { issue: issueFixture({ start_date: "2026-10-10" }) });
     fireEvent.click(screen.getByRole("button", { name: "Due date" }));
