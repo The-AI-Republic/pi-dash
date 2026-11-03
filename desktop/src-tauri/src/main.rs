@@ -19,7 +19,10 @@ mod pidash_cli;
 mod updates;
 
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use sha2::{Digest, Sha256};
 use tauri::{
     Manager, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent,
     webview::NewWindowResponse,
@@ -201,6 +204,92 @@ async fn open_in_browser(app: tauri::AppHandle, url: String) -> Result<(), Strin
         .map_err(|e| e.to_string())
 }
 
+/// The sign-in URL with this app's challenge on it, replacing any the caller
+/// supplied.
+fn sign_in_url_with_challenge(url: &Url, challenge: &str) -> Url {
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(k, _)| k != "desktop_challenge")
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    let mut bound = url.clone();
+    bound
+        .query_pairs_mut()
+        .clear()
+        .extend_pairs(kept)
+        .append_pair("desktop_challenge", challenge);
+    bound
+}
+
+/// Start a desktop sign-in: open the server's sign-in URL in the default
+/// browser and remember that this app instance is waiting for the callback.
+///
+/// `pidash://auth/callback` links can be opened by anything on the machine —
+/// including a link built from someone else's sign-in, which would otherwise
+/// sign this app into their account. So the app keeps a secret per sign-in,
+/// sends only its hash here (`desktop_challenge`), and `handle_deep_link`
+/// honours a callback only while one is pending, handing the secret to the
+/// server to check against the flow.
+#[tauri::command]
+async fn desktop_begin_sign_in(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    let parsed = Url::parse(&url).map_err(|e| format!("invalid URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("scheme not allowed: {}", parsed.scheme()));
+    }
+    let challenge = app.state::<SignInState>().begin(Instant::now())?;
+    app.opener()
+        .open_url(sign_in_url_with_challenge(&parsed, &challenge).as_str(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+/// How long a started sign-in waits for its callback. The server keeps the
+/// flow for 10 minutes by default; a callback that arrives later has no flow
+/// left to complete.
+const SIGN_IN_TTL: Duration = Duration::from_secs(10 * 60);
+
+struct PendingSignIn {
+    verifier: String,
+    started: Instant,
+}
+
+/// The sign-in this app instance started and is waiting on, if any.
+#[derive(Default)]
+struct SignInState(Mutex<Option<PendingSignIn>>);
+
+impl SignInState {
+    /// Record that a sign-in is starting and return the challenge the server
+    /// stores on the flow. A second start while one is still pending keeps the
+    /// same verifier, so whichever browser tab finishes first completes.
+    fn begin(&self, now: Instant) -> Result<String, String> {
+        let mut pending = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let verifier = match pending.take() {
+            Some(p) if now.duration_since(p.started) < SIGN_IN_TTL => p.verifier,
+            _ => new_sign_in_verifier()?,
+        };
+        let challenge = sign_in_challenge(&verifier);
+        *pending = Some(PendingSignIn { verifier, started: now });
+        Ok(challenge)
+    }
+
+    /// The pending sign-in's verifier, once: a callback spends it whether or
+    /// not the server goes on to accept the exchange.
+    fn take(&self, now: Instant) -> Option<String> {
+        let pending = self.0.lock().unwrap_or_else(|e| e.into_inner()).take()?;
+        (now.duration_since(pending.started) < SIGN_IN_TTL).then_some(pending.verifier)
+    }
+}
+
+fn new_sign_in_verifier() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| format!("no random source: {e}"))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// S256, as in PKCE: the server sees only this hash until the callback.
+fn sign_in_challenge(verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
 /// Process an incoming `pidash://auth/callback?code=<>&state=<>` deep link.
 ///
 /// The identity provider redirected the system browser directly to this
@@ -208,21 +297,51 @@ async fn open_in_browser(app: tauri::AppHandle, url: String) -> Result<(), Strin
 /// it as a separate client with `redirect_uri=pidash://auth/callback`, so we
 /// receive the standard authorization `code` + `state`. We forward both to
 /// the server's `/api/auth/desktop-exchange/` by navigating the webview
-/// there; the server looks up the PKCE verifier by `state`, completes the
-/// token exchange, establishes the desktop session, and sets cookies on the
-/// webview's response. The cookie jar inside the app gets populated without
-/// ever putting a session token in a URL.
+/// there, together with the secret of the sign-in this app started
+/// (`desktop_begin_sign_in`); the server checks the secret against the flow,
+/// looks up the PKCE verifier by `state`, completes the token exchange,
+/// establishes the desktop session, and sets cookies on the webview's
+/// response. The cookie jar inside the app gets populated without ever
+/// putting a session token in a URL.
+///
+/// A callback that arrives while no sign-in is pending is dropped: this app
+/// did not ask for it.
 fn handle_deep_link(app: &tauri::AppHandle, url: &str) {
-    let Ok(parsed) = Url::parse(url) else {
-        eprintln!("deep-link: invalid URL: {url}");
+    let config = app.state::<AppConfig>();
+    let sign_in = app.state::<SignInState>();
+    let target = match deep_link_target(url, &config, &sign_in, Instant::now()) {
+        Ok(target) => target,
+        Err(reason) => {
+            // Not the URL: an auth callback carries a live code.
+            eprintln!("deep-link: ignored ({reason})");
+            return;
+        }
+    };
+    let Some(window) = app.get_webview_window("main") else {
+        eprintln!("deep-link: main window not found");
         return;
+    };
+    show_main_window(app);
+    if let Err(e) = window.navigate(target) {
+        eprintln!("deep-link: navigate failed: {e}");
+    }
+}
+
+/// Where a deep link sends the webview, or why it is ignored.
+fn deep_link_target(
+    url: &str,
+    config: &AppConfig,
+    sign_in: &SignInState,
+    now: Instant,
+) -> Result<Url, &'static str> {
+    let Ok(parsed) = Url::parse(url) else {
+        return Err("invalid URL");
     };
     if parsed.scheme() != "pidash"
         || parsed.host_str() != Some("auth")
         || parsed.path() != "/callback"
     {
-        eprintln!("deep-link: ignoring unrecognized URL: {url}");
-        return;
+        return Err("unrecognized URL");
     }
     let mut code: Option<String> = None;
     let mut state_token: Option<String> = None;
@@ -237,12 +356,10 @@ fn handle_deep_link(app: &tauri::AppHandle, url: &str) {
             _ => {}
         }
     }
-    let Some(window) = app.get_webview_window("main") else {
-        eprintln!("deep-link: main window not found");
-        return;
+    // Spent by any callback, including one the provider reports as failed.
+    let Some(verifier) = sign_in.take(now) else {
+        return Err("no sign-in was started from this app");
     };
-    show_main_window(app);
-    let config = app.state::<AppConfig>();
 
     // The provider returns `?error=...&error_description=...` on user-aborted
     // or denied auth flows. Surface that in the webview's sign-in page
@@ -264,15 +381,11 @@ fn handle_deep_link(app: &tauri::AppHandle, url: &str) {
                 pairs.append_pair("error_description", &desc);
             }
         }
-        if let Err(e) = window.navigate(error_url) {
-            eprintln!("deep-link: navigate failed: {e}");
-        }
-        return;
+        return Ok(error_url);
     }
 
     let (Some(code), Some(state_token)) = (code, state_token) else {
-        eprintln!("deep-link: missing code or state param");
-        return;
+        return Err("missing code or state param");
     };
     let mut session_url = config.target_url.clone();
     session_url.set_path("/api/auth/desktop-exchange/");
@@ -280,10 +393,9 @@ fn handle_deep_link(app: &tauri::AppHandle, url: &str) {
         .query_pairs_mut()
         .clear()
         .append_pair("code", &code)
-        .append_pair("state", &state_token);
-    if let Err(e) = window.navigate(session_url) {
-        eprintln!("deep-link: navigate failed: {e}");
-    }
+        .append_pair("state", &state_token)
+        .append_pair("desktop_verifier", &verifier);
+    Ok(session_url)
 }
 
 /// Wipe the webview's own session state — cookies first of all.
@@ -453,11 +565,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .manage(ZoomState(Mutex::new(1.0)))
         .manage(desktop_http)
         .manage(AppConfig { target_url, bundle_root, web_base })
+        .manage(SignInState::default())
         .manage(managed_runner::DaemonState::default())
         .manage(chat::ChatState::default())
         .manage(<updates::UpdateState>::default())
         .invoke_handler(tauri::generate_handler![
             open_in_browser,
+            desktop_begin_sign_in,
             desktop_http::desktop_api_request,
             desktop_http::desktop_api_stream,
             desktop_http::desktop_api_cancel,
@@ -884,6 +998,131 @@ mod tests {
         let url = Url::parse("https://pidash.example.com/?next_path=%2Facme%2F").unwrap();
         let target = bundle_redirect_for(&url, &server(), &root()).unwrap();
         assert_eq!(target.as_str(), "tauri://localhost/?next_path=%2Facme%2F");
+    }
+
+    fn config() -> AppConfig {
+        AppConfig { target_url: server(), bundle_root: Some(root()), web_base: web() }
+    }
+
+    const CALLBACK: &str = "pidash://auth/callback?code=C&state=S";
+
+    #[test]
+    fn auth_callback_is_ignored_when_this_app_started_no_sign_in() {
+        // A link minted from someone else's sign-in, opened on this machine.
+        let sign_in = SignInState::default();
+        assert_eq!(
+            deep_link_target(CALLBACK, &config(), &sign_in, Instant::now()),
+            Err("no sign-in was started from this app")
+        );
+        assert_eq!(
+            deep_link_target("pidash://auth/callback?error=access_denied", &config(), &sign_in, Instant::now()),
+            Err("no sign-in was started from this app")
+        );
+    }
+
+    #[test]
+    fn auth_callback_carries_the_verifier_of_the_sign_in_this_app_started() {
+        let sign_in = SignInState::default();
+        let now = Instant::now();
+        let challenge = sign_in.begin(now).unwrap();
+        let target = deep_link_target(CALLBACK, &config(), &sign_in, now).unwrap();
+        assert_eq!(target.origin(), server().origin());
+        assert_eq!(target.path(), "/api/auth/desktop-exchange/");
+        let query: std::collections::HashMap<_, _> = target.query_pairs().into_owned().collect();
+        assert_eq!(query["code"], "C");
+        assert_eq!(query["state"], "S");
+        assert_eq!(sign_in_challenge(&query["desktop_verifier"]), challenge);
+        assert_eq!(query.len(), 3);
+    }
+
+    #[test]
+    fn a_started_sign_in_honours_one_callback_only() {
+        let sign_in = SignInState::default();
+        let now = Instant::now();
+        sign_in.begin(now).unwrap();
+        assert!(deep_link_target(CALLBACK, &config(), &sign_in, now).is_ok());
+        assert_eq!(
+            deep_link_target(CALLBACK, &config(), &sign_in, now),
+            Err("no sign-in was started from this app")
+        );
+    }
+
+    #[test]
+    fn a_started_sign_in_expires() {
+        let sign_in = SignInState::default();
+        let now = Instant::now();
+        sign_in.begin(now).unwrap();
+        assert_eq!(
+            deep_link_target(CALLBACK, &config(), &sign_in, now + SIGN_IN_TTL),
+            Err("no sign-in was started from this app")
+        );
+    }
+
+    #[test]
+    fn unrecognized_deep_links_do_not_spend_the_pending_sign_in() {
+        let sign_in = SignInState::default();
+        let now = Instant::now();
+        sign_in.begin(now).unwrap();
+        for url in ["not a url", "pidash://other/callback?code=C&state=S", "pidash://auth/elsewhere"] {
+            assert!(deep_link_target(url, &config(), &sign_in, now).is_err(), "{url}");
+        }
+        assert!(deep_link_target(CALLBACK, &config(), &sign_in, now).is_ok());
+    }
+
+    #[test]
+    fn provider_error_callback_lands_on_bundle_sign_in_and_ends_the_sign_in() {
+        let sign_in = SignInState::default();
+        let now = Instant::now();
+        sign_in.begin(now).unwrap();
+        let target = deep_link_target(
+            "pidash://auth/callback?error=access_denied&error_description=User%20cancelled",
+            &config(),
+            &sign_in,
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            target.as_str(),
+            "tauri://localhost/sign-in?error=access_denied&error_description=User+cancelled"
+        );
+        assert!(deep_link_target(CALLBACK, &config(), &sign_in, now).is_err());
+    }
+
+    #[test]
+    fn restarting_a_pending_sign_in_keeps_its_challenge() {
+        let sign_in = SignInState::default();
+        let now = Instant::now();
+        let first = sign_in.begin(now).unwrap();
+        assert_eq!(sign_in.begin(now + Duration::from_secs(60)).unwrap(), first);
+        // The restart also restarts the clock.
+        assert!(sign_in.take(now + SIGN_IN_TTL).is_some());
+        // Once spent or expired, the next sign-in gets a fresh secret.
+        assert_ne!(sign_in.begin(now).unwrap(), first);
+        assert_ne!(sign_in.begin(now + SIGN_IN_TTL).unwrap(), sign_in.begin(now + SIGN_IN_TTL * 3).unwrap());
+    }
+
+    #[test]
+    fn sign_in_challenge_is_the_s256_of_the_verifier() {
+        // RFC 7636 appendix B.
+        assert_eq!(
+            sign_in_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn sign_in_url_gets_the_challenge() {
+        let url = Url::parse("https://pidash.example.com/api/auth/sign-in/?return_to=%2Facme%2F&desktop=1&desktop_challenge=stale").unwrap();
+        let bound = sign_in_url_with_challenge(&url, "abc");
+        let query: Vec<_> = bound.query_pairs().into_owned().collect();
+        assert_eq!(
+            query,
+            [
+                ("return_to".to_string(), "/acme/".to_string()),
+                ("desktop".to_string(), "1".to_string()),
+                ("desktop_challenge".to_string(), "abc".to_string()),
+            ]
+        );
     }
 
     #[test]
