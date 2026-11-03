@@ -13,6 +13,7 @@ import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../../core/api/client.js";
+import { useSessionStore } from "../../../../core/session/store.js";
 import { authKeys } from "../../../auth/queries.js";
 
 vi.mock("../../../../shared/shell/index.js", () => ({
@@ -146,6 +147,7 @@ interface Call {
 interface StubOptions {
   patchStatus?: number;
   bindStatus?: number;
+  bindBody?: unknown;
   patchRows?: Array<Record<string, unknown>>;
   grantStatus?: number;
   bytesOk?: boolean;
@@ -170,7 +172,7 @@ function stubApi(options: StubOptions = {}) {
     }
     if (url === `https://api.test${BIND_PATH}` && method === "POST") {
       const status = options.bindStatus ?? 201;
-      if (status !== 201) return jsonResponse(url, status, { detail: "no provider account" });
+      if (status !== 201) return jsonResponse(url, status, options.bindBody ?? { detail: "no provider account" });
       return jsonResponse(url, 201, { ...binding(), repo_url: "https://github.com/acme/site.git" });
     }
     if (url === `https://api.test${WORKSPACE_ASSET_PATH}` && method === "POST") {
@@ -202,6 +204,7 @@ function wrapper(queryClient: QueryClient) {
 
 afterEach(() => {
   resetAppClient();
+  useSessionStore.setState({ status: "unknown", returnUrl: null });
   vi.clearAllMocks();
 });
 
@@ -291,6 +294,21 @@ describe("useBindRepository", () => {
     });
     await waitFor(() => expect(hook.result.current.isError).toBe(true));
     expect(notifyError).toHaveBeenCalledWith(REPO_BIND_FAILED_TITLE, expect.any(String));
+    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
+    expect(notifySuccess).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a provider-missing 401 verbatim without expiring the session (NEWFRONT-395)", async () => {
+    const { calls } = stubApi({ bindStatus: 401, bindBody: { error: "GitHub token is missing" } });
+    useSessionStore.getState().markAuthenticated();
+    const hook = renderHook(() => useBindRepository("acme", UUID), { wrapper: wrapper(testClient()) });
+
+    act(() => {
+      hook.result.current.mutate({ repoUrl: "https://github.com/octocat/Hello-World" });
+    });
+    await waitFor(() => expect(hook.result.current.isError).toBe(true));
+    expect(notifyError).toHaveBeenCalledWith(REPO_BIND_FAILED_TITLE, "GitHub token is missing");
+    expect(useSessionStore.getState().status).toBe("authenticated");
     expect(calls.some((call) => call.method === "PATCH")).toBe(false);
     expect(notifySuccess).not.toHaveBeenCalled();
   });
