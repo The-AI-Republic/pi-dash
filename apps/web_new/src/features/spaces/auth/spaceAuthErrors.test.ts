@@ -95,6 +95,7 @@ const EXPECTED: ExpectedMapping[] = [
   { code: "5120", message: "GitHub couldn't sign you in. Try again." },
   { code: "5121", message: "GitLab couldn't sign you in. Try again." },
   { code: "5122", message: "Your GitHub account isn't in the required organization." },
+  { code: "5900", message: "Too many attempts. Wait a moment and try again." },
 ];
 
 describe("describeSpaceAuthCode", () => {
@@ -114,7 +115,7 @@ describe("describeSpaceAuthCode", () => {
     expect(describeSpaceAuthCode("  5065  ")?.step).toBe("password");
   });
 
-  it.each([["5900"], ["5112"], ["5021"], ["9999"], [""], ["banana"]])("leaves %s unmapped", (code) => {
+  it.each([["5112"], ["5021"], ["9999"], [""], ["banana"]])("leaves %s unmapped", (code) => {
     expect(describeSpaceAuthCode(code)).toBeNull();
   });
 
@@ -132,7 +133,8 @@ describe("describeSpaceAuthCode", () => {
 describe("bannerForSpaceAuthFailure", () => {
   it("reads numeric codes from the catalog", () => {
     expect(bannerForSpaceAuthFailure("5102")).toBe("That code has expired. Send another code and try again.");
-    expect(bannerForSpaceAuthFailure("5900")).toBeNull();
+    expect(bannerForSpaceAuthFailure("5900")).toBe("Too many attempts. Wait a moment and try again.");
+    expect(bannerForSpaceAuthFailure("9999")).toBeNull();
   });
 
   it("explains transport failures instead of stranding the visitor", () => {
