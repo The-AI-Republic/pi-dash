@@ -25,7 +25,9 @@ const sizeClasses: Record<ButtonSize, string> = {
 };
 
 const variantClasses: Record<ButtonVariant, string> = {
-  primary: "bg-(--accent) text-(--on-accent) hover:bg-(--accent-hover)",
+  // Google blue pair (NEWFRONT-1052), not the indigo accent: --accent must
+  // keep its AA contrast, so primary buttons carry their own tokens.
+  primary: "bg-(--button-primary) text-(--on-button-primary) hover:bg-(--button-primary-hover)",
   secondary: "border border-(--border) bg-(--bg) text-(--text) hover:bg-(--subtle)",
   ghost: "bg-transparent text-(--text) hover:bg-(--subtle)",
   // Outline style: the light-theme danger hue sits below AA for filled

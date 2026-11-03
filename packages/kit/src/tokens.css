@@ -21,6 +21,14 @@
   --accent-hover: #4f5bc4;
   --accent-subtle: #eef0fb;
   --on-accent: #ffffff;
+  /* Primary buttons (NEWFRONT-1052): Google blue, per owner request. Kept
+     separate from --accent on purpose: white on #4285f4 sits below the 4.5
+     AA bar the accent tokens must clear, so the accent stays indigo while
+     buttons take the Google pair. Defined once here so every theme —
+     dark, contrast, custom — renders the same Google blue button. */
+  --button-primary: #4285f4;
+  --button-primary-hover: #3367d6;
+  --on-button-primary: #ffffff;
   --success: #2f9e5b;
   --warning: #d9912b;
   --danger: #e5484d;
