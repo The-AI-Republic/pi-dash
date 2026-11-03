@@ -13,7 +13,6 @@ laptop closed over lunch, and the wrong one for a laptop that never comes back
 
 from __future__ import annotations
 
-import logging
 from datetime import timedelta
 
 from celery import shared_task
@@ -22,10 +21,9 @@ from django.utils import timezone
 
 from pi_dash.core.agent_execution import AgentExecutorKind
 from pi_dash.managed_runner.errors import ManagedRunnerReason
+from pi_dash.managed_runner.events import event_logger
 from pi_dash.runner.models import AgentRun, AgentRunStatus
 from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
-
-logger = logging.getLogger(__name__)
 
 
 @shared_task(name="managed_runner.expire_waiting_runs")
@@ -57,5 +55,5 @@ def expire_waiting_runs() -> int:
             },
         ):
             expired += 1
-            logger.info("managed_runner.queued_expired run=%s", run_id)
+            event_logger.info("managed_runner.queued_expired run=%s", run_id)
     return expired
