@@ -11,6 +11,7 @@ import { setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
 import { AssistantService } from "@pi-dash/services";
 import type { IUserLLMConfig, TAssistantProviderKind } from "@pi-dash/types";
 import { Button } from "@pi-dash/ui";
+import { useSTTConfig } from "@/hooks/use-stt-config";
 import { AssistantMCPServersSettings } from "./assistant-mcp-servers";
 import { DictationSettings } from "./dictation-settings";
 
@@ -25,6 +26,10 @@ const KNOWN_MODELS = [
 
 export const AIAssistantProfileSettings = observer(function AIAssistantProfileSettings() {
   const { data: config, mutate } = useSWR<IUserLLMConfig>("assistant-llm-config", () => service.getLLMConfig());
+  // `enabled` is the VOICE_DICTATION_ENABLED kill switch. With it off the
+  // section still shows when a key is saved, so the user can remove it.
+  const { data: sttConfig } = useSTTConfig();
+  const showDictation = !!sttConfig && (sttConfig.enabled || sttConfig.has_api_key);
 
   const [provider, setProvider] = useState<TAssistantProviderKind>("openai_compatible");
   const [baseUrl, setBaseUrl] = useState("");
@@ -169,9 +174,11 @@ export const AIAssistantProfileSettings = observer(function AIAssistantProfileSe
         </div>
       )}
 
-      <div className="mt-2 border-t border-subtle pt-5">
-        <DictationSettings />
-      </div>
+      {showDictation && (
+        <div className="mt-2 border-t border-subtle pt-5">
+          <DictationSettings />
+        </div>
+      )}
 
       <div className="mt-2 border-t border-subtle pt-5">
         <AssistantMCPServersSettings />

@@ -71,6 +71,7 @@ export function ChatComposer({
   const dictation = useDictation({ onResult: handleTranscript });
 
   const {
+    isEnabled: dictationEnabled,
     status: dictationStatus,
     elapsedMs,
     errorMessage,
@@ -98,6 +99,9 @@ export function ChatComposer({
     if (dictationStatus === "recording" || dictationStatus === "requesting") stopDictation();
   }, [dictationStatus, stopDictation]);
 
+  // Dictation is behind the VOICE_DICTATION_ENABLED kill switch: with it off,
+  // neither the mic nor any of its hints render.
+  const showDictation = dictationEnabled && dictationSupported;
   const isRecording = dictationStatus === "recording";
   const isTranscribing = dictationStatus === "transcribing";
 
@@ -141,7 +145,7 @@ export function ChatComposer({
   return (
     <div className={cn("shrink-0", bordered && "border-t border-subtle pt-3")}>
       {disabledReason && <div className="mb-2 text-12 text-secondary">{disabledReason}</div>}
-      {dictationHint && <div className="mb-2 text-12">{dictationHint}</div>}
+      {showDictation && dictationHint && <div className="mb-2 text-12">{dictationHint}</div>}
       <div className="flex items-end gap-2">
         <textarea
           value={draft}
@@ -156,7 +160,7 @@ export function ChatComposer({
           placeholder={placeholder}
           className="min-h-20 flex-1 resize-none rounded-md border border-subtle bg-surface-1 px-3 py-2 text-13 outline-none focus:border-accent-strong"
         />
-        {dictationSupported && (
+        {showDictation && (
           <Button
             variant={isRecording ? "accent-danger" : "neutral-primary"}
             aria-label={micLabel}

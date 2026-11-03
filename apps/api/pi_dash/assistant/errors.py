@@ -45,6 +45,17 @@ class STTConfigMissing(AssistantError):
     http_status = 422
 
 
+class DictationDisabled(AssistantError):
+    """Voice dictation is switched off on this instance (``VOICE_DICTATION_ENABLED``).
+
+    404 rather than 403: with the kill switch off the feature does not exist
+    here, so there is nothing the caller could be granted.
+    """
+
+    code = "dictation_disabled"
+    http_status = 404
+
+
 class AssistantNotConfigured(AssistantError):
     code = "assistant_not_configured"
     http_status = 503
