@@ -199,10 +199,24 @@ function renderCell(key: string, cellContext = context(), row = issue()) {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   resetAppClient();
   resetEditionIssuesProviders();
   delete edition.flags[WORKFLOW_FLAG];
 });
+
+/** Freeze the clock only; real timers keep the async queries working. */
+function freezeClock(at: Date): void {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(at);
+}
+
+/**
+ * Mid-October noon, local time: the calendar opens on today's month when
+ * the picked date is empty, so the October picks below need an October
+ * clock no matter when the suite runs.
+ */
+const OCTOBER_CLOCK = new Date(2026, 9, 15, 12, 0, 0, 0);
 
 describe("SheetPropertyCell", () => {
   it("marks the spec's editable columns and leaves the rest read-only", () => {
@@ -284,6 +298,7 @@ describe("SheetPropertyCell", () => {
   });
 
   it("keeps the due-date bound on a start-date write", async () => {
+    freezeClock(OCTOBER_CLOCK);
     stubClient();
     const ctx = context();
     renderCell("start_date", ctx, issue({ start_date: null, target_date: "2026-10-20" }));
@@ -294,6 +309,7 @@ describe("SheetPropertyCell", () => {
   });
 
   it("writes a start date with the existing due date carried along", async () => {
+    freezeClock(OCTOBER_CLOCK);
     stubClient();
     const ctx = context();
     renderCell("start_date", ctx, issue({ start_date: null, target_date: null }));
@@ -304,6 +320,7 @@ describe("SheetPropertyCell", () => {
   });
 
   it("keeps the start-date bound on a due-date write", async () => {
+    freezeClock(OCTOBER_CLOCK);
     stubClient();
     const ctx = context();
     renderCell("due_date", ctx, issue({ start_date: "2026-10-10", target_date: null }));
@@ -774,6 +791,7 @@ describe("SheetPropertyCell", () => {
   });
 
   it("writes a due date while the start date is unset", async () => {
+    freezeClock(OCTOBER_CLOCK);
     stubClient();
     const ctx = context();
     renderCell("due_date", ctx, issue({ start_date: undefined, target_date: null }));
