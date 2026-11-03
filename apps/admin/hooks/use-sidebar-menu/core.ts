@@ -4,13 +4,21 @@
  * See the LICENSE file for details.
  */
 
-import { Image, BrainCog, Cog, Mail, RefreshCw } from "lucide-react";
+import { Image, BrainCog, Cog, Mail, RefreshCw, Server } from "lucide-react";
 // pi dash imports
 import { LockIcon, WorkspaceIcon } from "@pi-dash/propel/icons";
 // types
 import type { TSidebarMenuItem } from "./types";
 
-export type TCoreSidebarMenuKey = "general" | "email" | "workspace" | "authentication" | "ai" | "loop" | "image";
+export type TCoreSidebarMenuKey =
+  | "general"
+  | "email"
+  | "workspace"
+  | "authentication"
+  | "ai"
+  | "loop"
+  | "runners"
+  | "image";
 
 export const coreSidebarMenuLinks: Record<TCoreSidebarMenuKey, TSidebarMenuItem> = {
   general: {
@@ -48,6 +56,12 @@ export const coreSidebarMenuLinks: Record<TCoreSidebarMenuKey, TSidebarMenuItem>
     name: "Loop",
     description: "Scheduled AI project management jobs.",
     href: `/loop/`,
+  },
+  runners: {
+    Icon: Server,
+    name: "Runners",
+    description: "All runners and the agent build each user is on.",
+    href: `/runners/`,
   },
   image: {
     Icon: Image,
