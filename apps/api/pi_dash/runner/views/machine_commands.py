@@ -125,6 +125,23 @@ class MachineCreateRunnerEndpoint(APIView):
         if agent not in _VALID_AGENTS:
             return Response({"error": "invalid_agent"}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Per-machine gate (PDASHOSS01-142): a daemon that advertised the
+        # agent kinds its binary understands gets a friendly rejection here
+        # instead of bouncing the command off its parser and writing back a
+        # raw ``unknown agent kind "…"`` error. An older daemon advertises
+        # nothing (empty list) and gates nothing.
+        if machine.supported_agents and agent not in machine.supported_agents:
+            return Response(
+                {
+                    "error": "unsupported_agent",
+                    "error_description": (
+                        f"the runner daemon on this machine does not support agent {agent!r}; "
+                        "upgrade pidash on the machine to use it"
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         request_id = str(_uuid.uuid4())
         message = {
             "type": "create_runner",
