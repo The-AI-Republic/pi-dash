@@ -23,6 +23,7 @@ and Rust mirrors it.
 """
 
 import psycopg
+import pytest
 
 from _harness.db import Database
 from _harness.settings import database_url, secret_key
@@ -140,3 +141,60 @@ def test_superuser_gains_is_staff(browser, db):
     after = _row(user["id"])
     assert after["is_staff"] is True
     assert res.json()["is_staff"] is True
+
+
+# -- NEWPIDASH-17: email sign-in and sign-out end in the same full save() --
+#
+# ``save_user_data`` (``adapter/base.py:220-234``) and the three sign-out
+# views (``views/app/signout.py:19-23``, ``views/space/signout.py:51-54``,
+# ``license/api/views/admin.py:388-391``) all finish with a bare
+# ``user.save()``, so every ``User.save()`` effect above applies to them.
+
+
+def _last_logout_time(uid: str):
+    with psycopg.connect(database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT last_logout_time FROM users WHERE id = %s", (uid,))
+            return cur.fetchone()[0]
+
+
+@pytest.mark.parametrize("path", ["/auth/sign-in/", "/auth/spaces/sign-in/"])
+def test_email_sign_in_applies_save_effects(browser, db, path):
+    user = _rotating_user(db, superuser=True)
+    before = _row(user["id"])
+    assert before["display_name"] == "" and before["is_staff"] is False
+    res = browser().post(path, data={"email": user["email"], "password": user["password"]})
+    assert res.status_code == 302, res.text[:200]
+    assert "error_code" not in res.headers["location"], res.headers["location"]
+    after = _row(user["id"])
+    _assert_save_effects(before, after, rotated=True)
+    assert after["updated_at"] > before["updated_at"]
+    assert after["display_name"] == user["email"].split("@")[0]
+    assert after["is_staff"] is True
+
+
+@pytest.mark.parametrize("path", ["/auth/sign-out/", "/auth/spaces/sign-out/"])
+def test_sign_out_applies_save_effects(browser, db, path):
+    user = _rotating_user(db, superuser=True)
+    before = _row(user["id"])
+    assert _last_logout_time(user["id"]) is None
+    res = browser(login_cookies(user)).post(path)
+    assert res.status_code == 302, res.text[:200]
+    after = _row(user["id"])
+    assert _last_logout_time(user["id"]) is not None, "sign-out must stamp last_logout_time"
+    _assert_save_effects(before, after, rotated=True)
+    assert after["updated_at"] > before["updated_at"]
+    assert after["token_updated_at"] > before["token_updated_at"]
+    assert after["display_name"] == user["email"].split("@")[0]
+    assert after["is_staff"] is True
+
+
+def test_sign_out_keeps_token_without_token_updated_at(browser, db, user):
+    before = _row(user["id"])
+    assert before["token_updated_at"] is None
+    res = browser(login_cookies(user)).post("/auth/sign-out/")
+    assert res.status_code == 302, res.text[:200]
+    after = _row(user["id"])
+    assert _last_logout_time(user["id"]) is not None
+    _assert_save_effects(before, after, rotated=False)
+    assert after["token"] == "" and after["token_updated_at"] is None

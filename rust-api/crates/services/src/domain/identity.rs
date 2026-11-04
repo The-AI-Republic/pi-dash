@@ -790,8 +790,7 @@ pub async fn agent_system_user_id(pool: &sqlx::PgPool) -> Result<Uuid, GetAgentU
 
 /// How the stamps write `display_name`: bound (gitlab/github resolve
 /// the backfill in Rust) or the atomic backfill `CASE` (gitea/google).
-/// `None` on the whole field omits the column (email/magic/admin,
-/// whose in-memory name already matches the stored row).
+/// `None` on the whole field omits the column (magic/admin).
 pub enum DisplayNameUpdate<'a> {
     Bound(&'a str),
     BackfillCase,
@@ -799,7 +798,7 @@ pub enum DisplayNameUpdate<'a> {
 
 /// How the stamps write `is_staff`: a bound `is_staff || is_superuser`
 /// (gitlab/github) or the atomic `OR` expression (gitea/google).
-/// `None` omits the column (email/magic/admin).
+/// `None` omits the column (magic/admin).
 pub enum StaffSync {
     Value(bool),
     OrSuperuser,
@@ -820,9 +819,9 @@ pub enum StaffSync {
 /// * `display_name` / `is_staff`: the `User.save()` backfill + sync
 ///   (`user.py:169-187`), in bound or `CASE`/expression form — or
 ///   omitted where the stored row already matches.
-/// * `touch_updated_at`: every path but email bumps `updated_at`
-///   (`auto_now`); email's missing bump is preserved verbatim (see the
-///   module docs).
+/// * `touch_updated_at`: bumps `updated_at` (`auto_now`); every login
+///   path sets it, email included — `save_user_data` ends in a full
+///   `user.save()` (NEWPIDASH-17).
 /// * `login_ip`/`login_uagent` bind NULL when `None` (the NOT NULL
 ///   columns raise into the same 500 Python hits,
 ///   `adapter/base.py:225-226`), on every path including gitea.
@@ -2297,18 +2296,31 @@ where
         .map(|_| ())
 }
 
-/// The sign-out stamps: `last_logout_ip`/`last_logout_time` plus
-/// `updated_at` (`auto_now`). One canonical statement serves the app
-/// sign-out and the license admin sign-out; the admin path's unquoted
-/// spelling and the app path's id-first bind order are normalized
-/// (same columns, same row — no fixture pins the spelling). The bind
-/// values stay per caller: the app path binds `None` when no IP is
-/// present, the admin path `""`.
+/// The sign-out stamps: `last_logout_ip`/`last_logout_time` and the
+/// full `user.save()` that follows them (`views/app/signout.py:19-23`,
+/// `views/space/signout.py:51-54`, `license/api/views/admin.py:388-391`),
+/// so every `User.save()` column effect applies (`user.py:169-187`,
+/// NEWPIDASH-17): `updated_at` (`auto_now`), the `token`/`token_updated_at`
+/// rotation when a token is already in use, the empty-`display_name` fill
+/// from the email prefix, and `is_staff` for superusers — the same
+/// effects as the password writes above. The `email` re-normalization is
+/// a no-op (the address never changes here), so it stays out. One
+/// canonical statement serves the app, space and license admin sign-outs.
+/// The bind values stay per caller: the app path binds `None` when no IP
+/// is present, the admin path `""`. `$4` is a fresh token.
 const STAMP_LOGOUT_SQL: &str = "UPDATE \"users\" SET \"last_logout_ip\" = $1, \
-    \"last_logout_time\" = $2, \"updated_at\" = $2 WHERE \"id\" = $3";
+    \"last_logout_time\" = $2, \"updated_at\" = $2, \
+    \"token\" = CASE WHEN \"token_updated_at\" IS NOT NULL THEN $4 ELSE \"token\" END, \
+    \"token_updated_at\" = CASE WHEN \"token_updated_at\" IS NOT NULL THEN $2 \
+    ELSE \"token_updated_at\" END, \
+    \"display_name\" = CASE WHEN COALESCE(\"display_name\", '') = '' \
+    THEN split_part(\"email\", '@', 1) ELSE \"display_name\" END, \
+    \"is_staff\" = CASE WHEN \"is_superuser\" THEN true ELSE \"is_staff\" END \
+    WHERE \"id\" = $3";
 
-/// Stamp the sign-out columns for one user. Runs on the caller's
-/// executor.
+/// Stamp the sign-out columns plus the `User.save()` effects for one
+/// user. The rotated token is drawn here (`uuid4().hex + uuid4().hex`,
+/// `user.py:174`). Runs on the caller's executor.
 pub async fn stamp_logout<'e, E>(
     ex: E,
     user_id: Uuid,
@@ -2318,10 +2330,12 @@ pub async fn stamp_logout<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
+    let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     sqlx::query(STAMP_LOGOUT_SQL)
         .bind(ip)
         .bind(now)
         .bind(user_id)
+        .bind(token)
         .execute(ex)
         .await
         .map(|_| ())
@@ -2710,14 +2724,22 @@ mod tests {
             medium: Some("email"),
             login_ip: Some(""),
             login_uagent: Some(""),
+            display_name: Some(DisplayNameUpdate::BackfillCase),
+            is_staff: Some(StaffSync::OrSuperuser),
+            touch_updated_at: true,
             ..stamps_fixture()
         };
+        // NEWPIDASH-17: the full `user.save()` effects (backfill, staff
+        // sync, `auto_now`) ride along, like gitea/google.
         assert_eq!(
             login_stamps_sql(&stamps),
             "UPDATE \"users\" SET \"last_login_medium\" = $1, \"last_active\" = $2, \
              \"last_login_time\" = $3, \"last_login_ip\" = $4, \"last_login_uagent\" = $5, \
-             \"token_updated_at\" = $6, \"token\" = $7, \"is_active\" = TRUE \
-             WHERE \"id\" = $8"
+             \"token_updated_at\" = $6, \"token\" = $7, \"is_active\" = TRUE, \
+             \"display_name\" = CASE WHEN \"display_name\" = '' \
+             THEN split_part(\"email\", '@', 1) ELSE \"display_name\" END, \
+             \"is_staff\" = \"is_staff\" OR \"is_superuser\", \
+             \"updated_at\" = $8 WHERE \"id\" = $9"
         );
     }
 
@@ -3682,9 +3704,9 @@ mod tests {
             login_uagent: None,
             avatar: None,
             avatar_asset_id: None,
-            display_name: None,
-            is_staff: None,
-            touch_updated_at: false,
+            display_name: Some(DisplayNameUpdate::BackfillCase),
+            is_staff: Some(StaffSync::OrSuperuser),
+            touch_updated_at: true,
             rotated_token: "tok",
             now,
         };
@@ -4889,7 +4911,14 @@ mod tests {
         assert_eq!(
             STAMP_LOGOUT_SQL,
             "UPDATE \"users\" SET \"last_logout_ip\" = $1, \"last_logout_time\" = $2, \
-             \"updated_at\" = $2 WHERE \"id\" = $3"
+             \"updated_at\" = $2, \
+             \"token\" = CASE WHEN \"token_updated_at\" IS NOT NULL THEN $4 ELSE \"token\" END, \
+             \"token_updated_at\" = CASE WHEN \"token_updated_at\" IS NOT NULL THEN $2 \
+             ELSE \"token_updated_at\" END, \
+             \"display_name\" = CASE WHEN COALESCE(\"display_name\", '') = '' \
+             THEN split_part(\"email\", '@', 1) ELSE \"display_name\" END, \
+             \"is_staff\" = CASE WHEN \"is_superuser\" THEN true ELSE \"is_staff\" END \
+             WHERE \"id\" = $3"
         );
         assert_eq!(
             TOUCH_USER_UPDATED_AT_SQL,
@@ -5024,6 +5053,49 @@ mod tests {
                 .await
                 .expect("read back");
         assert_eq!(logged, ("9.9.9.9".to_owned(), Some(later)));
+        // No token in use: the `User.save()` rotation leaves it alone, the
+        // named row keeps its name, and `updated_at` follows `auto_now`.
+        let saved: (String, Option<DateTime<Utc>>, String, bool, DateTime<Utc>) = sqlx::query_as(
+            "SELECT token, token_updated_at, display_name, is_staff, updated_at \
+             FROM users WHERE id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read back");
+        assert_eq!(
+            saved,
+            (String::new(), None, "stamp".to_owned(), false, later)
+        );
+        // NEWPIDASH-17: a token in use rotates, an empty name backfills
+        // from the email prefix, and a superuser gains `is_staff`.
+        sqlx::query(
+            "UPDATE users SET token = 'old', token_updated_at = $2, display_name = '', \
+             is_superuser = true WHERE id = $1",
+        )
+        .bind(user_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .expect("arm rotation");
+        let latest = later + chrono::Duration::hours(1);
+        stamp_logout(&mut *tx, user_id, Some("9.9.9.9"), latest)
+            .await
+            .expect("stamp logout");
+        let rotated: (String, Option<DateTime<Utc>>, String, bool, DateTime<Utc>) = sqlx::query_as(
+            "SELECT token, token_updated_at, display_name, is_staff, updated_at \
+                 FROM users WHERE id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read back");
+        assert_eq!(rotated.0.len(), 64, "fresh uuid4hex + uuid4hex token");
+        assert_ne!(rotated.0, "old");
+        assert_eq!(
+            (rotated.1, rotated.2.as_str(), rotated.3, rotated.4),
+            (Some(latest), "stamp1628", true, latest)
+        );
         // The app sign-out binds `None` when no IP is present: the NOT
         // NULL column raises, and the caller swallows it (bare redirect).
         sqlx::query("SAVEPOINT sp_logout_none")
