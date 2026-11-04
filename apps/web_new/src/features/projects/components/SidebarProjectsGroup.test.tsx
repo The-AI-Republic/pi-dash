@@ -369,6 +369,19 @@ describe("SidebarProjectsGroup loading and empty states", () => {
     expect(button).toHaveClass("invisible", "group-hover:visible");
   });
 
+  it("paints the header band and separates the section from the content above", () => {
+    // NEWPIDASH-4: the section title reads as a heading through a
+    // filled token band, never the hover/selected wash, with a top
+    // margin except when the section leads the sidebar. jsdom has no
+    // layout, so the class contract is the assertion.
+    setup();
+    const header = screen.getByTestId("projects-group-toggle").parentElement;
+    expect(header).toHaveClass("bg-(--border)", "rounded-(--radius-control)");
+    expect(header).not.toHaveClass("bg-(--subtle)");
+    const section = screen.getByTestId("sidebar-projects-group");
+    expect(section).toHaveClass("gap-(--space-1)", "[&:not(:first-child)]:mt-(--space-4)");
+  });
+
   it("shows guests no creation affordance", () => {
     setup({ projects: [], projectsStatus: "success", canCreateProject: false });
     expect(screen.queryByTestId("sidebar-create-project")).not.toBeInTheDocument();
