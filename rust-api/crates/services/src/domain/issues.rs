@@ -2758,6 +2758,53 @@ fn link_sub_issue_parents_sql(found: usize) -> String {
     )
 }
 
+/// One `bulk_update(issues, scalar_fields)` row (the app bulk-operation
+/// endpoint, `bulk_operations.py:154-174`): the merged scalar values — the
+/// property value when present, the stored value otherwise (rewriting the
+/// stored value is the same final row, so the twin writes every column
+/// unconditionally, as the driver did).
+pub struct BulkIssueScalars {
+    pub id: Uuid,
+    pub state_id: Option<Uuid>,
+    pub priority: String,
+    pub start_date: Option<NaiveDate>,
+    pub target_date: Option<NaiveDate>,
+    pub estimate_point_id: Option<Uuid>,
+}
+
+const BULK_ISSUE_SCALARS_SQL: &str = r#"UPDATE issues SET state_id = $1, priority = $2, start_date = $3,
+                          target_date = $4, estimate_point_id = $5, updated_at = $6
+                   WHERE id = $7"#;
+
+/// One row of `Issue.objects.bulk_update(issues, scalar_fields,
+/// batch_size=100)` (`bulk_operations.py:154-174`): the scalar UPDATE —
+/// state, priority, dates, estimate point, plus the shared `updated_at`
+/// bump — no `save()`, no signals (design D4: bulk paths skip hooks
+/// exactly as Django bulk paths skip signals). Moved verbatim from the
+/// app bulk-operation driver (PIDASHCONV-1711); the per-issue
+/// `issue_activity` fan-out stays driver-enqueued, as today. Runs on any
+/// executor so the driver keeps the write inside its transaction.
+pub async fn bulk_update_issue_scalars<'e, E>(
+    ex: E,
+    write: &BulkIssueScalars,
+    updated_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(BULK_ISSUE_SCALARS_SQL)
+        .bind(write.state_id)
+        .bind(write.priority.as_str())
+        .bind(write.start_date)
+        .bind(write.target_date)
+        .bind(write.estimate_point_id)
+        .bind(updated_at)
+        .bind(write.id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
 /// An activity enqueue that runs ahead of the row write (the archive
 /// endpoints enqueue before saving): the event, the pre-built spaced
 /// dumps, and the origin the driver resolved up front.
