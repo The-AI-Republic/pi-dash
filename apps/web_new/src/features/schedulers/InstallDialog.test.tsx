@@ -348,7 +348,7 @@ describe("InstallForm author path", { timeout: 30_000 }, () => {
       slug: "authored",
       description: "",
       prompt: "Audit nightly",
-      color: "#5e6ad2",
+      color: "#3b82f6",
       is_enabled: true,
     });
     expect(refreshDefinitions).toHaveBeenCalled();

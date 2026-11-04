@@ -1677,11 +1677,16 @@ describe("scheduler definition dialog", () => {
       Handle: fake({ input: "weekly-report" }),
       Description: fake({ input: "Summary" }),
       "Base prompt": fake({ input: "Review" }),
-      Color: fake({ input: "#5e6ad2" }),
+      "Custom color": fake({ input: "#8b5cf6" }),
     };
+    const swatch = fake({ count: 1 });
     const dialog = fake({
       byLabel: (label) => fields[label] ?? absent(),
-      role: (role) => (role === "switch" ? fake({ attribute: "true" }) : absent()),
+      role: (role, options) => {
+        if (role === "switch") return fake({ attribute: "true" });
+        if (role === "button" && options?.name === "Scheduler color #8b5cf6") return swatch;
+        return absent();
+      },
     });
     const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
     const driver = new WebNewDriver(page);
@@ -1690,18 +1695,32 @@ describe("scheduler definition dialog", () => {
       handle: "weekly-report",
       description: "Summary",
       prompt: "Review",
-      color: "#5e6ad2",
+      color: "#8b5cf6",
     });
     expect(fields["Base prompt"]?.fill).toHaveBeenCalledWith("Review");
-    expect(fields.Color?.fill).toHaveBeenCalledWith("#5e6ad2");
+    expect(swatch.click).toHaveBeenCalledTimes(1);
+    expect(fields["Custom color"]?.fill).not.toHaveBeenCalled();
     await expect(driver.schedulerDefinitionValues()).resolves.toEqual({
       name: "Weekly report",
       handle: "weekly-report",
       description: "Summary",
       prompt: "Review",
-      color: "#5e6ad2",
+      color: "#8b5cf6",
       enabled: true,
     });
+  });
+
+  it("fills a custom color through the synced picker input", async () => {
+    const custom = fake({ input: "#112233" });
+    const dialog = fake({
+      byLabel: (label) => (label === "Custom color" ? custom : absent()),
+      role: () => absent(),
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    const driver = new WebNewDriver(page);
+    await driver.schedulerFillDefinition({ color: "#112233" });
+    expect(custom.fill).toHaveBeenCalledWith("#112233");
+    await expect(driver.schedulerDefinitionValues()).resolves.toMatchObject({ color: "#112233" });
   });
 
   it("toggles enabled only when the state differs", async () => {
