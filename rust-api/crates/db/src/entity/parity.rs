@@ -149,20 +149,25 @@ fn expected_type(col: &ColumnType) -> Option<ExpectedType> {
     }
 }
 
-/// Compare entity `E`'s columns with `table` in `information_schema`.
-/// Fails with one line per drifted column.
-async fn assert_entity_parity<E>(pool: &sqlx::PgPool, table: &str)
+/// Compare entity `E`'s columns with `table` in `information_schema`, and
+/// its `unique` flags with the table's single-column unique indexes. Returns
+/// one line per drifted column.
+async fn entity_drift<E>(pool: &sqlx::PgPool, table: &str) -> Vec<String>
 where
     E: EntityTrait,
     E::Column: IntoEnumIterator,
 {
     let mut expected = BTreeMap::new();
+    let mut unique = Vec::new();
     for col in E::Column::iter() {
         let name = col.as_str().to_owned();
         let def = col.def();
         let col_type = def.get_column_type();
         let exp = expected_type(col_type)
             .unwrap_or_else(|| panic!("{table}.{name}: unmapped entity type {col_type:?}"));
+        if def.is_unique() {
+            unique.push(name.clone());
+        }
         expected.insert(name, (exp, def.is_null()));
     }
 
@@ -177,10 +182,11 @@ where
     .fetch_all(pool)
     .await
     .expect("information_schema query");
-    assert!(
-        !rows.is_empty(),
-        "table {table} missing from information_schema on the migrated database"
-    );
+    if rows.is_empty() {
+        return vec![format!(
+            "table {table} missing from information_schema on the migrated database"
+        )];
+    }
     let mut db = BTreeMap::new();
     for (name, udt, char_len, num_prec, num_scale, is_nullable) in rows {
         db.insert(
@@ -249,19 +255,38 @@ where
             ));
         }
     }
-    assert!(
-        diffs.is_empty(),
-        "schema drift on {table}:\n{}",
-        diffs.join("\n")
-    );
+    // A `unique` flag must stand for a full (non-partial) single-column
+    // unique index: the generator also reads a partial one (`WHERE ...`) as a
+    // column constraint, which would make a one-to-many edge look one-to-one.
+    let fully_unique: Vec<(String,)> = sqlx::query_as(
+        "SELECT a.attname::text FROM pg_index i \
+             JOIN pg_class t ON t.oid = i.indrelid \
+             JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = i.indkey[0] \
+             WHERE t.relname = $1 AND t.relnamespace = 'public'::regnamespace \
+             AND i.indisunique AND i.indnatts = 1 AND i.indpred IS NULL",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await
+    .expect("pg_index query");
+    for name in &unique {
+        if !fully_unique.iter().any(|(column,)| column == name) {
+            diffs.push(format!(
+                "column {table}.{name} is `unique` in the entity but has no full \
+                 single-column unique index (a partial index does not count)"
+            ));
+        }
+    }
+    diffs
 }
 
-/// One parity test per covered table: pins the entity's declared table
-/// name, then compares its columns with `information_schema`.
-macro_rules! parity_test {
-    ($test:ident, $entity:ident, $table:literal) => {
+/// One live test over every entity, sharing one connection: each entity's
+/// declared table name is its module name, and its columns match
+/// `information_schema`. All drift is reported together.
+macro_rules! parity_tests {
+    ($($entity:ident),+ $(,)?) => {
         #[tokio::test]
-        async fn $test() {
+        async fn entities_match_information_schema() {
             let url = match std::env::var("DATABASE_URL") {
                 Ok(url) => url,
                 Err(_) => {
@@ -274,343 +299,168 @@ macro_rules! parity_test {
                 .connect(&url)
                 .await
                 .expect("connect to scratch DATABASE_URL");
-            let entity = super::$entity::Entity;
-            assert_eq!(entity.table_name(), $table, "entity table_name drift");
-            assert_entity_parity::<super::$entity::Entity>(&pool, $table).await;
+            let mut drift = Vec::new();
+            $(
+                let table = stringify!($entity);
+                let declared = super::$entity::Entity.table_name();
+                if declared != table {
+                    drift.push(format!("entity {table} declares table_name {declared}"));
+                }
+                drift.extend(entity_drift::<super::$entity::Entity>(&pool, table).await);
+            )+
+            assert!(drift.is_empty(), "schema drift:\n{}", drift.join("\n"));
         }
     };
 }
 
-parity_test!(issues, issues, "issues");
-parity_test!(
+parity_tests!(
+    accounts,
     agent_chat_approval,
-    agent_chat_approval,
-    "agent_chat_approval"
-);
-parity_test!(agent_chat_event, agent_chat_event, "agent_chat_event");
-parity_test!(agent_chat_message, agent_chat_message, "agent_chat_message");
-parity_test!(agent_chat_session, agent_chat_session, "agent_chat_session");
-parity_test!(agent_run_approval, agent_run_approval, "agent_run_approval");
-parity_test!(agent_run_event, agent_run_event, "agent_run_event");
-parity_test!(
+    agent_chat_event,
+    agent_chat_message,
+    agent_chat_session,
+    agent_run,
+    agent_run_approval,
+    agent_run_event,
     agent_run_tool_call,
-    agent_run_tool_call,
-    "agent_run_tool_call"
-);
-parity_test!(analytic_views, analytic_views, "analytic_views");
-parity_test!(api_activity_logs, api_activity_logs, "api_activity_logs");
-parity_test!(assistant_event, assistant_event, "assistant_event");
-parity_test!(
+    analytic_views,
+    api_activity_logs,
+    api_tokens,
+    assistant_event,
     assistant_mcp_server,
-    assistant_mcp_server,
-    "assistant_mcp_server"
-);
-parity_test!(assistant_thread, assistant_thread, "assistant_thread");
-parity_test!(assistant_turn, assistant_turn, "assistant_turn");
-parity_test!(
-    assistant_user_stt_config,
-    assistant_user_stt_config,
-    "assistant_user_stt_config"
-);
-parity_test!(changelogs, changelogs, "changelogs");
-parity_test!(
-    chat_message_dedupe,
-    chat_message_dedupe,
-    "chat_message_dedupe"
-);
-parity_test!(cli_device_codes, cli_device_codes, "cli_device_codes");
-parity_test!(comment_reactions, comment_reactions, "comment_reactions");
-parity_test!(cycle_issues, cycle_issues, "cycle_issues");
-parity_test!(
-    cycle_user_properties,
-    cycle_user_properties,
-    "cycle_user_properties"
-);
-parity_test!(cycles, cycles, "cycles");
-parity_test!(deploy_boards, deploy_boards, "deploy_boards");
-parity_test!(
-    description_versions,
-    description_versions,
-    "description_versions"
-);
-parity_test!(dev_machine, dev_machine, "dev_machine");
-parity_test!(device_sessions, device_sessions, "device_sessions");
-parity_test!(devices, devices, "devices");
-parity_test!(
-    draft_issue_assignees,
-    draft_issue_assignees,
-    "draft_issue_assignees"
-);
-parity_test!(draft_issue_cycles, draft_issue_cycles, "draft_issue_cycles");
-parity_test!(draft_issue_labels, draft_issue_labels, "draft_issue_labels");
-parity_test!(
-    draft_issue_modules,
-    draft_issue_modules,
-    "draft_issue_modules"
-);
-parity_test!(draft_issues, draft_issues, "draft_issues");
-parity_test!(
-    email_notification_logs,
-    email_notification_logs,
-    "email_notification_logs"
-);
-parity_test!(estimate_points, estimate_points, "estimate_points");
-parity_test!(estimates, estimates, "estimates");
-parity_test!(exporters, exporters, "exporters");
-parity_test!(file_assets, file_assets, "file_assets");
-parity_test!(
-    git_code_review_links,
-    git_code_review_links,
-    "git_code_review_links"
-);
-parity_test!(git_comment_syncs, git_comment_syncs, "git_comment_syncs");
-parity_test!(git_issue_syncs, git_issue_syncs, "git_issue_syncs");
-parity_test!(
-    git_provider_accounts,
-    git_provider_accounts,
-    "git_provider_accounts"
-);
-parity_test!(git_repositories, git_repositories, "git_repositories");
-parity_test!(
-    git_repository_bindings,
-    git_repository_bindings,
-    "git_repository_bindings"
-);
-parity_test!(
-    git_webhook_deliveries,
-    git_webhook_deliveries,
-    "git_webhook_deliveries"
-);
-parity_test!(
-    git_webhook_registrations,
-    git_webhook_registrations,
-    "git_webhook_registrations"
-);
-parity_test!(
-    github_app_install_sessions,
-    github_app_install_sessions,
-    "github_app_install_sessions"
-);
-parity_test!(
-    github_app_installations,
-    github_app_installations,
-    "github_app_installations"
-);
-parity_test!(
-    github_comment_syncs,
-    github_comment_syncs,
-    "github_comment_syncs"
-);
-parity_test!(github_issue_syncs, github_issue_syncs, "github_issue_syncs");
-parity_test!(
-    github_pull_request_links,
-    github_pull_request_links,
-    "github_pull_request_links"
-);
-parity_test!(
-    github_repositories,
-    github_repositories,
-    "github_repositories"
-);
-parity_test!(
-    github_repository_syncs,
-    github_repository_syncs,
-    "github_repository_syncs"
-);
-parity_test!(
-    github_webhook_deliveries,
-    github_webhook_deliveries,
-    "github_webhook_deliveries"
-);
-parity_test!(importers, importers, "importers");
-parity_test!(instance_admins, instance_admins, "instance_admins");
-parity_test!(
-    instance_configurations,
-    instance_configurations,
-    "instance_configurations"
-);
-parity_test!(instances, instances, "instances");
-parity_test!(intake_issues, intake_issues, "intake_issues");
-parity_test!(intakes, intakes, "intakes");
-parity_test!(integrations, integrations, "integrations");
-parity_test!(issue_activities, issue_activities, "issue_activities");
-parity_test!(issue_agent_ticker, issue_agent_ticker, "issue_agent_ticker");
-parity_test!(issue_attachments, issue_attachments, "issue_attachments");
-parity_test!(issue_blockers, issue_blockers, "issue_blockers");
-parity_test!(
-    issue_description_versions,
-    issue_description_versions,
-    "issue_description_versions"
-);
-parity_test!(issue_labels, issue_labels, "issue_labels");
-parity_test!(issue_links, issue_links, "issue_links");
-parity_test!(issue_mentions, issue_mentions, "issue_mentions");
-parity_test!(issue_reactions, issue_reactions, "issue_reactions");
-parity_test!(issue_subscribers, issue_subscribers, "issue_subscribers");
-parity_test!(issue_types, issue_types, "issue_types");
-parity_test!(issue_versions, issue_versions, "issue_versions");
-parity_test!(issue_views, issue_views, "issue_views");
-parity_test!(issue_votes, issue_votes, "issue_votes");
-parity_test!(issue_worklogs, issue_worklogs, "issue_worklogs");
-parity_test!(labels, labels, "labels");
-parity_test!(loop_jobs, loop_jobs, "loop_jobs");
-parity_test!(loop_targets, loop_targets, "loop_targets");
-parity_test!(
-    loop_user_preferences,
-    loop_user_preferences,
-    "loop_user_preferences"
-);
-parity_test!(machine_session, machine_session, "machine_session");
-parity_test!(module_issues, module_issues, "module_issues");
-parity_test!(module_links, module_links, "module_links");
-parity_test!(module_members, module_members, "module_members");
-parity_test!(
-    module_user_properties,
-    module_user_properties,
-    "module_user_properties"
-);
-parity_test!(modules, modules, "modules");
-parity_test!(notifications, notifications, "notifications");
-parity_test!(page_labels, page_labels, "page_labels");
-parity_test!(page_logs, page_logs, "page_logs");
-parity_test!(page_versions, page_versions, "page_versions");
-parity_test!(pages, pages, "pages");
-parity_test!(pod, pod, "pod");
-parity_test!(
-    project_deploy_boards,
-    project_deploy_boards,
-    "project_deploy_boards"
-);
-parity_test!(
-    project_identifiers,
-    project_identifiers,
-    "project_identifiers"
-);
-parity_test!(
-    project_issue_types,
-    project_issue_types,
-    "project_issue_types"
-);
-parity_test!(
-    project_member_invites,
-    project_member_invites,
-    "project_member_invites"
-);
-parity_test!(project_pages, project_pages, "project_pages");
-parity_test!(
-    project_public_members,
-    project_public_members,
-    "project_public_members"
-);
-parity_test!(
-    project_user_properties,
-    project_user_properties,
-    "project_user_properties"
-);
-parity_test!(project_webhooks, project_webhooks, "project_webhooks");
-parity_test!(
-    prompt_section_override,
-    prompt_section_override,
-    "prompt_section_override"
-);
-parity_test!(prompt_template, prompt_template, "prompt_template");
-parity_test!(run_message_dedupe, run_message_dedupe, "run_message_dedupe");
-parity_test!(
-    runner_force_refresh,
-    runner_force_refresh,
-    "runner_force_refresh"
-);
-parity_test!(scheduler_bindings, scheduler_bindings, "scheduler_bindings");
-parity_test!(schedulers, schedulers, "schedulers");
-parity_test!(sessions, sessions, "sessions");
-parity_test!(
-    slack_project_syncs,
-    slack_project_syncs,
-    "slack_project_syncs"
-);
-parity_test!(
-    social_login_connections,
-    social_login_connections,
-    "social_login_connections"
-);
-parity_test!(stickies, stickies, "stickies");
-parity_test!(teams, teams, "teams");
-parity_test!(user_favorites, user_favorites, "user_favorites");
-parity_test!(user_recent_visits, user_recent_visits, "user_recent_visits");
-parity_test!(users_groups, users_groups, "users_groups");
-parity_test!(
-    users_user_permissions,
-    users_user_permissions,
-    "users_user_permissions"
-);
-parity_test!(webhook_logs, webhook_logs, "webhook_logs");
-parity_test!(webhooks, webhooks, "webhooks");
-parity_test!(
-    workspace_home_preferences,
-    workspace_home_preferences,
-    "workspace_home_preferences"
-);
-parity_test!(
-    workspace_integrations,
-    workspace_integrations,
-    "workspace_integrations"
-);
-parity_test!(
-    workspace_join_requests,
-    workspace_join_requests,
-    "workspace_join_requests"
-);
-parity_test!(
-    workspace_member_invites,
-    workspace_member_invites,
-    "workspace_member_invites"
-);
-parity_test!(workspace_themes, workspace_themes, "workspace_themes");
-parity_test!(
-    workspace_user_links,
-    workspace_user_links,
-    "workspace_user_links"
-);
-parity_test!(
-    workspace_user_preferences,
-    workspace_user_preferences,
-    "workspace_user_preferences"
-);
-parity_test!(
-    workspace_user_properties,
-    workspace_user_properties,
-    "workspace_user_properties"
-);
-parity_test!(agent_run, agent_run, "agent_run");
-parity_test!(runner, runner, "runner");
-parity_test!(runner_live_state, runner_live_state, "runner_live_state");
-parity_test!(issue_sequences, issue_sequences, "issue_sequences");
-parity_test!(issue_assignees, issue_assignees, "issue_assignees");
-parity_test!(issue_comments, issue_comments, "issue_comments");
-parity_test!(descriptions, descriptions, "descriptions");
-parity_test!(issue_relations, issue_relations, "issue_relations");
-parity_test!(users, users, "users");
-parity_test!(profiles, profiles, "profiles");
-parity_test!(accounts, accounts, "accounts");
-parity_test!(
-    user_notification_preferences,
-    user_notification_preferences,
-    "user_notification_preferences"
-);
-parity_test!(workspaces, workspaces, "workspaces");
-parity_test!(workspace_members, workspace_members, "workspace_members");
-parity_test!(projects, projects, "projects");
-parity_test!(project_members, project_members, "project_members");
-parity_test!(states, states, "states");
-parity_test!(api_tokens, api_tokens, "api_tokens");
-parity_test!(machine_token, machine_token, "machine_token");
-parity_test!(runner_session, runner_session, "runner_session");
-parity_test!(
+    assistant_message,
+    assistant_thread,
+    assistant_turn,
     assistant_user_llm_config,
-    assistant_user_llm_config,
-    "assistant_user_llm_config"
+    assistant_user_stt_config,
+    changelogs,
+    chat_message_dedupe,
+    cli_device_codes,
+    comment_reactions,
+    cycle_issues,
+    cycle_user_properties,
+    cycles,
+    deploy_boards,
+    description_versions,
+    descriptions,
+    dev_machine,
+    device_sessions,
+    devices,
+    draft_issue_assignees,
+    draft_issue_cycles,
+    draft_issue_labels,
+    draft_issue_modules,
+    draft_issues,
+    email_notification_logs,
+    estimate_points,
+    estimates,
+    exporters,
+    file_assets,
+    git_code_review_links,
+    git_comment_syncs,
+    git_issue_syncs,
+    git_provider_accounts,
+    git_repositories,
+    git_repository_bindings,
+    git_webhook_deliveries,
+    git_webhook_registrations,
+    github_app_install_sessions,
+    github_app_installations,
+    github_comment_syncs,
+    github_issue_syncs,
+    github_pull_request_links,
+    github_repositories,
+    github_repository_syncs,
+    github_webhook_deliveries,
+    importers,
+    instance_admins,
+    instance_configurations,
+    instances,
+    intake_issues,
+    intakes,
+    integrations,
+    issue_activities,
+    issue_agent_ticker,
+    issue_assignees,
+    issue_attachments,
+    issue_blockers,
+    issue_comments,
+    issue_description_versions,
+    issue_labels,
+    issue_links,
+    issue_mentions,
+    issue_reactions,
+    issue_relations,
+    issue_sequences,
+    issue_subscribers,
+    issue_types,
+    issue_versions,
+    issue_views,
+    issue_votes,
+    issue_worklogs,
+    issues,
+    labels,
+    loop_jobs,
+    loop_targets,
+    loop_user_preferences,
+    machine_session,
+    machine_token,
+    module_issues,
+    module_links,
+    module_members,
+    module_user_properties,
+    modules,
+    notifications,
+    page_labels,
+    page_logs,
+    page_versions,
+    pages,
+    pod,
+    profiles,
+    project_deploy_boards,
+    project_identifiers,
+    project_issue_types,
+    project_member_invites,
+    project_members,
+    project_pages,
+    project_public_members,
+    project_user_properties,
+    project_webhooks,
+    projects,
+    prompt_section_override,
+    prompt_template,
+    run_message_dedupe,
+    runner,
+    runner_force_refresh,
+    runner_live_state,
+    runner_session,
+    scheduler_bindings,
+    schedulers,
+    sessions,
+    slack_project_syncs,
+    social_login_connections,
+    states,
+    stickies,
+    teams,
+    user_favorites,
+    user_notification_preferences,
+    user_recent_visits,
+    users,
+    users_groups,
+    users_user_permissions,
+    webhook_logs,
+    webhooks,
+    workspace_home_preferences,
+    workspace_integrations,
+    workspace_join_requests,
+    workspace_member_invites,
+    workspace_members,
+    workspace_themes,
+    workspace_user_links,
+    workspace_user_preferences,
+    workspace_user_properties,
+    workspaces,
 );
-parity_test!(assistant_message, assistant_message, "assistant_message");
 
 #[test]
 fn inferred_string_compares_varchar_family_only() {
@@ -636,4 +486,30 @@ fn array_maps_to_underscore_element() {
 #[test]
 fn year_is_unmapped() {
     assert!(expected_type(&ColumnType::Year).is_none());
+}
+
+/// The two `inet` columns read as text and write back as inet, so a `String`
+/// decodes and binds (sqlx has no text <-> inet coercion).
+#[test]
+fn inet_columns_cast_through_text() {
+    use sea_orm::{ActiveValue::Set, DbBackend, QueryTrait};
+    let read = super::device_sessions::Entity::find()
+        .build(DbBackend::Postgres)
+        .to_string();
+    assert!(
+        read.contains(r#"CAST("device_sessions"."ip_address" AS "text")"#)
+            || read.contains(r#"CAST("device_sessions"."ip_address" AS text)"#),
+        "{read}"
+    );
+    let read = super::api_activity_logs::Entity::find()
+        .build(DbBackend::Postgres)
+        .to_string();
+    assert!(read.contains(r#""ip_address" AS"#) && read.contains("CAST("), "{read}");
+    let insert = super::device_sessions::Entity::insert(super::device_sessions::ActiveModel {
+        ip_address: Set(Some("10.0.0.1".to_owned())),
+        ..Default::default()
+    })
+    .build(DbBackend::Postgres)
+    .to_string();
+    assert!(insert.contains("CAST('10.0.0.1' AS inet)"), "{insert}");
 }

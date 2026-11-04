@@ -21,7 +21,14 @@ pub struct Model {
     pub response_code: i32,
     #[sea_orm(column_type = "Text", nullable)]
     pub response_body: Option<String>,
-    #[sea_orm(column_type = "custom(\"inet\")", nullable)]
+    // Postgres `inet`: read as text and written back as inet, so it decodes
+    // into and binds from a `String` (sqlx has no text <-> inet coercion).
+    #[sea_orm(
+        column_type = "custom(\"inet\")",
+        nullable,
+        select_as = "text",
+        save_as = "inet"
+    )]
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
     pub created_by_id: Option<Uuid>,

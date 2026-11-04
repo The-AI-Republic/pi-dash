@@ -20,7 +20,9 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(has_one = "super::machine_session::Entity")]
+    // `has_many`: only one *active* session per machine is unique (a partial
+    // index); a machine has many sessions over time.
+    #[sea_orm(has_many = "super::machine_session::Entity")]
     MachineSession,
     #[sea_orm(
         belongs_to = "super::users::Entity",

@@ -389,8 +389,10 @@ pidash_services::domain::run(&ctx, &db, |txn| {
 
 ## SeaORM entities (ORM-01)
 
-SeaORM 1.1 (`~1.1.20`, design `.ai_design/rust_orm/design.md` D1) covers
-the §4 tables only. The entities live at `crates/db/src/entity/`; Django
+SeaORM 1.1 (`~1.1.20`, design `.ai_design/rust_orm/design.md` D1) has an
+entity for every OSS table (all but `django_*`, `auth_*` and the overlay's
+`cloud_*`); reads and writes migrate onto them
+(`.ai_design/rust_orm/reads.md`). The entities live at `crates/db/src/entity/`; Django
 stays the schema owner — there are no SeaORM migrations.
 
 One pool, two handles (D5): the `DatabaseConnection` wraps the existing
@@ -410,45 +412,22 @@ It travels on the request and worker contexts next to the pools:
   `ctx.orm()`. The overlay binary sets it the same way when it builds
   its context for `register_oss_handlers`.
 
-Regenerating after a Django sync (the `entity` module doc records the
-exact command and Django SHA of the last generation):
-
-```sh
-export DATABASE_URL=postgresql://<user>@127.0.0.1:<port>/<db-migrated-by-apps/api>
-sea-orm-cli generate entity --database-url "$DATABASE_URL" \
-  --output-dir <staging-dir> \
-  --tables issues,issue_sequences,issue_assignees,issue_comments,descriptions,\
-issue_relations,users,profiles,accounts,user_notification_preferences,workspaces,\
-workspace_members,projects,project_members,states,api_tokens,machine_token,\
-runner_session,assistant_user_llm_config,assistant_message
-```
-
-Then copy the 22 files over `crates/db/src/entity/` and re-apply the
-four mechanical cleanups (the generator rewrites them): delete the
-`belongs_to` relations (plus `Related` impls) pointing at tables outside
-the §4 set — the compiler lists them as unresolved `super::<table>`
-paths; restore the module doc on `mod.rs` with the new Django SHA;
-restore the `#[cfg(test)] mod parity;` declaration; restore the
-`pub mod issue_hooks;` declaration while deleting the empty
-`impl ActiveModelBehavior for ActiveModel {}` the generator emits in
-`issues.rs` (the real hooks live in `issue_hooks`; the compiler rejects
-the duplicate); and delete the empty
-`impl ActiveModelBehavior for ActiveModel {}` the generator restores in
-`users.rs` (the hand-written impl lives in `users_hooks.rs`, which the
-generator never touches — keeping both fails the build with duplicate
-impls, loud by design). Finish with `cargo fmt`, the `entity::parity`
-tests below, and the usual clippy run.
+Regenerating after a Django sync: the `entity` module doc
+(`crates/db/src/entity/mod.rs`) holds the one command, which tables to copy,
+and every cleanup to re-apply; it is the single source, so this section does
+not repeat it. Finish with `cargo fmt`, the parity test below, and clippy.
 
 Schema parity: `crates/db/src/entity/parity.rs` compares every entity's
 table name, column names, column types and nullability with
-`information_schema.columns` on the migrated database, and fails on any
-drift (missing/extra column, renamed table, type or nullability change).
+`information_schema.columns`, and each `unique` flag with a full
+(non-partial) single-column unique index in `pg_index`, on the migrated
+database. One test covers every entity and lists all drift.
 Like every live-db test it skips when `DATABASE_URL` is unset and runs
 for real otherwise:
 
 ```sh
 export DATABASE_URL=postgresql://<user>@127.0.0.1:<port>/<migrated-db>
-cargo test -p pidash-db entity::parity
+cargo test -p pidash-db entity::parity::entities_match_information_schema
 ```
 
 ## Serializer + paginator kernel (F-07)

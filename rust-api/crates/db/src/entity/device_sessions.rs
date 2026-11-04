@@ -12,7 +12,14 @@ pub struct Model {
     pub id: Uuid,
     pub is_active: bool,
     pub user_agent: Option<String>,
-    #[sea_orm(column_type = "custom(\"inet\")", nullable)]
+    // Postgres `inet`: read as text and written back as inet, so it decodes
+    // into and binds from a `String` (sqlx has no text <-> inet coercion).
+    #[sea_orm(
+        column_type = "custom(\"inet\")",
+        nullable,
+        select_as = "text",
+        save_as = "inet"
+    )]
     pub ip_address: Option<String>,
     pub start_time: DateTimeWithTimeZone,
     pub end_time: Option<DateTimeWithTimeZone>,

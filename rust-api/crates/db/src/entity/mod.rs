@@ -20,13 +20,14 @@
 //! A table added to an existing entity file keeps that file's hand edits
 //! below: copy only new tables from the staging dir, and diff the rest.
 //!
-//! The generator output is committed verbatim except for four mechanical
-//! cleanups, all re-applied on every regeneration (see
-//! `rust-api/README.md`, "SeaORM entities"):
+//! The generator output is committed verbatim except for the cleanups below,
+//! all re-applied on every regeneration. With every table generated, nothing
+//! is left unresolved for the compiler to flag, so run
+//! `git diff crates/db/src/entity/` after copying and re-apply each item
+//! here by hand; the parity test catches the `unique` ones.
 //!
-//! * `belongs_to` relations (and their `Related` impls) that point at
-//!   tables outside the §4 set are deleted; the compiler lists them as
-//!   unresolved `super::<table>` paths. At generation time these were the
+//! * These `belongs_to` relations (and their `Related` impls) stay deleted
+//!   (they were outside the original §4 set and nothing joins them yet):
 //!   `assistant_thread` / `assistant_turn` relations of `assistant_message`,
 //!   `estimate_points` / `issue_types` / `pod` of `issues`, `dev_machine` of
 //!   `machine_token`, `estimates` / `file_assets` of `projects`,
@@ -50,7 +51,13 @@
 //!   `loop_user_preferences.user_id`, `machine_session.dev_machine_id`,
 //!   `pod.project_id`, `projects.workspace_id` and
 //!   `runner_session.runner_id`. Find them on regeneration with the
-//!   single-column `pg_index` rows where `indisunique AND indpred IS NOT NULL`.
+//!   single-column `pg_index` rows where `indisunique AND indpred IS NOT NULL`;
+//!   the parity test fails on any `unique` flag without a full unique index.
+//!   The matching reverse edges are `has_many`, not the generated `has_one`:
+//!   `workspaces` -> `projects` and `dev_machine` -> `machine_session`.
+//! * The two Postgres `inet` columns (`api_activity_logs.ip_address`,
+//!   `device_sessions.ip_address`) carry `select_as = "text"` and
+//!   `save_as = "inet"`, so they decode into and bind from a `String`.
 //! * In the tables added on 2026-11-04 (everything outside the first 20
 //!   and the agent-run set), relations are the generator's, minus:
 //!   `users_groups` -> `auth_group` and `users_user_permissions` ->
