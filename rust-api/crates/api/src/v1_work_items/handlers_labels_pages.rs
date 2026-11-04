@@ -3755,6 +3755,121 @@ async fn page_archive_inner(
 }
 
 // ---------------------------------------------------------------------------
+// Page move handler (`PageMoveAPIEndpoint`, views/page.py:563-605,
+// PDASHOSS01-347)
+// ---------------------------------------------------------------------------
+
+/// The page move path owns POST only (`urls/page.py:30`,
+/// `as_view(http_method_names=["post"])`).
+pub fn owned_page_move(
+    router: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
+    owned(router, &["POST"])
+}
+
+/// `POST .../pages/<page_id>/move/` (`views/page.py:592-605`): move the
+/// page and its sub-pages to the body's `project_id`
+/// ([`pidash_services::domain::pages`]); 200 with the page detail as
+/// `GET .../projects/<target>/pages/<page_id>/` renders it.
+pub async fn post_page_move(
+    State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
+    Path((slug, project_id, page_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&page_id) {
+        return proxy_request(&state, "POST", original.to_string()).await;
+    }
+    let page_id = page_id.parse::<Uuid>().expect("checked segment");
+    let raw = match read_body(body).await {
+        Ok(raw) => raw,
+        Err(denial) => return denial.into_response(),
+    };
+    match page_move_inner(&state, &headers, &slug, &project_id, &page_id, &raw).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn page_move_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    page_id: &Uuid,
+    raw_body: &[u8],
+) -> Result<Response, Denial> {
+    use pidash_services::domain::{self, pages as page_domain, WriteActor, WriteCtx};
+    let pre = preamble(state, headers, slug).await?;
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        &project_id,
+        V1WorkItemsRoute::PageMove,
+        "POST",
+    )
+    .await?;
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    // `get_page_or_error` (`:209-213`): the visibility queryset plus pk.
+    let row = fetch_visible_page(&pre.pool, slug, &project_id, &pre.actor.id, page_id).await?;
+    let Some(row) = row else {
+        return Err(Denial::NotFound(
+            pidash_services::v1_work_items::queries_search::page_not_found_body(),
+        ));
+    };
+    // `request.data` is read lazily by `move_page`, after the lookup.
+    let parsed = parse_write_body(headers, raw_body)?;
+    let target = match page_domain::parse_target_project(parsed.value.get("project_id")) {
+        Ok(target) => target,
+        Err(refusal) => return Ok(move_refusal_response(refusal)),
+    };
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = WriteCtx::new(WriteActor {
+        user_id: pre.actor.id,
+        timezone: pre.actor.timezone.clone(),
+    });
+    let input = page_domain::PageMove {
+        page_id: *page_id,
+        workspace_id: row_uuid(&row, "workspace_id")?,
+        source_project_id: project_id,
+        target_project_id: target,
+    };
+    let now = now_utc();
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let ctx = ctx.clone();
+        Box::pin(async move { page_domain::move_to_project(&ctx, txn, input, now).await })
+    })
+    .await
+    .map_err(|error| db_error(error, "page-move"))?;
+    match outcome {
+        Ok(target) => {
+            detail_response(
+                &pre.pool,
+                slug,
+                &target,
+                &pre.actor.id,
+                page_id,
+                &tz,
+                StatusCode::OK,
+            )
+            .await
+        }
+        Err(refusal) => Ok(move_refusal_response(refusal)),
+    }
+}
+
+/// A `PageMoveError` response: its status and exact body.
+fn move_refusal_response(refusal: pidash_services::domain::pages::MoveRefusal) -> Response {
+    let status = StatusCode::from_u16(refusal.status()).expect("refusal status");
+    json_response(status, refusal.body().to_owned())
+}
+
+// ---------------------------------------------------------------------------
 // Body converters (`utils/markdown_converter.py`)
 // ---------------------------------------------------------------------------
 //

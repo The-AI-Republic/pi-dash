@@ -286,6 +286,10 @@ pub enum V1WorkItemsRoute {
     /// `.../pages/<page_id>/archive/` (`urls/page.py:24`, POST/DELETE):
     /// `PageArchiveAPIEndpoint` (`views/page.py:480`).
     PageArchive,
+    /// `.../pages/<page_id>/move/` (`urls/page.py:30`, POST):
+    /// `PageMoveAPIEndpoint` (`views/page.py:563`, gate inherited from
+    /// `BasePageReadAPIEndpoint`, PDASHOSS01-347).
+    PageMove,
 }
 
 /// Map a D-18 route+method to its gate, exactly as the view classes declare.
@@ -895,9 +899,10 @@ mod tests {
             (R::PageList, &["GET", "POST"], G::ProjectEntity),
             (R::PageDetail, &["GET", "PATCH"], G::ProjectEntity),
             (R::PageArchive, &["POST", "DELETE"], G::ProjectEntity),
+            (R::PageMove, &["POST"], G::ProjectEntity),
         ];
-        // 12 deprecated twins + 27 work-items + 2 label + 3 page.
-        assert_eq!(cases.len(), 44);
+        // 12 deprecated twins + 27 work-items + 2 label + 4 page.
+        assert_eq!(cases.len(), 45);
         for (route, methods, gate) in cases {
             for method in *methods {
                 assert_eq!(gate_for(*route, method), *gate, "{route:?} {method}");
