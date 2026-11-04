@@ -1448,6 +1448,33 @@ describe("scheduler section tabs", () => {
     ]);
   });
 
+  it("reads New Scheduler in the tab row and the page-wide count", async () => {
+    function placementPage(inRow: boolean, total: number) {
+      const button = (shown: boolean) => fake({ count: shown ? 1 : 0, visible: shown });
+      return pageOf({
+        getByRole: (role: string) => {
+          if (role === "navigation")
+            return fake({
+              locate: (selector: string) =>
+                selector === "xpath=.."
+                  ? fake({ role: (inner: string) => (inner === "button" ? button(inRow) : absent()) })
+                  : absent(),
+            });
+          if (role === "button") return fake({ count: total });
+          return absent();
+        },
+      });
+    }
+    await expect(new WebNewDriver(placementPage(true, 1)).schedulerSectionNewPlacement()).resolves.toEqual({
+      inTabRow: true,
+      total: 1,
+    });
+    await expect(new WebNewDriver(placementPage(false, 0)).schedulerSectionNewPlacement()).resolves.toEqual({
+      inTabRow: false,
+      total: 0,
+    });
+  });
+
   it("lands the bare path on the calendar and follows both tabs", async () => {
     const page = tabsPage("Calendar");
     const driver = new WebNewDriver(page);
