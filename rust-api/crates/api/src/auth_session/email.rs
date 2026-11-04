@@ -207,9 +207,17 @@ struct Provenance {
     header_token: Option<String>,
     session_cookie: Option<String>,
     content_type: Option<String>,
+    /// `process_view`'s Origin/Referer verdict (NEWPIDASH-12), computed
+    /// off the headers before any token check.
+    csrf_origin: Result<(), String>,
 }
 
-fn provenance(headers: &HeaderMap, peer_ip: Option<String>, cookie_name: &str) -> Provenance {
+fn provenance(
+    headers: &HeaderMap,
+    peer_ip: Option<String>,
+    cookie_name: &str,
+    settings: &pidash_db::config::Settings,
+) -> Provenance {
     let cookie_header = headers
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
@@ -231,6 +239,7 @@ fn provenance(headers: &HeaderMap, peer_ip: Option<String>, cookie_name: &str) -
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned),
+        csrf_origin: super::csrf_origin_gate(settings, headers),
     }
 }
 
@@ -261,6 +270,7 @@ fn form_pairs(content_type: Option<&str>, body: &[u8]) -> Vec<(String, String)> 
 /// never renders the reason, so these are log labels only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CsrfDenial {
+    BadOrigin,
     NoCookie,
     BadToken,
 }
@@ -285,12 +295,16 @@ fn csrf_check_token(secret: &str, token: &str, source: TokenSource) -> Result<()
 }
 
 /// Mirror `CsrfViewMiddleware.process_view` for these endpoints: the
-/// `csrftoken` cookie must be present and the request token must
+/// Origin (or, on HTTPS, Referer) must verify first (NEWPIDASH-12), then
+/// the `csrftoken` cookie must be present and the request token must
 /// check out. A 64-char cookie unmasks first (`_get_secret`); a
 /// malformed cookie secret can never match (Django would mint a fresh
 /// secret and then fail the compare the same way); the failure page
 /// never renders the reason either way.
 fn csrf_gate(prov: &Provenance, pairs: &[(String, String)]) -> Result<(), CsrfDenial> {
+    if prov.csrf_origin.is_err() {
+        return Err(CsrfDenial::BadOrigin);
+    }
     let Some(cookie) = prov.csrf_cookie.as_deref() else {
         return Err(CsrfDenial::NoCookie);
     };
@@ -348,9 +362,10 @@ fn json_400(pairs: &[(String, serde_json::Value)]) -> Response {
 }
 
 /// Live 429 body: the `auth_exception_handler` rewrite (5900 dict).
-/// `Vary: Cookie`, same as above.
-fn throttle_429() -> Response {
-    (
+/// `Vary: Cookie`, same as above, plus the ceiled `Retry-After` when the
+/// wait is known and nonzero (`guards::retry_after_secs`).
+fn throttle_429(wait: Option<f64>) -> Response {
+    let mut response = (
         StatusCode::TOO_MANY_REQUESTS,
         [
             (header::CONTENT_TYPE, "application/json"),
@@ -358,7 +373,13 @@ fn throttle_429() -> Response {
         ],
         guards_kernel::throttle_denied_json(),
     )
-        .into_response()
+        .into_response();
+    if let Some(secs) = guards_kernel::retry_after_secs(wait) {
+        if let Ok(value) = header::HeaderValue::from_str(&secs.to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    response
 }
 
 /// DRF `UnsupportedMediaType` (`exceptions.py:217`): the request's
@@ -565,7 +586,7 @@ fn display_name_for(email: &str) -> String {
 // it directly.
 
 /// `save_user_data` (`base.py:220-234`): the login stamps plus the
-/// `is_active` flip in one `UPDATE`. The activation mail is published by
+/// `is_active` flip and the `User.save()` column effects in one `UPDATE`. The activation mail is published by
 /// the caller BEFORE this write (`base.py:230` precedes `:232-233`), so a
 /// broker failure 500s with the user still inactive and the mail is
 /// re-sent on the next login (QUIRK-activation-order).
@@ -586,11 +607,13 @@ async fn save_user_data(
             login_uagent: user_agent.as_deref(),
             avatar: None,
             avatar_asset_id: None,
-            display_name: None,
-            is_staff: None,
-            // The email stamps never bump `updated_at` (preserved verbatim;
-            // see `domain::identity`).
-            touch_updated_at: false,
+            // `user.save()` (`base.py:232`) is a full save, so every
+            // `User.save()` effect applies (`user.py:169-187`): the
+            // empty-`display_name` backfill, the superuser staff sync and
+            // the `auto_now` `updated_at` bump (NEWPIDASH-17).
+            display_name: Some(identity::DisplayNameUpdate::BackfillCase),
+            is_staff: Some(identity::StaffSync::OrSuperuser),
+            touch_updated_at: true,
             rotated_token: &token,
             now,
         },
@@ -675,11 +698,14 @@ async fn redirection_path(
     if let Some((slug,)) = fallback {
         return Ok(slug);
     }
-    let invites: (i64,) =
-        sqlx::query_as(r#"SELECT COUNT(*) FROM "workspace_member_invites" WHERE "email" = $1"#)
-            .bind(user_email)
-            .fetch_one(pool)
-            .await?;
+    // `redirection_path.py:42` reads through the soft-delete manager, so
+    // revoked invites do not count toward the invitations fallback.
+    let invites: (i64,) = sqlx::query_as(
+        r#"SELECT COUNT(*) FROM "workspace_member_invites" WHERE "email" = $1 AND "deleted_at" IS NULL"#,
+    )
+    .bind(user_email)
+    .fetch_one(pool)
+    .await?;
     if invites.0 > 0 {
         return Ok("invitations".to_owned());
     }
@@ -703,7 +729,7 @@ async fn accepted_workspace_invites(
         r#"SELECT i."workspace_id", i."role", w."slug"
            FROM "workspace_member_invites" i
            JOIN "workspaces" w ON w."id" = i."workspace_id"
-           WHERE i."email" = $1 AND i."accepted" = true
+           WHERE i."email" = $1 AND i."accepted" = true AND i."deleted_at" IS NULL
            ORDER BY i."created_at" DESC"#,
     )
     .bind(email)
@@ -722,7 +748,7 @@ async fn accepted_project_invites(
     // `role` is `smallint` (see above): `i16`, not `i32`.
     let rows: Vec<(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)> = sqlx::query_as(
         r#"SELECT "workspace_id", "project_id", "role", "created_by_id"
-           FROM "project_member_invites" WHERE "email" = $1 AND "accepted" = true
+           FROM "project_member_invites" WHERE "email" = $1 AND "accepted" = true AND "deleted_at" IS NULL
            ORDER BY "created_at" DESC"#,
     )
     .bind(email)
@@ -890,7 +916,7 @@ async fn insert_project_arm_project_members(
 /// rows as the bulk) and publishes one `track_event.delay` per invite;
 /// the project arm replays Django's two bulk statements (all
 /// `workspace_members` rows first, then the `project_members` bulk with
-/// each invite's `project_id`); then the invite deletes. Cache
+/// each invite's `project_id`); then the invite soft-deletes. Cache
 /// invalidation is a documented no-op (see the module docs). Each
 /// statement is its own autocommit write — no `transaction.atomic`
 /// anywhere — so a later failure keeps the earlier rows, exactly like
@@ -950,18 +976,24 @@ async fn post_user_auth_workflow(
     // `workspace_members` row before the `project_members` bulk below.
     insert_project_arm_workspace_members(pool, &project_invites, user_id, now).await?;
     insert_project_arm_project_members(pool, &project_invites, user_id, now).await?;
+    // Soft-delete (`SoftDeletionQuerySet.delete()`, `db/mixins.py:48-53`):
+    // stamp `deleted_at` instead of removing rows (magic.rs twin).
     sqlx::query(
-        r#"DELETE FROM "workspace_member_invites" WHERE "email" = $1 AND "accepted" = true"#,
+        r#"UPDATE "workspace_member_invites" SET "deleted_at" = $1 WHERE "email" = $2 AND "accepted" = true AND "deleted_at" IS NULL"#,
     )
+    .bind(now)
     .bind(user_email)
     .execute(pool)
     .await
     .map_err(|_| server_error())?;
-    sqlx::query(r#"DELETE FROM "project_member_invites" WHERE "email" = $1 AND "accepted" = true"#)
-        .bind(user_email)
-        .execute(pool)
-        .await
-        .map_err(|_| server_error())?;
+    sqlx::query(
+        r#"UPDATE "project_member_invites" SET "deleted_at" = $1 WHERE "email" = $2 AND "accepted" = true AND "deleted_at" IS NULL"#,
+    )
+    .bind(now)
+    .bind(user_email)
+    .execute(pool)
+    .await
+    .map_err(|_| server_error())?;
     Ok(())
 }
 
@@ -1213,7 +1245,7 @@ fn email_request(
 ) -> EmailRequest {
     let hosts = host_ctx(state);
     let cookie_name = state.settings().session.cookie_name.clone();
-    let prov = provenance(headers, peer_ip, &cookie_name);
+    let prov = provenance(headers, peer_ip, &cookie_name, state.settings());
     let pairs = form_pairs(prov.content_type.as_deref(), body);
     let next_path = pairs
         .iter()
@@ -1286,8 +1318,10 @@ async fn provider_outcome(
                 .await
                 .map_err(|_| server_error())?;
             if enable_signup.as_deref() == Some("0") {
+                // `adapter/base.py:111` reads through the soft-delete
+                // manager: a revoked invite does not satisfy the gate.
                 let invited: Option<(uuid::Uuid,)> = sqlx::query_as(
-                    r#"SELECT "id" FROM "workspace_member_invites" WHERE "email" = $1 LIMIT 1"#,
+                    r#"SELECT "id" FROM "workspace_member_invites" WHERE "email" = $1 AND "deleted_at" IS NULL LIMIT 1"#,
                 )
                 .bind(normalized)
                 .fetch_optional(pool)
@@ -1826,9 +1860,11 @@ async fn resolve_session_user(
 /// (`rate_limit.py:17-19` + `throttling.py:109-132` via the guards
 /// kernel): trim entries older than the window, allow iff fewer than
 /// 30 remain, recording `now` on allow with a 60s TTL (DRF caches
-/// with `timeout=duration`). Redis errors fall back to the
-/// process-local governor.
-async fn check_email_throttle(state: &AppState, ident: &str) -> bool {
+/// with `timeout=duration`). Denial carries the DRF wait for the
+/// `Retry-After` header (NEWPIDASH-16). Redis errors fall back to the
+/// process-local governor, whose denial carries no wait (unknown waits
+/// omit the header, like DRF).
+async fn check_email_throttle(state: &AppState, ident: &str) -> Result<(), Option<f64>> {
     let key = guards_kernel::throttle_cache_key(AUTHENTICATION_THROTTLE.scope, ident);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1855,13 +1891,22 @@ async fn check_email_throttle(state: &AppState, ident: &str) -> bool {
                 .await
                 .is_ok()
             {
-                return true;
+                return Ok(());
             }
         } else {
-            return false;
+            return Err(guards_kernel::throttle_wait(
+                &decision.history,
+                AUTHENTICATION_THROTTLE.requests,
+                AUTHENTICATION_THROTTLE.window_secs,
+                now,
+            ));
         }
     }
-    throttle_check(AUTHENTICATION_THROTTLE, ident)
+    if throttle_check(AUTHENTICATION_THROTTLE, ident) {
+        Ok(())
+    } else {
+        Err(None)
+    }
 }
 
 async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Response {
@@ -1907,6 +1952,11 @@ async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Res
     // `None` before the CSRF check; authenticated callers without a
     // valid token get the 403 (`authentication.py:124-148`).
     if authenticated {
+        // `process_view` verifies Origin/Referer before the cookie
+        // (NEWPIDASH-12).
+        if let Err(reason) = super::csrf_origin_gate(state.settings(), &parts.headers) {
+            return csrf_failure_json(&reason);
+        }
         let csrf_cookie = session_kernel::cookie_value(cookie_header, CSRF_COOKIE_NAME);
         let header_token = parts
             .headers
@@ -1931,8 +1981,8 @@ async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Res
         // DRF `get_ident`, not the first-entry `client_ip` stamp:
         // the whole X-Forwarded-For chain is the bucket.
         let ident = throttle_ident(&parts.headers, peer);
-        if !check_email_throttle(state, &ident).await {
-            return throttle_429();
+        if let Err(wait) = check_email_throttle(state, &ident).await {
+            return throttle_429(wait);
         }
     }
     if !instance_is_setup(pool).await.unwrap_or(false) {
@@ -2047,7 +2097,7 @@ async fn serve_signout(state: &AppState, req: axum::extract::Request, space: boo
         .extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|info| info.0.ip().to_string());
-    let prov = provenance(&parts.headers, peer, &cookie_name);
+    let prov = provenance(&parts.headers, peer, &cookie_name, state.settings());
     if csrf_gate(&prov, &form_pairs(prov.content_type.as_deref(), &body)).is_err() {
         return csrf_failure_response(render_csrf_failure(&hosts.root_base));
     }
@@ -2137,7 +2187,52 @@ mod tests {
             header_token: token.map(str::to_owned),
             session_cookie: None,
             content_type: Some("application/x-www-form-urlencoded".to_owned()),
+            csrf_origin: Ok(()),
         }
+    }
+
+    #[test]
+    fn csrf_gate_rejects_a_failed_origin_before_the_token() {
+        // NEWPIDASH-12: a matching cookie/token pair does not rescue a
+        // foreign Origin, and the Origin verdict wins over a missing cookie.
+        let secret = "abcdefghijklmnopqrstuvwxyz012345";
+        let pairs: Vec<(String, String)> = vec![];
+        let denied = Err(
+            "Origin checking failed - https://evil.example does not match any trusted origins."
+                .to_owned(),
+        );
+        let mut prov = prov_with(Some(secret), Some(secret));
+        assert_eq!(csrf_gate(&prov, &pairs), Ok(()));
+        prov.csrf_origin = denied.clone();
+        assert_eq!(csrf_gate(&prov, &pairs), Err(CsrfDenial::BadOrigin));
+        let mut prov = prov_with(None, None);
+        prov.csrf_origin = denied;
+        assert_eq!(csrf_gate(&prov, &pairs), Err(CsrfDenial::BadOrigin));
+    }
+
+    #[test]
+    fn provenance_runs_the_origin_gate() {
+        let settings = pidash_db::config::Settings::test_defaults();
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "app.test".parse().unwrap());
+        headers.insert("origin", "http://app.test".parse().unwrap());
+        assert_eq!(
+            provenance(&headers, None, "session-id", &settings).csrf_origin,
+            Ok(())
+        );
+        headers.insert("origin", "https://evil.example".parse().unwrap());
+        assert_eq!(
+            provenance(&headers, None, "session-id", &settings).csrf_origin,
+            Err(
+                "Origin checking failed - https://evil.example does not match any trusted origins."
+                    .to_owned()
+            )
+        );
+        headers.remove("origin");
+        assert_eq!(
+            provenance(&headers, None, "session-id", &settings).csrf_origin,
+            Ok(())
+        );
     }
 
     #[test]

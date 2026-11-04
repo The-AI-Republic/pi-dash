@@ -34,7 +34,9 @@ use crate::v1_cycles_modules::json::{
 };
 use pidash_compat::response::json_response as status_response;
 use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
-use pidash_services::domain::issues::to_spaced_json;
+use pidash_services::domain::issues::{
+    bulk_update_issue_scalars, to_spaced_json, BulkIssueScalars,
+};
 
 /// Bulk path in `app/urls/issue.py:119-123` form.
 pub const BULK_OPERATION_PATH: &str =
@@ -1097,24 +1099,21 @@ async fn apply_bulk_operation(
     let mut txn = base.pool.begin().await.map_err(|_| Denial::ServerError)?;
     if !issues.is_empty() {
         for issue in issues {
-            let state_id = properties.state_id.unwrap_or(issue.state_id);
-            let priority = properties.priority.as_deref().unwrap_or(&issue.priority);
-            let start_date = properties.start_date.unwrap_or(issue.start_date);
-            let target_date = properties.target_date.unwrap_or(issue.target_date);
-            let estimate_point_id = properties.estimate_point.unwrap_or(issue.estimate_point_id);
-            sqlx::query(
-                r#"UPDATE issues SET state_id = $1, priority = $2, start_date = $3,
-                          target_date = $4, estimate_point_id = $5, updated_at = $6
-                   WHERE id = $7"#,
+            bulk_update_issue_scalars(
+                &mut *txn,
+                &BulkIssueScalars {
+                    id: issue.id,
+                    state_id: properties.state_id.unwrap_or(issue.state_id),
+                    priority: properties
+                        .priority
+                        .clone()
+                        .unwrap_or_else(|| issue.priority.clone()),
+                    start_date: properties.start_date.unwrap_or(issue.start_date),
+                    target_date: properties.target_date.unwrap_or(issue.target_date),
+                    estimate_point_id: properties.estimate_point.unwrap_or(issue.estimate_point_id),
+                },
+                now,
             )
-            .bind(state_id)
-            .bind(priority)
-            .bind(start_date)
-            .bind(target_date)
-            .bind(estimate_point_id)
-            .bind(now)
-            .bind(issue.id)
-            .execute(&mut *txn)
             .await
             .map_err(write_denial)?;
         }

@@ -34,6 +34,7 @@ HTTP_SUITES_TXT = CT / "HTTP_SUITES.txt"
 IGNORES_TXT = CT / "TASK_ORACLE_IGNORES.txt"
 WORKER_SUITES_TXT = CT / "WORKER_SUITES.txt"
 ASGI_SUITES_TXT = CT / "ASGI_SUITES.txt"
+PRODUCTION_SUITES_TXT = CT / "PRODUCTION_SUITES.txt"
 KNOWN_FAILURES_MD = CT / "KNOWN_RUST_FAILURES.md"
 
 # Suite directories that never drive HTTP, hence never join the Rust matrix.
@@ -69,7 +70,9 @@ TASK_ONLY_DIRS = frozenset(
     }
 )
 
-ENTRY_RE = re.compile(r"^-\s+`([A-Za-z0-9_]+)`:\s+(PIDASHCONV-\d+)\b")
+# The fix issue may live in any Pi Dash project (PIDASHCONV-<n> from the
+# port, NEWPIDASH-<n> since): an uppercase project key, a dash, a number.
+ENTRY_RE = re.compile(r"^-\s+`([A-Za-z0-9_]+)`:\s+([A-Z][A-Z0-9]*-\d+)\b")
 
 
 def read_list(path: Path) -> list[str]:
@@ -91,6 +94,10 @@ def worker_suites() -> list[str]:
 
 def asgi_suites() -> list[str]:
     return read_list(ASGI_SUITES_TXT)
+
+
+def production_suites() -> list[str]:
+    return read_list(PRODUCTION_SUITES_TXT)
 
 
 def on_disk_suite_dirs() -> set[str]:
@@ -163,6 +170,9 @@ def cmd_check() -> int:
     for suite in asgi_suites():
         if suite not in listed:
             errors.append(f"{ASGI_SUITES_TXT.name}: `{suite}` is not a listed suite")
+    for suite in production_suites():
+        if suite not in listed:
+            errors.append(f"{PRODUCTION_SUITES_TXT.name}: `{suite}` is not a listed suite")
     try:
         known = known_failures()
     except ValueError as exc:
@@ -182,6 +192,7 @@ def cmd_check() -> int:
         f"{len(read_list(IGNORES_TXT))} ignored files, "
         f"{len(worker_suites())} worker suites, "
         f"{len(asgi_suites())} asgi suites, "
+        f"{len(production_suites())} production suites, "
         f"{len(known)} known failures"
     )
     return 0

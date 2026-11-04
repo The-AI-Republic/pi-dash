@@ -13,7 +13,10 @@ import { schedulerHarness, seatMember } from "../support";
 const ROWS = ["AGT-002"];
 
 test(
-  specTitle(ROWS, "create persists and refreshes; invalid and failing submits stay open"),
+  specTitle(
+    ROWS,
+    "create persists and refreshes; presets offered with first as default; invalid and failing submits stay open"
+  ),
   { tag: specTags(ROWS) },
   async ({ driver }) => {
     const harness = await test.step("fresh owner plus workspace", async () => schedulerHarness("parity-agt2"));
@@ -55,6 +58,14 @@ test(
         color: "#8b5cf6",
         is_enabled: true,
       });
+    });
+
+    await test.step("a fresh dialog defaults to the first preset swatch", async () => {
+      await driver.schedulerOpenCreate();
+      await expect
+        .poll(async () => (await driver.schedulerDefinitionValues()).color, { timeout: 30_000 })
+        .toBe("#3b82f6");
+      await driver.schedulerCloseDefinition();
     });
 
     await test.step("a malformed handle is rejected inline and keeps the dialog open", async () => {

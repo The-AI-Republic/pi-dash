@@ -107,16 +107,18 @@ test(
     });
 
     await test.step("repeat count and unit serialize a bare frequency", async () => {
-      // The unit control offers no sub-daily cadence: the builder's
-      // smallest repeat is a day, as §14 requires. The old widget lists
-      // does-not-repeat last instead of first.
+      // The new builder offers Hour ahead of Day (DIFF-2, new-system-only);
+      // the old widget has no sub-daily cadence and lists does-not-repeat
+      // last instead of first.
       const units = (await driver.schedulerRecurrenceFacts()).unitOptions;
       expect(units).toEqual(
         driver.target === "web_new"
-          ? ["none", "day", "week", "month", "year"]
+          ? ["none", "hour", "day", "week", "month", "year"]
           : ["day", "week", "month", "year", "none"]
       );
-      expect(units.filter((unit) => /hour|minute|second/i.test(unit))).toEqual([]);
+      expect(units.filter((unit) => /hour|minute|second/i.test(unit))).toEqual(
+        driver.target === "web_new" ? ["hour"] : []
+      );
       await driver.schedulerRecurrenceAct({ kind: "interval", value: 3 });
       await expect.poll(async () => (await driver.schedulerRecurrenceFacts()).rawValue).toBe("FREQ=DAILY;INTERVAL=3");
       // A typed zero or negative clamps to one, which serializes without

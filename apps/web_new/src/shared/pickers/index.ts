@@ -39,6 +39,8 @@ export {
 } from "./reference.js";
 export { MemberPicker } from "./MemberPicker.js";
 export type { MemberPickerProps } from "./MemberPicker.js";
+export { PropertyChip } from "./PropertyChip.js";
+export type { PropertyChipProps } from "./PropertyChip.js";
 export { selectMemberOptions } from "./members.js";
 export type { MemberOption, MemberOptionsInput } from "./members.js";
 export { StateGlyph, StatePicker } from "./StatePicker.js";

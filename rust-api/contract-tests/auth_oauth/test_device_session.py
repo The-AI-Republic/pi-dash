@@ -206,13 +206,6 @@ def test_workspaces_empty_and_inactive_membership(client: httpx.Client, ctx):
         )
 
 
-def test_workspaces_wrong_method(client: httpx.Client, ctx):
-    raw = mint_api_token(ctx["u1"]["id"])
-    resp = client.post("/api/v1/auth/workspaces/", headers={"X-Api-Key": raw}, json={})
-    assert resp.status_code == 405, (resp.status_code, resp.text[:200])
-    assert resp.json() == METHOD_NOT_ALLOWED("POST")
-
-
 # ---------------------------------------------------------------------------
 # machine-token exchange
 # ---------------------------------------------------------------------------
@@ -274,13 +267,6 @@ def test_machine_token_bad_json_and_scalar_body(client: httpx.Client, ctx):
         json={"workspace_slug": 123, "dev_machine_id": str(uuid.uuid4()), "host_label": "h"},
     )
     assert resp.status_code == 500, (resp.status_code, resp.text[:200])
-
-
-def test_machine_token_wrong_method(client: httpx.Client, ctx):
-    raw = mint_api_token(ctx["u1"]["id"])
-    resp = client.get("/api/v1/auth/machine-token/", headers={"X-Api-Key": raw})
-    assert resp.status_code == 405, (resp.status_code, resp.text[:200])
-    assert resp.json() == METHOD_NOT_ALLOWED("GET")
 
 
 def test_machine_token_valid_exchange(client: httpx.Client, ctx):
@@ -446,8 +432,60 @@ def test_revoke_machine_token(client: httpx.Client, ctx):
     assert resp.json() == INVALID_TOKEN
 
 
-def test_revoke_wrong_method(client: httpx.Client, ctx):
+# ---------------------------------------------------------------------------
+# G6 denial matrix (NEWPIDASH-31)
+# ---------------------------------------------------------------------------
+
+# Wrong-method denials on the three device-session routes (parity gap G6,
+# EXPECTED.md): the Rust handlers answer locally in DRF order — the auth
+# gate first (401 anonymous / 403 bad token), then the 405 — because the
+# token lives in Rust's database and a proxied verdict would fail Django's
+# copy of the gate before its own method check (PIDASHCONV-1478). This
+# matrix pins the denial wire shape (status, exact body, Allow) for every
+# denied (method, path) cell, against both backends.
+#
+# The GET view's Allow includes HEAD: Django's View.setup binds head=get
+# at request time, so live Django stamps "GET, HEAD, OPTIONS" (probed on
+# the real view class; PIDASHCONV-1478 read _allowed_methods pre-setup and
+# missed the binding). HEAD asserts status + Allow only: whether the 405
+# body rides the wire depends on the server, not the view.
+DENIED = {
+    "/api/v1/auth/workspaces/": {
+        "allow": "GET, HEAD, OPTIONS",
+        "methods": ("POST", "PUT", "PATCH", "DELETE"),
+    },
+    "/api/v1/auth/machine-token/": {
+        "allow": "POST, OPTIONS",
+        "methods": ("GET", "PUT", "PATCH", "DELETE", "HEAD"),
+    },
+    "/api/v1/auth/revoke/": {
+        "allow": "POST, OPTIONS",
+        "methods": ("GET", "PUT", "PATCH", "DELETE", "HEAD"),
+    },
+}
+
+
+def _denial_cases():
+    for path, spec in DENIED.items():
+        for method in spec["methods"]:
+            yield pytest.param(path, method, id=f"{method} {path}")
+
+
+@pytest.mark.parametrize(("path", "method"), list(_denial_cases()))
+def test_denied_matrix(client: httpx.Client, ctx, path, method):
+    """Authenticated wrong-method: 405 + exact body + Allow per cell."""
     raw = mint_api_token(ctx["u1"]["id"])
-    resp = client.get("/api/v1/auth/revoke/", headers={"X-Api-Key": raw})
-    assert resp.status_code == 405, (resp.status_code, resp.text[:200])
-    assert resp.json() == METHOD_NOT_ALLOWED("GET")
+    res = client.request(method, path, headers={"X-Api-Key": raw})
+    assert res.status_code == 405, (path, method, res.status_code, res.text[:200])
+    assert res.headers["allow"] == DENIED[path]["allow"], (path, method)
+    if method != "HEAD":
+        assert res.json() == METHOD_NOT_ALLOWED(method), (path, method)
+
+
+@pytest.mark.parametrize("path", list(DENIED))
+def test_denied_anonymous_401(client: httpx.Client, path):
+    """Anonymous wrong-method answers 401 at the gate (DRF order)."""
+    method = DENIED[path]["methods"][0]
+    res = client.request(method, path)
+    assert res.status_code == 401, (path, method, res.status_code, res.text[:200])
+    assert res.json() == UNAUTHENTICATED, (path, method)

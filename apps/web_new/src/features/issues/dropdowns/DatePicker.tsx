@@ -12,6 +12,7 @@ import { IconButton, Popover, cn } from "@pidash/kit";
 import { CalendarDays, ChevronLeft, ChevronRight, X } from "lucide-react";
 import * as React from "react";
 
+import { PropertyChip } from "../../../shared/pickers/PropertyChip.js";
 import {
   CAPTION_YEAR_MAX,
   CAPTION_YEAR_MIN,
@@ -167,6 +168,8 @@ export interface DatePickerProps {
   testId?: string | undefined;
   /** Explicit keyboard position inside a dialog's tab order. */
   tabIndex?: number | undefined;
+  /** Compact chip trigger for the create dialog's property row. */
+  chip?: boolean;
   /** Fully custom trigger; overrides the default value button. */
   trigger?: React.ReactElement<Record<string, unknown>> | undefined;
   /** Controlled popup state; omit for the picker's own state. */
@@ -188,6 +191,7 @@ export function DatePicker({
   overdue = false,
   testId = "date-picker",
   tabIndex,
+  chip = false,
   trigger,
   open: controlledOpen,
   onOpenChange,
@@ -200,6 +204,34 @@ export function DatePicker({
   }
   const normalizedStart = normalizeWeekStart(weekStart);
   const showClear = clearable && value !== null && !disabled;
+  const filled = value !== null;
+  const chipText = filled ? formatDay(value) : placeholder;
+  const defaultTrigger = chip ? (
+    <PropertyChip
+      label={filled ? `${label}: ${chipText}` : label}
+      icon={<CalendarDays size={14} strokeWidth={2} aria-hidden="true" className="shrink-0" />}
+      text={chipText}
+      placeholder={!filled}
+      {...(filled && overdue ? { textClassName: "text-(--danger)" } : {})}
+      {...(filled ? { title: chipText } : {})}
+      disabled={disabled}
+      data-testid={`${testId}-trigger`}
+    />
+  ) : (
+    <button
+      type="button"
+      aria-label={label}
+      disabled={disabled}
+      data-testid={`${testId}-trigger`}
+      className={cn(
+        "text-body inline-flex items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:hover:bg-transparent",
+        value === null ? "text-(--text-muted)" : overdue ? "text-(--danger)" : "text-(--text)"
+      )}
+    >
+      <CalendarDays size={14} strokeWidth={2} aria-hidden="true" className="shrink-0" />
+      {value === null ? placeholder : formatDay(value)}
+    </button>
+  );
 
   return (
     <div
@@ -207,27 +239,7 @@ export function DatePicker({
       {...(tabIndex === undefined ? {} : { tabIndex })}
       className="group inline-flex items-center gap-(--space-1)"
     >
-      <Popover
-        open={open}
-        onOpenChange={setOpen}
-        trigger={
-          trigger ?? (
-            <button
-              type="button"
-              aria-label={label}
-              disabled={disabled}
-              data-testid={`${testId}-trigger`}
-              className={cn(
-                "text-body inline-flex items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:hover:bg-transparent",
-                value === null ? "text-(--text-muted)" : overdue ? "text-(--danger)" : "text-(--text)"
-              )}
-            >
-              <CalendarDays size={14} strokeWidth={2} aria-hidden="true" className="shrink-0" />
-              {value === null ? placeholder : formatDay(value)}
-            </button>
-          )
-        }
-      >
+      <Popover open={open} onOpenChange={setOpen} trigger={trigger ?? defaultTrigger}>
         <DateCalendar
           value={value}
           min={min}

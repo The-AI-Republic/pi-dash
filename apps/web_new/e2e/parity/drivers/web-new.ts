@@ -153,6 +153,7 @@ import type {
   RunnersEditPodForm,
   RunnersPodTile,
   RunnersRail,
+  RunnersRailGeometry,
   RunnersRowActions,
   RunnersTab,
   RunnersTableRow,
@@ -1481,6 +1482,20 @@ export class WebNewDriver implements ParityDriver {
       .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
+  async submitEmailExpectingError(email: string): Promise<number> {
+    const page = this.page;
+    const emailField = page.getByPlaceholder("name@company.com").first();
+    await emailField.fill(email);
+    const emailForm = page.locator("form", { has: emailField });
+    const [response] = await Promise.all([
+      page.waitForResponse((res) => res.url().includes("/auth/email-check/"), {
+        timeout: WebNewDriver.WAIT_MS,
+      }),
+      this.cardSubmit(emailForm).click(),
+    ]);
+    return response.status();
+  }
+
   async submitPassword(password: string): Promise<void> {
     const page = this.page;
     const passwordField = page.getByPlaceholder("Enter password");
@@ -1780,6 +1795,16 @@ export class WebNewDriver implements ParityDriver {
     await this.page.goto(`/accounts/reset-password?${query.toString()}`);
     // Exact: the show/hide toggle ("Show new password") would also match.
     await this.page.getByLabel("New password", { exact: true }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async fillNewPasswordFields(password: string, confirmPassword: string): Promise<void> {
+    await this.page.getByLabel("New password", { exact: true }).fill(password);
+    await this.page.getByLabel("Confirm password", { exact: true }).fill(confirmPassword);
+  }
+
+  async newPasswordSubmitEnabled(): Promise<boolean> {
+    const form = this.page.locator("form", { has: this.page.getByLabel("New password", { exact: true }) });
+    return this.cardSubmit(form).isEnabled();
   }
 
   async submitNewPassword(password: string, confirmPassword: string): Promise<void> {
@@ -7664,6 +7689,55 @@ export class WebNewDriver implements ParityDriver {
     return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
+  /** The overflow slide-over row carrying a project name. */
+  private overflowRow(projectName: string): Locator {
+    return this.page
+      .getByTestId("projects-overflow-panel")
+      .locator("li[data-overflow-row]")
+      .filter({ hasText: projectName })
+      .first();
+  }
+
+  async isOverflowRowOpen(projectName: string): Promise<boolean> {
+    const row = this.overflowRow(projectName);
+    const toggle = row.getByTestId("project-row-toggle");
+    if ((await toggle.count()) > 0) {
+      return (await toggle.first().getAttribute("aria-expanded")) === "true";
+    }
+    return (await row.getByTestId("project-subnav-link").count()) > 0;
+  }
+
+  async setOverflowRowOpen(projectName: string, open: boolean): Promise<void> {
+    // Same drive-until-agree as the sidebar rows: the panel mounts its
+    // rows asynchronously after the projects fetch.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      if ((await this.isOverflowRowOpen(projectName)) === open) return;
+      await this.overflowRow(projectName).getByTestId("project-row-toggle").click({ timeout: 10_000 });
+    }
+    await expect.poll(() => this.isOverflowRowOpen(projectName), { timeout: 10_000 }).toBe(open);
+  }
+
+  async openOverflowQuickMenu(projectName: string): Promise<void> {
+    const row = this.overflowRow(projectName);
+    await row.hover();
+    await row.getByTestId("project-row-menu").click();
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: 10_000 });
+  }
+
+  async overflowSubnavLinks(): Promise<{ text: string; href: string | null }[]> {
+    const links = this.page.getByTestId("projects-overflow-panel").getByTestId("project-subnav-link");
+    const count = await links.count();
+    const rows: { text: string; href: string | null }[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const link = links.nth(index);
+      rows.push({
+        text: ((await link.innerText().catch(() => "")) ?? "").trim(),
+        href: await link.getAttribute("href").catch(() => null),
+      });
+    }
+    return rows;
+  }
+
   async isOverflowEmptyStateVisible(): Promise<boolean> {
     const empty = this.page.getByTestId("projects-overflow-empty");
     return (await empty.count()) > 0 && (await empty.first().isVisible());
@@ -9043,6 +9117,17 @@ export class WebNewDriver implements ParityDriver {
     // The inline panel closes on outside mousedown; a top-left click
     // lands far from the centered top-bar field.
     await this.page.mouse.click(5, 5);
+  }
+
+  async topBarSearchWidth(): Promise<number | null> {
+    const box = await this.topBarSearchInput().boundingBox();
+    return box?.width ?? null;
+  }
+
+  async topBarSearchRect(): Promise<{ x: number; width: number } | null> {
+    const box = await this.topBarSearchInput().boundingBox();
+    if (box === null) return null;
+    return { x: box.x, width: box.width };
   }
 
   // Shared empty-state kit tiers (NEWFRONT-294, SHELL-104). The reader
@@ -13727,6 +13812,21 @@ export class WebNewDriver implements ParityDriver {
     };
   }
 
+  async runnersRailGeometry(): Promise<RunnersRailGeometry> {
+    const rail = this.runnersRailRoot();
+    await rail.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // The content pane is the rail's sibling main in both apps.
+    const railBox = await rail.boundingBox();
+    const contentBox = await rail.locator("xpath=../main").first().boundingBox();
+    if (railBox === null || contentBox === null) throw new Error("[parity] runners rail or content pane has no box.");
+    return {
+      viewportHeight: await this.page.evaluate(() => window.innerHeight),
+      railTop: railBox.y,
+      railBottom: railBox.y + railBox.height,
+      contentBottom: contentBox.y + contentBox.height,
+    };
+  }
+
   // Pod tiles, the create/edit modals and the delete confirm (NEWFRONT-542,
   // RUN-012–015). Tiles are the labelled filter buttons; each sits in a
   // container with its overflow menu. The dialogs are the area's own; the
@@ -14355,7 +14455,16 @@ export class WebNewDriver implements ParityDriver {
     if (input.handle !== undefined) await dialog.getByLabel("Handle").fill(input.handle);
     if (input.description !== undefined) await dialog.getByLabel("Description").fill(input.description);
     if (input.prompt !== undefined) await dialog.getByLabel("Base prompt").fill(input.prompt);
-    if (input.color !== undefined) await dialog.getByLabel("Color").fill(input.color);
+    if (input.color !== undefined) {
+      // Presets are one-click swatches; anything else goes through the
+      // synced custom-color input behind the "More" overflow.
+      const swatch = dialog.getByRole("button", { name: `Scheduler color ${input.color.toLowerCase()}` });
+      if ((await swatch.count()) > 0) {
+        await swatch.click();
+      } else {
+        await dialog.getByLabel("Custom color").fill(input.color);
+      }
+    }
   }
 
   async schedulerSetDefinitionEnabled(enabled: boolean): Promise<void> {
@@ -14372,7 +14481,7 @@ export class WebNewDriver implements ParityDriver {
       handle: await dialog.getByLabel("Handle").inputValue(),
       description: await dialog.getByLabel("Description").inputValue(),
       prompt: await dialog.getByLabel("Base prompt").inputValue(),
-      color: await dialog.getByLabel("Color").inputValue(),
+      color: await dialog.getByLabel("Custom color").inputValue(),
       enabled: (await toggle.getAttribute("aria-checked")) === "true",
     };
   }
@@ -41311,6 +41420,24 @@ export class WebNewDriver implements ParityDriver {
 
   async wsSettingsWideViewport(): Promise<void> {
     await this.page.setViewportSize({ width: 1280, height: 800 });
+  }
+  async wsSettingsContentBox(): Promise<{
+    x: number;
+    width: number;
+    parentX: number;
+    parentWidth: number;
+  } | null> {
+    const column = this.page.getByTestId("settings-page-content");
+    if ((await column.count()) === 0) return null;
+    const box = await column.boundingBox();
+    const parentBox = await column.locator("xpath=..").boundingBox();
+    if (box === null || parentBox === null) return null;
+    return { x: box.x, width: box.width, parentX: parentBox.x, parentWidth: parentBox.width };
+  }
+  async wsSettingsContentGutter(): Promise<number> {
+    const facts = await this.wsSettingsContentBox();
+    if (facts === null) return 0;
+    return facts.x - facts.parentX;
   }
   async wsSettingsGeneralVisible(): Promise<boolean> {
     const form = this.page.getByTestId("workspace-general-form").first();

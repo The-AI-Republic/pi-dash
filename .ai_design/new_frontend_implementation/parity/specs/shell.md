@@ -344,9 +344,12 @@ and workspace item sort-order update (exact shapes owned by NEWFRONT-277).
 Oracle: `sidebar-nav/shell-051-drag-reorder.spec.ts`.
 
 SHELL-052 — An overflow slide-over holds searchable extra projects with
-create, copy-link, reorder and an empty-search state. Search filters by name
-or short code; no match shows empty art; outside click or sidebar collapse
-closes the panel. Browsing is open to all; create stays admin and member.
+create, per-row quick menus, expandable sections, reorder and an
+empty-search state. Search filters by name or short code; no match shows
+empty art; outside click or sidebar collapse closes the panel. Each row
+offers the same quick menu (copy-link included) and section expand as a
+sidebar row, with the same entries, role rules, labels and behaviour
+(SHELL-050/055). Browsing is open to all; create stays admin and member.
 Inputs: rail open flag, project store, clipboard. Oracle:
 `sidebar-nav/shell-052-overflow-slideover.spec.ts`.
 

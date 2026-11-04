@@ -8,12 +8,15 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_AFTER_COUNT,
+  MAX_HOUR_INTERVAL,
   WEEKDAY_CODES,
   WEEKDAY_LABELS,
   UNIT_LABELS,
   REPEAT_UNITS,
   defaultEndDate,
   defaultRecurrence,
+  hourlyHelper,
+  intervalError,
   monthlyForStart,
   ordinalForDay,
   parseRecurrence,
@@ -39,6 +42,24 @@ describe("parseRecurrence", () => {
   it("reads the bare frequency form with its interval", () => {
     expect(parseRecurrence("FREQ=DAILY", START).state).toMatchObject({ unit: "day", interval: 1 });
     expect(parseRecurrence("freq=weekly;interval=2", START).state).toMatchObject({ unit: "week", interval: 2 });
+  });
+
+  it("reads hourly rules with their interval and end", () => {
+    expect(parseRecurrence("FREQ=HOURLY", START)).toMatchObject({
+      state: { unit: "hour", interval: 1, ends: { mode: "never" } },
+      expressible: true,
+    });
+    expect(parseRecurrence("freq=hourly;interval=2", START).state).toMatchObject({ unit: "hour", interval: 2 });
+    expect(parseRecurrence("FREQ=HOURLY;INTERVAL=6;COUNT=30", START).state).toMatchObject({
+      unit: "hour",
+      interval: 6,
+      ends: { mode: "after", count: 30 },
+    });
+    expect(parseRecurrence("FREQ=HOURLY;UNTIL=20271231T235959Z", START).state).toMatchObject({
+      unit: "hour",
+      interval: 1,
+      ends: { mode: "on", date: "2027-12-31" },
+    });
   });
 
   it("reads weekly days Sunday-first", () => {
@@ -85,7 +106,11 @@ describe("parseRecurrence", () => {
       "=DAILY",
       "FREQ=",
       "FREQ=DAILY;FREQ=WEEKLY",
-      "FREQ=HOURLY",
+      "FREQ=MINUTELY",
+      "FREQ=HOURLY;BYHOUR=9",
+      "FREQ=HOURLY;BYMINUTE=30",
+      "FREQ=HOURLY;INTERVAL=2;BYDAY=MO",
+      "FREQ=HOURLY;BYMONTHDAY=1",
       "FREQ=NOPE",
       "FREQ=DAILY;INTERVAL=x",
       "FREQ=DAILY;INTERVAL=0",
@@ -114,7 +139,7 @@ describe("parseRecurrence", () => {
   });
 
   it("still yields a usable default state for a raw rule", () => {
-    const parsed = parseRecurrence("FREQ=HOURLY", START);
+    const parsed = parseRecurrence("FREQ=MINUTELY", START);
     expect(parsed.state.unit).toBe("day");
     expect(parsed.state.interval).toBe(1);
     expect(parsed.state.weekdays).toEqual(["MO"]);
@@ -129,6 +154,14 @@ describe("parseRecurrence", () => {
 
 describe("serializeRecurrence", () => {
   it("writes the bare frequency form for every unit", () => {
+    expect(serializeRecurrence(state({ unit: "hour" }))).toBe("FREQ=HOURLY");
+    expect(serializeRecurrence(state({ unit: "hour", interval: 2 }))).toBe("FREQ=HOURLY;INTERVAL=2");
+    expect(serializeRecurrence(state({ unit: "hour", interval: 3, ends: { mode: "after", count: 4 } }))).toBe(
+      "FREQ=HOURLY;INTERVAL=3;COUNT=4"
+    );
+    expect(serializeRecurrence(state({ unit: "hour", ends: { mode: "on", date: "2027-12-31" } }))).toBe(
+      "FREQ=HOURLY;UNTIL=20271231T235959Z"
+    );
     expect(serializeRecurrence(state({ unit: "day" }))).toBe("FREQ=DAILY");
     expect(serializeRecurrence(state({ unit: "week", weekdays: ["MO", "FR"] }))).toBe("FREQ=WEEKLY;BYDAY=MO,FR");
     expect(serializeRecurrence(state({ unit: "month", monthly: { on: "day", day: 15 } }))).toBe(
@@ -182,6 +215,10 @@ describe("round trip", () => {
   it("re-serializes an expressible rule to the same meaning", () => {
     const rules = [
       "FREQ=DAILY",
+      "FREQ=HOURLY",
+      "FREQ=HOURLY;INTERVAL=2",
+      "FREQ=HOURLY;INTERVAL=6;COUNT=30",
+      "FREQ=HOURLY;UNTIL=20271231T235959Z",
       "FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,FR",
       "FREQ=MONTHLY;BYMONTHDAY=15",
       "FREQ=MONTHLY;BYDAY=2MO",
@@ -261,9 +298,28 @@ describe("helper state transitions", () => {
     expect(DEFAULT_AFTER_COUNT).toBe(10);
   });
 
+  it("range-checks only the hourly step", () => {
+    expect(MAX_HOUR_INTERVAL).toBe(23);
+    expect(intervalError(state({ unit: "hour", interval: 1 }))).toBeNull();
+    expect(intervalError(state({ unit: "hour", interval: 23 }))).toBeNull();
+    expect(intervalError(state({ unit: "hour", interval: 24 }))).toBe(
+      "Use a whole number from 1 to 23; longer steps fit the Day unit."
+    );
+    for (const interval of [0, -2, 2.5, Number.NaN]) {
+      expect(intervalError(state({ unit: "hour", interval })), String(interval)).not.toBeNull();
+    }
+    expect(intervalError(state({ unit: "day", interval: 99 }))).toBeNull();
+    expect(intervalError(state({ unit: "none", interval: 0 }))).toBeNull();
+  });
+
+  it("describes the hourly cadence from the start time", () => {
+    expect(hourlyHelper(1)).toBe("Runs every hour from the start time");
+    expect(hourlyHelper(2)).toBe("Runs every 2 hours from the start time");
+  });
+
   it("names every unit and weekday for the controls", () => {
-    expect(REPEAT_UNITS).toEqual(["none", "day", "week", "month", "year"]);
-    expect(Object.values(UNIT_LABELS)).toEqual(["Does not repeat", "Day", "Week", "Month", "Year"]);
+    expect(REPEAT_UNITS).toEqual(["none", "hour", "day", "week", "month", "year"]);
+    expect(Object.values(UNIT_LABELS)).toEqual(["Does not repeat", "Hour", "Day", "Week", "Month", "Year"]);
     expect(Object.values(WEEKDAY_LABELS)).toEqual([
       "Sunday",
       "Monday",

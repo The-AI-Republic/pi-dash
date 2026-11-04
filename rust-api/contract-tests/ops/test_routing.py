@@ -42,6 +42,9 @@ MIXIN_SRC = REPO_ROOT / "apps/api/pi_dash/utils/core/mixins/view.py"
 ROUTING_RS = REPO_ROOT / "rust-api/crates/api/src/ops/routing.rs"
 POOL_RS = REPO_ROOT / "rust-api/crates/db/src/pool.rs"
 BIN_MAIN_RS = REPO_ROOT / "rust-api/bin/pidash-api/src/main.rs"
+STARTUP_MOD_RS = REPO_ROOT / "rust-api/crates/api/src/startup/mod.rs"
+STARTUP_SERVE_RS = REPO_ROOT / "rust-api/crates/api/src/startup/serve.rs"
+STARTUP_WORKER_RS = REPO_ROOT / "rust-api/crates/api/src/startup/worker.rs"
 
 # Pinned def spans (the gate owns drift; these fail closed if the sources
 # move, so the suite never silently replays drifted lines).
@@ -493,8 +496,42 @@ def test_rust_mirror_pins():
     assert "replica_scope(use_replica, inner.call(req))" in routing
 
 
+def _ensure_schema_calls(src, fname):
+    """Every `ensure_schema(...)` call statement in a Rust source file.
+
+    Returns each call from its opening line through the terminating
+    `.await`, so the pins below judge the whole pool argument instead of
+    one formatted line.
+    """
+    lines = src.splitlines()
+    calls = []
+    for i, line in enumerate(lines):
+        if "ensure_schema(" in line:
+            window = "\n".join(lines[i : i + 10])
+            end = window.find(".await")
+            assert end != -1, f"{fname}: ensure_schema call is never awaited"
+            calls.append(window[:end])
+    return calls
+
+
 def test_rust_migrations_run_on_primary():
+    # PIDASHCONV-1541 moved the boot sequence out of main.rs: `serve` and
+    # `worker` are thin callers of ServeBuilder/WorkerBuilder, which run
+    # the queue-schema DDL through queue_schema_pool(owner, primary).
     main = BIN_MAIN_RS.read_text(encoding="utf-8")
-    assert "ensure_schema(pools.primary())" in main
-    assert "ensure_schema(pools.replica()" not in main
-    assert "ensure_schema(pool_for" not in main
+    assert "ServeBuilder" in main
+    assert "WorkerBuilder" in main
+    assert "ensure_schema" not in main
+    # The selector falls back to primary when no explicit schema-owner
+    # pool was set (split-role deploys, PIDASHCONV-1558).
+    startup = STARTUP_MOD_RS.read_text(encoding="utf-8")
+    assert "owner.unwrap_or(primary)" in startup
+    for path in (STARTUP_SERVE_RS, STARTUP_WORKER_RS):
+        src = path.read_text(encoding="utf-8")
+        calls = _ensure_schema_calls(src, path.name)
+        assert calls, f"{path.name}: boot must run the queue-schema DDL"
+        for call in calls:
+            assert "queue_schema_pool(" in call, path.name
+            assert "primary()" in call, path.name
+            assert "replica" not in call, path.name
+            assert "pool_for" not in call, path.name

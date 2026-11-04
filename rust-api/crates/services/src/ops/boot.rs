@@ -50,7 +50,10 @@ pub const CACHE_FAILED: &str = "Failed to clear cache";
 /// Leaf `(app_label, migration_name)` nodes of the Django migration graph —
 /// `MigrationExecutor(connection).loader.graph.leaf_nodes()`, computed with
 /// the real Django 4.2 loader over `INSTALLED_APPS`
-/// (`settings/common.py:44-68`) at the ported commit (261 graph nodes):
+/// (`settings/common.py:44-68`) at the ported commit (261 graph nodes),
+/// re-synced for the post-port drift: db 0168→0170 (`b4defc50f`, NEWFRONT
+/// merge #2801) and runner 0029→0033 (`b790ee7fa` #1851, `09738d222` #1944,
+/// `04b6d3784` #386, `1998bc658` #447):
 /// no `run_before`, `replaces`, `__first__` or `__latest__` markers exist in
 /// any `pi_dash` migration, so the five first-party leaves are also exactly
 /// what an `ast` parse of the `dependencies` lists in `apps/api` yields
@@ -59,11 +62,11 @@ pub const LEAF_MIGRATIONS: &[(&str, &str)] = &[
     ("assistant", "0004_usersttconfig"),
     ("auth", "0012_alter_user_first_name_max_length"),
     ("contenttypes", "0002_remove_content_type_name"),
-    ("db", "0168_ticker_stop_signal_disarm_reason"),
+    ("db", "0170_issueview_anchor"),
     ("django_celery_beat", "0018_improve_crontab_helptext"),
     ("license", "0006_instance_is_current_version_deprecated"),
     ("prompting", "0007_reseed_directional_relations"),
-    ("runner", "0029_drop_agentrun_trigger_blocker_completed"),
+    ("runner", "0033_agent_run_error_details"),
     ("sessions", "0001_initial"),
 ];
 
@@ -302,11 +305,11 @@ mod tests {
                 ("assistant", "0004_usersttconfig"),
                 ("auth", "0012_alter_user_first_name_max_length"),
                 ("contenttypes", "0002_remove_content_type_name"),
-                ("db", "0168_ticker_stop_signal_disarm_reason"),
+                ("db", "0170_issueview_anchor"),
                 ("django_celery_beat", "0018_improve_crontab_helptext"),
                 ("license", "0006_instance_is_current_version_deprecated"),
                 ("prompting", "0007_reseed_directional_relations"),
-                ("runner", "0029_drop_agentrun_trigger_blocker_completed"),
+                ("runner", "0033_agent_run_error_details"),
                 ("sessions", "0001_initial"),
             ]
         );

@@ -423,10 +423,16 @@ def _gap_for_unmatched(dj: dict) -> str:
 
 # Django paths whose disallowed methods are served by explicit
 # `*_not_allowed` handlers that replay the view's auth + permission
-# prelude and answer DRF's 405 bytes (read-verified; standing proof
-# via contract assertions is the G6 fix issue).
+# prelude and answer DRF's 405 bytes (proven by contract suites green
+# on both backends: the workspace seven by
+# `contract-tests/app_workspace/test_denied_methods.py`, the
+# device-session three by the G6 denial matrix in
+# `contract-tests/auth_oauth/test_device_session.py`).
 NOT_ALLOWED_PATHS = {
     "/api/users/me/workspaces/",
+    "/api/v1/auth/machine-token/",
+    "/api/v1/auth/revoke/",
+    "/api/v1/auth/workspaces/",
     "/api/workspace-slug-check/",
     "/api/workspaces/",
     "/api/workspaces/{slug}/",

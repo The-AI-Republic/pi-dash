@@ -101,6 +101,11 @@ TIMESTAMP_JSON_KEYS = frozenset(
         # revoked_at (replay runner_web_lifecycle request 32); same
         # server-minted class, DB-guarded the same way.
         "revoked_at",
+        # Evidence: the runner pause/resume bodies render the
+        # just-stamped paused_at = now() per backend
+        # (runner/views/runners.py RunnerPauseEndpoint/RunnerResumeEndpoint);
+        # the replay sees two instants seconds apart. No corpus sends it.
+        "paused_at",
         # Evidence: the agent-run yield stamps done_payload.yielded_at
         # = now() per backend (api/views/issue.py:1303); the replay
         # sees two instants milliseconds apart (v1_work_items_followup

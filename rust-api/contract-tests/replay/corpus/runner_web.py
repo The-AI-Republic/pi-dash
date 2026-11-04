@@ -11,7 +11,8 @@ ticket mint), test_web_runners.py (patch/revoke/revive/delete +
 invites), test_web_runs.py (create/cancel/release-pin + re-tick),
 test_web_approvals.py (decide incl. the 500 bug), test_web_chat.py
 (session create/message/warm/cancel/close, chat approvals decide,
-all online + offline legs).
+all online + offline legs), test_web_runner_pause.py (pause/resume
+toggles + idempotency + 404s).
 
 Approvals are seeded black-box through the daemon endpoints inside
 the flow (as the suites do), so the session also covers the daemon
@@ -192,7 +193,7 @@ SESSIONS = (
         source=(
             "runner/test_web_catalog.py (pods), test_web_machines.py, "
             "runner/test_web_runners.py, test_web_runs.py, "
-            "test_web_approvals.py, test_web_chat.py"
+            "test_web_approvals.py, test_web_chat.py, test_web_runner_pause.py"
         ),
         auth_users=("admin", "member", "api_key"),
         static_context=dict(_STATIC),
@@ -207,7 +208,7 @@ SESSIONS = (
             "machine_token": ["token_hash", "token_fingerprint"],
         },
         timestamp_columns={
-            "runner": ["enrolled_at", "revoked_at", "last_heartbeat_at"],
+            "runner": ["enrolled_at", "revoked_at", "last_heartbeat_at", "paused_at"],
             # Evidence: machine revoke stamps revoked_at with now()
             # per backend (request 53).
             "dev_machine": ["last_seen_at", "revoked_at"],
@@ -691,6 +692,45 @@ SESSIONS = (
                 route=f"{WEB}/machine-tokens/{{workspace_id}}/tickets/",
                 json={"host_label": "redeem-w"},
                 auth="admin", expect_status=404,
+                **_csrf("w0"),
+            ),
+            # -- operator pause / resume (NEWPIDASH-32; ron is online
+            # with no runs, so in_flight_runs is [] and the pause
+            # release + resume drain are no-ops) --
+            Request(
+                "POST", f"{WEB}/{{ron}}/pause/",
+                route=f"{WEB}/{{runner_id}}/pause/",
+                json={}, auth="admin", expect_status=200,
+                **_csrf("w0"),
+            ),
+            Request(
+                "POST", f"{WEB}/{{ron}}/pause/",
+                route=f"{WEB}/{{runner_id}}/pause/",
+                json={}, auth="admin", expect_status=200,
+                **_csrf("w0"),
+            ),
+            Request(
+                "POST", f"{WEB}/{{ron}}/resume/",
+                route=f"{WEB}/{{runner_id}}/resume/",
+                json={}, auth="admin", expect_status=200,
+                **_csrf("w0"),
+            ),
+            Request(
+                "POST", f"{WEB}/{{ron}}/resume/",
+                route=f"{WEB}/{{runner_id}}/resume/",
+                json={}, auth="admin", expect_status=200,
+                **_csrf("w0"),
+            ),
+            Request(
+                "POST", f"{WEB}/{{missing}}/pause/",
+                route=f"{WEB}/{{runner_id}}/pause/",
+                json={}, auth="admin", expect_status=404,
+                **_csrf("w0"),
+            ),
+            Request(
+                "POST", f"{WEB}/{{missing}}/resume/",
+                route=f"{WEB}/{{runner_id}}/resume/",
+                json={}, auth="admin", expect_status=404,
                 **_csrf("w0"),
             ),
         ),

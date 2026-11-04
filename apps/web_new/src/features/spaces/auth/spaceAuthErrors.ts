@@ -5,9 +5,9 @@
 // form posts that fail redirect back to the spaces base carrying an
 // error_code; the card maps each known code to banner copy plus the step
 // and mode that can fix it. Codes the catalog does not know — including
-// the deliberately unmodelled rate-limit code and Gitea configuration
-// failure — map to null: no banner, the card stays where it is. The code
-// itself is never shown and the server's raw message is never echoed.
+// the deliberately unmodelled Gitea configuration failure — map to null:
+// no banner, the card stays where it is. The code itself is never shown
+// and the server's raw message is never echoed.
 import type { SpaceAuthMode, SpaceAuthStep } from "./spaceAuthMachine.js";
 
 /** Banner copy plus the fixing step/mode; absent step/mode keeps the card's. */
@@ -53,6 +53,9 @@ const CATALOG: Record<string, SpaceAuthCodeMapping> = {
   "5120": { message: "GitHub couldn't sign you in. Try again." },
   "5121": { message: "GitLab couldn't sign you in. Try again." },
   "5122": { message: "Your GitHub account isn't in the required organization." },
+  // No step or mode: a throttled call banners on the step that made it
+  // (email for a check, code for a generate) and keeps the mode.
+  "5900": { message: "Too many attempts. Wait a moment and try again." },
 };
 
 /** Normalize the wire value; the JSON envelope may carry a number. */
@@ -62,9 +65,9 @@ function normalizeCode(code: string | number): string {
 
 /**
  * Map a server error code to its banner and fixing step/mode, or null when
- * the catalog does not model it (unknown numbers, the rate limit, the Gitea
- * configuration failure). A mapping without a step or mode keeps the card's
- * current step or mode.
+ * the catalog does not model it (unknown numbers, the Gitea configuration
+ * failure). A mapping without a step or mode keeps the card's current step
+ * or mode.
  */
 export function describeSpaceAuthCode(code: string | number): SpaceAuthCodeMapping | null {
   return CATALOG[normalizeCode(code)] ?? null;

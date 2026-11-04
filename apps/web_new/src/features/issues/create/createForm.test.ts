@@ -8,6 +8,7 @@ import {
   buildCreatePayload,
   buildDraftInput,
   canGenerateTitle,
+  defaultExecutionSelection,
   descriptionText,
   emptyCreateForm,
   hasDraftWorthKeeping,
@@ -26,6 +27,7 @@ import {
   toCreateProjectOption,
   TITLE_MAX_LENGTH,
   UNTITLED_DRAFT_NAME,
+  withDefaultExecution,
   type CreateFormState,
   type CreateProjectOption,
 } from "./createForm.js";
@@ -413,5 +415,56 @@ describe("initialCreateForm", () => {
 
   it("leaves the form blank when the section has no value", () => {
     expect(initialCreateForm(PROJECT)).toEqual(emptyCreateForm(PROJECT));
+  });
+});
+
+describe("default execution target (NEWPIDASH-23)", () => {
+  const pods = [
+    { id: "pod-a", is_default: false },
+    { id: "pod-b", is_default: true },
+  ];
+
+  it("picks the default pod, else the first, else nothing", () => {
+    expect(defaultExecutionSelection(pods)).toEqual({ type: "pod", podId: "pod-b" });
+    expect(defaultExecutionSelection([{ id: "pod-a", is_default: false }])).toEqual({ type: "pod", podId: "pod-a" });
+    expect(defaultExecutionSelection([])).toBeNull();
+  });
+
+  it("starts on no pick when the project runs on an agent by default", () => {
+    expect(defaultExecutionSelection(pods, "cloud_agent")).toBeNull();
+    expect(defaultExecutionSelection(pods, "managed_runner")).toBeNull();
+    expect(defaultExecutionSelection(pods, "local_runner")).toEqual({ type: "pod", podId: "pod-b" });
+  });
+
+  it("fills only an empty target", () => {
+    const fallback = defaultExecutionSelection(pods);
+    const blank = emptyCreateForm(PROJECT);
+    expect(withDefaultExecution(blank, fallback).execution).toEqual({ type: "pod", podId: "pod-b" });
+    expect(withDefaultExecution(blank, null)).toBe(blank);
+    const agent = { ...blank, execution: { type: "agent", executor: "cloud_agent" } as const };
+    expect(withDefaultExecution(agent, fallback)).toBe(agent);
+  });
+
+  it("sends the preselected pod with the create", () => {
+    const filled = withDefaultExecution(
+      { ...emptyCreateForm(PROJECT), name: "Title" },
+      defaultExecutionSelection(pods)
+    );
+    expect(buildCreatePayload(filled)).toEqual({
+      name: "Title",
+      assigned_pod_id: "pod-b",
+      assigned_runner_id: null,
+      agent_executor: "local_runner",
+    });
+  });
+
+  it("does not count the preselected pod as work, but counts another pick", () => {
+    const seeded = defaultExecutionSelection(pods);
+    const blank = emptyCreateForm(PROJECT);
+    expect(hasDraftWorthKeeping(withDefaultExecution(blank, seeded), undefined, seeded)).toBe(false);
+    expect(hasDraftWorthKeeping({ ...blank, execution: { type: "pod", podId: "pod-a" } }, undefined, seeded)).toBe(
+      true
+    );
+    expect(hasDraftWorthKeeping(withDefaultExecution(blank, seeded))).toBe(true);
   });
 });

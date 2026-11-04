@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Oracle scenario (NEWFRONT-125): the overflow slide-over holds searchable
-// extra projects with create, copy-link, reorder and an empty-search state.
+// extra projects with create, per-row quick menus, expandable sections,
+// reorder and an empty-search state.
 // Observed on the running old app: once the project cap from the display
 // preferences leaves joined projects out of the main sidebar, a More
 // toggle opens a slide-over with a search box; typing filters by name or
-// short code, keeping only matching projects; a hopeless query shows the
-// empty state; clicking outside closes the panel. Row: SHELL-052.
+// short code, keeping only matching projects; each panel row offers the
+// same quick menu and section expand as a sidebar row; a hopeless query
+// shows the empty state; clicking outside closes the panel. Row: SHELL-052.
 // Cap discipline: the row limit lives on the seed user, so this scenario
 // is the only one that ever lowers it, and it restores the uncapped
 // baseline in the final step. Every guard below re-pins the cap because
@@ -131,6 +133,41 @@ test(
       for (const gone of excluded) {
         await expect.poll(panelHas(gone), { timeout: 30_000 }).toBe(false);
       }
+    });
+
+    await test.step("panel rows expand their sections", async () => {
+      // Pin the panel to the scenario project so the row reads below are
+      // unambiguous even when a sibling run holds its own project here.
+      await driver.setProjectsOverflowOpen(true);
+      await driver.searchOverflowProjects("_SO");
+      const panelHas = async () => (await driver.overflowProjectNames()).some((entry) => entry.includes(SECOND_NAME));
+      await expect.poll(panelHas, { timeout: 30_000 }).toBe(true);
+      await driver.setOverflowRowOpen(SECOND_NAME, true);
+      await expect.poll(() => driver.isOverflowRowOpen(SECOND_NAME), { timeout: 30_000 }).toBe(true);
+      // Work Items, Schedulers and AI Workers render regardless of the
+      // project's feature flags, so they pin the expansion without
+      // depending on the seed flag shape sibling runs keep flipping.
+      const texts = (await driver.overflowSubnavLinks()).map((link) => link.text);
+      expect(texts).toEqual(expect.arrayContaining(["Work Items", "Schedulers", "AI Workers"]));
+      for (const link of await driver.overflowSubnavLinks()) {
+        expect(link.href ?? "").toContain(`/projects/${second.id}/`);
+      }
+    });
+
+    await test.step("panel rows offer the project quick menu", async () => {
+      await driver.setProjectsOverflowOpen(true);
+      await driver.searchOverflowProjects("_SO");
+      await driver.openOverflowQuickMenu(SECOND_NAME);
+      await expect.poll(() => driver.projectQuickMenuTexts(), { timeout: 30_000 }).not.toEqual([]);
+      // The owner holds project admin standing: publish, copy, archives
+      // and settings, with no leave entry (same set as SHELL-050 rows).
+      const texts = (await driver.projectQuickMenuTexts()).join(" ");
+      for (const entry of ["Publish project", "Copy link", "Archives", "Settings"]) {
+        expect(texts).toContain(entry);
+      }
+      expect(texts).not.toContain("Leave project");
+      // Dismiss the menu so the hopeless-query search below starts clean.
+      await driver.page.keyboard.press("Escape");
     });
 
     await test.step("a hopeless query shows the empty state", async () => {

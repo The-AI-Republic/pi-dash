@@ -66,8 +66,12 @@ export function SidebarMoreGroup({ workspaceSlug, role, currentPath }: SidebarMo
   }, [currentPath, workspaceSlug]);
 
   return (
-    <section aria-label="More" data-testid="sidebar-more-group" className="flex flex-col gap-(--space-1)">
-      <div className="flex w-full items-center justify-between rounded-(--radius-control) px-(--space-2) py-(--space-1)">
+    <section
+      aria-label="More"
+      data-testid="sidebar-more-group"
+      className="flex flex-col gap-(--space-1) [&:not(:first-child)]:mt-(--space-4)"
+    >
+      <div className="sidebar-section-header flex w-full items-center justify-between rounded-(--radius-control) bg-(--border) px-(--space-2) py-(--space-1)">
         <button
           type="button"
           aria-expanded={open}

@@ -10,6 +10,7 @@ import { Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption }
 import { Package, X } from "lucide-react";
 import * as React from "react";
 
+import { PropertyChip } from "./PropertyChip.js";
 import { selectModuleOptions, type ModuleOption } from "./modules.js";
 import { usePickerModules } from "./reference.js";
 
@@ -23,6 +24,10 @@ interface ModulePickerBase {
   variant?: ButtonVariant;
   /** Default trigger shows the glyph without the label. */
   iconOnly?: boolean;
+  /** Compact chip trigger for the create dialog's property row. */
+  chip?: boolean;
+  /** Accessible property name; the chip reads "Modules: Checkout" when set. */
+  label?: string | undefined;
   /** Fully custom trigger; overrides the default value button. */
   trigger?: React.ReactElement<Record<string, unknown>>;
   /** Default trigger text when nothing is selected. */
@@ -98,6 +103,8 @@ export function ModulePicker(props: ModulePickerProps): React.ReactElement {
     disabled = false,
     variant = "secondary",
     iconOnly = false,
+    chip = false,
+    label = "Modules",
     trigger,
     placeholder = "No module",
     tabIndex,
@@ -141,6 +148,20 @@ export function ModulePicker(props: ModulePickerProps): React.ReactElement {
     if (!props.multiple) {
       const current = props.value === null ? undefined : options.find((option) => option.id === props.value);
       const text = current?.name ?? placeholder;
+      if (chip) {
+        const filled = current !== undefined;
+        return (
+          <PropertyChip
+            label={filled ? `${label}: ${text}` : label}
+            icon={<ModuleGlyph />}
+            text={text}
+            placeholder={!filled}
+            {...(filled ? { title: text } : {})}
+            {...(triggerId === undefined ? {} : { id: triggerId })}
+            {...(tabIndex === undefined ? {} : { tabIndex })}
+          />
+        );
+      }
       if (iconOnly) {
         return (
           <IconButton label={text} variant={variant}>
@@ -169,6 +190,20 @@ export function ModulePicker(props: ModulePickerProps): React.ReactElement {
           : props.value.length === 1
             ? "1 module"
             : `${props.value.length} Modules`;
+    if (chip) {
+      const filled = props.value.length > 0;
+      return (
+        <PropertyChip
+          label={filled ? `${label}: ${text}` : label}
+          icon={<ModuleGlyph />}
+          text={text}
+          placeholder={!filled}
+          {...(filled ? { title: text } : {})}
+          {...(triggerId === undefined ? {} : { id: triggerId })}
+          {...(tabIndex === undefined ? {} : { tabIndex })}
+        />
+      );
+    }
     if (iconOnly) {
       return (
         <IconButton label={text} variant={variant}>
