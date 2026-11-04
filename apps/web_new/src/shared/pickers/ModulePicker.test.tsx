@@ -328,6 +328,28 @@ describe("ModulePicker chip", () => {
     expect(await screen.findByRole("button", { name: "Modules: Alpha" })).toHaveTextContent("Alpha");
   });
 
+  it("carries the dialog tab stop through the chip", async () => {
+    const { queryClient } = harness(MODULES);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ModulePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={ALPHA}
+          onChange={() => undefined}
+          chip
+          placeholder="Modules"
+          triggerId="Modules"
+          tabIndex={11}
+          preload
+        />
+      </QueryClientProvider>
+    );
+    const chip = await screen.findByRole("button", { name: "Modules: Alpha" });
+    expect(chip).toHaveAttribute("id", "Modules");
+    expect(chip).toHaveAttribute("tabindex", "11");
+  });
+
   it("shows the property name while empty", () => {
     const { queryClient } = harness(MODULES);
     render(
