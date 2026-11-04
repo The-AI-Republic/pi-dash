@@ -16,11 +16,16 @@ Entry format (parsed by `_harness/rust_matrix.py`, one line per suite):
 
 Rules:
 
-- One fix issue per root cause, filed under PIDASHCONV-1 with title
-  `Rust <domain> fix: …`, the failing test, and the suspected file.
+- One fix issue per root cause, with the failing test and the suspected
+  file. Under PIDASHCONV the title was `Rust <domain> fix: …`; since the
+  NEWPIDASH project it is a NEWPIDASH `Bug:`/`Drift:` issue (the parser
+  accepts any `<PROJECT>-<n>` id).
 - Never edit the test to match Rust; fix Rust (or prove Django wrong in
   the fix issue and port the corrected behaviour).
 - This list must be empty for PIDASHCONV-821 to be Done.
 
 ## Suites
 
+- `assistant`: NEWPIDASH-36 — test_llm_config.py::test_generate_title_deepseek_body_flattens_extra_body: Rust generate-title never reaches the provider through HTTP_PROXY (502 provider_unreachable)
+- `prompting`: NEWPIDASH-35 — test_csrf_secure_proxy.py (8): under the production profile Rust does not honour X-Forwarded-Proto in the prompting CSRF check
+- `v1_openapi`: NEWPIDASH-34 — test_routes_golden.py: Rust OpenAPI document omits the v1 scheduler write routes (main 730ea8d28, 7d64d46ad)
