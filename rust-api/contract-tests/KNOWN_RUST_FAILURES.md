@@ -26,6 +26,4 @@ Rules:
 
 ## Suites
 
-- `assistant`: NEWPIDASH-36 — test_llm_config.py::test_generate_title_deepseek_body_flattens_extra_body: Rust generate-title never reaches the provider through HTTP_PROXY (502 provider_unreachable)
-- `prompting`: NEWPIDASH-35 — test_csrf_secure_proxy.py (8): under the production profile Rust does not honour X-Forwarded-Proto in the prompting CSRF check
 - `v1_openapi`: NEWPIDASH-34 — test_routes_golden.py: Rust OpenAPI document omits the v1 scheduler write routes (main 730ea8d28, 7d64d46ad)
