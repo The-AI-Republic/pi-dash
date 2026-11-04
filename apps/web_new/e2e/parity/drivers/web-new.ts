@@ -14355,7 +14355,16 @@ export class WebNewDriver implements ParityDriver {
     if (input.handle !== undefined) await dialog.getByLabel("Handle").fill(input.handle);
     if (input.description !== undefined) await dialog.getByLabel("Description").fill(input.description);
     if (input.prompt !== undefined) await dialog.getByLabel("Base prompt").fill(input.prompt);
-    if (input.color !== undefined) await dialog.getByLabel("Color").fill(input.color);
+    if (input.color !== undefined) {
+      // Presets are one-click swatches; anything else goes through the
+      // synced custom-color input behind the "More" overflow.
+      const swatch = dialog.getByRole("button", { name: `Scheduler color ${input.color.toLowerCase()}` });
+      if ((await swatch.count()) > 0) {
+        await swatch.click();
+      } else {
+        await dialog.getByLabel("Custom color").fill(input.color);
+      }
+    }
   }
 
   async schedulerSetDefinitionEnabled(enabled: boolean): Promise<void> {
@@ -14372,7 +14381,7 @@ export class WebNewDriver implements ParityDriver {
       handle: await dialog.getByLabel("Handle").inputValue(),
       description: await dialog.getByLabel("Description").inputValue(),
       prompt: await dialog.getByLabel("Base prompt").inputValue(),
-      color: await dialog.getByLabel("Color").inputValue(),
+      color: await dialog.getByLabel("Custom color").inputValue(),
       enabled: (await toggle.getAttribute("aria-checked")) === "true",
     };
   }
