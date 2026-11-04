@@ -158,6 +158,7 @@ import type {
   RunnersPodTile,
   RunnersRail,
   RunnersRailContact,
+  RunnersRailGeometry,
   RunnersRowActions,
   RunnersTab,
   RunnersTableRow,
@@ -26175,6 +26176,21 @@ export class WebDriver implements ParityDriver {
       overviewHref: (await overview.count()) > 0 ? await overview.first().getAttribute("href") : null,
       contacts,
       emptyVisible: (await rail.getByText("No runners connected").count()) > 0,
+    };
+  }
+
+  async runnersRailGeometry(): Promise<RunnersRailGeometry> {
+    const rail = this.runnersRailRoot();
+    await rail.waitFor({ timeout: WebDriver.WAIT_MS });
+    // The content pane is the rail's sibling main in both apps.
+    const railBox = await rail.boundingBox();
+    const contentBox = await rail.locator("xpath=../main").first().boundingBox();
+    if (railBox === null || contentBox === null) throw new Error("[parity] runners rail or content pane has no box.");
+    return {
+      viewportHeight: await this.page.evaluate(() => window.innerHeight),
+      railTop: railBox.y,
+      railBottom: railBox.y + railBox.height,
+      contentBottom: contentBox.y + contentBox.height,
     };
   }
 
