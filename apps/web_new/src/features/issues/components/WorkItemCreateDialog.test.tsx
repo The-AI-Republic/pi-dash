@@ -832,29 +832,62 @@ describe("WorkItemCreateDialog core form", () => {
     setup();
     await waitFor(() => expect(titleField()).toHaveFocus());
     expect(screen.getByRole("dialog", { name: "Create new work item" })).toBeInTheDocument();
-    for (const field of ["Project", "State", "Runs on", "Priority", "Assignees", "Parent"]) {
-      expect(screen.getByText(field)).toBeInTheDocument();
+    // The properties render as chips without captions (NEWPIDASH-10):
+    // each chip names its property to assistive tech.
+    expect(await screen.findByRole("button", { name: "State: Todo" })).toBeInTheDocument();
+    for (const name of ["Runs on", "Priority: None", "Assignees", "Labels", "Start date", "Due date", "Add parent"]) {
+      expect(screen.getByRole("button", { name })).toBeInTheDocument();
     }
-    // Labels and the dates name themselves on their own controls, as the
-    // old form did, so no caption repeats them.
     expect(screen.getByRole("group", { name: "Labels" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Start date" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Due date" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add parent" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add parent" })).toBeInTheDocument();
   });
 
-  it("captions the project field like the neighbouring property fields", () => {
-    // NEWFRONT-1039: the selector was the one field in the strip without a
-    // caption, so the only project label was the trigger's own text.
+  it("shows the properties as one chip row in the old form's order", async () => {
+    // NEWPIDASH-10: a single wrapping row, state first and parent last,
+    // with no caption repeating the chip's own text.
+    setup({
+      projects: {
+        [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", {
+          cycle_view: true,
+          module_view: true,
+          estimate: STATE_ID,
+        }),
+      },
+    });
+    // The states read and the project detail read resolve
+    // independently; wait for both before reading the row.
+    for (const name of ["State: Todo", "Cycle", "Modules", "Estimate"]) {
+      await waitFor(() => expect(screen.getByRole("button", { name })).toBeInTheDocument());
+    }
+    const row = screen.getByTestId("property-chips");
+    const chips = within(row)
+      .getAllByRole("button")
+      .map((chip) => chip.getAttribute("aria-label") ?? chip.textContent ?? "");
+    expect(chips).toEqual([
+      "State: Todo",
+      "Runs on",
+      "Priority: None",
+      "Assignees",
+      "Labels",
+      "Start date",
+      "Due date",
+      "Cycle",
+      "Modules",
+      "Estimate",
+      "Add parent",
+    ]);
+    for (const caption of ["State", "Priority", "Parent"]) {
+      expect(screen.queryByText(caption)).not.toBeInTheDocument();
+    }
+  });
+
+  it("keeps the project field captioned above the chipless strip", () => {
+    // NEWFRONT-1039: the selector keeps its caption; the property chips
+    // below it carry no captions of their own (NEWPIDASH-10).
     setup();
     const caption = screen.getByText("Project");
     const projectSlot = caption.parentElement as HTMLElement;
-    // The caption sits above the picker inside the same slot, exactly like
-    // State/Priority/Assignees, and the picker keeps its own trigger text.
     expect(within(projectSlot).getAllByRole("button").length).toBeGreaterThan(0);
-    expect((screen.getByText("State").parentElement as HTMLElement).className).toBe(projectSlot.className);
-    expect((screen.getByText("Priority").parentElement as HTMLElement).className).toBe(projectSlot.className);
+    expect(screen.queryByText("Parent")).not.toBeInTheDocument();
   });
 
   it("leaves focus in the description while the user types there", async () => {
@@ -938,7 +971,7 @@ describe("WorkItemCreateDialog core form", () => {
     await user.type(titleField(), "Still here");
     // A state change re-runs the effect with the same visit key; the
     // typed title must survive rather than reset to the kept draft.
-    await user.click(screen.getByRole("button", { name: "Select target" }));
+    await user.click(screen.getByRole("button", { name: "Runs on" }));
     await waitFor(() => expect(titleField()).toHaveValue("Still here"));
     expect(h.onOpenChange).not.toHaveBeenCalled();
   });
@@ -1075,7 +1108,7 @@ describe("WorkItemCreateDialog title rules (ISS-118)", () => {
       runners: [DIALOG_RUNNER],
     });
     await user.type(titleField(), "Needs a runner");
-    await user.click(screen.getByRole("button", { name: "Select target" }));
+    await user.click(screen.getByRole("button", { name: "Runs on" }));
     await user.click(await screen.findByRole("option", { name: /gpu-box/ }));
     save();
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("That runner belongs to another project."));
@@ -1093,7 +1126,7 @@ describe("WorkItemCreateDialog title rules (ISS-118)", () => {
       runners: [DIALOG_RUNNER],
     });
     await user.type(titleField(), "Needs a runner");
-    await user.click(screen.getByRole("button", { name: "Select target" }));
+    await user.click(screen.getByRole("button", { name: "Runs on" }));
     await user.click(await screen.findByRole("option", { name: /gpu-box/ }));
     save();
     await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
@@ -1113,7 +1146,7 @@ describe("WorkItemCreateDialog title rules (ISS-118)", () => {
       runners: [DIALOG_RUNNER],
     });
     await user.type(titleField(), "Needs a runner");
-    await user.click(screen.getByRole("button", { name: "Select target" }));
+    await user.click(screen.getByRole("button", { name: "Runs on" }));
     await user.click(await screen.findByRole("option", { name: /gpu-box/ }));
     save();
     await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
@@ -1142,17 +1175,16 @@ describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
     await waitFor(() => expect(screen.getByText("Estimate")).toBeInTheDocument());
     await user.type(titleField(), "Everything at once");
 
-    await user.click(screen.getByRole("button", { name: "Select state" }));
+    await user.click(await screen.findByRole("button", { name: "State: Todo" }));
     await user.click(await screen.findByRole("option", { name: "Todo" }));
 
-    await user.click(screen.getByRole("button", { name: "Select target" }));
+    await user.click(screen.getByRole("button", { name: "Runs on" }));
     await user.click(await screen.findByRole("option", { name: /Local pod/ }));
 
-    const prioritySlot = within(screen.getByText("Priority").parentElement as HTMLElement);
-    await user.click(prioritySlot.getByRole("button", { name: "None" }));
+    await user.click(screen.getByRole("button", { name: "Priority: None" }));
     await user.click(await screen.findByRole("option", { name: "High" }));
 
-    await user.click(screen.getByRole("button", { name: "Select members" }));
+    await user.click(screen.getByRole("button", { name: "Assignees" }));
     // The seeded directory member is the signed-in user.
     await user.click(await screen.findByRole("option", { name: "You" }));
 
@@ -1186,7 +1218,7 @@ describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
     await waitFor(() => expect(screen.getByText("Estimate")).toBeInTheDocument());
     await user.type(titleField(), "Placed and estimated");
 
-    await user.click(screen.getByRole("button", { name: "Select target" }));
+    await user.click(screen.getByRole("button", { name: "Runs on" }));
     await user.click(await screen.findByRole("option", { name: /Local pod/ }));
 
     const inMonthDays = (): HTMLButtonElement[] =>
@@ -1203,8 +1235,7 @@ describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
     const dueIso = dueDay.dataset.day as string;
     await user.click(dueDay);
 
-    const estimateSlot = within(screen.getByText("Estimate").parentElement as HTMLElement);
-    await user.click(estimateSlot.getByRole("button", { name: "None" }));
+    await user.click(screen.getByRole("button", { name: "Estimate" }));
     await user.click(await screen.findByRole("option", { name: "3" }));
 
     save();
@@ -1519,9 +1550,9 @@ describe("WorkItemCreateDialog discard guard (ISS-120)", () => {
     const user = userEvent.setup();
     const h = setup({}, { initialProjectId: PROJECT_BEACON });
     await user.type(titleField(), "State draft");
-    await user.click(screen.getByRole("button", { name: "Select state" }));
+    await user.click(await screen.findByRole("button", { name: "State: Todo" }));
     await user.click(await screen.findByRole("option", { name: "Todo" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Todo" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "State: Todo" })).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "Save to Drafts" }));
     await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
     expect(posts(h.sent)[0]).toEqual({
@@ -1690,7 +1721,7 @@ describe("WorkItemCreateDialog workflow gate (ISS-233)", () => {
     const h = setup({ states: TWO_STATES }, { initialValues: { stateId: DONE_STATE } });
     registerClosedDone();
     await user.type(titleField(), "Started elsewhere");
-    await user.click(screen.getByRole("button", { name: "Select state" }));
+    await user.click(await screen.findByRole("button", { name: "State: Done" }));
     const done = await screen.findByRole("option", { name: /Done/ });
     expect(done).toBeEnabled();
     await user.keyboard("{Escape}");
@@ -1705,7 +1736,7 @@ describe("WorkItemCreateDialog workflow gate (ISS-233)", () => {
     const user = userEvent.setup();
     setup({ states: TWO_STATES });
     await user.type(titleField(), "New work");
-    await user.click(screen.getByRole("button", { name: "Select state" }));
+    await user.click(await screen.findByRole("button", { name: "State: Todo" }));
     const done = await screen.findByRole("option", { name: /Done/ });
     expect(done).toBeDisabled();
     expect(done).toHaveTextContent("Finish the review first");
@@ -1733,7 +1764,7 @@ describe("WorkItemCreateDialog workflow gate (ISS-233)", () => {
     await user.type(titleField(), "Moved to an open state");
     save();
     expect(await screen.findByRole("alert")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Select state" }));
+    await user.click(await screen.findByRole("button", { name: "State: Done" }));
     await user.click(await screen.findByRole("option", { name: /Todo/ }));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     save();
@@ -1806,7 +1837,7 @@ describe("WorkItemCreateDialog project selector (ISS-123)", () => {
     const user = userEvent.setup();
     const h = setup({}, { initialValues: { stateId: STATE_ID, targetDate: "2026-12-01" } });
     await waitFor(() => expect(screen.getByRole("heading", { name: CREATE_DIALOG_TITLE })).toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "Due date" })).toHaveTextContent("Dec 1, 2026");
+    expect(screen.getByRole("button", { name: "Due date: Dec 1, 2026" })).toHaveTextContent("Dec 1, 2026");
     await user.type(titleField(), "Dated from the section");
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
@@ -1887,9 +1918,7 @@ describe("WorkItemCreateDialog project selector (ISS-123)", () => {
       },
       props
     );
-    await waitFor(() => expect(screen.getByText("Estimate")).toBeInTheDocument());
-    const estimateSlot = within(screen.getByText("Estimate").parentElement as HTMLElement);
-    await waitFor(() => expect(estimateSlot.getByRole("button", { name: "3" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Estimate: 3" })).toBeInTheDocument());
   });
 
   it("keeps the Atlas target when the picker cannot offer a guest row", async () => {
@@ -1922,9 +1951,9 @@ describe("WorkItemCreateDialog project selector (ISS-123)", () => {
     const h = setup();
     await user.type(titleField(), "Stays");
     await typeDescription(user, "Old project words");
-    await user.click(screen.getByRole("button", { name: "Select state" }));
+    await user.click(await screen.findByRole("button", { name: "State: Todo" }));
     await user.click(await screen.findByRole("option", { name: "Todo" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Todo" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "State: Todo" })).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "Atlas" }));
     // Picking the project that is already selected keeps the form as it is.
     await user.click(await screen.findByRole("option", { name: "Atlas" }));
@@ -1937,7 +1966,7 @@ describe("WorkItemCreateDialog project selector (ISS-123)", () => {
     // it a fresh surface (ISS-123).
     const description = await screen.findByRole("textbox", { name: "Description" });
     await waitFor(() => expect(description).toHaveValue(""));
-    expect(screen.getByRole("button", { name: "Select state" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "State: Todo" })).toBeInTheDocument();
     expect(loadWorkItemDraft(SLUG)?.projectId).toBe(PROJECT_BEACON);
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
@@ -2159,7 +2188,7 @@ describe("WorkItemCreateDialog edit-mode workflow gate (ISS-233)", () => {
       }
     );
     await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
-    await user.click(screen.getByRole("button", { name: "Select state" }));
+    await user.click(await screen.findByRole("button", { name: "State: Todo" }));
     const done = await screen.findByRole("option", { name: /Done/ });
     expect(done).toBeDisabled();
     expect(done).toHaveTextContent("Locked here");
@@ -2320,10 +2349,10 @@ describe("WorkItemCreateDialog edit mode (ISS-126)", () => {
       props
     );
     // The pickers name the stored rows from their cached lists.
-    await waitFor(() => expect(screen.getByRole("button", { name: "Sprint 4" })).toBeInTheDocument());
-    await user.click(screen.getByRole("button", { name: "Sprint 4" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Cycle: Sprint 4" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Cycle: Sprint 4" }));
     await user.click(await screen.findByRole("option", { name: "No cycle" }));
-    await user.click(screen.getByRole("button", { name: "Checkout" }));
+    await user.click(screen.getByRole("button", { name: "Modules: Checkout" }));
     await user.click((await screen.findAllByRole("option", { name: "Checkout" }))[0]!);
     save();
     await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
@@ -2372,7 +2401,7 @@ describe("WorkItemCreateDialog edit mode (ISS-126)", () => {
       props
     );
     await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
-    await user.click(screen.getByRole("button", { name: "Select target" }));
+    await user.click(screen.getByRole("button", { name: "Runs on" }));
     await user.click(await screen.findByRole("option", { name: /gpu-box/ }));
     save();
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("That runner belongs to another project."));
@@ -2421,10 +2450,10 @@ describe("WorkItemCreateDialog edit mode (ISS-126)", () => {
       }
     );
     await waitFor(() => expect(titleField()).toHaveValue("Draft title"));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Sprint 4" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Cycle: Sprint 4" })).toBeInTheDocument());
     // Clear the cycle and add a module: the draft serializer replaces
     // both sets, so the PATCH carries the complete values.
-    await user.click(screen.getByRole("button", { name: "Sprint 4" }));
+    await user.click(screen.getByRole("button", { name: "Cycle: Sprint 4" }));
     await user.click(await screen.findByRole("option", { name: "No cycle" }));
     await user.click(screen.getByRole("button", { name: "Modules" }));
     await user.click((await screen.findAllByRole("option", { name: "Checkout" }))[0]!);
@@ -3157,13 +3186,26 @@ describe("WorkItemCreateDialog tab order (ISS-125)", () => {
 
   it("numbers the title, description, strip and footer in the old order", async () => {
     setup(
-      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }) } },
+      {
+        projects: {
+          [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", {
+            cycle_view: true,
+            module_view: true,
+            estimate: STATE_ID,
+          }),
+        },
+      },
       {}
     );
-    await waitFor(() => expect(screen.getByRole("button", { name: "Cycle" })).toBeInTheDocument());
+    for (const name of ["State: Todo", "Cycle", "Modules", "Estimate"]) {
+      await waitFor(() => expect(screen.getByRole("button", { name })).toBeInTheDocument());
+    }
     expect(screen.getByRole("textbox", { name: "Description" })).toHaveAttribute("tabindex", "2");
     const order = modalTabOrder();
     expect(order).toContain("input#1:Title");
+    // The popover layer assigns the chip triggers generated ids, so the
+    // oracle reading carries those instead of the chip text (as before);
+    // only the id-bearing cycle/modules triggers read back by name.
     expect(order.some((entry) => entry.startsWith("button#4:"))).toBe(true);
     expect(order.some((entry) => entry.startsWith("button#5:"))).toBe(true);
     expect(order.some((entry) => entry.startsWith("button#6:"))).toBe(true);
@@ -3172,13 +3214,20 @@ describe("WorkItemCreateDialog tab order (ISS-125)", () => {
     expect(order).toContain("div#9:Due date");
     expect(order).toContain("button#10:Cycle");
     expect(order).toContain("button#11:Modules");
+    expect(order.some((entry) => entry.startsWith("button#12:"))).toBe(true);
+    expect(order).toContain("div#13:Add parent");
     expect(order).toContain("div#15:Discard");
     expect(order).toContain("div#16:Save");
+    // The chip stops keep ascending index order.
+    const stops = order
+      .filter((entry) => /^(button|div)#(4|5|6|7|8|9|10|11|12|13):/.test(entry))
+      .map((entry) => entry.replace(/^(?:button|div)#(\d+):.*$/, "$1"));
+    expect(stops).toEqual(["4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]);
   });
 
   it("hides the cycle and module stops on a project without those views", async () => {
     setup();
-    await waitFor(() => expect(screen.getByText("State")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "State: Todo" })).toBeInTheDocument());
     const order = modalTabOrder();
     expect(order.some((entry) => entry.includes("#10:"))).toBe(false);
     expect(order.some((entry) => entry.includes("#11:"))).toBe(false);
@@ -3225,8 +3274,9 @@ describe("WorkItemCreateDialog draft entry (ISS-139/141)", () => {
     );
     await waitFor(() => expect(titleField()).toHaveValue("Plan (copy)"));
     expect(h.sent).toBeDefined();
-    const chips = screen.getAllByText("Labels");
-    expect(chips.length).toBeGreaterThan(0);
+    // The duplicated priority and labels land on their chips.
+    expect(screen.getByRole("button", { name: "Priority: High" })).toHaveTextContent("High");
+    expect(screen.getByRole("button", { name: "Labels: 1 selected" })).toHaveTextContent("1 selected");
   });
 
   it("saves a copy through the caller's write with the typed name", async () => {

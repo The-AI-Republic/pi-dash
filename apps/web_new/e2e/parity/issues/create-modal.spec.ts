@@ -47,6 +47,31 @@ test(
       }
     });
 
+    await test.step("the properties render as an ordered chip row", async () => {
+      // NEWPIDASH-10: one wrapping chip row, no captions. The fixed chips
+      // show their placeholder or value; the conditional chips track the
+      // live project flags (sibling suites toggle them on the shared
+      // stack), so each is asserted against its own placeholder text.
+      for (const placeholder of ["None", "Assignees", "Labels", "Start date", "Due date", "Add parent"]) {
+        expect(await driver.modalTextContains(placeholder)).toBe(true);
+      }
+      const order = await driver.modalTabOrder();
+      const present = (prefix: string): boolean => order.some((entry) => entry.startsWith(prefix));
+      for (const stop of ["button#4:", "button#5:", "button#6:", "div#7:", "div#8:", "div#9:"]) {
+        expect(present(stop)).toBe(true);
+      }
+      expect(present("button#10:")).toBe(await driver.modalTextContains("Cycle"));
+      expect(present("button#11:")).toBe(await driver.modalTextContains("Modules"));
+      // The estimate stop is a button on the new form and a div on the
+      // old one; either tag counts.
+      const stop12 = order.some((entry) => entry.startsWith("button#12:") || entry.startsWith("div#12:"));
+      expect(stop12).toBe(await driver.modalTextContains("Estimate"));
+      const stops = order
+        .filter((entry) => /^(button|div)#(4|5|6|7|8|9|10|11|12):/.test(entry))
+        .map((entry) => Number(entry.replace(/^(?:button|div)#(\d+):.*$/, "$1")));
+      expect([...stops].sort((a, b) => a - b)).toEqual(stops);
+    });
+
     const session = await signInSession(seed.email, seed.password);
 
     await test.step("saving creates the issue with a view/copy toast", async () => {
