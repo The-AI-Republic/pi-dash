@@ -31,6 +31,10 @@ import { EditInstallDialog, installDraftFromBinding, installUpdatePayload } from
 import { bindingKeys, invalidateInstalls } from "./installData.js";
 import { DEFAULT_TZID, isoToLocalStart } from "./schedule.js";
 
+// Pin the zone so the repeated-hour case below runs the same wherever the
+// suite runs. The other cases convert symmetrically and hold in any zone.
+process.env.TZ = "America/Los_Angeles";
+
 const SLUG = "acme";
 const PROJECT = "p1";
 
@@ -139,6 +143,15 @@ describe("installUpdatePayload", () => {
   it("trims the context but hands the rule over untouched", () => {
     const draft = installDraftFromBinding(binding({ extra_context: "  padded  ", rrule: " FREQ=DAILY " }));
     expect(installUpdatePayload(draft)).toMatchObject({ extra_context: "padded", rrule: " FREQ=DAILY " });
+  });
+
+  it("keeps the stored start when the wall time is untouched in a repeated hour", () => {
+    // 2026-11-01T09:15:00Z is the second (standard-time) 01:15 in
+    // America/Los_Angeles; the edit form passes the binding's dtstart as
+    // the original so saving without touching Starts at keeps the instant.
+    const draft = installDraftFromBinding(binding({ dtstart: "2026-11-01T09:15:00Z" }));
+    expect(draft.schedule.startsAt).toBe("2026-11-01T01:15");
+    expect(installUpdatePayload(draft, "2026-11-01T09:15:00Z").dtstart).toBe("2026-11-01T09:15:00.000Z");
   });
 });
 
