@@ -272,6 +272,10 @@ export interface ParityDriver {
   openResetPassword(params: { uid: string; token: string; email: string }): Promise<void>;
   /** Fill the new-password fields on the reset/set form and submit. */
   submitNewPassword(password: string, confirmPassword: string): Promise<void>;
+  /** Fill the new-password fields on the reset/set form without submitting. */
+  fillNewPasswordFields(password: string, confirmPassword: string): Promise<void>;
+  /** Whether the reset/set form submit is currently enabled. */
+  newPasswordSubmitEnabled(): Promise<boolean>;
   /** Open the set-password page; requires a signed-in session. */
   openSetPassword(): Promise<void>;
   /** Open an arbitrary app path (guards and legacy redirects). */

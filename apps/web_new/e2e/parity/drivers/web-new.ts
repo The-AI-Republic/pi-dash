@@ -1797,6 +1797,16 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByLabel("New password", { exact: true }).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
+  async fillNewPasswordFields(password: string, confirmPassword: string): Promise<void> {
+    await this.page.getByLabel("New password", { exact: true }).fill(password);
+    await this.page.getByLabel("Confirm password", { exact: true }).fill(confirmPassword);
+  }
+
+  async newPasswordSubmitEnabled(): Promise<boolean> {
+    const form = this.page.locator("form", { has: this.page.getByLabel("New password", { exact: true }) });
+    return this.cardSubmit(form).isEnabled();
+  }
+
   async submitNewPassword(password: string, confirmPassword: string): Promise<void> {
     // The reset form's fields; the card's own confirm lives on another
     // route, so the label reads stay unambiguous per page.

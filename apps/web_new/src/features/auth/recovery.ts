@@ -10,6 +10,7 @@
 import { isApiError } from "@pidash/api-client";
 
 import { describeAuthError } from "./authErrors.js";
+import { isStrongSecret } from "./passwordStrength.js";
 
 /** Resend throttle on the forgot-password page (AUTH-012). */
 export const FORGOT_RESEND_COOLDOWN_S = 30;
@@ -147,17 +148,13 @@ export type PasswordStrength = "empty" | "weak" | "strong";
 /**
  * Client-side secret meter (AUTH-010). The server (zxcvbn) stays
  * authoritative; this only gates the submit so weak secrets never post.
- * Strong means long enough with at least three of the four classes.
+ * Strong is the shared all-classes rule: long enough with an upper-case
+ * letter, a lower-case letter, a digit, and a mark from the fixed
+ * punctuation set — the same gate the sign-up card enforces.
  */
 export function secretStrength(password: string): PasswordStrength {
   if (password.length === 0) return "empty";
-  if (password.length < MIN_SECRET_LENGTH) return "weak";
-  let classes = 0;
-  if (/[a-z]/.test(password)) classes += 1;
-  if (/[A-Z]/.test(password)) classes += 1;
-  if (/[0-9]/.test(password)) classes += 1;
-  if (/[^a-zA-Z0-9]/.test(password)) classes += 1;
-  return classes >= 3 ? "strong" : "weak";
+  return isStrongSecret(password) ? "strong" : "weak";
 }
 
 /** Indicator text while the secret field holds a weak value; null otherwise. */
