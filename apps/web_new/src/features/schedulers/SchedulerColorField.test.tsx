@@ -80,6 +80,15 @@ describe("SchedulerColorField", () => {
     expect(screen.getByLabelText("Custom color")).toHaveValue("#112233");
   });
 
+  it.each(["", "not-a-hex-color"])("falls back to the default picker value for %s", (value) => {
+    setup(value);
+    for (const button of swatches()) {
+      expect(button).toHaveAttribute("aria-pressed", "false");
+    }
+    expect(screen.getByRole("button", { name: "More colors" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("Custom color")).toHaveValue(DEFAULT_SCHEDULER_COLOR);
+  });
+
   it("shows the More tooltip on the overflow button", () => {
     setup();
     fireEvent.focus(screen.getByRole("button", { name: "More colors" }));
