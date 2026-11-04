@@ -9,7 +9,8 @@ reads included.
 Maintainer decision, 2026-11-03/04: **rust-api reads and writes go through
 SeaORM entities and the query builder. Raw SQL stays only where SeaORM cannot
 express a statement**, and each such site says why with a
-`// raw-sql: <reason>` comment on the call line or the line above it.
+`// raw-sql: <reason>` comment on the call line, or alone on the line above
+it.
 
 The trigger was the rustpidash incident: every work item returned 500. A
 hand-written agent-run `SELECT` had two `llm_model` output columns. sqlx
@@ -27,17 +28,16 @@ separate objects. Hand-written SQL makes every handler re-solve that by hand.
   migrates the sites.
 - **No new duplicate output columns** in a hand-written `SELECT`.
 
-Starting point (2026-11-04): about 4,100 raw-SQL sites in about 260
-production files.
+Starting point (2026-11-04): 4,163 raw-SQL sites in 259 production files.
 
 ## 2. What counts as raw SQL
 
 | Counted | Not counted |
 | --- | --- |
-| `sqlx::query`, `query_as`, `query_scalar` (and `_with`) | SeaORM `Entity::find()`, `ActiveModel`, `select_only().column_as(..)` |
-| `Statement::from_string` / `from_sql_and_values`, `execute_unprepared`, `*_raw(` | sea-query builder calls (`Query::select()`, `Expr::col`, `PgExpr` operators) |
-| `Expr::cust*` (SQL text inside the builder) | test code (`#[cfg(test)]`, `tests/`), including test seeding |
-| positional `PgRow::try_get(<index>)` | a site marked `// raw-sql: <reason>` |
+| `sqlx::query`, `query_as`, `query_scalar` (and `_with`), the `query!` macros, `raw_sql`, `QueryBuilder::new` | SeaORM `Entity::find()`, `ActiveModel`, `select_only().column_as(..)` |
+| `Statement::from_string` / `from_sql_and_values`, `execute_unprepared`, `from_raw_sql`, `find_by_statement` | sea-query builder calls (`Query::select()`, `Expr::col`, `PgExpr` operators) |
+| `Expr::cust*` (SQL text inside the builder) | test code (`#[cfg(test)]` items, files declared `#[cfg(test)] mod x;`, `tests/`), including test seeding |
+| positional `try_get(<index>)` in any form (`.try_get(0)`, `.try_get::<T, _>(2)`, `Row::try_get(&r, 3)`) | a site marked `// raw-sql: <reason>` |
 
 ## 3. Patterns
 
@@ -196,7 +196,7 @@ joins (the bug class behind the incident), then volume. Counts are as of
 
 | Batch | Scope | Why first |
 | --- | --- | --- |
-| 0 | The 17 `[dup]` statements (12 distinct): `app_intake`, `app_issues/handlers_engage`, `auth_oauth`, `prompting`, `v1_assets`, `v1_cli_auth`, `jobs/assistant`, `oss_worker`, `app_views_search`, `dispatch/tools`, `orchestration/creation`, `read/work_items` | Each may be a live bug like #2850. Triage: alias, or migrate. |
+| 0 | The 19 `[dup]` statements: `app_intake`, `app_issues/handlers_engage`, `auth_oauth`, `prompting`, `v1_assets`, `v1_cli_auth`, `jobs/assistant`, `oss_worker`, `jobs/tasks_mail`, `app_views_search`, `dispatch/tools`, `orchestration/creation`, `read/work_items` | Each may be a live bug like #2850. Triage: alias, or migrate. |
 | 1 | `api/runner_enroll` (246 sites, 123 positional) | Most positional reads |
 | 2 | `api/app_issues` (250, 112 joins) | The issue detail surface |
 | 3 | `db/src` shared queries (286, 125 joins) | Used by many modules |

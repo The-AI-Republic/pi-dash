@@ -28,8 +28,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Guard unit tests
+        run: python3 rust-api/scripts/test_raw_sql_guard.py
       - name: Run raw-SQL guard
-        run: python3 rust-api/scripts/raw_sql_guard.py --check
+        run: |
+          set -o pipefail
+          python3 rust-api/scripts/raw_sql_guard.py --check | tee /tmp/raw_sql_guard.out
       - name: Raw-SQL totals
         if: always()
         run: |
@@ -37,6 +41,6 @@ jobs:
             echo "## Raw SQL remaining in rust-api"
             echo
             echo '```'
-            python3 rust-api/scripts/raw_sql_guard.py --report
+            grep -E '^raw_sql_' /tmp/raw_sql_guard.out || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
