@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { PageBodyOptionActions } from "./pageBodyActions.js";
 import { PAGE_COPY_MARKDOWN_LABEL } from "./pageBodyActions.js";
 import { PAGE_FULL_WIDTH_LABEL, PAGE_STICKY_TOOLBAR_LABEL } from "./pageDisplayMenu.js";
+import { PAGE_ACTION_MOVE } from "./pageActions.js";
 import { PAGE_ACTION_ADD_SUB_PAGE } from "./pageNested.js";
 import { PAGE_PREFERENCES_DEFAULTS } from "./pagePreferences.js";
 import {
@@ -125,7 +126,7 @@ describe("pageDetailMenuItems", () => {
     expect(labels(items)).not.toContain(PAGE_ACTION_ADD_SUB_PAGE);
   });
 
-  it("never carries the row menu's new-tab, copy-link, lock or move entries", () => {
+  it("never carries the row menu's new-tab, copy-link or lock entries", () => {
     const items = pageDetailMenuItems(
       { ...capabilities, body: bodyActions(), archived: true },
       handlers({ onExport: vi.fn(), onAddSubPage: vi.fn() }),
@@ -138,6 +139,20 @@ describe("pageDetailMenuItems", () => {
     expect(names).not.toContain("Lock");
     expect(names).not.toContain("Unlock");
     expect(names.some((name) => /move to project/i.test(name))).toBe(false);
+  });
+
+  it("offers the cross-project move only once the host wires it, before export", () => {
+    const onMoveToProject = vi.fn();
+    const items = pageDetailMenuItems(
+      capabilities,
+      handlers({ onExport: vi.fn(), onMoveToProject }),
+      PAGE_PREFERENCES_DEFAULTS,
+      vi.fn()
+    );
+    const names = labels(items);
+    expect(names.slice(-2)).toEqual([PAGE_ACTION_MOVE, PAGE_EXPORT_ITEM]);
+    items.find((item) => item.label === PAGE_ACTION_MOVE)?.onSelect();
+    expect(onMoveToProject).toHaveBeenCalledTimes(1);
   });
 
   it("runs each entry's handler", () => {

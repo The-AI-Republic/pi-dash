@@ -51,13 +51,6 @@ export const ISSUE_DEDUPE_FLAG = "issue-dedupe";
  */
 export const INTAKE_SOURCE_PILL_FLAG = "intake-source-pill";
 /**
- * Cross-project page move (PAGE-017, parity/specs/pages.md §3.8 and
- * §11.1). Editions whose server serves `pages/{id}/move/` set this; the
- * community edition leaves it absent, so the pages row menu carries no
- * move entry and no dialog ever mounts.
- */
-export const PAGE_MOVE_FLAG = "page-move";
-/**
  * Page editor assistant (PAGE-075, parity/specs/pages.md §9.3; Decisions
  * D26). Editions whose server serves the workspace editor-task endpoint
  * with a configured model set this; the community edition leaves it
