@@ -205,6 +205,19 @@ describe("EditInstallDialog", () => {
     expect(contracts.updateSchedulerBinding.mock.calls[0]?.[4]).toMatchObject({ rrule: "FREQ=HOURLY;BYHOUR=9 " });
   });
 
+  it("saves an untouched repeated-hour start back unchanged when only other fields change", async () => {
+    // 2026-11-01T09:15:00Z is the second (standard-time) 01:15 in
+    // America/Los_Angeles; the dialog must hand the stored instant to the
+    // payload so the save does not move it to the first occurrence.
+    const user = userEvent.setup();
+    setup({ binding: binding({ dtstart: "2026-11-01T09:15:00Z" }) });
+    expect(screen.getByLabelText("Starts at")).toHaveValue("2026-11-01T01:15");
+    await user.click(screen.getByRole("radio", { name: "Apply fix" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(contracts.updateSchedulerBinding).toHaveBeenCalled());
+    expect(contracts.updateSchedulerBinding.mock.calls[0]?.[4]).toMatchObject({ dtstart: "2026-11-01T09:15:00.000Z" });
+  });
+
   it("opens a stored hourly rule in the builder with Hour selected", () => {
     setup({ binding: binding({ rrule: "FREQ=HOURLY;INTERVAL=2" }) });
     expect(screen.getByLabelText("Repeat unit")).toHaveValue("hour");
