@@ -582,7 +582,9 @@ class PageMoveAPIEndpoint(BasePageReadAPIEndpoint):
         parameters=[PAGE_ID_PARAMETER],
         request=None,
         responses={
-            200: OpenApiResponse(description="Page moved; the page as seen in the target project", response=PageDetailSerializer),
+            200: OpenApiResponse(
+                description="Page moved; the page as seen in the target project", response=PageDetailSerializer
+            ),
             400: OpenApiResponse(
                 description="Invalid target, same project, target in another workspace or archived, or page locked"
             ),
