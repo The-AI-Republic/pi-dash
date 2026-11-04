@@ -76,6 +76,7 @@ from pi_dash.utils.content_validator import validate_html_content
 from pi_dash.utils.error_codes import ERROR_CODES
 from pi_dash.utils.live_document import LiveConversionError, convert_document
 from pi_dash.utils.markdown_converter import markdown_to_html
+from pi_dash.utils.page_move import PageMoveError, move_page
 from pi_dash.utils.page_tree import parent_error
 from pi_dash.utils.openapi import (
     page_docs,
@@ -178,13 +179,13 @@ class BasePageReadAPIEndpoint(BaseAPIView):
     permission_classes = [ProjectEntityPermission]
     use_read_replica = True
 
-    def get_queryset(self):
+    def get_queryset(self, project_id=None):
         # One `Exists` over the through table rather than a join through the
         # `projects` m2m: the m2m would fan the row out per linked project and
         # let the project filters match on *different* projects.
         linked_to_project = ProjectPage.objects.filter(
             page_id=OuterRef("pk"),
-            project_id=self.kwargs.get("project_id"),
+            project_id=project_id or self.kwargs.get("project_id"),
             project__archived_at__isnull=True,
             project__project_projectmember__member=self.request.user,
             project__project_projectmember__is_active=True,
@@ -557,3 +558,48 @@ class PageArchiveAPIEndpoint(BasePageReadAPIEndpoint):
                 page.save(update_fields=["parent"])
             unarchive_archive_page_and_descendants(page_id, None)
         return self.detail_response(page.id)
+
+
+class PageMoveAPIEndpoint(BasePageReadAPIEndpoint):
+    """Move a page, with its sub-pages, to another project of the workspace.
+
+    See :mod:`pi_dash.utils.page_move` for the rules. The page keeps its id,
+    owner, body, labels and version history; afterwards it is reachable
+    under the target project only.
+    """
+
+    serializer_class = PageDetailSerializer
+
+    @page_docs(
+        operation_id="move_page",
+        summary="Move page",
+        description=(
+            "Move a page and its sub-pages to another project in the same workspace. The page keeps its id, "
+            "owner, body, labels and version history. A sub-page moved on its own becomes a top-level page. "
+            "Favourites of the moved pages in the source project are removed. The caller must be an admin of "
+            "the source project and an admin or member of the target project."
+        ),
+        parameters=[PAGE_ID_PARAMETER],
+        request=None,
+        responses={
+            200: OpenApiResponse(description="Page moved; the page as seen in the target project", response=PageDetailSerializer),
+            400: OpenApiResponse(
+                description="Invalid target, same project, target in another workspace or archived, or page locked"
+            ),
+            403: OpenApiResponse(description="Not an admin of the source project or no write access to the target"),
+        },
+    )
+    def post(self, request, slug, project_id, page_id):
+        """Move page
+
+        Move a page and its sub-pages to the project given as `project_id`.
+        """
+        page, error = self.get_page_or_error(page_id)
+        if error:
+            return error
+        try:
+            target_project_id = move_page(page=page, source_project_id=project_id, data=request.data, user=request.user)
+        except PageMoveError as exc:
+            return Response(exc.body, status=exc.http_status)
+        page = self.get_queryset(project_id=target_project_id).get(pk=page_id)
+        return Response(PageDetailSerializer(page).data, status=status.HTTP_200_OK)
