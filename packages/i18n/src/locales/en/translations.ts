@@ -1983,4 +1983,12 @@ export default {
   "View workspace definition": "View workspace definition",
   year: "year",
   "{count} runs": "{count} runs",
+  // Move a page to another project.
+  Move: "Move",
+  Moving: "Moving",
+  "Move {page} and its sub-pages to another project in this workspace.":
+    "Move {page} and its sub-pages to another project in this workspace.",
+  "Page could not be moved. Please try again.": "Page could not be moved. Please try again.",
+  "Page moved to {project}.": "Page moved to {project}.",
+  "There is no other project you can move this page to.": "There is no other project you can move this page to.",
 } as const;
