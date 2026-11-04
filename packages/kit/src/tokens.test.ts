@@ -105,6 +105,10 @@ describe("tokens.css", () => {
     expect(darkContrast.get("--on-accent")).toBe("#000000");
   });
 
+  it("defines the settings content column width", () => {
+    expect(light.get("--settings-content-max")).toBe("56.25rem");
+  });
+
   it("maps the custom theme to the engine's palette variables (SHELL-095)", () => {
     expect(custom.get("--bg")).toBe("var(--theme-custom-background, #ffffff)");
     expect(custom.get("--accent")).toBe("var(--theme-custom-primary, #5e6ad2)");

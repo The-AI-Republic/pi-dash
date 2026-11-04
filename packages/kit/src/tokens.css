@@ -114,6 +114,9 @@
   --radius-dialog: 8px;
   --radius-full: 9999px;
 
+  /* Layout: centred content columns (56.25rem = 900px at the 16px root). */
+  --settings-content-max: 56.25rem;
+
   /* Elevation: lists are flat; overlays and dialogs lift */
   --shadow-popover: 0 4px 16px rgb(0 0 0 / 0.1);
   --shadow-dialog: 0 12px 48px rgb(0 0 0 / 0.18);
