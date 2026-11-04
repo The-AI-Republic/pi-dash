@@ -370,6 +370,116 @@ describe("SignInCard", () => {
     expect(screen.getByLabelText("Work email")).toBeInTheDocument();
   });
 
+  it("maps a throttled password submit to the rate-limit banner", async () => {
+    const user = userEvent.setup();
+    await renderReadyCard(
+      statusTransport((url) => {
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        if (url.endsWith("/api/instances/")) return { status: 200, body: CONFIG, url };
+        if (url.endsWith("/auth/email-check/")) {
+          return { status: 200, body: JSON.stringify({ existing: true, status: "CREDENTIAL" }), url };
+        }
+        if (url.endsWith("/auth/sign-in/")) {
+          return { status: 429, body: JSON.stringify({ error_code: 5900, error_message: "RATE_LIMIT_EXCEEDED" }), url };
+        }
+        throw new Error(`unexpected ${url}`);
+      })
+    );
+    await user.type(screen.getByLabelText("Work email"), "ada@example.com");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.type(await screen.findByLabelText("Password"), "secret");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("Rate limit exceeded. Wait a moment and try again.");
+    expect(banner).not.toHaveTextContent("Could not reach the server");
+  });
+
+  it("maps a throttled code submit to the rate-limit banner", async () => {
+    const user = userEvent.setup();
+    await renderReadyCard(
+      statusTransport((url) => {
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        if (url.endsWith("/api/instances/")) return { status: 200, body: CONFIG, url };
+        if (url.endsWith("/auth/email-check/")) {
+          return { status: 200, body: JSON.stringify({ existing: true, status: "MAGIC_CODE" }), url };
+        }
+        if (url.endsWith("/auth/magic-generate/")) return { status: 200, body: JSON.stringify({ key: "k" }), url };
+        if (url.endsWith("/auth/magic-sign-in/")) {
+          return { status: 429, body: JSON.stringify({ error_code: 5900, error_message: "RATE_LIMIT_EXCEEDED" }), url };
+        }
+        throw new Error(`unexpected ${url}`);
+      })
+    );
+    await user.type(screen.getByLabelText("Work email"), "ada@example.com");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.type(await screen.findByLabelText("One-time code"), "123456");
+    await user.click(screen.getByRole("button", { name: "Verify and sign in" }));
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("Rate limit exceeded. Wait a moment and try again.");
+    expect(banner).not.toHaveTextContent("Could not reach the server");
+  });
+
+  it("maps a mail-unconfigured resend to its catalog banner", async () => {
+    const user = userEvent.setup();
+    let generates = 0;
+    await renderReadyCard(
+      statusTransport((url) => {
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        if (url.endsWith("/api/instances/")) return { status: 200, body: CONFIG, url };
+        if (url.endsWith("/auth/email-check/")) {
+          return { status: 200, body: JSON.stringify({ existing: true, status: "MAGIC_CODE" }), url };
+        }
+        if (url.endsWith("/auth/magic-generate/")) {
+          generates += 1;
+          if (generates > 1) {
+            return {
+              status: 400,
+              body: JSON.stringify({ error_code: 5025, error_message: "SMTP_NOT_CONFIGURED" }),
+              url,
+            };
+          }
+          return { status: 200, body: JSON.stringify({ key: "k1" }), url };
+        }
+        throw new Error(`unexpected ${url}`);
+      })
+    );
+    await user.type(screen.getByLabelText("Work email"), "ada@example.com");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByLabelText("One-time code");
+    await user.click(screen.getByRole("button", { name: "Resend code" }));
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("This instance cannot send email, so codes are unavailable.");
+    expect(banner).not.toHaveTextContent("Could not send a code");
+  });
+
+  it("maps a disabled unique-code generate on the password step to its catalog banner", async () => {
+    const user = userEvent.setup();
+    await renderReadyCard(
+      statusTransport((url) => {
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        if (url.endsWith("/api/instances/")) return { status: 200, body: CONFIG, url };
+        if (url.endsWith("/auth/email-check/")) {
+          return { status: 200, body: JSON.stringify({ existing: true, status: "CREDENTIAL" }), url };
+        }
+        if (url.endsWith("/auth/magic-generate/")) {
+          return {
+            status: 400,
+            body: JSON.stringify({ error_code: 5016, error_message: "MAGIC_LINK_LOGIN_DISABLED" }),
+            url,
+          };
+        }
+        throw new Error(`unexpected ${url}`);
+      })
+    );
+    await user.type(screen.getByLabelText("Work email"), "ada@example.com");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByLabelText("Password");
+    await user.click(screen.getByRole("button", { name: "Sign in with unique code" }));
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("Code sign-in is disabled on this instance.");
+    expect(banner).not.toHaveTextContent("Could not send a code");
+  });
+
   it("flips unknown addresses into sign-up mode and creates the account", async () => {
     const user = userEvent.setup();
     const posts: string[] = [];
