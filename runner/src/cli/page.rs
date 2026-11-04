@@ -46,6 +46,12 @@ pub enum PageCommand {
     Archive(ArchiveArgs),
     /// Restore an archived page. Prints the restored page.
     Unarchive(ArchiveArgs),
+    /// Move a page, with its sub-pages, to another project of the
+    /// workspace. The page keeps its id, owner, body, labels and history; a
+    /// sub-page moved on its own becomes a top-level page. Needs project
+    /// admin in the source project and write access in the target. Prints
+    /// the moved page as seen in the target project.
+    Move(MoveArgs),
 }
 
 /// Who can see a page. Sent to the server as the integer `access` field.
@@ -148,6 +154,20 @@ pub struct ArchiveArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct MoveArgs {
+    /// Page UUID, as listed by `pidash page list`.
+    pub page_id: String,
+
+    /// Project the page is in now: identifier (slug like `ENG`) or UUID.
+    #[arg(long)]
+    pub project: String,
+
+    /// Project to move the page to: identifier (slug like `DOCS`) or UUID.
+    #[arg(long)]
+    pub to: String,
+}
+
+#[derive(Debug, Args)]
 pub struct ListArgs {
     /// Project identifier (slug like `ENG`) or project UUID.
     #[arg(long)]
@@ -198,6 +218,7 @@ pub async fn run(args: PageArgs, paths: &crate::util::paths::Paths) -> i32 {
         PageCommand::Update(args) => cmd_update(&client, args).await,
         PageCommand::Archive(args) => cmd_archive(&client, args).await,
         PageCommand::Unarchive(args) => cmd_unarchive(&client, args).await,
+        PageCommand::Move(args) => cmd_move(&client, args).await,
     };
     match result {
         Ok(()) => 0,
@@ -272,6 +293,28 @@ pub async fn cmd_unarchive(client: &ApiClient, args: ArchiveArgs) -> Result<(), 
     let page_id = validated_page_id(&args.page_id)?;
     let path = format!("{}archive/", page_path(client, project_ref, page_id));
     let resp = client.delete(&path).await?;
+    print_json(&resp);
+    Ok(())
+}
+
+pub async fn cmd_move(client: &ApiClient, args: MoveArgs) -> Result<(), CliError> {
+    let project_ref = validated_project(&args.project)?;
+    let page_id = validated_page_id(&args.page_id)?;
+    let to = args.to.trim();
+    if to.is_empty() {
+        return Err(CliError::new(EXIT_INVALID, "--to must not be empty"));
+    }
+    // The server takes the target as a project UUID in the body; resolve an
+    // identifier like `DOCS` client-side.
+    let target_id = if looks_like_uuid(to) {
+        to.to_string()
+    } else {
+        super::project::resolve_project(client, to).await?.id
+    };
+    let path = format!("{}move/", page_path(client, project_ref, page_id));
+    let mut body = Map::new();
+    body.insert("project_id".into(), Value::String(target_id));
+    let resp = client.post(&path, &Value::Object(body)).await?;
     print_json(&resp);
     Ok(())
 }

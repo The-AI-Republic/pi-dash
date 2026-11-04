@@ -89,11 +89,11 @@ pidash runner add --project <PROJECT> [--name <NAME>] [--workspace <SLUG>]
 | `--name <N>`             | Human-friendly runner name. Auto-generated if omitted.                                                                                 |
 | `--workspace <S>`        | Workspace slug. Required if you belong to multiple workspaces.                                                                         |
 | `--pod <P>`              | Pod within the project. Defaults to project's default pod.                                                                             |
-| `--working-dir <P>`      | Working dir for this runner. A repo, an empty dir (cloned into on first run), or any task folder. Defaults to a path under `data_dir`.  |
-| `--agent <K>`            | Which agent CLI the runner drives: `codex` (default), `claude-code`, `cursor-agent`, `open-claw`, `grok`, `muse-code`.                  |
-| `--model <M>`            | Default LLM model for the agent. Omit to use the agent's own default.                                                                   |
-| `--reasoning-effort <T>` | Codex reasoning tier (`low`/`medium`/`high`/`xhigh`). `--agent codex` only.                                                             |
-| `--skip-agent-install`   | Don't auto-install the agent CLI if it's missing; you'll install it yourself.                                                           |
+| `--working-dir <P>`      | Working dir for this runner. A repo, an empty dir (cloned into on first run), or any task folder. Defaults to a path under `data_dir`. |
+| `--agent <K>`            | Which agent CLI the runner drives: `codex` (default), `claude-code`, `cursor-agent`, `open-claw`, `grok`, `muse-code`.                 |
+| `--model <M>`            | Default LLM model for the agent. Omit to use the agent's own default.                                                                  |
+| `--reasoning-effort <T>` | Codex reasoning tier (`low`/`medium`/`high`/`xhigh`). `--agent codex` only.                                                            |
+| `--skip-agent-install`   | Don't auto-install the agent CLI if it's missing; you'll install it yourself.                                                          |
 
 On the first runner: installs the OS service (systemd user unit / launchd agent / Windows scheduled task) and starts the daemon.
 
@@ -558,6 +558,14 @@ Archive a page, or restore an archived one. Both print the page afterwards. Arch
 ```
 pidash page archive 550e8400-e29b-41d4-a716-446655440000 --project ENG
 pidash page unarchive 550e8400-e29b-41d4-a716-446655440000 --project ENG
+```
+
+### `pidash page move <PAGE_UUID> --project <P> --to <TARGET>`
+
+Move a page and its sub-pages to another project in the same workspace. `--to` takes a project identifier or UUID. The page keeps its id, owner, body, labels and version history. A sub-page moved on its own becomes a top-level page in the target. The command prints the moved page as it appears in the target project. Afterwards the page is listed under `--to` and returns 404 under `--project`. You must be an admin of the source project and an admin or member of the target. Moving a locked page, moving into an archived project, moving into a project in another workspace, or moving into the project the page is already in all fail with 400 (exit `2`). A missing role fails with 403 (exit `3`).
+
+```
+pidash page move 550e8400-e29b-41d4-a716-446655440000 --project ENG --to DOCS
 ```
 
 **Errors.** Page ids and `--parent` must be UUIDs; anything else exits `2` without a request, as does `--body` together with `--body-file` (a usage error from the argument parser). Server-side:
