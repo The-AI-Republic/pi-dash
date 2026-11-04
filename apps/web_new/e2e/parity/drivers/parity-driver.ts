@@ -4963,6 +4963,8 @@ export interface ParityDriver {
   runnersReleaseMutationShaping(): Promise<void>;
   /** Side-nav rail: header, overview link, contacts, empty state. */
   runnersRail(): Promise<RunnersRail>;
+  /** The rail's and the content pane's vertical extent against the viewport (NEWPIDASH-3). */
+  runnersRailGeometry(): Promise<RunnersRailGeometry>;
   /** Pod tiles in display order with default marker and runner count. */
   runnersPodTiles(): Promise<RunnersPodTile[]>;
   /** Toggle one pod tile's table filter. */
@@ -11725,6 +11727,14 @@ export interface RunnersRail {
   overviewHref: string | null;
   contacts: RunnersRailContact[];
   emptyVisible: boolean;
+}
+
+/** Vertical extent of the runners rail and its content pane, in CSS px from the viewport top. */
+export interface RunnersRailGeometry {
+  viewportHeight: number;
+  railTop: number;
+  railBottom: number;
+  contentBottom: number;
 }
 
 /** One rail chat contact. */
