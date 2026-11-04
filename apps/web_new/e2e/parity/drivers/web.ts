@@ -6228,6 +6228,136 @@ export class WebDriver implements ParityDriver {
       await aside.locator("#extended-project-sidebar-toggle").first().click({ timeout: WebDriver.actionTimeout });
     }
   }
+  /**
+   * The extended panel itself. It carries the same id as its sidebar
+   * toggle (a div here, a button there), so the tag disambiguates; it
+   * renders beside the sidebar, never inside the aside.
+   */
+  private overflowPanel(): Locator {
+    return this.page.locator("div#extended-project-sidebar-toggle");
+  }
+  async isOverflowRowOpen(projectName: string): Promise<boolean> {
+    // Same two expansion paths as the sidebar rows: the toggle sets
+    // aria-expanded, while landing on a project route renders the
+    // sub-navigation without flipping it — scoped to the panel, which
+    // the old app mounts beside the aside.
+    const panel = this.overflowPanel();
+    const toggle = panel.getByRole("button").filter({ hasText: projectName }).first();
+    if ((await toggle.count()) === 0) return false;
+    const expanded =
+      ((await toggle.getAttribute("aria-expanded", { timeout: WebDriver.actionTimeout }).catch(() => null)) ?? "") ===
+      "true";
+    if (expanded) return true;
+    const rowLink = panel.locator("a").filter({ hasText: projectName }).first();
+    const rowHref = await rowLink.getAttribute("href", { timeout: WebDriver.itemTimeout }).catch(() => null);
+    const idMatch = rowHref === null ? null : /\/projects\/([^/]+)\//.exec(`${rowHref}/`);
+    if (idMatch === null) return false;
+    const prefix = `/projects/${idMatch[1]}/`;
+    const links = panel.locator("a");
+    const count = await links.count();
+    for (let index = 0; index < count; index += 1) {
+      const href = await links
+        .nth(index)
+        .getAttribute("href", { timeout: WebDriver.itemTimeout })
+        .catch(() => null);
+      if (
+        href !== null &&
+        href.startsWith(prefix) &&
+        /\/projects\/[^/]+\/(issues|pages|intake|schedulers|runners|cycles|modules|views)\//.test(href)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+  async setOverflowRowOpen(projectName: string, open: boolean): Promise<void> {
+    // Panel-scoped twin of the sidebar drive: a remount between the
+    // state read and the click can swallow it, so verify and drive once
+    // more instead of leaving the row shut for the caller's poll budget.
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      if ((await this.isOverflowRowOpen(projectName)) === open) return;
+      await this.toggleOverflowRow(projectName);
+      await this.page.waitForTimeout(2000);
+    }
+  }
+  private async toggleOverflowRow(projectName: string): Promise<void> {
+    // One retry on a fresh lookup: a remount between resolve and click
+    // leaves a detached handle that burns the whole click timeout.
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const panel = this.overflowPanel();
+        const button = panel.getByRole("button").filter({ hasText: projectName }).first();
+        await button.waitFor({ state: "visible", timeout: 30_000 });
+        await button.click({ timeout: WebDriver.actionTimeout });
+        return;
+      } catch {
+        // Fall through to the fresh lookup below.
+      }
+    }
+  }
+  async openOverflowQuickMenu(projectName: string): Promise<void> {
+    // Panel-scoped twin of the sidebar quick-menu open: the toggle is
+    // hover-revealed per row and a plain click opens the menu.
+    const panel = this.overflowPanel();
+    const rowButton = panel.getByRole("button").filter({ hasText: projectName }).first();
+    const rowLink = panel.locator("a").filter({ hasText: projectName }).first();
+    let row = rowLink;
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      if ((await rowButton.count()) > 0) {
+        row = rowButton;
+        break;
+      }
+      if ((await rowLink.count()) > 0) {
+        row = rowLink;
+        break;
+      }
+      if (Date.now() > deadline) break;
+      await this.page.waitForTimeout(500);
+    }
+    await row.waitFor({ state: "visible", timeout: 30_000 });
+    const container = row.locator("xpath=ancestor::*[contains(@class,'group/project-item')][1]");
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await row.hover({ timeout: WebDriver.actionTimeout }).catch(() => {});
+      const toggle = container.getByRole("button", { name: "Toggle quick actions menu" }).first();
+      await toggle.click({ timeout: WebDriver.actionTimeout }).catch(() => {});
+      await this.page.waitForTimeout(2000);
+      if ((await this.projectQuickMenuTexts()).length > 0) return;
+    }
+  }
+  async overflowSubnavLinks(): Promise<{ text: string; href: string | null }[]> {
+    // Panel-scoped twin of the sidebar sub-navigation read: slashed
+    // entry hrefs separate section entries from the bare row link.
+    const panel = this.overflowPanel();
+    const links = panel.locator("a");
+    const count = await links.count();
+    const rows: { text: string; href: string | null }[] = [];
+    const seen = new Set<string>();
+    for (let index = 0; index < count; index += 1) {
+      const href = await links
+        .nth(index)
+        .getAttribute("href", { timeout: WebDriver.itemTimeout })
+        .catch(() => null);
+      if (
+        href === null ||
+        !/\/projects\/[^/]+\/(issues|pages|intake|schedulers|runners|cycles|modules|views)\//.test(href)
+      ) {
+        continue;
+      }
+      if (seen.has(href)) continue;
+      seen.add(href);
+      const text = (
+        (await links
+          .nth(index)
+          .textContent({ timeout: WebDriver.itemTimeout })
+          .catch(() => null)) ?? ""
+      )
+        .trim()
+        .replace(/\s+/g, " ");
+      if (text.length > 0) rows.push({ text, href });
+    }
+    return rows;
+  }
   async sidebarLinkTexts(): Promise<string[]> {
     const aside = await this.screenAside();
     return WebDriver.clean(await aside.locator("a").allTextContents());

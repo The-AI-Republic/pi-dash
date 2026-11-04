@@ -208,6 +208,9 @@ export function SidebarProjectsGroup({
             workspaceSlug={workspaceSlug}
             projects={joined}
             canCreateProject={canCreateProject}
+            tabbed={tabbed}
+            currentPath={currentPath}
+            activeProjectId={activeProjectId}
             onCreateProject={onCreateProject}
             onNavigate={onNavigate}
             onClose={() => setOverflowOpen(false)}

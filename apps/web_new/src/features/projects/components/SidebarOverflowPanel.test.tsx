@@ -18,6 +18,20 @@ import {
   ROW_LINK_COPIED_TITLE,
 } from "./SidebarProjectRow.js";
 
+// The runners sub-nav entry renders as a router Link (migrated route), so
+// stand it in as a plain anchor and assert the navigation intent only.
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
+  Link: (props: { to?: string; children?: React.ReactNode } & Record<string, unknown>) => {
+    const { to, children, ...rest } = props;
+    return (
+      <a href={to} {...rest}>
+        {children}
+      </a>
+    );
+  },
+}));
+
 vi.mock("../../../shared/shell/toaster.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/toaster.js")>();
   return { ...original, notifyError: vi.fn(), notifySuccess: vi.fn() };
@@ -63,6 +77,7 @@ const PROJECTS = [
 ];
 
 const CLIPBOARD_DESCRIPTOR = Object.getOwnPropertyDescriptor(globalThis.navigator, "clipboard");
+const assign = vi.fn();
 
 function stubClipboard(writeText: (text: string) => Promise<void>): void {
   Object.defineProperty(globalThis.navigator, "clipboard", { value: { writeText }, configurable: true });
@@ -123,6 +138,9 @@ function setup(props: Partial<SidebarOverflowPanelProps> = {}) {
         workspaceSlug="acme"
         projects={PROJECTS}
         canCreateProject
+        tabbed={false}
+        currentPath="/acme/"
+        activeProjectId={null}
         onCreateProject={onCreateProject}
         onNavigate={onNavigate}
         onClose={onClose}
@@ -134,9 +152,21 @@ function setup(props: Partial<SidebarOverflowPanelProps> = {}) {
 }
 
 function panelNames(): string[] {
-  return screen
-    .queryAllByTestId("projects-overflow-list")
-    .flatMap((list) => Array.from(list.querySelectorAll("a")).map((link) => link.textContent ?? ""));
+  return screen.queryAllByTestId("project-row-link").map((link) => link.textContent ?? "");
+}
+
+function menuNames(): string[] {
+  return screen.getAllByRole("menuitem").map((item) => item.textContent ?? "");
+}
+
+function openMenu(name: string): void {
+  fireEvent.click(screen.getByRole("button", { name: `Actions for ${name}` }));
+}
+
+function escapeOn(target: Element): void {
+  act(() => {
+    target.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  });
 }
 
 function stubRowRects(spans: Record<string, { top: number; bottom: number }>): void {
@@ -180,6 +210,11 @@ function pointerCancel(): void {
 beforeEach(() => {
   window.localStorage.clear();
   vi.clearAllMocks();
+  Object.defineProperty(globalThis.window, "location", {
+    value: { assign, origin: "https://app.test" },
+    writable: true,
+    configurable: true,
+  });
   act(() => {
     useShellChrome.getState().setSidebarCollapsed(false);
     useShellChrome.getState().setSidebarWidth(SIDEBAR_DEFAULT_WIDTH);
@@ -210,7 +245,7 @@ describe("SidebarOverflowPanel", () => {
 
   it("follows plain left clicks client-side", () => {
     const h = setup();
-    const link = screen.getByTestId("projects-overflow-list").querySelectorAll("a")[0];
+    const link = screen.getAllByTestId("project-row-link")[0];
     if (link === undefined) throw new Error("missing panel row");
     fireEvent.click(link, { button: 0 });
     expect(h.onNavigate).toHaveBeenCalledWith(`/acme/projects/${PROJECT_A}/issues`);
@@ -242,16 +277,14 @@ describe("SidebarOverflowPanel", () => {
     expect(screen.queryByTestId("projects-overflow-create")).not.toBeInTheDocument();
   });
 
-  it("copies row links with the shared confirmation", async () => {
+  it("copies row links from the menu with the shared confirmation", async () => {
     const written: string[] = [];
     stubClipboard(async (text: string) => void written.push(text));
     setup();
-    const rows = screen.getByTestId("projects-overflow-list").querySelectorAll("li");
-    const copy = rows[0]?.querySelector('[data-testid="overflow-row-copy"]');
-    if (!(copy instanceof HTMLElement)) throw new Error("missing copy button");
-    fireEvent.click(copy);
+    openMenu("Atlas");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Copy link" }));
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(ROW_LINK_COPIED_TITLE, ROW_LINK_COPIED_BODY));
-    expect(written).toEqual([`${window.location.origin}/acme/projects/${PROJECT_A}/issues`]);
+    expect(written).toEqual([`https://app.test/acme/projects/${PROJECT_A}/issues`]);
   });
 
   it("toasts when the clipboard refuses or is missing", async () => {
@@ -259,18 +292,16 @@ describe("SidebarOverflowPanel", () => {
       throw new Error("denied");
     });
     setup();
-    const copy = screen.getAllByTestId("overflow-row-copy")[0];
-    if (!(copy instanceof HTMLElement)) throw new Error("missing copy button");
-    fireEvent.click(copy);
+    openMenu("Atlas");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Copy link" }));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(ROW_COPY_FAILED_TITLE, ROW_COPY_FAILED_BODY));
   });
 
   it("toasts when the clipboard is unavailable", async () => {
     Reflect.deleteProperty(globalThis.navigator, "clipboard");
     setup();
-    const copy = screen.getAllByTestId("overflow-row-copy")[0];
-    if (!(copy instanceof HTMLElement)) throw new Error("missing copy button");
-    fireEvent.click(copy);
+    openMenu("Atlas");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Copy link" }));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(ROW_COPY_FAILED_TITLE, ROW_COPY_FAILED_BODY));
   });
 
@@ -361,5 +392,259 @@ describe("SidebarOverflowPanel", () => {
     pointerMove(200);
     await waitFor(() => expect(screen.getAllByTestId("overflow-drop-indicator")).toHaveLength(1));
     pointerCancel();
+  });
+});
+
+describe("SidebarOverflowPanel quick menu", () => {
+  it("offers admins publish, copy, archives and settings", () => {
+    setup();
+    openMenu("Atlas");
+    expect(menuNames()).toEqual(["Publish project", "Copy link", "Archives", "Settings"]);
+  });
+
+  it("offers members copy, archives and settings", () => {
+    setup({ projects: [project(PROJECT_A, "Atlas", { member_role: 15 })] });
+    openMenu("Atlas");
+    expect(menuNames()).toEqual(["Copy link", "Archives", "Settings"]);
+  });
+
+  it("offers project guests copy, settings and leave", () => {
+    setup({ projects: [project(PROJECT_A, "Atlas", { member_role: 5 })] });
+    openMenu("Atlas");
+    expect(menuNames()).toEqual(["Copy link", "Settings", "Leave project"]);
+  });
+
+  it("opens the publish dialog without closing the panel", async () => {
+    const h = setup();
+    openMenu("Atlas");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Publish project" }));
+    expect(await screen.findByRole("heading", { name: "Publish project" })).toBeInTheDocument();
+    expect(h.onClose).not.toHaveBeenCalled();
+  });
+
+  it("opens the leave dialog without closing the panel", async () => {
+    const h = setup({ projects: [project(PROJECT_A, "Atlas", { member_role: 5 })] });
+    openMenu("Atlas");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Leave project" }));
+    expect(await screen.findByRole("heading", { name: "Leave project" })).toBeInTheDocument();
+    expect(h.onClose).not.toHaveBeenCalled();
+  });
+
+  it("loads archives and settings outside the client router and closes the panel", () => {
+    const h = setup();
+    openMenu("Atlas");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Archives" }));
+    expect(assign).toHaveBeenCalledWith(`/acme/projects/${PROJECT_A}/archives/issues`);
+    expect(h.onClose).toHaveBeenCalledTimes(1);
+    openMenu("Atlas");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+    expect(assign).toHaveBeenCalledWith(`/acme/settings/projects/${PROJECT_A}`);
+    expect(h.onClose).toHaveBeenCalledTimes(2);
+  });
+
+  it("exposes the toggle and the menu to the keyboard with row names", () => {
+    setup();
+    const toggle = screen.getByRole("button", { name: "Expand Atlas" });
+    const menu = screen.getByRole("button", { name: "Actions for Atlas" });
+    expect(toggle.tabIndex).toBeGreaterThanOrEqual(0);
+    expect(menu.tabIndex).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("SidebarOverflowPanel expansion", () => {
+  it("expands and collapses rows through the toggle", () => {
+    setup();
+    expect(screen.queryByTestId("project-subnav")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Expand Atlas" }));
+    expect(screen.getByTestId("project-subnav")).toHaveAccessibleName("Atlas sections");
+    expect(screen.getByRole("button", { name: "Collapse Atlas" })).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Collapse Atlas" }));
+    expect(screen.queryByTestId("project-subnav")).not.toBeInTheDocument();
+  });
+
+  it("hides the toggle in tabbed mode", () => {
+    setup({ tabbed: true });
+    expect(screen.queryByTestId("project-row-toggle")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("project-subnav")).not.toBeInTheDocument();
+  });
+
+  it("starts the route project expanded", () => {
+    setup({ activeProjectId: PROJECT_A });
+    expect(screen.getByTestId("project-subnav")).toHaveAccessibleName("Atlas sections");
+  });
+
+  it("expands the route project on arrival", () => {
+    const h = setup();
+    expect(screen.queryByTestId("project-subnav")).not.toBeInTheDocument();
+    h.view.rerender(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <SidebarOverflowPanel
+          workspaceSlug="acme"
+          projects={PROJECTS}
+          canCreateProject
+          tabbed={false}
+          currentPath="/acme/"
+          activeProjectId={PROJECT_B}
+          onCreateProject={() => undefined}
+          onNavigate={() => undefined}
+          onClose={() => undefined}
+        />
+      </QueryClientProvider>
+    );
+    expect(screen.getByTestId("project-subnav")).toHaveAccessibleName("Beacon sections");
+  });
+
+  it("lists flag-gated entries with slashed addresses", () => {
+    setup({
+      projects: [project(PROJECT_A, "Atlas", { page_view: true, issue_views_view: true })],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Expand Atlas" }));
+    const links = screen.getAllByTestId("project-subnav-link");
+    expect(links.map((link) => link.textContent)).toEqual(
+      expect.arrayContaining(["Work Items", "Views", "Pages", "Schedulers", "AI Workers"])
+    );
+    expect(links.map((link) => link.textContent)).not.toContain("Cycles");
+    expect(links.map((link) => link.textContent)).not.toContain("Modules");
+    for (const link of links) {
+      expect(link.getAttribute("href")).toContain(`/projects/${PROJECT_A}/`);
+    }
+  });
+
+  it("hides member-plus entries from project guests", () => {
+    setup({ projects: [project(PROJECT_A, "Atlas", { member_role: 5 })] });
+    fireEvent.click(screen.getByRole("button", { name: "Expand Atlas" }));
+    const texts = screen.getAllByTestId("project-subnav-link").map((link) => link.textContent);
+    expect(texts).toEqual(expect.arrayContaining(["Work Items", "Schedulers"]));
+    expect(texts).not.toContain("AI Workers");
+  });
+
+  it("marks the current entry and badges pending intake", () => {
+    setup({
+      projects: [project(PROJECT_A, "Atlas", { page_view: true, inbox_view: true, intake_count: 4 })],
+      currentPath: `/acme/projects/${PROJECT_A}/pages/`,
+      activeProjectId: PROJECT_A,
+    });
+    const entries = screen.getAllByTestId("project-subnav-link");
+    const pages = entries.find((link) => (link.textContent ?? "").includes("Pages"));
+    expect(pages).toHaveAttribute("aria-current", "page");
+    const intake = entries.find((link) => (link.textContent ?? "").includes("Intake"));
+    expect(intake?.textContent).toContain("4");
+  });
+
+  it("navigates from section links and closes the panel", () => {
+    const h = setup({ activeProjectId: PROJECT_A });
+    const entries = screen.getAllByTestId("project-subnav-link");
+    const schedulers = entries.find((link) => (link.textContent ?? "").includes("Schedulers"));
+    if (schedulers === undefined) throw new Error("schedulers entry missing");
+    fireEvent.click(schedulers);
+    expect(h.onNavigate).toHaveBeenCalledWith(`/acme/projects/${PROJECT_A}/schedulers/`);
+    expect(h.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves modified section clicks to the browser", () => {
+    const h = setup({ activeProjectId: PROJECT_A });
+    const entries = screen.getAllByTestId("project-subnav-link");
+    const schedulers = entries.find((link) => (link.textContent ?? "").includes("Schedulers"));
+    if (schedulers === undefined) throw new Error("schedulers entry missing");
+    fireEvent.click(schedulers, { metaKey: true, button: 0 });
+    expect(h.onNavigate).not.toHaveBeenCalled();
+    expect(h.onClose).not.toHaveBeenCalled();
+  });
+
+  it("closes the panel from the runners entry without double navigation", () => {
+    const h = setup({ activeProjectId: PROJECT_A });
+    const entries = screen.getAllByTestId("project-subnav-link");
+    const runners = entries.find((link) => (link.textContent ?? "").includes("AI Workers"));
+    if (runners === undefined) throw new Error("runners entry missing");
+    fireEvent.click(runners);
+    expect(h.onNavigate).not.toHaveBeenCalled();
+    expect(h.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves modified runners clicks to the browser", () => {
+    const h = setup({ activeProjectId: PROJECT_A });
+    const entries = screen.getAllByTestId("project-subnav-link");
+    const runners = entries.find((link) => (link.textContent ?? "").includes("AI Workers"));
+    if (runners === undefined) throw new Error("runners entry missing");
+    fireEvent.click(runners, { metaKey: true, button: 0 });
+    expect(h.onNavigate).not.toHaveBeenCalled();
+    expect(h.onClose).not.toHaveBeenCalled();
+  });
+
+  it("keeps expanded rows expanded across search typing", () => {
+    setup();
+    fireEvent.click(screen.getByRole("button", { name: "Expand Atlas" }));
+    expect(screen.getByTestId("project-subnav")).toBeInTheDocument();
+    const search = screen.getByTestId("projects-overflow-search");
+    fireEvent.change(search, { target: { value: "Beacon" } });
+    expect(panelNames()).toEqual(["BCNBeacon"]);
+    expect(screen.queryByTestId("project-subnav")).not.toBeInTheDocument();
+    fireEvent.change(search, { target: { value: "" } });
+    expect(panelNames()).toEqual(["ATLAtlas", "BCNBeacon"]);
+    expect(screen.getByTestId("project-subnav")).toHaveAccessibleName("Atlas sections");
+  });
+
+  it("collapses sub-navs while dragging and restores them after", async () => {
+    setup();
+    stubRowRects({ [PROJECT_A]: { top: 0, bottom: 20 }, [PROJECT_B]: { top: 20, bottom: 40 } });
+    fireEvent.click(screen.getByRole("button", { name: "Expand Atlas" }));
+    expect(screen.getByTestId("project-subnav")).toBeInTheDocument();
+    const handle = screen.getAllByTestId("overflow-drag-handle")[0];
+    if (!(handle instanceof HTMLElement)) throw new Error("missing drag handle");
+    fireEvent.pointerDown(handle);
+    expect(screen.queryByTestId("project-subnav")).not.toBeInTheDocument();
+    pointerUp();
+    await waitFor(() => expect(screen.getByTestId("project-subnav")).toBeInTheDocument());
+  });
+
+  it("does not start a drag from the toggle or the menu", () => {
+    const h = setup();
+    stubRowRects({ [PROJECT_A]: { top: 0, bottom: 20 }, [PROJECT_B]: { top: 20, bottom: 40 } });
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Expand Atlas" }));
+    pointerMove(200);
+    pointerUp();
+    expect(h.calls.some((call) => call.method === "PATCH")).toBe(false);
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Actions for Atlas" }));
+    pointerMove(200);
+    pointerUp();
+    expect(h.calls.some((call) => call.method === "PATCH")).toBe(false);
+  });
+});
+
+describe("SidebarOverflowPanel overlay interplay", () => {
+  it("ignores outside clicks inside an open row menu", () => {
+    const h = setup();
+    openMenu("Atlas");
+    const item = screen.getByRole("menuitem", { name: "Copy link" });
+    act(() => {
+      item.dispatchEvent(new window.MouseEvent("pointerdown", { bubbles: true }));
+    });
+    expect(h.onClose).not.toHaveBeenCalled();
+  });
+
+  it("closes an open menu before the panel on Escape", () => {
+    const h = setup();
+    openMenu("Atlas");
+    const menu = screen.getByRole("menu", { name: "Actions for Atlas" });
+    escapeOn(menu);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(h.onClose).not.toHaveBeenCalled();
+    act(() => {
+      document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(h.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the panel open while a row dialog owns Escape", async () => {
+    const h = setup();
+    openMenu("Atlas");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Publish project" }));
+    expect(await screen.findByRole("heading", { name: "Publish project" })).toBeInTheDocument();
+    const dialogs = screen.getAllByRole("dialog");
+    const overlay = dialogs.find((dialog) => dialog.getAttribute("data-testid") !== "projects-overflow-panel");
+    if (overlay === undefined) throw new Error("missing dialog overlay");
+    escapeOn(overlay);
+    expect(h.onClose).not.toHaveBeenCalled();
+    expect(screen.getByTestId("projects-overflow-panel")).toBeInTheDocument();
   });
 });

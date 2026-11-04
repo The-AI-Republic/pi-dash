@@ -7664,6 +7664,55 @@ export class WebNewDriver implements ParityDriver {
     return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
+  /** The overflow slide-over row carrying a project name. */
+  private overflowRow(projectName: string): Locator {
+    return this.page
+      .getByTestId("projects-overflow-panel")
+      .locator("li[data-overflow-row]")
+      .filter({ hasText: projectName })
+      .first();
+  }
+
+  async isOverflowRowOpen(projectName: string): Promise<boolean> {
+    const row = this.overflowRow(projectName);
+    const toggle = row.getByTestId("project-row-toggle");
+    if ((await toggle.count()) > 0) {
+      return (await toggle.first().getAttribute("aria-expanded")) === "true";
+    }
+    return (await row.getByTestId("project-subnav-link").count()) > 0;
+  }
+
+  async setOverflowRowOpen(projectName: string, open: boolean): Promise<void> {
+    // Same drive-until-agree as the sidebar rows: the panel mounts its
+    // rows asynchronously after the projects fetch.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      if ((await this.isOverflowRowOpen(projectName)) === open) return;
+      await this.overflowRow(projectName).getByTestId("project-row-toggle").click({ timeout: 10_000 });
+    }
+    await expect.poll(() => this.isOverflowRowOpen(projectName), { timeout: 10_000 }).toBe(open);
+  }
+
+  async openOverflowQuickMenu(projectName: string): Promise<void> {
+    const row = this.overflowRow(projectName);
+    await row.hover();
+    await row.getByTestId("project-row-menu").click();
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: 10_000 });
+  }
+
+  async overflowSubnavLinks(): Promise<{ text: string; href: string | null }[]> {
+    const links = this.page.getByTestId("projects-overflow-panel").getByTestId("project-subnav-link");
+    const count = await links.count();
+    const rows: { text: string; href: string | null }[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const link = links.nth(index);
+      rows.push({
+        text: ((await link.innerText().catch(() => "")) ?? "").trim(),
+        href: await link.getAttribute("href").catch(() => null),
+      });
+    }
+    return rows;
+  }
+
   async isOverflowEmptyStateVisible(): Promise<boolean> {
     const empty = this.page.getByTestId("projects-overflow-empty");
     return (await empty.count()) > 0 && (await empty.first().isVisible());
