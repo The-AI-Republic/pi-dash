@@ -8,10 +8,15 @@
 // discard guard still counts as work, and how the form looks after a
 // create-with-more reset.
 
-import type { DraftIssueCreateInput, IssueCreateInput } from "@pidash/api-client";
+import type { DraftIssueCreateInput, IssueCreateInput, Pod } from "@pidash/api-client";
 
 import { hasStoredDescriptionContent, storedTextContent } from "../../../shared/editor/index.js";
-import { executionTargetPatch, type ExecutionSelection } from "../../../shared/pickers/index.js";
+import {
+  executionSelectionId,
+  executionTargetPatch,
+  isAgentRowKind,
+  type ExecutionSelection,
+} from "../../../shared/pickers/index.js";
 import { TITLE_MAX_LENGTH, type CreateProjectOption } from "./createProjects.js";
 
 export { TITLE_MAX_LENGTH } from "./createProjects.js";
@@ -62,6 +67,34 @@ export function emptyCreateForm(projectId: string | null, descriptionHtml = ""):
     parentId: null,
     gitWorkBranch: "",
   };
+}
+
+/**
+ * The target a new item starts on: the project's default pod, else its
+ * first pod, else nothing. A pod pick also pins the local executor, so
+ * the create stores the same execution target the old form wrote and the
+ * "Runs on" field names it before the first run. A project that runs on
+ * an agent by default (cloud or managed) starts on no pick at all: the
+ * old form shows that agent and sends nothing, leaving the item on the
+ * project default.
+ */
+export function defaultExecutionSelection(
+  pods: ReadonlyArray<Pick<Pod, "id" | "is_default">>,
+  projectDefaultExecutor: string | null = null
+): ExecutionSelection | null {
+  if (projectDefaultExecutor !== null && isAgentRowKind(projectDefaultExecutor)) return null;
+  const pod = pods.find((row) => row.is_default) ?? pods[0];
+  return pod === undefined ? null : { type: "pod", podId: pod.id };
+}
+
+/**
+ * Fill an empty target with the default. Any pick already made (another
+ * pod, a runner, an agent) stays; only a blank form, a project switch or
+ * a Create more reset leaves the target empty.
+ */
+export function withDefaultExecution(form: CreateFormState, fallback: ExecutionSelection | null): CreateFormState {
+  if (form.execution !== null || fallback === null) return form;
+  return { ...form, execution: fallback };
 }
 
 /**
@@ -269,8 +302,9 @@ export function buildDraftInput(form: CreateFormState): DraftIssueCreateInput {
  * Whether the discard guard has anything worth keeping (ISS-120). The
  * project is context, not content, and so are the memberships a route
  * seeded: an untouched form opened from a cycle or module page differs
- * from its context in nothing (ISS-124/ISS-125). Empty values and a
- * description without content do not count either.
+ * from its context in nothing (ISS-124/ISS-125), and neither does the
+ * default pod the form preselected. Empty values and a description
+ * without content do not count either.
  */
 /** Whether two id lists match element for element, in order. */
 function sameIds(left: readonly string[], right: readonly string[]): boolean {
@@ -280,7 +314,11 @@ function sameIds(left: readonly string[], right: readonly string[]): boolean {
 /** Nothing seeded from the route: a caller with no context. */
 const NO_MEMBERSHIP: CreateMembership = { cycleId: null, moduleIds: [] };
 
-export function hasDraftWorthKeeping(form: CreateFormState, context: CreateMembership = NO_MEMBERSHIP): boolean {
+export function hasDraftWorthKeeping(
+  form: CreateFormState,
+  context: CreateMembership = NO_MEMBERSHIP,
+  seededExecution: ExecutionSelection | null = null
+): boolean {
   if (normalizeTitle(form.name) !== "") return true;
   if (hasStoredDescriptionContent(form.descriptionHtml)) return true;
   if (form.stateId !== null) return true;
@@ -291,7 +329,8 @@ export function hasDraftWorthKeeping(form: CreateFormState, context: CreateMembe
   if (form.cycleId !== context.cycleId) return true;
   if (!sameIds(form.moduleIds, context.moduleIds)) return true;
   if (form.estimatePoint !== null) return true;
-  if (form.execution !== null) return true;
+  // The preselected default pod is context too: the user did not pick it.
+  if (executionSelectionId(form.execution) !== executionSelectionId(seededExecution)) return true;
   if (form.parentId !== null) return true;
   if (form.gitWorkBranch.trim() !== "") return true;
   return false;
