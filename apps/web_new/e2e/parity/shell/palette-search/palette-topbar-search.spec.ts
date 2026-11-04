@@ -59,6 +59,22 @@ test.describe("top-bar search box", () => {
         await expect.poll(() => driver.isTopBarResultsOpen()).toBe(false);
         expect(await driver.topBarSearchValue()).toBe("");
       });
+
+      await test.step("focus widens the box and close shrinks it back (NEWPIDASH-7)", async () => {
+        // Bounding-box comparison, not exact pixels: both apps grow the
+        // box while the panel is open and restore it on close.
+        const narrow = await driver.topBarSearchWidth();
+        expect(narrow).not.toBeNull();
+        await driver.focusTopBarSearch();
+        await expect.poll(() => driver.isTopBarResultsOpen()).toBe(true);
+        // Polled: the width animates from narrow to wide.
+        await expect.poll(async () => driver.topBarSearchWidth()).toBeGreaterThan(narrow!);
+        const wide = (await driver.topBarSearchWidth())!;
+        expect(wide).toBeGreaterThan(narrow!);
+        await driver.pressInTopBarSearch("Escape");
+        await expect.poll(() => driver.isTopBarResultsOpen()).toBe(false);
+        await expect.poll(async () => driver.topBarSearchWidth()).toBeLessThanOrEqual(narrow! + 1);
+      });
     }
   );
 });

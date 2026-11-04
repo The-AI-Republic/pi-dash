@@ -406,3 +406,104 @@ describe("TopBarSearch server results (SHELL-081/084/085/093)", { timeout: SEARC
     expect(screen.queryByText(/error|failed|unreachable/i)).not.toBeInTheDocument();
   });
 });
+
+describe("TopBarSearch expand on open (NEWPIDASH-7)", { timeout: SEARCH_TEST_TIMEOUT }, () => {
+  function box(): HTMLElement {
+    return screen.getByTestId("topbar-search-box");
+  }
+
+  function expectClosedWidth(): void {
+    expect(box().style.width).toBe("100%");
+  }
+
+  function expectOpenWidth(): void {
+    expect(box().style.width).toContain("554px");
+  }
+
+  it("stays narrow while closed and widens with a transition while open", async () => {
+    const user = userEvent.setup();
+    registerCommands([{ id: "theme", title: "Change interface theme", run: () => undefined }]);
+    renderBox({ scope: null });
+    // Closed: the flow footprint is the narrow box; the inner box fills it.
+    expect(box().parentElement!.style.width).toBe("364px");
+    expectClosedWidth();
+    expect(box().className).toContain("transition-[width]");
+    expect(box().className).toContain("motion-reduce:transition-none");
+    await user.click(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER));
+    expectOpenWidth();
+    // The results panel mounts inside the widened box, so it inherits the width.
+    const panel = screen.getByRole("listbox", { name: "Top bar search results" });
+    expect(box()).toContainElement(panel);
+  });
+
+  it("widens through the palette focus request (SHELL-089)", () => {
+    renderBox({ scope: null });
+    expectClosedWidth();
+    act(() => {
+      useTopSearchFocus.getState().requestTopSearchFocus();
+    });
+    expectOpenWidth();
+    expect(screen.getByRole("listbox", { name: "Top bar search results" })).toBeInTheDocument();
+  });
+
+  it("collapses on Escape", async () => {
+    const user = userEvent.setup();
+    registerCommands([{ id: "theme", title: "Change interface theme", run: () => undefined }]);
+    renderBox({ scope: null });
+    await user.click(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER));
+    expectOpenWidth();
+    await user.keyboard("{Escape}");
+    expectClosedWidth();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("collapses on an outside click", async () => {
+    const user = userEvent.setup();
+    registerCommands([{ id: "theme", title: "Change interface theme", run: () => undefined }]);
+    renderBox({ scope: null });
+    await user.click(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER));
+    expectOpenWidth();
+    fireEvent.pointerDown(document.body);
+    expectClosedWidth();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("collapses when a result is chosen", async () => {
+    const user = userEvent.setup();
+    registerCommands([{ id: "theme", title: "Change interface theme", run: () => undefined }]);
+    renderBox({ scope: null });
+    await user.click(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER));
+    expectOpenWidth();
+    await user.click(await screen.findByRole("option", { name: "Change interface theme" }, LAZY_ROW_TIMEOUT));
+    expectClosedWidth();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("collapses and resets the term on blur", async () => {
+    const user = userEvent.setup();
+    registerCommands([{ id: "theme", title: "Change interface theme", run: () => undefined }]);
+    renderBox({ scope: null });
+    const input = screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER) as HTMLInputElement;
+    await user.click(input);
+    await user.type(input, "abc");
+    expectOpenWidth();
+    fireEvent.blur(input, { relatedTarget: document.body });
+    expectClosedWidth();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(input.value).toBe("");
+  });
+
+  it("stays open when focus moves inside the panel", async () => {
+    const user = userEvent.setup();
+    registerCommands([{ id: "theme", title: "Change interface theme", run: () => undefined }]);
+    renderBox({ scope: null });
+    const input = screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER);
+    await user.click(input);
+    expectOpenWidth();
+    fireEvent.blur(input, {
+      relatedTarget: screen.getByRole("listbox", { name: "Top bar search results" }),
+    });
+    expectOpenWidth();
+    expect(screen.getByRole("listbox", { name: "Top bar search results" })).toBeInTheDocument();
+  });
+});

@@ -9564,6 +9564,11 @@ export class WebDriver implements ParityDriver {
     await this.page.mouse.click(5, 5);
   }
 
+  async topBarSearchWidth(): Promise<number | null> {
+    const box = await this.topBarSearchInput().boundingBox();
+    return box?.width ?? null;
+  }
+
   // --- shared empty-state kit tiers (SHELL-104) ---
 
   private emptyStateBox(title: string): Locator {

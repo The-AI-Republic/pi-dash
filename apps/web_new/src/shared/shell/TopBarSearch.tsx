@@ -36,6 +36,12 @@ const LazySearchPanel = React.lazy(() =>
 /** The always-visible top-bar field prompt (SHELL-081). */
 export const TOPBAR_SEARCH_PLACEHOLDER = "Search commands...";
 
+// Box widths (NEWPIDASH-7): narrow at rest, wide while the results panel
+// is open, matching the old app's sizes. Kept in style props (not width
+// utilities) so the open width can cap itself to the viewport.
+const SEARCH_BOX_NARROW_PX = 364;
+const SEARCH_BOX_WIDE_PX = 554;
+
 export interface TopBarSearchProps {
   /** Null renders commands only (shells without workspace context). */
   scope: PaletteSearchScope | null;
@@ -105,42 +111,68 @@ export function TopBarSearch({ scope, onSelectSearchResult }: TopBarSearchProps)
     onDismiss: close,
   });
 
+  // Tabbing (or otherwise moving focus) out of the box closes the panel
+  // and collapses it; focus landing on a row inside stays open. A null
+  // target (an outside click the pointer handler already closed) closes.
+  const handleBlur = (event: React.FocusEvent<HTMLDivElement>): void => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) close();
+  };
+
   return (
-    <div ref={containerRef} className="relative w-full max-w-md">
-      <input
-        ref={inputRef}
-        type="text"
-        aria-label="Search commands"
-        placeholder={TOPBAR_SEARCH_PLACEHOLDER}
-        value={term}
-        onChange={(event) => setTerm(event.target.value)}
-        onFocus={() => setOpen(true)}
-        // Re-clicking the focused box reopens: focus alone never refires
-        // while the input already holds it (after Escape, say).
-        onClick={() => setOpen(true)}
-        onKeyDown={onKeyDown}
-        className="text-body h-(--control-height) w-full rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-4) text-(--text) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
-      />
-      {open ? (
-        <div
-          role="listbox"
-          aria-label="Top bar search results"
-          className="shadow-dialog absolute top-full right-0 left-0 z-50 mt-(--space-2) max-h-80 overflow-auto rounded-(--radius-dialog) border border-(--border) bg-(--bg)"
-        >
-          <React.Suspense fallback={null}>
-            <LazySearchPanel
-              term={term}
-              scope={scope}
-              activeIndex={activeIndex}
-              onActiveIndexChange={setActiveIndex}
-              onTermChange={setTerm}
-              onClose={close}
-              onSelectSearchResult={onSelectSearchResult}
-              onPanelApi={handlePanelApi}
-            />
-          </React.Suspense>
-        </div>
-      ) : null}
+    // The outer div reserves the narrow footprint in the top-bar flow; the
+    // inner box overlays it and grows symmetric about its centre while
+    // open, so the items on either side never move. The panel mounts
+    // inside the inner box with left/right pinned, so it always matches
+    // the box width. The open width never exceeds the viewport (minus the
+    // bar's own side padding) and never shrinks below the narrow box.
+    <div
+      ref={containerRef}
+      onBlur={handleBlur}
+      className="relative h-(--control-height) shrink-0"
+      style={{ width: SEARCH_BOX_NARROW_PX, maxWidth: "100%" }}
+    >
+      <div
+        data-testid="topbar-search-box"
+        className="absolute top-0 left-1/2 z-10 h-full -translate-x-1/2 transition-[width] duration-(--motion-duration) ease-in-out motion-reduce:transition-none"
+        style={{
+          width: open ? `max(100%, min(${SEARCH_BOX_WIDE_PX}px, calc(100vw - var(--space-8))))` : "100%",
+        }}
+      >
+        <input
+          ref={inputRef}
+          type="text"
+          aria-label="Search commands"
+          placeholder={TOPBAR_SEARCH_PLACEHOLDER}
+          value={term}
+          onChange={(event) => setTerm(event.target.value)}
+          onFocus={() => setOpen(true)}
+          // Re-clicking the focused box reopens: focus alone never refires
+          // while the input already holds it (after Escape, say).
+          onClick={() => setOpen(true)}
+          onKeyDown={onKeyDown}
+          className="text-body h-(--control-height) w-full rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-4) text-(--text) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
+        />
+        {open ? (
+          <div
+            role="listbox"
+            aria-label="Top bar search results"
+            className="shadow-dialog absolute top-full right-0 left-0 z-50 mt-(--space-2) max-h-80 overflow-auto rounded-(--radius-dialog) border border-(--border) bg-(--bg)"
+          >
+            <React.Suspense fallback={null}>
+              <LazySearchPanel
+                term={term}
+                scope={scope}
+                activeIndex={activeIndex}
+                onActiveIndexChange={setActiveIndex}
+                onTermChange={setTerm}
+                onClose={close}
+                onSelectSearchResult={onSelectSearchResult}
+                onPanelApi={handlePanelApi}
+              />
+            </React.Suspense>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
