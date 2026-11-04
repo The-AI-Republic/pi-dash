@@ -1408,6 +1408,11 @@ async fn generate(
     // before the throttle (DRF `initial()` order: auth → throttle), so a
     // CSRF failure leaves the throttle history untouched.
     if authenticated {
+        // `process_view` verifies Origin/Referer before the cookie
+        // (NEWPIDASH-12).
+        if let Err(reason) = super::csrf_origin_gate(state.settings(), &headers) {
+            return csrf_failure_json(&reason);
+        }
         let cookie_header = headers
             .get(header::COOKIE)
             .and_then(|v| v.to_str().ok())
@@ -1609,6 +1614,10 @@ async fn sign(
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok());
     {
+        // Origin/Referer first (`process_view`, NEWPIDASH-12).
+        if super::csrf_origin_gate(&settings, &headers).is_err() {
+            return csrf_failure_response(render_csrf_failure(&root));
+        }
         let cookie_header = headers
             .get(header::COOKIE)
             .and_then(|v| v.to_str().ok())

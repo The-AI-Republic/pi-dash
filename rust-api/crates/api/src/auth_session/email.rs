@@ -207,9 +207,17 @@ struct Provenance {
     header_token: Option<String>,
     session_cookie: Option<String>,
     content_type: Option<String>,
+    /// `process_view`'s Origin/Referer verdict (NEWPIDASH-12), computed
+    /// off the headers before any token check.
+    csrf_origin: Result<(), String>,
 }
 
-fn provenance(headers: &HeaderMap, peer_ip: Option<String>, cookie_name: &str) -> Provenance {
+fn provenance(
+    headers: &HeaderMap,
+    peer_ip: Option<String>,
+    cookie_name: &str,
+    settings: &pidash_db::config::Settings,
+) -> Provenance {
     let cookie_header = headers
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
@@ -231,6 +239,7 @@ fn provenance(headers: &HeaderMap, peer_ip: Option<String>, cookie_name: &str) -
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned),
+        csrf_origin: super::csrf_origin_gate(settings, headers),
     }
 }
 
@@ -261,6 +270,7 @@ fn form_pairs(content_type: Option<&str>, body: &[u8]) -> Vec<(String, String)> 
 /// never renders the reason, so these are log labels only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CsrfDenial {
+    BadOrigin,
     NoCookie,
     BadToken,
 }
@@ -285,12 +295,16 @@ fn csrf_check_token(secret: &str, token: &str, source: TokenSource) -> Result<()
 }
 
 /// Mirror `CsrfViewMiddleware.process_view` for these endpoints: the
-/// `csrftoken` cookie must be present and the request token must
+/// Origin (or, on HTTPS, Referer) must verify first (NEWPIDASH-12), then
+/// the `csrftoken` cookie must be present and the request token must
 /// check out. A 64-char cookie unmasks first (`_get_secret`); a
 /// malformed cookie secret can never match (Django would mint a fresh
 /// secret and then fail the compare the same way); the failure page
 /// never renders the reason either way.
 fn csrf_gate(prov: &Provenance, pairs: &[(String, String)]) -> Result<(), CsrfDenial> {
+    if prov.csrf_origin.is_err() {
+        return Err(CsrfDenial::BadOrigin);
+    }
     let Some(cookie) = prov.csrf_cookie.as_deref() else {
         return Err(CsrfDenial::NoCookie);
     };
@@ -1222,7 +1236,7 @@ fn email_request(
 ) -> EmailRequest {
     let hosts = host_ctx(state);
     let cookie_name = state.settings().session.cookie_name.clone();
-    let prov = provenance(headers, peer_ip, &cookie_name);
+    let prov = provenance(headers, peer_ip, &cookie_name, state.settings());
     let pairs = form_pairs(prov.content_type.as_deref(), body);
     let next_path = pairs
         .iter()
@@ -1918,6 +1932,11 @@ async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Res
     // `None` before the CSRF check; authenticated callers without a
     // valid token get the 403 (`authentication.py:124-148`).
     if authenticated {
+        // `process_view` verifies Origin/Referer before the cookie
+        // (NEWPIDASH-12).
+        if let Err(reason) = super::csrf_origin_gate(state.settings(), &parts.headers) {
+            return csrf_failure_json(&reason);
+        }
         let csrf_cookie = session_kernel::cookie_value(cookie_header, CSRF_COOKIE_NAME);
         let header_token = parts
             .headers
@@ -2058,7 +2077,7 @@ async fn serve_signout(state: &AppState, req: axum::extract::Request, space: boo
         .extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|info| info.0.ip().to_string());
-    let prov = provenance(&parts.headers, peer, &cookie_name);
+    let prov = provenance(&parts.headers, peer, &cookie_name, state.settings());
     if csrf_gate(&prov, &form_pairs(prov.content_type.as_deref(), &body)).is_err() {
         return csrf_failure_response(render_csrf_failure(&hosts.root_base));
     }
@@ -2148,7 +2167,52 @@ mod tests {
             header_token: token.map(str::to_owned),
             session_cookie: None,
             content_type: Some("application/x-www-form-urlencoded".to_owned()),
+            csrf_origin: Ok(()),
         }
+    }
+
+    #[test]
+    fn csrf_gate_rejects_a_failed_origin_before_the_token() {
+        // NEWPIDASH-12: a matching cookie/token pair does not rescue a
+        // foreign Origin, and the Origin verdict wins over a missing cookie.
+        let secret = "abcdefghijklmnopqrstuvwxyz012345";
+        let pairs: Vec<(String, String)> = vec![];
+        let denied = Err(
+            "Origin checking failed - https://evil.example does not match any trusted origins."
+                .to_owned(),
+        );
+        let mut prov = prov_with(Some(secret), Some(secret));
+        assert_eq!(csrf_gate(&prov, &pairs), Ok(()));
+        prov.csrf_origin = denied.clone();
+        assert_eq!(csrf_gate(&prov, &pairs), Err(CsrfDenial::BadOrigin));
+        let mut prov = prov_with(None, None);
+        prov.csrf_origin = denied;
+        assert_eq!(csrf_gate(&prov, &pairs), Err(CsrfDenial::BadOrigin));
+    }
+
+    #[test]
+    fn provenance_runs_the_origin_gate() {
+        let settings = pidash_db::config::Settings::test_defaults();
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "app.test".parse().unwrap());
+        headers.insert("origin", "http://app.test".parse().unwrap());
+        assert_eq!(
+            provenance(&headers, None, "session-id", &settings).csrf_origin,
+            Ok(())
+        );
+        headers.insert("origin", "https://evil.example".parse().unwrap());
+        assert_eq!(
+            provenance(&headers, None, "session-id", &settings).csrf_origin,
+            Err(
+                "Origin checking failed - https://evil.example does not match any trusted origins."
+                    .to_owned()
+            )
+        );
+        headers.remove("origin");
+        assert_eq!(
+            provenance(&headers, None, "session-id", &settings).csrf_origin,
+            Ok(())
+        );
     }
 
     #[test]

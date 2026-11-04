@@ -701,9 +701,10 @@ fn header_source_name(source: &str) -> String {
     }
 }
 
-/// `CsrfViewMiddleware._check_token` (Django 4.2): `Ok(())` or the
-/// rejection reason. Origin/Referer checks only apply to HTTPS; the
-/// reason never reaches the response body here (the failure page only
+/// `CsrfViewMiddleware.process_view` + `_check_token` (Django 4.2):
+/// `Ok(())` or the rejection reason. The Origin (or, on HTTPS without
+/// one, Referer) check runs first (NEWPIDASH-12); the reason never
+/// reaches the response body on the plain Views (the failure page only
 /// reads `root_url`), but the DRF denial echoes it.
 ///
 /// The check runs in two phases because DRF's `SessionAuthentication`
@@ -712,7 +713,11 @@ fn header_source_name(source: &str) -> String {
 /// body-parse failure (400/415) surfaces between the cookie check and
 /// the token comparison: cookie-check → parse → token-check. Anonymous
 /// callers skip both phases (no `enforce_csrf` without a user).
-fn check_csrf_cookie(headers: &HeaderMap) -> Result<String, String> {
+fn check_csrf_cookie(
+    settings: &pidash_db::config::Settings,
+    headers: &HeaderMap,
+) -> Result<String, String> {
+    super::csrf_origin_gate(settings, headers)?;
     let secret = match csrf_cookie_secret(headers) {
         None => return Err("CSRF cookie not set.".to_owned()),
         Some(Err(error)) => return Err(format!("CSRF cookie {}.", error.reason())),
@@ -1003,7 +1008,7 @@ async fn change_password(
         Ok(actor) => actor,
         Err(fail) => return actor_fail(fail),
     };
-    if let Err(reason) = check_csrf_cookie(&headers) {
+    if let Err(reason) = check_csrf_cookie(state.settings(), &headers) {
         return csrf_denied(&reason);
     }
     let data = match read_body(&headers, &body) {
@@ -1160,7 +1165,7 @@ async fn set_password(
     };
     // Cookie-check → parse → token-check → throttle (skipped), mirroring
     // the `request.POST`-parsing CSRF check (see `check_csrf_cookie`).
-    if let Err(reason) = check_csrf_cookie(&headers) {
+    if let Err(reason) = check_csrf_cookie(state.settings(), &headers) {
         return csrf_denied(&reason);
     }
     let data = match read_body(&headers, &body) {
@@ -1413,7 +1418,7 @@ async fn forgot_password(
     // the throttle first and parse in the handler below.
     let authed = actor.is_some();
     if authed {
-        if let Err(reason) = check_csrf_cookie(&headers) {
+        if let Err(reason) = check_csrf_cookie(state.settings(), &headers) {
             return csrf_denied(&reason);
         }
     } else if let Err(wait) = throttle_gate(
@@ -1586,6 +1591,11 @@ async fn reset_password(
     let Some(pool) = pool_of(&state) else {
         return server_error();
     };
+    // `CsrfViewMiddleware.process_view`: Origin/Referer first, before
+    // `_check_token` reads `request.POST` (NEWPIDASH-12).
+    if super::csrf_origin_gate(state.settings(), &headers).is_err() {
+        return csrf_failure_page(&base_host_for(&state, false, false));
+    }
     // Form only: `request.POST` fills only under a form media type —
     // a JSON body, a missing content-type, or any other media type
     // reads as a missing password below — while multipart text fields
