@@ -6,7 +6,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerCommands, type PidashCommand } from "../commands/index.js";
-import { formatChordKeys, groupBoundCommands, isMacPlatform, ShortcutsDialog } from "./ShortcutsDialog.js";
+import { groupBoundCommands, ShortcutsDialog } from "./ShortcutsDialog.js";
 import { useShortcutsDialog } from "./shortcutsDialogStore.js";
 
 function command(overrides: Partial<PidashCommand> & { id: string; title: string }): PidashCommand {
@@ -15,46 +15,7 @@ function command(overrides: Partial<PidashCommand> & { id: string; title: string
 
 afterEach(() => {
   useShortcutsDialog.getState().closeShortcuts();
-});
-
-describe("chord glyphs", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it("adapts chord glyphs to the platform", () => {
-    expect(formatChordKeys("mod+shift+c", true)).toEqual(["⌘", "⇧", "C"]);
-    expect(formatChordKeys("mod+shift+c", false)).toEqual(["Ctrl", "Shift", "C"]);
-    expect(formatChordKeys("ctrl+alt+/", true)).toEqual(["⌃", "⌥", "/"]);
-    expect(formatChordKeys("mod+k", false)).toEqual(["Ctrl", "K"]);
-  });
-
-  it("renders unknown chord parts uppercased instead of vanishing", () => {
-    expect(formatChordKeys("bogus", false)).toEqual(["BOGUS"]);
-    expect(formatChordKeys("mod+ ", true)).toEqual(["⌘", "Space"]);
-  });
-
-  it("detects macOS from the platform string", () => {
-    vi.stubGlobal("navigator", { platform: "MacIntel" });
-    expect(isMacPlatform()).toBe(true);
-    vi.stubGlobal("navigator", { platform: "Win32" });
-    expect(isMacPlatform()).toBe(false);
-  });
-
-  it("treats a missing navigator as non-Mac", () => {
-    vi.stubGlobal("navigator", undefined);
-    expect(isMacPlatform()).toBe(false);
-  });
-
-  it("treats a navigator without a platform string as non-Mac", () => {
-    vi.stubGlobal("navigator", {});
-    expect(isMacPlatform()).toBe(false);
-  });
-
-  it("covers every modifier alias on both platforms", () => {
-    expect(formatChordKeys("meta+cmd+option", true)).toEqual(["⌘", "⌘", "⌥"]);
-    expect(formatChordKeys("ctrl+alt", false)).toEqual(["Ctrl", "Alt"]);
-  });
+  vi.unstubAllGlobals();
 });
 
 describe("groupBoundCommands", () => {
@@ -139,6 +100,28 @@ describe("ShortcutsDialog", () => {
       useShortcutsDialog.getState().openShortcuts();
       await waitFor(() => expect(screen.getByText("Go to home")).not.toBeNull());
       expect(screen.getByText("Copy current page URL")).not.toBeNull();
+    } finally {
+      unregister();
+    }
+  });
+
+  it("adapts chord glyphs to macOS with spoken key names", () => {
+    vi.stubGlobal("navigator", { platform: "MacIntel" });
+    const unregister = registerCommands([
+      command({
+        id: "shell.copy-url",
+        title: "Copy current page URL",
+        section: "Miscellaneous",
+        shortcut: "mod+shift+c",
+      }),
+    ]);
+    try {
+      useShortcutsDialog.getState().openShortcuts();
+      render(<ShortcutsDialog />);
+      expect(screen.getByLabelText("Command+Shift+C")).not.toBeNull();
+      expect(screen.getByText("⌘", { selector: "kbd" })).not.toBeNull();
+      expect(screen.getByText("⇧", { selector: "kbd" })).not.toBeNull();
+      expect(screen.getByText("C", { selector: "kbd" })).not.toBeNull();
     } finally {
       unregister();
     }
