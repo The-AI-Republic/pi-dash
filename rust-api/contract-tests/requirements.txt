@@ -49,3 +49,8 @@ pymongo>=4.6
 # version the oracles assert (bs4.__version__ == "4.12.3") and Django uses
 # (apps/api/requirements/base.txt) — a drift would reshape the entity table.
 beautifulsoup4==4.12.3
+# NEWPIDASH-30: soupsieve backs bs4's select_one, so the favicon oracles
+# pin its behavior too (rel matching is ASCII case-insensitive since 4.x;
+# 2.x matched case-sensitively). Pinned to the asserted version for a
+# deterministic oracle in every installer.
+soupsieve==4.0
