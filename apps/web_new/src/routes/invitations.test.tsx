@@ -42,6 +42,21 @@ describe("invitations guard", () => {
     ).resolves.toEqual({});
   });
 
+  it("renders the inbox when every onboarding flag is set without the marker", async () => {
+    const profile = {
+      is_onboarded: false,
+      onboarding_step: {
+        profile_complete: true,
+        workspace_create: true,
+        workspace_invite: true,
+        workspace_join: true,
+      },
+    };
+    await expect(
+      Route.options.beforeLoad?.(stubContext({ me: { is_password_autoset: false }, profile }))
+    ).resolves.toEqual({});
+  });
+
   it("bounces visitors to the entry route with a return path", async () => {
     const failed = new ApiError({ status: 401, code: "http", message: "signed out" });
     try {
