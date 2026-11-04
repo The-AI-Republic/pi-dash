@@ -33,7 +33,9 @@ vi.mock("../../../shared/shell/toaster.js", () => shell);
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { createRealtimeHub, getRealtimeHub, resetRealtimeHub } from "../../../core/query/realtime.js";
+import { ApiError } from "@pidash/api-client";
 import { pageKeys } from "./keys.js";
+import { pageForestKey } from "./treeQueries.js";
 import {
   PAGE_EVENT_ARCHIVED,
   PAGE_EVENT_DELETED,
@@ -44,6 +46,7 @@ import {
   PAGE_EVENT_UNARCHIVED,
   PAGE_EVENT_UNLOCKED,
   PAGES_REALTIME_TOPIC,
+  dropMovedPages,
   localCalendarDate,
   patchPageRow,
   publishPageEvent,
@@ -73,6 +76,8 @@ import { PAGES_PAGE_ID, PAGES_PROJECT_ID, makePageRow } from "../testing.js";
 const SLUG = "acme";
 const OTHER_PROJECT = "723e4567-e89b-12d3-a456-426614174008";
 const OTHER_ROW = "823e4567-e89b-12d3-a456-426614174007";
+const CHILD_ROW = "923e4567-e89b-12d3-a456-426614174009";
+const GRANDCHILD_ROW = "a23e4567-e89b-12d3-a456-42661417400a";
 
 function newClient(): QueryClient {
   return new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -515,11 +520,67 @@ describe("usePageMoveWrite", () => {
     });
 
     expect(contracts.movePageToProject).toHaveBeenCalledWith(expect.anything(), SLUG, PAGES_PROJECT_ID, PAGES_PAGE_ID, {
-      new_project_id: OTHER_PROJECT,
+      project_id: OTHER_PROJECT,
     });
     expect(cachedList(client).map((row) => row.id)).toEqual([OTHER_ROW]);
     expect(shell.notifySuccess).toHaveBeenCalledWith(PAGE_MOVED_TITLE);
     expect(events).toEqual([expect.objectContaining({ event: PAGE_EVENT_MOVED })]);
+  });
+
+  it("drops the moved page's sub-pages and detail, then hands the target to the caller", async () => {
+    const client = newClient();
+    seed(client);
+    const child = makePageRow({ id: CHILD_ROW, name: "Child", parent: PAGES_PAGE_ID, parent_id: PAGES_PAGE_ID });
+    client.setQueryData(pageKeys.children(SLUG, PAGES_PROJECT_ID, PAGES_PAGE_ID), [child]);
+    client.setQueryData(pageForestKey(SLUG, PAGES_PROJECT_ID), {
+      rows: [makePageRow(), child, makePageRow({ id: OTHER_ROW, name: "Other" })],
+      complete: true,
+    });
+    client.setQueryData(pageKeys.detail(SLUG, PAGES_PROJECT_ID, CHILD_ROW), child);
+    contracts.movePageToProject.mockResolvedValue(undefined);
+    const onMoved = vi.fn();
+    const hook = renderHook(() => usePageMoveWrite(target()), { wrapper: wrapper(client) });
+
+    await act(async () => {
+      hook.result.current.move(OTHER_PROJECT, { onMoved });
+      await settle();
+    });
+
+    expect(onMoved).toHaveBeenCalledWith(OTHER_PROJECT);
+    expect(cachedList(client).map((row) => row.id)).toEqual([OTHER_ROW]);
+    expect(
+      client.getQueryData<{ rows: { id: string }[] }>(pageForestKey(SLUG, PAGES_PROJECT_ID))?.rows.map((row) => row.id)
+    ).toEqual([OTHER_ROW]);
+    expect(client.getQueryData(pageKeys.children(SLUG, PAGES_PROJECT_ID, PAGES_PAGE_ID))).toBeUndefined();
+    expect(cachedDetail(client)).toBeUndefined();
+    expect(client.getQueryData(pageKeys.detail(SLUG, PAGES_PROJECT_ID, CHILD_ROW))).toBeUndefined();
+  });
+
+  it("names the server's reason when the move is refused", async () => {
+    const client = newClient();
+    seed(client);
+    contracts.movePageToProject.mockRejectedValue(
+      new ApiError({
+        status: 403,
+        code: "http",
+        message: "Only a project admin can move a page to another project",
+        body: { error: "Only a project admin can move a page to another project" },
+      })
+    );
+    const onMoved = vi.fn();
+    const hook = renderHook(() => usePageMoveWrite(target()), { wrapper: wrapper(client) });
+
+    await act(async () => {
+      hook.result.current.move(OTHER_PROJECT, { onMoved });
+      await settle();
+    });
+
+    expect(onMoved).not.toHaveBeenCalled();
+    expect(cachedList(client).map((row) => row.id)).toEqual([PAGES_PAGE_ID, OTHER_ROW]);
+    expect(shell.notifyError).toHaveBeenCalledWith(
+      PAGE_MOVE_FAILED_TITLE,
+      "Only a project admin can move a page to another project"
+    );
   });
 
   it("keeps the row when the move fails", async () => {
@@ -560,5 +621,50 @@ describe("usePageMoveWrite", () => {
       await settle();
     });
     await waitFor(() => expect(shell.notifySuccess).toHaveBeenCalled());
+  });
+});
+
+describe("dropMovedPages", () => {
+  it("removes the whole cached subtree and leaves unrelated rows and lists alone", () => {
+    const client = newClient();
+    const root = makePageRow();
+    const child = makePageRow({ id: CHILD_ROW, parent: PAGES_PAGE_ID, parent_id: PAGES_PAGE_ID });
+    const grandchild = makePageRow({ id: GRANDCHILD_ROW, parent: CHILD_ROW, parent_id: CHILD_ROW });
+    const other = makePageRow({ id: OTHER_ROW, name: "Other" });
+    const otherChild = makePageRow({
+      id: "b23e4567-e89b-12d3-a456-42661417400b",
+      parent: OTHER_ROW,
+      parent_id: OTHER_ROW,
+    });
+    client.setQueryData(pageKeys.list(SLUG, PAGES_PROJECT_ID), [root, other]);
+    client.setQueryData(pageKeys.children(SLUG, PAGES_PROJECT_ID, PAGES_PAGE_ID), [child]);
+    client.setQueryData(pageKeys.children(SLUG, PAGES_PROJECT_ID, CHILD_ROW, true), [grandchild]);
+    client.setQueryData(pageKeys.children(SLUG, PAGES_PROJECT_ID, OTHER_ROW), [otherChild]);
+    client.setQueryData(pageForestKey(SLUG, PAGES_PROJECT_ID, true), {
+      rows: [root, child, grandchild, other, otherChild],
+      complete: true,
+    });
+    // Another project's identical keys are never touched.
+    client.setQueryData(pageKeys.list(SLUG, OTHER_PROJECT), [root]);
+
+    const moved = dropMovedPages(client, SLUG, PAGES_PROJECT_ID, PAGES_PAGE_ID);
+
+    expect([...moved].sort()).toEqual([PAGES_PAGE_ID, CHILD_ROW, GRANDCHILD_ROW].sort());
+    expect(cachedList(client).map((row) => row.id)).toEqual([OTHER_ROW]);
+    expect(client.getQueryData(pageKeys.children(SLUG, PAGES_PROJECT_ID, PAGES_PAGE_ID))).toBeUndefined();
+    expect(client.getQueryData(pageKeys.children(SLUG, PAGES_PROJECT_ID, CHILD_ROW, true))).toBeUndefined();
+    expect(client.getQueryData(pageKeys.children(SLUG, PAGES_PROJECT_ID, OTHER_ROW))).toEqual([otherChild]);
+    expect(
+      client
+        .getQueryData<{ rows: { id: string }[] }>(pageForestKey(SLUG, PAGES_PROJECT_ID, true))
+        ?.rows.map((row) => row.id)
+    ).toEqual([OTHER_ROW, otherChild.id]);
+    expect(client.getQueryData(pageKeys.list(SLUG, OTHER_PROJECT))).toEqual([root]);
+  });
+
+  it("still drops the page itself when nothing about it is cached", () => {
+    const client = newClient();
+    expect([...dropMovedPages(client, SLUG, PAGES_PROJECT_ID, PAGES_PAGE_ID)]).toEqual([PAGES_PAGE_ID]);
+    expect(cachedList(client)).toEqual([]);
   });
 });

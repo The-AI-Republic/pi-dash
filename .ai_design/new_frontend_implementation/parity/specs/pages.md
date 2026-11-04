@@ -394,11 +394,13 @@ canonical owner-level order (pinned by the oracle):
   and cannot be undone; the confirm button shows a busy state while the
   request runs. Cancel writes nothing. Deleting from the detail navigates
   back to the list after success.
-- **Move to project…** — owner or admin, **cloud edition only**; the
-  community build carries no entry and the server route is a no-op stub
-  (PAGE-017, §11.1 and §11.2). The licensed behaviour is a picker over
-  the projects the caller can write to; confirming relocates the page, it
-  leaves the current project's collection and appears in the target's.
+- **Move to project…** — project admin only, never on a locked page, in
+  every edition (PAGE-017, PDASHOSS01-347; the server enforces both). A
+  picker over the other live projects where the caller is a member or
+  admin; confirming moves the page and its sub-pages, which leave the
+  current project's collection and appear in the target's under the same
+  id. A refusal shows the server's `error` text; the detail options menu
+  carries the same entry and follows the page to the target project.
 
 A member's menu holds only the first three entries; a guest gets no rows at
 all. List rows deliberately do **not** carry Export (PAGE-083).
@@ -1128,7 +1130,7 @@ import the contracts, never call raw fetch.
 | `POST BASE/pages/{pageId}/archive/`             | —                                                                                                                                                | 200 `{archived_at}`; archives the whole subtree; drops favourites                                    | 015, 059, 088 |
 | `DELETE BASE/pages/{pageId}/archive/`           | —                                                                                                                                                | 204; a page whose parent is still archived is detached to the top level first                        | 015, 059, 088 |
 | `POST BASE/pages/{pageId}/duplicate/`           | —                                                                                                                                                | the copy                                                                                             | 012, 060      |
-| `POST BASE/pages/{pageId}/move/`                | `{new_project_id}`                                                                                                                               | cloud only; community route absent/no-op                                                             | 017           |
+| `POST BASE/pages/{pageId}/move/`                | `{project_id}`                                                                                                                                   | 204; `{"error"}` on 400/403/404; admin of source, writer of target, page unlocked                    | 017           |
 | `GET BASE/pages/{pageId}/description/`          | —                                                                                                                                                | `application/octet-stream` binary                                                                    | 064, 067      |
 | `PATCH BASE/pages/{pageId}/description/`        | binary + `description_html` + `description_json`                                                                                                 | updated page; `400` with `PAGE_LOCKED`/`PAGE_ARCHIVED` codes on a frozen page                        | 063, 064      |
 | `GET BASE/pages/{pageId}/versions/`             | —                                                                                                                                                | array of `{id, created_at, created_by/author, ...}`                                                  | 051           |

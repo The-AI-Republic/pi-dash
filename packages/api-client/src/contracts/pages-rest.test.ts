@@ -8,6 +8,7 @@
 // src/contract/pages.contract.test.ts.
 import { describe, expect, it } from "vitest";
 import type { ApiClient } from "../client.js";
+import { ApiError } from "../errors.js";
 import {
   addPageFavorite,
   archivePage,
@@ -358,25 +359,25 @@ describe("pages state switches", () => {
     expect(calls[0]).toMatchObject({ method: "DELETE", url: `${BASE}${PAGE}/archive/` });
   });
 
-  it("moves the page to another project", async () => {
+  it("moves the page to another project with the target's id", async () => {
     const { client, calls } = stubClient();
-    await movePageToProject(client, WS, PROJECT, PAGE, { new_project_id: "623e4567-e89b-12d3-a456-426614174005" });
+    await movePageToProject(client, WS, PROJECT, PAGE, { project_id: "623e4567-e89b-12d3-a456-426614174005" });
+    expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
       method: "POST",
       url: `${BASE}${PAGE}/move/`,
-      json: { new_project_id: "623e4567-e89b-12d3-a456-426614174005" },
+      json: { project_id: "623e4567-e89b-12d3-a456-426614174005" },
     });
   });
 
-  it("surfaces a 404 from a build without the move route", async () => {
+  it("surfaces the server's refusal unchanged", async () => {
+    const refusal = new ApiError({ status: 400, code: "http", message: "The target project is archived" });
     const client = {
       post: async () => {
-        throw new Error("Not found");
+        throw refusal;
       },
     } as unknown as ApiClient;
-    await expect(movePageToProject(client, WS, PROJECT, PAGE, { new_project_id: PROJECT })).rejects.toThrow(
-      "Not found"
-    );
+    await expect(movePageToProject(client, WS, PROJECT, PAGE, { project_id: PROJECT })).rejects.toBe(refusal);
   });
 });
 

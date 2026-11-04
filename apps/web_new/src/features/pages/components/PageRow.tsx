@@ -33,7 +33,7 @@ export interface PageRowProps {
   canDuplicate: boolean;
   /** The page's owner or a project admin may switch its state. */
   canManage: boolean;
-  /** Cross-project move is an edition flag; community builds carry none. */
+  /** The viewer is a project admin; locked pages still hide the entry. */
   canMove: boolean;
   /** Member and above: the nested menu entry that creates a child (PAGE-084). */
   onAddSubPage?: (() => void) | undefined;
