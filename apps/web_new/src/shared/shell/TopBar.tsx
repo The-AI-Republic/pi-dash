@@ -88,7 +88,9 @@ export function TopBar({
           </IconButton>
         ) : null}
       </div>
-      <div className="flex shrink-0 items-center">{searchBox}</div>
+      {/* The search cell yields below the box's rest width when the bar is
+          short of room, so narrow windows never scroll sideways. */}
+      <div className="flex min-w-0 items-center">{searchBox}</div>
       <div className="flex flex-1 items-center justify-end gap-(--space-2)">
         <a
           href={`/${workspaceSlug}/notifications/`}

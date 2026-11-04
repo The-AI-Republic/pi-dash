@@ -75,6 +75,46 @@ test.describe("top-bar search box", () => {
         await expect.poll(() => driver.isTopBarResultsOpen()).toBe(false);
         await expect.poll(async () => driver.topBarSearchWidth()).toBeLessThanOrEqual(narrow! + 1);
       });
+
+      await test.step("a 640px window never scrolls sideways (NEWPIDASH-7)", async () => {
+        // Below the box's rest width plus its neighbours, web_new yields
+        // the closed footprint and caps the open overlay to the viewport,
+        // so the page never gains a horizontal scrollbar and the box stays
+        // inside the window, closed and open. The old bar is fixed-width
+        // by design (every cell shrink-0 around a fixed 364px box), so on
+        // the oracle only the open/close function is asserted.
+        const NARROW_PX = 640;
+        await driver.setViewportSize(NARROW_PX, 800);
+        const fitsWindow = async (): Promise<boolean> =>
+          driver.page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+        if (driver.target === "web_new") {
+          const closed = await driver.topBarSearchRect();
+          expect(closed).not.toBeNull();
+          expect(closed!.x).toBeGreaterThanOrEqual(0);
+          expect(closed!.x + closed!.width).toBeLessThanOrEqual(NARROW_PX);
+          await expect.poll(fitsWindow).toBe(true);
+          await driver.focusTopBarSearch();
+          await expect.poll(() => driver.isTopBarResultsOpen()).toBe(true);
+          // Polled: the width animates from narrow to wide.
+          await expect.poll(async () => (await driver.topBarSearchRect())?.width).toBeGreaterThan(closed!.width);
+          // Past the transition: the final rect is the widest one.
+          await driver.page.waitForTimeout(500);
+          const open = await driver.topBarSearchRect();
+          expect(open!.width).toBeGreaterThan(closed!.width);
+          expect(open!.x).toBeGreaterThanOrEqual(0);
+          expect(open!.x + open!.width).toBeLessThanOrEqual(NARROW_PX);
+          await expect.poll(fitsWindow).toBe(true);
+          await driver.pressInTopBarSearch("Escape");
+          await expect.poll(() => driver.isTopBarResultsOpen()).toBe(false);
+          await expect.poll(fitsWindow).toBe(true);
+        } else {
+          await driver.focusTopBarSearch();
+          await expect.poll(() => driver.isTopBarResultsOpen()).toBe(true);
+          await driver.pressInTopBarSearch("Escape");
+          await expect.poll(() => driver.isTopBarResultsOpen()).toBe(false);
+        }
+        await driver.setViewportSize(1280, 720);
+      });
     }
   );
 });

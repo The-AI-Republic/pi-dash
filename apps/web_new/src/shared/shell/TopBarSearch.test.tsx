@@ -436,6 +436,14 @@ describe("TopBarSearch expand on open (NEWPIDASH-7)", { timeout: SEARCH_TEST_TIM
     expect(box()).toContainElement(panel);
   });
 
+  it("lets the closed footprint yield when the bar lacks room", () => {
+    renderBox({ scope: null });
+    const footprint = box().parentElement!;
+    expect(footprint.style.width).toBe("364px");
+    expect(footprint.className).toContain("min-w-0");
+    expect(footprint.className).not.toContain("shrink-0");
+  });
+
   it("widens through the palette focus request (SHELL-089)", () => {
     renderBox({ scope: null });
     expectClosedWidth();

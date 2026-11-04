@@ -119,16 +119,19 @@ export function TopBarSearch({ scope, onSelectSearchResult }: TopBarSearchProps)
   };
 
   return (
-    // The outer div reserves the narrow footprint in the top-bar flow; the
-    // inner box overlays it and grows symmetric about its centre while
-    // open, so the items on either side never move. The panel mounts
-    // inside the inner box with left/right pinned, so it always matches
-    // the box width. The open width never exceeds the viewport (minus the
-    // bar's own side padding) and never shrinks below the narrow box.
+    // The outer div reserves the narrow footprint in the top-bar flow but
+    // yields below it when the bar is short of room (no shrink floor
+    // anywhere in this chain), so narrow windows never scroll sideways.
+    // The inner box overlays the footprint and grows symmetric about its
+    // centre while open, so the items on either side never move. The panel
+    // mounts inside the inner box with left/right pinned, so it always
+    // matches the box width. The open width never exceeds the viewport
+    // (minus the bar's own side padding) and never shrinks below the
+    // footprint.
     <div
       ref={containerRef}
       onBlur={handleBlur}
-      className="relative h-(--control-height) shrink-0"
+      className="relative h-(--control-height) min-w-0"
       style={{ width: SEARCH_BOX_NARROW_PX, maxWidth: "100%" }}
     >
       <div

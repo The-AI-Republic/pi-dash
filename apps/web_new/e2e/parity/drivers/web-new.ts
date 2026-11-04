@@ -9050,6 +9050,12 @@ export class WebNewDriver implements ParityDriver {
     return box?.width ?? null;
   }
 
+  async topBarSearchRect(): Promise<{ x: number; width: number } | null> {
+    const box = await this.topBarSearchInput().boundingBox();
+    if (box === null) return null;
+    return { x: box.x, width: box.width };
+  }
+
   // Shared empty-state kit tiers (NEWFRONT-294, SHELL-104). The reader
   // scopes to the box carrying the given exact title text, mirroring the
   // oracle queries against the new kit's rendered structure.
