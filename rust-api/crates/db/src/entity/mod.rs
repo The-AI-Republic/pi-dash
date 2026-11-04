@@ -48,6 +48,7 @@
 pub mod prelude;
 
 pub mod accounts;
+pub mod agent_run;
 pub mod api_tokens;
 pub mod assistant_message;
 pub mod assistant_user_llm_config;
@@ -63,6 +64,8 @@ pub mod machine_token;
 pub mod profiles;
 pub mod project_members;
 pub mod projects;
+pub mod runner;
+pub mod runner_live_state;
 pub mod runner_session;
 pub mod states;
 pub mod user_notification_preferences;

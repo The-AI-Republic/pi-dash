@@ -105,6 +105,7 @@ use pidash_auth::scope::TenantScope;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS, TABLE as TICKER_TABLE,
 };
+use pidash_services::app_issues::agent_runs::{self, AgentRunWithRunner};
 use pidash_services::app_issues::serializers_create::{
     assignee_member_filter_sql, issue_create_to_representation, issue_create_validate,
     label_filter_null_project_sql, label_filter_sql, CreateValidateError, ExecutorPolicy,
@@ -115,7 +116,6 @@ use pidash_services::app_issues::serializers_create::{
 use pidash_services::app_issues::serializers_detail::{
     issue_detail_to_representation, serialize_drf_datetime, serialize_iso_datetime,
     AgentLiveStateRow, AgentRunDetailRow, AgentTickerInput, IssueDetailBaseRow, IssueDetailRow,
-    ACTIVE_AGENT_RUN_SQL, AGENT_RUN_COUNT_SQL, LATEST_AGENT_RUN_SQL,
 };
 use pidash_services::app_issues::serializers_engage::{
     GITHUB_ISSUE_SYNC_PROBE_SQL, GIT_ISSUE_SYNC_PROBE_SQL,
@@ -3493,100 +3493,80 @@ struct RenderedLive {
     updated_at: String,
 }
 
-/// One `AgentRun` row off the `LATEST/ACTIVE_AGENT_RUN_SQL` projection.
-/// The live-state leg mirrors `_serialize_agent_run`: a runner-less run
-/// carries none, and a live row observed on another run is dropped.
-fn rendered_run_from_pg(
-    row: &sqlx::postgres::PgRow,
-    include_live_state: bool,
-) -> Result<RenderedRun, sqlx::Error> {
-    let opt_moment = |name: &str| -> Result<Option<String>, sqlx::Error> {
-        let moment: Option<DateTime<Utc>> = row.try_get(name)?;
-        Ok(moment.map(serialize_iso_datetime))
+/// One run off the SeaORM agent-run reader. The live-state leg mirrors
+/// `_serialize_agent_run`: a runner-less run carries none, and a live row
+/// observed on another run is dropped.
+fn rendered_run(view: &AgentRunWithRunner, include_live_state: bool) -> RenderedRun {
+    let run = &view.run;
+    let iso = |moment: &Option<sea_orm::prelude::DateTimeWithTimeZone>| {
+        moment.map(|moment| serialize_iso_datetime(moment.with_timezone(&Utc)))
     };
-    let id: Uuid = row.try_get("id")?;
-    let runner_id: Option<Uuid> = row.try_get("runner_id")?;
-    let live_updated: Option<DateTime<Utc>> = row.try_get("updated_at")?;
-    let observed: Option<Uuid> = row.try_get("observed_run_id")?;
-    let live = if include_live_state && runner_id.is_some() {
-        match (live_updated, observed) {
-            (Some(updated), observed) if observed.is_none_or(|seen| seen == id) => {
-                let usage: Value = row.try_get("usage")?;
-                let live_llm: Option<String> = row.try_get("live_llm_model")?;
-                Some(RenderedLive {
-                    observed_run_id: observed.map(|seen| seen.to_string()),
-                    last_event_at: opt_moment("last_event_at")?,
-                    last_event_kind: row.try_get("last_event_kind")?,
-                    last_event_summary: row.try_get("last_event_summary")?,
-                    agent_pid: row.try_get("agent_pid")?,
-                    agent_subprocess_alive: row.try_get("agent_subprocess_alive")?,
-                    approvals_pending: row.try_get("approvals_pending")?,
-                    usage,
-                    llm_model: live_llm,
-                    turn_count: row.try_get("turn_count")?,
-                    agent_health: row.try_get("agent_health")?,
-                    agent_last_activity_at: opt_moment("agent_last_activity_at")?,
-                    updated_at: serialize_iso_datetime(updated),
-                })
-            }
-            _ => None,
+    let live = match &view.live {
+        Some(live)
+            if include_live_state
+                && run.runner_id.is_some()
+                && live.observed_run_id.is_none_or(|seen| seen == run.id) =>
+        {
+            Some(RenderedLive {
+                observed_run_id: live.observed_run_id.map(|seen| seen.to_string()),
+                last_event_at: iso(&live.last_event_at),
+                last_event_kind: live.last_event_kind.clone(),
+                last_event_summary: live.last_event_summary.clone(),
+                agent_pid: live.agent_pid,
+                agent_subprocess_alive: live.agent_subprocess_alive,
+                approvals_pending: live.approvals_pending,
+                usage: live.usage.clone(),
+                llm_model: live.llm_model.clone(),
+                turn_count: live.turn_count,
+                agent_health: live.agent_health.clone(),
+                agent_last_activity_at: iso(&live.agent_last_activity_at),
+                updated_at: serialize_iso_datetime(live.updated_at.with_timezone(&Utc)),
+            })
         }
-    } else {
-        None
+        _ => None,
     };
-    let created: DateTime<Utc> = row.try_get("created_at")?;
-    let run_llm: String = row.try_get("llm_model")?;
-    Ok(RenderedRun {
-        id: id.to_string(),
-        status: row.try_get("status")?,
-        executor_kind: row.try_get("executor_kind")?,
-        runner_id: runner_id.map(|runner| runner.to_string()),
-        runner_name: row.try_get("name")?,
-        created_at: serialize_iso_datetime(created),
-        assigned_at: opt_moment("assigned_at")?,
-        started_at: opt_moment("started_at")?,
-        ended_at: opt_moment("ended_at")?,
-        done_payload: row.try_get("done_payload")?,
-        error: row.try_get("error")?,
-        error_code: row.try_get("error_code")?,
-        llm_model: run_llm,
-        input_tokens: row.try_get("input_tokens")?,
-        output_tokens: row.try_get("output_tokens")?,
-        total_tokens: row.try_get("total_tokens")?,
+    RenderedRun {
+        id: run.id.to_string(),
+        status: run.status.clone(),
+        executor_kind: run.executor_kind.clone(),
+        runner_id: run.runner_id.map(|runner| runner.to_string()),
+        runner_name: view.runner_name.clone(),
+        created_at: serialize_iso_datetime(run.created_at.with_timezone(&Utc)),
+        assigned_at: iso(&run.assigned_at),
+        started_at: iso(&run.started_at),
+        ended_at: iso(&run.ended_at),
+        done_payload: run.done_payload.clone(),
+        error: run.error(),
+        error_code: run.error_code(),
+        llm_model: run.llm_model.clone(),
+        input_tokens: run.input_tokens,
+        output_tokens: run.output_tokens,
+        total_tokens: run.total_tokens,
         live,
-    })
+    }
 }
 
 async fn fetch_agent_runs(
     pool: &sqlx::PgPool,
     issue_id: &Uuid,
 ) -> Result<(Option<RenderedRun>, Option<RenderedRun>, i64), Denial> {
-    let latest: Option<sqlx::postgres::PgRow> = sqlx::query(LATEST_AGENT_RUN_SQL)
-        .bind(issue_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let latest = agent_runs::latest_agent_run(&db, *issue_id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let active: Option<sqlx::postgres::PgRow> = sqlx::query(ACTIVE_AGENT_RUN_SQL)
-        .bind(issue_id)
-        .fetch_optional(pool)
+    let active = agent_runs::active_agent_run(&db, *issue_id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let count: (i64,) = sqlx::query_as(AGENT_RUN_COUNT_SQL)
-        .bind(issue_id)
-        .fetch_one(pool)
+    let count = agent_runs::agent_run_count(&db, *issue_id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let active = active
-        .map(|row| rendered_run_from_pg(&row, true))
-        .transpose()
-        .map_err(|_| Denial::ServerError)?;
+    let active = active.as_ref().map(|view| rendered_run(view, true));
     // The latest run carries live state only when no run is active
     // (`include_live_state=active_run is None`).
     let latest = latest
-        .map(|row| rendered_run_from_pg(&row, active.is_none()))
-        .transpose()
-        .map_err(|_| Denial::ServerError)?;
-    Ok((latest, active, count.0))
+        .as_ref()
+        .map(|view| rendered_run(view, active.is_none()));
+    Ok((latest, active, count))
 }
 
 /// The cached blocker summary via the public read service: both

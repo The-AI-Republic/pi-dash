@@ -282,6 +282,9 @@ macro_rules! parity_test {
 }
 
 parity_test!(issues, issues, "issues");
+parity_test!(agent_run, agent_run, "agent_run");
+parity_test!(runner, runner, "runner");
+parity_test!(runner_live_state, runner_live_state, "runner_live_state");
 parity_test!(issue_sequences, issue_sequences, "issue_sequences");
 parity_test!(issue_assignees, issue_assignees, "issue_assignees");
 parity_test!(issue_comments, issue_comments, "issue_comments");
