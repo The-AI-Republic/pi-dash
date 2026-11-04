@@ -33,7 +33,12 @@ import { pageDetailQueryOptions, pageVersionQueryOptions, pageVersionsQueryOptio
 import { usePageMark, usePageRename } from "../api/detailMutations.js";
 import { useDuplicatePage } from "../api/mutations.js";
 import { useAddSubPage } from "../api/nestedMutations.js";
-import { usePageArchiveWrite, usePageDeleteWrite, usePageVisibilityWrite } from "../api/rowMutations.js";
+import {
+  usePageArchiveWrite,
+  usePageDeleteWrite,
+  usePageMoveWrite,
+  usePageVisibilityWrite,
+} from "../api/rowMutations.js";
 import { pagesListQueryOptions } from "../api/queries.js";
 import { pageKeys } from "../api/keys.js";
 import { pageForestQueryOptions } from "../api/treeQueries.js";
@@ -61,11 +66,13 @@ import { snapshotBodyHtml } from "../lib/versionContent.js";
 import { pageAncestors, pageDeleteKnownCount } from "../lib/pageNested.js";
 import { quickCreateAccess } from "../lib/pageCreate.js";
 import { copyPageLink } from "../lib/share.js";
+import { canMovePageToProject } from "../lib/pageProjectMove.js";
 import { pageAssistantReady } from "../lib/pageAssistant.js";
 import { usePageSyncStatus } from "../lib/pageSync.js";
 import { usePageLiveSession, usePageReadOnlySyncReport } from "../lib/pageLiveSession.js";
 import { PageBodySkeleton, PageDetailSpinner } from "./PageDetailLoading.js";
 import { PageDeleteDialog } from "./PageDeleteDialog.js";
+import { PageMoveDialog } from "./PageMoveDialog.js";
 import { PageDetailPaletteEntries } from "./PageDetailPaletteEntries.js";
 import { PageDetailPanel } from "./PageDetailPanel.js";
 import { PageDetailHeader } from "./PageDetailHeader.js";
@@ -303,6 +310,8 @@ export function PageDetailScreen({
   const archive = usePageArchiveWrite(headerTarget);
   const deletion = usePageDeleteWrite(headerTarget);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
+  const projectMove = usePageMoveWrite(headerTarget);
+  const [moveOpen, setMoveOpen] = React.useState(false);
   // A shelved page never reports its subtree size through the row, so the
   // confirmation reads the direct children once the dialog is actually open
   // (PAGE-089) — the same shape the connected row uses.
@@ -432,6 +441,7 @@ export function PageDetailScreen({
   }
 
   const canManage = capabilities.canManage || isProjectAdmin(role);
+  const canMoveProject = canMovePageToProject({ admin: isProjectAdmin(role), locked: page.is_locked });
   const projectName = project.data?.name ?? projectId;
   const pageTitle = page.name.trim() === "" ? PAGE_UNTITLED : page.name;
   const actors = pageActorRows({
@@ -500,6 +510,7 @@ export function PageDetailScreen({
                 setExportOpen(true);
               },
             })}
+        {...(canMoveProject ? { onMoveToProject: () => setMoveOpen(true) } : {})}
         {...(isProjectAuthorized(role) && !capabilities.isShelved
           ? {
               onAddSubPage: () => {
@@ -692,6 +703,24 @@ export function PageDetailScreen({
             onDeleted: () => {
               setDeleteOpen(false);
               goTo(pageTabHref(workspaceSlug, projectId, "archived"));
+            },
+          });
+        }}
+      />
+      <PageMoveDialog
+        open={moveOpen && canMoveProject}
+        onOpenChange={setMoveOpen}
+        workspaceSlug={workspaceSlug}
+        currentProjectId={projectId}
+        pageName={page.name}
+        pending={projectMove.pending}
+        onConfirm={(targetProjectId) => {
+          projectMove.move(targetProjectId, {
+            // The page keeps its id, so the viewer follows it into the
+            // target project before this project's caches drop it.
+            onMoved: (movedTo) => {
+              setMoveOpen(false);
+              goTo(pageDetailHref(workspaceSlug, movedTo, page.id));
             },
           });
         }}

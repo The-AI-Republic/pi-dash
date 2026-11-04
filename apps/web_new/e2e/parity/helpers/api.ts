@@ -15510,19 +15510,19 @@ export async function serverPagesRowEnableGuestViewAll(
   if (!res.ok) throw new Error(`[parity] project guest-view patch failed with HTTP ${res.status}.`);
 }
 
-/** Move-attempt status without throwing (the community tree carries no move route). */
+/** Cross-project move status without throwing (204 moved; 400/403/404 refusals). */
 export async function serverMovePageStatus(
   workspaceSlug: string,
   projectId: string,
   pageId: string,
-  newProjectId: string,
+  targetProjectId: string,
   sessionCookie: string,
   apiBase: string = apiBaseFromEnv()
 ): Promise<number> {
   const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/move/`, {
     method: "POST",
     headers: { cookie: sessionCookie, "content-type": "application/json" },
-    body: JSON.stringify({ new_project_id: newProjectId }),
+    body: JSON.stringify({ project_id: targetProjectId }),
   });
   return res.status;
 }

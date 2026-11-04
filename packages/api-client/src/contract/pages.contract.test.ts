@@ -250,16 +250,17 @@ describe.skipIf(!contractEnabled)("pages REST contract", () => {
     }
   });
 
-  it("records the community build's missing move route as a 404", async () => {
+  it("refuses a move into the page's own project with the server's reason", async () => {
     const client = await sharedSignedIn();
     const projectId = await seededProjectId(client);
     const created = await createPage(client, CONTRACT_WORKSPACE, projectId, { name: `${PROBE} move` });
     try {
-      // Cloud editions serve POST .../move/; the community build has no
-      // route at all, so the live leg pins the 404 absence (PAGE-017).
+      // The move route answers 204 on success; the same-project refusal is
+      // the one outcome the shared contract project can pin without a
+      // second project, and it proves the route reads `project_id`.
       await expect(
-        movePageToProject(client, CONTRACT_WORKSPACE, projectId, created.id, { new_project_id: projectId })
-      ).rejects.toMatchObject({ status: 404 });
+        movePageToProject(client, CONTRACT_WORKSPACE, projectId, created.id, { project_id: projectId })
+      ).rejects.toMatchObject({ status: 400, message: "The page is already in this project" });
     } finally {
       await removeProbe(client, projectId, created.id);
     }
