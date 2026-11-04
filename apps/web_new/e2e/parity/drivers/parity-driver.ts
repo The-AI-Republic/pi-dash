@@ -964,6 +964,8 @@ export interface ParityDriver {
   isOverflowCreateVisible(): Promise<boolean>;
   /** Whether the overflow slide-over shows its no-match empty state. */
   isOverflowEmptyStateVisible(): Promise<boolean>;
+  /** Whether an overflow slide-over row's sub-navigation is expanded. */
+  isOverflowRowOpen(projectName: string): Promise<boolean>;
   /** Whether a sidebar project row's link is currently inside the viewport. */
   isProjectRowInViewport(projectName: string): Promise<boolean>;
   /** Whether a sidebar project row's sub-navigation is expanded. */
@@ -992,6 +994,8 @@ export interface ParityDriver {
   openFavoritesFolderDialog(): Promise<void>;
   /** Open the help menu from the sidebar. */
   openHelpMenu(): Promise<void>;
+  /** Open the quick-actions menu of the named overflow slide-over row. */
+  openOverflowQuickMenu(projectName: string): Promise<void>;
   /** Open the quick-actions menu of the named sidebar project row. */
   openProjectQuickMenu(projectName: string): Promise<void>;
   /** Follow a sidebar link by its label. */
@@ -1004,6 +1008,8 @@ export interface ParityDriver {
   openWorkspaceSwitcher(): Promise<void>;
   /** Project names listed in the overflow slide-over. */
   overflowProjectNames(): Promise<string[]>;
+  /** Links of the currently expanded overflow slide-over sub-navigation. */
+  overflowSubnavLinks(): Promise<{ text: string; href: string | null }[]>;
   /** Item labels of the currently open project quick-actions menu. */
   projectQuickMenuTexts(): Promise<string[]>;
   /** Href of a sidebar project row, if the row is rendered. */
@@ -1018,6 +1024,8 @@ export interface ParityDriver {
   setFavoritesOpen(open: boolean): Promise<void>;
   /** Expand or collapse the secondary-destinations disclosure. */
   setMoreSectionOpen(open: boolean): Promise<void>;
+  /** Bring an overflow slide-over row to the wanted expansion state. */
+  setOverflowRowOpen(projectName: string, open: boolean): Promise<void>;
   /**
    * Bring a sidebar project row to the wanted expansion state, toggling
    * again when a remount swallows the first click. Leaves the final state
