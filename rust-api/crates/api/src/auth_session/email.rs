@@ -586,7 +586,7 @@ fn display_name_for(email: &str) -> String {
 // it directly.
 
 /// `save_user_data` (`base.py:220-234`): the login stamps plus the
-/// `is_active` flip in one `UPDATE`. The activation mail is published by
+/// `is_active` flip and the `User.save()` column effects in one `UPDATE`. The activation mail is published by
 /// the caller BEFORE this write (`base.py:230` precedes `:232-233`), so a
 /// broker failure 500s with the user still inactive and the mail is
 /// re-sent on the next login (QUIRK-activation-order).
@@ -607,11 +607,13 @@ async fn save_user_data(
             login_uagent: user_agent.as_deref(),
             avatar: None,
             avatar_asset_id: None,
-            display_name: None,
-            is_staff: None,
-            // The email stamps never bump `updated_at` (preserved verbatim;
-            // see `domain::identity`).
-            touch_updated_at: false,
+            // `user.save()` (`base.py:232`) is a full save, so every
+            // `User.save()` effect applies (`user.py:169-187`): the
+            // empty-`display_name` backfill, the superuser staff sync and
+            // the `auto_now` `updated_at` bump (NEWPIDASH-17).
+            display_name: Some(identity::DisplayNameUpdate::BackfillCase),
+            is_staff: Some(identity::StaffSync::OrSuperuser),
+            touch_updated_at: true,
             rotated_token: &token,
             now,
         },

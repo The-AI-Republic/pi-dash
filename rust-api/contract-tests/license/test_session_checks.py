@@ -285,3 +285,40 @@ def test_fresh_session_passes_control(admin_api, world):
     assert body["is_authenticated"] is True
     res = admin_api.patch("/api/instances/", json={"instance_name": "Fresh"})
     assert res.status_code == 200
+
+
+def test_fresh_session_signout_applies_save_effects(world):
+    """NEWPIDASH-17: a live admin sign-out stamps the logout columns and
+    ends in a full ``user.save()`` (``license/api/views/admin.py:388-391``),
+    so every ``User.save()`` effect applies (``db/models/user.py:169-187``):
+    ``updated_at`` bumps, a token already in use rotates with
+    ``token_updated_at``, and an empty ``display_name`` fills from the
+    email prefix."""
+    db = world["db"]
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET token = %s, token_updated_at = now() - interval '1 hour',"
+                " display_name = '' WHERE email = %s"
+                " RETURNING updated_at, token, token_updated_at;",
+                ("ef" * 32, "admin@example.com"),
+            )
+            before = cur.fetchone()
+        conn.commit()
+    client = _primed_client_with_cookie(signing.ADMIN_SESSION_COOKIE, world["admin_key"])
+    res = client.post("/api/instances/admins/sign-out/", data={})
+    assert res.status_code == 302, (res.status_code, res.text[:200])
+    _, at = _logout_stamps(db, "admin@example.com")
+    assert at is not None
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT updated_at, token, token_updated_at, display_name FROM users"
+                " WHERE email = %s;",
+                ("admin@example.com",),
+            )
+            updated_at, token, token_updated_at, display_name = cur.fetchone()
+    assert updated_at > before[0], "save() must bump updated_at"
+    assert token != before[1] and len(token) == 64, "save() must rotate token"
+    assert token_updated_at > before[2], "save() must re-stamp token_updated_at"
+    assert display_name == "admin", "save() must fill an empty display_name"
