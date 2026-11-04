@@ -189,14 +189,15 @@ fn csrf_denied(reason: &str) -> Response {
 /// Live 429: `auth_exception_handler` rewrites DRF's default throttled
 /// response to the 5900 error dict (`adapter/exception.py:26-31`); the
 /// `Retry-After` header from `exception_handler` survives the rewrite
-/// (`views.py:90-91`, `'%d' % wait`, truncated).
+/// (`views.py:90-91`, `'%d' % wait`, ceiled — see
+/// `guards::retry_after_secs`).
 fn throttled(wait: Option<f64>) -> Response {
     let mut response = json_response(
         StatusCode::TOO_MANY_REQUESTS,
         pidash_services::auth_session::throttle_denied_json(),
     );
-    if let Some(wait) = wait {
-        if let Ok(value) = header::HeaderValue::from_str(&format!("{}", wait.trunc() as u64)) {
+    if let Some(secs) = pidash_services::auth_session::retry_after_secs(wait) {
+        if let Ok(value) = header::HeaderValue::from_str(&secs.to_string()) {
             response.headers_mut().insert(header::RETRY_AFTER, value);
         }
     }

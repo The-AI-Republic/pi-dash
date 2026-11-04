@@ -61,8 +61,8 @@ use axum::routing::post;
 use axum::Router;
 
 use pidash_services::auth_session::guards::{
-    allow_request, parse_rate, throttle_cache_key, throttle_denied_json,
-    AUTHENTICATION_THROTTLE_RATE, AUTHENTICATION_THROTTLE_SCOPE, DEFAULT_ANON_RATE,
+    allow_request, parse_rate, retry_after_secs, throttle_cache_key, throttle_denied_json,
+    throttle_wait, AUTHENTICATION_THROTTLE_RATE, AUTHENTICATION_THROTTLE_SCOPE, DEFAULT_ANON_RATE,
     DEFAULT_ANON_SCOPE,
 };
 use pidash_services::auth_session::magic::{
@@ -206,14 +206,22 @@ fn server_error() -> Response {
 }
 
 /// Throttle denial: the `auth_exception_handler` rewrite of DRF's
-/// `Throttled` (`exception.py:26-31`), 429 + the 5900 dict.
-fn throttled() -> Response {
-    (
+/// `Throttled` (`exception.py:26-31`), 429 + the 5900 dict, plus the
+/// ceiled `Retry-After` when the wait is known and nonzero
+/// (`guards::retry_after_secs`).
+fn throttled(wait: Option<f64>) -> Response {
+    let mut response = (
         StatusCode::TOO_MANY_REQUESTS,
         [(header::CONTENT_TYPE, JSON_CONTENT_TYPE)],
         throttle_denied_json(),
     )
-        .into_response()
+        .into_response();
+    if let Some(secs) = retry_after_secs(wait) {
+        if let Ok(value) = header::HeaderValue::from_str(&secs.to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    response
 }
 
 /// Malformed JSON body on a JSON post: DRF `ParseError`
@@ -514,13 +522,14 @@ impl Cache {
 /// 30/minute). Histories are compact-JSON float arrays; a miss, an
 /// unreadable value, or a failed re-cache fails open to allow (the merged
 /// assistant-throttle precedent — cutover traffic owns these keys, and a
-/// blip must never 500 an auth endpoint).
+/// blip must never 500 an auth endpoint). Denial carries the DRF wait for
+/// the `Retry-After` header (NEWPIDASH-16).
 async fn check_generate_throttle(
     cache: Option<&Cache>,
     headers: &axum::http::HeaderMap,
     peer: Option<String>,
     app: bool,
-) -> bool {
+) -> Result<(), Option<f64>> {
     let (rate, scope) = if app {
         (AUTHENTICATION_THROTTLE_RATE, AUTHENTICATION_THROTTLE_SCOPE)
     } else {
@@ -528,9 +537,9 @@ async fn check_generate_throttle(
     };
     let (num_requests, duration_secs) = match parse_rate(Some(rate)) {
         Some(parsed) => parsed,
-        None => return true,
+        None => return Ok(()),
     };
-    let Some(cache) = cache else { return true };
+    let Some(cache) = cache else { return Ok(()) };
     let key = throttle_cache_key(scope, &throttle_ident(headers, peer));
     let now = now_secs_f64();
     let history: Vec<f64> = match cache.get(&key).await {
@@ -539,7 +548,12 @@ async fn check_generate_throttle(
     };
     let decision = allow_request(&history, num_requests, duration_secs, now);
     if !decision.allowed {
-        return false;
+        return Err(throttle_wait(
+            &decision.history,
+            num_requests,
+            duration_secs,
+            now,
+        ));
     }
     if let Err(error) = cache
         .set_ex(
@@ -551,7 +565,7 @@ async fn check_generate_throttle(
     {
         tracing::debug!(%error, key = key.as_str(), "magic.throttle: re-cache failed; allowance stands");
     }
-    true
+    Ok(())
 }
 
 fn now_secs_f64() -> f64 {
@@ -1437,11 +1451,13 @@ async fn generate(
             return csrf_failure_json(&reason);
         }
     }
-    if !authenticated
-        && !check_generate_throttle(cache.as_ref(), &headers, Some(peer.0.ip().to_string()), app)
-            .await
-    {
-        return throttled();
+    if !authenticated {
+        if let Err(wait) =
+            check_generate_throttle(cache.as_ref(), &headers, Some(peer.0.ip().to_string()), app)
+                .await
+        {
+            return throttled(wait);
+        }
     }
     if !or_500!(instance_setup_done(&pool).await) {
         let slug = "INSTANCE_NOT_CONFIGURED";

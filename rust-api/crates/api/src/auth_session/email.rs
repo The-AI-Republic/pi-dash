@@ -362,9 +362,10 @@ fn json_400(pairs: &[(String, serde_json::Value)]) -> Response {
 }
 
 /// Live 429 body: the `auth_exception_handler` rewrite (5900 dict).
-/// `Vary: Cookie`, same as above.
-fn throttle_429() -> Response {
-    (
+/// `Vary: Cookie`, same as above, plus the ceiled `Retry-After` when the
+/// wait is known and nonzero (`guards::retry_after_secs`).
+fn throttle_429(wait: Option<f64>) -> Response {
+    let mut response = (
         StatusCode::TOO_MANY_REQUESTS,
         [
             (header::CONTENT_TYPE, "application/json"),
@@ -372,7 +373,13 @@ fn throttle_429() -> Response {
         ],
         guards_kernel::throttle_denied_json(),
     )
-        .into_response()
+        .into_response();
+    if let Some(secs) = guards_kernel::retry_after_secs(wait) {
+        if let Ok(value) = header::HeaderValue::from_str(&secs.to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    response
 }
 
 /// DRF `UnsupportedMediaType` (`exceptions.py:217`): the request's
@@ -1851,9 +1858,11 @@ async fn resolve_session_user(
 /// (`rate_limit.py:17-19` + `throttling.py:109-132` via the guards
 /// kernel): trim entries older than the window, allow iff fewer than
 /// 30 remain, recording `now` on allow with a 60s TTL (DRF caches
-/// with `timeout=duration`). Redis errors fall back to the
-/// process-local governor.
-async fn check_email_throttle(state: &AppState, ident: &str) -> bool {
+/// with `timeout=duration`). Denial carries the DRF wait for the
+/// `Retry-After` header (NEWPIDASH-16). Redis errors fall back to the
+/// process-local governor, whose denial carries no wait (unknown waits
+/// omit the header, like DRF).
+async fn check_email_throttle(state: &AppState, ident: &str) -> Result<(), Option<f64>> {
     let key = guards_kernel::throttle_cache_key(AUTHENTICATION_THROTTLE.scope, ident);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1880,13 +1889,22 @@ async fn check_email_throttle(state: &AppState, ident: &str) -> bool {
                 .await
                 .is_ok()
             {
-                return true;
+                return Ok(());
             }
         } else {
-            return false;
+            return Err(guards_kernel::throttle_wait(
+                &decision.history,
+                AUTHENTICATION_THROTTLE.requests,
+                AUTHENTICATION_THROTTLE.window_secs,
+                now,
+            ));
         }
     }
-    throttle_check(AUTHENTICATION_THROTTLE, ident)
+    if throttle_check(AUTHENTICATION_THROTTLE, ident) {
+        Ok(())
+    } else {
+        Err(None)
+    }
 }
 
 async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Response {
@@ -1961,8 +1979,8 @@ async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Res
         // DRF `get_ident`, not the first-entry `client_ip` stamp:
         // the whole X-Forwarded-For chain is the bucket.
         let ident = throttle_ident(&parts.headers, peer);
-        if !check_email_throttle(state, &ident).await {
-            return throttle_429();
+        if let Err(wait) = check_email_throttle(state, &ident).await {
+            return throttle_429(wait);
         }
     }
     if !instance_is_setup(pool).await.unwrap_or(false) {
