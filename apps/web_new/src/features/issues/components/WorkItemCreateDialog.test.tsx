@@ -134,6 +134,8 @@ const PARENT_ID = "823e4567-e89b-12d3-a456-426614174007";
 const TYPE_ONE = "923e4567-e89b-12d3-a456-426614174008";
 const TYPE_TWO = "a23e4567-e89b-12d3-a456-426614174009";
 const TYPE_NINE = "b23e4567-e89b-12d3-a456-42661417400a";
+/** What a create carries once the stub's default pod is preselected (NEWPIDASH-23). */
+const DEFAULT_TARGET = { assigned_pod_id: PARENT_ID, assigned_runner_id: null, agent_executor: "local_runner" };
 
 const PROJECTS: WorkItemCreateProject[] = [
   { id: PROJECT_ATLAS, name: "Atlas", identifier: "ATL", memberRole: 15, archived: false },
@@ -290,6 +292,10 @@ interface StubOptions {
   editStatus?: number;
   editErrorBody?: unknown;
   runners?: unknown[];
+  /** Replace the project pods the execution picker lists. */
+  pods?: unknown[];
+  /** Per-project pods, keyed by project id; wins over `pods`. */
+  podsByProject?: Record<string, unknown[]>;
   publishStatus?: number;
   assistant?: { model_name: string; has_api_key: boolean };
   generate?: { status: number; body: unknown; delayMs?: number };
@@ -551,6 +557,10 @@ function stubTransport(options: StubOptions = {}) {
       );
     }
     if (url.endsWith("/runners/pods/") || /\/runners\/pods\/\?/.test(url)) {
+      const podProject = new URL(url).searchParams.get("project") ?? "";
+      const scoped = options.podsByProject?.[podProject];
+      if (scoped !== undefined) return json(200, scoped);
+      if (options.pods !== undefined) return json(200, options.pods);
       return json(200, [
         {
           id: PARENT_ID,
@@ -835,7 +845,9 @@ describe("WorkItemCreateDialog core form", () => {
     // The properties render as chips without captions (NEWPIDASH-10):
     // each chip names its property to assistive tech.
     expect(await screen.findByRole("button", { name: "State: Todo" })).toBeInTheDocument();
-    for (const name of ["Runs on", "Priority: None", "Assignees", "Labels", "Start date", "Due date", "Add parent"]) {
+    // A create starts on the project's default pod (NEWPIDASH-23).
+    expect(await screen.findByRole("button", { name: "Runs on: Local pod" })).toBeInTheDocument();
+    for (const name of ["Priority: None", "Assignees", "Labels", "Start date", "Due date", "Add parent"]) {
       expect(screen.getByRole("button", { name })).toBeInTheDocument();
     }
     expect(screen.getByRole("group", { name: "Labels" })).toBeInTheDocument();
@@ -855,7 +867,7 @@ describe("WorkItemCreateDialog core form", () => {
     });
     // The states read and the project detail read resolve
     // independently; wait for both before reading the row.
-    for (const name of ["State: Todo", "Cycle", "Modules", "Estimate"]) {
+    for (const name of ["State: Todo", "Runs on: Local pod", "Cycle", "Modules", "Estimate"]) {
       await waitFor(() => expect(screen.getByRole("button", { name })).toBeInTheDocument());
     }
     const row = screen.getByTestId("property-chips");
@@ -864,7 +876,7 @@ describe("WorkItemCreateDialog core form", () => {
       .map((chip) => chip.getAttribute("aria-label") ?? chip.textContent ?? "");
     expect(chips).toEqual([
       "State: Todo",
-      "Runs on",
+      "Runs on: Local pod",
       "Priority: None",
       "Assignees",
       "Labels",
@@ -971,7 +983,7 @@ describe("WorkItemCreateDialog core form", () => {
     await user.type(titleField(), "Still here");
     // A state change re-runs the effect with the same visit key; the
     // typed title must survive rather than reset to the kept draft.
-    await user.click(screen.getByRole("button", { name: "Runs on" }));
+    await user.click(await screen.findByRole("button", { name: "Runs on: Local pod" }));
     await waitFor(() => expect(titleField()).toHaveValue("Still here"));
     expect(h.onOpenChange).not.toHaveBeenCalled();
   });
@@ -1034,7 +1046,7 @@ describe("WorkItemCreateDialog title rules (ISS-118)", () => {
     await user.type(titleField(), "  Fresh report  ");
     save();
     await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
-    expect(posts(h.sent)[0]).toEqual({ name: "Fresh report" });
+    expect(posts(h.sent)[0]).toEqual({ name: "Fresh report", ...DEFAULT_TARGET });
     expect(h.onCreated).toHaveBeenCalledWith(CREATED_ID);
     // ISS-131: the landed create announces itself with its action toast.
     expect(await screen.findByText("Work item created successfully")).toBeInTheDocument();
@@ -1084,7 +1096,7 @@ describe("WorkItemCreateDialog title rules (ISS-118)", () => {
     await user.type(titleField(), "Second try");
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
-    expect(posts(h.sent)[0]).toEqual({ name: "Second try" });
+    expect(posts(h.sent)[0]).toEqual({ name: "Second try", ...DEFAULT_TARGET });
   });
 
   it("keeps the form open and toasts when the create fails", async () => {
@@ -1108,7 +1120,7 @@ describe("WorkItemCreateDialog title rules (ISS-118)", () => {
       runners: [DIALOG_RUNNER],
     });
     await user.type(titleField(), "Needs a runner");
-    await user.click(screen.getByRole("button", { name: "Runs on" }));
+    await user.click(await screen.findByRole("button", { name: "Runs on: Local pod" }));
     await user.click(await screen.findByRole("option", { name: /gpu-box/ }));
     save();
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("That runner belongs to another project."));
@@ -1126,7 +1138,7 @@ describe("WorkItemCreateDialog title rules (ISS-118)", () => {
       runners: [DIALOG_RUNNER],
     });
     await user.type(titleField(), "Needs a runner");
-    await user.click(screen.getByRole("button", { name: "Runs on" }));
+    await user.click(await screen.findByRole("button", { name: "Runs on: Local pod" }));
     await user.click(await screen.findByRole("option", { name: /gpu-box/ }));
     save();
     await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
@@ -1146,7 +1158,7 @@ describe("WorkItemCreateDialog title rules (ISS-118)", () => {
       runners: [DIALOG_RUNNER],
     });
     await user.type(titleField(), "Needs a runner");
-    await user.click(screen.getByRole("button", { name: "Runs on" }));
+    await user.click(await screen.findByRole("button", { name: "Runs on: Local pod" }));
     await user.click(await screen.findByRole("option", { name: /gpu-box/ }));
     save();
     await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
@@ -1178,7 +1190,7 @@ describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
     await user.click(await screen.findByRole("button", { name: "State: Todo" }));
     await user.click(await screen.findByRole("option", { name: "Todo" }));
 
-    await user.click(screen.getByRole("button", { name: "Runs on" }));
+    await user.click(await screen.findByRole("button", { name: "Runs on: Local pod" }));
     await user.click(await screen.findByRole("option", { name: /Local pod/ }));
 
     await user.click(screen.getByRole("button", { name: "Priority: None" }));
@@ -1218,7 +1230,7 @@ describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
     await waitFor(() => expect(screen.getByText("Estimate")).toBeInTheDocument());
     await user.type(titleField(), "Placed and estimated");
 
-    await user.click(screen.getByRole("button", { name: "Runs on" }));
+    await user.click(await screen.findByRole("button", { name: "Runs on: Local pod" }));
     await user.click(await screen.findByRole("option", { name: /Local pod/ }));
 
     const inMonthDays = (): HTMLButtonElement[] =>
@@ -1340,6 +1352,7 @@ describe("WorkItemCreateDialog assistant titles (ISS-118)", () => {
     expect(posts(h.sent)[0]).toEqual({
       name: "Named by the assistant",
       description_html: "<p>Words about the work</p>",
+      ...DEFAULT_TARGET,
     });
   });
 
@@ -1409,7 +1422,7 @@ describe("WorkItemCreateDialog Create more (ISS-119)", () => {
     await user.type(titleField(), "Second item");
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(2));
-    expect(posts(h.sent)[1]).toEqual({ name: "Second item" });
+    expect(posts(h.sent)[1]).toEqual({ name: "Second item", ...DEFAULT_TARGET });
   });
 
   it("clears the description editor between items", async () => {
@@ -1425,7 +1438,147 @@ describe("WorkItemCreateDialog Create more (ISS-119)", () => {
     await user.type(titleField(), "Second item");
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(2));
-    expect(posts(h.sent)[1]).toEqual({ name: "Second item" });
+    expect(posts(h.sent)[1]).toEqual({ name: "Second item", ...DEFAULT_TARGET });
+  });
+});
+
+function podRow(id: string, name: string, isDefault: boolean): Record<string, unknown> {
+  return {
+    id,
+    name,
+    description: "",
+    is_default: isDefault,
+    workspace: WORKSPACE_ID,
+    project: PROJECT_ATLAS,
+    project_identifier: "ATL",
+    created_by: null,
+    runner_count: 1,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  };
+}
+
+describe("WorkItemCreateDialog default pod (NEWPIDASH-23)", () => {
+  it("preselects the project's default pod and sends it with a title-only create", async () => {
+    const h = setup({ pods: [podRow(TYPE_ONE, "Spare pod", false), podRow(PARENT_ID, "Local pod", true)] });
+    expect(await screen.findByRole("button", { name: "Runs on: Local pod" })).toBeInTheDocument();
+    fireEvent.change(titleField(), { target: { value: "Only a title" } });
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toEqual({
+      name: "Only a title",
+      assigned_pod_id: PARENT_ID,
+      assigned_runner_id: null,
+      agent_executor: "local_runner",
+    });
+  });
+
+  it("falls back to the first pod when none is marked default", async () => {
+    const h = setup({ pods: [podRow(TYPE_ONE, "First pod", false), podRow(TYPE_TWO, "Second pod", false)] });
+    expect(await screen.findByRole("button", { name: "Runs on: First pod" })).toBeInTheDocument();
+    fireEvent.change(titleField(), { target: { value: "No default" } });
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({ assigned_pod_id: TYPE_ONE, agent_executor: "local_runner" });
+  });
+
+  it("leaves the target empty for a project without pods", async () => {
+    const h = setup({ pods: [] });
+    await waitFor(() => expect(h.calls.some((call) => call.url.includes("/runners/pods/"))).toBe(true));
+    fireEvent.change(titleField(), { target: { value: "No pods" } });
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toEqual({ name: "No pods" });
+    expect(screen.getByRole("button", { name: "Runs on" })).toBeInTheDocument();
+  });
+
+  it("keeps a different pick instead of the default", async () => {
+    const user = userEvent.setup();
+    const h = setup({ pods: [podRow(PARENT_ID, "Local pod", true), podRow(TYPE_ONE, "Spare pod", false)] });
+    await user.click(await screen.findByRole("button", { name: "Runs on: Local pod" }));
+    await user.click(await screen.findByRole("option", { name: /Spare pod/ }));
+    fireEvent.change(titleField(), { target: { value: "Picked" } });
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({ assigned_pod_id: TYPE_ONE });
+  });
+
+  it("re-applies the default after a Create more reset", async () => {
+    const user = userEvent.setup();
+    const h = setup({ pods: [podRow(PARENT_ID, "Local pod", true), podRow(TYPE_ONE, "Spare pod", false)] });
+    await user.click(screen.getByRole("switch", { name: "Create more" }));
+    await user.click(await screen.findByRole("button", { name: "Runs on: Local pod" }));
+    await user.click(await screen.findByRole("option", { name: /Spare pod/ }));
+    fireEvent.change(titleField(), { target: { value: "First item" } });
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    await waitFor(() => expect(titleField()).toHaveValue(""));
+    expect(await screen.findByRole("button", { name: "Runs on: Local pod" })).toBeInTheDocument();
+    fireEvent.change(titleField(), { target: { value: "Second item" } });
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(2));
+    expect(posts(h.sent)[1]).toMatchObject({ name: "Second item", assigned_pod_id: PARENT_ID });
+  });
+
+  it("re-defaults to the new project's pod after a project switch", async () => {
+    const user = userEvent.setup();
+    const h = setup({
+      podsByProject: {
+        [PROJECT_ATLAS]: [podRow(PARENT_ID, "Atlas pod", true)],
+        [PROJECT_BEACON]: [podRow(TYPE_TWO, "Beacon pod", true)],
+      },
+    });
+    expect(await screen.findByRole("button", { name: "Runs on: Atlas pod" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Atlas" }));
+    await user.click(await screen.findByRole("option", { name: "Beacon" }));
+    expect(await screen.findByRole("button", { name: "Runs on: Beacon pod" })).toBeInTheDocument();
+    fireEvent.change(titleField(), { target: { value: "Moved" } });
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({ assigned_pod_id: TYPE_TWO });
+  });
+
+  it("keeps an agent pick over the default pod", async () => {
+    const user = userEvent.setup();
+    const h = setup({
+      projects: {
+        [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", {
+          agent_executor_options: [{ kind: "cloud_agent", available: true, reason_code: "" }],
+        }),
+        [PROJECT_BEACON]: projectDetail(PROJECT_BEACON, "Beacon"),
+      },
+    });
+    await user.click(await screen.findByRole("button", { name: "Runs on: Local pod" }));
+    await user.click(await screen.findByRole("option", { name: /Pi Dash Cloud Agent/ }));
+    fireEvent.change(titleField(), { target: { value: "In the cloud" } });
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({ assigned_pod_id: null, agent_executor: "cloud_agent" });
+  });
+
+  it("leaves the target on the project default when that default is an agent", async () => {
+    const h = setup({
+      projects: {
+        [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", {
+          default_agent_executor: "cloud_agent",
+          agent_executor_options: [{ kind: "cloud_agent", available: true, reason_code: "" }],
+        }),
+        [PROJECT_BEACON]: projectDetail(PROJECT_BEACON, "Beacon"),
+      },
+    });
+    await waitFor(() => expect(h.calls.some((call) => call.url.includes("/runners/pods/"))).toBe(true));
+    fireEvent.change(titleField(), { target: { value: "Cloud project" } });
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toEqual({ name: "Cloud project" });
+  });
+
+  it("does not count the preselected pod as work for the discard guard", async () => {
+    const h = setup();
+    expect(await screen.findByRole("button", { name: "Runs on: Local pod" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect(h.onOpenChange).toHaveBeenCalledWith(false);
+    expect(screen.queryByText("Save this draft?")).not.toBeInTheDocument();
   });
 });
 
@@ -1808,7 +1961,7 @@ describe("WorkItemCreateDialog parent picker (ISS-122)", () => {
     await user.type(titleField(), "No parent");
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
-    expect(posts(h.sent)[0]).toEqual({ name: "No parent" });
+    expect(posts(h.sent)[0]).toEqual({ name: "No parent", ...DEFAULT_TARGET });
   });
 });
 
@@ -1970,7 +2123,7 @@ describe("WorkItemCreateDialog project selector (ISS-123)", () => {
     expect(loadWorkItemDraft(SLUG)?.projectId).toBe(PROJECT_BEACON);
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
-    expect(posts(h.sent)[0]).toEqual({ name: "Stays" });
+    expect(posts(h.sent)[0]).toEqual({ name: "Stays", ...DEFAULT_TARGET });
     expect(h.calls.some((call) => call.url.endsWith(`/projects/${PROJECT_BEACON}/issues/`))).toBe(true);
   });
 });
@@ -2045,7 +2198,7 @@ describe("WorkItemCreateDialog preset parent (ISS-175)", () => {
     await user.type(titleField(), "Two");
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(2));
-    expect(posts(h.sent)[1]).toEqual({ name: "Two" });
+    expect(posts(h.sent)[1]).toEqual({ name: "Two", ...DEFAULT_TARGET });
   });
 });
 
@@ -2591,7 +2744,7 @@ describe("WorkItemCreateDialog context prefill (ISS-124)", () => {
     expect(screen.queryByText("Modules")).not.toBeInTheDocument();
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
-    expect(posts(h.sent)[0]).toEqual({ name: "From a cycle" });
+    expect(posts(h.sent)[0]).toEqual({ name: "From a cycle", ...DEFAULT_TARGET });
     await waitFor(() =>
       expect(h.calls.some((call) => call.url.includes(`/cycles/${CYCLE_ID}/cycle-issues/`))).toBe(true)
     );
@@ -2848,7 +3001,7 @@ describe("WorkItemCreateDialog advanced git branch (ISS-128)", () => {
     fireEvent.change(screen.getByLabelText("Work branch"), { target: { value: "  team/feature-1  " } });
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
-    expect(posts(h.sent)[0]).toEqual({ name: "Branch here", git_work_branch: "team/feature-1" });
+    expect(posts(h.sent)[0]).toEqual({ name: "Branch here", git_work_branch: "team/feature-1", ...DEFAULT_TARGET });
   });
 
   it("counts a branch as draft-worthy work", async () => {

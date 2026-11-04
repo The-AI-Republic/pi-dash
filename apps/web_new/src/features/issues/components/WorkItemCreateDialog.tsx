@@ -33,6 +33,7 @@ import {
   PriorityPicker,
   ProjectPicker,
   StatePicker,
+  usePickerPods,
   usePickerProject,
   type ExecutionSelection,
   type PriorityLevel,
@@ -67,6 +68,7 @@ import {
   buildCreatePayload,
   buildDraftInput,
   canGenerateTitle,
+  defaultExecutionSelection,
   descriptionText,
   emptyCreateForm,
   GIT_BRANCH_MAX_LENGTH,
@@ -83,6 +85,7 @@ import {
   toCreateProjectOption,
   titleError,
   visibleDescriptionHtml,
+  withDefaultExecution,
   type CreateFormInitialValues,
   type CreateFormState,
   type CreateMembership,
@@ -773,6 +776,27 @@ export function WorkItemCreateDialog({
       : edit !== null
         ? stateOptionGate(projectId, baseline?.form.stateId ?? null)
         : creationStateGate(projectId);
+  // A new item starts on the project's default pod, as the old create
+  // form did (NEWPIDASH-23): once the pods and the project's default
+  // executor load, an empty target takes the default pod (else the first
+  // pod). The reads key on the project, so a project switch or a Create
+  // more reset, which both clear the target, fill it again from the new
+  // project. An edit keeps the row's own target.
+  const creating = open && !editing;
+  const targetReads = creating && projectId !== "";
+  const pods = usePickerPods(workspaceSlug, projectId, targetReads);
+  const targetProject = usePickerProject(workspaceSlug, projectId, targetReads);
+  const seededExecution = React.useMemo(
+    () =>
+      creating && pods.data !== undefined && targetProject.data !== undefined
+        ? defaultExecutionSelection(pods.data, targetProject.data.default_agent_executor)
+        : null,
+    [creating, pods.data, targetProject.data]
+  );
+  React.useEffect(() => {
+    if (seededExecution === null) return;
+    setForm((current) => withDefaultExecution(current, seededExecution));
+  }, [seededExecution, form.execution]);
   const busy =
     create.isPending ||
     writeEdit.isPending ||
@@ -841,7 +865,7 @@ export function WorkItemCreateDialog({
       return;
     }
     // An edit never prompts: there is a stored row to fall back on.
-    if (editing || !hasDraftWorthKeeping(form, routeMembership.current)) {
+    if (editing || !hasDraftWorthKeeping(form, routeMembership.current, seededExecution)) {
       finishClose();
       return;
     }
@@ -1372,6 +1396,8 @@ export function WorkItemCreateDialog({
               chip
               label="Runs on"
               placeholder="Runs on"
+              // A create names its preselected default pod right away.
+              preload={!editing}
               saveError={executionError}
             />
             <PriorityPicker
