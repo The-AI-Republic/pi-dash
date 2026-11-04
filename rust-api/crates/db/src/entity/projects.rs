@@ -22,7 +22,8 @@ pub struct Model {
     pub default_assignee_id: Option<Uuid>,
     pub project_lead_id: Option<Uuid>,
     pub updated_by_id: Option<Uuid>,
-    #[sea_orm(unique)]
+    // Not `unique`: the generator reads a partial unique index as a
+    // column constraint (see the module doc in `mod.rs`).
     pub workspace_id: Uuid,
     pub emoji: Option<String>,
     pub cycle_view: bool,

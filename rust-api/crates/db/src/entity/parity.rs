@@ -282,6 +282,305 @@ macro_rules! parity_test {
 }
 
 parity_test!(issues, issues, "issues");
+parity_test!(
+    agent_chat_approval,
+    agent_chat_approval,
+    "agent_chat_approval"
+);
+parity_test!(agent_chat_event, agent_chat_event, "agent_chat_event");
+parity_test!(agent_chat_message, agent_chat_message, "agent_chat_message");
+parity_test!(agent_chat_session, agent_chat_session, "agent_chat_session");
+parity_test!(agent_run_approval, agent_run_approval, "agent_run_approval");
+parity_test!(agent_run_event, agent_run_event, "agent_run_event");
+parity_test!(
+    agent_run_tool_call,
+    agent_run_tool_call,
+    "agent_run_tool_call"
+);
+parity_test!(analytic_views, analytic_views, "analytic_views");
+parity_test!(api_activity_logs, api_activity_logs, "api_activity_logs");
+parity_test!(assistant_event, assistant_event, "assistant_event");
+parity_test!(
+    assistant_mcp_server,
+    assistant_mcp_server,
+    "assistant_mcp_server"
+);
+parity_test!(assistant_thread, assistant_thread, "assistant_thread");
+parity_test!(assistant_turn, assistant_turn, "assistant_turn");
+parity_test!(
+    assistant_user_stt_config,
+    assistant_user_stt_config,
+    "assistant_user_stt_config"
+);
+parity_test!(changelogs, changelogs, "changelogs");
+parity_test!(
+    chat_message_dedupe,
+    chat_message_dedupe,
+    "chat_message_dedupe"
+);
+parity_test!(cli_device_codes, cli_device_codes, "cli_device_codes");
+parity_test!(comment_reactions, comment_reactions, "comment_reactions");
+parity_test!(cycle_issues, cycle_issues, "cycle_issues");
+parity_test!(
+    cycle_user_properties,
+    cycle_user_properties,
+    "cycle_user_properties"
+);
+parity_test!(cycles, cycles, "cycles");
+parity_test!(deploy_boards, deploy_boards, "deploy_boards");
+parity_test!(
+    description_versions,
+    description_versions,
+    "description_versions"
+);
+parity_test!(dev_machine, dev_machine, "dev_machine");
+parity_test!(device_sessions, device_sessions, "device_sessions");
+parity_test!(devices, devices, "devices");
+parity_test!(
+    draft_issue_assignees,
+    draft_issue_assignees,
+    "draft_issue_assignees"
+);
+parity_test!(draft_issue_cycles, draft_issue_cycles, "draft_issue_cycles");
+parity_test!(draft_issue_labels, draft_issue_labels, "draft_issue_labels");
+parity_test!(
+    draft_issue_modules,
+    draft_issue_modules,
+    "draft_issue_modules"
+);
+parity_test!(draft_issues, draft_issues, "draft_issues");
+parity_test!(
+    email_notification_logs,
+    email_notification_logs,
+    "email_notification_logs"
+);
+parity_test!(estimate_points, estimate_points, "estimate_points");
+parity_test!(estimates, estimates, "estimates");
+parity_test!(exporters, exporters, "exporters");
+parity_test!(file_assets, file_assets, "file_assets");
+parity_test!(
+    git_code_review_links,
+    git_code_review_links,
+    "git_code_review_links"
+);
+parity_test!(git_comment_syncs, git_comment_syncs, "git_comment_syncs");
+parity_test!(git_issue_syncs, git_issue_syncs, "git_issue_syncs");
+parity_test!(
+    git_provider_accounts,
+    git_provider_accounts,
+    "git_provider_accounts"
+);
+parity_test!(git_repositories, git_repositories, "git_repositories");
+parity_test!(
+    git_repository_bindings,
+    git_repository_bindings,
+    "git_repository_bindings"
+);
+parity_test!(
+    git_webhook_deliveries,
+    git_webhook_deliveries,
+    "git_webhook_deliveries"
+);
+parity_test!(
+    git_webhook_registrations,
+    git_webhook_registrations,
+    "git_webhook_registrations"
+);
+parity_test!(
+    github_app_install_sessions,
+    github_app_install_sessions,
+    "github_app_install_sessions"
+);
+parity_test!(
+    github_app_installations,
+    github_app_installations,
+    "github_app_installations"
+);
+parity_test!(
+    github_comment_syncs,
+    github_comment_syncs,
+    "github_comment_syncs"
+);
+parity_test!(github_issue_syncs, github_issue_syncs, "github_issue_syncs");
+parity_test!(
+    github_pull_request_links,
+    github_pull_request_links,
+    "github_pull_request_links"
+);
+parity_test!(
+    github_repositories,
+    github_repositories,
+    "github_repositories"
+);
+parity_test!(
+    github_repository_syncs,
+    github_repository_syncs,
+    "github_repository_syncs"
+);
+parity_test!(
+    github_webhook_deliveries,
+    github_webhook_deliveries,
+    "github_webhook_deliveries"
+);
+parity_test!(importers, importers, "importers");
+parity_test!(instance_admins, instance_admins, "instance_admins");
+parity_test!(
+    instance_configurations,
+    instance_configurations,
+    "instance_configurations"
+);
+parity_test!(instances, instances, "instances");
+parity_test!(intake_issues, intake_issues, "intake_issues");
+parity_test!(intakes, intakes, "intakes");
+parity_test!(integrations, integrations, "integrations");
+parity_test!(issue_activities, issue_activities, "issue_activities");
+parity_test!(issue_agent_ticker, issue_agent_ticker, "issue_agent_ticker");
+parity_test!(issue_attachments, issue_attachments, "issue_attachments");
+parity_test!(issue_blockers, issue_blockers, "issue_blockers");
+parity_test!(
+    issue_description_versions,
+    issue_description_versions,
+    "issue_description_versions"
+);
+parity_test!(issue_labels, issue_labels, "issue_labels");
+parity_test!(issue_links, issue_links, "issue_links");
+parity_test!(issue_mentions, issue_mentions, "issue_mentions");
+parity_test!(issue_reactions, issue_reactions, "issue_reactions");
+parity_test!(issue_subscribers, issue_subscribers, "issue_subscribers");
+parity_test!(issue_types, issue_types, "issue_types");
+parity_test!(issue_versions, issue_versions, "issue_versions");
+parity_test!(issue_views, issue_views, "issue_views");
+parity_test!(issue_votes, issue_votes, "issue_votes");
+parity_test!(issue_worklogs, issue_worklogs, "issue_worklogs");
+parity_test!(labels, labels, "labels");
+parity_test!(loop_jobs, loop_jobs, "loop_jobs");
+parity_test!(loop_targets, loop_targets, "loop_targets");
+parity_test!(
+    loop_user_preferences,
+    loop_user_preferences,
+    "loop_user_preferences"
+);
+parity_test!(machine_session, machine_session, "machine_session");
+parity_test!(module_issues, module_issues, "module_issues");
+parity_test!(module_links, module_links, "module_links");
+parity_test!(module_members, module_members, "module_members");
+parity_test!(
+    module_user_properties,
+    module_user_properties,
+    "module_user_properties"
+);
+parity_test!(modules, modules, "modules");
+parity_test!(notifications, notifications, "notifications");
+parity_test!(page_labels, page_labels, "page_labels");
+parity_test!(page_logs, page_logs, "page_logs");
+parity_test!(page_versions, page_versions, "page_versions");
+parity_test!(pages, pages, "pages");
+parity_test!(pod, pod, "pod");
+parity_test!(
+    project_deploy_boards,
+    project_deploy_boards,
+    "project_deploy_boards"
+);
+parity_test!(
+    project_identifiers,
+    project_identifiers,
+    "project_identifiers"
+);
+parity_test!(
+    project_issue_types,
+    project_issue_types,
+    "project_issue_types"
+);
+parity_test!(
+    project_member_invites,
+    project_member_invites,
+    "project_member_invites"
+);
+parity_test!(project_pages, project_pages, "project_pages");
+parity_test!(
+    project_public_members,
+    project_public_members,
+    "project_public_members"
+);
+parity_test!(
+    project_user_properties,
+    project_user_properties,
+    "project_user_properties"
+);
+parity_test!(project_webhooks, project_webhooks, "project_webhooks");
+parity_test!(
+    prompt_section_override,
+    prompt_section_override,
+    "prompt_section_override"
+);
+parity_test!(prompt_template, prompt_template, "prompt_template");
+parity_test!(run_message_dedupe, run_message_dedupe, "run_message_dedupe");
+parity_test!(
+    runner_force_refresh,
+    runner_force_refresh,
+    "runner_force_refresh"
+);
+parity_test!(scheduler_bindings, scheduler_bindings, "scheduler_bindings");
+parity_test!(schedulers, schedulers, "schedulers");
+parity_test!(sessions, sessions, "sessions");
+parity_test!(
+    slack_project_syncs,
+    slack_project_syncs,
+    "slack_project_syncs"
+);
+parity_test!(
+    social_login_connections,
+    social_login_connections,
+    "social_login_connections"
+);
+parity_test!(stickies, stickies, "stickies");
+parity_test!(teams, teams, "teams");
+parity_test!(user_favorites, user_favorites, "user_favorites");
+parity_test!(user_recent_visits, user_recent_visits, "user_recent_visits");
+parity_test!(users_groups, users_groups, "users_groups");
+parity_test!(
+    users_user_permissions,
+    users_user_permissions,
+    "users_user_permissions"
+);
+parity_test!(webhook_logs, webhook_logs, "webhook_logs");
+parity_test!(webhooks, webhooks, "webhooks");
+parity_test!(
+    workspace_home_preferences,
+    workspace_home_preferences,
+    "workspace_home_preferences"
+);
+parity_test!(
+    workspace_integrations,
+    workspace_integrations,
+    "workspace_integrations"
+);
+parity_test!(
+    workspace_join_requests,
+    workspace_join_requests,
+    "workspace_join_requests"
+);
+parity_test!(
+    workspace_member_invites,
+    workspace_member_invites,
+    "workspace_member_invites"
+);
+parity_test!(workspace_themes, workspace_themes, "workspace_themes");
+parity_test!(
+    workspace_user_links,
+    workspace_user_links,
+    "workspace_user_links"
+);
+parity_test!(
+    workspace_user_preferences,
+    workspace_user_preferences,
+    "workspace_user_preferences"
+);
+parity_test!(
+    workspace_user_properties,
+    workspace_user_properties,
+    "workspace_user_properties"
+);
 parity_test!(agent_run, agent_run, "agent_run");
 parity_test!(runner, runner, "runner");
 parity_test!(runner_live_state, runner_live_state, "runner_live_state");
