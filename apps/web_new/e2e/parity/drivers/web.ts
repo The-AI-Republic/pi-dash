@@ -665,6 +665,16 @@ export class WebDriver implements ParityDriver {
     await this.clickNativeSubmit(this.page.locator("form", { has: this.passwordField() }));
   }
 
+  async fillNewPasswordFields(password: string, confirmPassword: string): Promise<void> {
+    // The old app shares the sign-up placeholders on the reset/set forms,
+    // so the fill and the enabled check ride the same locators.
+    return this.fillPasswordFields(password, confirmPassword);
+  }
+
+  async newPasswordSubmitEnabled(): Promise<boolean> {
+    return this.passwordSubmitEnabled();
+  }
+
   async openSetPassword(): Promise<void> {
     await this.page.goto("/accounts/set-password");
     await this.page.waitForLoadState("domcontentloaded");
