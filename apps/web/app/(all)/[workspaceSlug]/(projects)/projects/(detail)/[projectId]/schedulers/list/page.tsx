@@ -16,14 +16,12 @@ function ProjectSchedulersListPage({ params }: Route.ComponentProps) {
   const { t } = useTranslation();
   const { getProjectById } = useProject();
   const project = getProjectById(projectId);
-  const pageTitle = project?.name
-    ? `${project.name} - ${t("Schedulers")}`
-    : t("Schedulers");
+  const pageTitle = project?.name ? `${project.name} - ${t("Schedulers")}` : t("Schedulers");
 
   return (
     <>
       <PageHead title={pageTitle} />
-      <SchedulerBindingsPanel workspaceSlug={workspaceSlug} projectId={projectId} />
+      <SchedulerBindingsPanel workspaceSlug={workspaceSlug} projectId={projectId} showNewSchedulerButton={false} />
     </>
   );
 }

@@ -116,14 +116,14 @@ function makeBinding(): ISchedulerBinding {
   };
 }
 
-function renderPanel() {
+function renderPanel(props: { showNewSchedulerButton?: boolean } = {}) {
   useSWR.mockImplementation((key: unknown) => {
     const kind = Array.isArray(key) ? key[0] : null;
     if (kind === "scheduler-bindings") return { data: [makeBinding()], mutate: vi.fn() };
     if (kind === "schedulers") return { data: [], mutate: vi.fn() };
     return { data: undefined, mutate: vi.fn() };
   });
-  return render(<SchedulerBindingsPanel workspaceSlug="acme" projectId="proj-1" />);
+  return render(<SchedulerBindingsPanel workspaceSlug="acme" projectId="proj-1" {...props} />);
 }
 
 describe("SchedulerBindingsPanel row navigation", () => {
@@ -150,5 +150,21 @@ describe("SchedulerBindingsPanel row navigation", () => {
     fireEvent.click(screen.getByText("Uninstall"));
     fireEvent.click(screen.getByRole("switch"));
     expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+describe("SchedulerBindingsPanel header New Scheduler button", () => {
+  beforeEach(() => {
+    useSWR.mockReset();
+  });
+
+  it("shows the header button by default (project settings page)", () => {
+    renderPanel();
+    expect(screen.getByText("New Scheduler")).toBeTruthy();
+  });
+
+  it("hides the header button when the Schedulers tab bar carries it", () => {
+    renderPanel({ showNewSchedulerButton: false });
+    expect(screen.queryByText("New Scheduler")).toBeNull();
   });
 });
