@@ -3456,37 +3456,16 @@ async fn fetch_clock_policy(
 }
 
 /// The issue's latest and active runs plus the run count through the
-/// SeaORM agent-run reader. The live-state leg mirrors
-/// `_serialize_agent_run`: a runner-less run carries none, a live row
-/// observed on another run is dropped, and the latest run carries live
-/// state only when no run is active (`include_live_state=active_run is
-/// None`).
+/// SeaORM agent-run reader. The live-state rule (`include_live_state`, the
+/// observed-run guard) is applied by `agent_status_to_representation`.
 async fn fetch_agent_runs(
     pool: &sqlx::PgPool,
     issue_id: &Uuid,
 ) -> Result<(Option<RenderedAgentRun>, Option<RenderedAgentRun>, i64), Denial> {
-    let db = pidash_db::pool::sea_orm_connection(pool);
-    let runs = agent_runs::issue_agent_runs(&db, *issue_id)
+    let runs = agent_runs::issue_agent_runs(pool, *issue_id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let active = runs.active.map(|run| with_live_state(run, true));
-    let latest = runs
-        .latest
-        .map(|run| with_live_state(run, active.is_none()));
-    Ok((latest, active, runs.count))
-}
-
-fn with_live_state(mut run: RenderedAgentRun, include_live_state: bool) -> RenderedAgentRun {
-    let keep = include_live_state
-        && run.runner_id.is_some()
-        && run
-            .live
-            .as_ref()
-            .is_some_and(|live| live.observed_run_id.is_none_or(|seen| seen == run.run_id));
-    if !keep {
-        run.live = None;
-    }
-    run
+    Ok((runs.latest, runs.active, runs.count))
 }
 
 /// The cached blocker summary via the public read service: both

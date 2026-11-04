@@ -91,8 +91,8 @@ use pidash_services::app_issues::serializers_assoc::{
 };
 use pidash_services::app_issues::{
     issue_detail_base_to_representation, issue_detail_to_representation, issue_is_actively_synced,
-    order_sql, AgentRunDetailRow, AgentTickerInput, IssueDetailBaseRow, IssueDetailRow,
-    GITHUB_ISSUE_SYNC_PROBE_SQL, GIT_ISSUE_SYNC_PROBE_SQL,
+    order_sql, AgentTickerInput, IssueDetailBaseRow, IssueDetailRow, GITHUB_ISSUE_SYNC_PROBE_SQL,
+    GIT_ISSUE_SYNC_PROBE_SQL,
 };
 use pidash_services::orchestration::blockers::{
     blockers_sql, dependents_sql, has_open_blockers_sql, relations_summary, BlockerRow,
@@ -1805,15 +1805,6 @@ async fn full_is_synced(
     ))
 }
 
-/// The serializer view over one run. This handler drops a JSON-null
-/// `done_payload` (its `row_to_json` origin never told SQL NULL apart from
-/// a JSON null).
-fn agent_run_detail_row(run: &RenderedAgentRun) -> AgentRunDetailRow<'_> {
-    let mut row = run.detail_row();
-    row.done_payload = row.done_payload.filter(|value| !value.is_null());
-    row
-}
-
 /// One direction of the blocker fetch: the merged statement with its two
 /// `:issue_id` placeholders bound to one positional.
 async fn fetch_blocker_rows(
@@ -1925,8 +1916,7 @@ async fn render_full(
     let assignee_ids = get_id_list(row, "assignee_ids");
     let is_synced = full_is_synced(pool, row, issue_id).await?;
     let is_epic = probe_is_epic(pool, get_str(row, "i_type_id")).await?;
-    let db = pidash_db::pool::sea_orm_connection(pool);
-    let runs = agent_runs::issue_agent_runs(&db, *issue_id)
+    let runs = agent_runs::issue_agent_runs(pool, *issue_id)
         .await
         .map_err(|_| Denial::ServerError)?;
     let (latest, active, run_count) = (runs.latest, runs.active, runs.count);
@@ -1961,8 +1951,8 @@ async fn render_full(
         policy: &policy,
         state,
     });
-    let latest_row = latest.as_ref().map(agent_run_detail_row);
-    let active_row = active.as_ref().map(agent_run_detail_row);
+    let latest_row = latest.as_ref().map(RenderedAgentRun::detail_row);
+    let active_row = active.as_ref().map(RenderedAgentRun::detail_row);
     let base = IssueDetailBaseRow {
         id: req_str(row, "i_id")?,
         name: req_str(row, "i_name")?,
