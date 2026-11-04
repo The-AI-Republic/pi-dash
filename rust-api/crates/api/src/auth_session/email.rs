@@ -675,11 +675,14 @@ async fn redirection_path(
     if let Some((slug,)) = fallback {
         return Ok(slug);
     }
-    let invites: (i64,) =
-        sqlx::query_as(r#"SELECT COUNT(*) FROM "workspace_member_invites" WHERE "email" = $1"#)
-            .bind(user_email)
-            .fetch_one(pool)
-            .await?;
+    // `redirection_path.py:42` reads through the soft-delete manager, so
+    // revoked invites do not count toward the invitations fallback.
+    let invites: (i64,) = sqlx::query_as(
+        r#"SELECT COUNT(*) FROM "workspace_member_invites" WHERE "email" = $1 AND "deleted_at" IS NULL"#,
+    )
+    .bind(user_email)
+    .fetch_one(pool)
+    .await?;
     if invites.0 > 0 {
         return Ok("invitations".to_owned());
     }
@@ -703,7 +706,7 @@ async fn accepted_workspace_invites(
         r#"SELECT i."workspace_id", i."role", w."slug"
            FROM "workspace_member_invites" i
            JOIN "workspaces" w ON w."id" = i."workspace_id"
-           WHERE i."email" = $1 AND i."accepted" = true
+           WHERE i."email" = $1 AND i."accepted" = true AND i."deleted_at" IS NULL
            ORDER BY i."created_at" DESC"#,
     )
     .bind(email)
@@ -722,7 +725,7 @@ async fn accepted_project_invites(
     // `role` is `smallint` (see above): `i16`, not `i32`.
     let rows: Vec<(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)> = sqlx::query_as(
         r#"SELECT "workspace_id", "project_id", "role", "created_by_id"
-           FROM "project_member_invites" WHERE "email" = $1 AND "accepted" = true
+           FROM "project_member_invites" WHERE "email" = $1 AND "accepted" = true AND "deleted_at" IS NULL
            ORDER BY "created_at" DESC"#,
     )
     .bind(email)
@@ -890,7 +893,7 @@ async fn insert_project_arm_project_members(
 /// rows as the bulk) and publishes one `track_event.delay` per invite;
 /// the project arm replays Django's two bulk statements (all
 /// `workspace_members` rows first, then the `project_members` bulk with
-/// each invite's `project_id`); then the invite deletes. Cache
+/// each invite's `project_id`); then the invite soft-deletes. Cache
 /// invalidation is a documented no-op (see the module docs). Each
 /// statement is its own autocommit write — no `transaction.atomic`
 /// anywhere — so a later failure keeps the earlier rows, exactly like
@@ -950,18 +953,24 @@ async fn post_user_auth_workflow(
     // `workspace_members` row before the `project_members` bulk below.
     insert_project_arm_workspace_members(pool, &project_invites, user_id, now).await?;
     insert_project_arm_project_members(pool, &project_invites, user_id, now).await?;
+    // Soft-delete (`SoftDeletionQuerySet.delete()`, `db/mixins.py:48-53`):
+    // stamp `deleted_at` instead of removing rows (magic.rs twin).
     sqlx::query(
-        r#"DELETE FROM "workspace_member_invites" WHERE "email" = $1 AND "accepted" = true"#,
+        r#"UPDATE "workspace_member_invites" SET "deleted_at" = $1 WHERE "email" = $2 AND "accepted" = true AND "deleted_at" IS NULL"#,
     )
+    .bind(now)
     .bind(user_email)
     .execute(pool)
     .await
     .map_err(|_| server_error())?;
-    sqlx::query(r#"DELETE FROM "project_member_invites" WHERE "email" = $1 AND "accepted" = true"#)
-        .bind(user_email)
-        .execute(pool)
-        .await
-        .map_err(|_| server_error())?;
+    sqlx::query(
+        r#"UPDATE "project_member_invites" SET "deleted_at" = $1 WHERE "email" = $2 AND "accepted" = true AND "deleted_at" IS NULL"#,
+    )
+    .bind(now)
+    .bind(user_email)
+    .execute(pool)
+    .await
+    .map_err(|_| server_error())?;
     Ok(())
 }
 
@@ -1286,8 +1295,10 @@ async fn provider_outcome(
                 .await
                 .map_err(|_| server_error())?;
             if enable_signup.as_deref() == Some("0") {
+                // `adapter/base.py:111` reads through the soft-delete
+                // manager: a revoked invite does not satisfy the gate.
                 let invited: Option<(uuid::Uuid,)> = sqlx::query_as(
-                    r#"SELECT "id" FROM "workspace_member_invites" WHERE "email" = $1 LIMIT 1"#,
+                    r#"SELECT "id" FROM "workspace_member_invites" WHERE "email" = $1 AND "deleted_at" IS NULL LIMIT 1"#,
                 )
                 .bind(normalized)
                 .fetch_optional(pool)
