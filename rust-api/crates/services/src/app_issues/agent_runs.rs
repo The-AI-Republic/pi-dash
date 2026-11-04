@@ -6,158 +6,437 @@
 //! projection carried two `llm_model` columns. sqlx resolves a duplicated
 //! output name to the LAST column, so by-name reads got the runner's live
 //! model instead of the run's, and positional reads went stale whenever a
-//! column was added or dropped. Here the run, the runner's name and the live
-//! state come back as separate typed values, so they cannot be confused.
+//! column was added or dropped. Here the statement is built from the
+//! entities, every joined column has its own alias, and rows decode by name
+//! into one typed struct ([`unique_output_names`] pins the aliases).
 
 use pidash_db::entity::{agent_run, runner, runner_live_state};
+use sea_orm::sea_query::extension::postgres::PgExpr;
+use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, DbErr, DerivePartialModel, EntityTrait, FromQueryResult,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult, JoinType, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, RelationTrait, Select,
 };
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::serializers_detail::ACTIVE_RUN_STATUSES;
+use super::serializers_detail::{
+    serialize_iso_datetime, AgentLiveStateRow, AgentRunDetailRow, ACTIVE_RUN_STATUSES,
+};
 
-/// The `agent_run` columns the serializers render (no prompt or config
-/// payloads).
-#[derive(Debug, Clone, PartialEq, DerivePartialModel, FromQueryResult)]
-#[sea_orm(entity = "agent_run::Entity")]
-pub struct AgentRunSummary {
-    pub id: Uuid,
+type Moment = sea_orm::prelude::DateTimeWithTimeZone;
+
+/// One row of [`run_query`]: the run's rendered columns, the runner's name
+/// and the runner's live state (all `live_*` NULL when it has none). Only
+/// the two `error_details` keys the serializers read leave the database.
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+struct RunRow {
+    id: Uuid,
+    status: String,
+    executor_kind: String,
+    runner_id: Option<Uuid>,
+    created_at: Moment,
+    assigned_at: Option<Moment>,
+    started_at: Option<Moment>,
+    ended_at: Option<Moment>,
+    done_payload: Option<Value>,
+    error_message: Option<Value>,
+    error_code: Option<Value>,
+    llm_model: String,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    total_tokens: Option<i64>,
+    runner_name: Option<String>,
+    live_runner_id: Option<Uuid>,
+    live_observed_run_id: Option<Uuid>,
+    live_last_event_at: Option<Moment>,
+    live_last_event_kind: Option<String>,
+    live_last_event_summary: Option<String>,
+    live_agent_pid: Option<i32>,
+    live_agent_subprocess_alive: Option<bool>,
+    live_approvals_pending: Option<i32>,
+    live_usage: Option<Value>,
+    live_llm_model: Option<String>,
+    live_turn_count: Option<i32>,
+    live_agent_health: Option<String>,
+    live_agent_last_activity_at: Option<Moment>,
+    live_updated_at: Option<Moment>,
+}
+
+/// A run with its datetimes rendered as plain `isoformat` (`+00:00`, the
+/// services convention) and ids as strings: the one owned shape every
+/// caller borrows its [`AgentRunDetailRow`] from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderedAgentRun {
+    pub id: String,
+    pub run_id: Uuid,
     pub status: String,
     pub executor_kind: String,
-    pub runner_id: Option<Uuid>,
-    pub created_at: sea_orm::prelude::DateTimeWithTimeZone,
-    pub assigned_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
-    pub started_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
-    pub ended_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    pub runner_id: Option<String>,
+    pub runner_name: Option<String>,
+    pub created_at: String,
+    pub assigned_at: Option<String>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
     pub done_payload: Option<Value>,
-    pub error_details: Value,
+    pub error: String,
+    pub error_code: String,
     pub llm_model: String,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub total_tokens: Option<i64>,
+    pub live: Option<RenderedLiveState>,
 }
 
-impl AgentRunSummary {
-    /// `error_details->>'message'`, or `''` (`COALESCE(.., '')`).
-    pub fn error(&self) -> String {
-        details_text(&self.error_details, "message")
-    }
-
-    /// `error_details->>'code'`, or `''`.
-    pub fn error_code(&self) -> String {
-        details_text(&self.error_details, "code")
-    }
-}
-
-/// One run with what the old `LEFT JOIN runner ... LEFT JOIN
-/// runner_live_state` carried: the runner's name, and its live state when
-/// the runner has one.
+/// The runner's `runner_live_state` row, rendered like [`RenderedAgentRun`].
 #[derive(Debug, Clone, PartialEq)]
-pub struct AgentRunWithRunner {
-    pub run: AgentRunSummary,
-    pub runner_name: Option<String>,
-    pub live: Option<runner_live_state::Model>,
+pub struct RenderedLiveState {
+    pub observed_run_id: Option<Uuid>,
+    pub observed_run_id_text: Option<String>,
+    pub last_event_at: Option<String>,
+    pub last_event_kind: Option<String>,
+    pub last_event_summary: Option<String>,
+    pub agent_pid: Option<i32>,
+    pub agent_subprocess_alive: Option<bool>,
+    pub approvals_pending: Option<i32>,
+    pub usage: Value,
+    pub llm_model: Option<String>,
+    pub turn_count: Option<i32>,
+    pub agent_health: Option<String>,
+    pub agent_last_activity_at: Option<String>,
+    pub updated_at: String,
 }
 
-/// The issue's newest run, any status.
-pub async fn latest_agent_run(
+impl RenderedAgentRun {
+    /// The services serializer view over this run.
+    pub fn detail_row(&self) -> AgentRunDetailRow<'_> {
+        AgentRunDetailRow {
+            id: &self.id,
+            status: &self.status,
+            executor_kind: &self.executor_kind,
+            runner_id: self.runner_id.as_deref(),
+            runner_name: self.runner_name.as_deref(),
+            created_at: &self.created_at,
+            assigned_at: self.assigned_at.as_deref(),
+            started_at: self.started_at.as_deref(),
+            ended_at: self.ended_at.as_deref(),
+            done_payload: self.done_payload.as_ref(),
+            error: &self.error,
+            error_code: &self.error_code,
+            llm_model: &self.llm_model,
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            total_tokens: self.total_tokens,
+            live_state: self.live.as_ref().map(|live| AgentLiveStateRow {
+                observed_run_id: live.observed_run_id_text.as_deref(),
+                last_event_at: live.last_event_at.as_deref(),
+                last_event_kind: live.last_event_kind.as_deref(),
+                last_event_summary: live.last_event_summary.as_deref(),
+                agent_pid: live.agent_pid,
+                agent_subprocess_alive: live.agent_subprocess_alive,
+                approvals_pending: live.approvals_pending,
+                usage: &live.usage,
+                llm_model: live.llm_model.as_deref(),
+                turn_count: live.turn_count,
+                agent_health: live.agent_health.as_deref(),
+                agent_last_activity_at: live.agent_last_activity_at.as_deref(),
+                updated_at: &live.updated_at,
+            }),
+        }
+    }
+}
+
+/// The issue's newest run, its newest active run, and its run count.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IssueAgentRuns {
+    pub latest: Option<RenderedAgentRun>,
+    pub active: Option<RenderedAgentRun>,
+    pub count: i64,
+}
+
+/// Latest run, active run and count for one issue. When the newest run is
+/// itself active it is also the newest active run, so the active read is
+/// skipped.
+pub async fn issue_agent_runs(
     db: &DatabaseConnection,
     issue_id: Uuid,
-) -> Result<Option<AgentRunWithRunner>, DbErr> {
-    newest_run(db, issue_id, false).await
-}
-
-/// The issue's newest run in an [`ACTIVE_RUN_STATUSES`] status.
-pub async fn active_agent_run(
-    db: &DatabaseConnection,
-    issue_id: Uuid,
-) -> Result<Option<AgentRunWithRunner>, DbErr> {
-    newest_run(db, issue_id, true).await
-}
-
-/// How many runs the issue has.
-pub async fn agent_run_count(db: &DatabaseConnection, issue_id: Uuid) -> Result<i64, DbErr> {
+) -> Result<IssueAgentRuns, DbErr> {
+    let latest = newest_run(db, issue_id, false).await?;
+    let active = match &latest {
+        Some(run) if ACTIVE_RUN_STATUSES.contains(&run.status.as_str()) => Some(run.clone()),
+        _ => newest_run(db, issue_id, true).await?,
+    };
     let count = agent_run::Entity::find()
         .filter(agent_run::Column::WorkItemId.eq(issue_id))
         .count(db)
         .await
         .inspect_err(|error| tracing::error!(%error, %issue_id, "agent run count failed"))?;
-    i64::try_from(count).map_err(|_| DbErr::Custom("agent run count overflows i64".to_owned()))
+    let count = i64::try_from(count)
+        .map_err(|_| DbErr::Custom("agent run count overflows i64".to_owned()))?;
+    Ok(IssueAgentRuns {
+        latest,
+        active,
+        count,
+    })
 }
 
 async fn newest_run(
     db: &DatabaseConnection,
     issue_id: Uuid,
     active_only: bool,
-) -> Result<Option<AgentRunWithRunner>, DbErr> {
-    let mut query = agent_run::Entity::find().filter(agent_run::Column::WorkItemId.eq(issue_id));
-    if active_only {
-        query = query.filter(agent_run::Column::Status.is_in(ACTIVE_RUN_STATUSES));
-    }
-    let run = query
-        .order_by_desc(agent_run::Column::CreatedAt)
-        .into_partial_model::<AgentRunSummary>()
+) -> Result<Option<RenderedAgentRun>, DbErr> {
+    let row = run_query(issue_id, active_only)
+        .into_model::<RunRow>()
         .one(db)
         .await
         .inspect_err(|error| tracing::error!(%error, %issue_id, "agent run read failed"))?;
-    let Some(run) = run else {
-        return Ok(None);
-    };
-    let (runner_name, live) = match run.runner_id {
-        Some(runner_id) => runner_and_live_state(db, runner_id).await?,
-        None => (None, None),
-    };
-    Ok(Some(AgentRunWithRunner {
-        run,
-        runner_name,
-        live,
-    }))
+    Ok(row.map(render))
 }
 
-/// The runner's name and live state. Both stay `None` when the runner row is
-/// gone, as the outer join did.
-async fn runner_and_live_state(
-    db: &DatabaseConnection,
-    runner_id: Uuid,
-) -> Result<(Option<String>, Option<runner_live_state::Model>), DbErr> {
-    let name: Option<String> = runner::Entity::find_by_id(runner_id)
+/// `runs.select_related("runner__live_state").order_by("-created_at")`
+/// (`issue.py:1385`), narrowed to the active statuses for the active run
+/// (`:1386-1402`). No tiebreak: Django emits none either.
+fn run_query(issue_id: Uuid, active_only: bool) -> Select<agent_run::Entity> {
+    let mut query = agent_run::Entity::find()
         .select_only()
-        .column(runner::Column::Name)
-        .into_tuple()
-        .one(db)
-        .await
-        .inspect_err(|error| tracing::error!(%error, %runner_id, "runner read failed"))?;
-    if name.is_none() {
-        return Ok((None, None));
+        .columns([
+            agent_run::Column::Id,
+            agent_run::Column::Status,
+            agent_run::Column::ExecutorKind,
+            agent_run::Column::RunnerId,
+            agent_run::Column::CreatedAt,
+            agent_run::Column::AssignedAt,
+            agent_run::Column::StartedAt,
+            agent_run::Column::EndedAt,
+            agent_run::Column::DonePayload,
+            agent_run::Column::LlmModel,
+            agent_run::Column::InputTokens,
+            agent_run::Column::OutputTokens,
+            agent_run::Column::TotalTokens,
+        ])
+        .column_as(error_details_key("message"), "error_message")
+        .column_as(error_details_key("code"), "error_code")
+        .column_as(runner::Column::Name, "runner_name")
+        .column_as(runner_live_state::Column::RunnerId, "live_runner_id")
+        .column_as(
+            runner_live_state::Column::ObservedRunId,
+            "live_observed_run_id",
+        )
+        .column_as(runner_live_state::Column::LastEventAt, "live_last_event_at")
+        .column_as(
+            runner_live_state::Column::LastEventKind,
+            "live_last_event_kind",
+        )
+        .column_as(
+            runner_live_state::Column::LastEventSummary,
+            "live_last_event_summary",
+        )
+        .column_as(runner_live_state::Column::AgentPid, "live_agent_pid")
+        .column_as(
+            runner_live_state::Column::AgentSubprocessAlive,
+            "live_agent_subprocess_alive",
+        )
+        .column_as(
+            runner_live_state::Column::ApprovalsPending,
+            "live_approvals_pending",
+        )
+        .column_as(runner_live_state::Column::Usage, "live_usage")
+        .column_as(runner_live_state::Column::LlmModel, "live_llm_model")
+        .column_as(runner_live_state::Column::TurnCount, "live_turn_count")
+        .column_as(runner_live_state::Column::AgentHealth, "live_agent_health")
+        .column_as(
+            runner_live_state::Column::AgentLastActivityAt,
+            "live_agent_last_activity_at",
+        )
+        .column_as(runner_live_state::Column::UpdatedAt, "live_updated_at")
+        .join(JoinType::LeftJoin, agent_run::Relation::Runner.def())
+        .join(JoinType::LeftJoin, runner::Relation::RunnerLiveState.def())
+        .filter(agent_run::Column::WorkItemId.eq(issue_id));
+    if active_only {
+        query = query.filter(agent_run::Column::Status.is_in(ACTIVE_RUN_STATUSES));
     }
-    let live = runner_live_state::Entity::find_by_id(runner_id)
-        .one(db)
-        .await
-        .inspect_err(
-            |error| tracing::error!(%error, %runner_id, "runner live state read failed"),
-        )?;
-    Ok((name, live))
+    query.order_by_desc(agent_run::Column::CreatedAt)
 }
 
-/// Postgres `jsonb ->> key`: a string as itself, JSON null or a missing key
-/// as `''` (the `COALESCE`), any other value as its JSON text.
-fn details_text(details: &Value, key: &str) -> String {
-    match details.get(key) {
-        None | Some(Value::Null) => String::new(),
+/// `agent_run.error_details -> key`: only the one value leaves the database.
+fn error_details_key(key: &str) -> sea_orm::sea_query::SimpleExpr {
+    Expr::col((agent_run::Entity, agent_run::Column::ErrorDetails)).get_json_field(key)
+}
+
+fn render(row: RunRow) -> RenderedAgentRun {
+    let iso = |moment: Option<Moment>| moment.map(render_moment);
+    let live = match (row.live_runner_id, row.live_updated_at) {
+        (Some(_), Some(updated_at)) => Some(RenderedLiveState {
+            observed_run_id: row.live_observed_run_id,
+            observed_run_id_text: row.live_observed_run_id.map(|id| id.to_string()),
+            last_event_at: iso(row.live_last_event_at),
+            last_event_kind: row.live_last_event_kind,
+            last_event_summary: row.live_last_event_summary,
+            agent_pid: row.live_agent_pid,
+            agent_subprocess_alive: row.live_agent_subprocess_alive,
+            approvals_pending: row.live_approvals_pending,
+            usage: row.live_usage.unwrap_or(Value::Null),
+            llm_model: row.live_llm_model,
+            turn_count: row.live_turn_count,
+            agent_health: row.live_agent_health,
+            agent_last_activity_at: iso(row.live_agent_last_activity_at),
+            updated_at: render_moment(updated_at),
+        }),
+        _ => None,
+    };
+    RenderedAgentRun {
+        id: row.id.to_string(),
+        run_id: row.id,
+        status: row.status,
+        executor_kind: row.executor_kind,
+        runner_id: row.runner_id.map(|id| id.to_string()),
+        runner_name: row.runner_name,
+        created_at: render_moment(row.created_at),
+        assigned_at: iso(row.assigned_at),
+        started_at: iso(row.started_at),
+        ended_at: iso(row.ended_at),
+        done_payload: row.done_payload,
+        error: details_text(row.error_message.as_ref()),
+        error_code: details_text(row.error_code.as_ref()),
+        llm_model: row.llm_model,
+        input_tokens: row.input_tokens,
+        output_tokens: row.output_tokens,
+        total_tokens: row.total_tokens,
+        live,
+    }
+}
+
+fn render_moment(moment: Moment) -> String {
+    serialize_iso_datetime(moment.with_timezone(&chrono::Utc))
+}
+
+/// `AgentRun.error` / `.error_code` (`runner/models.py:1079-1092`):
+/// `(error_details or {}).get(key) or ""`. A falsy value (missing, null,
+/// false, 0, "", [], {}) is `""`; a string is itself; any other value its
+/// JSON text.
+fn details_text(value: Option<&Value>) -> String {
+    match value {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => String::new(),
         Some(Value::String(text)) => text.clone(),
+        Some(Value::Number(number)) if number.as_f64() == Some(0.0) => String::new(),
+        Some(Value::Array(items)) if items.is_empty() => String::new(),
+        Some(Value::Object(map)) if map.is_empty() => String::new(),
         Some(other) => other.to_string(),
     }
+}
+
+/// The output column names of a built statement's select list, in order.
+#[cfg(test)]
+fn unique_output_names(sql: &str) -> Vec<String> {
+    let select = sql
+        .strip_prefix("SELECT ")
+        .and_then(|rest| rest.split(" FROM ").next())
+        .expect("select list");
+    let mut columns = Vec::new();
+    let (mut depth, mut start) = (0usize, 0usize);
+    for (at, ch) in select.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                columns.push(select[start..at].trim());
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    columns.push(select[start..].trim());
+    columns
+        .into_iter()
+        .map(|column| {
+            column
+                .rsplit(" AS ")
+                .next()
+                .and_then(|name| name.rsplit('.').next())
+                .expect("column name")
+                .trim_matches('"')
+                .to_owned()
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::read::test_support::{pool, seed_world};
+    use sea_orm::{DbBackend, QueryTrait};
     use serde_json::json;
     use sqlx::PgPool;
+
+    fn built(active_only: bool) -> String {
+        run_query(Uuid::nil(), active_only)
+            .build(DbBackend::Postgres)
+            .to_string()
+    }
+
+    #[test]
+    fn run_query_has_one_name_per_output_column() {
+        for active_only in [false, true] {
+            let mut names = unique_output_names(&built(active_only));
+            assert_eq!(names.len(), 30, "{names:?}");
+            names.sort();
+            let total = names.len();
+            names.dedup();
+            assert_eq!(names.len(), total, "duplicate output column: {names:?}");
+        }
+    }
+
+    #[test]
+    fn run_query_pins_joins_filter_and_order() {
+        let latest = built(false);
+        assert!(
+            latest.contains(
+                r#"LEFT JOIN "runner" ON "agent_run"."runner_id" = "runner"."id" LEFT JOIN "runner_live_state" ON "runner"."id" = "runner_live_state"."runner_id""#
+            ),
+            "{latest}"
+        );
+        assert!(
+            latest.contains(
+                r#"WHERE "agent_run"."work_item_id" = '00000000-0000-0000-0000-000000000000'"#
+            ),
+            "{latest}"
+        );
+        assert!(
+            latest.ends_with(r#"ORDER BY "agent_run"."created_at" DESC"#),
+            "{latest}"
+        );
+        assert!(
+            !latest.contains(r#""status" IN"#),
+            "latest is unfiltered: {latest}"
+        );
+        assert!(
+            latest.contains(r#""agent_run"."error_details" -> 'message' AS "error_message""#),
+            "{latest}"
+        );
+        assert!(!latest.contains("prompt"), "{latest}");
+        let active = built(true);
+        for status in ACTIVE_RUN_STATUSES {
+            assert!(
+                active.contains(&format!("'{status}'")),
+                "{status}: {active}"
+            );
+        }
+    }
+
+    #[test]
+    fn details_text_follows_the_django_property() {
+        let text = |value: Value| details_text(Some(&value));
+        assert_eq!(text(json!("boom")), "boom");
+        assert_eq!(text(json!("")), "");
+        assert_eq!(text(json!(null)), "");
+        assert_eq!(text(json!(false)), "");
+        assert_eq!(text(json!(0)), "");
+        assert_eq!(text(json!([])), "");
+        assert_eq!(text(json!({})), "");
+        assert_eq!(text(json!(3)), "3");
+        assert_eq!(text(json!(true)), "true");
+        assert_eq!(details_text(None), "");
+    }
 
     async fn seed_pod(pool: &PgPool, workspace_id: Uuid, project_id: Uuid) -> Uuid {
         let id = Uuid::new_v4();
@@ -195,6 +474,17 @@ mod tests {
         .await
         .expect("seed runner");
         id
+    }
+
+    async fn seed_live_state(pool: &PgPool, runner: Uuid) {
+        sqlx::query(
+            "INSERT INTO runner_live_state (runner_id, updated_at, usage, llm_model) \
+             VALUES ($1, now(), '{}', NULL)",
+        )
+        .bind(runner)
+        .execute(pool)
+        .await
+        .expect("seed live state");
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -245,14 +535,7 @@ mod tests {
         let world = seed_world(&pool).await;
         let pod = seed_pod(&pool, world.workspace_id, world.project_id).await;
         let runner = seed_runner(&pool, world.workspace_id, world.user_id, pod).await;
-        sqlx::query(
-            "INSERT INTO runner_live_state (runner_id, updated_at, usage, llm_model) \
-             VALUES ($1, now(), '{}', NULL)",
-        )
-        .bind(runner)
-        .execute(&pool)
-        .await
-        .expect("seed live state");
+        seed_live_state(&pool, runner).await;
         let older = seed_run(
             &pool,
             &world,
@@ -271,77 +554,76 @@ mod tests {
             Some(runner),
             "completed",
             "deepseek/deepseek-v4.1-flash",
-            json!({"message": "boom", "code": "E42"}),
+            json!({"message": "boom", "code": "E42", "trace": "x".repeat(4096)}),
             0,
         )
         .await;
         let db = pidash_db::pool::sea_orm_connection(&pool);
 
-        let latest = latest_agent_run(&db, world.issue_id)
-            .await
-            .expect("latest")
-            .expect("has a run");
-        assert_eq!(latest.run.id, newest);
-        assert_eq!(latest.run.llm_model, "deepseek/deepseek-v4.1-flash");
-        assert_eq!(latest.run.error(), "boom");
-        assert_eq!(latest.run.error_code(), "E42");
+        let runs = issue_agent_runs(&db, world.issue_id).await.expect("runs");
+        let latest = runs.latest.expect("has a run");
+        assert_eq!(latest.run_id, newest);
+        assert_eq!(latest.llm_model, "deepseek/deepseek-v4.1-flash");
+        assert_eq!(latest.error, "boom");
+        assert_eq!(latest.error_code, "E42");
         assert_eq!(latest.runner_name.as_deref(), Some("macmini-7"));
-        let live = latest.live.expect("runner has live state");
-        assert_eq!(live.llm_model, None);
-
-        let active = active_agent_run(&db, world.issue_id)
-            .await
-            .expect("active")
-            .expect("the older run is running");
-        assert_eq!(active.run.id, older);
-        assert_eq!(active.run.error(), "");
-
-        assert_eq!(
-            agent_run_count(&db, world.issue_id).await.expect("count"),
-            2
-        );
+        assert_eq!(latest.live.expect("runner has live state").llm_model, None);
+        let active = runs.active.expect("the older run is running");
+        assert_eq!(active.run_id, older);
+        assert_eq!(active.error, "");
+        assert_eq!(runs.count, 2);
     }
 
-    /// A runner-less run carries no runner name and no live state; an issue
-    /// without runs reads as `None` and a zero count.
+    /// A newest run that is itself active is also the active run.
     #[tokio::test]
-    async fn live_runner_less_run_and_empty_issue() {
+    async fn live_active_newest_run_is_the_active_run() {
+        let Some(pool) = pool().await else {
+            return;
+        };
+        let world = seed_world(&pool).await;
+        let pod = seed_pod(&pool, world.workspace_id, world.project_id).await;
+        seed_run(&pool, &world, pod, None, "completed", "m", json!({}), 60).await;
+        let newest = seed_run(&pool, &world, pod, None, "running", "m", json!({}), 0).await;
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let runs = issue_agent_runs(&db, world.issue_id).await.expect("runs");
+        assert_eq!(runs.latest.as_ref().map(|run| run.run_id), Some(newest));
+        assert_eq!(runs.active, runs.latest);
+        assert_eq!(runs.count, 2);
+    }
+
+    /// A runner-less run and a runner with no live-state row both carry no
+    /// live state; an issue without runs reads as `None` and a zero count.
+    #[tokio::test]
+    async fn live_missing_runner_or_live_state_and_empty_issue() {
         let Some(pool) = pool().await else {
             return;
         };
         let world = seed_world(&pool).await;
         let db = pidash_db::pool::sea_orm_connection(&pool);
-        assert!(latest_agent_run(&db, world.issue_id)
-            .await
-            .expect("latest")
-            .is_none());
-        assert_eq!(
-            agent_run_count(&db, world.issue_id).await.expect("count"),
-            0
-        );
+        let empty = issue_agent_runs(&db, world.issue_id).await.expect("runs");
+        assert_eq!((empty.latest, empty.active, empty.count), (None, None, 0));
 
         let pod = seed_pod(&pool, world.workspace_id, world.project_id).await;
-        seed_run(&pool, &world, pod, None, "queued", "m", json!({}), 0).await;
-        let latest = latest_agent_run(&db, world.issue_id)
-            .await
-            .expect("latest")
-            .expect("has a run");
-        assert_eq!(latest.runner_name, None);
-        assert_eq!(latest.live, None);
-        assert!(active_agent_run(&db, world.issue_id)
-            .await
-            .expect("active")
-            .is_some());
-    }
+        seed_run(&pool, &world, pod, None, "queued", "m", json!({}), 10).await;
+        let runs = issue_agent_runs(&db, world.issue_id).await.expect("runs");
+        let latest = runs.latest.expect("has a run");
+        assert_eq!((latest.runner_name, latest.live), (None, None));
 
-    #[test]
-    fn details_text_follows_jsonb_text_extraction() {
-        let details = json!({"message": "boom", "code": "E1", "n": 3, "nil": null});
-        assert_eq!(details_text(&details, "message"), "boom");
-        assert_eq!(details_text(&details, "code"), "E1");
-        assert_eq!(details_text(&details, "n"), "3");
-        assert_eq!(details_text(&details, "nil"), "");
-        assert_eq!(details_text(&details, "absent"), "");
-        assert_eq!(details_text(&json!({}), "message"), "");
+        let runner = seed_runner(&pool, world.workspace_id, world.user_id, pod).await;
+        seed_run(
+            &pool,
+            &world,
+            pod,
+            Some(runner),
+            "completed",
+            "m",
+            json!({}),
+            0,
+        )
+        .await;
+        let runs = issue_agent_runs(&db, world.issue_id).await.expect("runs");
+        let latest = runs.latest.expect("has a run");
+        assert_eq!(latest.runner_name.as_deref(), Some("macmini-7"));
+        assert_eq!(latest.live, None, "runner without a live-state row");
     }
 }

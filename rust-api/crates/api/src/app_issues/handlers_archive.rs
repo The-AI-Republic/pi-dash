@@ -77,10 +77,10 @@ use sqlx::Row;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS, TABLE as TICKER_TABLE,
 };
+use pidash_services::app_issues::agent_runs::{self, RenderedAgentRun};
 use pidash_services::app_issues::{
     issue_detail_base_to_representation, issue_detail_to_representation, issue_is_actively_synced,
-    on_results_fields, order_sql, raw_group_mismatch, serialize_drf_datetime,
-    serialize_iso_datetime, AgentLiveStateRow, AgentRunDetailRow, AgentTickerInput,
+    on_results_fields, order_sql, raw_group_mismatch, serialize_drf_datetime, AgentTickerInput,
     IssueDetailBaseRow, IssueDetailRow, ListParams, ParseOptions, GITHUB_ISSUE_SYNC_PROBE_SQL,
     GIT_ISSUE_SYNC_PROBE_SQL,
 };
@@ -696,48 +696,10 @@ struct DetailOwned {
     policy: ProjectClockPolicy,
     state_name: Option<String>,
     state_group: Option<String>,
-    latest_run: Option<OwnedRun>,
-    active_run: Option<OwnedRun>,
+    latest_run: Option<RenderedAgentRun>,
+    active_run: Option<RenderedAgentRun>,
     run_count: i64,
     blockers: pidash_services::orchestration::blockers::RelationsSummary,
-}
-
-/// An agent-run row with its joined runner/live facts, all owned.
-struct OwnedRun {
-    id: String,
-    status: String,
-    executor_kind: String,
-    runner_id: Option<String>,
-    runner_name: Option<String>,
-    created_at: String,
-    assigned_at: Option<String>,
-    started_at: Option<String>,
-    ended_at: Option<String>,
-    done_payload: Option<Value>,
-    error: String,
-    error_code: String,
-    llm_model: String,
-    input_tokens: Option<i64>,
-    output_tokens: Option<i64>,
-    total_tokens: Option<i64>,
-    live_state: Option<OwnedLiveState>,
-}
-
-/// A joined live-state row, all owned.
-struct OwnedLiveState {
-    observed_run_id: Option<String>,
-    last_event_at: Option<String>,
-    last_event_kind: Option<String>,
-    last_event_summary: Option<String>,
-    agent_pid: Option<i32>,
-    agent_subprocess_alive: Option<bool>,
-    approvals_pending: Option<i32>,
-    usage: Value,
-    llm_model: Option<String>,
-    turn_count: Option<i32>,
-    agent_health: Option<String>,
-    agent_last_activity_at: Option<String>,
-    updated_at: String,
 }
 
 impl DetailOwned {
@@ -766,9 +728,11 @@ impl DetailOwned {
                 }
             }
         };
-        let latest_run = fetch_agent_run(pool, true, issue_id).await?;
-        let active_run = fetch_agent_run(pool, false, issue_id).await?;
-        let run_count = fetch_run_count(pool, issue_id).await?;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let runs = agent_runs::issue_agent_runs(&db, issue_id)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        let (latest_run, active_run, run_count) = (runs.latest, runs.active, runs.count);
         let blockers = fetch_blockers(pool, issue_id).await?;
         Ok(Self {
             id,
@@ -859,48 +823,10 @@ impl DetailOwned {
                 policy: &self.policy,
                 state,
             }),
-            latest_run: self.latest_run.as_ref().map(OwnedRun::view),
-            active_run: self.active_run.as_ref().map(OwnedRun::view),
+            latest_run: self.latest_run.as_ref().map(RenderedAgentRun::detail_row),
+            active_run: self.active_run.as_ref().map(RenderedAgentRun::detail_row),
             run_count: self.run_count,
             blockers: &self.blockers,
-        }
-    }
-}
-
-impl OwnedRun {
-    fn view(&self) -> AgentRunDetailRow<'_> {
-        AgentRunDetailRow {
-            id: &self.id,
-            status: &self.status,
-            executor_kind: &self.executor_kind,
-            runner_id: self.runner_id.as_deref(),
-            runner_name: self.runner_name.as_deref(),
-            created_at: &self.created_at,
-            assigned_at: self.assigned_at.as_deref(),
-            started_at: self.started_at.as_deref(),
-            ended_at: self.ended_at.as_deref(),
-            done_payload: self.done_payload.as_ref(),
-            error: &self.error,
-            error_code: &self.error_code,
-            llm_model: &self.llm_model,
-            input_tokens: self.input_tokens,
-            output_tokens: self.output_tokens,
-            total_tokens: self.total_tokens,
-            live_state: self.live_state.as_ref().map(|live| AgentLiveStateRow {
-                observed_run_id: live.observed_run_id.as_deref(),
-                last_event_at: live.last_event_at.as_deref(),
-                last_event_kind: live.last_event_kind.as_deref(),
-                last_event_summary: live.last_event_summary.as_deref(),
-                agent_pid: live.agent_pid,
-                agent_subprocess_alive: live.agent_subprocess_alive,
-                approvals_pending: live.approvals_pending,
-                usage: &live.usage,
-                llm_model: live.llm_model.as_deref(),
-                turn_count: live.turn_count,
-                agent_health: live.agent_health.as_deref(),
-                agent_last_activity_at: live.agent_last_activity_at.as_deref(),
-                updated_at: &live.updated_at,
-            }),
         }
     }
 }
@@ -1074,71 +1000,6 @@ async fn fetch_state(
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(row.map(|(_, name, group)| (name, group)))
-}
-
-/// The newest (or newest active) run through the SeaORM agent-run reader.
-/// A runner with no live-state row carries no live state.
-async fn fetch_agent_run(
-    pool: &sqlx::PgPool,
-    latest: bool,
-    issue_id: uuid::Uuid,
-) -> Result<Option<OwnedRun>, Denial> {
-    use pidash_services::app_issues::agent_runs;
-    let db = pidash_db::pool::sea_orm_connection(pool);
-    let view = if latest {
-        agent_runs::latest_agent_run(&db, issue_id).await
-    } else {
-        agent_runs::active_agent_run(&db, issue_id).await
-    }
-    .map_err(|_| Denial::ServerError)?;
-    let Some(view) = view else {
-        return Ok(None);
-    };
-    let iso = |moment: &Option<sea_orm::prelude::DateTimeWithTimeZone>| {
-        moment.map(|moment| serialize_iso_datetime(moment.with_timezone(&chrono::Utc)))
-    };
-    let run = &view.run;
-    Ok(Some(OwnedRun {
-        id: run.id.to_string(),
-        status: run.status.clone(),
-        executor_kind: run.executor_kind.clone(),
-        runner_id: run.runner_id.map(|id| id.to_string()),
-        runner_name: view.runner_name.clone(),
-        created_at: serialize_iso_datetime(run.created_at.with_timezone(&chrono::Utc)),
-        assigned_at: iso(&run.assigned_at),
-        started_at: iso(&run.started_at),
-        ended_at: iso(&run.ended_at),
-        done_payload: run.done_payload.clone(),
-        error: run.error(),
-        error_code: run.error_code(),
-        llm_model: run.llm_model.clone(),
-        input_tokens: run.input_tokens,
-        output_tokens: run.output_tokens,
-        total_tokens: run.total_tokens,
-        live_state: view.live.as_ref().map(|live| OwnedLiveState {
-            observed_run_id: live.observed_run_id.map(|id| id.to_string()),
-            last_event_at: iso(&live.last_event_at),
-            last_event_kind: live.last_event_kind.clone(),
-            last_event_summary: live.last_event_summary.clone(),
-            agent_pid: live.agent_pid,
-            agent_subprocess_alive: live.agent_subprocess_alive,
-            approvals_pending: live.approvals_pending,
-            usage: live.usage.clone(),
-            llm_model: live.llm_model.clone(),
-            turn_count: live.turn_count,
-            agent_health: live.agent_health.clone(),
-            agent_last_activity_at: iso(&live.agent_last_activity_at),
-            updated_at: serialize_iso_datetime(live.updated_at.with_timezone(&chrono::Utc)),
-        }),
-    }))
-}
-
-/// How many runs the issue has.
-async fn fetch_run_count(pool: &sqlx::PgPool, issue_id: uuid::Uuid) -> Result<i64, Denial> {
-    let db = pidash_db::pool::sea_orm_connection(pool);
-    pidash_services::app_issues::agent_runs::agent_run_count(&db, issue_id)
-        .await
-        .map_err(|_| Denial::ServerError)
 }
 
 /// One cached `relations_summary` over the two summary statements plus

@@ -105,7 +105,7 @@ use pidash_auth::scope::TenantScope;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS, TABLE as TICKER_TABLE,
 };
-use pidash_services::app_issues::agent_runs::{self, AgentRunWithRunner};
+use pidash_services::app_issues::agent_runs::{self, RenderedAgentRun};
 use pidash_services::app_issues::serializers_create::{
     assignee_member_filter_sql, issue_create_to_representation, issue_create_validate,
     label_filter_null_project_sql, label_filter_sql, CreateValidateError, ExecutorPolicy,
@@ -114,8 +114,8 @@ use pidash_services::app_issues::serializers_create::{
     HAS_ACTIVE_RUN_SQL, PARENT_EXISTS_SQL, POD_FETCH_SQL, PROJECT_FETCH_SQL, STATE_EXISTS_SQL,
 };
 use pidash_services::app_issues::serializers_detail::{
-    issue_detail_to_representation, serialize_drf_datetime, serialize_iso_datetime,
-    AgentLiveStateRow, AgentRunDetailRow, AgentTickerInput, IssueDetailBaseRow, IssueDetailRow,
+    issue_detail_to_representation, serialize_drf_datetime, AgentTickerInput, IssueDetailBaseRow,
+    IssueDetailRow,
 };
 use pidash_services::app_issues::serializers_engage::{
     GITHUB_ISSUE_SYNC_PROBE_SQL, GIT_ISSUE_SYNC_PROBE_SQL,
@@ -3455,118 +3455,38 @@ async fn fetch_clock_policy(
     })
 }
 
-/// A run row with every wire string pre-rendered (datetimes via
-/// `_serialize_datetime`, i.e. UTC `isoformat`).
-struct RenderedRun {
-    id: String,
-    status: String,
-    executor_kind: String,
-    runner_id: Option<String>,
-    runner_name: Option<String>,
-    created_at: String,
-    assigned_at: Option<String>,
-    started_at: Option<String>,
-    ended_at: Option<String>,
-    done_payload: Option<Value>,
-    error: String,
-    error_code: String,
-    llm_model: String,
-    input_tokens: Option<i64>,
-    output_tokens: Option<i64>,
-    total_tokens: Option<i64>,
-    live: Option<RenderedLive>,
-}
-
-struct RenderedLive {
-    observed_run_id: Option<String>,
-    last_event_at: Option<String>,
-    last_event_kind: Option<String>,
-    last_event_summary: Option<String>,
-    agent_pid: Option<i32>,
-    agent_subprocess_alive: Option<bool>,
-    approvals_pending: Option<i32>,
-    usage: Value,
-    llm_model: Option<String>,
-    turn_count: Option<i32>,
-    agent_health: Option<String>,
-    agent_last_activity_at: Option<String>,
-    updated_at: String,
-}
-
-/// One run off the SeaORM agent-run reader. The live-state leg mirrors
-/// `_serialize_agent_run`: a runner-less run carries none, and a live row
-/// observed on another run is dropped.
-fn rendered_run(view: &AgentRunWithRunner, include_live_state: bool) -> RenderedRun {
-    let run = &view.run;
-    let iso = |moment: &Option<sea_orm::prelude::DateTimeWithTimeZone>| {
-        moment.map(|moment| serialize_iso_datetime(moment.with_timezone(&Utc)))
-    };
-    let live = match &view.live {
-        Some(live)
-            if include_live_state
-                && run.runner_id.is_some()
-                && live.observed_run_id.is_none_or(|seen| seen == run.id) =>
-        {
-            Some(RenderedLive {
-                observed_run_id: live.observed_run_id.map(|seen| seen.to_string()),
-                last_event_at: iso(&live.last_event_at),
-                last_event_kind: live.last_event_kind.clone(),
-                last_event_summary: live.last_event_summary.clone(),
-                agent_pid: live.agent_pid,
-                agent_subprocess_alive: live.agent_subprocess_alive,
-                approvals_pending: live.approvals_pending,
-                usage: live.usage.clone(),
-                llm_model: live.llm_model.clone(),
-                turn_count: live.turn_count,
-                agent_health: live.agent_health.clone(),
-                agent_last_activity_at: iso(&live.agent_last_activity_at),
-                updated_at: serialize_iso_datetime(live.updated_at.with_timezone(&Utc)),
-            })
-        }
-        _ => None,
-    };
-    RenderedRun {
-        id: run.id.to_string(),
-        status: run.status.clone(),
-        executor_kind: run.executor_kind.clone(),
-        runner_id: run.runner_id.map(|runner| runner.to_string()),
-        runner_name: view.runner_name.clone(),
-        created_at: serialize_iso_datetime(run.created_at.with_timezone(&Utc)),
-        assigned_at: iso(&run.assigned_at),
-        started_at: iso(&run.started_at),
-        ended_at: iso(&run.ended_at),
-        done_payload: run.done_payload.clone(),
-        error: run.error(),
-        error_code: run.error_code(),
-        llm_model: run.llm_model.clone(),
-        input_tokens: run.input_tokens,
-        output_tokens: run.output_tokens,
-        total_tokens: run.total_tokens,
-        live,
-    }
-}
-
+/// The issue's latest and active runs plus the run count through the
+/// SeaORM agent-run reader. The live-state leg mirrors
+/// `_serialize_agent_run`: a runner-less run carries none, a live row
+/// observed on another run is dropped, and the latest run carries live
+/// state only when no run is active (`include_live_state=active_run is
+/// None`).
 async fn fetch_agent_runs(
     pool: &sqlx::PgPool,
     issue_id: &Uuid,
-) -> Result<(Option<RenderedRun>, Option<RenderedRun>, i64), Denial> {
+) -> Result<(Option<RenderedAgentRun>, Option<RenderedAgentRun>, i64), Denial> {
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let latest = agent_runs::latest_agent_run(&db, *issue_id)
+    let runs = agent_runs::issue_agent_runs(&db, *issue_id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let active = agent_runs::active_agent_run(&db, *issue_id)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let count = agent_runs::agent_run_count(&db, *issue_id)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let active = active.as_ref().map(|view| rendered_run(view, true));
-    // The latest run carries live state only when no run is active
-    // (`include_live_state=active_run is None`).
-    let latest = latest
-        .as_ref()
-        .map(|view| rendered_run(view, active.is_none()));
-    Ok((latest, active, count))
+    let active = runs.active.map(|run| with_live_state(run, true));
+    let latest = runs
+        .latest
+        .map(|run| with_live_state(run, active.is_none()));
+    Ok((latest, active, runs.count))
+}
+
+fn with_live_state(mut run: RenderedAgentRun, include_live_state: bool) -> RenderedAgentRun {
+    let keep = include_live_state
+        && run.runner_id.is_some()
+        && run
+            .live
+            .as_ref()
+            .is_some_and(|live| live.observed_run_id.is_none_or(|seen| seen == run.run_id));
+    if !keep {
+        run.live = None;
+    }
+    run
 }
 
 /// The cached blocker summary via the public read service: both
@@ -3707,72 +3627,8 @@ async fn render_detail_map(
         policy: &policy,
         state: state_ref,
     });
-    let latest_row = latest.as_ref().map(|run| AgentRunDetailRow {
-        id: run.id.as_str(),
-        status: run.status.as_str(),
-        executor_kind: run.executor_kind.as_str(),
-        runner_id: run.runner_id.as_deref(),
-        runner_name: run.runner_name.as_deref(),
-        created_at: run.created_at.as_str(),
-        assigned_at: run.assigned_at.as_deref(),
-        started_at: run.started_at.as_deref(),
-        ended_at: run.ended_at.as_deref(),
-        done_payload: run.done_payload.as_ref(),
-        error: run.error.as_str(),
-        error_code: run.error_code.as_str(),
-        llm_model: run.llm_model.as_str(),
-        input_tokens: run.input_tokens,
-        output_tokens: run.output_tokens,
-        total_tokens: run.total_tokens,
-        live_state: run.live.as_ref().map(|live| AgentLiveStateRow {
-            observed_run_id: live.observed_run_id.as_deref(),
-            last_event_at: live.last_event_at.as_deref(),
-            last_event_kind: live.last_event_kind.as_deref(),
-            last_event_summary: live.last_event_summary.as_deref(),
-            agent_pid: live.agent_pid,
-            agent_subprocess_alive: live.agent_subprocess_alive,
-            approvals_pending: live.approvals_pending,
-            usage: &live.usage,
-            llm_model: live.llm_model.as_deref(),
-            turn_count: live.turn_count,
-            agent_health: live.agent_health.as_deref(),
-            agent_last_activity_at: live.agent_last_activity_at.as_deref(),
-            updated_at: live.updated_at.as_str(),
-        }),
-    });
-    let active_row = active.as_ref().map(|run| AgentRunDetailRow {
-        id: run.id.as_str(),
-        status: run.status.as_str(),
-        executor_kind: run.executor_kind.as_str(),
-        runner_id: run.runner_id.as_deref(),
-        runner_name: run.runner_name.as_deref(),
-        created_at: run.created_at.as_str(),
-        assigned_at: run.assigned_at.as_deref(),
-        started_at: run.started_at.as_deref(),
-        ended_at: run.ended_at.as_deref(),
-        done_payload: run.done_payload.as_ref(),
-        error: run.error.as_str(),
-        error_code: run.error_code.as_str(),
-        llm_model: run.llm_model.as_str(),
-        input_tokens: run.input_tokens,
-        output_tokens: run.output_tokens,
-        total_tokens: run.total_tokens,
-        live_state: run.live.as_ref().map(|live| AgentLiveStateRow {
-            observed_run_id: live.observed_run_id.as_deref(),
-            last_event_at: live.last_event_at.as_deref(),
-            last_event_kind: live.last_event_kind.as_deref(),
-            last_event_summary: live.last_event_summary.as_deref(),
-            agent_pid: live.agent_pid,
-            agent_subprocess_alive: live.agent_subprocess_alive,
-            approvals_pending: live.approvals_pending,
-            usage: &live.usage,
-            llm_model: live.llm_model.as_deref(),
-            turn_count: live.turn_count,
-            agent_health: live.agent_health.as_deref(),
-            agent_last_activity_at: live.agent_last_activity_at.as_deref(),
-            updated_at: live.updated_at.as_str(),
-        }),
-    });
+    let latest_row = latest.as_ref().map(RenderedAgentRun::detail_row);
+    let active_row = active.as_ref().map(RenderedAgentRun::detail_row);
     let detail = IssueDetailRow {
         base,
         description_html: save.description_html.as_str(),

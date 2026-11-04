@@ -65,12 +65,11 @@ use pidash_db::issue_filters::{
 use pidash_db::tasks_ticker::IssueAgentTicker;
 use pidash_services::app_intake::permissions as guards;
 use pidash_services::app_intake::tasks as intake_tasks;
-use pidash_services::app_issues::agent_runs;
+use pidash_services::app_issues::agent_runs::{self, RenderedAgentRun};
 use pidash_services::app_issues::serializers_create::managed_unavailable_detail;
 use pidash_services::app_issues::serializers_create::HAS_ACTIVE_RUN_SQL;
 use pidash_services::app_issues::serializers_detail::{
-    agent_status_to_representation, agent_ticker_to_representation, serialize_iso_datetime,
-    AgentLiveStateRow, AgentRunDetailRow, AgentTickerView,
+    agent_status_to_representation, agent_ticker_to_representation, AgentTickerView,
 };
 use pidash_services::dispatch::admission::{managed_runner_availability, LlmProfile};
 use pidash_services::dispatch::policy::{
@@ -2208,48 +2207,6 @@ struct TickerOwned {
     state_name: Option<String>,
 }
 
-/// One run off the SeaORM agent-run reader,
-/// with pre-rendered `isoformat` datetimes (the services convention:
-/// rows carry strings, `+00:00`, never the actor zone).
-struct AgentRunOwned {
-    id: String,
-    status: String,
-    executor_kind: String,
-    runner_id: Option<String>,
-    runner_name: Option<String>,
-    created_at: String,
-    assigned_at: Option<String>,
-    started_at: Option<String>,
-    ended_at: Option<String>,
-    done_payload: Option<serde_json::Value>,
-    error: String,
-    error_code: String,
-    llm_model: String,
-    input_tokens: Option<i64>,
-    output_tokens: Option<i64>,
-    total_tokens: Option<i64>,
-    live: Option<AgentLiveOwned>,
-}
-
-/// The runner's `runner_live_state` row, present exactly when it exists.
-/// Carries the PIDASHCONV-1315 `agent_health`/`agent_last_activity_at`
-/// columns.
-struct AgentLiveOwned {
-    observed_run_id: Option<String>,
-    last_event_at: Option<String>,
-    last_event_kind: Option<String>,
-    last_event_summary: Option<String>,
-    agent_pid: Option<i32>,
-    agent_subprocess_alive: Option<bool>,
-    approvals_pending: Option<i32>,
-    usage: serde_json::Value,
-    llm_model: Option<String>,
-    turn_count: Option<i32>,
-    agent_health: Option<String>,
-    agent_last_activity_at: Option<String>,
-    updated_at: String,
-}
-
 pub struct BlockerSummary {
     pub blocked_by: Vec<serde_json::Value>,
     pub blocking: Vec<serde_json::Value>,
@@ -2495,101 +2452,6 @@ async fn fetch_ticker_owned(
     }))
 }
 
-/// The newest (or newest active) run through the SeaORM agent-run reader,
-/// with datetimes pre-rendered to `isoformat` (`+00:00`), the services
-/// convention. A runner with no live-state row carries no live state.
-async fn fetch_agent_run(
-    db: &sea_orm::DatabaseConnection,
-    latest: bool,
-    issue_id: &Uuid,
-) -> Result<Option<AgentRunOwned>, Denial> {
-    let view = if latest {
-        agent_runs::latest_agent_run(db, *issue_id).await
-    } else {
-        agent_runs::active_agent_run(db, *issue_id).await
-    }
-    .map_err(|_| Denial::ServerError)?;
-    let Some(view) = view else {
-        return Ok(None);
-    };
-    let iso = |moment: &Option<sea_orm::prelude::DateTimeWithTimeZone>| {
-        moment.map(|moment| serialize_iso_datetime(moment.with_timezone(&Utc)))
-    };
-    let run = &view.run;
-    let live = view.live.as_ref().map(|live| AgentLiveOwned {
-        observed_run_id: live.observed_run_id.map(|id| id.to_string()),
-        last_event_at: iso(&live.last_event_at),
-        last_event_kind: live.last_event_kind.clone(),
-        last_event_summary: live.last_event_summary.clone(),
-        agent_pid: live.agent_pid,
-        agent_subprocess_alive: live.agent_subprocess_alive,
-        approvals_pending: live.approvals_pending,
-        usage: live.usage.clone(),
-        llm_model: live.llm_model.clone(),
-        turn_count: live.turn_count,
-        agent_health: live.agent_health.clone(),
-        agent_last_activity_at: iso(&live.agent_last_activity_at),
-        updated_at: serialize_iso_datetime(live.updated_at.with_timezone(&Utc)),
-    });
-    Ok(Some(AgentRunOwned {
-        id: run.id.to_string(),
-        status: run.status.clone(),
-        executor_kind: run.executor_kind.clone(),
-        runner_id: run.runner_id.map(|id| id.to_string()),
-        runner_name: view.runner_name.clone(),
-        created_at: serialize_iso_datetime(run.created_at.with_timezone(&Utc)),
-        assigned_at: iso(&run.assigned_at),
-        started_at: iso(&run.started_at),
-        ended_at: iso(&run.ended_at),
-        done_payload: run.done_payload.clone(),
-        error: run.error(),
-        error_code: run.error_code(),
-        llm_model: run.llm_model.clone(),
-        input_tokens: run.input_tokens,
-        output_tokens: run.output_tokens,
-        total_tokens: run.total_tokens,
-        live,
-    }))
-}
-
-/// The services [`AgentRunDetailRow`] view over an owned run row.
-fn agent_run_detail_row(run: &AgentRunOwned) -> AgentRunDetailRow<'_> {
-    let live_state = run.live.as_ref().map(|live| AgentLiveStateRow {
-        observed_run_id: live.observed_run_id.as_deref(),
-        last_event_at: live.last_event_at.as_deref(),
-        last_event_kind: live.last_event_kind.as_deref(),
-        last_event_summary: live.last_event_summary.as_deref(),
-        agent_pid: live.agent_pid,
-        agent_subprocess_alive: live.agent_subprocess_alive,
-        approvals_pending: live.approvals_pending,
-        usage: &live.usage,
-        llm_model: live.llm_model.as_deref(),
-        turn_count: live.turn_count,
-        agent_health: live.agent_health.as_deref(),
-        agent_last_activity_at: live.agent_last_activity_at.as_deref(),
-        updated_at: live.updated_at.as_str(),
-    });
-    AgentRunDetailRow {
-        id: run.id.as_str(),
-        status: run.status.as_str(),
-        executor_kind: run.executor_kind.as_str(),
-        runner_id: run.runner_id.as_deref(),
-        runner_name: run.runner_name.as_deref(),
-        created_at: run.created_at.as_str(),
-        assigned_at: run.assigned_at.as_deref(),
-        started_at: run.started_at.as_deref(),
-        ended_at: run.ended_at.as_deref(),
-        done_payload: run.done_payload.as_ref().filter(|value| !value.is_null()),
-        error: run.error.as_str(),
-        error_code: run.error_code.as_str(),
-        llm_model: run.llm_model.as_str(),
-        input_tokens: run.input_tokens,
-        output_tokens: run.output_tokens,
-        total_tokens: run.total_tokens,
-        live_state,
-    }
-}
-
 /// `get_agent_status` (`serializers/issue.py:1373-1412`): the ticker
 /// plus the latest and active runs. `None` when neither exists. Runs
 /// and the count come from the shared agent-run statements; the block
@@ -2602,13 +2464,12 @@ pub async fn render_agent_status(
     ticker: Option<AgentTickerView<'_>>,
 ) -> Result<serde_json::Value, Denial> {
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let latest = fetch_agent_run(&db, true, &issue.id).await?;
-    let active = fetch_agent_run(&db, false, &issue.id).await?;
-    let run_count = agent_runs::agent_run_count(&db, issue.id)
+    let runs = agent_runs::issue_agent_runs(&db, issue.id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let latest_row = latest.as_ref().map(agent_run_detail_row);
-    let active_row = active.as_ref().map(agent_run_detail_row);
+    let run_count = runs.count;
+    let latest_row = runs.latest.as_ref().map(RenderedAgentRun::detail_row);
+    let active_row = runs.active.as_ref().map(RenderedAgentRun::detail_row);
     let status =
         agent_status_to_representation(ticker, active_row.as_ref(), latest_row.as_ref(), run_count);
     match status {

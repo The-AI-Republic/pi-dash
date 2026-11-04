@@ -85,14 +85,14 @@ use super::{
 };
 use pidash_compat::response::json_response;
 use pidash_db::tasks_ticker::IssueAgentTicker;
-use pidash_services::app_issues::agent_runs::{self, AgentRunWithRunner};
+use pidash_services::app_issues::agent_runs::{self, RenderedAgentRun};
 use pidash_services::app_issues::serializers_assoc::{
     project_user_property_to_representation, ProjectUserPropertyRow,
 };
 use pidash_services::app_issues::{
     issue_detail_base_to_representation, issue_detail_to_representation, issue_is_actively_synced,
-    order_sql, AgentLiveStateRow, AgentRunDetailRow, AgentTickerInput, IssueDetailBaseRow,
-    IssueDetailRow, GITHUB_ISSUE_SYNC_PROBE_SQL, GIT_ISSUE_SYNC_PROBE_SQL,
+    order_sql, AgentRunDetailRow, AgentTickerInput, IssueDetailBaseRow, IssueDetailRow,
+    GITHUB_ISSUE_SYNC_PROBE_SQL, GIT_ISSUE_SYNC_PROBE_SQL,
 };
 use pidash_services::orchestration::blockers::{
     blockers_sql, dependents_sql, has_open_blockers_sql, relations_summary, BlockerRow,
@@ -1805,113 +1805,13 @@ async fn full_is_synced(
     ))
 }
 
-/// One run off the SeaORM agent-run reader plus its pre-rendered datetimes
-/// (plain `isoformat`, NOT DRF's format, via the services renderer).
-struct AgentRunOwned {
-    view: AgentRunWithRunner,
-    id: String,
-    runner_id: Option<String>,
-    created_at: String,
-    assigned_at: Option<String>,
-    started_at: Option<String>,
-    ended_at: Option<String>,
-    error: String,
-    error_code: String,
-    live: Option<AgentLiveOwned>,
-}
-
-/// The runner's live-state row, with its ids and datetimes pre-rendered.
-struct AgentLiveOwned {
-    observed_run_id: Option<String>,
-    last_event_at: Option<String>,
-    agent_last_activity_at: Option<String>,
-    updated_at: String,
-}
-
-fn render_iso(moment: &sea_orm::prelude::DateTimeWithTimeZone) -> String {
-    pidash_services::app_issues::serialize_iso_datetime(moment.with_timezone(&chrono::Utc))
-}
-
-async fn fetch_agent_run(
-    pool: &sqlx::PgPool,
-    latest: bool,
-    issue_id: &uuid::Uuid,
-) -> Result<Option<AgentRunOwned>, Denial> {
-    let db = pidash_db::pool::sea_orm_connection(pool);
-    let view = if latest {
-        agent_runs::latest_agent_run(&db, *issue_id).await
-    } else {
-        agent_runs::active_agent_run(&db, *issue_id).await
-    }
-    .map_err(|_| Denial::ServerError)?;
-    let Some(view) = view else {
-        return Ok(None);
-    };
-    let run = &view.run;
-    let live = view.live.as_ref().map(|live| AgentLiveOwned {
-        observed_run_id: live.observed_run_id.map(|id| id.to_string()),
-        last_event_at: live.last_event_at.as_ref().map(render_iso),
-        agent_last_activity_at: live.agent_last_activity_at.as_ref().map(render_iso),
-        updated_at: render_iso(&live.updated_at),
-    });
-    Ok(Some(AgentRunOwned {
-        id: run.id.to_string(),
-        runner_id: run.runner_id.map(|id| id.to_string()),
-        created_at: render_iso(&run.created_at),
-        assigned_at: run.assigned_at.as_ref().map(render_iso),
-        started_at: run.started_at.as_ref().map(render_iso),
-        ended_at: run.ended_at.as_ref().map(render_iso),
-        error: run.error(),
-        error_code: run.error_code(),
-        live,
-        view,
-    }))
-}
-
-fn agent_run_detail_row(run: &AgentRunOwned) -> AgentRunDetailRow<'_> {
-    let summary = &run.view.run;
-    let live_state = run
-        .view
-        .live
-        .as_ref()
-        .zip(run.live.as_ref())
-        .map(|(live, rendered)| AgentLiveStateRow {
-            observed_run_id: rendered.observed_run_id.as_deref(),
-            last_event_at: rendered.last_event_at.as_deref(),
-            last_event_kind: live.last_event_kind.as_deref(),
-            last_event_summary: live.last_event_summary.as_deref(),
-            agent_pid: live.agent_pid,
-            agent_subprocess_alive: live.agent_subprocess_alive,
-            approvals_pending: live.approvals_pending,
-            usage: &live.usage,
-            llm_model: live.llm_model.as_deref(),
-            turn_count: live.turn_count,
-            agent_health: live.agent_health.as_deref(),
-            agent_last_activity_at: rendered.agent_last_activity_at.as_deref(),
-            updated_at: &rendered.updated_at,
-        });
-    AgentRunDetailRow {
-        id: &run.id,
-        status: &summary.status,
-        executor_kind: &summary.executor_kind,
-        runner_id: run.runner_id.as_deref(),
-        runner_name: run.view.runner_name.as_deref(),
-        created_at: &run.created_at,
-        assigned_at: run.assigned_at.as_deref(),
-        started_at: run.started_at.as_deref(),
-        ended_at: run.ended_at.as_deref(),
-        done_payload: summary
-            .done_payload
-            .as_ref()
-            .filter(|value| !value.is_null()),
-        error: &run.error,
-        error_code: &run.error_code,
-        llm_model: &summary.llm_model,
-        input_tokens: summary.input_tokens,
-        output_tokens: summary.output_tokens,
-        total_tokens: summary.total_tokens,
-        live_state,
-    }
+/// The serializer view over one run. This handler drops a JSON-null
+/// `done_payload` (its `row_to_json` origin never told SQL NULL apart from
+/// a JSON null).
+fn agent_run_detail_row(run: &RenderedAgentRun) -> AgentRunDetailRow<'_> {
+    let mut row = run.detail_row();
+    row.done_payload = row.done_payload.filter(|value| !value.is_null());
+    row
 }
 
 /// One direction of the blocker fetch: the merged statement with its two
@@ -2025,12 +1925,11 @@ async fn render_full(
     let assignee_ids = get_id_list(row, "assignee_ids");
     let is_synced = full_is_synced(pool, row, issue_id).await?;
     let is_epic = probe_is_epic(pool, get_str(row, "i_type_id")).await?;
-    let latest = fetch_agent_run(pool, true, issue_id).await?;
-    let active = fetch_agent_run(pool, false, issue_id).await?;
-    let run_count =
-        agent_runs::agent_run_count(&pidash_db::pool::sea_orm_connection(pool), *issue_id)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let runs = agent_runs::issue_agent_runs(&db, *issue_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let (latest, active, run_count) = (runs.latest, runs.active, runs.count);
     let blockers = fetch_relations_summary(pool, issue_id).await?;
     let ticker_row = decode_ticker(row)?;
     let policy = ProjectClockPolicy {
