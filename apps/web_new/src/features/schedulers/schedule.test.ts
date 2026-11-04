@@ -3,6 +3,11 @@
 // See the LICENSE file for details.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+// Pin the zone for the whole file so the DST repeated-hour cases below run
+// the same wherever the suite runs. Every other case in this file converts
+// symmetrically and holds in any zone.
+process.env.TZ = "America/Los_Angeles";
+
 import {
   DEFAULT_TZID,
   browserTimeZone,
@@ -39,6 +44,54 @@ describe("start time round trip", () => {
     expect(localStartToIso("  ")).toBe("");
     expect(localStartToIso("not-a-date")).toBe("");
     expect(isoToLocalStart("nope")).toBe("");
+  });
+
+  it("keeps the stored instant when the Starts at input is left untouched in the repeated hour", () => {
+    // 2026-11-01T09:15:00Z is the second (standard-time) 01:15 in
+    // America/Los_Angeles. The wall string is ambiguous, but an edit that
+    // never touched the input must save the stored instant back unchanged.
+    const stored = "2026-11-01T09:15:00Z";
+    const startsAt = isoToLocalStart(stored);
+    expect(startsAt).toBe("2026-11-01T01:15");
+    const payload = schedulePayload(
+      { startsAt, timeZone: "UTC", rrule: "FREQ=DAILY", projectContext: "", enabled: true },
+      stored
+    );
+    expect(payload.dtstart).toBe("2026-11-01T09:15:00.000Z");
+  });
+
+  it("prefers the occurrence matching the stored offset when the wall time changes inside the repeated hour", () => {
+    // Stored second-occurrence 01:15, edited to 01:45: both occurrences of
+    // 01:45 exist, so the save keeps the standard-time one.
+    const payload = schedulePayload(
+      { startsAt: "2026-11-01T01:45", timeZone: "UTC", rrule: "FREQ=DAILY", projectContext: "", enabled: true },
+      "2026-11-01T09:15:00Z"
+    );
+    expect(payload.dtstart).toBe("2026-11-01T09:45:00.000Z");
+  });
+
+  it("keeps the first occurrence for an ambiguous wall time with no stored instant", () => {
+    // The create path has no original to anchor to: unchanged behaviour.
+    expect(localStartToIso("2026-11-01T01:15")).toBe("2026-11-01T08:15:00.000Z");
+    expect(localStartToIso("2026-11-01T01:15", "not-a-date")).toBe("2026-11-01T08:15:00.000Z");
+  });
+
+  it("re-derives the instant when the wall time moves out of the repeated hour", () => {
+    const payload = schedulePayload(
+      { startsAt: "2026-11-01T03:15", timeZone: "UTC", rrule: "FREQ=DAILY", projectContext: "", enabled: true },
+      "2026-11-01T09:15:00Z"
+    );
+    expect(payload.dtstart).toBe(new Date("2026-11-01T03:15").toISOString());
+  });
+
+  it("keeps the first occurrence when the stored instant was in daylight time", () => {
+    // Stored first-occurrence 01:15, edited to 01:45: the daylight
+    // occurrence already matches the stored offset, so the save keeps it.
+    const payload = schedulePayload(
+      { startsAt: "2026-11-01T01:45", timeZone: "UTC", rrule: "FREQ=DAILY", projectContext: "", enabled: true },
+      "2026-11-01T08:15:00Z"
+    );
+    expect(payload.dtstart).toBe("2026-11-01T08:45:00.000Z");
   });
 });
 
