@@ -2045,6 +2045,10 @@ export interface ParityDriver {
   pressInTopBarSearch(key: string): Promise<void>;
   /** Click outside the top-bar panel to close it. */
   closeTopBarViaOutsideClick(): Promise<void>;
+  /** Rendered width of the top-bar search input in CSS pixels, or null when absent. */
+  topBarSearchWidth(): Promise<number | null>;
+  /** Viewport-relative left edge and width of the top-bar search input, or null when absent. */
+  topBarSearchRect(): Promise<{ x: number; width: number } | null>;
 
   // --- shared empty-state kit tiers (SHELL-104) ---
   //     The kit tiers are distinguished by rendered structure: Simple centers
