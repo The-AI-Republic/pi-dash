@@ -20,7 +20,10 @@ token/userinfo URLs on both backends (the stage-1 sealed-provider pin,
 reaffirmed by PIDASHCONV-1083/1084/1089), so Google has no HTTP success
 test here: its net is the ``google_kernel_save_user_data_*`` live test
 in ``oauth_google.rs`` plus the UPDATE shape pin below (the
-PIDASHCONV-1084 pattern).
+PIDASHCONV-1084 pattern). The no-``X-Forwarded-For`` peer fallback is
+likewise untestable over HTTP on either backend; its net is the
+``request_context_ip_*`` live test in ``oauth_google.rs``
+(NEWPIDASH-14).
 
 The ``GITEA_*`` ``instance_configurations`` rows are inserted
 function-scoped and deleted in teardown, so the suite's boot-time
