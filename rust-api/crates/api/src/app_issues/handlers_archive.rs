@@ -728,8 +728,7 @@ impl DetailOwned {
                 }
             }
         };
-        let db = pidash_db::pool::sea_orm_connection(pool);
-        let runs = agent_runs::issue_agent_runs(&db, issue_id)
+        let runs = agent_runs::issue_agent_runs(pool, issue_id)
             .await
             .map_err(|_| Denial::ServerError)?;
         let (latest_run, active_run, run_count) = (runs.latest, runs.active, runs.count);

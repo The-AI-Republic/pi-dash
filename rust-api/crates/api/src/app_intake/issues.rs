@@ -2463,8 +2463,7 @@ pub async fn render_agent_status(
     issue: &IssueRow,
     ticker: Option<AgentTickerView<'_>>,
 ) -> Result<serde_json::Value, Denial> {
-    let db = pidash_db::pool::sea_orm_connection(pool);
-    let runs = agent_runs::issue_agent_runs(&db, issue.id)
+    let runs = agent_runs::issue_agent_runs(pool, issue.id)
         .await
         .map_err(|_| Denial::ServerError)?;
     let run_count = runs.count;

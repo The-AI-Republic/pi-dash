@@ -602,8 +602,8 @@ pub struct AgentStatusView<'a> {
 ///
 /// `ticker` is the already-rendered `agent_ticker` block (or `None` without
 /// a ticker row); `active_run` / `latest_run` are the
-/// runs from [`super::agent_runs`] (or `None` without one); `run_count`
-/// is [`super::agent_runs::agent_run_count`].
+/// runs from [`super::agent_runs::issue_agent_runs`] (or `None` without
+/// one); `run_count` is its [`super::agent_runs::IssueAgentRuns::count`].
 /// Returns `None` when the ticker block is `None` and there is no latest
 /// run (`:1404-1405`). The active run always carries live state; the latest
 /// carries it only when there is no active run (`:1410-1411`).

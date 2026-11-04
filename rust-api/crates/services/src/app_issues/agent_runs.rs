@@ -8,14 +8,14 @@
 //! model instead of the run's, and positional reads went stale whenever a
 //! column was added or dropped. Here the statement is built from the
 //! entities, every joined column has its own alias, and rows decode by name
-//! into one typed struct ([`unique_output_names`] pins the aliases).
+//! into one typed struct (a unit test pins the aliases).
 
 use pidash_db::entity::{agent_run, runner, runner_live_state};
 use sea_orm::sea_query::extension::postgres::PgExpr;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult, JoinType, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, RelationTrait, Select,
+    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QueryOrder, QuerySelect, RelationTrait, Select,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -69,7 +69,6 @@ struct RunRow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderedAgentRun {
     pub id: String,
-    pub run_id: Uuid,
     pub status: String,
     pub executor_kind: String,
     pub runner_id: Option<String>,
@@ -91,8 +90,7 @@ pub struct RenderedAgentRun {
 /// The runner's `runner_live_state` row, rendered like [`RenderedAgentRun`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderedLiveState {
-    pub observed_run_id: Option<Uuid>,
-    pub observed_run_id_text: Option<String>,
+    pub observed_run_id: Option<String>,
     pub last_event_at: Option<String>,
     pub last_event_kind: Option<String>,
     pub last_event_summary: Option<String>,
@@ -128,7 +126,7 @@ impl RenderedAgentRun {
             output_tokens: self.output_tokens,
             total_tokens: self.total_tokens,
             live_state: self.live.as_ref().map(|live| AgentLiveStateRow {
-                observed_run_id: live.observed_run_id_text.as_deref(),
+                observed_run_id: live.observed_run_id.as_deref(),
                 last_event_at: live.last_event_at.as_deref(),
                 last_event_kind: live.last_event_kind.as_deref(),
                 last_event_summary: live.last_event_summary.as_deref(),
@@ -154,30 +152,54 @@ pub struct IssueAgentRuns {
     pub count: i64,
 }
 
-/// Latest run, active run and count for one issue. When the newest run is
-/// itself active it is also the newest active run, so the active read is
-/// skipped.
+/// Latest run, active run and count for one issue, over the request's pool
+/// (SeaORM wraps it; no new connection). An issue without runs costs one
+/// query. Otherwise the count runs alongside the latest read, and when the
+/// newest run is itself active it is also the newest active run, so the
+/// active read is skipped.
 pub async fn issue_agent_runs(
-    db: &DatabaseConnection,
+    pool: &sqlx::PgPool,
     issue_id: Uuid,
 ) -> Result<IssueAgentRuns, DbErr> {
-    let latest = newest_run(db, issue_id, false).await?;
-    let active = match &latest {
-        Some(run) if ACTIVE_RUN_STATUSES.contains(&run.status.as_str()) => Some(run.clone()),
-        _ => newest_run(db, issue_id, true).await?,
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let (latest, count) =
+        tokio::try_join!(newest_run(&db, issue_id, false), run_count(&db, issue_id))?;
+    let Some(latest) = latest else {
+        return Ok(IssueAgentRuns {
+            latest: None,
+            active: None,
+            count,
+        });
     };
-    let count = agent_run::Entity::find()
-        .filter(agent_run::Column::WorkItemId.eq(issue_id))
-        .count(db)
-        .await
-        .inspect_err(|error| tracing::error!(%error, %issue_id, "agent run count failed"))?;
-    let count = i64::try_from(count)
-        .map_err(|_| DbErr::Custom("agent run count overflows i64".to_owned()))?;
+    let active = if ACTIVE_RUN_STATUSES.contains(&latest.status.as_str()) {
+        Some(latest.clone())
+    } else {
+        newest_run(&db, issue_id, true).await?
+    };
     Ok(IssueAgentRuns {
-        latest,
+        latest: Some(latest),
         active,
         count,
     })
+}
+
+/// `runs.count()` (`issue.py:1412`): every run of the issue, any status.
+async fn run_count(db: &DatabaseConnection, issue_id: Uuid) -> Result<i64, DbErr> {
+    let count: Option<i64> = count_query(issue_id)
+        .into_tuple()
+        .one(db)
+        .await
+        .inspect_err(|error| tracing::error!(%error, %issue_id, "agent run count failed"))?;
+    Ok(count.unwrap_or(0))
+}
+
+/// `SELECT COUNT("agent_run"."id") AS "n" ... WHERE work_item_id = $1`.
+/// `id` is the primary key, so this is `COUNT(*)`.
+fn count_query(issue_id: Uuid) -> Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .select_only()
+        .column_as(agent_run::Column::Id.count(), "n")
+        .filter(agent_run::Column::WorkItemId.eq(issue_id))
 }
 
 async fn newest_run(
@@ -267,8 +289,7 @@ fn render(row: RunRow) -> RenderedAgentRun {
     let iso = |moment: Option<Moment>| moment.map(render_moment);
     let live = match (row.live_runner_id, row.live_updated_at) {
         (Some(_), Some(updated_at)) => Some(RenderedLiveState {
-            observed_run_id: row.live_observed_run_id,
-            observed_run_id_text: row.live_observed_run_id.map(|id| id.to_string()),
+            observed_run_id: row.live_observed_run_id.map(|id| id.to_string()),
             last_event_at: iso(row.live_last_event_at),
             last_event_kind: row.live_last_event_kind,
             last_event_summary: row.live_last_event_summary,
@@ -286,7 +307,6 @@ fn render(row: RunRow) -> RenderedAgentRun {
     };
     RenderedAgentRun {
         id: row.id.to_string(),
-        run_id: row.id,
         status: row.status,
         executor_kind: row.executor_kind,
         runner_id: row.runner_id.map(|id| id.to_string()),
@@ -312,8 +332,12 @@ fn render_moment(moment: Moment) -> String {
 
 /// `AgentRun.error` / `.error_code` (`runner/models.py:1079-1092`):
 /// `(error_details or {}).get(key) or ""`. A falsy value (missing, null,
-/// false, 0, "", [], {}) is `""`; a string is itself; any other value its
-/// JSON text.
+/// false, 0, "", [], {}) is `""` and a string is itself, as in Django.
+///
+/// Tier 3 (rule 13): a truthy non-string value renders as its JSON text.
+/// Django has no output to match there: the serializer passes `run.error` to
+/// `classify_run_error`, whose `.strip()` raises on a non-string, so the
+/// request 500s. Every writer stores strings.
 fn details_text(value: Option<&Value>) -> String {
     match value {
         None | Some(Value::Null) | Some(Value::Bool(false)) => String::new(),
@@ -424,6 +448,17 @@ mod tests {
     }
 
     #[test]
+    fn count_query_counts_every_run_of_the_issue() {
+        let sql = count_query(Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert_eq!(
+            sql,
+            r#"SELECT COUNT("agent_run"."id") AS "n" FROM "agent_run" WHERE "agent_run"."work_item_id" = '00000000-0000-0000-0000-000000000000'"#
+        );
+    }
+
+    #[test]
     fn details_text_follows_the_django_property() {
         let text = |value: Value| details_text(Some(&value));
         assert_eq!(text(json!("boom")), "boom");
@@ -433,8 +468,10 @@ mod tests {
         assert_eq!(text(json!(0)), "");
         assert_eq!(text(json!([])), "");
         assert_eq!(text(json!({})), "");
+        // Tier 3: Django 500s on these (classify_run_error .strip()).
         assert_eq!(text(json!(3)), "3");
         assert_eq!(text(json!(true)), "true");
+        assert_eq!(text(json!({"detail": "x"})), r#"{"detail":"x"}"#);
         assert_eq!(details_text(None), "");
     }
 
@@ -558,18 +595,17 @@ mod tests {
             0,
         )
         .await;
-        let db = pidash_db::pool::sea_orm_connection(&pool);
 
-        let runs = issue_agent_runs(&db, world.issue_id).await.expect("runs");
+        let runs = issue_agent_runs(&pool, world.issue_id).await.expect("runs");
         let latest = runs.latest.expect("has a run");
-        assert_eq!(latest.run_id, newest);
+        assert_eq!(latest.id, newest.to_string());
         assert_eq!(latest.llm_model, "deepseek/deepseek-v4.1-flash");
         assert_eq!(latest.error, "boom");
         assert_eq!(latest.error_code, "E42");
         assert_eq!(latest.runner_name.as_deref(), Some("macmini-7"));
         assert_eq!(latest.live.expect("runner has live state").llm_model, None);
         let active = runs.active.expect("the older run is running");
-        assert_eq!(active.run_id, older);
+        assert_eq!(active.id, older.to_string());
         assert_eq!(active.error, "");
         assert_eq!(runs.count, 2);
     }
@@ -584,9 +620,11 @@ mod tests {
         let pod = seed_pod(&pool, world.workspace_id, world.project_id).await;
         seed_run(&pool, &world, pod, None, "completed", "m", json!({}), 60).await;
         let newest = seed_run(&pool, &world, pod, None, "running", "m", json!({}), 0).await;
-        let db = pidash_db::pool::sea_orm_connection(&pool);
-        let runs = issue_agent_runs(&db, world.issue_id).await.expect("runs");
-        assert_eq!(runs.latest.as_ref().map(|run| run.run_id), Some(newest));
+        let runs = issue_agent_runs(&pool, world.issue_id).await.expect("runs");
+        assert_eq!(
+            runs.latest.as_ref().map(|run| run.id.clone()),
+            Some(newest.to_string())
+        );
         assert_eq!(runs.active, runs.latest);
         assert_eq!(runs.count, 2);
     }
@@ -599,13 +637,12 @@ mod tests {
             return;
         };
         let world = seed_world(&pool).await;
-        let db = pidash_db::pool::sea_orm_connection(&pool);
-        let empty = issue_agent_runs(&db, world.issue_id).await.expect("runs");
+        let empty = issue_agent_runs(&pool, world.issue_id).await.expect("runs");
         assert_eq!((empty.latest, empty.active, empty.count), (None, None, 0));
 
         let pod = seed_pod(&pool, world.workspace_id, world.project_id).await;
         seed_run(&pool, &world, pod, None, "queued", "m", json!({}), 10).await;
-        let runs = issue_agent_runs(&db, world.issue_id).await.expect("runs");
+        let runs = issue_agent_runs(&pool, world.issue_id).await.expect("runs");
         let latest = runs.latest.expect("has a run");
         assert_eq!((latest.runner_name, latest.live), (None, None));
 
@@ -621,7 +658,7 @@ mod tests {
             0,
         )
         .await;
-        let runs = issue_agent_runs(&db, world.issue_id).await.expect("runs");
+        let runs = issue_agent_runs(&pool, world.issue_id).await.expect("runs");
         let latest = runs.latest.expect("has a run");
         assert_eq!(latest.runner_name.as_deref(), Some("macmini-7"));
         assert_eq!(latest.live, None, "runner without a live-state row");
