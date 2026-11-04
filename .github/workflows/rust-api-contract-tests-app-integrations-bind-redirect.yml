@@ -77,10 +77,9 @@ jobs:
       BASE_URL: http://127.0.0.1:8000
       SECRET_KEY: "contract-tests-fixed-secret"
       GITLAB_ALLOWED_HOSTS: https://api.github.com
-      BIND_REDIRECT_MITM_PORT: "15132"
-      BIND_REDIRECT_CA_BUNDLE: /tmp/pidash-1513-ca-bundle.pem
-      HTTPS_PROXY: http://127.0.0.1:15132
-      REQUESTS_CA_BUNDLE: /tmp/pidash-1513-ca-bundle.pem
+      # No MITM/proxy vars here: job-level HTTPS_PROXY poisons checkout + pip,
+      # which run before the test MITM exists (NEWPIDASH-27). They live on the
+      # server-start and pytest steps below.
     steps:
       - uses: actions/checkout@v6
 
@@ -107,6 +106,11 @@ jobs:
 
       - name: Start live Django server (MITM proxy env)
         working-directory: apps/api
+        env:
+          # Step-scoped: the server dials api.github.com through the test
+          # MITM once pytest binds it; earlier steps must not see a proxy.
+          HTTPS_PROXY: http://127.0.0.1:15132
+          REQUESTS_CA_BUNDLE: /tmp/pidash-1513-ca-bundle.pem
         run: |
           python manage.py runserver 127.0.0.1:8000 --noreload > /tmp/django-bind-redirect.log 2>&1 &
           for i in $(seq 1 30); do
@@ -119,6 +123,11 @@ jobs:
 
       - name: Run bind-redirect oracle (Django)
         working-directory: rust-api/contract-tests
+        env:
+          # The test module binds the MITM on this port and mints the bundle
+          # at this path (its defaults match; explicit so both legs agree).
+          BIND_REDIRECT_MITM_PORT: "15132"
+          BIND_REDIRECT_CA_BUNDLE: /tmp/pidash-1513-ca-bundle.pem
         # Same plugin dodge as the integrations-redirect job: the API install
         # puts pytest-django in this interpreter; the oracle never touches Django.
         run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django app_integrations/test_repo_bind_redirect.py -v

@@ -98,10 +98,9 @@ jobs:
       DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
       CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
       CONTRACT_TASK_TIMEOUT: "60"
-      GITHUB_REDIRECT_MITM_PORT: "14722"
-      GITHUB_REDIRECT_CA_BUNDLE: /tmp/pidash-1472-ca-bundle.pem
-      HTTPS_PROXY: http://127.0.0.1:14722
-      REQUESTS_CA_BUNDLE: /tmp/pidash-1472-ca-bundle.pem
+      # No MITM/proxy vars here: job-level HTTPS_PROXY poisons checkout + pip,
+      # which run before the test MITM exists (NEWPIDASH-27). They live on the
+      # worker-start and pytest steps below.
     steps:
       - uses: actions/checkout@v6
 
@@ -134,6 +133,11 @@ jobs:
 
       - name: Start Celery worker (solo, MITM proxy env, no beat)
         working-directory: apps/api
+        env:
+          # Step-scoped: the worker dials api.github.com through the test
+          # MITM once pytest binds it; earlier steps must not see a proxy.
+          HTTPS_PROXY: http://127.0.0.1:14722
+          REQUESTS_CA_BUNDLE: /tmp/pidash-1472-ca-bundle.pem
         run: |
           # Same oracle includes as the worker-plane job (PIDASHCONV-1104):
           # task modules the stock worker never imports (PDASHOSS01-292).
@@ -143,6 +147,11 @@ jobs:
 
       - name: Run redirect oracle (Django)
         working-directory: rust-api/contract-tests
+        env:
+          # The test module binds the MITM on this port and mints the bundle
+          # at this path (its defaults match; explicit so both legs agree).
+          GITHUB_REDIRECT_MITM_PORT: "14722"
+          GITHUB_REDIRECT_CA_BUNDLE: /tmp/pidash-1472-ca-bundle.pem
         # Same plugin dodge as the worker-plane job: the API install puts
         # pytest-django in this interpreter; the oracle never touches Django.
         run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django integrations/test_github_redirect.py -v
