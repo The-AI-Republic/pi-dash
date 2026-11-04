@@ -47139,6 +47139,28 @@ export class WebDriver implements ParityDriver {
     await this.page.setViewportSize({ width: 1280, height: 800 });
   }
 
+  async wsSettingsContentBox(): Promise<{
+    x: number;
+    width: number;
+    parentX: number;
+    parentWidth: number;
+  } | null> {
+    const column = this.page.locator("div.mx-auto.max-w-225");
+    if ((await column.count()) === 0) return null;
+    const box = await column.boundingBox();
+    const parentBox = await column.locator("xpath=..").boundingBox();
+    if (box === null || parentBox === null) return null;
+    return { x: box.x, width: box.width, parentX: parentBox.x, parentWidth: parentBox.width };
+  }
+
+  async wsSettingsContentGutter(): Promise<number> {
+    // The old column carries its own side padding, so the gutter reads
+    // from its computed style rather than from the parent inset.
+    const column = this.page.locator("div.mx-auto.max-w-225");
+    if ((await column.count()) === 0) return 0;
+    return column.evaluate((element) => parseFloat(getComputedStyle(element).paddingLeft));
+  }
+
   async wsSettingsGeneralVisible(): Promise<boolean> {
     const name = this.page.locator("#name").first();
     if ((await name.count()) === 0) return false;

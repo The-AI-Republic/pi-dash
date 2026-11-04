@@ -10038,6 +10038,15 @@ export interface WsSettingsMemberRowFacts {
   wsSettingsMobileCrumb(): Promise<string>;
   /** Restore the wide viewport after narrow-screen reads. */
   wsSettingsWideViewport(): Promise<void>;
+  /** Bounding box of the settings content column with its padded parent, or null on full-width sections. */
+  wsSettingsContentBox(): Promise<{
+    x: number;
+    width: number;
+    parentX: number;
+    parentWidth: number;
+  } | null>;
+  /** Effective left gutter of the settings content column in CSS pixels. */
+  wsSettingsContentGutter(): Promise<number>;
   /** Whether the general details form is currently rendered. */
   wsSettingsGeneralVisible(): Promise<boolean>;
   /** Current value of the workspace-name field. */

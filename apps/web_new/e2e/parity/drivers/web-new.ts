@@ -41312,6 +41312,24 @@ export class WebNewDriver implements ParityDriver {
   async wsSettingsWideViewport(): Promise<void> {
     await this.page.setViewportSize({ width: 1280, height: 800 });
   }
+  async wsSettingsContentBox(): Promise<{
+    x: number;
+    width: number;
+    parentX: number;
+    parentWidth: number;
+  } | null> {
+    const column = this.page.getByTestId("settings-page-content");
+    if ((await column.count()) === 0) return null;
+    const box = await column.boundingBox();
+    const parentBox = await column.locator("xpath=..").boundingBox();
+    if (box === null || parentBox === null) return null;
+    return { x: box.x, width: box.width, parentX: parentBox.x, parentWidth: parentBox.width };
+  }
+  async wsSettingsContentGutter(): Promise<number> {
+    const facts = await this.wsSettingsContentBox();
+    if (facts === null) return 0;
+    return facts.x - facts.parentX;
+  }
   async wsSettingsGeneralVisible(): Promise<boolean> {
     const form = this.page.getByTestId("workspace-general-form").first();
     if ((await form.count()) === 0) return false;
