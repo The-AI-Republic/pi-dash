@@ -8,7 +8,7 @@
 
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
-import { decidePageGate, loadGateInputs, ONBOARDING_PATH } from "../core/session/index.js";
+import { decidePageGate, isOnboardedProfile, loadGateInputs, ONBOARDING_PATH } from "../core/session/index.js";
 import { InvitationInbox } from "../features/auth/components/InvitationInbox.js";
 
 export const Route = createFileRoute("/invitations")({
@@ -17,7 +17,7 @@ export const Route = createFileRoute("/invitations")({
     const decision = decidePageGate({
       page: "signed-in-only",
       signedIn: me !== null,
-      onboarded: profile?.is_onboarded ?? false,
+      onboarded: isOnboardedProfile(profile),
       hasPassword: me?.is_password_autoset === false,
       currentPath: location.href,
     });
