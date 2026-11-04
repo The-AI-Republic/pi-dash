@@ -692,7 +692,7 @@ describe("recurrence builder", () => {
         if (value === undefined) return absent();
         if (label !== "Repeat unit") return fake({ count: 1, visible: true, input: value });
         // The unit select exposes its option list so the scenario can prove
-        // no sub-daily cadence is offered.
+        // the offered cadences, Hour included (DIFF-2, new-system-only).
         return fake({
           count: 1,
           visible: true,
@@ -701,7 +701,7 @@ describe("recurrence builder", () => {
             selector === "option"
               ? fake({
                   evaluateAll: async (fn: (nodes: unknown[]) => unknown) =>
-                    fn(["none", "day", "week", "month", "year"].map((unit) => ({ value: unit }))),
+                    fn(["none", "hour", "day", "week", "month", "year"].map((unit) => ({ value: unit }))),
                 })
               : absent(),
         });
@@ -718,7 +718,7 @@ describe("recurrence builder", () => {
       visible: true,
       interval: "2",
       unit: "week",
-      unitOptions: ["none", "day", "week", "month", "year"],
+      unitOptions: ["none", "hour", "day", "week", "month", "year"],
       weekdays: [
         { name: "Sunday", pressed: false },
         { name: "Monday", pressed: true },

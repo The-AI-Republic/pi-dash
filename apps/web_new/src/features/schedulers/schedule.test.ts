@@ -143,7 +143,11 @@ describe("describeRrule", () => {
     expect(describeRrule("FREQ=DAILY;INTERVAL=2")).toBe("every 2 days");
     expect(describeRrule("freq=daily;byhour=9;byminute=5")).toBe("every day at 09:05");
     expect(describeRrule("FREQ=MONTHLY;BYMONTHDAY=1,15")).toBe("every month on day 1, 15");
+    expect(describeRrule("FREQ=HOURLY")).toBe("every hour");
+    expect(describeRrule("FREQ=HOURLY;INTERVAL=1")).toBe("every hour");
+    expect(describeRrule("FREQ=HOURLY;INTERVAL=2")).toBe("every 2 hours");
     expect(describeRrule("FREQ=HOURLY;COUNT=3")).toBe("every hour for 3 times");
+    expect(describeRrule("FREQ=HOURLY;INTERVAL=6;UNTIL=20270101T235959Z")).toBe("every 6 hours until 2027-01-01");
     expect(describeRrule("FREQ=YEARLY;COUNT=1")).toBe("every year for 1 time");
     expect(describeRrule("FREQ=DAILY;UNTIL=20270101T090000Z")).toBe("every day until 2027-01-01");
     expect(describeRrule("FREQ=MINUTELY")).toBe("every minute");
@@ -177,6 +181,8 @@ describe("describeStoredRrule", () => {
 
   it("delegates every non-blank rule to the plain-language reading", () => {
     expect(describeStoredRrule("FREQ=DAILY")).toBe("every day");
+    expect(describeStoredRrule("FREQ=HOURLY")).toBe("every hour");
+    expect(describeStoredRrule("FREQ=HOURLY;INTERVAL=2")).toBe("every 2 hours");
     expect(describeStoredRrule("FREQ=NOPE")).toBe("FREQ=NOPE");
   });
 });
