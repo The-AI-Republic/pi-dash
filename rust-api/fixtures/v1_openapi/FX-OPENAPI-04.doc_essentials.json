@@ -10355,6 +10355,93 @@
         }
       }
     },
+    "/api/v1/workspaces/{slug}/projects/{project_id}/pages/{page_id}/move/": {
+      "post": {
+        "operationId": "move_page",
+        "tags": [
+          "Pages"
+        ],
+        "summary": "Move page",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "page_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Page ID",
+            "required": true,
+            "examples": {
+              "ExamplePageID": {
+                "value": "550e8400-e29b-41d4-a716-446655440000",
+                "summary": "Example page ID",
+                "description": "A typical page UUID"
+              }
+            }
+          },
+          {
+            "in": "path",
+            "name": "project_id",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+            "required": true,
+            "examples": {
+              "uuid": {
+                "value": "00000000-0000-0000-0000-000000000000",
+                "summary": "UUID form"
+              },
+              "slug": {
+                "value": "ENG",
+                "summary": "Workspace-scoped identifier"
+              }
+            }
+          },
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Workspace slug",
+            "required": true,
+            "examples": {
+              "ExampleWorkspace": {
+                "value": "my-workspace",
+                "summary": "Example workspace",
+                "description": "A typical workspace slug"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Authentication credentials were not provided or are invalid."
+          },
+          "403": {
+            "description": "Not an admin of the source project or no write access to the target"
+          },
+          "404": {
+            "description": "The requested resource was not found."
+          },
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageDetail"
+                }
+              }
+            },
+            "description": "Page moved; the page as seen in the target project"
+          },
+          "400": {
+            "description": "Invalid target, same project, target in another workspace or archived, or page locked"
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{slug}/projects/{project_id}/project-members/": {
       "get": {
         "operationId": "get_project_members_2",

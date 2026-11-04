@@ -9,7 +9,8 @@
 // cluster: the navigation-pane
 // toggle, favourite, lock, link copy, sub-page creation and the options
 // menu with its display toggles, hosted markup copy, history shortcut,
-// duplication, shelve/restore, visibility, delete and hosted export.
+// duplication, shelve/restore, visibility, delete, the cross-project move
+// and hosted export.
 
 import { Breadcrumbs, IconButton, Menu } from "@pidash/kit";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -86,6 +87,8 @@ export interface PageDetailHeaderProps {
   paneOpen: boolean;
   /** Creates a child page and opens it; absent for guests (PAGE-084). */
   onAddSubPage?: (() => void) | undefined;
+  /** Opens the cross-project move; absent unless an admin views an unlocked page (PAGE-017). */
+  onMoveToProject?: (() => void) | undefined;
   /** The local display preferences the options menu toggles read. */
   preferences: PagePreferences;
   /** Write one display preference (local only, PAGE-072). */
@@ -118,6 +121,7 @@ export function PageDetailHeader({
   onOpenPane,
   paneOpen,
   onAddSubPage,
+  onMoveToProject,
   preferences,
   onPreferenceChange,
 }: PageDetailHeaderProps): React.ReactElement {
@@ -157,6 +161,7 @@ export function PageDetailHeader({
       onRequestDelete,
       ...(onExport === undefined ? {} : { onExport }),
       ...(onAddSubPage === undefined ? {} : { onAddSubPage }),
+      ...(onMoveToProject === undefined ? {} : { onMoveToProject }),
     },
     preferences,
     onPreferenceChange

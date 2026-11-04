@@ -77,6 +77,8 @@ pub enum Relation {
     Issues,
     #[sea_orm(has_many = "super::project_members::Entity")]
     ProjectMembers,
+    #[sea_orm(has_many = "super::project_pages::Entity")]
+    ProjectPages,
     #[sea_orm(
         belongs_to = "super::states::Entity",
         from = "Column::DefaultStateId",
@@ -85,6 +87,8 @@ pub enum Relation {
         on_delete = "NoAction"
     )]
     States,
+    #[sea_orm(has_many = "super::user_favorites::Entity")]
+    UserFavorites,
     #[sea_orm(has_many = "super::user_notification_preferences::Entity")]
     UserNotificationPreferences,
     #[sea_orm(
@@ -171,9 +175,21 @@ impl Related<super::project_members::Entity> for Entity {
     }
 }
 
+impl Related<super::project_pages::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::ProjectPages.def()
+    }
+}
+
 impl Related<super::states::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::States.def()
+    }
+}
+
+impl Related<super::user_favorites::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::UserFavorites.def()
     }
 }
 

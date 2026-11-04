@@ -10,8 +10,14 @@
 //!   --tables issues,issue_sequences,issue_assignees,issue_comments,descriptions,\
 //! issue_relations,users,profiles,accounts,user_notification_preferences,workspaces,\
 //! workspace_members,projects,project_members,states,api_tokens,machine_token,\
-//! runner_session,assistant_user_llm_config,assistant_message
+//! runner_session,assistant_user_llm_config,assistant_message,pages,project_pages,\
+//! user_favorites,page_logs
 //! ```
+//!
+//! `pages`, `project_pages`, `user_favorites` and `page_logs` were added for the
+//! page move (`domain::pages`, PDASHOSS01-347), generated against Django
+//! `0bab11c83` with the same command; the only edits to the existing files are
+//! the generator's new `has_many` relations on `projects` and `workspaces`.
 //!
 //! The generator output is committed verbatim except for four mechanical
 //! cleanups, all re-applied on every regeneration (see
@@ -60,11 +66,15 @@ pub mod issue_relations;
 pub mod issue_sequences;
 pub mod issues;
 pub mod machine_token;
+pub mod page_logs;
+pub mod pages;
 pub mod profiles;
 pub mod project_members;
+pub mod project_pages;
 pub mod projects;
 pub mod runner_session;
 pub mod states;
+pub mod user_favorites;
 pub mod user_notification_preferences;
 pub mod users;
 pub mod workspace_members;

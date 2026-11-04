@@ -7,10 +7,8 @@ import {
   INTAKE_SOURCE_PILL_FLAG,
   ISSUE_DEDUPE_FLAG,
   PAGE_ASSISTANT_FLAG,
-  PAGE_MOVE_FLAG,
   isAppRailEnabled,
   isPageAssistantEnabled,
-  isPageMoveEnabled,
   isSidebarToggleEnabled,
   edition,
 } from "./index.js";
@@ -75,11 +73,6 @@ describe("edition", () => {
     expect(edition.flags[ISSUE_DEDUPE_FLAG]).toBeUndefined();
   });
 
-  it("leaves the cross-project page move absent (PAGE-017: community pins no affordance)", () => {
-    expect(edition.flags[PAGE_MOVE_FLAG]).toBeUndefined();
-    expect(isPageMoveEnabled(edition)).toBe(false);
-  });
-
   it("leaves the page assistant absent (PAGE-075: community pins no handle or menu)", () => {
     expect(edition.flags[PAGE_ASSISTANT_FLAG]).toBeUndefined();
     expect(isPageAssistantEnabled(edition)).toBe(false);
@@ -120,12 +113,6 @@ describe("shell edition gates", () => {
     expect(isAppRailEnabled(flags({ "app-rail": false }))).toBe(false);
     expect(isAppRailEnabled(flags({ "app-rail": true }))).toBe(true);
     expect(isAppRailEnabled(edition)).toBe(false);
-  });
-
-  it("enables the cross-project page move only where the edition opts in", () => {
-    expect(isPageMoveEnabled(flags({}))).toBe(false);
-    expect(isPageMoveEnabled(flags({ "page-move": false }))).toBe(false);
-    expect(isPageMoveEnabled(flags({ "page-move": true }))).toBe(true);
   });
 
   it("enables the page assistant only where the edition opts in", () => {

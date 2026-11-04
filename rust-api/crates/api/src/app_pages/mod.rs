@@ -133,6 +133,7 @@
 //! stands.
 
 pub mod gate;
+pub mod handlers_move;
 pub mod handlers_versions;
 
 use axum::extract::{Path, Query, Request, State};
@@ -365,6 +366,13 @@ pub fn routes() -> Router<AppState> {
             owned(
                 axum::routing::post(lock_page).delete(unlock_page),
                 &["GET", "PUT", "PATCH", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/move/",
+            owned(
+                axum::routing::post(handlers_move::move_page),
+                &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
             ),
         )
         .route(

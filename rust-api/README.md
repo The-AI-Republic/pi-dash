@@ -420,10 +420,11 @@ sea-orm-cli generate entity --database-url "$DATABASE_URL" \
   --tables issues,issue_sequences,issue_assignees,issue_comments,descriptions,\
 issue_relations,users,profiles,accounts,user_notification_preferences,workspaces,\
 workspace_members,projects,project_members,states,api_tokens,machine_token,\
-runner_session,assistant_user_llm_config,assistant_message
+runner_session,assistant_user_llm_config,assistant_message,pages,project_pages,\
+user_favorites,page_logs
 ```
 
-Then copy the 22 files over `crates/db/src/entity/` and re-apply the
+Then copy the 26 files over `crates/db/src/entity/` and re-apply the
 four mechanical cleanups (the generator rewrites them): delete the
 `belongs_to` relations (plus `Related` impls) pointing at tables outside
 the §4 set — the compiler lists them as unresolved `super::<table>`

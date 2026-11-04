@@ -130,6 +130,7 @@ vi.mock("./PageEditorSurface.js", async (importOriginal) => {
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const OTHER = "323e4567-e89b-12d3-a456-426614174009";
+const MOVE_TARGET = "523e4567-e89b-12d3-a456-426614174055";
 const MID = "423e4567-e89b-12d3-a456-426614174010";
 const VIEWER = "523e4567-e89b-12d3-a456-426614174005";
 
@@ -165,6 +166,10 @@ interface Harness {
   projectGuestViewAll: boolean;
   /** The instance bootstrap answers with an LLM configuration. */
   instanceLlm: boolean;
+  /** Bodies the cross-project move received, and its answer (PAGE-017). */
+  moveBodies: unknown[];
+  moveStatus: number;
+  moveAnswer: unknown;
 }
 
 let harness: Harness;
@@ -214,6 +219,9 @@ beforeEach(() => {
     projectStatus: 200,
     projectGuestViewAll: false,
     instanceLlm: false,
+    moveBodies: [],
+    moveStatus: 204,
+    moveAnswer: null,
   };
   resetPageBodyCache();
   resetPageBodyDrafts();
@@ -420,6 +428,16 @@ beforeEach(() => {
     if (url.endsWith("/api/workspaces/acme/members/")) {
       if (harness.membersHold !== null) await harness.membersHold;
       return jsonResponse(url, 200, [makeWorkspaceMember()]);
+    }
+    if (url.endsWith("/api/workspaces/acme/projects/") && init.method === "GET") {
+      return jsonResponse(url, 200, [
+        makeProjectRow({ id: PROJECT, intake_count: 0 }),
+        makeProjectRow({ id: MOVE_TARGET, name: "Target project", identifier: "TGT", intake_count: 0 }),
+      ]);
+    }
+    if (url.endsWith("/move/") && init.method === "POST") {
+      harness.moveBodies.push(JSON.parse(init.body ?? "{}") as unknown);
+      return jsonResponse(url, harness.moveStatus, harness.moveAnswer);
     }
     throw new Error(`unexpected request: ${url}`);
   }) as never);
@@ -1427,12 +1445,12 @@ describe("PageDetailScreen negative rows (PAGE-082, PAGE-083)", () => {
     expect(screen.queryByRole("button", { name: /shortcuts?/i })).not.toBeInTheDocument();
   });
 
-  it("keeps the options menu free of lock, move and new-tab entries", async () => {
+  it("keeps the options menu free of lock and new-tab entries", async () => {
     renderScreen();
     await screen.findByRole("textbox", { name: "Page title" });
     fireEvent.click(screen.getByRole("button", { name: "Page options" }));
     const labels = (await screen.findAllByRole("menuitem")).map((item) => item.textContent ?? "");
-    for (const absent of ["Lock", "Unlock", "Open in new tab", "Move to project…"]) {
+    for (const absent of ["Lock", "Unlock", "Open in new tab"]) {
       expect(labels).not.toContain(absent);
     }
   });
@@ -2067,5 +2085,61 @@ describe("PageDetailScreen stored-embed heal (PAGE-040)", () => {
     // A later re-render must not restore a second copy.
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(document.querySelectorAll("issue-embed-component")).toHaveLength(1);
+  });
+});
+
+describe("PageDetailScreen cross-project move (PAGE-017)", () => {
+  async function openOptions(): Promise<void> {
+    await screen.findByRole("textbox", { name: "Page title" });
+    fireEvent.click(screen.getByRole("button", { name: "Page options" }));
+  }
+
+  async function moveToTarget(): Promise<void> {
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Move to project…" }));
+    await screen.findByRole("heading", { name: "Move page" });
+    fireEvent.click(screen.getByRole("button", { name: "Select a project" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Target project/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Move page" }));
+  }
+
+  it("moves the page for an admin and follows it into the target project", async () => {
+    renderScreen();
+    await openOptions();
+    await moveToTarget();
+    await waitFor(() => expect(harness.moveBodies).toEqual([{ project_id: MOVE_TARGET }]));
+    await waitFor(() =>
+      expect(router.navigate).toHaveBeenCalledWith({ href: `/acme/projects/${MOVE_TARGET}/pages/${harness.pageId}` })
+    );
+    expect(notifySuccess).toHaveBeenCalledWith("Page moved to the new project.");
+  });
+
+  it("stays on the page and names the server's reason when the move is refused", async () => {
+    harness.moveStatus = 400;
+    harness.moveAnswer = { error: "The target project is archived" };
+    renderScreen();
+    await openOptions();
+    await moveToTarget();
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith("Page could not be moved.", "The target project is archived")
+    );
+    expect(router.navigate).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: "Move page" })).toBeInTheDocument();
+  });
+
+  it("offers no move to a member who owns the page", async () => {
+    harness.role = 15;
+    renderScreen();
+    await openOptions();
+    await screen.findByRole("menuitem", { name: "Version history" });
+    expect(screen.queryByRole("menuitem", { name: "Move to project…" })).not.toBeInTheDocument();
+  });
+
+  it("offers no move on a locked page, even to an admin", async () => {
+    harness.page = { ...harness.page, is_locked: true };
+    renderScreen();
+    await screen.findByTestId("page-detail-header");
+    fireEvent.click(await screen.findByRole("button", { name: "Page options" }));
+    await screen.findByRole("menuitem", { name: "Version history" });
+    expect(screen.queryByRole("menuitem", { name: "Move to project…" })).not.toBeInTheDocument();
   });
 });

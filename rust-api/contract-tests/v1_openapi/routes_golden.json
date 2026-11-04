@@ -306,6 +306,9 @@
     "delete",
     "post"
   ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/pages/{page_id}/move/": [
+    "post"
+  ],
   "/api/v1/workspaces/{slug}/projects/{project_id}/project-members/": [
     "get",
     "post"

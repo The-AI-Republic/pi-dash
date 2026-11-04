@@ -309,6 +309,10 @@ parity_test!(
     "assistant_user_llm_config"
 );
 parity_test!(assistant_message, assistant_message, "assistant_message");
+parity_test!(pages, pages, "pages");
+parity_test!(project_pages, project_pages, "project_pages");
+parity_test!(user_favorites, user_favorites, "user_favorites");
+parity_test!(page_logs, page_logs, "page_logs");
 
 #[test]
 fn inferred_string_compares_varchar_family_only() {

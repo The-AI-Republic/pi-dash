@@ -42,12 +42,20 @@ pub enum Relation {
     Issues,
     #[sea_orm(has_many = "super::machine_token::Entity")]
     MachineToken,
+    #[sea_orm(has_many = "super::page_logs::Entity")]
+    PageLogs,
+    #[sea_orm(has_many = "super::pages::Entity")]
+    Pages,
     #[sea_orm(has_many = "super::project_members::Entity")]
     ProjectMembers,
+    #[sea_orm(has_many = "super::project_pages::Entity")]
+    ProjectPages,
     #[sea_orm(has_one = "super::projects::Entity")]
     Projects,
     #[sea_orm(has_many = "super::states::Entity")]
     States,
+    #[sea_orm(has_many = "super::user_favorites::Entity")]
+    UserFavorites,
     #[sea_orm(has_many = "super::user_notification_preferences::Entity")]
     UserNotificationPreferences,
     #[sea_orm(
@@ -126,9 +134,27 @@ impl Related<super::machine_token::Entity> for Entity {
     }
 }
 
+impl Related<super::page_logs::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::PageLogs.def()
+    }
+}
+
+impl Related<super::pages::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Pages.def()
+    }
+}
+
 impl Related<super::project_members::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::ProjectMembers.def()
+    }
+}
+
+impl Related<super::project_pages::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::ProjectPages.def()
     }
 }
 
@@ -141,6 +167,12 @@ impl Related<super::projects::Entity> for Entity {
 impl Related<super::states::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::States.def()
+    }
+}
+
+impl Related<super::user_favorites::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::UserFavorites.def()
     }
 }
 
