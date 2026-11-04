@@ -172,8 +172,8 @@ pub const GOOGLE_NOT_CONFIGURED_CODE: i32 = 5105;
 pub const GOOGLE_PROVIDER_ERROR_CODE: i32 = 5115;
 /// `AUTHENTICATION_ERROR_CODES["INVALID_EMAIL"]` (`error.py:9`).
 pub const INVALID_EMAIL_CODE: i32 = 5005;
-/// `AUTHENTICATION_ERROR_CODES["SIGNUP_DISABLED"]` (`error.py:12`).
-pub const SIGNUP_DISABLED_CODE: i32 = 5035;
+/// `AUTHENTICATION_ERROR_CODES["SIGNUP_DISABLED"]` (`error.py:10`).
+pub const SIGNUP_DISABLED_CODE: i32 = 5015;
 
 /// `get_configuration_value` keys the google provider reads
 /// (`provider/oauth/google.py:28-39`).
@@ -914,7 +914,7 @@ pub async fn find_user_by_email(
 /// `Adapter.__check_signup` (`adapter/base.py:95-119`): when
 /// `ENABLE_SIGNUP == "0"` (string compare) and no
 /// `WorkspaceMemberInvite` row carries the email, signup raises
-/// `SIGNUP_DISABLED` (5035) with the email as payload. Any invite row
+/// `SIGNUP_DISABLED` (5015) with the email as payload. Any invite row
 /// counts — accepted or not.
 pub async fn check_signup(
     pool: &sqlx::PgPool,
@@ -2017,7 +2017,7 @@ pub struct AuthedUser {
 }
 
 /// Full success pipeline for one `code`: config (5105), token exchange +
-/// userinfo (5115), sanitize (5005/5035), lookup, signup (profile +
+/// userinfo (5115), sanitize (5005), lookup, signup (profile +
 /// avatar upload attempt with provider-URL fallback, then IDP sync for
 /// the new user when enabled — `not is_signup`, never for existing
 /// users), stamps, post-auth workflow on the app side (`with_callback`),
@@ -2600,6 +2600,20 @@ mod tests {
         );
     }
 
+    /// `SIGNUP_DISABLED` catalog pin (NEWPIDASH-13): the google gate
+    /// must emit 5015 (`adapter/error.py:10`), not
+    /// `AUTHENTICATION_FAILED_SIGN_UP` (5035). Cross-pinned against
+    /// the shared table so the local const cannot drift again.
+    /// FAILS on the pre-fix code (5035).
+    #[test]
+    fn signup_disabled_code_matches_adapter_catalog() {
+        assert_eq!(SIGNUP_DISABLED_CODE, 5015);
+        assert_eq!(
+            pidash_services::auth_session::shapes::error_code("SIGNUP_DISABLED"),
+            Some(SIGNUP_DISABLED_CODE),
+        );
+    }
+
     // -- live kernel tests (env-gated, PIDASHCONV-1089) ------------------
     // Same convention as the github kernel harness (PIDASHCONV-1083):
     // unset DATABASE_URL (plain `cargo test`) skips these. REDIS_URL
@@ -2764,6 +2778,86 @@ mod tests {
             .await
             .ok();
         }
+    }
+
+    /// `Adapter.__check_signup` through the google gate (NEWPIDASH-13):
+    /// with `ENABLE_SIGNUP == "0"` and no live invite, the gate raises
+    /// `SIGNUP_DISABLED` with the catalog code 5015 (not
+    /// `AUTHENTICATION_FAILED_SIGN_UP` 5035) and the email as payload;
+    /// a live invite passes. The google HTTP callback is sealed
+    /// (hardcoded `https://oauth2.googleapis.com` URLs on both
+    /// backends, exchange before the gate), so this kernel test is the
+    /// live net — same convention as the invitation tests below.
+    /// FAILS on the pre-fix code (5035).
+    #[tokio::test]
+    async fn google_kernel_signup_disabled_answers_5015() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("go13-{tag}@example.test");
+        // Reap before sow: a crashed earlier run must not leak an
+        // ENABLE_SIGNUP row or invite rows into this one.
+        sqlx::query(r#"DELETE FROM "workspace_member_invites" WHERE "email" = $1"#)
+            .bind(&email)
+            .execute(&pool)
+            .await
+            .expect("reap invites");
+        sqlx::query(r#"DELETE FROM "instance_configurations" WHERE "key" = 'ENABLE_SIGNUP'"#)
+            .execute(&pool)
+            .await
+            .expect("reap config");
+        // Sow ENABLE_SIGNUP=0 (a db-sourced registry key; column list
+        // mirrors `_harness.db.Database.make_config`).
+        let now = chrono::Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "instance_configurations"
+               ("created_at", "updated_at", "id", "key", "value", "category", "is_encrypted")
+               VALUES ($1, $1, $2, 'ENABLE_SIGNUP', '0', 'general', FALSE)"#,
+        )
+        .bind(now)
+        .bind(uuid::Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("seed ENABLE_SIGNUP=0");
+
+        let err = check_signup(&pool, "contract-test-secret", &email)
+            .await
+            .expect_err("gate raises without an invite");
+
+        // A live invite satisfies the gate (seeded user + workspaces).
+        let invited_tag = format!("{tag}i");
+        let invited_email = format!("go13-{invited_tag}@example.test");
+        let slug = format!("go13-{invited_tag}");
+        let (_user_id, workspace_id, decoy_workspace_id) =
+            seed_invited_user(&pool, &invited_email, &slug).await;
+        let invited_outcome = check_signup(&pool, "contract-test-secret", &invited_email).await;
+
+        // Observe everything before cleanup so a failure still sweeps.
+        cleanup_kernel_world(&pool, &invited_email, &[workspace_id, decoy_workspace_id]).await;
+        sqlx::query(r#"DELETE FROM "instance_configurations" WHERE "key" = 'ENABLE_SIGNUP'"#)
+            .execute(&pool)
+            .await
+            .expect("sweep config");
+        sqlx::query(r#"DELETE FROM "workspace_member_invites" WHERE "email" = $1"#)
+            .bind(&email)
+            .execute(&pool)
+            .await
+            .expect("sweep invites");
+
+        match err {
+            CallbackError::Auth(exception) => {
+                assert_eq!(exception.error_code, 5015, "catalog code");
+                assert_eq!(exception.error_message, "SIGNUP_DISABLED");
+                assert_eq!(
+                    exception.payload,
+                    vec![("email".to_owned(), Value::String(email.clone()))],
+                    "email payload"
+                );
+            }
+            CallbackError::Internal => panic!("expected SIGNUP_DISABLED, got Internal"),
+        }
+        assert!(invited_outcome.is_ok(), "live invite satisfies the gate");
     }
 
     /// `create_user` inserts the notification-preferences row
