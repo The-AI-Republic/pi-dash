@@ -373,10 +373,12 @@ describe("SidebarProjectsGroup loading and empty states", () => {
     // NEWPIDASH-4: the section title reads as a heading through a
     // filled token band, never the hover/selected wash, with a top
     // margin except when the section leads the sidebar. jsdom has no
-    // layout, so the class contract is the assertion.
+    // layout, so the class contract is the assertion. The marker class
+    // is the high-contrast opt-out hook (app.css drops the band where
+    // --border is mid-tone).
     setup();
     const header = screen.getByTestId("projects-group-toggle").parentElement;
-    expect(header).toHaveClass("bg-(--border)", "rounded-(--radius-control)");
+    expect(header).toHaveClass("sidebar-section-header", "bg-(--border)", "rounded-(--radius-control)");
     expect(header).not.toHaveClass("bg-(--subtle)");
     const section = screen.getByTestId("sidebar-projects-group");
     expect(section).toHaveClass("gap-(--space-1)", "[&:not(:first-child)]:mt-(--space-4)");

@@ -327,7 +327,7 @@ export function SidebarFavoritesGroup({ workspaceSlug }: SidebarFavoritesGroupPr
       data-testid="sidebar-favorites-group"
       className="flex flex-col gap-(--space-1) [&:not(:first-child)]:mt-(--space-4)"
     >
-      <div className="group flex w-full items-center justify-between rounded-(--radius-control) bg-(--border) px-(--space-2) py-(--space-1)">
+      <div className="sidebar-section-header group flex w-full items-center justify-between rounded-(--radius-control) bg-(--border) px-(--space-2) py-(--space-1)">
         <button
           type="button"
           aria-expanded={open}
