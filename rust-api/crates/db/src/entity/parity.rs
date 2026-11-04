@@ -504,7 +504,10 @@ fn inet_columns_cast_through_text() {
     let read = super::api_activity_logs::Entity::find()
         .build(DbBackend::Postgres)
         .to_string();
-    assert!(read.contains(r#""ip_address" AS"#) && read.contains("CAST("), "{read}");
+    assert!(
+        read.contains(r#""ip_address" AS"#) && read.contains("CAST("),
+        "{read}"
+    );
     let insert = super::device_sessions::Entity::insert(super::device_sessions::ActiveModel {
         ip_address: Set(Some("10.0.0.1".to_owned())),
         ..Default::default()
