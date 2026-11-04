@@ -97,6 +97,7 @@
   "/api/v1/workspaces/{slug}/projects/{project_id}/pages/": ["get", "post"],
   "/api/v1/workspaces/{slug}/projects/{project_id}/pages/{page_id}/": ["get", "patch"],
   "/api/v1/workspaces/{slug}/projects/{project_id}/pages/{page_id}/archive/": ["delete", "post"],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/pages/{page_id}/move/": ["post"],
   "/api/v1/workspaces/{slug}/projects/{project_id}/project-members/": ["get", "post"],
   "/api/v1/workspaces/{slug}/projects/{project_id}/project-members/{pk}/": ["delete", "get", "patch"],
   "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/": ["get", "post"],
