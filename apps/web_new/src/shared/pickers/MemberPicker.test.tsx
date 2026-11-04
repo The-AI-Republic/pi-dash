@@ -588,3 +588,53 @@ describe("MemberPicker", () => {
     expect(calls.some((url) => url === "https://api.test/api/workspaces/acme/members/")).toBe(true);
   });
 });
+
+describe("MemberPicker chip", () => {
+  it("shows the property name while empty", () => {
+    const { queryClient } = harness(memberRoutes());
+    setupPicker(queryClient, { multiple: true, value: [], chip: true, label: "Assignees", placeholder: "Assignees" });
+    expect(screen.getByRole("button", { name: "Assignees" })).toHaveTextContent("Assignees");
+  });
+
+  it("names a single member with avatar and name", async () => {
+    const { queryClient } = harness(memberRoutes());
+    setupPicker(queryClient, { value: ANA, chip: true, preload: true });
+    const chip = await screen.findByRole("button", { name: "Assignee: Ana" });
+    expect(chip).toHaveTextContent("Ana");
+    expect(document.querySelector(`img[src="${AVATAR}"]`)).not.toBeNull();
+  });
+
+  it("shows the prompt while a single value stays empty", () => {
+    const { queryClient } = harness(memberRoutes());
+    setupPicker(queryClient, { value: null, chip: true, tabIndex: 7 });
+    const chip = screen.getByRole("button", { name: "Assignee" });
+    expect(chip).toHaveTextContent("Select member");
+    expect(chip).not.toHaveAttribute("title");
+    expect(chip).toHaveAttribute("tabindex", "7");
+  });
+
+  it("names a single member without an avatar", async () => {
+    const { queryClient } = harness(memberRoutes());
+    setupPicker(queryClient, { value: MAX, chip: true, preload: true });
+    const chip = await screen.findByRole("button", { name: "Assignee: Max" });
+    expect(chip).toHaveTextContent("Max");
+    expect(chip.querySelector("img")).toBeNull();
+  });
+
+  it("shows picked members as borderless avatars named in full", async () => {
+    const { queryClient } = harness(memberRoutes());
+    setupPicker(queryClient, {
+      multiple: true,
+      value: [ANA, MAX],
+      chip: true,
+      label: "Assignees",
+      placeholder: "Assignees",
+      preload: true,
+    });
+    const chip = await screen.findByRole("button", { name: "Assignees: Ana, Max" });
+    expect(chip.querySelector("span.truncate")).toBeNull();
+    expect(chip.className).not.toContain("border");
+    expect(chip).toHaveAttribute("title", "Ana, Max");
+    expect(document.querySelector(`img[src="${AVATAR}"]`)).not.toBeNull();
+  });
+});

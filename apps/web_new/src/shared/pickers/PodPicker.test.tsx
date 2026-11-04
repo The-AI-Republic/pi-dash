@@ -596,3 +596,29 @@ describe("PodPicker", () => {
     expect(onChange).toHaveBeenCalledWith({ type: "pod", podId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" });
   });
 });
+
+describe("PodPicker chip", () => {
+  it("shows the property name while empty", () => {
+    const { queryClient } = harness();
+    renderPicker({ chip: true, label: "Runs on", placeholder: "Runs on" }, queryClient);
+    expect(screen.getByRole("button", { name: "Runs on" })).toHaveTextContent("Runs on");
+  });
+
+  it("names the picked target once the lists answer", async () => {
+    const { queryClient } = harness();
+    renderPicker(
+      {
+        value: { type: "pod", podId: POD_DEFAULT },
+        chip: true,
+        label: "Runs on",
+        placeholder: "Runs on",
+        preload: true,
+        waitingLabel: "queued",
+      },
+      queryClient
+    );
+    const chip = await screen.findByRole("button", { name: "Runs on: ACME-Backend" });
+    expect(chip).toHaveTextContent("ACME-Backend");
+    expect(chip).toHaveTextContent("queued");
+  });
+});

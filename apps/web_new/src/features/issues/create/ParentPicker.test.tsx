@@ -196,4 +196,16 @@ describe("ParentPicker empty and error states", () => {
     await user.click(screen.getByRole("button", { name: "Add parent" }));
     expect(await screen.findByText("Couldn't search work items.")).toBeInTheDocument();
   });
+
+  it("renders the add trigger and the tag at the chip height", () => {
+    setup();
+    expect(screen.getByRole("button", { name: "Add parent" }).className).toContain("h-6");
+  });
+
+  it("carries the full identifier and title on the tag tooltip", () => {
+    setup({ value: PARENT });
+    const tag = screen.getByTestId("parent-tag");
+    expect(tag.className).toContain("h-6");
+    expect(tag).toHaveAttribute("title", "ATL-12 Parent work");
+  });
 });
