@@ -97,6 +97,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use pidash_compat::csrf_origin::check_origin_and_referer;
+#[cfg(test)]
+use pidash_compat::csrf_origin::{check_referer, origin_verified};
+
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -553,223 +557,6 @@ fn parse_cookies(header: &str) -> Vec<(&str, &str)> {
         .collect()
 }
 
-/// `is_same_domain` (`django/utils/http.py:239-256`): a `.`-prefixed
-/// pattern matches the bare domain and every subdomain. Only the pattern
-/// is lowercased; the host is compared as given, exactly like Django.
-fn same_domain(host: &str, pattern: &str) -> bool {
-    if pattern.is_empty() {
-        return false;
-    }
-    let pattern = pattern.to_lowercase();
-    let suffix_match =
-        pattern.starts_with('.') && (host.ends_with(&pattern) || host == &pattern[1..]);
-    suffix_match || pattern == host
-}
-
-/// The subset of `urllib.parse.urlparse` this gate needs: scheme,
-/// netloc, and the remainder (path/query/fragment). `None` stands for
-/// Python's empty scheme or netloc and for the `ValueError` branches.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedUrl {
-    scheme: String,
-    netloc: String,
-    rest: String,
-}
-
-impl ParsedUrl {
-    /// `ParseResult.geturl()`: the scheme is lowercased; the remaining
-    /// components are returned as parsed.
-    fn geturl(&self) -> String {
-        format!("{}://{}{}", self.scheme, self.netloc, self.rest)
-    }
-}
-
-fn urlparse(value: &str) -> Option<ParsedUrl> {
-    let value = value
-        .trim_start_matches(|c: char| c <= ' ')
-        .replace(['\t', '\r', '\n'], "");
-    let (scheme, after) = value.split_once(':')?;
-    if !valid_url_scheme(scheme) {
-        return None;
-    }
-    let after = after.strip_prefix("//")?;
-    let end = after.find(['/', '?', '#']).unwrap_or(after.len());
-    let netloc = &after[..end];
-    if netloc.is_empty() || !valid_bracketed_netloc(netloc) {
-        return None;
-    }
-    Some(ParsedUrl {
-        scheme: scheme.to_ascii_lowercase(),
-        netloc: netloc.to_owned(),
-        rest: after[end..].to_owned(),
-    })
-}
-
-fn valid_url_scheme(scheme: &str) -> bool {
-    let mut bytes = scheme.bytes();
-    let Some(first) = bytes.next() else {
-        return false;
-    };
-    first.is_ascii_alphabetic()
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
-}
-
-/// The bracketed-host validation in `urllib.parse.urlsplit` /
-/// `_check_bracketed_netloc`.
-fn valid_bracketed_netloc(netloc: &str) -> bool {
-    let host_port = netloc.rsplit_once('@').map_or(netloc, |(_, rest)| rest);
-    if !host_port.contains(['[', ']']) {
-        return !netloc.contains(['[', ']']);
-    }
-    let Some(after_open) = host_port.strip_prefix('[') else {
-        return false;
-    };
-    let Some((host, after_close)) = after_open.split_once(']') else {
-        return false;
-    };
-    if !(after_close.is_empty() || after_close.starts_with(':')) {
-        return false;
-    }
-    if let Some(rest) = host.strip_prefix('v') {
-        let Some((hex, suffix)) = rest.split_once('.') else {
-            return false;
-        };
-        !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) && !suffix.is_empty()
-    } else {
-        host.parse::<std::net::Ipv6Addr>().is_ok()
-    }
-}
-
-/// Split `scheme://netloc` origins into exact entries and per-scheme
-/// subdomain suffixes (`csrf_trusted_origins_hosts` /
-/// `allowed_origins_exact` / `allowed_origin_subdomains`).
-fn split_trusted_origins(trusted: &[String]) -> (HashSet<String>, HashMap<String, Vec<String>>) {
-    let mut exact = HashSet::new();
-    let mut subdomains: HashMap<String, Vec<String>> = HashMap::new();
-    for origin in trusted {
-        if !origin.contains('*') {
-            exact.insert(origin.clone());
-            continue;
-        }
-        if let Some(parsed) = urlparse(origin) {
-            subdomains
-                .entry(parsed.scheme)
-                .or_default()
-                .push(parsed.netloc.trim_start_matches('*').to_owned());
-        }
-    }
-    (exact, subdomains)
-}
-
-/// `csrf_trusted_origins_hosts` (`csrf.py:180-184`): every trusted
-/// origin's netloc with leading wildcards removed.
-fn trusted_origin_hosts(trusted: &[String]) -> Vec<String> {
-    trusted
-        .iter()
-        .filter_map(|origin| urlparse(origin))
-        .map(|parsed| parsed.netloc.trim_start_matches('*').to_owned())
-        .collect()
-}
-
-/// `_origin_verified` (`csrf.py:276-300`): same-origin, exact trusted,
-/// or trusted-subdomain. The good origin's scheme follows `is_secure()`.
-fn origin_verified(origin: &str, host: &str, secure: bool, trusted: &[String]) -> bool {
-    if !host.is_empty() && origin == format!("{}://{host}", if secure { "https" } else { "http" }) {
-        return true;
-    }
-    let (exact, subdomains) = split_trusted_origins(trusted);
-    if exact.contains(origin) {
-        return true;
-    }
-    let Some(parsed) = urlparse(origin) else {
-        return false;
-    };
-    subdomains
-        .get(&parsed.scheme)
-        .map(|suffixes| {
-            suffixes
-                .iter()
-                .any(|suffix| same_domain(&parsed.netloc, suffix))
-        })
-        .unwrap_or(false)
-}
-
-/// The port Django's `request.get_port()` would report: the Host header's
-/// port, else the scheme default. `CSRF_COOKIE_DOMAIN` only consults it
-/// for the non-default ports Django would append.
-fn request_port(headers: &axum::http::HeaderMap, secure: bool) -> String {
-    if let Some(host) = headers.get("host").and_then(|value| value.to_str().ok()) {
-        if let Some(port) = host_port(host) {
-            return port;
-        }
-    }
-    if secure { "443" } else { "80" }.to_owned()
-}
-
-fn host_port(host: &str) -> Option<String> {
-    if let Some(inner) = host.strip_prefix('[') {
-        let (_, after) = inner.split_once(']')?;
-        return after
-            .strip_prefix(':')
-            .filter(|p| !p.is_empty())
-            .map(str::to_owned);
-    }
-    let (_, port) = host.rsplit_once(':')?;
-    if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    Some(port.to_owned())
-}
-
-/// `_check_referer` (`csrf.py:302-345`): no Referer, malformed URL,
-/// non-https scheme, a trusted-origin host, or the cookie domain / current
-/// host via `is_same_domain` in that order, with Django's reason strings.
-fn check_referer(
-    headers: &axum::http::HeaderMap,
-    cookie_domain: Option<&str>,
-    trusted: &[String],
-) -> Result<(), String> {
-    let Some(referer) = headers.get("referer").and_then(|value| value.to_str().ok()) else {
-        return Err("Referer checking failed - no Referer.".to_owned());
-    };
-    let Some(parsed) = urlparse(referer) else {
-        return Err("Referer checking failed - Referer is malformed.".to_owned());
-    };
-    if parsed.scheme != "https" {
-        return Err(
-            "Referer checking failed - Referer is insecure while host is secure.".to_owned(),
-        );
-    }
-    if trusted_origin_hosts(trusted)
-        .iter()
-        .any(|host| same_domain(&parsed.netloc, host))
-    {
-        return Ok(());
-    }
-    let good_referer = match cookie_domain {
-        Some(domain) => {
-            let port = request_port(headers, true);
-            if port == "443" || port == "80" {
-                domain.to_owned()
-            } else {
-                format!("{domain}:{port}")
-            }
-        }
-        None => headers
-            .get("host")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("")
-            .to_owned(),
-    };
-    if !same_domain(&parsed.netloc, &good_referer) {
-        return Err(format!(
-            "Referer checking failed - {} does not match any trusted origins.",
-            parsed.geturl()
-        ));
-    }
-    Ok(())
-}
-
 /// `process_view` origin/referer checks plus `_check_token`'s
 /// `_get_secret` gate. Returns the 403 reason on rejection.
 fn enforce_csrf_cookie(
@@ -783,21 +570,10 @@ fn enforce_csrf_cookie(
     if matches!(method, "GET" | "HEAD" | "OPTIONS" | "TRACE") {
         return Ok(());
     }
-    if let Some(origin) = headers.get("origin").and_then(|value| value.to_str().ok()) {
-        let host = headers
-            .get("host")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("");
-        if !origin_verified(origin, host, secure, settings_trusted_origins) {
-            return Err(format!(
-                "Origin checking failed - {origin} does not match any trusted origins."
-            ));
-        }
-    } else if secure {
-        // `process_view:446-465`: an Origin-less HTTPS request must pass
-        // the Referer branch.
-        check_referer(headers, cookie_domain, settings_trusted_origins)?;
-    }
+    // `process_view:430-465`: Origin, else (HTTPS only) Referer. The
+    // port lives in `pidash_compat::csrf_origin`, shared with the auth
+    // gates (NEWPIDASH-12).
+    check_origin_and_referer(headers, secure, settings_trusted_origins, cookie_domain)?;
     csrf_secret_from_headers(headers)?;
     Ok(())
 }
