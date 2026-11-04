@@ -11,7 +11,7 @@ python rust-api/contract-tests/parity/job_inventory.py check --binary <pidash-ap
 
 and fails when the live diff contains anything not listed here, or when
 a listed row no longer appears live (a fix landed: delete its lines).
-The ```` ```expected-routes ```` / ```` ```expected-jobs ```` fenced
+The ` ```expected-routes ` / ` ```expected-jobs ` fenced
 blocks are machine-read (one `gap :: subject :: detail` signature per
 line, sorted); the prose around them is for reviewers. Never add a
 `G0`/`W0` line: unclassified rows must be resolved by hand, given a gap
@@ -41,6 +41,7 @@ lived under G1+G4 below (their HEAD gap was
 PIDASHCONV-829's proxy arms resolve them, so that section is empty too.
 
 ```expected-routes
+
 ```
 
 ### G1+G4 — magic-generate routes (resolved by PIDASHCONV-829)
@@ -57,6 +58,7 @@ Fix: PIDASHCONV-827 (landed). The 7 paths are Rust-owned (the 5 merged
 counts already reflect this.
 
 ```expected-routes
+
 ```
 
 ### G3 — DRF router artifacts: api-root index + format suffixes (0 rows; fixed)
@@ -68,6 +70,7 @@ inventory rows (edge fallback) plus contract pins, so the rows are
 deleted below.
 
 ```expected-routes
+
 ```
 
 ### G4 — magic-link sign-in/up routes missing proxy arms (resolved by PIDASHCONV-829)
@@ -84,9 +87,10 @@ all-proxied inventory rows (dotted-pk proxy in the detail handlers)
 plus contract pins, so the rows are deleted below.
 
 ```expected-routes
+
 ```
 
-### G6 — handler-denial 405s, proven (OWNED-by-denial) (7 rows)
+### G6 — handler-denial 405s, proven (OWNED-by-denial) (10 rows)
 
 Fix: PIDASHCONV-830. Proven by
 `contract-tests/app_workspace/test_denied_methods.py` (green on both
@@ -107,8 +111,22 @@ those routes; PIDASHCONV-864 taught
 gone from the fenced lines below. Only the POST-only export route
 truly 405s HEAD, and that denial is proven like the rest.
 
+NEWPIDASH-31 extends G6 with the three device-session auth routes.
+Their denials are deliberate (PIDASHCONV-1478): the API-key token
+lives in Rust's database, so a proxied verdict would fail Django's
+copy of the auth gate before its own method check — the handlers
+answer locally in DRF order instead (401 anonymous, 403 bad token,
+then the 405 with the view's `Allow`). Proven by the G6 denial
+matrix in `contract-tests/auth_oauth/test_device_session.py` (green
+on both backends). The GET view's `Allow` includes HEAD via the same
+`head = get` binding (`GET, HEAD, OPTIONS`, probed on the real view
+class); only the POST-owned routes truly 405 HEAD.
+
 ```expected-routes
 G6 :: /api/users/me/workspaces/ :: POST:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405
+G6 :: /api/v1/auth/machine-token/ :: GET:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405;HEAD:serves-but-django-405
+G6 :: /api/v1/auth/revoke/ :: GET:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405;HEAD:serves-but-django-405
+G6 :: /api/v1/auth/workspaces/ :: POST:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405
 G6 :: /api/workspace-slug-check/ :: POST:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405
 G6 :: /api/workspaces/ :: PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405
 G6 :: /api/workspaces/{slug}/ :: POST:serves-but-django-405
@@ -187,6 +205,7 @@ row reclassified to OWNED (signature deleted). The `W-assistant` gap id
 stays reserved in `WIRE_GAPS`.
 
 ```expected-jobs
+
 ```
 
 ### W-cloud-agent (0 rows; wired)
@@ -199,6 +218,7 @@ runs; PIDASHCONV-866 tracks true run ownership. The `W-cloud-agent`
 gap id stays reserved in `WIRE_GAPS`).
 
 ```expected-jobs
+
 ```
 
 ### W-mail (0 rows; wired by PIDASHCONV-865)
@@ -211,6 +231,7 @@ handler); the send/stack rows are gone here (live `RedisMail`/`MailDb`/
 `worker()`). The `W-mail` gap id stays reserved in `WIRE_GAPS`.
 
 ```expected-jobs
+
 ```
 
 ### W-export (0 rows; fixed)
@@ -225,6 +246,7 @@ OWNED (signature deleted). The `W-export` gap id stays reserved in
 `WIRE_GAPS`.
 
 ```expected-jobs
+
 ```
 
 ### W-activity (0 rows; fixed)
@@ -236,6 +258,7 @@ Django's `redis_instance()` `RuntimeError` under the broad-except).
 The row reclassified to OWNED (signature deleted).
 
 ```expected-jobs
+
 ```
 
 ### Non-Pi-Dash tasks (0 rows; dropped by PIDASHCONV-1108)
@@ -252,6 +275,7 @@ inventory table), so they no longer appear as PROXIED rows:
   dead — defined but never referenced.
 
 ```expected-jobs
+
 ```
 
 ## Beat
