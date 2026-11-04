@@ -186,6 +186,21 @@ pub fn drf_throttled_body() -> Value {
     serde_json::json!({"detail": "Request was throttled."})
 }
 
+/// `Retry-After` rendering chain, shared by the auth 429 renderers
+/// (NEWPIDASH-16): `Throttled.__init__` ceils the wait
+/// (`exceptions.py:237`), then the exception handler emits
+/// `Retry-After: '%d' % wait` only when the ceiled value is truthy
+/// (`views.py:90-91`). `None` in (overfull history, unknown wait) means
+/// the header is absent.
+pub fn retry_after_secs(wait: Option<f64>) -> Option<i64> {
+    let secs = wait?.ceil() as i64;
+    if secs == 0 {
+        None
+    } else {
+        Some(secs)
+    }
+}
+
 /// 401 body for the `IsAuthenticated` endpoints: DRF `NotAuthenticated`
 /// default, passed through untouched (`exception.py:22-24`).
 pub fn unauthenticated_body() -> Value {
@@ -538,6 +553,16 @@ mod tests {
         // Saturated history: None.
         let full: Vec<f64> = (0..31).map(|i| 100.0 - i as f64).collect();
         assert_eq!(throttle_wait(&full, 30, 60, 100.0), None);
+    }
+
+    #[test]
+    fn retry_after_ceils_and_omits_zero() {
+        // NEWPIDASH-16: ceil, never floor; 0/None omit the header.
+        assert_eq!(retry_after_secs(Some(59.472)), Some(60));
+        assert_eq!(retry_after_secs(Some(59.0)), Some(59));
+        assert_eq!(retry_after_secs(Some(0.4)), Some(1));
+        assert_eq!(retry_after_secs(Some(0.0)), None);
+        assert_eq!(retry_after_secs(None), None);
     }
 
     #[test]
