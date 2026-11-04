@@ -2,8 +2,9 @@
 
 Pins the Django-observed favicon discovery the Rust crawler must
 reproduce: ``<link>`` attribute values are HTML-unescaped, ``rel`` is
-matched after whitespace normalisation, and the last of duplicate
-attributes wins. Each test replicates exactly
+matched after whitespace normalisation and ASCII case-insensitively
+(soupsieve 4.x per the HTML link-types rule), and the last of
+duplicate attributes wins. Each test replicates exactly
 ``apps/api/pi_dash/bgtasks/work_item_link_task.py:194-199``::
 
     favicon_tag = soup.select_one(selector)
@@ -30,6 +31,7 @@ tests reproduce.
 """
 
 import bs4
+import soupsieve
 from bs4 import BeautifulSoup
 
 
@@ -51,6 +53,9 @@ def django_find(content: bytes):
 def test_oracle_library_versions():
     """The pins below were observed on these exact versions."""
     assert bs4.__version__ == "4.12.3"
+    # rel selector matching is soupsieve's: 2.x matched case-sensitively,
+    # 4.x matches ASCII case-insensitively (NEWPIDASH-30).
+    assert soupsieve.__version__ == "4.0"
 
 
 def test_href_entity_is_unescaped():
@@ -84,17 +89,33 @@ def test_rel_tab_and_newline_split():
     )
 
 
-def test_rel_extra_token_order_and_case_miss():
-    # Not token containment: extras, reorder and case all miss.
+def test_rel_extra_token_and_order_miss():
+    # Not token containment: extras and reorder miss.
     assert django_find(b'<link rel="icon x" href="c.ico">') is None
     assert django_find(b'<link rel="x icon" href="d.ico">') is None
-    assert django_find(b'<link rel="ICON" href="e.ico">') is None
     assert (
         django_find(b'<link rel="shortcut icon extra" href="f.ico">') is None
     )
     assert django_find(b'<link rel="icon shortcut" href="g.ico">') is None
     assert django_find(b'<link rel="" href="j.ico">') is None
     assert django_find(b"<link>") is None
+
+
+def test_rel_value_case_insensitive():
+    # Link types are ASCII case-insensitive (soupsieve 4.x): case alone
+    # never misses (NEWPIDASH-30).
+    assert django_find(b'<link rel="ICON" href="e.ico">') == (
+        'link[rel="icon"]',
+        "e.ico",
+    )
+    assert django_find(b'<link rel="Icon" href="k.ico">') == (
+        'link[rel="icon"]',
+        "k.ico",
+    )
+    assert django_find(b'<link rel="SHORTCUT ICON" href="m.ico">') == (
+        'link[rel="shortcut icon"]',
+        "m.ico",
+    )
 
 
 def test_rel_entity_decodes_before_match():
