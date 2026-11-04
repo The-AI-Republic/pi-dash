@@ -850,6 +850,20 @@ export class WebDriver implements ParityDriver {
       .waitFor({ timeout: WebDriver.WAIT_MS });
   }
 
+  async submitEmailExpectingError(email: string): Promise<number> {
+    const page = this.page;
+    const emailField = page.getByPlaceholder("name@company.com").first();
+    await emailField.fill(email);
+    const emailForm = page.locator("form", { has: emailField });
+    const [response] = await Promise.all([
+      page.waitForResponse((res) => res.url().includes("/auth/email-check/"), {
+        timeout: WebDriver.WAIT_MS,
+      }),
+      this.submitOf(emailForm).click(),
+    ]);
+    return response.status();
+  }
+
   /**
    * The old app posts the native form, so the submit ends in a full page
    * load whether the credentials were right or wrong. The load wait never

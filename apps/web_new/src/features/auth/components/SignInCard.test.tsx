@@ -28,6 +28,27 @@ function stubTransport(handler: (url: string, init: TransportInit) => StubRoute 
   };
 }
 
+interface StubStatusRoute {
+  status: number;
+  body: string;
+  url: string;
+}
+
+/** Stub that can answer with a server error status plus the error envelope. */
+function statusTransport(
+  handler: (url: string, init: TransportInit) => StubStatusRoute | Promise<StubStatusRoute>
+): Transport {
+  return async (url, init) => {
+    const response = await handler(url, init);
+    return {
+      status: response.status,
+      url: response.url,
+      headers: { get: () => null },
+      text: async () => response.body,
+    };
+  };
+}
+
 function renderCard(transport: Transport, props: SignInCardProps = {}, queryClient?: QueryClient) {
   createAppClient("https://api.test", transport);
   const client = queryClient ?? new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -268,6 +289,84 @@ describe("SignInCard", () => {
     await user.type(screen.getByLabelText("Work email"), "ada@example.com");
     await user.click(screen.getByRole("button", { name: "Continue" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not send a code");
+    expect(screen.getByLabelText("Work email")).toBeInTheDocument();
+  });
+
+  it("maps a throttled email check to the rate-limit banner", async () => {
+    const user = userEvent.setup();
+    await renderReadyCard(
+      statusTransport((url) => {
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        if (url.endsWith("/api/instances/")) return { status: 200, body: CONFIG, url };
+        if (url.endsWith("/auth/email-check/")) {
+          return {
+            status: 429,
+            body: JSON.stringify({ error_code: 5900, error_message: "RATE_LIMIT_EXCEEDED" }),
+            url,
+          };
+        }
+        throw new Error(`unexpected ${url}`);
+      })
+    );
+    await user.type(screen.getByLabelText("Work email"), "ada@example.com");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("Rate limit exceeded. Wait a moment and try again.");
+    expect(banner).not.toHaveTextContent("Could not reach the server");
+    expect(screen.getByLabelText("Work email")).toBeInTheDocument();
+  });
+
+  it("maps a mail-unconfigured code generate to its catalog banner", async () => {
+    const user = userEvent.setup();
+    await renderReadyCard(
+      statusTransport((url) => {
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        if (url.endsWith("/api/instances/")) return { status: 200, body: CONFIG, url };
+        if (url.endsWith("/auth/email-check/")) {
+          return {
+            status: 200,
+            body: JSON.stringify({ existing: true, status: "MAGIC_CODE" }),
+            url,
+          };
+        }
+        if (url.endsWith("/auth/magic-generate/")) {
+          return {
+            status: 400,
+            body: JSON.stringify({ error_code: 5025, error_message: "SMTP_NOT_CONFIGURED" }),
+            url,
+          };
+        }
+        throw new Error(`unexpected ${url}`);
+      })
+    );
+    await user.type(screen.getByLabelText("Work email"), "ada@example.com");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("This instance cannot send email, so codes are unavailable.");
+    expect(banner).not.toHaveTextContent("Could not send a code");
+    expect(screen.getByLabelText("Work email")).toBeInTheDocument();
+  });
+
+  it("stays silent when the check answers an uncatalogued code", async () => {
+    const user = userEvent.setup();
+    await renderReadyCard(
+      statusTransport((url) => {
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        if (url.endsWith("/api/instances/")) return { status: 200, body: CONFIG, url };
+        if (url.endsWith("/auth/email-check/")) {
+          return {
+            status: 400,
+            body: JSON.stringify({ error_code: 5999, error_message: "SOMETHING_NEW" }),
+            url,
+          };
+        }
+        throw new Error(`unexpected ${url}`);
+      })
+    );
+    await user.type(screen.getByLabelText("Work email"), "ada@example.com");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled());
+    expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getByLabelText("Work email")).toBeInTheDocument();
   });
 

@@ -9115,6 +9115,15 @@ export interface ParityDriver {
   cyclesFiltersClearAll(): Promise<void>;
   /** Whether the filters menu button carries its active-filters marker. */
   cyclesFiltersActive(): Promise<boolean>;
+
+  // --- Auth throttled email check (NEWPIDASH-15, AUTH-006). Appended;
+  // --- existing methods above are untouched per the shared driver contract.
+  /**
+   * Submit the email step when the answer keeps the card on it (a
+   * server-answered error such as the 429 throttle refusal). Resolves with
+   * the email-check response status once it arrives.
+   */
+  submitEmailExpectingError(email: string): Promise<number>;
 }
 
 /** One list group / board column as rendered (NEWFRONT-449, SPC-023/024/026). */

@@ -30,6 +30,7 @@ import {
   singleInvitation,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
+import { parityApiUrl } from "../helpers/parity-env";
 import type { ParityDriver } from "../drivers/index";
 
 /**
@@ -102,6 +103,53 @@ async function withInstanceConfig(
     await patchInstanceConfig(before, admin);
   }
   return admin;
+}
+
+/**
+ * One anonymous email-check POST without the harness 429 retries: the
+ * throttle probe below needs the raw status, not a waited-out answer.
+ */
+async function rawEmailCheck(email: string): Promise<{ status: number; code: unknown }> {
+  const apiBase = parityApiUrl(process.env).trim().replace(/\/+$/, "");
+  const res = await fetch(`${apiBase}/auth/email-check/`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  let code: unknown = null;
+  try {
+    code = ((await res.json()) as { error_code?: unknown }).error_code ?? null;
+  } catch {
+    code = null;
+  }
+  return { status: res.status, code };
+}
+
+/**
+ * Saturate the shared 30/minute anonymous throttle bucket, then leave it
+ * draining: the caller asserts against the saturated window while the
+ * rolling minute still holds these requests.
+ */
+async function exhaustEmailCheckThrottle(email: string): Promise<void> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const { status } = await rawEmailCheck(email);
+    if (status === 429) return;
+  }
+  throw new Error("[parity] email-check never throttled after 40 anonymous posts.");
+}
+
+/**
+ * Wait until the anonymous throttle bucket drains again so later scenarios
+ * (here and in parallel runs) meet an unsaturated window.
+ */
+async function waitForEmailCheckThrottle(email: string): Promise<void> {
+  const deadline = Date.now() + 120_000;
+  for (;;) {
+    const { status } = await rawEmailCheck(email);
+    if (status !== 429) return;
+    if (Date.now() > deadline) throw new Error("[parity] email-check still throttled after 120s.");
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+  }
 }
 
 test(
@@ -329,6 +377,33 @@ test(
       await expect.poll(() => driver.authStep()).toBe("email");
       expect(await driver.bannerText()).toBeNull();
     });
+  }
+);
+
+test(
+  specTitle(["AUTH-006"], "a throttled email check banners the rate limit on the email step"),
+  { tag: specTags(["AUTH-006"]) },
+  async ({ driver, seed }) => {
+    await driver.openSignInWithParams({});
+    await expect.poll(() => driver.authStep()).toBe("email");
+    await exhaustEmailCheckThrottle(seed.email);
+    try {
+      await test.step("the UI submit is answered 429", async () => {
+        const status = await driver.submitEmailExpectingError(seed.email);
+        expect(status).toBe(429);
+      });
+
+      await test.step("the card shows the rate-limit banner, not a connectivity message", async () => {
+        await expect.poll(() => driver.authStep()).toBe("email");
+        await expect.poll(() => driver.bannerText()).toMatch(/rate limit exceeded/i);
+        expect(await driver.bannerText()).not.toMatch(/could not reach the server/i);
+        await driver.dismissBanner();
+        await expect.poll(() => driver.bannerText()).toBeNull();
+        await expect.poll(() => driver.authStep()).toBe("email");
+      });
+    } finally {
+      await waitForEmailCheckThrottle(seed.email);
+    }
   }
 );
 

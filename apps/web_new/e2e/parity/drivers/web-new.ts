@@ -1482,6 +1482,20 @@ export class WebNewDriver implements ParityDriver {
       .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
+  async submitEmailExpectingError(email: string): Promise<number> {
+    const page = this.page;
+    const emailField = page.getByPlaceholder("name@company.com").first();
+    await emailField.fill(email);
+    const emailForm = page.locator("form", { has: emailField });
+    const [response] = await Promise.all([
+      page.waitForResponse((res) => res.url().includes("/auth/email-check/"), {
+        timeout: WebNewDriver.WAIT_MS,
+      }),
+      this.cardSubmit(emailForm).click(),
+    ]);
+    return response.status();
+  }
+
   async submitPassword(password: string): Promise<void> {
     const page = this.page;
     const passwordField = page.getByPlaceholder("Enter password");
