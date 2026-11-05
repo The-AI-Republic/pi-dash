@@ -46,7 +46,7 @@ from pi_dash.authentication.services.cli_tokens import (
 from pi_dash.db.models import APIToken, CLIDeviceCode, WorkspaceMember
 from pi_dash.db.models.api import CLI_DEVICE_SCOPE_CLI, CLI_DEVICE_SCOPE_ENGINE, CLI_DEVICE_SCOPES
 from pi_dash.authentication.utils.host import base_host
-from pi_dash.runner.models import DevMachine, MachineToken
+from pi_dash.runner.models import DevMachine, EngineCredentialRevokeReason, MachineToken
 from pi_dash.runner.services import tokens as runner_tokens
 from pi_dash.runner.services.engine_credentials import (
     SILENT_RENEWAL_REFUSED_STATES,
@@ -54,6 +54,7 @@ from pi_dash.runner.services.engine_credentials import (
     engine_profile_for_user,
     instance_can_serve_engine,
     issue_engine_credential,
+    revoke_engine_credential,
 )
 from pi_dash.runner.services.permissions import is_workspace_member
 
@@ -731,6 +732,12 @@ class DeviceCodeRevokeEndpoint(APIView):
     Used by ``pidash auth logout``. The caller authenticates with their
     current token (which we then mark inactive). Subsequent requests
     with that token will 401.
+
+    For a daemon credential bound to a computer this is the full logout
+    (design §4.3): the machine's engine is signed out too, in the same
+    transaction (credential revoked, state ``signed_out``), so the app's
+    silent renewal is refused until an explicit sign-in.
+    ``engine/credential/revoke/`` stays for ``pidash auth logout --engine``.
     """
 
     permission_classes = [IsAuthenticated]
@@ -739,7 +746,10 @@ class DeviceCodeRevokeEndpoint(APIView):
     def post(self, request):
         machine_token = getattr(request, "auth_machine_token", None)
         if machine_token is not None:
-            machine_token.revoke()
+            with transaction.atomic():
+                if machine_token.dev_machine_id is not None:
+                    revoke_engine_credential(machine_token.dev_machine, reason=EngineCredentialRevokeReason.SIGNED_OUT)
+                machine_token.revoke()
             return Response({"ok": True}, status=status.HTTP_200_OK)
         # request.auth is the raw token string (see APIKeyAuthentication).
         raw_token = request.auth
