@@ -460,14 +460,14 @@
         try_files {path} {path}/ /index.html
         file_server
     }
-    # Both apps serve their bundles from /assets/: web_new first, then the old app.
-    @web_new_assets {
-        path /assets/*
+    # web_new's bundles (/assets/) and public files (apps/web_new/public/): web_new first, then the old app.
+    @web_new_static {
+        path /assets/* /apple-touch-icon.svg /empty-state/* /icon-contrast.svg /icon.svg /illustrations/* /logos/* /manifest.desktop.webmanifest /manifest.webmanifest /social-card.svg /world-map.svg
         file {
             root /app/web_new
         }
     }
-    handle @web_new_assets {
+    handle @web_new_static {
         root * /app/web_new
         file_server
     }

@@ -181,4 +181,22 @@ describe("web_new nginx", () => {
     assert.ok(block !== null, "web_new nginx has no `location /assets/` block");
     assert.match(block[1], /try_files\s+\$uri\s+=404;/);
   });
+
+  it("answers 404 for a missing file under every public directory (PIDASH-2)", () => {
+    // The proxy sends web_new's public directories (illustrations/, logos/,
+    // ...) here first, with the same 404 retry of the old app as /assets/.
+    const conf = readFileSync(join(root, "apps", "web_new", "nginx", "nginx.conf"), "utf8");
+    const block = /location\s+~\s+\^\/\(([^)]*)\)\/\s*\{([^}]*)\}/.exec(conf);
+    assert.ok(block !== null, "web_new nginx has no `location ~ ^/(dir|...)/` block for its public directories");
+    assert.match(block[2], /try_files\s+\$uri\s+=404;/);
+    const dirs = readdirSync(join(root, "apps", "web_new", "public"), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+      .map((entry) => entry.name)
+      .toSorted();
+    assert.deepEqual(
+      block[1].split("|").toSorted(),
+      dirs,
+      "nginx public-directory list is out of step with apps/web_new/public/"
+    );
+  });
 });

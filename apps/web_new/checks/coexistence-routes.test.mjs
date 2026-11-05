@@ -7,7 +7,7 @@
 // legacy-shadow guard (NEWFRONT-953), and the insert/replace/check cycle on
 // throwaway Caddyfile copies, and the CLI entry point.
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -25,6 +25,7 @@ import {
   main,
   matcherCoversEntry,
   parseEntry,
+  publicPathsOf,
   reservedTopLevelOf,
   syncFile,
   validateList,
@@ -135,15 +136,22 @@ describe("buildCeLines", () => {
     // Both apps build their bundles into /assets/, and a web_new page shell
     // is useless without its own. The old app's bundles fall through.
     assert.deepEqual(buildCeAssetLines(), [
-      "\t# Both apps serve their bundles from /assets/: web_new first, then the old app.",
-      "\treverse_proxy /assets/* web_new:3000 {",
-      "\t\t@web_new_asset_missing status 404",
-      "\t\thandle_response @web_new_asset_missing {",
+      "\t# web_new's bundles (/assets/) and public files (apps/web_new/public/): web_new first, then the old app.",
+      "\t@web_new_static path /assets/*",
+      "\treverse_proxy @web_new_static web_new:3000 {",
+      "\t\t@web_new_static_missing status 404",
+      "\t\thandle_response @web_new_static_missing {",
       "\t\t\treverse_proxy web:3000",
       "\t\t}",
       "\t}",
     ]);
     assert.deepEqual(buildCeLines(["/{ws}"]).slice(-buildCeAssetLines().length), buildCeAssetLines());
+  });
+
+  it("routes web_new's public files with its bundles, behind the same 404 fallback (PIDASH-2)", () => {
+    const lines = buildCeLines(["/{ws}"], [], ["/icon.svg", "/illustrations/*"]);
+    assert.ok(lines.includes("\t@web_new_static path /assets/* /icon.svg /illustrations/*"), lines.join("\n"));
+    assert.deepEqual(lines.slice(-8), buildCeAssetLines(["/icon.svg", "/illustrations/*"]));
   });
 
   it("adds no asset route when nothing or everything has migrated", () => {
@@ -184,18 +192,24 @@ describe("buildAioLines", () => {
     // A bundle web_new does not have falls through to the old app's
     // static root below, instead of a 404 or web_new's index.html.
     assert.deepEqual(buildAioAssetLines(), [
-      "    # Both apps serve their bundles from /assets/: web_new first, then the old app.",
-      "    @web_new_assets {",
+      "    # web_new's bundles (/assets/) and public files (apps/web_new/public/): web_new first, then the old app.",
+      "    @web_new_static {",
       "        path /assets/*",
       "        file {",
       "            root /app/web_new",
       "        }",
       "    }",
-      "    handle @web_new_assets {",
+      "    handle @web_new_static {",
       "        root * /app/web_new",
       "        file_server",
       "    }",
     ]);
+  });
+
+  it("serves web_new's public files the same way (PIDASH-2)", () => {
+    const lines = buildAioLines(["/{ws}"], [], ["/icon.svg", "/logos/*"]);
+    assert.ok(lines.includes("        path /assets/* /icon.svg /logos/*"), lines.join("\n"));
+    assert.deepEqual(lines.slice(-11), buildAioAssetLines(["/icon.svg", "/logos/*"]));
   });
 
   it("adds no asset route when nothing or everything has migrated", () => {
@@ -498,13 +512,34 @@ describe("main", () => {
   });
 });
 
+describe("publicPathsOf", () => {
+  it("maps top-level public files to exact paths and directories to subtrees", () => {
+    const dir = mkdtempSync(join(tmpdir(), "coexistence-public-"));
+    writeFileSync(join(dir, "icon.svg"), "");
+    writeFileSync(join(dir, "manifest.webmanifest"), "");
+    writeFileSync(join(dir, ".DS_Store"), "");
+    mkdirSync(join(dir, "illustrations"));
+    writeFileSync(join(dir, "illustrations", "not-found.svg"), "");
+    mkdirSync(join(dir, "assets"));
+    assert.deepEqual(publicPathsOf(dir), ["/icon.svg", "/illustrations/*", "/manifest.webmanifest"]);
+  });
+
+  it("refuses a public entry name Caddy cannot match literally", () => {
+    const dir = mkdtempSync(join(tmpdir(), "coexistence-public-"));
+    writeFileSync(join(dir, "my icon.svg"), "");
+    assert.throws(() => publicPathsOf(dir), /unroutable public entry name: my icon\.svg/);
+  });
+});
+
 describe("the repo's generated Caddyfiles", () => {
-  const proxyDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "proxy");
+  const here = dirname(fileURLToPath(import.meta.url));
+  const proxyDir = join(here, "..", "..", "proxy");
+  const publicDir = join(here, "..", "public");
 
   it("route web_new's /assets/* bundles before the old app's catch-all (PIDASH-2)", () => {
     for (const [name, assetLines, anchor] of [
-      ["Caddyfile.ce", buildCeAssetLines(), CE_ANCHOR],
-      ["Caddyfile.aio.ce", buildAioAssetLines(), AIO_ANCHOR],
+      ["Caddyfile.ce", buildCeAssetLines(publicPathsOf(publicDir)), CE_ANCHOR],
+      ["Caddyfile.aio.ce", buildAioAssetLines(publicPathsOf(publicDir)), AIO_ANCHOR],
     ]) {
       const text = readFileSync(join(proxyDir, name), "utf8");
       const block = assetLines.join("\n");
@@ -512,6 +547,27 @@ describe("the repo's generated Caddyfiles", () => {
       assert.ok(
         text.indexOf(block) < text.indexOf(anchor),
         `${name}: /assets/* must sit above the old app's catch-all`
+      );
+    }
+  });
+  it("route every entry of apps/web_new/public/ to web_new (PIDASH-2)", () => {
+    // Listed independently of the generator: icon.svg, the manifests and
+    // illustrations/ must not reach the old app's SPA fallback.
+    const wanted = readdirSync(publicDir, { withFileTypes: true })
+      .filter((entry) => !entry.name.startsWith("."))
+      .map((entry) => (entry.isDirectory() ? `/${entry.name}/*` : `/${entry.name}`));
+    assert.ok(wanted.includes("/icon.svg") && wanted.includes("/illustrations/*"), wanted.join(" "));
+    for (const [name, matcher] of [
+      ["Caddyfile.ce", /^\t@web_new_static path (.+)$/m],
+      ["Caddyfile.aio.ce", /@web_new_static \{\n\s+path (.+)$/m],
+    ]) {
+      const found = matcher.exec(readFileSync(join(proxyDir, name), "utf8"));
+      assert.ok(found !== null, `${name} has no @web_new_static matcher`);
+      const routed = found[1].split(" ");
+      assert.deepEqual(
+        wanted.filter((path) => !routed.includes(path)),
+        [],
+        `${name} sends these web_new public files to the old app`
       );
     }
   });
