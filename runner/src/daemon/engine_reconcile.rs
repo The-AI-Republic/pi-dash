@@ -85,11 +85,14 @@ impl RunnerSpawnCtx {
         // Never race `EngineRunnerAdd` / machine control's create: a row
         // they just created has no block yet.
         let _engine_ops = self.engine_ops_lock.lock().await;
-        let tombstones = crate::engine::tombstones::load(&self.paths);
-        // Live engine rows seen across every workspace, and whether every
-        // workspace was read: tombstones are pruned only from a full view.
+        // Live engine rows seen, the workspaces whose rows were read, and
+        // whether every signed-in workspace was read. A tombstone is pruned
+        // only after its own workspace was read (a signed-out workspace's
+        // removed runners must not come back at its next sign-in).
         let mut live = BTreeSet::new();
+        let mut read_workspaces = BTreeSet::new();
         let mut complete = true;
+        let mut any_read = false;
         for (workspace, token) in self.tokens.session_candidates() {
             let payload = match self.engine.refresh_machine(&token, machine_id).await {
                 Ok(p) => p,
@@ -106,17 +109,25 @@ impl RunnerSpawnCtx {
                 complete = false;
                 continue;
             };
+            any_read = true;
             live.extend(
                 rows.iter()
                     .filter(|r| r.is_engine() && !r.is_revoked())
                     .map(|r| r.id),
             );
-            self.reconcile_rows(workspace.as_deref(), &rows, &tombstones, &mut report)
+            read_workspaces.extend(workspace.clone().filter(|w| !w.is_empty()));
+            read_workspaces.extend(
+                rows.iter()
+                    .filter(|r| !r.workspace_slug.is_empty())
+                    .map(|r| r.workspace_slug.clone()),
+            );
+            self.reconcile_rows(workspace.as_deref(), &rows, &mut report)
                 .await;
         }
-        if complete
-            && !tombstones.is_empty()
-            && let Err(e) = crate::engine::tombstones::retain_live(&self.paths, &live)
+        // With no workspace read at all there is no view to prune from.
+        let complete = complete && any_read;
+        if let Err(e) =
+            crate::engine::tombstones::prune(&self.paths, &read_workspaces, complete, &live)
         {
             tracing::warn!("pruning engine runner tombstones failed: {e:#}");
         }
@@ -127,7 +138,6 @@ impl RunnerSpawnCtx {
         &self,
         workspace: Option<&str>,
         rows: &[MachineRunnerRow],
-        tombstones: &BTreeSet<Uuid>,
         report: &mut ReconcileReport,
     ) {
         let cfg = match crate::config::file::load_config(&self.paths) {
@@ -137,6 +147,11 @@ impl RunnerSpawnCtx {
                 return;
             }
         };
+        // Read after the config: `runner remove --local-only` writes the
+        // tombstone before it strips the block, so a block missing from
+        // this config always has its tombstone in this read, even when
+        // the removal landed during the machine GET.
+        let tombstones = crate::engine::tombstones::load(&self.paths);
         for row in rows.iter().filter(|r| r.is_engine()) {
             let block = cfg.runners.iter().find(|b| b.runner_id == row.id);
             match block {
@@ -351,7 +366,17 @@ mod tests {
     /// transport: runners it starts are offline, so nothing but the mock
     /// is ever contacted.
     fn ctx(paths: &Paths, url: &str, machine_id: Uuid) -> RunnerSpawnCtx {
-        let tokens = WorkspaceTokens::from_cli(Some(&cli()));
+        ctx_signed_in(paths, url, machine_id, cli())
+    }
+
+    /// [`ctx`] signed in with `cli`'s workspaces.
+    fn ctx_signed_in(
+        paths: &Paths,
+        url: &str,
+        machine_id: Uuid,
+        cli: CliSection,
+    ) -> RunnerSpawnCtx {
+        let tokens = WorkspaceTokens::from_cli(Some(&cli));
         let mut ctx = RunnerSpawnCtx::for_tests_with_daemon(
             None,
             tokens.clone(),
@@ -542,6 +567,126 @@ mod tests {
         assert!(crate::engine::tombstones::load(&paths).is_empty());
     }
 
+    /// `remove --local-only` on workspace beta's runner, then `auth logout
+    /// --workspace beta`, then `auth login --workspace beta`: the runner
+    /// must not come back. Reconciling while beta is signed out reads only
+    /// acme, so beta's tombstone has to survive it.
+    #[tokio::test]
+    async fn a_signed_out_workspace_keeps_its_tombstones_until_it_is_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        paths.ensure().unwrap();
+        let machine_id = Uuid::new_v4();
+        let mut block = engine_block("builtin-h-beta-web", "WEB", tmp.path().join("tasks/web"));
+        block.workspace_slug = Some("beta".into());
+        let row = serde_json::json!({"id": block.runner_id, "name": block.name,
+            "workspace_slug": "beta", "project_identifier": "WEB", "agent_kind": "engine"});
+        let path = crate::engine::api::dev_machine_path(machine_id);
+        let handler: Handler = Arc::new(move |req| {
+            if req.path != path || req.method != "GET" {
+                return (404, String::new());
+            }
+            // The payload lists only the token's workspace.
+            let runners = match req.bearer() {
+                Some("mt_beta") => vec![row.clone()],
+                _ => vec![],
+            };
+            (200, serde_json::json!({ "runners": runners }).to_string())
+        });
+        let server = test_server::start(handler).await;
+        let mut both = cli();
+        both.workspaces = vec![crate::config::schema::WorkspaceCredential {
+            slug: "beta".into(),
+            token: "mt_beta".into(),
+        }];
+        seed(&paths, &server.url, vec![block.clone()]);
+
+        crate::cli::runner::remove(
+            crate::cli::runner::RemoveArgs {
+                name: block.name.clone(),
+                local_only: true,
+                yes: true,
+            },
+            &paths,
+        )
+        .await
+        .unwrap();
+        assert!(crate::engine::tombstones::load(&paths).contains(&block.runner_id));
+
+        // Signed out of beta: only acme is read, beta's tombstone stays.
+        let acme_only = ctx_signed_in(&paths, &server.url, machine_id, cli());
+        assert_eq!(
+            acme_only.reconcile_engine_runners().await,
+            ReconcileReport::default()
+        );
+        assert!(crate::engine::tombstones::load(&paths).contains(&block.runner_id));
+
+        // Signed in to beta again: its live row is still not re-added.
+        let signed_in = ctx_signed_in(&paths, &server.url, machine_id, both);
+        assert_eq!(
+            signed_in.reconcile_engine_runners().await,
+            ReconcileReport::default()
+        );
+        assert!(
+            crate::config::file::load_config(&paths)
+                .unwrap()
+                .runners
+                .is_empty()
+        );
+        assert!(crate::engine::tombstones::load(&paths).contains(&block.runner_id));
+    }
+
+    /// A `remove --local-only` that lands while reconcile waits on the
+    /// machine GET: the block is gone from the config reconcile reads, so
+    /// the tombstone written before it must be seen too.
+    #[tokio::test]
+    async fn a_removal_during_the_machine_read_is_not_re_added() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        paths.ensure().unwrap();
+        let machine_id = Uuid::new_v4();
+        let block = engine_block("builtin-h-acme-web", "WEB", tmp.path().join("tasks/web"));
+        let row = serde_json::json!({"id": block.runner_id, "name": block.name,
+            "workspace_slug": "acme", "project_identifier": "WEB", "agent_kind": "engine"});
+        let path = crate::engine::api::dev_machine_path(machine_id);
+        let removed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (paths_h, removed_h, id) = (paths.clone(), removed.clone(), block.runner_id);
+        let handler: Handler = Arc::new(move |req| {
+            if req.path != path || req.method != "GET" {
+                return (404, String::new());
+            }
+            // What `runner remove --local-only` does: tombstone, then strip.
+            if !removed_h.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                crate::engine::tombstones::add(&paths_h, id, Some("acme")).unwrap();
+                crate::config::file::mutate_config(&paths_h, |c| {
+                    c.runners.retain(|r| r.runner_id != id);
+                    Ok(())
+                })
+                .unwrap();
+            }
+            (
+                200,
+                serde_json::json!({ "runners": [row.clone()] }).to_string(),
+            )
+        });
+        let server = test_server::start(handler).await;
+        seed(&paths, &server.url, vec![block.clone()]);
+
+        let ctx = ctx(&paths, &server.url, machine_id);
+        assert_eq!(
+            ctx.reconcile_engine_runners().await,
+            ReconcileReport::default()
+        );
+        assert!(removed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            crate::config::file::load_config(&paths)
+                .unwrap()
+                .runners
+                .is_empty()
+        );
+        assert!(crate::engine::tombstones::load(&paths).contains(&block.runner_id));
+    }
+
     #[tokio::test]
     async fn adding_a_runner_again_forgets_its_tombstone() {
         let tmp = tempfile::tempdir().unwrap();
@@ -549,7 +694,7 @@ mod tests {
         paths.ensure().unwrap();
         seed(&paths, "http://127.0.0.1:9", vec![]);
         let id = Uuid::new_v4();
-        crate::engine::tombstones::add(&paths, id).unwrap();
+        crate::engine::tombstones::add(&paths, id, Some("acme")).unwrap();
         let resp = EnrollResponse {
             runner_id: id,
             runner_name: "builtin-h-acme-web".into(),

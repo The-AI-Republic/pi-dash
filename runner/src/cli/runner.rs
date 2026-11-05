@@ -762,8 +762,12 @@ pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
     // it before the block goes so the engine reconcile loop doesn't re-add
     // the runner (it would otherwise see a live engine row with no block).
     if !matches!(mode, RemoveMode::Cascade) && cfg.runners[idx].agent.kind == AgentKind::Engine {
-        crate::engine::tombstones::add(paths, runner_id)
-            .context("recording the locally removed engine runner")?;
+        crate::engine::tombstones::add(
+            paths,
+            runner_id,
+            cfg.runners[idx].workspace_slug.as_deref(),
+        )
+        .context("recording the locally removed engine runner")?;
     }
     let _ = try_ipc_remove_local(paths, &args.name).await;
 
