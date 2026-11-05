@@ -3038,10 +3038,7 @@ mod tests {
         assert_eq!(get::<i64>(&rows[0], "completed_issues"), 1);
         assert_eq!(get::<i64>(&rows[0], "started_issues"), 1);
         assert_eq!(get::<i64>(&rows[0], "cancelled_issues"), 0);
-        assert_eq!(
-            get::<Option<DateTime<Utc>>>(&rows[0], "start_date").is_some(),
-            true
-        );
+        assert!(get::<Option<DateTime<Utc>>>(&rows[0], "start_date").is_some());
         // The estimate gate: points estimate on P, none on Q.
         assert_eq!(run(transfer_estimate_type(&scope)).await.len(), 1);
         assert!(run(transfer_estimate_type(&TenantScope {
@@ -3125,7 +3122,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![i_started]
         );
-        drop(conn);
         tx.rollback().await.expect("rollback");
     }
 }

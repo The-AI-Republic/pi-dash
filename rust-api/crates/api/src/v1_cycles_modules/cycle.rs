@@ -75,14 +75,14 @@
 
 use std::collections::BTreeMap;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query as AxumQuery, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use chrono::{Datelike, LocalResult, TimeZone};
 use chrono_tz::Tz;
 use sea_orm::sea_query::{
-    Alias, Asterisk, Condition, Expr, Func, OnConflict, Query, SelectStatement,
+    Alias, Asterisk, Condition, Expr, Func, OnConflict, Order, Query, SelectStatement, SimpleExpr,
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DbBackend, DbErr, EntityTrait, FromQueryResult, JoinType,
@@ -95,9 +95,9 @@ use super::module::{check_max_length, CoerceFail};
 use pidash_auth::permissions::project;
 use pidash_compat::response::{json_created, json_ok, no_content};
 use pidash_db::entity::{
-    api_tokens, cycle_issues, cycles, dev_machine, estimate_points, estimates, file_assets,
-    issue_assignees, issue_labels, issues, labels, machine_token, project_members, projects,
-    states, user_favorites, users, workspace_members, workspaces,
+    api_tokens, cycle_issues, cycles, dev_machine, estimate_points, file_assets, issue_assignees,
+    issue_labels, issues, labels, machine_token, project_members, projects, states, user_favorites,
+    users, workspace_members, workspaces,
 };
 use pidash_db::v1_cycles_modules::cycle_queries::{self as queries, TenantScope};
 
@@ -1046,11 +1046,6 @@ fn row_json(row: &Row, column: &str, site: &str) -> Result<Value, Denial> {
         .map_err(|error| db_error(error, site))
 }
 
-fn row_json_opt(row: &Row, column: &str, site: &str) -> Result<Option<Value>, Denial> {
-    row.try_get::<Option<Value>>("", column)
-        .map_err(|error| db_error(error, site))
-}
-
 /// `sort_order` is a `FloatField` (`float8`): decode `f64` and render with
 /// `.0` for integral values exactly like Python's `repr(float)`.
 fn render_f64(value: f64) -> Value {
@@ -1613,6 +1608,36 @@ pub async fn expand_issue_full(
         );
     }
     Ok(rendered)
+}
+
+/// `relations_summary` value for one issue (the `IssueSerializer`
+/// single-item shape: both capped open-first lists).
+///
+/// Kept as the public seam for callers that render the full issue
+/// shape (`v1_assets::intake`); delegates to the shared
+/// `orchestration::blockers` read, which runs the same 3 statements.
+pub async fn fetch_relations_summary(
+    pool: &PgPool,
+    issue_id: &uuid::Uuid,
+) -> Result<Value, Denial> {
+    let summary =
+        pidash_services::orchestration::blockers::fetch_relations_summary(&orm(pool), *issue_id)
+            .await
+            .map_err(|error| db_error(error, "relations-summary"))?;
+    serde_json::to_value(summary.relations_summary)
+        .map_err(|error| db_error(error, "relations-summary"))
+}
+
+/// `has_open_blockers` over the FULL blocker set (never the capped
+/// list): a live `blocked_by` target whose state group is neither
+/// `completed` nor `cancelled` — a stateless target counts as open.
+/// Same shared read as [`fetch_relations_summary`].
+pub async fn has_open_blockers(pool: &PgPool, issue_id: &uuid::Uuid) -> Result<bool, Denial> {
+    let summary =
+        pidash_services::orchestration::blockers::fetch_relations_summary(&orm(pool), *issue_id)
+            .await
+            .map_err(|error| db_error(error, "has-open-blockers"))?;
+    Ok(summary.has_open_blockers)
 }
 
 /// `projects.identifier` by pk, deliberately unfiltered (`_base_manager`
@@ -6195,15 +6220,92 @@ pub fn burndown_chart(
 /// The burndown scope: `Issue.issue_objects` (live, non-triage,
 /// non-archived, project-live, non-draft) bridged live to this cycle in
 /// this project/workspace (`analytics_plot.py:171-196`).
-pub const BURNDOWN_SCOPE_FROM: &str = r#"FROM "issues" i
-     INNER JOIN "cycle_issues" ci ON ci."issue_id" = i."id" AND ci."cycle_id" = $3 AND ci."deleted_at" IS NULL
-     INNER JOIN "workspaces" w ON w."id" = i."workspace_id"
-     INNER JOIN "projects" p ON p."id" = i."project_id"
-     LEFT JOIN "states" st ON st."id" = i."state_id""#;
-pub const BURNDOWN_SCOPE_WHERE: &str = r#"i."deleted_at" IS NULL
-     AND NOT (st."group" = 'triage' AND st."group" IS NOT NULL)
-     AND i."archived_at" IS NULL AND p."archived_at" IS NULL AND NOT i."is_draft"
-     AND i."project_id" = $2 AND w."slug" = $1"#;
+fn burndown_col(table: &str, column: &str) -> Expr {
+    Expr::col((Alias::new(table), Alias::new(column)))
+}
+
+/// Actor-zone truncating date of `completed_at`:
+/// `timezone(CAST(<tz> AS text), "i"."completed_at")::date`.
+fn burndown_day_expr(actor_tz: &str) -> SimpleExpr {
+    let timezone: SimpleExpr = Func::cust(Alias::new("timezone"))
+        .args([
+            Expr::val(actor_tz).cast_as(Alias::new("text")),
+            burndown_col("i", "completed_at").into(),
+        ])
+        .into();
+    timezone.cast_as(Alias::new("date"))
+}
+
+/// `estimate_points."value"` cast to double (the estimate math casts the
+/// `value` CharField to float; `::double precision` is the same type).
+fn burndown_value_expr() -> SimpleExpr {
+    burndown_col("ep", "value").cast_as(Alias::new("double precision"))
+}
+
+/// Shared `FROM`/`WHERE` of the three burndown reads: outer scope
+/// (`"issues" AS "i"`, live bridge in this cycle) plus the tenant
+/// scope. The `cycle_id`/`deleted_at` bridge predicates ride in the
+/// `WHERE` (the `FROM` they came from was an inner join, so the
+/// placement is equivalent).
+fn burndown_select(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    cycle_id: &uuid::Uuid,
+    with_estimate: bool,
+) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.from_as(Alias::new("issues"), Alias::new("i"));
+    sel.join_as(
+        JoinType::InnerJoin,
+        Alias::new("cycle_issues"),
+        Alias::new("ci"),
+        burndown_col("ci", "issue_id").equals((Alias::new("i"), Alias::new("id"))),
+    );
+    sel.join_as(
+        JoinType::InnerJoin,
+        Alias::new("workspaces"),
+        Alias::new("w"),
+        burndown_col("w", "id").equals((Alias::new("i"), Alias::new("workspace_id"))),
+    );
+    sel.join_as(
+        JoinType::InnerJoin,
+        Alias::new("projects"),
+        Alias::new("p"),
+        burndown_col("p", "id").equals((Alias::new("i"), Alias::new("project_id"))),
+    );
+    sel.join_as(
+        JoinType::LeftJoin,
+        Alias::new("states"),
+        Alias::new("st"),
+        burndown_col("st", "id").equals((Alias::new("i"), Alias::new("state_id"))),
+    );
+    if with_estimate {
+        sel.join_as(
+            JoinType::InnerJoin,
+            Alias::new("estimate_points"),
+            Alias::new("ep"),
+            burndown_col("ep", "id").equals((Alias::new("i"), Alias::new("estimate_point_id"))),
+        );
+    }
+    sel.cond_where(
+        Condition::all()
+            .add(burndown_col("i", "deleted_at").is_null())
+            .add(
+                Condition::all()
+                    .add(burndown_col("st", "group").eq("triage"))
+                    .add(burndown_col("st", "group").is_not_null())
+                    .not(),
+            )
+            .add(burndown_col("i", "archived_at").is_null())
+            .add(burndown_col("p", "archived_at").is_null())
+            .add(burndown_col("i", "is_draft").not())
+            .add(burndown_col("i", "project_id").eq(*project_id))
+            .add(burndown_col("w", "slug").eq(slug))
+            .add(burndown_col("ci", "cycle_id").eq(*cycle_id))
+            .add(burndown_col("ci", "deleted_at").is_null()),
+    );
+    sel
+}
 
 /// Points distribution: one `(date, value)` per estimated issue, date
 /// ascending with physical ties (Django's `.order_by("date")` over the
@@ -6217,30 +6319,17 @@ pub async fn fetch_burndown_points(
     cycle_id: &uuid::Uuid,
     actor_tz: &Tz,
 ) -> Result<Vec<(Option<chrono::NaiveDate>, ChartNumber)>, Denial> {
-    let sql = format!(
-        "SELECT (i.\"completed_at\" AT TIME ZONE $4)::date AS d, CAST(ep.\"value\" AS FLOAT) AS v \
-         {from} \
-         INNER JOIN \"estimate_points\" ep ON ep.\"id\" = i.\"estimate_point_id\" \
-         WHERE {scope} ORDER BY d, i.\"ctid\"",
-        from = BURNDOWN_SCOPE_FROM,
-        scope = BURNDOWN_SCOPE_WHERE,
-    );
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .bind(actor_tz.name())
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "burndown-points"))?;
+    let day = burndown_day_expr(actor_tz.name());
+    let mut sel = burndown_select(slug, project_id, cycle_id, true);
+    sel.expr_as(day.clone(), Alias::new("d"));
+    sel.expr_as(burndown_value_expr(), Alias::new("v"));
+    sel.order_by_expr(day, Order::Asc);
+    sel.order_by((Alias::new("i"), Alias::new("ctid")), Order::Asc);
+    let rows = fetch_rows(pool, &sel, "burndown-points").await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        let day: Option<chrono::NaiveDate> = row
-            .try_get("d")
-            .map_err(|error| db_error(error, "burndown-points"))?;
-        let value: Option<f64> = row
-            .try_get("v")
-            .map_err(|error| db_error(error, "burndown-points"))?;
+        let day = row_date_opt(row, "d", "burndown-points")?;
+        let value = row_f64_opt(row, "v", "burndown-points")?;
         if let Some(number) = value {
             out.push((day, ChartNumber::Float(number)));
         }
@@ -6258,26 +6347,14 @@ pub async fn fetch_burndown_points_total(
     project_id: &uuid::Uuid,
     cycle_id: &uuid::Uuid,
 ) -> Result<ChartNumber, Denial> {
-    let sql = format!(
-        "SELECT CAST(ep.\"value\" AS FLOAT) AS v {from} \
-         INNER JOIN \"estimate_points\" ep ON ep.\"id\" = i.\"estimate_point_id\" \
-         WHERE {scope} ORDER BY i.\"created_at\" DESC",
-        from = BURNDOWN_SCOPE_FROM,
-        scope = BURNDOWN_SCOPE_WHERE,
-    );
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "burndown-points-total"))?;
+    let mut sel = burndown_select(slug, project_id, cycle_id, true);
+    sel.expr_as(burndown_value_expr(), Alias::new("v"));
+    sel.order_by((Alias::new("i"), Alias::new("created_at")), Order::Desc);
+    let rows = fetch_rows(pool, &sel, "burndown-points-total").await?;
     let mut total = ChartNumber::Int(0);
     let mut seen = false;
     for row in &rows {
-        let value: Option<f64> = row
-            .try_get("v")
-            .map_err(|error| db_error(error, "burndown-points-total"))?;
+        let value = row_f64_opt(row, "v", "burndown-points-total")?;
         if let Some(number) = value {
             total = chart_add(total, ChartNumber::Float(number));
             seen = true;
@@ -6300,25 +6377,23 @@ pub async fn fetch_burndown_issues(
     cycle_id: &uuid::Uuid,
     actor_tz: &Tz,
 ) -> Result<Vec<(Option<chrono::NaiveDate>, ChartNumber)>, Denial> {
-    let sql = format!(
-        "SELECT (i.\"completed_at\" AT TIME ZONE $4)::date AS d, COUNT(*) AS n {from} \
-         WHERE {scope} AND i.\"completed_at\" IS NOT NULL GROUP BY d ORDER BY d",
-        from = BURNDOWN_SCOPE_FROM,
-        scope = BURNDOWN_SCOPE_WHERE,
+    let day = burndown_day_expr(actor_tz.name());
+    let mut sel = burndown_select(slug, project_id, cycle_id, false);
+    sel.expr_as(day.clone(), Alias::new("d"));
+    sel.expr_as(
+        SimpleExpr::from(Func::count(Expr::col(Asterisk))),
+        Alias::new("n"),
     );
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .bind(actor_tz.name())
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "burndown-issues"))?;
+    sel.cond_where(burndown_col("i", "completed_at").is_not_null());
+    // `GROUP BY "d"` (the output alias), not the day expression: the
+    // bound zone repeats per appearance as a distinct parameter, so
+    // grouping by the expression copy fails expression matching.
+    sel.add_group_by([SimpleExpr::from(Expr::col(Alias::new("d")))]);
+    sel.order_by_expr(SimpleExpr::from(Expr::col(Alias::new("d"))), Order::Asc);
+    let rows = fetch_rows(pool, &sel, "burndown-issues").await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        let day: Option<chrono::NaiveDate> = row
-            .try_get("d")
-            .map_err(|error| db_error(error, "burndown-issues"))?;
+        let day = row_date_opt(row, "d", "burndown-issues")?;
         let count: i64 = row_i64(row, "n", "burndown-issues")?;
         out.push((day, ChartNumber::Int(count)));
     }
@@ -6370,17 +6445,14 @@ pub async fn transfer_cycle_issues_inner(
     }
     let file_truthy = JVal::Bool(true);
     let new_raw = new_raw.unwrap_or(&file_truthy);
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT c."id", c."end_date" FROM "cycles" c
-           INNER JOIN "workspaces" w ON c."workspace_id" = w."id"
-           WHERE w."slug" = $1 AND c."project_id" = $2 AND c."id" = $3 AND c."deleted_at" IS NULL"#,
+    let row = fetch_entity_row(
+        &pre.pool,
+        live_cycle_in_tenant(slug, &project_id, cycle_id)
+            .select_only()
+            .columns([cycles::Column::Id, cycles::Column::EndDate]),
+        "transfer-old-get",
     )
-    .bind(slug)
-    .bind(project_id)
-    .bind(cycle_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "transfer-old-get"))?;
+    .await?;
     let Some(row) = row else {
         return Err(Denial::NotFound);
     };
@@ -6409,13 +6481,13 @@ pub async fn transfer_cycle_issues_inner(
     let new_cycle_text = raw_id_text(new_raw)?;
     // Target lookup + guard (`:59-66`): missing → 500 (ported bug T1),
     // ended → 400, dateless → proceeds.
-    let target: Option<sqlx::postgres::PgRow> = sqlx::query(queries::TRANSFER_CYCLE_LOOKUP_SQL)
-        .bind(slug)
-        .bind(project_id)
-        .bind(new_cycle_id)
-        .fetch_optional(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "transfer-target"))?;
+    let scope = TenantScope { slug, project_id };
+    let target = fetch_row(
+        &pre.pool,
+        &queries::transfer_cycle_lookup(&scope, new_cycle_id),
+        "transfer-target",
+    )
+    .await?;
     let facts = shapes::NewCycleFacts {
         exists: target.is_some(),
         end_epoch_micros: match target {
@@ -6432,13 +6504,12 @@ pub async fn transfer_cycle_issues_inner(
     }
     // Source recount (`:68-143`): missing → the 400 (unreachable past the
     // view's `.get`, but ported).
-    let recount: Option<sqlx::postgres::PgRow> = sqlx::query(queries::TRANSFER_OLD_CYCLE_SQL)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_optional(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "transfer-recount"))?;
+    let recount = fetch_row(
+        &pre.pool,
+        &queries::transfer_old_cycle(&scope, *cycle_id),
+        "transfer-recount",
+    )
+    .await?;
     let Some(recount) = recount else {
         return Err(Denial::BadError(
             shapes::TRANSFER_SOURCE_CYCLE_NOT_FOUND_ERROR.to_owned(),
@@ -6460,20 +6531,25 @@ pub async fn transfer_cycle_issues_inner(
     // (`analytics_plot.py:246,260`).
     let today = micros_now().date_naive();
     // Estimate gate (`:153-159`): the EXISTS the snapshot branch reads.
-    let estimate_type: bool = sqlx::query_scalar::<_, i32>(queries::TRANSFER_ESTIMATE_TYPE_SQL)
-        .bind(slug)
-        .bind(project_id)
-        .fetch_optional(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "transfer-estimate-gate"))?
-        .is_some();
+    let estimate_type: bool = fetch_row(
+        &pre.pool,
+        &queries::transfer_estimate_type(&scope),
+        "transfer-estimate-gate",
+    )
+    .await?
+    .is_some();
     // Issue distributions (`:338-410`, always loaded).
     let label_issues = fetch_label_issue_rows(
         &pre.pool,
         slug,
         &project_id,
         cycle_id,
-        queries::TRANSFER_LABEL_ISSUE_SQL,
+        queries::transfer_distribution(
+            &scope,
+            *cycle_id,
+            queries::Distribution::Label,
+            queries::Measure::Issues,
+        ),
     )
     .await?;
     let assignee_issues = fetch_assignee_issue_rows(
@@ -6481,7 +6557,12 @@ pub async fn transfer_cycle_issues_inner(
         slug,
         &project_id,
         cycle_id,
-        queries::TRANSFER_ASSIGNEE_ISSUE_SQL,
+        queries::transfer_distribution(
+            &scope,
+            *cycle_id,
+            queries::Distribution::Assignee,
+            queries::Measure::Issues,
+        ),
     )
     .await?;
     let issues_burndown =
@@ -6501,7 +6582,12 @@ pub async fn transfer_cycle_issues_inner(
             slug,
             &project_id,
             cycle_id,
-            queries::TRANSFER_LABEL_ESTIMATE_SQL,
+            queries::transfer_distribution(
+                &scope,
+                *cycle_id,
+                queries::Distribution::Label,
+                queries::Measure::Estimates,
+            ),
         )
         .await?
     } else {
@@ -6513,7 +6599,12 @@ pub async fn transfer_cycle_issues_inner(
             slug,
             &project_id,
             cycle_id,
-            queries::TRANSFER_ASSIGNEE_ESTIMATE_SQL,
+            queries::transfer_distribution(
+                &scope,
+                *cycle_id,
+                queries::Distribution::Assignee,
+                queries::Measure::Estimates,
+            ),
         )
         .await?
     } else {
@@ -6546,22 +6637,21 @@ pub async fn transfer_cycle_issues_inner(
     });
     // `current_cycle.save(update_fields=["progress_snapshot"])`: the column
     // alone — `updated_at`/`updated_by` do NOT move.
-    sqlx::query(r#"UPDATE "cycles" SET "progress_snapshot" = $1 WHERE "id" = $2"#)
-        .bind(&snapshot)
-        .bind(cycle_id)
-        .execute(&pre.pool)
+    cycles::Entity::update_many()
+        .col_expr(cycles::Column::ProgressSnapshot, Expr::value(snapshot))
+        .filter(cycles::Column::Id.eq(*cycle_id))
+        .exec(&orm(&pre.pool))
         .await
-        .map_err(|error| db_write_error(error, "transfer-snapshot"))?;
+        .map_err(|error| orm_write_error(error, "transfer-snapshot"))?;
     // The move (`:437-456`): open-state bridges re-point at the target in
     // `-created_at` select order; `bulk_update(["cycle_id"])` touches only
     // `cycle_id`.
-    let moves: Vec<sqlx::postgres::PgRow> = sqlx::query(queries::TRANSFER_MOVE_SELECT_SQL)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_all(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "transfer-moves"))?;
+    let moves = fetch_rows(
+        &pre.pool,
+        &queries::transfer_move_select(&scope, *cycle_id),
+        "transfer-moves",
+    )
+    .await?;
     let mut move_ids: Vec<uuid::Uuid> = Vec::with_capacity(moves.len());
     let mut activity: Vec<pidash_jobs::v1_cycles_modules::publish::CycleMove> =
         Vec::with_capacity(moves.len());
@@ -6576,12 +6666,7 @@ pub async fn transfer_cycle_issues_inner(
         ));
     }
     if !move_ids.is_empty() {
-        sqlx::query(r#"UPDATE "cycle_issues" SET "cycle_id" = $1 WHERE "id" = ANY($2)"#)
-            .bind(new_cycle_id)
-            .bind(&move_ids)
-            .execute(&pre.pool)
-            .await
-            .map_err(|error| db_write_error(error, "transfer-move-update"))?;
+        move_bridges(&pre.pool, &move_ids, &new_cycle_id, "transfer-move-update").await?;
     }
     let job = pidash_jobs::v1_cycles_modules::publish::cycle_issues_transferred_job(
         &pre.actor.id.to_string(),
@@ -6609,19 +6694,13 @@ pub fn coerce_transfer_target(value: &JVal) -> Result<Option<uuid::Uuid>, Denial
 /// One transfer distribution fetch: label issue rows.
 pub async fn fetch_label_issue_rows(
     pool: &PgPool,
-    slug: &str,
-    project_id: &uuid::Uuid,
-    cycle_id: &uuid::Uuid,
-    sql: &str,
+    _slug: &str,
+    _project_id: &uuid::Uuid,
+    _cycle_id: &uuid::Uuid,
+    stmt: SelectStatement,
 ) -> Result<Vec<pidash_services::v1_cycles_modules::cycle_queries::LabelIssueRow>, Denial> {
     use pidash_services::v1_cycles_modules::cycle_queries::LabelIssueRow;
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "transfer-dist"))?;
+    let rows = fetch_rows(pool, &stmt, "transfer-dist").await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(LabelIssueRow {
@@ -6639,19 +6718,13 @@ pub async fn fetch_label_issue_rows(
 /// One transfer distribution fetch: assignee issue rows.
 pub async fn fetch_assignee_issue_rows(
     pool: &PgPool,
-    slug: &str,
-    project_id: &uuid::Uuid,
-    cycle_id: &uuid::Uuid,
-    sql: &str,
+    _slug: &str,
+    _project_id: &uuid::Uuid,
+    _cycle_id: &uuid::Uuid,
+    stmt: SelectStatement,
 ) -> Result<Vec<pidash_services::v1_cycles_modules::cycle_queries::AssigneeIssueRow>, Denial> {
     use pidash_services::v1_cycles_modules::cycle_queries::AssigneeIssueRow;
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "transfer-dist"))?;
+    let rows = fetch_rows(pool, &stmt, "transfer-dist").await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(AssigneeIssueRow {
@@ -6670,19 +6743,13 @@ pub async fn fetch_assignee_issue_rows(
 /// One transfer distribution fetch: label estimate rows.
 pub async fn fetch_label_estimate_rows(
     pool: &PgPool,
-    slug: &str,
-    project_id: &uuid::Uuid,
-    cycle_id: &uuid::Uuid,
-    sql: &str,
+    _slug: &str,
+    _project_id: &uuid::Uuid,
+    _cycle_id: &uuid::Uuid,
+    stmt: SelectStatement,
 ) -> Result<Vec<pidash_services::v1_cycles_modules::cycle_queries::LabelEstimateRow>, Denial> {
     use pidash_services::v1_cycles_modules::cycle_queries::LabelEstimateRow;
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "transfer-dist"))?;
+    let rows = fetch_rows(pool, &stmt, "transfer-dist").await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(LabelEstimateRow {
@@ -6700,19 +6767,13 @@ pub async fn fetch_label_estimate_rows(
 /// One transfer distribution fetch: assignee estimate rows.
 pub async fn fetch_assignee_estimate_rows(
     pool: &PgPool,
-    slug: &str,
-    project_id: &uuid::Uuid,
-    cycle_id: &uuid::Uuid,
-    sql: &str,
+    _slug: &str,
+    _project_id: &uuid::Uuid,
+    _cycle_id: &uuid::Uuid,
+    stmt: SelectStatement,
 ) -> Result<Vec<pidash_services::v1_cycles_modules::cycle_queries::AssigneeEstimateRow>, Denial> {
     use pidash_services::v1_cycles_modules::cycle_queries::AssigneeEstimateRow;
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "transfer-dist"))?;
+    let rows = fetch_rows(pool, &stmt, "transfer-dist").await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         out.push(AssigneeEstimateRow {
@@ -6790,7 +6851,7 @@ pub async fn list_cycles(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((slug, project_id)): Path<(String, String)>,
-    Query(query): Query<QueryMap>,
+    AxumQuery(query): AxumQuery<QueryMap>,
 ) -> Response {
     match list_cycles_inner(&state, &headers, &slug, &project_id, &query).await {
         Ok(response) => response,
@@ -6818,7 +6879,7 @@ pub async fn retrieve_cycle(
     uri: Uri,
     headers: HeaderMap,
     Path((slug, project_id, pk)): Path<(String, String, String)>,
-    Query(query): Query<QueryMap>,
+    AxumQuery(query): AxumQuery<QueryMap>,
 ) -> Response {
     let Ok(pk) = path_uuid(&pk) else {
         return proxy_through(state, method, uri, headers, Bytes::new()).await;
@@ -6871,7 +6932,7 @@ pub async fn list_cycle_issues(
     uri: Uri,
     headers: HeaderMap,
     Path((slug, project_id, cycle_id)): Path<(String, String, String)>,
-    Query(query): Query<QueryMap>,
+    AxumQuery(query): AxumQuery<QueryMap>,
 ) -> Response {
     let Ok(cycle_id) = path_uuid(&cycle_id) else {
         return proxy_through(state, method, uri, headers, Bytes::new()).await;
@@ -6907,7 +6968,7 @@ pub async fn get_cycle_issue(
     uri: Uri,
     headers: HeaderMap,
     Path((slug, project_id, cycle_id, issue_id)): Path<(String, String, String, String)>,
-    Query(query): Query<QueryMap>,
+    AxumQuery(query): AxumQuery<QueryMap>,
 ) -> Response {
     let (Ok(cycle_id), Ok(issue_id)) = (path_uuid(&cycle_id), path_uuid(&issue_id)) else {
         return proxy_through(state, method, uri, headers, Bytes::new()).await;
@@ -6990,7 +7051,7 @@ pub async fn list_archived_cycles(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((slug, project_id)): Path<(String, String)>,
-    Query(query): Query<QueryMap>,
+    AxumQuery(query): AxumQuery<QueryMap>,
 ) -> Response {
     match list_archived_cycles_inner(&state, &headers, &slug, &project_id, &query).await {
         Ok(response) => response,
@@ -7379,7 +7440,7 @@ mod tests {
     /// `"`), so this pins the final SQL, not the resolver string.
     #[test]
     fn order_by_injection_escaped() {
-        use pidash_db::v1_cycles_modules::cycle_queries::cycle_issue_list_get_sql;
+        use sea_query::PostgresQueryBuilder;
         for (raw, term) in [
             ("created_at", r#""issues"."created_at" ASC"#),
             ("-created_at", r#""issues"."created_at" DESC"#),
@@ -7397,7 +7458,15 @@ mod tests {
             ),
         ] {
             let order = resolve_cycle_issue_order(Some(raw));
-            let sql = cycle_issue_list_get_sql(&order);
+            let sql = pidash_db::v1_cycles_modules::cycle_queries::cycle_issue_list_get(
+                &order,
+                &TenantScope {
+                    slug: "acme",
+                    project_id: uuid::Uuid::nil(),
+                },
+                uuid::Uuid::nil(),
+            )
+            .to_string(PostgresQueryBuilder);
             assert!(sql.contains(term), "{raw}: {sql}");
         }
     }
@@ -8519,18 +8588,6 @@ mod tests {
     }
 
     #[test]
-    fn compact_binds_edges() {
-        // Gaps close in order of first appearance; literals untouched.
-        assert_eq!(
-            compact_binds("SELECT $1, $2, $4, $5, $4"),
-            "SELECT $1, $2, $3, $4, $3"
-        );
-        assert_eq!(compact_binds("SELECT '$4', $2, $1"), "SELECT '$4', $1, $2");
-        assert_eq!(compact_binds("SELECT 1"), "SELECT 1");
-        assert_eq!(compact_binds("SELECT $10, $2"), "SELECT $1, $2");
-    }
-
-    #[test]
     fn bridge_dump_rendering() {
         assert_eq!(render_bridge_dump(&[]), "[]");
         let id = uuid::Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").expect("uuid");
@@ -9000,6 +9057,106 @@ mod tests {
         )
         .expect("owner");
         assert_eq!(validated.owned_by, owner);
+    }
+
+    /// Live burndown reads over seeded temp tables: one completed
+    /// estimated issue counts; a draft and a triage issue never count.
+    #[tokio::test]
+    async fn live_burndown_reads() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "issues",
+            "states",
+            "workspaces",
+            "projects",
+            "cycle_issues",
+            "estimate_points",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (ws, project, cycle, done, started, backlog, triage, point) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let (i_done, i_started, i_draft, i_triage) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let issue = |id: uuid::Uuid,
+                     state: uuid::Uuid,
+                     draft: bool,
+                     with_point: bool,
+                     completed: bool,
+                     age: i32| {
+            format!(
+                "INSERT INTO issues (id, name, workspace_id, project_id, state_id, sort_order, priority, complexity_score, sequence_id, created_at, updated_at, is_draft, archived_at, completed_at, estimate_point_id, description_html, description_json, git_work_branch, workpad) VALUES ('{id}', 'n', '{ws}', '{project}', '{state}', 1, 'none', 0, 1, now() - interval '{age} min', now(), {draft}, NULL, {}, {}, '', '{{}}', '', '')",
+                if completed { "now()" } else { "NULL" },
+                if with_point {
+                    format!("'{point}'")
+                } else {
+                    "NULL".to_owned()
+                },
+            )
+        };
+        let bridge = |issue: uuid::Uuid| {
+            format!(
+                "INSERT INTO cycle_issues (id, created_at, updated_at, project_id, workspace_id, cycle_id, issue_id) VALUES ('{}', now(), now(), '{project}', '{ws}', '{cycle}', '{issue}')",
+                uuid::Uuid::new_v4()
+            )
+        };
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme')"),
+            format!("INSERT INTO projects (id, archived_at) VALUES ('{project}', NULL)"),
+            format!("INSERT INTO states (id, name, \"group\", created_at, updated_at, description, color, slug, project_id, workspace_id, sequence, \"default\", is_triage) VALUES ('{done}', 'Done', 'completed', now(), now(), '', '', 'done', '{project}', '{ws}', 1, false, false), ('{started}', 'Doing', 'started', now(), now(), '', '', 'doing', '{project}', '{ws}', 2, false, false), ('{backlog}', 'Backlog', 'backlog', now(), now(), '', '', 'backlog', '{project}', '{ws}', 3, true, false), ('{triage}', 'Triage', 'triage', now(), now(), '', '', 'triage', '{project}', '{ws}', 4, false, true)"),
+            format!("INSERT INTO estimate_points (id, value) VALUES ('{point}', '3')"),
+            issue(i_done, done, false, true, true, 5),
+            issue(i_started, started, false, false, false, 4),
+            issue(i_draft, backlog, true, true, false, 3),
+            issue(i_triage, triage, false, true, false, 2),
+            bridge(i_done),
+            bridge(i_started),
+            bridge(i_draft),
+            bridge(i_triage),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        let utc = chrono_tz::Tz::UTC;
+        let points = fetch_burndown_points(&pool, "acme", &project, &cycle, &utc)
+            .await
+            .expect("points");
+        assert_eq!(points.len(), 1);
+        assert!(points[0].0.is_some());
+        assert_eq!(points[0].1, ChartNumber::Float(3.0));
+        let total = fetch_burndown_points_total(&pool, "acme", &project, &cycle)
+            .await
+            .expect("total");
+        assert_eq!(total, ChartNumber::Float(3.0));
+        let issues = fetch_burndown_issues(&pool, "acme", &project, &cycle, &utc)
+            .await
+            .expect("issues");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].1, ChartNumber::Int(1));
     }
 }
 
