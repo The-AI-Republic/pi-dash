@@ -630,5 +630,6 @@ describe("PodPicker chip", () => {
     );
     const chip = screen.getByRole("button", { name: "Runs on: Pi Dash Cloud Agent" });
     expect(chip).toHaveTextContent("Pi Dash Cloud Agent");
+    expect(chip.querySelector("svg")).not.toBeNull();
   });
 });
