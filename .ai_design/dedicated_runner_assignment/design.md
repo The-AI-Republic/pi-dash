@@ -1,11 +1,32 @@
 # Hybrid Issue Assignment — a Pod or One Dedicated Runner
 
-**Status:** design, all decisions settled (PDASHOSS01-296, HA-1). Coordinator: PDASHOSS01-295.
+**Status:** design (PDASHOSS01-296, HA-1). H-1 to H-10 settled; H-11 to H-14, for engine runners (§23), adopt H-1, H-2 and H-8 by default and need the product owner's confirmation. Coordinator: PDASHOSS01-295.
 **Builds on:** `.ai_design/issue_runner/design.md` (pods, `Issue.assigned_pod`, the matcher), `.ai_design/n_runners_in_same_machine/new_pod_project_relationship/design.md` (pods are project-scoped), `.ai_design/issue_run_improve/design.md` §5.7 (run pinning), `.ai_design/managed_runner/design.md` §8.4–§8.5 (a pin that is an execution target, and waiting visibly).
 
 Today an issue is routed to a **pod**: any free runner in that squad takes the run. This doc adds a second mode: the issue is routed to **one dedicated runner**, chosen by a person, because of the machine, tools or access that runner has.
 
-Every decision in this doc is settled. The offline policy (§11) was decided by the project owner on 2026-10-12, the five open questions H-2 to H-6 were answered on 2026-10-15, and H-7 to H-9 on 2026-10-21; §21 lists the answers and where each one lands.
+Every decision in §1 to §22 is settled. The offline policy (§11) was decided by the project owner on 2026-10-12, the five open questions H-2 to H-6 were answered on 2026-10-15, and H-7 to H-9 on 2026-10-21; §21 lists the answers and where each one lands. §23, added on 2026-11-05, brings in the engine runners and carries H-10 (decided) and H-11 to H-14 (to confirm).
+
+**Implementation status (2026-11-05).** Nothing of this design is implemented on the server. At `main` `08be546d6` no Django or `rust-api/` code mentions `assigned_runner`, `pin_kind`, `dispatch_wait`, `dedicated_runner_lost_action` or `assignable_for`; HA-2 to HA-6 are open. The new frontend already ships the UI against this contract, merged with `apps/web_new` on 2026-10-30:
+
+- the two-level pod and runner picker: `apps/web_new/src/shared/pickers/pods.ts` (`buildExecutionTargets`, the E-code sentences, the status line) and `PodPicker.tsx`, reading the runner list with `assignable_for` (`src/shared/pickers/reference.ts`);
+- the execution-target write: `src/features/issues/api/executionTarget.ts`, one issue `PATCH` of `assigned_pod_id`, `assigned_runner_id` and `agent_executor`; the create form sends `assigned_runner_id` too (`src/features/issues/create/createForm.ts`);
+- the waiting banner and badge: `src/features/issues/detail/waiting/waiting.ts` and `WaitingBanner.tsx`, reading `agent_status.active_run.pinned_runner`, `pinned_runner_name`, `pin_kind` and `dispatch_wait`, and calling `POST /api/runners/runs/<id>/release-pin/`;
+- the AI Workers project settings page: `src/features/project-settings/ai-workers/` and the route `src/routes/$ws/_gated/settings/projects/$projectId/ai-workers.tsx`, writing `dedicated_runner_lost_action` through the project `PATCH`;
+- the shapes, in `packages/api-client/src/contracts/`: `issues.ts` (`assigned_runner_id`, `AssignedRunnerDetail`), `issue-agent.ts` and `runs.ts` (`DispatchWait`, the pin fields, `ReleaseRunPinResult`), `runners.ts` (`assignable`, `not_assignable_code`, `is_busy`, `queue_depth`, `assignableFor`), `projects.ts` (`dedicated_runner_lost_action`).
+
+The server work must match the contract `apps/web_new` already sends and reads. Checked against this doc, these match: the `assigned_runner_id` write and read on the app API (§14.1), including the list field and the 400 body keyed by `assigned_runner_id`; `assigned_runner_detail` field for field; the four `assignable_for` row fields (§7.4); the run pin fields and `dispatch_wait` field for field (§14.3); the release-pin path and its `assignment` note (§12.2); the banner's three actions (§14.4); the two `dedicated_runner_lost_action` values (§6.6). Differences found:
+
+| #   | Where                                        | Difference                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| --- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M1  | Issue and project `PATCH` today              | Not a shape mismatch but a live gap: the server has no `assigned_runner_id` or `dedicated_runner_lost_action` field, so DRF drops both without an error. A runner picked in `apps/web_new` shows as chosen until the refetch, then reads as the pod; the AI Workers setting does not persist. This is the "saved choice that dispatch ignores" §19 rules out, reached from the client side. Until HA-2b, `apps/web_new` should not offer the runner level (or HA-2a should reject the field). |
+| M2  | `pods.ts` agent rows, `executionTargetPatch` | The picker still offers Cloud Agent and Pi Dash Agent (desktop) as peers, from `agent_executor_options`, and an agent pick writes `assigned_pod_id: null`. §8 only says the runner is cleared. Once the engine design removes the executor choice (§23.6), the picker must hide options marked `deprecated`, and `AgentExecutorOption` has no such field yet.                                                                                                                                 |
+| M3  | `waiting.ts`, `DispatchWait`                 | No `runner_paused` case and no `pause_reason` field (§23.5). An unknown reason renders as the raw code ("Waiting for runner X — runner_paused."), so it degrades but reads badly.                                                                                                                                                                                                                                                                                                             |
+| M4  | `pods.ts` runner rows                        | Rows are labelled `runner.name`. An engine runner should read "Built-in engine · <machine>" (§23.6), from `provisioning` and `dev_machine_detail`, which the runner contract already carries. `RUNNER_NOT_ASSIGNABLE_REASONS` keeps `runner_desktop_bundled`, which §23.1 removes.                                                                                                                                                                                                            |
+| M5  | `ai-workers/rules.ts`                        | The `fall_back` explainer says "Queued runs continue on any runner in the pod instead". §13.1 falls back to the issue's pod, then the project's default pod, then the no-eligible-runner bounce. The text should not promise the pod.                                                                                                                                                                                                                                                         |
+| M6  | Runner list (`listRunners`)                  | The picker reads the list without `include_bundled`, so engines are hidden today by the server filter. The engine design removes that filter and has the picker skip `desktop_bundled` rows itself until §23 lands; §23 then lists them.                                                                                                                                                                                                                                                      |
+
+**Sequencing (product owner, 2026-11-05).** The built-in engine design (`.ai_design/built_engine_as_runner/design.md`, PIDESKAPP-121, PR #1496) is implemented and finished first. Implementation of this design, §23 included, starts only after that work is merged, and builds on its `Runner.pod_dispatch`, engine usage rule and machine pause fields as they are on `main` by then. The Rust port is on `main` now (not `origin/rust-dev`, as §17 says) and reads and writes through SeaORM (#2896, the raw-SQL ratchet guard #2881); the HA work touches files the SeaORM migration batches changed, the runner endpoints in Batches 1a to 1g (#2899 to #2916) and the issue, transition and clock domains in Batches 2a to 3c (#2918 to #2939), so it starts from `main` after those and uses SeaORM for reads and writes.
 
 ---
 
@@ -27,7 +48,7 @@ The dispatch layer already has what is needed: `AgentRun.pinned_runner` routes a
 
 - **Routing by capability.** v1 picks a runner by identity. "Any runner that has label X" is sketched in §16 and deferred.
 - **Scheduler bindings.** `SchedulerBinding.pod` keeps its squad-only shape in v1 (§15).
-- **Cloud Agent and managed (desktop) runs.** They have no user-choosable runner (§8).
+- **Cloud Agent and managed (desktop) runs.** They have no user-choosable runner (§8). The built-in engine as a runner, which replaces managed runs, is §23.
 - **Multi-run concurrency on one runner.** A runner still works one issue run at a time.
 - **Changing the pod model.** Every runner still belongs to exactly one pod; a dedicated runner is "the pod, narrowed to one runner". Runners with no pod, and a runner in several pods, are deferred (§22).
 - **Product code in this issue.** This doc only.
@@ -89,7 +110,7 @@ Rejected alternatives:
 | --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
 | I1  | `assigned_runner` set ⇒ `assigned_pod` set and `assigned_runner.pod_id == assigned_pod_id`.                                                                      | DB check for "pod is set"; the shared service (§7.3) and the lifecycle hooks (§13) for pod equality. |
 | I2  | `assigned_runner` set ⇒ `agent_executor == "local_runner"` (explicit, not inherited).                                                                            | DB check constraint.                                                                                 |
-| I3  | `assigned_runner` is never a revoked or `desktop_bundled` runner.                                                                                                | Shared service on write; `Runner.revoke()` on revoke (§13).                                          |
+| I3  | `assigned_runner` is never a revoked or `desktop_bundled` runner. For engine runners, §23.1 reduces it to "never revoked".                                       | Shared service on write; `Runner.revoke()` on revoke (§13).                                          |
 | I4  | A queued run of an issue with a dedicated runner carries `pinned_runner == issue.assigned_runner` and `pin_kind == "dedicated"`, unless it was released (§12.2). | The pin resolver (§9.1) and the re-point step (§13.2).                                               |
 | I5  | `pin_kind == "dedicated"` ⇒ `executor_kind == "local_runner"`.                                                                                                   | DB check constraint on `AgentRun`.                                                                   |
 
@@ -165,7 +186,7 @@ A runner `R` can be the dedicated runner of issue `X`, when user `U` makes the r
 | E2  | `R.pod.project_id == X.project_id` and the pod is not soft-deleted.                          | `runner_wrong_project`      |
 | E3  | If the request also names a pod, it is `R.pod`.                                              | `runner_pod_mismatch`       |
 | E4  | `R.status != revoked`.                                                                       | `runner_revoked`            |
-| E5  | `R.provisioning != desktop_bundled`.                                                         | `runner_desktop_bundled`    |
+| E5  | `R.provisioning != desktop_bundled`. Lifted for engine runners (§23.1).                      | `runner_desktop_bundled`    |
 | E6  | The executor after this request is `local_runner` (§8).                                      | `executor_not_local`        |
 | E7  | `R.owner` is the issue's creator or one of its current assignees.                            | `runner_owner_not_on_issue` |
 | E8  | The issue has no run that a runner holds; `QUEUED` and `PAUSED_AWAITING_INPUT` pass (§13.2). | `active_run_in_progress`    |
@@ -266,13 +287,13 @@ Comment coalescing, the one-active-run rule and the ticker are unchanged.
 
 ### 9.3 Matcher
 
-`next_for_runner()` changes in one place: the tier order, which now depends on what the runner served last (§10.2). Everything else stays: it already serves only runs pinned to this runner or unpinned, already applies `filter_runs_usable_by_runner`; `next_queued_run_for_pod()` already excludes pinned runs; desktop-bundled runners already take only managed runs. For a runner whose last run was not a dedicated one the order is exactly today's, so a pod with no dedicated issues sees no change and the existing matcher and pin tests pass unmodified. HA-3 adds the alternation tests (§18).
+`next_for_runner()` changes in one place: the tier order, which now depends on what the runner served last (§10.2). Everything else stays: it already serves only runs pinned to this runner or unpinned, already applies `filter_runs_usable_by_runner`; `next_queued_run_for_pod()` already excludes pinned runs; desktop-bundled runners already take only managed runs (for engine runners, §23.2 replaces this). For a runner whose last run was not a dedicated one the order is exactly today's, so a pod with no dedicated issues sees no change and the existing matcher and pin tests pass unmodified. HA-3 adds the alternation tests (§18).
 
 `apply_run_resume_unavailable` changes: for a `dedicated` pin it re-queues the run and keeps the pin and the kind (it still clears the parent's `thread_id`, so the next attempt is a fresh session on the same runner). For a `locality` pin it behaves as today.
 
 ### 9.4 Preflight and messages
 
-`pod_has_runner_for_issue_principal()` gains a branch for a dedicated issue: it checks that one runner instead of the pod — not revoked, not `desktop_bundled`, in the run's pod, and owned by the run creator, the issue creator or a current assignee. On failure the existing bounce runs (`_bounce_issue_no_eligible_runner`: back to Backlog, system comment) with reason `dedicated-runner-not-eligible`, and the comment names the runner and the failing rule.
+`pod_has_runner_for_issue_principal()` gains a branch for a dedicated issue: it checks that one runner instead of the pod — not revoked, not `desktop_bundled`, in the run's pod, and owned by the run creator, the issue creator or a current assignee. For an engine runner, §23.2 replaces "not `desktop_bundled`" with the engine usage rule. On failure the existing bounce runs (`_bounce_issue_no_eligible_runner`: back to Backlog, system comment) with reason `dedicated-runner-not-eligible`, and the comment names the runner and the failing rule.
 
 Offline is not a bounce. The run is created and waits (§11). When a run is created for a dedicated runner that is not online, creation also posts one system comment:
 
@@ -412,12 +433,11 @@ The runner-move guard (`runner/views/runners.py`) refuses a move while a non-ter
 
 - **`fail_to_backlog` (default).** The issue's queued run is failed with `error_code = "dedicated_runner_revoked"` instead of being un-pinned. The issue moves to Backlog through the existing bounce (`orchestration/scheduling.py:_bounce_issue_no_eligible_runner`, reason `dedicated-runner-revoked`), whose system comment (a new message for this reason) names the runner and says it was revoked or deleted and that a person must choose a new runner or the pod. This applies whether or not the issue had a queued run: an issue in a ticking state is moved to Backlog so no tick creates a run on a squad the user did not choose. An issue in another state (Backlog, Todo, Done, …) only gets the cleared assignment and the comment.
 - **`fall_back`.** The issue is routed to a squad, in this order:
-
   1. Its own pod, if that pod still has a runner that could serve the issue after this revoke. The queued run is un-pinned and served by the pod's shared queue (today's revoke behaviour).
   2. Otherwise the project's default pod (`Pod.default_for_project`), if it has such a runner. `assigned_pod` is set to it in the same transaction. `AgentRun.pod` is immutable, so the queued run is cancelled and, on commit, a replacement is created in the default pod through `_create_and_dispatch_run`, as the project-move handoff does.
   3. Otherwise the existing no-eligible-runner bounce applies: back to Backlog with its comment (reason `no-eligible-runner`).
 
-  "A runner that could serve the issue" is `pod_has_runner_for_issue_principal(pod, issue, run.created_by_id)`: non-revoked, not `desktop_bundled`, and owned by the run's creator, the issue's creator or a current assignee. A bare "non-revoked runner" check is not enough: a pod whose only other runners are desktop-bundled, or private to users not on the issue, would pass it, and the un-pinned run would sit in the shared queue that no runner serves, with no `dispatch_wait` (it has no pin) and no bounce. The same check is what the replacement run's preflight applies in step 2, so steps 2 and 3 cannot disagree.
+  "A runner that could serve the issue" is `pod_has_runner_for_issue_principal(pod, issue, run.created_by_id)`: non-revoked, not `desktop_bundled`, and owned by the run's creator, the issue's creator or a current assignee (for engine runners, §23.2). A bare "non-revoked runner" check is not enough: a pod whose only other runners are desktop-bundled, or private to users not on the issue, would pass it, and the un-pinned run would sit in the shared queue that no runner serves, with no `dispatch_wait` (it has no pin) and no bounce. The same check is what the replacement run's preflight applies in step 2, so steps 2 and 3 cannot disagree.
 
   When the issue has no queued run, the same order applies with `run_creator_id=None` (the function then counts only the issue's creator and current assignees): step 2 only changes `assigned_pod` and creates no run, and step 3 moves the issue to Backlog only if it is in a ticking state, as for `fail_to_backlog`.
 
@@ -492,11 +512,11 @@ Computed, not stored. The run serializers (`AgentRunSerializer`, and `_serialize
 }
 ```
 
-`reason` is one of `runner_offline` (status is not online, or the heartbeat is older than `HEARTBEAT_GRACE`), `runner_busy` (the runner has a busy run, older runs in its personal queue, or — when its last run was dedicated — a shared run it takes first under §10.2; `runs_ahead` counts them), `runner_not_permitted` (§9.4), or `dispatching` (the runner is free and the drain has not run yet). `releasable` tells the client whether the requester may release. This also makes waiting on a locality pin visible, which it is not today.
+`reason` is one of `runner_offline` (status is not online, or the heartbeat is older than `HEARTBEAT_GRACE`), `runner_busy` (the runner has a busy run, older runs in its personal queue, or — when its last run was dedicated — a shared run it takes first under §10.2; `runs_ahead` counts them), `runner_not_permitted` (§9.4), or `dispatching` (the runner is free and the drain has not run yet). §23.5 adds `runner_paused` for engine runners. `releasable` tells the client whether the requester may release. This also makes waiting on a locality pin visible, which it is not today.
 
 ### 14.4 Web picker (`apps/web`)
 
-- `dropdowns/pod/base.tsx` becomes a two-level picker. Each pod is a group: its first option is "Any runner in <pod>" (pod assignment, today's value); under it, the pod's runners that the viewer can see. Cloud Agent and Pi Dash Agent stay as peers.
+- `dropdowns/pod/base.tsx` becomes a two-level picker. Each pod is a group: its first option is "Any runner in <pod>" (pod assignment, today's value); under it, the pod's runners that the viewer can see. Cloud Agent and Pi Dash Agent stay as peers (until the engine design removes them; §23.6).
 - Each runner row: name, status line (§10.1), owner. A runner with `assignable = false` is disabled and shows the reason for its code.
 - `execution-target.ts`: the dropdown value becomes a tagged value (`pod:<id>`, `runner:<id>`, or an executor sentinel). `executionTargetPatch` returns `{agent_executor: "local_runner", assigned_pod_id, assigned_runner_id}` for a runner and `{…, assigned_runner_id: null}` for a pod.
 - Collapsed label: "gpu-box" with the pod as secondary text; when waiting, the `dispatch_wait` reason as a badge.
@@ -608,19 +628,24 @@ Scope this design adds to the epics as first written: `--pod` on the CLI and `as
 
 ## 21. Decisions
 
-All decided. H-1 by the project owner on 2026-10-12; H-2 to H-6 on 2026-10-15; H-7 to H-9 on 2026-10-21.
+H-1 by the project owner on 2026-10-12; H-2 to H-6 on 2026-10-15; H-7 to H-9 on 2026-10-21. H-10 was decided on 2026-11-04 as PO-10 of the engine design and moved here on 2026-11-05. H-11 to H-14 are proposed defaults that need the product owner's confirmation (§23.8).
 
-| #   | Question                                                         | Decision                                                                                                                                                                                                | Section     |
-| --- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| H-1 | Dedicated runner offline with a run queued                       | Wait, visibly; no automatic fallback, no timeout.                                                                                                                                                       | §11         |
-| H-2 | Dedicated runner revoked or deleted                              | A project setting (§6.6) on a new AI Workers page. Default: fail the queued run, move the issue to Backlog, comment. Alternative: fall back to the pod, then the default pod, then the existing bounce. | §6.6, §13.1 |
-| H-3 | Dedicated work versus squad work on the same runner; queue limit | Strict 1:1 alternation between dedicated runs and the shared queue; locality pins keep first priority; no cap; queue depth shown and warned.                                                            | §10         |
-| H-4 | Who may dedicate an issue to a runner                            | Confirmed: the runner's owner, who is also the issue's creator or a current assignee. Otherwise rejected; the owner is not auto-added.                                                                  | §7.1        |
-| H-5 | Rollout gate                                                     | No gate. HA-2's write path lands after HA-3's dispatch, recorded as `blocked_by` relations.                                                                                                             | §19         |
-| H-6 | Showing a dedicated runner's name, status and owner on the issue | Confirmed: shown to everyone who can see the issue.                                                                                                                                                     | §14.1       |
-| H-7 | Who may change or clear a dedicated runner someone else set      | Any creator or current assignee, whoever set it. No rule protects the previous choice.                                                                                                                  | §7.1        |
-| H-8 | Who may release a waiting dedicated run to the pod               | Only the issue's creator and current assignees. (Cancel for every issue run is restricted the same way in PDASHOSS01-317, outside this design.)                                                         | §12.2       |
-| H-9 | The dedicated runner's owner is removed from the assignees       | Confirmed as written: the assignment is not cleared; a queued run is failed as stranded and the next run is bounced to Backlog.                                                                         | §13.1       |
+| #    | Question                                                                                         | Decision                                                                                                                                                                                                | Section     |
+| ---- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| H-1  | Dedicated runner offline with a run queued                                                       | Wait, visibly; no automatic fallback, no timeout.                                                                                                                                                       | §11         |
+| H-2  | Dedicated runner revoked or deleted                                                              | A project setting (§6.6) on a new AI Workers page. Default: fail the queued run, move the issue to Backlog, comment. Alternative: fall back to the pod, then the default pod, then the existing bounce. | §6.6, §13.1 |
+| H-3  | Dedicated work versus squad work on the same runner; queue limit                                 | Strict 1:1 alternation between dedicated runs and the shared queue; locality pins keep first priority; no cap; queue depth shown and warned.                                                            | §10         |
+| H-4  | Who may dedicate an issue to a runner                                                            | Confirmed: the runner's owner, who is also the issue's creator or a current assignee. Otherwise rejected; the owner is not auto-added.                                                                  | §7.1        |
+| H-5  | Rollout gate                                                                                     | No gate. HA-2's write path lands after HA-3's dispatch, recorded as `blocked_by` relations.                                                                                                             | §19         |
+| H-6  | Showing a dedicated runner's name, status and owner on the issue                                 | Confirmed: shown to everyone who can see the issue.                                                                                                                                                     | §14.1       |
+| H-7  | Who may change or clear a dedicated runner someone else set                                      | Any creator or current assignee, whoever set it. No rule protects the previous choice.                                                                                                                  | §7.1        |
+| H-8  | Who may release a waiting dedicated run to the pod                                               | Only the issue's creator and current assignees. (Cancel for every issue run is restricted the same way in PDASHOSS01-317, outside this design.)                                                         | §12.2       |
+| H-9  | The dedicated runner's owner is removed from the assignees                                       | Confirmed as written: the assignment is not cleared; a queued run is failed as stranded and the next run is bounced to Backlog.                                                                         | §13.1       |
+| H-10 | A human run on an issue dedicated to someone else's engine, which the engine usage rule excludes | Refused at creation with `assigned_runner_not_owner`, offering "Run on my engine instead" and "Run on any runner in <pod> once". Decided as the engine design's PO-10.                                  | §23.3       |
+| H-11 | Run dedicated to an offline or paused engine                                                     | **Proposed:** H-1 applies to engines as written.                                                                                                                                                        | §23.8       |
+| H-12 | Engine removed or revoked while issues are dedicated to it                                       | **Proposed:** H-2 applies to engines as written.                                                                                                                                                        | §23.8       |
+| H-13 | Who may release a waiting run dedicated to an engine                                             | **Proposed:** H-8 applies to engines as written.                                                                                                                                                        | §23.8       |
+| H-14 | The changes to this design for engine runners                                                    | **Proposed:** §23.1 to §23.7.                                                                                                                                                                           | §23         |
 
 ## 22. Deferred
 
@@ -632,3 +657,79 @@ All decided. H-1 by the project owner on 2026-10-12; H-2 to H-6 on 2026-10-15; H
 - Bulk-editing the dedicated runner across issues.
 - Runners that belong to no pod (§3).
 - Many-to-many membership between runners and pods (§3). v1 keeps one pod per runner.
+
+## 23. Engine runners (built-in engine)
+
+Added on 2026-11-05. The engine design (`.ai_design/built_engine_as_runner/design.md`, PIDESKAPP-121, "ENGINE" below) makes the built-in engine an ordinary runner: a `Runner` row with `provisioning = desktop_bundled` per machine and project, hosted by the Pi Dash CLI daemon, billed to its owner's wallet. ENGINE revision 4.0 gives an engine issue work only through its pod and moves everything about dedicating an issue to one engine here. ENGINE revisions 3.3 and 3.4 are where this section comes from.
+
+**Depends on ENGINE (PR #1496) being merged and implemented.** This section uses ENGINE's concepts as they are on `main` when HA implementation starts (Sequencing, top of this doc): `Runner.pod_dispatch` (`pinned_only` / `pod_member`), the engine usage rule (ENGINE section 8: an engine takes only runs its owner created, plus automatic runs on the owner's issues and schedulers, unless `DevMachine.engine_team_runs` is on), the machine pause fields `DevMachine.engine_paused_by_owner` and `engine_auto_pause_reason`, the removal of the executor choice, and the merge endpoint. Where this section says nothing, the rest of this design applies to engines as written.
+
+### 23.1 Engines can be dedicated runners
+
+- E5 and I3 are lifted for engine runners. I3 becomes "never a revoked runner"; the code `runner_desktop_bundled` is removed. An engine on a legacy desktop machine (an older app build) can be chosen too.
+- E1 and E7 are unchanged, so only the engine's owner can dedicate an issue to it, on an issue they created or are assigned to. A runner is visible only to its owner, so nobody else can pick someone's engine.
+- Every phase is pinned (§9.1, §9.2), whatever the engine's `pod_dispatch`: a `pinned_only` engine takes the runs dedicated to it, and only those. Automatic runs (ticks) on an issue dedicated to it are admitted under the usage rule.
+
+### 23.2 The engine usage rule where this design tests "not `desktop_bundled`"
+
+- **Matcher (§9.3).** "Desktop-bundled runners already take only managed runs" is replaced by ENGINE section 7: an engine takes runs dedicated to it, and, when it is a `pod_member`, its locality pins and the pod's shared queue, all under the usage rule. A `pinned_only` engine serves no shared queue, so under H-3 it works through its dedicated queue in order.
+- **Preflight (§9.4) and `fall_back` (§13.1).** "Not `desktop_bundled`" is replaced, for engine runners only, by the engine usage rule, which also reads the trigger (human versus automatic, `HUMAN_TRIGGERS` in `apps/api/pi_dash/runner/models.py:261-268` at `08be546d6`). Ordinary runners keep this design's test. `pod_has_runner_for_issue_principal` is the one function both use, so they cannot disagree.
+- **Stranded sweep (§12.1).** It also fails a queued engine run the usage rule stops admitting while it waits, for example when the owner turns the opt-in off or is removed from the assignees.
+
+### 23.3 A teammate's run on an issue dedicated to an engine (H-10)
+
+This design creates a run the dedicated runner will not take whenever the runner's owner is on the issue, and the stranded sweep fails it later. For an engine that would spend nothing but would confuse the teammate, so:
+
+- A human-triggered run by someone the engine usage rule excludes is refused at creation with `assigned_runner_not_owner`, and nothing is queued. This covers a teammate's Run, Run AI or Comment & Run, and a teammate's state move into a ticking state, on an issue dedicated to the owner's engine while the opt-in is off.
+- The UI offers **Run on my engine instead**, which re-assigns the issue to the caller's own runner under E1 and E7 (allowed by H-7), and **Run on any runner in <pod> once**, which creates the run unpinned in the pod for that run only, as a release would (§12.2).
+- For Comment & Run the comment is saved and the issue gets one system comment saying why no run started. For a state move the move stands and gets the same system comment.
+- **A refused run does not arm the clock.** Every human event reaches `scheduling.reconcile` before the run is created: in `handle_issue_state_transition` at `apps/api/pi_dash/orchestration/service.py:243`, with the preflight at `:286`; in `handle_issue_comment` at `:417`, before `_create_continuation_run` (all at `08be546d6`). A refused state move or Comment & Run would otherwise leave the issue ticking, and the next tick, an automatic run on the owner's issue that the usage rule admits, would start the very run the refusal stopped. The refusal check therefore runs **before** `reconcile`: when the issue is dedicated to an engine and the rule refuses the event's human run, the event is applied to the issue (the state changes, the comment is saved) but not to the clock, which keeps its previous state. A clock the owner or an admitted run already armed keeps ticking; that work is the owner's.
+- The Rust counterpart is the human-run reconcile in `rust-api/crates/api/src/runner_runs/dispatch.rs` (`clock::reconcile` at `:1657` at `08be546d6`); the check goes before it, and in the Rust state-transition path the same way.
+
+### 23.4 Lifecycle for engines
+
+- **Offline (§11, H-11).** A run dedicated to an offline engine is created and waits, with no timeout and no fallback; only a person ends the wait. Creation posts the §9.4 comment naming "Built-in engine · <machine>". Session open drains the personal queue first, as for any runner.
+- **Removed or revoked (§13.1, H-12).** "Remove from project" and "Remove this computer" revoke the engine runner, so the project's `dedicated_runner_lost_action` applies.
+- **Release (§12.2, H-13).** As written. The released run joins the pod's shared queue, where an engine takes it only as a pod member and under the usage rule.
+- **Resume and busy rejection (§9.3).** `apply_run_resume_unavailable` keeps a dedicated pin, so a cancellation race cannot send the run to another machine.
+- **Merge of two machines.** ENGINE's merge endpoint retires the source machine's engine runner when both machines have one for the same project. Once this design is built, that retirement first re-assigns each issue dedicated to the source runner to the survivor through `apply_execution_target` with the system actor (E7 holds: same owner). When the survivor is in the same pod, a `QUEUED` run is re-pointed (§13.2). When it is in another pod of the project, the issue's `assigned_pod` changes, so a `QUEUED` run is cancelled and, on commit, recreated in the survivor's pod through `_create_and_dispatch_run`, the handoff `fall_back` uses. Nothing is then dedicated to the source runner, so the lost-runner rule does not fire.
+- **Pod move (§13.1).** A move to a pod of **another project** is refused while any issue is dedicated to the runner, with `runner_has_assigned_issues`, and the UI lists the issues. Otherwise I1 and E2 would break. This applies to every runner, not only engines: §13.1 covers moves within one project only. ENGINE already restricts engine runners to pods of their own project; this rule covers own-agent runners.
+
+### 23.5 `dispatch_wait.reason = runner_paused`
+
+A paused engine is treated as offline for matching. A dedicated run waiting for it reports `reason = runner_paused` and a `pause_reason`: `owner_paused` for `DevMachine.engine_paused_by_owner`, else the value of `engine_auto_pause_reason` (`engine_sign_in_required`, `gateway_session_revoked`, `wallet_empty`, `profile_unavailable`, `engine_disabled`). When the engine is both paused and offline, `runner_paused` wins, because a person must act on it. The issue then says, for example, "Waiting for Built-in engine · <machine>: the wallet is empty". `pause_reason` is `null` for every other reason. `apps/web_new` needs the case (Implementation status, M3).
+
+### 23.6 Picker and executors
+
+- There is no executor choice once ENGINE is built: `managed_runner` and `cloud_agent` are no longer offered for issues and projects, and old clients that send them get `local_runner`, pod-level (ENGINE section 6). §8's table then describes legacy rows only, and the picker (§14.4) has no Cloud Agent or Pi Dash Agent peers.
+- The picker's runner level lists engines as "Built-in engine · <machine>", read from `provisioning` and the runner's dev machine. ENGINE's interim rule that the picker skips `desktop_bundled` rows is removed. `assignable_for` reports engines like any runner.
+- ENGINE's pod-level translation of `agent_executor = managed_runner` from old desktop builds stays; this design does not bring back the per-caller engine.
+
+### 23.7 Legacy `managed_runner` runs: no exemption needed
+
+ENGINE revision 3.4 exempted a legacy queued `managed_runner` run from I4 and made §13.2's re-point cancel and recreate it, because I5 forbids `pin_kind = dedicated` on it and its migration backfilled `assigned_runner` onto such issues. Neither cause remains:
+
+- ENGINE now migrates issues set to the built-in engine to pod-level `local_runner` and writes no `assigned_runner`, so at the upgrade no issue with a legacy run is dedicated to anything.
+- After the upgrade no new `managed_runner` run is created (ENGINE section 6), and the queued ones are failed by the existing sweep after `MANAGED_RUNNER_QUEUED_MAX_AGE_SECS` (12 h).
+- This design is implemented only after ENGINE is merged and released, so by the time HA-2b's write path can set `assigned_runner`, every legacy queued run has ended. No path re-points one.
+
+Conclusion: the exemption is dropped. HA-6's rollout check confirms there is no `QUEUED` run with `executor_kind = managed_runner` before HA-2b ships.
+
+### 23.8 Decisions to confirm
+
+H-10 is decided (ENGINE's PO-10). H-11 to H-13 adopt this design's decisions for engines by default, as ENGINE revision 3.3 announced on PIDESKAPP-121; the product owner may confirm or reverse each.
+
+| #    | Choice                                                     | Default                                                                                             | Not chosen                                                                                                                                                     |
+| ---- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| H-11 | Run dedicated to an offline or paused engine               | H-1: every run waits, visibly, with no timeout; only a person ends the wait (§23.4, §23.5).         | ENGINE revision 3.2's rule: refuse a person's run and expire automatic runs after 12 h. That would change H-1, for engines only or for every dedicated runner. |
+| H-12 | Engine removed or revoked while issues are dedicated to it | H-2: the project's `dedicated_runner_lost_action`, default `fail_to_backlog`.                       | ENGINE revision 3.2's `assigned_runner_removed`, leaving the issue pod-level, for engines only.                                                                |
+| H-13 | Who may release a waiting run dedicated to an engine       | H-8: the issue's creator and current assignees, for that run only.                                  | Refuse release for engines, so no pod runner takes their runs.                                                                                                 |
+| H-14 | The changes in §23.1 to §23.7                              | Adopt them. They follow from ENGINE's executor removal, usage rule and engine-in-the-CLI decisions. | Keep engines out of dedicated assignment.                                                                                                                      |
+
+### 23.9 Epics and tests
+
+- **HA-2:** E5 and I3 for engines (§23.1); `assigned_runner_not_owner` at creation (§23.3, the issue side).
+- **HA-3:** the matcher, preflight, `fall_back` and stranded-sweep rules (§23.2); the refusal check before `reconcile` (§23.3); `runner_paused` (§23.5); the cross-project pod-move refusal and the merge re-assignment (§23.4).
+- **HA-4:** the engine label, the `runner_paused` banner text and "Run on my engine instead" in `apps/web_new` (§23.3, §23.6; M3, M4).
+- **Rust port:** every item above, with SeaORM, in the files the runner and clock batches changed (Sequencing, top of this doc).
+- **Scenarios** (from ENGINE revision 3.4, to add to HA-6): an issue dedicated to an engine gets a person's Run and a tick while the engine is offline, and both wait as "Waiting for Built-in engine · <machine>" with no timeout; the engine is removed and the lost-runner rule applies; a busy rejection requeues the run still pinned to the engine; a tick on an issue dedicated to a `pinned_only` engine runs on it without a preflight bounce; a teammate's Run is refused with `assigned_runner_not_owner`; a teammate's state move changes the state, creates no run and leaves no tick to start one, and the owner's later Run ticks as usual; a move to another project's pod is refused while issues are dedicated to the runner; two machines merge and the dedicated issues follow the surviving engine.
