@@ -59,7 +59,7 @@ use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use sea_orm::EntityTrait;
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_auth::permissions::project;
@@ -74,9 +74,7 @@ use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 pub use pidash_services::html_normalize::lxml_roundtrip;
 use pidash_services::operations;
 use pidash_services::operations::issues::parse_python_int;
-use pidash_services::read::{
-    self, DecodedIssue, RenderRequest, WriteProject, ISSUE_EXTRA_COLS, ISSUE_SELECT_COLS,
-};
+use pidash_services::read::{self, DecodedIssue, RenderRequest, WriteProject};
 use pidash_services::v1_work_items::queries_core as core_queries;
 use pidash_services::v1_work_items::shape_issue as shape;
 use pidash_services::v1_work_items::{filter_fields, FieldSpec};
@@ -85,9 +83,9 @@ use crate::domain_hooks::AppTaskEnqueueHook;
 use crate::issue_transition::AppTransitionHook;
 use crate::state::AppState;
 
+use super::issue_reads;
 use super::perms::{decide, gate_for, resolve_moved_by_run, RunFacts, V1WorkItemsRoute};
 pub use pidash_compat::response::SERVER_ERROR_BODY;
-use pidash_types::runner_runs::AgentRunStatus;
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -376,9 +374,10 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
 /// (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
 /// rows, so a soft-deleted token 403s instead of authenticating.
 async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid, Denial> {
-    let row = super::auth_reads::live_api_token(&pidash_db::pool::sea_orm_connection(pool), presented)
-        .await
-    .map_err(|error| db_error(error, "api-token-lookup"))?;
+    let row =
+        super::auth_reads::live_api_token(&pidash_db::pool::sea_orm_connection(pool), presented)
+            .await
+            .map_err(|error| db_error(error, "api-token-lookup"))?;
     let Some(super::auth_reads::ApiTokenLookup {
         token,
         is_active,
@@ -412,8 +411,11 @@ async fn resolve_machine_token(
     secret_key: &[u8],
 ) -> Result<uuid::Uuid, Denial> {
     let presented_hash = pidash_auth::token::hash_token(presented, secret_key);
-    let row = super::auth_reads::machine_token_with_device(&pidash_db::pool::sea_orm_connection(pool), &presented_hash)
-        .await
+    let row = super::auth_reads::machine_token_with_device(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &presented_hash,
+    )
+    .await
     .map_err(|error| db_error(error, "machine-token-lookup"))?;
     let Some(super::auth_reads::MachineTokenLookup {
         token_hash,
@@ -437,8 +439,12 @@ async fn resolve_machine_token(
         .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`);
     // a `false` revokes the token, then denies.
-    let member = super::auth_reads::is_active_workspace_member(&pidash_db::pool::sea_orm_connection(pool), workspace_id, user_id)
-        .await
+    let member = super::auth_reads::is_active_workspace_member(
+        &pidash_db::pool::sea_orm_connection(pool),
+        workspace_id,
+        user_id,
+    )
+    .await
     .map_err(|error| db_error(error, "machine-token-member"))?;
     if !member {
         // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
@@ -659,11 +665,6 @@ async fn require_gate(
 // fetchers and the renderers; the wrappers map failures onto Denial).
 // ---------------------------------------------------------------------------
 
-/// Decode one list/detail row via the public read service.
-fn decode_issue(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedIssue, Denial> {
-    read::decode_issue(row, tz).map_err(|_| Denial::ServerError)
-}
-
 /// Render one decoded row via the public read service.
 async fn render_decoded(
     pool: &PgPool,
@@ -735,157 +736,14 @@ async fn fetch_project_for_write(pool: &PgPool, project_id: &Uuid) -> Result<Wri
         })
 }
 
-/// One `:named` bind value for [`push_where`].
-#[derive(Debug)]
-enum WhereBind<'a> {
-    Uuid(&'a Uuid),
-    Text(&'a str),
-    Integer(i64),
-    Uuids(&'a [Uuid]),
-    Texts(&'a [String]),
-}
-
-/// Splice a `:named`-placeholder `WHERE` (the `queries_core` fragments)
-/// into a [`sqlx::QueryBuilder`], pushing binds positionally. `IN (:list)`
-/// becomes `= ANY($N)` (identical semantics; sqlx binds the whole slice
-/// as one array parameter). `::` casts pass through untouched.
-fn push_where<'a>(
-    qb: &mut sqlx::QueryBuilder<'a, sqlx::Postgres>,
-    where_text: &str,
-    binds: &HashMap<&str, WhereBind<'a>>,
-) -> Result<(), Denial> {
-    let rewritten = where_text.replace("IN (:", "= ANY(:");
-    let mut rest = rewritten.as_str();
-    while let Some(colon) = rest.find(':') {
-        let (head, tail) = rest.split_at(colon);
-        qb.push(head);
-        if tail.starts_with("::") {
-            qb.push("::");
-            rest = tail.strip_prefix("::").expect("checked cast");
-            continue;
-        }
-        let ident: String = tail[1..]
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
-        if ident.is_empty() {
-            qb.push(":");
-            rest = &tail[1..];
-            continue;
-        }
-        match binds.get(ident.as_str()) {
-            Some(WhereBind::Uuid(id)) => {
-                qb.push_bind(*id);
-            }
-            Some(WhereBind::Text(text)) => {
-                qb.push_bind(*text);
-            }
-            Some(WhereBind::Integer(number)) => {
-                qb.push_bind(*number);
-            }
-            Some(WhereBind::Uuids(ids)) => {
-                qb.push_bind(*ids);
-            }
-            Some(WhereBind::Texts(texts)) => {
-                qb.push_bind(*texts);
-            }
-            None => return Err(Denial::ServerError),
-        }
-        rest = &tail[1 + ident.len()..];
-    }
-    qb.push(rest);
-    Ok(())
-}
-
-/// Extract the `= ANY($N)` list binds for a compiled [`IssueFilter`].
-/// Returns the per-placeholder vectors in a stable struct; unknown keys
-/// cannot occur (the compiler is closed) and are skipped defensively.
-struct FilterLists {
-    states: Vec<Uuid>,
-    state_groups: Vec<String>,
-    priorities: Vec<String>,
-    parents: Vec<Uuid>,
-    label_ids: Vec<Uuid>,
-    assignee_ids: Vec<Uuid>,
-}
-
-fn filter_lists(filters: &pidash_db::issue_filters::IssueFilter) -> Result<FilterLists, Denial> {
-    use pidash_db::issue_filters::FilterValue;
-    let mut lists = FilterLists {
-        states: Vec::new(),
-        state_groups: Vec::new(),
-        priorities: Vec::new(),
-        parents: Vec::new(),
-        label_ids: Vec::new(),
-        assignee_ids: Vec::new(),
-    };
-    for (key, value) in filters.predicates() {
-        match (key.as_str(), value) {
-            ("state__in", FilterValue::Uuids(ids)) => lists.states.clone_from(ids),
-            ("state__group__in", FilterValue::Strings(groups)) => {
-                lists.state_groups.clone_from(groups);
-            }
-            ("priority__in", FilterValue::Strings(priorities)) => {
-                lists.priorities.clone_from(priorities);
-            }
-            ("parent__in", FilterValue::Uuids(ids)) => lists.parents.clone_from(ids),
-            ("label_issue__label_id__in", FilterValue::Strings(ids)) => {
-                // Resolved ids and `is_uuid`-passing tokens: all parseable.
-                for id in ids {
-                    lists
-                        .label_ids
-                        .push(id.parse::<Uuid>().map_err(|_| Denial::ServerError)?);
-                }
-            }
-            ("issue_assignee__assignee_id__in", FilterValue::Strings(ids)) => {
-                for id in ids {
-                    lists
-                        .assignee_ids
-                        .push(id.parse::<Uuid>().map_err(|_| Denial::ServerError)?);
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(lists)
-}
-
-/// The extra select expression a `SELECT DISTINCT` list query needs when
-/// the `ORDER BY` names a joined column outside the select list (Postgres
-/// rejects `DISTINCT` + `ORDER BY` on unselected expressions; Django adds
-/// them to the select). Returns `None` when the ordered expression is
-/// already selected (every `issues.*` column, the four list annotations,
-/// the inlined `CASE`/`MAX` annotations — parens are syntax, not AST —
-/// and the three joined extras).
-fn order_extra_select(order_by_sql: &str) -> Option<String> {
-    let expr = order_by_sql
-        .strip_suffix(" ASC")
-        .or_else(|| order_by_sql.strip_suffix(" DESC"))
-        .unwrap_or(order_by_sql);
-    if expr.starts_with("\"issues\".")
-        || expr.starts_with("\"sub_issues_count\"")
-        || expr.starts_with("\"cycle_id\"")
-        || expr.starts_with("\"link_count\"")
-        || expr.starts_with("\"attachment_count\"")
-        || expr.starts_with("CASE ")
-        || expr.starts_with("MAX(")
-    {
-        return None;
-    }
-    if expr == "\"projects\".\"identifier\""
-        || expr == "\"workspaces\".\"slug\""
-        || expr == "\"states\".\"group\""
-    {
-        return None;
-    }
-    Some(format!("{expr} AS \"order_extra\""))
-}
-
-/// Fetch one list page: the `WHERE` from [`core_queries::list_queryset_where`]
-/// plus [`core_queries::filter_where_sql`], the
-/// [`core_queries::order_spec`] ordering, and the `[offset, stop)` window.
-/// Returns the decoded rows plus the total count. `order_param` is the raw
-/// `?order_by=` value (default `-created_at`).
+/// Fetch one list page (`IssueListCreateAPIEndpoint.get_queryset` + the
+/// ordering chain + the `[offset, stop)` window) and the
+/// `total_count_queryset` total: two sea-query statements
+/// ([`issue_reads::page_statement`], [`issue_reads::count_statement`]), as
+/// before. `order_param` is the raw `?order_by=` value (default
+/// `-created_at`); an ordering Django would fan out with new joins, a
+/// non-UUID filter id or a negative window answer the 500 the text
+/// builder answered.
 #[allow(clippy::too_many_arguments)]
 async fn fetch_issue_page(
     pool: &PgPool,
@@ -897,147 +755,36 @@ async fn fetch_issue_page(
     stop: i64,
     tz: &Tz,
 ) -> Result<(Vec<DecodedIssue>, i64), Denial> {
-    use core_queries::OrderSpec;
-    let (annotation_sql, joins_sql, order_by_sql, requires_grouping) =
-        match core_queries::order_spec(order_param) {
-            OrderSpec::Ordered {
-                annotation_sql,
-                joins_sql,
-                order_by_sql,
-                requires_grouping,
-            } => (annotation_sql, joins_sql, order_by_sql, requires_grouping),
-            // Multi-level `__` paths Django fans out with new joins: the
-            // queryset raises `FieldError` into the 500 (ported quirk 12).
-            OrderSpec::Unsupported => return Err(Denial::ServerError),
-        };
-    let mut where_text = core_queries::list_queryset_where();
-    let extra = core_queries::filter_where_sql(filters);
-    if !extra.is_empty() {
-        where_text.push_str(" AND ");
-        where_text.push_str(&extra);
-    }
-    let lists = filter_lists(filters)?;
-    let mut binds: HashMap<&str, WhereBind<'_>> = HashMap::new();
-    binds.insert("project_id", WhereBind::Uuid(project_id));
-    binds.insert("slug", WhereBind::Text(slug));
-    binds.insert("states", WhereBind::Uuids(&lists.states));
-    binds.insert("state_groups", WhereBind::Texts(&lists.state_groups));
-    binds.insert("priorities", WhereBind::Texts(&lists.priorities));
-    binds.insert("parents", WhereBind::Uuids(&lists.parents));
-    binds.insert("label_ids", WhereBind::Uuids(&lists.label_ids));
-    binds.insert("assignee_ids", WhereBind::Uuids(&lists.assignee_ids));
-
-    let filter_joins = core_queries::filter_joins_sql(filters);
-    let mut page = sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT DISTINCT ");
-    page.push(ISSUE_SELECT_COLS);
-    page.push(", ");
-    page.push(core_queries::sub_issues_count_sql());
-    page.push(", ");
-    page.push(core_queries::cycle_id_sql());
-    page.push(", ");
-    page.push(core_queries::link_count_sql());
-    page.push(", ");
-    page.push(core_queries::attachment_count_sql());
-    if let Some(annotation) = annotation_sql.as_deref() {
-        page.push(", ");
-        page.push(annotation);
-    }
-    if let Some(extra_select) = order_extra_select(&order_by_sql) {
-        page.push(", ");
-        page.push(extra_select);
-    }
-    page.push(", ");
-    page.push(ISSUE_EXTRA_COLS);
-    page.push(" FROM \"issues\" ");
-    page.push(core_queries::base_joins_sql());
-    if !filter_joins.is_empty() {
-        page.push(" ");
-        page.push(filter_joins.clone());
-    }
-    if !joins_sql.is_empty() {
-        page.push(" ");
-        page.push(joins_sql);
-    }
-    page.push(" WHERE ");
-    push_where(&mut page, &where_text, &binds)?;
-    if requires_grouping {
-        // The `MAX` branch aggregates over a join: Django groups by the
-        // select list; grouping by the row key plus the joined extras
-        // yields the same one-group-per-issue (scalar subqueries need no
-        // `GROUP BY` membership).
-        page.push(" GROUP BY \"issues\".\"id\", \"projects\".\"identifier\", \"workspaces\".\"slug\", \"states\".\"group\"");
-    }
-    page.push(" ORDER BY ");
-    page.push(order_by_sql);
-    page.push(" LIMIT ");
-    page.push_bind(stop - offset);
-    page.push(" OFFSET ");
-    page.push_bind(offset);
-    let rows: Vec<sqlx::postgres::PgRow> = page
-        .build()
-        .fetch_all(pool)
+    let page = issue_reads::page_statement(slug, *project_id, filters, order_param, offset, stop)
+        .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let decoded = issue_reads::fetch_issues(&db, &page, tz)
         .await
         .map_err(|error| db_error(error, "issue-list-page"))?;
-    let mut decoded = Vec::with_capacity(rows.len());
-    for row in &rows {
-        decoded.push(decode_issue(row, tz)?);
-    }
-
-    // `total_count_queryset` (`:397-399`): the manager scope plus the
-    // compiled filters, `.distinct()` only when filters are present.
-    let (count_where, distinct) = core_queries::total_count_query(filters);
-    let mut count = sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT ");
-    if distinct {
-        count.push("COUNT(DISTINCT \"issues\".\"id\")");
-    } else {
-        count.push("COUNT(*)");
-    }
-    count.push(" FROM \"issues\" ");
-    count.push(core_queries::base_joins_sql());
-    if !filter_joins.is_empty() {
-        count.push(" ");
-        count.push(filter_joins);
-    }
-    count.push(" WHERE ");
-    push_where(&mut count, &count_where, &binds)?;
-    let total: Option<i64> = count
-        .build()
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| db_error(error, "issue-list-count"))?
-        .map(|row: sqlx::postgres::PgRow| row.try_get::<i64, _>(0))
-        .transpose()
+    let count = issue_reads::count_statement(slug, *project_id, filters)
         .map_err(|_| Denial::ServerError)?;
-    Ok((decoded, total.unwrap_or(0)))
+    let total = issue_reads::fetch_count(&db, &count)
+        .await
+        .map_err(|error| db_error(error, "issue-list-count"))?;
+    Ok((decoded, total))
 }
 
 /// Fetch rows for the single-`WHERE` lookups (detail/by-identifier/
-/// external/patch/delete): the `issues` columns plus the joined extras,
-/// `Meta.ordering` (`-created_at`) like the inline `.get()`s. The caller
-/// applies the `.get()` cardinality (0 → 404, 1 → row, 2+ → 500).
+/// external): the `issues` columns plus the joined extras, `Meta.ordering`
+/// (`-created_at`) like the inline `.get()`s. The caller applies the
+/// `.get()` cardinality (0 → 404, 1 → row, 2+ → 500).
 async fn fetch_lookup_rows(
     pool: &PgPool,
-    joins_sql: &str,
-    where_text: &str,
-    binds: &HashMap<&str, WhereBind<'_>>,
+    lookup: issue_reads::Lookup<'_>,
     tz: &Tz,
 ) -> Result<Vec<DecodedIssue>, Denial> {
-    let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT ");
-    query.push(ISSUE_SELECT_COLS);
-    query.push(", ");
-    query.push(ISSUE_EXTRA_COLS);
-    query.push(" FROM \"issues\" ");
-    query.push(joins_sql);
-    query.push(" WHERE ");
-    push_where(&mut query, where_text, binds)?;
-    query.push(" ORDER BY ");
-    query.push(core_queries::LOOKUP_ORDER_SQL);
-    let rows: Vec<sqlx::postgres::PgRow> = query
-        .build()
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "issue-lookup"))?;
-    rows.iter().map(|row| decode_issue(row, tz)).collect()
+    issue_reads::fetch_issues(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &issue_reads::lookup_statement(lookup),
+        tz,
+    )
+    .await
+    .map_err(|error| db_error(error, "issue-lookup"))
 }
 
 /// Apply `.get()` cardinality to [`fetch_lookup_rows`] output: exactly one
@@ -1294,15 +1041,13 @@ async fn by_identifier_inner(
     // `ValueError` into the 500. Out-of-`i64` magnitudes saturate and
     // miss (Python's unbounded int misses the same way).
     let sequence = parse_python_int(issue_identifier).ok_or(Denial::ServerError)?;
-    let mut binds: HashMap<&str, WhereBind<'_>> = HashMap::new();
-    binds.insert("project_identifier", WhereBind::Text(project_identifier));
-    binds.insert("sequence", WhereBind::Integer(sequence));
-    binds.insert("slug", WhereBind::Text(slug));
     let rows = fetch_lookup_rows(
         &pre.pool,
-        &core_queries::inline_lookup_joins_sql(),
-        &core_queries::workspace_get_lookup_where(),
-        &binds,
+        issue_reads::Lookup::WorkspaceGet {
+            project_identifier,
+            sequence,
+            slug,
+        },
         &activate_timezone(pre.actor.timezone.as_deref())?,
     )
     .await?;
@@ -1352,29 +1097,11 @@ async fn compile_list_filters(
             params.insert(key.to_string(), value);
         }
     }
-    let mut binds: HashMap<&str, WhereBind<'_>> = HashMap::new();
-    binds.insert("project_id", WhereBind::Uuid(project_id));
-    binds.insert("workspace_slug", WhereBind::Text(slug));
-    let mut states_query = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
-    push_where(
-        &mut states_query,
-        &core_queries::states_lookup_sql(),
-        &binds,
-    )?;
-    let state_rows: Vec<(Uuid, String)> = states_query
-        .build_query_as()
-        .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let state_rows = issue_reads::filter_states(&db, *project_id)
         .await
         .map_err(|error| db_error(error, "filter-states"))?;
-    let mut labels_query = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
-    push_where(
-        &mut labels_query,
-        &core_queries::labels_lookup_sql(),
-        &binds,
-    )?;
-    let label_rows: Vec<(Uuid, String)> = labels_query
-        .build_query_as()
-        .fetch_all(pool)
+    let label_rows = issue_reads::filter_labels(&db, *project_id, slug)
         .await
         .map_err(|error| db_error(error, "filter-labels"))?;
     let states: Vec<(String, String)> = state_rows
@@ -1399,22 +1126,9 @@ async fn compile_list_filters(
         if resolved.contains_key(&(identifier.clone(), *sequence)) {
             continue;
         }
-        let mut parent_binds: HashMap<&str, WhereBind<'_>> = HashMap::new();
-        parent_binds.insert("project_identifier", WhereBind::Text(identifier));
-        parent_binds.insert("sequence", WhereBind::Integer(*sequence));
-        parent_binds.insert("workspace_slug", WhereBind::Text(slug));
-        let mut parent_query = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
-        push_where(
-            &mut parent_query,
-            &core_queries::parent_lookup_sql(),
-            &parent_binds,
-        )?;
-        let found: Option<Uuid> = parent_query
-            .build_query_scalar()
-            .fetch_optional(pool)
+        let found = issue_reads::resolve_parent(&db, slug, identifier, *sequence)
             .await
-            .map_err(|error| db_error(error, "filter-parent"))?
-            .flatten();
+            .map_err(|error| db_error(error, "filter-parent"))?;
         resolved.insert(
             (identifier.clone(), *sequence),
             found.map(|id| id.to_string()),
@@ -1495,16 +1209,14 @@ async fn issue_list_inner(
     let external_id = query_last(query, "external_id").unwrap_or_default();
     let external_source = query_last(query, "external_source").unwrap_or_default();
     if !external_id.is_empty() && !external_source.is_empty() {
-        let mut binds: HashMap<&str, WhereBind<'_>> = HashMap::new();
-        binds.insert("external_id", WhereBind::Text(&external_id));
-        binds.insert("external_source", WhereBind::Text(&external_source));
-        binds.insert("project_id", WhereBind::Uuid(&project_id));
-        binds.insert("slug", WhereBind::Text(slug));
         let rows = fetch_lookup_rows(
             &pre.pool,
-            &core_queries::external_id_lookup_joins_sql(),
-            &core_queries::external_id_lookup_where(),
-            &binds,
+            issue_reads::Lookup::ExternalId {
+                external_id: &external_id,
+                external_source: &external_source,
+                project_id,
+                slug,
+            },
             &tz,
         )
         .await?;
@@ -1632,15 +1344,13 @@ async fn issue_detail_inner(
     )
     .await?;
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
-    let mut binds: HashMap<&str, WhereBind<'_>> = HashMap::new();
-    binds.insert("pk", WhereBind::Uuid(pk));
-    binds.insert("project_id", WhereBind::Uuid(&project_id));
-    binds.insert("slug", WhereBind::Text(slug));
     let rows = fetch_lookup_rows(
         &pre.pool,
-        &core_queries::inline_lookup_joins_sql(),
-        &core_queries::detail_get_lookup_where(),
-        &binds,
+        issue_reads::Lookup::DetailGet {
+            pk: *pk,
+            project_id,
+            slug,
+        },
         &tz,
     )
     .await?;

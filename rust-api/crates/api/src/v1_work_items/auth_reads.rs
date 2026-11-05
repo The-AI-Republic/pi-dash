@@ -6,18 +6,18 @@
 //! here, once. Every function returns the raw [`DbErr`]; the callers map
 //! it through their own `db_error`.
 //!
-//! * [`live_api_token`]: `APIToken.objects.filter(token=...)`
+//! * [`live_api_token`][]: `APIToken.objects.filter(token=...)`
 //!   (`api/middleware/api_authentication.py:19-46`); the
 //!   `SoftDeletionManager` scope (`deleted_at IS NULL`) hides tombstones.
-//! * [`machine_token_with_device`]: the `machine_token` row by HMAC hash,
+//! * [`machine_token_with_device`][]: the `machine_token` row by HMAC hash,
 //!   plus whether its `dev_machine` (LEFT JOIN) is revoked.
-//! * [`is_active_workspace_member`]: `is_workspace_member`
+//! * [`is_active_workspace_member`][]: `is_workspace_member`
 //!   (`core/permissions.py:28-34`).
-//! * [`user_timezone`]: `request.user.user_timezone` (`TimezoneMixin`).
-//! * [`workspace_id_by_slug`]: the slug lookup the gates scope on (no
+//! * [`user_timezone`][]: `request.user.user_timezone` (`TimezoneMixin`).
+//! * [`workspace_id_by_slug`][]: the slug lookup the gates scope on (no
 //!   liveness predicate, as before).
 //! * [`project_member_roles`], [`project_membership_exists`],
-//!   [`identifier_membership`], [`workspace_role_exists`]: the
+//!   [`identifier_membership`][], [`workspace_role_exists`]: the
 //!   `app/permissions/project.py` membership facts.
 //! * [`run_facts_by_id`], [`newest_run_facts_on_issue`],
 //!   [`yield_run_by_id`]: the `AgentRun.objects.select_related("runner")`
@@ -382,7 +382,10 @@ pub async fn yield_run_by_id<C: ConnectionTrait>(
     run_id: Uuid,
 ) -> Result<Option<YieldRunRow>, DbErr> {
     run_facts_select()
-        .columns([agent_run::Column::WorkspaceId, agent_run::Column::DonePayload])
+        .columns([
+            agent_run::Column::WorkspaceId,
+            agent_run::Column::DonePayload,
+        ])
         .join(
             JoinType::InnerJoin,
             agent_run::Entity::belongs_to(workspaces::Entity)

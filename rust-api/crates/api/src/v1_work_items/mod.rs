@@ -61,6 +61,7 @@ pub mod handlers_move_search;
 pub mod handlers_pr_links;
 pub mod handlers_relations;
 pub mod handlers_social;
+pub mod issue_reads;
 pub mod perms;
 pub mod routes;
 
