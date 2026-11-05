@@ -54,17 +54,18 @@ pytestmark = pytest.mark.contract
 
 @pytest.fixture(autouse=True)
 def _no_outbound(monkeypatch):
-    """Keep runner frames and issue background tasks in-process."""
-    monkeypatch.setattr("pi_dash.runner.services.pubsub.send_to_runner", lambda *a, **k: None)
-    from pi_dash.app.views.issue import base
+    """Keep runner frames and Celery tasks in-process.
 
-    for task in (
-        base.issue_activity,
-        base.model_activity,
-        base.issue_description_version_task,
-        base.recent_visited_task,
-    ):
-        monkeypatch.setattr(task, "delay", lambda *a, **k: None)
+    ``delay`` is stubbed on the ``Task`` class, not on task instances: an
+    instance-level ``monkeypatch.setattr`` leaves the bound method behind as
+    an instance attribute on undo, which shadows other tests' class-level
+    patches of ``Task.delay``.
+    """
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr("pi_dash.runner.services.pubsub.send_to_runner", lambda *a, **k: None)
+    with patch("celery.app.task.Task.delay", return_value=MagicMock(id="mock-task-id")):
+        yield
 
 
 @pytest.fixture
@@ -179,10 +180,7 @@ def _issue_url(workspace, project, issue):
 # --------------------------------------------------------------------------
 
 
-def test_executor_options_return_deprecated_entries(session_client, workspace, project, member, monkeypatch):
-    from pi_dash.app.views.project import base
-
-    monkeypatch.setattr(base.recent_visited_task, "delay", lambda **kwargs: None)
+def test_executor_options_return_deprecated_entries(session_client, workspace, project, member):
     resp = session_client.get(f"/api/workspaces/{workspace.slug}/projects/{project.id}/")
     assert resp.status_code == 200, resp.content
     options = {opt["kind"]: opt for opt in resp.json()["agent_executor_options"]}
@@ -193,10 +191,7 @@ def test_executor_options_return_deprecated_entries(session_client, workspace, p
 
 
 @pytest.mark.parametrize("legacy", ["cloud_agent", "managed_runner"])
-def test_project_default_executor_write_is_translated(session_client, workspace, project, member, monkeypatch, legacy):
-    from pi_dash.app.views.project import base
-
-    monkeypatch.setattr(base.model_activity, "delay", lambda **kwargs: None)
+def test_project_default_executor_write_is_translated(session_client, workspace, project, member, legacy):
     resp = session_client.patch(
         f"/api/workspaces/{workspace.slug}/projects/{project.id}/",
         {"default_agent_executor": legacy},
