@@ -88,8 +88,8 @@ def _with_suffix(base: str, n: int) -> str:
     return f"{base[: RUNNER_NAME_MAX - len(suffix)].rstrip('-')}{suffix}"
 
 
-def _taken_names(machine: DevMachine, pod, exclude_runner_id=None, runner_model=None) -> set:
-    runners = (runner_model or Runner)._base_manager
+def _taken_names(machine: DevMachine, pod, exclude_runner_id=None) -> set:
+    runners = Runner._base_manager
     machine_names = runners.filter(dev_machine_id=machine.pk, revoked_at__isnull=True)
     # ``runner_unique_name_per_pod`` covers every row in the pod, revoked too.
     pod_names = runners.filter(pod_id=pod.pk) if pod is not None else runners.none()
@@ -99,12 +99,10 @@ def _taken_names(machine: DevMachine, pod, exclude_runner_id=None, runner_model=
     return set(machine_names.values_list("name", flat=True)) | set(pod_names.values_list("name", flat=True))
 
 
-def unique_runner_name(base: str, machine: DevMachine, pod, exclude_runner_id=None, runner_model=None) -> str:
+def unique_runner_name(base: str, machine: DevMachine, pod, exclude_runner_id=None) -> str:
     """``base``, or ``base-2``, ``base-3``… — the first not used by a live
-    runner of ``machine`` or by any runner in ``pod``.
-
-    ``runner_model`` lets a data migration pass its historical ``Runner``."""
-    taken = _taken_names(machine, pod, exclude_runner_id, runner_model)
+    runner of ``machine`` or by any runner in ``pod``."""
+    taken = _taken_names(machine, pod, exclude_runner_id)
     if base not in taken:
         return base
     n = 2
@@ -113,11 +111,9 @@ def unique_runner_name(base: str, machine: DevMachine, pod, exclude_runner_id=No
     return _with_suffix(base, n)
 
 
-def engine_runner_name(machine: DevMachine, workspace, project, pod, exclude_runner_id=None, runner_model=None) -> str:
+def engine_runner_name(machine: DevMachine, workspace, project, pod, exclude_runner_id=None) -> str:
     """The server-assigned name for an engine runner (design §5)."""
-    return unique_runner_name(
-        engine_runner_base_name(machine, workspace, project), machine, pod, exclude_runner_id, runner_model
-    )
+    return unique_runner_name(engine_runner_base_name(machine, workspace, project), machine, pod, exclude_runner_id)
 
 
 # ---------------------------------------------------------------------------
