@@ -94,7 +94,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -344,9 +344,9 @@ pub fn is_secure_request(headers: &HeaderMap, settings: &pidash_db::config::Sett
 
 /// `get_client_ip` (`utils/ip_address.py:8-14`): first `X-Forwarded-For`
 /// entry, unstripped, else `REMOTE_ADDR`, else `None` (which binds NULL
-/// downstream — the documented 500 hazard). Handlers pass `None` for the
-/// peer: axum handlers do not see it without `ConnectInfo` (same call as
-/// the admin port's sign-out stamps).
+/// downstream — the documented 500 hazard). The callbacks pass the
+/// `ConnectInfo` peer (NEWPIDASH-14), so live `REMOTE_ADDR` is always
+/// present exactly like Django; the initiates pass `None` (no stamps).
 pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> Option<String> {
     if let Some(forwarded) = headers
         .get("x-forwarded-for")
@@ -426,6 +426,7 @@ impl<'a> RequestContext<'a> {
         query: HashMap<String, String>,
         headers: HeaderMap,
         session: Option<Extension<SessionHandle>>,
+        peer: Option<SocketAddr>,
     ) -> Result<Self, Response> {
         // `request.get_host()`: a missing or non-ASCII `Host` header is
         // `DisallowedHost` (400) in Django.
@@ -449,7 +450,7 @@ impl<'a> RequestContext<'a> {
                 .get("user-agent")
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_owned),
-            ip: client_ip(&headers, None),
+            ip: client_ip(&headers, peer),
             headers,
             host,
             secure: false,
@@ -552,7 +553,8 @@ pub async fn app_initiate(
     headers: HeaderMap,
     session: Option<Extension<SessionHandle>>,
 ) -> Response {
-    let ctx = match RequestContext::build(&state, query, headers, session) {
+    // Initiate reads host/scheme only; no peer is threaded (no stamps).
+    let ctx = match RequestContext::build(&state, query, headers, session, None) {
         Ok(ctx) => ctx.finish_scheme(state.settings()),
         Err(response) => return response,
     };
@@ -609,7 +611,8 @@ pub async fn space_initiate(
     headers: HeaderMap,
     session: Option<Extension<SessionHandle>>,
 ) -> Response {
-    let ctx = match RequestContext::build(&state, query, headers, session) {
+    // Initiate reads host/scheme only; no peer is threaded (no stamps).
+    let ctx = match RequestContext::build(&state, query, headers, session, None) {
         Ok(ctx) => ctx.finish_scheme(state.settings()),
         Err(response) => return response,
     };
@@ -2196,8 +2199,11 @@ pub async fn app_callback(
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
     session: Option<Extension<SessionHandle>>,
+    peer: ConnectInfo<SocketAddr>,
 ) -> Response {
-    let ctx = match RequestContext::build(&state, query, headers, session) {
+    // `REMOTE_ADDR` (`get_client_ip` fallback; serve installs the peer via
+    // `into_make_service_with_connect_info`, so this is always present live).
+    let ctx = match RequestContext::build(&state, query, headers, session, Some(peer.0)) {
         Ok(ctx) => ctx.finish_scheme(state.settings()),
         Err(response) => return response,
     };
@@ -2298,8 +2304,11 @@ pub async fn space_callback(
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
     session: Option<Extension<SessionHandle>>,
+    peer: ConnectInfo<SocketAddr>,
 ) -> Response {
-    let ctx = match RequestContext::build(&state, query, headers, session) {
+    // `REMOTE_ADDR` (`get_client_ip` fallback; serve installs the peer via
+    // `into_make_service_with_connect_info`, so this is always present live).
+    let ctx = match RequestContext::build(&state, query, headers, session, Some(peer.0)) {
         Ok(ctx) => ctx.finish_scheme(state.settings()),
         Err(response) => return response,
     };
@@ -3724,5 +3733,90 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -- hermetic tests: RequestContext client-IP resolution (NEWPIDASH-14)
+
+    fn full_test_settings() -> pidash_db::config::Settings {
+        let mut vars = HashMap::new();
+        vars.insert("APP_BASE_URL".to_owned(), "http://app.test".to_owned());
+        vars.insert("SPACE_BASE_URL".to_owned(), "http://space.test".to_owned());
+        pidash_db::config::Settings::from_map_with(
+            &vars,
+            pidash_db::config::Profile::Common,
+            &pidash_db::config::NoOverlay,
+        )
+        .expect("test settings")
+    }
+
+    /// Hermetic state: `RequestContext::build` only checks that a pool and
+    /// an ORM handle are installed, so a lazy pool to a never-bound port
+    /// suffices and these tests run without `DATABASE_URL` (the plain
+    /// `cargo test` CI job sets none).
+    fn ctx_test_state() -> AppState {
+        let pool = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/google_ctx_hermetic")
+            .expect("lazy pool");
+        let pools = pidash_db::Pools::primary_only(pool);
+        let orm = pidash_db::sea_orm_connection(pools.primary());
+        AppState::with_settings("test", full_test_settings())
+            .with_pools(pools)
+            .with_orm(orm)
+    }
+
+    fn ctx_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "app.test".parse().expect("host"));
+        headers
+    }
+
+    fn ctx_session() -> Option<Extension<SessionHandle>> {
+        Some(Extension(SessionHandle::new(
+            crate::middleware::RequestSession::empty(),
+        )))
+    }
+
+    /// `RequestContext` resolves the login IP like `get_client_ip`
+    /// (NEWPIDASH-14): without `X-Forwarded-For` it falls back to the
+    /// peer address (`REMOTE_ADDR`), never `None` — a `None` ip binds
+    /// NULL into NOT NULL `users.last_login_ip` and the returning-login
+    /// stamp 500s. Fails when `build` drops the peer; the pre-fix run
+    /// showed `None` here.
+    #[tokio::test]
+    async fn request_context_ip_falls_back_to_peer_without_xff() {
+        let state = ctx_test_state();
+        let peer: SocketAddr = "203.0.113.9:50831".parse().expect("peer addr");
+        let ctx = RequestContext::build(
+            &state,
+            HashMap::new(),
+            ctx_headers(),
+            ctx_session(),
+            Some(peer),
+        )
+        .expect("ctx builds");
+        assert_eq!(
+            ctx.ip.as_deref(),
+            Some("203.0.113.9"),
+            "without X-Forwarded-For the login IP is the peer address, not None"
+        );
+    }
+
+    /// `X-Forwarded-For` still wins over the peer (NEWPIDASH-14):
+    /// `get_client_ip` takes the first forwarded entry, unstripped.
+    #[tokio::test]
+    async fn request_context_ip_prefers_first_xff_entry() {
+        let state = ctx_test_state();
+        let peer: SocketAddr = "203.0.113.9:50831".parse().expect("peer addr");
+        let mut headers = ctx_headers();
+        headers.insert(
+            "x-forwarded-for",
+            "198.51.100.7, 203.0.113.9".parse().expect("xff"),
+        );
+        let ctx = RequestContext::build(&state, HashMap::new(), headers, ctx_session(), Some(peer))
+            .expect("ctx builds");
+        assert_eq!(
+            ctx.ip.as_deref(),
+            Some("198.51.100.7"),
+            "the first X-Forwarded-For entry wins over the peer"
+        );
     }
 }
