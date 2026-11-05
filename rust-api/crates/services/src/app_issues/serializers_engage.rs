@@ -435,16 +435,45 @@ pub async fn github_issue_synced(
 
 /// Django `.exists()` probe for `GitCommentSync.objects.filter(comment=comment)`
 /// (`issue.py:85`): `git_comment_syncs`
-/// (`db/models/integration/git.py:190-206`) with the soft-delete guard.
-pub const GIT_COMMENT_SYNC_PROBE_SQL: &str =
-    "SELECT 1 FROM git_comment_syncs WHERE comment_id = $1 AND deleted_at IS NULL LIMIT 1";
+/// (`db/models/integration/git.py:190-206`) with the default
+/// `SoftDeletionManager` guard (soft-deleted rows do not count).
+pub async fn git_comment_synced(
+    db: &impl sea_orm::ConnectionTrait,
+    comment_id: uuid::Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    use pidash_db::entity::git_comment_syncs;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let hit: Option<uuid::Uuid> = git_comment_syncs::Entity::find()
+        .select_only()
+        .column(git_comment_syncs::Column::Id)
+        .filter(git_comment_syncs::Column::CommentId.eq(comment_id))
+        .filter(git_comment_syncs::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
 
 /// Django `.exists()` probe for
 /// `GithubCommentSync.objects.filter(comment=comment)` (`issue.py:86`):
 /// `github_comment_syncs` (`db/models/integration/github.py:104-118`) with
 /// the soft-delete guard.
-pub const GITHUB_COMMENT_SYNC_PROBE_SQL: &str =
-    "SELECT 1 FROM github_comment_syncs WHERE comment_id = $1 AND deleted_at IS NULL LIMIT 1";
+pub async fn github_comment_synced(
+    db: &impl sea_orm::ConnectionTrait,
+    comment_id: uuid::Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    use pidash_db::entity::github_comment_syncs;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let hit: Option<uuid::Uuid> = github_comment_syncs::Entity::find()
+        .select_only()
+        .column(github_comment_syncs::Column::Id)
+        .filter(github_comment_syncs::Column::CommentId.eq(comment_id))
+        .filter(github_comment_syncs::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
 
 /// Port of `_issue_is_actively_synced` (`issue.py:63-76`).
 ///
@@ -972,16 +1001,6 @@ mod tests {
                 GITHUB_ISSUE_SYNC_PROBE_SQL,
                 "github_issue_syncs",
                 "issue_id",
-            ),
-            (
-                GIT_COMMENT_SYNC_PROBE_SQL,
-                "git_comment_syncs",
-                "comment_id",
-            ),
-            (
-                GITHUB_COMMENT_SYNC_PROBE_SQL,
-                "github_comment_syncs",
-                "comment_id",
             ),
         ] {
             assert!(sql.contains(table), "probe names its sync table: {sql}");

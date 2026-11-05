@@ -114,9 +114,9 @@ pub use serializers_engage::{
     issue_is_actively_synced, issue_reaction_lite_to_representation,
     issue_subscriber_to_representation, ActivitySourceData, AppIssueFlatRow, AppIssueFlatView,
     IssueActivityRow, IssueActivityView, IssueReactionLiteRow, IssueReactionLiteView,
-    IssueSubscriberRow, IssueSubscriberView, APP_ISSUE_FLAT_FIELDS, GITHUB_COMMENT_SYNC_PROBE_SQL,
-    GITHUB_ISSUE_SYNC_PROBE_SQL, GIT_COMMENT_SYNC_PROBE_SQL, GIT_ISSUE_SYNC_PROBE_SQL,
-    ISSUE_ACTIVITY_ALL_FIELDS, ISSUE_REACTION_LITE_FIELDS, ISSUE_SUBSCRIBER_ALL_FIELDS,
+    IssueSubscriberRow, IssueSubscriberView, APP_ISSUE_FLAT_FIELDS, GITHUB_ISSUE_SYNC_PROBE_SQL,
+    GIT_ISSUE_SYNC_PROBE_SQL, ISSUE_ACTIVITY_ALL_FIELDS, ISSUE_REACTION_LITE_FIELDS,
+    ISSUE_SUBSCRIBER_ALL_FIELDS,
 };
 pub use serializers_expand::{
     intake_issue_lite_to_representation, issue_relation_expand_to_representation,

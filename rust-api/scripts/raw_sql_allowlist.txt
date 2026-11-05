@@ -28,7 +28,6 @@ crates/api/src/app_integrations/handlers_github_ws.rs 17
 crates/api/src/app_integrations/mod.rs 1
 crates/api/src/app_issues/handlers_archive.rs 3
 crates/api/src/app_issues/handlers_core.rs 41
-crates/api/src/app_issues/handlers_engage.rs 37
 crates/api/src/app_issues/handlers_relations.rs 53
 crates/api/src/app_issues/mod.rs 2
 crates/api/src/app_modules/handlers_archive.rs 5
@@ -255,7 +254,6 @@ crates/services/src/scheduler/builtins.rs 5
 [dup]
 # SELECTs with two output columns of one name (fix, don't add).
 crates/api/src/app_intake/issues.rs | 03711dfaa7dd
-crates/api/src/app_issues/handlers_engage.rs | 818baedb1c81
 crates/api/src/auth_oauth/device_session.rs | e6dc5d83f1e3
 crates/api/src/prompting/mod.rs | 5eb6f5df0734
 crates/api/src/prompting/mod.rs | ca7bbdefd9fe
