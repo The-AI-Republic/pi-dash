@@ -174,6 +174,81 @@ pub mod runner_session {
         })
     }
 
+    // -----------------------------------------------------------------------
+    // SeaORM twins of the statements above
+    // -----------------------------------------------------------------------
+    //
+    // Same predicates, ordering, `LIMIT` and lock as the captured text;
+    // Django's `.get()` `LIMIT 21` becomes `.one()` on a primary-key
+    // match (at most one row either way).
+
+    /// A [`RunnerSession`] from the entity row (SeaORM decodes
+    /// `timestamptz` as `DateTime<FixedOffset>`; the row model keeps
+    /// `Utc`).
+    pub fn runner_session_from_model(model: crate::entity::runner_session::Model) -> RunnerSession {
+        RunnerSession {
+            id: model.id,
+            runner_id: model.runner_id,
+            protocol_version: model.protocol_version,
+            created_at: model.created_at.with_timezone(&chrono::Utc),
+            last_seen_at: model.last_seen_at.map(|at| at.with_timezone(&chrono::Utc)),
+            revoked_at: model.revoked_at.map(|at| at.with_timezone(&chrono::Utc)),
+            revoked_reason: model.revoked_reason,
+        }
+    }
+
+    /// The runner's active rows, newest first
+    /// (`filter(runner_id=…, revoked_at__isnull=True)` under
+    /// `Meta.ordering`): the shared core of [`OPEN_PRIOR_SQL`],
+    /// [`ACTIVE_ID_SQL`] and the pubsub close list.
+    pub fn active_select(
+        runner_id: uuid::Uuid,
+    ) -> sea_orm::Select<crate::entity::runner_session::Entity> {
+        use crate::entity::runner_session::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+        Entity::find()
+            .filter(Column::RevokedAt.is_null())
+            .filter(Column::RunnerId.eq(runner_id))
+            .order_by_desc(Column::CreatedAt)
+    }
+
+    /// [`OPEN_PRIOR_SQL`] on SeaORM: the active row, `LIMIT 1 FOR
+    /// UPDATE`. Run inside the open transaction.
+    pub fn open_prior_select(
+        runner_id: uuid::Uuid,
+    ) -> sea_orm::Select<crate::entity::runner_session::Entity> {
+        use sea_orm::QuerySelect;
+        active_select(runner_id).limit(1).lock_exclusive()
+    }
+
+    /// [`DELETE_GET_SQL`] on SeaORM: `get(id=sid, runner=runner,
+    /// revoked_at__isnull=True)`.
+    pub fn delete_get_select(
+        session_id: uuid::Uuid,
+        runner_id: uuid::Uuid,
+    ) -> sea_orm::Select<crate::entity::runner_session::Entity> {
+        use crate::entity::runner_session::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        Entity::find()
+            .filter(Column::Id.eq(session_id))
+            .filter(Column::RevokedAt.is_null())
+            .filter(Column::RunnerId.eq(runner_id))
+    }
+
+    /// [`POLL_GET_SQL`] on SeaORM: `get(id=sid, runner=runner)` — no
+    /// `revoked_at` filter; the caller rejects a revoked row with its
+    /// reason.
+    pub fn poll_get_select(
+        session_id: uuid::Uuid,
+        runner_id: uuid::Uuid,
+    ) -> sea_orm::Select<crate::entity::runner_session::Entity> {
+        use crate::entity::runner_session::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        Entity::find()
+            .filter(Column::Id.eq(session_id))
+            .filter(Column::RunnerId.eq(runner_id))
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -525,6 +600,123 @@ pub mod machine_session {
             revoked_at: row.try_get("revoked_at")?,
             revoked_reason: row.try_get("revoked_reason")?,
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // SeaORM twins of the statements above
+    // -----------------------------------------------------------------------
+    //
+    // Same predicates, ordering, `LIMIT` and lock as the captured text;
+    // Django's `.get()` `LIMIT 21` becomes `.one()` on a primary-key
+    // match. `machine_session` is not a design §4 table, so the writes
+    // run from the handlers directly.
+
+    /// A [`MachineSession`] from the entity row.
+    pub fn machine_session_from_model(
+        model: crate::entity::machine_session::Model,
+    ) -> MachineSession {
+        MachineSession {
+            id: model.id,
+            dev_machine_id: model.dev_machine_id,
+            protocol_version: model.protocol_version,
+            created_at: model.created_at.with_timezone(&chrono::Utc),
+            last_seen_at: model.last_seen_at.map(|at| at.with_timezone(&chrono::Utc)),
+            revoked_at: model.revoked_at.map(|at| at.with_timezone(&chrono::Utc)),
+            revoked_reason: model.revoked_reason,
+        }
+    }
+
+    /// [`OPEN_PRIOR_SQL`] on SeaORM: the machine's active row, newest
+    /// first, `LIMIT 1 FOR UPDATE`. Run inside the open transaction.
+    pub fn open_prior_select(
+        dev_machine_id: uuid::Uuid,
+    ) -> sea_orm::Select<crate::entity::machine_session::Entity> {
+        use crate::entity::machine_session::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+        Entity::find()
+            .filter(Column::DevMachineId.eq(dev_machine_id))
+            .filter(Column::RevokedAt.is_null())
+            .order_by_desc(Column::CreatedAt)
+            .limit(1)
+            .lock_exclusive()
+    }
+
+    /// [`OPEN_INSERT_SQL`] on SeaORM: the `create(…)` row — every
+    /// column supplied (the pk is caller-minted), `revoked_at` null,
+    /// `revoked_reason` the `''` default, protocol version
+    /// [`DEFAULT_PROTOCOL_VERSION`].
+    pub fn open_insert_row(
+        id: uuid::Uuid,
+        dev_machine_id: uuid::Uuid,
+        created_at: chrono::DateTime<chrono::Utc>,
+        last_seen_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::entity::machine_session::ActiveModel {
+        use sea_orm::Set;
+        crate::entity::machine_session::ActiveModel {
+            id: Set(id),
+            dev_machine_id: Set(dev_machine_id),
+            protocol_version: Set(DEFAULT_PROTOCOL_VERSION),
+            created_at: Set(created_at.into()),
+            last_seen_at: Set(Some(last_seen_at.into())),
+            revoked_at: Set(None),
+            revoked_reason: Set(DEFAULT_REVOKED_REASON.to_owned()),
+        }
+    }
+
+    /// [`REVOKE_SQL`] on SeaORM: `save(update_fields=["revoked_at",
+    /// "revoked_reason"])` on one row.
+    pub fn revoke_statement(
+        session_id: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        reason: &str,
+    ) -> sea_orm::UpdateMany<crate::entity::machine_session::Entity> {
+        use crate::entity::machine_session::{Column, Entity};
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        Entity::update_many()
+            .col_expr(Column::RevokedAt, Expr::value(now))
+            .col_expr(Column::RevokedReason, Expr::value(reason.to_owned()))
+            .filter(Column::Id.eq(session_id))
+    }
+
+    /// [`DELETE_GET_SQL`] on SeaORM: `get(dev_machine=…, id=sid,
+    /// revoked_at__isnull=True)`.
+    pub fn delete_get_select(
+        dev_machine_id: uuid::Uuid,
+        session_id: uuid::Uuid,
+    ) -> sea_orm::Select<crate::entity::machine_session::Entity> {
+        use crate::entity::machine_session::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        Entity::find()
+            .filter(Column::DevMachineId.eq(dev_machine_id))
+            .filter(Column::Id.eq(session_id))
+            .filter(Column::RevokedAt.is_null())
+    }
+
+    /// [`POLL_GET_SQL`] on SeaORM: `get(dev_machine=…, id=sid)` — no
+    /// `revoked_at` filter; the caller rejects a revoked row.
+    pub fn poll_get_select(
+        dev_machine_id: uuid::Uuid,
+        session_id: uuid::Uuid,
+    ) -> sea_orm::Select<crate::entity::machine_session::Entity> {
+        use crate::entity::machine_session::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        Entity::find()
+            .filter(Column::DevMachineId.eq(dev_machine_id))
+            .filter(Column::Id.eq(session_id))
+    }
+
+    /// [`TOUCH_SQL`] on SeaORM: `save(update_fields=["last_seen_at"])`.
+    pub fn touch_statement(
+        session_id: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> sea_orm::UpdateMany<crate::entity::machine_session::Entity> {
+        use crate::entity::machine_session::{Column, Entity};
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        Entity::update_many()
+            .col_expr(Column::LastSeenAt, Expr::value(now))
+            .filter(Column::Id.eq(session_id))
     }
 
     #[cfg(test)]

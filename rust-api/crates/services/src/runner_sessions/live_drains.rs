@@ -49,18 +49,25 @@
 //!   as warning lines the executor logs.
 
 use chrono::{DateTime, Utc};
+use sea_orm::sea_query::{Alias, Expr, LockBehavior, LockType, Query, SimpleExpr};
+use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_auth::permissions::runner::VISIBILITY_PRIVATE;
 use pidash_db::config::RunnerSettings;
+use pidash_db::entity::{agent_run, issue_assignees, issues, pod, runner, scheduler_bindings};
+use pidash_db::orm_tx::{into_sqlx, TxConn};
+use pidash_db::runner_enroll::columns::enums::RUNNER_STATUS_ONLINE;
 use pidash_db::runner_sessions::machine_outbox::MachineOutboxError;
-use pidash_db::runner_sessions::models::runner_session::runner_session_from_row;
 use pidash_db::runner_sessions::outbox::{self as session_outbox, OutboxError};
 use pidash_db::runner_sessions::RunnerSession;
+use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::runner_runs::AgentRunStatus;
 
 use super::drain as drain_kernel;
-use super::guards::alive_threshold;
+use super::guards::{alive_threshold, BUSY_STATUSES};
 use super::pubsub::{self as pubsub_kernel, PubsubStore};
 
 /// `timezone.now()` truncated to microseconds (Django datetimes are
@@ -130,15 +137,12 @@ impl PubsubStore for PoolPubsubStore {
         &self,
         runner_id: Uuid,
     ) -> Result<Vec<RunnerSession>, OutboxError> {
-        let rows = sqlx::query(pubsub_kernel::CLOSE_ACTIVE_SESSIONS_SQL)
-            .bind(runner_id)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(OutboxError::Db)?;
-        rows.iter()
-            .map(runner_session_from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(OutboxError::Db)
+        pubsub_kernel::active_runner_sessions(
+            &pidash_db::pool::sea_orm_connection(&self.pool),
+            runner_id,
+        )
+        .await
+        .map_err(|error| OutboxError::Db(into_sqlx(error)))
     }
 
     async fn revoke_runner_session(
@@ -199,6 +203,268 @@ pub enum DrainError {
     Config(String),
 }
 
+impl From<sea_orm::DbErr> for DrainError {
+    fn from(error: sea_orm::DbErr) -> Self {
+        DrainError::Db(into_sqlx(error))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SeaORM statements (twins of the `drain` kernel text)
+// ---------------------------------------------------------------------------
+//
+// Same predicates, ordering, `LIMIT`s and `FOR UPDATE SKIP LOCKED` as
+// the captured text in [`drain_kernel`]; the selects read only the cells
+// the executors consume.
+
+/// The runner cells an assignment needs.
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
+struct DrainRunnerRow {
+    id: Uuid,
+    owner_id: Uuid,
+    pod_id: Uuid,
+    provisioning: String,
+    visibility: i16,
+}
+
+/// The run cells the assign frame needs.
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
+struct NextRunRow {
+    id: Uuid,
+    work_item_id: Option<Uuid>,
+    prompt: String,
+    run_config: Value,
+}
+
+/// `~Exists(AgentRun.objects.filter(runner=OuterRef("pk"),
+/// status__in=BUSY_STATUSES))`: the runner holds no busy run.
+fn no_busy_run_condition() -> SimpleExpr {
+    let busy = Alias::new("U1");
+    Expr::exists(
+        Query::select()
+            .expr(Expr::val(1))
+            .from_as(agent_run::Entity, busy.clone())
+            .and_where(
+                Expr::col((busy.clone(), agent_run::Column::Status))
+                    .is_in(BUSY_STATUSES.iter().map(AgentRunStatus::value)),
+            )
+            .and_where(
+                Expr::col((busy, agent_run::Column::RunnerId))
+                    .equals((runner::Entity, runner::Column::Id)),
+            )
+            .limit(1)
+            .to_owned(),
+    )
+    .not()
+}
+
+/// The idle-runner core (`assignable()` + `idle`): fresh heartbeat,
+/// unpaused, ONLINE, no busy run.
+fn idle_runner_core(threshold: DateTime<Utc>) -> sea_orm::Select<runner::Entity> {
+    runner::Entity::find()
+        .select_only()
+        .columns([
+            runner::Column::Id,
+            runner::Column::OwnerId,
+            runner::Column::PodId,
+            runner::Column::Provisioning,
+            runner::Column::Visibility,
+        ])
+        .filter(runner::Column::LastHeartbeatAt.gte(threshold))
+        .filter(runner::Column::PausedAt.is_null())
+        .filter(runner::Column::Status.eq(RUNNER_STATUS_ONLINE))
+        .filter(no_busy_run_condition())
+}
+
+/// [`drain_kernel::DRAIN_FOR_RUNNER_LOCK_SQL`]: the runner back under
+/// `FOR UPDATE SKIP LOCKED` when still idle; `Runner.Meta.ordering`.
+fn drain_for_runner_lock_select(
+    threshold: DateTime<Utc>,
+    runner_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectModel<DrainRunnerRow>> {
+    idle_runner_core(threshold)
+        .filter(runner::Column::Id.eq(runner_id))
+        .order_by_desc(runner::Column::LastHeartbeatAt)
+        .order_by_desc(runner::Column::CreatedAt)
+        .limit(1)
+        .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
+        .into_model()
+}
+
+/// [`drain_kernel::DRAIN_POD_IDLE_RUNNERS_SQL`]: the pod's idle set
+/// (no `DESKTOP_BUNDLED` exclusion, no `LIMIT` — ported as written),
+/// `-last_heartbeat_at` only, `FOR UPDATE SKIP LOCKED`.
+fn drain_pod_idle_runners_select(
+    threshold: DateTime<Utc>,
+    pod_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectModel<DrainRunnerRow>> {
+    idle_runner_core(threshold)
+        .filter(runner::Column::PodId.eq(pod_id))
+        .order_by_desc(runner::Column::LastHeartbeatAt)
+        .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
+        .into_model()
+}
+
+/// [`drain_kernel::DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL`]:
+/// `Runner.objects.filter(pk=…).first()` — presence only.
+fn runner_by_id_select(runner_id: Uuid) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Uuid>> {
+    runner::Entity::find()
+        .select_only()
+        .column(runner::Column::Id)
+        .filter(runner::Column::Id.eq(runner_id))
+        .order_by_desc(runner::Column::LastHeartbeatAt)
+        .order_by_desc(runner::Column::CreatedAt)
+        .limit(1)
+        .into_tuple()
+}
+
+/// [`drain_kernel::DRAIN_POD_BY_ID_LOOKUP_SQL`]:
+/// `Pod.objects.filter(pk=…).first()` under the soft-delete manager —
+/// presence only.
+fn pod_by_id_select(pod_id: Uuid) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Uuid>> {
+    pod::Entity::find()
+        .select_only()
+        .column(pod::Column::Id)
+        .filter(pod::Column::DeletedAt.is_null())
+        .filter(pod::Column::Id.eq(pod_id))
+        .order_by_desc(pod::Column::IsDefault)
+        .order_by_asc(pod::Column::CreatedAt)
+        .limit(1)
+        .into_tuple()
+}
+
+/// `filter_runs_usable_by_runner` for a private runner
+/// ([`crate::runner_runs::guards::runs_usable_by_runner_predicate`]):
+/// the run was created by or is owned by the runner's owner, or its
+/// work item is visible to them (creator or live assignee), or its
+/// scheduler binding is theirs.
+fn runs_usable_by_runner_condition(owner_id: Uuid) -> Condition {
+    let issue = Alias::new("U0");
+    let assignee = Alias::new("U2");
+    let issue_exists = Query::select()
+        .expr(Expr::val(1))
+        .from_as(issues::Entity, issue.clone())
+        .join_as(
+            sea_orm::JoinType::LeftJoin,
+            issue_assignees::Entity,
+            assignee.clone(),
+            Expr::col((issue.clone(), issues::Column::Id))
+                .equals((assignee.clone(), issue_assignees::Column::IssueId)),
+        )
+        .and_where(Expr::col((issue.clone(), issues::Column::DeletedAt)).is_null())
+        .and_where(
+            Expr::col((issue.clone(), issues::Column::Id))
+                .equals((agent_run::Entity, agent_run::Column::WorkItemId)),
+        )
+        .cond_where(
+            Condition::any()
+                .add(Expr::col((issue, issues::Column::CreatedById)).eq(owner_id))
+                .add(
+                    Condition::all()
+                        .add(
+                            Expr::col((assignee.clone(), issue_assignees::Column::AssigneeId))
+                                .eq(owner_id),
+                        )
+                        .add(Expr::col((assignee, issue_assignees::Column::DeletedAt)).is_null()),
+                ),
+        )
+        .limit(1)
+        .to_owned();
+    let binding = Alias::new("U0");
+    let scheduler_exists = Query::select()
+        .expr(Expr::val(1))
+        .from_as(scheduler_bindings::Entity, binding.clone())
+        .and_where(Expr::col((binding.clone(), scheduler_bindings::Column::DeletedAt)).is_null())
+        .and_where(Expr::col((binding.clone(), scheduler_bindings::Column::ActorId)).eq(owner_id))
+        .and_where(
+            Expr::col((binding, scheduler_bindings::Column::Id))
+                .equals((agent_run::Entity, agent_run::Column::SchedulerBindingId)),
+        )
+        .limit(1)
+        .to_owned();
+    Condition::any()
+        .add(agent_run::Column::CreatedById.eq(owner_id))
+        .add(agent_run::Column::OwnerId.eq(owner_id))
+        .add(Expr::exists(issue_exists))
+        .add(Expr::exists(scheduler_exists))
+}
+
+/// [`drain_kernel::next_for_runner_sql`] on SeaORM: the next QUEUED run
+/// this runner should take — pinned-to-me first, then the pod queue,
+/// FIFO inside each tier, `FOR UPDATE SKIP LOCKED`. `None` for a
+/// non-private runner (`qs.none()`: no query runs).
+fn next_for_runner_select(
+    pod_id: Uuid,
+    runner_id: Uuid,
+    owner_id: Uuid,
+    provisioning: &str,
+    visibility: i32,
+) -> Option<sea_orm::Selector<sea_orm::SelectModel<NextRunRow>>> {
+    if visibility != VISIBILITY_PRIVATE {
+        return None;
+    }
+    let pinned_to_me: SimpleExpr = Expr::case(
+        Expr::col((agent_run::Entity, agent_run::Column::PinnedRunnerId)).eq(runner_id),
+        Expr::val(0),
+    )
+    .finally(Expr::val(1))
+    .into();
+    let mut select = agent_run::Entity::find()
+        .select_only()
+        .columns([
+            agent_run::Column::Id,
+            agent_run::Column::WorkItemId,
+            agent_run::Column::Prompt,
+            agent_run::Column::RunConfig,
+        ])
+        .filter(agent_run::Column::ExecutorKind.is_in([
+            AgentExecutorKind::LocalRunner.value(),
+            AgentExecutorKind::ManagedRunner.value(),
+        ]))
+        .filter(agent_run::Column::PodId.eq(pod_id))
+        .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
+        .filter(
+            Condition::any()
+                .add(agent_run::Column::PinnedRunnerId.eq(runner_id))
+                .add(agent_run::Column::PinnedRunnerId.is_null()),
+        )
+        .filter(runs_usable_by_runner_condition(owner_id));
+    select = if drain_kernel::is_desktop_provisioning(provisioning) {
+        select
+            .filter(agent_run::Column::ExecutorKind.eq(AgentExecutorKind::ManagedRunner.value()))
+            .filter(agent_run::Column::PinnedRunnerId.eq(runner_id))
+    } else {
+        select.filter(agent_run::Column::ExecutorKind.eq(AgentExecutorKind::LocalRunner.value()))
+    };
+    Some(
+        select
+            .order_by(pinned_to_me, sea_orm::Order::Asc)
+            .order_by_asc(agent_run::Column::CreatedAt)
+            .limit(1)
+            .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
+            .into_model(),
+    )
+}
+
+/// [`drain_kernel::ASSIGN_RUN_UPDATE_SQL`]: `save(update_fields=["runner",
+/// "owner", "status", "assigned_at"])` in model field order.
+fn assign_run_update_statement(
+    run_id: Uuid,
+    runner_id: Uuid,
+    owner_id: Uuid,
+    now: DateTime<Utc>,
+) -> sea_orm::UpdateMany<agent_run::Entity> {
+    agent_run::Entity::update_many()
+        .col_expr(agent_run::Column::OwnerId, Expr::value(owner_id))
+        .col_expr(agent_run::Column::RunnerId, Expr::value(runner_id))
+        .col_expr(
+            agent_run::Column::Status,
+            Expr::value(AgentRunStatus::Assigned.value()),
+        )
+        .col_expr(agent_run::Column::AssignedAt, Expr::value(now))
+        .filter(agent_run::Column::Id.eq(run_id))
+}
+
 // ---------------------------------------------------------------------------
 // Executors
 // ---------------------------------------------------------------------------
@@ -212,9 +478,8 @@ pub async fn drain_for_runner_by_id(
     runner: &RunnerSettings,
     runner_id: Uuid,
 ) -> Result<bool, DrainError> {
-    let row = sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL)
-        .bind(runner_id)
-        .fetch_optional(pool)
+    let row = runner_by_id_select(runner_id)
+        .one(&pidash_db::pool::sea_orm_connection(pool))
         .await?;
     if row.is_none() {
         return Ok(false);
@@ -234,51 +499,43 @@ async fn drain_for_runner(
 ) -> Result<bool, DrainError> {
     let mut tx = pool.begin().await?;
     let threshold = alive_threshold(now_micros());
-    let locked = sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_LOCK_SQL)
-        .bind(threshold)
-        .bind(runner_id)
-        .fetch_optional(&mut *tx)
+    let conn = TxConn::new(&mut tx);
+    let locked = drain_for_runner_lock_select(threshold, runner_id)
+        .one(&conn)
         .await?;
     let Some(locked) = locked else {
         tx.commit().await?;
         return Ok(false);
     };
-    let owner_id: Uuid = locked.try_get("owner_id")?;
-    let pod_id: Uuid = locked.try_get("pod_id")?;
-    let provisioning: String = locked.try_get("provisioning")?;
-    let visibility: i16 = locked.try_get("visibility")?;
+    let owner_id = locked.owner_id;
+    let pod_id = locked.pod_id;
     // Non-private runners issue no query (the `qs.none()` arm).
-    let Some(next_sql) = drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-    else {
+    let Some(next) = next_for_runner_select(
+        pod_id,
+        runner_id,
+        owner_id,
+        &locked.provisioning,
+        i32::from(locked.visibility),
+    ) else {
         tx.commit().await?;
         return Ok(false);
     };
-    let run = sqlx::query(&next_sql)
-        .bind(pod_id)
-        .bind(runner_id)
-        .bind(owner_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let run = next.one(&conn).await?;
     let Some(run) = run else {
         tx.commit().await?;
         return Ok(false);
     };
-    let run_id: Uuid = run.try_get("id")?;
-    let work_item_id: Option<Uuid> = run.try_get("work_item_id")?;
-    let prompt: String = run.try_get("prompt")?;
-    let run_config: Value = run.try_get("run_config")?;
-    let Value::Object(run_config) = run_config else {
+    let run_id = run.id;
+    let work_item_id = run.work_item_id;
+    let prompt = run.prompt;
+    let Value::Object(run_config) = run.run_config else {
         return Err(DrainError::Config(
             "drain_for_runner: run_config is not an object".to_owned(),
         ));
     };
     // `$3` is a fresh `timezone.now()` per assignment (`:285-289`).
-    sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
-        .bind(owner_id)
-        .bind(runner_id)
-        .bind(now_micros())
-        .bind(run_id)
-        .execute(&mut *tx)
+    assign_run_update_statement(run_id, runner_id, owner_id, now_micros())
+        .exec(&conn)
         .await?;
     let plan = drain_kernel::plan_assignment(&drain_kernel::AssignmentFacts {
         run_id,
@@ -308,9 +565,8 @@ pub async fn drain_pod_by_id(
     runner: &RunnerSettings,
     pod_id: Uuid,
 ) -> Result<usize, DrainError> {
-    let pod = sqlx::query(drain_kernel::DRAIN_POD_BY_ID_LOOKUP_SQL)
-        .bind(pod_id)
-        .fetch_optional(pool)
+    let pod = pod_by_id_select(pod_id)
+        .one(&pidash_db::pool::sea_orm_connection(pool))
         .await?;
     if pod.is_none() {
         return Ok(0);
@@ -330,46 +586,37 @@ async fn drain_pod(
 ) -> Result<usize, DrainError> {
     let mut tx = pool.begin().await?;
     let threshold = alive_threshold(now_micros());
-    let runners = sqlx::query(drain_kernel::DRAIN_POD_IDLE_RUNNERS_SQL)
-        .bind(threshold)
-        .bind(pod_id)
-        .fetch_all(&mut *tx)
+    let conn = TxConn::new(&mut tx);
+    let runners = drain_pod_idle_runners_select(threshold, pod_id)
+        .all(&conn)
         .await?;
     let mut plans: Vec<drain_kernel::AssignmentPlan> = Vec::new();
     for runner_row in &runners {
-        let runner_id: Uuid = runner_row.try_get("id")?;
-        let owner_id: Uuid = runner_row.try_get("owner_id")?;
-        let provisioning: String = runner_row.try_get("provisioning")?;
-        let visibility: i16 = runner_row.try_get("visibility")?;
-        let Some(next_sql) =
-            drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-        else {
+        let runner_id = runner_row.id;
+        let owner_id = runner_row.owner_id;
+        let Some(next) = next_for_runner_select(
+            pod_id,
+            runner_id,
+            owner_id,
+            &runner_row.provisioning,
+            i32::from(runner_row.visibility),
+        ) else {
             continue;
         };
-        let run = sqlx::query(&next_sql)
-            .bind(pod_id)
-            .bind(runner_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+        let run = next.one(&conn).await?;
         let Some(run) = run else {
             continue;
         };
-        let run_id: Uuid = run.try_get("id")?;
-        let work_item_id: Option<Uuid> = run.try_get("work_item_id")?;
-        let prompt: String = run.try_get("prompt")?;
-        let run_config: Value = run.try_get("run_config")?;
-        let Value::Object(run_config) = run_config else {
+        let run_id = run.id;
+        let work_item_id = run.work_item_id;
+        let prompt = run.prompt;
+        let Value::Object(run_config) = run.run_config else {
             return Err(DrainError::Config(
                 "drain_pod: run_config is not an object".to_owned(),
             ));
         };
-        sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
-            .bind(owner_id)
-            .bind(runner_id)
-            .bind(now_micros())
-            .bind(run_id)
-            .execute(&mut *tx)
+        assign_run_update_statement(run_id, runner_id, owner_id, now_micros())
+            .exec(&conn)
             .await?;
         plans.push(drain_kernel::plan_assignment(
             &drain_kernel::AssignmentFacts {

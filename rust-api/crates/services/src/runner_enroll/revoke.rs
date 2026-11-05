@@ -103,8 +103,12 @@ use pidash_db::runner_enroll::columns::revoke_reasons::{
     KNOWN_REVOKE_REASONS, REVOKE_REASON_MAX_LEN,
 };
 
-use crate::runner_runs::finalization::{finalize_update_sql, FinalizeValues};
+use crate::runner_runs::finalization::{
+    plan_terminal_event, FinalizeValues, TerminalEventPlan, ERROR_DETAILS_COLUMN,
+};
+use crate::runner_runs::SetValue;
 use crate::runner_sessions::guards;
+use pidash_types::runner_runs::AgentRunStatus;
 
 // ---------------------------------------------------------------------------
 // Reasons (`models.py:575-590`)
@@ -270,40 +274,228 @@ fn pinned_queued(runner_id: Uuid) -> sea_orm::Select<agent_run::Entity> {
         .filter(agent_run::Column::Status.eq("queued"))
 }
 
-/// Revoke-finalize `UPDATE` performer: render
-/// [`finalize_update_sql`] from the planned `values` and bind the
-/// revoke extras in clause order.
+/// Revoke-finalize `UPDATE` performer: the planned `values` as one
+/// SeaORM `UPDATE` on the locked primary key ([`finalize_update`]).
 ///
 /// `values` is the revoke plan (`status`, `ended_at`, both markers,
 /// `cancel_reason`, then the folded `error_details` patch carrying
 /// `error` / `error_code`); the caller pins that column order before
-/// the finalize lock, and the binds below follow it. `ended_at` binds
-/// the caller's own clock
-/// (each driver stamps its own `now`, never hoisted across legs).
-/// `run_id` binds last (the locked primary key).
-pub async fn execute_revoke_finalize_update<'e, E>(
-    ex: E,
+/// the finalize lock. `ended_at` is the caller's own clock (each
+/// driver stamps its own `now`, never hoisted across legs).
+pub async fn execute_revoke_finalize_update(
+    db: &impl ConnectionTrait,
     values: &FinalizeValues,
     run_id: Uuid,
-    stored_reason: &str,
     ended_at: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(&finalize_update_sql(values))
-        .bind(FINALIZE_TO_STATUS)
-        .bind(ended_at)
-        .bind(None::<DateTime<Utc>>)
-        .bind(None::<DateTime<Utc>>)
-        .bind(stored_reason)
-        .bind(crate::runner_runs::finalization::error_details_patch(
-            values,
-        ))
-        .bind(run_id)
-        .execute(ex)
+) -> Result<(), DbErr> {
+    finalize_update(db, values, run_id, ended_at)
         .await
-        .map(|_| ())
+        .map(drop)
+}
+
+// ---------------------------------------------------------------------------
+// SeaORM finalize kernel (twin of `runner_runs::finalization`)
+// ---------------------------------------------------------------------------
+//
+// The `finalize_agent_run` statements as SeaORM / sea-query builders:
+// the first-writer-wins lock, the `UPDATE` with the `error_details`
+// merge, and the idempotent cloud terminal event. Same predicates,
+// order, lock and binds as the text twins in
+// `crate::runner_runs::finalization`; names and signatures match the
+// SeaORM kernel that lands with pi-dash#2953, so the session / revoke
+// drivers swap to `finalization::*` mechanically once it merges.
+
+/// The finalize lock statement
+/// ([`finalization::lock_run_for_finalize_sql`](crate::runner_runs::finalization::lock_run_for_finalize_sql)):
+/// the non-terminal row by id, plus the expected runner / status when
+/// given, `ORDER BY created_at DESC LIMIT 1 FOR UPDATE`.
+pub fn lock_run_for_finalize_select(
+    run_id: Uuid,
+    expected_runner_id: Option<Uuid>,
+    expected_status: Option<AgentRunStatus>,
+) -> sea_orm::Select<agent_run::Entity> {
+    use agent_run::{Column, Entity};
+    let mut select = Entity::find().filter(Column::Id.eq(run_id)).filter(
+        Column::Status.is_not_in(
+            pidash_types::runner_runs::TERMINAL_RUN_STATUSES
+                .iter()
+                .map(AgentRunStatus::value),
+        ),
+    );
+    if let Some(runner_id) = expected_runner_id {
+        select = select.filter(Column::RunnerId.eq(runner_id));
+    }
+    if let Some(status) = expected_status {
+        select = select.filter(Column::Status.eq(status.value()));
+    }
+    select
+        .order_by_desc(Column::CreatedAt)
+        .limit(1)
+        .lock_exclusive()
+}
+
+/// Run the finalize lock: the locked full row, or `None` when the run
+/// is terminal already or misses an expected filter
+/// (first-writer-wins).
+pub async fn lock_run_for_finalize(
+    db: &impl ConnectionTrait,
+    run_id: Uuid,
+    expected_runner_id: Option<Uuid>,
+    expected_status: Option<AgentRunStatus>,
+) -> Result<Option<agent_run::Model>, DbErr> {
+    lock_run_for_finalize_select(run_id, expected_runner_id, expected_status)
+        .one(db)
+        .await
+}
+
+/// `merge_error_details` over the row being updated
+/// ([`finalization::error_details_merge_sql`](crate::runner_runs::finalization::error_details_merge_sql)):
+/// the stored bag (`{}` when not an object), minus every key the patch
+/// names, `||` the patch with its nulls stripped.
+pub fn error_details_merge_expr(patch: &serde_json::Value) -> sea_orm::sea_query::SimpleExpr {
+    use agent_run::Column;
+    use sea_orm::sea_query::{Alias, BinOper, Func, SimpleExpr};
+    let stored = Expr::col((agent_run::Entity, Column::ErrorDetails));
+    let mut bag: SimpleExpr = Expr::case(
+        SimpleExpr::from(Func::cust(Alias::new("jsonb_typeof")).arg(stored.clone())).eq("object"),
+        stored,
+    )
+    .finally(Expr::val(serde_json::Value::Object(Default::default())).cast_as(Alias::new("jsonb")))
+    .into();
+    if let Some(map) = patch.as_object() {
+        for key in map.keys() {
+            bag = bag.binary(BinOper::Sub, Expr::val(key.clone()));
+        }
+    }
+    bag.binary(
+        sea_orm::sea_query::extension::postgres::PgBinOper::Concatenate,
+        SimpleExpr::from(
+            Func::cust(Alias::new("jsonb_strip_nulls"))
+                .arg(Expr::val(patch.clone()).cast_as(Alias::new("jsonb"))),
+        ),
+    )
+}
+
+/// The finalize `UPDATE` statement
+/// ([`finalization::finalize_update_sql`](crate::runner_runs::finalization::finalize_update_sql)):
+/// `SET` in clause order on the locked primary key. `Now` clauses take
+/// `now`, `Null` clauses write SQL `NULL`, the `error_details` patch
+/// merges into the stored bag.
+pub fn finalize_update_statement(
+    values: &FinalizeValues,
+    run_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<sea_orm::UpdateMany<agent_run::Entity>, DbErr> {
+    use agent_run::{Column, Entity};
+    use sea_orm::sea_query::{Keyword, SimpleExpr};
+    let mut update = Entity::update_many();
+    for clause in &values.clauses {
+        let column: Column = clause
+            .column
+            .parse()
+            .map_err(|_| DbErr::Custom(format!("unknown agent_run column {}", clause.column)))?;
+        let expr: SimpleExpr = match (&clause.value, clause.column) {
+            (SetValue::Json(patch), ERROR_DETAILS_COLUMN) => error_details_merge_expr(patch),
+            (SetValue::Null, _) => SimpleExpr::Keyword(Keyword::Null),
+            (SetValue::Now, _) => Expr::val(now).into(),
+            (SetValue::Text(text), _) => Expr::val(text.clone()).into(),
+            (SetValue::Json(json), _) => Expr::val(json.clone()).into(),
+        };
+        update = update.col_expr(column, expr);
+    }
+    Ok(update.filter(Column::Id.eq(run_id)))
+}
+
+/// Run the finalize `UPDATE`; returns the rows written.
+pub async fn finalize_update(
+    db: &impl ConnectionTrait,
+    values: &FinalizeValues,
+    run_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<u64, DbErr> {
+    Ok(finalize_update_statement(values, run_id, now)?
+        .exec(db)
+        .await?
+        .rows_affected)
+}
+
+/// The terminal event's `kind`.
+pub const TERMINAL_EVENT_KIND: &str = "terminal";
+
+/// Terminal-event existence
+/// ([`finalization::terminal_event_exists_sql`](crate::runner_runs::finalization::terminal_event_exists_sql)).
+pub async fn terminal_event_exists(db: &impl ConnectionTrait, run_id: Uuid) -> Result<bool, DbErr> {
+    use pidash_db::entity::agent_run_event::{Column, Entity};
+    Ok(Entity::find()
+        .select_only()
+        .column(Column::Id)
+        .filter(Column::AgentRunId.eq(run_id))
+        .filter(Column::Kind.eq(TERMINAL_EVENT_KIND))
+        .into_tuple::<i64>()
+        .one(db)
+        .await?
+        .is_some())
+}
+
+/// Terminal-event max sequence
+/// ([`finalization::terminal_event_max_seq_sql`](crate::runner_runs::finalization::terminal_event_max_seq_sql)):
+/// the highest `seq` for the run, or `None` without events.
+pub async fn terminal_event_max_seq(
+    db: &impl ConnectionTrait,
+    run_id: Uuid,
+) -> Result<Option<i32>, DbErr> {
+    use pidash_db::entity::agent_run_event::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .column(Column::Seq)
+        .filter(Column::AgentRunId.eq(run_id))
+        .order_by_desc(Column::Seq)
+        .into_tuple::<i32>()
+        .one(db)
+        .await
+}
+
+/// Terminal-event `INSERT`
+/// ([`finalization::insert_terminal_event`](crate::runner_runs::finalization::insert_terminal_event))
+/// on SeaORM: the planned row, `kind = terminal`, `created_at = now`;
+/// the id is the database default.
+pub async fn insert_terminal_event_orm(
+    db: &impl ConnectionTrait,
+    run_id: Uuid,
+    plan: TerminalEventPlan,
+    now: DateTime<Utc>,
+) -> Result<(), DbErr> {
+    use pidash_db::entity::agent_run_event::{ActiveModel, Entity};
+    use sea_orm::{NotSet, Set};
+    Entity::insert(ActiveModel {
+        id: NotSet,
+        seq: Set(plan.seq),
+        kind: Set(TERMINAL_EVENT_KIND.to_owned()),
+        payload: Set(plan.payload),
+        created_at: Set(now.into()),
+        agent_run_id: Set(run_id),
+    })
+    .exec_without_returning(db)
+    .await
+    .map(drop)
+}
+
+/// `finalize_agent_run:73-84` for a cloud run: append the terminal
+/// event unless one exists (exists check, max-seq read, insert: the
+/// same three statements, in order).
+pub async fn append_terminal_event_once(
+    db: &impl ConnectionTrait,
+    run_id: Uuid,
+    new_status: AgentRunStatus,
+    error_code: &str,
+    now: DateTime<Utc>,
+) -> Result<(), DbErr> {
+    if terminal_event_exists(db, run_id).await? {
+        return Ok(());
+    }
+    let max_seq = terminal_event_max_seq(db, run_id).await?;
+    let plan = plan_terminal_event(max_seq, new_status, error_code);
+    insert_terminal_event_orm(db, run_id, plan, now).await
 }
 
 // ---------------------------------------------------------------------------
