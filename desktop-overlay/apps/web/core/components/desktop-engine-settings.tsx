@@ -117,6 +117,7 @@ function DaemonStatus(props: {
         </div>
       );
     case "app_too_old":
+    case "not_answering":
       return <p className="text-13 text-secondary">{problem}</p>;
     case "account_mismatch":
       return (

@@ -285,11 +285,42 @@ pub(crate) fn copy_bundled_cli(bundled: &Path, dest_dir: &Path) -> Result<PathBu
         std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| format!("making {} executable: {e}", staging.display()))?;
     }
+    // Windows refuses to replace an exe that is running (the service's
+    // `pidash.exe`), but lets it be renamed: move it aside first, and put it
+    // back if the new copy cannot take its place. The old copy is removed
+    // on the next update, once nothing runs it.
+    let aside = set_running_binary_aside(&dest)?;
     std::fs::rename(&staging, &dest).map_err(|e| {
         let _ = std::fs::remove_file(&staging);
+        if let Some(aside) = &aside {
+            let _ = std::fs::rename(aside, &dest);
+        }
         format!("installing {}: {e}", dest.display())
     })?;
     Ok(dest)
+}
+
+/// Where a replaced binary is moved aside: `pidash.exe` → `pidash.exe.old`.
+fn aside_path(dest: &Path) -> PathBuf {
+    let mut name = dest.file_name().unwrap_or_default().to_os_string();
+    name.push(".old");
+    dest.with_file_name(name)
+}
+
+/// On Windows, rename an existing `dest` to [`aside_path`] so the new copy
+/// can be renamed into place while the old one is still running. Returns
+/// the aside path when something was moved. A no-op elsewhere: a rename
+/// over a running binary works on Unix.
+fn set_running_binary_aside(dest: &Path) -> Result<Option<PathBuf>, String> {
+    if !cfg!(windows) || !dest.exists() {
+        return Ok(None);
+    }
+    let aside = aside_path(dest);
+    // Left by an earlier update; still locked if that copy is still running.
+    let _ = std::fs::remove_file(&aside);
+    std::fs::rename(dest, &aside)
+        .map_err(|e| format!("moving the running {} aside: {e}", dest.display()))?;
+    Ok(Some(aside))
 }
 
 /// Put `dir` on the user's PATH for future shells, if it isn't already.
@@ -403,6 +434,9 @@ pub async fn pidash_cli_login<R: Runtime>(
     let Some(cli) = status.path else {
         return Err("The pidash CLI is not installed yet.".to_string());
     };
+    // PO-13 natively, not only in the UI: the daemon may have been signed
+    // in as someone else since the consent screen.
+    crate::daemon::check_login_allowed(force.unwrap_or(false)).await?;
     let (args, stdin) = login_invocation(device_code, cloud_url, workspace, force.unwrap_or(false));
     let app_clone = app.clone();
     match tauri::async_runtime::spawn_blocking(move || {
@@ -1046,6 +1080,14 @@ mod bundle_install_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_replaced_binary_is_moved_aside_next_to_it() {
+        assert_eq!(
+            aside_path(Path::new("/x/bin/pidash.exe")),
+            PathBuf::from("/x/bin/pidash.exe.old")
+        );
+    }
 
     #[test]
     fn shared_seq_counter_is_unique_and_contiguous_across_threads() {

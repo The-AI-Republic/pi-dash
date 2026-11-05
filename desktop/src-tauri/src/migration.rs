@@ -150,7 +150,10 @@ pub fn finish(
     // Step 4: the signed-in account's engine home. Other accounts' homes stay.
     let source = paths.legacy_engine_home(account)?;
     if source.is_dir() {
-        let target = daemon.engine_home(daemon_account.or(Some(account)));
+        // The daemon keys its engine home by its own recorded account and
+        // uses `default` when it recorded none; follow it, so the history
+        // lands where the engine reads it.
+        let target = daemon.engine_home(daemon_account);
         move_merge(&source, &target)?;
         restrict_tree(&target);
         report.engine_home_moved_to = Some(target);
@@ -435,11 +438,28 @@ binary = "/old/bundle/pidash-agent-engine"
         assert!(scan(&f.paths).is_empty());
     }
 
+    /// A daemon that recorded no account reads `engine/default/`: the
+    /// history goes there, not under the app's user id.
+    #[test]
+    fn with_no_daemon_account_the_engine_home_goes_to_default() {
+        let f = fixture();
+        let report = finish(&f.paths, &f.daemon, &f.tree, "user-1", None).unwrap();
+        assert_eq!(
+            report.engine_home_moved_to.as_deref(),
+            Some(f.daemon.engine_home(None).as_path())
+        );
+        assert!(
+            f.daemon
+                .engine_home(None)
+                .ends_with("engine/default/codex-home")
+        );
+    }
+
     #[test]
     fn finish_is_idempotent() {
         let f = fixture();
-        finish(&f.paths, &f.daemon, &f.tree, "user-1", None).unwrap();
-        let again = finish(&f.paths, &f.daemon, &f.tree, "user-1", None).unwrap();
+        finish(&f.paths, &f.daemon, &f.tree, "user-1", Some("user-1")).unwrap();
+        let again = finish(&f.paths, &f.daemon, &f.tree, "user-1", Some("user-1")).unwrap();
         assert_eq!(again, FinishReport::default());
         assert!(f.task.join("notes.md").exists());
         assert!(
@@ -471,7 +491,7 @@ binary = "/old/bundle/pidash-agent-engine"
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("history.jsonl"), "daemon's own").unwrap();
         std::fs::write(target.join("config.toml"), "daemon config").unwrap();
-        finish(&f.paths, &f.daemon, &f.tree, "user-1", None).unwrap();
+        finish(&f.paths, &f.daemon, &f.tree, "user-1", Some("user-1")).unwrap();
         assert_eq!(
             std::fs::read_to_string(target.join("history.jsonl")).unwrap(),
             "daemon's own"

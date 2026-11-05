@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 url = "2"
 
 [dependencies]
+anyhow = "1"
 # The shared desktop ↔ daemon IPC protocol + transport client (PDASHOSS01-158).
 # The desktop depends on this lightweight crate — NOT the whole runner — which
 # is what the workspace `exclude = ["desktop"]` split protects. It is also the

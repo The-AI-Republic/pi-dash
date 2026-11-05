@@ -136,6 +136,9 @@ fn socket() -> Result<PathBuf, String> {
 pub enum CallError {
     /// Nothing listens on the socket: no daemon is running.
     Unreachable(String),
+    /// A daemon may be there but did not take the connection or answer in
+    /// time (a busy pipe, a slow daemon). Not "no daemon", not "too old".
+    NoAnswer(String),
     /// The daemon answered with an error (its message), or not in time, or
     /// with something that is not the expected frame.
     Failed(String),
@@ -145,6 +148,7 @@ impl CallError {
     pub fn message(&self) -> String {
         match self {
             Self::Unreachable(e) => format!("Pi Dash is not running on this computer ({e})"),
+            Self::NoAnswer(e) => format!("Pi Dash on this computer is not answering ({e})"),
             Self::Failed(e) => e.clone(),
         }
     }
@@ -158,14 +162,35 @@ pub async fn call_at(
 ) -> Result<Response, CallError> {
     let mut client = pidash_ipc::Client::connect(socket)
         .await
-        .map_err(|e| CallError::Unreachable(format!("{e:#}")))?;
+        .map_err(classify_connect_error)?;
     match tokio::time::timeout(timeout, client.call(req)).await {
-        Err(_) => Err(CallError::Failed(
+        Err(_) => Err(CallError::NoAnswer(
             "the Pi Dash daemon did not answer in time".into(),
         )),
         Ok(Err(e)) => Err(CallError::Failed(format!("{e:#}"))),
         Ok(Ok(Response::Error(err))) => Err(CallError::Failed(err.message)),
         Ok(Ok(resp)) => Ok(resp),
+    }
+}
+
+/// Only "nothing is there" (no socket or pipe, or a stale socket nobody
+/// listens on) means no daemon. Anything else, such as a pipe that stays
+/// busy or a permission error, is a daemon that did not answer.
+fn classify_connect_error(e: anyhow::Error) -> CallError {
+    let message = format!("{e:#}");
+    let absent = e
+        .chain()
+        .filter_map(|c| c.downcast_ref::<std::io::Error>())
+        .any(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            )
+        });
+    if absent {
+        CallError::Unreachable(message)
+    } else {
+        CallError::NoAnswer(message)
     }
 }
 
@@ -182,12 +207,16 @@ pub enum HelloProbe {
     Unreachable,
     /// Something listens but did not answer `Hello`: a daemon older than v5.
     NoHello(String),
+    /// A daemon may be there but did not answer in time or took no
+    /// connection (busy). Asked again later, not reported as too old.
+    NoAnswer(String),
     Answered(Box<HelloInfo>),
 }
 
 pub async fn probe_hello(socket: &Path) -> HelloProbe {
     match call_at(socket, Request::Hello, HELLO_TIMEOUT).await {
         Err(CallError::Unreachable(_)) => HelloProbe::Unreachable,
+        Err(CallError::NoAnswer(e)) => HelloProbe::NoAnswer(e),
         Err(CallError::Failed(e)) => HelloProbe::NoHello(e),
         Ok(Response::Hello(info)) => HelloProbe::Answered(Box::new(info)),
         Ok(other) => HelloProbe::NoHello(format!("unexpected answer to Hello: {other:?}")),
@@ -239,6 +268,11 @@ pub enum Discovery {
         ipc_version: Option<u32>,
         cli: CliInfo,
     },
+    /// A daemon that did not answer in time, or whose pipe stayed busy.
+    /// Not "too old": the app asks again.
+    NotAnswering {
+        reason: String,
+    },
     /// A daemon newer than this app understands: update the app.
     AppTooOld {
         daemon_version: String,
@@ -274,6 +308,7 @@ pub fn evaluate(probe: HelloProbe, app: &AppIdentity, cli: CliInfo) -> Discovery
                 cli,
             };
         }
+        HelloProbe::NoAnswer(reason) => return Discovery::NotAnswering { reason },
         HelloProbe::Answered(hello) => hello,
     };
     if hello.ipc_version < MIN_DAEMON_IPC {
@@ -397,12 +432,72 @@ fn cli_info() -> CliInfo {
 }
 
 // ---------------------------------------------------------------------------
+// The app's account, for native checks (PO-13)
+// ---------------------------------------------------------------------------
+
+/// The account the webview last asked discovery about: the app's signed-in
+/// account. Native commands that sign the daemon in check against it, so
+/// PO-13 does not rest on the UI alone.
+static APP_IDENTITY: std::sync::Mutex<Option<AppIdentity>> = std::sync::Mutex::new(None);
+
+fn remember_app_identity(identity: &AppIdentity) {
+    *APP_IDENTITY.lock().unwrap_or_else(|e| e.into_inner()) = Some(identity.clone());
+}
+
+fn app_identity() -> Option<AppIdentity> {
+    APP_IDENTITY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Whether the app may sign the daemon in now (design §4.6, PO-13): refused
+/// when the daemon is signed in as another account or to another cloud,
+/// unless `force` ("Sign Pi Dash on this computer in as me") and it hosts
+/// no runners. Asked again right before the sign-in, so an account change
+/// since the consent screen (a `pidash auth login` in a terminal) is caught.
+pub fn login_allowed(probe: HelloProbe, app: &AppIdentity, force: bool) -> Result<(), String> {
+    match evaluate(probe, app, CliInfo::default()) {
+        Discovery::AccountMismatch {
+            daemon_account,
+            hosts_runners,
+            ..
+        } => {
+            if force && !hosts_runners {
+                return Ok(());
+            }
+            Err(if hosts_runners {
+                format!(
+                    "Pi Dash on this computer is signed in as {daemon_account} and hosts runners. \
+                     Run `pidash auth logout` in a terminal first to use it with this account."
+                )
+            } else {
+                format!(
+                    "Pi Dash on this computer is signed in as {daemon_account}, not this account."
+                )
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// [`login_allowed`] against the running daemon and the account the app
+/// last reported. No check when the app has not reported one yet.
+pub async fn check_login_allowed(force: bool) -> Result<(), String> {
+    let Some(app) = app_identity() else {
+        return Ok(());
+    };
+    login_allowed(probe_hello(&socket()?).await, &app, force)
+}
+
+// ---------------------------------------------------------------------------
 // Tauri commands
 // ---------------------------------------------------------------------------
 
 /// Find the computer's daemon and say whether the app can work with it.
 #[tauri::command]
 pub async fn daemon_discover(app_identity: AppIdentity) -> Result<Discovery, String> {
+    remember_app_identity(&app_identity);
     let probe = probe_hello(&socket()?).await;
     let cli = tauri::async_runtime::spawn_blocking(cli_info)
         .await
@@ -680,6 +775,74 @@ mod tests {
             ),
             "{out:?}"
         );
+    }
+
+    #[test]
+    fn a_daemon_that_does_not_answer_in_time_is_not_reported_too_old() {
+        let out = evaluate(
+            HelloProbe::NoAnswer("did not answer in time".into()),
+            &app(),
+            CliInfo::default(),
+        );
+        assert!(matches!(out, Discovery::NotAnswering { .. }), "{out:?}");
+    }
+
+    #[test]
+    fn only_a_missing_or_refused_endpoint_means_no_daemon() {
+        let gone = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound))
+            .context("connecting");
+        assert!(matches!(
+            classify_connect_error(gone),
+            CallError::Unreachable(_)
+        ));
+        let refused =
+            anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
+        assert!(matches!(
+            classify_connect_error(refused),
+            CallError::Unreachable(_)
+        ));
+        // ERROR_PIPE_BUSY that outlasted the client's retries, a permission error…
+        let busy = anyhow::Error::new(std::io::Error::from_raw_os_error(231)).context("connecting");
+        assert!(matches!(
+            classify_connect_error(busy),
+            CallError::NoAnswer(_)
+        ));
+        let denied = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(matches!(
+            classify_connect_error(denied),
+            CallError::NoAnswer(_)
+        ));
+    }
+
+    /// PO-13 natively: a sign-in is refused when the daemon is signed in as
+    /// another account, unless forced on a daemon that hosts no runners.
+    #[test]
+    fn login_is_refused_for_another_account_unless_forced_on_an_empty_daemon() {
+        let me = Some(account(Some("u-1"), None, "https://pidash.example.com"));
+        assert!(login_allowed(answered(hello(MAX_DAEMON_IPC, me)), &app(), false).is_ok());
+        assert!(login_allowed(HelloProbe::Unreachable, &app(), false).is_ok());
+        assert!(login_allowed(answered(hello(MAX_DAEMON_IPC, None)), &app(), false).is_ok());
+
+        let other = Some(account(
+            Some("u-2"),
+            Some("someone@example.com"),
+            "https://pidash.example.com",
+        ));
+        let err = login_allowed(
+            answered(hello(MAX_DAEMON_IPC, other.clone())),
+            &app(),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("someone@example.com"), "{err}");
+        assert!(
+            login_allowed(answered(hello(MAX_DAEMON_IPC, other.clone())), &app(), true).is_ok()
+        );
+
+        let mut busy = hello(MAX_DAEMON_IPC, other);
+        busy.workspaces[0].runners = 2;
+        let err = login_allowed(answered(busy), &app(), true).unwrap_err();
+        assert!(err.contains("hosts runners"), "{err}");
     }
 
     #[test]

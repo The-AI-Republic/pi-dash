@@ -172,10 +172,21 @@ async function migrateTree(tree: LegacyTree, account: string, hello: HelloInfo, 
  * Run the desktop migration for the signed-in `account`. Never throws: each
  * tree that fails is reported and left for the next launch.
  */
-export async function migrateLegacyTrees(
-  account: string,
-  deps: MigrationDeps = defaultDeps
-): Promise<MigrationOutcome> {
+export function migrateLegacyTrees(account: string, deps: MigrationDeps = defaultDeps): Promise<MigrationOutcome> {
+  // One run at a time: a window focus or the minute timer while a run is in
+  // flight joins it instead of starting a second (duplicate device grants,
+  // a spurious "already on").
+  if (inFlight) return inFlight;
+  const run = runMigration(account, deps).finally(() => {
+    if (inFlight === run) inFlight = null;
+  });
+  inFlight = run;
+  return run;
+}
+
+let inFlight: Promise<MigrationOutcome> | null = null;
+
+async function runMigration(account: string, deps: MigrationDeps): Promise<MigrationOutcome> {
   let trees: LegacyTree[];
   try {
     trees = await deps.invoke<LegacyTree[]>("legacy_scan");
