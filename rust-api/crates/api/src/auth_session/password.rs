@@ -1650,8 +1650,9 @@ async fn reset_password(
         }
     };
     // Lookup (`User.objects.get(id=id)`): a non-UUID pk raises
-    // `ValidationError` (500 on both twins); an unknown id raises
-    // `DoesNotExist` (INVALID on app, 500 on space).
+    // `ValidationError` (500 on both twins, kept); an unknown id raises
+    // `DoesNotExist` (INVALID on app; DIFF-4: the space 500 was an old
+    // bug, fixed here to the same INVALID redirect).
     let user_id = match pk.parse::<uuid::Uuid>() {
         Ok(id) => id,
         Err(_) => return server_error(),
@@ -1661,12 +1662,13 @@ async fn reset_password(
         Err(_) => return server_error(),
     };
     let Some(user) = user else {
-        if !is_space {
-            let (code, message) = pw::reset_app_failure_params(pw::ResetAppFailure::InvalidToken);
-            let base = base_host_for(&state, true, false);
-            return redirect_302(pw::reset_app_error_location(&base, code, message));
-        }
-        return server_error();
+        // DIFF-4 (NEWPIDASH-21; old bug fix for PB-1044 and the
+        // unknown-id half of PB-1055): Django answers 500 here on the
+        // space twin because `DoesNotExist` escapes
+        // `ResetPasswordSpaceEndpoint.post`. The new system answers the
+        // same INVALID_PASSWORD_TOKEN redirect the token-check failure
+        // below produces on the calling twin.
+        return reset_invalid_redirect(&state, is_space);
     };
     // Token check: false answers INVALID_PASSWORD_TOKEN on both twins.
     if !pw::check_password_token(
