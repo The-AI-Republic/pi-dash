@@ -1330,8 +1330,7 @@ impl RunnerLoop {
         // Release, not Shutdown: swapping the runtime to another session must
         // not close the old session in the cloud — the user may switch back to
         // it from the chat history panel, and a warm/message revives it.
-        let _ = chat.tx.send(ChatCommand::Release).await;
-        let _ = tokio::time::timeout(Duration::from_secs(5), &mut chat.done_rx).await;
+        release_chat(&mut chat).await;
     }
 
     async fn start_chat_runtime(
@@ -2294,7 +2293,7 @@ impl ChatWorker {
         }
         let mut ending: Vec<AgentBridge> = std::mem::take(&mut self.retired);
         ending.extend(bridge.take());
-        AgentBridge::finish_all(ending, Duration::from_secs(5)).await;
+        AgentBridge::finish_all(ending, CHAT_FINISH_GRACE).await;
         let _ = self.active_tx.send(false);
         self.state.set_chat_active(false).await;
     }
@@ -3198,6 +3197,37 @@ struct RunMetadata {
 /// human is never stalled, but the loop must notice the approval resolving even
 /// when no agent event follows it.
 const APPROVAL_WATCHDOG_RECHECK: Duration = Duration::from_secs(30);
+
+/// Ask a chat runtime to release and wait, up to [`CHAT_RELEASE_WAIT`], for
+/// it to finish its process trees. True when it finished in time.
+async fn release_chat(chat: &mut CurrentChat) -> bool {
+    let _ = chat.tx.send(ChatCommand::Release).await;
+    if tokio::time::timeout(CHAT_RELEASE_WAIT, &mut chat.done_rx)
+        .await
+        .is_ok()
+    {
+        return true;
+    }
+    tracing::warn!(
+        chat_session_id = %chat.chat_session_id,
+        "chat runtime did not finish its process trees within {CHAT_RELEASE_WAIT:?}; handing the workspace on"
+    );
+    false
+}
+
+/// Graceful step when a chat runtime ends (stdin closed, leader may exit).
+const CHAT_FINISH_GRACE: Duration = Duration::from_secs(5);
+
+/// How long a runtime swap or an Assign waits for the old chat runtime to
+/// finish its trees before handing the workspace on: the whole finish bound
+/// (grace, SIGTERM wait, SIGKILL wait, reap margin), so the next owner never
+/// starts beside a tree that is still being cleaned (runner cleanup §4.3).
+const CHAT_RELEASE_WAIT: Duration = Duration::from_secs(
+    CHAT_FINISH_GRACE.as_secs()
+        + crate::util::proctree::TERM_WAIT.as_secs()
+        + crate::util::proctree::KILL_WAIT.as_secs()
+        + 4,
+);
 
 impl AssignWorker {
     async fn run_metadata(&self) -> RunMetadata {
@@ -4175,6 +4205,35 @@ mod tests {
     //! ``runner/tests/cloud_ws_fake.rs``.
 
     use super::*;
+
+    /// A runtime swap waits for the old chat runtime's whole finish bound
+    /// (grace + SIGTERM wait + SIGKILL wait), not just the grace, before the
+    /// next owner gets the workspace.
+    #[tokio::test(start_paused = true)]
+    async fn chat_release_waits_for_the_full_tree_finish_bound() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let (_active_tx, active_rx) = watch::channel(false);
+        let (done_tx, done_rx) = oneshot::channel();
+        let mut chat = CurrentChat {
+            chat_session_id: uuid::Uuid::new_v4(),
+            tx,
+            active_rx,
+            done_rx,
+        };
+        let worst = CHAT_FINISH_GRACE
+            + crate::util::proctree::TERM_WAIT
+            + crate::util::proctree::KILL_WAIT
+            + Duration::from_secs(3);
+        tokio::spawn(async move {
+            assert!(matches!(rx.recv().await, Some(ChatCommand::Release)));
+            tokio::time::sleep(worst).await;
+            let _ = done_tx.send(());
+        });
+        assert!(
+            release_chat(&mut chat).await,
+            "the release gave up before the trees were finished"
+        );
+    }
     use crate::cloud::protocol::Envelope;
     use crate::config::schema::{
         AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, CursorAgentSection,

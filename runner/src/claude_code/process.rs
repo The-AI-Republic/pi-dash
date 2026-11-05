@@ -111,14 +111,14 @@ impl ClaudeProcess {
         self.stderr_ring.lock().await.snapshot()
     }
 
-    /// Bridge-owned observability handle. PID was captured at spawn time;
-    /// `exit_rx` yields `Some(ExitSnapshot)` once the wait task observes
-    /// termination.
     /// True once the leader has exited and its process group is gone.
     pub fn is_gone(&self) -> bool {
         self.child.is_gone()
     }
 
+    /// Bridge-owned observability handle. PID was captured at spawn time;
+    /// `exit_rx` yields `Some(ExitSnapshot)` once the wait task observes
+    /// termination.
     pub fn process_handle(&self) -> AgentProcessHandle {
         AgentProcessHandle {
             pid: self.pid,
