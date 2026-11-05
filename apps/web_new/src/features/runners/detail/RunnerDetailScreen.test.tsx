@@ -165,7 +165,7 @@ describe("RunnerDetailScreen", () => {
     expect(screen.getByRole("heading", { name: "Built-in engine · build box" })).toBeInTheDocument();
     expect(screen.getByTestId("runner-built-in-badge")).toHaveTextContent("Built-in");
     expect(screen.getByText(ENGINE_RENAME_HINT)).toBeInTheDocument();
-    expect(meta()["Pod work"]).toBe("Assigned issues only");
+    expect(meta()["Pod work"]).toBe("Off");
     expect(meta()["Working directory"]).toBe("/tmp/wd");
   });
 
@@ -173,7 +173,7 @@ describe("RunnerDetailScreen", () => {
     setup({ runner: runner({ pod_dispatch: "pod_member" }) });
     expect(screen.queryByTestId("runner-built-in-badge")).toBeNull();
     expect(screen.queryByText(ENGINE_RENAME_HINT)).toBeNull();
-    expect(meta()["Pod work"]).toBe("Takes pod work");
+    expect(meta()["Pod work"]).toBe("On");
   });
 
   it("links back to the workspace list and into chat", () => {

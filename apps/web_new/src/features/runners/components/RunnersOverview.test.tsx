@@ -547,7 +547,7 @@ describe("pod members panel", () => {
       </QueryClientProvider>
     );
     const panel = screen.getByTestId("pod-members");
-    expect(panel).toHaveTextContent("Assigned issues only");
+    expect(panel).toHaveTextContent("Pod work: off");
     expect(panel).toHaveTextContent("Takes pod work");
     // Only the viewer's own runner carries an action.
     const addButtons = screen.getAllByRole("button", { name: "Add to pod" });
