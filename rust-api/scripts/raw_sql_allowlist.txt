@@ -213,8 +213,6 @@ crates/jobs/src/tasks_webhooks/webhook_send.rs 6
 crates/services/src/assistant/config.rs 1
 crates/services/src/assistant/mcp.rs 1
 crates/services/src/dispatch/execution.rs 7
-crates/services/src/domain/assistant.rs 21
-crates/services/src/domain/comments.rs 24
 crates/services/src/domain/identity.rs 43
 crates/services/src/domain/issues_move.rs 3
 crates/services/src/domain/issues_move_creation.rs 4

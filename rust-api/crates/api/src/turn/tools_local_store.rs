@@ -2335,9 +2335,15 @@ impl ToolStore for PgToolStore {
             edited_at: None,
         };
         let mut tx = self.pool.begin().await?;
-        comment_domain::insert_comment_row(&mut *tx, &rows).await?;
-        comment_domain::insert_description_row(&mut *tx, &rows).await?;
-        comment_domain::link_comment_description(&mut *tx, rows.id, rows.description_id).await?;
+        comment_domain::insert_comment_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows).await?;
+        comment_domain::insert_description_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows)
+            .await?;
+        comment_domain::link_comment_description(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            rows.id,
+            rows.description_id,
+        )
+        .await?;
         tx.commit().await?;
         Ok(comment_id)
     }
@@ -2389,7 +2395,7 @@ impl ToolStore for PgToolStore {
             .await?;
             message_seq = max.unwrap_or(0) + 1;
             pidash_services::domain::assistant::create_message_row(
-                &mut *tx,
+                &pidash_db::orm_tx::TxConn::new(&mut tx),
                 &pidash_services::domain::assistant::NewMessage {
                     id: message_id,
                     thread_id: deps.thread_id,
@@ -2446,7 +2452,7 @@ impl ToolStore for PgToolStore {
             .await?;
             event_seq = max.unwrap_or(0) + 1;
             pidash_services::domain::assistant::append_event(
-                &mut *tx,
+                &pidash_db::orm_tx::TxConn::new(&mut tx),
                 &pidash_services::domain::assistant::NewEvent {
                     thread_id: deps.thread_id,
                     turn_id: turn,
