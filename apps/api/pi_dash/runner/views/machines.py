@@ -8,8 +8,8 @@ Daemon-facing (``/api/v1/runner/``):
 
 - ``GET dev-machines/<id>/`` — machine token of that machine (any of its
   workspace tokens). The daemon's view of its machine: engine pause and
-  sign-in fields plus every runner row of the machine, revoked rows
-  included, so it can reconcile its runner blocks (§5).
+  sign-in fields plus the machine's runner rows in the token's workspace,
+  revoked rows included, so it can reconcile its runner blocks (§5).
 - ``PATCH dev-machines/<id>/`` — machine token of that machine. The
   daemon's engine pause (``pidash engine pause``) and rename; answers the
   same body as ``GET``.
@@ -86,15 +86,16 @@ def _daemon_runner_row(runner: Runner) -> dict:
     }
 
 
-def daemon_machine_payload(machine: DevMachine) -> dict:
+def daemon_machine_payload(machine: DevMachine, workspace_id) -> dict:
     """The machine as its own daemon sees it (``GET``/``PATCH``
     ``dev-machines/<id>/``): the machine fields, including the engine pause
     (``engine_paused_by_owner``, ``engine_auto_pause_reason``) and sign-in
     (``engine_sign_in_state``, ``engine_credential_expires_at``), plus
-    ``runners``: every runner row of the machine across all its workspaces
-    (one daemon serves them all), revoked rows included, oldest first."""
+    ``runners``: the machine's runner rows in the calling token's workspace
+    (the daemon reconciles per workspace, one read per workspace token),
+    revoked rows included, oldest first."""
     runners = (
-        Runner.objects.filter(dev_machine=machine)
+        Runner.objects.filter(dev_machine=machine, workspace_id=workspace_id)
         .select_related("workspace", "pod", "pod__project")
         .order_by("created_at", "id")
     )
@@ -106,7 +107,8 @@ class DaemonDevMachineEndpoint(APIView):
 
     ``GET`` answers :func:`daemon_machine_payload`. ``PATCH`` takes
     ``engine_paused_by_owner`` (bool) and/or ``label`` (string) and answers
-    the same body. Any of the machine's workspace tokens works; a token of
+    the same body. Any of the machine's workspace tokens works, and the
+    ``runners`` list is scoped to that token's workspace; a token of
     another machine, or one not bound to a machine, is refused with 403.
     """
 
@@ -130,7 +132,7 @@ class DaemonDevMachineEndpoint(APIView):
         machine = DevMachine.objects.filter(pk=dev_machine_id, owner_id=token.user_id).first()
         if machine is None:
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
-        return Response(daemon_machine_payload(machine), status=status.HTTP_200_OK)
+        return Response(daemon_machine_payload(machine, token.workspace_id), status=status.HTTP_200_OK)
 
     def patch(self, request, dev_machine_id):
         token = self._own_machine_token(request, dev_machine_id)
@@ -141,7 +143,7 @@ class DaemonDevMachineEndpoint(APIView):
             machine = update_machine_controls(dev_machine_id, token.user, values)
         except MachineControlError as exc:
             return Response({"error": exc.code}, status=exc.http_status)
-        return Response(daemon_machine_payload(machine), status=status.HTTP_200_OK)
+        return Response(daemon_machine_payload(machine, token.workspace_id), status=status.HTTP_200_OK)
 
 
 def _candidate_payload(machine: DevMachine) -> dict:

@@ -220,7 +220,7 @@ def _machine_url(machine):
 
 
 @override_settings(**ENABLED)
-def test_daemon_machine_get_lists_engine_fields_and_every_runner_row(
+def test_daemon_machine_get_lists_engine_fields_and_the_token_workspace_runner_rows(
     db, create_user, workspace, workspace_b, machine, mt, lane
 ):
     issue_engine_credential(user=create_user, dev_machine=machine)
@@ -245,8 +245,11 @@ def test_daemon_machine_get_lists_engine_fields_and_every_runner_row(
     other = DevMachine.objects.create(owner=create_user, host_label="desk")
     _engine(create_user, workspace, other, "builtin-desk-test-workspace-def")
 
-    # Any of the machine's workspace tokens works.
-    for token in (mt, _mint_mt(create_user, workspace_b, machine)):
+    # Any of the machine's workspace tokens works; the machine fields are the
+    # same for both, the runner rows are the token's workspace only.
+    mt_b = _mint_mt(create_user, workspace_b, machine)
+    bodies = {}
+    for key, token in (("a", mt), ("b", mt_b)):
         resp = _client(bearer=token).get(_machine_url(machine))
         assert resp.status_code == 200, resp.data
         body = resp.data
@@ -255,28 +258,39 @@ def test_daemon_machine_get_lists_engine_fields_and_every_runner_row(
         assert body["engine_auto_pause_reason"] == EngineAutoPauseReason.WALLET_EMPTY
         assert body["engine_sign_in_state"] == EngineSignInState.ACTIVE
         assert body["engine_credential_expires_at"] is not None
-        rows = body["runners"]
-        assert [r["id"] for r in rows] == [str(engine.id), str(gone.id), str(own.id)]
-        first, revoked, mine = rows
-        assert first == {
-            "id": str(engine.id),
-            "name": "builtin-rich-mbp-test-workspace-def",
-            "workspace_slug": "test-workspace",
-            "project_id": str(pod.project_id),
-            "project_identifier": "DEF",
-            "pod_id": str(pod.id),
-            "agent_kind": "engine",
-            "provisioning": RunnerProvisioning.DESKTOP_BUNDLED,
-            "status": engine.status,
-            "revoked_at": None,
-            "revoked_reason": "",
-            "working_dir": "/home/rich/work/def",
-        }
-        assert revoked["workspace_slug"] == "second-ws"
-        assert revoked["revoked_at"] is not None and revoked["status"] == "revoked"
-        assert revoked["working_dir"] == ""
-        assert mine["agent_kind"] == "claude_code"
-        assert mine["provisioning"] == RunnerProvisioning.MANUAL
+        bodies[key] = body
+    assert {k: v for k, v in bodies["a"].items() if k != "runners"} == {
+        k: v for k, v in bodies["b"].items() if k != "runners"
+    }
+
+    # Workspace A's token: its engine and own-agent rows, not B's revoked row.
+    rows = bodies["a"]["runners"]
+    assert [r["id"] for r in rows] == [str(engine.id), str(own.id)]
+    first, mine = rows
+    assert first == {
+        "id": str(engine.id),
+        "name": "builtin-rich-mbp-test-workspace-def",
+        "workspace_slug": "test-workspace",
+        "project_id": str(pod.project_id),
+        "project_identifier": "DEF",
+        "pod_id": str(pod.id),
+        "agent_kind": "engine",
+        "provisioning": RunnerProvisioning.DESKTOP_BUNDLED,
+        "status": engine.status,
+        "revoked_at": None,
+        "revoked_reason": "",
+        "working_dir": "/home/rich/work/def",
+    }
+    assert mine["agent_kind"] == "claude_code"
+    assert mine["provisioning"] == RunnerProvisioning.MANUAL
+
+    # Workspace B's token: only B's row, revoked included.
+    (revoked,) = bodies["b"]["runners"]
+    assert revoked["id"] == str(gone.id)
+    assert revoked["workspace_slug"] == "second-ws"
+    assert revoked["revoked_at"] is not None and revoked["status"] == "revoked"
+    assert revoked["revoked_reason"] == "user_revoke"
+    assert revoked["working_dir"] == ""
 
 
 def test_daemon_machine_get_is_restricted_to_the_token_machine(db, create_user, workspace, machine, mt):
