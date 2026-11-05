@@ -1,6 +1,6 @@
 # Rust raw SQL to SeaORM: migration playbook
 
-Companion to [design.md](design.md), which moved the writes to the core
+Companion to [design.md](../../.ai_design/rust_orm/design.md), which moved the writes to the core
 tables onto SeaORM domain services. This document covers everything else,
 reads included.
 
@@ -122,12 +122,12 @@ agent_run::Entity::find()
 ### 3.5 Writes
 
 Writes to the design §4 tables go through `pidash_services::domain`
-(design.md). Any other write uses
+(`.ai_design/rust_orm/design.md`). Any other write uses
 `ActiveModel { .. }.insert/update/delete` or `Entity::update_many()` /
 `delete_many()` with a filter.
 
 **Transactions:** a SeaORM transaction cannot adopt an `sqlx::Transaction`,
-and sqlx cannot join a SeaORM one (design.md). Migrate a transaction's whole
+and sqlx cannot join a SeaORM one (`.ai_design/rust_orm/design.md`). Migrate a transaction's whole
 body together, or keep it on one side. Never split one transaction across
 the two.
 

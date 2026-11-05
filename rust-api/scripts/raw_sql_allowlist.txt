@@ -16,7 +16,7 @@ crates/api/src/app_cycles/handlers_favorites.rs 5
 crates/api/src/app_cycles/handlers_misc.rs 21
 crates/api/src/app_cycles/handlers_progress.rs 6
 crates/api/src/app_intake/intakes.rs 7
-crates/api/src/app_intake/issues.rs 104
+crates/api/src/app_intake/issues.rs 73
 crates/api/src/app_intake/mod.rs 9
 crates/api/src/app_intake/versions.rs 4
 crates/api/src/app_integrations/handlers_external.rs 6
@@ -26,9 +26,9 @@ crates/api/src/app_integrations/handlers_github_app.rs 31
 crates/api/src/app_integrations/handlers_github_proj.rs 34
 crates/api/src/app_integrations/handlers_github_ws.rs 17
 crates/api/src/app_integrations/mod.rs 1
-crates/api/src/app_issues/handlers_archive.rs 49
+crates/api/src/app_issues/handlers_archive.rs 18
 crates/api/src/app_issues/handlers_bulk.rs 17
-crates/api/src/app_issues/handlers_core.rs 44
+crates/api/src/app_issues/handlers_core.rs 41
 crates/api/src/app_issues/handlers_engage.rs 37
 crates/api/src/app_issues/handlers_issue_types.rs 7
 crates/api/src/app_issues/handlers_labels_attachments.rs 34

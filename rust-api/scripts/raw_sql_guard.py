@@ -6,7 +6,7 @@ SeaORM entities and the query builder, not hand-written SQL. Raw SQL stays
 only where SeaORM cannot express a statement, and each such site says why
 with a `// raw-sql: <reason>` comment on the call line, or alone on the line
 above it.
-The playbook is .ai_design/rust_orm/reads.md.
+The playbook is rust-api/docs/orm-migration.md.
 
 This script counts, per production file (test code excluded the same way as
 write_guard.py), the raw-SQL call sites that carry no `raw-sql:` reason:
