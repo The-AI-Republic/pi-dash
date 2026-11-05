@@ -9,11 +9,11 @@ class AgentExecutorKind(models.TextChoices):
 
     Runner (``LOCAL_RUNNER``) is the only executor issues and projects can be
     set to (``.ai_design/built_engine_as_runner/design.md`` §6); which machine
-    runs the work is a dispatch question answered by pods and
-    ``Issue.assigned_runner``. The other two values stay readable for history:
-    ``AgentRun.executor_kind`` rows keep them, and queued or running
-    ``cloud_agent`` runs finish on the Cloud Agent. Writes of either from
-    older clients are translated by :func:`normalize_executor_write`.
+    runs the work is a dispatch question answered by pods. The other two
+    values stay readable for history: ``AgentRun.executor_kind`` rows keep
+    them, and queued or running ``cloud_agent`` runs finish on the Cloud
+    Agent. Writes of either from older clients are translated to
+    ``local_runner``, pod-level, by :func:`normalize_executor_write`.
     """
 
     LOCAL_RUNNER = "local_runner", "Local Runner"
@@ -21,7 +21,7 @@ class AgentExecutorKind(models.TextChoices):
     # (removing it is separate cleanup) and still serves cloud chat.
     CLOUD_AGENT = "cloud_agent", "Pi Dash Cloud Agent"
     # Legacy: the built-in engine is now a runner (``provisioning =
-    # desktop_bundled``) reached through a pod or an assigned runner.
+    # desktop_bundled``) that takes issue work as a member of its pod.
     MANAGED_RUNNER = "managed_runner", "Pi Dash Agent"
 
 
@@ -128,8 +128,8 @@ def agent_executor_options(project, user=None) -> list[dict[str, object]]:
         cloud_available = False
         cloud_reason = "llm_config_missing"
     # Only runners that take pod work count as "a runner is available":
-    # ``pinned_only`` runners (engines by default) serve only issues assigned
-    # to them, and a paused engine takes nothing.
+    # ``pinned_only`` runners (engines by default) take no new issue work,
+    # and a paused engine takes nothing.
     online_local = (
         Runner.objects.filter(
             pod__project_id=project.id,

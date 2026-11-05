@@ -33,7 +33,7 @@ from pi_dash.prompting.composer import build_first_turn
 from pi_dash.prompting.recipes import RecipeNotFound
 from pi_dash.prompting.registry import PromptRegistryError
 from pi_dash.prompting.renderer import PromptRenderError
-from pi_dash.runner.services.dispatch_rules import AssignedRunnerUnavailable, nonstrict_pin_allowed
+from pi_dash.runner.services.dispatch_rules import locality_pin_allowed
 from pi_dash.runner.models import (
     AgentRun,
     AgentRunStatus,
@@ -311,16 +311,7 @@ def _resolve_fallback_creator(issue: Issue):
 
     Prefer the issue's creator; fall back to the project lead. New call sites
     must always pass ``actor`` explicitly; this helper is a back-compat shim.
-
-    An issue assigned to a runner whose owner created or is assigned to it
-    runs as that owner (``built_engine_as_runner`` design §7, §8).
     """
-    from pi_dash.runner.services.dispatch_rules import live_assigned_runner, runner_may_take
-
-    assigned = live_assigned_runner(issue)
-    if assigned is not None and assigned.owner.is_active:
-        if runner_may_take(assigned, created_by_id=None, human=False, issue=issue):
-            return assigned.owner
     if issue.created_by_id:
         return issue.created_by
     project = issue.project
@@ -470,11 +461,7 @@ def _create_continuation_run(*, issue: Issue, parent: AgentRun, creator, pod, tr
             requested=issue.agent_executor,
             actor=creator,
             automatic=trigger in AUTOMATIC_ISSUE_TRIGGERS,
-            issue=issue,
         )
-    except AssignedRunnerUnavailable as exc:
-        logger.info("orchestration.continuation: refused issue=%s code=%s", issue.id, exc.code)
-        return ContinuationOutcome(reason=exc.code)
     except (ValueError, RuntimeError) as exc:
         logger.warning("orchestration.continuation: executor unavailable: %s", exc)
         return ContinuationOutcome(reason=str(exc))
@@ -557,12 +544,9 @@ def _pinned_runner_for(parent: AgentRun, target_pod: Optional[Pod] = None) -> Op
     A paused runner is not: it takes no new work until resumed, so a pin to it
     would park the run exactly like a pin to a gone runner.
 
-    This is the *non-strict* pin. When the issue has an ``assigned_runner``
-    the run creation seam (``execution_fields``) returns that runner as a
-    strict pin, which overrides this one (``built_engine_as_runner`` design
-    §7). A built-in engine gets a non-strict pin only while it is a pod
-    member and its machine's engine is not paused; otherwise the follow-up is
-    created unpinned in the pod.
+    A built-in engine gets a locality pin only while it is a ``pod_member``
+    and its machine's engine is not paused; otherwise the follow-up is
+    created unpinned in the pod (``built_engine_as_runner`` design §7).
     """
     from pi_dash.runner.services.matcher import HEARTBEAT_GRACE
 
@@ -579,7 +563,7 @@ def _pinned_runner_for(parent: AgentRun, target_pod: Optional[Pod] = None) -> Op
         return None
     if target_pod is not None and runner.pod_id != target_pod.id:
         return None
-    if not nonstrict_pin_allowed(runner):
+    if not locality_pin_allowed(runner):
         return None
     return runner
 
@@ -624,7 +608,6 @@ def _create_project_move_handoff_run(*, issue: Issue, parent: AgentRun, pod: Pod
             requested=issue.agent_executor,
             actor=parent.created_by,
             automatic=True,
-            issue=issue,
         )
     except (ValueError, RuntimeError) as exc:
         # The target project's executor cannot accept this creator (e.g. a
@@ -797,11 +780,7 @@ def _create_and_dispatch_run(
             requested=issue.agent_executor,
             actor=creator,
             automatic=trigger in AUTOMATIC_ISSUE_TRIGGERS,
-            issue=issue,
         )
-    except AssignedRunnerUnavailable as exc:
-        logger.info("orchestration: refused issue=%s code=%s", issue.id, exc.code)
-        return TransitionOutcome(reason=exc.code)
     except (ValueError, RuntimeError) as exc:
         logger.warning("orchestration: executor unavailable: %s", exc)
         return TransitionOutcome(reason=str(exc))

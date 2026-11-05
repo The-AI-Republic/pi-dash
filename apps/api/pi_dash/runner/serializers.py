@@ -187,8 +187,8 @@ class RunnerSerializer(serializers.ModelSerializer):
             # and support tooling can answer "is this the bundled desktop
             # runner or one the user installed?" without a second query.
             "provisioning",
-            # Whether the runner takes unpinned pod work (built_engine_as_runner
-            # §7). Changed through the owner-only PATCH.
+            # Whether the runner takes pod work (built_engine_as_runner §7).
+            # Changed through the owner-only PATCH.
             "pod_dispatch",
             "os",
             "arch",
@@ -324,8 +324,6 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "thread_id",
             "agent_metadata",
             "runner",
-            "pinned_runner",
-            "pin_strict",
             "work_item",
             "scheduler_binding",
             "scheduler_binding_detail",

@@ -61,8 +61,8 @@ def resolve_executor_kind(*, project, requested=None) -> str:
         raise CloudAgentUnavailable("Pi Dash Cloud Agent is not currently available")
     if value == AgentExecutorKind.MANAGED_RUNNER:
         # Legacy value (design ``built_engine_as_runner`` §6): the built-in
-        # engine is a runner like any other, picked through the issue's
-        # ``assigned_runner`` or a pod, so new runs are ``local_runner``.
+        # engine is a runner like any other that takes issue work only as a
+        # member of its pod, so new runs are ``local_runner``, pod-level.
         # Migration ``runner.0035`` rewrote stored rows; this covers anything
         # that slipped past it.
         return AgentExecutorKind.LOCAL_RUNNER

@@ -212,9 +212,6 @@ def move_work_item_to_project(*, slug, project_id, pk, target_ref, actor, origin
         issue.sequence_id = next_sequence
         issue.state = target_state
         issue.assigned_pod = target_pod
-        # A runner belongs to one project's pod, so an assignment never
-        # survives a project move (built_engine_as_runner §7).
-        issue.assigned_runner = None
         issue.parent = None
         issue.estimate_point = None
         issue.type = None
@@ -230,7 +227,6 @@ def move_work_item_to_project(*, slug, project_id, pk, target_ref, actor, origin
                 "sequence_id",
                 "state",
                 "assigned_pod",
-                "assigned_runner",
                 "parent",
                 "estimate_point",
                 "type",

@@ -15,7 +15,6 @@ from rest_framework.views import APIView
 from pi_dash.authentication.session import BaseSessionAuthentication
 from pi_dash.runner.models import (
     AgentRun,
-    AgentRunStatus,
     DevMachine,
     MachineSession,
     MachineToken,
@@ -299,7 +298,7 @@ class DevMachineDeleteEndpoint(APIView):
 
         Owner only (a machine is user-scoped and private). Body may carry
         ``engine_paused_by_owner`` and/or ``engine_team_runs`` (booleans).
-        Pausing releases the machine's engines' queued non-strict pins to
+        Pausing releases the machine's engines' queued locality pins to
         their pods in the same transaction; resuming drains them.
         """
         workspace_id = _request_workspace_id(request)
@@ -457,12 +456,6 @@ class RunnerDetailEndpoint(APIView):
         # Hold the pod lock for the duration of the runner save so a concurrent
         # pod soft-delete cannot leave the runner pointing at an inactive pod.
         if "pod" in request.data:
-            from pi_dash.db.models.issue import Issue
-            from pi_dash.runner.services.dispatch_rules import (
-                RUNNER_HAS_ASSIGNED_ISSUES,
-                rehome_assigned_work,
-            )
-
             with transaction.atomic():
                 new_pod = Pod.objects.select_for_update().filter(pk=new_pod_id).first()
                 if new_pod is None:
@@ -475,10 +468,9 @@ class RunnerDetailEndpoint(APIView):
                         {"error": "pod is in a different workspace"},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-                moving_project = new_pod.project_id != runner.pod.project_id
                 # An engine runner is one per machine and project, so it
                 # only moves between pods of its own project (design §7).
-                if moving_project and runner.is_engine:
+                if runner.is_engine and runner.pod is not None and new_pod.project_id != runner.pod.project_id:
                     return Response(
                         {
                             "error": "a built-in engine runner can only move between pods of its project",
@@ -486,30 +478,6 @@ class RunnerDetailEndpoint(APIView):
                         },
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-                # Issues assigned to this runner are dispatched in its pod; a
-                # move to another project would point them at a pod of a
-                # project they are not in. List them so the UI can show them.
-                if moving_project:
-                    assigned = list(
-                        Issue.objects.filter(assigned_runner=runner).values(
-                            "id", "sequence_id", "name", "project_id"
-                        )[:50]
-                    )
-                    if assigned:
-                        return Response(
-                            {
-                                "error": (
-                                    "issues are assigned to this runner; "
-                                    "reassign them before moving it to another project"
-                                ),
-                                "code": RUNNER_HAS_ASSIGNED_ISSUES,
-                                "issues": [
-                                    {**row, "id": str(row["id"]), "project_id": str(row["project_id"])}
-                                    for row in assigned
-                                ],
-                            },
-                            status=status.HTTP_409_CONFLICT,
-                        )
                 # Refuse to move a runner that has a non-terminal run *bound*
                 # to it — either one it is actively serving (``runner=``) or
                 # one reserved for it (``pinned_runner=``, e.g. a queued or
@@ -522,19 +490,10 @@ class RunnerDetailEndpoint(APIView):
                 # block. Only a real move is guarded — re-sending the current
                 # pod stays a no-op. Mirrors the issue-side reassignment guard,
                 # which also keys on NON_TERMINAL_STATUSES.
-                #
-                # Queued *strict* runs are the exception: they belong to the
-                # runner, not to a pod, so they move with it below in this
-                # transaction together with the assigned issues
-                # (``built_engine_as_runner`` design §7).
-                if new_pod.id != runner.pod_id and (
-                    AgentRun.objects.filter(
-                        Q(runner=runner) | Q(pinned_runner=runner),
-                        status__in=NON_TERMINAL_STATUSES,
-                    )
-                    .exclude(pinned_runner=runner, status=AgentRunStatus.QUEUED, pin_strict=True, runner__isnull=True)
-                    .exists()
-                ):
+                if new_pod.id != runner.pod_id and AgentRun.objects.filter(
+                    Q(runner=runner) | Q(pinned_runner=runner),
+                    status__in=NON_TERMINAL_STATUSES,
+                ).exists():
                     return Response(
                         {
                             "error": "runner has an in-flight or queued run; wait for it to finish or cancel it first",
@@ -542,8 +501,6 @@ class RunnerDetailEndpoint(APIView):
                         },
                         status=status.HTTP_409_CONFLICT,
                     )
-                if new_pod.id != runner.pod_id:
-                    rehome_assigned_work(runner, new_pod)
                 runner.pod = new_pod
                 updates.append("pod")
                 runner.save(update_fields=list(set(updates + ["updated_at"])))
@@ -558,15 +515,15 @@ class RunnerDetailEndpoint(APIView):
 
     @staticmethod
     def _apply_pod_dispatch_change(runner):
-        """Turning an engine's pod work off releases its queued non-strict
-        pins to the pod in the same transaction; turning it on lets it take
-        pod work at once (design §7)."""
+        """Turning an engine's pod work off releases its queued locality pins
+        to the pod in the same transaction; turning it on lets it take pod
+        work at once (design §7)."""
         from pi_dash.runner.models import RunnerPodDispatch
-        from pi_dash.runner.services.dispatch_rules import release_nonstrict_pins
+        from pi_dash.runner.services.dispatch_rules import release_locality_pins
 
         if runner.pod_dispatch == RunnerPodDispatch.PINNED_ONLY:
             if runner.is_engine:
-                release_nonstrict_pins([runner.pk])
+                release_locality_pins([runner.pk])
         else:
             transaction.on_commit(lambda rid=runner.pk: drain_for_runner_by_id(rid))
 
