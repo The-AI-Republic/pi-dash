@@ -1000,6 +1000,55 @@ def test_a_report_decided_on_a_stale_read_does_not_replace_engine_disabled(db, m
     assert machine.engine_auto_pause_reason == "engine_disabled"
 
 
+def test_a_healthy_report_clears_only_the_reason_it_read(db, create_user, machine):
+    """PIDESKAPP-206 re-review: a model-token failure sets
+    ``engine_sign_in_required`` between the report's read (``wallet_empty``)
+    and its write. The heartbeat clears ``wallet_empty`` only."""
+    from pi_dash.runner.services import engine_state
+
+    issue_engine_credential(user=machine.owner, dev_machine=machine)
+    stale = DevMachine.objects.get(pk=machine.pk)
+    stale.engine_auto_pause_reason = "wallet_empty"
+    DevMachine.objects.filter(pk=machine.pk).update(engine_auto_pause_reason="engine_sign_in_required")
+    assert engine_state._clear(stale, engine_state._CLEARED_BY_HEALTHY_REPORT) is False
+    machine.refresh_from_db()
+    assert machine.engine_auto_pause_reason == "engine_sign_in_required"
+
+
+def test_a_healthy_report_rechecks_the_credential_on_the_locked_row(db, machine):
+    """The credential is revoked after the report's unlocked read: the sign-in
+    pause stays."""
+    from pi_dash.runner.services import engine_state
+
+    issue_engine_credential(user=machine.owner, dev_machine=machine)
+    DevMachine.objects.filter(pk=machine.pk).update(engine_auto_pause_reason="engine_sign_in_required")
+    stale = DevMachine.objects.get(pk=machine.pk)  # sees a live credential
+    DevMachine.objects.filter(pk=machine.pk).update(engine_sign_in_state=EngineSignInState.SIGNED_OUT)
+    assert engine_state._clear(stale, engine_state._CLEARED_BY_HEALTHY_REPORT) is False
+    machine.refresh_from_db()
+    assert machine.engine_auto_pause_reason == "engine_sign_in_required"
+
+
+@override_settings(**ENABLED)
+def test_silent_approval_ignores_a_report_older_than_the_credential(db, web, create_user, workspace, lane):
+    """PIDESKAPP-206 re-review: the daemon reported ``signed_out`` (full
+    logout), then an interactive sign-in ran while it was stopped. The stale
+    report must not let the app's silent approvals keep re-issuing."""
+    machine_id = "6f1c7d1e-1111-4a2b-9c3d-0000000000a3"
+    _cli_login(web, machine_id, interactive=True)
+    machine = DevMachine.objects.get(pk=machine_id)
+    DevMachine.objects.filter(pk=machine.pk).update(
+        engine_state={"state": "signed_out", "sign_in_state": "signed_out"},
+        engine_state_reported_at=timezone.now() - timedelta(minutes=5),
+    )
+    live = EngineCredential.objects.get(dev_machine_id=machine_id, revoked_at__isnull=True)
+    EngineCredential.objects.filter(pk=live.pk).update(created_at=timezone.now() - timedelta(minutes=1))
+    for _ in range(2):
+        resp = _cli_login(web, machine_id, interactive=False)
+        assert "engine_credential" not in resp.data
+    assert EngineCredential.objects.get(dev_machine_id=machine_id, revoked_at__isnull=True).pk == live.pk
+
+
 @override_settings(**ENABLED)
 def test_silent_cli_login_reissues_a_credential_the_daemon_lost(db, web, create_user, workspace, lane):
     """PIDESKAPP-122 review: the server says ``active`` but the daemon reports
@@ -1010,15 +1059,22 @@ def test_silent_cli_login_reissues_a_credential_the_daemon_lost(db, web, create_
     assert on.data["engine_credential"]["token"].startswith("ec_")
     machine = DevMachine.objects.get(pk=machine_id)
     DevMachine.objects.filter(pk=machine.pk).update(
-        engine_state={"state": "signed_out", "sign_in_state": "never"}
+        engine_state={"state": "signed_out", "sign_in_state": "never"},
+        engine_state_reported_at=timezone.now(),
     )
     again = _cli_login(web, machine_id, interactive=False)
     assert again.data["engine_credential"]["token"].startswith("ec_")
     assert EngineCredential.objects.filter(dev_machine_id=machine_id, revoked_at__isnull=True).count() == 1
 
+    # PIDESKAPP-206 re-review: that report predates the re-issued credential,
+    # so a second silent approval before the next heartbeat is refused and
+    # the new credential keeps its 14 days.
+    reissued = EngineCredential.objects.get(dev_machine_id=machine_id, revoked_at__isnull=True)
+    second = _cli_login(web, machine_id, interactive=False)
+    assert "engine_credential" not in second.data
+    assert EngineCredential.objects.get(dev_machine_id=machine_id, revoked_at__isnull=True).pk == reissued.pk
+
     # A daemon that reports its own live credential keeps it.
-    DevMachine.objects.filter(pk=machine.pk).update(
-        engine_state={"state": "available", "sign_in_state": "active"}
-    )
+    DevMachine.objects.filter(pk=machine.pk).update(engine_state={"state": "available", "sign_in_state": "active"})
     kept = _cli_login(web, machine_id, interactive=False)
     assert "engine_credential" not in kept.data

@@ -71,6 +71,12 @@ def silent_issue_allowed(machine: DevMachine, now=None) -> bool:
     the engine on for this machine, so re-issuing the lost credential is a
     renewal, not a new consent. Without this the engine stayed off until the
     server's credential reached ``expiring``, about 11 days.
+
+    The report counts only when it is newer than the live credential. A
+    report from before the credential was issued (the daemon was stopped, or
+    has not heartbeated since an interactive sign-in) describes a credential
+    the daemon no longer lacks; trusting it would let every silent approval
+    supersede the credential and restart its fixed 14 days.
     """
     state = machine.current_engine_sign_in_state(now)
     if silent_renewal_allowed(state):
@@ -78,7 +84,19 @@ def silent_issue_allowed(machine: DevMachine, now=None) -> bool:
     if state != EngineSignInState.ACTIVE:
         return False
     reported = (machine.engine_state or {}).get("sign_in_state")
-    return reported in _DAEMON_HOLDS_NO_CREDENTIAL
+    if reported not in _DAEMON_HOLDS_NO_CREDENTIAL:
+        return False
+    reported_at = machine.engine_state_reported_at
+    if reported_at is None:
+        return False
+    live = (
+        EngineCredential.objects.filter(dev_machine_id=machine.pk, revoked_at__isnull=True)
+        .order_by("-created_at")
+        .values_list("created_at", flat=True)
+        .first()
+    )
+    return live is None or reported_at > live
+
 
 #: Revocation reason → stored machine sign-in state.
 _STATE_FOR_REASON = {
