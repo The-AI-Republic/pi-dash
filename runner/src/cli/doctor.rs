@@ -474,6 +474,18 @@ enum CredentialsFile {
     Missing,
 }
 
+/// Whether a Claude config/settings file sets a given credential key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConfigKey {
+    /// The key is set (non-empty string) in this file.
+    Found(PathBuf),
+    /// The file exists but could not be read or parsed, so we cannot rule
+    /// the key out.
+    Unreadable(PathBuf),
+    /// No file, or the file parsed and does not set the key.
+    Absent,
+}
+
 /// Everything the Claude auth decision depends on, gathered up front so the
 /// decision itself ([`classify_claude_auth`]) is pure and unit-testable.
 #[derive(Debug, Clone)]
@@ -486,6 +498,11 @@ struct ClaudeAuthProbe {
     /// First third-party-provider switch that is set.
     third_party_provider: Option<&'static str>,
     credentials: CredentialsFile,
+    /// `apiKeyHelper` in user or managed Claude settings.
+    api_key_helper: ConfigKey,
+    /// `primaryApiKey` in Claude's global config (`~/.claude.json`), where
+    /// a Console API-key login is stored.
+    stored_api_key: ConfigKey,
     is_macos: bool,
 }
 
@@ -513,23 +530,38 @@ fn classify_claude_auth(p: &ClaudeAuthProbe) -> AuthStatus {
             "{var} is set; cloud-provider credentials are not checked"
         ));
     }
-    match &p.credentials {
-        CredentialsFile::Found(path) => {
-            AuthStatus::LoggedIn(format!("credentials found ({})", path.display()))
-        }
-        CredentialsFile::Unrecognized(path) => AuthStatus::Unknown(format!(
+    if let CredentialsFile::Found(path) = &p.credentials {
+        return AuthStatus::LoggedIn(format!("credentials found ({})", path.display()));
+    }
+    if let ConfigKey::Found(path) = &p.api_key_helper {
+        return AuthStatus::LoggedIn(format!("apiKeyHelper is set ({})", path.display()));
+    }
+    if let ConfigKey::Found(path) = &p.stored_api_key {
+        return AuthStatus::LoggedIn(format!("API key stored in {}", path.display()));
+    }
+    // From here on nothing positive was found. Only report "not logged in"
+    // when every source we know of was actually ruled out.
+    if let CredentialsFile::Unrecognized(path) = &p.credentials {
+        return AuthStatus::Unknown(format!(
             "unrecognised credentials file ({})",
             path.display()
-        )),
-        // On macOS Claude Code keeps its login in the Keychain, so a missing
-        // file says nothing.
-        CredentialsFile::Missing if p.is_macos => AuthStatus::Unknown(
-            "credentials are kept in the macOS Keychain, which doctor does not read".to_string(),
-        ),
-        CredentialsFile::Missing => {
-            AuthStatus::NotLoggedIn("no auth env var and no credentials file".to_string())
+        ));
+    }
+    for key in [&p.api_key_helper, &p.stored_api_key] {
+        if let ConfigKey::Unreadable(path) = key {
+            return AuthStatus::Unknown(format!("could not read {}", path.display()));
         }
     }
+    // On macOS Claude Code keeps its login in the Keychain, so a missing
+    // file says nothing.
+    if p.is_macos {
+        return AuthStatus::Unknown(
+            "credentials are kept in the macOS Keychain, which doctor does not read".to_string(),
+        );
+    }
+    AuthStatus::NotLoggedIn(
+        "no auth env var, credentials file, apiKeyHelper or stored API key".to_string(),
+    )
 }
 
 /// Parse `claude auth status` JSON. Tolerates login-shell noise around the
@@ -565,6 +597,77 @@ fn claude_credentials_path(
         Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir).join(".credentials.json")),
         _ => home.map(|h| h.join(".claude").join(".credentials.json")),
     }
+}
+
+/// Claude's settings and global-config locations for a config root
+/// (`CLAUDE_CONFIG_DIR`, else `~/.claude`). Returns
+/// `(settings files that may set apiKeyHelper, global config file)`.
+///
+/// Project-level `.claude/settings*.json` are not scanned: they live in the
+/// per-run checkout, which doctor does not know.
+fn claude_config_files(
+    config_dir: Option<std::ffi::OsString>,
+    home: Option<PathBuf>,
+    managed: &[PathBuf],
+) -> (Vec<PathBuf>, Option<PathBuf>) {
+    let custom = config_dir.filter(|d| !d.is_empty()).map(PathBuf::from);
+    let root = custom
+        .clone()
+        .or_else(|| home.as_ref().map(|h| h.join(".claude")));
+    let mut settings: Vec<PathBuf> = root.into_iter().map(|r| r.join("settings.json")).collect();
+    settings.extend(managed.iter().cloned());
+    let global = match custom {
+        Some(dir) => Some(dir.join(".claude.json")),
+        None => home.map(|h| h.join(".claude.json")),
+    };
+    (settings, global)
+}
+
+/// System-wide managed settings, which can also set `apiKeyHelper`.
+fn claude_managed_settings_paths() -> Vec<PathBuf> {
+    let p = if cfg!(target_os = "macos") {
+        "/Library/Application Support/ClaudeCode/managed-settings.json"
+    } else if cfg!(target_os = "windows") {
+        r"C:\ProgramData\ClaudeCode\managed-settings.json"
+    } else {
+        "/etc/claude-code/managed-settings.json"
+    };
+    vec![PathBuf::from(p)]
+}
+
+/// Whether the JSON file at `path` sets `key` to a non-empty string. The
+/// value itself is never returned.
+fn read_config_key(path: &Path, key: &str) -> ConfigKey {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return if path.exists() {
+            ConfigKey::Unreadable(path.to_path_buf())
+        } else {
+            ConfigKey::Absent
+        };
+    };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) if v.is_object() => match v.get(key).and_then(|x| x.as_str()) {
+            Some(s) if !s.trim().is_empty() => ConfigKey::Found(path.to_path_buf()),
+            _ => ConfigKey::Absent,
+        },
+        _ => ConfigKey::Unreadable(path.to_path_buf()),
+    }
+}
+
+/// First file that sets `key`; otherwise the first unreadable one; else
+/// [`ConfigKey::Absent`].
+fn scan_config_key(paths: &[PathBuf], key: &str) -> ConfigKey {
+    let results: Vec<ConfigKey> = paths.iter().map(|p| read_config_key(p, key)).collect();
+    results
+        .iter()
+        .find(|r| matches!(r, ConfigKey::Found(_)))
+        .or_else(|| {
+            results
+                .iter()
+                .find(|r| matches!(r, ConfigKey::Unreadable(_)))
+        })
+        .cloned()
+        .unwrap_or(ConfigKey::Absent)
 }
 
 fn read_credentials_file(path: &Path) -> CredentialsFile {
@@ -700,6 +803,7 @@ async fn agent_env_snapshot() -> AgentEnvSnapshot {
 fn build_claude_probe(
     status: Option<ClaudeStatus>,
     env: &AgentEnvSnapshot,
+    managed_settings: &[PathBuf],
     is_macos: bool,
 ) -> ClaudeAuthProbe {
     let find = |list: &[&'static str]| {
@@ -713,11 +817,18 @@ fn build_claude_probe(
     )
     .map(|p| read_credentials_file(&p))
     .unwrap_or(CredentialsFile::Missing);
+    let (settings, global) = claude_config_files(
+        env.config_dir.clone().map(Into::into),
+        env.home.clone().map(PathBuf::from),
+        managed_settings,
+    );
     ClaudeAuthProbe {
         status,
         env_var: find(CLAUDE_AUTH_ENV_VARS),
         third_party_provider: find(CLAUDE_THIRD_PARTY_ENV_VARS),
         credentials,
+        api_key_helper: scan_config_key(&settings, "apiKeyHelper"),
+        stored_api_key: scan_config_key(&Vec::from_iter(global), "primaryApiKey"),
         is_macos,
     }
 }
@@ -725,7 +836,12 @@ fn build_claude_probe(
 async fn gather_claude_auth_probe(binary: &str) -> ClaudeAuthProbe {
     let status = claude_auth_status(binary).await;
     let env = agent_env_snapshot().await;
-    build_claude_probe(status, &env, cfg!(target_os = "macos"))
+    build_claude_probe(
+        status,
+        &env,
+        &claude_managed_settings_paths(),
+        cfg!(target_os = "macos"),
+    )
 }
 
 async fn check_git() -> Result<String> {
@@ -1007,6 +1123,8 @@ mod tests {
             env_var: None,
             third_party_provider: None,
             credentials: CredentialsFile::Missing,
+            api_key_helper: ConfigKey::Absent,
+            stored_api_key: ConfigKey::Absent,
             is_macos: false,
         }
     }
@@ -1244,7 +1362,7 @@ mod tests {
             config_dir: None,
             home: None,
         };
-        let p = build_claude_probe(None, &env, false);
+        let p = build_claude_probe(None, &env, &[], false);
         assert_eq!(p.env_var, Some("ANTHROPIC_API_KEY"));
         assert_eq!(p.third_party_provider, Some("CLAUDE_CODE_USE_VERTEX"));
         assert!(matches!(classify_claude_auth(&p), AuthStatus::LoggedIn(_)));
@@ -1260,7 +1378,112 @@ mod tests {
             config_dir: Some(dir.path().display().to_string()),
             ..AgentEnvSnapshot::default()
         };
-        let p = build_claude_probe(None, &env, false);
+        let p = build_claude_probe(None, &env, &[], false);
         assert!(matches!(p.credentials, CredentialsFile::Found(_)));
+    }
+
+    #[test]
+    fn claude_auth_api_key_helper_is_logged_in() {
+        let p = ClaudeAuthProbe {
+            api_key_helper: ConfigKey::Found(PathBuf::from("/h/.claude/settings.json")),
+            ..probe()
+        };
+        match classify_claude_auth(&p) {
+            AuthStatus::LoggedIn(d) => assert!(d.contains("apiKeyHelper"), "{d}"),
+            other => panic!("expected LoggedIn, got {other:?}"),
+        }
+        let p = ClaudeAuthProbe {
+            stored_api_key: ConfigKey::Found(PathBuf::from("/h/.claude.json")),
+            ..probe()
+        };
+        assert!(matches!(classify_claude_auth(&p), AuthStatus::LoggedIn(_)));
+    }
+
+    #[test]
+    fn claude_auth_unreadable_settings_could_not_verify() {
+        // A settings file we cannot parse might hold an apiKeyHelper, so we
+        // cannot claim "not logged in".
+        for p in [
+            ClaudeAuthProbe {
+                api_key_helper: ConfigKey::Unreadable(PathBuf::from("/h/.claude/settings.json")),
+                ..probe()
+            },
+            ClaudeAuthProbe {
+                stored_api_key: ConfigKey::Unreadable(PathBuf::from("/h/.claude.json")),
+                ..probe()
+            },
+        ] {
+            assert!(matches!(classify_claude_auth(&p), AuthStatus::Unknown(_)));
+        }
+    }
+
+    #[test]
+    fn read_config_key_outcomes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        assert_eq!(read_config_key(&path, "apiKeyHelper"), ConfigKey::Absent);
+        std::fs::write(&path, r#"{"apiKeyHelper":"/bin/get-key.sh"}"#).unwrap();
+        assert_eq!(
+            read_config_key(&path, "apiKeyHelper"),
+            ConfigKey::Found(path.clone())
+        );
+        std::fs::write(&path, r#"{"model":"opus","apiKeyHelper":""}"#).unwrap();
+        assert_eq!(read_config_key(&path, "apiKeyHelper"), ConfigKey::Absent);
+        std::fs::write(&path, "{ not json").unwrap();
+        assert_eq!(
+            read_config_key(&path, "apiKeyHelper"),
+            ConfigKey::Unreadable(path.clone())
+        );
+    }
+
+    #[test]
+    fn build_claude_probe_finds_api_key_helper_in_settings() {
+        // Old CLI (status unavailable), no env var, no credentials file, but
+        // `apiKeyHelper` in the user's settings: logged in, not a warning.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude").join("settings.json"),
+            r#"{"apiKeyHelper":"~/bin/anthropic-key.sh"}"#,
+        )
+        .unwrap();
+        let env = AgentEnvSnapshot {
+            home: Some(home.path().display().to_string()),
+            ..AgentEnvSnapshot::default()
+        };
+        let p = build_claude_probe(None, &env, &[], false);
+        assert!(matches!(p.api_key_helper, ConfigKey::Found(_)));
+        assert!(matches!(classify_claude_auth(&p), AuthStatus::LoggedIn(_)));
+
+        // Managed settings count too, and CLAUDE_CONFIG_DIR moves the user
+        // settings and global config.
+        let cfg = tempfile::tempdir().unwrap();
+        let managed = tempfile::tempdir().unwrap();
+        let managed_file = managed.path().join("managed-settings.json");
+        std::fs::write(&managed_file, r#"{"apiKeyHelper":"/opt/key.sh"}"#).unwrap();
+        let env = AgentEnvSnapshot {
+            config_dir: Some(cfg.path().display().to_string()),
+            home: Some(home.path().display().to_string()),
+            ..AgentEnvSnapshot::default()
+        };
+        let p = build_claude_probe(None, &env, std::slice::from_ref(&managed_file), false);
+        assert_eq!(p.api_key_helper, ConfigKey::Found(managed_file));
+
+        // A Console API key stored in the global config counts.
+        std::fs::write(cfg.path().join(".claude.json"), r#"{"primaryApiKey":"sk"}"#).unwrap();
+        let p = build_claude_probe(None, &env, &[], false);
+        assert!(matches!(p.stored_api_key, ConfigKey::Found(_)));
+
+        // With all sources ruled out it is still "not logged in" on Linux.
+        let empty = tempfile::tempdir().unwrap();
+        let env = AgentEnvSnapshot {
+            home: Some(empty.path().display().to_string()),
+            ..AgentEnvSnapshot::default()
+        };
+        let p = build_claude_probe(None, &env, &[], false);
+        assert!(matches!(
+            classify_claude_auth(&p),
+            AuthStatus::NotLoggedIn(_)
+        ));
     }
 }
