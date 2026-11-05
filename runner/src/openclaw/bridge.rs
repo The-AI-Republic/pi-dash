@@ -278,6 +278,12 @@ impl Bridge {
         Ok(())
     }
 
+    /// True once every process this bridge started (the current turn's and
+    /// the retired ones) has exited and its process group is gone.
+    pub fn is_gone(&self) -> bool {
+        self.proc.as_ref().is_none_or(|p| p.is_gone()) && self.retired.iter().all(|p| p.is_gone())
+    }
+
     pub fn process_handle(&self) -> AgentProcessHandle {
         AgentProcessHandle {
             pid: self.proc.as_ref().and_then(|p| p.pid()),

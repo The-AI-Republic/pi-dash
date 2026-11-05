@@ -597,10 +597,32 @@ impl AgentBridge {
         }
     }
 
+    /// Keep an exited bridge on a chat runtime's retired list until the
+    /// runtime ends, and drop every retired bridge whose process group is
+    /// already gone, so a long chat on a one-shot engine does not accumulate
+    /// one bridge per turn.
+    pub fn retire(retired: &mut Vec<AgentBridge>, bridge: AgentBridge) {
+        retire_pruned(retired, bridge, AgentBridge::is_gone);
+    }
+
     /// Finish several bridges in parallel (a chat runtime's retired bridges
     /// plus its current one, when the runtime ends).
     pub async fn finish_all(bridges: Vec<AgentBridge>, grace: Duration) {
         futures_util::future::join_all(bridges.into_iter().map(|b| b.finish(grace))).await;
+    }
+
+    /// True once every process this bridge started has exited and its
+    /// process group is gone. A chat runtime drops such a retired bridge
+    /// instead of keeping it until the runtime ends.
+    pub fn is_gone(&self) -> bool {
+        match self {
+            AgentBridge::Codex(b) => b.server.is_gone(),
+            AgentBridge::ClaudeCode(b) => b.is_gone(),
+            AgentBridge::CursorAgent(b) => b.is_gone(),
+            AgentBridge::OpenClaw(b) => b.is_gone(),
+            AgentBridge::Grok(b) => b.is_gone(),
+            AgentBridge::MuseCode(b) => b.is_gone(),
+        }
     }
 
     /// Bridge-owned observability handle: the agent subprocess's PID and a
@@ -633,6 +655,14 @@ impl AgentBridge {
             AgentBridge::MuseCode(b) => b.recent_stderr().await,
         }
     }
+}
+
+/// Push `item` onto a retired list and drop every entry whose process
+/// group is already gone (dropping it then finishes nothing: its tree is
+/// disarmed). Entries whose group still has members are kept.
+pub(crate) fn retire_pruned<T>(retired: &mut Vec<T>, item: T, is_gone: impl Fn(&T) -> bool) {
+    retired.push(item);
+    retired.retain(|t| !is_gone(t));
 }
 
 fn selected_model(

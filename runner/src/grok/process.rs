@@ -96,6 +96,11 @@ impl GrokProcess {
         Ok(())
     }
 
+    /// True once the leader has exited and its process group is gone.
+    pub fn is_gone(&self) -> bool {
+        self.child.is_gone()
+    }
+
     pub fn process_handle(&self) -> AgentProcessHandle {
         AgentProcessHandle {
             pid: self.pid,

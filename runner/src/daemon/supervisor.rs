@@ -2380,7 +2380,7 @@ impl ChatWorker {
                 // turn), but processes it started belong to the chat
                 // runtime, not the turn: keep the tree until the runtime
                 // ends (runner cleanup §4.3).
-                self.retired.push(bridge);
+                AgentBridge::retire(&mut self.retired, bridge);
             }
             *started_sent = false;
         }
@@ -2504,7 +2504,7 @@ impl ChatWorker {
                 // turn), but processes it started belong to the chat
                 // runtime, not the turn: keep the tree until the runtime
                 // ends (runner cleanup §4.3).
-                self.retired.push(bridge);
+                AgentBridge::retire(&mut self.retired, bridge);
             }
             *started_sent = false;
         }

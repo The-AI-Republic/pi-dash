@@ -285,11 +285,17 @@ fn only_zombies(members: &[crate::util::procinfo::ProcInfo]) -> bool {
 /// for it until the zombies are reaped, so EPERM is not "could not clean"
 /// until the members show a live process we may not signal. Our own leader
 /// is reaped by its bridge's wait task; orphans by init/launchd.
-/// `members` is only called when the answer depends on it.
+///
+/// The last member can be reaped between the EPERM and the listing, which
+/// then shows no member at all. So EPERM with no visible member asks
+/// `recheck` (a fresh `kill(-pgid, 0)`) once more: ESRCH now means the group
+/// is gone; anything else stays "could not clean".
+/// `members` and `recheck` are only called when the answer depends on them.
 #[cfg_attr(not(unix), allow(dead_code))]
 fn classify_kill(
     res: KillResult,
     members: impl FnOnce() -> Vec<crate::util::procinfo::ProcInfo>,
+    recheck: impl FnOnce() -> KillResult,
 ) -> Probe {
     match res {
         KillResult::NoSuchGroup => Probe::Gone,
@@ -302,13 +308,25 @@ fn classify_kill(
             }
         }
         KillResult::NotPermitted => {
-            if only_zombies(&members()) {
+            let members = members();
+            if only_zombies(&members)
+                || (members.is_empty() && recheck() == KillResult::NoSuchGroup)
+            {
                 Probe::Gone
             } else {
                 Probe::Denied
             }
         }
     }
+}
+
+/// A fresh `kill(-pgid, 0)`, for [`classify_kill`]'s recheck.
+#[cfg(unix)]
+fn recheck_group(pgid: i32) -> KillResult {
+    kill_result(nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(-pgid),
+        None,
+    ))
 }
 
 /// `kill(-pgid, 0)`, refined by [`classify_kill`].
@@ -320,9 +338,11 @@ pub fn probe_group(pgid: i32) -> Probe {
         if pgid <= 1 {
             return Probe::Denied;
         }
-        classify_kill(kill_result(kill(Pid::from_raw(-pgid), None)), || {
-            crate::util::procinfo::group_members(pgid)
-        })
+        classify_kill(
+            kill_result(kill(Pid::from_raw(-pgid), None)),
+            || crate::util::procinfo::group_members(pgid),
+            || recheck_group(pgid),
+        )
     }
     #[cfg(not(unix))]
     {
@@ -355,11 +375,12 @@ enum Signalled {
 fn signal_result(
     res: KillResult,
     members: impl FnOnce() -> Vec<crate::util::procinfo::ProcInfo>,
+    recheck: impl FnOnce() -> KillResult,
 ) -> Result<(), bool> {
     match res {
         // Delivered: the caller polls for the group to empty.
         KillResult::Delivered => Ok(()),
-        other => Err(classify_kill(other, members) == Probe::Gone),
+        other => Err(classify_kill(other, members, recheck) == Probe::Gone),
     }
 }
 
@@ -377,9 +398,11 @@ fn signal_group(pgid: i32, sig: Sig) -> Result<(), bool> {
             Sig::Term => Signal::SIGTERM,
             Sig::Kill => Signal::SIGKILL,
         };
-        signal_result(kill_result(killpg(Pid::from_raw(pgid), s)), || {
-            crate::util::procinfo::group_members(pgid)
-        })
+        signal_result(
+            kill_result(killpg(Pid::from_raw(pgid), s)),
+            || crate::util::procinfo::group_members(pgid),
+            || recheck_group(pgid),
+        )
     }
     #[cfg(not(unix))]
     {
@@ -388,12 +411,15 @@ fn signal_group(pgid: i32, sig: Sig) -> Result<(), bool> {
     }
 }
 
-/// Poll `probe_group` until it stops reporting `Alive` or `bound` passes.
+/// Poll `probe_group` until it reports `Gone` or `bound` passes, and return
+/// the last answer. `Denied` is polled through too: after a signal, macOS
+/// answers EPERM while members are mid-exit, so only an EPERM that lasts the
+/// whole bound counts as "could not clean".
 async fn wait_group(pgid: i32, bound: Duration) -> Probe {
     let deadline = tokio::time::Instant::now() + bound;
     loop {
         let p = probe_group(pgid);
-        if p != Probe::Alive || tokio::time::Instant::now() >= deadline {
+        if p == Probe::Gone || tokio::time::Instant::now() >= deadline {
             return p;
         }
         tokio::time::sleep(POLL).await;
@@ -1795,15 +1821,50 @@ mod tests {
         }
     }
 
+    /// A recheck that still answers EPERM.
+    fn still_eperm() -> KillResult {
+        KillResult::NotPermitted
+    }
+
+    #[test]
+    fn eperm_then_reaped_before_listing_is_gone() {
+        // macOS: kill(-pgid) is EPERM while the last member is exiting, and
+        // its parent reaps it before the members are listed, so none is
+        // visible. The fresh probe then answers ESRCH: the group is gone.
+        let reaped = || KillResult::NoSuchGroup;
+        assert_eq!(
+            classify_kill(KillResult::NotPermitted, Vec::new, reaped),
+            Probe::Gone
+        );
+        assert_eq!(
+            signal_result(KillResult::NotPermitted, Vec::new, reaped),
+            Err(true)
+        );
+        // A visible live member is never overridden by the recheck.
+        let live = || vec![member(4242, false)];
+        assert_eq!(
+            classify_kill(KillResult::NotPermitted, live, || panic!("no recheck")),
+            Probe::Denied
+        );
+        // Only ESRCH counts: a recheck that now delivers proves nothing.
+        assert_eq!(
+            classify_kill(KillResult::NotPermitted, Vec::new, || KillResult::Delivered),
+            Probe::Denied
+        );
+    }
+
     #[test]
     fn eperm_with_zombie_only_members_is_gone() {
         // macOS: kill(-pgid) is EPERM while only unreaped zombies remain.
         let zombies = || vec![member(4242, true), member(4243, true)];
         assert_eq!(
-            classify_kill(KillResult::NotPermitted, zombies),
+            classify_kill(KillResult::NotPermitted, zombies, still_eperm),
             Probe::Gone
         );
-        assert_eq!(signal_result(KillResult::NotPermitted, zombies), Err(true));
+        assert_eq!(
+            signal_result(KillResult::NotPermitted, zombies, still_eperm),
+            Err(true)
+        );
     }
 
     #[test]
@@ -1821,10 +1882,13 @@ mod tests {
             merge_group_members(4242, listed, |pid| Some(member(pid, false)))
         };
         assert_eq!(
-            classify_kill(KillResult::NotPermitted, exiting),
+            classify_kill(KillResult::NotPermitted, exiting, still_eperm),
             Probe::Gone
         );
-        assert_eq!(signal_result(KillResult::NotPermitted, exiting), Err(true));
+        assert_eq!(
+            signal_result(KillResult::NotPermitted, exiting, still_eperm),
+            Err(true)
+        );
         // A plain running member (no P_WEXIT) is still could-not-clean.
         let running = || {
             let listed = vec![crate::util::procinfo::ProcInfo {
@@ -1834,7 +1898,7 @@ mod tests {
             merge_group_members(4242, listed, |pid| Some(member(pid, false)))
         };
         assert_eq!(
-            classify_kill(KillResult::NotPermitted, running),
+            classify_kill(KillResult::NotPermitted, running, still_eperm),
             Probe::Denied
         );
     }
@@ -1843,17 +1907,20 @@ mod tests {
     fn eperm_with_a_live_member_is_still_could_not_clean() {
         let mixed = || vec![member(4242, true), member(4243, false)];
         assert_eq!(
-            classify_kill(KillResult::NotPermitted, mixed),
+            classify_kill(KillResult::NotPermitted, mixed, still_eperm),
             Probe::Denied
         );
-        assert_eq!(signal_result(KillResult::NotPermitted, mixed), Err(false));
+        assert_eq!(
+            signal_result(KillResult::NotPermitted, mixed, still_eperm),
+            Err(false)
+        );
         // Members we cannot see prove nothing: still EPERM.
         assert_eq!(
-            classify_kill(KillResult::NotPermitted, Vec::new),
+            classify_kill(KillResult::NotPermitted, Vec::new, still_eperm),
             Probe::Denied
         );
         assert_eq!(
-            signal_result(KillResult::NotPermitted, Vec::new),
+            signal_result(KillResult::NotPermitted, Vec::new, still_eperm),
             Err(false)
         );
     }
@@ -1862,13 +1929,34 @@ mod tests {
     fn other_kill_results_keep_their_meaning() {
         let zombies = || vec![member(4242, true)];
         let live = || vec![member(4242, false)];
-        assert_eq!(classify_kill(KillResult::Delivered, zombies), Probe::Gone);
-        assert_eq!(classify_kill(KillResult::Delivered, live), Probe::Alive);
-        assert_eq!(classify_kill(KillResult::NoSuchGroup, live), Probe::Gone);
-        assert_eq!(classify_kill(KillResult::Failed, zombies), Probe::Denied);
-        assert_eq!(signal_result(KillResult::Delivered, zombies), Ok(()));
-        assert_eq!(signal_result(KillResult::NoSuchGroup, live), Err(true));
-        assert_eq!(signal_result(KillResult::Failed, zombies), Err(false));
+        assert_eq!(
+            classify_kill(KillResult::Delivered, zombies, still_eperm),
+            Probe::Gone
+        );
+        assert_eq!(
+            classify_kill(KillResult::Delivered, live, still_eperm),
+            Probe::Alive
+        );
+        assert_eq!(
+            classify_kill(KillResult::NoSuchGroup, live, still_eperm),
+            Probe::Gone
+        );
+        assert_eq!(
+            classify_kill(KillResult::Failed, zombies, still_eperm),
+            Probe::Denied
+        );
+        assert_eq!(
+            signal_result(KillResult::Delivered, zombies, still_eperm),
+            Ok(())
+        );
+        assert_eq!(
+            signal_result(KillResult::NoSuchGroup, live, still_eperm),
+            Err(true)
+        );
+        assert_eq!(
+            signal_result(KillResult::Failed, zombies, still_eperm),
+            Err(false)
+        );
     }
 
     #[tokio::test]

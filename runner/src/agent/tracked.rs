@@ -346,6 +346,62 @@ pub(crate) mod tests {
         );
     }
 
+    /// A chat runtime's retired list keeps an exited leader whose children
+    /// still run, and drops one whose group is already gone, so a long chat
+    /// on a one-shot engine does not grow by one entry per turn.
+    #[tokio::test]
+    async fn retiring_prunes_entries_whose_group_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let pf = dir.path().join("pids");
+        let mut retired: Vec<TrackedChild> = Vec::new();
+
+        // A leader that exits at once but leaves children behind.
+        let (lingering, _s1) = start(&mut fake_agent(&pf, false, true));
+        let pids = read_pids(&pf, 3).await;
+        crate::agent::retire_pruned(&mut retired, lingering, TrackedChild::is_gone);
+
+        // A leader that exits and leaves nothing.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("exit 0");
+        crate::util::shell::new_session(&mut cmd);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let (empty, _s2) = start(&mut cmd);
+        let mut exit_rx = empty.exit_rx();
+        tokio::time::timeout(Duration::from_secs(10), exit_rx.wait_for(Option::is_some))
+            .await
+            .expect("leader exit observed")
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !empty.is_gone() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "empty group never gone"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        crate::agent::retire_pruned(&mut retired, empty, TrackedChild::is_gone);
+        assert_eq!(retired.len(), 1, "the emptied tree is pruned at once");
+
+        // A live leader is kept beside the lingering tree.
+        let (live, _s3) = start(&mut fake_agent(&dir.path().join("pids3"), false, false));
+        crate::agent::retire_pruned(&mut retired, live, TrackedChild::is_gone);
+        assert_eq!(retired.len(), 2, "trees with members are kept");
+        assert!(
+            alive(pids[0]),
+            "the lingering tree's children were left alone"
+        );
+
+        for t in retired {
+            assert_eq!(t.finish(Duration::from_secs(1)).await, FinishOutcome::Gone);
+        }
+        assert!(
+            wait_all_gone(&pids, Duration::from_secs(5)).await,
+            "{pids:?} survived"
+        );
+    }
+
     #[tokio::test]
     async fn dropping_an_unfinished_child_still_cleans_its_group() {
         let dir = tempfile::tempdir().unwrap();

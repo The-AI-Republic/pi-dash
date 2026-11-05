@@ -519,7 +519,7 @@ async fn ensure_bridge(
         if let Some(bridge) = rt.bridge.take() {
             // A one-shot engine's leader exits after every turn; what it
             // started lives until the session closes (runner cleanup §4.3).
-            rt.retired.push(bridge);
+            AgentBridge::retire(&mut rt.retired, bridge);
         }
         rt.started_sent = false;
     }
