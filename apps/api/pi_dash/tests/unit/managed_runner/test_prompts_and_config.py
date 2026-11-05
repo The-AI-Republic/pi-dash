@@ -157,9 +157,11 @@ def test_check_passes_for_a_sane_configuration():
     assert managed_runner_configuration_check(None) == []
 
 
-@override_settings(MANAGED_RUNNER_MAX_PER_USER_PROJECT=0, MANAGED_RUNNER_QUEUED_MAX_AGE_SECS=0)
+@override_settings(MANAGED_RUNNER_QUEUED_MAX_AGE_SECS=0)
 def test_check_rejects_nonsense_limits():
     from pi_dash.managed_runner.checks import managed_runner_configuration_check
 
     ids = {e.id for e in managed_runner_configuration_check(None)}
-    assert {"managed.E003", "managed.E004"} <= ids
+    assert "managed.E004" in ids
+    # The per-user/project cap is gone (built_engine_as_runner §5).
+    assert "managed.E003" not in ids

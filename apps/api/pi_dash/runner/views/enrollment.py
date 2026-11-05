@@ -40,10 +40,14 @@ from pi_dash.runner.models import (
     Runner,
     RunnerForceRefresh,
     RunnerProvisioning,
-    RunnerStatus,
 )
 from pi_dash.runner.serializers import RunnerEnrollRequestSerializer
 from pi_dash.runner.services import tokens
+from pi_dash.runner.services.machine_identity import (
+    ENGINE_NAME_PREFIX,
+    engine_runner_name,
+    live_engine_runner_for,
+)
 from pi_dash.runner.services.permissions import is_workspace_member
 from pi_dash.runner.services.pubsub import close_runner_session, send_to_runner
 
@@ -222,37 +226,6 @@ class RunnerInviteEndpoint(APIView):
             },
             status=status.HTTP_410_GONE,
         )
-
-
-def _managed_cap_error(*, user, pod, workspace_id):
-    """Refuse a second bundled runner for the same user on the same project.
-
-    The desktop enrolls one runner per project it opens; more than that would
-    be a bug in the client (or a stale row it failed to reuse), and silently
-    accepting them would leave the pod with several machines all claiming the
-    same pinned work. Returns a ``Response`` to return, or ``None`` to proceed.
-    """
-    from django.conf import settings
-
-    existing = (
-        Runner.objects.filter(
-            owner=user,
-            pod=pod,
-            workspace_id=workspace_id,
-            provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
-        )
-        .exclude(status=RunnerStatus.REVOKED)
-        .count()
-    )
-    if existing >= settings.MANAGED_RUNNER_MAX_PER_USER_PROJECT:
-        return Response(
-            {
-                "error": "managed_runner_limit",
-                "error_description": "This project already has a Pi Dash Agent registered for you on a machine.",
-            },
-            status=status.HTTP_409_CONFLICT,
-        )
-    return None
 
 
 class RunnerEnrollEndpoint(APIView):
@@ -579,6 +552,11 @@ class RunnerCreateEndpoint(APIView):
         host_label = (request.data.get("host_label") or "").strip()[:255]
         body_name = (request.data.get("name") or "").strip()[:128]
         pod_name = (request.data.get("pod") or "").strip()
+        # ``agent_kind`` (the CLI's field; ``agent`` accepted as an alias):
+        # ``engine`` asks for a built-in engine runner, anything else (or
+        # nothing) for an own-agent runner — except on a legacy desktop
+        # machine, whose older builds send no agent and mean the engine.
+        agent_kind = str(request.data.get("agent_kind") or request.data.get("agent") or "").strip().lower()
 
         if not project_identifier:
             return Response(
@@ -688,9 +666,9 @@ class RunnerCreateEndpoint(APIView):
         last_exc: Optional[IntegrityError] = None
         runner: Optional[Runner] = None
         machine_minted: Optional[tokens.MintedToken] = None
+        engine_named = False
         while attempts < _MAX_AUTO_NAME_RETRIES:
             attempts += 1
-            name = body_name or _next_auto_runner_name(pod)
             try:
                 with transaction.atomic():
                     dev_machine = _get_or_create_dev_machine(
@@ -698,31 +676,47 @@ class RunnerCreateEndpoint(APIView):
                         dev_machine_id=dev_machine_id,
                         host_label=host_label,
                     )
-                    # Provisioning is inherited from the machine, never read
-                    # from the body: a client must not be able to claim it is
-                    # Pi Dash-managed and thereby take pinned desktop work.
-                    provisioning = getattr(dev_machine, "provisioning", RunnerProvisioning.MANUAL)
-                    if provisioning == RunnerProvisioning.DESKTOP_BUNDLED:
-                        # Sign-out removes the local config, but the server row
-                        # deliberately survives. Re-enrollment must recover it
-                        # before applying the per-user/project creation cap.
-                        runner = (
-                            Runner.objects.select_for_update()
-                            .filter(
-                                owner=request.user,
-                                workspace_id=workspace.id,
-                                dev_machine=dev_machine,
-                                pod=pod,
-                                provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
-                                revoked_at__isnull=True,
+                    # Provisioning follows the requested agent, per runner
+                    # (design §5): one machine hosts engine and own-agent
+                    # runners side by side. It is never read as a value from
+                    # the body, so a client cannot claim to be an engine
+                    # without passing the engine checks below.
+                    legacy_machine = dev_machine is not None and dev_machine.is_legacy_desktop
+                    wants_engine = agent_kind == ENGINE_AGENT_KIND or (not agent_kind and legacy_machine)
+                    if not wants_engine:
+                        provisioning = RunnerProvisioning.MANUAL
+                        name = body_name or _next_auto_runner_name(pod)
+                    else:
+                        provisioning = RunnerProvisioning.DESKTOP_BUNDLED
+                        if dev_machine is None:
+                            return Response(
+                                {"error": "dev_machine_required"},
+                                status=status.HTTP_400_BAD_REQUEST,
                             )
-                            .first()
-                        )
+                        if not legacy_machine:
+                            refusal = _engine_refusal(request.user, dev_machine)
+                            if refusal is not None:
+                                return refusal
+                        # At most one live engine runner per (machine,
+                        # project). The machine row is locked above, so two
+                        # concurrent adds serialize here. Re-adding (after a
+                        # local sign-out or a desktop migration) returns the
+                        # existing row with its id, pods and pins.
+                        runner = live_engine_runner_for(dev_machine, project, lock=True)
                         if runner is not None:
+                            if not legacy_machine and not runner.name.startswith(ENGINE_NAME_PREFIX + "-"):
+                                runner.name = engine_runner_name(
+                                    dev_machine, workspace, project, runner.pod, exclude_runner_id=runner.pk
+                                )
+                                runner.save(update_fields=["name", "updated_at"])
                             break
-                        cap_error = _managed_cap_error(user=request.user, pod=pod, workspace_id=workspace.id)
-                        if cap_error is not None:
-                            return cap_error
+                        if legacy_machine:
+                            # Older desktop builds keep naming their runners.
+                            name = body_name or _next_auto_runner_name(pod)
+                        else:
+                            # Client-supplied names are ignored for engines.
+                            name = engine_runner_name(dev_machine, workspace, project, pod)
+                            engine_named = True
                     runner = Runner.objects.create(
                         owner=request.user,
                         workspace_id=workspace.id,
@@ -749,7 +743,7 @@ class RunnerCreateEndpoint(APIView):
                 )
             except IntegrityError as exc:
                 last_exc = exc
-                if body_name:
+                if body_name and not engine_named:
                     # Caller named it explicitly — don't retry.
                     return Response(
                         {"error": "runner_name_taken"},
@@ -781,10 +775,48 @@ class RunnerCreateEndpoint(APIView):
             "long_poll_interval_secs": 25,
             "protocol_version": 4,
             "machine_token_minted": machine_minted is not None,
+            "provisioning": runner.provisioning,
+            "pod_dispatch": runner.pod_dispatch,
         }
         if machine_minted is not None:
             body["machine_token"] = machine_minted.raw
         return Response(body, status=status.HTTP_201_CREATED)
+
+
+ENGINE_AGENT_KIND = "engine"
+
+
+def _engine_refusal(user, dev_machine: DevMachine) -> Optional[Response]:
+    """Why a new-path engine runner cannot be created now, or ``None``.
+
+    The server creates an engine runner only for a machine with a live
+    engine credential and an instance that can serve the engine (design §5,
+    §4.3). ``reason_code`` uses the engine pause vocabulary.
+    """
+    from pi_dash.runner.services.engine_credentials import engine_profile_for_user
+
+    available, profile, pause_reason = engine_profile_for_user(user)
+    if not available:
+        return Response(
+            {
+                "error": "engine_unavailable",
+                "reason_code": pause_reason,
+                "profile_reason_code": profile.reason_code,
+                "error_description": "This Pi Dash instance cannot serve the built-in engine for this account.",
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+    if not dev_machine.has_live_engine_credential():
+        return Response(
+            {
+                "error": "engine_unavailable",
+                "reason_code": "engine_sign_in_required",
+                "engine_sign_in_state": dev_machine.current_engine_sign_in_state(),
+                "error_description": "Sign the built-in engine in on this computer first (`pidash login --engine`).",
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+    return None
 
 
 def _next_auto_runner_name(pod: Pod) -> str:

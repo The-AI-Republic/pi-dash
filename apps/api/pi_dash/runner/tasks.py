@@ -190,6 +190,18 @@ def _releasable_pins():
     )
 
 
+@shared_task(name="runner.pause_engines_with_expired_credentials")
+def pause_engines_with_expired_credentials() -> int:
+    """Pause engines whose 14-day engine credential ran out
+    (``engine_sign_in_required``, built_engine_as_runner §4.3)."""
+    from pi_dash.runner.services.engine_state import pause_engines_with_expired_credentials as _pause
+
+    paused = _pause()
+    if paused:
+        logger.info("pause_engines_with_expired_credentials paused %s machine(s)", paused)
+    return paused
+
+
 @shared_task(name="runner.release_pins_on_offline_runners")
 def release_pins_on_offline_runners() -> int:
     """Return QUEUED runs pinned to a long-silent or paused runner to the pod queue.

@@ -44,9 +44,17 @@ from pi_dash.authentication.services.cli_tokens import (
     deactivate_api_token,
 )
 from pi_dash.db.models import APIToken, CLIDeviceCode, WorkspaceMember
+from pi_dash.db.models.api import CLI_DEVICE_SCOPE_CLI, CLI_DEVICE_SCOPE_ENGINE, CLI_DEVICE_SCOPES
 from pi_dash.authentication.utils.host import base_host
 from pi_dash.runner.models import DevMachine, MachineToken
 from pi_dash.runner.services import tokens as runner_tokens
+from pi_dash.runner.services.engine_credentials import (
+    SILENT_RENEWAL_REFUSED_STATES,
+    IssuedEngineCredential,
+    engine_profile_for_user,
+    instance_can_serve_engine,
+    issue_engine_credential,
+)
 from pi_dash.runner.services.permissions import is_workspace_member
 
 logger = logging.getLogger("pi_dash.auth.cli")
@@ -129,6 +137,147 @@ def _rotate_machine_token(*, user, workspace, dev_machine: DevMachine, host_labe
     return minted
 
 
+def _parse_uuid(value):
+    try:
+        return _uuid.UUID(str(value).strip())
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _check_engine_grant_approval(row, user, *, requested_machine_id, interactive):
+    """Approval rules for an ``engine`` grant (design §4.3, §4.6).
+
+    The machine (named at start by the CLI, or now by the app) must be the
+    approver's own. A silent approval must name it, and is refused when the
+    machine's engine was explicitly signed out or revoked: only an explicit
+    sign-in clears those. Returns ``(refusal_response, machine)``.
+    """
+    machine_id = requested_machine_id or row.dev_machine_id
+    if requested_machine_id and row.dev_machine_id and requested_machine_id != row.dev_machine_id:
+        return Response({"error": "dev_machine_mismatch"}, status=status.HTTP_400_BAD_REQUEST), None
+    machine = None
+    if machine_id is not None:
+        machine = DevMachine.objects.filter(pk=machine_id).first()
+        if machine is None or machine.owner_id != user.id or machine.revoked_at is not None:
+            return Response({"error": "dev_machine_not_found"}, status=status.HTTP_404_NOT_FOUND), None
+    if interactive:
+        return None, machine
+    if machine is None:
+        return (
+            Response(
+                {
+                    "error": "dev_machine_id_required",
+                    "error_description": "A silent engine approval must name the computer it is for.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            ),
+            None,
+        )
+    state = machine.current_engine_sign_in_state()
+    if state in SILENT_RENEWAL_REFUSED_STATES:
+        logger.info(
+            "engine_credential.silent_approval_refused user=%s dev_machine=%s state=%s",
+            user.id,
+            machine.id,
+            state,
+        )
+        return (
+            Response(
+                {
+                    "error": "engine_silent_renewal_refused",
+                    "engine_sign_in_state": state,
+                    "error_description": "The built-in engine was signed out on this computer; sign it in explicitly.",
+                },
+                status=status.HTTP_409_CONFLICT,
+            ),
+            None,
+        )
+    return None, machine
+
+
+def _bearer_machine_token(request):
+    """The ``Authorization: Bearer mt_…`` value on an engine grant redemption."""
+    header = request.headers.get("Authorization") or ""
+    parts = header.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].startswith("mt_"):
+        return None
+    return parts[1]
+
+
+def _maybe_issue_engine_credential(*, user, dev_machine: DevMachine, grant) -> "IssuedEngineCredential | None":
+    """The engine half of ``pidash auth login`` (design §4.3).
+
+    Issued only for a human-approved device grant (never for a bare machine
+    token or a personal API token, so neither can mint one), when the
+    instance can serve the engine, and — when the machine's engine was
+    signed out or revoked — only if a person approved interactively.
+    """
+    if grant is None or dev_machine.revoked_at is not None:
+        return None
+    if dev_machine.current_engine_sign_in_state() in SILENT_RENEWAL_REFUSED_STATES and not grant.interactive_approval:
+        return None
+    if not instance_can_serve_engine(user):
+        return None
+    return issue_engine_credential(user=user, dev_machine=dev_machine)
+
+
+def _redeem_engine_grant(row, machine_token: MachineToken) -> Response:
+    """Trade an approved ``engine`` grant for an engine credential.
+
+    Runs inside the token endpoint's transaction with ``row`` locked. The
+    credential is bound to the presenting machine token's machine, which
+    must belong to the person who approved the grant (and match the machine
+    the grant named, if any).
+    """
+    machine = machine_token.dev_machine
+    if machine is None:
+        return Response(
+            {"error": "dev_machine_required", "error_description": "This machine token is not bound to a computer."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    if machine_token.user_id != row.user_id or machine.owner_id != row.user_id:
+        return Response(
+            {"error": "access_denied", "error_description": "This computer does not belong to the approving user."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    if row.dev_machine_id is not None and row.dev_machine_id != machine.pk:
+        return Response(
+            {"error": "dev_machine_mismatch", "error_description": "This grant was approved for another computer."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    # Re-checked here, not only at approval: the user may have signed the
+    # engine out between a silent approval and its redemption.
+    state = machine.current_engine_sign_in_state()
+    if not row.interactive_approval and state in SILENT_RENEWAL_REFUSED_STATES:
+        return Response(
+            {"error": "engine_silent_renewal_refused", "engine_sign_in_state": state},
+            status=status.HTTP_409_CONFLICT,
+        )
+    available, _profile, pause_reason = engine_profile_for_user(row.user)
+    if not available:
+        return Response(
+            {
+                "error": "engine_unavailable",
+                "reason_code": pause_reason,
+                "engine_sign_in_state": state,
+                "error_description": "This Pi Dash instance cannot serve the built-in engine for this account.",
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+    issued = issue_engine_credential(user=row.user, dev_machine=machine)
+    row.consumed = True
+    row.dev_machine_id = machine.pk
+    row.save(update_fields=["consumed", "last_polled_at", "dev_machine_id", "updated_at"])
+    return Response(
+        {
+            "engine_credential": issued.as_payload(),
+            "engine_sign_in_state": machine.current_engine_sign_in_state(),
+            "dev_machine_id": str(machine.pk),
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
 class DeviceCodeStartThrottle(AnonRateThrottle):
     """Per-IP cap on `device/start/` to keep the table from being
     filled with junk by an unauthenticated caller. The legit flow
@@ -157,6 +306,21 @@ class DeviceCodeStartEndpoint(APIView):
 
     def post(self, request):
         expires_at = timezone.now() + DEVICE_CODE_TTL
+        # ``scope``: ``cli`` (default, ``pidash auth login``) or ``engine``
+        # (``pidash login --engine``, the engine credential alone). An
+        # engine grant may name its machine; that is only a claim until the
+        # approver's ownership and the redeeming machine token confirm it.
+        scope = str(request.data.get("scope") or CLI_DEVICE_SCOPE_CLI).strip().lower()
+        if scope not in CLI_DEVICE_SCOPES:
+            return Response(
+                {"error": "invalid_scope", "error_description": "scope must be 'cli' or 'engine'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        claimed_machine_id = None
+        if scope == CLI_DEVICE_SCOPE_ENGINE and request.data.get("dev_machine_id"):
+            claimed_machine_id = _parse_uuid(request.data.get("dev_machine_id"))
+            if claimed_machine_id is None:
+                return Response({"error": "invalid_dev_machine_id"}, status=status.HTTP_400_BAD_REQUEST)
         # Retry on the (vanishingly improbable) unique-constraint
         # collision so a 1-in-10^11 unlucky generator output doesn't
         # surface a 500 to the user.
@@ -164,6 +328,8 @@ class DeviceCodeStartEndpoint(APIView):
             try:
                 row = CLIDeviceCode.objects.create(
                     expires_at=expires_at,
+                    scope=scope,
+                    dev_machine_id=claimed_machine_id,
                     # No user/workspace yet — the row is "pending" until
                     # the human approves it in their browser session.
                 )
@@ -182,6 +348,7 @@ class DeviceCodeStartEndpoint(APIView):
                 "verification_uri": _verification_uri(request),
                 "expires_in": int(DEVICE_CODE_TTL.total_seconds()),
                 "interval": DEVICE_CODE_POLL_INTERVAL_SECONDS,
+                "scope": row.scope,
             },
             status=status.HTTP_200_OK,
         )
@@ -216,6 +383,22 @@ class DeviceCodeApproveEndpoint(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         canonical = f"{normalized[:4]}-{normalized[4:]}"
+
+        from pi_dash.db.models.workspace import Workspace
+
+        workspace_slug = str(request.data.get("workspace_slug") or "").strip()
+        # ``interactive``: true when a person approves on the browser device
+        # page, false (the default) for the desktop app's silent approval.
+        # Only an interactive approval may sign an engine in again after the
+        # user signed it out (design §4.3).
+        interactive = request.data.get("interactive", False)
+        if not isinstance(interactive, bool):
+            return Response({"error": "interactive must be a boolean."}, status=status.HTTP_400_BAD_REQUEST)
+        requested_machine_id = None
+        if request.data.get("dev_machine_id"):
+            requested_machine_id = _parse_uuid(request.data.get("dev_machine_id"))
+            if requested_machine_id is None:
+                return Response({"error": "invalid_dev_machine_id"}, status=status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
             try:
@@ -253,29 +436,54 @@ class DeviceCodeApproveEndpoint(APIView):
                     status=status.HTTP_409_CONFLICT,
                 )
 
-            # Pick a workspace the approving user is a member of. v1 is
-            # single-workspace-per-host, so we just pick the most recent
-            # one; future work can let the user choose during approval.
-            membership = (
-                WorkspaceMember.objects.filter(member=request.user, is_active=True)
-                .select_related("workspace")
-                .order_by("-created_at")
-                .first()
-            )
+            # Workspace: the one the approver names (``pidash auth login
+            # --workspace`` and the app pass it, design §4.3), else the
+            # approver's most recent one, as before.
+            workspace = None
+            if workspace_slug:
+                workspace = Workspace.objects.filter(slug=workspace_slug).first()
+                if workspace is None or not is_workspace_member(request.user, workspace.id):
+                    return Response({"error": "workspace_not_found"}, status=status.HTTP_404_NOT_FOUND)
+            else:
+                membership = (
+                    WorkspaceMember.objects.filter(member=request.user, is_active=True)
+                    .select_related("workspace")
+                    .order_by("-created_at")
+                    .first()
+                )
+                workspace = membership.workspace if membership else None
+
+            update_fields = ["user", "workspace", "approved", "interactive_approval", "updated_at"]
+            machine = None
+            if row.scope == CLI_DEVICE_SCOPE_ENGINE:
+                refusal, machine = _check_engine_grant_approval(
+                    row, request.user, requested_machine_id=requested_machine_id, interactive=interactive
+                )
+                if refusal is not None:
+                    return refusal
+                if machine is not None and row.dev_machine_id != machine.pk:
+                    row.dev_machine_id = machine.pk
+                    update_fields.append("dev_machine_id")
 
             row.user = request.user
-            row.workspace = membership.workspace if membership else None
+            row.workspace = workspace
             row.approved = True
-            row.save(update_fields=["user", "workspace", "approved", "updated_at"])
+            # Once a person has approved on the browser page, a later silent
+            # re-approval (same user) never downgrades it.
+            row.interactive_approval = bool(row.interactive_approval or interactive)
+            row.save(update_fields=update_fields)
 
-        return Response(
-            {
-                "ok": True,
-                "user_email": request.user.email,
-                "workspace_slug": row.workspace.slug if row.workspace else None,
-            },
-            status=status.HTTP_200_OK,
-        )
+        body = {
+            "ok": True,
+            "user_email": request.user.email,
+            "workspace_slug": row.workspace.slug if row.workspace else None,
+            "scope": row.scope,
+            "interactive": row.interactive_approval,
+        }
+        if machine is not None:
+            body["dev_machine_id"] = str(machine.pk)
+            body["engine_sign_in_state"] = machine.current_engine_sign_in_state()
+        return Response(body, status=status.HTTP_200_OK)
 
 
 class DeviceCodeTokenEndpoint(APIView):
@@ -327,6 +535,33 @@ class DeviceCodeTokenEndpoint(APIView):
                     status=status.HTTP_410_GONE,
                 )
 
+            # An engine grant is redeemed by a signed-in daemon: the device
+            # code alone (a person approved it) is not enough, nor is the
+            # machine token alone (no person approved). Checked on every
+            # poll so a missing token fails fast instead of at approval.
+            machine_token = None
+            if row.scope == CLI_DEVICE_SCOPE_ENGINE:
+                raw_mt = _bearer_machine_token(request)
+                if raw_mt is None:
+                    return Response(
+                        {
+                            "error": "machine_token_required",
+                            "error_description": "Redeem an engine grant with Authorization: Bearer <machine token>.",
+                        },
+                        status=status.HTTP_401_UNAUTHORIZED,
+                    )
+                from rest_framework.exceptions import AuthenticationFailed
+
+                from pi_dash.runner.authentication import resolve_machine_token
+
+                try:
+                    machine_token = resolve_machine_token(raw_mt)
+                except AuthenticationFailed as exc:
+                    return Response(
+                        {"error": "invalid_client", "error_description": str(exc.detail)},
+                        status=status.HTTP_401_UNAUTHORIZED,
+                    )
+
             # Enforce a minimum gap between polls. RFC 8628 says a client
             # MUST NOT poll faster than `interval`; if they do we should
             # tell them to `slow_down`. We accept the first poll
@@ -352,6 +587,9 @@ class DeviceCodeTokenEndpoint(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            if row.scope == CLI_DEVICE_SCOPE_ENGINE:
+                return _redeem_engine_grant(row, machine_token)
+
             # Override the default `generate_label_token` (opaque hex)
             # so this row is distinguishable from user-created PATs in
             # the settings UI token list.
@@ -363,7 +601,8 @@ class DeviceCodeTokenEndpoint(APIView):
                 description=CLI_DEVICE_API_TOKEN_DESCRIPTION,
             )
             row.consumed = True
-            row.save(update_fields=["consumed", "last_polled_at", "updated_at"])
+            row.api_token = api_token
+            row.save(update_fields=["consumed", "last_polled_at", "api_token", "updated_at"])
 
         return Response(
             {
@@ -463,7 +702,17 @@ class DeviceMachineTokenEndpoint(APIView):
                     dev_machine=dev_machine,
                     host_label=host_label,
                 )
+                engine = None
                 if getattr(request, "auth_machine_token", None) is None:
+                    # The same sign-in also signs the engine in, in this
+                    # transaction and for this machine (design §4.3). Only a
+                    # device-flow token (a person approved the grant) can.
+                    grant = (
+                        CLIDeviceCode.objects.filter(api_token__token=request.auth, scope=CLI_DEVICE_SCOPE_CLI)
+                        .order_by("-created_at")
+                        .first()
+                    )
+                    engine = _maybe_issue_engine_credential(user=request.user, dev_machine=dev_machine, grant=grant)
                     deactivate_api_token(request.auth, only_cli_device_tokens=True)
         except DevMachineOwnershipError:
             return Response(
@@ -471,15 +720,16 @@ class DeviceMachineTokenEndpoint(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        return Response(
-            {
-                "machine_token": minted.raw,
-                "workspace_slug": workspace.slug,
-                "dev_machine_id": str(dev_machine.id),
-                "host_label": dev_machine.host_label,
-            },
-            status=status.HTTP_201_CREATED,
-        )
+        body = {
+            "machine_token": minted.raw,
+            "workspace_slug": workspace.slug,
+            "dev_machine_id": str(dev_machine.id),
+            "host_label": dev_machine.host_label,
+            "engine_sign_in_state": dev_machine.current_engine_sign_in_state(),
+        }
+        if engine is not None:
+            body["engine_credential"] = engine.as_payload()
+        return Response(body, status=status.HTTP_201_CREATED)
 
 
 class DeviceCodeRevokeEndpoint(APIView):

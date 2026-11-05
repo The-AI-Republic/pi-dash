@@ -201,6 +201,11 @@ class DevMachineRevokeEndpoint(APIView):
                 machine.revoked_at = now
                 machine.save(update_fields=["revoked_at", "updated_at"])
             MachineToken.objects.filter(dev_machine=machine, revoked_at__isnull=True).update(revoked_at=now)
+            # "Remove this computer" revokes both credentials (design §11).
+            from pi_dash.runner.models import EngineCredentialRevokeReason
+            from pi_dash.runner.services.engine_credentials import revoke_engine_credential
+
+            revoke_engine_credential(machine, reason=EngineCredentialRevokeReason.MACHINE_REMOVED)
             runners = list(Runner.objects.select_for_update().filter(dev_machine=machine, revoked_at__isnull=True))
 
             # Enqueue before Runner.revoke() closes sessions; this mirrors runner-delete.
@@ -290,18 +295,27 @@ class DevMachineDeleteEndpoint(APIView):
         delete_dev_machine_svc(machine, purge_local=purge_local)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    #: Owner-settable built-in engine controls (``built_engine_as_runner``
-    #: design §8). ``engine_auto_pause_reason`` is server-set and read-only.
-    ENGINE_FIELDS = ("engine_paused_by_owner", "engine_team_runs")
+    #: Owner-settable machine fields: the built-in engine controls
+    #: (``built_engine_as_runner`` design §8) and the machine's name (§4.10).
+    #: ``engine_auto_pause_reason`` is server-set and read-only.
+    FIELDS = ("engine_paused_by_owner", "engine_team_runs", "label")
 
     def patch(self, request, machine_id):
-        """``PATCH /api/runners/dev-machines/<machine_id>/`` — engine controls.
+        """``PATCH /api/runners/dev-machines/<machine_id>/`` — owner controls.
 
         Owner only (a machine is user-scoped and private). Body may carry
-        ``engine_paused_by_owner`` and/or ``engine_team_runs`` (booleans).
-        Pausing releases the machine's engines' queued non-strict pins to
-        their pods in the same transaction; resuming drains them.
+        ``engine_paused_by_owner`` / ``engine_team_runs`` (booleans) and
+        ``label`` (the machine's name; empty resets it to the hostname, and
+        renames its engine runners everywhere they are shown). Pausing
+        releases the machine's engines' queued non-strict pins to their pods
+        in the same transaction; resuming drains them.
         """
+        from pi_dash.runner.services.machine_identity import (
+            MachineControlError,
+            parse_machine_controls,
+            update_machine_controls,
+        )
+
         workspace_id = _request_workspace_id(request)
         if not workspace_id:
             return Response(
@@ -310,40 +324,17 @@ class DevMachineDeleteEndpoint(APIView):
             )
         if not is_workspace_member(request.user, workspace_id):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
-        unknown = sorted(set(request.data.keys()) - set(self.ENGINE_FIELDS) - {"workspace"})
-        if unknown:
-            return Response(
-                {"error": "only engine controls can be changed here: " + ", ".join(self.ENGINE_FIELDS)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        values = {}
-        for field in self.ENGINE_FIELDS:
-            if field in request.data:
-                value = request.data.get(field)
-                if not isinstance(value, bool):
-                    return Response(
-                        {"error": f"{field} must be a boolean"},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-                values[field] = value
-
-        from pi_dash.runner.services.dispatch_rules import on_engine_pause_changed
-
-        with transaction.atomic():
-            machine = DevMachine.objects.select_for_update().filter(pk=machine_id).first()
-            if machine is None or not _machine_is_in_workspace_scope(request.user, machine, workspace_id):
-                return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
-            if machine.owner_id != request.user.id:
-                return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
-            if machine.revoked_at is not None:
-                return Response({"error": "dev_machine_revoked"}, status=status.HTTP_409_CONFLICT)
-            was_paused = machine.engine_paused
-            changed = [field for field, value in values.items() if getattr(machine, field) != value]
-            for field in changed:
-                setattr(machine, field, values[field])
-            if changed:
-                machine.save(update_fields=[*changed, "updated_at"])
-                on_engine_pause_changed(machine, was_paused=was_paused)
+        try:
+            values = parse_machine_controls(request.data, self.FIELDS)
+        except MachineControlError as exc:
+            return Response({"error": exc.code}, status=exc.http_status)
+        machine = DevMachine.objects.filter(pk=machine_id).first()
+        if machine is None or not _machine_is_in_workspace_scope(request.user, machine, workspace_id):
+            return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            machine = update_machine_controls(machine_id, request.user, values)
+        except MachineControlError as exc:
+            return Response({"error": exc.code}, status=exc.http_status)
         return Response(_serialize_dev_machine(machine, request.user, workspace_id), status=status.HTTP_200_OK)
 
 
@@ -380,14 +371,8 @@ class RunnerListEndpoint(APIView):
         pod_id = request.query_params.get("pod")
         if pod_id:
             qs = qs.filter(pod_id=pod_id)
-        # Desktop-bundled runners are an implementation detail of the app: the
-        # user never registered them and cannot meaningfully manage them here,
-        # so they stay out of the "Add runner" / runner-management lists unless
-        # explicitly asked for (support and admin tooling pass the flag).
-        if request.query_params.get("include_bundled") not in ("1", "true", "yes"):
-            from pi_dash.runner.models import RunnerProvisioning
-
-            qs = qs.exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
+        # Built-in engine runners are listed like any other runner, labelled
+        # by machine (built_engine_as_runner §11); lists stay owner-only.
         project_id = request.query_params.get("project")
         if project_id:
             qs = qs.filter(pod__project_id=project_id)
