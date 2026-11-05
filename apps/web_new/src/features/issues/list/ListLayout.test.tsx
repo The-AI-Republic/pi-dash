@@ -573,13 +573,16 @@ describe("ListLayout", () => {
     expect(mocks.pages.mock.results.at(-1)?.value.loadMoreSection).toHaveBeenCalledWith(sections[0]);
   });
 
-  it("hands the grouping dimension's section order to the pages, and none when ungrouped (NEWPIDASH-39)", () => {
+  it("hands the grouping dimension's section order to the pages, and none when ungrouped or unordered (NEWPIDASH-39)", () => {
     mocks.refs.mockReturnValue({ ...refs(), orders: { state: ["backlog", "todo"] } });
     mocks.pages.mockReturnValue(pageState({ sections: [], grouped: true }));
     renderLayout({ prefs: prefs({ groupBy: "state" }) });
     expect(mocks.pages.mock.calls.at(-1)?.[8]).toEqual(["backlog", "todo"]);
     cleanup();
     renderLayout({ prefs: prefs({ groupBy: null }) });
+    expect(mocks.pages.mock.calls.at(-1)?.[8]).toEqual([]);
+    cleanup();
+    renderLayout({ prefs: prefs({ groupBy: "priority" }) });
     expect(mocks.pages.mock.calls.at(-1)?.[8]).toEqual([]);
   });
 

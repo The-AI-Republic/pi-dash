@@ -144,6 +144,17 @@ describe("group titles and ordering", () => {
     ).toEqual(["backlog", "todo", "doing-early", "doing-late", "review", "test", "done", "cancelled"]);
   });
 
+  it("sorts a group outside the workflow first and keeps ties stable (NEWPIDASH-39)", () => {
+    expect(
+      stateWorkflowOrder([
+        { id: "todo", group: "unstarted", sequence: 9 },
+        { id: "triage", group: "triage", sequence: 1 },
+        { id: "first", group: "started", sequence: 5 },
+        { id: "second", group: "started", sequence: 5 },
+      ])
+    ).toEqual(["triage", "todo", "first", "second"]);
+  });
+
   it("disables creation only for creator grouping", () => {
     expect(creationDisabledForGroup("created_by")).toBe(true);
     expect(creationDisabledForGroup("state")).toBe(false);
