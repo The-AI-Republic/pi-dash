@@ -53,11 +53,27 @@ Run these locally before pushing:
 ```sh
 cd rust-api
 python3 scripts/write_guard.py --check
+python3 scripts/raw_sql_guard.py --check
+python3 scripts/test_raw_sql_guard.py
 ```
 
 The write guard (ORM-09, design D7) fails when raw SQL or sea-query writes
 to the ORM-covered tables appear outside `pidash_services::domain`. New
 sites must move into `domain/`; the allowlist only shrinks.
+
+The raw-SQL guard enforces SeaORM for reads and writes. It counts each
+production file's raw SQL (sqlx `query*` calls and macros, `raw_sql`,
+`QueryBuilder`, SeaORM raw-SQL escape hatches such as `Statement::from_string`
+and `Expr::cust`, and positional `try_get(<index>)` and `.get::<T, _>(<index>)` reads; a bare `.get(0)` is
+not counted, being indistinguishable from slice indexing)
+against `scripts/raw_sql_allowlist.txt`, and fails
+on any increase. A file below its entry fails too: lower the entry in the PR
+that migrates the sites. A query SeaORM cannot express stays raw only with a
+`// raw-sql: <reason>` comment on the call line, or alone on the line
+above it. The
+guard also fails on a new hand-written `SELECT` with two output columns of
+one name; sqlx resolves a duplicated name to the last column.
+`--report` prints the totals.
 
 ## Run the contract suite
 
