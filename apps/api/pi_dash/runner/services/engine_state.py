@@ -67,12 +67,19 @@ def _clear(machine: DevMachine, clearable) -> bool:
     current = machine.engine_auto_pause_reason
     if not current or current not in clearable:
         return False
-    if current == R.ENGINE_SIGN_IN_REQUIRED and not machine.is_legacy_desktop:
-        # The server's own view wins: a daemon cannot clear a sign-in pause
-        # while the server holds no live credential for the machine.
-        if not machine.has_live_engine_credential():
-            return False
-    return set_engine_auto_pause_reason(machine, R.NONE, only_from=clearable)
+    with transaction.atomic():
+        if current == R.ENGINE_SIGN_IN_REQUIRED and not machine.is_legacy_desktop:
+            # The server's own view wins: a daemon cannot clear a sign-in
+            # pause while the server holds no live credential for the
+            # machine. Checked on the locked row, so a revocation that
+            # committed after the caller's read is seen.
+            locked = DevMachine.objects.select_for_update().get(pk=machine.pk)
+            if not locked.has_live_engine_credential():
+                return False
+        # ``(current,)``, not ``clearable``: only the reason this report read
+        # and disproves is cleared. A different reason set meanwhile (say a
+        # model-token failure's ``engine_sign_in_required``) is kept.
+        return set_engine_auto_pause_reason(machine, R.NONE, only_from=(current,))
 
 
 def _clean(value) -> str:
