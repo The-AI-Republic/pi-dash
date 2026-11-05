@@ -110,7 +110,19 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     if tokens.is_empty() {
         match workspace {
             Some(slug) => println!("Workspace {slug:?} is not signed in — nothing to revoke."),
-            None => println!("Not logged in — nothing to revoke."),
+            None => {
+                // No workspace is signed in (e.g. each was signed out with
+                // `--workspace`), but an engine credential can outlive them
+                // and still mint wallet-billed model tokens. A full logout
+                // always signs the engine out; with no machine token left to
+                // revoke it with, it is forgotten locally (with a warning).
+                if cfg.is_some() && sign_out_engine(paths, args.local_only).await? {
+                    crate::service::reload::notify_credentials_changed(paths).await;
+                    println!("Not logged in to any workspace; signed out the built-in engine.");
+                } else {
+                    println!("Not logged in — nothing to revoke.");
+                }
+            }
         }
         return Ok(());
     }
@@ -192,4 +204,67 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::schema::{
+        CliSection, Config, DaemonConfig, EngineCredential, EngineSignInState,
+    };
+
+    fn paths(root: &std::path::Path) -> Paths {
+        Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            runtime_dir: root.join("runtime"),
+            machine_context_dir: root.join("config"),
+        }
+    }
+
+    #[tokio::test]
+    async fn full_logout_with_no_workspace_left_still_signs_the_engine_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(tmp.path());
+        let cfg = Config {
+            version: 2,
+            daemon: DaemonConfig {
+                cloud_url: "https://cloud.invalid".into(),
+                ..DaemonConfig::default()
+            },
+            runners: vec![],
+            cli: Some(CliSection {
+                engine_credential: Some(EngineCredential {
+                    token: "ec_left_behind".into(),
+                    expires_at: Some(chrono::Utc::now() + chrono::Duration::days(10)),
+                }),
+                engine_sign_in_state: Some(EngineSignInState::Active),
+                ..Default::default()
+            }),
+            engine: Default::default(),
+            auth: Default::default(),
+        };
+        file::write_config(&p, &cfg).unwrap();
+
+        run(
+            Args {
+                local_only: false,
+                workspace: None,
+                engine: false,
+            },
+            &p,
+        )
+        .await
+        .unwrap();
+
+        let after = file::load_config(&p).unwrap();
+        let cli = after.cli.unwrap();
+        assert!(cli.engine_credential.is_none(), "ec_ forgotten");
+        assert_eq!(cli.engine_sign_in_state, Some(EngineSignInState::SignedOut));
+        assert!(
+            !std::fs::read_to_string(p.config_path())
+                .unwrap()
+                .contains("ec_left_behind")
+        );
+    }
 }
