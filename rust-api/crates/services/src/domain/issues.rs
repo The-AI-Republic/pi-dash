@@ -2820,6 +2820,57 @@ where
         .map(|_| ())
 }
 
+/// The bulk-operation assignee union (`bulk_operations.py`,
+/// `IssueAssignee.objects.bulk_create(..., ignore_conflicts=True)`): one
+/// fresh bridge row per `(issue_id, assignee_id)` pair, stamped with the
+/// actor and the request's shared `now`; any unique conflict skips the
+/// row (`ON CONFLICT DO NOTHING`). The caller already dropped the pairs
+/// that are live. Runs on any SeaORM connection, so the driver keeps it
+/// inside its transaction (`TxConn`).
+pub struct BulkAssigneeUnion<'a> {
+    pub pairs: &'a [(Uuid, Uuid)],
+    pub project_id: Uuid,
+    pub workspace_id: Uuid,
+    pub actor_id: Uuid,
+    pub now: DateTime<Utc>,
+}
+
+/// Rows per `INSERT` statement for [`insert_bulk_assignees`]: 9 binds a
+/// row stays well under Postgres' 65,535-bind ceiling.
+const BULK_ASSIGNEE_CHUNK: usize = 5_000;
+
+/// Insert [`BulkAssigneeUnion`] rows; returns the rows written.
+pub async fn insert_bulk_assignees(
+    db: &impl ConnectionTrait,
+    union: &BulkAssigneeUnion<'_>,
+) -> Result<u64, DbErr> {
+    use pidash_db::entity::issue_assignees;
+    use sea_orm::sea_query::OnConflict;
+    use sea_orm::EntityTrait;
+    let mut written = 0;
+    for chunk in union.pairs.chunks(BULK_ASSIGNEE_CHUNK) {
+        let rows = chunk
+            .iter()
+            .map(|&(issue_id, assignee_id)| issue_assignees::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                created_at: Set(union.now.into()),
+                updated_at: Set(union.now.into()),
+                created_by_id: Set(Some(union.actor_id)),
+                updated_by_id: Set(Some(union.actor_id)),
+                issue_id: Set(issue_id),
+                assignee_id: Set(assignee_id),
+                project_id: Set(union.project_id),
+                workspace_id: Set(union.workspace_id),
+                deleted_at: Set(None),
+            });
+        written += issue_assignees::Entity::insert_many(rows)
+            .on_conflict(OnConflict::new().do_nothing().to_owned())
+            .exec_without_returning(db)
+            .await?;
+    }
+    Ok(written)
+}
+
 /// An activity enqueue that runs ahead of the row write (the archive
 /// endpoints enqueue before saving): the event, the pre-built spaced
 /// dumps, and the origin the driver resolved up front.

@@ -20,6 +20,17 @@ use std::collections::{BTreeMap, HashSet};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use chrono::{DateTime, NaiveDate, Utc};
+use pidash_db::entity::{
+    cycle_issues, cycles, estimate_points, issue_assignees, issue_labels, issue_subscribers,
+    issues, labels, module_issues, modules, projects, states, users, workspaces,
+};
+use pidash_db::orm_tx::TxConn;
+use sea_orm::prelude::DateTimeWithTimeZone;
+use sea_orm::sea_query::{Expr, OnConflict};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult,
+    JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait, RuntimeErr, Set,
+};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
@@ -35,7 +46,8 @@ use crate::v1_cycles_modules::json::{
 use pidash_compat::response::json_response as status_response;
 use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 use pidash_services::domain::issues::{
-    bulk_update_issue_scalars, to_spaced_json, BulkIssueScalars,
+    bulk_update_issue_scalars, insert_bulk_assignees, to_spaced_json, BulkAssigneeUnion,
+    BulkIssueScalars,
 };
 
 /// Bulk path in `app/urls/issue.py:119-123` form.
@@ -168,45 +180,75 @@ pub async fn bulk_subscribe(
         }
     };
     let issues = fetch_bulk_issues(&base.pool, &slug, &base.project_id, &ids).await?;
-    let rows: Vec<(Uuid,)> = sqlx::query_as(
-        r#"SELECT issue_id FROM issue_subscribers
-           WHERE issue_id = ANY($1) AND subscriber_id = $2 AND deleted_at IS NULL"#,
-    )
-    .bind(ids.as_slice())
-    .bind(base.user_id)
-    .fetch_all(&base.pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let subscribed: HashSet<Uuid> = rows.into_iter().map(|row| row.0).collect();
+    let fresh = subscribe_issues(&base, &project, &issues).await?;
+    Ok(json_response(format!(
+        "{{\"message\":\"Subscribed to {} issues\",\"subscribed\":{}}}",
+        fresh.len(),
+        fresh.len()
+    )))
+}
+
+/// The idempotent subscribe: the selection minus the actor's live
+/// subscriptions, inserted with `bulk_create(..., ignore_conflicts=True)`
+/// (no transaction, no activity). Returns the fresh issue ids.
+async fn subscribe_issues(
+    base: &BulkBase,
+    project: &ProjectScope,
+    issues: &[IssueRow],
+) -> Result<Vec<Uuid>, Denial> {
+    let db = orm(&base.pool);
+    let rows: Vec<Uuid> = issue_subscribers::Entity::find()
+        .select_only()
+        .column(issue_subscribers::Column::IssueId)
+        .filter(issue_subscribers::Column::IssueId.is_in(issues.iter().map(|issue| issue.id)))
+        .filter(issue_subscribers::Column::SubscriberId.eq(base.user_id))
+        .filter(issue_subscribers::Column::DeletedAt.is_null())
+        .into_tuple()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let subscribed: HashSet<Uuid> = rows.into_iter().collect();
     let fresh: Vec<Uuid> = issues
         .iter()
         .map(|issue| issue.id)
         .filter(|id| !subscribed.contains(id))
         .collect();
     if !fresh.is_empty() {
-        let now = Utc::now();
-        sqlx::query(
-            r#"INSERT INTO issue_subscribers
-               (id, created_at, updated_at, created_by_id, updated_by_id,
-                issue_id, project_id, subscriber_id, workspace_id)
-               SELECT gen_random_uuid(), $1, $1, $2, $2, issue_id, $3, $2, $4
-               FROM unnest($5::uuid[]) AS t(issue_id)
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(now)
-        .bind(base.user_id)
-        .bind(base.project_id)
-        .bind(project.workspace_id)
-        .bind(fresh.as_slice())
-        .execute(&base.pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        let now: DateTimeWithTimeZone = Utc::now().into();
+        // `bulk_create(..., ignore_conflicts=True)`.
+        for chunk in fresh.chunks(INSERT_CHUNK) {
+            let rows = chunk
+                .iter()
+                .map(|&issue_id| issue_subscribers::ActiveModel {
+                    id: Set(Uuid::new_v4()),
+                    created_at: Set(now),
+                    updated_at: Set(now),
+                    created_by_id: Set(Some(base.user_id)),
+                    updated_by_id: Set(Some(base.user_id)),
+                    issue_id: Set(issue_id),
+                    project_id: Set(base.project_id),
+                    subscriber_id: Set(base.user_id),
+                    workspace_id: Set(project.workspace_id),
+                    deleted_at: Set(None),
+                });
+            issue_subscribers::Entity::insert_many(rows)
+                .on_conflict(OnConflict::new().do_nothing().to_owned())
+                .exec_without_returning(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+        }
     }
-    Ok(json_response(format!(
-        "{{\"message\":\"Subscribed to {} issues\",\"subscribed\":{}}}",
-        fresh.len(),
-        fresh.len()
-    )))
+    Ok(fresh)
+}
+
+/// Rows per bridge `INSERT` statement: 9 binds a row stays well under
+/// Postgres' 65,535-bind ceiling (the old `unnest` form bound two
+/// arrays, so it had no ceiling to hit).
+const INSERT_CHUNK: usize = 5_000;
+
+/// A SeaORM connection over the request pool (no I/O).
+fn orm(pool: &sqlx::PgPool) -> DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
 }
 
 /// Session auth + the project-kwarg rewrite, before any permission or
@@ -246,19 +288,10 @@ async fn lite_allowed(
     project_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<bool, Denial> {
-    let allowed: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(allowed.is_some())
+    let role = super::access::project_role(&orm(pool), slug, *project_id, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(role.is_some())
 }
 
 /// The view-body project lookup (`bulk_operations.py:99-101,361-363`):
@@ -272,21 +305,23 @@ async fn fetch_project(
     slug: &str,
     project_id: &Uuid,
 ) -> Result<Option<ProjectScope>, Denial> {
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-        r#"SELECT p.id, p.workspace_id FROM projects p
-           JOIN workspaces w ON w.id = p.workspace_id
-           WHERE p.id = $1 AND w.slug = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|(_, workspace_id)| ProjectScope { workspace_id }))
+    let workspace_id: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(workspace_id.map(|workspace_id| ProjectScope { workspace_id }))
 }
 
 /// The bulk selection: live issues in the tenant (`Issue.objects` —
 /// drafts, archived and triage rows included), model `-created_at` order.
+#[derive(Debug, FromQueryResult)]
 struct IssueRow {
     id: Uuid,
     state_id: Option<Uuid>,
@@ -296,15 +331,28 @@ struct IssueRow {
     estimate_point_id: Option<Uuid>,
 }
 
-/// The bulk-selection row shape (one tuple per issue).
-type BulkIssueTuple = (
-    Uuid,
-    Option<Uuid>,
-    String,
-    Option<NaiveDate>,
-    Option<NaiveDate>,
-    Option<Uuid>,
-);
+fn bulk_issues_query(
+    slug: &str,
+    project_id: Uuid,
+    ids: &[Uuid],
+) -> sea_orm::Select<issues::Entity> {
+    issues::Entity::find()
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::StateId,
+            issues::Column::Priority,
+            issues::Column::StartDate,
+            issues::Column::TargetDate,
+            issues::Column::EstimatePointId,
+        ])
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issues::Column::ProjectId.eq(project_id))
+        .filter(issues::Column::Id.is_in(ids.iter().copied()))
+        .filter(issues::Column::DeletedAt.is_null())
+        .order_by_desc(issues::Column::CreatedAt)
+}
 
 async fn fetch_bulk_issues(
     pool: &sqlx::PgPool,
@@ -312,33 +360,11 @@ async fn fetch_bulk_issues(
     project_id: &Uuid,
     ids: &[Uuid],
 ) -> Result<Vec<IssueRow>, Denial> {
-    let rows: Vec<BulkIssueTuple> = sqlx::query_as(
-        r#"SELECT i.id, i.state_id, i.priority, i.start_date, i.target_date,
-                  i.estimate_point_id
-           FROM issues i JOIN workspaces w ON w.id = i.workspace_id
-           WHERE w.slug = $1 AND i.project_id = $2 AND i.id = ANY($3)
-           AND i.deleted_at IS NULL
-           ORDER BY i.created_at DESC"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(rows
-        .into_iter()
-        .map(
-            |(id, state_id, priority, start_date, target_date, estimate_point_id)| IssueRow {
-                id,
-                state_id,
-                priority,
-                start_date,
-                target_date,
-                estimate_point_id,
-            },
-        )
-        .collect())
+    bulk_issues_query(slug, *project_id, ids)
+        .into_model::<IssueRow>()
+        .all(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// A 400 with a pre-rendered JSON body.
@@ -934,52 +960,80 @@ async fn check_batch(
     properties: &BulkProperties,
     issues: &[IssueRow],
 ) -> Result<BatchCheck, Denial> {
+    let db = orm(pool);
+    let server = |_: DbErr| Denial::ServerError;
     if let Some(Some(state_id)) = properties.state_id {
         // `all_state_objects`: soft-deleted states count (no filter).
-        let found: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM states WHERE id = $1")
-            .bind(state_id)
-            .fetch_optional(pool)
+        let found: Option<Uuid> = states::Entity::find()
+            .select_only()
+            .column(states::Column::Id)
+            .filter(states::Column::Id.eq(state_id))
+            .into_tuple()
+            .one(&db)
             .await
-            .map_err(|_| Denial::ServerError)?;
+            .map_err(server)?;
         if found.is_none() {
             return Err(Denial::BadError(format!("State {state_id} does not exist")));
         }
     }
-    if let Some(label_ids) = &properties.label_ids {
-        missing_ids_error(
-            pool,
-            "SELECT id FROM labels WHERE id = ANY($1) AND deleted_at IS NULL",
-            label_ids,
-            "Labels",
-        )
-        .await?;
+    if let Some(label_ids) = properties
+        .label_ids
+        .as_deref()
+        .filter(|ids| !ids.is_empty())
+    {
+        let found: Vec<Uuid> = labels::Entity::find()
+            .select_only()
+            .column(labels::Column::Id)
+            .filter(labels::Column::Id.is_in(label_ids.iter().copied()))
+            .filter(labels::Column::DeletedAt.is_null())
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(server)?;
+        missing_ids_error(label_ids, &found, "Labels")?;
     }
-    if let Some(assignee_ids) = &properties.assignee_ids {
+    if let Some(assignee_ids) = properties
+        .assignee_ids
+        .as_deref()
+        .filter(|ids| !ids.is_empty())
+    {
         // `User.objects` is the stock manager: no soft-delete filter.
-        missing_ids_error(
-            pool,
-            "SELECT id FROM users WHERE id = ANY($1)",
-            assignee_ids,
-            "Users",
-        )
-        .await?;
+        let found: Vec<Uuid> = users::Entity::find()
+            .select_only()
+            .column(users::Column::Id)
+            .filter(users::Column::Id.is_in(assignee_ids.iter().copied()))
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(server)?;
+        missing_ids_error(assignee_ids, &found, "Users")?;
     }
-    if let Some(module_ids) = &properties.module_ids {
-        missing_ids_error(
-            pool,
-            "SELECT id FROM modules WHERE id = ANY($1) AND deleted_at IS NULL",
-            module_ids,
-            "Modules",
-        )
-        .await?;
+    if let Some(module_ids) = properties
+        .module_ids
+        .as_deref()
+        .filter(|ids| !ids.is_empty())
+    {
+        let found: Vec<Uuid> = modules::Entity::find()
+            .select_only()
+            .column(modules::Column::Id)
+            .filter(modules::Column::Id.is_in(module_ids.iter().copied()))
+            .filter(modules::Column::DeletedAt.is_null())
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(server)?;
+        missing_ids_error(module_ids, &found, "Modules")?;
     }
     if let Some(Some(point_id)) = properties.estimate_point {
-        let found: Option<(i32,)> =
-            sqlx::query_as("SELECT 1 FROM estimate_points WHERE id = $1 AND deleted_at IS NULL")
-                .bind(point_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|_| Denial::ServerError)?;
+        let found: Option<Uuid> = estimate_points::Entity::find()
+            .select_only()
+            .column(estimate_points::Column::Id)
+            .filter(estimate_points::Column::Id.eq(point_id))
+            .filter(estimate_points::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(server)?;
         if found.is_none() {
             return Err(Denial::BadError(format!(
                 "Estimate point {point_id} does not exist"
@@ -988,25 +1042,25 @@ async fn check_batch(
     }
     let mut batch = BatchCheck { cycle: None };
     if let Some(Some(cycle_id)) = properties.cycle_id {
-        let row: Option<(Uuid, Option<DateTime<Utc>>)> = sqlx::query_as(
-            r#"SELECT c.id, c.end_date FROM cycles c
-               JOIN workspaces w ON w.id = c.workspace_id
-               WHERE w.slug = $1 AND c.project_id = $2 AND c.id = $3
-               AND c.deleted_at IS NULL"#,
-        )
-        .bind(slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        let row: Option<(Uuid, Option<DateTimeWithTimeZone>)> = cycles::Entity::find()
+            .select_only()
+            .columns([cycles::Column::Id, cycles::Column::EndDate])
+            .join(JoinType::InnerJoin, cycles::Relation::Workspaces.def())
+            .filter(workspaces::Column::Slug.eq(slug))
+            .filter(cycles::Column::ProjectId.eq(*project_id))
+            .filter(cycles::Column::Id.eq(cycle_id))
+            .filter(cycles::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(server)?;
         let Some((id, end_date)) = row else {
             return Err(Denial::BadError(format!(
                 "Cycle {cycle_id} does not exist in this project"
             )));
         };
         if let Some(end) = end_date {
-            if end < Utc::now() {
+            if end.with_timezone(&Utc) < Utc::now() {
                 return Err(Denial::BadError(COMPLETED_CYCLE_MESSAGE.to_owned()));
             }
         }
@@ -1024,23 +1078,10 @@ async fn check_batch(
     Ok(batch)
 }
 
-/// The `_missing` helper: referenced rows that do not resolve, sorted as
+/// The `_missing` helper: referenced ids with no `found` row, sorted as
 /// strings in the error.
-async fn missing_ids_error(
-    pool: &sqlx::PgPool,
-    sql: &str,
-    ids: &[Uuid],
-    label: &str,
-) -> Result<(), Denial> {
-    if ids.is_empty() {
-        return Ok(());
-    }
-    let rows: Vec<(Uuid,)> = sqlx::query_as(sql)
-        .bind(ids)
-        .fetch_all(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let found: HashSet<Uuid> = rows.into_iter().map(|row| row.0).collect();
+fn missing_ids_error(ids: &[Uuid], found: &[Uuid], label: &str) -> Result<(), Denial> {
+    let found: HashSet<&Uuid> = found.iter().collect();
     let mut missing: Vec<String> = ids
         .iter()
         .filter(|id| !found.contains(id))
@@ -1072,6 +1113,16 @@ fn write_denial(error: sqlx::Error) -> Denial {
         }
     }
     Denial::ServerError
+}
+
+/// [`write_denial`] for a SeaORM failure: the wrapped sqlx error decides.
+fn orm_write_denial(error: DbErr) -> Denial {
+    match error {
+        DbErr::Exec(RuntimeErr::SqlxError(inner)) | DbErr::Query(RuntimeErr::SqlxError(inner)) => {
+            write_denial(inner)
+        }
+        _ => Denial::ServerError,
+    }
 }
 
 /// One shared `now` for the row writes (the view's `timezone.now()`);
@@ -1120,10 +1171,8 @@ async fn apply_bulk_operation(
     }
     if let Some(label_ids) = &properties.label_ids {
         if !label_ids.is_empty() {
-            union_bridges(
+            union_labels(
                 &mut txn,
-                "issue_labels",
-                "label_id",
                 &base.project_id,
                 &project.workspace_id,
                 &base.user_id,
@@ -1136,10 +1185,8 @@ async fn apply_bulk_operation(
     }
     if let Some(assignee_ids) = &properties.assignee_ids {
         if !assignee_ids.is_empty() {
-            union_bridges(
+            union_assignees(
                 &mut txn,
-                "issue_assignees",
-                "assignee_id",
                 &base.project_id,
                 &project.workspace_id,
                 &base.user_id,
@@ -1213,16 +1260,7 @@ async fn apply_bulk_operation(
                         .await;
                     }
                 }
-                let ids: Vec<Uuid> = issues.iter().map(|issue| issue.id).collect();
-                sqlx::query(
-                    r#"UPDATE cycle_issues SET deleted_at = $1
-                       WHERE issue_id = ANY($2) AND deleted_at IS NULL"#,
-                )
-                .bind(now)
-                .bind(ids.as_slice())
-                .execute(&mut *txn)
-                .await
-                .map_err(write_denial)?;
+                clear_cycle_bridges(&mut txn, issues, now).await?;
             }
             Some(_) => {
                 let Some(target) = cycle_set else {
@@ -1272,13 +1310,30 @@ async fn apply_bulk_operation(
     )))
 }
 
-/// Union `label`/`assignee` bridge rows onto the selection (the view's
-/// `live` set, membership only).
+/// The union's new `(issue_id, other_id)` pairs in enqueue order (issues
+/// outer, ids inner): every pair not already live, each once.
+fn union_pairs(
+    existing: Vec<(Uuid, Uuid)>,
+    issues: &[IssueRow],
+    ids: &[Uuid],
+) -> Vec<(Uuid, Uuid)> {
+    let mut seen: HashSet<(Uuid, Uuid)> = existing.into_iter().collect();
+    let mut pairs: Vec<(Uuid, Uuid)> = Vec::new();
+    for issue in issues {
+        for id in ids {
+            if seen.insert((issue.id, *id)) {
+                pairs.push((issue.id, *id));
+            }
+        }
+    }
+    pairs
+}
+
+/// Union `label` bridge rows onto the selection (the view's `live` set,
+/// membership only), `bulk_create(..., ignore_conflicts=True)`.
 #[allow(clippy::too_many_arguments)]
-async fn union_bridges(
+async fn union_labels(
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    table: &str,
-    column: &str,
     project_id: &Uuid,
     workspace_id: &Uuid,
     user_id: &Uuid,
@@ -1286,47 +1341,82 @@ async fn union_bridges(
     issues: &[IssueRow],
     ids: &[Uuid],
 ) -> Result<(), Denial> {
-    let issue_ids: Vec<Uuid> = issues.iter().map(|issue| issue.id).collect();
-    let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(&format!(
-        "SELECT issue_id, {column} FROM {table} WHERE issue_id = ANY($1) AND deleted_at IS NULL"
-    ))
-    .bind(issue_ids.as_slice())
-    .fetch_all(&mut **txn)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let mut seen: HashSet<(Uuid, Uuid)> = HashSet::new();
-    for (issue_id, other_id) in rows {
-        seen.insert((issue_id, other_id));
-    }
-    let mut added_issues: Vec<Uuid> = Vec::new();
-    let mut added_ids: Vec<Uuid> = Vec::new();
-    for issue in issues {
-        for id in ids {
-            if !seen.contains(&(issue.id, *id)) {
-                seen.insert((issue.id, *id));
-                added_issues.push(issue.id);
-                added_ids.push(*id);
-            }
-        }
-    }
-    if !added_issues.is_empty() {
-        sqlx::query(&format!(
-            "INSERT INTO {table} \
-             (id, created_at, updated_at, created_by_id, updated_by_id, \
-              issue_id, {column}, project_id, workspace_id) \
-             SELECT gen_random_uuid(), $1, $1, $2, $2, issue_id, other_id, $3, $4 \
-             FROM unnest($5::uuid[], $6::uuid[]) AS t(issue_id, other_id) \
-             ON CONFLICT DO NOTHING"
-        ))
-        .bind(now)
-        .bind(user_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(added_issues.as_slice())
-        .bind(added_ids.as_slice())
-        .execute(&mut **txn)
+    let conn = TxConn::new(txn);
+    let existing: Vec<(Uuid, Uuid)> = issue_labels::Entity::find()
+        .select_only()
+        .columns([issue_labels::Column::IssueId, issue_labels::Column::LabelId])
+        .filter(issue_labels::Column::IssueId.is_in(issues.iter().map(|issue| issue.id)))
+        .filter(issue_labels::Column::DeletedAt.is_null())
+        .into_tuple()
+        .all(&conn)
         .await
-        .map_err(write_denial)?;
+        .map_err(|_| Denial::ServerError)?;
+    let pairs = union_pairs(existing, issues, ids);
+    let now: DateTimeWithTimeZone = now.into();
+    for chunk in pairs.chunks(INSERT_CHUNK) {
+        let rows = chunk
+            .iter()
+            .map(|&(issue_id, label_id)| issue_labels::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                created_at: Set(now),
+                updated_at: Set(now),
+                created_by_id: Set(Some(*user_id)),
+                updated_by_id: Set(Some(*user_id)),
+                issue_id: Set(issue_id),
+                label_id: Set(label_id),
+                project_id: Set(*project_id),
+                workspace_id: Set(*workspace_id),
+                deleted_at: Set(None),
+            });
+        issue_labels::Entity::insert_many(rows)
+            .on_conflict(OnConflict::new().do_nothing().to_owned())
+            .exec_without_returning(&conn)
+            .await
+            .map_err(orm_write_denial)?;
+    }
+    Ok(())
+}
+
+/// Union `assignee` bridge rows onto the selection: the live read here,
+/// the write through `domain::issues::insert_bulk_assignees`
+/// (`issue_assignees` is a design §4 table).
+#[allow(clippy::too_many_arguments)]
+async fn union_assignees(
+    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    project_id: &Uuid,
+    workspace_id: &Uuid,
+    user_id: &Uuid,
+    now: DateTime<Utc>,
+    issues: &[IssueRow],
+    ids: &[Uuid],
+) -> Result<(), Denial> {
+    let conn = TxConn::new(txn);
+    let existing: Vec<(Uuid, Uuid)> = issue_assignees::Entity::find()
+        .select_only()
+        .columns([
+            issue_assignees::Column::IssueId,
+            issue_assignees::Column::AssigneeId,
+        ])
+        .filter(issue_assignees::Column::IssueId.is_in(issues.iter().map(|issue| issue.id)))
+        .filter(issue_assignees::Column::DeletedAt.is_null())
+        .into_tuple()
+        .all(&conn)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let pairs = union_pairs(existing, issues, ids);
+    if !pairs.is_empty() {
+        insert_bulk_assignees(
+            &conn,
+            &BulkAssigneeUnion {
+                pairs: &pairs,
+                project_id: *project_id,
+                workspace_id: *workspace_id,
+                actor_id: *user_id,
+                now,
+            },
+        )
+        .await
+        .map_err(orm_write_denial)?;
     }
     Ok(())
 }
@@ -1343,48 +1433,41 @@ async fn union_module_bridges(
     issues: &[IssueRow],
     module_ids: &[Uuid],
 ) -> Result<Vec<(Uuid, Uuid)>, Denial> {
-    let issue_ids: Vec<Uuid> = issues.iter().map(|issue| issue.id).collect();
-    let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        r#"SELECT issue_id, module_id FROM module_issues
-           WHERE issue_id = ANY($1) AND deleted_at IS NULL"#,
-    )
-    .bind(issue_ids.as_slice())
-    .fetch_all(&mut **txn)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let mut seen: HashSet<(Uuid, Uuid)> = HashSet::new();
-    for (issue_id, module_id) in rows {
-        seen.insert((issue_id, module_id));
-    }
-    let mut pairs: Vec<(Uuid, Uuid)> = Vec::new();
-    for issue in issues {
-        for module_id in module_ids {
-            if !seen.contains(&(issue.id, *module_id)) {
-                seen.insert((issue.id, *module_id));
-                pairs.push((issue.id, *module_id));
-            }
-        }
-    }
-    if !pairs.is_empty() {
-        let pair_issues: Vec<Uuid> = pairs.iter().map(|pair| pair.0).collect();
-        let pair_modules: Vec<Uuid> = pairs.iter().map(|pair| pair.1).collect();
-        sqlx::query(
-            r#"INSERT INTO module_issues
-               (id, created_at, updated_at, created_by_id, updated_by_id,
-                issue_id, module_id, project_id, workspace_id)
-               SELECT gen_random_uuid(), $1, $1, $2, $2, issue_id, module_id, $3, $4
-               FROM unnest($5::uuid[], $6::uuid[]) AS t(issue_id, module_id)
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(now)
-        .bind(user_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(pair_issues.as_slice())
-        .bind(pair_modules.as_slice())
-        .execute(&mut **txn)
+    let conn = TxConn::new(txn);
+    let existing: Vec<(Uuid, Uuid)> = module_issues::Entity::find()
+        .select_only()
+        .columns([
+            module_issues::Column::IssueId,
+            module_issues::Column::ModuleId,
+        ])
+        .filter(module_issues::Column::IssueId.is_in(issues.iter().map(|issue| issue.id)))
+        .filter(module_issues::Column::DeletedAt.is_null())
+        .into_tuple()
+        .all(&conn)
         .await
-        .map_err(write_denial)?;
+        .map_err(|_| Denial::ServerError)?;
+    let pairs = union_pairs(existing, issues, module_ids);
+    let now: DateTimeWithTimeZone = now.into();
+    for chunk in pairs.chunks(INSERT_CHUNK) {
+        let rows = chunk
+            .iter()
+            .map(|&(issue_id, module_id)| module_issues::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                created_at: Set(now),
+                updated_at: Set(now),
+                created_by_id: Set(Some(*user_id)),
+                updated_by_id: Set(Some(*user_id)),
+                issue_id: Set(issue_id),
+                module_id: Set(module_id),
+                project_id: Set(*project_id),
+                workspace_id: Set(*workspace_id),
+                deleted_at: Set(None),
+            });
+        module_issues::Entity::insert_many(rows)
+            .on_conflict(OnConflict::new().do_nothing().to_owned())
+            .exec_without_returning(&conn)
+            .await
+            .map_err(orm_write_denial)?;
     }
     Ok(pairs)
 }
@@ -1405,82 +1488,12 @@ async fn apply_cycle_set(
     issues: &[IssueRow],
     target: &Uuid,
 ) -> Result<(), Denial> {
-    let ids: Vec<Uuid> = issues.iter().map(|issue| issue.id).collect();
-    let rows: Vec<(Uuid, Uuid, Uuid)> = sqlx::query_as(
-        r#"SELECT id, issue_id, cycle_id FROM cycle_issues
-           WHERE issue_id = ANY($1) AND deleted_at IS NULL ORDER BY created_at DESC"#,
-    )
-    .bind(ids.as_slice())
-    .fetch_all(&mut **txn)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let mut staying: HashSet<Uuid> = HashSet::new();
-    let mut moved: Vec<(Uuid, Uuid, Uuid)> = Vec::new();
-    for (id, issue_id, cycle_id) in &rows {
-        if cycle_id == target {
-            staying.insert(*issue_id);
-        } else {
-            moved.push((*id, *issue_id, *cycle_id));
-        }
-    }
-    let moved_ids: HashSet<Uuid> = moved.iter().map(|row| row.1).collect();
-    let mut created: Vec<CreatedBridge> = Vec::new();
-    for issue in issues {
-        if staying.contains(&issue.id) || moved_ids.contains(&issue.id) {
-            continue;
-        }
-        // `bulk_create` stamps each object with its own `now()` calls
-        // (`auto_now_add` + `auto_now`), so rows carry distinct
-        // timestamps — and the serialize below reads them back.
-        let created_at = Utc::now();
-        let updated_at = Utc::now();
-        let row: (
-            Uuid,
-            Uuid,
-            DateTime<Utc>,
-            DateTime<Utc>,
-            Option<Uuid>,
-            Option<Uuid>,
-        ) = sqlx::query_as(
-            r#"INSERT INTO cycle_issues
-                   (id, created_at, updated_at, created_by_id, updated_by_id,
-                    project_id, workspace_id, cycle_id, issue_id)
-                   VALUES (gen_random_uuid(), $1, $2, $3, $3, $4, $5, $6, $7)
-                   RETURNING id, issue_id, created_at, updated_at,
-                             created_by_id, updated_by_id"#,
-        )
-        .bind(created_at)
-        .bind(updated_at)
-        .bind(user_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(target)
-        .bind(issue.id)
-        .fetch_one(&mut **txn)
-        .await
-        .map_err(write_denial)?;
-        created.push(CreatedBridge {
-            id: row.0,
-            issue_id: row.1,
-            created_at: row.2,
-            updated_at: row.3,
-            created_by: row.4,
-            updated_by: row.5,
-            project_id: *project_id,
-            workspace_id: *workspace_id,
-            cycle_id: *target,
-        });
-    }
-    let mut moved_activity: Vec<Value> = Vec::new();
-    for (id, issue_id, old_cycle_id) in &moved {
-        moved_activity.push(moved_bridge_json(old_cycle_id, target, issue_id));
-        sqlx::query("UPDATE cycle_issues SET cycle_id = $1 WHERE id = $2")
-            .bind(target)
-            .bind(id)
-            .execute(&mut **txn)
-            .await
-            .map_err(write_denial)?;
-    }
+    let (created, moved) =
+        write_cycle_set(txn, project_id, workspace_id, user_id, issues, target).await?;
+    let moved_activity: Vec<Value> = moved
+        .iter()
+        .map(|(_, issue_id, old_cycle_id)| moved_bridge_json(old_cycle_id, target, issue_id))
+        .collect();
     let mut requested = Map::new();
     requested.insert(
         "cycles_list".to_owned(),
@@ -1515,6 +1528,114 @@ async fn apply_cycle_set(
         ),
     )
     .await;
+    Ok(())
+}
+
+/// The cycle-set rows inside the transaction: read the live bridges
+/// (`-created_at`), insert one bridge per issue with none, then move the
+/// bridges pointing elsewhere. Returns the created rows and the moved
+/// `(bridge_id, issue_id, old_cycle_id)` triples, in that order.
+#[allow(clippy::type_complexity)]
+async fn write_cycle_set(
+    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    project_id: &Uuid,
+    workspace_id: &Uuid,
+    user_id: &Uuid,
+    issues: &[IssueRow],
+    target: &Uuid,
+) -> Result<(Vec<CreatedBridge>, Vec<(Uuid, Uuid, Uuid)>), Denial> {
+    let conn = TxConn::new(txn);
+    let rows: Vec<(Uuid, Uuid, Uuid)> = cycle_issues::Entity::find()
+        .select_only()
+        .columns([
+            cycle_issues::Column::Id,
+            cycle_issues::Column::IssueId,
+            cycle_issues::Column::CycleId,
+        ])
+        .filter(cycle_issues::Column::IssueId.is_in(issues.iter().map(|issue| issue.id)))
+        .filter(cycle_issues::Column::DeletedAt.is_null())
+        .order_by_desc(cycle_issues::Column::CreatedAt)
+        .into_tuple()
+        .all(&conn)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let mut staying: HashSet<Uuid> = HashSet::new();
+    let mut moved: Vec<(Uuid, Uuid, Uuid)> = Vec::new();
+    for (id, issue_id, cycle_id) in &rows {
+        if cycle_id == target {
+            staying.insert(*issue_id);
+        } else {
+            moved.push((*id, *issue_id, *cycle_id));
+        }
+    }
+    let moved_ids: HashSet<Uuid> = moved.iter().map(|row| row.1).collect();
+    let mut created: Vec<CreatedBridge> = Vec::new();
+    for issue in issues {
+        if staying.contains(&issue.id) || moved_ids.contains(&issue.id) {
+            continue;
+        }
+        // `bulk_create` stamps each object with its own `now()` calls
+        // (`auto_now_add` + `auto_now`), so rows carry distinct
+        // timestamps — and the serialize below reads them back.
+        let created_at = Utc::now();
+        let updated_at = Utc::now();
+        // `insert` reads the stored row back (`RETURNING`), so the
+        // serialize sees the database's microsecond timestamps.
+        let row = cycle_issues::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            created_at: Set(created_at.into()),
+            updated_at: Set(updated_at.into()),
+            created_by_id: Set(Some(*user_id)),
+            updated_by_id: Set(Some(*user_id)),
+            project_id: Set(*project_id),
+            workspace_id: Set(*workspace_id),
+            cycle_id: Set(*target),
+            issue_id: Set(issue.id),
+            deleted_at: Set(None),
+        }
+        .insert(&conn)
+        .await
+        .map_err(orm_write_denial)?;
+        created.push(CreatedBridge {
+            id: row.id,
+            issue_id: row.issue_id,
+            created_at: row.created_at.with_timezone(&Utc),
+            updated_at: row.updated_at.with_timezone(&Utc),
+            created_by: row.created_by_id,
+            updated_by: row.updated_by_id,
+            project_id: *project_id,
+            workspace_id: *workspace_id,
+            cycle_id: *target,
+        });
+    }
+    for (id, _, _) in &moved {
+        cycle_issues::Entity::update_many()
+            .col_expr(cycle_issues::Column::CycleId, Expr::value(*target))
+            .filter(cycle_issues::Column::Id.eq(*id))
+            .exec(&conn)
+            .await
+            .map_err(orm_write_denial)?;
+    }
+    Ok((created, moved))
+}
+
+/// The cycle-clear leg (`cycle_id: null`): soft-delete every live bridge
+/// of the selection with the request's shared `now`.
+async fn clear_cycle_bridges(
+    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    issues: &[IssueRow],
+    now: DateTime<Utc>,
+) -> Result<(), Denial> {
+    cycle_issues::Entity::update_many()
+        .col_expr(
+            cycle_issues::Column::DeletedAt,
+            Expr::value(DateTimeWithTimeZone::from(now)),
+        )
+        .filter(cycle_issues::Column::IssueId.is_in(issues.iter().map(|issue| issue.id)))
+        .filter(cycle_issues::Column::DeletedAt.is_null())
+        .exec(&TxConn::new(txn))
+        .await
+        .map_err(orm_write_denial)?;
     Ok(())
 }
 
@@ -1743,6 +1864,397 @@ mod tests {
     use crate::v1_cycles_modules::body::FilePart;
 
     const IID: &str = "11111111-1111-1111-1111-111111111111";
+
+    fn issue_row(id: Uuid) -> IssueRow {
+        IssueRow {
+            id,
+            state_id: None,
+            priority: "none".to_owned(),
+            start_date: None,
+            target_date: None,
+            estimate_point_id: None,
+        }
+    }
+
+    /// The bulk selection keeps the old statement's tenant join, scope
+    /// and model `-created_at` order.
+    #[test]
+    fn bulk_issue_statement_shape() {
+        use sea_orm::QueryTrait;
+        let issue = Uuid::from_u128(1);
+        let sql = bulk_issues_query("acme", Uuid::from_u128(2), &[issue])
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.starts_with(
+            r#"SELECT "issues"."id", "issues"."state_id", "issues"."priority", "issues"."start_date", "issues"."target_date", "issues"."estimate_point_id" FROM "issues" INNER JOIN "workspaces" ON "issues"."workspace_id" = "workspaces"."id""#
+        ), "{sql}");
+        assert!(
+            sql.contains(&format!(r#""issues"."id" IN ('{issue}')"#)),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""issues"."deleted_at" IS NULL"#));
+        assert!(
+            sql.ends_with(r#"ORDER BY "issues"."created_at" DESC"#),
+            "{sql}"
+        );
+    }
+
+    /// Union pairs: issues outer, ids inner, live pairs and repeats skipped.
+    #[test]
+    fn union_pairs_skip_live_and_repeated_pairs() {
+        let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let (x, y) = (Uuid::from_u128(10), Uuid::from_u128(11));
+        let pairs = union_pairs(vec![(a, x)], &[issue_row(a), issue_row(b)], &[x, y, y]);
+        assert_eq!(pairs, vec![(a, y), (b, x), (b, y)]);
+    }
+
+    #[test]
+    fn missing_ids_sort_as_strings() {
+        let (a, b, c) = (Uuid::from_u128(3), Uuid::from_u128(1), Uuid::from_u128(2));
+        assert!(missing_ids_error(&[a, b], &[a, b], "Labels").is_ok());
+        match missing_ids_error(&[a, b, c], &[c], "Labels") {
+            Err(Denial::BadError(message)) => {
+                assert_eq!(message, format!("Labels do not exist: {b}, {a}"))
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// The bulk reads and writes against constraint-free temp tables on a
+    /// one-connection pool.
+    #[tokio::test]
+    async fn live_bulk_rows() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "workspaces",
+            "projects",
+            "project_members",
+            "issues",
+            "issue_subscribers",
+            "states",
+            "labels",
+            "users",
+            "modules",
+            "estimate_points",
+            "cycles",
+            "issue_labels",
+            "issue_assignees",
+            "module_issues",
+            "cycle_issues",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        sqlx::query("ALTER TABLE cycle_issues ADD PRIMARY KEY (id)")
+            .execute(&pool)
+            .await
+            .expect("pk");
+        let id = Uuid::new_v4;
+        let (ws, project, gone_project, actor, outsider) = (id(), id(), id(), id(), id());
+        let (old, new, deleted) = (id(), id(), id());
+        let (state, label, module, point, open_cycle, done_cycle, other_cycle) =
+            (id(), id(), id(), id(), id(), id(), id());
+        let old_bridge = id();
+        let issue = |iid: Uuid, age: i32, gone: bool| {
+            format!(
+                "INSERT INTO issues (id, workspace_id, project_id, priority, start_date, created_at, \
+                 deleted_at) VALUES ('{iid}', '{ws}', '{project}', 'high', '2026-01-02', \
+                 now() - interval '{age} min', {})",
+                if gone { "now()" } else { "NULL" }
+            )
+        };
+        let bridge = |table: &str, column: &str, issue: Uuid, other: Uuid| {
+            format!(
+                "INSERT INTO {table} (id, created_at, updated_at, issue_id, {column}, project_id, \
+                 workspace_id, deleted_at) VALUES ('{}', now(), now(), '{issue}', '{other}', \
+                 '{project}', '{ws}', NULL)",
+                id()
+            )
+        };
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme')"),
+            format!(
+                "INSERT INTO projects (id, workspace_id, deleted_at) VALUES \
+                 ('{project}', '{ws}', NULL), ('{gone_project}', '{ws}', now())"
+            ),
+            format!(
+                "INSERT INTO project_members (id, member_id, project_id, workspace_id, role, \
+                 is_active, deleted_at) VALUES ('{}', '{actor}', '{project}', '{ws}', 5, true, NULL)",
+                id()
+            ),
+            issue(old, 2, false),
+            issue(new, 1, false),
+            issue(deleted, 0, true),
+            // A soft-deleted state still resolves (`all_state_objects`).
+            format!("INSERT INTO states (id, deleted_at) VALUES ('{state}', now())"),
+            format!("INSERT INTO labels (id, deleted_at) VALUES ('{label}', NULL)"),
+            format!("INSERT INTO users (id) VALUES ('{actor}')"),
+            format!("INSERT INTO modules (id, deleted_at) VALUES ('{module}', NULL)"),
+            format!("INSERT INTO estimate_points (id, deleted_at) VALUES ('{point}', NULL)"),
+            format!(
+                "INSERT INTO cycles (id, workspace_id, project_id, end_date, deleted_at) VALUES \
+                 ('{open_cycle}', '{ws}', '{project}', now() + interval '1 day', NULL), \
+                 ('{done_cycle}', '{ws}', '{project}', now() - interval '1 day', NULL), \
+                 ('{other_cycle}', '{ws}', '{project}', NULL, NULL)"
+            ),
+            bridge("issue_labels", "label_id", old, label),
+            bridge("issue_assignees", "assignee_id", old, actor),
+            bridge("module_issues", "module_id", new, module),
+            format!(
+                "INSERT INTO cycle_issues (id, created_at, updated_at, issue_id, cycle_id, \
+                 project_id, workspace_id, deleted_at) VALUES ('{old_bridge}', now(), now(), \
+                 '{old}', '{other_cycle}', '{project}', '{ws}', NULL)"
+            ),
+            format!(
+                "INSERT INTO issue_subscribers (id, created_at, updated_at, issue_id, \
+                 subscriber_id, project_id, workspace_id, deleted_at) VALUES ('{}', now(), now(), \
+                 '{old}', '{actor}', '{project}', '{ws}', NULL)",
+                id()
+            ),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+
+        // Gates and the tenant reads.
+        assert!(lite_allowed(&pool, "acme", &project, &actor)
+            .await
+            .expect("lite"));
+        assert!(!lite_allowed(&pool, "acme", &project, &outsider)
+            .await
+            .expect("lite"));
+        assert!(!lite_allowed(&pool, "other", &project, &actor)
+            .await
+            .expect("lite"));
+        let scope = fetch_project(&pool, "acme", &project)
+            .await
+            .expect("project")
+            .expect("live");
+        assert_eq!(scope.workspace_id, ws);
+        assert!(fetch_project(&pool, "acme", &gone_project)
+            .await
+            .expect("project")
+            .is_none());
+        assert!(fetch_project(&pool, "other", &project)
+            .await
+            .expect("project")
+            .is_none());
+        let issues = fetch_bulk_issues(&pool, "acme", &project, &[old, new, deleted])
+            .await
+            .expect("issues");
+        assert_eq!(
+            issues.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![new, old]
+        );
+        assert_eq!(issues[0].priority, "high");
+        assert_eq!(issues[0].start_date, NaiveDate::from_ymd_opt(2026, 1, 2));
+        assert!(fetch_bulk_issues(&pool, "other", &project, &[old])
+            .await
+            .expect("issues")
+            .is_empty());
+
+        // Whole-batch reference checks.
+        let ok = BulkProperties {
+            state_id: Some(Some(state)),
+            label_ids: Some(vec![label]),
+            assignee_ids: Some(vec![actor]),
+            module_ids: Some(vec![module]),
+            estimate_point: Some(Some(point)),
+            cycle_id: Some(Some(open_cycle)),
+            ..Default::default()
+        };
+        let batch = check_batch(&pool, "acme", &project, &ok, &issues)
+            .await
+            .expect("valid");
+        assert_eq!(batch.cycle.map(|cycle| cycle.id), Some(open_cycle));
+        let bad = |properties: BulkProperties| {
+            let pool = pool.clone();
+            let issues = &issues;
+            async move {
+                match check_batch(&pool, "acme", &project, &properties, issues).await {
+                    Err(Denial::BadError(message)) => message,
+                    other => panic!("unexpected {:?}", other.map(|_| ())),
+                }
+            }
+        };
+        let ghost = Uuid::new_v4();
+        assert_eq!(
+            bad(BulkProperties {
+                state_id: Some(Some(ghost)),
+                ..Default::default()
+            })
+            .await,
+            format!("State {ghost} does not exist")
+        );
+        assert_eq!(
+            bad(BulkProperties {
+                label_ids: Some(vec![label, ghost]),
+                ..Default::default()
+            })
+            .await,
+            format!("Labels do not exist: {ghost}")
+        );
+        assert_eq!(
+            bad(BulkProperties {
+                assignee_ids: Some(vec![ghost]),
+                ..Default::default()
+            })
+            .await,
+            format!("Users do not exist: {ghost}")
+        );
+        assert_eq!(
+            bad(BulkProperties {
+                module_ids: Some(vec![ghost]),
+                ..Default::default()
+            })
+            .await,
+            format!("Modules do not exist: {ghost}")
+        );
+        assert_eq!(
+            bad(BulkProperties {
+                estimate_point: Some(Some(ghost)),
+                ..Default::default()
+            })
+            .await,
+            format!("Estimate point {ghost} does not exist")
+        );
+        assert_eq!(
+            bad(BulkProperties {
+                cycle_id: Some(Some(ghost)),
+                ..Default::default()
+            })
+            .await,
+            format!("Cycle {ghost} does not exist in this project")
+        );
+        assert_eq!(
+            bad(BulkProperties {
+                cycle_id: Some(Some(done_cycle)),
+                ..Default::default()
+            })
+            .await,
+            COMPLETED_CYCLE_MESSAGE
+        );
+        assert_eq!(
+            bad(BulkProperties {
+                target_date: Some(NaiveDate::from_ymd_opt(2026, 1, 1)),
+                ..Default::default()
+            })
+            .await,
+            DATE_ORDER_MESSAGE
+        );
+
+        // The transactional writes.
+        let now = Utc::now();
+        let mut txn = pool.begin().await.expect("begin");
+        union_labels(&mut txn, &project, &ws, &actor, now, &issues, &[label])
+            .await
+            .expect("labels");
+        union_assignees(&mut txn, &project, &ws, &actor, now, &issues, &[actor])
+            .await
+            .expect("assignees");
+        let pairs = union_module_bridges(&mut txn, &project, &ws, &actor, now, &issues, &[module])
+            .await
+            .expect("modules");
+        assert_eq!(pairs, vec![(old, module)]);
+        let (created, moved) =
+            write_cycle_set(&mut txn, &project, &ws, &actor, &issues, &open_cycle)
+                .await
+                .expect("cycle set");
+        assert_eq!(moved, vec![(old_bridge, old, other_cycle)]);
+        assert_eq!(created.len(), 1);
+        assert_eq!(
+            (
+                created[0].issue_id,
+                created[0].created_by,
+                created[0].cycle_id
+            ),
+            (new, Some(actor), open_cycle)
+        );
+        // `RETURNING` hands back the stored (microsecond) timestamps.
+        assert_eq!(created[0].created_at.timestamp_subsec_nanos() % 1000, 0);
+        txn.commit().await.expect("commit");
+        for (table, column, other) in [
+            ("issue_labels", "label_id", label),
+            ("issue_assignees", "assignee_id", actor),
+            ("module_issues", "module_id", module),
+            ("cycle_issues", "cycle_id", open_cycle),
+        ] {
+            let (count,): (i64,) = sqlx::query_as(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE {column} = $1 AND deleted_at IS NULL \
+                 AND issue_id = ANY($2) AND project_id = $3 AND workspace_id = $4"
+            ))
+            .bind(other)
+            .bind([old, new].as_slice())
+            .bind(project)
+            .bind(ws)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+            assert_eq!(count, 2, "{table}");
+        }
+        let mut txn = pool.begin().await.expect("begin");
+        clear_cycle_bridges(&mut txn, &issues, now)
+            .await
+            .expect("clear");
+        txn.commit().await.expect("commit");
+        let (live,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM cycle_issues WHERE deleted_at IS NULL")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(live, 0);
+
+        // Subscribe: idempotent over the live subscription.
+        let base = BulkBase {
+            pool: pool.clone(),
+            slug: "acme".to_owned(),
+            project_id: project,
+            user_id: actor,
+        };
+        assert_eq!(
+            subscribe_issues(&base, &scope, &issues)
+                .await
+                .expect("subscribe"),
+            vec![new]
+        );
+        assert!(subscribe_issues(&base, &scope, &issues)
+            .await
+            .expect("again")
+            .is_empty());
+
+        // A unique violation is the invalid-payload 400.
+        let mut txn = pool.begin().await.expect("begin");
+        let duplicate = cycle_issues::ActiveModel {
+            id: Set(old_bridge),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            created_by_id: Set(None),
+            updated_by_id: Set(None),
+            cycle_id: Set(open_cycle),
+            issue_id: Set(old),
+            project_id: Set(project),
+            workspace_id: Set(ws),
+            deleted_at: Set(None),
+        }
+        .insert(&TxConn::new(&mut txn))
+        .await
+        .expect_err("duplicate pk");
+        assert!(matches!(
+            orm_write_denial(duplicate),
+            Denial::BadError(message) if message == PAYLOAD_INVALID_MESSAGE
+        ));
+    }
 
     fn dval_from_json(text: &str) -> DVal {
         let parsed = parse_request_bytes_spans(text.as_bytes(), &[]).expect("valid json");
