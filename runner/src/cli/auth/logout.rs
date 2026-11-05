@@ -76,6 +76,9 @@ pub(crate) async fn sign_out_engine(paths: &Paths, local_only: bool) -> Result<b
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
+    // Signing out forgets keychain items the keychain can never return, so
+    // a damaged keychain can't keep this computer signed in.
+    let _forget = crate::config::secrets::forget_unreadable(paths);
     if args.engine {
         let held = sign_out_engine(paths, args.local_only).await?;
         crate::service::reload::notify_credentials_changed(paths).await;
@@ -127,7 +130,13 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         return Ok(());
     }
 
-    if workspace.is_none() {
+    // Signing out the last workspace leaves no machine token to revoke
+    // the engine credential with later, so it counts as a full logout.
+    let last_workspace = workspace.is_some_and(|slug| {
+        let signed_in = cli.workspace_tokens();
+        signed_in.len() == 1 && signed_in[0].0.as_deref() == Some(slug)
+    });
+    if workspace.is_none() || last_workspace {
         // `pidash auth logout` signs the engine out too (design §4.3). Its
         // credential is revoked first, while a machine token still works.
         sign_out_engine(paths, args.local_only).await?;
@@ -266,5 +275,141 @@ mod tests {
                 .unwrap()
                 .contains("ec_left_behind")
         );
+    }
+
+    fn two_workspaces_and_engine(url: &str) -> Config {
+        Config {
+            version: 2,
+            daemon: DaemonConfig {
+                cloud_url: url.into(),
+                ..DaemonConfig::default()
+            },
+            runners: vec![],
+            cli: Some(CliSection {
+                token: Some("mt_acme".into()),
+                workspace_slug: Some("acme".into()),
+                engine_credential: Some(EngineCredential {
+                    token: "ec_live".into(),
+                    expires_at: Some(chrono::Utc::now() + chrono::Duration::days(10)),
+                }),
+                engine_sign_in_state: Some(EngineSignInState::Active),
+                ..Default::default()
+            }),
+            engine: Default::default(),
+            auth: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn signing_out_the_last_workspace_signs_the_engine_out_first() {
+        use crate::engine::test_server;
+        let server = test_server::start(std::sync::Arc::new(|_| (200, "{}".into()))).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(tmp.path());
+        file::write_config(&p, &two_workspaces_and_engine(&server.url)).unwrap();
+
+        run(
+            Args {
+                local_only: false,
+                workspace: Some("acme".into()),
+                engine: false,
+            },
+            &p,
+        )
+        .await
+        .unwrap();
+
+        let reqs = server.requests.lock().unwrap().clone();
+        let engine_revoke = reqs
+            .iter()
+            .position(|r| r.path == crate::engine::api::CREDENTIAL_REVOKE_PATH)
+            .expect("the engine credential was revoked");
+        let token_revoke = reqs
+            .iter()
+            .position(|r| r.path == "/api/v1/auth/revoke/")
+            .expect("the machine token was revoked");
+        assert!(
+            engine_revoke < token_revoke,
+            "engine first, while mt_ works"
+        );
+        assert_eq!(reqs[engine_revoke].bearer(), Some("mt_acme"));
+        let cli = file::load_config(&p).unwrap().cli.unwrap();
+        assert!(cli.engine_credential.is_none());
+        assert_eq!(cli.engine_sign_in_state, Some(EngineSignInState::SignedOut));
+    }
+
+    #[tokio::test]
+    async fn signing_out_one_of_two_workspaces_leaves_the_engine_signed_in() {
+        use crate::engine::test_server;
+        let server = test_server::start(std::sync::Arc::new(|_| (200, "{}".into()))).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(tmp.path());
+        let mut cfg = two_workspaces_and_engine(&server.url);
+        cfg.cli
+            .as_mut()
+            .unwrap()
+            .workspaces
+            .push(crate::config::schema::WorkspaceCredential {
+                slug: "beta".into(),
+                token: "mt_beta".into(),
+            });
+        file::write_config(&p, &cfg).unwrap();
+
+        run(
+            Args {
+                local_only: false,
+                workspace: Some("beta".into()),
+                engine: false,
+            },
+            &p,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            server
+                .requests_to(crate::engine::api::CREDENTIAL_REVOKE_PATH)
+                .is_empty()
+        );
+        let cli = file::load_config(&p).unwrap().cli.unwrap();
+        assert_eq!(cli.engine_credential.unwrap().token, "ec_live");
+    }
+
+    #[tokio::test]
+    async fn logout_gets_past_a_keychain_item_that_can_never_be_read() {
+        use crate::config::schema::CredentialsStoreMode;
+        use crate::config::secrets::{self, ITEM_ENGINE_CREDENTIAL, MemoryKeyring};
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(tmp.path());
+        let keyring = MemoryKeyring::new();
+        secrets::use_backend_for(&p.config_dir, keyring.clone());
+        let mut cfg = two_workspaces_and_engine("https://cloud.invalid");
+        cfg.auth.credentials_store = CredentialsStoreMode::Auto;
+        file::write_config(&p, &cfg).unwrap();
+        file::migrate_credentials_store(&p).unwrap();
+        keyring.break_item(ITEM_ENGINE_CREDENTIAL);
+        // Ordinary writes are refused and name the way out.
+        let err = file::mutate_config(&p, |_| Ok(())).unwrap_err();
+        assert!(format!("{err:#}").contains("pidash auth logout"), "{err:#}");
+
+        run(
+            Args {
+                local_only: true,
+                workspace: None,
+                engine: false,
+            },
+            &p,
+        )
+        .await
+        .unwrap();
+
+        let after = file::load_config(&p).unwrap();
+        assert!(after.auth.unread_keyring_items.is_empty());
+        let cli = after.cli.unwrap_or_default();
+        assert!(cli.workspace_tokens().is_empty());
+        assert!(cli.engine_credential.is_none());
+        assert!(keyring.items().is_empty(), "{:?}", keyring.items());
+        // Writes work again.
+        file::mutate_config(&p, |_| Ok(())).unwrap();
     }
 }

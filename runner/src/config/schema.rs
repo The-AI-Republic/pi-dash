@@ -94,6 +94,13 @@ pub struct AuthSection {
     /// writing it is refused (it would drop or delete them).
     #[serde(skip)]
     pub unread_keyring_items: Vec<String>,
+    /// In memory only: the part of `unread_keyring_items` the keychain can
+    /// never return as it is (duplicate items, a value that is not text).
+    /// Writes stay refused for them too, except from `pidash auth login`
+    /// and `pidash auth logout`, which forget and replace them
+    /// ([`crate::config::secrets::forget_unreadable`]).
+    #[serde(skip)]
+    pub broken_keyring_items: Vec<String>,
 }
 
 impl AuthSection {

@@ -135,6 +135,8 @@ struct TokenError {
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
+    // Signing in replaces keychain items the keychain can never return.
+    let _forget = crate::config::secrets::forget_unreadable(paths);
     if args.engine {
         return engine_login(&args, paths).await;
     }
@@ -146,6 +148,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
 }
 
 pub async fn run_auth_only(args: Args, paths: &Paths) -> Result<()> {
+    let _forget = crate::config::secrets::forget_unreadable(paths);
     login_and_bind_workspace(&args, paths).await.map(|_| ())
 }
 
@@ -730,9 +733,22 @@ async fn exchange_for_machine_token(
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("machine-token exchange failed: HTTP {status}: {body}");
     }
-    resp.json::<MachineTokenResponse>()
+    // Read as text and parse here: serde's own message can quote a value,
+    // and this response carries the `mt_` and `ec_` credentials.
+    let body = resp
+        .text()
         .await
-        .context("parsing machine-token exchange response")
+        .context("reading machine-token exchange response")?;
+    parse_machine_token_response(&body)
+}
+
+fn parse_machine_token_response(body: &str) -> Result<MachineTokenResponse> {
+    serde_json::from_str::<MachineTokenResponse>(body).map_err(|e| {
+        anyhow::anyhow!(
+            "parsing machine-token exchange response: {}",
+            crate::engine::api::unparsable(&e)
+        )
+    })
 }
 
 fn pick_workspace(workspaces: &[WorkspaceRow]) -> Result<&WorkspaceRow> {
@@ -760,6 +776,19 @@ fn pick_workspace(workspaces: &[WorkspaceRow]) -> Result<&WorkspaceRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_machine_token_parse_error_never_prints_the_credentials() {
+        let body = r#"{"machine_token":"mt_secret","workspace_slug":"acme","engine_credential":"ec_secret"}"#;
+        let err = parse_machine_token_response(body).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(!msg.contains("ec_secret"), "{msg}");
+        assert!(!msg.contains("mt_secret"), "{msg}");
+        assert!(
+            msg.contains("parsing machine-token exchange response"),
+            "{msg}"
+        );
+    }
     use tempfile::tempdir;
 
     fn paths_for(root: &std::path::Path) -> Paths {
