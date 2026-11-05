@@ -3735,7 +3735,7 @@ mod tests {
         }
     }
 
-    // -- live kernel tests: RequestContext client-IP resolution (NEWPIDASH-14)
+    // -- hermetic tests: RequestContext client-IP resolution (NEWPIDASH-14)
 
     fn full_test_settings() -> pidash_db::config::Settings {
         let mut vars = HashMap::new();
@@ -3749,8 +3749,14 @@ mod tests {
         .expect("test settings")
     }
 
-    fn ctx_test_state(pool: &sqlx::PgPool) -> AppState {
-        let pools = pidash_db::Pools::primary_only(pool.clone());
+    /// Hermetic state: `RequestContext::build` only checks that a pool and
+    /// an ORM handle are installed, so a lazy pool to a never-bound port
+    /// suffices and these tests run without `DATABASE_URL` (the plain
+    /// `cargo test` CI job sets none).
+    fn ctx_test_state() -> AppState {
+        let pool = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/google_ctx_hermetic")
+            .expect("lazy pool");
+        let pools = pidash_db::Pools::primary_only(pool);
         let orm = pidash_db::sea_orm_connection(pools.primary());
         AppState::with_settings("test", full_test_settings())
             .with_pools(pools)
@@ -3777,10 +3783,7 @@ mod tests {
     /// showed `None` here.
     #[tokio::test]
     async fn request_context_ip_falls_back_to_peer_without_xff() {
-        let Some(pool) = kernel_pool().await else {
-            return;
-        };
-        let state = ctx_test_state(&pool);
+        let state = ctx_test_state();
         let peer: SocketAddr = "203.0.113.9:50831".parse().expect("peer addr");
         let ctx = RequestContext::build(
             &state,
@@ -3801,10 +3804,7 @@ mod tests {
     /// `get_client_ip` takes the first forwarded entry, unstripped.
     #[tokio::test]
     async fn request_context_ip_prefers_first_xff_entry() {
-        let Some(pool) = kernel_pool().await else {
-            return;
-        };
-        let state = ctx_test_state(&pool);
+        let state = ctx_test_state();
         let peer: SocketAddr = "203.0.113.9:50831".parse().expect("peer addr");
         let mut headers = ctx_headers();
         headers.insert(
