@@ -81,8 +81,7 @@
 //!   it in its own unit ("row-locked read", PIDASHCONV-592); it is not
 //!   one of this issue's five units.
 //! * Machine-delete / runner-delete flows — handlers-D (PIDASHCONV-593)
-//!   reuses [`scoped_machine_read_sql`] + the M4 probes (the delete
-//!   read is text-identical to `_scoped_machine`'s unlocked read).
+//!   reads through [`machine_gate`] + the M4 probe functions (SeaORM).
 //! * Response bodies (`workspace is required`, `not found`, …) —
 //!   handlers-B/C/D own every status + body; the guard→error mapping
 //!   is documented on each builder but no body const lives here.
@@ -170,8 +169,15 @@
 
 use pidash_compat::py::py_strip;
 use pidash_db::app_project::models::project as project_cols;
+use pidash_db::entity::{
+    dev_machine, machine_token, pod, projects, runner, workspace_members, workspaces,
+};
 use pidash_db::runner_enroll::columns::{
     dev_machine as dm_cols, machine_token as mt_cols, pod as pod_cols, runner as r_cols,
+};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QueryOrder, QuerySelect, RelationDef, RelationTrait, Select,
 };
 use uuid::Uuid;
 
@@ -690,20 +696,182 @@ pub fn request_workspace_id(data_workspace: Option<&str>, query_workspace: Optio
     py_strip(picked).to_string()
 }
 
-/// `_scoped_machine` read (`machine_commands.py:63-73`).
-///
-/// `DevMachine.objects.filter(pk).first()`: full row, `Meta.ordering`,
-/// `LIMIT 1` — UNLOCKED (unlike [`machine_locked_read_sql`]). `$1` =
-/// machine id. Miss or out-of-scope (M4 probes) → 404 `not found`;
-/// `revoked_at` set → 409 `dev_machine_revoked`. The delete endpoint
-/// (`runners.py:281`) runs this same read before its service call.
-pub fn scoped_machine_read_sql() -> String {
-    format!(
-        "SELECT {} FROM \"dev_machine\" WHERE \"dev_machine\".\"id\" = $1 \
-         ORDER BY \"dev_machine\".\"last_seen_at\" DESC, \"dev_machine\".\"created_at\" DESC \
-         LIMIT 1",
-        qualified(dm_cols::TABLE, dm_cols::COLUMNS),
-    )
+// ---------------------------------------------------------------------------
+// SeaORM gate reads (the delete / machine-command gates)
+// ---------------------------------------------------------------------------
+
+/// The runner facts the delete gate reads.
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+pub struct RunnerGateRow {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub workspace_id: Uuid,
+    pub visibility: i16,
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// The [`runner_detail_sql`] read reduced to the gate columns: the
+/// `select_related("pod__project")` INNER JOINs stay (they drop a runner
+/// whose pod or project row is gone), as do `Meta.ordering` and `LIMIT 1`.
+pub fn runner_gate_query(runner_id: Uuid) -> Select<runner::Entity> {
+    // The entities omit runner -> pod (see entity/mod.rs).
+    let to_pod: RelationDef = runner::Entity::belongs_to(pod::Entity)
+        .from(runner::Column::PodId)
+        .to(pod::Column::Id)
+        .into();
+    runner::Entity::find()
+        .select_only()
+        .columns([
+            runner::Column::Id,
+            runner::Column::OwnerId,
+            runner::Column::WorkspaceId,
+            runner::Column::Visibility,
+            runner::Column::RevokedAt,
+        ])
+        .join(JoinType::InnerJoin, to_pod)
+        .join(JoinType::InnerJoin, pod::Relation::Projects.def())
+        .filter(runner::Column::Id.eq(runner_id))
+        .order_by_desc(runner::Column::LastHeartbeatAt)
+        .order_by_desc(runner::Column::CreatedAt)
+}
+
+pub async fn runner_gate(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<Option<RunnerGateRow>, DbErr> {
+    runner_gate_query(runner_id)
+        .into_model::<RunnerGateRow>()
+        .one(db)
+        .await
+}
+
+/// The machine facts the scope gates read.
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+pub struct MachineGateRow {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub visibility: i16,
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// `_scoped_machine`'s read (`machine_commands.py:63-73`,
+/// `DevMachine.objects.filter(pk).first()`) reduced to the gate columns:
+/// unlocked, `Meta.ordering`, `LIMIT 1`.
+pub async fn machine_gate(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+) -> Result<Option<MachineGateRow>, DbErr> {
+    dev_machine::Entity::find()
+        .select_only()
+        .columns([
+            dev_machine::Column::Id,
+            dev_machine::Column::OwnerId,
+            dev_machine::Column::Visibility,
+            dev_machine::Column::RevokedAt,
+        ])
+        .filter(dev_machine::Column::Id.eq(machine_id))
+        .order_by_desc(dev_machine::Column::LastSeenAt)
+        .order_by_desc(dev_machine::Column::CreatedAt)
+        .into_model::<MachineGateRow>()
+        .one(db)
+        .await
+}
+
+/// M4a ([`machine_scope_runner_probe_sql`]): a private runner of this
+/// owner on the machine in the workspace exists.
+pub async fn machine_scope_runner_exists(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+    owner_id: Uuid,
+    workspace_id: Uuid,
+) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = runner::Entity::find()
+        .select_only()
+        .column(runner::Column::Id)
+        .filter(runner::Column::DevMachineId.eq(machine_id))
+        .filter(runner::Column::OwnerId.eq(owner_id))
+        .filter(runner::Column::Visibility.eq(0i16))
+        .filter(runner::Column::WorkspaceId.eq(workspace_id))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// M4b ([`machine_scope_token_probe_sql`]): a token of this user for the
+/// machine in the workspace exists (revoked tokens count).
+pub async fn machine_scope_token_exists(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+    user_id: Uuid,
+    workspace_id: Uuid,
+) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = machine_token::Entity::find()
+        .select_only()
+        .column(machine_token::Column::Id)
+        .filter(machine_token::Column::DevMachineId.eq(machine_id))
+        .filter(machine_token::Column::UserId.eq(user_id))
+        .filter(machine_token::Column::WorkspaceId.eq(workspace_id))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// `workspace_role` (`core/permissions.py:37-45`): the caller's active,
+/// live membership role (`-created_at`, `.first()`).
+pub async fn workspace_role(
+    db: &impl ConnectionTrait,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> Result<Option<i16>, DbErr> {
+    workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .order_by_desc(workspace_members::Column::CreatedAt)
+        .into_tuple()
+        .one(db)
+        .await
+}
+
+/// `Workspace.objects.filter(pk=ws).first()` (`machine_commands.py:105`):
+/// the live workspace's slug.
+pub async fn workspace_slug(
+    db: &impl ConnectionTrait,
+    workspace_id: Uuid,
+) -> Result<Option<String>, DbErr> {
+    workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Slug)
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Id.eq(workspace_id))
+        .order_by_desc(workspaces::Column::CreatedAt)
+        .into_tuple()
+        .one(db)
+        .await
+}
+
+/// `Project.objects.filter(workspace_id=ws, identifier=id).exists()`
+/// (`machine_commands.py:108`), manager scope applied.
+pub async fn project_identifier_exists(
+    db: &impl ConnectionTrait,
+    workspace_id: Uuid,
+    identifier: &str,
+) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .filter(projects::Column::DeletedAt.is_null())
+        .filter(projects::Column::Identifier.eq(identifier))
+        .filter(projects::Column::WorkspaceId.eq(workspace_id))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
 }
 
 #[cfg(test)]
@@ -1459,26 +1627,6 @@ mod tests {
         assert_eq!(request_workspace_id(Some(""), Some("")), "");
     }
 
-    #[test]
-    fn scoped_machine_read_is_unlocked_first() {
-        let sql = scoped_machine_read_sql();
-        let list = assert_suffix(
-            &sql,
-            "FROM \"dev_machine\" WHERE \"dev_machine\".\"id\" = $1 \
-             ORDER BY \"dev_machine\".\"last_seen_at\" DESC, \"dev_machine\".\"created_at\" DESC \
-             LIMIT 1",
-        );
-        assert_eq!(list, expected_list("dev_machine", MACHINE_COLS));
-        // Text-identical to the M6 locked read minus the lock (the
-        // fixture records this read as prose — "machine by PK (NO
-        // lock)" — so the pin is structural, not a fixture needle).
-        assert!(!sql.contains("FOR UPDATE"));
-        assert_eq!(
-            sql,
-            machine_locked_read_sql().replace(" LIMIT 1 FOR UPDATE", " LIMIT 1")
-        );
-    }
-
     // -- rows.json shape --
 
     #[test]
@@ -1502,5 +1650,108 @@ mod tests {
             );
         }
         assert!(rows["M3_example_row"].get("control_online").is_some());
+    }
+
+    /// The SeaORM gate reads against constraint-free temp copies of their
+    /// tables on one sqlx transaction (`TxConn`): the runner gate keeps
+    /// the pod/project INNER JOINs, the probes match only in scope.
+    #[tokio::test]
+    async fn live_gate_reads() {
+        let Some(pool) = crate::read::test_support::pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        for table in [
+            "runner",
+            "pod",
+            "projects",
+            "dev_machine",
+            "machine_token",
+            "workspace_members",
+            "workspaces",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        let (user, ws, project, pod_id, orphan_pod, machine, runner_id, orphan) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for sql in [
+            format!("INSERT INTO projects (id, identifier, workspace_id) VALUES ('{project}', 'PRJ', '{ws}')"),
+            format!("INSERT INTO pod (id, project_id) VALUES ('{pod_id}', '{project}')"),
+            format!(
+                "INSERT INTO runner (id, owner_id, workspace_id, pod_id, dev_machine_id, visibility, created_at) \
+                 VALUES ('{runner_id}', '{user}', '{ws}', '{pod_id}', '{machine}', 0, now()), \
+                 ('{orphan}', '{user}', '{ws}', '{orphan_pod}', NULL, 0, now())"
+            ),
+            format!("INSERT INTO dev_machine (id, owner_id, visibility, revoked_at, created_at) VALUES ('{machine}', '{user}', 0, now(), now())"),
+            format!("INSERT INTO machine_token (id, dev_machine_id, user_id, workspace_id) VALUES (gen_random_uuid(), '{machine}', '{user}', '{ws}')"),
+            format!(
+                "INSERT INTO workspace_members (id, workspace_id, member_id, role, is_active, created_at) VALUES \
+                 (gen_random_uuid(), '{ws}', '{user}', 20, true, now()), \
+                 (gen_random_uuid(), '{ws}', '{user}', 5, true, now() - interval '1 day')"
+            ),
+            format!("INSERT INTO workspaces (id, slug, created_at) VALUES ('{ws}', 'ws-gate', now())"),
+        ] {
+            sqlx::query(&sql).execute(&mut *tx).await.expect("seed");
+        }
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let gate = runner_gate(&conn, runner_id)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(
+            (gate.owner_id, gate.workspace_id, gate.visibility),
+            (user, ws, 0)
+        );
+        // Pod row missing: the INNER JOIN drops the runner.
+        assert_eq!(runner_gate(&conn, orphan).await.expect("read"), None);
+        let machine_row = machine_gate(&conn, machine)
+            .await
+            .expect("read")
+            .expect("row");
+        assert!(machine_row.revoked_at.is_some());
+        assert!(machine_scope_runner_exists(&conn, machine, user, ws)
+            .await
+            .expect("probe"));
+        assert!(
+            !machine_scope_runner_exists(&conn, machine, Uuid::new_v4(), ws)
+                .await
+                .expect("probe")
+        );
+        assert!(machine_scope_token_exists(&conn, machine, user, ws)
+            .await
+            .expect("probe"));
+        assert!(
+            !machine_scope_token_exists(&conn, machine, user, Uuid::new_v4())
+                .await
+                .expect("probe")
+        );
+        // Newest membership wins (`-created_at`).
+        assert_eq!(
+            workspace_role(&conn, ws, user).await.expect("role"),
+            Some(20)
+        );
+        assert_eq!(
+            workspace_slug(&conn, ws).await.expect("slug").as_deref(),
+            Some("ws-gate")
+        );
+        assert!(project_identifier_exists(&conn, ws, "PRJ")
+            .await
+            .expect("probe"));
+        assert!(!project_identifier_exists(&conn, ws, "NOPE")
+            .await
+            .expect("probe"));
     }
 }
