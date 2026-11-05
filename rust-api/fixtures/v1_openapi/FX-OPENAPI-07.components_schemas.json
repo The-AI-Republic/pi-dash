@@ -1,10 +1,10 @@
 {
-  "_trace": "components.schemas of the live drf-spectacular document (GET /api/schema/?format=json, ENABLE_DRF_SPECTACULAR=1) served by Django at apps/api == origin/main d656243d3; supplies the referenced components the served api-v1 document must resolve. Captured by PIDASHCONV-1208 (v1_openapi dangling-$ref fix).",
-  "_method": "httpx/curl GET http://127.0.0.1:19220/api/schema/?format=json (scratch DB pidash_1208_dj); the served JSON body is hashed below and components.schemas copied verbatim, key order preserved.",
+  "_trace": "components.schemas of the live drf-spectacular document (GET /api/schema/?format=json, ENABLE_DRF_SPECTACULAR=1) served by Django at apps/api == origin/main d656243d3; supplies the referenced components the served api-v1 document must resolve. Captured by PIDASHCONV-1208 (v1_openapi dangling-$ref fix). Re-recorded by NEWPIDASH-34 at apps/api == origin/main 08be546d6 (+SchedulerBindingAPI, +SchedulerAPI.is_builtin, SchedulerRunAPI.error_code reshape; scheduler-writes drift 730ea8d28/7d64d46ad).",
+  "_method": "httpx GET http://127.0.0.1:18734/api/schema/?format=json (scratch DB pidash_n34_dj); the served JSON body is hashed below and components.schemas copied verbatim, key order preserved.",
   "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
-  "django_doc_sha256": "9760cb0b3c7c0885b37f020ebc848b7e69b87f1fb02bdd1db0c9578131b669f7",
-  "django_doc_bytes": 1397521,
-  "schema_count": 89,
+  "django_doc_sha256": "5c35ac9acb8964c678678d851be8b23f912ea6a5c9f853d8bc8685d02bb5e3dd",
+  "django_doc_bytes": 1417414,
+  "schema_count": 90,
   "schemas": {
     "Cycle": {
       "type": "object",
@@ -8299,11 +8299,137 @@
           "x-spec-enum-id": "4a797422aacb8b54",
           "readOnly": true
         },
+        "is_builtin": {
+          "type": "boolean",
+          "readOnly": true
+        },
         "is_enabled": {
           "type": "boolean",
           "readOnly": true
         },
         "bindings": {
+          "type": "string",
+          "readOnly": true
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "readOnly": true
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time",
+          "readOnly": true,
+          "title": "Last Modified At"
+        }
+      }
+    },
+    "SchedulerBindingAPI": {
+      "type": "object",
+      "description": "One install of a scheduler onto one project: cadence + runtime state.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "readOnly": true
+        },
+        "scheduler": {
+          "type": "string",
+          "format": "uuid",
+          "readOnly": true
+        },
+        "scheduler_slug": {
+          "type": "string",
+          "readOnly": true
+        },
+        "scheduler_name": {
+          "type": "string",
+          "readOnly": true
+        },
+        "project": {
+          "type": "string",
+          "format": "uuid",
+          "readOnly": true,
+          "nullable": true
+        },
+        "workspace": {
+          "type": "string",
+          "format": "uuid",
+          "readOnly": true
+        },
+        "dtstart": {
+          "type": "string",
+          "format": "date-time",
+          "readOnly": true
+        },
+        "tzid": {
+          "type": "string",
+          "readOnly": true
+        },
+        "rrule": {
+          "type": "string",
+          "readOnly": true
+        },
+        "rdates": {
+          "readOnly": true
+        },
+        "exdates": {
+          "readOnly": true
+        },
+        "extra_context": {
+          "type": "string",
+          "readOnly": true
+        },
+        "enabled": {
+          "type": "boolean",
+          "readOnly": true
+        },
+        "outcome_mode": {
+          "enum": [
+            "create_issue",
+            "apply_fix",
+            "fix_and_review"
+          ],
+          "type": "string",
+          "description": "* `create_issue` - Create issues\n* `apply_fix` - Apply fix (open PR)\n* `fix_and_review` - Fix & open for review",
+          "x-spec-enum-id": "65419881e3ce912a",
+          "readOnly": true
+        },
+        "pod": {
+          "type": "string",
+          "format": "uuid",
+          "readOnly": true,
+          "nullable": true
+        },
+        "pod_name": {
+          "type": "string",
+          "readOnly": true
+        },
+        "next_run_at": {
+          "type": "string",
+          "format": "date-time",
+          "readOnly": true,
+          "nullable": true
+        },
+        "last_run": {
+          "type": "string",
+          "format": "uuid",
+          "readOnly": true,
+          "nullable": true
+        },
+        "last_run_status": {
+          "type": "string",
+          "readOnly": true
+        },
+        "last_run_started_at": {
+          "type": "string",
+          "readOnly": true
+        },
+        "last_run_ended_at": {
+          "type": "string",
+          "readOnly": true
+        },
+        "last_error": {
           "type": "string",
           "readOnly": true
         },
@@ -8386,6 +8512,7 @@
         },
         "error_code": {
           "type": "string",
+          "description": "The short machine reason for a terminal failure, or ``\"\"``.\n\nA column until PDASHOSS01-187; now a view onto ``error_details`` so\nevery reader and both serializers keep their flat key. Read-only —\nwriters pass ``error_code`` to\n``agent_run_finalization.finalize_agent_run``, which folds it in.",
           "readOnly": true
         },
         "created_at": {
