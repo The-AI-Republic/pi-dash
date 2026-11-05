@@ -14,8 +14,11 @@
 //!   yet observed it gone; after ESRCH it is never signalled again;
 //! * EPERM means "could not clean", never "empty";
 //! * crash recovery acts only on records of this daemon's instance id, and
-//!   only on a group that still carries our tag (or, where the environment is
-//!   unreadable, only started after the recorded leader).
+//!   only on a group proven ours (see [`group_identity`]): a member carries
+//!   our tag (Linux), or the recorded leader is still alive with its recorded
+//!   start time, or the group is leaderless and every member started inside
+//!   the owner's lifetime (at or after the leader, at or before the owning
+//!   daemon's last-alive mark, `data_dir/proc/alive`).
 //!
 //! Windows keeps today's leader-only behaviour behind the same API: no group
 //! exists, so every group operation is a no-op there.
@@ -37,6 +40,16 @@ pub const TERM_WAIT: Duration = Duration::from_secs(3);
 /// How long a group gets to disappear after SIGKILL.
 pub const KILL_WAIT: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(50);
+/// How far two readings of one process's start time may differ and still be
+/// the same process. Linux derives start times from `btime` in `/proc/stat`,
+/// which can jitter by about a second between daemons; macOS start times are
+/// exact. A pid cannot be freed and handed to a new process within this
+/// window in practice.
+pub const START_TOLERANCE_MS: u64 = 2_000;
+/// How often the instance-lock holder rewrites `data_dir/proc/alive`.
+pub const ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+/// File holding the lock holder's last-alive mark, beside the records.
+pub const ALIVE_FILE: &str = "alive";
 
 /// What a tree belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +89,10 @@ tokio::task_local! {
 pub struct ProcContext {
     pub instance_id: String,
     pub proc_dir: PathBuf,
+    /// Whether ownership checks may use environment reads (the tag). Defaults
+    /// to [`crate::util::procinfo::ENV_OWNERSHIP_PROOF`]; tests turn it off to
+    /// exercise the macOS start-time proof on Linux.
+    pub env_proof: bool,
 }
 
 impl ProcContext {
@@ -83,6 +100,7 @@ impl ProcContext {
         Self {
             instance_id: instance_id.into(),
             proc_dir: data_dir.join("proc"),
+            env_proof: crate::util::procinfo::ENV_OWNERSHIP_PROOF,
         }
     }
 
@@ -120,20 +138,28 @@ pub struct ProcRecord {
     /// between writing the record and spawning.
     pub pgid: Option<i32>,
     pub leader_start_time_ms: Option<u64>,
+    /// Upper bound of the owning daemon's lifetime, stamped by the first
+    /// recovery pass that keeps this record (the crashed daemon's last-alive
+    /// mark; `0` when there was none). Later passes reuse it, so a newer
+    /// daemon's lifetime never widens the window a leaderless group is
+    /// checked against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_alive_until_ms: Option<u64>,
 }
 
 fn record_path(dir: &Path, id: Uuid) -> PathBuf {
     dir.join(format!("{id}.json"))
 }
 
-/// Write `rec` atomically: tmp file, fsync, rename, fsync the directory.
-pub fn write_record(dir: &Path, rec: &ProcRecord) -> std::io::Result<PathBuf> {
+/// Write `bytes` to `dir/name` atomically: tmp file, fsync, rename, fsync the
+/// directory.
+fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let path = record_path(dir, rec.record_id);
-    let tmp = dir.join(format!(".{}.json.tmp", rec.record_id));
+    let path = dir.join(name);
+    let tmp = dir.join(format!(".{name}.tmp"));
     {
         let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&serde_json::to_vec(rec).map_err(std::io::Error::other)?)?;
+        f.write_all(bytes)?;
         f.sync_all()?;
     }
     std::fs::rename(&tmp, &path)?;
@@ -142,6 +168,46 @@ pub fn write_record(dir: &Path, rec: &ProcRecord) -> std::io::Result<PathBuf> {
         let _ = d.sync_all();
     }
     Ok(path)
+}
+
+/// Write `rec` atomically (see [`write_atomic`]).
+pub fn write_record(dir: &Path, rec: &ProcRecord) -> std::io::Result<PathBuf> {
+    let bytes = serde_json::to_vec(rec).map_err(std::io::Error::other)?;
+    write_atomic(dir, &format!("{}.json", rec.record_id), &bytes)
+}
+
+/// Wall-clock milliseconds since the Unix epoch (the unit of process start
+/// times in [`crate::util::procinfo`]).
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+#[derive(Serialize, Deserialize)]
+struct AliveMark {
+    instance_id: String,
+    alive_ms: u64,
+}
+
+/// Record that this instance was alive at `at_ms` (`dir/alive`, atomic). The
+/// instance-lock holder rewrites it every [`ALIVE_INTERVAL`]; after a crash it
+/// bounds which leaderless groups can still be ours.
+pub fn write_alive(dir: &Path, instance_id: &str, at_ms: u64) -> std::io::Result<()> {
+    let mark = AliveMark {
+        instance_id: instance_id.to_string(),
+        alive_ms: at_ms,
+    };
+    let bytes = serde_json::to_vec(&mark).map_err(std::io::Error::other)?;
+    write_atomic(dir, ALIVE_FILE, &bytes).map(|_| ())
+}
+
+/// The last-alive mark `instance_id` left in `dir`, if any.
+pub fn read_alive(dir: &Path, instance_id: &str) -> Option<u64> {
+    let bytes = std::fs::read(dir.join(ALIVE_FILE)).ok()?;
+    let mark: AliveMark = serde_json::from_slice(&bytes).ok()?;
+    (mark.instance_id == instance_id).then_some(mark.alive_ms)
 }
 
 /// All parseable records in `dir` whose instance id is `instance_id`.
@@ -293,6 +359,8 @@ struct TreeInner {
     scope: Option<ProcScope>,
     tag: Option<String>,
     record_dir: Option<PathBuf>,
+    /// See [`ProcContext::env_proof`].
+    env_proof: bool,
     record: Mutex<Option<ProcRecord>>,
     phase: Mutex<Phase>,
     /// Start time of the leader, for the identity check after it is reaped.
@@ -316,8 +384,8 @@ impl TreeInner {
     ///
     /// Once the leader has been reaped, an emptied group's pgid may have been
     /// reused, so the group is first re-proven ours with the same check crash
-    /// recovery uses ([`group_identity`]): a member carries our tag, or,
-    /// without a readable tag, every member started at or after our leader.
+    /// recovery uses ([`group_identity`]), with the leader known dead and the
+    /// owner's lifetime running until now.
     fn signal(&self, sig: Sig) -> Signalled {
         let mut phase = self.phase.lock().unwrap_or_else(|e| e.into_inner());
         let Phase::Armed(pgid) = *phase else {
@@ -328,7 +396,14 @@ impl TreeInner {
                 .leader_start_ms
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            match group_identity(pgid, self.tag.as_deref(), leader_start) {
+            let proof = Ownership {
+                tag: self.tag.as_deref(),
+                leader_start,
+                leader_dead: true,
+                alive_until_ms: now_ms(),
+                env_proof: self.env_proof,
+            };
+            match group_identity(pgid, &proof) {
                 Some(true) => {}
                 Some(false) => {
                     *phase = Phase::Gone;
@@ -554,6 +629,9 @@ impl ProcessTree {
             ));
         }
         let record_id = Uuid::new_v4();
+        let env_proof = ctx
+            .as_ref()
+            .map_or(crate::util::procinfo::ENV_OWNERSHIP_PROOF, |c| c.env_proof);
         let (tag, record_dir, record) = match (&scope, &ctx) {
             (Some(scope), Some(ctx)) => {
                 let tag = ctx.tag_for(scope);
@@ -567,6 +645,7 @@ impl ProcessTree {
                     scratch: None,
                     pgid: None,
                     leader_start_time_ms: None,
+                    owner_alive_until_ms: None,
                 };
                 write_record(&ctx.proc_dir, &rec)?;
                 (Some(tag), Some(ctx.proc_dir.clone()), Some(rec))
@@ -578,6 +657,7 @@ impl ProcessTree {
             scope,
             tag,
             record_dir,
+            env_proof,
             record: Mutex::new(record),
             phase: Mutex::new(Phase::Provisional),
             leader_start_ms: Mutex::new(None),
@@ -777,24 +857,50 @@ async fn clean_tagged_pids(tag: &str) -> bool {
     }
 }
 
-/// Is the live group `pgid` still the one whose leader started at
-/// `leader_start` and whose members carry `tag`? `Some(true)`: a member
-/// carries the tag, or no member's environment could be checked and every
-/// member started at or after the leader. `Some(false)`: a member is older
-/// than the leader, so the pgid was reused. `None`: cannot prove either way
-/// (or no live member is left). Used by crash recovery and, once the leader
-/// is reaped, before every signal of a live tree.
-fn group_identity(pgid: i32, tag: Option<&str>, leader_start: Option<u64>) -> Option<bool> {
-    let members: Vec<_> = crate::util::procinfo::group_members(pgid)
-        .into_iter()
-        .filter(|m| !m.zombie)
-        .collect();
-    if members.is_empty() {
+/// What a group must match to be ours. See [`group_identity`].
+struct Ownership<'a> {
+    /// Our `PIDASH_PROC_TAG`, when records (and so the tag) are kept.
+    tag: Option<&'a str>,
+    /// Recorded start time of our leader.
+    leader_start: Option<u64>,
+    /// Our leader is known to have exited (we reaped it): any process with
+    /// pid == pgid is someone else.
+    leader_dead: bool,
+    /// The owning daemon was not alive after this time: now for a live tree,
+    /// the crashed daemon's last-alive mark in recovery (`0` = unknown).
+    alive_until_ms: u64,
+    /// Environment reads may be used (Linux; see `procinfo`).
+    env_proof: bool,
+}
+
+/// Is the live group `pgid` still ours? Used by crash recovery and, once the
+/// leader is reaped, before every signal of a live tree.
+///
+/// * `Some(true)`: a member carries our tag (only where environments are
+///   readable); or the process with pid == pgid is our original leader (its
+///   start time matches the recorded one); or the group is leaderless and
+///   every member started inside the owner's lifetime (at or after the
+///   recorded leader start, at or before `alive_until_ms`) and, where
+///   environments are readable, none was readable without our tag.
+/// * `Some(false)`: the pgid provably belongs to another group now: its
+///   leader is a different process, or a member is older than our leader.
+/// * `None`: cannot prove either way (or no live member is left). Never
+///   signal; keep the record.
+///
+/// A group created after our group emptied has every member started after
+/// our leader, so the leader start alone cannot tell it apart; the leader
+/// identity and the lifetime upper bound can.
+fn group_identity(pgid: i32, o: &Ownership<'_>) -> Option<bool> {
+    let all = crate::util::procinfo::group_members(pgid);
+    let live: Vec<_> = all.iter().filter(|m| !m.zombie).collect();
+    if live.is_empty() {
         return None;
     }
     let mut any_readable = false;
-    if let Some(tag) = tag {
-        for m in &members {
+    if o.env_proof
+        && let Some(tag) = o.tag
+    {
+        for m in &live {
             match tagged(m.pid, tag) {
                 Some(true) => return Some(true),
                 Some(false) => any_readable = true,
@@ -802,29 +908,55 @@ fn group_identity(pgid: i32, tag: Option<&str>, leader_start: Option<u64>) -> Op
             }
         }
     }
-    let leader_start = leader_start?;
-    let all_after = members.iter().all(|m| m.start_time_ms >= leader_start);
-    if !any_readable && all_after {
-        return Some(true);
+    let leader_start = o.leader_start?;
+    if let Some(leader) = all.iter().find(|m| m.pid == pgid) {
+        // A process holds the group's pid: it is either our leader or the
+        // leader of a group that reused the pgid.
+        if o.leader_dead {
+            return Some(false);
+        }
+        return Some(leader.start_time_ms.abs_diff(leader_start) <= START_TOLERANCE_MS);
     }
-    if !all_after {
-        // A member older than our leader: the pgid was reused, so our group
-        // is gone.
+    if live
+        .iter()
+        .any(|m| m.start_time_ms.saturating_add(START_TOLERANCE_MS) < leader_start)
+    {
+        // A member older than our leader: the pgid was reused.
         return Some(false);
     }
-    // Readable, untagged, but started after our leader: cannot prove either
-    // way. Keep the record and retry later.
-    None
+    if any_readable {
+        // Readable, untagged, started after our leader: cannot prove either
+        // way. Keep the record and retry later.
+        return None;
+    }
+    // Leaderless: every member must have started while the owner was alive.
+    // A member started later belongs to a group that reused the pgid after
+    // the crash, or to ours started after the last mark; we cannot tell, so
+    // do not signal.
+    live.iter()
+        .all(|m| m.start_time_ms <= o.alive_until_ms)
+        .then_some(true)
+}
+
+/// Inputs to [`recover`] beyond the records.
+#[derive(Debug, Clone, Copy)]
+pub struct RecoverOpts {
+    /// The previous daemon's last-alive mark ([`read_alive`]), read before
+    /// this daemon starts its own heartbeat.
+    pub last_alive_ms: Option<u64>,
+    /// See [`ProcContext::env_proof`].
+    pub env_proof: bool,
 }
 
 /// Crash recovery for `records` (already filtered to our instance id by
 /// [`list_records`]; call it before any new spawn so live records are not in
 /// the list). Deletes a record only once its group is confirmed gone.
-pub async fn recover(records: Vec<(PathBuf, ProcRecord)>) -> RecoveryReport {
+pub async fn recover(records: Vec<(PathBuf, ProcRecord)>, opts: RecoverOpts) -> RecoveryReport {
     // Records are independent, so resolve them in parallel: the whole pass
     // takes about one record's worst case (SIGTERM 3 s + SIGKILL 2 s), which
     // keeps daemon start short while it waits for recovery.
-    let results = futures_util::future::join_all(records.into_iter().map(recover_one)).await;
+    let results =
+        futures_util::future::join_all(records.into_iter().map(|r| recover_one(r, opts))).await;
     let mut report = RecoveryReport::default();
     for r in results {
         match r {
@@ -842,12 +974,23 @@ enum Recovered {
     Kept,
 }
 
-async fn recover_one((path, rec): (PathBuf, ProcRecord)) -> Recovered {
+async fn recover_one((path, mut rec): (PathBuf, ProcRecord), opts: RecoverOpts) -> Recovered {
+    // The owner's lifetime ends at the mark read by the first pass that saw
+    // this record; a later daemon's mark must not widen it.
+    let alive_until_ms = rec
+        .owner_alive_until_ms
+        .unwrap_or(opts.last_alive_ms.unwrap_or(0));
     let outcome = match rec.pgid {
         // Crash between record and spawn (or before the pgid was filled
         // in): resolve by tag alone.
         None => {
-            if clean_tagged_pids(&rec.tag).await {
+            if !opts.env_proof {
+                tracing::warn!(
+                    record_id = %rec.record_id,
+                    "proc record has no pgid and process environments are unreadable on this platform; nothing can be found to clean"
+                );
+                Recovered::Resolved
+            } else if clean_tagged_pids(&rec.tag).await {
                 Recovered::Resolved
             } else {
                 Recovered::Kept
@@ -856,26 +999,43 @@ async fn recover_one((path, rec): (PathBuf, ProcRecord)) -> Recovered {
         Some(pgid) => match probe_group(pgid) {
             Probe::Gone => Recovered::Resolved,
             Probe::Denied => Recovered::Kept,
-            Probe::Alive => match group_identity(pgid, Some(&rec.tag), rec.leader_start_time_ms) {
-                Some(true) => {
-                    tracing::info!(pgid, record_id = %rec.record_id, "recovering leftover agent process group");
-                    if clean_foreign_group(pgid).await {
-                        Recovered::Cleaned
-                    } else {
-                        Recovered::Kept
+            Probe::Alive => {
+                let proof = Ownership {
+                    tag: Some(&rec.tag),
+                    leader_start: rec.leader_start_time_ms,
+                    leader_dead: false,
+                    alive_until_ms,
+                    env_proof: opts.env_proof,
+                };
+                match group_identity(pgid, &proof) {
+                    Some(true) => {
+                        tracing::info!(pgid, record_id = %rec.record_id, "recovering leftover agent process group");
+                        if clean_foreign_group(pgid).await {
+                            Recovered::Cleaned
+                        } else {
+                            Recovered::Kept
+                        }
                     }
+                    Some(false) => {
+                        tracing::info!(pgid, record_id = %rec.record_id, "proc record's pgid now belongs to another group; ignoring it");
+                        Recovered::Resolved
+                    }
+                    None => Recovered::Kept,
                 }
-                Some(false) => {
-                    tracing::info!(pgid, record_id = %rec.record_id, "proc record's pgid now belongs to another group; ignoring it");
-                    Recovered::Resolved
-                }
-                None => Recovered::Kept,
-            },
+            }
         },
     };
     match outcome {
         Recovered::Kept => {
             tracing::warn!(record_id = %rec.record_id, "could not resolve proc record; keeping it for the next start");
+            if rec.owner_alive_until_ms.is_none() {
+                rec.owner_alive_until_ms = Some(alive_until_ms);
+                if let Some(dir) = path.parent()
+                    && let Err(e) = write_record(dir, &rec)
+                {
+                    tracing::warn!(record_id = %rec.record_id, "failed to stamp proc record: {e}");
+                }
+            }
         }
         Recovered::Cleaned | Recovered::Resolved => {
             let _ = std::fs::remove_file(&path);
@@ -930,6 +1090,7 @@ mod tests {
             scratch: None,
             pgid: Some(999_999),
             leader_start_time_ms: Some(0),
+            owner_alive_until_ms: None,
         };
         write_record(&mine.proc_dir, &rec("mine")).unwrap();
         write_record(&mine.proc_dir, &rec("theirs")).unwrap();
@@ -975,10 +1136,64 @@ mod tests {
         Arc::new(ProcContext::new(id, dir))
     }
 
-    #[tokio::test]
-    async fn recovery_cleans_a_leaderless_group_left_by_a_crashed_daemon() {
+    /// A context whose ownership checks never read environments: the macOS
+    /// behaviour, exercised on every platform.
+    fn ctx_env(dir: &Path, id: &str, env_proof: bool) -> Arc<ProcContext> {
+        let mut c = ProcContext::new(id, dir);
+        c.env_proof = env_proof;
+        Arc::new(c)
+    }
+
+    fn opts(ctx: &ProcContext, last_alive_ms: Option<u64>) -> RecoverOpts {
+        RecoverOpts {
+            last_alive_ms,
+            env_proof: ctx.env_proof,
+        }
+    }
+
+    fn stale(ctx: &ProcContext, id: &str, pgid: Option<i32>, leader_start: Option<u64>) -> PathBuf {
+        let rec = ProcRecord {
+            record_id: Uuid::new_v4(),
+            instance_id: ctx.instance_id.clone(),
+            runner_id: None,
+            kind: ScopeKind::Run,
+            run_or_chat_id: id.into(),
+            tag: format!("{}:run:{id}", ctx.instance_id),
+            scratch: None,
+            pgid,
+            leader_start_time_ms: leader_start,
+            owner_alive_until_ms: None,
+        };
+        write_record(&ctx.proc_dir, &rec).unwrap()
+    }
+
+    /// A group whose leader started (tagged or not), forked `sleep 300` and
+    /// exited, and was reaped: `(pgid, orphan pid)`.
+    async fn leaderless_group(dir: &Path, tag: Option<&str>) -> (i32, i32) {
+        let pf = dir.join(format!("pids-{}", Uuid::new_v4()));
+        let mut child = session_cmd(
+            &format!("sleep 300 & echo $! > {}; exit 0", pf.display()),
+            tag,
+        )
+        .spawn()
+        .unwrap();
+        let pgid = child.id().unwrap() as i32;
+        child.wait().await.unwrap();
+        let orphan = read_pids(&pf, 1).await[0];
+        assert!(alive(orphan));
+        (pgid, orphan)
+    }
+
+    fn kill_now(pid: i32) {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+
+    async fn leaderless_group_left_by_a_crashed_daemon_is_cleaned(env_proof: bool) {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx(dir.path(), "test-instance-crash");
+        let ctx = ctx_env(dir.path(), "test-instance-crash", env_proof);
         let pf = dir.path().join("pids");
         let tree = ProcessTree::prepare(Some(scope("run-crash")), Some(ctx.clone())).unwrap();
         // The agent starts a child, then exits (as on stdin EOF when the
@@ -994,18 +1209,32 @@ mod tests {
         child.wait().await.unwrap();
         let orphan = read_pids(&pf, 1).await[0];
         assert!(alive(orphan));
-        // Crash: no finish, no drop backstop.
+        // Crash: no finish, no drop backstop. The daemon's last heartbeat
+        // came after the orphan started.
         tree.abandon();
+        let last_alive = now_ms();
 
         let records = list_records(&ctx.proc_dir, &ctx.instance_id);
         assert_eq!(records.len(), 1, "unresolved record survives the crash");
         assert_eq!(records[0].1.pgid, Some(pgid));
-        let report = recover(records).await;
+        let report = recover(records, opts(&ctx, Some(last_alive))).await;
         assert_eq!(report.cleaned, 1, "{report:?}");
         assert!(wait_all_gone(&[orphan], Duration::from_secs(1)).await);
         assert!(list_records(&ctx.proc_dir, &ctx.instance_id).is_empty());
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn recovery_cleans_a_leaderless_group_left_by_a_crashed_daemon() {
+        leaderless_group_left_by_a_crashed_daemon_is_cleaned(true).await;
+    }
+
+    #[tokio::test]
+    async fn recovery_cleans_a_leaderless_group_by_start_times_when_environments_are_unreadable() {
+        leaderless_group_left_by_a_crashed_daemon_is_cleaned(false).await;
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn recovery_resolves_a_provisional_record_by_tag() {
         let dir = tempfile::tempdir().unwrap();
@@ -1018,7 +1247,7 @@ mod tests {
         let pid = child.id().unwrap() as i32;
         let records = list_records(&ctx.proc_dir, &ctx.instance_id);
         assert_eq!(records[0].1.pgid, None);
-        let report = recover(records).await;
+        let report = recover(records, opts(&ctx, None)).await;
         assert_eq!(report.kept, 0, "{report:?}");
         let _ = child.wait().await;
         assert!(!alive(pid));
@@ -1026,62 +1255,142 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_ignores_a_reused_pgid_whose_members_are_not_ours() {
+    async fn a_provisional_record_signals_nothing_when_environments_are_unreadable() {
+        // macOS: no tag scan is possible, so nothing is signalled and the
+        // (unactionable) record is dropped.
         let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx(dir.path(), "test-instance-reuse");
-        // A group that is alive, untagged, and older than the "recorded"
-        // leader: its pgid was reused after our group died.
-        let mut child = session_cmd("exec sleep 300", None).spawn().unwrap();
+        let ctx = ctx_env(dir.path(), "test-instance-prov-noenv", false);
+        let tree = ProcessTree::prepare(Some(scope("run-prov")), Some(ctx.clone())).unwrap();
+        let tag = tree.tag().unwrap().to_string();
+        tree.abandon();
+        let mut child = session_cmd("exec sleep 300", Some(&tag)).spawn().unwrap();
         let pid = child.id().unwrap() as i32;
-        let rec = ProcRecord {
-            record_id: Uuid::new_v4(),
-            instance_id: ctx.instance_id.clone(),
-            runner_id: None,
-            kind: ScopeKind::Run,
-            run_or_chat_id: "old".into(),
-            tag: format!("{}:run:old", ctx.instance_id),
-            scratch: None,
-            pgid: Some(pid),
-            leader_start_time_ms: Some(u64::MAX / 2),
-        };
-        write_record(&ctx.proc_dir, &rec).unwrap();
-        let report = recover(list_records(&ctx.proc_dir, &ctx.instance_id)).await;
-        assert_eq!(report.cleaned, 0);
-        assert_eq!(report.resolved, 1);
-        assert!(
-            alive(pid),
-            "a group we cannot prove is ours is never signalled"
-        );
+        let report = recover(
+            list_records(&ctx.proc_dir, &ctx.instance_id),
+            opts(&ctx, Some(now_ms())),
+        )
+        .await;
+        assert_eq!(report.resolved, 1, "{report:?}");
+        assert!(alive(pid));
         let _ = child.start_kill();
         let _ = child.wait().await;
     }
 
     #[tokio::test]
+    async fn recovery_ignores_a_reused_pgid_whose_leader_has_a_different_start_time() {
+        for env_proof in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = ctx_env(dir.path(), "test-instance-reuse", env_proof);
+            // A live group whose leader holds the recorded pgid but is not our
+            // leader: it started a minute after the recorded one, i.e. after
+            // our group died and the pid was reused. Its members are all
+            // newer than our leader, so only the leader identity tells.
+            let mut child = session_cmd("sleep 300 & exec sleep 300", None)
+                .spawn()
+                .unwrap();
+            let pid = child.id().unwrap() as i32;
+            let start = crate::util::procinfo::info(pid).unwrap().start_time_ms;
+            stale(&ctx, "old", Some(pid), Some(start - 60_000));
+            let report = recover(
+                list_records(&ctx.proc_dir, &ctx.instance_id),
+                opts(&ctx, Some(now_ms())),
+            )
+            .await;
+            assert_eq!(report.cleaned, 0, "env_proof={env_proof}");
+            assert_eq!(report.resolved, 1, "env_proof={env_proof}");
+            assert!(alive(pid), "a reused pgid is never signalled");
+            kill_now(-pid);
+            let _ = child.wait().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_ignores_a_reused_pgid_whose_members_are_older_than_our_leader() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx(dir.path(), "test-instance-older");
+        let (pgid, orphan) = leaderless_group(dir.path(), None).await;
+        stale(&ctx, "older", Some(pgid), Some(u64::MAX / 2));
+        let report = recover(
+            list_records(&ctx.proc_dir, &ctx.instance_id),
+            opts(&ctx, Some(u64::MAX)),
+        )
+        .await;
+        assert_eq!(report.resolved, 1, "{report:?}");
+        assert!(alive(orphan));
+        kill_now(orphan);
+    }
+
+    #[tokio::test]
+    async fn a_leaderless_group_started_after_the_last_alive_mark_is_not_signalled() {
+        // A group created after the crash, whose leader got the stale pgid
+        // and has since exited: every member started after our leader, but
+        // also after the crashed daemon's last-alive mark, so it cannot be
+        // ours.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_env(dir.path(), "test-instance-after", false);
+        let leader_start = now_ms() - 60_000;
+        let last_alive = leader_start + 1_000;
+        let (pgid, orphan) = leaderless_group(dir.path(), None).await;
+        let path = stale(&ctx, "after", Some(pgid), Some(leader_start));
+        let report = recover(
+            list_records(&ctx.proc_dir, &ctx.instance_id),
+            opts(&ctx, Some(last_alive)),
+        )
+        .await;
+        assert_eq!(report.kept, 1, "{report:?}");
+        assert!(alive(orphan), "not signalled");
+        let rec: ProcRecord = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            rec.owner_alive_until_ms,
+            Some(last_alive),
+            "the owner's lifetime is pinned on the kept record"
+        );
+        // A later daemon's newer mark must not widen the window.
+        let report = recover(
+            list_records(&ctx.proc_dir, &ctx.instance_id),
+            opts(&ctx, Some(now_ms())),
+        )
+        .await;
+        assert_eq!(report.kept, 1, "{report:?}");
+        assert!(alive(orphan), "still not signalled");
+        kill_now(orphan);
+    }
+
+    #[tokio::test]
+    async fn a_leaderless_group_is_not_signalled_without_a_last_alive_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_env(dir.path(), "test-instance-nomark", false);
+        let leader_start = now_ms() - 60_000;
+        let (pgid, orphan) = leaderless_group(dir.path(), None).await;
+        stale(&ctx, "nomark", Some(pgid), Some(leader_start));
+        let report = recover(
+            list_records(&ctx.proc_dir, &ctx.instance_id),
+            opts(&ctx, None),
+        )
+        .await;
+        assert_eq!(report.kept, 1, "{report:?}");
+        assert!(alive(orphan));
+        kill_now(orphan);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
     async fn an_unprovable_record_is_kept_for_the_next_start() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ctx(dir.path(), "test-instance-keep");
-        // Untagged but started after the recorded leader: cannot prove
-        // either way, so neither signal nor forget.
-        let mut child = session_cmd("exec sleep 300", None).spawn().unwrap();
-        let pid = child.id().unwrap() as i32;
-        let rec = ProcRecord {
-            record_id: Uuid::new_v4(),
-            instance_id: ctx.instance_id.clone(),
-            runner_id: None,
-            kind: ScopeKind::Run,
-            run_or_chat_id: "keep".into(),
-            tag: format!("{}:run:keep", ctx.instance_id),
-            scratch: None,
-            pgid: Some(pid),
-            leader_start_time_ms: Some(0),
-        };
-        write_record(&ctx.proc_dir, &rec).unwrap();
-        let report = recover(list_records(&ctx.proc_dir, &ctx.instance_id)).await;
+        // Leaderless, readable but untagged, inside the owner's lifetime:
+        // cannot prove either way, so neither signal nor forget.
+        let (pgid, orphan) = leaderless_group(dir.path(), None).await;
+        stale(&ctx, "keep", Some(pgid), Some(0));
+        let report = recover(
+            list_records(&ctx.proc_dir, &ctx.instance_id),
+            opts(&ctx, Some(now_ms())),
+        )
+        .await;
         assert_eq!(report.kept, 1);
-        assert!(alive(pid));
+        assert!(alive(orphan));
         assert_eq!(list_records(&ctx.proc_dir, &ctx.instance_id).len(), 1);
-        let _ = child.start_kill();
-        let _ = child.wait().await;
+        kill_now(orphan);
     }
 
     #[tokio::test]
@@ -1096,38 +1405,70 @@ mod tests {
         // Our instance shares the data dir but has a different id.
         let records = list_records(&theirs.proc_dir, "test-instance-mine");
         assert!(records.is_empty());
-        assert_eq!(recover(records).await, RecoveryReport::default());
+        assert_eq!(
+            recover(records, opts(&theirs, Some(now_ms()))).await,
+            RecoveryReport::default()
+        );
         assert!(alive(pid));
         let _ = child.start_kill();
         let _ = child.wait().await;
     }
 
     #[tokio::test]
-    async fn a_group_kept_after_its_leader_was_reaped_is_revalidated_before_any_signal() {
+    async fn a_group_whose_pgid_is_held_by_a_new_leader_after_ours_was_reaped_is_never_signalled() {
         // After the leader is reaped an empty group's pgid can be reused. Model
-        // that: the tree is armed on a live group that is untagged (the
-        // reuser), and the leader has been reported reaped.
+        // that: the tree is armed on a live group led by another process (the
+        // reuser), and our leader has been reported reaped.
+        for env_proof in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = ctx_env(dir.path(), "test-instance-revalidate", env_proof);
+            let tree = ProcessTree::prepare(Some(scope("run-reval")), Some(ctx.clone())).unwrap();
+            let mut impostor = session_cmd("exec sleep 300", None).spawn().unwrap();
+            let pid = impostor.id().unwrap() as i32;
+            tree.attach(impostor.id());
+            tree.leader_reaped();
+            assert_eq!(tree.pgid(), Some(pid), "a live group stays armed");
+            let outcome = tree.finish_group().await;
+            assert_eq!(
+                outcome,
+                FinishOutcome::Gone,
+                "ours is gone; the pgid is someone else's"
+            );
+            assert!(alive(pid), "the reuser is never signalled by finish");
+            drop(tree);
+            assert!(alive(pid), "nor by the drop backstop");
+            let _ = impostor.start_kill();
+            let _ = impostor.wait().await;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_leaderless_untagged_group_after_the_leader_was_reaped_is_not_signalled() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx(dir.path(), "test-instance-revalidate");
-        let tree = ProcessTree::prepare(Some(scope("run-reval")), Some(ctx.clone())).unwrap();
-        let mut impostor = session_cmd("exec sleep 300", None).spawn().unwrap();
-        let pid = impostor.id().unwrap() as i32;
-        tree.attach(impostor.id());
+        let ctx = ctx(dir.path(), "test-instance-untagged");
+        let pf = dir.path().join("pids");
+        let tree = ProcessTree::prepare(Some(scope("run-untagged")), Some(ctx.clone())).unwrap();
+        // Untagged on purpose: readable environments without our tag.
+        let mut child = session_cmd(
+            &format!("sleep 300 & echo $! > {}; exit 0", pf.display()),
+            None,
+        )
+        .spawn()
+        .unwrap();
+        tree.attach(child.id());
+        child.wait().await.unwrap();
         tree.leader_reaped();
-        assert_eq!(tree.pgid(), Some(pid), "a live group stays armed");
+        let orphan = read_pids(&pf, 1).await[0];
         let outcome = tree.finish_group().await;
         assert!(
             matches!(outcome, FinishOutcome::Unresolved(_)),
             "{outcome:?}"
         );
-        assert!(
-            alive(pid),
-            "an unprovable group is never signalled by finish"
-        );
+        assert!(alive(orphan), "an unprovable group is never signalled");
         drop(tree);
-        assert!(alive(pid), "nor by the drop backstop");
-        let _ = impostor.start_kill();
-        let _ = impostor.wait().await;
+        assert!(alive(orphan));
+        kill_now(orphan);
     }
 
     #[tokio::test]
@@ -1145,10 +1486,9 @@ mod tests {
         assert!(!path.exists(), "and its record is resolved");
     }
 
-    #[tokio::test]
-    async fn a_tagged_group_kept_after_its_leader_was_reaped_is_still_cleaned() {
+    async fn tagged_group_kept_after_the_leader_was_reaped_is_cleaned(env_proof: bool) {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx(dir.path(), "test-instance-tagged");
+        let ctx = ctx_env(dir.path(), "test-instance-tagged", env_proof);
         let pf = dir.path().join("pids");
         let tree = ProcessTree::prepare(Some(scope("run-tagged")), Some(ctx.clone())).unwrap();
         let mut child = session_cmd(
@@ -1163,6 +1503,17 @@ mod tests {
         let orphan = read_pids(&pf, 1).await[0];
         assert_eq!(tree.finish_group().await, FinishOutcome::Gone);
         assert!(wait_all_gone(&[orphan], Duration::from_secs(1)).await);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_tagged_group_kept_after_its_leader_was_reaped_is_still_cleaned() {
+        tagged_group_kept_after_the_leader_was_reaped_is_cleaned(true).await;
+    }
+
+    #[tokio::test]
+    async fn a_group_kept_after_its_leader_was_reaped_is_cleaned_by_start_times() {
+        tagged_group_kept_after_the_leader_was_reaped_is_cleaned(false).await;
     }
 
     #[tokio::test]

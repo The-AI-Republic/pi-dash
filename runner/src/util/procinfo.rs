@@ -11,6 +11,20 @@
 //! * macOS: `proc_listpids` / `proc_pidinfo(PROC_PIDTBSDINFO)` and
 //!   `sysctl(KERN_PROCARGS2)`.
 //! * Elsewhere: nothing is readable, so callers fall back to "do not signal".
+//!
+//! macOS strips other processes' environments: `KERN_PROCARGS2` for another
+//! process (same uid, even an unsigned binary) succeeds but returns only argc,
+//! the exec path and argv, with no environment (`ps -E` shows none either).
+//! So on macOS an environment read is never evidence of ownership:
+//! [`environ`] reports a successful read with no entries as unreadable, and
+//! [`ENV_OWNERSHIP_PROOF`] is false, so ownership checks there use pid and
+//! start times only. Environment-based escapee detection (design §4.4) is
+//! Linux only for the same reason.
+
+/// Whether a process environment read can prove (or disprove) that a process
+/// carries our tag. True only where other same-uid processes' environments are
+/// actually readable (Linux). See the module docs for macOS.
+pub const ENV_OWNERSHIP_PROOF: bool = cfg!(target_os = "linux");
 
 /// What we know about one live process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,7 +320,9 @@ mod imp {
             return None;
         }
         buf.truncate(size);
-        parse_procargs2(&buf)
+        // macOS returns argv but no environment for other processes: an
+        // empty environment means "not readable", never "no tag".
+        parse_procargs2(&buf).filter(|env| !env.is_empty())
     }
 }
 
