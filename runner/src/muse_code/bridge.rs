@@ -40,7 +40,7 @@ use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use crate::agent::{
-    AgentProcessHandle, BridgeEvent, ENGINE_STARTUP_TIMEOUT, ExitSnapshot, RunPayload,
+    AgentProcessHandle, BridgeEvent, ENGINE_STARTUP_TIMEOUT, ExitRelay, ExitSnapshot, RunPayload,
     STDERR_RING_LINES, StderrBuffer, StderrRing, StderrSnapshot,
 };
 use crate::cloud::protocol::{ApprovalDecision, FailureReason};
@@ -69,11 +69,11 @@ pub struct Bridge {
     /// seeded from a prior turn. Reused as the `--session-id` argument on
     /// follow-up turns for conversational continuity.
     session_id: Option<String>,
-    /// Single exit-watch channel owned by the bridge. Reset to `None` at the
-    /// start of each `run` and republished by the spawned process's wait task,
-    /// so both `process_handle()` and `shutdown()` read a consistent liveness
-    /// signal. See the Cursor bridge for the full rationale.
-    exit_tx: watch::Sender<Option<ExitSnapshot>>,
+    /// The bridge's stable exit channel. Each turn's process publishes
+    /// into it only while it is the current one (see [`ExitRelay`]), so
+    /// both `process_handle()` (assignment path) and `bridge_has_exited()`
+    /// (chat path) see the current turn's liveness, never a retired one's.
+    exit: ExitRelay,
     exit_rx: watch::Receiver<Option<ExitSnapshot>>,
     stderr_ring: StderrRing,
     /// The currently-spawned one-shot subprocess, if a `run` is in flight (or
@@ -100,7 +100,7 @@ impl Bridge {
         model_default: Option<String>,
         resume_session_id: Option<&str>,
     ) -> Result<Self> {
-        let (exit_tx, exit_rx) = watch::channel::<Option<ExitSnapshot>>(None);
+        let (exit, exit_rx) = ExitRelay::new();
         let stderr_ring: StderrRing = Arc::new(Mutex::new(StderrBuffer::new(STDERR_RING_LINES)));
         Ok(Self {
             binary: binary.to_string(),
@@ -109,7 +109,7 @@ impl Bridge {
             session_id: resume_session_id
                 .filter(|s| !s.is_empty())
                 .map(ToOwned::to_owned),
-            exit_tx,
+            exit,
             exit_rx,
             stderr_ring,
             proc: None,
@@ -163,28 +163,16 @@ impl Bridge {
         prompt_file: Option<PromptFile>,
         run_id: Uuid,
     ) -> Result<BridgeCursor> {
-        // Reset the exit signal before the new process can publish into it, so a
-        // prior turn's exit snapshot doesn't make this turn look already-dead.
-        // Use `send_if_modified` so a no-op reset (a fresh bridge whose value is
-        // already `None`) does NOT fire a watch notification that a subscriber
-        // captured before `run` would misread as "already exited". Only a
-        // genuine `Some -> None` clear (a reused bridge) publishes a change.
-        self.exit_tx.send_if_modified(|v| {
-            if v.is_some() {
-                *v = None;
-                true
-            } else {
-                false
-            }
-        });
+        // A fresh exit channel for this turn's process, relayed into the
+        // bridge's channel only while it is current: a retired turn's leader
+        // exiting later must not make this turn look exited. `next` also
+        // clears a prior turn's snapshot without notifying when already
+        // `None` (the supervisor subscribes before `run`).
+        let proc_exit_tx = self.exit.next();
         self.pending.clear();
-        let proc = MuseProcess::spawn_command(
-            cmd,
-            prompt_file,
-            self.exit_tx.clone(),
-            self.stderr_ring.clone(),
-        )
-        .await?;
+        let proc =
+            MuseProcess::spawn_command(cmd, prompt_file, proc_exit_tx, self.stderr_ring.clone())
+                .await?;
         if let Some(old) = self.proc.replace(proc) {
             self.retired.push(old);
         }

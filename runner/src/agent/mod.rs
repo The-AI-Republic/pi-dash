@@ -253,6 +253,68 @@ pub struct ExitSnapshot {
     pub observed_at: DateTime<Utc>,
 }
 
+/// A one-shot engine's stable exit channel, fed only by its current turn's
+/// process.
+///
+/// Cursor, MuseCode and OpenClaw spawn one subprocess per turn but expose one
+/// exit watch for the bridge's lifetime (the supervisor subscribes before the
+/// first `run`). A retired turn's process stays owned until the runtime ends,
+/// so its leader can exit after the next turn has started. Each process gets
+/// its own channel from [`ExitRelay::next`]; a relay task copies its exit into
+/// the shared channel only while that process is still the current one, so
+/// an old leader's exit never marks the current turn as exited.
+#[derive(Clone)]
+pub struct ExitRelay {
+    tx: watch::Sender<Option<ExitSnapshot>>,
+    /// Generation of the current process. Held while publishing, so a bump in
+    /// [`ExitRelay::next`] and an old relay's send cannot interleave.
+    current: Arc<std::sync::Mutex<u64>>,
+}
+
+impl ExitRelay {
+    pub fn new() -> (Self, watch::Receiver<Option<ExitSnapshot>>) {
+        let (tx, rx) = watch::channel(None);
+        let relay = Self {
+            tx,
+            current: Arc::new(std::sync::Mutex::new(0)),
+        };
+        (relay, rx)
+    }
+
+    /// Make the next spawned process the current one and return the sender
+    /// for its own exit. Clears the shared value; a no-op clear (already
+    /// `None`) sends no notification, so a subscriber that subscribed before
+    /// `run` does not misread it as an exit. Earlier processes stop relaying.
+    pub fn next(&self) -> watch::Sender<Option<ExitSnapshot>> {
+        let generation = {
+            let mut g = self
+                .current
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *g += 1;
+            self.tx.send_if_modified(|v| v.take().is_some());
+            *g
+        };
+        let (proc_tx, mut proc_rx) = watch::channel::<Option<ExitSnapshot>>(None);
+        let relay = self.clone();
+        tokio::spawn(async move {
+            // `changed` still yields a value sent just before the sender drops.
+            while proc_rx.changed().await.is_ok() {
+                let snap = proc_rx.borrow_and_update().clone();
+                let g = relay
+                    .current
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if *g != generation {
+                    return;
+                }
+                relay.tx.send_replace(snap);
+            }
+        });
+        proc_tx
+    }
+}
+
 /// Events the bridge surfaces to the daemon's state machine. Agent-agnostic:
 /// Codex and Claude both translate their native protocols into this shape.
 #[derive(Debug, Clone)]
@@ -674,9 +736,61 @@ fn selected_model(
 
 #[cfg(test)]
 mod tests {
+    use super::{ExitRelay, ExitSnapshot};
     use super::{
         STDERR_LINE_CAP_BYTES, StderrBuffer, sanitize_stderr_line, selected_model, strip_ansi_codes,
     };
+    use chrono::Utc;
+    use std::time::Duration;
+
+    fn snap(code: i32) -> ExitSnapshot {
+        ExitSnapshot {
+            status_code: Some(code),
+            signal: None,
+            observed_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn exit_relay_ignores_a_retired_process_and_relays_the_current_one() {
+        let (relay, rx) = ExitRelay::new();
+        let old = relay.next();
+        let current = relay.next();
+        // The retired process exits after the next one became current.
+        let _ = old.send(Some(snap(1)));
+        drop(old);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(rx.borrow().is_none(), "a retired process must not publish");
+
+        let _ = current.send(Some(snap(0)));
+        drop(current);
+        let mut rx2 = rx.clone();
+        let got = tokio::time::timeout(Duration::from_secs(2), rx2.wait_for(|v| v.is_some()))
+            .await
+            .expect("the current process's exit is relayed")
+            .expect("channel open")
+            .as_ref()
+            .and_then(|s| s.status_code);
+        assert_eq!(got, Some(0));
+    }
+
+    #[tokio::test]
+    async fn exit_relay_next_clears_without_a_spurious_notification() {
+        let (relay, mut rx) = ExitRelay::new();
+        let _first = relay.next();
+        assert!(
+            !rx.has_changed().unwrap(),
+            "clearing an already-empty value must not notify"
+        );
+        let second = relay.next();
+        let _ = second.send(Some(snap(0)));
+        tokio::time::timeout(Duration::from_secs(2), rx.wait_for(|v| v.is_some()))
+            .await
+            .expect("relayed")
+            .expect("open");
+        let _third = relay.next();
+        assert!(rx.borrow_and_update().is_none(), "next clears a prior exit");
+    }
 
     #[test]
     fn stderr_buffer_evicts_oldest_when_full() {

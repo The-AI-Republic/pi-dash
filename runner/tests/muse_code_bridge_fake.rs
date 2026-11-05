@@ -370,3 +370,54 @@ async fn shutdown_returns_promptly_after_the_process_exits() {
         "shutdown should return promptly after the process already exited"
     );
 }
+
+#[tokio::test]
+async fn an_old_turns_late_exit_does_not_mark_the_current_turn_exited() {
+    // Turn 1 replays a completed run, then its leader lingers ~1 s. Turn 2
+    // starts at once and blocks. Turn 1's late exit must not reach the bridge's
+    // exit channel, which now belongs to turn 2.
+    let mut turn1 = Command::new("sh");
+    turn1
+        .arg("-c")
+        .arg(r#"cat "$1"; sleep 1"#)
+        .arg("sh")
+        .arg(fixture("echo_completed_run.jsonl"));
+    let mut turn2 = Command::new("sh");
+    turn2
+        .arg("-c")
+        .arg(r#"sed '/run.lifecycle.started/q' "$1"; sleep 30"#)
+        .arg("sh")
+        .arg(fixture("echo_resumed_run.jsonl"));
+
+    let mut bridge = new_bridge(None).await;
+    let mut cursor = bridge
+        .run_with_command(turn1, None, Uuid::new_v4())
+        .await
+        .expect("turn 1 setup");
+    let events = drain(&mut bridge, &mut cursor).await;
+    assert!(
+        matches!(events.last(), Some(BridgeEvent::Completed { .. })),
+        "{events:?}"
+    );
+    let old_pid = bridge.process_handle().pid.expect("turn 1 pid");
+    assert!(
+        proc_alive(old_pid),
+        "turn 1's leader should still be running"
+    );
+
+    let _cursor2 = bridge
+        .run_with_command(turn2, None, Uuid::new_v4())
+        .await
+        .expect("turn 2 setup");
+    let handle = bridge.process_handle();
+    assert!(
+        wait_until(|| !proc_alive(old_pid), Duration::from_secs(5)).await,
+        "turn 1's leader should exit on its own"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        handle.exit_rx.borrow().is_none(),
+        "turn 1's exit must not mark the running turn 2 as exited"
+    );
+    bridge.finish(Duration::from_secs(1)).await.expect("finish");
+}
