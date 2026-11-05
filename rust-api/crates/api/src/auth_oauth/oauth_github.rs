@@ -1093,7 +1093,7 @@ async fn complete_login_or_signup(
         // avatar exists to delete (same shape as the google signup).
         let mut created_asset = None;
         if !avatar.is_empty() {
-            identity::stamp_avatar_url(pool, id, &avatar)
+            identity::stamp_avatar_url(&pidash_db::pool::sea_orm_connection(pool), id, &avatar)
                 .await
                 .map_err(|_| CallbackFailure::Server)?;
             if let Some(asset_id) = super::download_and_upload_avatar(
@@ -1101,9 +1101,13 @@ async fn complete_login_or_signup(
             )
             .await
             {
-                identity::stamp_avatar_asset(pool, id, asset_id)
-                    .await
-                    .map_err(|_| CallbackFailure::Server)?;
+                identity::stamp_avatar_asset(
+                    &pidash_db::pool::sea_orm_connection(pool),
+                    id,
+                    asset_id,
+                )
+                .await
+                .map_err(|_| CallbackFailure::Server)?;
                 created_asset = Some(asset_id);
             }
         }
@@ -1169,7 +1173,7 @@ async fn complete_login_or_signup(
         {
             Some(asset_id) => {
                 identity::sync_user_data(
-                    pool,
+                    &pidash_db::pool::sea_orm_connection(pool),
                     user_id,
                     &identity::SyncUpdate {
                         first_name: &first_name,
@@ -1187,7 +1191,7 @@ async fn complete_login_or_signup(
             }
             None => {
                 identity::sync_user_data(
-                    pool,
+                    &pidash_db::pool::sea_orm_connection(pool),
                     user_id,
                     &identity::SyncUpdate {
                         first_name: &first_name,
@@ -1230,7 +1234,7 @@ async fn complete_login_or_signup(
     };
     let is_staff = is_staff || is_superuser;
     identity::save_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user_id,
         &identity::LoginStamps {
             medium: Some("github"),
@@ -1293,7 +1297,7 @@ async fn complete_login_or_signup(
         metadata,
     });
     account_queries::create_update_account(
-        &mut conn,
+        &pidash_db::orm_tx::TxConn::new(&mut conn),
         user_id,
         "github",
         &user_data_value,

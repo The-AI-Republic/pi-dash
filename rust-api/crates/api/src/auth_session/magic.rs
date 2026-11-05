@@ -912,7 +912,7 @@ async fn save_user_data(
         uuid::Uuid::new_v4().simple()
     );
     let updated = identity::save_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user.id,
         &identity::LoginStamps {
             medium: Some("magic-code"),
@@ -952,8 +952,13 @@ async fn get_or_create_profile(
     now: chrono::DateTime<chrono::Utc>,
     user_id: &uuid::Uuid,
 ) -> Result<(bool, Option<uuid::Uuid>), sqlx::Error> {
-    let path =
-        identity::get_or_create_profile(pool, *user_id, now, &profile_background_color()).await?;
+    let path = identity::get_or_create_profile(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *user_id,
+        now,
+        &profile_background_color(),
+    )
+    .await?;
     Ok((path.is_onboarded, path.last_workspace_id))
 }
 
@@ -1376,7 +1381,7 @@ async fn login_user(request: LoginRequest<'_>) -> Result<String, Response> {
     }
     // `user_logged_in` → `update_last_login` (`auth/models.py`): the
     // signal save, inside `login()` before the session persists.
-    if identity::stamp_last_login(pool, user.id, now)
+    if identity::stamp_last_login(&pidash_db::pool::sea_orm_connection(pool), user.id, now)
         .await
         .is_err()
     {

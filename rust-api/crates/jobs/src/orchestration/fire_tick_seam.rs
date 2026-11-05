@@ -522,9 +522,12 @@ where
         // `get_agent_system_user` (`workpad.py:44-71`): find by reserved
         // username; create the service bot when missing; refuse when a
         // human holds the name.
-        if let Some(found) = find_agent_user(&mut **self.dispatch_tx().inner(), AGENT_USERNAME)
-            .await
-            .map_err(db)?
+        if let Some(found) = find_agent_user(
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
+            AGENT_USERNAME,
+        )
+        .await
+        .map_err(db)?
         {
             if !found.is_bot {
                 return Err(AgentUserCollisionError.into());
@@ -537,7 +540,7 @@ where
         // evaluates `timezone.now`; the unusable hash lands right after
         // (`workpad.py:62-65`).
         let id = create_bot_user(
-            &mut **self.dispatch_tx().inner(),
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
             &NewBotUser {
                 id: None,
                 username: AGENT_USERNAME,
@@ -554,7 +557,7 @@ where
         .await
         .map_err(db)?;
         stamp_bot_unusable_password(
-            &mut **self.dispatch_tx().inner(),
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
             id,
             &make_unusable_password(),
         )

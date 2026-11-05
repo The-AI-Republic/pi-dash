@@ -609,7 +609,11 @@ async fn user_entity_save(
                 now,
             );
             pidash_services::domain::identity::link_avatar_asset(
-                pool, *owner_id, *asset_id, &write, now,
+                &pidash_db::pool::sea_orm_connection(pool),
+                *owner_id,
+                *asset_id,
+                &write,
+                now,
             )
             .await
             .map_err(|_| server_error())?;
@@ -648,7 +652,11 @@ async fn user_entity_save(
                 now,
             );
             pidash_services::domain::identity::link_cover_asset(
-                pool, *owner_id, *asset_id, &write, now,
+                &pidash_db::pool::sea_orm_connection(pool),
+                *owner_id,
+                *asset_id,
+                &write,
+                now,
             )
             .await
             .map_err(|_| server_error())?;
@@ -694,9 +702,14 @@ async fn user_entity_delete(
                 &user_save::new_user_token(),
                 now,
             );
-            pidash_services::domain::identity::unlink_avatar_asset(pool, *owner_id, &write, now)
-                .await
-                .map_err(|_| server_error())?;
+            pidash_services::domain::identity::unlink_avatar_asset(
+                &pidash_db::pool::sea_orm_connection(pool),
+                *owner_id,
+                &write,
+                now,
+            )
+            .await
+            .map_err(|_| server_error())?;
             Ok(())
         }
         q::UserDeleteAction::ClearCover => {
@@ -724,9 +737,14 @@ async fn user_entity_delete(
                 &user_save::new_user_token(),
                 now,
             );
-            pidash_services::domain::identity::unlink_cover_asset(pool, *owner_id, &write, now)
-                .await
-                .map_err(|_| server_error())?;
+            pidash_services::domain::identity::unlink_cover_asset(
+                &pidash_db::pool::sea_orm_connection(pool),
+                *owner_id,
+                &write,
+                now,
+            )
+            .await
+            .map_err(|_| server_error())?;
             Ok(())
         }
         q::UserDeleteAction::Noop => Ok(()),
