@@ -981,3 +981,44 @@ def test_heartbeat_does_not_replace_engine_disabled(db, machine, mt):
     )
     machine.refresh_from_db()
     assert machine.engine_auto_pause_reason == "engine_disabled"
+
+
+def test_a_report_decided_on_a_stale_read_does_not_replace_engine_disabled(db, machine):
+    """PIDESKAPP-122 review: the instance switches the engine off between the
+    report's unlocked read and its write; the locked re-check keeps it."""
+    from pi_dash.runner.services import engine_state
+
+    stale = DevMachine.objects.get(pk=machine.pk)  # read before the switch-off
+    DevMachine.objects.filter(pk=machine.pk).update(engine_auto_pause_reason="engine_disabled")
+    assert engine_state._apply(stale, "engine_sign_in_required", keep=("engine_disabled",)) is False
+    machine.refresh_from_db()
+    assert machine.engine_auto_pause_reason == "engine_disabled"
+
+    stale.engine_auto_pause_reason = "wallet_empty"  # the healthy report saw a clearable reason
+    assert engine_state._clear(stale, {"wallet_empty"}) is False
+    machine.refresh_from_db()
+    assert machine.engine_auto_pause_reason == "engine_disabled"
+
+
+@override_settings(**ENABLED)
+def test_silent_cli_login_reissues_a_credential_the_daemon_lost(db, web, create_user, workspace, lane):
+    """PIDESKAPP-122 review: the server says ``active`` but the daemon reports
+    it holds no credential (keychain wiped, reinstall). A silent sign-in
+    re-issues it instead of leaving the engine off until ``expiring``."""
+    machine_id = "6f1c7d1e-1111-4a2b-9c3d-0000000000a2"
+    on = _cli_login(web, machine_id, interactive=True)
+    assert on.data["engine_credential"]["token"].startswith("ec_")
+    machine = DevMachine.objects.get(pk=machine_id)
+    DevMachine.objects.filter(pk=machine.pk).update(
+        engine_state={"state": "signed_out", "sign_in_state": "never"}
+    )
+    again = _cli_login(web, machine_id, interactive=False)
+    assert again.data["engine_credential"]["token"].startswith("ec_")
+    assert EngineCredential.objects.filter(dev_machine_id=machine_id, revoked_at__isnull=True).count() == 1
+
+    # A daemon that reports its own live credential keeps it.
+    DevMachine.objects.filter(pk=machine.pk).update(
+        engine_state={"state": "available", "sign_in_state": "active"}
+    )
+    kept = _cli_login(web, machine_id, interactive=False)
+    assert "engine_credential" not in kept.data

@@ -55,7 +55,7 @@ from pi_dash.runner.services.engine_credentials import (
     engine_profile_for_user,
     instance_can_serve_engine,
     issue_engine_credential,
-    silent_renewal_allowed,
+    silent_issue_allowed,
 )
 from pi_dash.runner.services.permissions import is_workspace_member
 
@@ -170,7 +170,7 @@ def _check_engine_grant_approval(row, user, *, requested_machine_id, interactive
         # against the redeeming machine token's machine (same rules).
         return None, machine
     state = machine.current_engine_sign_in_state()
-    if not silent_renewal_allowed(state):
+    if not silent_issue_allowed(machine):
         logger.info(
             "engine_credential.silent_approval_refused user=%s dev_machine=%s state=%s",
             user.id,
@@ -223,7 +223,7 @@ def _maybe_issue_engine_credential(*, user, dev_machine: DevMachine, grant) -> "
     if grant is None or dev_machine.revoked_at is not None:
         return None
     silent = not grant.interactive_approval
-    if silent and not silent_renewal_allowed(dev_machine.current_engine_sign_in_state()):
+    if silent and not silent_issue_allowed(dev_machine):
         return None
     if not instance_can_serve_engine(user):
         return None
@@ -273,7 +273,7 @@ def _redeem_engine_grant(row, machine_token: MachineToken) -> Response:
     # engine out between a silent approval and its redemption.
     state = machine.current_engine_sign_in_state()
     silent = not row.interactive_approval
-    if silent and not silent_renewal_allowed(state):
+    if silent and not silent_issue_allowed(machine):
         return _silent_redemption_refused(state)
     available, _profile, pause_reason = engine_profile_for_user(row.user)
     if not available:

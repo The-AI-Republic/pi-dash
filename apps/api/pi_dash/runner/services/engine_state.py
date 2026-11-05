@@ -49,16 +49,18 @@ _CLEARED_BY_MODEL_TOKEN = frozenset(
 _CLEARED_BY_PROFILE = frozenset({R.PROFILE_UNAVAILABLE, R.ENGINE_DISABLED})
 
 _HEALTHY_STATES = frozenset({"available", "expiring"})
+#: Pause reasons a daemon report never replaces: the profile endpoint owns them.
+_NEVER_REPLACED_BY_A_REPORT = (R.ENGINE_DISABLED,)
 _SIGNED_OUT_STATES = frozenset({"expired", "signed_out", "revoked"})
 _MAX_FIELD = 64
 
 
-def _apply(machine: DevMachine, reason: str) -> bool:
+def _apply(machine: DevMachine, reason: str, *, keep=()) -> bool:
     if reason == R.ENGINE_SIGN_IN_REQUIRED and machine.is_legacy_desktop:
         return False
     if machine.revoked_at is not None:
         return False
-    return set_engine_auto_pause_reason(machine, reason)
+    return set_engine_auto_pause_reason(machine, reason, keep=keep)
 
 
 def _clear(machine: DevMachine, clearable) -> bool:
@@ -70,7 +72,7 @@ def _clear(machine: DevMachine, clearable) -> bool:
         # while the server holds no live credential for the machine.
         if not machine.has_live_engine_credential():
             return False
-    return set_engine_auto_pause_reason(machine, R.NONE)
+    return set_engine_auto_pause_reason(machine, R.NONE, only_from=clearable)
 
 
 def _clean(value) -> str:
@@ -103,10 +105,12 @@ def record_engine_state_report(machine: DevMachine, report: dict) -> None:
         # endpoint's to set and clear; a daemon report never replaces it,
         # or the machine page would ask for a sign-in that cannot help.
         pass
+    # ``keep``: re-checked under the row lock, since the instance may switch
+    # the engine off between the read above and the write.
     elif reason_code in _REPORTABLE:
-        _apply(fresh, reason_code)
+        _apply(fresh, reason_code, keep=_NEVER_REPLACED_BY_A_REPORT)
     elif state == "signed_out" or stored.get("sign_in_state") in _SIGNED_OUT_STATES:
-        _apply(fresh, R.ENGINE_SIGN_IN_REQUIRED)
+        _apply(fresh, R.ENGINE_SIGN_IN_REQUIRED, keep=_NEVER_REPLACED_BY_A_REPORT)
     elif state in _HEALTHY_STATES and not reason_code:
         _clear(fresh, _CLEARED_BY_HEALTHY_REPORT)
     machine.engine_auto_pause_reason = fresh.engine_auto_pause_reason
