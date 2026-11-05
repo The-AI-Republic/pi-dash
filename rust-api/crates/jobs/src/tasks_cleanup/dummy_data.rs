@@ -864,7 +864,7 @@ impl PgDummyData {
             let priority = plan::PRIORITIES[randint(rng, 0, 4) as usize];
             let creator_id = &creator_ids[randint(rng, 0, (creator_ids.len() - 1) as u32) as usize];
             let issue_id = insert_demo_issue(
-                &self.pool,
+                &pidash_db::pool::sea_orm_connection(&self.pool),
                 &DemoIssue {
                     state_id,
                     project_id,
@@ -884,7 +884,7 @@ impl PgDummyData {
             .await
             .map_err(db_error)?;
             insert_demo_issue_sequence(
-                &self.pool,
+                &pidash_db::pool::sea_orm_connection(&self.pool),
                 &DemoIssueSequence {
                     issue_id: &issue_id,
                     project_id,
@@ -1037,7 +1037,7 @@ impl PgDummyData {
             let draw = randint(rng, 0, max_draw as u32) as usize;
             for assignee_position in sample_positions(rng, assignee_ids.len(), draw)? {
                 insert_demo_issue_assignee(
-                    &self.pool,
+                    &pidash_db::pool::sea_orm_connection(&self.pool),
                     &DemoIssueAssignee {
                         issue_id: &issue_ids[position],
                         assignee_id: &assignee_ids[assignee_position],

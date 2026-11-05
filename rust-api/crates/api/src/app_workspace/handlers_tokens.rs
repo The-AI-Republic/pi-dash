@@ -1660,9 +1660,13 @@ async fn token_delete(
     // `delete()` saves the instance, so `BaseModel.save` stamps
     // `updated_by` too (second statement inside the domain pair — same
     // handler sequencing as the PATCH save).
-    if pidash_services::domain::tokens::soft_delete_token(&pool, pk, user_id)
-        .await
-        .is_err()
+    if pidash_services::domain::tokens::soft_delete_token(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        pk,
+        user_id,
+    )
+    .await
+    .is_err()
     {
         return Denial::ServerError.into_response();
     }
@@ -1771,7 +1775,7 @@ async fn token_create(
     }
     let user_type: i16 = if is_bot { 1 } else { 0 };
     let issued = match pidash_services::domain::tokens::issue_token(
-        &pool,
+        &pidash_db::pool::sea_orm_connection(&pool),
         &pidash_services::domain::tokens::NewApiToken {
             label: label.clone(),
             description: description.clone(),
@@ -2074,7 +2078,7 @@ async fn token_patch(
     // pair.
     let now = Utc::now();
     if pidash_services::domain::tokens::update_token(
-        &pool,
+        &pidash_db::pool::sea_orm_connection(&pool),
         pk,
         user_id,
         now,

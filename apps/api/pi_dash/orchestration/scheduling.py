@@ -896,17 +896,6 @@ def _resolve_creator_for_trigger(issue: Issue, *, triggered_by: str, actor=None)
     if effective in MACHINE_EXECUTORS:
         if actor is not None:
             return actor
-        # An issue assigned to a runner runs as that runner's owner when the
-        # usage rule allows it (the owner created or is assigned to the
-        # issue), so automatic work on it is the owner's own work
-        # (``built_engine_as_runner`` design §7, §8). Otherwise the existing
-        # resolution applies and the preflight decides.
-        from pi_dash.runner.services.dispatch_rules import live_assigned_runner, runner_may_take
-
-        assigned = live_assigned_runner(issue)
-        if assigned is not None and assigned.owner.is_active:
-            if runner_may_take(assigned, created_by_id=None, human=False, issue=issue):
-                return assigned.owner
         if triggered_by in _MACHINE_TRIGGERS:
             from pi_dash.orchestration.workpad import get_agent_system_user
 
@@ -992,8 +981,7 @@ def preflight_eligibility_or_bounce(issue: Issue, *, run_creator, pod, triggered
     # §6; a stale ``managed_runner`` value is the legacy spelling of one). The
     # engine usage rule depends on whether a person or the clock started the
     # run, so the structural check is told which (§8). "The runner is offline
-    # right now" is never a reason to bounce: a strictly pinned automatic run
-    # is created and waits visibly, and a person's run is refused at creation.
+    # right now" is never a reason to bounce: the run waits in the pod.
     from pi_dash.runner.models import HUMAN_TRIGGERS
     from pi_dash.runner.services.matcher import (
         pod_has_runner_for_issue_principal,
@@ -1231,8 +1219,6 @@ def dispatch_run_ai_run_with_reason(issue: Issue, *, actor) -> tuple[Optional[Ag
       principal / eligible runner can serve the run (no creator, or the
       eligibility preflight bounced the issue).
     - Returns ``(None, RUN_AI_NO_POD)`` when no pod is available.
-    - Returns ``(None, "assigned_runner_not_owner" | "assigned_runner_offline")``
-      when the issue's assigned runner refuses the caller's run.
     - When a prior run exists, delegates to ``_create_continuation_run``
       so the new run inherits parent linkage and runner pinning (repo
       locality, same as Comment & Run / tick).
@@ -1296,32 +1282,7 @@ def dispatch_run_ai_run_with_reason(issue: Issue, *, actor) -> tuple[Optional[Ag
             fresh_session=fresh_session,
             trigger=TRIGGER_RUN_AI,
         )
-    if outcome.created_run is None and outcome.reason in _ASSIGNED_RUNNER_REFUSALS:
-        # The issue's assigned runner refused this person's run (PO-5,
-        # PO-10): surface the code so the client can offer the alternatives.
-        return None, outcome.reason
     return outcome.created_run, None
-
-
-#: Run-creation refusals from an issue's ``assigned_runner``
-#: (``dispatch_rules``), passed through as Run AI refusal reasons.
-_ASSIGNED_RUNNER_REFUSALS = frozenset({"assigned_runner_not_owner", "assigned_runner_offline"})
-
-
-def assigned_runner_refusal_detail(issue: Issue, code: str) -> str:
-    """User-facing sentence for an assigned-runner refusal on ``issue``."""
-    from pi_dash.runner.services.dispatch_rules import (
-        ASSIGNED_RUNNER_OFFLINE,
-        live_assigned_runner,
-        machine_offline_detail,
-    )
-
-    runner = live_assigned_runner(issue)
-    if runner is None:
-        return "This issue's runner cannot take this run."
-    if code == ASSIGNED_RUNNER_OFFLINE:
-        return machine_offline_detail(runner)
-    return f"This issue is assigned to {runner.machine_display_name}, which only runs its owner's work."
 
 
 def run_ai_for_human(issue: Issue, *, actor) -> tuple[Optional[AgentRun], Optional[str]]:

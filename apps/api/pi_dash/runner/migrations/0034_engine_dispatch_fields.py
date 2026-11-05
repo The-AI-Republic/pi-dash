@@ -6,9 +6,7 @@
 
 PIDESKAPP-123, ``.ai_design/built_engine_as_runner/design.md`` §7-§9:
 
-- ``AgentRun.pin_strict``: the pin is the run's execution target (an issue's
-  ``assigned_runner``) and is never released to the pod.
-- ``Runner.pod_dispatch``: whether the runner takes unpinned pod work. Every
+- ``Runner.pod_dispatch``: whether the runner takes pod work. Every
   existing row gets ``pod_member`` here, which is today's behaviour for
   own-agent runners; the data migration that follows sets engine runners to
   ``pinned_only``.
@@ -28,15 +26,10 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.AddField(
-            model_name="agentrun",
-            name="pin_strict",
-            field=models.BooleanField(default=False),
-        ),
-        migrations.AddField(
             model_name="runner",
             name="pod_dispatch",
             field=models.CharField(
-                choices=[("pinned_only", "Pinned work only"), ("pod_member", "Takes pod work")],
+                choices=[("pinned_only", "Pod work off"), ("pod_member", "Pod work on")],
                 default="pod_member",
                 max_length=16,
             ),
@@ -74,14 +67,12 @@ class Migration(migrations.Migration):
         # naming the new NOT NULL columns.
         migrations.RunSQL(
             sql=[
-                "ALTER TABLE agent_run ALTER COLUMN pin_strict SET DEFAULT false",
                 "ALTER TABLE runner ALTER COLUMN pod_dispatch SET DEFAULT 'pod_member'",
                 "ALTER TABLE dev_machine ALTER COLUMN engine_paused_by_owner SET DEFAULT false",
                 "ALTER TABLE dev_machine ALTER COLUMN engine_auto_pause_reason SET DEFAULT ''",
                 "ALTER TABLE dev_machine ALTER COLUMN engine_team_runs SET DEFAULT false",
             ],
             reverse_sql=[
-                "ALTER TABLE agent_run ALTER COLUMN pin_strict DROP DEFAULT",
                 "ALTER TABLE runner ALTER COLUMN pod_dispatch DROP DEFAULT",
                 "ALTER TABLE dev_machine ALTER COLUMN engine_paused_by_owner DROP DEFAULT",
                 "ALTER TABLE dev_machine ALTER COLUMN engine_auto_pause_reason DROP DEFAULT",

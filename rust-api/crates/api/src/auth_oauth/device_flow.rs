@@ -804,7 +804,7 @@ async fn post_token(State(state): State<AppState>, body: Bytes) -> Response {
     let user_id = row_user_id.expect("approved row carries a user");
     let api_token = format!("pi_dash_api_{}", uuid::Uuid::new_v4().simple());
     let minted = pidash_services::domain::tokens::issue_device_token(
-        &mut *tx,
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         &pidash_services::domain::tokens::NewDeviceToken {
             id: uuid::Uuid::new_v4(),
             token: api_token.clone(),

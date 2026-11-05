@@ -4,16 +4,17 @@
 
 """Run creation and matching for built-in engine runners.
 
-Since PIDESKAPP-123 (``.ai_design/built_engine_as_runner/design.md`` §6-§8)
-the engine is a runner like any other: ``managed_runner`` is a legacy executor
-value, an issue reaches one specific engine through ``Issue.assigned_runner``
-(a *strict* pin), and an engine takes pod work only once its owner makes it a
-pod member. Two invariants still carry most of the weight here:
+Since PIDESKAPP-123 (``.ai_design/built_engine_as_runner/design.md`` §6-§8,
+revision 4.0) the engine is a runner like any other: ``managed_runner`` is a
+legacy executor value translated to ``local_runner``, pod-level, and an engine
+gets issue work only once its owner makes it a pod member. Two invariants
+carry most of the weight here:
 
-1. a strictly pinned run is created *for one runner* and can never drift to
-   another;
-2. a ``pinned_only`` engine never receives work that was not strictly pinned
-   to it, so one person's laptop cannot become the team's build server.
+1. a new run never names a runner: which machine runs it is the pod's
+   choice, plus locality pins for continuations;
+2. a ``pinned_only`` engine never receives new issue work (only the legacy
+   ``managed_runner`` runs already pinned to it), so one person's laptop
+   cannot become the team's build server.
 """
 
 from __future__ import annotations
@@ -33,39 +34,19 @@ from pi_dash.runner.models import (
     RunnerStatus,
 )
 from pi_dash.runner.services import matcher
-from pi_dash.runner.services.dispatch_rules import (
-    ASSIGNED_RUNNER_NOT_OWNER,
-    ASSIGNED_RUNNER_OFFLINE,
-    WAITING_FOR_RUNNER,
-    AssignedRunnerUnavailable,
-)
 
 from .conftest import MANAGED_SETTINGS, make_runner
 
 pytestmark = pytest.mark.unit
 
 
-def _assign(issue, runner):
-    """Assign ``issue`` to ``runner``, created by the runner's owner.
-
-    A queryset update, because ``BaseModel.save`` blanks ``created_by``
-    outside a request and the usage rule reads it.
-    """
-    type(issue).objects.filter(pk=issue.pk).update(
-        assigned_runner=runner, assigned_pod=runner.pod, created_by=runner.owner
-    )
-    issue.refresh_from_db()
-    return issue
-
-
-def _fields(project, user, issue=None, **kw):
+def _fields(project, user, **kw):
     return execution_fields(
         project=project,
         run_kind="issue",
         has_issue=True,
         requested=AgentExecutorKind.MANAGED_RUNNER,
         actor=user,
-        issue=issue,
         **kw,
     )
 
@@ -91,9 +72,12 @@ def test_engine_runner_starts_pinned_only(bundled_runner, manual_runner):
 
 @pytest.mark.parametrize("online", [True, False])
 @override_settings(**MANAGED_SETTINGS)
-def test_project_move_handoff_keeps_strict_pin_in_destination(
+def test_project_move_handoff_of_legacy_managed_issue_is_pod_level(
     project, create_user, bundled_runner, issue_for_project, online
 ):
+    """A legacy ``managed_runner`` issue moved to another project gets a
+    ``local_runner`` run in the destination pod with no pin: a ``pinned_only``
+    engine does not take it, a pod member does."""
     from unittest.mock import patch
 
     from pi_dash.orchestration.service import _create_project_move_handoff_run
@@ -101,7 +85,9 @@ def test_project_move_handoff_keeps_strict_pin_in_destination(
     if not online:
         bundled_runner.status = RunnerStatus.OFFLINE
         bundled_runner.save(update_fields=["status"])
-    issue = _assign(issue_for_project, bundled_runner)
+    issue = issue_for_project
+    type(issue).objects.filter(pk=issue.pk).update(agent_executor=AgentExecutorKind.MANAGED_RUNNER)
+    issue.refresh_from_db()
     parent = AgentRun.objects.create(
         workspace=project.workspace,
         created_by=create_user,
@@ -116,13 +102,14 @@ def test_project_move_handoff_keeps_strict_pin_in_destination(
     ):
         run = _create_project_move_handoff_run(issue=issue, parent=parent, pod=bundled_runner.pod)
     assert run.executor_kind == AgentExecutorKind.LOCAL_RUNNER
-    assert run.pinned_runner_id == bundled_runner.id
-    assert run.pin_strict is True
+    assert run.pinned_runner_id is None
     assert run.status == AgentRunStatus.QUEUED
-    if not online:
-        assert run.error_code == WAITING_FOR_RUNNER
-        bundled_runner.status = RunnerStatus.ONLINE
-        bundled_runner.save(update_fields=["status"])
+    assert not run.error_code
+    with transaction.atomic():
+        assert matcher.next_for_runner(bundled_runner) is None
+    bundled_runner.pod_dispatch = RunnerPodDispatch.POD_MEMBER
+    bundled_runner.status = RunnerStatus.ONLINE
+    bundled_runner.save(update_fields=["pod_dispatch", "status"])
     with transaction.atomic():
         assert matcher.next_for_runner(bundled_runner).id == run.id
 
@@ -132,87 +119,18 @@ def test_project_move_handoff_keeps_strict_pin_in_destination(
 # --------------------------------------------------------------------------
 
 
-def test_pod_level_issue_gets_no_pin(project, create_user, issue_for_project, bundled_runner):
-    fields = _fields(project, create_user, issue_for_project)
+@pytest.mark.parametrize("automatic", [True, False])
+def test_legacy_managed_request_creates_a_pod_level_local_run(project, create_user, bundled_runner, automatic):
+    """Section 6: no run names a runner at creation, whoever starts it and
+    whether or not the caller has an engine in the project."""
+    fields = _fields(project, create_user, automatic=automatic)
     assert fields == {"executor_kind": AgentExecutorKind.LOCAL_RUNNER, "tool_plan": {}}
 
 
-def test_creation_pins_strictly_to_the_assigned_runner(project, create_user, issue_for_project, bundled_runner):
-    issue = _assign(issue_for_project, bundled_runner)
-    fields = _fields(project, create_user, issue)
-    assert fields["executor_kind"] == AgentExecutorKind.LOCAL_RUNNER
-    assert fields["pinned_runner"] == bundled_runner
-    assert fields["pin_strict"] is True
-    assert "error_details" not in fields
-
-
-def test_teammates_click_on_an_engine_assigned_issue_is_refused(
-    project, create_user, create_user2, issue_for_project, bundled_runner
-):
-    """PO-10: the issue names one person's engine; a teammate's Run is refused
-    rather than queued for a runner that would never take it."""
-    issue = _assign(issue_for_project, bundled_runner)
-    with pytest.raises(AssignedRunnerUnavailable) as exc:
-        _fields(project, create_user2, issue)
-    assert exc.value.code == ASSIGNED_RUNNER_NOT_OWNER
-
-
-def test_teammates_click_is_admitted_with_the_owners_opt_in(
-    project, create_user, create_user2, issue_for_project, bundled_runner, desktop_machine
-):
-    desktop_machine.engine_team_runs = True
-    desktop_machine.save(update_fields=["engine_team_runs"])
-    issue = _assign(issue_for_project, bundled_runner)
-    fields = _fields(project, create_user2, issue)
-    assert fields["pinned_runner"] == bundled_runner
-
-
-def test_person_started_run_is_refused_when_runner_offline(project, create_user, issue_for_project, bundled_runner):
-    """PO-5: refused at creation, naming the machine."""
+def test_offline_engine_creates_no_waiting_marker(project, create_user, bundled_runner):
     bundled_runner.status = RunnerStatus.OFFLINE
     bundled_runner.save(update_fields=["status"])
-    issue = _assign(issue_for_project, bundled_runner)
-    with pytest.raises(AssignedRunnerUnavailable) as exc:
-        _fields(project, create_user, issue, automatic=False)
-    assert exc.value.code == ASSIGNED_RUNNER_OFFLINE
-    assert str(exc.value) == "rich-laptop is offline"
-
-
-def test_person_started_run_queues_behind_a_busy_runner(project, create_user, issue_for_project, bundled_runner):
-    bundled_runner.status = RunnerStatus.BUSY
-    bundled_runner.save(update_fields=["status"])
-    issue = _assign(issue_for_project, bundled_runner)
-    fields = _fields(project, create_user, issue, automatic=False)
-    assert fields["pinned_runner"] == bundled_runner
-    assert "error_details" not in fields
-
-
-def test_paused_engine_counts_as_offline(project, create_user, issue_for_project, bundled_runner, desktop_machine):
-    desktop_machine.engine_paused_by_owner = True
-    desktop_machine.save(update_fields=["engine_paused_by_owner"])
-    issue = _assign(issue_for_project, bundled_runner)
-    with pytest.raises(AssignedRunnerUnavailable) as exc:
-        _fields(project, create_user, issue, automatic=False)
-    assert exc.value.code == ASSIGNED_RUNNER_OFFLINE
-
-
-def test_automatic_run_queues_visibly_when_runner_offline(project, create_user, issue_for_project, bundled_runner):
-    """A tick firing while the lid is shut waits, not bounces."""
-    bundled_runner.status = RunnerStatus.OFFLINE
-    bundled_runner.save(update_fields=["status"])
-    issue = _assign(issue_for_project, bundled_runner)
-    fields = _fields(project, create_user, issue, automatic=True)
-    assert fields["pinned_runner"] == bundled_runner
-    assert fields["pin_strict"] is True
-    assert fields["error_details"] == {"code": WAITING_FOR_RUNNER}
-
-
-def test_revoked_assigned_runner_never_pins(project, create_user, issue_for_project, bundled_runner):
-    issue = _assign(issue_for_project, bundled_runner)
-    from pi_dash.runner.models import Runner
-
-    Runner.objects.filter(pk=bundled_runner.pk).update(status=RunnerStatus.REVOKED)
-    assert "pinned_runner" not in _fields(project, create_user, issue)
+    assert "error_details" not in _fields(project, create_user, automatic=True)
 
 
 # --------------------------------------------------------------------------
@@ -230,7 +148,6 @@ def test_legacy_managed_run_row_is_insertable_with_a_pinned_runner(project, crea
         pod=project.pods.get(is_default=True),
         executor_kind=AgentExecutorKind.MANAGED_RUNNER,
         pinned_runner=bundled_runner,
-        pin_strict=True,
         status=AgentRunStatus.QUEUED,
         prompt="",
     )
@@ -295,7 +212,6 @@ def test_legacy_managed_pin_is_still_delivered(project, create_user, bundled_run
         pod=bundled_runner.pod,
         executor_kind=AgentExecutorKind.MANAGED_RUNNER,
         pinned_runner=bundled_runner,
-        pin_strict=True,
         status=AgentRunStatus.QUEUED,
         prompt="",
     )
@@ -306,14 +222,13 @@ def test_legacy_managed_pin_is_still_delivered(project, create_user, bundled_run
     assert run.status == AgentRunStatus.ASSIGNED
 
 
-def test_strict_pin_to_engine_never_reaches_manual_runner(project, create_user, bundled_runner, manual_runner):
+def test_legacy_pin_to_engine_never_reaches_manual_runner(project, create_user, bundled_runner, manual_runner):
     AgentRun.objects.create(
         workspace=project.workspace,
         created_by=create_user,
         pod=manual_runner.pod,
-        executor_kind=AgentExecutorKind.LOCAL_RUNNER,
+        executor_kind=AgentExecutorKind.MANAGED_RUNNER,
         pinned_runner=bundled_runner,
-        pin_strict=True,
         status=AgentRunStatus.QUEUED,
         prompt="",
     )
@@ -332,20 +247,23 @@ def test_pinned_only_engine_is_not_selected_for_pod_work(project, create_user, b
         assert matcher.select_runner_in_pod(pod) == manual
 
 
-def test_preflight_counts_an_assigned_engine_even_when_offline(
+def test_preflight_counts_a_pod_member_engine_even_when_offline(
     project, create_user, bundled_runner, issue_for_project
 ):
-    """Offline is not structural: the run is created and waits (§9)."""
-    issue = _assign(issue_for_project, bundled_runner)
+    """Offline is not structural: the run is created and waits in the pod
+    (§9)."""
+    type(issue_for_project).objects.filter(pk=issue_for_project.pk).update(created_by=create_user)
+    issue_for_project.refresh_from_db()
     pod = project.pods.get(is_default=True)
+    bundled_runner.pod_dispatch = RunnerPodDispatch.POD_MEMBER
     bundled_runner.status = RunnerStatus.OFFLINE
-    bundled_runner.save(update_fields=["status"])
-    assert matcher.pod_has_runner_for_issue_principal(pod, issue, None, human=False) is True
+    bundled_runner.save(update_fields=["pod_dispatch", "status"])
+    assert matcher.pod_has_runner_for_issue_principal(pod, issue_for_project, None, human=False) is True
 
     # Revoked *is* structural — nothing can ever serve it.
     bundled_runner.status = RunnerStatus.REVOKED
     bundled_runner.save(update_fields=["status"])
-    assert matcher.pod_has_runner_for_issue_principal(pod, issue, None, human=False) is False
+    assert matcher.pod_has_runner_for_issue_principal(pod, issue_for_project, None, human=False) is False
 
 
 def test_pod_level_preflight_ignores_pinned_only_engines(project, create_user, bundled_runner, issue_for_project):

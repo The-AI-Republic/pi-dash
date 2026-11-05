@@ -210,18 +210,21 @@ class RunnerProvisioning(models.TextChoices):
 
 
 class RunnerPodDispatch(models.TextChoices):
-    """Whether a runner takes unpinned work from its pod.
+    """Whether a runner takes issue work from its pod.
 
     ``POD_MEMBER`` is the behaviour every own-agent runner has always had: it
-    takes runs pinned to it and the pod's unpinned queue. ``PINNED_ONLY``
-    takes only runs strictly pinned to it (an issue's ``assigned_runner``).
-    Built-in engine runners start ``PINNED_ONLY`` because pod work spends the
-    owner's wallet; the owner turns pod membership on per project
-    (``.ai_design/built_engine_as_runner/design.md`` §7).
+    takes runs pinned to it for repo locality and the pod's unpinned queue.
+    Built-in engine runners start ``PINNED_ONLY`` ("Pod work: off") because
+    pod work spends the owner's wallet: such an engine takes no new issue
+    work and serves only the legacy ``managed_runner`` runs already pinned to
+    it. The owner turns pod work on per project
+    (``.ai_design/built_engine_as_runner/design.md`` §7). The value keeps its
+    name because the dedicated-runner design's engine section uses it for an
+    engine that takes only the issues dedicated to it.
     """
 
-    PINNED_ONLY = "pinned_only", "Pinned work only"
-    POD_MEMBER = "pod_member", "Takes pod work"
+    PINNED_ONLY = "pinned_only", "Pod work off"
+    POD_MEMBER = "pod_member", "Pod work on"
 
 
 class EngineAutoPauseReason(models.TextChoices):
@@ -881,16 +884,6 @@ class Runner(models.Model):
                 affected_run_ids = [pk for pk, _ in active_runs]
                 affected_pod_ids = {pid for _, pid in active_runs if pid is not None}
 
-            # (3a) Strict pins are the run's target, never a preference: fail
-            # them rather than letting them drift to another runner, and make
-            # the runner's assigned issues pod-level (design
-            # ``built_engine_as_runner`` §7). Runs before the unpin below so
-            # ``SET_NULL`` on a later hard delete has nothing strict left.
-            from pi_dash.runner.services.dispatch_rules import detach_removed_runner
-
-            detach_removed_runner(self)
-
-            # (3b) Non-strict (repo-locality) pins go back to the pod queue.
             pinned_pod_ids = list(
                 AgentRun.objects.filter(pinned_runner=self, status=AgentRunStatus.QUEUED).values_list(
                     "pod_id", flat=True
@@ -1256,11 +1249,6 @@ class AgentRun(models.Model):
         blank=True,
         related_name="pinned_agent_runs",
     )
-    # A strict pin is the run's execution target, not a locality preference:
-    # it comes from the issue's ``assigned_runner`` and is never released to
-    # the pod (offline sweep, busy rejection, release-pin, pause). Revoking
-    # the runner fails the run instead (design §7).
-    pin_strict = models.BooleanField(default=False)
     work_item = models.ForeignKey(
         "db.Issue",
         on_delete=models.SET_NULL,

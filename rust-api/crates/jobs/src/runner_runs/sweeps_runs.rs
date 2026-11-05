@@ -994,7 +994,7 @@ impl SweepsRunsStore for LiveSweepsRunsStore {
         now: DateTime<Utc>,
     ) -> Result<u64, SweepsError> {
         pidash_services::domain::tokens::revoke_runner_sessions_by_ids(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             session_ids,
             now,
             REVOKED_REASON_IDLE,

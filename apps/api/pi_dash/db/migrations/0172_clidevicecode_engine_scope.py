@@ -21,7 +21,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("db", "0171_issue_assigned_runner"),
+        ("db", "0170_issueview_anchor"),
     ]
 
     operations = [

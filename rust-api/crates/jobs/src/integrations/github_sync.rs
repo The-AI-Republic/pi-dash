@@ -970,7 +970,7 @@ async fn create_issue(
     let stripped = strip_html_text(description_html);
     let issue_id = Uuid::new_v4();
     domain_issues::insert_mirror_issue(
-        &mut **tx,
+        &pidash_db::orm_tx::TxConn::new(tx),
         &domain_issues::MirrorIssueInsert {
             issue_id,
             now: *now,
@@ -992,7 +992,7 @@ async fn create_issue(
     .await
     .map_err(db_error)?;
     domain_issues::insert_issue_sequence(
-        &mut **tx,
+        &pidash_db::orm_tx::TxConn::new(tx),
         &domain_issues::MirrorIssueSequence {
             project_id: scan.project_id,
             workspace_id: *workspace_id,
@@ -1174,7 +1174,7 @@ pub async fn upsert_issue(
             // `save()` recomputes the stripped form (`issue.py:345-350`).
             let stripped = strip_html_text(&description_html);
             domain_issues::update_github_mirror_issue(
-                pool,
+                &pidash_db::pool::sea_orm_connection(pool),
                 &domain_issues::GithubMirrorIssueUpdate {
                     issue_id,
                     name,
@@ -1374,7 +1374,7 @@ pub async fn upsert_comment(
                 labels: &empty_list,
                 edited_at: None,
             };
-            comment_domain::insert_description_row(&mut *tx, &rows)
+            comment_domain::insert_description_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows)
                 .await
                 .map_err(db_error)?;
             let linked = comment_domain::CommentRows {
@@ -1383,9 +1383,12 @@ pub async fn upsert_comment(
                 deleted_at: None,
                 ..rows
             };
-            comment_domain::insert_comment_row_linked(&mut *tx, &linked)
-                .await
-                .map_err(db_error)?;
+            comment_domain::insert_comment_row_linked(
+                &pidash_db::orm_tx::TxConn::new(&mut tx),
+                &linked,
+            )
+            .await
+            .map_err(db_error)?;
             linked.id
         }
         Some((comment_id, old_html, old_stripped, old_json, description_id)) => {
@@ -1403,7 +1406,7 @@ pub async fn upsert_comment(
                 project_id: scan.project_id,
                 actor: scan.actor_id,
             };
-            comment_domain::update_sync_comment(&mut *tx, &update)
+            comment_domain::update_sync_comment(&pidash_db::orm_tx::TxConn::new(&mut tx), &update)
                 .await
                 .map_err(db_error)?;
             // Change-tracked description refresh (`issue.py:629-646`):
@@ -1421,7 +1424,7 @@ pub async fn upsert_comment(
                 if let Some(description_id) = description_id {
                     if html_changed {
                         comment_domain::sync_description_html(
-                            &mut *tx,
+                            &pidash_db::orm_tx::TxConn::new(&mut tx),
                             description_id,
                             &comment_html,
                         )
@@ -1430,7 +1433,7 @@ pub async fn upsert_comment(
                     }
                     if stripped_changed {
                         comment_domain::sync_description_stripped(
-                            &mut *tx,
+                            &pidash_db::orm_tx::TxConn::new(&mut tx),
                             description_id,
                             &comment_stripped,
                         )
@@ -1439,16 +1442,21 @@ pub async fn upsert_comment(
                     }
                     if json_changed {
                         comment_domain::sync_description_json(
-                            &mut *tx,
+                            &pidash_db::orm_tx::TxConn::new(&mut tx),
                             description_id,
                             &empty_json,
                         )
                         .await
                         .map_err(db_error)?;
                     }
-                    comment_domain::touch_synced_description(&mut *tx, description_id, None, *now)
-                        .await
-                        .map_err(db_error)?;
+                    comment_domain::touch_synced_description(
+                        &pidash_db::orm_tx::TxConn::new(&mut tx),
+                        description_id,
+                        None,
+                        *now,
+                    )
+                    .await
+                    .map_err(db_error)?;
                 }
             }
             comment_id
@@ -2701,7 +2709,7 @@ mod tests {
         // Mirror rows: actor restamp collapsed into the update (the
         // issue pin moved to `domain::issues::sync_bare_sql_shapes` with
         // the statement; the comment pins moved to
-        // `domain::comments::sync_sql_shapes` with the twins).
+        // `domain::comments::comment_statement_shapes` with the twins).
 
         // Metadata-only writes touch nothing else.
         assert_eq!(

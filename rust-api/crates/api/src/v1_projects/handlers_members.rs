@@ -385,9 +385,12 @@ async fn authenticate_api_token(
     auth_token::validate_api_token(Some(&row), presented, now.timestamp())
         .map_err(|_| Denial::InvalidToken)?;
     // `api_token.last_used = now; save(update_fields=["last_used"])`.
-    pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, presented)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    pidash_services::domain::tokens::touch_api_token_last_used_by_token(
+        &pidash_db::pool::sea_orm_connection(pool),
+        presented,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     Ok(user_id)
 }
 
@@ -433,14 +436,20 @@ async fn authenticate_machine_token(
     .await
     .map_err(|_| Denial::ServerError)?;
     if !member {
-        pidash_services::domain::tokens::revoke_machine_token_by_id_now(pool, row.id)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        return Err(Denial::InvalidToken);
-    }
-    pidash_services::domain::tokens::touch_machine_token_last_used_by_id_now(pool, row.id)
+        pidash_services::domain::tokens::revoke_machine_token_by_id_now(
+            &pidash_db::pool::sea_orm_connection(pool),
+            row.id,
+        )
         .await
         .map_err(|_| Denial::ServerError)?;
+        return Err(Denial::InvalidToken);
+    }
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id_now(
+        &pidash_db::pool::sea_orm_connection(pool),
+        row.id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     Ok(row.user_id)
 }
 

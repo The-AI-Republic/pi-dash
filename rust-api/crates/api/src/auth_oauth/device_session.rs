@@ -251,9 +251,13 @@ async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Caller
         }
     }
     // `api_token.last_used = now; save(update_fields=["last_used"])`.
-    pidash_services::domain::tokens::touch_api_token_last_used_by_id(pool, id, now)
-        .await
-        .map_err(|_| Failure::server_error().into_response())?;
+    pidash_services::domain::tokens::touch_api_token_last_used_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        id,
+        now,
+    )
+    .await
+    .map_err(|_| Failure::server_error().into_response())?;
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
     crate::middleware::publish_logger_user_id(&user_id.to_string());
@@ -320,15 +324,23 @@ async fn authenticate_machine(
     if !is_member(pool, workspace_id, user_id).await? {
         // `machine_token.revoke()` on the way out (`revoked_at` is `None`
         // here, so the guard is a no-op and the write always lands).
-        pidash_services::domain::tokens::revoke_machine_token_by_id(pool, id, now)
-            .await
-            .map_err(|_| Failure::server_error().into_response())?;
+        pidash_services::domain::tokens::revoke_machine_token_by_id(
+            &pidash_db::pool::sea_orm_connection(pool),
+            id,
+            now,
+        )
+        .await
+        .map_err(|_| Failure::server_error().into_response())?;
         return Err(invalid_token());
     }
     // `MachineToken.objects.filter(pk=...).update(last_used_at=now)`.
-    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(pool, id, now)
-        .await
-        .map_err(|_| Failure::server_error().into_response())?;
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        id,
+        now,
+    )
+    .await
+    .map_err(|_| Failure::server_error().into_response())?;
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
     crate::middleware::publish_logger_user_id(&user_id.to_string());
@@ -810,7 +822,7 @@ async fn exchange_in_transaction(
     // `_rotate_machine_token` (`device.py:112-129`): revoke every live
     // token for the pair, then mint.
     pidash_services::domain::tokens::revoke_tokens_for_device_pair(
-        &mut **tx,
+        &pidash_db::orm_tx::TxConn::new(tx),
         workspace_id,
         params.dev_machine_id,
         now,
@@ -824,7 +836,7 @@ async fn exchange_in_transaction(
     );
     let token_id = Uuid::new_v4();
     pidash_services::domain::tokens::insert_machine_token(
-        &mut **tx,
+        &pidash_db::orm_tx::TxConn::new(tx),
         &pidash_services::domain::tokens::NewMachineToken {
             id: token_id,
             user_id,
@@ -844,9 +856,14 @@ async fn exchange_in_transaction(
     // callers, keep machine-token callers on their rotation
     // (`device.py:466-467`).
     if let Caller::Api { raw: bridge, .. } = caller {
-        if cli_token::deactivate_api_token(&mut **tx, Some(bridge), true, now)
-            .await
-            .is_err()
+        if cli_token::deactivate_api_token(
+            &pidash_db::orm_tx::TxConn::new(tx),
+            Some(bridge),
+            true,
+            now,
+        )
+        .await
+        .is_err()
         {
             return Err(Failure::server_error().into_response());
         }
@@ -875,7 +892,7 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
             // `machine_token.revoke()`: no-op when already revoked, else
             // stamp `revoked_at` (`runner/models.py:865-869`).
             if pidash_services::domain::tokens::revoke_machine_token_by_id_if_active(
-                &pool,
+                &pidash_db::pool::sea_orm_connection(&pool),
                 token_id,
                 Utc::now(),
             )
@@ -905,7 +922,7 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
             };
             if let Some((id, true)) = row {
                 if pidash_services::domain::tokens::deactivate_api_token_by_id(
-                    &pool,
+                    &pidash_db::pool::sea_orm_connection(&pool),
                     id,
                     Utc::now(),
                 )
