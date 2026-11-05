@@ -322,9 +322,34 @@ def test_legacy_machine_availability_follows_desktop_endpoints(db, client, creat
     assert legacy.engine_sign_in_state == EngineSignInState.NEVER
 
 
-def test_merge_requires_a_session(db, merge_setup):
+def _merge_with_token(token, source, target):
+    return _client(bearer=token).post(
+        reverse("runner:dev-machine-merge-into", kwargs={"dev_machine_id": source.id}),
+        {"target_dev_machine_id": str(target.id)},
+        format="json",
+    )
+
+
+def test_merge_with_a_machine_token_only_into_its_own_machine(db, create_user, workspace, merge_setup):
     s = merge_setup
-    resp = _client(bearer=s["mt_source"]).post(
+    # The old machine's token cannot pull itself into another machine.
+    assert _merge_with_token(s["mt_source"], s["source"], s["target"]).status_code == 403
+    # Nor can a third machine's token merge into the target.
+    third = DevMachine.objects.create(owner=create_user, host_label="third")
+    assert _merge_with_token(_mint_mt(create_user, workspace, third), s["source"], s["target"]).status_code == 403
+    s["loser"].refresh_from_db()
+    assert s["loser"].revoked_at is None
+    # The target's own token (`pidash auth login` on the computer it now
+    # serves) may: the CLI's "Replace it".
+    resp = _merge_with_token(_mint_mt(create_user, workspace, s["target"]), s["source"], s["target"])
+    assert resp.status_code == 200, resp.data
+    s["own"].refresh_from_db()
+    assert s["own"].dev_machine_id == s["target"].id
+
+
+def test_merge_needs_authentication(db, merge_setup):
+    s = merge_setup
+    resp = _client().post(
         reverse("runner:dev-machine-merge-into", kwargs={"dev_machine_id": s["source"].id}),
         {"target_dev_machine_id": str(s["target"].id)},
         format="json",

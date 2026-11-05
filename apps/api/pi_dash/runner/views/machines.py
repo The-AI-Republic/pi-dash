@@ -16,8 +16,10 @@ Daemon-facing (``/api/v1/runner/``):
 - ``GET dev-machines/<id>/replace-candidates/`` — machine token of that
   machine, or the owner's session. The "Is this <label>? Replace it"
   prompt after a sign-in that created a new machine.
-- ``POST dev-machines/<source-id>/merge-into/`` — the owner's session.
-  Merge a replaced or legacy machine into the one now serving the computer.
+- ``POST dev-machines/<source-id>/merge-into/`` — the owner's session, or
+  the machine token of the *target* (the machine now serving the computer,
+  so ``pidash auth login`` can offer "Replace it" too). Merge a replaced or
+  legacy machine into that one.
 
 Web (``/api/runners/``):
 
@@ -181,8 +183,9 @@ class DevMachineMergeEndpoint(APIView):
     """``POST dev-machines/<source-id>/merge-into/`` with
     ``{"target_dev_machine_id": "<uuid>"}`` (``target`` accepted too)."""
 
-    authentication_classes = [BaseSessionAuthentication]
+    authentication_classes = [MachineTokenAuthentication, BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]
+    throttle_classes: list = []
 
     def post(self, request, dev_machine_id):
         target_id = str(request.data.get("target_dev_machine_id") or request.data.get("target") or "").strip()
@@ -192,6 +195,12 @@ class DevMachineMergeEndpoint(APIView):
             target_id = str(_uuid.UUID(target_id))
         except ValueError:
             return Response({"error": "invalid_target_dev_machine_id"}, status=status.HTTP_400_BAD_REQUEST)
+        # A machine token may only merge into its own machine: the computer
+        # it serves is the one that replaces the old machine (§4.10). The
+        # old machine's token, or a third machine's, is refused.
+        token = getattr(request, "auth_machine_token", None)
+        if token is not None and str(token.dev_machine_id) != target_id:
+            return Response({"error": "dev_machine_mismatch"}, status=status.HTTP_403_FORBIDDEN)
         try:
             result = merge_dev_machine(user=request.user, source_id=dev_machine_id, target_id=target_id)
         except MergeError as exc:
