@@ -157,20 +157,6 @@ function sessionHistoryItem(session: IAgentChatSession, activeId: string | undef
 }
 
 /**
- * What the agent is *doing*, for the activity strip — or `null` to show
- * nothing.
- *
- * Only work the user would otherwise not see: commands run, files edited,
- * approvals, failures, warnings. Lifecycle narration ("session started",
- * "working…", "replying") is deliberately absent: a modern agent UI shows a
- * busy indicator and its tool calls, not a running commentary, and the strip
- * showing it was the original complaint in a prettier form.
- *
- * Engine frames the daemon does not classify arrive as `kind: "raw"` with the
- * real method inside the payload, which is why this reads the payload rather
- * than the kind.
- */
-/**
  * Shown when a runner refuses a chat because an issue run holds its working
  * folder. Server-routed chat shares that folder with the runner's runs, so a
  * busy runner answers `runner_busy` instead of chatting (design
@@ -186,6 +172,20 @@ export function runnerBusyMessage(event: IAgentChatEvent): string | null {
   return code === "runner_busy" ? RUNNER_BUSY_MESSAGE : null;
 }
 
+/**
+ * What the agent is *doing*, for the activity strip — or `null` to show
+ * nothing.
+ *
+ * Only work the user would otherwise not see: commands run, files edited,
+ * approvals, failures, warnings. Lifecycle narration ("session started",
+ * "working…", "replying") is deliberately absent: a modern agent UI shows a
+ * busy indicator and its tool calls, not a running commentary, and the strip
+ * showing it was the original complaint in a prettier form.
+ *
+ * Engine frames the daemon does not classify arrive as `kind: "raw"` with the
+ * real method inside the payload, which is why this reads the payload rather
+ * than the kind.
+ */
 export function engineActivityLabel(event: IAgentChatEvent): string | null {
   if (runnerBusyMessage(event)) return "Runner busy with an issue run";
   if (event.kind !== "raw") {
@@ -532,8 +532,10 @@ const RunnerChatPage = observer(function RunnerChatPage() {
         setPendingApproval(null);
       }
       // A busy runner turned the message down; say why rather than "Failed".
+      // Only for live frames: the stream replays the session's history from
+      // the start, and an old refusal must not reappear after the run ended.
       const busy = runnerBusyMessage(event);
-      if (busy) setStreamError(busy);
+      if (busy && isRealtimeEvent(event, streamStartedAtRef.current)) setStreamError(busy);
       if (["turn_started", "turn_completed", "chat_failed", "chat_closed", "chat_warmed"].includes(event.kind)) {
         mutateSessions();
         mutateMessages();
