@@ -733,4 +733,130 @@ mod tests {
             .expect("miss is Ok");
         assert_eq!(assigned, 0);
     }
+
+    /// Drain selects against temp copies on one transaction
+    /// (`TxConn`): the by-id lookups, the idle lock, the next-run
+    /// claim (pinned first), and the assign write.
+    #[tokio::test]
+    async fn live_drain_selects_on_temp_tables() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("pool connects");
+        let mut tx = pool.begin().await.expect("begin");
+        for table in [
+            "runner",
+            "pod",
+            "agent_run",
+            "issues",
+            "issue_assignees",
+            "scheduler_bindings",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        let (runner_id, pod_id, owner, ws, creator, pinned_id, queued_id) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let now = chrono::Utc::now();
+        sqlx::query(&format!(
+            "INSERT INTO pod (id, name, description, is_default, created_at, updated_at, workspace_id, project_id) \
+             VALUES ('{pod_id}', 'main', '', true, now(), now(), '{ws}', '{ws}')"
+        ))
+        .execute(&mut *tx).await.expect("seed pod");
+        sqlx::query(&format!(
+            "INSERT INTO runner (id, name, capabilities, status, os, arch, runner_version, protocol_version, created_at, updated_at, owner_id, workspace_id, pod_id, host_label, refresh_token_hash, refresh_token_fingerprint, refresh_token_generation, previous_refresh_token_hash, access_token_signing_key_version, enrollment_token_hash, enrollment_token_fingerprint, revoked_reason, visibility, dev_metadata, provisioning, last_heartbeat_at) \
+             VALUES ('{runner_id}', 'r', '{{}}', 'online', '', '', '', 4, now(), now(), '{owner}', '{ws}', '{pod_id}', '', '', '', 0, '', 1, '', '', '', 0, '{{}}', 'manual', now())"
+        ))
+        .execute(&mut *tx).await.expect("seed runner");
+        let pinned_sql = format!("'{runner_id}'");
+        for (id, pinned_runner, created_ago) in [
+            (queued_id, "NULL".to_owned(), "interval '2 hours'"),
+            (pinned_id, pinned_sql, "interval '1 hour'"),
+        ] {
+            sqlx::query(&format!(
+                "INSERT INTO agent_run (id, status, prompt, run_config, required_capabilities, thread_id, created_at, assigned_at, workspace_id, pod_id, created_by_id, owner_id, llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason, tool_plan, phase_kind, agent_metadata, usage, error_details, pinned_runner_id) \
+                 VALUES ('{id}', 'queued', 'p', '{{}}', '{{}}', '', now() - {created_ago}, now(), '{ws}', '{pod_id}', '{creator}', '{owner}', '', 'manual', 'local_runner', 0, '', '{{}}', 'main', '{{}}', '{{}}', '{{}}', {pinned_runner})"
+            ))
+            .execute(&mut *tx).await.expect("seed agent_run");
+        }
+        {
+            let conn = TxConn::new(&mut tx);
+            assert_eq!(
+                runner_by_id_select(runner_id)
+                    .one(&conn)
+                    .await
+                    .expect("by-id")
+                    .expect("row"),
+                runner_id
+            );
+            assert_eq!(
+                pod_by_id_select(pod_id)
+                    .one(&conn)
+                    .await
+                    .expect("by-id")
+                    .expect("row"),
+                pod_id
+            );
+            assert!(pod_by_id_select(Uuid::new_v4())
+                .one(&conn)
+                .await
+                .expect("miss")
+                .is_none());
+            let threshold = now - chrono::Duration::seconds(90);
+            let locked = drain_for_runner_lock_select(threshold, runner_id)
+                .one(&conn)
+                .await
+                .expect("lock")
+                .expect("row");
+            assert_eq!(locked.id, runner_id);
+            let idle: Vec<_> = drain_pod_idle_runners_select(threshold, pod_id)
+                .all(&conn)
+                .await
+                .expect("idle");
+            assert_eq!(idle.len(), 1);
+            // Pinned-to-me beats the older unpinned run (FIFO inside tiers).
+            let next =
+                next_for_runner_select(pod_id, runner_id, owner, "manual", VISIBILITY_PRIVATE)
+                    .expect("private => Some")
+                    .one(&conn)
+                    .await
+                    .expect("next")
+                    .expect("row");
+            assert_eq!(next.id, pinned_id);
+            // Non-private runners issue no query (`qs.none()` arm).
+            assert!(next_for_runner_select(
+                pod_id,
+                runner_id,
+                owner,
+                "manual",
+                VISIBILITY_PRIVATE + 1
+            )
+            .is_none());
+            assert_eq!(
+                assign_run_update_statement(pinned_id, runner_id, owner, now)
+                    .exec(&conn)
+                    .await
+                    .expect("assign")
+                    .rows_affected,
+                1
+            );
+        }
+        tx.rollback().await.expect("rollback");
+    }
 }

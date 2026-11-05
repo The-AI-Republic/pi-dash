@@ -1030,4 +1030,138 @@ mod tests {
         assert!(outcome.cancelled_run_ids.is_empty());
         assert!(outcome.drained_pod_ids.is_empty());
     }
+
+    /// S1–S4 performers + finalize kernel against temp copies on one
+    /// transaction (`TxConn`): the cascade reads and writes land.
+    #[tokio::test]
+    async fn live_revoke_performers_on_temp_tables() {
+        let Some(pool) = crate::read::test_support::pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        for table in ["runner", "agent_run"] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        sqlx::query(
+            "CREATE TEMP TABLE agent_run_event (LIKE public.agent_run_event INCLUDING DEFAULTS INCLUDING IDENTITY) ON COMMIT DROP",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("temp table");
+        let (runner_id, pod_id, queued, running, pinned, terminal) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (owner, ws, creator) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let now = chrono::Utc::now();
+        sqlx::query(&format!(
+            "INSERT INTO runner (id, name, capabilities, status, os, arch, runner_version, protocol_version, created_at, updated_at, owner_id, workspace_id, pod_id, host_label, refresh_token_hash, refresh_token_fingerprint, refresh_token_generation, previous_refresh_token_hash, access_token_signing_key_version, enrollment_token_hash, enrollment_token_fingerprint, revoked_reason, visibility, dev_metadata, provisioning) \
+             VALUES ('{runner_id}', 'r', '{{}}', 'online', '', '', '', 4, now(), now(), '{owner}', '{ws}', '{pod_id}', '', '', '', 0, '', 1, '', '', '', 0, '{{}}', 'manual')"
+        ))
+        .execute(&mut *tx)
+        .await
+        .expect("seed runner");
+        for (id, status, pinned_runner, assigned_at) in [
+            (queued, "queued", Some(runner_id), "now()"),
+            (running, "running", None, "now()"),
+            (pinned, "queued", Some(runner_id), "now()"),
+            (terminal, "completed", None, "NULL"),
+        ] {
+            let pinned_sql = pinned_runner.map_or("NULL".to_owned(), |p| format!("'{p}'"));
+            let runner_sql = if pinned_runner.is_some() {
+                let r = format!("'{runner_id}'");
+                r
+            } else if id == running {
+                format!("'{runner_id}'")
+            } else {
+                "NULL".to_owned()
+            };
+            sqlx::query(&format!(
+                "INSERT INTO agent_run (id, status, prompt, run_config, required_capabilities, thread_id, created_at, assigned_at, workspace_id, runner_id, pod_id, created_by_id, llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason, tool_plan, phase_kind, agent_metadata, usage, error_details, pinned_runner_id) \
+                 VALUES ('{id}', '{status}', '', '{{}}', '{{}}', '', now(), {assigned_at}, '{ws}', {runner_sql}, '{pod_id}', '{creator}', '', 'manual', 'local_runner', 0, '', '{{}}', 'main', '{{}}', '{{}}', '{{}}', {pinned_sql})"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("seed agent_run");
+        }
+        {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            // S1.
+            stamp_runner_revoked(&conn, runner_id, now, "manual_revoke")
+                .await
+                .expect("S1");
+            // S3 sees the two non-terminal runner runs (plus queued pinned
+            // runs are runner runs only when runner_id matches; the pinned
+            // unpinned-run with NULL runner is excluded).
+            let locked = lock_active_runs(&conn, runner_id).await.expect("S3");
+            let mut locked_ids: Vec<Uuid> = locked.iter().map(|(id, _)| *id).collect();
+            locked_ids.sort_unstable();
+            let mut want = vec![queued, running, pinned];
+            want.sort_unstable();
+            assert_eq!(locked_ids, want);
+            // S4a: queued runs pinned to the runner (queued + pinned).
+            let pinned_ids = pinned_queued_pod_ids(&conn, runner_id).await.expect("S4a");
+            assert_eq!(pinned_ids.len(), 2);
+            // Finalize lock: the queued run locks; the terminal run misses.
+            let run = lock_run_for_finalize(&conn, queued, None, None)
+                .await
+                .expect("lock")
+                .expect("row");
+            assert_eq!(run.status, "queued");
+            assert!(lock_run_for_finalize(&conn, terminal, None, None)
+                .await
+                .expect("lock")
+                .is_none());
+            // Finalize update writes status + ended_at.
+            let values = FinalizeValues {
+                clauses: vec![
+                    crate::runner_runs::SetClause {
+                        column: "status",
+                        value: crate::runner_runs::SetValue::Text("cancelled".to_owned()),
+                    },
+                    crate::runner_runs::SetClause {
+                        column: "ended_at",
+                        value: crate::runner_runs::SetValue::Now,
+                    },
+                ],
+            };
+            let rows = finalize_update(&conn, &values, queued, now)
+                .await
+                .expect("finalize");
+            assert_eq!(rows, 1);
+            // Terminal event is idempotent: insert once, exists + max seq.
+            assert!(!terminal_event_exists(&conn, queued).await.expect("exists"));
+            assert_eq!(
+                terminal_event_max_seq(&conn, queued).await.expect("max"),
+                None
+            );
+            let plan = plan_terminal_event(None, AgentRunStatus::Cancelled, "runner_revoked");
+            insert_terminal_event_orm(&conn, queued, plan, now)
+                .await
+                .expect("insert terminal");
+            assert!(terminal_event_exists(&conn, queued).await.expect("exists"));
+            assert_eq!(
+                terminal_event_max_seq(&conn, queued).await.expect("max"),
+                Some(1)
+            );
+            // S4b unpins every queued run pinned to the runner.
+            unpin_queued_runs_for_runner(&conn, runner_id)
+                .await
+                .expect("S4b");
+            assert!(pinned_queued_pod_ids(&conn, runner_id)
+                .await
+                .expect("S4a after")
+                .is_empty());
+        }
+        tx.rollback().await.expect("rollback");
+    }
 }

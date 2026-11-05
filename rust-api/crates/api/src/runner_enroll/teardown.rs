@@ -3191,4 +3191,118 @@ mod tests {
         deduped.dedup();
         assert_eq!(deduped.len(), reasons.len());
     }
+
+    /// Pause/resume + pin-release against temp copies on one transaction
+    /// (`TxConn`): the pause stamp, the in-flight body read, the pin
+    /// ids + re-lock + clears, and the resume stamp.
+    #[tokio::test]
+    async fn live_pause_resume_on_temp_tables() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect");
+        let mut tx = pool.begin().await.expect("begin");
+        for table in ["runner", "agent_run"] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        let (runner_id, pod_id, user_id, ws, creator, busy_id, pin_id, parent_id) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let now = chrono::Utc::now();
+        sqlx::query(&format!(
+            "INSERT INTO runner (id, name, capabilities, status, os, arch, runner_version, protocol_version, created_at, updated_at, owner_id, workspace_id, pod_id, host_label, refresh_token_hash, refresh_token_fingerprint, refresh_token_generation, previous_refresh_token_hash, access_token_signing_key_version, enrollment_token_hash, enrollment_token_fingerprint, revoked_reason, visibility, dev_metadata, provisioning) \
+             VALUES ('{runner_id}', 'r', '{{}}', 'online', '', '', '', 4, now(), now(), '{user_id}', '{ws}', '{pod_id}', '', '', '', 0, '', 1, '', '', '', 0, '{{}}', 'manual')"
+        ))
+        .execute(&mut *tx).await.expect("seed runner");
+        sqlx::query(&format!(
+            "INSERT INTO agent_run (id, status, prompt, run_config, required_capabilities, thread_id, created_at, assigned_at, workspace_id, runner_id, pod_id, created_by_id, llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason, tool_plan, phase_kind, agent_metadata, usage, error_details) \
+             VALUES ('{busy_id}', 'running', '', '{{}}', '{{}}', '', now(), now(), '{ws}', '{runner_id}', '{pod_id}', '{creator}', '', 'manual', 'local_runner', 0, '', '{{}}', 'main', '{{}}', '{{}}', '{{}}')"
+        ))
+        .execute(&mut *tx).await.expect("seed busy run");
+        sqlx::query(&format!(
+            "INSERT INTO agent_run (id, status, prompt, run_config, required_capabilities, thread_id, created_at, assigned_at, workspace_id, pod_id, created_by_id, llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason, tool_plan, phase_kind, agent_metadata, usage, error_details, parent_run_id) \
+             VALUES ('{parent_id}', 'completed', '', '{{}}', '{{}}', 'parent-thread', now(), NULL, '{ws}', '{pod_id}', '{creator}', '', 'manual', 'local_runner', 0, '', '{{}}', 'main', '{{}}', '{{}}', '{{}}', NULL)"
+        ))
+        .execute(&mut *tx).await.expect("seed parent run");
+        sqlx::query(&format!(
+            "INSERT INTO agent_run (id, status, prompt, run_config, required_capabilities, thread_id, created_at, assigned_at, workspace_id, pod_id, created_by_id, llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason, tool_plan, phase_kind, agent_metadata, usage, error_details, pinned_runner_id, parent_run_id) \
+             VALUES ('{pin_id}', 'queued', '', '{{}}', '{{}}', '', now(), now(), '{ws}', '{pod_id}', '{creator}', '', 'manual', 'local_runner', 0, '', '{{}}', 'main', '{{}}', '{{}}', '{{}}', '{runner_id}', '{parent_id}')"
+        ))
+        .execute(&mut *tx).await.expect("seed pinned run");
+        {
+            let conn = TxConn::new(&mut tx);
+            // Pause stamps the runner and the in-flight read sees the busy run.
+            assert_eq!(
+                pause_runner_statement(runner_id, user_id, now)
+                    .exec(&conn)
+                    .await
+                    .expect("pause")
+                    .rows_affected,
+                1
+            );
+            let inflight: Vec<(Uuid, String)> = in_flight_runs_select(runner_id)
+                .all(&conn)
+                .await
+                .expect("in-flight");
+            assert_eq!(inflight, vec![(busy_id, "running".to_owned())]);
+            // Pin ids, re-lock with the parent's thread, then the clears.
+            let ids: Vec<Uuid> = paused_runner_pin_ids_select(runner_id)
+                .all(&conn)
+                .await
+                .expect("pin ids");
+            assert_eq!(ids, vec![pin_id]);
+            let row = paused_runner_pin_lock_select(pin_id)
+                .one(&conn)
+                .await
+                .expect("pin lock")
+                .expect("row");
+            assert_eq!(row.pod_id, pod_id);
+            assert_eq!(row.parent_run_id, Some(parent_id));
+            assert_eq!(row.parent_thread_id.as_deref(), Some("parent-thread"));
+            assert_eq!(
+                clear_parent_thread_statement(parent_id)
+                    .exec(&conn)
+                    .await
+                    .expect("clear parent")
+                    .rows_affected,
+                1
+            );
+            assert_eq!(
+                clear_pin_statement(pin_id)
+                    .exec(&conn)
+                    .await
+                    .expect("clear pin")
+                    .rows_affected,
+                1
+            );
+            assert!(paused_runner_pin_ids_select(runner_id)
+                .all(&conn)
+                .await
+                .expect("pin ids after")
+                .is_empty());
+            // Resume clears the stamps.
+            assert_eq!(
+                resume_runner_statement(runner_id, now)
+                    .exec(&conn)
+                    .await
+                    .expect("resume")
+                    .rows_affected,
+                1
+            );
+        }
+        tx.rollback().await.expect("rollback");
+    }
 }

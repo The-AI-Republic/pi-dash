@@ -440,6 +440,131 @@ pub mod runner_session {
 
         // (The touch SQL pin moved with the statement to
         // `pidash_services::domain::tokens`.)
+
+        /// SeaORM twins against constraint-free temp copies on one
+        /// transaction (`TxConn`): the active/open/delete/poll reads
+        /// and the machine open-insert/revoke/touch writes.
+        #[tokio::test]
+        async fn live_session_twins_on_temp_tables() {
+            use sea_orm::EntityTrait;
+
+            let Ok(url) = std::env::var("DATABASE_URL") else {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                return;
+            };
+            let pool = sqlx::PgPool::connect(&url).await.expect("connect");
+            let mut tx = pool.begin().await.expect("begin");
+            for table in ["runner_session", "machine_session"] {
+                sqlx::query(&format!(
+                    "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM public.{table} WITH NO DATA"
+                ))
+                .execute(&mut *tx)
+                .await
+                .expect("temp table");
+            }
+            let (runner, session, other) = (
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+            );
+            let now = chrono::Utc::now();
+            sqlx::query(&format!(
+                "INSERT INTO runner_session (id, runner_id, protocol_version, created_at, last_seen_at, revoked_at, revoked_reason) VALUES \
+                 ('{session}', '{runner}', 4, '{now}', '{now}', NULL, ''), \
+                 ('{other}', '{runner}', 4, '{now}', '{now}', '{now}', 'evicted_by_new_session')"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("seed runner_session");
+            {
+                let conn = crate::orm_tx::TxConn::new(&mut tx);
+                // `active_select` carries only the newest active row; the
+                // revoked row is invisible.
+                let active = active_select(runner)
+                    .one(&conn)
+                    .await
+                    .expect("active")
+                    .expect("row");
+                assert_eq!(active.id, session);
+                let prior = open_prior_select(runner)
+                    .one(&conn)
+                    .await
+                    .expect("prior")
+                    .expect("row");
+                assert_eq!(prior.id, session);
+                let fetched = delete_get_select(session, runner)
+                    .one(&conn)
+                    .await
+                    .expect("delete get")
+                    .expect("row");
+                assert_eq!(fetched.id, session);
+                // Poll has no revoked_at filter: the revoked row is fetched.
+                let polled = poll_get_select(other, runner)
+                    .one(&conn)
+                    .await
+                    .expect("poll get")
+                    .expect("row");
+                assert_eq!(polled.revoked_reason, "evicted_by_new_session");
+                let mapped = runner_session_from_model(active);
+                assert_eq!(mapped.id, session);
+
+                // Machine twin: insert via SeaORM, touch, revoke, reads.
+                let machine = uuid::Uuid::new_v4();
+                let msid = uuid::Uuid::new_v4();
+                crate::entity::machine_session::Entity::insert(
+                    crate::runner_sessions::models::machine_session::open_insert_row(
+                        msid, machine, now, now,
+                    ),
+                )
+                .exec_without_returning(&conn)
+                .await
+                .expect("machine insert");
+                let mprior =
+                    crate::runner_sessions::models::machine_session::open_prior_select(machine)
+                        .one(&conn)
+                        .await
+                        .expect("machine prior")
+                        .expect("row");
+                assert_eq!(mprior.id, msid);
+                let later = chrono::Utc::now();
+                crate::runner_sessions::models::machine_session::touch_statement(msid, later)
+                    .exec(&conn)
+                    .await
+                    .expect("machine touch");
+                let mtouched =
+                    crate::runner_sessions::models::machine_session::poll_get_select(machine, msid)
+                        .one(&conn)
+                        .await
+                        .expect("machine poll")
+                        .expect("row");
+                assert!(mtouched.last_seen_at.unwrap() >= later - chrono::Duration::seconds(1));
+                crate::runner_sessions::models::machine_session::revoke_statement(
+                    msid,
+                    later,
+                    "clean_shutdown",
+                )
+                .exec(&conn)
+                .await
+                .expect("machine revoke");
+                assert!(
+                    crate::runner_sessions::models::machine_session::delete_get_select(
+                        machine, msid
+                    )
+                    .one(&conn)
+                    .await
+                    .expect("machine delete")
+                    .is_none()
+                );
+                let mrevoked =
+                    crate::runner_sessions::models::machine_session::poll_get_select(machine, msid)
+                        .one(&conn)
+                        .await
+                        .expect("machine poll revoked")
+                        .expect("row");
+                assert_eq!(mrevoked.revoked_reason, "clean_shutdown");
+            }
+            tx.rollback().await.expect("rollback");
+        }
     }
 }
 

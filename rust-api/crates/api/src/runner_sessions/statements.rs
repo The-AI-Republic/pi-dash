@@ -680,7 +680,7 @@ mod tests {
         assert_eq!(
             snapshot,
             "SELECT \"runner\".\"last_heartbeat_at\", \"runner\".\"status\" FROM \"runner\" WHERE \
-             \"runner\".\"id\" = '00000000-0000-0000-0000-000000000000' LIMIT 1 FOR UPDATE"
+             \"runner\".\"id\" = '00000000-0000-0000-0000-000000000000' FOR UPDATE"
         );
         let update = pg_update(heartbeat_update_statement(Uuid::nil(), at(), "busy"));
         assert!(update.starts_with(
@@ -839,10 +839,314 @@ mod tests {
         assert!(scoped.contains("\"agent_chat_message\".\"status\" = 'streaming'"));
         assert!(scoped.contains("\"agent_chat_message\".\"local_turn_id\" = 't1'"));
         assert!(scoped.ends_with("ORDER BY \"agent_chat_message\".\"created_at\" DESC LIMIT 1"));
-        assert!(!pg_select(assistant_fallback_select(Uuid::nil())).contains("local_turn_id"));
+        // The fallback projects every column (including local_turn_id
+        // in the SELECT list) but never predicates on it.
+        let fallback = pg_select(assistant_fallback_select(Uuid::nil()));
+        assert!(fallback.contains("\"agent_chat_message\".\"local_turn_id\""));
+        assert!(!fallback.contains("\"agent_chat_message\".\"local_turn_id\" = "));
         let seq = pg_selector(next_event_seq_select(Uuid::nil()));
         assert!(seq.starts_with(
             "SELECT MAX(\"agent_chat_event\".\"seq\") AS \"seq__max\" FROM \"agent_chat_event\" WHERE"
         ), "{seq}");
+    }
+
+    async fn live_pool() -> Option<sqlx::PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return None;
+        };
+        Some(sqlx::PgPool::connect(&url).await.expect("connect"))
+    }
+
+    /// Session statements against temp copies on one transaction
+    /// (`TxConn`): hello/presence/heartbeat, the reaper scans + barrier,
+    /// live-state, open lookups, and the chat release writes.
+    #[tokio::test]
+    async fn live_statements_on_temp_tables() {
+        use sea_orm::EntityTrait;
+
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        for table in [
+            "runner",
+            "pod",
+            "projects",
+            "agent_run",
+            "runner_live_state",
+            "agent_chat_session",
+            "agent_chat_message",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        for table in ["agent_run_event", "agent_chat_event"] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} (LIKE public.{table} INCLUDING DEFAULTS INCLUDING IDENTITY) ON COMMIT DROP"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        let (runner_id, pod_id, project_id, ws, owner) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let now = chrono::Utc::now();
+        let seed_runner = format!(
+            "INSERT INTO runner (id, name, capabilities, status, os, arch, runner_version, protocol_version, created_at, updated_at, owner_id, workspace_id, pod_id, host_label, refresh_token_hash, refresh_token_fingerprint, refresh_token_generation, previous_refresh_token_hash, access_token_signing_key_version, enrollment_token_hash, enrollment_token_fingerprint, revoked_reason, visibility, dev_metadata, provisioning, last_heartbeat_at) \
+             VALUES ('{runner_id}', 'r', '{{}}', 'online', '', '', '', 4, now(), now(), '{owner}', '{ws}', '{pod_id}', '', '', '', 0, '', 1, '', '', '', 0, '{{}}', 'manual', now())"
+        );
+        sqlx::query(&seed_runner)
+            .execute(&mut *tx)
+            .await
+            .expect("seed runner");
+        sqlx::query(&format!(
+            "INSERT INTO projects (id, created_at, updated_at, name, description, network, identifier, workspace_id, cycle_view, module_view, issue_views_view, page_view, intake_view, archive_in, close_in, logo_props) \
+             VALUES ('{project_id}', now(), now(), 'Proj', '', 0, 'PRJ', '{ws}', false, false, false, false, false, 0, 0, '{{}}')"
+        ))
+        .execute(&mut *tx).await.expect("seed project");
+        sqlx::query(&format!(
+            "INSERT INTO pod (id, name, description, is_default, created_at, updated_at, workspace_id, project_id) \
+             VALUES ('{pod_id}', 'main', '', true, now(), now(), '{ws}', '{project_id}')"
+        ))
+        .execute(&mut *tx).await.expect("seed pod");
+        let (stale_id, fresh_id) = (Uuid::new_v4(), Uuid::new_v4());
+        for (id, assigned_at, status) in [
+            (stale_id, "now() - interval '2 hours'", "cancel_requested"),
+            (fresh_id, "now()", "running"),
+        ] {
+            sqlx::query(&format!(
+                "INSERT INTO agent_run (id, status, prompt, run_config, required_capabilities, thread_id, created_at, assigned_at, workspace_id, runner_id, pod_id, created_by_id, llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason, tool_plan, phase_kind, agent_metadata, usage, error_details) \
+                 VALUES ('{id}', '{status}', 'p', '{{}}', '{{}}', '', now(), {assigned_at}, '{ws}', '{runner_id}', '{pod_id}', '{owner}', '', 'manual', 'local_runner', 0, '', '{{}}', 'main', '{{}}', '{{}}', '{{}}')"
+            ))
+            .execute(&mut *tx).await.expect("seed agent_run");
+        }
+        sqlx::query(&format!(
+            "INSERT INTO agent_run_event (seq, kind, payload, created_at, agent_run_id) VALUES (3, 'terminal', '{{}}', now(), '{stale_id}')"
+        ))
+        .execute(&mut *tx).await.expect("seed event");
+        let (session_id, message_id, creator) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        sqlx::query(&format!(
+            "INSERT INTO agent_chat_session (id, status, agent_kind, local_thread_id, local_session_id, cwd, model, active_turn_id, close_requested, error, created_at, updated_at, created_by_id, pod_id, runner_id, workspace_id) \
+             VALUES ('{session_id}', 'open', 'claude', '', '', '', '', 'turn-1', false, '', now(), now(), '{creator}', '{pod_id}', '{runner_id}', '{ws}')"
+        ))
+        .execute(&mut *tx).await.expect("seed chat session");
+        sqlx::query(&format!(
+            "INSERT INTO agent_chat_message (id, role, content, content_parts, status, local_item_id, local_turn_id, seq, created_at, session_id) \
+             VALUES ('{message_id}', 'assistant', 'hi', '[]', 'streaming', 'it-1', 'turn-1', 1, now(), '{session_id}')"
+        ))
+        .execute(&mut *tx).await.expect("seed chat message");
+
+        {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            // Hello update writes the planned SET clauses.
+            let hello = hello_update_statement(
+                &[SetClause {
+                    column: "os",
+                    value: SetValue::Text("linux".to_owned()),
+                }],
+                runner_id,
+                now,
+            )
+            .expect("hello");
+            assert_eq!(
+                hello.exec(&conn).await.expect("hello exec").rows_affected,
+                1
+            );
+            // Offline marker skips revoked rows (online runner goes offline).
+            assert_eq!(
+                mark_runner_offline_statement(runner_id)
+                    .exec(&conn)
+                    .await
+                    .expect("offline")
+                    .rows_affected,
+                1
+            );
+            // Heartbeat snapshot + write.
+            let snapshot = heartbeat_snapshot_select(runner_id)
+                .one(&conn)
+                .await
+                .expect("snapshot")
+                .expect("row");
+            assert_eq!(snapshot.1, "offline");
+            assert_eq!(
+                heartbeat_update_statement(runner_id, now, "online")
+                    .exec(&conn)
+                    .await
+                    .expect("heartbeat")
+                    .rows_affected,
+                1
+            );
+            // Reaper scans find only the stale counter-requested run.
+            let statuses = [AgentRunStatus::Running, AgentRunStatus::CancelRequested];
+            let cutoff = now - chrono::Duration::hours(1);
+            let ids: Vec<Uuid> = stale_cancel_ids_select(cutoff, runner_id, &statuses, None)
+                .all(&conn)
+                .await
+                .expect("stale ids");
+            assert_eq!(ids, vec![stale_id]);
+            let pairs: Vec<(Uuid, Option<Uuid>)> =
+                stale_pairs_select(cutoff, runner_id, &statuses, None, &[])
+                    .all(&conn)
+                    .await
+                    .expect("stale pairs");
+            assert_eq!(pairs.len(), 1);
+            assert_eq!(
+                cancel_barrier_update_statement(now, &[stale_id])
+                    .exec(&conn)
+                    .await
+                    .expect("barrier")
+                    .rows_affected,
+                1
+            );
+            let claim = in_flight_claim_select(fresh_id, runner_id)
+                .one(&conn)
+                .await
+                .expect("claim")
+                .expect("row");
+            assert_eq!(claim.0, "running");
+            // Live-state insert + observed read + typed update.
+            runner_live_state::Entity::insert(live_state_insert_row(runner_id, now))
+                .exec_without_returning(&conn)
+                .await
+                .expect("live insert");
+            assert_eq!(
+                live_state_observed_select(runner_id)
+                    .one(&conn)
+                    .await
+                    .expect("observed")
+                    .expect("row"),
+                None
+            );
+            assert_eq!(
+                live_state_update_statement(
+                    vec![(runner_live_state::Column::TurnCount, Expr::val(3i32).into(),)],
+                    runner_id,
+                    now,
+                )
+                .exec(&conn)
+                .await
+                .expect("live update")
+                .rows_affected,
+                1
+            );
+            // Open lookups: slug join + ack + last seq.
+            let slug = resolve_runner_slug_select(runner_id)
+                .one(&conn)
+                .await
+                .expect("slug")
+                .expect("row");
+            assert_eq!((slug.0, slug.1.as_deref()), (pod_id, Some("PRJ")));
+            let ack = resume_ack_lookup_select(fresh_id, runner_id)
+                .one(&conn)
+                .await
+                .expect("ack")
+                .expect("row");
+            assert_eq!(ack.0, "running");
+            assert_eq!(
+                last_event_seq_select(stale_id)
+                    .one(&conn)
+                    .await
+                    .expect("seq")
+                    .expect("row"),
+                3
+            );
+            assert!(redeliver_cancel_select(runner_id, None)
+                .one(&conn)
+                .await
+                .expect("redeliver")
+                .is_none());
+            // Chat release: ids, lock, scoped probes, writes, event seq.
+            let chat_ids: Vec<Uuid> = active_chat_session_ids_select(runner_id)
+                .all(&conn)
+                .await
+                .expect("chat ids");
+            assert_eq!(chat_ids, vec![session_id]);
+            let locked = session_lock_open_select(session_id)
+                .one(&conn)
+                .await
+                .expect("lock")
+                .expect("row");
+            assert_eq!(locked.id, session_id);
+            assert!(finalize_explicit_lookup_select(session_id, message_id)
+                .one(&conn)
+                .await
+                .expect("explicit")
+                .is_some());
+            assert!(assistant_turn_scoped_select(session_id, "turn-1")
+                .one(&conn)
+                .await
+                .expect("scoped")
+                .is_some());
+            assert!(assistant_fallback_select(session_id)
+                .one(&conn)
+                .await
+                .expect("fallback")
+                .is_some());
+            let update = MessageStatusUpdate {
+                id: message_id,
+                status: AgentChatMessageStatus::Completed,
+                completed_at: now,
+            };
+            assert_eq!(
+                message_status_update_statement(&update)
+                    .exec(&conn)
+                    .await
+                    .expect("msg update")
+                    .rows_affected,
+                1
+            );
+            let plan = FailTurnPlan {
+                finalize: pidash_services::runner_runs::chat::FinalizePlan {
+                    updates: Vec::new(),
+                    returned_message_id: None,
+                },
+                session_error: "boom".to_owned(),
+                close_session: false,
+                closed_at: None,
+                events: Vec::new(),
+                queue_drain: false,
+            };
+            let _ = fail_session_update_statement(session_id, &plan, now)
+                .exec(&conn)
+                .await
+                .expect("fail session");
+            assert_eq!(
+                next_event_seq_select(session_id)
+                    .one(&conn)
+                    .await
+                    .expect("next seq")
+                    .expect("row"),
+                None
+            );
+            let inputs = NewEventInputs {
+                source_key: "k".to_owned(),
+                kind: "chat_added".to_owned(),
+                payload: serde_json::json!({}),
+                message_id: Some(message_id),
+            };
+            insert_event_statement(session_id, 1, &inputs, now)
+                .exec_without_returning(&conn)
+                .await
+                .expect("insert event");
+            assert_eq!(
+                next_event_seq_select(session_id)
+                    .one(&conn)
+                    .await
+                    .expect("next seq")
+                    .expect("row"),
+                Some(1)
+            );
+        }
+        tx.rollback().await.expect("rollback");
     }
 }
