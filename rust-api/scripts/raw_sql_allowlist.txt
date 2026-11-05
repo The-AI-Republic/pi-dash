@@ -95,7 +95,7 @@ crates/api/src/middleware/session.rs 5
 crates/api/src/orchestration.rs 5
 crates/api/src/prompting/mod.rs 35
 crates/api/src/runner_enroll/delete_cmds.rs 1
-crates/api/src/runner_enroll/teardown.rs 24
+crates/api/src/runner_enroll/teardown.rs 10
 crates/api/src/runner_runs/approvals.rs 1
 crates/api/src/runner_runs/chat.rs 84
 crates/api/src/runner_runs/dispatch.rs 17
@@ -192,7 +192,7 @@ crates/jobs/src/oss_worker/execute_seams.rs 6
 crates/jobs/src/oss_worker/model_runtime/invoke.rs 1
 crates/jobs/src/oss_worker/model_runtime/tools_exec.rs 57
 crates/jobs/src/queue.rs 11
-crates/jobs/src/runner_enroll.rs 32
+crates/jobs/src/runner_enroll.rs 5
 crates/jobs/src/runner_runs/offline_recovery.rs 15
 crates/jobs/src/runner_runs/sweeps_chat.rs 43
 crates/jobs/src/runner_runs/sweeps_runs.rs 12
@@ -251,7 +251,7 @@ crates/services/src/read/relations.rs 1
 crates/services/src/read/search.rs 1
 crates/services/src/read/work_items.rs 20
 crates/services/src/read/workspace.rs 3
-crates/services/src/runner_enroll/revoke.rs 3
+crates/services/src/runner_enroll/revoke.rs 1
 crates/services/src/runner_runs/chat.rs 2
 crates/services/src/runner_runs/finalization.rs 1
 crates/services/src/runner_sessions/live_drains.rs 9
