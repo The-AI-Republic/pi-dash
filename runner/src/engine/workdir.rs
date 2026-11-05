@@ -182,6 +182,24 @@ fn looks_removable_or_network(path: &Path) -> bool {
             .any(|p| s.starts_with(p))
 }
 
+/// Allocate and create the folder of a new engine runner for `project` in
+/// `workspace` under the configured task root (design §10). Used by every
+/// path that turns the engine on for a project: `EngineRunnerAdd`,
+/// `pidash runner add --agent engine`, machine control's `create_runner`
+/// and the reconcile's re-add.
+pub fn allocate_engine_folder(
+    paths: &Paths,
+    workspace: &str,
+    project: &str,
+) -> anyhow::Result<PathBuf> {
+    let cfg = crate::config::file::load_config(paths)?;
+    let root = task_root(paths, &cfg);
+    let dir = allocate_working_dir(&root, workspace, project, &cfg)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| anyhow::anyhow!("creating {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
 /// A safe single path component from a slug or project identifier.
 fn component(raw: &str, fallback: &str) -> String {
     let out: String = raw

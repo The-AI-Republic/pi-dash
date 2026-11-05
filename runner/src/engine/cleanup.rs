@@ -3,11 +3,66 @@
 //! `pidash update` leaves the previous engine version directory in place
 //! (a daemon that resolved it at start may still be running it). Once the
 //! daemon runs a newer engine and no run uses the older directories, they
-//! can go. Not wired into the supervisor yet: the caller decides when no run
-//! uses a directory and passes that in as `in_use`.
+//! can go. The daemon calls [`cleanup_after_start`] from its reconcile tick
+//! (`daemon::engine_reconcile`) until it has run once with no run in flight;
+//! a directory a live process still executes from is kept
+//! ([`dir_in_use_by_a_process`]).
 
 use std::io;
 use std::path::{Path, PathBuf};
+
+/// The daemon's wiring: with the engine it resolved at start, remove the
+/// older versions beside it. `None` when there is nothing to do now: the
+/// engine is a config override (no version directory), or `busy` (a run or
+/// chat turn is in flight — the caller tries again later). `in_use` is asked
+/// per directory, as for [`remove_older_versions`].
+pub fn cleanup_after_start(
+    engine: &super::locate::ResolvedEngine,
+    busy: bool,
+    in_use: impl Fn(&Path) -> bool,
+) -> Option<io::Result<Vec<PathBuf>>> {
+    let version = engine.version.as_deref()?;
+    let version_dir = engine.binary.parent()?;
+    let root = version_dir.parent()?;
+    if busy {
+        return None;
+    }
+    Some(remove_older_versions(root, version, in_use))
+}
+
+/// Whether a running process executes a binary inside `dir` (Linux:
+/// `/proc/<pid>/exe`). Elsewhere `false`: every engine this daemon starts
+/// is the running version, and the service manager stops the previous
+/// daemon's agents with it.
+pub fn dir_in_use_by_a_process(dir: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return false;
+        };
+        let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if !name
+                .to_str()
+                .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+            {
+                continue;
+            }
+            if let Ok(exe) = std::fs::read_link(entry.path().join("exe"))
+                && exe.starts_with(&dir)
+            {
+                return true;
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = dir;
+        false
+    }
+}
 
 /// Remove every `<root>/<version>/` whose version is older than `running`
 /// and for which `in_use` returns false. Entries that are not version
@@ -132,6 +187,50 @@ mod tests {
                 .is_empty()
         );
         assert!(staging.exists() && odd.exists());
+    }
+
+    #[test]
+    fn daemon_wiring_removes_old_versions_beside_the_resolved_engine() {
+        use super::super::locate::{EngineSource, Layout, ResolvedEngine};
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("lib/pidash/engine");
+        let old = version_dir(&root, "0.150.0");
+        let running = version_dir(&root, "0.153.4");
+        let engine = ResolvedEngine {
+            binary: running.join("pidash-agent-engine"),
+            version: Some("0.153.4".into()),
+            source: EngineSource::Installed(Layout::UnixLib),
+        };
+        // A run in flight: nothing yet.
+        assert!(cleanup_after_start(&engine, true, |_| false).is_none());
+        assert!(old.exists());
+        // A process still executing the old engine keeps it.
+        let kept = cleanup_after_start(&engine, false, |d| d == old)
+            .unwrap()
+            .unwrap();
+        assert!(kept.is_empty() && old.exists());
+        // Idle: the old version goes, the running one stays.
+        let removed = cleanup_after_start(&engine, false, |_| false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(removed, vec![old.clone()]);
+        assert!(!old.exists() && running.exists());
+        // A config override has no version directory to clean beside.
+        let custom = ResolvedEngine {
+            binary: running.join("pidash-agent-engine"),
+            version: None,
+            source: EngineSource::ConfigOverride,
+        };
+        assert!(cleanup_after_start(&custom, false, |_| false).is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_running_test_binary_counts_as_in_use() {
+        let exe = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        assert!(dir_in_use_by_a_process(exe.parent().unwrap()));
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!dir_in_use_by_a_process(tmp.path()));
     }
 
     #[test]

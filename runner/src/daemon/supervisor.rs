@@ -171,6 +171,9 @@ impl Supervisor {
         });
         let spawn_ctx = RunnerSpawnCtx {
             engine: engine.clone(),
+            local_chat: Arc::new(crate::ipc::engine_chat::EngineChatProfile::new(
+                config.daemon.dev_machine_id,
+            )),
             transport: transport.clone(),
             tokens: tokens.clone(),
             paths: paths.clone(),
@@ -181,6 +184,7 @@ impl Supervisor {
             instances: ipc_instances.clone(),
             tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             activation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            engine_ops_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         let ipc = IpcServer {
@@ -252,6 +256,21 @@ impl Supervisor {
             }
         };
 
+        // Engine reconcile (design §5): at start and every 10 minutes,
+        // drop engine blocks whose server row is revoked and re-add this
+        // machine's live engine rows that have no block. The same tick
+        // removes engine versions older than the running one once no run
+        // can be using them (design §4.5).
+        let reconcile_handle = if opts.offline {
+            None
+        } else {
+            let ctx = spawn_ctx.clone();
+            let shutdown = state.shutdown_notified();
+            Some(tokio::spawn(async move {
+                crate::daemon::engine_reconcile::run(ctx, shutdown).await
+            }))
+        };
+
         // Wake from sleep / network change: retry every cloud connection
         // now instead of waiting out a backoff of up to 6 hours.
         let triggers_handle = if opts.offline {
@@ -314,6 +333,9 @@ impl Supervisor {
         if let Some(h) = engine_handle {
             h.abort();
         }
+        if let Some(h) = reconcile_handle {
+            h.abort();
+        }
         ipc_handle.abort();
         Ok(())
     }
@@ -374,6 +396,8 @@ async fn build_runner_instance(
 pub(crate) struct RunnerSpawnCtx {
     /// The machine's built-in engine (PIDESKAPP-121).
     pub(crate) engine: Arc<crate::engine::manager::EngineManager>,
+    /// The machine-level engine profile local chat runs on (design §12.1).
+    pub(crate) local_chat: Arc<crate::ipc::engine_chat::EngineChatProfile>,
     transport: Option<SharedHttpTransport>,
     /// Workspace → dev-machine token (design §4.9). Replaces the single
     /// `shared_machine_token`; shared with the machine control session.
@@ -390,6 +414,10 @@ pub(crate) struct RunnerSpawnCtx {
     tasks: Arc<std::sync::Mutex<HashMap<uuid::Uuid, SpawnedInstanceTasks>>>,
     /// Serialises every add / stop / restart of a runner.
     activation_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serialises turning the engine on for a project (`EngineRunnerAdd`,
+    /// machine control's engine `create_runner`) with the engine reconcile,
+    /// so a row created a moment ago is never taken for one with no block.
+    pub(crate) engine_ops_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// How long a stopped runner's HTTP loops get to exit before they are
@@ -728,6 +756,54 @@ impl RunnerSpawnCtx {
 
     pub(crate) fn cloud_url(&self) -> String {
         self.daemon.cloud_url.clone()
+    }
+
+    /// The dev machine this daemon is (`[daemon].dev_machine_id`).
+    pub(crate) fn dev_machine_id(&self) -> Option<uuid::Uuid> {
+        self.daemon.dev_machine_id
+    }
+
+    /// Every runner the daemon hosts right now.
+    pub(crate) fn running_instances(&self) -> Vec<RunnerInstance> {
+        self.all_instances()
+    }
+
+    /// Tear `inst` down locally (no cloud call): the same teardown the
+    /// cloud's `remove_runner` frame triggers — cancel its run, strip its
+    /// block, delete its data dir (its working dir is kept). Returns once
+    /// it is out of the registry, so a re-add of the same id cannot race.
+    pub(crate) async fn remove_runner_locally(
+        &self,
+        inst: &RunnerInstance,
+        reason: &str,
+    ) -> Result<()> {
+        use anyhow::Context as _;
+        let envelope = crate::cloud::protocol::Envelope::for_runner(
+            inst.runner_id,
+            ServerMsg::RemoveRunner {
+                runner_id: inst.runner_id,
+                reason: Some(reason.to_string()),
+            },
+        );
+        inst.mailbox_tx
+            .send(InboundEnvelope {
+                stream_id: None,
+                env: envelope,
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "delivering synthesized RemoveRunner to {:?} mailbox (loop may have already exited)",
+                    inst.name
+                )
+            })?;
+        if !self
+            .wait_runner_removed(inst.runner_id, RUNNER_REMOVE_WAIT)
+            .await
+        {
+            anyhow::bail!("runner {:?} did not finish its teardown in time", inst.name);
+        }
+        Ok(())
     }
 
     /// Cut reconnect waits short and restart the backoff schedule
@@ -4589,7 +4665,11 @@ mod tests {
                 tokens.clone(),
                 None,
             ),
+            local_chat: Arc::new(crate::ipc::engine_chat::EngineChatProfile::new(
+                daemon.dev_machine_id,
+            )),
             transport,
+
             tokens,
             paths: paths.clone(),
             daemon,
@@ -4627,6 +4707,7 @@ mod tests {
                 insts.iter().map(|i| (i.runner_id, (*i).clone())).collect(),
             )),
             activation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            engine_ops_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 

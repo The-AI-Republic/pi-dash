@@ -21,6 +21,7 @@ impl RunnerSpawnCtx {
         project: String,
         working_dir: Option<PathBuf>,
     ) -> Result<EngineRunnerInfo> {
+        let _engine_ops = self.engine_ops_lock.lock().await;
         let status = self.engine.status();
         let req = AddEngineRunner {
             workspace,
@@ -61,6 +62,27 @@ impl RunnerSpawnCtx {
                 )
             })?;
         Ok((block.runner_id, token))
+    }
+
+    /// `EngineSetPaused`: set the owner's pause switch on the server with a
+    /// live daemon credential, cache the answer and report the new state.
+    pub(crate) async fn engine_set_paused(
+        &self,
+        paused: bool,
+    ) -> Result<crate::ipc::protocol::EngineStatusInfo> {
+        let machine_id = self
+            .dev_machine_id()
+            .context("this computer has no dev-machine id yet; run `pidash auth login`")?;
+        let (_, token) = self
+            .tokens
+            .session_candidates()
+            .into_iter()
+            .next()
+            .context("this computer holds no daemon credential; run `pidash auth login`")?;
+        self.engine
+            .set_paused(&token, machine_id, paused)
+            .await
+            .map_err(|e| anyhow::anyhow!("the server did not change the engine pause: {e}"))
     }
 
     /// `EngineSettingsGet`.
