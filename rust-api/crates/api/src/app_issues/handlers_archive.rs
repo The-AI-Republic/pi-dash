@@ -65,7 +65,7 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -93,12 +93,11 @@ use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
 use pidash_types::orchestration::StateRef;
 
-use super::queries_core::{archive_retrieve_sql, archive_scope_where, ARCHIVE_JOINS};
+use super::queries_core::archive_retrieve_sql;
 use super::{
-    actor_user_id, alias_nullable_only, annotation_selects, complex_filter, denial_from_param,
-    fetch_json_rows, flat_paginated_response, group_join_alias, grouped_response, json_response,
-    legacy_sql, multi_map, order_key, query_last, render_condition, resolve_project_id, Binder,
-    Denial, FilteredSet, Gate, HandlerResult, ListContext, QueryMap, RELATION_JOINS,
+    actor_user_id, denial_from_param, fetch_json_rows, flat_paginated_response, grouped_response,
+    json_response, multi_map, query_last, resolve_project_id, Binder, Denial, Gate, HandlerResult,
+    ListContext, QueryMap,
 };
 use crate::domain_hooks::AppTaskEnqueueHook;
 use crate::issue_transition::AppTransitionHook;
@@ -320,7 +319,7 @@ pub async fn archived_list(
     }
     let show_sub_issues = query_last(&query, "show_sub_issues").as_deref() == Some("true")
         || query_last(&query, "show_sub_issues").is_none();
-    let filtered = archive_filtered_set(
+    let set = super::list_engine::archive_issue_set(
         &context.gate,
         &context.slug,
         &query,
@@ -335,13 +334,12 @@ pub async fn archived_list(
     // (empty counts render `NULL`), so its count keys order `NULL`-style.
     // Its `FROM` always carries the unfiltered `issue_cycle` bridge join,
     // which the cycle-name traversal reuses like Django.
-    let key = order_key(
+    let key = super::list_engine::order_expr(
         &order_spec.out_param,
         &params.order_by,
         Some("issue_cycle"),
         true,
     )?;
-    let direction = if key.descending { "DESC" } else { "ASC" };
     let per_page = params.per_page;
     let cursor = crate::paginator::Cursor::from_string(&params.cursor_raw)
         .map_err(|error| Denial::BadDetail(error.detail()))?;
@@ -363,125 +361,28 @@ pub async fn archived_list(
     if let Some(group) = group_by.clone() {
         return grouped_response(
             &list_context,
-            &filtered,
+            &set,
             &group,
             sub_group_by.clone(),
-            &key.expr,
-            direction,
+            &key,
             per_page,
             cursor,
-            &key.joins,
         )
         .await;
     }
-    let selects = annotation_selects(true, None, false, true, false);
     let fields = on_results_fields(None, None);
     flat_paginated_response(
         &list_context,
-        &filtered,
-        &key.expr,
-        direction,
+        &set,
+        &key,
         per_page,
         cursor,
-        selects,
+        super::LIST_ANNOTATIONS,
         fields,
         false,
         None,
-        &key.joins,
     )
     .await
-}
-
-/// The filtered archived set: [`archive_scope_where`] plus the
-/// `show_sub_issues` top-level filter, then the same rich + legacy
-/// stacks and relation joins as [`super::filtered_set`]. The `states`
-/// join serves `state__group` grouping/ordering with Django's auto-join
-/// semantics (no soft-delete guard); there is no `projects` join (the
-/// archive scope never filters on it, and no filter leaf references it).
-fn archive_filtered_set(
-    gate: &Gate,
-    slug: &str,
-    query: &QueryMap,
-    group_by: Option<&str>,
-    sub_group_by: Option<&str>,
-    show_sub_issues: bool,
-) -> Result<FilteredSet, Denial> {
-    let mut binder = Binder::new();
-    let mut preamble = archive_scope_where(&mut binder, slug, gate.project_id);
-    if !show_sub_issues {
-        preamble.push_str(" AND issue.parent_id IS NULL");
-    }
-    let mut fragments: Vec<String> = vec![preamble];
-    let mut complex_sql = String::new();
-    if let Some(cond) = complex_filter(query, &gate.timezone)? {
-        let (fragment, values) = render_condition(&cond);
-        complex_sql = binder.splice(&fragment, values);
-    }
-    let flat: HashMap<String, String> = query
-        .keys()
-        .filter_map(|key| query_last(query, key).map(|last| (key.clone(), last)))
-        .collect();
-    let today = chrono::Utc::now().date_naive();
-    let legacy = pidash_db::issue_filters::issue_filters_get(&flat, "", today)
-        .map_err(|_| Denial::ServerError)?;
-    let mut legacy_sql_text = String::new();
-    for (name, value) in legacy.predicates() {
-        // The archive view shares the issue viewset's `TimezoneMixin`:
-        // `__date` terms truncate in the actor zone.
-        let fragment = legacy_sql(&mut binder, name, value, &gate.timezone)?;
-        if legacy_sql_text.is_empty() {
-            legacy_sql_text = fragment;
-        } else {
-            legacy_sql_text = format!("{legacy_sql_text} AND {fragment}");
-        }
-    }
-    if !complex_sql.is_empty() {
-        fragments.push(complex_sql);
-    }
-    if !legacy_sql_text.is_empty() {
-        fragments.push(legacy_sql_text);
-    }
-    let where_sql = fragments.join(" AND ");
-    let mut joins = String::new();
-    let mut referenced = Vec::new();
-    for (table, alias, key_column) in RELATION_JOINS {
-        let marker = format!("\"{alias}\".");
-        let mentioned = where_sql.contains(&marker);
-        let nullable_only = mentioned && alias_nullable_only(&where_sql, alias);
-        let used = mentioned || group_join_alias(group_by, sub_group_by, alias);
-        let inner = used && !nullable_only || group_join_alias(group_by, sub_group_by, alias);
-        if used {
-            referenced.push(*alias);
-        }
-        let kind = if inner { "INNER JOIN" } else { "LEFT JOIN" };
-        joins.push_str(&format!(
-            " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
-        ));
-        let _ = key_column;
-    }
-    let intake_used = where_sql.contains("\"issue_intake\".");
-    joins.push_str(&format!(
-        " {} intake_issues AS issue_intake ON issue_intake.issue_id = issue.id",
-        if intake_used {
-            "INNER JOIN"
-        } else {
-            "LEFT JOIN"
-        }
-    ));
-    if intake_used {
-        referenced.push("issue_intake");
-    }
-    let from_where = format!(
-        "{ARCHIVE_JOINS} \
-        LEFT JOIN states AS state ON state.id = issue.state_id \
-        {joins} \
-        WHERE {where_sql}"
-    );
-    Ok(FilteredSet {
-        from_where,
-        values: binder.values(),
-        referenced,
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2009,18 +1910,21 @@ mod tests {
             guest_scoped: false,
         };
         let query = QueryMap::new();
-        let filtered =
-            archive_filtered_set(&gate, "ws", &query, None, None, true).expect("filtered");
-        assert!(filtered
-            .from_where
-            .contains("issue.archived_at IS NOT NULL"));
-        assert!(filtered.from_where.contains("issue_types.is_epic"));
-        assert!(filtered.from_where.contains("LEFT JOIN states AS state"));
-        assert!(!filtered.from_where.contains("project.archived_at"));
-        assert!(!filtered.from_where.contains("issue.parent_id IS NULL"));
-        let filtered =
-            archive_filtered_set(&gate, "ws", &query, None, None, false).expect("filtered");
-        assert!(filtered.from_where.contains("issue.parent_id IS NULL"));
+        let render = |show: bool| {
+            let mut stmt =
+                super::super::list_engine::archive_issue_set(&gate, "ws", &query, None, None, show)
+                    .expect("filtered")
+                    .select();
+            stmt.expr(sea_query::Expr::val(1));
+            stmt.to_string(sea_query::PostgresQueryBuilder)
+        };
+        let sql = render(true);
+        assert!(sql.contains(r#""issue"."archived_at" IS NOT NULL"#));
+        assert!(sql.contains(r#""issue_types"."is_epic""#));
+        assert!(sql.contains(r#"LEFT JOIN "states" AS "state""#));
+        assert!(!sql.contains(r#""project"."archived_at""#));
+        assert!(!sql.contains(r#""issue"."parent_id" IS NULL"#));
+        assert!(render(false).contains(r#""issue"."parent_id" IS NULL"#));
     }
 
     /// FX-ISS-21 archive row: the save fires the receivers and they no-op
