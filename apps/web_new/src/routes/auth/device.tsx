@@ -9,7 +9,7 @@ import { ToastHost } from "@pidash/kit";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import * as React from "react";
 
-import { decidePageGate, loadGateInputs, ONBOARDING_PATH } from "../../core/session/index.js";
+import { decidePageGate, isOnboardedProfile, loadGateInputs, ONBOARDING_PATH } from "../../core/session/index.js";
 import { asString } from "../../features/auth/entrySearch.js";
 import { DeviceApprovalCard } from "../../features/auth/components/DeviceApprovalCard.js";
 import { getToastManager, useSessionExpiredRedirect } from "../../shared/shell/index.js";
@@ -27,7 +27,7 @@ export const Route = createFileRoute("/auth/device")({
     const decision = decidePageGate({
       page: "signed-in-only",
       signedIn: me !== null,
-      onboarded: profile?.is_onboarded ?? false,
+      onboarded: isOnboardedProfile(profile),
       hasPassword: me?.is_password_autoset === false,
       currentPath: location.href,
     });

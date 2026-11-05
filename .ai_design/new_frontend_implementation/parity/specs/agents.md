@@ -64,7 +64,8 @@ members and guests all read the list. The single read is `GET
 `schedulers-catalog/catalog.spec.ts`. (AGT-001)
 
 Creation opens from the catalog header action into a definition dialog with
-name, handle, description, base prompt, color and enabled flag. A valid
+name, handle, description, base prompt, color and enabled flag. The color
+field offers the 16 preset swatches with the first as the default. A valid
 submit persists through `POST /api/workspaces/{slug}/schedulers/`, refreshes
 the list and shows a success notice. Invalid input is rejected inline, a
 backend failure surfaces its field detail, and the dialog stays open on

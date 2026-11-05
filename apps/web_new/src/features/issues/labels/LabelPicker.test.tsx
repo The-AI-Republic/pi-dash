@@ -351,3 +351,19 @@ describe("LabelPicker chrome", () => {
     expect(screen.getByTestId("label-picker-trigger")).toHaveAttribute("aria-label", "Sidebar labels");
   });
 });
+
+describe("LabelPicker chip", () => {
+  it("shows the property name while empty and the count once set", () => {
+    setup({}, { value: [], chip: true, emptyText: "Labels" });
+    const empty = screen.getByRole("button", { name: "Labels" });
+    expect(empty).toHaveTextContent("Labels");
+    expect(empty.querySelector("svg")).not.toBeNull();
+  });
+
+  it("counts the selection in the chip", () => {
+    setup({}, { value: [AID, BID], chip: true, emptyText: "Labels" });
+    const chip = screen.getByRole("button", { name: "Labels: 2 selected" });
+    expect(chip).toHaveTextContent("2 selected");
+    expect(chip).toHaveAttribute("title", "2 selected");
+  });
+});

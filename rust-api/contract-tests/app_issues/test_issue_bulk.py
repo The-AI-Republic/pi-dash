@@ -50,7 +50,10 @@ def _drain_broker():
         return []
     from _harness import broker_probe
 
-    return broker_probe.drain_queue()
+    # Drain to empty: the matrix runs workerless, so every earlier test's
+    # .delay() piles up on the broker and the default 100-message cap
+    # would stop short of this test's job (oldest first).
+    return broker_probe.drain_queue(limit=10000)
 
 
 def _rust_rows(db_conn, task, after_id):

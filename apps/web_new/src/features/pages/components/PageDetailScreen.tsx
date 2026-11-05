@@ -258,7 +258,8 @@ export function PageDetailScreen({
     [mark]
   );
   // The rename path hands the title's committed value straight to the
-  // mutation; `mutate` is stable, so the header does not re-render for it.
+  // mutation. The commit is bound to the page open now, so the blur the
+  // route fires while leaving a page still renames that page.
   const saveName = rename.mutate;
 
   // The pane reads the canvas, so headings, counts and assets follow

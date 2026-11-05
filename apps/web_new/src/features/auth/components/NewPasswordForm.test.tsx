@@ -43,6 +43,9 @@ describe("NewPasswordForm", () => {
     await user.type(secret, "abcdefgh");
     expect(screen.getByText("Weak password — add mixed case, numbers, or symbols.")).toBeInTheDocument();
     await user.clear(secret);
+    await user.type(secret, "Password1");
+    expect(screen.getByText("Weak password — add mixed case, numbers, or symbols.")).toBeInTheDocument();
+    await user.clear(secret);
     await user.type(secret, STRONG);
     expect(screen.queryByText(/at least 8 characters|Weak password/)).toBeNull();
   });
@@ -93,6 +96,12 @@ describe("NewPasswordForm", () => {
     expect(submit).toBeDisabled();
     await user.type(screen.getByLabelText("New password"), "abcdefgh");
     await user.type(screen.getByLabelText("Confirm password"), "abcdefgh");
+    expect(submit).toBeDisabled();
+
+    await user.clear(screen.getByLabelText("New password"));
+    await user.clear(screen.getByLabelText("Confirm password"));
+    await user.type(screen.getByLabelText("New password"), "Password1");
+    await user.type(screen.getByLabelText("Confirm password"), "Password1");
     expect(submit).toBeDisabled();
 
     await user.clear(screen.getByLabelText("New password"));

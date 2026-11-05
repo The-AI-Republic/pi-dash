@@ -11,7 +11,6 @@
 // (NEWFRONT-285/286/287) extend this content without touching the
 // shell contract.
 
-import { Kbd } from "@pidash/kit";
 import { Blocks, FileText, House } from "lucide-react";
 import * as React from "react";
 
@@ -213,9 +212,6 @@ export function Sidebar({
       {projectsGroup}
       {moreGroup}
       {favoritesGroup}
-      <p className="text-caption flex items-center gap-(--space-2) px-(--space-2) text-(--text-muted)">
-        Commands <Kbd keys={["mod", "K"]} />
-      </p>
     </SidebarShell>
   );
 }

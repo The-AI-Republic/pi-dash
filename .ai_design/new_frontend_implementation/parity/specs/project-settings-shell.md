@@ -36,12 +36,14 @@ observed end states.
 
 Sidebar entries are plain navigation links to slash-terminated
 addresses built from the workspace slug, the project id, and a per-tab
-suffix. The live highlight marks an entry active by matching the
-current path against a pattern that requires the trailing slash (the
-General entry uses an exact comparison). Slash-form addresses highlight
-correctly. The equivalent slashless deep link renders the same tab with
-nothing marked — pinned as bug NEWFRONT-396, including the bare-path
-forward landing unhighlighted (see PSET-002).
+suffix. On the old app the live highlight marks an entry active by
+matching the current path against a pattern that requires the trailing
+slash (the General entry uses an exact comparison): slash-form
+addresses highlight correctly, while the equivalent slashless deep link
+renders the same tab with nothing marked — pinned as bug NEWFRONT-396,
+including the bare-path forward landing unhighlighted (see PSET-002).
+On the new surface the bug is fixed: the tab's own address highlights
+in either slash form.
 
 Role filtering removes entries instead of disabling them. Every tab
 carries a list of permitted project roles; the sidebar keeps only
@@ -91,8 +93,9 @@ Every tab renders at its own suffixed address beneath
 `/github` (shown as Repository), `/schedulers`, `/features/cycles`,
 `/features/modules`, `/features/views`, `/features/pages` and
 `/features/intake`. Sidebar links always use the slash-terminated
-form; typed slashless forms render the same tab content minus the
-highlight (the NEWFRONT-396 bug above). States, labels and members
+form; typed slashless forms render the same tab content, and on the new
+surface highlight the same tab too (on the old app minus the highlight —
+the NEWFRONT-396 bug above). States, labels and members
 have no per-record addresses. A legacy redirect maps the retired
 per-project settings prefix onto the workspace settings route while
 preserving the trailing suffix, so old bookmarks land on the same tab.

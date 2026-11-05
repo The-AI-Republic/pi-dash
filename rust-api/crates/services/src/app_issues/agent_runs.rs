@@ -153,24 +153,23 @@ pub struct IssueAgentRuns {
 }
 
 /// Latest run, active run and count for one issue, over the request's pool
-/// (SeaORM wraps it; no new connection). An issue without runs costs one
-/// query. Otherwise the count runs alongside the latest read, and when the
-/// newest run is itself active it is also the newest active run, so the
-/// active read is skipped.
+/// (SeaORM wraps it; no new connection). The reads run one after another on
+/// one connection at a time: an issue without runs costs one query; with
+/// runs, the count follows, and the active read is skipped when the newest
+/// run is itself active (it is then also the newest active run).
 pub async fn issue_agent_runs(
     pool: &sqlx::PgPool,
     issue_id: Uuid,
 ) -> Result<IssueAgentRuns, DbErr> {
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let (latest, count) =
-        tokio::try_join!(newest_run(&db, issue_id, false), run_count(&db, issue_id))?;
-    let Some(latest) = latest else {
+    let Some(latest) = newest_run(&db, issue_id, false).await? else {
         return Ok(IssueAgentRuns {
             latest: None,
             active: None,
-            count,
+            count: 0,
         });
     };
+    let count = run_count(&db, issue_id).await?;
     let active = if ACTIVE_RUN_STATUSES.contains(&latest.status.as_str()) {
         Some(latest.clone())
     } else {

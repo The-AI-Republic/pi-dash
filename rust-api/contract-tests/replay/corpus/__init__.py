@@ -32,6 +32,7 @@ from . import (
     v1_assets,
     v1_cycles_modules,
     v1_projects,
+    v1_schedulers,
     v1_work_items,
 )
 
@@ -63,6 +64,7 @@ ALL_SESSIONS = [
     *v1_assets.SESSIONS,
     *v1_cycles_modules.SESSIONS,
     *v1_projects.SESSIONS,
+    *v1_schedulers.SESSIONS,
     *v1_work_items.SESSIONS,
 ]
 

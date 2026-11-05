@@ -39,3 +39,32 @@ def reset_throttle_key(key: str) -> None:
     import redis
 
     redis.Redis.from_url(url, socket_timeout=5).delete(key)
+
+
+def seed_throttle_window(
+    rdb,
+    scope: str,
+    ident: str,
+    *,
+    age_secs: float = 0.2,
+    count: int = 30,
+    window_secs: int = 60,
+) -> float:
+    """Seed a full throttle window so the next request is denied with a known wait.
+
+    Writes ``count`` identical timestamps ``age_secs`` old, so the true wait
+    is ``window_secs - age_secs`` (fractional): DRF answers
+    ``Retry-After: ceil(wait)``. Both backend key formats are written — the
+    Django ``django_redis`` pickle under the ``:1:`` version prefix and the
+    Rust compact-JSON float array — because the two never collide and the
+    suite runs against either backend. Returns the seeded timestamp.
+    """
+    import json
+    import pickle
+    import time
+
+    t0 = time.time() - age_secs
+    history = [t0] * count
+    rdb.set(f"throttle_{scope}_{ident}", json.dumps(history), ex=window_secs)
+    rdb.set(f":1:throttle_{scope}_{ident}", pickle.dumps(history), ex=window_secs)
+    return t0

@@ -13,6 +13,7 @@ import { Cloud, Container, Monitor, Server } from "lucide-react";
 import * as React from "react";
 
 import { useWorkspace } from "../../core/session/hooks.js";
+import { PropertyChip } from "./PropertyChip.js";
 import {
   buildExecutionTargets,
   executionSelectionId,
@@ -39,6 +40,10 @@ export interface PodPickerProps {
   variant?: ButtonVariant;
   /** Default trigger shows the glyph without the name. */
   iconOnly?: boolean;
+  /** Compact chip trigger for the create dialog's property row. */
+  chip?: boolean;
+  /** Accessible property name; the chip reads "Runs on: Local pod" when set. */
+  label?: string | undefined;
   /** Fully custom trigger; overrides the default value button. */
   trigger?: React.ReactElement<Record<string, unknown>>;
   /** Default trigger text when nothing is selected. */
@@ -138,6 +143,8 @@ export function PodPicker({
   disabled = false,
   variant = "secondary",
   iconOnly = false,
+  chip = false,
+  label = "Runs on",
   trigger,
   placeholder = "Select target",
   preload = false,
@@ -191,6 +198,32 @@ export function PodPicker({
   function defaultTrigger(): React.ReactElement<Record<string, unknown>> {
     const text = selectTriggerText(value, targets, listsLoaded, placeholder);
     const glyph = selectionGlyph(value, targets);
+    if (chip) {
+      const filled = text !== placeholder;
+      const podName = selectTriggerPodName(value, targets);
+      const fullText = podName === null ? text : `${text} · ${podName}`;
+      return (
+        <PropertyChip
+          label={filled ? `${label}: ${fullText}` : label}
+          icon={glyph}
+          text={text}
+          placeholder={!filled}
+          {...(filled ? { title: fullText } : {})}
+          trailing={
+            <>
+              {podName === null ? null : (
+                <span className="text-caption min-w-0 truncate text-(--text-muted)">{podName}</span>
+              )}
+              {waitingLabel === undefined ? null : (
+                <Badge tone="warning" dot>
+                  {waitingLabel}
+                </Badge>
+              )}
+            </>
+          }
+        />
+      );
+    }
     if (iconOnly) {
       return (
         <IconButton label={text} variant={variant}>

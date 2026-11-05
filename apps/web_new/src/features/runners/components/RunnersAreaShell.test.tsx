@@ -25,6 +25,11 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 import { RUNNERS_DENIED_HEADING } from "./NotAuthorizedView.js";
 import { isProjectScope, RunnersAreaShell } from "./RunnersAreaShell.js";
 
+/** Class tokens that would fix an element's height instead of letting it stretch. */
+function heightPins(element: HTMLElement): string[] {
+  return Array.from(element.classList).filter((token) => /^(h|max-h)-/.test(token) || token === "self-start");
+}
+
 const runner = { id: "r-1", name: "alpha", status: "online", enrolled_at: null } as Runner;
 
 describe("isProjectScope", () => {
@@ -96,6 +101,50 @@ describe("RunnersAreaShell", () => {
     expect(main).toContainElement(screen.getByText("child"));
     expect(screen.getByTestId("runners-tabs")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Runs" })).toHaveAttribute("aria-current", "page");
+  });
+
+  // NEWPIDASH-3: the content main the area mounts into is a plain scroll
+  // box, so the area must be its own full-height column for the rail and
+  // the content pane to reach the bottom of the page.
+  it("lays the area out as a full-height column whose row stretches the rail and the content pane", () => {
+    render(
+      <RunnersAreaShell
+        scope={{ workspaceSlug: "acme", projectId: "p-1" }}
+        access="allowed"
+        runners={[runner]}
+        pathname="/acme/projects/p-1/runners"
+        chrome={<header>Project chrome</header>}
+      >
+        <p>child</p>
+      </RunnersAreaShell>
+    );
+    const area = screen.getByTestId("runners-area");
+    expect(area).toHaveClass("flex", "h-full", "min-h-0", "flex-col");
+    const [chromeSlot, row] = Array.from(area.children);
+    expect(chromeSlot).toHaveClass("shrink-0");
+    expect(chromeSlot).toContainElement(screen.getByText("Project chrome"));
+    expect(row).toBe(screen.getByTestId("runners-area-row"));
+    expect(row).toHaveClass("flex", "min-h-0", "flex-1", "overflow-hidden");
+    expect(row).not.toHaveClass("flex-col");
+    const rail = screen.getByTestId("runners-rail");
+    const main = screen.getByRole("main", { name: "AI Workers content" });
+    expect(Array.from(row!.children)).toEqual([rail, main]);
+    // Neither child pins its own height, so both stretch to the row's.
+    expect(rail).toHaveClass("min-h-0");
+    expect(heightPins(rail)).toEqual([]);
+    expect(main).toHaveClass("min-w-0", "flex-1", "overflow-auto");
+    expect(heightPins(main)).toEqual([]);
+  });
+
+  it("keeps the full-height column without chrome", () => {
+    render(
+      <RunnersAreaShell scope={{ workspaceSlug: "acme" }} access="allowed" runners={[]} pathname="/acme/runners">
+        <p>child</p>
+      </RunnersAreaShell>
+    );
+    const area = screen.getByTestId("runners-area");
+    expect(area).toHaveClass("flex", "h-full", "min-h-0", "flex-col");
+    expect(Array.from(area.children)).toEqual([screen.getByTestId("runners-area-row")]);
   });
 
   it("renders without chrome", () => {

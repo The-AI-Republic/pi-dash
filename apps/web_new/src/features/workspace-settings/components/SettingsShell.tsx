@@ -53,6 +53,10 @@ export function SettingsShell({
   // The sidebar names the integrations entry with its provider suffix
   // (§1); the frame and the tab title use the section name (§2).
   const frameTitle = section === "integrations" ? current.title : current.label;
+  // Wide sections skip the frame's centred column: the roster table, the
+  // plan grid with its comparison table, and the export form with its
+  // history table all need the full content width, as in the old app.
+  const fullWidth = section === "members" || section === "billing" || section === "exports";
 
   useDocumentHead({
     title: workspaceSettingsTitle({ workspaceName, section, webhookDetail }),
@@ -91,7 +95,9 @@ export function SettingsShell({
           activeLabel={webhookDetail ? "Webhook" : current.label}
           onNavigate={onNavigate}
         />
-        <SettingsPageFrame title={webhookDetail ? "Webhook" : frameTitle}>{body}</SettingsPageFrame>
+        <SettingsPageFrame title={webhookDetail ? "Webhook" : frameTitle} fullWidth={fullWidth}>
+          {body}
+        </SettingsPageFrame>
       </div>
     </div>
   );

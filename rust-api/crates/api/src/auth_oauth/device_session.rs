@@ -347,10 +347,12 @@ fn not_found(error: &str) -> Failure {
 // ---------------------------------------------------------------------------
 
 /// DRF `default_response_headers` `Allow` for the GET-owned view:
-/// `WorkspaceListEndpoint` defines only `get` (`device.py:395`), so
-/// `_allowed_methods` is `GET, OPTIONS` (plus the inherited DRF
-/// `options`; there is no `head`).
-const ALLOW_WORKSPACES: &str = "GET, OPTIONS";
+/// `WorkspaceListEndpoint` defines only `get` (`device.py:395`), but
+/// Django's `View.setup` binds `head = get` at request time, so the
+/// live `Allow` is `GET, HEAD, OPTIONS` (probed on the real view class,
+/// NEWPIDASH-31 — PIDASHCONV-1478 read `_allowed_methods` pre-setup and
+/// missed the binding).
+const ALLOW_WORKSPACES: &str = "GET, HEAD, OPTIONS";
 /// DRF `default_response_headers` `Allow` for the POST-owned views,
 /// which define only `post` (`device.py:417,496`).
 const ALLOW_POST_ONLY: &str = "POST, OPTIONS";
@@ -960,7 +962,7 @@ mod tests {
             not_allowed_body("DELETE"),
             r#"{"detail":"Method \"DELETE\" not allowed."}"#
         );
-        assert_eq!(ALLOW_WORKSPACES, "GET, OPTIONS");
+        assert_eq!(ALLOW_WORKSPACES, "GET, HEAD, OPTIONS");
         assert_eq!(ALLOW_POST_ONLY, "POST, OPTIONS");
     }
 

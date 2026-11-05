@@ -41,6 +41,21 @@ def test_known_failures_parses_entries_and_rejects_dupes(tmp_path):
         rust_matrix.known_failures(doc)
 
 
+def test_known_failures_accepts_any_project_key(tmp_path):
+    """Fix issues filed after the port live in NEWPIDASH (NEWPIDASH-25)."""
+    doc = tmp_path / "KNOWN_RUST_FAILURES.md"
+    doc.write_text(
+        "## Suites\n\n"
+        "- `app_issues`: NEWPIDASH-34 — new project\n"
+        "- `web_edge`: PIDASHCONV-823 — old project\n"
+        "- `loop`: pidash-1 — lowercase key is not an entry\n"
+    )
+    assert rust_matrix.known_failures(doc) == {
+        "app_issues": "NEWPIDASH-34",
+        "web_edge": "PIDASHCONV-823",
+    }
+
+
 def _verdict(**kw):
     args = {"suite": "app_issues", "django_exit": 0, "rust_exit": 0,
             "suites": SUITES, "known": {}}
@@ -106,4 +121,12 @@ def test_worker_suites_subset_of_matrix():
 def test_asgi_suites_subset_of_matrix():
     suites = rust_matrix.http_suites()
     for suite in rust_matrix.asgi_suites():
+        assert suite in suites
+
+
+def test_production_suites_subset_of_matrix():
+    suites = rust_matrix.http_suites()
+    production = rust_matrix.production_suites()
+    assert "prompting" in production
+    for suite in production:
         assert suite in suites

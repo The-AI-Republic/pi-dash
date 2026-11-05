@@ -573,16 +573,62 @@ struct GithubAuth {
     user_data: providers::ProviderUserData,
 }
 
+/// Test-only base URL for the four github OAuth endpoints (contract +
+/// unit stubs). Unset in production: both backends hardcode
+/// `https://github.com` / `https://api.github.com`, so without this the
+/// exchange legs are unstubbable (PIDASHCONV-1472 precedent:
+/// `PIDASH_GITHUB_API_BASE` for the job transports). When set — e.g. to
+/// `http://127.0.0.1:<stub-port>` — the token, userinfo, emails and
+/// org-membership URLs are built under it instead of the production
+/// hosts. Read per exchange, so contract servers pick it up from boot
+/// env.
+fn oauth_stub_base() -> Option<String> {
+    std::env::var("PIDASH_GITHUB_OAUTH_BASE")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// The four endpoint URLs for one exchange: the production consts by
+/// default, or stubbed under `oauth_base` when the test override is set
+/// (one stub serves all four paths).
+struct GithubUrls {
+    token: String,
+    userinfo: String,
+    emails: String,
+    org_membership_base: String,
+}
+
+fn github_urls(oauth_base: Option<&str>) -> GithubUrls {
+    match oauth_base {
+        Some(base) => {
+            let base = base.trim_end_matches('/');
+            GithubUrls {
+                token: format!("{base}/login/oauth/access_token"),
+                userinfo: format!("{base}/user"),
+                emails: format!("{base}/user/emails"),
+                org_membership_base: format!("{base}/orgs"),
+            }
+        }
+        None => GithubUrls {
+            token: providers::GITHUB_TOKEN_URL.to_owned(),
+            userinfo: providers::GITHUB_USERINFO_URL.to_owned(),
+            emails: providers::GITHUB_EMAILS_URL.to_owned(),
+            org_membership_base: providers::GITHUB_ORG_MEMBERSHIP_URL.to_owned(),
+        },
+    }
+}
+
 /// `GitHubOAuthProvider.authenticate()` (`github.py:84-182` over
 /// `adapter/oauth.py:66-100`).
 ///
 /// Transport mirrors `requests` exactly: no timeout on the token/userinfo
-/// calls, connection/status failures raise the provider error (5120),
-/// while a non-JSON body escapes as a 500 (`response.json()` raising
-/// `ValueError` is not a `RequestException`). The org-membership GET has
-/// no `try` at all (`github.py:137-143`), so its transport failure is a
-/// 500 too — only a non-200 *status* raises `GITHUB_USER_NOT_IN_ORG`
-/// (5122).
+/// calls; transport, status, body-read and decode failures all raise the
+/// provider error (5120), because `response.json()` sits inside the
+/// `try ... except requests.RequestException` and `JSONDecodeError` has
+/// subclassed `RequestException` since requests 2.27. The org-membership
+/// GET has no `try` at all (`github.py:137-143`), so its transport
+/// failure is a 500 — only a non-200 *status* raises
+/// `GITHUB_USER_NOT_IN_ORG` (5122).
 async fn exchange_github(
     client_id: &str,
     client_secret: &str,
@@ -590,8 +636,38 @@ async fn exchange_github(
     code: &str,
     redirect_uri: &str,
 ) -> Result<GithubAuth, CallbackFailure> {
+    let stub_base = oauth_stub_base();
+    exchange_github_with_base(
+        client_id,
+        client_secret,
+        organization_id,
+        code,
+        redirect_uri,
+        stub_base.as_deref(),
+    )
+    .await
+}
+
+/// [`exchange_github`] with the endpoint base pinned: `None` is the
+/// production-host call above; `Some(http://127.0.0.1:<port>)` drives a
+/// local stub (unit tests call this directly, so no test mutates process
+/// env).
+async fn exchange_github_with_base(
+    client_id: &str,
+    client_secret: &str,
+    organization_id: Option<&str>,
+    code: &str,
+    redirect_uri: &str,
+    oauth_base: Option<&str>,
+) -> Result<GithubAuth, CallbackFailure> {
     let provider_error = || CallbackFailure::Auth(exchange::map_exchange_error("github"));
     let http = reqwest::Client::new();
+    let GithubUrls {
+        token: token_url,
+        userinfo: userinfo_url,
+        emails: emails_url,
+        org_membership_base,
+    } = github_urls(oauth_base);
 
     // `set_token_data` (`github.py:84-89`): form POST with
     // `{"Accept": "application/json"}`.
@@ -599,7 +675,7 @@ async fn exchange_github(
         providers::github_token_post_data(code, client_id, client_secret, redirect_uri);
     let post_refs: Vec<(&str, &str)> = post_pairs.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let token_response = http
-        .post(providers::GITHUB_TOKEN_URL)
+        .post(token_url)
         .header("Accept", "application/json")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(providers::urlencode(&post_refs))
@@ -610,20 +686,18 @@ async fn exchange_github(
     let token_response = token_response
         .error_for_status()
         .map_err(|_| provider_error())?;
-    // `.json()` outside `RequestException` reach: decode failure is a 500.
+    // `.json()` is inside the `try` too (`oauth.py:75-84`), and
+    // `JSONDecodeError` subclasses `RequestException`, so a non-JSON
+    // body is the provider error — like the google/gitlab/gitea ports.
     // (`reqwest` ships without its `json` feature here, so decode goes
     // through `bytes` + `serde_json`, with the same error mapping.)
-    let token_bytes = token_response
-        .bytes()
-        .await
-        .map_err(|_| CallbackFailure::Server)?;
-    let token_json: Value =
-        serde_json::from_slice(&token_bytes).map_err(|_| CallbackFailure::Server)?;
+    let token_bytes = token_response.bytes().await.map_err(|_| provider_error())?;
+    let token_json: Value = serde_json::from_slice(&token_bytes).map_err(|_| provider_error())?;
     let tokens = providers::github_token_data(&token_json);
 
     // `get_user_response` (`oauth.py:86-100`).
     let userinfo_response = http
-        .get(providers::GITHUB_USERINFO_URL)
+        .get(userinfo_url)
         .header(
             "Authorization",
             format!("Bearer {}", python_str(&tokens.access_token)),
@@ -637,17 +711,15 @@ async fn exchange_github(
     let userinfo_bytes = userinfo_response
         .bytes()
         .await
-        .map_err(|_| CallbackFailure::Server)?;
-    let userinfo: Value =
-        serde_json::from_slice(&userinfo_bytes).map_err(|_| CallbackFailure::Server)?;
+        .map_err(|_| provider_error())?;
+    let userinfo: Value = serde_json::from_slice(&userinfo_bytes).map_err(|_| provider_error())?;
 
     // Org gate (`github.py:145-160`): only when an organization id is set;
     // a non-200 membership status raises 5122, transport failure escapes.
     if organization_id.is_some_and(|org| !org.is_empty()) {
         let org = organization_id.unwrap_or("");
         let login = userinfo.get("login").and_then(|v| v.as_str()).unwrap_or("");
-        let membership_url =
-            providers::github_membership_url(providers::GITHUB_ORG_MEMBERSHIP_URL, org, login);
+        let membership_url = providers::github_membership_url(&org_membership_base, org, login);
         let membership = http
             .get(membership_url)
             .header(
@@ -669,11 +741,12 @@ async fn exchange_github(
     }
 
     // `__get_email` (`github.py:108-135`): transport → 5120, non-list or
-    // missing primary → 5120, decode failure → 500. The status is never
-    // checked (`raise_for_status` is absent there, unlike the token and
-    // userinfo legs), so a non-2xx body decodes like any other.
+    // missing primary → 5120, and decode failure → 5120 as well
+    // (`requests.get(...).json()` is inside the `try`). The status is
+    // never checked (`raise_for_status` is absent there, unlike the token
+    // and userinfo legs), so a non-2xx body decodes like any other.
     let emails_response = http
-        .get(providers::GITHUB_EMAILS_URL)
+        .get(emails_url)
         .header(
             "Authorization",
             format!("Bearer {}", python_str(&tokens.access_token)),
@@ -685,9 +758,8 @@ async fn exchange_github(
     let emails_bytes = emails_response
         .bytes()
         .await
-        .map_err(|_| CallbackFailure::Server)?;
-    let emails: Value =
-        serde_json::from_slice(&emails_bytes).map_err(|_| CallbackFailure::Server)?;
+        .map_err(|_| provider_error())?;
+    let emails: Value = serde_json::from_slice(&emails_bytes).map_err(|_| provider_error())?;
     let email =
         providers::github_primary_email(&emails).map_err(|_| exchange::map_github_email_error())?;
 
@@ -3185,5 +3257,182 @@ mod tests {
             "S3 traffic shape"
         );
         let _ = avatar_url;
+    }
+
+    // -- exchange decode mapping (NEWPIDASH-18) -------------------------
+    // A 200 with a non-JSON body on any of the three exchange legs is the
+    // provider error (5120), because `response.json()` sits inside the
+    // `try ... except requests.RequestException` and `JSONDecodeError`
+    // subclasses `RequestException`. These drive
+    // `exchange_github_with_base` against a loopback stub serving the
+    // four endpoint paths.
+
+    /// Loopback OAuth-provider stub: answers each request from `routes`
+    /// (`(method, path, status line, body)`; first match wins, else 404)
+    /// and records the request lines seen. Bodies starting with `<`
+    /// are served as `text/html`, the rest as `application/json`.
+    fn exchange_stub(
+        routes: Vec<(&'static str, &'static str, &'static str, &'static str)>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind exchange stub");
+        let port = listener.local_addr().expect("stub addr").port();
+        let recorded = std::sync::Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let Ok(mut socket) = stream else {
+                    break;
+                };
+                let _ = socket.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut buf = [0u8; 8192];
+                let Ok(n) = socket.read(&mut buf) else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let request_line = head.lines().next().unwrap_or("").to_owned();
+                recorded.lock().expect("locks").push(request_line.clone());
+                let (_, _, status, body) = routes
+                    .iter()
+                    .find(|(method, path, _, _)| {
+                        request_line.starts_with(&format!("{method} {path}"))
+                    })
+                    .copied()
+                    .unwrap_or(("GET", "/", "404 Not Found", "not found"));
+                let content_type = if body.starts_with('<') {
+                    "text/html"
+                } else {
+                    "application/json"
+                };
+                let header = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = socket.write_all(header.as_bytes());
+                let _ = socket.write_all(body.as_bytes());
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), seen)
+    }
+
+    fn assert_provider_error(err: CallbackFailure) {
+        match err {
+            CallbackFailure::Auth(exc) => {
+                assert_eq!(exc.error_code, 5120);
+                assert_eq!(exc.error_message, "GITHUB_OAUTH_PROVIDER_ERROR");
+            }
+            CallbackFailure::Server => panic!("non-JSON provider body mapped to 500, want 5120"),
+        }
+    }
+
+    #[test]
+    fn github_urls_default_to_production_consts() {
+        let urls = github_urls(None);
+        assert_eq!(urls.token, providers::GITHUB_TOKEN_URL);
+        assert_eq!(urls.userinfo, providers::GITHUB_USERINFO_URL);
+        assert_eq!(urls.emails, providers::GITHUB_EMAILS_URL);
+        assert_eq!(
+            urls.org_membership_base,
+            providers::GITHUB_ORG_MEMBERSHIP_URL
+        );
+    }
+
+    #[test]
+    fn github_urls_override_serves_all_four_paths() {
+        let urls = github_urls(Some("http://127.0.0.1:9999/"));
+        assert_eq!(urls.token, "http://127.0.0.1:9999/login/oauth/access_token");
+        assert_eq!(urls.userinfo, "http://127.0.0.1:9999/user");
+        assert_eq!(urls.emails, "http://127.0.0.1:9999/user/emails");
+        assert_eq!(urls.org_membership_base, "http://127.0.0.1:9999/orgs");
+    }
+
+    #[tokio::test]
+    async fn github_exchange_nonjson_token_body_is_provider_error() {
+        let (base, seen) = exchange_stub(vec![(
+            "POST",
+            "/login/oauth/access_token",
+            "200 OK",
+            "<html><body>Bad Gateway</body></html>",
+        )]);
+        let err = exchange_github_with_base(
+            "id",
+            "secret",
+            None,
+            "code",
+            "http://app.test/auth/github/callback/",
+            Some(&base),
+        )
+        .await
+        .err()
+        .expect("non-JSON token body must fail the exchange");
+        assert_provider_error(err);
+        let seen = seen.lock().expect("locks");
+        assert!(
+            seen.iter()
+                .any(|line| line.starts_with("POST /login/oauth/access_token")),
+            "stub saw no token POST: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn github_exchange_nonjson_userinfo_body_is_provider_error() {
+        let (base, seen) = exchange_stub(vec![
+            (
+                "POST",
+                "/login/oauth/access_token",
+                "200 OK",
+                r#"{"access_token":"t"}"#,
+            ),
+            ("GET", "/user", "200 OK", "<html>proxy error</html>"),
+        ]);
+        let err = exchange_github_with_base(
+            "id",
+            "secret",
+            None,
+            "code",
+            "http://app.test/auth/github/callback/",
+            Some(&base),
+        )
+        .await
+        .err()
+        .expect("non-JSON userinfo body must fail the exchange");
+        assert_provider_error(err);
+        let seen = seen.lock().expect("locks");
+        assert!(
+            seen.iter().any(|line| line.starts_with("GET /user ")),
+            "stub saw no userinfo GET: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn github_exchange_empty_emails_body_is_provider_error() {
+        let (base, seen) = exchange_stub(vec![
+            (
+                "POST",
+                "/login/oauth/access_token",
+                "200 OK",
+                r#"{"access_token":"t"}"#,
+            ),
+            // Prefix match: the emails route sorts before `/user`.
+            ("GET", "/user/emails", "200 OK", ""),
+            ("GET", "/user", "200 OK", r#"{"login":"octocat"}"#),
+        ]);
+        let err = exchange_github_with_base(
+            "id",
+            "secret",
+            None,
+            "code",
+            "http://app.test/auth/github/callback/",
+            Some(&base),
+        )
+        .await
+        .err()
+        .expect("empty emails body must fail the exchange");
+        assert_provider_error(err);
+        let seen = seen.lock().expect("locks");
+        assert!(
+            seen.iter().any(|line| line.starts_with("GET /user/emails")),
+            "stub saw no emails GET: {seen:?}"
+        );
     }
 }

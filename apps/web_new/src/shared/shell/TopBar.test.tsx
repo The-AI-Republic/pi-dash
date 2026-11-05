@@ -60,6 +60,13 @@ describe("TopBar composition", () => {
     expect(screen.queryByText("Community", { exact: true })).not.toBeInTheDocument();
     expect(screen.queryByText("Pro", { exact: true })).not.toBeInTheDocument();
   });
+
+  it("lets the search cell yield below the box rest width (NEWPIDASH-7)", () => {
+    renderBar({ searchBox: <input type="search" placeholder="Search commands" /> });
+    const cell = screen.getByPlaceholderText("Search commands").parentElement!;
+    expect(cell.className).toContain("min-w-0");
+    expect(cell.className).not.toContain("shrink-0");
+  });
 });
 
 describe("sidebar toggle", () => {

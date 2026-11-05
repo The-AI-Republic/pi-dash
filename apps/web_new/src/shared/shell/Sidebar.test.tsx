@@ -89,6 +89,11 @@ describe("Sidebar", () => {
     expect(screen.queryByTestId("sidebar-workspace-switcher")).not.toBeInTheDocument();
   });
 
+  it("shows no Commands hint", () => {
+    render(sidebar());
+    expect(screen.queryByText("Commands")).toBeNull();
+  });
+
   it("renders the home row and marks it current on home", () => {
     render(sidebar({ currentPath: "/acme/" }));
     const home = screen.getByRole("link", { name: "Home" });

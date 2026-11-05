@@ -894,6 +894,9 @@ test(
       if (code === "5090" || code === "5092") return /code isn't valid/i;
       if (code === "5095" || code === "5097" || code === "5100" || code === "5102") return /code has expired/i;
       if (code === "5060") return /no account uses this address/i;
+      // Fixed on web_new (bug NEWFRONT-822): a throttled call banners
+      // instead of staying silent as the old card does.
+      if (code === "5900") return /too many attempts/i;
       return fallback;
     };
     const cases: {
@@ -912,7 +915,7 @@ test(
       { code: "5102", step: "code", mode: "sign-up", banner: webNewBanner("5102", /expired magic code/i) },
       { code: "5060", step: "email", mode: "sign-up", banner: webNewBanner("5060", /no account found/i) },
       { code: "5030", step: "email", mode: "sign-up", banner: webNewBanner("5030", /already registered/i) },
-      { code: "5900", step: "email", mode: "sign-up", banner: null },
+      { code: "5900", step: "email", mode: "sign-up", banner: webNewBanner("5900", null) },
       { code: "9999", step: "email", mode: "sign-up", banner: null },
     ];
     for (const { code, step, mode, banner } of cases) {
