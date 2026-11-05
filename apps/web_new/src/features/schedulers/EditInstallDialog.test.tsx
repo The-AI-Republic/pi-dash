@@ -31,6 +31,10 @@ import { EditInstallDialog, installDraftFromBinding, installUpdatePayload } from
 import { bindingKeys, invalidateInstalls } from "./installData.js";
 import { DEFAULT_TZID, isoToLocalStart } from "./schedule.js";
 
+// Pin the zone so the repeated-hour case below runs the same wherever the
+// suite runs. The other cases convert symmetrically and hold in any zone.
+process.env.TZ = "America/Los_Angeles";
+
 const SLUG = "acme";
 const PROJECT = "p1";
 
@@ -140,6 +144,15 @@ describe("installUpdatePayload", () => {
     const draft = installDraftFromBinding(binding({ extra_context: "  padded  ", rrule: " FREQ=DAILY " }));
     expect(installUpdatePayload(draft)).toMatchObject({ extra_context: "padded", rrule: " FREQ=DAILY " });
   });
+
+  it("keeps the stored start when the wall time is untouched in a repeated hour", () => {
+    // 2026-11-01T09:15:00Z is the second (standard-time) 01:15 in
+    // America/Los_Angeles; the edit form passes the binding's dtstart as
+    // the original so saving without touching Starts at keeps the instant.
+    const draft = installDraftFromBinding(binding({ dtstart: "2026-11-01T09:15:00Z" }));
+    expect(draft.schedule.startsAt).toBe("2026-11-01T01:15");
+    expect(installUpdatePayload(draft, "2026-11-01T09:15:00Z").dtstart).toBe("2026-11-01T09:15:00.000Z");
+  });
 });
 
 describe("EditInstallDialog", () => {
@@ -190,6 +203,19 @@ describe("EditInstallDialog", () => {
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(contracts.updateSchedulerBinding).toHaveBeenCalled());
     expect(contracts.updateSchedulerBinding.mock.calls[0]?.[4]).toMatchObject({ rrule: "FREQ=HOURLY;BYHOUR=9 " });
+  });
+
+  it("saves an untouched repeated-hour start back unchanged when only other fields change", async () => {
+    // 2026-11-01T09:15:00Z is the second (standard-time) 01:15 in
+    // America/Los_Angeles; the dialog must hand the stored instant to the
+    // payload so the save does not move it to the first occurrence.
+    const user = userEvent.setup();
+    setup({ binding: binding({ dtstart: "2026-11-01T09:15:00Z" }) });
+    expect(screen.getByLabelText("Starts at")).toHaveValue("2026-11-01T01:15");
+    await user.click(screen.getByRole("radio", { name: "Apply fix" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(contracts.updateSchedulerBinding).toHaveBeenCalled());
+    expect(contracts.updateSchedulerBinding.mock.calls[0]?.[4]).toMatchObject({ dtstart: "2026-11-01T09:15:00.000Z" });
   });
 
   it("opens a stored hourly rule in the builder with Hour selected", () => {

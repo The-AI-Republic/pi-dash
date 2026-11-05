@@ -42,6 +42,18 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # NEWPIDASH-30: CACHES is unconditionally django_redis, so any
+      # DRF-dispatched view (CSRF priming, sign-in) 500s with
+      # "Missing connections string" without this.
+      redis:
+        image: valkey/valkey:7.2.11-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/pidash_contract
       WEB_URL: http://localhost
@@ -50,6 +62,10 @@ jobs:
       API_KEY_RATE_LIMIT: 100000/minute
       DJANGO_SETTINGS_MODULE: pi_dash.settings.test
       BASE_URL: http://127.0.0.1:8000
+      REDIS_URL: redis://localhost:6379/0
+      # No RabbitMQ in this job: tasks .delay()ed by the exercised
+      # endpoints (sign-in) enqueue to redis; nothing consumes them.
+      AMQP_URL: redis://localhost:6379/1
     steps:
       - uses: actions/checkout@v4
 
@@ -157,12 +173,23 @@ jobs:
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_STORAGE_BUCKET_NAME: pi-dash-contract
+      # NEWPIDASH-30: Django's S3Storage reads AWS_S3_BUCKET_NAME (not
+      # the setting above); without it copy/metadata tasks crash on a
+      # None bucket and their oracles time out. Same pair as the
+      # exports and rust-matrix workflows.
+      AWS_S3_BUCKET_NAME: pi-dash-contract
       AWS_S3_ENDPOINT_URL: http://localhost:4566
       BASE_URL: http://localhost:8000
       DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
       CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
       CONTRACT_REDIS_URL: redis://localhost:6379/0
       CONTRACT_TASK_TIMEOUT: "60"
+      # NEWPIDASH-30: suites that mint sessions (rrule parity) read the
+      # backend key from SECRET_KEY; the Django server reads the same
+      # variable, so forged sessions validate on the live backend.
+      SECRET_KEY: "contract-tests-fixed-secret"
+      CONTRACT_SECRET_KEY: "contract-tests-fixed-secret"
+      CONTRACT_DJANGO_SECRET_KEY: "contract-tests-fixed-secret"
       # D-06 assistant task oracle (PIDASHCONV-254): BYOK config encryption
       # needs a backend. Fernet with a committed test-only key (ephemeral CI
       # database; never a real secret) — the other oracles never touch BYOK.
@@ -311,7 +338,12 @@ jobs:
         # job serves Django from the frozen checkout, so the file stays out
         # of the selection until the next main-sync merges main into
         # rust-dev, then is added next to assistant/test_turn_errors.py.
-        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' --ignore-glob='*/test_s3_stall.py' --ignore-glob='*/test_mongo_write_error.py' --ignore-glob='*/test_s3_retry.py' tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py assistant/test_update_issue_completion.py assistant/test_create_issue_transition.py assistant/test_dispatch_coding_run.py
+        # NEWPIDASH-30: the two live tests in test_beat_catchup.py need
+        # `pidash-api worker` (rust_job_queue + the scheduler loop),
+        # which this Django-only job never boots; they run in the
+        # tasks-cleanup-rust job instead. The file's Celery-oracle tests
+        # still run here.
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' --ignore-glob='*/test_s3_stall.py' --ignore-glob='*/test_mongo_write_error.py' --ignore-glob='*/test_s3_retry.py' --deselect tasks_cleanup/test_beat_catchup.py::test_rust_worker_liveness --deselect tasks_cleanup/test_beat_catchup.py::test_rust_scheduler_catches_up_stale_daily_entry tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py assistant/test_update_issue_completion.py assistant/test_create_issue_transition.py assistant/test_dispatch_coding_run.py
 
       - name: Upload service logs on failure
         if: failure()

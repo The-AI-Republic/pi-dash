@@ -272,6 +272,10 @@ export interface ParityDriver {
   openResetPassword(params: { uid: string; token: string; email: string }): Promise<void>;
   /** Fill the new-password fields on the reset/set form and submit. */
   submitNewPassword(password: string, confirmPassword: string): Promise<void>;
+  /** Fill the new-password fields on the reset/set form without submitting. */
+  fillNewPasswordFields(password: string, confirmPassword: string): Promise<void>;
+  /** Whether the reset/set form submit is currently enabled. */
+  newPasswordSubmitEnabled(): Promise<boolean>;
   /** Open the set-password page; requires a signed-in session. */
   openSetPassword(): Promise<void>;
   /** Open an arbitrary app path (guards and legacy redirects). */
@@ -9115,6 +9119,15 @@ export interface ParityDriver {
   cyclesFiltersClearAll(): Promise<void>;
   /** Whether the filters menu button carries its active-filters marker. */
   cyclesFiltersActive(): Promise<boolean>;
+
+  // --- Auth throttled email check (NEWPIDASH-15, AUTH-006). Appended;
+  // --- existing methods above are untouched per the shared driver contract.
+  /**
+   * Submit the email step when the answer keeps the card on it (a
+   * server-answered error such as the 429 throttle refusal). Resolves with
+   * the email-check response status once it arrives.
+   */
+  submitEmailExpectingError(email: string): Promise<number>;
 }
 
 /** One list group / board column as rendered (NEWFRONT-449, SPC-023/024/026). */

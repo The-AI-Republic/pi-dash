@@ -1482,6 +1482,20 @@ export class WebNewDriver implements ParityDriver {
       .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
+  async submitEmailExpectingError(email: string): Promise<number> {
+    const page = this.page;
+    const emailField = page.getByPlaceholder("name@company.com").first();
+    await emailField.fill(email);
+    const emailForm = page.locator("form", { has: emailField });
+    const [response] = await Promise.all([
+      page.waitForResponse((res) => res.url().includes("/auth/email-check/"), {
+        timeout: WebNewDriver.WAIT_MS,
+      }),
+      this.cardSubmit(emailForm).click(),
+    ]);
+    return response.status();
+  }
+
   async submitPassword(password: string): Promise<void> {
     const page = this.page;
     const passwordField = page.getByPlaceholder("Enter password");
@@ -1781,6 +1795,16 @@ export class WebNewDriver implements ParityDriver {
     await this.page.goto(`/accounts/reset-password?${query.toString()}`);
     // Exact: the show/hide toggle ("Show new password") would also match.
     await this.page.getByLabel("New password", { exact: true }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async fillNewPasswordFields(password: string, confirmPassword: string): Promise<void> {
+    await this.page.getByLabel("New password", { exact: true }).fill(password);
+    await this.page.getByLabel("Confirm password", { exact: true }).fill(confirmPassword);
+  }
+
+  async newPasswordSubmitEnabled(): Promise<boolean> {
+    const form = this.page.locator("form", { has: this.page.getByLabel("New password", { exact: true }) });
+    return this.cardSubmit(form).isEnabled();
   }
 
   async submitNewPassword(password: string, confirmPassword: string): Promise<void> {

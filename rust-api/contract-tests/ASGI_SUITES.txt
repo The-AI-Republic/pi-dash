@@ -21,5 +21,14 @@
 #   runner: same hang signature on GET .../chat/sessions/.../events/
 #     (async-iterator warning + >30s header timeout); its README still
 #     shows runserver illustratively ("e.g."), CI proves uvicorn needed.
+#   loop: not a streaming suite — it pins the wire input production sees
+#     (NEWPIDASH-25). Production serves Django with gunicorn +
+#     UvicornWorker (apps/api/bin/docker-entrypoint-api.sh), which leaves
+#     a missing Content-Type empty; runserver's wsgiref handler fills in
+#     CONTENT_TYPE=text/plain instead, so
+#     loop/test_body_negotiation.py::test_missing_content_type_is_unsupported_media_type
+#     read 'Unsupported media type "text/plain"' under runserver and the
+#     production 'Unsupported media type ""' under uvicorn (and on Rust).
 assistant
+loop
 runner

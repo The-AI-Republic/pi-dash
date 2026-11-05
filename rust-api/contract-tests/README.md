@@ -55,7 +55,7 @@ re-recording fixtures.
   set (sign-in refuses without it), and Redis up (session open/poll,
   stream-upgrade tickets, machine-token redeem, DRF anon throttle), e.g.
   `SECRET_KEY=contract-test-secret WEB_URL=http://localhost:3000 python
-  apps/api/manage.py runserver 8000` after `manage.py migrate`. The anon
+apps/api/manage.py runserver 8000` after `manage.py migrate`. The anon
   throttle (30/min per IP) is shared across runs: re-running the suite
   within a minute of a previous run can 429 the AllowAny endpoints —
   either wait out the window or clear this run's key in Redis.
@@ -153,14 +153,14 @@ re-recording fixtures.
   host under test (else `Secure` cookies + CSRF 403 over `http`),
   `APP_BASE_URL`/`WEB_URL` must point at the server under test, dummy
   `AWS_*` creds suffice for offline presigning but `AWS_S3_BUCKET_NAME`
-  + `AWS_REGION` must also be set, one Redis db index per parallel run
-  (anon throttle 30/min — pace full runs). Tripwire: `BaseViewSet`
-  `permission_classes` is redundant with the global DRF
-  `DEFAULT_PERMISSION_CLASSES`, so the demo removes BOTH layers — then
-  `test_list_requires_auth`, `test_create_requires_auth`,
-  `test_issue_reaction_list_requires_auth` flip 401/403 → 200 (revert
-  afterwards). Pins two Django bugs for the port: project-boards 500 and
-  always-empty reaction/vote lists.
+  - `AWS_REGION` must also be set, one Redis db index per parallel run
+    (anon throttle 30/min — pace full runs). Tripwire: `BaseViewSet`
+    `permission_classes` is redundant with the global DRF
+    `DEFAULT_PERMISSION_CLASSES`, so the demo removes BOTH layers — then
+    `test_list_requires_auth`, `test_create_requires_auth`,
+    `test_issue_reaction_list_requires_auth` flip 401/403 → 200 (revert
+    afterwards). Pins two Django bugs for the port: project-boards 500 and
+    always-empty reaction/vote lists.
 
 ## Run: web_edge
 
@@ -213,12 +213,13 @@ CONTRACT_WEB_URL=http://127.0.0.1:8123 \
 
 Env contract:
 
-| var                   | meaning                                                                                                                 |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `BASE_URL`            | server under test (default `http://127.0.0.1:8000`)                                                                     |
-| `DATABASE_URL`        | psycopg conninfo for seeding (required)                                                                                 |
-| `CONTRACT_SECRET_KEY` | must equal the server's `SECRET_KEY`; only used to forge session cookies / machine-token hashes when seeding (required) |
-| `CONTRACT_WEB_URL`    | must equal the server's `WEB_URL`; expected `verification_uri` base (required)                                          |
+| var                       | meaning                                                                                                                                                                                                                       |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BASE_URL`                | server under test (default `http://127.0.0.1:8000`)                                                                                                                                                                           |
+| `DATABASE_URL`            | psycopg conninfo for seeding (required)                                                                                                                                                                                       |
+| `CONTRACT_SECRET_KEY`     | must equal the server's `SECRET_KEY`; only used to forge session cookies / machine-token hashes when seeding (required)                                                                                                       |
+| `CONTRACT_WEB_URL`        | must equal the server's `WEB_URL`; expected `verification_uri` base (required)                                                                                                                                                |
+| `PIDASH_CONTRACT_BACKEND` | which backend `BASE_URL` serves: `django` (default when unset) or `rust`; read by `_harness.diffs` (see "Deliberate differences" below). The Rust-matrix CI sets it explicitly per half; Django-only runs rely on the default |
 
 ## Run: app_issues (PIDASHCONV-84)
 
@@ -406,6 +407,39 @@ WORKER_QUEUE=ct17 \
   reruns against the same database are safe.
 - Raw-SQL seeding bypasses model signals (no builtin-scheduler seeding, no
   default-pod creation): each test sees exactly what it inserted.
+
+## Deliberate differences (DIFF cases)
+
+When an "Old bug fix" changes the new system on purpose, the contract case
+that pinned the old behaviour pins _both_ behaviours with the per-backend
+expectation marker, `_harness.diffs.expect`:
+
+```python
+from _harness.diffs import expect
+
+def test_space_unknown_uuid_user(browser, user):
+    res = browser.post(space_reset_url(user), data={"new_password": "x"})
+    assert res.status_code == expect("DIFF-4", django=500, rust=302)
+```
+
+- `diff_id` names the row in `.ai_design/validation/differences.md` this
+  divergence is recorded under (anything but `DIFF-<n>` fails the test).
+- The `django=` arm pins the old system's real behaviour — run the case
+  against live Django to prove it before converting.
+- The `rust=` arm pins the fixed behaviour.
+- Each arm is a fixed expectation: the case still fails if either backend
+  drifts from its pinned value. Never delete the case and never weaken it
+  to pass on both.
+
+How the harness knows which backend is under test:
+`PIDASH_CONTRACT_BACKEND` — `django` when unset or blank (the default),
+`rust` for the Rust server; any other value fails the test. The Rust-matrix
+CI (`.github/workflows/rust-api-contract-rust.yml`) exports it explicitly
+per half (`django` for the oracle run, `rust` for the Rust run); Django-only
+workflows and local Django runs rely on the default. New code branches on
+`diffs.current_backend()` / `diffs.is_rust()` instead of reading the
+variable ad hoc. Unit tests: `_harness/tests/test_diffs.py` (no backend
+needed).
 
 The server under test must be the full stack: Postgres (seeded directly),
 Redis + a Celery worker (write endpoints enqueue activity tasks), and S3
