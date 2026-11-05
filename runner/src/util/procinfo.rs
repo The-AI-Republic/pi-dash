@@ -8,8 +8,11 @@
 //!
 //! * Linux: `/proc/<pid>/stat` (pgid, state, start time) and
 //!   `/proc/<pid>/environ`.
-//! * macOS: `proc_listpids` / `proc_pidinfo(PROC_PIDTBSDINFO)` and
-//!   `sysctl(KERN_PROCARGS2)`.
+//! * macOS: `proc_listpids` / `proc_pidinfo(PROC_PIDTBSDINFO)`,
+//!   `sysctl(KERN_PROC_PGRP)` for group members and `sysctl(KERN_PROCARGS2)`.
+//!   `proc_pidinfo` returns nothing for a zombie, so group members are listed
+//!   with `KERN_PROC_PGRP` (whose `kinfo_proc` entries include zombies) and
+//!   `proc_pidinfo` is used only for the details of live members.
 //! * Elsewhere: nothing is readable, so callers fall back to "do not signal".
 //!
 //! macOS strips other processes' environments: `KERN_PROCARGS2` for another
@@ -57,13 +60,13 @@ pub fn info(pid: i32) -> Option<ProcInfo> {
     imp::info(pid)
 }
 
-/// Every process currently in process group `pgid`.
+/// Every process currently in process group `pgid`, zombies included.
+///
+/// Zombies matter: on macOS `kill(-pgid, _)` answers EPERM for a group whose
+/// only members are zombies, and the caller can only tell that apart from a
+/// real permission failure by seeing them here.
 pub fn group_members(pgid: i32) -> Vec<ProcInfo> {
-    imp::all_pids()
-        .into_iter()
-        .filter_map(imp::info)
-        .filter(|p| p.pgid == pgid)
-        .collect()
+    imp::group_members(pgid)
 }
 
 /// Every live process owned by this uid.
@@ -162,6 +165,39 @@ pub fn parse_linux_stat(stat: &str) -> Option<(char, i32, u64)> {
     Some((state, pgid, start))
 }
 
+/// Combine a kernel group listing that includes zombies (macOS
+/// `KERN_PROC_PGRP`) with per-process details that only exist for live
+/// processes (macOS `proc_pidinfo`).
+///
+/// * A zombie keeps its listed values: it can never run again, and the live
+///   lookup cannot see it.
+/// * A live entry takes the live details when the lookup still places it in
+///   `pgid`, and is dropped when it has moved to another group since.
+/// * A live entry the lookup cannot read (it exited or became a zombie in
+///   between) keeps its listed values and stays live, so a caller never
+///   mistakes it for gone; the next poll sees its new state.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn merge_group_members(
+    pgid: i32,
+    listed: Vec<ProcInfo>,
+    live: impl Fn(i32) -> Option<ProcInfo>,
+) -> Vec<ProcInfo> {
+    listed
+        .into_iter()
+        .filter(|p| p.pgid == pgid)
+        .filter_map(|p| {
+            if p.zombie {
+                return Some(p);
+            }
+            match live(p.pid) {
+                Some(l) if l.pgid == pgid => Some(l),
+                Some(_) => None,
+                None => Some(p),
+            }
+        })
+        .collect()
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     use super::{ProcInfo, parse_linux_stat};
@@ -215,6 +251,14 @@ mod imp {
             start_time_ms: boot_time_ms() + ticks * 1000 / ticks_per_sec(),
             zombie: matches!(state, 'Z' | 'X'),
         })
+    }
+
+    pub fn group_members(pgid: i32) -> Vec<ProcInfo> {
+        all_pids()
+            .into_iter()
+            .filter_map(info)
+            .filter(|p| p.pgid == pgid)
+            .collect()
     }
 
     pub fn environ(pid: i32) -> Option<Vec<Vec<u8>>> {
@@ -284,6 +328,182 @@ mod imp {
         })
     }
 
+    /// `struct extern_proc` from `<sys/proc.h>` (64-bit layout). `libc` does
+    /// not export `kinfo_proc` for Apple targets; only `p_starttime`,
+    /// `p_stat` and `p_pid` are read, the rest is layout.
+    #[repr(C)]
+    struct ExternProc {
+        p_starttime: libc::timeval,
+        p_vmspace: *mut libc::c_void,
+        p_sigacts: *mut libc::c_void,
+        p_flag: libc::c_int,
+        p_stat: libc::c_char,
+        p_pid: libc::pid_t,
+        p_oppid: libc::pid_t,
+        p_dupfd: libc::c_int,
+        user_stack: *mut libc::c_char,
+        exit_thread: *mut libc::c_void,
+        p_debugger: libc::c_int,
+        sigwait: libc::c_int,
+        p_estcpu: libc::c_uint,
+        p_cpticks: libc::c_int,
+        p_pctcpu: u32,
+        p_wchan: *mut libc::c_void,
+        p_wmesg: *mut libc::c_char,
+        p_swtime: libc::c_uint,
+        p_slptime: libc::c_uint,
+        p_realtimer: [libc::timeval; 2],
+        p_rtime: libc::timeval,
+        p_uticks: u64,
+        p_sticks: u64,
+        p_iticks: u64,
+        p_traceflag: libc::c_int,
+        p_tracep: *mut libc::c_void,
+        p_siglist: libc::c_int,
+        p_textvp: *mut libc::c_void,
+        p_holdcnt: libc::c_int,
+        p_sigmask: u32,
+        p_sigignore: u32,
+        p_sigcatch: u32,
+        p_priority: u8,
+        p_usrpri: u8,
+        p_nice: libc::c_char,
+        p_comm: [libc::c_char; 17],
+        p_pgrp: *mut libc::c_void,
+        p_addr: *mut libc::c_void,
+        p_xstat: u16,
+        p_acflag: u16,
+        p_ru: *mut libc::c_void,
+    }
+
+    /// `struct _pcred` from `<sys/sysctl.h>`.
+    #[repr(C)]
+    struct Pcred {
+        pc_lock: [libc::c_char; 72],
+        pc_ucred: *mut libc::c_void,
+        p_ruid: u32,
+        p_svuid: u32,
+        p_rgid: u32,
+        p_svgid: u32,
+        p_refcnt: libc::c_int,
+    }
+
+    /// `struct _ucred` from `<sys/sysctl.h>`.
+    #[repr(C)]
+    struct Ucred {
+        cr_ref: i32,
+        cr_uid: u32,
+        cr_ngroups: libc::c_short,
+        cr_groups: [u32; 16],
+    }
+
+    /// `struct vmspace` from `<sys/vm.h>`.
+    #[repr(C)]
+    struct Vmspace {
+        vm_refcnt: i32,
+        vm_shm: *mut libc::c_char,
+        vm_sizes: [i32; 5],
+        vm_addrs: [*mut libc::c_char; 3],
+    }
+
+    /// `struct eproc` from `<sys/sysctl.h>` (64-bit layout). Only `e_pgid`
+    /// and `e_ucred.cr_uid` are read.
+    #[repr(C)]
+    struct Eproc {
+        e_paddr: *mut libc::c_void,
+        e_sess: *mut libc::c_void,
+        e_pcred: Pcred,
+        e_ucred: Ucred,
+        e_vm: Vmspace,
+        e_ppid: libc::pid_t,
+        e_pgid: libc::pid_t,
+        e_jobc: libc::c_short,
+        e_tdev: i32,
+        e_tpgid: libc::pid_t,
+        e_tsess: *mut libc::c_void,
+        e_wmesg: [libc::c_char; 8],
+        e_xsize: i32,
+        e_xrssize: libc::c_short,
+        e_xccount: libc::c_short,
+        e_xswrss: libc::c_short,
+        e_flag: i32,
+        e_login: [libc::c_char; 12],
+        e_spare: [i32; 4],
+    }
+
+    #[repr(C)]
+    struct KinfoProc {
+        kp_proc: ExternProc,
+        kp_eproc: Eproc,
+    }
+
+    // `sizeof(struct kinfo_proc)` is 648 on 64-bit macOS (x86_64 and arm64).
+    const _: () = assert!(std::mem::size_of::<KinfoProc>() == 648);
+    const _: () = assert!(std::mem::offset_of!(KinfoProc, kp_eproc) == 296);
+    const _: () = assert!(std::mem::offset_of!(ExternProc, p_stat) == 36);
+    const _: () = assert!(std::mem::offset_of!(ExternProc, p_pid) == 40);
+    const _: () = assert!(std::mem::offset_of!(Eproc, e_ucred) == 120);
+    const _: () = assert!(std::mem::offset_of!(Eproc, e_pgid) == 268);
+
+    /// Every process in group `pgid`, zombies included, via
+    /// `sysctl({CTL_KERN, KERN_PROC, KERN_PROC_PGRP, pgid})`. Live members
+    /// take their details from `proc_pidinfo`; zombies (which `proc_pidinfo`
+    /// cannot see) keep the `kinfo_proc` values.
+    pub fn group_members(pgid: i32) -> Vec<ProcInfo> {
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PGRP, pgid];
+        let mut size: libc::size_t = 0;
+        // SAFETY: a null buffer asks for the required size only.
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                4,
+                std::ptr::null_mut(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 {
+            return Vec::new();
+        }
+        let entry = std::mem::size_of::<KinfoProc>();
+        // Headroom for processes that join between the two calls.
+        let cap = size / entry + 8;
+        let mut buf: Vec<KinfoProc> = Vec::with_capacity(cap);
+        let mut size = cap * entry;
+        // SAFETY: the buffer holds `cap` entries and we pass its byte size;
+        // the kernel writes at most `size` bytes and reports how many.
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                4,
+                buf.as_mut_ptr().cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 {
+            return Vec::new();
+        }
+        // SAFETY: the kernel initialised `size / entry` whole entries.
+        unsafe { buf.set_len((size / entry).min(cap)) };
+        let listed = buf
+            .iter()
+            .map(|k| {
+                let tv = k.kp_proc.p_starttime;
+                ProcInfo {
+                    pid: k.kp_proc.p_pid,
+                    pgid: k.kp_eproc.e_pgid,
+                    uid: k.kp_eproc.e_ucred.cr_uid,
+                    start_time_ms: (tv.tv_sec as u64) * 1000 + (tv.tv_usec as u64) / 1000,
+                    zombie: k.kp_proc.p_stat as u32 == libc::SZOMB,
+                }
+            })
+            .collect();
+        super::merge_group_members(pgid, listed, info)
+    }
+
     pub fn environ(pid: i32) -> Option<Vec<Vec<u8>>> {
         let mut argmax: libc::c_int = 0;
         let mut size = std::mem::size_of::<libc::c_int>();
@@ -338,6 +558,10 @@ mod imp {
         None
     }
 
+    pub fn group_members(_pgid: i32) -> Vec<ProcInfo> {
+        Vec::new()
+    }
+
     pub fn environ(_pid: i32) -> Option<Vec<Vec<u8>>> {
         None
     }
@@ -371,6 +595,76 @@ mod tests {
     #[test]
     fn procargs2_rejects_short_buffers() {
         assert_eq!(parse_procargs2(&[1, 0]), None);
+    }
+
+    fn proc(pid: i32, pgid: i32, start: u64, zombie: bool) -> ProcInfo {
+        ProcInfo {
+            pid,
+            pgid,
+            uid: 501,
+            start_time_ms: start,
+            zombie,
+        }
+    }
+
+    #[test]
+    fn group_listing_keeps_zombies_the_live_lookup_cannot_see() {
+        // macOS: KERN_PROC_PGRP lists zombies, proc_pidinfo returns nothing
+        // for them. A zombie must stay in the member list.
+        let listed = vec![
+            proc(10, 10, 1_000, true),
+            proc(11, 10, 2_000, false),
+            proc(12, 10, 3_000, false),
+            proc(13, 10, 4_000, false),
+            proc(14, 99, 5_000, false),
+        ];
+        let live = |pid: i32| match pid {
+            // Live details win over the listing.
+            11 => Some(proc(11, 10, 2_500, false)),
+            // Moved to another group since the listing: not a member.
+            12 => Some(proc(12, 77, 3_000, false)),
+            // 13 exited between the two reads: stays a live member.
+            _ => None,
+        };
+        let got = merge_group_members(10, listed, live);
+        assert_eq!(
+            got,
+            vec![
+                proc(10, 10, 1_000, true),
+                proc(11, 10, 2_500, false),
+                proc(13, 10, 4_000, false),
+            ]
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn an_unreaped_zombie_is_listed_as_a_group_member() {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        )
+        .unwrap();
+        // Not reaped yet: the group's only member is a zombie.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let members = loop {
+            let m = group_members(pid);
+            if m.iter().any(|p| p.zombie) || std::time::Instant::now() > deadline {
+                break m;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let _ = child.wait();
+        assert_eq!(members.len(), 1, "{members:?}");
+        assert_eq!(members[0].pid, pid);
+        assert!(members[0].zombie, "{members:?}");
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

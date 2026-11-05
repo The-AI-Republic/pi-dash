@@ -1341,6 +1341,38 @@ mod tests {
         leaderless_group_left_by_a_crashed_daemon_is_cleaned(false).await;
     }
 
+    #[tokio::test]
+    async fn a_zombie_only_group_left_by_a_crashed_daemon_is_resolved_and_its_record_removed() {
+        // The stale agent died but its parent (here the test) has not reaped
+        // it yet. macOS answers kill(-pgid) with EPERM for such a group, so
+        // recovery must see the zombie and treat the group as gone.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_env(dir.path(), "test-instance-zombie", false);
+        let mut child = session_cmd("exec sleep 300", None).spawn().unwrap();
+        let pid = child.id().unwrap() as i32;
+        let start = crate::util::procinfo::info(pid).unwrap().start_time_ms;
+        stale(&ctx, "run-zombie", Some(pid), Some(start));
+        kill_now(pid);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !only_zombies(&crate::util::procinfo::group_members(pid)) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the killed agent never showed up as a zombie: {:?}",
+                crate::util::procinfo::group_members(pid)
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(probe_group(pid), Probe::Gone);
+        let report = recover(
+            list_records(&ctx.proc_dir, &ctx.instance_id),
+            opts(&ctx, Some(now_ms())),
+        )
+        .await;
+        assert_eq!(report.kept, 0, "{report:?}");
+        assert!(list_records(&ctx.proc_dir, &ctx.instance_id).is_empty());
+        let _ = child.wait().await;
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn recovery_resolves_a_provisional_record_by_tag() {
