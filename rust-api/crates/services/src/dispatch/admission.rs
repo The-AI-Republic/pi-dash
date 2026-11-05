@@ -437,6 +437,59 @@ pub const ONLINE_MANAGED_RUNNER_SQL: &str = "SELECT runner.id FROM runner INNER 
 /// `$2` project id (uuid), `$3` workspace id (uuid).
 pub const ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL: &str = "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE runner.owner_id = $1 AND runner.provisioning = 'desktop_bundled' AND pod.project_id = $2 AND runner.workspace_id = $3 AND runner.revoked_at IS NULL AND runner.paused_at IS NOT NULL LIMIT 1";
 
+/// Which managed-runner probe [`managed_runner_probe`] runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedRunnerProbe {
+    /// [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`].
+    Enrolled,
+    /// [`ONLINE_MANAGED_RUNNER_SQL`], heartbeat at or after the bound.
+    Online(chrono::DateTime<chrono::Utc>),
+    /// [`ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL`].
+    Paused,
+}
+
+/// The SeaORM form of the three managed-runner probes: the matching
+/// runner's id (the newest heartbeat first for [`ManagedRunnerProbe::Online`]),
+/// or `None`. Non-revoked desktop-bundled runners the owner holds on the
+/// project's pod (`runner INNER JOIN pod`), in this workspace.
+pub async fn managed_runner_probe(
+    db: &impl sea_orm::ConnectionTrait,
+    probe: ManagedRunnerProbe,
+    owner_id: uuid::Uuid,
+    project_id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+) -> Result<Option<uuid::Uuid>, sea_orm::DbErr> {
+    use pidash_db::entity::{pod, runner};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect};
+    let to_pod: sea_orm::RelationDef = runner::Entity::belongs_to(pod::Entity)
+        .from(runner::Column::PodId)
+        .to(pod::Column::Id)
+        .into();
+    let mut query = runner::Entity::find()
+        .select_only()
+        .column(runner::Column::Id)
+        .join(JoinType::InnerJoin, to_pod)
+        .filter(runner::Column::OwnerId.eq(owner_id))
+        .filter(runner::Column::Provisioning.eq("desktop_bundled"))
+        .filter(pod::Column::ProjectId.eq(project_id))
+        .filter(runner::Column::WorkspaceId.eq(workspace_id))
+        .filter(runner::Column::RevokedAt.is_null());
+    match probe {
+        ManagedRunnerProbe::Enrolled => {}
+        ManagedRunnerProbe::Online(bound) => {
+            query = query
+                .filter(runner::Column::Status.eq("online"))
+                .filter(runner::Column::LastHeartbeatAt.gte(bound))
+                .filter(runner::Column::PausedAt.is_null())
+                .order_by_desc(runner::Column::LastHeartbeatAt);
+        }
+        ManagedRunnerProbe::Paused => {
+            query = query.filter(runner::Column::PausedAt.is_not_null());
+        }
+    }
+    query.into_tuple().one(db).await
+}
+
 // ---------------------------------------------------------------------------
 // Desktop-only permission (`permissions.py:12-28`)
 // ---------------------------------------------------------------------------

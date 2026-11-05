@@ -1090,6 +1090,216 @@ pub fn label_filter_null_project_sql(count: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// SeaORM forms of the validate/create/update probes above
+// ---------------------------------------------------------------------------
+
+/// [`POD_FETCH_SQL`]: `Pod.all_objects.get(pk)`, tombstones included.
+pub async fn fetch_pod_ref(
+    db: &impl sea_orm::ConnectionTrait,
+    pod_id: uuid::Uuid,
+) -> Result<Option<PodRef>, sea_orm::DbErr> {
+    use pidash_db::entity::pod;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    type PodRow = (
+        uuid::Uuid,
+        uuid::Uuid,
+        Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    );
+    let row: Option<PodRow> = pod::Entity::find()
+        .select_only()
+        .columns([
+            pod::Column::Id,
+            pod::Column::ProjectId,
+            pod::Column::DeletedAt,
+        ])
+        .filter(pod::Column::Id.eq(pod_id))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(row.map(|(id, project_id, deleted_at)| PodRef {
+        id,
+        project_id,
+        deleted: deleted_at.is_some(),
+    }))
+}
+
+/// [`STATE_EXISTS_SQL`]: a live non-triage state in the context project.
+/// A `None` project renders Django's `project_id IS NULL`.
+pub async fn state_exists(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: Option<uuid::Uuid>,
+    state_id: uuid::Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    use pidash_db::entity::states;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let hit: Option<uuid::Uuid> = states::Entity::find()
+        .select_only()
+        .column(states::Column::Id)
+        .filter(match project_id {
+            Some(project) => states::Column::ProjectId.eq(project),
+            None => states::Column::ProjectId.is_null(),
+        })
+        .filter(states::Column::Id.eq(state_id))
+        .filter(states::Column::DeletedAt.is_null())
+        .filter(states::Column::Group.ne("triage"))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// [`PARENT_EXISTS_SQL`]: a live issue in the context project (`None`
+/// renders `IS NULL`).
+pub async fn parent_exists(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: Option<uuid::Uuid>,
+    issue_id: uuid::Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    use pidash_db::entity::issues;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let hit: Option<uuid::Uuid> = issues::Entity::find()
+        .select_only()
+        .column(issues::Column::Id)
+        .filter(match project_id {
+            Some(project) => issues::Column::ProjectId.eq(project),
+            None => issues::Column::ProjectId.is_null(),
+        })
+        .filter(issues::Column::Id.eq(issue_id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// [`ESTIMATE_EXISTS_SQL`]: a live estimate point in the context project
+/// (`None` renders `IS NULL`).
+pub async fn estimate_exists(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: Option<uuid::Uuid>,
+    estimate_point_id: uuid::Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    use pidash_db::entity::estimate_points;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let hit: Option<uuid::Uuid> = estimate_points::Entity::find()
+        .select_only()
+        .column(estimate_points::Column::Id)
+        .filter(match project_id {
+            Some(project) => estimate_points::Column::ProjectId.eq(project),
+            None => estimate_points::Column::ProjectId.is_null(),
+        })
+        .filter(estimate_points::Column::Id.eq(estimate_point_id))
+        .filter(estimate_points::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// [`PROJECT_FETCH_SQL`]: `Project.objects.filter(pk).first()` (live rows,
+/// `-created_at`).
+pub async fn fetch_resolved_project(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: uuid::Uuid,
+) -> Result<Option<ResolvedProject>, sea_orm::DbErr> {
+    use pidash_db::entity::projects;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    let row: Option<(uuid::Uuid, uuid::Uuid)> = projects::Entity::find()
+        .select_only()
+        .columns([projects::Column::Id, projects::Column::WorkspaceId])
+        .filter(projects::Column::Id.eq(project_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .order_by_desc(projects::Column::CreatedAt)
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(row.map(|(project_id, workspace_id)| ResolvedProject {
+        project_id,
+        workspace_id,
+    }))
+}
+
+/// The `NON_TERMINAL_STATUSES` values [`HAS_ACTIVE_RUN_SQL`] lists, in
+/// tuple order.
+pub const ACTIVE_RUN_STATUSES: [&str; 8] = [
+    "queued",
+    "assigned",
+    "waiting_for_worktree",
+    "running",
+    "cancel_requested",
+    "awaiting_approval",
+    "awaiting_reauth",
+    "paused_awaiting_input",
+];
+
+/// [`HAS_ACTIVE_RUN_SQL`]: a non-terminal run on the issue (plain manager).
+pub async fn has_active_run(
+    db: &impl sea_orm::ConnectionTrait,
+    issue_id: uuid::Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    use pidash_db::entity::agent_run;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let hit: Option<uuid::Uuid> = agent_run::Entity::find()
+        .select_only()
+        .column(agent_run::Column::Id)
+        .filter(agent_run::Column::WorkItemId.eq(issue_id))
+        .filter(agent_run::Column::Status.is_in(ACTIVE_RUN_STATUSES))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// [`assignee_member_filter_sql`]: the ids among `ids` that are active,
+/// live MEMBER-or-better members of the project, `-created_at` order.
+pub async fn filter_assignee_members(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: uuid::Uuid,
+    ids: &[uuid::Uuid],
+) -> Result<Vec<uuid::Uuid>, sea_orm::DbErr> {
+    use pidash_db::entity::project_members;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    let rows: Vec<Option<uuid::Uuid>> = project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::MemberId)
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(project_members::Column::Role.gte(15i16))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::MemberId.is_in(ids.iter().copied()))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .order_by_desc(project_members::Column::CreatedAt)
+        .into_tuple()
+        .all(db)
+        .await?;
+    Ok(rows.into_iter().flatten().collect())
+}
+
+/// [`label_filter_sql`] / [`label_filter_null_project_sql`]: the live
+/// labels among `ids` in the context project (`None` matches project-less
+/// labels), `-created_at` order.
+pub async fn filter_project_labels(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: Option<uuid::Uuid>,
+    ids: &[uuid::Uuid],
+) -> Result<Vec<uuid::Uuid>, sea_orm::DbErr> {
+    use pidash_db::entity::labels;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    labels::Entity::find()
+        .select_only()
+        .column(labels::Column::Id)
+        .filter(match project_id {
+            Some(project) => labels::Column::ProjectId.eq(project),
+            None => labels::Column::ProjectId.is_null(),
+        })
+        .filter(labels::Column::Id.is_in(ids.iter().copied()))
+        .filter(labels::Column::DeletedAt.is_null())
+        .order_by_desc(labels::Column::CreatedAt)
+        .into_tuple()
+        .all(db)
+        .await
+}
+
+// ---------------------------------------------------------------------------
 // create (issue.py:387-462) / update (issue.py:464-518): write specs
 // ---------------------------------------------------------------------------
 
