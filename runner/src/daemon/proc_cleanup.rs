@@ -255,6 +255,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn the_heartbeat_rewrites_the_mark_every_5_s() {
+        // The mark bounds the post-crash window in which a leaderless group
+        // cannot be proven ours (macOS); keep it about 5 s wide.
+        assert!(proctree::ALIVE_INTERVAL <= Duration::from_secs(5));
+        let dir = tempfile::tempdir().unwrap();
+        let mut own = prepare(dir.path());
+        let ctx = own.ctx.clone().unwrap();
+        own.start_heartbeat();
+        let read = || proctree::read_alive(&ctx.proc_dir, &ctx.instance_id);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let first = loop {
+            if let Some(m) = read() {
+                break m;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "heartbeat never wrote"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let deadline = std::time::Instant::now() + proctree::ALIVE_INTERVAL * 2;
+        loop {
+            if read().is_some_and(|m| m > first) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "mark not rewritten within two intervals"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        drop(own);
+    }
+
     #[test]
     fn second_daemon_on_the_same_data_dir_does_not_recover() {
         let dir = tempfile::tempdir().unwrap();

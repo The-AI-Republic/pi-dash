@@ -48,7 +48,7 @@ const POLL: Duration = Duration::from_millis(50);
 /// window in practice.
 pub const START_TOLERANCE_MS: u64 = 2_000;
 /// How often the instance-lock holder rewrites `data_dir/proc/alive`.
-pub const ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+pub const ALIVE_INTERVAL: Duration = Duration::from_secs(5);
 /// File holding the lock holder's last-alive mark, beside the records.
 pub const ALIVE_FILE: &str = "alive";
 
