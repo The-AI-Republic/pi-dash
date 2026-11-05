@@ -40,7 +40,7 @@ use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use crate::agent::{
-    AgentProcessHandle, BridgeEvent, ENGINE_STARTUP_TIMEOUT, ExitSnapshot, RunPayload,
+    AgentProcessHandle, BridgeEvent, ENGINE_STARTUP_TIMEOUT, ExitRelay, ExitSnapshot, RunPayload,
     STDERR_RING_LINES, StderrBuffer, StderrRing, StderrSnapshot,
 };
 use crate::cloud::protocol::{ApprovalDecision, FailureReason};
@@ -69,16 +69,20 @@ pub struct Bridge {
     /// seeded from a prior turn. Reused as the `--session-id` argument on
     /// follow-up turns for conversational continuity.
     session_id: Option<String>,
-    /// Single exit-watch channel owned by the bridge. Reset to `None` at the
-    /// start of each `run` and republished by the spawned process's wait task,
-    /// so both `process_handle()` and `shutdown()` read a consistent liveness
-    /// signal. See the Cursor bridge for the full rationale.
-    exit_tx: watch::Sender<Option<ExitSnapshot>>,
+    /// The bridge's stable exit channel. Each turn's process publishes
+    /// into it only while it is the current one (see [`ExitRelay`]), so
+    /// both `process_handle()` (assignment path) and `bridge_has_exited()`
+    /// (chat path) see the current turn's liveness, never a retired one's.
+    exit: ExitRelay,
     exit_rx: watch::Receiver<Option<ExitSnapshot>>,
     stderr_ring: StderrRing,
     /// The currently-spawned one-shot subprocess, if a `run` is in flight (or
     /// just finished). `None` before the first `run`.
     proc: Option<MuseProcess>,
+    /// Earlier turns' processes whose groups may still have members (a dev
+    /// server the agent started). Kept owned until the bridge is finished, so
+    /// they live as long as the runtime, not just the turn.
+    retired: Vec<MuseProcess>,
     /// Events pulled off stdout while waiting synchronously for the first
     /// frame. Drained by `next_events` before touching the mpsc so no frame is
     /// lost.
@@ -96,7 +100,7 @@ impl Bridge {
         model_default: Option<String>,
         resume_session_id: Option<&str>,
     ) -> Result<Self> {
-        let (exit_tx, exit_rx) = watch::channel::<Option<ExitSnapshot>>(None);
+        let (exit, exit_rx) = ExitRelay::new();
         let stderr_ring: StderrRing = Arc::new(Mutex::new(StderrBuffer::new(STDERR_RING_LINES)));
         Ok(Self {
             binary: binary.to_string(),
@@ -105,10 +109,11 @@ impl Bridge {
             session_id: resume_session_id
                 .filter(|s| !s.is_empty())
                 .map(ToOwned::to_owned),
-            exit_tx,
+            exit,
             exit_rx,
             stderr_ring,
             proc: None,
+            retired: Vec::new(),
             pending: VecDeque::new(),
         })
     }
@@ -158,29 +163,21 @@ impl Bridge {
         prompt_file: Option<PromptFile>,
         run_id: Uuid,
     ) -> Result<BridgeCursor> {
-        // Reset the exit signal before the new process can publish into it, so a
-        // prior turn's exit snapshot doesn't make this turn look already-dead.
-        // Use `send_if_modified` so a no-op reset (a fresh bridge whose value is
-        // already `None`) does NOT fire a watch notification that a subscriber
-        // captured before `run` would misread as "already exited". Only a
-        // genuine `Some -> None` clear (a reused bridge) publishes a change.
-        self.exit_tx.send_if_modified(|v| {
-            if v.is_some() {
-                *v = None;
-                true
-            } else {
-                false
-            }
-        });
+        // A fresh exit channel for this turn's process, relayed into the
+        // bridge's channel only while it is current: a retired turn's leader
+        // exiting later must not make this turn look exited. `next` also
+        // clears a prior turn's snapshot without notifying when already
+        // `None` (the supervisor subscribes before `run`).
+        let proc_exit_tx = self.exit.next();
         self.pending.clear();
-        let proc = MuseProcess::spawn_command(
-            cmd,
-            prompt_file,
-            self.exit_tx.clone(),
-            self.stderr_ring.clone(),
-        )
-        .await?;
-        self.proc = Some(proc);
+        let proc =
+            MuseProcess::spawn_command(cmd, prompt_file, proc_exit_tx, self.stderr_ring.clone())
+                .await?;
+        if let Some(old) = self.proc.replace(proc) {
+            self.retired.push(old);
+        }
+        // Dropping a retired process whose group is gone finishes it at once.
+        self.retired.retain(|p| !p.is_gone());
         let thread_id = self.wait_for_init(run_id).await?;
         Ok(BridgeCursor::new(run_id, thread_id, self.model.clone()))
     }
@@ -312,12 +309,17 @@ impl Bridge {
         }
     }
 
-    pub async fn shutdown(self, grace: Duration) -> Result<()> {
-        if let Some(proc) = self.proc {
-            proc.shutdown(grace, self.exit_rx.clone()).await
-        } else {
-            Ok(())
-        }
+    /// Finish the current turn's process and every retired one, in parallel.
+    pub async fn finish(self, grace: Duration) -> Result<()> {
+        let all = self.proc.into_iter().chain(self.retired);
+        futures_util::future::join_all(all.map(|p| p.finish(grace))).await;
+        Ok(())
+    }
+
+    /// True once every process this bridge started (the current turn's and
+    /// the retired ones) has exited and its process group is gone.
+    pub fn is_gone(&self) -> bool {
+        self.proc.as_ref().is_none_or(|p| p.is_gone()) && self.retired.iter().all(|p| p.is_gone())
     }
 
     pub fn process_handle(&self) -> AgentProcessHandle {

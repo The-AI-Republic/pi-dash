@@ -39,7 +39,7 @@ use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use crate::agent::{
-    AgentProcessHandle, BridgeEvent, ENGINE_STARTUP_TIMEOUT, ExitSnapshot, RunPayload,
+    AgentProcessHandle, BridgeEvent, ENGINE_STARTUP_TIMEOUT, ExitRelay, ExitSnapshot, RunPayload,
     STDERR_RING_LINES, StderrBuffer, StderrRing, StderrSnapshot,
 };
 use crate::cloud::protocol::{ApprovalDecision, FailureReason};
@@ -56,15 +56,20 @@ pub struct Bridge {
     /// ACP session id captured from the first frame that carries one, or
     /// seeded from `--resume`. Surfaced as the run's thread id.
     session_id: Option<String>,
-    /// Single exit-watch channel owned by the bridge. Reset to `None` at the
-    /// start of each `run` and republished by the spawned process's wait task,
-    /// so both `process_handle()` and liveness checks read a consistent signal.
-    exit_tx: watch::Sender<Option<ExitSnapshot>>,
+    /// The bridge's stable exit channel. Each turn's process publishes
+    /// into it only while it is the current one (see [`ExitRelay`]), so
+    /// both `process_handle()` (assignment path) and `bridge_has_exited()`
+    /// (chat path) see the current turn's liveness, never a retired one's.
+    exit: ExitRelay,
     exit_rx: watch::Receiver<Option<ExitSnapshot>>,
     stderr_ring: StderrRing,
     /// The currently-spawned one-shot subprocess, if a `run` is in flight (or
     /// just finished). `None` before the first `run`.
     proc: Option<OpenClawProcess>,
+    /// Earlier turns' processes whose groups may still have members (a dev
+    /// server the agent started). Kept owned until the bridge is finished, so
+    /// they live as long as the runtime, not just the turn.
+    retired: Vec<OpenClawProcess>,
     /// Frames pulled off stdout while waiting synchronously for the first
     /// session-bearing frame. Drained by `next_events` before touching the
     /// mpsc so no frame is lost.
@@ -82,7 +87,7 @@ impl Bridge {
         model_default: Option<String>,
         resume_session_id: Option<&str>,
     ) -> Result<Self> {
-        let (exit_tx, exit_rx) = watch::channel::<Option<ExitSnapshot>>(None);
+        let (exit, exit_rx) = ExitRelay::new();
         let stderr_ring: StderrRing = Arc::new(Mutex::new(StderrBuffer::new(STDERR_RING_LINES)));
         Ok(Self {
             binary: binary.to_string(),
@@ -91,10 +96,11 @@ impl Bridge {
             session_id: resume_session_id
                 .filter(|s| !s.is_empty())
                 .map(ToOwned::to_owned),
-            exit_tx,
+            exit,
             exit_rx,
             stderr_ring,
             proc: None,
+            retired: Vec::new(),
             pending: VecDeque::new(),
         })
     }
@@ -134,25 +140,20 @@ impl Bridge {
     /// frame. Production `run` builds the command from config; tests inject a
     /// fake command directly.
     pub async fn run_with_command(&mut self, cmd: Command, run_id: Uuid) -> Result<BridgeCursor> {
-        // Reset the exit signal before the new process can publish into it, so
-        // a prior turn's exit snapshot doesn't make this turn look already-dead.
-        // Use `send_if_modified` so a no-op reset (a fresh bridge whose value
-        // is already `None`) does NOT fire a watch notification that the
-        // supervisor (which subscribed before calling `run`) would misread as
-        // an immediate exit. Only a genuine `Some -> None` clear publishes.
-        self.exit_tx.send_if_modified(|v| {
-            if v.is_some() {
-                *v = None;
-                true
-            } else {
-                false
-            }
-        });
+        // A fresh exit channel for this turn's process, relayed into the
+        // bridge's channel only while it is current: a retired turn's leader
+        // exiting later must not make this turn look exited. `next` also
+        // clears a prior turn's snapshot without notifying when already
+        // `None` (the supervisor subscribes before `run`).
+        let proc_exit_tx = self.exit.next();
         self.pending.clear();
         let proc =
-            OpenClawProcess::spawn_command(cmd, self.exit_tx.clone(), self.stderr_ring.clone())
-                .await?;
-        self.proc = Some(proc);
+            OpenClawProcess::spawn_command(cmd, proc_exit_tx, self.stderr_ring.clone()).await?;
+        if let Some(old) = self.proc.replace(proc) {
+            self.retired.push(old);
+        }
+        // Dropping a retired process whose group is gone finishes it at once.
+        self.retired.retain(|p| !p.is_gone());
         let thread_id = self.wait_for_session(run_id).await?;
         Ok(BridgeCursor {
             run_id,
@@ -262,12 +263,17 @@ impl Bridge {
         }
     }
 
-    pub async fn shutdown(self, grace: Duration) -> Result<()> {
-        if let Some(proc) = self.proc {
-            proc.shutdown(grace, self.exit_rx.clone()).await
-        } else {
-            Ok(())
-        }
+    /// Finish the current turn's process and every retired one, in parallel.
+    pub async fn finish(self, grace: Duration) -> Result<()> {
+        let all = self.proc.into_iter().chain(self.retired);
+        futures_util::future::join_all(all.map(|p| p.finish(grace))).await;
+        Ok(())
+    }
+
+    /// True once every process this bridge started (the current turn's and
+    /// the retired ones) has exited and its process group is gone.
+    pub fn is_gone(&self) -> bool {
+        self.proc.as_ref().is_none_or(|p| p.is_gone()) && self.retired.iter().all(|p| p.is_gone())
     }
 
     pub fn process_handle(&self) -> AgentProcessHandle {
@@ -426,6 +432,60 @@ mod tests {
             .position(|a| a == "--model")
             .expect("--model present");
         assert_eq!(argv.get(i + 1).map(String::as_str), Some("claude-x"));
+    }
+
+    fn sh(script: &str) -> Command {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(script);
+        cmd
+    }
+
+    fn alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    #[tokio::test]
+    async fn an_old_turns_late_exit_does_not_mark_the_current_turn_exited() {
+        // Turn 1 ends its turn, then its leader lingers ~1 s; turn 2 starts at
+        // once and keeps running. Turn 1's late exit must not reach the
+        // bridge's exit channel, which now belongs to turn 2.
+        let turn1 = r#"
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"s1"}}'
+            printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
+            sleep 1
+        "#;
+        let turn2 = r#"
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"s1"}}'
+            sleep 30
+        "#;
+        let mut bridge = Bridge::spawn("acpx", Path::new("/tmp"), None)
+            .await
+            .expect("bridge setup");
+        bridge
+            .run_with_command(sh(turn1), Uuid::new_v4())
+            .await
+            .expect("turn 1 setup");
+        let old_pid = bridge.process_handle().pid.expect("turn 1 pid");
+        bridge
+            .run_with_command(sh(turn2), Uuid::new_v4())
+            .await
+            .expect("turn 2 setup");
+        let handle = bridge.process_handle();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while alive(old_pid) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!alive(old_pid), "turn 1's leader should exit on its own");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            handle.exit_rx.borrow().is_none(),
+            "turn 1's exit must not mark the running turn 2 as exited"
+        );
+        bridge.finish(Duration::from_secs(1)).await.expect("finish");
     }
 
     fn cursor() -> BridgeCursor {

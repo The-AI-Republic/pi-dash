@@ -13,12 +13,12 @@
 //! the first run — observes the real subprocess once it starts.
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
 
+use crate::agent::tracked::TrackedChild;
 use crate::agent::{ExitSnapshot, StderrRing};
 use crate::cursor_agent::schema::StreamEvent;
 use crate::util::shell::is_benign_login_shell_warning;
@@ -30,13 +30,7 @@ use crate::util::shell::is_benign_login_shell_warning;
 pub struct CursorProcess {
     pid: Option<u32>,
     pub inbound: mpsc::Receiver<StreamEvent>,
-    kill_tx: mpsc::Sender<KillRequest>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum KillRequest {
-    Graceful,
-    Force,
+    child: TrackedChild,
 }
 
 impl CursorProcess {
@@ -53,9 +47,9 @@ impl CursorProcess {
         // No stdin: cursor-agent print mode takes the prompt from argv.
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let mut child = cmd.spawn().context("spawning cursor-agent subprocess")?;
+            .stderr(Stdio::piped());
+        let (mut child, tree) =
+            crate::agent::tracked::spawn(&mut cmd).context("spawning cursor-agent subprocess")?;
         let stdout = child.stdout.take().context("cursor-agent stdout missing")?;
         let stderr = child.stderr.take().context("cursor-agent stderr missing")?;
         let pid = child.id();
@@ -63,19 +57,22 @@ impl CursorProcess {
         let (tx, rx) = mpsc::channel(128);
         tokio::spawn(read_events(stdout, tx));
         tokio::spawn(drain_stderr(stderr, stderr_ring));
-
-        let (kill_tx, kill_rx) = mpsc::channel::<KillRequest>(2);
-        tokio::spawn(wait_task(child, kill_rx, exit_tx));
+        let child = TrackedChild::supervise(child, tree, exit_tx);
 
         Ok(Self {
             pid,
             inbound: rx,
-            kill_tx,
+            child,
         })
     }
 
     pub fn pid(&self) -> Option<u32> {
         self.pid
+    }
+
+    /// True once the leader has exited and its process group is gone.
+    pub fn is_gone(&self) -> bool {
+        self.child.is_gone()
     }
 
     /// Best-effort interrupt: send SIGINT if we can, otherwise fall back to
@@ -96,100 +93,20 @@ impl CursorProcess {
                 }
             }
         }
-        self.kill_tx
-            .send(KillRequest::Force)
+        self.child
+            .kill_leader()
             .await
             .context("failed to send kill request to cursor-agent wait task")?;
         Ok(())
     }
 
-    pub async fn shutdown(
-        self,
-        grace: std::time::Duration,
-        mut exit_rx: watch::Receiver<Option<ExitSnapshot>>,
-    ) -> Result<()> {
-        // Already exited (the one-shot turn finished, or a prior kill landed):
-        // there is nothing to wait on, and the wait task has already published
-        // its final snapshot and ended — so a `changed()` here would never fire.
-        // Return immediately instead of blocking the full `grace`.
-        if exit_rx.borrow().is_some() {
-            return Ok(());
-        }
-        let _ = self.kill_tx.send(KillRequest::Graceful).await;
-        match tokio::time::timeout(grace, exit_rx.changed()).await {
-            Ok(Ok(())) => {
-                let snap = exit_rx.borrow().clone();
-                tracing::debug!(?snap, "cursor-agent exited gracefully");
-            }
-            _ => {
-                tracing::warn!("cursor-agent did not exit within grace; sending SIGKILL");
-                let _ = self.kill_tx.send(KillRequest::Force).await;
-                // Bounded wait: the wait task may have already ended (so the
-                // snapshot is never republished); never let shutdown hang
-                // indefinitely on a `changed()` that will not come.
-                let _ = tokio::time::timeout(grace, exit_rx.changed()).await;
-            }
-        }
+    /// Stop the agent and everything it started: close stdin (where there is
+    /// one), wait for the leader up to `grace`, then finish its process
+    /// group. Replaces the old `shutdown`; see `agent::tracked`.
+    pub async fn finish(self, grace: std::time::Duration) -> Result<()> {
+        let outcome = self.child.finish(grace).await;
+        tracing::debug!(?outcome, "agent process tree finished");
         Ok(())
-    }
-}
-
-/// Owns the `Child` exclusively. Awaits either a kill request (force-kill the
-/// subprocess) or the child's natural exit, then publishes an `ExitSnapshot`
-/// and terminates.
-async fn wait_task(
-    mut child: Child,
-    mut kill_rx: mpsc::Receiver<KillRequest>,
-    exit_tx: watch::Sender<Option<ExitSnapshot>>,
-) {
-    let snapshot = loop {
-        tokio::select! {
-            biased;
-            req = kill_rx.recv() => {
-                match req {
-                    Some(KillRequest::Force) => {
-                        let _ = child.start_kill();
-                    }
-                    Some(KillRequest::Graceful) => {
-                        // No-op: wait for natural exit.
-                    }
-                    None => {
-                        // All senders dropped — the owning `CursorProcess` (and
-                        // its kill channel) is gone, i.e. the bridge was dropped
-                        // without a graceful shutdown. The only way to reach here
-                        // with the child still alive is a mid-run drop, so kill
-                        // it rather than leaving an orphaned `cursor-agent`
-                        // running to completion. `start_kill` is a no-op if it
-                        // already exited; we then `wait` to reap it (no zombie).
-                        // Breaking out of the loop here also stops the biased
-                        // select! from spinning on the now-closed recv channel.
-                        let _ = child.start_kill();
-                        let res = child.wait().await;
-                        break exit_snapshot_from(res.ok());
-                    }
-                }
-            }
-            res = child.wait() => {
-                break exit_snapshot_from(res.ok());
-            }
-        }
-    };
-    let _ = exit_tx.send(Some(snapshot));
-}
-
-fn exit_snapshot_from(status: Option<std::process::ExitStatus>) -> ExitSnapshot {
-    #[cfg(unix)]
-    let signal = {
-        use std::os::unix::process::ExitStatusExt;
-        status.as_ref().and_then(|s| s.signal())
-    };
-    #[cfg(not(unix))]
-    let signal: Option<i32> = None;
-    let status_code = status.as_ref().and_then(|s| s.code());
-    ExitSnapshot {
-        status_code,
-        signal,
-        observed_at: Utc::now(),
     }
 }
 

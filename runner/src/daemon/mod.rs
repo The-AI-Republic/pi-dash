@@ -7,6 +7,7 @@ mod run_event_mirror;
 pub mod runner_instance;
 pub mod runner_out;
 pub mod state;
+pub mod proc_cleanup;
 pub mod supervisor;
 
 use anyhow::Result;

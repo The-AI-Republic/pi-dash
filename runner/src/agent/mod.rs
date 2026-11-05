@@ -4,6 +4,7 @@
 //! not have to know which underlying CLI is driving a run.
 
 pub mod package;
+pub mod tracked;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -252,6 +253,68 @@ pub struct ExitSnapshot {
     pub observed_at: DateTime<Utc>,
 }
 
+/// A one-shot engine's stable exit channel, fed only by its current turn's
+/// process.
+///
+/// Cursor, MuseCode and OpenClaw spawn one subprocess per turn but expose one
+/// exit watch for the bridge's lifetime (the supervisor subscribes before the
+/// first `run`). A retired turn's process stays owned until the runtime ends,
+/// so its leader can exit after the next turn has started. Each process gets
+/// its own channel from [`ExitRelay::next`]; a relay task copies its exit into
+/// the shared channel only while that process is still the current one, so
+/// an old leader's exit never marks the current turn as exited.
+#[derive(Clone)]
+pub struct ExitRelay {
+    tx: watch::Sender<Option<ExitSnapshot>>,
+    /// Generation of the current process. Held while publishing, so a bump in
+    /// [`ExitRelay::next`] and an old relay's send cannot interleave.
+    current: Arc<std::sync::Mutex<u64>>,
+}
+
+impl ExitRelay {
+    pub fn new() -> (Self, watch::Receiver<Option<ExitSnapshot>>) {
+        let (tx, rx) = watch::channel(None);
+        let relay = Self {
+            tx,
+            current: Arc::new(std::sync::Mutex::new(0)),
+        };
+        (relay, rx)
+    }
+
+    /// Make the next spawned process the current one and return the sender
+    /// for its own exit. Clears the shared value; a no-op clear (already
+    /// `None`) sends no notification, so a subscriber that subscribed before
+    /// `run` does not misread it as an exit. Earlier processes stop relaying.
+    pub fn next(&self) -> watch::Sender<Option<ExitSnapshot>> {
+        let generation = {
+            let mut g = self
+                .current
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *g += 1;
+            self.tx.send_if_modified(|v| v.take().is_some());
+            *g
+        };
+        let (proc_tx, mut proc_rx) = watch::channel::<Option<ExitSnapshot>>(None);
+        let relay = self.clone();
+        tokio::spawn(async move {
+            // `changed` still yields a value sent just before the sender drops.
+            while proc_rx.changed().await.is_ok() {
+                let snap = proc_rx.borrow_and_update().clone();
+                let g = relay
+                    .current
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if *g != generation {
+                    return;
+                }
+                relay.tx.send_replace(snap);
+            }
+        });
+        proc_tx
+    }
+}
+
 /// Events the bridge surfaces to the daemon's state machine. Agent-agnostic:
 /// Codex and Claude both translate their native protocols into this shape.
 #[derive(Debug, Clone)]
@@ -293,7 +356,6 @@ pub struct RunPayload {
     pub prompt: String,
     pub model: Option<String>,
 }
-
 
 /// Build the Pi Dash-controlled environment for this runner's agent.
 ///
@@ -586,14 +648,42 @@ impl AgentBridge {
         }
     }
 
-    pub async fn shutdown(self, grace: Duration) -> Result<()> {
+    pub async fn finish(self, grace: Duration) -> Result<()> {
         match self {
-            AgentBridge::Codex(b) => b.server.shutdown(grace).await,
-            AgentBridge::ClaudeCode(b) => b.shutdown(grace).await,
-            AgentBridge::CursorAgent(b) => b.shutdown(grace).await,
-            AgentBridge::OpenClaw(b) => b.shutdown(grace).await,
-            AgentBridge::Grok(b) => b.shutdown(grace).await,
-            AgentBridge::MuseCode(b) => b.shutdown(grace).await,
+            AgentBridge::Codex(b) => b.server.finish(grace).await,
+            AgentBridge::ClaudeCode(b) => b.finish(grace).await,
+            AgentBridge::CursorAgent(b) => b.finish(grace).await,
+            AgentBridge::OpenClaw(b) => b.finish(grace).await,
+            AgentBridge::Grok(b) => b.finish(grace).await,
+            AgentBridge::MuseCode(b) => b.finish(grace).await,
+        }
+    }
+
+    /// Keep an exited bridge on a chat runtime's retired list until the
+    /// runtime ends, and drop every retired bridge whose process group is
+    /// already gone, so a long chat on a one-shot engine does not accumulate
+    /// one bridge per turn.
+    pub fn retire(retired: &mut Vec<AgentBridge>, bridge: AgentBridge) {
+        retire_pruned(retired, bridge, AgentBridge::is_gone);
+    }
+
+    /// Finish several bridges in parallel (a chat runtime's retired bridges
+    /// plus its current one, when the runtime ends).
+    pub async fn finish_all(bridges: Vec<AgentBridge>, grace: Duration) {
+        futures_util::future::join_all(bridges.into_iter().map(|b| b.finish(grace))).await;
+    }
+
+    /// True once every process this bridge started has exited and its
+    /// process group is gone. A chat runtime drops such a retired bridge
+    /// instead of keeping it until the runtime ends.
+    pub fn is_gone(&self) -> bool {
+        match self {
+            AgentBridge::Codex(b) => b.server.is_gone(),
+            AgentBridge::ClaudeCode(b) => b.is_gone(),
+            AgentBridge::CursorAgent(b) => b.is_gone(),
+            AgentBridge::OpenClaw(b) => b.is_gone(),
+            AgentBridge::Grok(b) => b.is_gone(),
+            AgentBridge::MuseCode(b) => b.is_gone(),
         }
     }
 
@@ -629,6 +719,14 @@ impl AgentBridge {
     }
 }
 
+/// Push `item` onto a retired list and drop every entry whose process
+/// group is already gone (dropping it then finishes nothing: its tree is
+/// disarmed). Entries whose group still has members are kept.
+pub(crate) fn retire_pruned<T>(retired: &mut Vec<T>, item: T, is_gone: impl Fn(&T) -> bool) {
+    retired.push(item);
+    retired.retain(|t| !is_gone(t));
+}
+
 fn selected_model(
     model_override: Option<String>,
     configured_default: Option<String>,
@@ -638,9 +736,61 @@ fn selected_model(
 
 #[cfg(test)]
 mod tests {
+    use super::{ExitRelay, ExitSnapshot};
     use super::{
         STDERR_LINE_CAP_BYTES, StderrBuffer, sanitize_stderr_line, selected_model, strip_ansi_codes,
     };
+    use chrono::Utc;
+    use std::time::Duration;
+
+    fn snap(code: i32) -> ExitSnapshot {
+        ExitSnapshot {
+            status_code: Some(code),
+            signal: None,
+            observed_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn exit_relay_ignores_a_retired_process_and_relays_the_current_one() {
+        let (relay, rx) = ExitRelay::new();
+        let old = relay.next();
+        let current = relay.next();
+        // The retired process exits after the next one became current.
+        let _ = old.send(Some(snap(1)));
+        drop(old);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(rx.borrow().is_none(), "a retired process must not publish");
+
+        let _ = current.send(Some(snap(0)));
+        drop(current);
+        let mut rx2 = rx.clone();
+        let got = tokio::time::timeout(Duration::from_secs(2), rx2.wait_for(|v| v.is_some()))
+            .await
+            .expect("the current process's exit is relayed")
+            .expect("channel open")
+            .as_ref()
+            .and_then(|s| s.status_code);
+        assert_eq!(got, Some(0));
+    }
+
+    #[tokio::test]
+    async fn exit_relay_next_clears_without_a_spurious_notification() {
+        let (relay, mut rx) = ExitRelay::new();
+        let _first = relay.next();
+        assert!(
+            !rx.has_changed().unwrap(),
+            "clearing an already-empty value must not notify"
+        );
+        let second = relay.next();
+        let _ = second.send(Some(snap(0)));
+        tokio::time::timeout(Duration::from_secs(2), rx.wait_for(|v| v.is_some()))
+            .await
+            .expect("relayed")
+            .expect("open");
+        let _third = relay.next();
+        assert!(rx.borrow_and_update().is_none(), "next clears a prior exit");
+    }
 
     #[test]
     fn stderr_buffer_evicts_oldest_when_full() {

@@ -80,6 +80,13 @@ impl Supervisor {
             state,
             approvals: _supervisor_approvals,
         } = self;
+        // Process ownership (runner cleanup §4.1): take the exclusive
+        // instance lock and recover this instance's stale proc records
+        // *before* any runner can spawn (bounded; a resumed chat reuses its
+        // tag, so recovery must not run alongside new agents). Held until
+        // the daemon exits.
+        let _proc_ownership = crate::daemon::proc_cleanup::startup(&paths.data_dir).await;
+
         // Daemon-level state has no single runner_id any more — runners
         // come and go under one connection. Per-instance state still
         // holds its own runner_id (set in RunnerInstance::new).
@@ -273,6 +280,19 @@ impl Supervisor {
         if let Some(h) = replay_retry_handle {
             h.abort();
             let _ = h.await;
+        }
+
+        // Finish every agent process tree before anything is published:
+        // stop accepting new spawns, snapshot the live trees and finish them
+        // in parallel (≤ 10 s), so the drain below reports runs whose
+        // processes are already gone. Total stays inside launchd's 20 s
+        // `ExitTimeOut` (finish ≤ 10 s, drain ≤ 5 s).
+        let unresolved = crate::util::proctree::shutdown_all(Duration::from_secs(10)).await;
+        if unresolved > 0 {
+            tracing::warn!(
+                unresolved,
+                "some agent process groups could not be confirmed gone; their records are kept for the next start"
+            );
         }
 
         // Drain in-flight runs before tearing down: send RunFailed with
@@ -536,6 +556,7 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
             live_instances,
             current_run: None,
             current_chat: None,
+            stopping_chat: None,
             local_chat_active: inst_chat_active,
         };
         if let Err(e) = run.run().await {
@@ -1201,6 +1222,10 @@ struct RunnerLoop {
     /// next inbound frame.
     current_run: Option<CurrentRun>,
     current_chat: Option<CurrentChat>,
+    /// A chat runtime that has been told to end but whose process trees are
+    /// not confirmed gone yet. While set, the working dir is not handed to a
+    /// run or another chat runtime (see [`release_chat_dir`]).
+    stopping_chat: Option<StoppingChat>,
     /// Shared with this runner's `RunnerInstance` (and therefore the IPC
     /// server): `true` while a *local* chat turn (PDASHOSS01-159, driven over
     /// the daemon IPC socket, not this cloud loop) holds the working copy. The
@@ -1219,7 +1244,123 @@ struct CurrentChat {
     chat_session_id: uuid::Uuid,
     tx: mpsc::Sender<ChatCommand>,
     active_rx: watch::Receiver<bool>,
-    done_rx: oneshot::Receiver<()>,
+    /// Fires when the runtime has ended and finished its process trees:
+    /// `true` when every tree was confirmed gone.
+    done_rx: oneshot::Receiver<bool>,
+}
+
+/// A chat runtime on its way out (see [`release_chat_dir`]).
+struct StoppingChat {
+    chat_session_id: uuid::Uuid,
+    /// Pending while the runtime is still finishing its trees.
+    done_rx: Option<oneshot::Receiver<bool>>,
+    /// How long a handoff waits for `done_rx` before refusing.
+    deadline: tokio::time::Instant,
+}
+
+/// Grace a chat runtime gives each agent to exit after stdin EOF, when the
+/// runtime ends.
+const CHAT_FINISH_GRACE: Duration = Duration::from_secs(5);
+
+/// How long handing a chat runtime's working dir to the next run or chat
+/// runtime waits for the old runtime's trees: the whole finish bound (grace,
+/// then SIGTERM ≤ 3 s, then SIGKILL ≤ 2 s) plus a margin for reaping.
+const CHAT_HANDOFF_BOUND: Duration = Duration::from_secs(
+    CHAT_FINISH_GRACE.as_secs()
+        + crate::util::proctree::TERM_WAIT.as_secs()
+        + crate::util::proctree::KILL_WAIT.as_secs()
+        + 3,
+);
+
+/// Start a chat runtime: the worker runs inside its own process scope, and
+/// `done_rx` reports whether every tree it started is confirmed gone.
+fn spawn_chat_runtime(
+    mut worker: ChatWorker,
+    chat_session_id: uuid::Uuid,
+    runner_id: String,
+    tx: mpsc::Sender<ChatCommand>,
+    active_rx: watch::Receiver<bool>,
+) -> CurrentChat {
+    let (done_tx, done_rx) = oneshot::channel();
+    // One process scope per chat runtime: its agent trees are finished
+    // when the runtime ends (Release, idle timeout, Close, Shutdown), not
+    // per turn (runner cleanup §4.2).
+    let proc_scope = crate::util::proctree::ProcScope {
+        kind: crate::util::proctree::ScopeKind::Chat,
+        id: chat_session_id.to_string(),
+        runner_id: Some(runner_id),
+    };
+    tokio::spawn(async move {
+        crate::util::proctree::PROC_SCOPE
+            .scope(proc_scope, worker.run(chat_session_id))
+            .await;
+        let id = chat_session_id.to_string();
+        // Safety net for a bridge dropped without being finished.
+        crate::util::proctree::finish_scope(crate::util::proctree::ScopeKind::Chat, &id).await;
+        let clean =
+            !crate::util::proctree::scope_unresolved(crate::util::proctree::ScopeKind::Chat, &id);
+        let _ = done_tx.send(clean);
+    });
+    CurrentChat {
+        chat_session_id,
+        tx,
+        active_rx,
+        done_rx,
+    }
+}
+
+/// Free the working dir held by a chat runtime before a run or another chat
+/// runtime starts in it. A live runtime in `current` is released (Release, not
+/// Shutdown: the cloud session stays open for revival) and moves to
+/// `stopping`. Waits, at most until its deadline (the whole finish bound), for
+/// its trees to finish. Returns `true` once the dir is free: no runtime holds
+/// it and no tree of the old runtime may still be running. Returns `false`
+/// while the old trees are still finishing or could not be confirmed gone;
+/// the caller must not start anything in the dir then, and a later call
+/// checks again.
+async fn release_chat_dir(
+    current: &mut Option<CurrentChat>,
+    stopping: &mut Option<StoppingChat>,
+) -> bool {
+    if let Some(chat) = current.take() {
+        let _ = chat.tx.send(ChatCommand::Release).await;
+        *stopping = Some(StoppingChat {
+            chat_session_id: chat.chat_session_id,
+            done_rx: Some(chat.done_rx),
+            deadline: tokio::time::Instant::now() + CHAT_HANDOFF_BOUND,
+        });
+    }
+    let Some(st) = stopping.as_mut() else {
+        return true;
+    };
+    if let Some(rx) = st.done_rx.as_mut() {
+        match tokio::time::timeout_at(st.deadline, rx).await {
+            Ok(Ok(true)) => {
+                *stopping = None;
+                return true;
+            }
+            // Ended with an unresolved tree, or the runtime task went away
+            // without reporting: fall through to the tree check.
+            Ok(_) => st.done_rx = None,
+            Err(_) => {
+                tracing::warn!(
+                    chat_session_id = %st.chat_session_id,
+                    "previous chat runtime is still finishing its agent processes; not handing over the working dir"
+                );
+                return false;
+            }
+        }
+    }
+    let id = st.chat_session_id.to_string();
+    if crate::util::proctree::scope_unresolved(crate::util::proctree::ScopeKind::Chat, &id) {
+        tracing::warn!(
+            chat_session_id = %st.chat_session_id,
+            "previous chat runtime's agent processes are not confirmed gone; not handing over the working dir"
+        );
+        return false;
+    }
+    *stopping = None;
+    true
 }
 
 async fn acknowledge_cancel_without_active_process(out: &RunnerOut, run_id: uuid::Uuid) {
@@ -1303,15 +1444,9 @@ impl RunnerLoop {
         });
     }
 
-    async fn stop_idle_chat_runtime(&mut self) {
-        let Some(mut chat) = self.current_chat.take() else {
-            return;
-        };
-        // Release, not Shutdown: swapping the runtime to another session must
-        // not close the old session in the cloud — the user may switch back to
-        // it from the chat history panel, and a warm/message revives it.
-        let _ = chat.tx.send(ChatCommand::Release).await;
-        let _ = tokio::time::timeout(Duration::from_secs(5), &mut chat.done_rx).await;
+    /// See [`release_chat_dir`].
+    async fn release_chat_dir(&mut self) -> bool {
+        release_chat_dir(&mut self.current_chat, &mut self.stopping_chat).await
     }
 
     async fn start_chat_runtime(
@@ -1320,25 +1455,22 @@ impl RunnerLoop {
     ) -> mpsc::Sender<ChatCommand> {
         let (tx, rx) = mpsc::channel(8);
         let (active_tx, active_rx) = watch::channel(false);
-        let (done_tx, done_rx) = oneshot::channel();
-        self.current_chat = Some(CurrentChat {
-            chat_session_id,
-            tx: tx.clone(),
-            active_rx,
-            done_rx,
-        });
-        let mut worker = ChatWorker {
+        let worker = ChatWorker {
             runner_config: self.runner_config.clone(),
             state: self.state.clone(),
             approvals: self.approvals.clone(),
             out: self.out.clone(),
             command_rx: rx,
             active_tx,
+            retired: Vec::new(),
         };
-        tokio::spawn(async move {
-            worker.run(chat_session_id).await;
-            let _ = done_tx.send(());
-        });
+        self.current_chat = Some(spawn_chat_runtime(
+            worker,
+            chat_session_id,
+            self.runner_config.runner_id.to_string(),
+            tx.clone(),
+            active_rx,
+        ));
         tx
     }
 
@@ -1355,8 +1487,19 @@ impl RunnerLoop {
                         self.current_run = None;
                         continue;
                     }
-                    () = wait_chat_done(&mut self.current_chat) => {
-                        self.current_chat = None;
+                    clean = wait_chat_done(&mut self.current_chat) => {
+                        // The runtime ended on its own (idle timeout, Close).
+                        // A tree it could not confirm gone keeps the working
+                        // dir held until a later check sees it gone.
+                        if let Some(chat) = self.current_chat.take()
+                            && !clean
+                        {
+                            self.stopping_chat = Some(StoppingChat {
+                                chat_session_id: chat.chat_session_id,
+                                done_rx: None,
+                                deadline: tokio::time::Instant::now(),
+                            });
+                        }
                         continue;
                     }
                     f = &mut inbound => f,
@@ -1489,8 +1632,16 @@ impl RunnerLoop {
                         );
                         continue;
                     }
-                    if self.current_chat.is_some() {
-                        self.stop_idle_chat_runtime().await;
+                    // Hand the working dir over only once the previous chat
+                    // runtime's processes are confirmed gone; otherwise they
+                    // could still be changing files under the new run.
+                    if !self.release_chat_dir().await {
+                        self.nack_assign(
+                            run_id,
+                            "assign rejected: the previous chat agent's processes are still stopping"
+                                .to_string(),
+                        );
+                        continue;
                     }
                     // Intra-assign-lane guard — one issue in flight at a time —
                     // is kept for ALL runners (the assign lane stays
@@ -1553,24 +1704,37 @@ impl RunnerLoop {
                             approvals,
                             out,
                             cancel,
+                            terminal: None,
                         };
-                        if let Err(e) = worker
+                        let result = worker
                             .run(run_id, prompt, repo_url, expected_codex_model)
-                            .await
-                        {
+                            .await;
+                        // Safety net: whichever path ended the run (including
+                        // a bridge dropped mid-startup), no process tree of it
+                        // outlives the worker.
+                        crate::util::proctree::finish_scope(
+                            crate::util::proctree::ScopeKind::Run,
+                            &run_id.to_string(),
+                        )
+                        .await;
+                        if let Err(e) = result {
                             tracing::error!("run {run_id} failed: {e:#}");
-                            let _ = worker
-                                .out
-                                .send(ClientMsg::RunFailed {
-                                    run_id,
-                                    reason: FailureReason::Internal,
-                                    detail: Some(format!("{e:#}")),
-                                    ended_at: Utc::now(),
-                                    tokens: None,
-                                    model: None,
-                                })
-                                .await;
-                            worker.state.set_current_run(None).await;
+                            // During daemon shutdown the drain reports the run
+                            // as `DaemonRestart`; do not race it.
+                            if !crate::util::proctree::shutting_down() {
+                                let _ = worker
+                                    .out
+                                    .send(ClientMsg::RunFailed {
+                                        run_id,
+                                        reason: FailureReason::Internal,
+                                        detail: Some(format!("{e:#}")),
+                                        ended_at: Utc::now(),
+                                        tokens: None,
+                                        model: None,
+                                    })
+                                    .await;
+                                worker.state.set_current_run(None).await;
+                            }
                         }
                         let _ = done_tx.send(());
                     });
@@ -1653,7 +1817,7 @@ impl RunnerLoop {
                                     .await;
                                 continue;
                             }
-                            chat.tx.clone()
+                            Some(chat.tx.clone())
                         } else if *chat.active_rx.borrow() {
                             let _ = self
                                 .out
@@ -1666,11 +1830,33 @@ impl RunnerLoop {
                                 .await;
                             continue;
                         } else {
-                            self.stop_idle_chat_runtime().await;
-                            self.start_chat_runtime(chat_session_id).await
+                            None
                         }
                     } else {
-                        self.start_chat_runtime(chat_session_id).await
+                        None
+                    };
+                    let tx = match tx {
+                        Some(tx) => tx,
+                        // A new runtime needs the working dir: only once the
+                        // previous runtime's processes are confirmed gone.
+                        None if self.release_chat_dir().await => {
+                            self.start_chat_runtime(chat_session_id).await
+                        }
+                        None => {
+                            let _ = self
+                                .out
+                                .send(ClientMsg::ChatFailed {
+                                    chat_session_id,
+                                    code: "chat_turn_active".into(),
+                                    detail: Some(
+                                        "the previous chat agent's processes are still stopping"
+                                            .into(),
+                                    ),
+                                    failed_at: Utc::now(),
+                                })
+                                .await;
+                            continue;
+                        }
                     };
                     if tx.send(ChatCommand::Message(turn)).await.is_err() {
                         let _ = self
@@ -1728,7 +1914,7 @@ impl RunnerLoop {
                                     .await;
                                 continue;
                             }
-                            chat.tx.clone()
+                            Some(chat.tx.clone())
                         } else if *chat.active_rx.borrow() {
                             let _ = self
                                 .out
@@ -1743,11 +1929,30 @@ impl RunnerLoop {
                                 .await;
                             continue;
                         } else {
-                            self.stop_idle_chat_runtime().await;
-                            self.start_chat_runtime(chat_session_id).await
+                            None
                         }
                     } else {
-                        self.start_chat_runtime(chat_session_id).await
+                        None
+                    };
+                    let tx = match tx {
+                        Some(tx) => tx,
+                        None if self.release_chat_dir().await => {
+                            self.start_chat_runtime(chat_session_id).await
+                        }
+                        None => {
+                            let _ = self
+                                .out
+                                .send(ClientMsg::ChatEvent {
+                                    chat_session_id,
+                                    bridge_seq: 0,
+                                    kind: "chat_warm_skipped".into(),
+                                    payload: serde_json::json!({
+                                        "reason": "chat_turn_active",
+                                    }),
+                                })
+                                .await;
+                            continue;
+                        }
                     };
                     if tx.send(ChatCommand::Warm(warm)).await.is_err() {
                         let _ = self
@@ -2003,11 +2208,9 @@ async fn wait_done(current: &mut Option<CurrentRun>) {
     }
 }
 
-async fn wait_chat_done(current: &mut Option<CurrentChat>) {
+async fn wait_chat_done(current: &mut Option<CurrentChat>) -> bool {
     match current {
-        Some(chat) => {
-            let _ = (&mut chat.done_rx).await;
-        }
+        Some(chat) => (&mut chat.done_rx).await.unwrap_or(false),
         None => std::future::pending().await,
     }
 }
@@ -2086,6 +2289,10 @@ struct ChatWorker {
     out: RunnerOut,
     command_rx: mpsc::Receiver<ChatCommand>,
     active_tx: watch::Sender<bool>,
+    /// Bridges whose leader exited between turns. Their process trees live
+    /// until the chat runtime ends, when they are finished with the current
+    /// bridge.
+    retired: Vec<AgentBridge>,
 }
 
 impl ChatWorker {
@@ -2160,7 +2367,7 @@ impl ChatWorker {
                             })
                             .await;
                         if let Some(bridge) = bridge.take() {
-                            bridge.shutdown(Duration::from_secs(5)).await.ok();
+                            bridge.finish(Duration::from_secs(5)).await.ok();
                         }
                         workspace_path.take();
                         started_sent = false;
@@ -2192,7 +2399,7 @@ impl ChatWorker {
                                 })
                                 .await;
                             if let Some(bridge) = bridge.take() {
-                                bridge.shutdown(Duration::from_secs(5)).await.ok();
+                                bridge.finish(Duration::from_secs(5)).await.ok();
                             }
                             started_sent = false;
                             false
@@ -2219,7 +2426,7 @@ impl ChatWorker {
                     break;
                 }
                 ChatCommand::Release => {
-                    // Runtime swap (see `stop_idle_chat_runtime`). No terminal
+                    // Runtime swap (see `release_chat_dir`). No terminal
                     // `ChatClosed` — the cloud session stays open for revival.
                     // The post-loop persist below still commits + pushes.
                     break;
@@ -2238,9 +2445,9 @@ impl ChatWorker {
                 }
             }
         }
-        if let Some(bridge) = bridge.take() {
-            bridge.shutdown(Duration::from_secs(5)).await.ok();
-        }
+        let mut ending: Vec<AgentBridge> = std::mem::take(&mut self.retired);
+        ending.extend(bridge.take());
+        AgentBridge::finish_all(ending, CHAT_FINISH_GRACE).await;
         let _ = self.active_tx.send(false);
         self.state.set_chat_active(false).await;
     }
@@ -2322,7 +2529,11 @@ impl ChatWorker {
 
         if bridge.as_ref().is_some_and(bridge_has_exited) {
             if let Some(bridge) = bridge.take() {
-                bridge.shutdown(Duration::from_secs(1)).await.ok();
+                // The leader exited (a one-shot engine does so after every
+                // turn), but processes it started belong to the chat
+                // runtime, not the turn: keep the tree until the runtime
+                // ends (runner cleanup §4.3).
+                AgentBridge::retire(&mut self.retired, bridge);
             }
             *started_sent = false;
         }
@@ -2442,7 +2653,11 @@ impl ChatWorker {
 
         if bridge_slot.as_ref().is_some_and(bridge_has_exited) {
             if let Some(bridge) = bridge_slot.take() {
-                bridge.shutdown(Duration::from_secs(1)).await.ok();
+                // The leader exited (a one-shot engine does so after every
+                // turn), but processes it started belong to the chat
+                // runtime, not the turn: keep the tree until the runtime
+                // ends (runner cleanup §4.3).
+                AgentBridge::retire(&mut self.retired, bridge);
             }
             *started_sent = false;
         }
@@ -2533,7 +2748,7 @@ impl ChatWorker {
                 let close_after_turn = matches!(command, Some(ChatCommand::Close { .. }));
                 tracing::info!(?command, %chat_session_id, "chat turn interrupted during engine startup");
                 if let Some(bridge) = bridge_slot.take() {
-                    bridge.shutdown(Duration::from_secs(5)).await.ok();
+                    bridge.finish(Duration::from_secs(5)).await.ok();
                 }
                 *started_sent = false;
                 self.out
@@ -3121,6 +3336,10 @@ struct AssignWorker {
     approvals: ApprovalRouter,
     out: RunnerOut,
     cancel: tokio_util::sync::CancellationToken,
+    /// The run's terminal message (`RunCompleted` / `RunFailed`), held until
+    /// the agent's process tree is finished so completion is never published
+    /// while the run's processes are still alive (runner cleanup §4.1).
+    terminal: Option<ClientMsg>,
 }
 
 struct RunMetadata {
@@ -3179,10 +3398,21 @@ impl AssignWorker {
         // Scope the run id over everything this run does so every agent
         // subprocess the bridges spawn (and re-spawn per turn) inherits
         // `PIDASH_RUN_ID` — see `util::shell::RUN_ENV`.
-        crate::util::shell::RUN_ENV
+        //
+        // The process scope tags every agent process tree of this run
+        // (`PIDASH_PROC_TAG`, proc records) — see `util::proctree`.
+        let proc_scope = crate::util::proctree::ProcScope {
+            kind: crate::util::proctree::ScopeKind::Run,
+            id: run_id.to_string(),
+            runner_id: Some(self.runner_config.runner_id.to_string()),
+        };
+        crate::util::proctree::PROC_SCOPE
             .scope(
-                crate::util::shell::RunEnv { run_id },
-                self.handle_assign_inner(run_id, prompt, repo_url, expected_codex_model),
+                proc_scope,
+                crate::util::shell::RUN_ENV.scope(
+                    crate::util::shell::RunEnv { run_id },
+                    self.handle_assign_inner(run_id, prompt, repo_url, expected_codex_model),
+                ),
             )
             .await
     }
@@ -3295,6 +3525,13 @@ impl AssignWorker {
         {
             Ok(b) => b,
             Err(e) => {
+                // A bridge that failed mid-startup was dropped; make sure its
+                // process tree is gone before the failure is published.
+                crate::util::proctree::finish_scope(
+                    crate::util::proctree::ScopeKind::Run,
+                    &run_id.to_string(),
+                )
+                .await;
                 hist.append(&HistoryEntry::Footer {
                     ts: Utc::now(),
                     final_status: "failed".to_string(),
@@ -3304,16 +3541,19 @@ impl AssignWorker {
                 .await
                 .ok();
                 let reason = self.crash_reason();
-                self.send(ClientMsg::RunFailed {
+                self.terminal = Some(ClientMsg::RunFailed {
                     run_id,
                     reason,
                     detail: Some(format!("{e:#}")),
                     ended_at: Utc::now(),
                     tokens: None,
                     model: None,
-                })
-                .await;
-                self.state.set_current_run(None).await;
+                });
+                // Spawning is refused once daemon shutdown began; the drain
+                // owns that run's report.
+                if self.publish_terminal().await {
+                    self.state.set_current_run(None).await;
+                }
                 return Ok(());
             }
         };
@@ -3349,7 +3589,7 @@ impl AssignWorker {
             // The handshake was abandoned mid-flight, so the bridge is
             // discarded. On shutdown the daemon's drain reports the run as
             // `DaemonRestart`; only an explicit cancel is reported here.
-            bridge.shutdown(Duration::from_secs(5)).await.ok();
+            bridge.finish(Duration::from_secs(5)).await.ok();
             let cancelled = self.cancel.is_cancelled();
             hist.append(&HistoryEntry::Footer {
                 ts: Utc::now(),
@@ -3383,17 +3623,19 @@ impl AssignWorker {
                 })
                 .await
                 .ok();
-                self.send(ClientMsg::RunFailed {
+                // Clean up before completion is published.
+                bridge.finish(Duration::from_secs(5)).await.ok();
+                self.terminal = Some(ClientMsg::RunFailed {
                     run_id,
                     reason: self.crash_reason(),
                     detail: Some(detail),
                     ended_at: Utc::now(),
                     tokens: None,
                     model: None,
-                })
-                .await;
-                bridge.shutdown(Duration::from_secs(5)).await.ok();
-                self.state.set_current_run(None).await;
+                });
+                if self.publish_terminal().await {
+                    self.state.set_current_run(None).await;
+                }
                 return Ok(());
             }
         };
@@ -3420,12 +3662,15 @@ impl AssignWorker {
         })
         .await?;
 
-        // Pump events until terminal.
-        let outcome = self
+        // Pump events until terminal. The terminal message is held in
+        // `self.terminal` and published only after the process tree is
+        // finished — on every path, including the error return.
+        let pumped = self
             .pump_events(&mut bridge, &mut cursor, &mut hist, &workspace_path)
-            .await?;
-
-        bridge.shutdown(Duration::from_secs(5)).await.ok();
+            .await;
+        bridge.finish(Duration::from_secs(5)).await.ok();
+        let published = self.publish_terminal().await;
+        let outcome = pumped?;
 
         let summary = RunSummary {
             run_id,
@@ -3452,8 +3697,29 @@ impl AssignWorker {
             return Ok(());
         }
 
-        self.state.set_current_run(None).await;
+        if published {
+            self.state.set_current_run(None).await;
+        }
         Ok(())
+    }
+
+    /// Publish the held terminal message. Returns `false` when daemon
+    /// shutdown has begun: the shutdown drain then reports the run as
+    /// `DaemonRestart` (it needs the run still marked in flight), and a
+    /// crash report from agents the shutdown itself killed would race it.
+    async fn publish_terminal(&mut self) -> bool {
+        if crate::util::proctree::shutting_down() {
+            if self.terminal.take().is_some() {
+                tracing::info!(
+                    "daemon shutting down; leaving the run's terminal report to the drain"
+                );
+            }
+            return false;
+        }
+        if let Some(msg) = self.terminal.take() {
+            self.send(msg).await;
+        }
+        true
     }
 
     async fn pump_events(
@@ -3543,14 +3809,14 @@ impl AssignWorker {
                             .await;
                         run_events.flush_before_lifecycle(&self.out).await;
                         let metadata = self.run_metadata().await;
-                        self.send(ClientMsg::RunFailed {
+                        self.terminal = Some(ClientMsg::RunFailed {
                             run_id: cursor.run_id(),
                             reason,
                             detail: Some(detail.clone()),
                             ended_at: Utc::now(),
                             tokens: metadata.tokens,
                             model: metadata.model,
-                        }).await;
+                        });
                         hist.append(&HistoryEntry::Footer {
                             ts: Utc::now(),
                             final_status: "failed".into(),
@@ -3595,14 +3861,14 @@ impl AssignWorker {
                     let detail = self.build_failure_detail(&base, bridge).await;
                     run_events.flush_before_lifecycle(&self.out).await;
                     let metadata = self.run_metadata().await;
-                    self.send(ClientMsg::RunFailed {
+                    self.terminal = Some(ClientMsg::RunFailed {
                         run_id: cursor.run_id(),
                         reason: FailureReason::Timeout,
                         detail: Some(detail.clone()),
                         ended_at: Utc::now(),
                         tokens: metadata.tokens,
                         model: metadata.model,
-                    }).await;
+                    });
                     hist.append(&HistoryEntry::Footer {
                         ts: Utc::now(),
                         final_status: "failed".into(),
@@ -3972,14 +4238,13 @@ impl AssignWorker {
             } => {
                 run_events.flush_before_lifecycle(&self.out).await;
                 let metadata = self.run_metadata().await;
-                self.send(ClientMsg::RunCompleted {
+                self.terminal = Some(ClientMsg::RunCompleted {
                     run_id,
                     done_payload: done_payload.clone(),
                     ended_at: Utc::now(),
                     tokens: metadata.tokens,
                     model: metadata.model,
-                })
-                .await;
+                });
                 hist.append(&HistoryEntry::Footer {
                     ts: Utc::now(),
                     final_status: "completed".into(),
@@ -4011,15 +4276,14 @@ impl AssignWorker {
                 let enriched = self.build_failure_detail(&base, bridge).await;
                 run_events.flush_before_lifecycle(&self.out).await;
                 let metadata = self.run_metadata().await;
-                self.send(ClientMsg::RunFailed {
+                self.terminal = Some(ClientMsg::RunFailed {
                     run_id,
                     reason,
                     detail: Some(enriched.clone()),
                     ended_at: Utc::now(),
                     tokens: metadata.tokens,
                     model: metadata.model,
-                })
-                .await;
+                });
                 hist.append(&HistoryEntry::Footer {
                     ts: Utc::now(),
                     final_status: "failed".into(),
@@ -4291,6 +4555,7 @@ mod tests {
                 approvals: ApprovalRouter::new(),
                 out: RunnerOut::new(config.runner_id, tx),
                 cancel: tokio_util::sync::CancellationToken::new(),
+                terminal: None,
             };
             worker
                 .run(
@@ -4323,6 +4588,429 @@ mod tests {
         }
     }
 
+    /// Fake `claude` for the ordering tests: writes the pid of a `sleep`
+    /// child to `$PIDFILE`, then runs `body`. The child's stdio is detached so
+    /// only the leader holds the agent's stdout.
+    #[cfg(unix)]
+    fn ordering_fixture(body: &str) -> (tempfile::TempDir, AssignWorker, mpsc::Receiver<crate::cloud::protocol::Envelope<ClientMsg>>, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        paths.ensure().unwrap();
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir_all(&wd).unwrap();
+        let pidfile = tmp.path().join("child.pid");
+        let fake = tmp.path().join("fake-claude");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nsleep 300 </dev/null >/dev/null 2>&1 &\necho $! > '{}'\n{body}\n",
+                pidfile.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut config = runner_config("ordering", "TEST", wd);
+        config.project_slug = None;
+        config.agent.kind = AgentKind::ClaudeCode;
+        config.claude_code.binary = fake.to_string_lossy().into_owned();
+        let runner_paths = paths.for_runner(config.runner_id);
+        runner_paths.ensure().unwrap();
+        let (tx, rx) = mpsc::channel(64);
+        let worker = AssignWorker {
+            runner_paths,
+            daemon_paths: paths,
+            runner_config: config.clone(),
+            state: StateHandle::new(Config {
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![config.clone()],
+                cli: None,
+            }),
+            approvals: ApprovalRouter::new(),
+            out: RunnerOut::new(config.runner_id, tx),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            terminal: None,
+        };
+        (tmp, worker, rx, pidfile)
+    }
+
+    #[cfg(unix)]
+    const INIT: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess_order"}'"#;
+    #[cfg(unix)]
+    const RESULT: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess_order","result":"done","usage":{"input_tokens":1,"output_tokens":1}}'"#;
+
+    /// Run the worker and return the terminal message, asserting the agent's
+    /// child was already gone when it was received.
+    #[cfg(unix)]
+    async fn terminal_after_cleanup(
+        mut worker: AssignWorker,
+        mut rx: mpsc::Receiver<crate::cloud::protocol::Envelope<ClientMsg>>,
+        pidfile: &std::path::Path,
+        cancel_after_start: bool,
+    ) -> ClientMsg {
+        let cancel = worker.cancel.clone();
+        let run = tokio::spawn(async move {
+            worker
+                .run(uuid::Uuid::new_v4(), "hi".into(), None, None)
+                .await
+                .unwrap();
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let msg = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .expect("worker produced a terminal message")
+                .expect("channel open")
+                .body;
+            match msg {
+                ClientMsg::RunStarted { .. } if cancel_after_start => cancel.cancel(),
+                ClientMsg::RunCompleted { .. }
+                | ClientMsg::RunFailed { .. }
+                | ClientMsg::RunCancelled { .. } => {
+                    let pid: i32 = std::fs::read_to_string(pidfile)
+                        .expect("fake agent started its child")
+                        .trim()
+                        .parse()
+                        .unwrap();
+                    assert!(
+                        !crate::agent::tracked::tests::alive(pid),
+                        "terminal message published while the agent's child {pid} was alive"
+                    );
+                    run.await.unwrap();
+                    return msg;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completion_is_published_only_after_the_tree_is_gone() {
+        let (_tmp, worker, rx, pidfile) =
+            ordering_fixture(&format!("read -r _\n{INIT}\n{RESULT}\ncat >/dev/null"));
+        let msg = terminal_after_cleanup(worker, rx, &pidfile, false).await;
+        assert!(matches!(msg, ClientMsg::RunCompleted { .. }), "{msg:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failure_is_published_only_after_the_tree_is_gone() {
+        // The agent dies without a result (stdout closes) and leaves a child.
+        let (_tmp, worker, rx, pidfile) = ordering_fixture(&format!("read -r _\n{INIT}\nexit 3"));
+        let msg = terminal_after_cleanup(worker, rx, &pidfile, false).await;
+        assert!(matches!(msg, ClientMsg::RunFailed { .. }), "{msg:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_failure_is_published_only_after_the_tree_is_gone() {
+        // No init frame: the handshake fails.
+        let (_tmp, worker, rx, pidfile) = ordering_fixture("exit 1");
+        let msg = terminal_after_cleanup(worker, rx, &pidfile, false).await;
+        assert!(matches!(msg, ClientMsg::RunFailed { .. }), "{msg:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancel_is_acknowledged_only_after_the_tree_is_gone() {
+        let (_tmp, worker, rx, pidfile) =
+            ordering_fixture(&format!("read -r _\n{INIT}\nwhile :; do sleep 1; done"));
+        let msg = terminal_after_cleanup(worker, rx, &pidfile, true).await;
+        assert!(matches!(msg, ClientMsg::RunCancelled { .. }), "{msg:?}");
+    }
+
+    /// How a chat runtime ends in [`chat_tree_lives_for_the_runtime`].
+    #[cfg(unix)]
+    enum ChatEnd {
+        Release,
+        Close,
+        /// The command channel closes: the same exit as the idle timeout.
+        Idle,
+    }
+
+    /// A chat runtime driving a fake multi-turn `claude` that starts a
+    /// `sleep` child on its first turn. The child must survive between turns
+    /// and be gone once the runtime has ended.
+    #[cfg(unix)]
+    async fn chat_tree_lives_for_the_runtime(end: ChatEnd) {
+        chat_tree_lives_for_the_runtime_with(end, false).await;
+    }
+
+    /// A one-shot engine (cursor, muse, openclaw) exits after every turn; the
+    /// next turn spawns a new leader. What the first leader started still
+    /// belongs to the chat runtime and must survive the next turn.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_one_shot_engines_child_survives_the_next_turn_and_is_finished_on_release() {
+        chat_tree_lives_for_the_runtime_with(ChatEnd::Release, true).await;
+    }
+
+    #[cfg(unix)]
+    async fn chat_tree_lives_for_the_runtime_with(end: ChatEnd, one_shot: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir_all(&wd).unwrap();
+        let pidfile = tmp.path().join("child.pid");
+        let leaderfile = tmp.path().join("leader.pid");
+        let fake = tmp.path().join("fake-claude");
+        let init = r#"{"type":"system","subtype":"init","session_id":"sess_chat"}"#;
+        let result = r#"{"type":"result","subtype":"success","session_id":"sess_chat","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\necho $$ > '{lf}'\n[ -f '{pf}' ] || {{ sleep 300 </dev/null >/dev/null 2>&1 & echo $! > '{pf}'; }}\n\
+                 while IFS= read -r _; do printf '%s\\n' '{init}'; printf '%s\\n' '{result}'; {stop}done\n",
+                pf = pidfile.display(),
+                lf = leaderfile.display(),
+                // One-shot: the leader answers one turn and exits.
+                stop = if one_shot { "exit 0; " } else { "" },
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut config = runner_config("chat", "WEB", wd);
+        config.project_slug = None;
+        config.agent.kind = AgentKind::ClaudeCode;
+        config.claude_code.binary = fake.to_string_lossy().into_owned();
+        let (tx, mut rx) = mpsc::channel::<Envelope<ClientMsg>>(64);
+        let (cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (active_tx, _active_rx) = watch::channel(false);
+        let mut chat = ChatWorker {
+            runner_config: config.clone(),
+            state: StateHandle::new(Config {
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![config.clone()],
+                cli: None,
+            }),
+            approvals: ApprovalRouter::new(),
+            out: RunnerOut::new(config.runner_id, tx),
+            command_rx: cmd_rx,
+            active_tx,
+            retired: Vec::new(),
+        };
+        let session = uuid::Uuid::new_v4();
+        let worker = tokio::spawn(async move { chat.run(session).await });
+        let turn = |content: &str| {
+            ChatCommand::Message(ChatTurn {
+                message_id: uuid::Uuid::new_v4(),
+                content: content.into(),
+                cwd: None,
+                model: None,
+                local_thread_id: None,
+                local_session_id: None,
+            })
+        };
+        async fn turn_done(rx: &mut mpsc::Receiver<Envelope<ClientMsg>>) {
+            loop {
+                let msg = tokio::time::timeout(Duration::from_secs(60), rx.recv())
+                    .await
+                    .expect("chat turn finished")
+                    .expect("channel open")
+                    .body;
+                match msg {
+                    ClientMsg::ChatMessageCompleted { .. } => return,
+                    ClientMsg::ChatFailed { detail, .. } => panic!("chat turn failed: {detail:?}"),
+                    _ => {}
+                }
+            }
+        }
+        cmd_tx.send(turn("one")).await.unwrap();
+        turn_done(&mut rx).await;
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        if one_shot {
+            // Let the first leader exit and be reaped, so turn two sees an
+            // exited bridge and spawns a new leader.
+            let leader: i32 = std::fs::read_to_string(&leaderfile)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while crate::agent::tracked::tests::alive(leader) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "one-shot leader exits"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        cmd_tx.send(turn("two")).await.unwrap();
+        turn_done(&mut rx).await;
+        assert!(
+            crate::agent::tracked::tests::alive(pid),
+            "the agent's child survives between turns of a live runtime"
+        );
+        match end {
+            ChatEnd::Release => cmd_tx.send(ChatCommand::Release).await.unwrap(),
+            ChatEnd::Close => cmd_tx.send(ChatCommand::Close { reason: None }).await.unwrap(),
+            ChatEnd::Idle => drop(cmd_tx),
+        }
+        tokio::time::timeout(Duration::from_secs(30), worker)
+            .await
+            .expect("chat runtime ended")
+            .unwrap();
+        assert!(
+            !crate::agent::tracked::tests::alive(pid),
+            "the agent's child is gone once the runtime ended"
+        );
+    }
+
+    /// A chat agent that ignores stdin EOF (and SIGTERM) takes the whole
+    /// finish bound to stop. The working dir is handed to the next run only
+    /// once its tree is gone, never after a shorter wait.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_working_dir_is_handed_over_only_after_an_eof_ignoring_chat_agent_is_gone() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir_all(&wd).unwrap();
+        let pidfile = tmp.path().join("child.pid");
+        let leaderfile = tmp.path().join("leader.pid");
+        let fake = tmp.path().join("fake-claude");
+        let init = r#"{"type":"system","subtype":"init","session_id":"sess_eof"}"#;
+        let result = r#"{"type":"result","subtype":"success","session_id":"sess_eof","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        // Answers turns; on stdin EOF it ignores SIGTERM and keeps running,
+        // and so does the child it started.
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\necho $$ > '{lf}'\ntrap '' TERM\nsleep 300 </dev/null >/dev/null 2>&1 & echo $! > '{pf}'\n\
+                 while IFS= read -r _; do printf '%s\\n' '{init}'; printf '%s\\n' '{result}'; done\n\
+                 sleep 300\n",
+                pf = pidfile.display(),
+                lf = leaderfile.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut config = runner_config("chat", "WEB", wd);
+        config.project_slug = None;
+        config.agent.kind = AgentKind::ClaudeCode;
+        config.claude_code.binary = fake.to_string_lossy().into_owned();
+        let (tx, mut rx) = mpsc::channel::<Envelope<ClientMsg>>(64);
+        let (cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (active_tx, active_rx) = watch::channel(false);
+        let worker = ChatWorker {
+            runner_config: config.clone(),
+            state: StateHandle::new(Config {
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![config.clone()],
+                cli: None,
+            }),
+            approvals: ApprovalRouter::new(),
+            out: RunnerOut::new(config.runner_id, tx),
+            command_rx: cmd_rx,
+            active_tx,
+            retired: Vec::new(),
+        };
+        let session = uuid::Uuid::new_v4();
+        let mut current = Some(spawn_chat_runtime(
+            worker,
+            session,
+            config.runner_id.to_string(),
+            cmd_tx.clone(),
+            active_rx,
+        ));
+        cmd_tx
+            .send(ChatCommand::Message(ChatTurn {
+                message_id: uuid::Uuid::new_v4(),
+                content: "one".into(),
+                cwd: None,
+                model: None,
+                local_thread_id: None,
+                local_session_id: None,
+            }))
+            .await
+            .unwrap();
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(60), rx.recv())
+                .await
+                .expect("chat turn finished")
+                .expect("channel open")
+                .body;
+            match msg {
+                ClientMsg::ChatMessageCompleted { .. } => break,
+                ClientMsg::ChatFailed { detail, .. } => panic!("chat turn failed: {detail:?}"),
+                _ => {}
+            }
+        }
+        let read_pid = |p: &std::path::Path| -> i32 {
+            std::fs::read_to_string(p).unwrap().trim().parse().unwrap()
+        };
+        let child = read_pid(&pidfile);
+        let leader = read_pid(&leaderfile);
+        drop(cmd_tx);
+        let mut stopping = None;
+        let started = std::time::Instant::now();
+        let free = release_chat_dir(&mut current, &mut stopping).await;
+        let took = started.elapsed();
+        assert!(free, "the dir is handed over within the finish bound");
+        assert!(
+            !crate::agent::tracked::tests::alive(leader)
+                && !crate::agent::tracked::tests::alive(child),
+            "the old agent and its child are gone before the dir is handed over"
+        );
+        assert!(
+            took > Duration::from_secs(5),
+            "the old agent ignored EOF and SIGTERM, so stopping it outlasts the old 5 s wait ({took:?})"
+        );
+        assert!(current.is_none() && stopping.is_none());
+    }
+
+    /// While the old runtime is still finishing past the handoff bound, the
+    /// dir stays held; it is released once the runtime reports a clean end,
+    /// and never when it reports a tree it could not confirm gone.
+    #[tokio::test]
+    async fn the_working_dir_stays_held_until_the_old_runtime_reports() {
+        let session = uuid::Uuid::new_v4();
+        let (done_tx, done_rx) = oneshot::channel();
+        let mut current = None;
+        let mut stopping = Some(StoppingChat {
+            chat_session_id: session,
+            done_rx: Some(done_rx),
+            deadline: tokio::time::Instant::now(),
+        });
+        assert!(!release_chat_dir(&mut current, &mut stopping).await);
+        assert!(!release_chat_dir(&mut current, &mut stopping).await);
+        assert!(stopping.is_some(), "still held");
+        done_tx.send(true).unwrap();
+        assert!(release_chat_dir(&mut current, &mut stopping).await);
+        assert!(stopping.is_none());
+        assert!(
+            release_chat_dir(&mut current, &mut stopping).await,
+            "nothing held: free"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chat_tree_is_finished_on_release() {
+        chat_tree_lives_for_the_runtime(ChatEnd::Release).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chat_tree_is_finished_on_close() {
+        chat_tree_lives_for_the_runtime(ChatEnd::Close).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chat_tree_is_finished_when_the_runtime_idles_out() {
+        chat_tree_lives_for_the_runtime(ChatEnd::Idle).await;
+    }
+
     #[tokio::test]
     async fn chat_and_run_resolve_to_the_same_working_dir() {
         // One exclusive dir per runner: the chat lane resolves to exactly the
@@ -4346,6 +5034,7 @@ mod tests {
             out: RunnerOut::new(config.runner_id, tx),
             command_rx: cmd_rx,
             active_tx,
+            retired: Vec::new(),
         };
         let chat_dir = chat
             .resolve_chat_workspace(uuid::Uuid::new_v4(), None)

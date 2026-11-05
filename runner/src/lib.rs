@@ -1,4 +1,8 @@
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`: the agent spawn helper needs one audited `pre_exec`
+// (`setsid`, util::shell::new_session) and the macOS process inspector calls
+// libc (util::procinfo). Each site carries its own `#[allow(unsafe_code)]`
+// and a SAFETY note; everything else stays unsafe-free.
+#![deny(unsafe_code)]
 #![deny(rust_2018_idioms)]
 
 pub mod agent;

@@ -102,6 +102,9 @@ struct ChatSession {
 #[derive(Default)]
 struct SessionRuntime {
     bridge: Option<AgentBridge>,
+    /// Bridges whose leader exited between turns. Their process trees belong
+    /// to the session, so they are finished when it closes, not per turn.
+    retired: Vec<AgentBridge>,
     workspace: Option<PathBuf>,
     bridge_seq: u64,
     started_sent: bool,
@@ -232,6 +235,7 @@ pub(crate) async fn handle_warm<S: ChatSink>(
     );
     let workspace = match ensure_bridge(
         inst,
+        args.chat_session_id,
         &mut rt,
         args.cwd.as_deref(),
         args.model.clone(),
@@ -270,7 +274,7 @@ pub(crate) async fn handle_warm<S: ChatSink>(
         Err(e) => {
             // Mid-handshake bridge: discard it so the next warm/send respawns.
             if let Some(bridge) = rt.bridge.take() {
-                bridge.shutdown(Duration::from_secs(5)).await.ok();
+                bridge.finish(Duration::from_secs(5)).await.ok();
             }
             rt.started_sent = false;
             sink.emit(Response::ChatEvent {
@@ -338,6 +342,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
     );
     let workspace = match ensure_bridge(
         inst,
+        args.chat_session_id,
         &mut rt,
         args.cwd.as_deref(),
         args.model.clone(),
@@ -368,25 +373,36 @@ pub(crate) async fn handle_send<S: ChatSink>(
             .bridge
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("chat bridge missing after spawn"))?;
-        drive_turn(
-            DriveCtx {
-                chat_session_id,
-                message_id: args.message_id,
-                content: args.content,
-                model: args.model,
-                mode: approval_mode,
-                runner_id: inst.config.runner_id,
-                config: &inst.config,
-                approvals: &inst.approvals,
-                workspace: &workspace,
-                cancel: &session.cancel,
-            },
-            bridge,
-            &mut bridge_seq,
-            &mut started_sent,
-            sink,
-        )
-        .await
+        // One-shot engines spawn per turn; keep those processes in the
+        // session's process scope too.
+        let proc_scope = crate::util::proctree::ProcScope {
+            kind: crate::util::proctree::ScopeKind::Chat,
+            id: chat_session_id.to_string(),
+            runner_id: Some(inst.runner_id.to_string()),
+        };
+        crate::util::proctree::PROC_SCOPE
+            .scope(
+                proc_scope,
+                drive_turn(
+                    DriveCtx {
+                        chat_session_id,
+                        message_id: args.message_id,
+                        content: args.content,
+                        model: args.model,
+                        mode: approval_mode,
+                        runner_id: inst.config.runner_id,
+                        config: &inst.config,
+                        approvals: &inst.approvals,
+                        workspace: &workspace,
+                        cancel: &session.cancel,
+                    },
+                    bridge,
+                    &mut bridge_seq,
+                    &mut started_sent,
+                    sink,
+                ),
+            )
+            .await
     };
     rt.bridge_seq = bridge_seq;
     rt.started_sent = started_sent;
@@ -396,7 +412,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
         Ok(t) => t,
         Err(e) => {
             if let Some(bridge) = rt.bridge.take() {
-                bridge.shutdown(Duration::from_secs(5)).await.ok();
+                bridge.finish(Duration::from_secs(5)).await.ok();
             }
             rt.started_sent = false;
             if e.is::<StartupCancelled>() {
@@ -442,9 +458,9 @@ pub(crate) async fn handle_close<S: ChatSink>(
         // acquire it to tear the bridge down.
         session.cancel.notify_waiters();
         let mut rt = session.rt.lock().await;
-        if let Some(bridge) = rt.bridge.take() {
-            bridge.shutdown(Duration::from_secs(5)).await.ok();
-        }
+        let mut ending: Vec<AgentBridge> = std::mem::take(&mut rt.retired);
+        ending.extend(rt.bridge.take());
+        AgentBridge::finish_all(ending, Duration::from_secs(5)).await;
         rt.started_sent = false;
     }
     inst.chat_sessions.remove(chat_session_id).await;
@@ -484,6 +500,7 @@ pub(crate) async fn handle_decide(
 /// workspace path.
 async fn ensure_bridge(
     inst: &RunnerInstance,
+    chat_session_id: Uuid,
     rt: &mut SessionRuntime,
     cwd: Option<&str>,
     model: Option<String>,
@@ -500,7 +517,9 @@ async fn ensure_bridge(
 
     if rt.bridge.as_ref().is_some_and(bridge_has_exited) {
         if let Some(bridge) = rt.bridge.take() {
-            bridge.shutdown(Duration::from_secs(1)).await.ok();
+            // A one-shot engine's leader exits after every turn; what it
+            // started lives until the session closes (runner cleanup §4.3).
+            AgentBridge::retire(&mut rt.retired, bridge);
         }
         rt.started_sent = false;
     }
@@ -510,15 +529,26 @@ async fn ensure_bridge(
         // does not disturb the captured value — the new mode only lands when a
         // fresh session spawns its own bridge.
         rt.approval_mode = mode.unwrap_or_default();
+        // The agent's process tree belongs to this chat session (runner
+        // cleanup §4.3); it is finished when the session's bridge is.
+        let proc_scope = crate::util::proctree::ProcScope {
+            kind: crate::util::proctree::ScopeKind::Chat,
+            id: chat_session_id.to_string(),
+            runner_id: Some(inst.runner_id.to_string()),
+        };
         rt.bridge = Some(
-            AgentBridge::spawn_from_config_with_resume(
-                &inst.config,
-                &workspace,
-                model,
-                resume_id,
-                Some(rt.approval_mode),
-            )
-            .await?,
+            crate::util::proctree::PROC_SCOPE
+                .scope(
+                    proc_scope,
+                    AgentBridge::spawn_from_config_with_resume(
+                        &inst.config,
+                        &workspace,
+                        model,
+                        resume_id,
+                        Some(rt.approval_mode),
+                    ),
+                )
+                .await?,
         );
     }
     Ok(workspace)
@@ -1160,7 +1190,7 @@ mod tests {
         assert!(err.is::<StartupCancelled>(), "unexpected error: {err:#}");
         assert!(begin.elapsed() < Duration::from_secs(5));
         assert!(!started, "no ChatStarted before the engine came up");
-        bridge.shutdown(Duration::from_secs(1)).await.ok();
+        bridge.finish(Duration::from_secs(1)).await.ok();
     }
 
     #[tokio::test]

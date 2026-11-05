@@ -202,8 +202,14 @@ impl Bridge {
         self.proc.interrupt().await
     }
 
-    pub async fn shutdown(self, grace: Duration) -> Result<()> {
-        self.proc.shutdown(grace).await
+    pub async fn finish(self, grace: Duration) -> Result<()> {
+        self.proc.finish(grace).await
+    }
+
+    /// True once every process this bridge started has exited and its
+    /// process group is gone.
+    pub fn is_gone(&self) -> bool {
+        self.proc.is_gone()
     }
 
     pub fn process_handle(&self) -> crate::agent::AgentProcessHandle {
