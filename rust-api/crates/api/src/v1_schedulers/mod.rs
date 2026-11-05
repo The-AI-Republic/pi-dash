@@ -61,6 +61,7 @@
 
 pub mod handlers;
 pub mod perms;
+pub mod service;
 pub mod writes;
 
 use axum::body::Bytes;
@@ -145,7 +146,7 @@ pub enum Denial {
 }
 
 impl Denial {
-    fn status_and_body(&self) -> (StatusCode, String) {
+    pub(crate) fn status_and_body(&self) -> (StatusCode, String) {
         match self {
             Denial::Unauthorized => (StatusCode::UNAUTHORIZED, UNAUTHENTICATED_BODY.to_owned()),
             Denial::InvalidToken => (StatusCode::FORBIDDEN, INVALID_TOKEN_BODY.to_owned()),
@@ -447,18 +448,29 @@ pub async fn preamble(
     }
     let pool = pool_of(state)?;
     let actor = actor(&pool, headers, state.settings().secret_key.as_bytes()).await?;
-    let workspace_id: Option<uuid::Uuid> =
-        sqlx::query_scalar(r#"SELECT "id" FROM "workspaces" WHERE "slug" = $1"#)
-            .bind(slug)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?
-            .flatten();
+    let workspace_id = workspace_id_by_slug(&pool, slug).await?;
     Ok(Preamble {
         pool,
         actor,
         workspace_id,
     })
+}
+
+/// The workspace id for a slug: `None` when unknown. Shared by the v1
+/// [`preamble`] and the [`service`](crate::v1_schedulers::service)
+/// entries, so the unknown-slug 403 trap has one implementation.
+pub(crate) async fn workspace_id_by_slug(
+    pool: &PgPool,
+    slug: &str,
+) -> Result<Option<uuid::Uuid>, Denial> {
+    let id: Option<uuid::Uuid> =
+        sqlx::query_scalar(r#"SELECT "id" FROM "workspaces" WHERE "slug" = $1"#)
+            .bind(slug)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?
+            .flatten();
+    Ok(id)
 }
 
 /// `_rewrite_project_kwarg` (`api/views/base.py:51-98`): a slug-or-UUID
