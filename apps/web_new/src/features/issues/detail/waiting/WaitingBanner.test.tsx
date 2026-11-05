@@ -11,7 +11,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../../core/api/client.js";
 import { setSessionClient } from "../../../../core/session/queries.js";
 import { CANCEL_RUN_FAILED_TITLE, RELEASE_RUN_FAILED_TITLE } from "./waitingRuns.js";
-import { agentReasonMessage } from "../../../../shared/lib/agentReasons.js";
 import { WaitingBanner } from "./WaitingBanner.js";
 
 vi.mock("../../../../shared/shell/index.js", async (importOriginal) => {
@@ -240,7 +239,6 @@ function waitingIssue(overrides: Record<string, unknown> = {}): Issue {
 
 interface StubOptions {
   releaseStatus?: number;
-  releaseBody?: unknown;
   cancelStatus?: number;
   patchStatus?: number;
   patchBody?: unknown;
@@ -265,7 +263,7 @@ function harness(options: StubOptions = {}) {
     if (path === `/api/workspaces/${SLUG}/projects/${PROJECT}/`) return json(200, PROJECT_ROW);
     if (path === `/api/runners/runs/${RUN}/release-pin/` && method === "POST") {
       const status = options.releaseStatus ?? 200;
-      return json(status, status === 200 ? { ...agentRunPayload(), pinned_runner: null } : (options.releaseBody ?? {}));
+      return json(status, status === 200 ? { ...agentRunPayload(), pinned_runner: null } : {});
     }
     if (path === `/api/runners/runs/${RUN}/cancel/` && method === "POST") {
       const status = options.cancelStatus ?? 200;
@@ -419,50 +417,5 @@ describe("WaitingBanner", () => {
     await user.click(screen.getByRole("button", { name: "Close dialog" }));
     await waitFor(() => expect(screen.queryByRole("heading", { name: "Change runner" })).not.toBeInTheDocument());
     expect(calls.some((call) => call.method === "PATCH")).toBe(false);
-  });
-
-  it("shows the pin_strict sentence when the release is refused", async () => {
-    const { queryClient } = harness({
-      releaseStatus: 409,
-      releaseBody: { error: "run is pinned to the issue's assigned runner", code: "pin_strict" },
-    });
-    renderBanner(queryClient);
-    fireEvent.click(await screen.findByRole("button", { name: /Run on any runner in/ }));
-    await waitFor(() =>
-      expect(notifyError).toHaveBeenCalledWith(RELEASE_RUN_FAILED_TITLE, agentReasonMessage("pin_strict"))
-    );
-  });
-});
-
-describe("WaitingBanner for an offline computer", () => {
-  function machineWaitIssue(): Issue {
-    return waitingIssue({
-      activeRun: { dispatch_wait: undefined, pinned_runner: undefined, error_code: "desktop_not_connected" },
-    });
-  }
-
-  it("reads Waiting for <machine> with its offline sentence and no release", async () => {
-    const { queryClient } = harness();
-    renderBanner(queryClient, machineWaitIssue());
-    expect(await screen.findByRole("region", { name: "Waiting for ana-desktop" })).toBeInTheDocument();
-    expect(screen.getByText(/ana-desktop is offline/)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Run on any runner in/ })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Change runner" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Cancel run" })).toBeInTheDocument();
-  });
-
-  it("falls back to a neutral name while the runner is unknown", async () => {
-    const { queryClient } = harness();
-    const issue = machineWaitIssue();
-    issue.assigned_runner_id = "99999999-9999-4999-8999-999999999999";
-    renderBanner(queryClient, issue);
-    expect(await screen.findByText(/Waiting for this runner/)).toBeInTheDocument();
-  });
-
-  it("cancels the waiting run", async () => {
-    const { calls, queryClient } = harness();
-    renderBanner(queryClient, machineWaitIssue());
-    fireEvent.click(await screen.findByRole("button", { name: "Cancel run" }));
-    await waitFor(() => expect(calls.some((call) => call.url.endsWith(`/api/runners/runs/${RUN}/cancel/`))).toBe(true));
   });
 });

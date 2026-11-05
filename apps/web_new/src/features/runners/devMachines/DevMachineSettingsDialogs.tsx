@@ -102,7 +102,7 @@ export const SIGN_OUT_ENGINE_COPY: MachineConfirmCopy = {
 export function replaceMachineCopy(sourceName: string, targetName: string): MachineConfirmCopy {
   return {
     title: `Is ${targetName} the computer that replaced ${sourceName}?`,
-    body: `The runners of ${sourceName} move to ${targetName} with their pods, assigned issues and queued runs, and ${sourceName} is retired. Built-in engine runners are set up again on ${targetName}; own-agent runners need setting up again there. Only confirm if both are the same computer.`,
+    body: `The runners of ${sourceName} move to ${targetName} with their pods and queued runs, and ${sourceName} is retired. Built-in engine runners are set up again on ${targetName}; own-agent runners need setting up again there. Only confirm if both are the same computer.`,
     confirm: "Merge",
   };
 }

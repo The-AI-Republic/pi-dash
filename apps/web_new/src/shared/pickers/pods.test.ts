@@ -140,7 +140,8 @@ describe("runnerReasonMessage", () => {
   it("renders every eligibility code as a sentence", () => {
     expect(runnerReasonMessage("")).toBe("");
     expect(runnerReasonMessage("runner_revoked")).toContain("revoked");
-    expect(runnerReasonMessage("runner_desktop_bundled")).toContain("built-in engine");
+    expect(runnerReasonMessage("runner_desktop_bundled")).toContain("Desktop runners");
+    expect(runnerReasonMessage("executor_not_local")).toContain("local runner");
     expect(runnerReasonMessage("runner_owner_not_on_issue")).toContain("assignee");
     expect(runnerReasonMessage("runner_wrong_project")).toContain("another project");
     expect(runnerReasonMessage("runner_pod_mismatch")).toContain("pod");
@@ -305,7 +306,7 @@ describe("buildExecutionTargets with runners", () => {
     ]);
   });
 
-  it("names engine runners by machine", () => {
+  it("never offers built-in engine runners (design §7, §11)", () => {
     const engine = runner({
       id: "a23e4567-e89b-12d3-a456-426614174009",
       name: "builtin-mbp-acme-ACME",
@@ -313,12 +314,10 @@ describe("buildExecutionTargets with runners", () => {
       pod: POD_A.id,
       dev_machine_detail: { id: "m-1", label: "Work laptop", host_label: "rich-mbp" },
     });
-    const targets = buildExecutionTargets([POD_A] as PodList, [engine] as unknown as RunnerList);
-    expect(targets[1]).toMatchObject({
-      kind: "runner",
-      label: "Built-in engine · Work laptop",
-      machineName: "Work laptop",
-    });
+    const own = runner({ id: "b23e4567-e89b-12d3-a456-426614174010", name: "gpu-box", pod: POD_A.id });
+    const targets = buildExecutionTargets([POD_A] as PodList, [engine, own] as unknown as RunnerList);
+    expect(targets.map((target) => target.kind)).toEqual(["pod", "runner"]);
+    expect(targets[1]).toMatchObject({ kind: "runner", runnerId: own.id, label: "gpu-box" });
   });
 
   it("keeps runners without eligibility answers pickable", () => {

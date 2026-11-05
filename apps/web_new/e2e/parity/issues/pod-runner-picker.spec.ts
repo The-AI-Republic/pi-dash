@@ -11,13 +11,10 @@
 // agent row.
 //
 // The OSS backend lists runners without the eligibility answers
-// (`assignable`, `not_assignable_code`, `is_busy`, `queue_depth`,
-// PDASHOSS01-297), so the scenarios answer the runner list through the
-// browser. The server now stores `assigned_runner_id` (owner-only,
-// PIDESKAPP-123), but the planted runners belong to the API token's
-// user, so the detail read is still answered from the captured writes
-// to keep the scenarios independent of who owns them. Rows: ISS-241,
-// ISS-242.
+// (`assignable`, `not_assignable_code`, `is_busy`, `queue_depth`) and
+// drops `assigned_runner_id` on write — both are PDASHOSS01-297 — so the
+// scenarios answer those two calls through the browser and keep the rest
+// live. Rows: ISS-241, ISS-242.
 import { test, expect, type Page } from "../fixtures";
 import {
   fetchIssue,

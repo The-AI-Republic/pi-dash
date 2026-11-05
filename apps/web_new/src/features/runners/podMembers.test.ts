@@ -82,31 +82,17 @@ describe("runnerUpdateErrorMessage", () => {
   const refusal = (status: number, body: Record<string, unknown>) =>
     new ApiError({ status, code: String(body["code"] ?? status), message: "refused", body });
 
-  it("explains busy runners, engines leaving their project and assigned issues", () => {
-    expect(runnerUpdateErrorMessage(refusal(409, { code: "runner_busy" }), "WEB")).toBe(RUNNER_BUSY_MESSAGE);
-    expect(runnerUpdateErrorMessage(refusal(400, { code: "engine_runner_project_fixed" }), "WEB")).toBe(
+  it("explains busy runners and engines leaving their project", () => {
+    expect(runnerUpdateErrorMessage(refusal(409, { code: "runner_busy" }))).toBe(RUNNER_BUSY_MESSAGE);
+    expect(runnerUpdateErrorMessage(refusal(400, { code: "engine_runner_project_fixed" }))).toBe(
       ENGINE_PROJECT_FIXED_MESSAGE
-    );
-    expect(
-      runnerUpdateErrorMessage(
-        refusal(409, {
-          code: "runner_has_assigned_issues",
-          issues: [
-            { sequence_id: 12, name: "Fix login" },
-            { sequence_id: 14, name: "Docs" },
-          ],
-        }),
-        "WEB"
-      )
-    ).toBe(
-      "Issues are assigned to this runner. Assign them elsewhere before moving it to another project: WEB-12 Fix login, WEB-14 Docs."
     );
   });
 
   it("falls back to the server sentence, then the generic one", () => {
-    expect(runnerUpdateErrorMessage(refusal(400, { error: "pod is in a different workspace" }), "WEB")).toBe(
+    expect(runnerUpdateErrorMessage(refusal(400, { error: "pod is in a different workspace" }))).toBe(
       "pod is in a different workspace"
     );
-    expect(runnerUpdateErrorMessage(new Error("offline"), "WEB")).toBe(RUNNER_UPDATE_FAILED);
+    expect(runnerUpdateErrorMessage(new Error("offline"))).toBe(RUNNER_UPDATE_FAILED);
   });
 });

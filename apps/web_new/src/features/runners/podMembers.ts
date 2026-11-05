@@ -4,8 +4,8 @@
 // Pod membership model (built-in engine design §7, §11). A runner always
 // sits in exactly one pod; whether it takes that pod's unpinned work is
 // its `pod_dispatch`. "Add to pod" makes it a pod member (moving it first
-// when it sits in another pod of the project), "Remove from pod" leaves
-// it serving only issues assigned to it, and "Move" changes the pod.
+// when it sits in another pod of the project), "Remove from pod" turns
+// its pod work off (`pinned_only`), and "Move" changes the pod.
 // Only a runner's owner may do any of these, so non-owners see the
 // members without actions. Pure, so the panel stays thin.
 
@@ -15,7 +15,7 @@ import { isEngineRunner } from "../../shared/lib/runnerIdentity.js";
 
 export const POD_MEMBERSHIP_LABELS: Record<RunnerPodDispatch, string> = {
   pod_member: "Takes pod work",
-  pinned_only: "Assigned issues only",
+  pinned_only: "Pod work: off",
 };
 
 /** Own-agent runners predating the field take pod work, as before. */
@@ -24,7 +24,7 @@ export function runnerPodDispatch(runner: Pick<Runner, "pod_dispatch" | "provisi
   return isEngineRunner(runner) ? "pinned_only" : "pod_member";
 }
 
-/** Live runners sitting in the pod, members and assigned-only alike. */
+/** Live runners sitting in the pod, with pod work on or off. */
 export function podRunners(runners: readonly Runner[], podId: string): Runner[] {
   return runners.filter((runner) => runner.pod === podId && runner.revoked_at === null);
 }
@@ -56,7 +56,7 @@ export function addToPodPatch(runner: Pick<Runner, "pod">, podId: string): Runne
   return runner.pod === podId ? { pod_dispatch: "pod_member" } : { pod: podId, pod_dispatch: "pod_member" };
 }
 
-/** The patch for "Remove from pod": keep the pod, serve assigned issues only. */
+/** The patch for "Remove from pod": keep the pod, turn its pod work off. */
 export const REMOVE_FROM_POD_PATCH: RunnerPatch = { pod_dispatch: "pinned_only" };
 
 /** Other pods of the same project a runner can move to. */
@@ -70,35 +70,17 @@ export const RUNNER_BUSY_MESSAGE =
   "This runner has a run in progress or reserved for it. Wait for it to finish, or cancel it, then move the runner.";
 export const ENGINE_PROJECT_FIXED_MESSAGE = "A built-in engine can only move between pods of its own project.";
 
-/** One issue the server lists as assigned to the runner. */
-interface AssignedIssue {
-  sequence_id?: unknown;
-  name?: unknown;
-}
-
-function assignedIssueLabel(issue: AssignedIssue, projectIdentifier: string): string {
-  const ref = typeof issue.sequence_id === "number" ? `${projectIdentifier}-${issue.sequence_id}` : "";
-  const name = typeof issue.name === "string" ? issue.name : "";
-  return [ref, name].filter((part) => part !== "").join(" ");
-}
-
 /**
- * What to tell the owner when a pod change is refused. Busy runners,
- * engines leaving their project and runners with assigned issues each
- * get their own sentence; the assigned issues are listed by key.
+ * What to tell the owner when a pod change is refused. Busy runners and
+ * engines leaving their project each get their own sentence; anything
+ * else shows the server's sentence.
  */
-export function runnerUpdateErrorMessage(error: unknown, projectIdentifier: string): string {
+export function runnerUpdateErrorMessage(error: unknown): string {
   if (!isApiError(error)) return RUNNER_UPDATE_FAILED;
   const body = (error.body ?? {}) as Record<string, unknown>;
   const code = typeof body["code"] === "string" ? body["code"] : error.code;
   if (code === "runner_busy") return RUNNER_BUSY_MESSAGE;
   if (code === "engine_runner_project_fixed") return ENGINE_PROJECT_FIXED_MESSAGE;
-  if (code === "runner_has_assigned_issues") {
-    const issues = Array.isArray(body["issues"]) ? (body["issues"] as AssignedIssue[]) : [];
-    const listed = issues.map((issue) => assignedIssueLabel(issue, projectIdentifier)).filter((text) => text !== "");
-    const head = "Issues are assigned to this runner. Assign them elsewhere before moving it to another project";
-    return listed.length === 0 ? `${head}.` : `${head}: ${listed.join(", ")}.`;
-  }
   const text = typeof body["error"] === "string" ? body["error"] : "";
   return text === "" ? RUNNER_UPDATE_FAILED : text;
 }

@@ -5,28 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { ApiError } from "@pidash/api-client";
 
-import {
-  AGENT_REASON_MESSAGES,
-  agentFailureMessage,
-  agentReasonMessage,
-  machineOfflineMessage,
-} from "./agentReasons.js";
-
-describe("engine-as-runner reasons", () => {
-  it("never tells the user to open the desktop app for an offline computer", () => {
-    expect(agentReasonMessage("desktop_not_connected")).toMatch(/offline/);
-    expect(agentReasonMessage("desktop_not_connected")).not.toMatch(/desktop app/i);
-  });
-
-  it("names the offline machine", () => {
-    expect(machineOfflineMessage("Work laptop")).toBe("Work laptop is offline");
-  });
-
-  it("explains strict pins and removed runners", () => {
-    expect(agentReasonMessage("pin_strict")).toContain("change the issue's runner");
-    expect(agentReasonMessage("assigned_runner_removed")).toContain("removed");
-  });
-});
+import { AGENT_REASON_MESSAGES, agentFailureMessage, agentReasonMessage } from "./agentReasons.js";
 
 const CODES = [
   "managed_runner_disabled",
@@ -41,10 +20,6 @@ const CODES = [
   "agent_profile_unreachable",
   "cloud_agent_unavailable",
   "no_local_runner",
-  "assigned_runner_not_owner",
-  "assigned_runner_offline",
-  "pin_strict",
-  "assigned_runner_removed",
 ];
 
 describe("AGENT_REASON_MESSAGES", () => {

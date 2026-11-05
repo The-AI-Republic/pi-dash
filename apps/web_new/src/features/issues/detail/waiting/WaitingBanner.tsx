@@ -5,34 +5,20 @@
 // §10.3): while the active run is queued for its runner, the banner
 // names the runner and the reason, and offers the three ways out —
 // release this run to the pod once, change the issue's runner, or
-// cancel the run. A run strictly pinned to an offline computer (built-in
-// engine design §9) reads "Waiting for <machine>" with the machine's
-// offline sentence; its pin is never released to the pod, so it offers
-// only changing the issue's runner and cancelling. Renders nothing while
-// nothing waits.
+// cancel the run. Renders nothing while nothing waits.
 import { Button, Dialog } from "@pidash/kit";
 import type { Issue } from "@pidash/api-client";
 import { Hourglass } from "lucide-react";
 import * as React from "react";
 
-import { useWorkspace } from "../../../../core/session/hooks.js";
 import {
   PodPicker,
   executionTargetPatch,
   usePickerPods,
-  usePickerRunners,
   type ExecutionSelection,
 } from "../../../../shared/pickers/index.js";
 import { useUpdateExecutionTarget } from "../../api/executionTarget.js";
-import {
-  machineWaitBannerText,
-  machineWaitLabel,
-  machineWaitName,
-  machineWaitPause,
-  selectMachineWait,
-  selectWaitingRun,
-  waitingBannerText,
-} from "./waiting.js";
+import { selectWaitingRun, waitingBannerText } from "./waiting.js";
 import { useCancelWaitingRun, useReleaseWaitingRun } from "./waitingRuns.js";
 
 export interface WaitingBannerProps {
@@ -50,9 +36,6 @@ export function WaitingBanner({
   disabled,
 }: WaitingBannerProps): React.ReactElement | null {
   const waiting = selectWaitingRun(issue);
-  const machineWait = waiting === null ? selectMachineWait(issue) : null;
-  const { workspace } = useWorkspace(workspaceSlug);
-  const runners = usePickerRunners(workspaceSlug, workspace?.id ?? "", projectId, issue.id, machineWait !== null);
   const pods = usePickerPods(workspaceSlug, projectId, waiting !== null);
   const release = useReleaseWaitingRun(workspaceSlug);
   const cancel = useCancelWaitingRun(workspaceSlug);
@@ -65,7 +48,7 @@ export function WaitingBanner({
     if (next) setPickerOpen(true);
   }
 
-  if (waiting === null && machineWait === null) return null;
+  if (waiting === null) return null;
 
   const podName = pods.data?.find((pod) => pod.id === issue.assigned_pod_id)?.name ?? null;
   const releaseLabel = podName === null ? "Run on any runner in the pod once" : `Run on any runner in ${podName} once`;
@@ -80,35 +63,25 @@ export function WaitingBanner({
     }
   }
 
-  const machineName = machineWait === null ? null : machineWaitName(machineWait, runners.data);
-  const machinePause = machineWait === null ? null : machineWaitPause(machineWait, runners.data);
-  const sentence =
-    waiting !== null
-      ? waitingBannerText(waiting.runnerName, waiting.wait)
-      : machineWaitBannerText(machineName ?? "", machinePause);
-  const activeRunId = waiting?.run.id ?? machineWait?.run.id ?? "";
-
   return (
     <section
-      aria-label={machineName === null ? "Waiting for runner" : machineWaitLabel(machineName)}
+      aria-label="Waiting for runner"
       className="flex flex-col gap-(--space-3) rounded-(--radius-card) border border-(--warning) bg-(--subtle) p-(--space-4)"
     >
       <p className="text-body flex items-center gap-(--space-2) text-(--text)">
         <Hourglass size={16} strokeWidth={1.5} className="shrink-0 text-(--text-muted)" aria-hidden="true" />
-        {sentence}
+        {waitingBannerText(waiting.runnerName, waiting.wait)}
       </p>
       <div className="flex flex-wrap items-center gap-(--space-2)">
-        {waiting === null ? null : (
-          <Button
-            variant="secondary"
-            size="small"
-            disabled={disabled || busy || !waiting.wait.releasable}
-            loading={release.isReleasing}
-            onClick={() => release.releaseWaitingRun(waiting.run.id)}
-          >
-            {releaseLabel}
-          </Button>
-        )}
+        <Button
+          variant="secondary"
+          size="small"
+          disabled={disabled || busy || !waiting.wait.releasable}
+          loading={release.isReleasing}
+          onClick={() => release.releaseWaitingRun(waiting.run.id)}
+        >
+          {releaseLabel}
+        </Button>
         <Dialog
           trigger={
             <Button variant="secondary" size="small" disabled={disabled || busy}>
@@ -138,7 +111,7 @@ export function WaitingBanner({
           size="small"
           disabled={disabled || busy}
           loading={cancel.isCancelling}
-          onClick={() => cancel.cancelWaitingRun(activeRunId)}
+          onClick={() => cancel.cancelWaitingRun(waiting.run.id)}
         >
           Cancel run
         </Button>

@@ -33,7 +33,7 @@ export const REVOKE_RUNNER_BODY =
 
 export const REMOVE_ENGINE_TITLE = "Remove from project?";
 export const REMOVE_ENGINE_BODY =
-  "The built-in engine stops taking this project's work and its runner is revoked; issues assigned to it follow the project's lost-runner rule. The engine's folder on the computer is kept, so turning the engine on for this project again picks up where it left off.";
+  "The built-in engine stops taking this project's work and its runner is revoked; runs queued for it go back to the pod for another runner. The engine's folder on the computer is kept, so turning the engine on for this project again picks up where it left off.";
 /** Label of a built-in engine's remove action (design §11). */
 export const REMOVE_ENGINE_LABEL = "Remove from project";
 export const DELETE_ENGINE_BODY =

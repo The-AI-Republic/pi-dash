@@ -159,9 +159,9 @@ export interface RunnerPatch {
 
 /**
  * Rename, move between pods, or change pod membership. Owner only.
- * A move is refused with 409 while a bound run is in flight, or (to
- * another project) while issues are assigned to the runner
- * (`runner_has_assigned_issues`, listing them). Answers the runner.
+ * A move is refused with 409 `runner_busy` while a bound run is in
+ * flight or queued for the runner, and an engine runner may only move
+ * between pods of its own project. Answers the runner.
  */
 export async function updateRunner(client: ApiClient, runnerId: string, patch: RunnerPatch): Promise<Runner> {
   const path = `/api/runners/${runnerId}/`;

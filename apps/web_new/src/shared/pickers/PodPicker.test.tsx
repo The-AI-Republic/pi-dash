@@ -238,8 +238,6 @@ describe("PodPicker", () => {
     const runnersCall = calls.find((url) => new URL(url).pathname === "/api/runners/");
     expect(runnersCall).toBeDefined();
     expect(new URL(runnersCall ?? "").searchParams.get("assignable_for")).toBe("new");
-    // Engines are listed too, on servers that still filter them.
-    expect(new URL(runnersCall ?? "").searchParams.get("include_bundled")).toBe("true");
   });
 
   it("picks pods", async () => {
@@ -429,7 +427,7 @@ describe("PodPicker", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it("names an engine runner by its machine and shows whether it is online", async () => {
+  it("hides engine runners and names each runner's machine and state", async () => {
     const engine = runnerRow({
       id: RUNNER_MAC,
       name: "builtin-mbp-acme-ACME",
@@ -446,10 +444,8 @@ describe("PodPicker", () => {
     const { queryClient } = harness({}, {}, { body: [own, engine] });
     renderPicker({}, queryClient);
     fireEvent.click(screen.getByRole("button", { name: "Select target" }));
-    const engineRow = await screen.findByRole("option", { name: /Built-in engine · Work laptop/ });
-    expect(engineRow.textContent).toContain("offline");
-    expect(engineRow.textContent).not.toContain("builtin-mbp");
-    const ownRow = screen.getByRole("option", { name: /gpu-box/ });
+    const ownRow = await screen.findByRole("option", { name: /gpu-box/ });
+    expect(screen.queryByRole("option", { name: /builtin-mbp|Built-in engine/ })).not.toBeInTheDocument();
     expect(ownRow.textContent).toContain("gpu-host");
     expect(ownRow.textContent).toContain("online · idle");
   });

@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Execution-target picker (parity/specs/issues.md §17, ISS-218;
-// built-in engine design §6, §7). Single-select over each pod's squad
-// row and its runners ("Specific runner"), with search. There is no
-// executor choice: Runner is the only executor. Runner rows name the
-// runner (engines as "Built-in engine · <machine>"), its machine and
-// whether it is online; unassignable runners disable with their reason
+// built-in engine design §6, §7, §11). Single-select over each pod's
+// squad row and its runners ("Specific runner"), with search. There is
+// no executor choice: Runner is the only executor, and built-in engine
+// runners are not offered (an engine is reached through its pod). Runner
+// rows name the runner, its machine and whether it is online;
+// unassignable runners disable with their reason
 // inline; the default pod carries a tag. Picks map onto the issue
 // execution-target patch. Reads resolve lazily on open; a caller that
 // has to name an existing target before the popup opens preloads them.
@@ -85,11 +86,7 @@ function ReasonText({ reason }: { reason: string }): React.ReactElement {
 
 /** The runner row's caption: machine, status line, then owner. */
 export function runnerCaption(target: Extract<ExecutionTarget, { kind: "runner" }>): string {
-  const label = target.label;
-  // An engine's label already names its machine; repeat it only for
-  // own-agent runners, whose names are their own.
-  const machine = target.machineName !== "" && !label.endsWith(target.machineName) ? target.machineName : "";
-  return [machine, target.statusLine, target.ownerName].filter((part) => part !== "").join(" · ");
+  return [target.machineName, target.statusLine, target.ownerName].filter((part) => part !== "").join(" · ");
 }
 
 function toComboboxOption(target: ExecutionTarget): ComboboxOption {

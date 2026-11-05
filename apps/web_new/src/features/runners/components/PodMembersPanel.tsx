@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 // Pod members (built-in engine design §7, §11). Shown under the pod filter
 // bar while a pod is selected: every live runner in the pod, whether it
-// takes the pod's work or only issues assigned to it, and — for the
+// takes the pod's work or has pod work off, and — for the
 // viewer's own runners — add, remove and move. "Add runner to pod" lists
 // the viewer's runners in the project, engines included. Writes go through
 // the owner-only runner PATCH; refusals toast their reason.
@@ -122,7 +122,7 @@ export function PodMembersPanel({ pod, runners, pods, userId, onUpdate }: PodMem
     try {
       await onUpdate(runner.id, patch);
     } catch (error) {
-      notifyError(RUNNER_UPDATE_FAILED_TITLE, runnerUpdateErrorMessage(error, pod.project_identifier));
+      notifyError(RUNNER_UPDATE_FAILED_TITLE, runnerUpdateErrorMessage(error));
     } finally {
       setBusyId(null);
     }

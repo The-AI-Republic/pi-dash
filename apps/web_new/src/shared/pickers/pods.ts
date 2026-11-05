@@ -2,16 +2,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Execution-target option shaping (parity/specs/issues.md §17/§21,
-// ISS-218; built-in engine design §6, §7). Runner is the only executor,
-// so the picker offers no agent rows: each pod offers an "any runner"
-// row plus its runners, each named the way every surface names it
-// (engines read "Built-in engine · <machine>"), with the machine, a
-// status line, an owner name and an assignability answer. A pod pick
-// pins the pod and clears the runner; a runner pick pins the runner
-// inside its pod. Both keep the local executor.
+// ISS-218; built-in engine design §6, §7, §11). Runner is the only
+// executor, so the picker offers no agent rows: each pod offers an "any
+// runner" row plus its runners, each with the machine it runs on, a
+// status line, an owner name and an assignability answer. Built-in
+// engine runners are never offered: an engine takes issue work only as
+// a pod member, through the pod row (dedicating an issue to one engine
+// belongs to the dedicated-runner design, HA §23). A pod pick pins the
+// pod and clears the runner; a runner pick pins the runner inside its
+// pod. Both keep the local executor.
 import type { ExecutorKind, Pod, PodList, Runner, RunnerList, WorkspaceMemberList } from "@pidash/api-client";
 
-import { runnerDisplayName, runnerMachineName } from "../lib/runnerIdentity.js";
+import { isEngineRunner, runnerMachineName } from "../lib/runnerIdentity.js";
 
 /** The one executor issues and projects run on. */
 export const LOCAL_EXECUTOR: ExecutorKind = "local_runner";
@@ -25,7 +27,8 @@ export const RUNNER_NOT_ASSIGNABLE_REASONS: Readonly<Record<string, string>> = {
   runner_wrong_project: "This runner belongs to another project.",
   runner_pod_mismatch: "This runner is not in this pod.",
   runner_revoked: "This runner was revoked.",
-  runner_desktop_bundled: "This built-in engine can't take this issue.",
+  runner_desktop_bundled: "Desktop runners can't take dedicated issues.",
+  executor_not_local: "Dedicated runners need the local runner.",
   runner_owner_not_on_issue: "Add the runner's owner as an assignee to choose it.",
   active_run_in_progress: "This issue has a run in progress.",
 };
@@ -144,7 +147,10 @@ export type ExecutionTarget =
 
 /**
  * Ordered picker rows: each pod in server order with its squad row
- * followed by that pod's runners in server order. Runners read
+ * followed by that pod's runners in server order. Built-in engine
+ * runners are skipped (design §7, §11): servers list them now that the
+ * `include_bundled` filter is gone, but an engine is reached only
+ * through its pod. Runners read
  * assignable unless the server says otherwise, so plain list rows
  * without eligibility answers stay pickable.
  */
@@ -157,14 +163,14 @@ export function buildExecutionTargets(
   for (const pod of pods) {
     targets.push({ kind: "pod", podId: pod.id, label: pod.name, isDefault: pod.is_default });
     for (const runner of runners) {
-      if (runner.pod !== pod.id) continue;
+      if (runner.pod !== pod.id || isEngineRunner(runner)) continue;
       const assignable = runner.assignable ?? true;
       const code = assignable ? "" : (runner.not_assignable_code ?? "");
       targets.push({
         kind: "runner",
         runnerId: runner.id,
         podId: pod.id,
-        label: runnerDisplayName(runner),
+        label: runner.name,
         machineName: runnerMachineName(runner) ?? "",
         statusLine: runnerStatusLine(runner),
         ownerName: resolveOwnerName(runner.owner) ?? "",

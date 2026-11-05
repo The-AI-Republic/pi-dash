@@ -52,16 +52,6 @@ export interface DispatchRefreshOptions {
   onSettledRefresh?: (() => Promise<unknown>) | undefined;
 }
 
-/** Options for the Run AI / Comment & Run hook. */
-export interface TriggerRunOptions extends DispatchRefreshOptions {
-  /**
-   * Sees a failed dispatch first. Returning true means the caller shows
-   * the refusal itself (an assigned-runner refusal with its own actions),
-   * so the generic failure toast is skipped.
-   */
-  onError?: ((error: unknown) => boolean) | undefined;
-}
-
 /** Server or transport message when one reads, else the fallback. */
 function failureMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message !== "") return error.message;
@@ -82,10 +72,9 @@ export interface TriggerRunArgs {
  * the queued notice) on success, null on failure; the executor the
  * server resolves is never written back.
  */
-export function useTriggerAgentRun(options: TriggerRunOptions = {}) {
+export function useTriggerAgentRun(options: DispatchRefreshOptions = {}) {
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const refresh = options.onSettledRefresh;
-  const onError = options.onError;
 
   const triggerRun = React.useCallback(
     async (args: TriggerRunArgs): Promise<AgentRunCreateResult | null> => {
@@ -105,16 +94,14 @@ export function useTriggerAgentRun(options: TriggerRunOptions = {}) {
         }
         outcome = run;
       } catch (error: unknown) {
-        if (onError?.(error) !== true) {
-          notifyError(RUN_START_FAILED_TITLE, failureMessage(error, RUN_START_FAILED_BODY));
-        }
+        notifyError(RUN_START_FAILED_TITLE, failureMessage(error, RUN_START_FAILED_BODY));
         outcome = null;
       } finally {
         setIsSubmitting(false);
       }
       return outcome;
     },
-    [refresh, onError]
+    [refresh]
   );
 
   return { triggerRun, isSubmitting };

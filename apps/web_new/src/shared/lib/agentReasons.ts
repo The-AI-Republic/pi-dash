@@ -21,10 +21,8 @@ import { isApiError } from "@pidash/api-client";
 export const AGENT_REASON_MESSAGES: Readonly<Record<string, string>> = {
   // Agent profile and machine gates (managed_runner/errors.py order).
   managed_runner_disabled: "The built-in agent is switched off on this server.",
-  // A run waiting for its runner's computer (built-in engine design §9):
-  // the daemon runs without the app, so the fix is the computer coming
-  // back online, not opening the desktop app.
-  desktop_not_connected: "The computer this runs on is offline. The run starts when it reconnects.",
+  desktop_not_connected:
+    "This computer is not connected to the server yet. Sign in again through the desktop app to link it.",
   // Both the Cloud Agent row and the built-in agent row report this code
   // (pi_dash.core.agent_execution): the viewer has no model configured, so
   // the sentence names neither surface.
@@ -46,18 +44,7 @@ export const AGENT_REASON_MESSAGES: Readonly<Record<string, string>> = {
   // Other execution targets the same picker renders.
   cloud_agent_unavailable: "The Cloud Agent is switched off on this server.",
   no_local_runner: "No online runner is available on this project's pods.",
-
-  // Run-creation refusals for an issue assigned to one runner (design §7, §9).
-  assigned_runner_not_owner: "This issue is assigned to someone else's runner, which only runs its owner's work.",
-  assigned_runner_offline: "The runner this issue is assigned to is offline.",
-  pin_strict: "This run waits for the issue's runner; change the issue's runner instead.",
-  assigned_runner_removed: "The runner this issue was assigned to was removed.",
 };
-
-/** The "<machine> is offline" sentence for a named computer (design §9). */
-export function machineOfflineMessage(machineName: string): string {
-  return `${machineName} is offline`;
-}
 
 /**
  * Render one reason code. Unknown codes are returned unchanged on purpose:

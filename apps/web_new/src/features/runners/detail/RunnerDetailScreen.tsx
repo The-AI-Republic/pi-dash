@@ -25,8 +25,8 @@ export const RUNNER_DETAIL_CHAT = "Open chat";
 export const DASH = "—";
 /** Pod-dispatch row copy (design §7). */
 export const POD_DISPATCH_LABELS = {
-  pod_member: "Takes pod work",
-  pinned_only: "Assigned issues only",
+  pod_member: "On",
+  pinned_only: "Off",
 } as const;
 /** Engines are renamed through their machine, never one by one (design §11). */
 export const ENGINE_RENAME_HINT = "Rename the computer to rename its built-in engine.";
