@@ -92,7 +92,12 @@ pub async fn set_working_dir(args: SetWorkingDirArgs, paths: &Paths) -> Result<(
                 );
                 Ok(())
             }
-            Response::Error(e) => anyhow::bail!("daemon refused: {}", e.message),
+            Response::Error(e) => {
+                match crate::service::reload::outdated_daemon_warning(paths).await {
+                    Some(warning) => anyhow::bail!("daemon refused: {}\n{warning}", e.message),
+                    None => anyhow::bail!("daemon refused: {}", e.message),
+                }
+            }
             other => anyhow::bail!("unexpected daemon response: {other:?}"),
         };
     }
@@ -419,6 +424,9 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         }
         ActivateOutcome::Failed(why) => {
             println!("(The running daemon did not activate the runner: {why})");
+            if let Some(warning) = crate::service::reload::outdated_daemon_warning(paths).await {
+                println!("{warning}");
+            }
             println!("The runner block was written; `pidash restart` loads it.");
         }
     }
