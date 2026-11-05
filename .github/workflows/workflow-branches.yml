@@ -1,4 +1,4 @@
-# Workflow branch-filter guard (PIDASH-1): fails if any workflow's
+# Workflow branch-filter guard: fails if any workflow's
 # branches / branches-ignore filter names `master` (the default branch is main).
 name: workflow-branches
 

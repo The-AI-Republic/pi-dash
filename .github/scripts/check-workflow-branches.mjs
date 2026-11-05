@@ -1,4 +1,4 @@
-// Workflow branch-filter guard (PIDASH-1). The default branch is `main`; a
+// Workflow branch-filter guard. The default branch is `main`; a
 // workflow whose `branches:` / `branches-ignore:` filter names `master` never
 // fires (or compares against a branch that does not exist). Dependency-free so
 // CI can run it with a bare `node`. Exits 1 and lists every offending line.

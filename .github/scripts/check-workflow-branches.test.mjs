@@ -1,4 +1,4 @@
-// Tests for check-workflow-branches.mjs (PIDASH-1). Run: node --test .github/scripts/
+// Tests for check-workflow-branches.mjs. Run: node --test .github/scripts/
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
