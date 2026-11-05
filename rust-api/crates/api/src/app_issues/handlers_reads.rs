@@ -73,6 +73,14 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
+use pidash_db::entity::{
+    issue_types, issues, project_user_properties, projects, states, workspaces,
+};
+use pidash_services::app_issues::serializers_engage;
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, Condition, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait,
+};
 use serde_json::{Map, Value};
 
 use crate::middleware::body_limit::read_request_bytes;
@@ -91,8 +99,7 @@ use pidash_services::app_issues::serializers_assoc::{
 };
 use pidash_services::app_issues::{
     issue_detail_base_to_representation, issue_detail_to_representation, issue_is_actively_synced,
-    order_sql, AgentTickerInput, IssueDetailBaseRow, IssueDetailRow, GITHUB_ISSUE_SYNC_PROBE_SQL,
-    GIT_ISSUE_SYNC_PROBE_SQL,
+    order_sql, AgentTickerInput, IssueDetailBaseRow, IssueDetailRow,
 };
 use pidash_services::orchestration::blockers::{
     blockers_sql, dependents_sql, has_open_blockers_sql, relations_summary, BlockerRow,
@@ -911,27 +918,31 @@ async fn apply_property_patch(
     if let Some(value) = &patch.preferences {
         fields.push(("preferences", value.clone()));
     }
-    let mut sql =
-        String::from("UPDATE project_user_properties SET updated_at = $1, updated_by_id = $2");
-    for (index, (field, _)) in fields.iter().enumerate() {
-        sql.push_str(&format!(", {field} = ${}", index + 5));
-    }
-    if patch.sort_order.is_some() {
-        sql.push_str(&format!(", sort_order = ${}", fields.len() + 5));
-    }
-    sql.push_str(" WHERE user_id = $3 AND project_id = $4 AND deleted_at IS NULL");
-    let mut query = sqlx::query(&sql)
-        .bind(now)
-        .bind(gate.user_id)
-        .bind(gate.user_id)
-        .bind(gate.project_id);
-    for (_, value) in &fields {
-        query = query.bind(value);
+    use std::str::FromStr as _;
+    let mut update = project_user_properties::Entity::update_many()
+        .col_expr(project_user_properties::Column::UpdatedAt, Expr::value(now))
+        .col_expr(
+            project_user_properties::Column::UpdatedById,
+            Expr::value(gate.user_id),
+        );
+    for (field, value) in &fields {
+        let column =
+            project_user_properties::Column::from_str(field).map_err(|_| Denial::ServerError)?;
+        update = update.col_expr(column, Expr::value(value.clone()));
     }
     if let Some(number) = patch.sort_order {
-        query = query.bind(number);
+        update = update.col_expr(
+            project_user_properties::Column::SortOrder,
+            Expr::value(number),
+        );
     }
-    query.execute(pool).await.map_err(|_| Denial::ServerError)?;
+    update
+        .filter(project_user_properties::Column::UserId.eq(gate.user_id))
+        .filter(project_user_properties::Column::ProjectId.eq(gate.project_id))
+        .filter(project_user_properties::Column::DeletedAt.is_null())
+        .exec(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -1729,13 +1740,18 @@ fn str_refs(ids: &[String]) -> Vec<&str> {
 }
 
 /// One sync-table `.exists()` probe (`issue.py:76`).
-async fn sync_probe(pool: &sqlx::PgPool, sql: &str, issue_id: &uuid::Uuid) -> Result<bool, Denial> {
-    let row: Option<(i32,)> = sqlx::query_as(sql)
-        .bind(issue_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(row.is_some())
+async fn sync_probe(
+    pool: &sqlx::PgPool,
+    github: bool,
+    issue_id: &uuid::Uuid,
+) -> Result<bool, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let hit = if github {
+        serializers_engage::github_issue_synced(&db, *issue_id).await
+    } else {
+        serializers_engage::git_issue_synced(&db, *issue_id).await
+    };
+    hit.map_err(|_| Denial::ServerError)
 }
 
 /// The full path carries no `is_synced` annotation, so a set
@@ -1749,12 +1765,12 @@ async fn full_is_synced(
     let source = get_str(row, "i_external_source");
     let has_source = source.is_some_and(|text| !text.is_empty());
     let git_hit = if has_source {
-        sync_probe(pool, GIT_ISSUE_SYNC_PROBE_SQL, issue_id).await?
+        sync_probe(pool, false, issue_id).await?
     } else {
         false
     };
     let github_hit = if has_source && !git_hit {
-        sync_probe(pool, GITHUB_ISSUE_SYNC_PROBE_SQL, issue_id).await?
+        sync_probe(pool, true, issue_id).await?
     } else {
         false
     };
@@ -1987,12 +2003,12 @@ async fn probe_synced(
 ) -> Result<bool, Denial> {
     let has_source = source.is_some_and(|text| !text.is_empty());
     let git_hit = if has_source {
-        sync_probe(pool, GIT_ISSUE_SYNC_PROBE_SQL, issue_id).await?
+        sync_probe(pool, false, issue_id).await?
     } else {
         false
     };
     let github_hit = if has_source && !git_hit {
-        sync_probe(pool, GITHUB_ISSUE_SYNC_PROBE_SQL, issue_id).await?
+        sync_probe(pool, true, issue_id).await?
     } else {
         false
     };
@@ -2647,25 +2663,37 @@ async fn epic_exists(
     project_id: &uuid::Uuid,
     epic_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
-    let row: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM issues AS issue \
-         JOIN projects AS project ON project.id = issue.project_id \
-         JOIN workspaces ON workspaces.id = issue.workspace_id \
-         LEFT JOIN states AS state ON state.id = issue.state_id \
-         JOIN issue_types ON issue_types.id = issue.type_id \
-         WHERE issue.deleted_at IS NULL AND issue.id = $1 \
-         AND issue.project_id = $2 AND workspaces.slug = $3 \
-         AND NOT (state.\"group\" = 'triage' AND state.\"group\" IS NOT NULL) \
-         AND issue.archived_at IS NULL AND project.archived_at IS NULL \
-         AND issue.is_draft = FALSE AND issue_types.is_epic",
-    )
-    .bind(epic_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.is_some())
+    let hit: Option<uuid::Uuid> = issues::Entity::find()
+        .select_only()
+        .column(issues::Column::Id)
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(
+            JoinType::InnerJoin,
+            issues::Entity::belongs_to(issue_types::Entity)
+                .from(issues::Column::TypeId)
+                .to(issue_types::Column::Id)
+                .into(),
+        )
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(issues::Column::Id.eq(*epic_id))
+        .filter(issues::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(
+            Condition::any()
+                .add(states::Column::Group.is_null())
+                .add(states::Column::Group.ne("triage")),
+        )
+        .filter(issues::Column::ArchivedAt.is_null())
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(issues::Column::IsDraft.eq(false))
+        .filter(issue_types::Column::IsEpic.eq(true))
+        .into_tuple()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
 }
 
 /// `GET .../epics/<epic_id>/issues/` (`epics.py:216-223`): the sub-issues
@@ -2722,6 +2750,24 @@ pub async fn epic_work_items_post(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every user-properties patch field resolves to its entity column.
+    #[test]
+    fn user_property_fields_are_columns() {
+        use std::str::FromStr as _;
+        for field in [
+            "filters",
+            "display_filters",
+            "display_properties",
+            "rich_filters",
+            "preferences",
+        ] {
+            assert!(
+                project_user_properties::Column::from_str(field).is_ok(),
+                "{field}"
+            );
+        }
+    }
     use crate::app_issues::OneOrMany;
 
     fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {

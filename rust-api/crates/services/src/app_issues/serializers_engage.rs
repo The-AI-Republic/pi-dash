@@ -397,6 +397,42 @@ pub const GIT_ISSUE_SYNC_PROBE_SQL: &str =
 pub const GITHUB_ISSUE_SYNC_PROBE_SQL: &str =
     "SELECT 1 FROM github_issue_syncs WHERE issue_id = $1 AND deleted_at IS NULL LIMIT 1";
 
+/// SeaORM forms of the two issue sync probes: a live sync row exists.
+pub async fn git_issue_synced(
+    db: &impl sea_orm::ConnectionTrait,
+    issue_id: uuid::Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    use pidash_db::entity::git_issue_syncs;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let hit: Option<uuid::Uuid> = git_issue_syncs::Entity::find()
+        .select_only()
+        .column(git_issue_syncs::Column::Id)
+        .filter(git_issue_syncs::Column::IssueId.eq(issue_id))
+        .filter(git_issue_syncs::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// See [`git_issue_synced`].
+pub async fn github_issue_synced(
+    db: &impl sea_orm::ConnectionTrait,
+    issue_id: uuid::Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    use pidash_db::entity::github_issue_syncs;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let hit: Option<uuid::Uuid> = github_issue_syncs::Entity::find()
+        .select_only()
+        .column(github_issue_syncs::Column::Id)
+        .filter(github_issue_syncs::Column::IssueId.eq(issue_id))
+        .filter(github_issue_syncs::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
 /// Django `.exists()` probe for `GitCommentSync.objects.filter(comment=comment)`
 /// (`issue.py:85`): `git_comment_syncs`
 /// (`db/models/integration/git.py:190-206`) with the soft-delete guard.
