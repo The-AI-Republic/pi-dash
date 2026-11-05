@@ -172,9 +172,7 @@ use pidash_db::entity::{
     agent_run, dev_machine, machine_session, machine_token, pod, projects, runner,
     runner_live_state, workspace_members, workspaces,
 };
-use pidash_db::runner_enroll::columns::{
-    dev_machine as dm_cols, machine_token as mt_cols, pod as pod_cols, runner as r_cols,
-};
+use pidash_db::runner_enroll::columns::{dev_machine as dm_cols, pod as pod_cols};
 use sea_orm::sea_query::{Expr, Func, Query};
 use sea_orm::{
     ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, JoinType,
@@ -231,22 +229,6 @@ fn qualified(table: &str, columns: &[&str]) -> String {
 // M1. Control-online subquery
 // ---------------------------------------------------------------------------
 
-/// M1 — control-online `Exists` fragment (`runners.py:52-59`), shared
-/// by the M3 list and the M5 serialize (both bind it as `$12`/`$13`).
-///
-/// `Exists(MachineSession where dev_machine = OuterRef(pk), active,
-/// last_seen_at >= cutoff)`: Django aliases the table `U0`, renders
-/// the `OuterRef("pk")` in parens, binds the `SELECT 1` constant
-/// (`one`) and the cutoff (`cutoff`), and appends `LIMIT 1`.
-pub fn control_online_fragment(one: usize, cutoff: usize) -> String {
-    format!(
-        "EXISTS(SELECT ${one} AS \"a\" FROM \"{MACHINE_SESSION_TABLE}\" U0 \
-         WHERE (U0.\"dev_machine_id\" = (\"dev_machine\".\"id\") \
-         AND U0.\"last_seen_at\" >= ${cutoff} AND U0.\"revoked_at\" IS NULL) \
-         LIMIT 1) AS \"control_online\""
-    )
-}
-
 // ---------------------------------------------------------------------------
 // M2/M3. Machine list + annotations
 // ---------------------------------------------------------------------------
@@ -255,70 +237,9 @@ pub fn control_online_fragment(one: usize, cutoff: usize) -> String {
 // M4. Scope probes
 // ---------------------------------------------------------------------------
 
-/// M4a — machine-scope runner probe (`runners.py:136-141`).
-///
-/// `Runner.objects.filter(workspace, owner, visibility=PRIVATE,
-/// dev_machine=machine).exists()`: `SELECT $1 AS "a" … LIMIT 1` with
-/// ordering cleared. `$1` is the constant `1`, then `$2` machine id,
-/// `$3` owner id, `$4` visibility (`0`), `$5` workspace id (Q-sorted).
-pub fn machine_scope_runner_probe_sql() -> String {
-    "SELECT $1 AS \"a\" FROM \"runner\" \
-     WHERE (\"runner\".\"dev_machine_id\" = $2 AND \"runner\".\"owner_id\" = $3 \
-     AND \"runner\".\"visibility\" = $4 AND \"runner\".\"workspace_id\" = $5) \
-     LIMIT 1"
-        .to_string()
-}
-
-/// M4b — machine-scope token probe (`runners.py:142-146`).
-///
-/// `MachineToken.objects.filter(workspace, user,
-/// dev_machine=machine).exists()`. `$1` is the constant `1`, then
-/// `$2` machine id, `$3` user id, `$4` workspace id (Q-sorted).
-pub fn machine_scope_token_probe_sql() -> String {
-    format!(
-        "SELECT $1 AS \"a\" FROM \"{}\" \
-         WHERE (\"{}\".\"dev_machine_id\" = $2 \
-         AND \"{}\".\"user_id\" = $3 \
-         AND \"{}\".\"workspace_id\" = $4) \
-         LIMIT 1",
-        mt_cols::TABLE,
-        mt_cols::TABLE,
-        mt_cols::TABLE,
-        mt_cols::TABLE,
-    )
-}
-
 // ---------------------------------------------------------------------------
 // M5. Single-machine serialize
 // ---------------------------------------------------------------------------
-
-/// M5 — single-machine serialize re-read (`runners.py:150-170`).
-///
-/// The M3 annotations over `DevMachine.objects.filter(pk)` +
-/// `.first()` (keeps `Meta.ordering`, adds `LIMIT 1`). Binds `$1`-`$13`
-/// exactly as [`machine_list_sql`]; `$14` is the machine pk.
-///
-/// When the row vanished, the view serializes the UNANNOTATED
-/// instance (QUIRK-m5-fallback) — handlers own that branch.
-pub fn machine_serialize_sql() -> String {
-    let exists = control_online_fragment(12, 13);
-    format!(
-        "SELECT {}, \
-         COUNT(DISTINCT \"runner\".\"id\") FILTER (WHERE (\"runner\".\"owner_id\" = $1 \
-         AND \"runner\".\"visibility\" = $2 AND \"runner\".\"workspace_id\" = $3)) AS \"runner_count\", \
-         COUNT(DISTINCT \"runner\".\"id\") FILTER (WHERE (\"runner\".\"owner_id\" = $4 \
-         AND \"runner\".\"visibility\" = $5 AND \"runner\".\"workspace_id\" = $6 \
-         AND \"runner\".\"revoked_at\" IS NULL AND \"runner\".\"status\" IN ($7, $8))) AS \"online_runner_count\", \
-         MAX(\"runner\".\"last_heartbeat_at\") FILTER (WHERE (\"runner\".\"owner_id\" = $9 \
-         AND \"runner\".\"visibility\" = $10 AND \"runner\".\"workspace_id\" = $11)) AS \"last_heartbeat_at\", \
-         {exists} \
-         FROM \"dev_machine\" LEFT OUTER JOIN \"runner\" ON (\"dev_machine\".\"id\" = \"runner\".\"dev_machine_id\") \
-         WHERE \"dev_machine\".\"id\" = $14 \
-         GROUP BY \"dev_machine\".\"id\" \
-         ORDER BY \"dev_machine\".\"last_seen_at\" DESC, \"dev_machine\".\"created_at\" DESC LIMIT 1",
-        qualified(dm_cols::TABLE, dm_cols::COLUMNS),
-    )
-}
 
 // ---------------------------------------------------------------------------
 // M6/M7. Machine revoke/rotate writes
@@ -363,40 +284,6 @@ pub fn machine_revoke_sql() -> String {
 // NOTE: the M6/M7 machine-token revoke builder lived here; the statement
 // moved to `crate::domain::tokens::revoke_tokens_for_dev_machine`
 // (PIDASHCONV-1520), whose test carries the pin.
-
-/// M6 — locked active-runner list (`runners.py:199`).
-///
-/// `list(Runner.objects.select_for_update().filter(dev_machine,
-/// revoked_at__isnull=True))`: full rows, `Meta.ordering` kept, NO
-/// `LIMIT` (a list, not `.first()`), `FOR UPDATE`. `$1` = machine id.
-/// Handlers then emit revoke frames BEFORE the per-runner cascade
-/// (services-C) — order pinned there, not here.
-pub fn machine_runners_locked_list_sql() -> String {
-    format!(
-        "SELECT {} FROM \"runner\" \
-         WHERE (\"runner\".\"dev_machine_id\" = $1 AND \"runner\".\"revoked_at\" IS NULL) \
-         ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC \
-         FOR UPDATE",
-        qualified(r_cols::TABLE, r_cols::COLUMNS),
-    )
-}
-
-/// M7 — active-runner id list (`runners.py:239-241`).
-///
-/// `Runner.objects.filter(dev_machine,
-/// revoked_at__isnull=True).values_list("pk", flat=True)`:
-/// bare ids, `Meta.ordering` kept, no `LIMIT`. `$1` = machine id.
-/// Per id the handler emits a revoke frame + closes the session;
-/// the runner ROWS are untouched (QUIRK-rotate-keeps-runners).
-///
-/// Guards: revoked machine → 409 `dev_machine_revoked` (checked
-/// BEFORE this read, `:231-235`).
-pub fn machine_runner_ids_sql() -> String {
-    "SELECT \"runner\".\"id\" FROM \"runner\" \
-     WHERE (\"runner\".\"dev_machine_id\" = $1 AND \"runner\".\"revoked_at\" IS NULL) \
-     ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC"
-        .to_string()
-}
 
 // ---------------------------------------------------------------------------
 // R1. Runner list
@@ -727,6 +614,63 @@ pub fn machine_list_query(
     visibility: i16,
     cutoff: chrono::DateTime<chrono::Utc>,
 ) -> Select<dev_machine::Entity> {
+    let runner_machines = Query::select()
+        .distinct()
+        .column(runner::Column::DevMachineId)
+        .from(runner::Entity)
+        .and_where(runner::Column::DevMachineId.is_not_null())
+        .and_where(runner::Column::OwnerId.eq(owner_id))
+        .and_where(runner::Column::Visibility.eq(visibility))
+        .and_where(runner::Column::WorkspaceId.eq(workspace_id))
+        .to_owned();
+    let token_machines = Query::select()
+        .distinct()
+        .column(machine_token::Column::DevMachineId)
+        .from(machine_token::Entity)
+        .and_where(machine_token::Column::DevMachineId.is_not_null())
+        .and_where(machine_token::Column::UserId.eq(owner_id))
+        .and_where(machine_token::Column::WorkspaceId.eq(workspace_id))
+        .to_owned();
+    annotated_machines(owner_id, workspace_id, visibility, cutoff)
+        .filter(
+            Condition::any()
+                .add(dev_machine::Column::Id.in_subquery(runner_machines))
+                .add(dev_machine::Column::Id.in_subquery(token_machines)),
+        )
+        .filter(dev_machine::Column::OwnerId.eq(owner_id))
+        .filter(dev_machine::Column::Visibility.eq(visibility))
+        .order_by_desc(dev_machine::Column::LastSeenAt)
+        .order_by_desc(dev_machine::Column::CreatedAt)
+}
+
+/// M5 (`runners.py:150-170`, `machine_serialize_sql`): the M3
+/// annotations over one machine by pk, `Meta.ordering`, first.
+pub async fn machine_serialize(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+    owner_id: Uuid,
+    workspace_id: Uuid,
+    visibility: i16,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<MachineListRow>, DbErr> {
+    annotated_machines(owner_id, workspace_id, visibility, cutoff)
+        .filter(dev_machine::Column::Id.eq(machine_id))
+        .order_by_desc(dev_machine::Column::LastSeenAt)
+        .order_by_desc(dev_machine::Column::CreatedAt)
+        .into_model::<MachineListRow>()
+        .one(db)
+        .await
+}
+
+/// The M3/M5 select: machine columns, the runner annotations (over the
+/// owner's private runners in the workspace) and M1 `control_online`,
+/// grouped by machine.
+fn annotated_machines(
+    owner_id: Uuid,
+    workspace_id: Uuid,
+    visibility: i16,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Select<dev_machine::Entity> {
     let in_scope = || {
         Condition::all()
             .add(runner::Column::OwnerId.eq(owner_id))
@@ -753,23 +697,6 @@ pub fn machine_list_query(
             .limit(1)
             .to_owned(),
     );
-    let runner_machines = Query::select()
-        .distinct()
-        .column(runner::Column::DevMachineId)
-        .from(runner::Entity)
-        .and_where(runner::Column::DevMachineId.is_not_null())
-        .and_where(runner::Column::OwnerId.eq(owner_id))
-        .and_where(runner::Column::Visibility.eq(visibility))
-        .and_where(runner::Column::WorkspaceId.eq(workspace_id))
-        .to_owned();
-    let token_machines = Query::select()
-        .distinct()
-        .column(machine_token::Column::DevMachineId)
-        .from(machine_token::Entity)
-        .and_where(machine_token::Column::DevMachineId.is_not_null())
-        .and_where(machine_token::Column::UserId.eq(owner_id))
-        .and_where(machine_token::Column::WorkspaceId.eq(workspace_id))
-        .to_owned();
     let runners: RelationDef = dev_machine::Entity::belongs_to(runner::Entity)
         .from(dev_machine::Column::Id)
         .to(runner::Column::DevMachineId)
@@ -803,16 +730,7 @@ pub fn machine_list_query(
         )
         .expr_as(control_online, "control_online")
         .join(JoinType::LeftJoin, runners)
-        .filter(
-            Condition::any()
-                .add(dev_machine::Column::Id.in_subquery(runner_machines))
-                .add(dev_machine::Column::Id.in_subquery(token_machines)),
-        )
-        .filter(dev_machine::Column::OwnerId.eq(owner_id))
-        .filter(dev_machine::Column::Visibility.eq(visibility))
         .group_by(dev_machine::Column::Id)
-        .order_by_desc(dev_machine::Column::LastSeenAt)
-        .order_by_desc(dev_machine::Column::CreatedAt)
 }
 
 pub async fn machine_list(
@@ -1044,10 +962,108 @@ pub async fn runner_live_state(
         .await
 }
 
+/// The M6 locked machine row the revoke / rotate views read.
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+pub struct LockedMachineRow {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub host_label: String,
+    pub label: String,
+    pub visibility: i16,
+    pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// M6 ([`machine_locked_read_sql`]): the machine by id, `Meta.ordering`,
+/// first, `FOR UPDATE`.
+pub async fn lock_machine(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+) -> Result<Option<LockedMachineRow>, DbErr> {
+    dev_machine::Entity::find()
+        .select_only()
+        .columns([
+            dev_machine::Column::Id,
+            dev_machine::Column::OwnerId,
+            dev_machine::Column::HostLabel,
+            dev_machine::Column::Label,
+            dev_machine::Column::Visibility,
+            dev_machine::Column::LastSeenAt,
+            dev_machine::Column::RevokedAt,
+            dev_machine::Column::CreatedAt,
+            dev_machine::Column::UpdatedAt,
+        ])
+        .filter(dev_machine::Column::Id.eq(machine_id))
+        .order_by_desc(dev_machine::Column::LastSeenAt)
+        .order_by_desc(dev_machine::Column::CreatedAt)
+        .lock_exclusive()
+        .into_model::<LockedMachineRow>()
+        .one(db)
+        .await
+}
+
+/// `DevMachine.revoke()` (`runners.py:186-190`): stamp `revoked_at` and
+/// `updated_at`.
+pub async fn revoke_machine(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+    revoked_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+) -> Result<(), DbErr> {
+    dev_machine::Entity::update_many()
+        .col_expr(dev_machine::Column::RevokedAt, Expr::value(revoked_at))
+        .col_expr(dev_machine::Column::UpdatedAt, Expr::value(updated_at))
+        .filter(dev_machine::Column::Id.eq(machine_id))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+fn live_machine_runners(machine_id: Uuid) -> Select<runner::Entity> {
+    runner::Entity::find()
+        .select_only()
+        .filter(runner::Column::DevMachineId.eq(machine_id))
+        .filter(runner::Column::RevokedAt.is_null())
+        .order_by_desc(runner::Column::LastHeartbeatAt)
+        .order_by_desc(runner::Column::CreatedAt)
+}
+
+/// The machine revoke's locked runner list (`runners.py:192-205`,
+/// [`machine_runners_locked_list_sql`]): `(id, revoked_at)` of the
+/// machine's unrevoked runners, `FOR UPDATE`.
+#[allow(clippy::type_complexity)]
+pub async fn lock_live_machine_runners(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+) -> Result<Vec<(Uuid, Option<chrono::DateTime<chrono::Utc>>)>, DbErr> {
+    live_machine_runners(machine_id)
+        .columns([runner::Column::Id, runner::Column::RevokedAt])
+        .lock_exclusive()
+        .into_tuple()
+        .all(db)
+        .await
+}
+
+/// The machine rotate's runner ids (`runners.py:229-231`,
+/// [`machine_runner_ids_sql`]): unlocked.
+pub async fn live_machine_runner_ids(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+) -> Result<Vec<Uuid>, DbErr> {
+    live_machine_runners(machine_id)
+        .column(runner::Column::Id)
+        .into_tuple()
+        .all(db)
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pidash_db::app_project::models::project as project_cols;
+    use pidash_db::runner_enroll::columns::{machine_token as mt_cols, runner as r_cols};
 
     const FIXTURE_SQL: &str =
         include_str!("../../../../../fixtures/runner_enroll/queries/machines_runners.sql");
@@ -1253,66 +1269,9 @@ mod tests {
 
     // -- M1 --
 
-    #[test]
-    fn m1_exists_shape_is_django_exact() {
-        assert_eq!(
-            control_online_fragment(12, 13),
-            "EXISTS(SELECT $12 AS \"a\" FROM \"machine_session\" U0 \
-             WHERE (U0.\"dev_machine_id\" = (\"dev_machine\".\"id\") \
-             AND U0.\"last_seen_at\" >= $13 AND U0.\"revoked_at\" IS NULL) \
-             LIMIT 1) AS \"control_online\"",
-        );
-        // Numbering is positional: other slots render the same shape.
-        assert!(control_online_fragment(1, 2).contains("SELECT $1 AS \"a\""));
-        assert!(control_online_fragment(1, 2).contains(">= $2"));
-        for fragment in [
-            fixture_fragment("EXISTS("),
-            fixture_fragment("FROM \"machine_session\""),
-            fixture_fragment("AS \"control_online\""),
-            fixture_fragment("\"revoked_at\" IS NULL"),
-            fixture_fragment("\"last_seen_at\" >="),
-        ] {
-            assert_builder_contains(&control_online_fragment(12, 13), &fragment);
-        }
-    }
-
     // -- M3 --
 
     // -- M4 --
-
-    #[test]
-    fn m4_probes_are_exists_with_cleared_ordering() {
-        assert_eq!(
-            machine_scope_runner_probe_sql(),
-            "SELECT $1 AS \"a\" FROM \"runner\" \
-             WHERE (\"runner\".\"dev_machine_id\" = $2 AND \"runner\".\"owner_id\" = $3 \
-             AND \"runner\".\"visibility\" = $4 AND \"runner\".\"workspace_id\" = $5) \
-             LIMIT 1",
-        );
-        assert_eq!(
-            machine_scope_token_probe_sql(),
-            "SELECT $1 AS \"a\" FROM \"machine_token\" \
-             WHERE (\"machine_token\".\"dev_machine_id\" = $2 \
-             AND \"machine_token\".\"user_id\" = $3 \
-             AND \"machine_token\".\"workspace_id\" = $4) \
-             LIMIT 1",
-        );
-        assert!(!machine_scope_runner_probe_sql().contains("ORDER BY"));
-        assert!(!machine_scope_token_probe_sql().contains("ORDER BY"));
-        for fragment in [
-            fixture_fragment("FROM \"runner\""),
-            fixture_fragment("\"workspace_id\" = "),
-            fixture_fragment("\"owner_id\" = "),
-        ] {
-            assert_builder_contains(&machine_scope_runner_probe_sql(), &fragment);
-        }
-        for fragment in [
-            fixture_fragment("FROM \"machine_token\""),
-            fixture_fragment("\"user_id\" = "),
-        ] {
-            assert_builder_contains(&machine_scope_token_probe_sql(), &fragment);
-        }
-    }
 
     // -- M5 --
 
@@ -1356,46 +1315,6 @@ mod tests {
     // (The token-revoke pin moved with the statement to
     // `crate::domain::tokens`; runners.py:198 and :238 still run the
     // identical call through `revoke_tokens_for_dev_machine`.)
-
-    #[test]
-    fn m6_locked_runner_list_has_no_limit() {
-        let sql = machine_runners_locked_list_sql();
-        let list = assert_suffix(
-            &sql,
-            "FROM \"runner\" \
-             WHERE (\"runner\".\"dev_machine_id\" = $1 AND \"runner\".\"revoked_at\" IS NULL) \
-             ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC \
-             FOR UPDATE",
-        );
-        assert_eq!(list, expected_list("runner", RUNNER_COLS));
-        assert!(!sql.contains("LIMIT"));
-        for fragment in [
-            fixture_fragment("FROM \"runner\" WHERE"),
-            fixture_fragment("FOR UPDATE"),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
-    }
-
-    #[test]
-    fn m7_runner_ids_are_bare_ids_without_lock() {
-        assert_eq!(
-            machine_runner_ids_sql(),
-            "SELECT \"runner\".\"id\" FROM \"runner\" \
-             WHERE (\"runner\".\"dev_machine_id\" = $1 AND \"runner\".\"revoked_at\" IS NULL) \
-             ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC",
-        );
-        // No lock, no LIMIT, and no runner UPDATE anywhere in M7
-        // (QUIRK-rotate-keeps-runners).
-        assert!(!machine_runner_ids_sql().contains("FOR UPDATE"));
-        assert!(!machine_runner_ids_sql().contains("LIMIT"));
-        for fragment in [
-            fixture_fragment("\"id\" FROM \"runner\""),
-            fixture_fragment("\"revoked_at\" IS NULL"),
-        ] {
-            assert_builder_contains(&machine_runner_ids_sql(), &fragment);
-        }
-    }
 
     // -- R1 --
 
@@ -1772,5 +1691,154 @@ mod tests {
             .expect("row");
         assert_eq!(live.turn_count, Some(3));
         assert!(runner_live_state(&conn, r2).await.expect("live").is_none());
+    }
+
+    /// The teardown statements: M6 lock, revoke stamp, the live-runner
+    /// lists, M5 against M3 on the same data, and the E3-E5 refresh reads
+    /// and writes.
+    #[tokio::test]
+    async fn live_teardown_statements() {
+        use crate::runner_enroll::queries::enroll_reads;
+        let Some(pool) = crate::read::test_support::pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        for table in [
+            "dev_machine",
+            "runner",
+            "machine_token",
+            "machine_session",
+            "workspaces",
+            "runner_force_refresh",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        sqlx::query("ALTER TABLE dev_machine ADD PRIMARY KEY (id)")
+            .execute(&mut *tx)
+            .await
+            .expect("pk");
+        let (me, ws, machine, live, gone) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for sql in [
+            format!(
+                "INSERT INTO dev_machine (id, owner_id, host_label, label, visibility, provisioning, created_at, updated_at) \
+                 VALUES ('{machine}', '{me}', 'h', 'H', 0, 'manual', now(), now())"
+            ),
+            format!(
+                "INSERT INTO runner (id, owner_id, workspace_id, dev_machine_id, visibility, status, \
+                 refresh_token_hash, refresh_token_generation, previous_refresh_token_hash, created_at, revoked_at) VALUES \
+                 ('{live}', '{me}', '{ws}', '{machine}', 0, 'online', 'cur', 4, 'prev', now(), NULL), \
+                 ('{gone}', '{me}', '{ws}', '{machine}', 0, 'revoked', '', 0, '', now(), now())"
+            ),
+            format!("INSERT INTO workspaces (id) VALUES ('{ws}')"),
+            format!("INSERT INTO runner_force_refresh (runner_id, min_rtg) VALUES ('{live}', 9)"),
+        ] {
+            sqlx::query(&sql).execute(&mut *tx).await.expect("seed");
+        }
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let locked = lock_machine(&conn, machine)
+            .await
+            .expect("M6")
+            .expect("row");
+        assert_eq!((locked.owner_id, locked.revoked_at), (me, None));
+        assert_eq!(
+            lock_live_machine_runners(&conn, machine)
+                .await
+                .expect("runners"),
+            vec![(live, None)]
+        );
+        assert_eq!(
+            live_machine_runner_ids(&conn, machine).await.expect("ids"),
+            vec![live]
+        );
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(CONTROL_PRESENCE_WINDOW_SECS);
+        let listed = machine_list(&conn, me, ws, 0, cutoff).await.expect("M3");
+        let single = machine_serialize(&conn, machine, me, ws, 0, cutoff)
+            .await
+            .expect("M5")
+            .expect("row");
+        assert_eq!(listed, vec![single.clone()]);
+        assert_eq!((single.runner_count, single.online_runner_count), (2, 1));
+        let now = chrono::Utc::now();
+        revoke_machine(&conn, machine, now, now)
+            .await
+            .expect("revoke");
+        assert!(lock_machine(&conn, machine)
+            .await
+            .expect("M6")
+            .expect("row")
+            .revoked_at
+            .is_some());
+        assert!(enroll_reads::dev_machine_is_revoked(&conn, machine)
+            .await
+            .expect("E4"));
+
+        let refresh = enroll_reads::refresh_locked_runner(&conn, live)
+            .await
+            .expect("E3")
+            .expect("row");
+        assert_eq!(
+            (
+                refresh.refresh_token_hash.as_str(),
+                refresh.refresh_token_generation,
+                refresh.previous_refresh_token_hash.as_str()
+            ),
+            ("cur", 4, "prev")
+        );
+        // No workspace row: the E3 INNER JOIN drops the runner.
+        let orphan = Uuid::new_v4();
+        conn.execute_unprepared(&format!(
+            "INSERT INTO runner (id, owner_id, workspace_id, created_at) VALUES ('{orphan}', '{me}', '{}', now())",
+            Uuid::new_v4()
+        ))
+        .await
+        .expect("seed");
+        assert_eq!(
+            enroll_reads::refresh_locked_runner(&conn, orphan)
+                .await
+                .expect("E3"),
+            None
+        );
+        assert!(enroll_reads::refresh_locked_runner(&conn, gone)
+            .await
+            .expect("E3")
+            .is_some());
+        enroll_reads::rotate_refresh_token(&conn, live, "new", "fp", 5, "cur")
+            .await
+            .expect("E5");
+        let rotated = enroll_reads::refresh_locked_runner(&conn, live)
+            .await
+            .expect("E3")
+            .expect("row");
+        assert_eq!(
+            (
+                rotated.refresh_token_hash.as_str(),
+                rotated.refresh_token_generation,
+                rotated.previous_refresh_token_hash.as_str()
+            ),
+            ("new", 5, "cur")
+        );
+        enroll_reads::clear_force_refresh(&conn, live)
+            .await
+            .expect("clear");
+        let left: Option<i32> = conn
+            .query_one(sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Postgres,
+                "SELECT 1 FROM runner_force_refresh",
+            ))
+            .await
+            .expect("probe")
+            .map(|_| 1);
+        assert_eq!(left, None);
     }
 }

@@ -186,7 +186,6 @@
 //! `agent_run`).
 
 use pidash_compat::py::py_strip;
-use pidash_db::app_project::models::project as project_cols;
 use pidash_db::entity::{
     agent_run, dev_machine, machine_token, pod, projects, runner, workspace_members, workspaces,
 };
@@ -249,36 +248,9 @@ fn qualified(table: &str, columns: &[&str]) -> String {
         .join(", ")
 }
 
-/// `$start, …, $start+count-1` placeholder list for an `__in` filter.
-fn in_placeholders(start: u32, count: usize) -> String {
-    (0..count)
-        .map(|i| format!("${}", start + i as u32))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 // ---------------------------------------------------------------------------
 // P1/P2/P4. Project read by id
 // ---------------------------------------------------------------------------
-
-/// Forward-FK `pod.project` read (the serializer's `project.identifier`
-/// / the `Pod.save()` denorm check).
-///
-/// A forward FK is resolved through `Project._base_manager` — a plain
-/// `models.Manager` — because `Project` sets no `base_manager_name`, so
-/// `SoftDeletionManager` does NOT scope it and a tombstoned project still
-/// renders (PIDASHCONV-1210; same base-manager semantics PB-0617 records
-/// for the scheduler `pod_name`). Same shape as [`project_by_id_sql`] with
-/// the `deleted_at` conjunct dropped (the `ORDER BY` is unobservable on a
-/// PK lookup, kept for parity). `$1` = project id.
-pub fn project_by_id_base_sql() -> String {
-    format!(
-        "SELECT {} FROM \"projects\" \
-         WHERE \"projects\".\"id\" = $1 \
-         ORDER BY \"projects\".\"created_at\" DESC LIMIT 1",
-        qualified(project_cols::TABLE, project_cols::COLUMNS),
-    )
-}
 
 // ---------------------------------------------------------------------------
 // P1. Pod lists
@@ -295,70 +267,6 @@ pub fn project_by_id_base_sql() -> String {
 // ---------------------------------------------------------------------------
 // P4. Pod patch
 // ---------------------------------------------------------------------------
-
-/// P4 — patch final write (`pods.py:202-203`).
-///
-/// `pod.save(update_fields=list(set(updates + ["updated_at"])))`, sent
-/// ONLY when `updates` is non-empty. `SET` order is Django
-/// model-field order regardless of the `set()` order
-/// (QUIRK-patch-set-order): `name`, `description`, `is_default`,
-/// `updated_at` — so the `$N` numbering depends on the flags (the
-/// trailing `$N` is always the pod id):
-///
-/// * name only: `$1` name, `$2` updated_at, `$3` id.
-/// * description only: `$1` description, `$2` updated_at, `$3` id.
-/// * is_default only: `$1` is_default, `$2` updated_at, `$3` id.
-/// * name + description: `$1` name, `$2` description, `$3` updated_at, `$4` id.
-/// * name + is_default: `$1` name, `$2` is_default, `$3` updated_at, `$4` id.
-/// * description + is_default: `$1` description, `$2` is_default, `$3` updated_at, `$4` id.
-/// * all three: `$1` name, `$2` description, `$3` is_default, `$4` updated_at, `$5` id.
-///
-/// `save()` also runs the workspace-denorm check first (see module
-/// docs): handlers run [`project_by_id_base_sql`] (a forward-FK read)
-/// unless `pod.project` is cached. Rename inputs: blank (after strip) →
-/// 400 `name cannot be empty`; bare suffix re-prefixed with
-/// `pod.project.identifier`
-/// (needs the project row); validator failure → 400 (handlers-owned).
-/// Description input: `value or ""`. Demote branch (`!wants_default
-/// && pod.is_default`) sets `FALSE`, leaving NO default
-/// (QUIRK-demote-leaves-no-default); unchanged `is_default` is a no-op.
-/// Response: 200 serialized (handlers-owned).
-///
-/// # Panics
-///
-/// Panics when all three flags are `false`: the source sends no `UPDATE`
-/// in that case, so there is no faithful SQL to emit.
-pub fn pod_patch_update_sql(
-    update_name: bool,
-    update_description: bool,
-    update_is_default: bool,
-) -> String {
-    assert!(
-        update_name || update_description || update_is_default,
-        "pod_patch_update_sql: at least one field flag must be set \
-         (the source sends no UPDATE when `updates` is empty)"
-    );
-    let mut set: Vec<String> = Vec::new();
-    let mut next: u32 = 1;
-    if update_name {
-        set.push(format!("\"name\" = ${next}"));
-        next += 1;
-    }
-    if update_description {
-        set.push(format!("\"description\" = ${next}"));
-        next += 1;
-    }
-    if update_is_default {
-        set.push(format!("\"is_default\" = ${next}"));
-        next += 1;
-    }
-    set.push(format!("\"updated_at\" = ${next}"));
-    next += 1;
-    format!(
-        "UPDATE \"pod\" SET {} WHERE \"pod\".\"id\" = ${next}",
-        set.join(", "),
-    )
-}
 
 // ---------------------------------------------------------------------------
 // P5. Pod delete: locked read + guards + stamp + sweep
@@ -377,25 +285,6 @@ pub fn pod_locked_read_sql() -> String {
          WHERE (\"pod\".\"deleted_at\" IS NULL AND \"pod\".\"id\" = $1) \
          ORDER BY \"pod\".\"is_default\" DESC, \"pod\".\"created_at\" ASC LIMIT 1 FOR UPDATE",
         qualified(pod_cols::TABLE, pod_cols::COLUMNS),
-    )
-}
-
-/// P5 — guard 2: non-terminal runs (`pods.py:236-243`).
-///
-/// `locked.agent_runs.filter(status__in=NON_TERMINAL_STATUSES).exists()`:
-/// the reverse-FK manager adds `pod_id = $1`; the 8 pinned statuses
-/// bind as `$2..$9` in [`NON_TERMINAL_STATUSES`] order. The `agent_run`
-/// table carries no manager scope. True → 409
-/// `pod has non-terminal runs; cancel or wait` / `pod_has_active_runs`
-/// (handlers-owned).
-///
-/// `$1` = pod id, `$2..$9` = the pinned status values in order.
-pub fn pod_active_runs_exist_sql() -> String {
-    format!(
-        "SELECT 1 AS \"a\" FROM \"{AGENT_RUN_TABLE}\" \
-         WHERE (\"{AGENT_RUN_TABLE}\".\"{AGENT_RUN_POD_FK}\" = $1 \
-         AND \"{AGENT_RUN_TABLE}\".\"{AGENT_RUN_STATUS_COL}\" IN ({})) LIMIT 1",
-        in_placeholders(2, NON_TERMINAL_STATUSES.len()),
     )
 }
 
@@ -990,14 +879,13 @@ pub async fn soft_delete_pod(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pidash_db::app_project::models::project as project_cols;
     use pidash_db::runner_enroll::columns::dev_machine as dm_cols;
     use pidash_db::runner_enroll::columns::runner as r_cols;
     use pidash_db::runner_enroll::columns::{enums, machine_token as mt_cols};
 
     const FIXTURE_SQL: &str =
         include_str!("../../../../../fixtures/runner_enroll/queries/pods_projects_desktop.sql");
-    const FIXTURE_WIRE: &str =
-        include_str!("../../../../../fixtures/runner_enroll/external/wire_pins.json");
 
     /// Collapse every whitespace run to one space.
     fn squashed(s: &str) -> String {
@@ -1131,24 +1019,6 @@ mod tests {
 
     // -- P1/P2/P4 project read --
 
-    #[test]
-    fn project_read_base_has_no_soft_delete_scope() {
-        // Forward-FK `pod.project` read: `_base_manager` (no scope), so a
-        // tombstoned project still renders (PIDASHCONV-1210). Otherwise the
-        // shape matches the scoped read.
-        let sql = project_by_id_base_sql();
-        let list = assert_suffix(
-            &sql,
-            "FROM \"projects\" WHERE \"projects\".\"id\" = $1 \
-             ORDER BY \"projects\".\"created_at\" DESC LIMIT 1",
-        );
-        assert_eq!(list, expected_list("projects", project_cols::COLUMNS));
-        assert!(
-            !sql.contains("\"deleted_at\" IS NULL"),
-            "base read must not filter tombstones:\n{sql}"
-        );
-    }
-
     // -- P1 lists + count --
 
     // -- P2 insert --
@@ -1156,65 +1026,6 @@ mod tests {
     // -- P3 --
 
     // -- P4 --
-
-    #[test]
-    fn patch_update_emits_model_order_for_every_subset() {
-        // Model order (name, description, is_default, updated_at) for all
-        // seven non-empty subsets; the trailing bind is always the pod id.
-        let cases = [
-            (
-                (true, false, false),
-                "UPDATE \"pod\" SET \"name\" = $1, \"updated_at\" = $2 WHERE \"pod\".\"id\" = $3",
-            ),
-            (
-                (false, true, false),
-                "UPDATE \"pod\" SET \"description\" = $1, \"updated_at\" = $2 WHERE \"pod\".\"id\" = $3",
-            ),
-            (
-                (false, false, true),
-                "UPDATE \"pod\" SET \"is_default\" = $1, \"updated_at\" = $2 WHERE \"pod\".\"id\" = $3",
-            ),
-            (
-                (true, true, false),
-                "UPDATE \"pod\" SET \"name\" = $1, \"description\" = $2, \"updated_at\" = $3 \
-                 WHERE \"pod\".\"id\" = $4",
-            ),
-            (
-                (true, false, true),
-                "UPDATE \"pod\" SET \"name\" = $1, \"is_default\" = $2, \"updated_at\" = $3 \
-                 WHERE \"pod\".\"id\" = $4",
-            ),
-            (
-                (false, true, true),
-                "UPDATE \"pod\" SET \"description\" = $1, \"is_default\" = $2, \"updated_at\" = $3 \
-                 WHERE \"pod\".\"id\" = $4",
-            ),
-            (
-                (true, true, true),
-                "UPDATE \"pod\" SET \"name\" = $1, \"description\" = $2, \"is_default\" = $3, \
-                 \"updated_at\" = $4 WHERE \"pod\".\"id\" = $5",
-            ),
-        ];
-        for ((name, desc, default), expected) in cases {
-            assert_eq!(
-                squashed(&pod_patch_update_sql(name, desc, default)),
-                squashed(expected),
-                "flags ({name}, {desc}, {default})"
-            );
-        }
-        for fragment in [
-            fixture_fragment("UPDATE \"pod\" SET"),
-            fixture_fragment("\"updated_at\" = "),
-        ] {
-            assert_builder_contains(&pod_patch_update_sql(true, true, true), &fragment);
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "at least one field flag must be set")]
-    fn patch_update_panics_when_updates_empty() {
-        let _ = pod_patch_update_sql(false, false, false);
-    }
 
     // -- P5 --
 
@@ -1228,50 +1039,6 @@ mod tests {
         );
         assert_eq!(list, expected_list("pod", POD_COLS));
         assert_builder_contains(&sql, &fixture_fragment("LIMIT 1 FOR UPDATE"));
-    }
-
-    #[test]
-    fn guard_runs_binds_eight_pinned_statuses() {
-        let sql = pod_active_runs_exist_sql();
-        assert_eq!(
-            sql,
-            "SELECT 1 AS \"a\" FROM \"agent_run\" \
-             WHERE (\"agent_run\".\"pod_id\" = $1 \
-             AND \"agent_run\".\"status\" IN ($2, $3, $4, $5, $6, $7, $8, $9)) LIMIT 1"
-        );
-        for fragment in [
-            fixture_fragment("FROM \"agent_run\""),
-            fixture_fragment("\"pod_id\" = $1"),
-            fixture_fragment("\"status\" IN"),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
-    }
-
-    #[test]
-    fn status_pin_matches_fixture_f8() {
-        // D13-F8 `non_terminal_statuses.value` (wire_pins.json) is the
-        // pinned matcher tuple; the retired entry carries an annotation
-        // the const must strip.
-        let wire: serde_json::Value = serde_json::from_str(FIXTURE_WIRE).unwrap();
-        assert_eq!(wire["fixture_id"], "D13-F8");
-        let pinned: Vec<&str> = wire["non_terminal_statuses"]["value"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap().split(" (").next().unwrap())
-            .collect();
-        assert_eq!(pinned, NON_TERMINAL_STATUSES);
-        assert_eq!(NON_TERMINAL_STATUSES.len(), 8);
-        // And the guard binds exactly those eight, in that order.
-        let sql = pod_active_runs_exist_sql();
-        for (i, status) in NON_TERMINAL_STATUSES.iter().enumerate() {
-            let _ = status;
-            assert!(
-                sql.contains(&format!("${}", i + 2)),
-                "missing bind for status #{i}:\n{sql}"
-            );
-        }
     }
 
     // -- J1 / J2 (SeaORM) --
