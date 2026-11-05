@@ -12,8 +12,8 @@ Every live engine runner (``provisioning = desktop_bundled``) gets
 across the machine's live runners or within the pod. The naming rules are a
 frozen copy of :func:`pi_dash.runner.services.machine_identity.engine_runner_name`
 as it was when this migration was written, so a later change to that function
-cannot change what this migration does on a database that has not run it yet. It runs after the executor,
-``assigned_runner`` backfill and pruning steps (``0035``) and the token
+cannot change what this migration does on a database that has not run it
+yet. It runs after the executor and pruning steps (``0035``) and the token
 expiries (``0037``), so pruned rows are not renamed.
 
 Deterministic: runners are visited per machine, oldest first, so the oldest
