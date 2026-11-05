@@ -543,6 +543,62 @@ test(
 );
 
 test(
+  specTitle(["ARCH-006"], "state sections follow the workflow order"),
+  { tag: specTags(["ARCH-006"]) },
+  async ({ driver, seed }) => {
+    // NEWPIDASH-46: sections read in workflow order (state group, then
+    // sequence), whatever order the grouped response lists its buckets in.
+    const tag = `NF222 order ${Date.now()}`;
+    const session = await signInSession(seed.email, seed.password);
+    const projectId = await serverCreateProjectWithFlags(
+      seed.workspaceSlug,
+      `${tag} project`,
+      parityProjectIdentifier("N222"),
+      {},
+      session
+    );
+    // Created in reverse workflow order so creation order cannot pass for workflow order.
+    const doneId = await serverCreateState(seed.workspaceSlug, projectId, `${tag} shipped`, "completed", session);
+    const startedId = await serverCreateState(seed.workspaceSlug, projectId, `${tag} doing`, "started", session);
+    const backlogId = await serverCreateState(seed.workspaceSlug, projectId, `${tag} someday`, "backlog", session);
+    const first = await archiveNamedIssue(seed, projectId, `${tag} alpha`, doneId, session);
+    const second = await archiveNamedIssue(seed, projectId, `${tag} beta`, startedId, session);
+    const third = await archiveNamedIssue(seed, projectId, `${tag} gamma`, backlogId, session);
+    try {
+      await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+      await driver.archivesOpenIssuesList(seed.workspaceSlug, projectId);
+      await expect
+        .poll(() => driver.archivesVisibleIssueNames(), LIST_POLL)
+        .toEqual(expect.arrayContaining([first.name, second.name, third.name]));
+      await driver.openDisplayOptions();
+      await driver.setDisplayGroupBy("States");
+      // The three created states sit in distinct groups, so group rank
+      // alone decides their relative order on both apps.
+      await expect
+        .poll(
+          async () => {
+            const headings = await driver.archivesGroupHeadings();
+            const somedayAt = headings.indexOf(`${tag} someday`);
+            const doingAt = headings.indexOf(`${tag} doing`);
+            const shippedAt = headings.indexOf(`${tag} shipped`);
+            return somedayAt !== -1 && somedayAt < doingAt && doingAt < shippedAt;
+          },
+          { timeout: 120_000 }
+        )
+        .toBe(true);
+    } finally {
+      await cleanupArchivedFixture(
+        seed,
+        projectId,
+        [first.id, second.id, third.id],
+        [doneId, startedId, backlogId],
+        session
+      );
+    }
+  }
+);
+
+test(
   specTitle(["ARCH-007"], "peek locks every field and carries the selection in the address"),
   { tag: specTags(["ARCH-007"]) },
   async ({ driver, seed }) => {

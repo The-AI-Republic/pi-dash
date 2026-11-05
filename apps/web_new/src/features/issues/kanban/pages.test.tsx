@@ -531,6 +531,33 @@ describe("envelope shaping", () => {
     expect(boardQueryKey("acme", { ...base, groupDomain: ["a"] })).toEqual(boardQueryKey("acme", base));
   });
 
+  it("forwards the explicit column order so state columns read in workflow order (NEWPIDASH-46)", () => {
+    const done = "823e4567-e89b-12d3-a456-426614174007";
+    const backlog = "a23e4567-e89b-12d3-a456-426614174009";
+    const board = toBoard(
+      {
+        ...groupedEnvelope,
+        results: {
+          [done]: { results: [row()], total_results: 1 },
+          [backlog]: { results: [row()], total_results: 1 },
+        },
+      } as never,
+      input({
+        groupLabels: new Map([
+          [done, "Done"],
+          [backlog, "Backlog"],
+        ]),
+        groupOrder: [backlog, done],
+      })
+    );
+    expect(board.columns.map((column) => column.key)).toEqual([backlog, done]);
+  });
+
+  it("does not put the explicit order in the query key", () => {
+    const base = input();
+    expect(boardQueryKey("acme", { ...base, groupOrder: ["a"], subOrder: ["b"] })).toEqual(boardQueryKey("acme", base));
+  });
+
   it("shapes a sub-grouped board with lanes", () => {
     const board = toBoard(subEnvelope as never, input({ subGroupBy: "labels" }));
     expect(board.subGrouped).toBe(true);
