@@ -20,7 +20,9 @@ use uuid::Uuid;
 
 /// One issue as the agent tools render it: the issue's own columns, its
 /// state's name and group (NULL without a state) and its project identifier.
-#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+/// Decodes by name both through SeaORM (`FromQueryResult`) and on the audit
+/// transaction's sqlx path (`sqlx::FromRow`, [`bound_issue_sql`]).
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult, sqlx::FromRow)]
 pub struct ToolIssueRow {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -46,38 +48,32 @@ pub async fn bound_issue(
         .into_model::<ToolIssueRow>()
         .one(db)
         .await
-        .inspect_err(|error| tracing::error!(%error, %issue_id, "bound issue read failed"))
 }
 
 /// The [`bound_issue`] statement as SQL text with one `$1` (the issue id),
 /// for the agent tools' audit transaction: that is an `sqlx::Transaction`,
 /// which a SeaORM call cannot join, so the caller runs this text on it.
-/// SeaORM still builds the statement, so its output names are unique.
-pub fn bound_issue_sql() -> String {
-    issue_query()
-        .filter(issues::Column::Id.eq(Uuid::nil()))
-        .build(sea_orm::DbBackend::Postgres)
-        .sql
+/// SeaORM still builds the statement (once), so its output names are unique.
+pub fn bound_issue_sql() -> &'static str {
+    static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        issue_query()
+            .filter(issues::Column::Id.eq(Uuid::nil()))
+            .build(sea_orm::DbBackend::Postgres)
+            .sql
+    });
+    &SQL
 }
 
-impl ToolIssueRow {
-    /// Decode one [`bound_issue_sql`] row by its unique output names.
-    pub fn from_pg_row(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
-        use sqlx::Row;
-        Ok(Self {
-            id: row.try_get("id")?,
-            workspace_id: row.try_get("workspace_id")?,
-            project_id: row.try_get("project_id")?,
-            sequence_id: row.try_get("sequence_id")?,
-            name: row.try_get("name")?,
-            priority: row.try_get("priority")?,
-            description_stripped: row.try_get("description_stripped")?,
-            workpad: row.try_get("workpad")?,
-            state_name: row.try_get("state_name")?,
-            state_group: row.try_get("state_group")?,
-            project_identifier: row.try_get("project_identifier")?,
-        })
-    }
+/// The search hit: what `_issue_data(issue)` (no detail) reads.
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+pub struct ToolIssueBrief {
+    pub id: Uuid,
+    pub sequence_id: i32,
+    pub name: String,
+    pub priority: String,
+    pub state_name: Option<String>,
+    pub state_group: Option<String>,
+    pub project_identifier: String,
 }
 
 /// `Issue.issue_objects.get(id=..., project_id=...)`: a live issue in the
@@ -94,7 +90,6 @@ pub async fn project_issue(
         .into_model::<ToolIssueRow>()
         .one(db)
         .await
-        .inspect_err(|error| tracing::error!(%error, %issue_id, "project issue read failed"))
 }
 
 /// `name__icontains=q | description_stripped__icontains=q`, newest first,
@@ -105,29 +100,32 @@ pub async fn search_project_issues(
     project_id: Uuid,
     escaped: &str,
     limit: u64,
-) -> Result<Vec<ToolIssueRow>, DbErr> {
+) -> Result<Vec<ToolIssueBrief>, DbErr> {
     search_query(project_id, escaped, limit)
-        .into_model::<ToolIssueRow>()
+        .into_model::<ToolIssueBrief>()
         .all(db)
         .await
-        .inspect_err(|error| tracing::error!(%error, %project_id, "issue search failed"))
 }
 
-/// The shared select: issue columns, `INNER JOIN projects`, `LEFT JOIN
+/// The detail select: issue columns, `INNER JOIN projects`, `LEFT JOIN
 /// states`, every joined column under its own alias.
 fn issue_query() -> Select<issues::Entity> {
+    joined(&[
+        issues::Column::Id,
+        issues::Column::WorkspaceId,
+        issues::Column::ProjectId,
+        issues::Column::SequenceId,
+        issues::Column::Name,
+        issues::Column::Priority,
+        issues::Column::DescriptionStripped,
+        issues::Column::Workpad,
+    ])
+}
+
+fn joined(columns: &[issues::Column]) -> Select<issues::Entity> {
     issues::Entity::find()
         .select_only()
-        .columns([
-            issues::Column::Id,
-            issues::Column::WorkspaceId,
-            issues::Column::ProjectId,
-            issues::Column::SequenceId,
-            issues::Column::Name,
-            issues::Column::Priority,
-            issues::Column::DescriptionStripped,
-            issues::Column::Workpad,
-        ])
+        .columns(columns.iter().copied())
         .column_as(states::Column::Name, "state_name")
         .column_as(states::Column::Group, "state_group")
         .column_as(projects::Column::Identifier, "project_identifier")
@@ -135,6 +133,10 @@ fn issue_query() -> Select<issues::Entity> {
         .join(JoinType::LeftJoin, issues::Relation::States.def())
 }
 
+/// Django's queryset was `.distinct()`, but with the PK selected and both
+/// joins to-one no row can repeat, so the search drops `DISTINCT` (and the
+/// `created_at` it forced into the select list) and selects only the
+/// brief's columns, not the wide description and workpad.
 fn search_query(project_id: Uuid, escaped: &str, limit: u64) -> Select<issues::Entity> {
     // `UPPER(col) LIKE UPPER('%' || q || '%')`: Django's icontains on
     // Postgres. The pattern is upper-cased in SQL, like the column, so both
@@ -144,18 +146,21 @@ fn search_query(project_id: Uuid, escaped: &str, limit: u64) -> Select<issues::E
         Expr::expr(Func::upper(Expr::col((issues::Entity, column))))
             .binary(BinOper::Like, Func::upper(Expr::val(pattern.clone())))
     };
-    issue_query()
-        .distinct()
-        .filter(issues::Column::ProjectId.eq(project_id))
-        .filter(issues::Column::DeletedAt.is_null())
-        .filter(
-            Condition::any()
-                .add(contains(issues::Column::Name))
-                .add(contains(issues::Column::DescriptionStripped)),
-        )
-        .column(issues::Column::CreatedAt)
-        .order_by_desc(issues::Column::CreatedAt)
-        .limit(limit)
+    joined(&[
+        issues::Column::Id,
+        issues::Column::SequenceId,
+        issues::Column::Name,
+        issues::Column::Priority,
+    ])
+    .filter(issues::Column::ProjectId.eq(project_id))
+    .filter(issues::Column::DeletedAt.is_null())
+    .filter(
+        Condition::any()
+            .add(contains(issues::Column::Name))
+            .add(contains(issues::Column::DescriptionStripped)),
+    )
+    .order_by_desc(issues::Column::CreatedAt)
+    .limit(limit)
 }
 
 #[cfg(test)]
@@ -168,7 +173,6 @@ mod tests {
             .strip_prefix("SELECT ")
             .and_then(|rest| rest.split(" FROM ").next())
             .expect("select list");
-        let select = select.strip_prefix("DISTINCT ").unwrap_or(select);
         select
             .split(", ")
             .map(|column| {
@@ -259,12 +263,11 @@ mod tests {
             .expect("found");
         assert_eq!(stateless.name, "Seed issue");
         assert_eq!((stateless.state_name, stateless.state_group), (None, None));
-        let row = sqlx::query(&bound_issue_sql())
+        let decoded: ToolIssueRow = sqlx::query_as(bound_issue_sql())
             .bind(world.issue_id)
             .fetch_one(&pool)
             .await
             .expect("transaction-path statement");
-        let decoded = ToolIssueRow::from_pg_row(&row).expect("decode");
         assert_eq!(decoded.name, "Seed issue");
     }
 
@@ -286,7 +289,8 @@ mod tests {
         let sql = search_query(Uuid::nil(), r"50\%", 5)
             .build(DbBackend::Postgres)
             .to_string();
-        assert!(sql.starts_with("SELECT DISTINCT "), "{sql}");
+        assert!(!sql.contains("DISTINCT"), "{sql}");
+        assert!(!sql.contains("workpad"), "{sql}");
         assert!(
             sql.contains(r#"UPPER("issues"."name") LIKE UPPER('%50\%%')"#)
                 || sql.contains(r#"UPPER("issues"."name") LIKE UPPER(E'%50\\%%')"#),

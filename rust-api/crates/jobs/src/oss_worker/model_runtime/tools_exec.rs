@@ -737,68 +737,24 @@ async fn emit_completed(
 // under its own alias.
 
 /// One bound-issue row: the `_issue_data` inputs.
-pub struct BoundIssue {
-    /// `str(issue.id)`.
-    pub id: Uuid,
-    /// `issue.workspace_id` (the relations default source reads it
-    /// off the issue, not the run).
-    pub workspace_id: Uuid,
-    /// `issue.project_id`.
-    pub project_id: Uuid,
-    /// `issue.sequence_id`.
-    pub sequence_id: i32,
-    /// `issue.name`.
-    pub name: String,
-    /// `issue.priority`.
-    pub priority: String,
-    /// `issue.description_stripped` (may be NULL).
-    pub description_stripped: Option<String>,
-    /// `issue.workpad` (may be NULL).
-    pub workpad: Option<String>,
-    /// `issue.state.name` (None when stateless).
-    pub state_name: Option<String>,
-    /// `issue.state.group` (None when stateless).
-    pub state_group: Option<String>,
-    /// `issue.project.identifier`.
-    pub project_identifier: String,
-}
+pub type BoundIssue = ToolIssueRow;
 
-impl From<ToolIssueRow> for BoundIssue {
-    fn from(row: ToolIssueRow) -> Self {
-        Self {
-            id: row.id,
-            workspace_id: row.workspace_id,
-            project_id: row.project_id,
-            sequence_id: row.sequence_id,
-            name: row.name,
-            priority: row.priority,
-            description_stripped: row.description_stripped,
-            workpad: Some(row.workpad),
-            state_name: row.state_name,
-            state_group: row.state_group,
-            project_identifier: row.project_identifier,
-        }
-    }
-}
-
-impl BoundIssue {
-    /// `_issue_data(issue, detail=True)` (`tools.py:160-171`).
-    fn detail_value(&self) -> Value {
-        let detail = plan::issue_data(
-            &self.id.to_string(),
-            &self.project_identifier,
-            i64::from(self.sequence_id),
-            &self.name,
-            self.state_name.as_deref(),
-            self.state_group.as_deref(),
-            &self.priority,
-            Some((
-                self.description_stripped.as_deref().unwrap_or(""),
-                self.workpad.as_deref().unwrap_or(""),
-            )),
-        );
-        serde_json::to_value(detail).expect("issue detail serializes")
-    }
+/// `_issue_data(issue, detail=True)` (`tools.py:160-171`).
+fn issue_detail(issue: &ToolIssueRow) -> Value {
+    let detail = plan::issue_data(
+        &issue.id.to_string(),
+        &issue.project_identifier,
+        i64::from(issue.sequence_id),
+        &issue.name,
+        issue.state_name.as_deref(),
+        issue.state_group.as_deref(),
+        &issue.priority,
+        Some((
+            issue.description_stripped.as_deref().unwrap_or(""),
+            issue.workpad.as_str(),
+        )),
+    );
+    serde_json::to_value(detail).expect("issue detail serializes")
 }
 
 /// Read the bound issue, if the run has one. A missing row reads as
@@ -815,7 +771,7 @@ async fn bound_issue(
     let row = tool_issues::bound_issue(db, issue_id)
         .await
         .map_err(orm_error)?;
-    Ok(row.map(BoundIssue::from))
+    Ok(row)
 }
 
 // ---------------------------------------------------------------------------
@@ -828,7 +784,7 @@ async fn op_get_current_issue(ctx: &ToolCtx, scope: &ToolScope) -> Result<Value,
     let Some(issue) = issue else {
         return Err(ToolExecError::AttributeError { attribute: "id" });
     };
-    Ok(issue.detail_value())
+    Ok(issue_detail(&issue))
 }
 
 /// `pidash_list_current_issue_comments` (`tools.py:204-213`).
@@ -934,21 +890,7 @@ async fn op_get_project_issue(
     let Some(row) = row else {
         return Err(ToolExecError::Missing { model: "Issue" });
     };
-    let detail = plan::issue_data(
-        &row.id.to_string(),
-        &row.project_identifier,
-        i64::from(row.sequence_id),
-        &row.name,
-        row.state_name.as_deref(),
-        row.state_group.as_deref(),
-        &row.priority,
-        Some((
-            row.description_stripped.as_deref().unwrap_or(""),
-            row.workpad.as_str(),
-        )),
-    );
-    serde_json::to_value(detail)
-        .map_err(|error| ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string())))
+    Ok(issue_detail(&row))
 }
 
 /// `pidash_list_linked_code_reviews` (`tools.py:253-272`): a run with
@@ -1070,13 +1012,11 @@ async fn bound_issue_tx(
         return Ok(None);
     };
     // raw-sql: runs on the tool's sqlx audit transaction, which a SeaORM call cannot join; SeaORM builds the statement (tool_issues::bound_issue_sql), so its output names are unique.
-    let row: Option<PgRow> = sqlx::query(&tool_issues::bound_issue_sql())
+    let row: Option<ToolIssueRow> = sqlx::query_as(tool_issues::bound_issue_sql())
         .bind(issue_id)
         .fetch_optional(&mut **tx.inner())
         .await?;
-    row.map(|row| ToolIssueRow::from_pg_row(&row).map(BoundIssue::from))
-        .transpose()
-        .map_err(ToolExecError::Db)
+    Ok(row)
 }
 
 /// Map a domain-write failure onto the tool errors: the model only
@@ -1095,6 +1035,12 @@ fn orm_error(error: sea_orm::DbErr) -> ToolExecError {
         sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(inner))
         | sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(inner))
         | sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(inner)) => ToolExecError::Db(inner),
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::Timeout) => {
+            ToolExecError::Db(sqlx::Error::PoolTimedOut)
+        }
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::ConnectionClosed) => {
+            ToolExecError::Db(sqlx::Error::PoolClosed)
+        }
         other => ToolExecError::Db(sqlx::Error::Protocol(other.to_string())),
     }
 }
