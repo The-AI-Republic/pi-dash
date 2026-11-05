@@ -102,7 +102,10 @@ struct TokenSuccess {
     /// built-in engine (design §4.3).
     #[serde(default)]
     engine_credential: Option<IssuedEngineCredential>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::engine::api::lenient_sign_in_state"
+    )]
     engine_sign_in_state: Option<EngineSignInState>,
     // The server also returns `workspace_slug` here (the workspace the
     // approve step auto-picked), but the CLI deliberately ignores it
@@ -119,7 +122,10 @@ struct MachineTokenResponse {
     /// token rather than with the device token.
     #[serde(default)]
     engine_credential: Option<IssuedEngineCredential>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::engine::api::lenient_sign_in_state"
+    )]
     engine_sign_in_state: Option<EngineSignInState>,
 }
 
@@ -402,11 +408,17 @@ pub(crate) async fn poll_engine_grant(
     interval: Duration,
     within: Duration,
 ) -> Result<crate::engine::api::EngineGrantResponse> {
+    use crate::engine::api::GrantPoll;
     let deadline = std::time::Instant::now() + within;
+    let mut interval = interval;
     loop {
         match api.redeem_engine_grant(device_code, machine_token).await {
-            Ok(Some(granted)) => return Ok(granted),
-            Ok(None) => {}
+            Ok(GrantPoll::Granted(granted)) => return Ok(granted),
+            Ok(GrantPoll::Pending) => {}
+            // RFC 8628 §3.5: add 5 seconds to the interval.
+            Ok(GrantPoll::SlowDown) => {
+                interval = (interval + Duration::from_secs(5)).min(Duration::from_secs(30));
+            }
             Err(e) => match e.reason_code() {
                 Some("expired_token") => {
                     anyhow::bail!(
@@ -544,8 +556,13 @@ async fn poll_for_token(
         let body_text = resp.text().await.unwrap_or_default();
 
         if status.is_success() {
-            return serde_json::from_str::<TokenSuccess>(&body_text)
-                .with_context(|| format!("parsing device-code token response: {body_text}"));
+            // Not quoting the body: it holds the access token.
+            return serde_json::from_str::<TokenSuccess>(&body_text).map_err(|e| {
+                anyhow::anyhow!(
+                    "parsing device-code token response: {}",
+                    crate::engine::api::unparsable(&e)
+                )
+            });
         }
 
         // Parse the RFC 8628 error code. Anything we don't recognise is
