@@ -2685,7 +2685,7 @@ async fn create_workspace(
     let member_view_props = default_view_props();
     let member_issue_props = default_issue_props();
     let member_result = pidash_services::domain::workspaces::members::add(
-        &pool,
+        &pidash_db::pool::sea_orm_connection(&pool),
         &pidash_services::domain::workspaces::members::NewMember {
             workspace_id,
             user_id: Some(actor.id),

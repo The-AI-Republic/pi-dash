@@ -2770,9 +2770,14 @@ async fn deactivate_member(
     actor_id: &Uuid,
     now: &DateTime<Utc>,
 ) -> Result<(), Denial> {
-    members::deactivate(pool, *target_id, *now, *actor_id)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    members::deactivate(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *target_id,
+        *now,
+        *actor_id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -2963,9 +2968,15 @@ async fn apply_patch(
         created_by: sets.created_by,
         deleted_at: sets.deleted_at,
     };
-    members::patch(pool, target_id, actor_id, &patch, now)
-        .await
-        .map_err(map_write_error)?;
+    members::patch(
+        &pidash_db::pool::sea_orm_connection(pool),
+        target_id,
+        actor_id,
+        &patch,
+        now,
+    )
+    .await
+    .map_err(map_write_error)?;
     Ok(())
 }
 
@@ -3315,7 +3326,14 @@ async fn member_views(
         return Denial::BadPayload.into_response();
     }
     let now = Utc::now();
-    let saved = members::save_view_props(pool, requester.id, &props, now, actor.id).await;
+    let saved = members::save_view_props(
+        &pidash_db::pool::sea_orm_connection(pool),
+        requester.id,
+        &props,
+        now,
+        actor.id,
+    )
+    .await;
     if let Err(error) = saved {
         return map_write_error(error).into_response();
     }

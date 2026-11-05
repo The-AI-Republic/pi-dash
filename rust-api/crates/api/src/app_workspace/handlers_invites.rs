@@ -3218,7 +3218,7 @@ async fn join_post(
         let (updated_by_id, created_by_id) =
             audit_columns_on_update(responder_id, member_created_by);
         if let Err(error) = members::update_role(
-            pool,
+            &pidash_db::pool::sea_orm_connection(pool),
             &members::RoleUpdate {
                 id: member_id,
                 role: invite.role,
@@ -3235,7 +3235,7 @@ async fn join_post(
             return Denial::ServerError.into_response();
         }
     } else if let Err(error) = members::add(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &members::NewMember {
             workspace_id: invite.workspace_id,
             user_id: Some(user_id),
@@ -3601,8 +3601,13 @@ async fn my_invites_create(
             continue;
         };
         bust_members_key(&state, &workspace_row.slug).await;
-        if let Err(error) =
-            members::activate_by_membership(pool, invite.workspace_id, user_id, invite.role).await
+        if let Err(error) = members::activate_by_membership(
+            &pidash_db::pool::sea_orm_connection(pool),
+            invite.workspace_id,
+            user_id,
+            invite.role,
+        )
+        .await
         {
             if is_integrity_error(&error) {
                 return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
@@ -3652,7 +3657,15 @@ async fn my_invites_create(
                 created_by: Some(user_id),
             })
             .collect();
-        if let Err(error) = members::bulk_add(pool, &rows, &view_props, &issue_props, now).await {
+        if let Err(error) = members::bulk_add(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &rows,
+            &view_props,
+            &issue_props,
+            now,
+        )
+        .await
+        {
             if is_integrity_error(&error) {
                 return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
             }
@@ -4140,7 +4153,7 @@ async fn join_request_approve(
             // The reactivate `.save()` stamps `updated_by` with the
             // approver (`db/models/base.py:42`).
             members::update_role(
-                &mut *tx,
+                &pidash_db::orm_tx::TxConn::new(&mut *tx),
                 &members::RoleUpdate {
                     id: member_id,
                     role: request_role,
@@ -4155,7 +4168,7 @@ async fn join_request_approve(
             // (`db/models/base.py:37-39`), so the column stays unset —
             // while the JSON props ride the model defaults (`:207-213`).
             members::add(
-                &mut *tx,
+                &pidash_db::orm_tx::TxConn::new(&mut *tx),
                 &members::NewMember {
                     workspace_id,
                     user_id: Some(requester_id),

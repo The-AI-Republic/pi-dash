@@ -3585,7 +3585,7 @@ pub async fn create_workspace(
     let issue_props =
         member_default_json(models_workspace::workspace_member::DEFAULT_ISSUE_PROPS_JSON)?;
     if let Err(error) = members::add(
-        &pool,
+        &pidash_db::pool::sea_orm_connection(&pool),
         &members::NewMember {
             workspace_id,
             user_id: Some(user_id),
@@ -3890,7 +3890,15 @@ async fn apply_workspace_update(
         background_color: &data.background_color,
         logo_asset_id: data.logo_asset_id,
     };
-    workspaces::patch(pool, data.id, &cols, &patch, user_id, now).await
+    workspaces::patch(
+        &pidash_db::pool::sea_orm_connection(pool),
+        data.id,
+        &cols,
+        &patch,
+        user_id,
+        now,
+    )
+    .await
 }
 
 /// DELETE `workspaces/<slug>/` (`:183-201`): profile-pointer cleanup,
@@ -3938,9 +3946,15 @@ pub async fn destroy_workspace(
     // `super().destroy()` (`mixins.py:72-78` + `workspace.py:107-118`):
     // soft delete, slug tombstone, `updated_by` re-stamp, fan-out.
     let tombstone = models_workspace::workspace::soft_deleted_slug(&data.slug, now);
-    workspaces::soft_delete(&pool, data.id, now, user_id, &tombstone)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    workspaces::soft_delete(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        data.id,
+        now,
+        user_id,
+        &tombstone,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     enqueue_soft_delete_related(&pool, "db", "workspace", &data.id).await;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }

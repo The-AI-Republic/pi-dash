@@ -2918,7 +2918,7 @@ async fn join_post(
             let issue_props: Value = serde_json::from_str(&default_issue_props_json())
                 .map_err(|_| Denial::ServerError)?;
             members::add(
-                &pool,
+                &pidash_db::pool::sea_orm_connection(&pool),
                 &members::NewMember {
                     workspace_id: invite.workspace_id,
                     user_id,
@@ -2937,7 +2937,7 @@ async fn join_post(
             .map_err(integrity_denial)?;
         }
         Some((id,)) => {
-            members::activate_by_id(&pool, id, created_by)
+            members::activate_by_id(&pidash_db::pool::sea_orm_connection(&pool), id, created_by)
                 .await
                 .map_err(|_| Denial::ServerError)?;
         }

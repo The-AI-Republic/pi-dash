@@ -1699,9 +1699,15 @@ pub async fn insert_workspace_members(
             },
         )
         .collect();
-    members::bulk_add(pool, &bulk_rows, &props, &issues, now)
-        .await
-        .map_err(|_| CallbackError::Internal)?;
+    members::bulk_add(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &bulk_rows,
+        &props,
+        &issues,
+        now,
+    )
+    .await
+    .map_err(|_| CallbackError::Internal)?;
     Ok(())
 }
 

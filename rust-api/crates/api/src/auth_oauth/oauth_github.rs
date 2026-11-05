@@ -1417,7 +1417,7 @@ async fn process_invitations(
         let view_props = workspace_default_props();
         let issue_props = serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true});
         members::add(
-            pool,
+            &pidash_db::pool::sea_orm_connection(pool),
             &members::NewMember {
                 workspace_id: *workspace_id,
                 user_id: Some(user_id),
@@ -1472,7 +1472,7 @@ async fn process_invitations(
         let view_props = workspace_default_props();
         let issue_props = serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true});
         members::add(
-            pool,
+            &pidash_db::pool::sea_orm_connection(pool),
             &members::NewMember {
                 workspace_id: *workspace_id,
                 user_id: Some(user_id),
