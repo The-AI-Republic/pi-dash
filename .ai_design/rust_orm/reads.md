@@ -196,7 +196,7 @@ joins (the bug class behind the incident), then volume. Counts are as of
 
 | Batch | Scope | Why first |
 | --- | --- | --- |
-| 0 | The 19 `[dup]` statements: `app_intake`, `app_issues/handlers_engage`, `auth_oauth`, `prompting`, `v1_assets`, `v1_cli_auth`, `jobs/assistant`, `oss_worker`, `jobs/tasks_mail`, `app_views_search`, `dispatch/tools`, `orchestration/creation`, `read/work_items` | Each may be a live bug like #2850. Triage: alias, or migrate. |
+| 0 | The 20 `[dup]` statements: `app_intake`, `app_issues/handlers_engage`, `auth_oauth`, `prompting`, `v1_assets`, `v1_cli_auth`, `jobs/assistant`, `oss_worker`, `jobs/tasks_mail`, `app_scheduler/queries` (12 clashing columns), `app_views_search`, `dispatch/tools`, `orchestration/creation`, `read/work_items` | Each may be a live bug like #2850. Triage: alias, or migrate. |
 | 1 | `api/runner_enroll` (246 sites, 123 positional) | Most positional reads |
 | 2 | `api/app_issues` (250, 112 joins) | The issue detail surface |
 | 3 | `db/src` shared queries (286, 125 joins) | Used by many modules |

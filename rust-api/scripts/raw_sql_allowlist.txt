@@ -275,6 +275,7 @@ crates/api/src/v1_cli_auth/runner.rs | e6dc5d83f1e3
 crates/jobs/src/assistant/sweep.rs | c3d8cccf610b
 crates/jobs/src/oss_worker/model_runtime/tools_exec.rs | 48d8df317dab
 crates/jobs/src/tasks_mail/notifications.rs | c6d50deb8e37
+crates/services/src/app_scheduler/queries.rs | b962acd7acf6
 crates/services/src/app_views_search/queries_search.rs | c53567bfb131
 crates/services/src/dispatch/tools.rs | 8d3374cbb249
 crates/services/src/dispatch/tools.rs | a0222fd82904
