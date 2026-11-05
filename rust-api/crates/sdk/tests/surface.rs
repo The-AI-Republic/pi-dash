@@ -484,6 +484,7 @@ surface_snapshot! {
     operations::relations,
     operations::requested_data_text,
     operations::requested_data_value,
+    operations::schedulers,
     operations::workpad,
     ops::AgentRunStatus,
     ops::AgentRunTrigger,

@@ -61,6 +61,7 @@
 
 pub mod handlers;
 pub mod perms;
+pub mod service;
 pub mod writes;
 
 use axum::body::Bytes;
@@ -145,7 +146,7 @@ pub enum Denial {
 }
 
 impl Denial {
-    fn status_and_body(&self) -> (StatusCode, String) {
+    pub(crate) fn status_and_body(&self) -> (StatusCode, String) {
         match self {
             Denial::Unauthorized => (StatusCode::UNAUTHORIZED, UNAUTHENTICATED_BODY.to_owned()),
             Denial::InvalidToken => (StatusCode::FORBIDDEN, INVALID_TOKEN_BODY.to_owned()),

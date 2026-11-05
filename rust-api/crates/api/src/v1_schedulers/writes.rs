@@ -256,7 +256,7 @@ pub struct RoleFacts {
     pub project_admin: bool,
 }
 
-async fn role_facts(
+pub(crate) async fn role_facts(
     pool: &PgPool,
     workspace_id: Option<&Uuid>,
     user_id: &Uuid,
@@ -314,17 +314,17 @@ pub fn workspace_admin_decorator_allows(facts: &RoleFacts) -> bool {
 }
 
 /// The authenticated, authorized context of one write.
-struct WriteContext {
-    pool: PgPool,
-    user_id: Uuid,
-    timezone: Tz,
-    project_id: Option<Uuid>,
-    workspace_id: Option<Uuid>,
+pub(crate) struct WriteContext {
+    pub(crate) pool: PgPool,
+    pub(crate) user_id: Uuid,
+    pub(crate) timezone: Tz,
+    pub(crate) project_id: Option<Uuid>,
+    pub(crate) workspace_id: Option<Uuid>,
 }
 
 /// Which pair of gates a route carries.
 #[derive(Clone, Copy)]
-enum Scope {
+pub(crate) enum Scope {
     Project,
     Workspace,
 }
@@ -639,15 +639,19 @@ async fn binding_patch(
         Ok(data) => data,
         Err(response) => return response,
     };
-    respond(binding_patch_inner(&context, &headers, &slug, &scheduler_id, &data).await)
+    let token = if_match_header(&headers);
+    respond(binding_patch_inner(&context, &slug, &scheduler_id, &data, token).await)
 }
 
-async fn binding_patch_inner(
+/// The binding-edit body past auth, the gates, the flag and body parsing.
+/// Shared by the v1 handler above and the [`super::service`] entry (same
+/// statements, so the two surfaces cannot drift).
+pub(crate) async fn binding_patch_inner(
     context: &WriteContext,
-    headers: &HeaderMap,
     slug: &str,
     scheduler_id: &Uuid,
     data: &Value,
+    if_match: Option<String>,
 ) -> Result<Response, Denial> {
     let Value::Object(body) = data else {
         return Err(Denial::BadError(NOT_AN_OBJECT_MESSAGE.to_owned()));
@@ -666,7 +670,7 @@ async fn binding_patch_inner(
         .await
         .map_err(|error| db_error(error, "v1-binding-begin"))?;
     let (binding, _) = lock_binding(&mut tx, scheduler_id, &project_id, slug).await?;
-    let token = if_match_header(headers).or_else(|| body_token(Some(body)));
+    let token = if_match.or_else(|| body_token(Some(body)));
     if let Some(denial) = precondition_denial(token, &binding.updated_at, "scheduler binding") {
         return Err(denial);
     }
@@ -731,26 +735,14 @@ async fn run_now(
             Ok(context) => context,
             Err(denial) => return denial.into_response(),
         };
-    let Some(project_id) = context.project_id else {
-        return Denial::ServerError.into_response();
-    };
-    let mut tx = match context.pool.begin().await {
-        Ok(tx) => tx,
-        Err(error) => return db_error(error, "v1-run-now-begin").into_response(),
-    };
-    let (binding, scheduler_enabled) =
-        match lock_binding(&mut tx, &scheduler_id, &project_id, &slug).await {
-            Ok(locked) => locked,
-            Err(denial) => return denial.into_response(),
-        };
     // `request.data` is read only when no `If-Match` header was sent. A
-    // media type Django must parse is proxied — after releasing the lock,
-    // which Django's own run of this view takes again.
+    // media type Django must parse is proxied. This juggling needs the
+    // request, so it stays handler-side while the lock moves into the
+    // core with the write it guards; responses are identical either way.
     let token = match if_match_header(&headers) {
         Some(token) => Some(token),
         None => {
             if !json_or_empty(&headers) {
-                drop(tx);
                 return crate::edge::proxy(State(state), req).await;
             }
             match app_bind::read_request_data(&state, req).await {
@@ -759,10 +751,31 @@ async fn run_now(
             }
         }
     };
-    if let Some(denial) = precondition_denial(token, &binding.updated_at, "scheduler binding") {
-        return denial.into_response();
+    respond(run_now_core(&context, &slug, &scheduler_id, token).await)
+}
+
+/// The run-now body past auth, the gates, the flag and token parsing:
+/// lock, precondition, conflict probe, write. Shared by the v1 handler
+/// above and the [`super::service`] entry (same statements, so the two
+/// surfaces cannot drift).
+pub(crate) async fn run_now_core(
+    context: &WriteContext,
+    slug: &str,
+    scheduler_id: &Uuid,
+    if_match: Option<String>,
+) -> Result<Response, Denial> {
+    let project_id = context.project_id.ok_or(Denial::ServerError)?;
+    let mut tx = context
+        .pool
+        .begin()
+        .await
+        .map_err(|error| db_error(error, "v1-run-now-begin"))?;
+    let (binding, scheduler_enabled) =
+        lock_binding(&mut tx, scheduler_id, &project_id, slug).await?;
+    if let Some(denial) = precondition_denial(if_match, &binding.updated_at, "scheduler binding") {
+        return Err(denial);
     }
-    respond(run_now_write(&context, tx, &binding, scheduler_enabled).await)
+    run_now_write(context, tx, &binding, scheduler_enabled).await
 }
 
 /// `run_now_conflict` (`scheduler/binding_writes.py`): why a tick could not
@@ -876,7 +889,8 @@ async fn definition_patch(
         Ok(data) => data,
         Err(response) => return response,
     };
-    respond(definition_patch_inner(&context, &headers, &slug, &scheduler_id, &data).await)
+    let token = if_match_header(&headers);
+    respond(definition_patch_inner(&context, &slug, &scheduler_id, &data, token).await)
 }
 
 /// `is_builtin_slug` / `is_builtin` (`scheduler/definition_writes.py`):
@@ -889,12 +903,15 @@ pub fn is_builtin_slug(slug: &str) -> bool {
         .any(|builtin| builtin.slug == slug)
 }
 
-async fn definition_patch_inner(
+/// The definition-edit body past auth, the gates, the flag and body
+/// parsing. Shared by the v1 handler above and the [`super::service`]
+/// entry (same statements, so the two surfaces cannot drift).
+pub(crate) async fn definition_patch_inner(
     context: &WriteContext,
-    headers: &HeaderMap,
     slug: &str,
     scheduler_id: &Uuid,
     data: &Value,
+    if_match: Option<String>,
 ) -> Result<Response, Denial> {
     let Value::Object(body) = data else {
         return Err(Denial::BadError(NOT_AN_OBJECT_MESSAGE.to_owned()));
@@ -922,7 +939,7 @@ async fn definition_patch_inner(
     if is_builtin_slug(&record.slug) {
         return Err(conflict("builtin_scheduler", BUILTIN_MESSAGE));
     }
-    let token = if_match_header(headers).or_else(|| body_token(Some(body)));
+    let token = if_match.or_else(|| body_token(Some(body)));
     if let Some(denial) = precondition_denial(token, &record.updated_at, "scheduler") {
         return Err(denial);
     }
@@ -1115,7 +1132,13 @@ pub async fn definition_create(
     respond(definition_create_inner(&context, &data).await)
 }
 
-async fn definition_create_inner(context: &WriteContext, data: &Value) -> Result<Response, Denial> {
+/// The definition-create body past auth, the gates, the flag and body
+/// parsing. Shared by the v1 handler above and the [`super::service`]
+/// entry (same statements, so the two surfaces cannot drift).
+pub(crate) async fn definition_create_inner(
+    context: &WriteContext,
+    data: &Value,
+) -> Result<Response, Denial> {
     let Value::Object(body) = data else {
         return Err(Denial::BadError(NOT_AN_OBJECT_MESSAGE.to_owned()));
     };
@@ -1170,47 +1193,56 @@ async fn definition_delete(
         Ok(context) => context,
         Err(denial) => return denial.into_response(),
     };
-    let mut tx = match context.pool.begin().await {
-        Ok(tx) => tx,
-        Err(error) => return db_error(error, "v1-definition-delete-begin").into_response(),
-    };
-    let record: app_sched::SchedulerRow = match sqlx::query_as(LOCKED_SCHEDULER_SQL)
-        .bind(scheduler_id)
-        .bind(&slug)
-        .fetch_optional(&mut *tx)
-        .await
-    {
-        Ok(Some(record)) => record,
-        Ok(None) => return Denial::SchedulerNotFound.into_response(),
-        Err(error) => return db_error(error, "v1-definition-delete-lock").into_response(),
-    };
-    if is_builtin_slug(&record.slug) {
-        return conflict("builtin_scheduler", BUILTIN_MESSAGE).into_response();
-    }
+    // The token is parsed before the lock now (it needs the request);
+    // responses are identical either way.
     let token = match delete_token(&state, &headers, req).await {
         Ok(token) => token,
         Err(other) => {
-            drop(tx);
             return match *other {
                 Ok(req) => crate::edge::proxy(State(state), req).await,
                 Err(response) => response,
             };
         }
     };
-    if let Some(denial) = precondition_denial(token, &record.updated_at, "scheduler") {
-        return denial.into_response();
+    respond(definition_delete_core(&context, &slug, &scheduler_id, token).await)
+}
+
+/// The definition-delete body past auth, the gates, the flag and token
+/// parsing. Shared by the v1 handler above and the [`super::service`]
+/// entry (same statements, so the two surfaces cannot drift).
+pub(crate) async fn definition_delete_core(
+    context: &WriteContext,
+    slug: &str,
+    scheduler_id: &Uuid,
+    if_match: Option<String>,
+) -> Result<Response, Denial> {
+    let mut tx = context
+        .pool
+        .begin()
+        .await
+        .map_err(|error| db_error(error, "v1-definition-delete-begin"))?;
+    let record: app_sched::SchedulerRow = sqlx::query_as(LOCKED_SCHEDULER_SQL)
+        .bind(scheduler_id)
+        .bind(slug)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| db_error(error, "v1-definition-delete-lock"))?
+        .ok_or(Denial::SchedulerNotFound)?;
+    if is_builtin_slug(&record.slug) {
+        return Err(conflict("builtin_scheduler", BUILTIN_MESSAGE));
     }
-    if let Err(denial) =
-        app_sched::soft_delete_scheduler(&mut tx, &scheduler_id, &context.user_id).await
-    {
-        return from_sched(denial).into_response();
+    if let Some(denial) = precondition_denial(if_match, &record.updated_at, "scheduler") {
+        return Err(denial);
     }
-    if let Err(error) = tx.commit().await {
-        return db_error(error, "v1-definition-delete-commit").into_response();
-    }
+    app_sched::soft_delete_scheduler(&mut tx, scheduler_id, &context.user_id)
+        .await
+        .map_err(from_sched)?;
+    tx.commit()
+        .await
+        .map_err(|error| db_error(error, "v1-definition-delete-commit"))?;
     // Instance `delete()` → `.delay(...)` after the stamp, as the app does.
-    app_sched::enqueue_soft_delete(&context.pool, "scheduler", &scheduler_id).await;
-    no_content()
+    app_sched::enqueue_soft_delete(&context.pool, "scheduler", scheduler_id).await;
+    Ok(no_content())
 }
 
 /// `ProjectSchedulerListAPIEndpoint.post`.
@@ -1253,7 +1285,10 @@ async fn scheduler_by_ref(
         .map_err(|error| db_error(error, "v1-install-scheduler"))
 }
 
-async fn binding_install_inner(
+/// The install body past auth, the gates, the flag and body parsing.
+/// Shared by the v1 handler above and the [`super::service`] entry (same
+/// statements, so the two surfaces cannot drift).
+pub(crate) async fn binding_install_inner(
     context: &WriteContext,
     slug: &str,
     data: &Value,
@@ -1360,44 +1395,51 @@ async fn binding_uninstall(
             Ok(context) => context,
             Err(denial) => return denial.into_response(),
         };
-    let Some(project_id) = context.project_id else {
-        return Denial::ServerError.into_response();
-    };
-    let mut tx = match context.pool.begin().await {
-        Ok(tx) => tx,
-        Err(error) => return db_error(error, "v1-uninstall-begin").into_response(),
-    };
-    let (binding, _) = match lock_binding(&mut tx, &scheduler_id, &project_id, &slug).await {
-        Ok(locked) => locked,
-        Err(denial) => return denial.into_response(),
-    };
+    // The token is parsed before the lock now (it needs the request);
+    // responses are identical either way.
     let token = match delete_token(&state, &headers, req).await {
         Ok(token) => token,
         Err(other) => {
-            drop(tx);
             return match *other {
                 Ok(req) => crate::edge::proxy(State(state), req).await,
                 Err(response) => response,
             };
         }
     };
-    if let Some(denial) = precondition_denial(token, &binding.updated_at, "scheduler binding") {
-        return denial.into_response();
+    respond(binding_uninstall_core(&context, &slug, &scheduler_id, token).await)
+}
+
+/// The uninstall body past auth, the gates, the flag and token parsing.
+/// Shared by the v1 handler above and the [`super::service`] entry (same
+/// statements, so the two surfaces cannot drift).
+pub(crate) async fn binding_uninstall_core(
+    context: &WriteContext,
+    slug: &str,
+    scheduler_id: &Uuid,
+    if_match: Option<String>,
+) -> Result<Response, Denial> {
+    let project_id = context.project_id.ok_or(Denial::ServerError)?;
+    let mut tx = context
+        .pool
+        .begin()
+        .await
+        .map_err(|error| db_error(error, "v1-uninstall-begin"))?;
+    let (binding, _) = lock_binding(&mut tx, scheduler_id, &project_id, slug).await?;
+    if let Some(denial) = precondition_denial(if_match, &binding.updated_at, "scheduler binding") {
+        return Err(denial);
     }
     // `binding.delete()`: two `now()` samples (deleted_at, then save's
     // updated_at), then the related-objects sweep after commit.
     let now = Utc::now();
     let now2 = Utc::now();
-    if let Err(denial) =
-        app_bind::uninstall_binding(&mut *tx, &binding.id, &context.user_id, &now, &now2).await
-    {
-        return from_app(denial).into_response();
-    }
-    if let Err(error) = tx.commit().await {
-        return db_error(error, "v1-uninstall-commit").into_response();
-    }
+    app_bind::uninstall_binding(&mut *tx, &binding.id, &context.user_id, &now, &now2)
+        .await
+        .map_err(from_app)?;
+    tx.commit()
+        .await
+        .map_err(|error| db_error(error, "v1-uninstall-commit"))?;
     app_bind::enqueue_soft_delete(&context.pool, &binding.id).await;
-    no_content()
+    Ok(no_content())
 }
 
 #[cfg(test)]

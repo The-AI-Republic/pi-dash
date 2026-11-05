@@ -426,6 +426,7 @@ pidash_sdk::operations::pull_requests
 pidash_sdk::operations::relations
 pidash_sdk::operations::requested_data_text
 pidash_sdk::operations::requested_data_value
+pidash_sdk::operations::schedulers
 pidash_sdk::operations::workpad
 pidash_sdk::ops::AgentRunStatus
 pidash_sdk::ops::AgentRunTrigger
