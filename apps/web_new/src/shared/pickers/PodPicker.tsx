@@ -48,6 +48,12 @@ export interface PodPickerProps {
   trigger?: React.ReactElement<Record<string, unknown>>;
   /** Default trigger text when nothing is selected. */
   placeholder?: string;
+  /**
+   * Project default executor: while nothing is picked, an agent
+   * default names itself on the trigger instead of the prompt
+   * (NEWPIDASH-45); the value stays null and submits send nothing.
+   */
+  projectDefaultExecutor?: string | null;
   /** Read targets up front so a set selection names itself before the popup opens. */
   preload?: boolean;
   open?: boolean | undefined;
@@ -122,8 +128,16 @@ function toComboboxOption(target: ExecutionTarget): ComboboxOption {
   };
 }
 
-function selectionGlyph(selection: ExecutionSelection | null, targets: ExecutionTarget[]): React.ReactNode {
-  if (selection === null) return null;
+function selectionGlyph(
+  selection: ExecutionSelection | null,
+  targets: ExecutionTarget[],
+  projectDefaultExecutor: string | null = null
+): React.ReactNode {
+  if (selection === null) {
+    return projectDefaultExecutor !== null && isAgentRowKind(projectDefaultExecutor) ? (
+      <AgentGlyph executor={projectDefaultExecutor} />
+    ) : null;
+  }
   if (selection.type === "agent") {
     return isAgentRowKind(selection.executor) ? <AgentGlyph executor={selection.executor} /> : null;
   }
@@ -147,6 +161,7 @@ export function PodPicker({
   label = "Runs on",
   trigger,
   placeholder = "Select target",
+  projectDefaultExecutor = null,
   preload = false,
   open: controlledOpen,
   onOpenChange,
@@ -196,8 +211,8 @@ export function PodPicker({
     value !== null && value.type === "runner" ? selectRunnerWaitNote(runners.data, value.runnerId) : null;
 
   function defaultTrigger(): React.ReactElement<Record<string, unknown>> {
-    const text = selectTriggerText(value, targets, listsLoaded, placeholder);
-    const glyph = selectionGlyph(value, targets);
+    const text = selectTriggerText(value, targets, listsLoaded, placeholder, projectDefaultExecutor);
+    const glyph = selectionGlyph(value, targets, projectDefaultExecutor);
     if (chip) {
       const filled = text !== placeholder;
       const podName = selectTriggerPodName(value, targets);

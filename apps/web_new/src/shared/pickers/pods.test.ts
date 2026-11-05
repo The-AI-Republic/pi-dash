@@ -414,6 +414,20 @@ describe("selectTriggerText", () => {
       "Unknown runner"
     );
   });
+
+  it("names the project-default agent while nothing is picked (NEWPIDASH-45)", () => {
+    expect(selectTriggerText(null, targets, true, "Runs on", "cloud_agent")).toBe("Pi Dash Cloud Agent");
+    expect(selectTriggerText(null, targets, true, "Runs on", "managed_runner")).toBe("Pi Dash Agent (desktop)");
+    // The agent label needs no lists, like an explicit agent pick.
+    expect(selectTriggerText(null, targets, false, "Runs on", "cloud_agent")).toBe("Pi Dash Cloud Agent");
+    // A local default, or none, keeps the prompt; an explicit pick always wins.
+    expect(selectTriggerText(null, targets, true, "Runs on", "local_runner")).toBe("Runs on");
+    expect(selectTriggerText(null, targets, true, "Runs on", null)).toBe("Runs on");
+    expect(selectTriggerText(null, targets, true, "Runs on", "tomorrow_executor")).toBe("Runs on");
+    expect(selectTriggerText({ type: "pod", podId: POD_A.id }, targets, true, "Runs on", "cloud_agent")).toBe(
+      "ACME-Backend"
+    );
+  });
 });
 
 describe("selectTriggerPodName", () => {

@@ -273,15 +273,22 @@ export function executionSelectionId(selection: ExecutionSelection | null): stri
  * Trigger text for a selection: the pod, runner or agent name. A set
  * pod or runner renders the prompt until the lists load; once loaded,
  * a missing row reads as unknown (every single picker shares the
- * prompt fallback).
+ * prompt fallback). While nothing is picked, a project whose default
+ * executor is an agent names that agent (NEWPIDASH-45, the old form's
+ * sentinel); the pick stays null and the submit still sends nothing.
  */
 export function selectTriggerText(
   selection: ExecutionSelection | null,
   targets: ExecutionTarget[],
   listsLoaded: boolean,
-  placeholder: string
+  placeholder: string,
+  projectDefaultExecutor: string | null = null
 ): string {
-  if (selection === null) return placeholder;
+  if (selection === null) {
+    return projectDefaultExecutor !== null && isAgentRowKind(projectDefaultExecutor)
+      ? AGENT_ROW_LABELS[projectDefaultExecutor]
+      : placeholder;
+  }
   if (selection.type === "agent") {
     return isAgentRowKind(selection.executor) ? AGENT_ROW_LABELS[selection.executor] : placeholder;
   }

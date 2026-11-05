@@ -1396,6 +1396,10 @@ export function WorkItemCreateDialog({
               chip
               label="Runs on"
               placeholder="Runs on"
+              // An agent-default create names its agent before any pick
+              // (NEWPIDASH-45); the read is create-only, so edits are
+              // unaffected. The value stays null and sends nothing.
+              projectDefaultExecutor={targetProject.data?.default_agent_executor ?? null}
               // A create names its preselected default pod right away.
               preload={!editing}
               saveError={executionError}
