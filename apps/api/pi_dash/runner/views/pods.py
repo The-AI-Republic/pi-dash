@@ -36,6 +36,11 @@ from pi_dash.runner.services.permissions import (
 )
 from pi_dash.runner.services.pod_naming import validate_user_pod_name
 
+#: ``Pod.pin_wait_budget_secs`` is a ``PositiveIntegerField``, i.e. a Postgres
+#: ``integer``. A larger value parses fine and then blows up as a ``DataError``
+#: on save, which surfaces as a 500 for what is plainly a bad request.
+MAX_PIN_WAIT_BUDGET_SECS = 2147483647
+
 
 def _can_manage_pod(user, pod: Pod) -> bool:
     """True if ``user`` may rename / toggle / delete this pod."""
@@ -184,6 +189,47 @@ class PodDetailEndpoint(APIView):
         if "description" in request.data:
             pod.description = request.data.get("description") or ""
             updates.append("description")
+        if "pin_wait_budget_secs" in request.data:
+            raw = request.data.get("pin_wait_budget_secs")
+            if raw is None or raw == "":
+                # Explicit null clears the override: inherit the instance
+                # default ``RUNNER_PIN_WAIT_BUDGET_SECS``.
+                pod.pin_wait_budget_secs = None
+            else:
+                # ``bool`` is an ``int`` in Python, so a bare ``int(raw)``
+                # would read ``true`` as a one-second budget; and a float
+                # would silently truncate (``12.9`` -> 12) while the string
+                # ``"12.9"`` is a 400, which is an incoherent contract.
+                # Accept only an int, or a string spelling one.
+                if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+                    return Response(
+                        {"error": "pin_wait_budget_secs must be an integer number of seconds"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                try:
+                    budget = int(str(raw).strip())
+                except ValueError:
+                    return Response(
+                        {"error": "pin_wait_budget_secs must be an integer number of seconds"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if budget < 0:
+                    return Response(
+                        {"error": "pin_wait_budget_secs cannot be negative"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if budget > MAX_PIN_WAIT_BUDGET_SECS:
+                    return Response(
+                        {
+                            "error": (
+                                "pin_wait_budget_secs must be at most "
+                                f"{MAX_PIN_WAIT_BUDGET_SECS} seconds"
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                pod.pin_wait_budget_secs = budget
+            updates.append("pin_wait_budget_secs")
         if "is_default" in request.data:
             wants_default = bool(request.data.get("is_default"))
             if wants_default and not pod.is_default:

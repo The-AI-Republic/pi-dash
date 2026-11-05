@@ -22,6 +22,7 @@ from .issue import (
     IssueReTickAPIEndpoint,
     IssueRunAiAPIEndpoint,
     IssueWaitAPIEndpoint,
+    AgentRunReleasePinAPIEndpoint,
     AgentRunYieldAPIEndpoint,
     LabelListCreateAPIEndpoint,
     LabelDetailAPIEndpoint,

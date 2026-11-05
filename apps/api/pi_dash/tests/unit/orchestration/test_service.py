@@ -922,3 +922,80 @@ def test_review_to_in_progress_with_no_resume_target_uses_fresh_session(
     assert outcome.created_run.parent_run_id is None
     assert outcome.created_run.parent_run_id != review_run.id
     assert outcome.created_run.pinned_runner_id is None
+
+
+# ---------------------------------------------------------------------------
+# A retry is not pinned back to the runner that just failed it for an infra
+# or startup reason. PIDASHCONV-491: a run died on ``macmini-muse-s11``
+# without the agent ever starting, the retry was pinned straight back to that
+# machine, and then sat behind a 7-hour run for 6 h 44 m. See PDASHOSS01-272.
+# ---------------------------------------------------------------------------
+
+
+def _make_failed_run(issue, runner, *, started=True, error_code=""):
+    return AgentRun.objects.create(
+        workspace=issue.workspace,
+        owner=runner.owner,
+        pod=runner.pod,
+        work_item=issue,
+        runner=runner,
+        status=AgentRunStatus.FAILED,
+        error_code=error_code,
+        prompt="prior work",
+        started_at=(timezone.now() - timezone.timedelta(minutes=5) if started else None),
+        ended_at=timezone.now(),
+    )
+
+
+@pytest.mark.unit
+def test_no_pin_when_the_parent_never_started_on_its_runner(
+    db, issue, runner_for_workspace
+):
+    """The PIDASHCONV-491 shape: assigned, agent never came up, run failed."""
+    parent = _make_failed_run(issue, runner_for_workspace, started=False)
+    assert service._pinned_runner_for(parent) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("code", ["heartbeat_reaped", "dispatch_timeout", "runner_revoked"])
+def test_no_pin_after_an_infra_failure_code(db, issue, runner_for_workspace, code):
+    """The runner went dark or never got the Assign — do not go back to it."""
+    parent = _make_failed_run(issue, runner_for_workspace, error_code=code)
+    assert service._pinned_runner_for(parent) is None
+
+
+@pytest.mark.unit
+def test_pin_survives_a_failure_the_agent_actually_reached(
+    db, issue, runner_for_workspace
+):
+    """The agent got its session and then failed: that is about the work, not
+    the machine, so repo locality still wins."""
+    parent = _make_failed_run(issue, runner_for_workspace, error_code="run_timeout")
+    assert service._pinned_runner_for(parent) == runner_for_workspace
+
+
+@pytest.mark.unit
+def test_pin_survives_a_completed_or_cancelled_parent(db, issue, runner_for_workspace):
+    """Only FAILED implicates the machine."""
+    for status in (AgentRunStatus.COMPLETED, AgentRunStatus.CANCELLED, AgentRunStatus.REFUSED):
+        parent = _make_failed_run(issue, runner_for_workspace, started=False)
+        AgentRun.objects.filter(pk=parent.pk).update(status=status)
+        parent.refresh_from_db()
+        assert service._pinned_runner_for(parent) == runner_for_workspace
+
+
+@pytest.mark.unit
+def test_retry_after_a_startup_failure_is_created_unpinned(
+    seeded, project, issue, states, runner_for_workspace, create_user
+):
+    """End to end through ``handle_issue_comment``: no pin on the retry."""
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    prior = _make_failed_run(issue, runner_for_workspace, started=False)
+
+    comment = _make_comment(issue, create_user, "retry please")
+    outcome = service.handle_issue_comment(comment)
+    assert outcome.reason == "created"
+    r_next = AgentRun.objects.filter(work_item=issue, parent_run=prior).order_by("-created_at").first()
+    assert r_next is not None
+    assert r_next.pinned_runner_id is None
