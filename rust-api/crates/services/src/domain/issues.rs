@@ -45,8 +45,16 @@
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, NaiveDate, Timelike, Utc};
-use pidash_db::entity::issues;
-use sea_orm::{ActiveModelTrait, ConnectionTrait, DbBackend, DbErr, Set, Statement};
+use pidash_db::entity::{
+    issue_assignees, issue_labels, issue_sequences, issues, project_members, projects, states,
+    user_recent_visits, workspaces,
+};
+use pidash_db::orm_tx::{into_sqlx, is_integrity_violation};
+use sea_orm::sea_query::{Alias, Expr, LockType, OnConflict, Query, SelectStatement};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QuerySelect,
+    QueryTrait, Set,
+};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -66,9 +74,7 @@ use crate::app_issues::issue_move::{
     issue_activity_kwargs as move_issue_activity_kwargs, move_model_activity_kwargs,
 };
 pub use crate::app_issues::issue_move::{MoveGuards, MoveOptions};
-use crate::app_issues::serializers_create::{
-    m2m_batches, m2m_insert_sql, DEFAULT_ASSIGNEE_EXISTS_SQL, LABEL_CLEAR_SQL,
-};
+use crate::app_issues::serializers_create::m2m_batches;
 use crate::orchestration::entries::{FireOutcome, FireRequest};
 
 /// `issue_description_version_task`
@@ -87,13 +93,6 @@ fn now_micros() -> DateTime<Utc> {
     let now = Utc::now();
     now.with_nanosecond(now.nanosecond() / 1000 * 1000)
         .unwrap_or(now)
-}
-
-fn is_integrity_violation(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::Database(db) => db.code().is_some_and(|code| code.starts_with("23")),
-        _ => false,
-    }
 }
 
 /// The acting user id for audit stamps: a nil actor (system paths with no
@@ -331,52 +330,109 @@ impl From<&issues::Model> for IssueFieldSet {
 // m2m legs
 // ---------------------------------------------------------------------------
 
+/// The two m2m bridge tables the issue legs write (`IssueAssignee` /
+/// `IssueLabel`): same columns, a different member column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum M2mTable {
+    Assignees,
+    Labels,
+}
+
+impl M2mTable {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Assignees => "issue_assignees",
+            Self::Labels => "issue_labels",
+        }
+    }
+}
+
+/// The audit and scope columns every row of one m2m write shares.
+#[derive(Debug, Clone, Copy)]
+struct M2mScope {
+    issue_id: Uuid,
+    project_id: Uuid,
+    workspace_id: Uuid,
+    created_by_id: Option<Uuid>,
+    updated_by_id: Option<Uuid>,
+}
+
+/// One multi-row m2m `INSERT` (one `bulk_create` chunk): per row a fresh
+/// uuid4 and two `now()` calls (`auto_now_add` + `auto_now`, like the
+/// per-object instantiation Django bulk-saves), `deleted_at` NULL, the
+/// shared audit/scope columns and the member id. `ignore_conflicts` (the
+/// update legs) adds Django's bare `ON CONFLICT DO NOTHING`.
+fn m2m_insert_statement(
+    table: M2mTable,
+    members: &[Uuid],
+    scope: M2mScope,
+    ignore_conflicts: bool,
+) -> sea_orm::sea_query::InsertStatement {
+    let mut stmt = match table {
+        M2mTable::Assignees => {
+            issue_assignees::Entity::insert_many(members.iter().map(|&member| {
+                let created = now_micros();
+                let updated = now_micros();
+                issue_assignees::ActiveModel {
+                    id: Set(Uuid::new_v4()),
+                    created_at: Set(created.into()),
+                    updated_at: Set(updated.into()),
+                    created_by_id: Set(scope.created_by_id),
+                    updated_by_id: Set(scope.updated_by_id),
+                    deleted_at: Set(None),
+                    project_id: Set(scope.project_id),
+                    workspace_id: Set(scope.workspace_id),
+                    issue_id: Set(scope.issue_id),
+                    assignee_id: Set(member),
+                }
+            }))
+            .into_query()
+        }
+        M2mTable::Labels => issue_labels::Entity::insert_many(members.iter().map(|&member| {
+            let created = now_micros();
+            let updated = now_micros();
+            issue_labels::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                created_at: Set(created.into()),
+                updated_at: Set(updated.into()),
+                created_by_id: Set(scope.created_by_id),
+                updated_by_id: Set(scope.updated_by_id),
+                deleted_at: Set(None),
+                project_id: Set(scope.project_id),
+                workspace_id: Set(scope.workspace_id),
+                issue_id: Set(scope.issue_id),
+                label_id: Set(member),
+            }
+        }))
+        .into_query(),
+    };
+    if ignore_conflicts {
+        stmt.on_conflict(OnConflict::new().do_nothing().to_owned());
+    }
+    stmt
+}
+
 /// One m2m `bulk_create(batch_size=10)` leg: a multi-row INSERT per
 /// 10-chunk in input order; an `IntegrityError` swallows the REST of the
 /// batches (`except: pass` wraps the whole call), any other error fails.
-/// Moved verbatim from the app handlers; generic over the executor so
-/// drivers run it on the pool and tests on a rolled-back transaction.
-#[allow(clippy::too_many_arguments)]
-async fn write_m2m_batches<'e, E>(
-    ex: E,
-    table: &str,
-    member_column: &str,
+/// Moved verbatim from the app handlers; runs on any SeaORM connection
+/// (drivers pass the pool, tests a rolled-back transaction).
+async fn write_m2m_batches(
+    db: &impl ConnectionTrait,
+    table: M2mTable,
     ids: &[Uuid],
-    issue_id: &Uuid,
-    project_id: &Uuid,
-    workspace_id: &Uuid,
-    created_by_id: Option<Uuid>,
-    updated_by_id: Option<Uuid>,
+    scope: M2mScope,
     ignore_conflicts: bool,
-) -> Result<(), DomainError>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres> + Copy,
-{
+) -> Result<(), DomainError> {
     for batch in m2m_batches(ids) {
-        let sql = m2m_insert_sql(table, member_column, batch.len(), ignore_conflicts);
-        let mut query = sqlx::query(&sql);
-        for member_id in batch {
-            // `auto_now_add` + `auto_now`: two `now()` calls per row, like
-            // the per-object instantiation Django bulk-saves.
-            let created = now_micros();
-            let updated = now_micros();
-            query = query
-                .bind(Uuid::new_v4())
-                .bind(created)
-                .bind(updated)
-                .bind(created_by_id)
-                .bind(updated_by_id)
-                .bind(project_id)
-                .bind(workspace_id)
-                .bind(issue_id)
-                .bind(member_id);
-        }
-        match query.execute(ex).await {
+        let stmt = m2m_insert_statement(table, batch, scope, ignore_conflicts);
+        match db.execute(db.get_database_backend().build(&stmt)).await {
             Ok(_) => {}
             Err(error) if is_integrity_violation(&error) => break,
             Err(error) => {
                 return Err(DomainError::Work(format!(
-                    "m2m {table} write failed: {error}"
+                    "m2m {} write failed: {error}",
+                    table.name()
                 )));
             }
         }
@@ -384,45 +440,45 @@ where
     Ok(())
 }
 
+/// `ProjectMember.objects.filter(member_id=default, project_id, role>=15,
+/// is_active).exists()` (`serializers/issue.py:423-430`), default
+/// soft-delete guard included: the default-assignee gate.
+fn default_assignee_member_select(default_assignee_id: Uuid, project_id: Uuid) -> SelectStatement {
+    project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Id)
+        .filter(project_members::Column::MemberId.eq(default_assignee_id))
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(project_members::Column::Role.gte(15))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_query()
+}
+
 /// The create default-assignee fallback (`serializers/issue.py:419-444`):
 /// empty/missing assignees + a valid project-default member → one
 /// `IssueAssignee` row, `IntegrityError` swallowed. Moved verbatim.
-async fn write_default_assignee<'e, E>(
-    ex: E,
-    default_assignee_id: &Uuid,
-    issue_id: &Uuid,
-    project_id: &Uuid,
-    workspace_id: &Uuid,
-    created_by_id: Option<Uuid>,
-) -> Result<(), DomainError>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres> + Copy,
-{
-    let member: Option<(i32,)> = sqlx::query_as(DEFAULT_ASSIGNEE_EXISTS_SQL)
-        .bind(default_assignee_id)
-        .bind(project_id)
-        .fetch_optional(ex)
+async fn write_default_assignee(
+    db: &impl ConnectionTrait,
+    default_assignee_id: Uuid,
+    scope: M2mScope,
+) -> Result<(), DomainError> {
+    let member = db
+        .query_one(
+            db.get_database_backend()
+                .build(&default_assignee_member_select(
+                    default_assignee_id,
+                    scope.project_id,
+                )),
+        )
         .await
         .map_err(|error| DomainError::Work(format!("default-assignee check failed: {error}")))?;
     if member.is_none() {
         return Ok(());
     }
-    let sql = m2m_insert_sql("issue_assignees", "assignee_id", 1, false);
-    let created = now_micros();
-    let updated = now_micros();
-    match sqlx::query(&sql)
-        .bind(Uuid::new_v4())
-        .bind(created)
-        .bind(updated)
-        .bind(created_by_id)
-        .bind(None::<Uuid>)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(issue_id)
-        .bind(default_assignee_id)
-        .execute(ex)
-        .await
-    {
+    let stmt = m2m_insert_statement(M2mTable::Assignees, &[default_assignee_id], scope, false);
+    match db.execute(db.get_database_backend().build(&stmt)).await {
         Ok(_) => Ok(()),
         Err(error) if is_integrity_violation(&error) => Ok(()),
         Err(error) => Err(DomainError::Work(format!(
@@ -431,62 +487,53 @@ where
     }
 }
 
-/// `IssueAssignee.objects.filter(issue).delete()` (`:475`): a SOFT
-/// delete — `SoftDeletionQuerySet.delete` defaults to `soft=True`
-/// (`db/mixins.py:48-52`), i.e. `UPDATE … SET deleted_at`, scoped by
-/// the default manager (`deleted_at IS NULL`). `updated_at` is NOT
-/// touched (queryset `update()` skips `auto_now`). Moved verbatim from
-/// `app_issues::serializers_create` (PIDASHCONV-1630). Params: `$1`
-/// deletion timestamp, `$2` issue id (uuid).
-pub(crate) const ASSIGNEE_CLEAR_SQL: &str =
-    "UPDATE issue_assignees SET deleted_at = $1 WHERE issue_id = $2 AND deleted_at IS NULL";
+/// `IssueAssignee` / `IssueLabel` `.objects.filter(issue).delete()`
+/// (`:475`, `:496`): a SOFT delete — `SoftDeletionQuerySet.delete`
+/// defaults to `soft=True` (`db/mixins.py:48-52`), i.e. `UPDATE … SET
+/// deleted_at`, scoped by the default manager (`deleted_at IS NULL`).
+/// `updated_at` is NOT touched (queryset `update()` skips `auto_now`).
+async fn clear_m2m_links(
+    db: &impl ConnectionTrait,
+    table: M2mTable,
+    issue_id: Uuid,
+    deleted_at: DateTime<Utc>,
+) -> Result<u64, DbErr> {
+    let done = match table {
+        M2mTable::Assignees => {
+            issue_assignees::Entity::update_many()
+                .col_expr(issue_assignees::Column::DeletedAt, Expr::value(deleted_at))
+                .filter(issue_assignees::Column::IssueId.eq(issue_id))
+                .filter(issue_assignees::Column::DeletedAt.is_null())
+                .exec(db)
+                .await?
+        }
+        M2mTable::Labels => {
+            issue_labels::Entity::update_many()
+                .col_expr(issue_labels::Column::DeletedAt, Expr::value(deleted_at))
+                .filter(issue_labels::Column::IssueId.eq(issue_id))
+                .filter(issue_labels::Column::DeletedAt.is_null())
+                .exec(db)
+                .await?
+        }
+    };
+    Ok(done.rows_affected)
+}
 
 /// One update m2m leg (`serializers/issue.py:477-511`): present keys
 /// soft-delete the live links, then re-insert the effective ids with
 /// `ON CONFLICT DO NOTHING`; audit ids come from the PRE-SAVE instance.
-/// Moved verbatim; the clear statement is the shared const (identical text
-/// to the handlers' `format!` for both tables).
-#[allow(clippy::too_many_arguments)]
-async fn update_m2m_leg<'e, E>(
-    ex: E,
-    table: &str,
-    member_column: &str,
-    present: bool,
+async fn update_m2m_leg(
+    db: &impl ConnectionTrait,
+    table: M2mTable,
     effective: &[Uuid],
-    issue_id: &Uuid,
-    project_id: &Uuid,
-    workspace_id: &Uuid,
-    audit: (Option<Uuid>, Option<Uuid>),
-) -> Result<(), DomainError>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres> + Copy,
-{
-    if !present {
-        return Ok(());
-    }
-    let clear = match table {
-        "issue_assignees" => ASSIGNEE_CLEAR_SQL,
-        _ => LABEL_CLEAR_SQL,
-    };
-    sqlx::query(clear)
-        .bind(now_micros())
-        .bind(issue_id)
-        .execute(ex)
+    scope: M2mScope,
+) -> Result<(), DomainError> {
+    clear_m2m_links(db, table, scope.issue_id, now_micros())
         .await
-        .map_err(|error| DomainError::Work(format!("m2m {table} clear failed: {error}")))?;
-    write_m2m_batches(
-        ex,
-        table,
-        member_column,
-        effective,
-        issue_id,
-        project_id,
-        workspace_id,
-        audit.0,
-        audit.1,
-        true,
-    )
-    .await
+        .map_err(|error| {
+            DomainError::Work(format!("m2m {} clear failed: {error}", table.name()))
+        })?;
+    write_m2m_batches(db, table, effective, scope, true).await
 }
 
 // ---------------------------------------------------------------------------
@@ -714,8 +761,7 @@ pub(crate) enum ChainEffect {
         actor_id: Uuid,
     },
     M2mInsert {
-        table: &'static str,
-        member_column: &'static str,
+        table: M2mTable,
         ids: Vec<Uuid>,
         issue_id: Uuid,
         project_id: Uuid,
@@ -796,21 +842,45 @@ pub(crate) enum ChainEffect {
     },
 }
 
-/// The destroy recent-visit delete, moved verbatim: a HARD delete scoped
-/// to the workspace slug + project + issue.
-const RECENT_VISIT_DELETE_SQL: &str = "DELETE FROM user_recent_visits AS visit \
-    USING workspaces AS workspace WHERE visit.workspace_id = workspace.id \
-    AND visit.project_id = $1 AND workspace.slug = $2 AND visit.entity_identifier = $3 \
-    AND visit.entity_name = 'issue'";
+/// The destroy recent-visit delete: a HARD delete scoped to the
+/// workspace slug + project + issue (the slug's workspace by subquery,
+/// the `DELETE … USING workspaces` join's rows).
+fn recent_visit_delete(
+    project_id: Uuid,
+    slug: &str,
+    issue_id: Uuid,
+) -> sea_orm::DeleteMany<user_recent_visits::Entity> {
+    user_recent_visits::Entity::delete_many()
+        .filter(
+            user_recent_visits::Column::WorkspaceId.in_subquery(
+                Query::select()
+                    .column(workspaces::Column::Id)
+                    .from(workspaces::Entity)
+                    .and_where(workspaces::Column::Slug.eq(slug))
+                    .to_owned(),
+            ),
+        )
+        .filter(user_recent_visits::Column::ProjectId.eq(project_id))
+        .filter(user_recent_visits::Column::EntityIdentifier.eq(issue_id))
+        .filter(user_recent_visits::Column::EntityName.eq("issue"))
+}
 
 /// The v1 create raw-data overrides (`api/views/issue.py:505-509`), moved
 /// verbatim: a second save limited to `update_fields=["created_at",
 /// "created_by"]` on the refetched row. It stays a chain leg between the
 /// m2m writes and the activity fan-out (it cannot fold into the INSERT:
 /// the fire's entry-run creation reads the pre-override `created_by_id`
-/// from the row).
-const CREATED_OVERRIDE_SQL: &str =
-    r#"UPDATE "issues" SET "created_at" = $1, "created_by_id" = $2 WHERE "id" = $3"#;
+/// from the row). Bare columns: no hooks, `updated_at` untouched.
+fn created_override_update(
+    issue_id: Uuid,
+    created_at: Option<DateTime<Utc>>,
+    created_by: Option<Uuid>,
+) -> sea_orm::UpdateMany<issues::Entity> {
+    issues::Entity::update_many()
+        .col_expr(issues::Column::CreatedAt, Expr::value(created_at))
+        .col_expr(issues::Column::CreatedById, Expr::value(created_by))
+        .filter(issues::Column::Id.eq(issue_id))
+}
 
 pub(crate) async fn run_chain(
     pool: &PgPool,
@@ -820,6 +890,7 @@ pub(crate) async fn run_chain(
     chain: Vec<ChainEffect>,
     outcome: &ChainOutcome,
 ) {
+    let db = pidash_db::pool::sea_orm_connection(pool);
     for effect in chain {
         match effect {
             // `github_signals.trigger_completion_comment`
@@ -867,7 +938,6 @@ pub(crate) async fn run_chain(
             }
             ChainEffect::M2mInsert {
                 table,
-                member_column,
                 ids,
                 issue_id,
                 project_id,
@@ -876,19 +946,15 @@ pub(crate) async fn run_chain(
                 updated_by,
                 ignore_conflicts,
             } => {
-                if let Err(error) = write_m2m_batches(
-                    pool,
-                    table,
-                    member_column,
-                    &ids,
-                    &issue_id,
-                    &project_id,
-                    &workspace_id,
-                    created_by,
-                    updated_by,
-                    ignore_conflicts,
-                )
-                .await
+                let scope = M2mScope {
+                    issue_id,
+                    project_id,
+                    workspace_id,
+                    created_by_id: created_by,
+                    updated_by_id: updated_by,
+                };
+                if let Err(error) =
+                    write_m2m_batches(&db, table, &ids, scope, ignore_conflicts).await
                 {
                     tracing::warn!(%error, "post-commit m2m leg failed; response fails");
                     outcome.record(ChainStop::M2m);
@@ -902,16 +968,14 @@ pub(crate) async fn run_chain(
                 workspace_id,
                 created_by,
             } => {
-                if let Err(error) = write_default_assignee(
-                    pool,
-                    &default_id,
-                    &issue_id,
-                    &project_id,
-                    &workspace_id,
-                    created_by,
-                )
-                .await
-                {
+                let scope = M2mScope {
+                    issue_id,
+                    project_id,
+                    workspace_id,
+                    created_by_id: created_by,
+                    updated_by_id: None,
+                };
+                if let Err(error) = write_default_assignee(&db, default_id, scope).await {
                     tracing::warn!(%error, "post-commit default-assignee leg failed; response fails");
                     outcome.record(ChainStop::M2m);
                     break;
@@ -939,11 +1003,8 @@ pub(crate) async fn run_chain(
                         break;
                     }
                 };
-                match sqlx::query(CREATED_OVERRIDE_SQL)
-                    .bind(created_at)
-                    .bind(created_by)
-                    .bind(issue_id)
-                    .execute(pool)
+                match created_override_update(issue_id, created_at, created_by)
+                    .exec(&db)
                     .await
                 {
                     Ok(_) => {}
@@ -1017,11 +1078,8 @@ pub(crate) async fn run_chain(
                 slug,
                 issue_id,
             } => {
-                if let Err(error) = sqlx::query(RECENT_VISIT_DELETE_SQL)
-                    .bind(project_id)
-                    .bind(slug.as_str())
-                    .bind(issue_id)
-                    .execute(pool)
+                if let Err(error) = recent_visit_delete(project_id, &slug, issue_id)
+                    .exec(&db)
                     .await
                 {
                     tracing::warn!(%error, "post-commit visit delete failed; response fails");
@@ -1205,8 +1263,7 @@ pub async fn create(
         }
     } else {
         chain.push(ChainEffect::M2mInsert {
-            table: "issue_assignees",
-            member_column: "assignee_id",
+            table: M2mTable::Assignees,
             ids: input.assignees,
             issue_id: model.id,
             project_id: model.project_id,
@@ -1218,8 +1275,7 @@ pub async fn create(
     }
     if !input.labels.is_empty() {
         chain.push(ChainEffect::M2mInsert {
-            table: "issue_labels",
-            member_column: "label_id",
+            table: M2mTable::Labels,
             ids: input.labels,
             issue_id: model.id,
             project_id: model.project_id,
@@ -1412,33 +1468,19 @@ async fn update_driver(
     // The m2m legs run ahead of the row write (`update()` pops them
     // first), on the pool: they persist even when the save fails, so they
     // stay out of the transaction. Audit ids come from the pre-save row.
+    let scope = M2mScope {
+        issue_id: fields.id,
+        project_id: fields.project_id,
+        workspace_id: fields.workspace_id,
+        created_by_id: m2m_audit.0,
+        updated_by_id: m2m_audit.1,
+    };
+    let db = pidash_db::pool::sea_orm_connection(pool);
     if let Some(ids) = &assignees {
-        update_m2m_leg(
-            pool,
-            "issue_assignees",
-            "assignee_id",
-            true,
-            ids,
-            &fields.id,
-            &fields.project_id,
-            &fields.workspace_id,
-            m2m_audit,
-        )
-        .await?;
+        update_m2m_leg(&db, M2mTable::Assignees, ids, scope).await?;
     }
     if let Some(ids) = &labels {
-        update_m2m_leg(
-            pool,
-            "issue_labels",
-            "label_id",
-            true,
-            ids,
-            &fields.id,
-            &fields.project_id,
-            &fields.workspace_id,
-            m2m_audit,
-        )
-        .await?;
+        update_m2m_leg(&db, M2mTable::Labels, ids, scope).await?;
     }
     // The save-time `sequence_id` int4 check (DRF never range-checks the
     // integer — the `DataError` surfaces at save, past the m2m legs, as a
@@ -1617,32 +1659,59 @@ pub async fn soft_delete(
     })
 }
 
-/// The workpad-PATCH issue read (`api/views/issue.py:3307-3311`), moved
-/// verbatim: `LIMIT 21` (executed `.get()`) + `FOR UPDATE OF issues`
+/// The workpad-PATCH issue read (`api/views/issue.py:3307-3311`):
+/// `LIMIT 21` (executed `.get()`) + `FOR UPDATE OF issues`
 /// (`of=("self",)` — a bare lock would 500 on the nullable state join).
-/// The triage/archived/draft predicates are load-bearing (a miss 404s);
-/// the projected `state_group` goes unused — the save hook re-reads the
-/// group itself, in the same transaction and snapshot. Public because the
-/// driver probes existence with the SAME text on the pool before
+/// `states` is a LEFT join, `projects` / `workspaces` INNER. The
+/// triage/archived/draft predicates are load-bearing (a miss 404s); the
+/// projected `state_group` goes unused — the save hook re-reads the group
+/// itself, in the same transaction and snapshot. Public because the
+/// driver probes existence with the SAME statement on the pool before
 /// validating (a miss 404s ahead of validation errors, as today) — one
-/// text, so the probe and the lock can never disagree on the match. The
-/// `FOR UPDATE` is harmless in the driver's autocommit probe (the lock
-/// releases at statement end).
-pub const WORKPAD_SELECT_SQL: &str = r#"SELECT "issues"."description_html", "issues"."state_id",
-          "issues"."completed_at", "states"."group" AS "state_group"
-   FROM "issues"
-   LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
-   INNER JOIN "projects" ON ("issues"."project_id" = "projects"."id")
-   INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id")
-   WHERE ("issues"."deleted_at" IS NULL
-     AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)
-     AND NOT ("issues"."archived_at" IS NOT NULL)
-     AND NOT ("projects"."archived_at" IS NOT NULL)
-     AND NOT ("issues"."is_draft")
-     AND "issues"."id" = $1
-     AND "issues"."project_id" = $2
-     AND "workspaces"."slug" = $3)
-   LIMIT 21 FOR UPDATE OF "issues""#;
+/// builder, so the probe and the lock can never disagree on the match.
+/// The `FOR UPDATE` is harmless in the driver's autocommit probe (the
+/// lock releases at statement end).
+pub fn workpad_select(issue_id: Uuid, project_id: Uuid, slug: &str) -> SelectStatement {
+    let state_group = Expr::col((states::Entity, states::Column::Group));
+    Query::select()
+        .column((issues::Entity, issues::Column::DescriptionHtml))
+        .column((issues::Entity, issues::Column::StateId))
+        .column((issues::Entity, issues::Column::CompletedAt))
+        .expr_as(state_group.clone(), Alias::new("state_group"))
+        .from(issues::Entity)
+        .left_join(
+            states::Entity,
+            Expr::col((issues::Entity, issues::Column::StateId))
+                .equals((states::Entity, states::Column::Id)),
+        )
+        .inner_join(
+            projects::Entity,
+            Expr::col((issues::Entity, issues::Column::ProjectId))
+                .equals((projects::Entity, projects::Column::Id)),
+        )
+        .inner_join(
+            workspaces::Entity,
+            Expr::col((issues::Entity, issues::Column::WorkspaceId))
+                .equals((workspaces::Entity, workspaces::Column::Id)),
+        )
+        .and_where(Expr::col((issues::Entity, issues::Column::DeletedAt)).is_null())
+        .and_where(
+            state_group
+                .clone()
+                .eq("triage")
+                .and(state_group.is_not_null())
+                .not(),
+        )
+        .and_where(Expr::col((issues::Entity, issues::Column::ArchivedAt)).is_null())
+        .and_where(Expr::col((projects::Entity, projects::Column::ArchivedAt)).is_null())
+        .and_where(Expr::col((issues::Entity, issues::Column::IsDraft)).not())
+        .and_where(Expr::col((issues::Entity, issues::Column::Id)).eq(issue_id))
+        .and_where(Expr::col((issues::Entity, issues::Column::ProjectId)).eq(project_id))
+        .and_where(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug))
+        .limit(21)
+        .lock_with_tables(LockType::Update, [issues::Entity])
+        .to_owned()
+}
 
 /// `PATCH .../workpad/`: the issue, project and slug for the locked read,
 /// the validated workpad text and the driver-stamped `updated_at` (the
@@ -1672,15 +1741,11 @@ pub async fn set_workpad(
 ) -> Result<ChainOutcome, DomainError> {
     let row = txn
         .connection()
-        .query_one(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            WORKPAD_SELECT_SQL,
-            [
-                sea_orm::Value::from(input.issue_id),
-                sea_orm::Value::from(input.project_id),
-                sea_orm::Value::from(input.slug),
-            ],
-        ))
+        .query_one(sea_orm::DbBackend::Postgres.build(&workpad_select(
+            input.issue_id,
+            input.project_id,
+            &input.slug,
+        )))
         .await?
         .ok_or_else(|| DomainError::Db(DbErr::RecordNotFound("workpad issue".to_owned())))?;
     let description_html: String = row.try_get("", "description_html")?;
@@ -1724,39 +1789,40 @@ pub async fn set_workpad(
 /// The agent-tool workpad write (`tools.py:300-307`): a `QuerySet.update`
 /// equivalent — bare columns, no hooks, no chain. Contrast
 /// [`set_workpad`], which runs the save (hook recomputes plus the
-/// completion leg) for the v1 workpad endpoint. Runs on any executor so
+/// completion leg) for the v1 workpad endpoint. Runs on any SeaORM connection so
 /// audit-transaction drivers keep the write inside their transaction.
-pub async fn update_workpad<'e, E>(
-    ex: E,
+pub async fn update_workpad(
+    db: &impl ConnectionTrait,
     issue_id: Uuid,
     project_id: Uuid,
     workpad: &str,
     updated_at: DateTime<Utc>,
-) -> Result<u64, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(WORKPAD_BARE_UPDATE_SQL)
-        .bind(issue_id)
-        .bind(project_id)
-        .bind(workpad)
-        .bind(updated_at)
-        .execute(ex)
+) -> Result<u64, sqlx::Error> {
+    issues::Entity::update_many()
+        .col_expr(issues::Column::Workpad, Expr::value(workpad))
+        .col_expr(issues::Column::UpdatedAt, Expr::value(updated_at))
+        .filter(issues::Column::Id.eq(issue_id))
+        .filter(issues::Column::ProjectId.eq(project_id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .exec(db)
         .await
-        .map(|done| done.rows_affected())
+        .map(|done| done.rows_affected)
+        .map_err(into_sqlx)
 }
-
-const WORKPAD_BARE_UPDATE_SQL: &str =
-    "UPDATE issues SET workpad = $3, updated_at = $4 WHERE id = $1 AND project_id = $2 \
-     AND deleted_at IS NULL";
 
 /// `set_workpad` write (`orchestration/workpad.py:79-84`):
 /// `update_fields=["workpad", "updated_at"]`, rendered in `_meta`
-/// order per the fixture. Moved verbatim from
-/// `pidash_db::orchestration::workpad` (PIDASHCONV-1630). `$1` is the
-/// stamp, `$2` the body, `$3` the issue id.
-pub(crate) const WORKPAD_SAVE_UPDATE_SQL: &str =
-    "UPDATE issues SET updated_at = $1, workpad = $2 WHERE id = $3";
+/// order per the fixture (`updated_at`, then `workpad`).
+fn workpad_save_update(
+    issue_id: Uuid,
+    body: Option<&str>,
+    now: DateTime<Utc>,
+) -> sea_orm::UpdateMany<issues::Entity> {
+    issues::Entity::update_many()
+        .col_expr(issues::Column::UpdatedAt, Expr::value(now))
+        .col_expr(issues::Column::Workpad, Expr::value(body.unwrap_or("")))
+        .filter(issues::Column::Id.eq(issue_id))
+}
 
 /// Overwrite the workpad body; `None`/empty clears it
 /// (`body or ""`). `now` stands in for the `auto_now` stamp. A
@@ -1766,23 +1832,18 @@ pub(crate) const WORKPAD_SAVE_UPDATE_SQL: &str =
 /// the PATCH-flow save (hook recomputes plus the completion leg),
 /// and [`update_workpad`], the agent-tool `QuerySet.update` shape —
 /// this is the orchestration `save(update_fields)` shape. Runs on any
-/// executor. Moved verbatim from
+/// SeaORM connection. Moved from
 /// `pidash_db::orchestration::workpad::set_workpad` (PIDASHCONV-1630).
-pub async fn update_workpad_save<'e, E>(
-    ex: E,
+pub async fn update_workpad_save(
+    db: &impl ConnectionTrait,
     issue_id: Uuid,
     body: Option<&str>,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(WORKPAD_SAVE_UPDATE_SQL)
-        .bind(now)
-        .bind(body.unwrap_or(""))
-        .bind(issue_id)
-        .execute(ex)
-        .await?;
+) -> Result<(), sqlx::Error> {
+    workpad_save_update(issue_id, body, now)
+        .exec(db)
+        .await
+        .map_err(into_sqlx)?;
     Ok(())
 }
 
@@ -1791,32 +1852,27 @@ where
 /// equivalent — the three columns land with no hook-recompute writes
 /// (`completed_at`/`description_stripped` stay untouched, exactly what
 /// the field list writes) and no chain: the driver routes completion,
-/// fire and orchestration itself, as today. Runs on any executor so
+/// fire and orchestration itself, as today. Runs on any SeaORM connection so
 /// audit-transaction drivers keep the write inside their transaction
 /// (and under their row lock — a separate domain transaction would
 /// deadlock against it).
-pub async fn update_issue_state<'e, E>(
-    ex: E,
+pub async fn update_issue_state(
+    db: &impl ConnectionTrait,
     issue_id: Uuid,
     state_id: Uuid,
     updated_at: DateTime<Utc>,
     updated_by_id: Uuid,
-) -> Result<u64, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(ISSUE_STATE_BARE_UPDATE_SQL)
-        .bind(issue_id)
-        .bind(state_id)
-        .bind(updated_at)
-        .bind(updated_by_id)
-        .execute(ex)
+) -> Result<u64, sqlx::Error> {
+    issues::Entity::update_many()
+        .col_expr(issues::Column::StateId, Expr::value(state_id))
+        .col_expr(issues::Column::UpdatedAt, Expr::value(updated_at))
+        .col_expr(issues::Column::UpdatedById, Expr::value(updated_by_id))
+        .filter(issues::Column::Id.eq(issue_id))
+        .exec(db)
         .await
-        .map(|done| done.rows_affected())
+        .map(|done| done.rows_affected)
+        .map_err(into_sqlx)
 }
-
-const ISSUE_STATE_BARE_UPDATE_SQL: &str =
-    "UPDATE issues SET state_id = $2, updated_at = $3, updated_by_id = $4 WHERE id = $1";
 
 /// N3 Issue INSERT (`views/intake.py:145-152`). `$1` = id, `$2` =
 /// created_at, `$3` = updated_at, `$4` = name, `$5` = description_json, `$6`
@@ -1870,38 +1926,81 @@ pub struct MirrorIssueInsert {
     pub pod_id: Option<Uuid>,
 }
 
-pub async fn insert_mirror_issue<'e, E>(
-    ex: E,
-    insert: &MirrorIssueInsert,
-) -> Result<u64, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(MIRROR_ISSUE_INSERT_SQL)
-        .bind(insert.issue_id)
-        .bind(insert.now)
-        .bind(insert.now)
-        .bind(insert.actor_id)
-        .bind(insert.actor_id)
-        .bind(insert.project_id)
-        .bind(insert.workspace_id)
-        .bind(insert.state_id)
-        .bind(&insert.name)
-        .bind(serde_json::json!({}))
-        .bind(&insert.description_html)
-        .bind(&insert.description_stripped)
-        .bind(insert.sequence_id)
-        .bind(insert.sort_order)
-        .bind(insert.completed_at)
-        .bind(&insert.external_source)
-        .bind(&insert.external_id)
-        .bind(insert.pod_id)
-        .execute(ex)
-        .await
-        .map(|done| done.rows_affected())
+/// `issues.sequence_id` is `int4`: an out-of-range driver value fails the
+/// write, as the server-side cast of the old `int8` bind did.
+fn int4(value: i64) -> Result<i32, sqlx::Error> {
+    i32::try_from(value).map_err(|_| sqlx::Error::Protocol("integer out of range".to_owned()))
 }
 
-const MIRROR_ISSUE_INSERT_SQL: &str = "INSERT INTO issues (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, workpad, created_via, assigned_pod_id, agent_executor) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, NULL, $8, NULL, NULL, $9, $10, $11, $12, NULL, 'none', 0, NULL, NULL, $13, $14, $15, NULL, FALSE, $16, $17, NULL, '', '', NULL, $18, NULL)";
+/// Execute one bare-column `issues` INSERT (no hooks) for its rows-affected
+/// count.
+async fn insert_issue_row(
+    db: &impl ConnectionTrait,
+    row: issues::ActiveModel,
+) -> Result<u64, sqlx::Error> {
+    issues::Entity::insert(row)
+        .exec_without_returning(db)
+        .await
+        .map_err(into_sqlx)
+}
+
+/// Execute one bare-column `issue_sequences` INSERT for its rows-affected
+/// count.
+async fn insert_sequence_row(
+    db: &impl ConnectionTrait,
+    row: issue_sequences::ActiveModel,
+) -> Result<u64, sqlx::Error> {
+    issue_sequences::Entity::insert(row)
+        .exec_without_returning(db)
+        .await
+        .map_err(into_sqlx)
+}
+
+fn mirror_issue_row(insert: &MirrorIssueInsert) -> Result<issues::ActiveModel, sqlx::Error> {
+    Ok(issues::ActiveModel {
+        id: Set(insert.issue_id),
+        created_at: Set(insert.now.into()),
+        updated_at: Set(insert.now.into()),
+        created_by_id: Set(Some(insert.actor_id)),
+        updated_by_id: Set(Some(insert.actor_id)),
+        deleted_at: Set(None),
+        project_id: Set(insert.project_id),
+        workspace_id: Set(insert.workspace_id),
+        parent_id: Set(None),
+        state_id: Set(insert.state_id),
+        point: Set(None),
+        estimate_point_id: Set(None),
+        name: Set(insert.name.clone()),
+        description_json: Set(serde_json::json!({})),
+        description_html: Set(insert.description_html.clone()),
+        description_stripped: Set(Some(insert.description_stripped.clone())),
+        description_binary: Set(None),
+        priority: Set("none".to_owned()),
+        complexity_score: Set(0),
+        start_date: Set(None),
+        target_date: Set(None),
+        sequence_id: Set(int4(insert.sequence_id)?),
+        sort_order: Set(insert.sort_order),
+        completed_at: Set(insert.completed_at.map(Into::into)),
+        archived_at: Set(None),
+        is_draft: Set(false),
+        external_source: Set(Some(insert.external_source.clone())),
+        external_id: Set(Some(insert.external_id.clone())),
+        type_id: Set(None),
+        git_work_branch: Set(String::new()),
+        workpad: Set(String::new()),
+        created_via: Set(None),
+        assigned_pod_id: Set(insert.pod_id),
+        agent_executor: Set(None),
+    })
+}
+
+pub async fn insert_mirror_issue(
+    db: &impl ConnectionTrait,
+    insert: &MirrorIssueInsert,
+) -> Result<u64, sqlx::Error> {
+    insert_issue_row(db, mirror_issue_row(insert)?).await
+}
 
 /// The `IssueSequence.objects.create(issue, sequence, project)`
 /// companion row (`issue.py:340`): `ProjectBaseModel` audit columns (NULL
@@ -1915,27 +2014,28 @@ pub struct MirrorIssueSequence {
     pub now: DateTime<Utc>,
 }
 
-pub async fn insert_issue_sequence<'e, E>(
-    ex: E,
-    seq: &MirrorIssueSequence,
-) -> Result<u64, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(MIRROR_ISSUE_SEQUENCE_INSERT_SQL)
-        .bind(Uuid::new_v4())
-        .bind(seq.now)
-        .bind(seq.now)
-        .bind(seq.project_id)
-        .bind(seq.workspace_id)
-        .bind(seq.issue_id)
-        .bind(seq.sequence)
-        .execute(ex)
-        .await
-        .map(|done| done.rows_affected())
+fn mirror_sequence_row(seq: &MirrorIssueSequence) -> issue_sequences::ActiveModel {
+    issue_sequences::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        created_at: Set(seq.now.into()),
+        updated_at: Set(seq.now.into()),
+        created_by_id: Set(None),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        project_id: Set(seq.project_id),
+        workspace_id: Set(seq.workspace_id),
+        issue_id: Set(Some(seq.issue_id)),
+        sequence: Set(seq.sequence),
+        deleted: Set(false),
+    }
 }
 
-const MIRROR_ISSUE_SEQUENCE_INSERT_SQL: &str = "INSERT INTO issue_sequences (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, sequence, deleted) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, FALSE)";
+pub async fn insert_issue_sequence(
+    db: &impl ConnectionTrait,
+    seq: &MirrorIssueSequence,
+) -> Result<u64, sqlx::Error> {
+    insert_sequence_row(db, mirror_sequence_row(seq)).await
+}
 
 /// The git-mirror UPDATE arm (`Issue.objects.filter(pk).update(...)`,
 /// `git_sync_task.py:100-108`): absolute values, no `save()` side
@@ -1955,31 +2055,46 @@ pub struct GitMirrorIssueUpdate {
     pub now: DateTime<Utc>,
 }
 
-pub async fn update_git_mirror_issue<'e, E>(
-    ex: E,
-    upd: &GitMirrorIssueUpdate,
-) -> Result<u64, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(GIT_MIRROR_UPDATE_SQL)
-        .bind(upd.issue_id)
-        .bind(&upd.name)
-        .bind(&upd.description_html)
-        .bind(&upd.description_stripped)
-        .bind(serde_json::json!({}))
-        .bind(upd.workspace_id)
-        .bind(upd.actor_id)
-        .bind(upd.actor_id)
-        .bind(&upd.external_source)
-        .bind(&upd.external_id)
-        .bind(upd.now)
-        .execute(ex)
-        .await
-        .map(|done| done.rows_affected())
+fn git_mirror_update(upd: &GitMirrorIssueUpdate) -> sea_orm::UpdateMany<issues::Entity> {
+    issues::Entity::update_many()
+        .col_expr(issues::Column::Name, Expr::value(upd.name.as_str()))
+        .col_expr(
+            issues::Column::DescriptionHtml,
+            Expr::value(upd.description_html.as_str()),
+        )
+        .col_expr(
+            issues::Column::DescriptionStripped,
+            Expr::value(upd.description_stripped.as_str()),
+        )
+        .col_expr(
+            issues::Column::DescriptionJson,
+            Expr::value(serde_json::json!({})),
+        )
+        .col_expr(issues::Column::WorkspaceId, Expr::value(upd.workspace_id))
+        .col_expr(issues::Column::CreatedById, Expr::value(upd.actor_id))
+        .col_expr(issues::Column::UpdatedById, Expr::value(upd.actor_id))
+        .col_expr(
+            issues::Column::ExternalSource,
+            Expr::value(upd.external_source.as_str()),
+        )
+        .col_expr(
+            issues::Column::ExternalId,
+            Expr::value(upd.external_id.as_str()),
+        )
+        .col_expr(issues::Column::UpdatedAt, Expr::value(upd.now))
+        .filter(issues::Column::Id.eq(upd.issue_id))
 }
 
-const GIT_MIRROR_UPDATE_SQL: &str = "UPDATE issues SET name = $2, description_html = $3, description_stripped = $4, description_json = $5, workspace_id = $6, created_by_id = $7, updated_by_id = $8, external_source = $9, external_id = $10, updated_at = $11 WHERE id = $1";
+pub async fn update_git_mirror_issue(
+    db: &impl ConnectionTrait,
+    upd: &GitMirrorIssueUpdate,
+) -> Result<u64, sqlx::Error> {
+    git_mirror_update(upd)
+        .exec(db)
+        .await
+        .map(|done| done.rows_affected)
+        .map_err(into_sqlx)
+}
 
 /// The github-mirror UPDATE arm (`update_or_create` via a full
 /// `Issue.save()`, `github_sync_task.py:135-140`, `issue.py:288-350`):
@@ -2000,28 +2115,38 @@ pub struct GithubMirrorIssueUpdate {
     pub now: DateTime<Utc>,
 }
 
-pub async fn update_github_mirror_issue<'e, E>(
-    ex: E,
-    upd: &GithubMirrorIssueUpdate,
-) -> Result<u64, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(GITHUB_MIRROR_UPDATE_SQL)
-        .bind(upd.issue_id)
-        .bind(&upd.name)
-        .bind(&upd.description_html)
-        .bind(&upd.description_stripped)
-        .bind(serde_json::json!({}))
-        .bind(upd.actor_id)
-        .bind(upd.completed_at)
-        .bind(upd.now)
-        .execute(ex)
-        .await
-        .map(|done| done.rows_affected())
+fn github_mirror_update(upd: &GithubMirrorIssueUpdate) -> sea_orm::UpdateMany<issues::Entity> {
+    issues::Entity::update_many()
+        .col_expr(issues::Column::Name, Expr::value(upd.name.as_str()))
+        .col_expr(
+            issues::Column::DescriptionHtml,
+            Expr::value(upd.description_html.as_str()),
+        )
+        .col_expr(
+            issues::Column::DescriptionStripped,
+            Expr::value(upd.description_stripped.as_str()),
+        )
+        .col_expr(
+            issues::Column::DescriptionJson,
+            Expr::value(serde_json::json!({})),
+        )
+        .col_expr(issues::Column::CreatedById, Expr::value(upd.actor_id))
+        .col_expr(issues::Column::UpdatedById, Expr::value(upd.actor_id))
+        .col_expr(issues::Column::CompletedAt, Expr::value(upd.completed_at))
+        .col_expr(issues::Column::UpdatedAt, Expr::value(upd.now))
+        .filter(issues::Column::Id.eq(upd.issue_id))
 }
 
-const GITHUB_MIRROR_UPDATE_SQL: &str = "UPDATE issues SET name = $2, description_html = $3, description_stripped = $4, description_json = $5, created_by_id = $6, updated_by_id = $6, completed_at = $7, updated_at = $8 WHERE id = $1";
+pub async fn update_github_mirror_issue(
+    db: &impl ConnectionTrait,
+    upd: &GithubMirrorIssueUpdate,
+) -> Result<u64, sqlx::Error> {
+    github_mirror_update(upd)
+        .exec(db)
+        .await
+        .map(|done| done.rows_affected)
+        .map_err(into_sqlx)
+}
 
 // ---------------------------------------------------------------------------
 // Agent-tool twins: the tool's create/update for callers that must stay
@@ -2064,38 +2189,51 @@ pub struct ToolIssueInsert<'a> {
     pub pod_id: Option<Uuid>,
 }
 
-pub async fn insert_tool_issue<'e, E>(
-    ex: E,
-    insert: &ToolIssueInsert<'_>,
-) -> Result<u64, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(TOOL_ISSUE_INSERT_SQL)
-        .bind(insert.issue_id)
-        .bind(insert.now)
-        .bind(insert.now)
-        .bind(insert.name)
-        .bind(Value::Object(Map::new()))
-        .bind(insert.description_html)
-        .bind(insert.description_stripped)
-        .bind(insert.priority)
-        .bind(insert.sequence_id)
-        .bind(insert.sort_order)
-        .bind(insert.completed_at)
-        .bind(insert.created_via)
-        .bind(insert.created_by)
-        .bind(insert.project_id)
-        .bind(insert.workspace_id)
-        .bind(insert.parent_id)
-        .bind(insert.state_id)
-        .bind(insert.pod_id)
-        .execute(ex)
-        .await
-        .map(|done| done.rows_affected())
+fn tool_issue_row(insert: &ToolIssueInsert<'_>) -> Result<issues::ActiveModel, sqlx::Error> {
+    Ok(issues::ActiveModel {
+        id: Set(insert.issue_id),
+        created_at: Set(insert.now.into()),
+        updated_at: Set(insert.now.into()),
+        deleted_at: Set(None),
+        point: Set(None),
+        name: Set(insert.name.to_owned()),
+        description_json: Set(Value::Object(Map::new())),
+        description_html: Set(insert.description_html.to_owned()),
+        description_stripped: Set(insert.description_stripped.map(str::to_owned)),
+        description_binary: Set(None),
+        priority: Set(insert.priority.to_owned()),
+        complexity_score: Set(0),
+        start_date: Set(None),
+        target_date: Set(None),
+        sequence_id: Set(int4(insert.sequence_id)?),
+        sort_order: Set(insert.sort_order),
+        completed_at: Set(insert.completed_at.map(Into::into)),
+        archived_at: Set(None),
+        is_draft: Set(false),
+        external_source: Set(None),
+        external_id: Set(None),
+        git_work_branch: Set(String::new()),
+        workpad: Set(String::new()),
+        created_via: Set(Some(insert.created_via.to_owned())),
+        agent_executor: Set(None),
+        created_by_id: Set(Some(insert.created_by)),
+        updated_by_id: Set(None),
+        project_id: Set(insert.project_id),
+        workspace_id: Set(insert.workspace_id),
+        parent_id: Set(insert.parent_id),
+        state_id: Set(insert.state_id),
+        estimate_point_id: Set(None),
+        type_id: Set(None),
+        assigned_pod_id: Set(insert.pod_id),
+    })
 }
 
-const TOOL_ISSUE_INSERT_SQL: &str = "INSERT INTO issues (id, created_at, updated_at, deleted_at, point, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, git_work_branch, workpad, created_via, agent_executor, created_by_id, updated_by_id, project_id, workspace_id, parent_id, state_id, estimate_point_id, type_id, assigned_pod_id) VALUES ($1, $2, $3, NULL, NULL, $4, $5, $6, $7, NULL, $8, 0, NULL, NULL, $9, $10, $11, NULL, FALSE, NULL, NULL, '', '', $12, NULL, $13, NULL, $14, $15, $16, $17, NULL, NULL, $18)";
+pub async fn insert_tool_issue(
+    db: &impl ConnectionTrait,
+    insert: &ToolIssueInsert<'_>,
+) -> Result<u64, sqlx::Error> {
+    insert_issue_row(db, tool_issue_row(insert)?).await
+}
 
 /// The `IssueSequence.objects.create(issue, sequence, project)`
 /// companion row of the agent-tool create (`issue.py:340`): the
@@ -2112,28 +2250,28 @@ pub struct ToolIssueSequence {
     pub now: DateTime<Utc>,
 }
 
-pub async fn insert_tool_issue_sequence<'e, E>(
-    ex: E,
-    seq: &ToolIssueSequence,
-) -> Result<u64, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(TOOL_ISSUE_SEQUENCE_INSERT_SQL)
-        .bind(Uuid::new_v4())
-        .bind(seq.now)
-        .bind(seq.now)
-        .bind(seq.created_by)
-        .bind(seq.project_id)
-        .bind(seq.workspace_id)
-        .bind(seq.issue_id)
-        .bind(seq.sequence)
-        .execute(ex)
-        .await
-        .map(|done| done.rows_affected())
+fn tool_sequence_row(seq: &ToolIssueSequence) -> issue_sequences::ActiveModel {
+    issue_sequences::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        created_at: Set(seq.now.into()),
+        updated_at: Set(seq.now.into()),
+        created_by_id: Set(Some(seq.created_by)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        project_id: Set(seq.project_id),
+        workspace_id: Set(seq.workspace_id),
+        issue_id: Set(Some(seq.issue_id)),
+        sequence: Set(seq.sequence),
+        deleted: Set(false),
+    }
 }
 
-const TOOL_ISSUE_SEQUENCE_INSERT_SQL: &str = "INSERT INTO issue_sequences (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, sequence, deleted) VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, FALSE)";
+pub async fn insert_tool_issue_sequence(
+    db: &impl ConnectionTrait,
+    seq: &ToolIssueSequence,
+) -> Result<u64, sqlx::Error> {
+    insert_sequence_row(db, tool_sequence_row(seq)).await
+}
 
 /// The agent-tool issue update (`locked.save(update_fields=...)`,
 /// `assistant/tools/issues.py:337-369`): exactly the tool's columns —
@@ -2163,96 +2301,78 @@ pub struct ToolIssueUpdate<'a> {
     pub now: DateTime<Utc>,
 }
 
-pub async fn update_tool_issue<'e, E>(ex: E, upd: &ToolIssueUpdate<'_>) -> Result<u64, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let mut sets: Vec<String> = Vec::new();
-    if upd.name.is_some() {
-        sets.push(format!("name = ${}", sets.len() + 1));
-    }
-    if upd.description_html.is_some() {
-        sets.push(format!("description_html = ${}", sets.len() + 1));
-        sets.push(format!("description_json = ${}", sets.len() + 1));
-    }
-    if upd.priority.is_some() {
-        sets.push(format!("priority = ${}", sets.len() + 1));
-    }
-    if upd.state_given {
-        sets.push(format!("state_id = ${}", sets.len() + 1));
-    }
-    if upd.parent_touched {
-        sets.push(format!("parent_id = ${}", sets.len() + 1));
-    }
-    sets.push(format!("updated_at = ${}", sets.len() + 1));
-    sets.push(format!("updated_by_id = ${}", sets.len() + 1));
-    let sql = format!(
-        "UPDATE issues SET {} WHERE id = ${}",
-        sets.join(", "),
-        sets.len() + 1
-    );
-    let mut statement = sqlx::query(&sql);
+/// The tool save's column list: only the touched arms, then the audit
+/// pair, in the tool's `update_fields` order.
+fn tool_issue_update(upd: &ToolIssueUpdate<'_>) -> sea_orm::UpdateMany<issues::Entity> {
+    let mut update = issues::Entity::update_many();
     if let Some(name) = upd.name {
-        statement = statement.bind(name);
+        update = update.col_expr(issues::Column::Name, Expr::value(name));
     }
     if let Some(html) = upd.description_html {
-        statement = statement.bind(html).bind(Value::Object(Map::new()));
+        update = update
+            .col_expr(issues::Column::DescriptionHtml, Expr::value(html))
+            .col_expr(
+                issues::Column::DescriptionJson,
+                Expr::value(Value::Object(Map::new())),
+            );
     }
     if let Some(priority) = upd.priority {
-        statement = statement.bind(priority);
+        update = update.col_expr(issues::Column::Priority, Expr::value(priority));
     }
     if upd.state_given {
-        statement = statement.bind(upd.state_id);
+        update = update.col_expr(issues::Column::StateId, Expr::value(upd.state_id));
     }
     if upd.parent_touched {
-        statement = statement.bind(upd.parent_id);
+        update = update.col_expr(issues::Column::ParentId, Expr::value(upd.parent_id));
     }
-    statement = statement
-        .bind(upd.now)
-        .bind(upd.updated_by_id)
-        .bind(upd.issue_id);
-    statement.execute(ex).await.map(|done| done.rows_affected())
+    update
+        .col_expr(issues::Column::UpdatedAt, Expr::value(upd.now))
+        .col_expr(issues::Column::UpdatedById, Expr::value(upd.updated_by_id))
+        .filter(issues::Column::Id.eq(upd.issue_id))
 }
 
-/// The `fix_duplicate_sequences` issue renumber
-/// (`fix_duplicate_sequences.py:90`): `bulk_update` writes
-/// `sequence_id` only, no `updated_at` bump (verified). Moved verbatim
-/// from `pidash_db::ops::repair` (PIDASHCONV-1630).
-pub(crate) const UPDATE_ISSUE_SEQUENCE_ID_SQL: &str =
-    "UPDATE issues SET sequence_id = $1 WHERE id = $2";
-
-/// The `fix_duplicate_sequences` sequence-row twin (`:91`): same rule,
-/// `sequence` only. Moved verbatim from `pidash_db::ops::repair`
-/// (PIDASHCONV-1630).
-pub(crate) const UPDATE_SEQUENCE_SQL: &str =
-    "UPDATE issue_sequences SET sequence = $1 WHERE id = $2";
+pub async fn update_tool_issue(
+    db: &impl ConnectionTrait,
+    upd: &ToolIssueUpdate<'_>,
+) -> Result<u64, sqlx::Error> {
+    tool_issue_update(upd)
+        .exec(db)
+        .await
+        .map(|done| done.rows_affected)
+        .map_err(into_sqlx)
+}
 
 /// The two `fix_duplicate_sequences` `bulk_update`s (`:90-91`): the
-/// issue renumbers, then the mapped sequence rows take the same new
-/// values. Each pair is `(row_id, new_value)`. Takes `&mut
-/// PgConnection` (the `create_update_account` precedent:
-/// multi-statement steps inside the caller's transaction are not
-/// executor-generic); the repair driver passes its advisory-locked
-/// transaction and commits. Moved verbatim from `FixTx::commit_plan`
+/// issue renumbers (`sequence_id` only), then the mapped sequence rows
+/// take the same new values (`sequence` only) — no `updated_at` bump on
+/// either (`bulk_update` never touches unlisted fields, verified). Each
+/// pair is `(row_id, new_value)`, one UPDATE per pair. Runs on the
+/// caller's connection: the repair driver passes its advisory-locked
+/// transaction (`TxConn`) and commits. Moved from `FixTx::commit_plan`
 /// (PIDASHCONV-1630) minus the commit.
 pub async fn apply_fix_plan(
-    conn: &mut sqlx::PgConnection,
+    db: &impl ConnectionTrait,
     issue_updates: &[(Uuid, i64)],
     sequence_updates: &[(Uuid, i64)],
 ) -> Result<(), sqlx::Error> {
     for (issue_id, new_sequence) in issue_updates {
-        sqlx::query(UPDATE_ISSUE_SEQUENCE_ID_SQL)
-            .bind(new_sequence)
-            .bind(issue_id)
-            .execute(&mut *conn)
-            .await?;
+        issues::Entity::update_many()
+            .col_expr(issues::Column::SequenceId, Expr::value(*new_sequence))
+            .filter(issues::Column::Id.eq(*issue_id))
+            .exec(db)
+            .await
+            .map_err(into_sqlx)?;
     }
     for (row_id, new_sequence) in sequence_updates {
-        sqlx::query(UPDATE_SEQUENCE_SQL)
-            .bind(new_sequence)
-            .bind(row_id)
-            .execute(&mut *conn)
-            .await?;
+        issue_sequences::Entity::update_many()
+            .col_expr(
+                issue_sequences::Column::Sequence,
+                Expr::value(*new_sequence),
+            )
+            .filter(issue_sequences::Column::Id.eq(*row_id))
+            .exec(db)
+            .await
+            .map_err(into_sqlx)?;
     }
     Ok(())
 }
@@ -2284,40 +2404,52 @@ pub struct SeedIssue<'a> {
     pub now: DateTime<Utc>,
 }
 
-const SEED_ISSUE_INSERT_SQL: &str = "INSERT INTO issues \
-    (created_at, updated_at, id, name, description_json, priority, start_date, target_date, \
-    sequence_id, created_by_id, parent_id, project_id, state_id, updated_by_id, workspace_id, \
-    description_html, description_stripped, completed_at, sort_order, point, archived_at, \
-    is_draft, external_id, external_source, description_binary, estimate_point_id, type_id, \
-    deleted_at, git_work_branch, assigned_pod_id, workpad, created_via, agent_executor, \
-    complexity_score) \
-    VALUES ($1, $1, $2, $3, '{}', $4, NULL, NULL, $5, $6, NULL, $7, $8, NULL, $9, $10, \
-    $11, $12, $13, NULL, NULL, false, NULL, NULL, NULL, NULL, NULL, NULL, '', $14, '', \
-    NULL, NULL, 0) \
-    RETURNING id";
+fn seed_issue_row(id: Uuid, issue: &SeedIssue<'_>) -> Result<issues::ActiveModel, sqlx::Error> {
+    Ok(issues::ActiveModel {
+        created_at: Set(issue.now.into()),
+        updated_at: Set(issue.now.into()),
+        id: Set(id),
+        name: Set(issue.name.to_owned()),
+        description_json: Set(serde_json::json!({})),
+        priority: Set(issue.priority.to_owned()),
+        start_date: Set(None),
+        target_date: Set(None),
+        sequence_id: Set(int4(issue.sequence_id)?),
+        created_by_id: Set(Some(issue.created_by)),
+        parent_id: Set(None),
+        project_id: Set(issue.project_id),
+        state_id: Set(Some(issue.state_id)),
+        updated_by_id: Set(None),
+        workspace_id: Set(issue.workspace_id),
+        description_html: Set(issue.description_html.to_owned()),
+        description_stripped: Set(issue.description_stripped.map(str::to_owned)),
+        completed_at: Set(issue.completed_at.map(Into::into)),
+        sort_order: Set(issue.sort_order),
+        point: Set(None),
+        archived_at: Set(None),
+        is_draft: Set(false),
+        external_id: Set(None),
+        external_source: Set(None),
+        description_binary: Set(None),
+        estimate_point_id: Set(None),
+        type_id: Set(None),
+        deleted_at: Set(None),
+        git_work_branch: Set(String::new()),
+        assigned_pod_id: Set(issue.assigned_pod_id),
+        workpad: Set(String::new()),
+        created_via: Set(None),
+        agent_executor: Set(None),
+        complexity_score: Set(0),
+    })
+}
 
-/// The seed issue-row insert. Returns the new row id.
-pub async fn insert_seed_issue<'e, E>(ex: E, issue: &SeedIssue<'_>) -> Result<Uuid, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let id: Uuid = sqlx::query_scalar(SEED_ISSUE_INSERT_SQL)
-        .bind(issue.now)
-        .bind(Uuid::new_v4())
-        .bind(issue.name)
-        .bind(issue.priority)
-        .bind(issue.sequence_id)
-        .bind(issue.created_by)
-        .bind(issue.project_id)
-        .bind(issue.state_id)
-        .bind(issue.workspace_id)
-        .bind(issue.description_html)
-        .bind(issue.description_stripped)
-        .bind(issue.completed_at)
-        .bind(issue.sort_order)
-        .bind(issue.assigned_pod_id)
-        .fetch_one(ex)
-        .await?;
+/// The seed issue-row insert. Returns the new (client-generated) row id.
+pub async fn insert_seed_issue(
+    db: &impl ConnectionTrait,
+    issue: &SeedIssue<'_>,
+) -> Result<Uuid, sqlx::Error> {
+    let id = Uuid::new_v4();
+    insert_issue_row(db, seed_issue_row(id, issue)?).await?;
     Ok(id)
 }
 
@@ -2335,29 +2467,30 @@ pub struct SeedIssueSequence {
     pub now: DateTime<Utc>,
 }
 
-const SEED_ISSUE_SEQUENCE_INSERT_SQL: &str = "INSERT INTO issue_sequences \
-    (created_at, updated_at, id, sequence, deleted, created_by_id, issue_id, project_id, \
-    updated_by_id, workspace_id, deleted_at) \
-    VALUES ($1, $1, $2, $3, false, NULL, $4, $5, NULL, $6, NULL) \
-    RETURNING id";
+fn seed_sequence_row(id: Uuid, seq: &SeedIssueSequence) -> issue_sequences::ActiveModel {
+    issue_sequences::ActiveModel {
+        created_at: Set(seq.now.into()),
+        updated_at: Set(seq.now.into()),
+        id: Set(id),
+        sequence: Set(seq.sequence),
+        deleted: Set(false),
+        created_by_id: Set(None),
+        issue_id: Set(Some(seq.issue_id)),
+        project_id: Set(seq.project_id),
+        updated_by_id: Set(None),
+        workspace_id: Set(seq.workspace_id),
+        deleted_at: Set(None),
+    }
+}
 
-/// The seed sequence-row insert. Returns the new row id.
-pub async fn insert_seed_issue_sequence<'e, E>(
-    ex: E,
+/// The seed sequence-row insert. Returns the new (client-generated) row
+/// id.
+pub async fn insert_seed_issue_sequence(
+    db: &impl ConnectionTrait,
     seq: &SeedIssueSequence,
-) -> Result<Uuid, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let id: Uuid = sqlx::query_scalar(SEED_ISSUE_SEQUENCE_INSERT_SQL)
-        .bind(seq.now)
-        .bind(Uuid::new_v4())
-        .bind(seq.sequence)
-        .bind(seq.issue_id)
-        .bind(seq.project_id)
-        .bind(seq.workspace_id)
-        .fetch_one(ex)
-        .await?;
+) -> Result<Uuid, sqlx::Error> {
+    let id = Uuid::new_v4();
+    insert_sequence_row(db, seed_sequence_row(id, seq)).await?;
     Ok(id)
 }
 
@@ -2384,40 +2517,54 @@ pub struct DemoIssue<'a> {
     pub now: DateTime<Utc>,
 }
 
-const DEMO_ISSUE_INSERT_SQL: &str = "INSERT INTO issues \
-    (id, state_id, project_id, workspace_id, name, description_html, description_stripped, \
-    sequence_id, sort_order, start_date, target_date, priority, created_by_id, created_at, \
-    updated_at, description_json, is_draft, git_work_branch, workpad, complexity_score) \
-    VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10, $11, $12, \
-    $13::uuid, $14, $14, '{}', FALSE, '', '', 0) \
-    ON CONFLICT DO NOTHING";
+/// A task `::uuid` string: a malformed id fails the write before any
+/// statement runs (the old server-side cast failed the statement).
+fn demo_uuid(value: &str) -> Result<Uuid, sqlx::Error> {
+    Uuid::parse_str(value).map_err(|error| sqlx::Error::Encode(Box::new(error)))
+}
 
-/// The dummy-data issue-row insert. Generates the row id
-/// client-side (as Django does) and returns it for the sequence,
-/// activity and link legs (pushed even on conflict, as today).
-pub async fn insert_demo_issue<'e, E>(ex: E, issue: &DemoIssue<'_>) -> Result<String, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let id = Uuid::new_v4().to_string();
-    sqlx::query(DEMO_ISSUE_INSERT_SQL)
-        .bind(&id)
-        .bind(issue.state_id)
-        .bind(issue.project_id)
-        .bind(issue.workspace_id)
-        .bind(issue.name)
-        .bind(issue.description_html)
-        .bind(issue.description_stripped)
-        .bind(issue.sequence_id)
-        .bind(issue.sort_order)
-        .bind(issue.start_date)
-        .bind(issue.target_date)
-        .bind(issue.priority)
-        .bind(issue.created_by)
-        .bind(issue.now)
-        .execute(ex)
-        .await?;
-    Ok(id)
+/// The dummy-data issue row: exactly the task's columns, the rest left to
+/// the column defaults (NULL), as the old column list did.
+fn demo_issue_row(id: Uuid, issue: &DemoIssue<'_>) -> Result<issues::ActiveModel, sqlx::Error> {
+    Ok(issues::ActiveModel {
+        id: Set(id),
+        state_id: Set(Some(demo_uuid(issue.state_id)?)),
+        project_id: Set(demo_uuid(issue.project_id)?),
+        workspace_id: Set(demo_uuid(issue.workspace_id)?),
+        name: Set(issue.name.to_owned()),
+        description_html: Set(issue.description_html.to_owned()),
+        description_stripped: Set(Some(issue.description_stripped.to_owned())),
+        sequence_id: Set(issue.sequence_id),
+        sort_order: Set(issue.sort_order),
+        start_date: Set(issue.start_date),
+        target_date: Set(issue.target_date),
+        priority: Set(issue.priority.to_owned()),
+        created_by_id: Set(Some(demo_uuid(issue.created_by)?)),
+        created_at: Set(issue.now.into()),
+        updated_at: Set(issue.now.into()),
+        description_json: Set(serde_json::json!({})),
+        is_draft: Set(false),
+        git_work_branch: Set(String::new()),
+        workpad: Set(String::new()),
+        complexity_score: Set(0),
+        ..Default::default()
+    })
+}
+
+/// The dummy-data issue-row insert (`ON CONFLICT DO NOTHING`). Generates
+/// the row id client-side (as Django does) and returns it for the
+/// sequence, activity and link legs (pushed even on conflict, as today).
+pub async fn insert_demo_issue(
+    db: &impl ConnectionTrait,
+    issue: &DemoIssue<'_>,
+) -> Result<String, sqlx::Error> {
+    let id = Uuid::new_v4();
+    issues::Entity::insert(demo_issue_row(id, issue)?)
+        .on_conflict(OnConflict::new().do_nothing().to_owned())
+        .exec_without_returning(db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(id.to_string())
 }
 
 /// One dummy-data sequence row: the per-issue
@@ -2431,27 +2578,29 @@ pub struct DemoIssueSequence<'a> {
     pub now: DateTime<Utc>,
 }
 
-const DEMO_ISSUE_SEQUENCE_INSERT_SQL: &str = "INSERT INTO issue_sequences \
-    (id, issue_id, sequence, project_id, workspace_id, created_at, updated_at, deleted) \
-    VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5::uuid, $6, $6, FALSE)";
+fn demo_sequence_row(
+    id: Uuid,
+    seq: &DemoIssueSequence<'_>,
+) -> Result<issue_sequences::ActiveModel, sqlx::Error> {
+    Ok(issue_sequences::ActiveModel {
+        id: Set(id),
+        issue_id: Set(Some(demo_uuid(seq.issue_id)?)),
+        sequence: Set(seq.sequence),
+        project_id: Set(demo_uuid(seq.project_id)?),
+        workspace_id: Set(demo_uuid(seq.workspace_id)?),
+        created_at: Set(seq.now.into()),
+        updated_at: Set(seq.now.into()),
+        deleted: Set(false),
+        ..Default::default()
+    })
+}
 
 /// The dummy-data sequence-row insert.
-pub async fn insert_demo_issue_sequence<'e, E>(
-    ex: E,
+pub async fn insert_demo_issue_sequence(
+    db: &impl ConnectionTrait,
     seq: &DemoIssueSequence<'_>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(DEMO_ISSUE_SEQUENCE_INSERT_SQL)
-        .bind(Uuid::new_v4().to_string())
-        .bind(seq.issue_id)
-        .bind(seq.sequence)
-        .bind(seq.project_id)
-        .bind(seq.workspace_id)
-        .bind(seq.now)
-        .execute(ex)
-        .await?;
+) -> Result<(), sqlx::Error> {
+    insert_sequence_row(db, demo_sequence_row(Uuid::new_v4(), seq)?).await?;
     Ok(())
 }
 
@@ -2467,33 +2616,34 @@ pub struct DemoIssueAssignee<'a> {
     pub now: DateTime<Utc>,
 }
 
-const DEMO_ISSUE_ASSIGNEE_INSERT_SQL: &str = "INSERT INTO issue_assignees \
-    (id, issue_id, assignee_id, project_id, workspace_id, created_at, updated_at) \
-    VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7) \
-    ON CONFLICT DO NOTHING";
-
-/// The dummy-data assignee-row insert.
-pub async fn insert_demo_issue_assignee<'e, E>(
-    ex: E,
+fn demo_assignee_row(
+    id: Uuid,
     row: &DemoIssueAssignee<'_>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(DEMO_ISSUE_ASSIGNEE_INSERT_SQL)
-        .bind(Uuid::new_v4().to_string())
-        .bind(row.issue_id)
-        .bind(row.assignee_id)
-        .bind(row.project_id)
-        .bind(row.workspace_id)
-        .bind(row.now)
-        .bind(row.now)
-        .execute(ex)
-        .await?;
-    Ok(())
+) -> Result<issue_assignees::ActiveModel, sqlx::Error> {
+    Ok(issue_assignees::ActiveModel {
+        id: Set(id),
+        issue_id: Set(demo_uuid(row.issue_id)?),
+        assignee_id: Set(demo_uuid(row.assignee_id)?),
+        project_id: Set(demo_uuid(row.project_id)?),
+        workspace_id: Set(demo_uuid(row.workspace_id)?),
+        created_at: Set(row.now.into()),
+        updated_at: Set(row.now.into()),
+        ..Default::default()
+    })
 }
 
-const TOUCH_ISSUE_SQL: &str = "UPDATE issues SET updated_at = NOW() WHERE id = $1";
+/// The dummy-data assignee-row insert (`ON CONFLICT DO NOTHING`).
+pub async fn insert_demo_issue_assignee(
+    db: &impl ConnectionTrait,
+    row: &DemoIssueAssignee<'_>,
+) -> Result<(), sqlx::Error> {
+    issue_assignees::Entity::insert(demo_assignee_row(Uuid::new_v4(), row)?)
+        .on_conflict(OnConflict::new().do_nothing().to_owned())
+        .exec_without_returning(db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(())
+}
 
 /// The pod-delete sweep (`pods.py:262-264`):
 /// `Issue.objects.filter(assigned_pod=pod).update(assigned_pod=None)`, a
@@ -2515,32 +2665,31 @@ pub async fn clear_assigned_pod(db: &impl ConnectionTrait, pod_id: Uuid) -> Resu
 /// `issue_activities_task.py:1535-1536`): no soft-delete guard —
 /// the caller probes the live row first. Moved verbatim from the
 /// dispatcher (PIDASHCONV-1632).
-pub async fn touch_issue<'e, E>(ex: E, issue_id: Uuid) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(TOUCH_ISSUE_SQL)
-        .bind(issue_id)
-        .execute(ex)
-        .await?;
+pub async fn touch_issue(db: &impl ConnectionTrait, issue_id: Uuid) -> Result<(), sqlx::Error> {
+    issues::Entity::update_many()
+        .col_expr(issues::Column::UpdatedAt, Expr::current_timestamp().into())
+        .filter(issues::Column::Id.eq(issue_id))
+        .exec(db)
+        .await
+        .map_err(into_sqlx)?;
     Ok(())
 }
-
-const TOUCH_ISSUES_SQL: &str =
-    "UPDATE issues SET updated_at = NOW() WHERE id = ANY($1) AND deleted_at IS NULL";
 
 /// The per-record `updated_at` touches from the cycle/module
 /// builders, one statement over the soft-filtered set — same final
 /// rows as the per-record guarded saves. Moved verbatim from the
 /// dispatcher (PIDASHCONV-1632).
-pub async fn touch_issues<'e, E>(ex: E, issue_ids: &[Uuid]) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(TOUCH_ISSUES_SQL)
-        .bind(issue_ids)
-        .execute(ex)
-        .await?;
+pub async fn touch_issues(
+    db: &impl ConnectionTrait,
+    issue_ids: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    issues::Entity::update_many()
+        .col_expr(issues::Column::UpdatedAt, Expr::current_timestamp().into())
+        .filter(issues::Column::Id.is_in(issue_ids.iter().copied()))
+        .filter(issues::Column::DeletedAt.is_null())
+        .exec(db)
+        .await
+        .map_err(into_sqlx)?;
     Ok(())
 }
 
@@ -2551,28 +2700,31 @@ where
 /// `updated_by` assignments never reach the row, exactly what the field
 /// list writes. Bare columns, no hooks, no chain: the driver routes the
 /// orchestration fire itself (`reconcile_on_seam` with the tick-caused
-/// event), as today. Runs on any executor so the dispatch seam keeps the
+/// event), as today. Runs on any SeaORM connection so the dispatch seam keeps the
 /// write inside its transaction.
-pub async fn update_issue_state_no_audit<'e, E>(
-    ex: E,
+pub async fn update_issue_state_no_audit(
+    db: &impl ConnectionTrait,
     issue_id: Uuid,
     state_id: Uuid,
     updated_at: DateTime<Utc>,
-) -> Result<u64, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(TICKER_STATE_UPDATE_SQL)
-        .bind(state_id)
-        .bind(updated_at)
-        .bind(issue_id)
-        .execute(ex)
+) -> Result<u64, sqlx::Error> {
+    ticker_state_update(issue_id, state_id, updated_at)
+        .exec(db)
         .await
-        .map(|done| done.rows_affected())
+        .map(|done| done.rows_affected)
+        .map_err(into_sqlx)
 }
 
-const TICKER_STATE_UPDATE_SQL: &str =
-    "UPDATE issues SET state_id = $1, updated_at = $2 WHERE id = $3";
+fn ticker_state_update(
+    issue_id: Uuid,
+    state_id: Uuid,
+    updated_at: DateTime<Utc>,
+) -> sea_orm::UpdateMany<issues::Entity> {
+    issues::Entity::update_many()
+        .col_expr(issues::Column::StateId, Expr::value(state_id))
+        .col_expr(issues::Column::UpdatedAt, Expr::value(updated_at))
+        .filter(issues::Column::Id.eq(issue_id))
+}
 
 /// The estimate-point delete reassignment
 /// (`EstimatePointEndpoint.destroy`, `estimate/base.py:185-247`): on
@@ -2582,31 +2734,53 @@ const TICKER_STATE_UPDATE_SQL: &str =
 /// nothing matches but the emits continue). No `updated_at` touch:
 /// a plain queryset `.update()`. The activity fan-out stays
 /// caller-enqueued, as today.
-pub async fn reassign_estimate_point<'e, E>(
-    ex: E,
+pub async fn reassign_estimate_point(
+    db: &impl ConnectionTrait,
     new_point_id: Uuid,
     project_id: Uuid,
     slug: &str,
     old_point_id: Uuid,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(REASSIGN_ESTIMATE_POINT_SQL)
-        .bind(new_point_id)
-        .bind(project_id)
-        .bind(slug)
-        .bind(old_point_id)
-        .execute(ex)
+) -> Result<(), sqlx::Error> {
+    reassign_estimate_point_update(new_point_id, project_id, slug, old_point_id)
+        .exec(db)
         .await
         .map(|_| ())
+        .map_err(into_sqlx)
 }
 
-const REASSIGN_ESTIMATE_POINT_SQL: &str = "UPDATE issues SET estimate_point_id = $1 WHERE id IN (
-                     SELECT i.id FROM issues i JOIN workspaces w ON w.id = i.workspace_id
-                     WHERE i.deleted_at IS NULL AND i.project_id = $2 AND w.slug = $3
-                       AND i.estimate_point_id = $4
-                   )";
+/// The live old-point queryset (`Issue.issue_objects`-free default
+/// manager: `deleted_at IS NULL`, project + workspace slug) as an id
+/// subquery over an aliased `issues`, then the one-column UPDATE.
+fn reassign_estimate_point_update(
+    new_point_id: Uuid,
+    project_id: Uuid,
+    slug: &str,
+    old_point_id: Uuid,
+) -> sea_orm::UpdateMany<issues::Entity> {
+    let inner = Alias::new("i");
+    let ws = Alias::new("w");
+    issues::Entity::update_many()
+        .col_expr(issues::Column::EstimatePointId, Expr::value(new_point_id))
+        .filter(
+            issues::Column::Id.in_subquery(
+                Query::select()
+                    .column((inner.clone(), issues::Column::Id))
+                    .from_as(issues::Entity, inner.clone())
+                    .join_as(
+                        sea_orm::JoinType::InnerJoin,
+                        workspaces::Entity,
+                        ws.clone(),
+                        Expr::col((ws.clone(), workspaces::Column::Id))
+                            .equals((inner.clone(), issues::Column::WorkspaceId)),
+                    )
+                    .and_where(Expr::col((inner.clone(), issues::Column::DeletedAt)).is_null())
+                    .and_where(Expr::col((inner.clone(), issues::Column::ProjectId)).eq(project_id))
+                    .and_where(Expr::col((ws, workspaces::Column::Slug)).eq(slug))
+                    .and_where(Expr::col((inner, issues::Column::EstimatePointId)).eq(old_point_id))
+                    .to_owned(),
+            ),
+        )
+}
 
 /// The automation bulk writes (`bulk_update(..., batch_size=100)`):
 /// `["archived_at"]` (`issue_automation_task.py:69`) and `["state"]`
@@ -2614,41 +2788,33 @@ const REASSIGN_ESTIMATE_POINT_SQL: &str = "UPDATE issues SET estimate_point_id =
 /// never bumps `auto_now` on unlisted fields), no `save()`, no signals.
 /// The driver keeps the batch-100 chunking; the per-issue
 /// `issue_activity.delay` fan-out stays driver-enqueued, as today.
-pub async fn bulk_set_archived_at<'e, E>(
-    ex: E,
+pub async fn bulk_set_archived_at(
+    db: &impl ConnectionTrait,
     ids: &[Uuid],
     archived_at: NaiveDate,
-) -> Result<u64, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(BULK_ARCHIVE_SQL)
-        .bind(archived_at)
-        .bind(ids)
-        .execute(ex)
+) -> Result<u64, sqlx::Error> {
+    issues::Entity::update_many()
+        .col_expr(issues::Column::ArchivedAt, Expr::value(archived_at))
+        .filter(issues::Column::Id.is_in(ids.iter().copied()))
+        .exec(db)
         .await
-        .map(|done| done.rows_affected())
+        .map(|done| done.rows_affected)
+        .map_err(into_sqlx)
 }
 
-const BULK_ARCHIVE_SQL: &str = "UPDATE issues SET archived_at = $1 WHERE id = ANY($2)";
-
-pub async fn bulk_set_state<'e, E>(
-    ex: E,
+pub async fn bulk_set_state(
+    db: &impl ConnectionTrait,
     ids: &[Uuid],
     state_id: Option<Uuid>,
-) -> Result<u64, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(BULK_CLOSE_SQL)
-        .bind(state_id)
-        .bind(ids)
-        .execute(ex)
+) -> Result<u64, sqlx::Error> {
+    issues::Entity::update_many()
+        .col_expr(issues::Column::StateId, Expr::value(state_id))
+        .filter(issues::Column::Id.is_in(ids.iter().copied()))
+        .exec(db)
         .await
-        .map(|done| done.rows_affected())
+        .map(|done| done.rows_affected)
+        .map_err(into_sqlx)
 }
-
-const BULK_CLOSE_SQL: &str = "UPDATE issues SET state_id = $1 WHERE id = ANY($2)";
 
 /// One `bulk_update(writes, ["start_date", "target_date"])` row (the app
 /// bulk-dates endpoint): the issue id plus the halves this request wrote
@@ -2661,116 +2827,74 @@ pub struct BulkIssueDates {
 }
 
 /// `bulk_update(writes, ["start_date", "target_date"])`: one statement, no
-/// signals, `updated_at` untouched. Moved verbatim from the app bulk-dates
-/// driver: the CASE arms run in column order (start arms, then target
-/// arms), then the id list; a side with no arms is omitted entirely (an
-/// armless `CASE` is a syntax error). Runs on any executor so the driver
-/// keeps the write on its pool.
-pub async fn bulk_update_issue_dates<'e, E>(
-    ex: E,
+/// signals, `updated_at` untouched. Moved from the app bulk-dates driver:
+/// one `CASE` per written side (start, then target), each arm in input
+/// order, `ELSE` the stored value; a side with no arms is omitted
+/// entirely (an armless `CASE` is a syntax error). Runs on any SeaORM
+/// connection so the driver keeps the write on its pool.
+pub async fn bulk_update_issue_dates(
+    db: &impl ConnectionTrait,
     writes: &[BulkIssueDates],
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    if writes.is_empty() {
+) -> Result<(), sqlx::Error> {
+    let Some(update) = bulk_issue_dates_update(writes) else {
         return Ok(());
-    }
-    let mut ids: Vec<Uuid> = Vec::new();
-    let mut values: Vec<(Uuid, NaiveDate)> = Vec::new();
-    let mut target_values: Vec<(Uuid, NaiveDate)> = Vec::new();
-    for write in writes {
-        ids.push(write.id);
-        if let Some(date) = write.start_date {
-            values.push((write.id, date));
-        }
-        if let Some(date) = write.target_date {
-            target_values.push((write.id, date));
-        }
-    }
-    let sql = bulk_issue_dates_sql(&values, &target_values, &ids);
-    let mut query = sqlx::query(&sql);
-    for (id, date) in values.iter().chain(target_values.iter()) {
-        query = query.bind(*id).bind(*date);
-    }
-    for id in &ids {
-        query = query.bind(*id);
-    }
-    query.execute(ex).await.map(|_| ())
+    };
+    update.exec(db).await.map(|_| ()).map_err(into_sqlx)
 }
 
-/// The CASE statement for [`bulk_update_issue_dates`]: the CASE values
-/// in arm order (start arms, then target arms), then the id list. A side
-/// with no arms is omitted entirely (an armless `CASE` is a syntax
-/// error).
-fn bulk_issue_dates_sql(
-    values: &[(Uuid, NaiveDate)],
-    target_values: &[(Uuid, NaiveDate)],
-    ids: &[Uuid],
-) -> String {
-    let mut sql = String::from("UPDATE issues SET ");
-    let mut placeholder: usize = 1;
-    let mut first_set = true;
-    for (column, arms) in [("start_date", values), ("target_date", target_values)] {
-        if arms.is_empty() {
+/// The CASE UPDATE for [`bulk_update_issue_dates`]; `None` for no writes.
+fn bulk_issue_dates_update(
+    writes: &[BulkIssueDates],
+) -> Option<sea_orm::UpdateMany<issues::Entity>> {
+    if writes.is_empty() {
+        return None;
+    }
+    let mut update = issues::Entity::update_many();
+    for (column, pick) in [
+        (
+            issues::Column::StartDate,
+            (|write: &BulkIssueDates| write.start_date) as fn(&BulkIssueDates) -> Option<NaiveDate>,
+        ),
+        (issues::Column::TargetDate, |write: &BulkIssueDates| {
+            write.target_date
+        }),
+    ] {
+        let mut arms = writes
+            .iter()
+            .filter_map(|write| pick(write).map(|date| (write.id, date)));
+        let Some((first_id, first_date)) = arms.next() else {
             continue;
+        };
+        let mut case = Expr::case(issues::Column::Id.eq(first_id), Expr::value(first_date));
+        for (id, date) in arms {
+            case = case.case(issues::Column::Id.eq(id), Expr::value(date));
         }
-        if !first_set {
-            sql.push_str(", ");
-        }
-        first_set = false;
-        sql.push_str(&format!("{column} = CASE id "));
-        for _ in arms {
-            sql.push_str(&format!("WHEN ${} THEN ${} ", placeholder, placeholder + 1));
-            placeholder += 2;
-        }
-        sql.push_str(&format!("ELSE {column} END"));
+        update = update.col_expr(column, case.finally(Expr::col(column)).into());
     }
-    sql.push_str(" WHERE id IN (");
-    let mut first = true;
-    for _ in ids {
-        if !first {
-            sql.push(',');
-        }
-        first = false;
-        sql.push_str(&format!("${placeholder}"));
-        placeholder += 1;
-    }
-    sql.push(')');
-    sql
+    Some(update.filter(issues::Column::Id.is_in(writes.iter().map(|write| write.id))))
 }
 
 /// `bulk_update(sub_issues, ["parent"])` (the app sub-issues link): one
-/// statement, no signals, `updated_at` untouched. Moved verbatim from the
-/// driver: the parent binds `$1`, the linked ids `$2…`, in input order.
-pub async fn link_sub_issue_parents<'e, E>(
-    ex: E,
+/// statement, no signals, `updated_at` untouched. Moved from the driver.
+pub async fn link_sub_issue_parents(
+    db: &impl ConnectionTrait,
     parent_id: Uuid,
     found: &[Uuid],
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let sql = link_sub_issue_parents_sql(found.len());
-    let mut query = sqlx::query(&sql);
-    query = query.bind(parent_id);
-    for id in found {
-        query = query.bind(*id);
-    }
-    query.execute(ex).await.map(|_| ())
+) -> Result<(), sqlx::Error> {
+    link_sub_issue_parents_update(parent_id, found)
+        .exec(db)
+        .await
+        .map(|_| ())
+        .map_err(into_sqlx)
 }
 
-/// The link statement for [`link_sub_issue_parents`]: the parent binds
-/// `$1`, the linked ids `$2…`, in input order.
-fn link_sub_issue_parents_sql(found: usize) -> String {
-    let mut holders = Vec::with_capacity(found);
-    for index in 0..found {
-        holders.push(format!("${}", index + 2));
-    }
-    format!(
-        "UPDATE issues SET parent_id = $1 WHERE id IN ({})",
-        holders.join(",")
-    )
+fn link_sub_issue_parents_update(
+    parent_id: Uuid,
+    found: &[Uuid],
+) -> sea_orm::UpdateMany<issues::Entity> {
+    issues::Entity::update_many()
+        .col_expr(issues::Column::ParentId, Expr::value(parent_id))
+        .filter(issues::Column::Id.is_in(found.iter().copied()))
 }
 
 /// One `bulk_update(issues, scalar_fields)` row (the app bulk-operation
@@ -2787,10 +2911,6 @@ pub struct BulkIssueScalars {
     pub estimate_point_id: Option<Uuid>,
 }
 
-const BULK_ISSUE_SCALARS_SQL: &str = r#"UPDATE issues SET state_id = $1, priority = $2, start_date = $3,
-                          target_date = $4, estimate_point_id = $5, updated_at = $6
-                   WHERE id = $7"#;
-
 /// One row of `Issue.objects.bulk_update(issues, scalar_fields,
 /// batch_size=100)` (`bulk_operations.py:154-174`): the scalar UPDATE —
 /// state, priority, dates, estimate point, plus the shared `updated_at`
@@ -2798,26 +2918,37 @@ const BULK_ISSUE_SCALARS_SQL: &str = r#"UPDATE issues SET state_id = $1, priorit
 /// exactly as Django bulk paths skip signals). Moved verbatim from the
 /// app bulk-operation driver (PIDASHCONV-1711); the per-issue
 /// `issue_activity` fan-out stays driver-enqueued, as today. Runs on any
-/// executor so the driver keeps the write inside its transaction.
-pub async fn bulk_update_issue_scalars<'e, E>(
-    ex: E,
+/// SeaORM connection so the driver keeps the write inside its transaction.
+pub async fn bulk_update_issue_scalars(
+    db: &impl ConnectionTrait,
     write: &BulkIssueScalars,
     updated_at: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(BULK_ISSUE_SCALARS_SQL)
-        .bind(write.state_id)
-        .bind(write.priority.as_str())
-        .bind(write.start_date)
-        .bind(write.target_date)
-        .bind(write.estimate_point_id)
-        .bind(updated_at)
-        .bind(write.id)
-        .execute(ex)
+) -> Result<(), sqlx::Error> {
+    bulk_issue_scalars_update(write, updated_at)
+        .exec(db)
         .await
         .map(|_| ())
+        .map_err(into_sqlx)
+}
+
+fn bulk_issue_scalars_update(
+    write: &BulkIssueScalars,
+    updated_at: DateTime<Utc>,
+) -> sea_orm::UpdateMany<issues::Entity> {
+    issues::Entity::update_many()
+        .col_expr(issues::Column::StateId, Expr::value(write.state_id))
+        .col_expr(
+            issues::Column::Priority,
+            Expr::value(write.priority.as_str()),
+        )
+        .col_expr(issues::Column::StartDate, Expr::value(write.start_date))
+        .col_expr(issues::Column::TargetDate, Expr::value(write.target_date))
+        .col_expr(
+            issues::Column::EstimatePointId,
+            Expr::value(write.estimate_point_id),
+        )
+        .col_expr(issues::Column::UpdatedAt, Expr::value(updated_at))
+        .filter(issues::Column::Id.eq(write.id))
 }
 
 /// The bulk-operation assignee union (`bulk_operations.py`,
@@ -3093,10 +3224,11 @@ pub async fn bulk_archive_update(
     if ids.is_empty() {
         return Ok(());
     }
-    sqlx::query("UPDATE issues SET archived_at = $1 WHERE id = ANY($2)")
-        .bind(today)
-        .bind(ids)
-        .execute(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    issues::Entity::update_many()
+        .col_expr(issues::Column::ArchivedAt, Expr::value(today))
+        .filter(issues::Column::Id.is_in(ids.iter().copied()))
+        .exec(&db)
         .await
         .map_err(|error| DomainError::Work(format!("bulk archive failed: {error}")))?;
     Ok(())
@@ -3115,43 +3247,72 @@ pub async fn bulk_soft_delete_issues(
     if ids.is_empty() {
         return Ok(());
     }
-    let placeholders = (0..ids.len())
-        .map(|index| format!("${}", index + 2))
-        .collect::<Vec<_>>()
-        .join(", ");
-    // The issues leg reuses the `issue_objects` scope (it soft-deletes
-    // only in-scope rows; out-of-scope ids still count as misses).
-    // Comma-join, not JOIN..ON: Postgres forbids referencing the UPDATE
-    // target from a FROM-clause ON expression.
-    let project_bind = ids.len() + 2;
-    let slug_bind = ids.len() + 3;
-    let sql = format!(
-        "UPDATE issues AS issue SET deleted_at = $1 \
-         FROM projects AS project, workspaces AS workspace \
-         WHERE issue.deleted_at IS NULL AND issue.id IN ({placeholders}) \
-         AND issue.project_id = ${project_bind} AND issue.project_id = project.id \
-         AND issue.workspace_id = workspace.id AND workspace.slug = ${slug_bind} \
-         AND NOT EXISTS (SELECT 1 FROM states AS state \
-         WHERE state.id = issue.state_id AND state.deleted_at IS NULL \
-         AND state.\"group\" = 'triage') \
-         AND issue.archived_at IS NULL AND project.archived_at IS NULL \
-         AND issue.is_draft = FALSE"
-    );
-    let mut query = sqlx::query(&sql).bind(now_micros());
-    for id in ids {
-        query = query.bind(id);
-    }
-    query = query.bind(project_id).bind(slug);
-    query
-        .execute(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    bulk_soft_delete_update(ids, *project_id, slug, now_micros())
+        .exec(&db)
         .await
         .map_err(|error| DomainError::Work(format!("bulk soft-delete failed: {error}")))?;
     Ok(())
 }
 
+/// The bulk soft-delete statement: the `issue_objects` scope (it
+/// soft-deletes only in-scope rows; out-of-scope ids still count as
+/// misses) — live, in the project, in the slug's workspace, not triage
+/// (a live triage state; an issue without a state passes), not archived,
+/// the project not archived, not a draft. The project / workspace joins
+/// of the old `UPDATE … FROM` are id subqueries over the same rows.
+fn bulk_soft_delete_update(
+    ids: &[Uuid],
+    project_id: Uuid,
+    slug: &str,
+    deleted_at: DateTime<Utc>,
+) -> sea_orm::UpdateMany<issues::Entity> {
+    issues::Entity::update_many()
+        .col_expr(issues::Column::DeletedAt, Expr::value(deleted_at))
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(issues::Column::Id.is_in(ids.iter().copied()))
+        .filter(issues::Column::ProjectId.eq(project_id))
+        .filter(
+            issues::Column::ProjectId.in_subquery(
+                Query::select()
+                    .column(projects::Column::Id)
+                    .from(projects::Entity)
+                    .and_where(projects::Column::ArchivedAt.is_null())
+                    .to_owned(),
+            ),
+        )
+        .filter(
+            issues::Column::WorkspaceId.in_subquery(
+                Query::select()
+                    .column(workspaces::Column::Id)
+                    .from(workspaces::Entity)
+                    .and_where(workspaces::Column::Slug.eq(slug))
+                    .to_owned(),
+            ),
+        )
+        .filter(
+            Expr::exists(
+                Query::select()
+                    .expr(Expr::val(1))
+                    .from(states::Entity)
+                    .and_where(
+                        Expr::col((states::Entity, states::Column::Id))
+                            .equals((issues::Entity, issues::Column::StateId)),
+                    )
+                    .and_where(Expr::col((states::Entity, states::Column::DeletedAt)).is_null())
+                    .and_where(Expr::col((states::Entity, states::Column::Group)).eq("triage"))
+                    .to_owned(),
+            )
+            .not(),
+        )
+        .filter(issues::Column::ArchivedAt.is_null())
+        .filter(issues::Column::IsDraft.eq(false))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::DbBackend;
     use std::future::Future;
     use std::pin::Pin;
 
@@ -3343,122 +3504,382 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bare_update_sql_shapes() {
-        // Moved verbatim from the retired `dispatch::tools` consts: the
-        // agent-tool `QuerySet.update` / `update_fields` equivalents.
-        assert!(WORKPAD_BARE_UPDATE_SQL.contains("SET workpad = $3"));
-        assert!(WORKPAD_BARE_UPDATE_SQL.contains("project_id = $2"));
-        assert!(WORKPAD_BARE_UPDATE_SQL.contains("deleted_at IS NULL"));
-        assert!(ISSUE_STATE_BARE_UPDATE_SQL.contains("SET state_id = $2"));
-        assert!(ISSUE_STATE_BARE_UPDATE_SQL.contains("updated_by_id = $4"));
+    /// Render a SeaORM / sea-query statement with its values inlined.
+    fn render(stmt: sea_orm::Statement) -> String {
+        stmt.to_string()
+    }
+
+    fn pin_time() -> DateTime<Utc> {
+        "2026-11-05T10:00:00Z".parse().expect("pin time")
     }
 
     #[test]
-    fn sync_bare_sql_shapes() {
-        // Moved verbatim from the retired sync consts (`git_sync` /
-        // `github_sync`): the mirror INSERT both providers shared, the
-        // sequence companion row, and the two provider-shaped UPDATE
-        // arms. Full-text pins: the statements moved byte-for-byte, so
-        // the jobs parse-suite coverage carries over by construction.
+    fn workpad_and_state_update_shapes() {
+        // `orchestration/workpad.py:79-84` `update_fields` order:
+        // `updated_at` before `workpad`; `None` writes `''`.
+        let issue = uid(1);
         assert_eq!(
-            MIRROR_ISSUE_INSERT_SQL,
-            "INSERT INTO issues (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, workpad, created_via, assigned_pod_id, agent_executor) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, NULL, $8, NULL, NULL, $9, $10, $11, $12, NULL, 'none', 0, NULL, NULL, $13, $14, $15, NULL, FALSE, $16, $17, NULL, '', '', NULL, $18, NULL)"
+            render(workpad_save_update(issue, None, pin_time()).build(DbBackend::Postgres)),
+            format!(
+                r#"UPDATE "issues" SET "updated_at" = '2026-11-05 10:00:00.000000 +00:00', "workpad" = '' WHERE "issues"."id" = '{issue}'"#
+            )
         );
-        assert!(MIRROR_ISSUE_INSERT_SQL.contains("sequence_id"));
-        assert!(MIRROR_ISSUE_INSERT_SQL.contains("sort_order"));
-        assert!(MIRROR_ISSUE_INSERT_SQL.contains("assigned_pod_id"));
-        assert!(MIRROR_ISSUE_INSERT_SQL.contains("'none', 0"));
+        // The ticker save writes state + `updated_at` only (no audit).
         assert_eq!(
-            MIRROR_ISSUE_SEQUENCE_INSERT_SQL,
-            "INSERT INTO issue_sequences (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, sequence, deleted) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, FALSE)"
+            render(ticker_state_update(issue, uid(2), pin_time()).build(DbBackend::Postgres)),
+            format!(
+                r#"UPDATE "issues" SET "state_id" = '{}', "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "issues"."id" = '{issue}'"#,
+                uid(2)
+            )
         );
+    }
+
+    #[test]
+    fn sync_rows_and_update_shapes() {
+        // The mirror INSERT: every column, the fixed literals of the old
+        // statement (`'none'`, `0`, `FALSE`, `''`, `{}`), the actor on
+        // both audit columns.
+        let insert = MirrorIssueInsert {
+            issue_id: uid(1),
+            now: pin_time(),
+            actor_id: uid(2),
+            project_id: uid(3),
+            workspace_id: uid(4),
+            state_id: None,
+            name: "n".to_owned(),
+            description_html: "<p>h</p>".to_owned(),
+            description_stripped: "h".to_owned(),
+            sequence_id: 7,
+            sort_order: 65535.0,
+            completed_at: None,
+            external_source: "github".to_owned(),
+            external_id: "42".to_owned(),
+            pod_id: Some(uid(5)),
+        };
+        let row = mirror_issue_row(&insert).expect("row");
+        assert_eq!(row.priority, Set("none".to_owned()));
+        assert_eq!(row.complexity_score, Set(0));
+        assert_eq!(row.created_by_id, Set(Some(uid(2))));
+        assert_eq!(row.updated_by_id, Set(Some(uid(2))));
+        assert_eq!(row.description_json, Set(serde_json::json!({})));
+        assert_eq!(row.sequence_id, Set(7));
+        assert_eq!(row.assigned_pod_id, Set(Some(uid(5))));
+        assert_eq!(row.git_work_branch, Set(String::new()));
+        assert_eq!(row.is_draft, Set(false));
+        assert!(mirror_issue_row(&MirrorIssueInsert {
+            sequence_id: i64::from(i32::MAX) + 1,
+            ..insert
+        })
+        .is_err());
+        let seq = mirror_sequence_row(&MirrorIssueSequence {
+            project_id: uid(3),
+            workspace_id: uid(4),
+            issue_id: uid(1),
+            sequence: 7,
+            now: pin_time(),
+        });
+        assert_eq!(seq.created_by_id, Set(None));
+        assert_eq!(seq.updated_by_id, Set(None));
+        assert_eq!(seq.deleted, Set(false));
         // Git arm: no state/sequence/sort touch, `updated_at` carried.
-        assert_eq!(
-            GIT_MIRROR_UPDATE_SQL,
-            "UPDATE issues SET name = $2, description_html = $3, description_stripped = $4, description_json = $5, workspace_id = $6, created_by_id = $7, updated_by_id = $8, external_source = $9, external_id = $10, updated_at = $11 WHERE id = $1"
-        );
-        assert!(!GIT_MIRROR_UPDATE_SQL.contains("state_id"));
-        assert!(!GIT_MIRROR_UPDATE_SQL.contains("sequence_id"));
-        assert!(!GIT_MIRROR_UPDATE_SQL.contains("sort_order"));
-        // Github arm: the audit restamp collapses onto one bind.
-        assert_eq!(
-            GITHUB_MIRROR_UPDATE_SQL,
-            "UPDATE issues SET name = $2, description_html = $3, description_stripped = $4, description_json = $5, created_by_id = $6, updated_by_id = $6, completed_at = $7, updated_at = $8 WHERE id = $1"
-        );
-        assert!(GITHUB_MIRROR_UPDATE_SQL.contains("created_by_id = $6"));
-    }
-
-    #[test]
-    fn tool_bare_sql_shapes() {
-        // Moved verbatim from the retired `PgToolStore` literals: the
-        // tool create's issue row (impersonated `created_by`, `updated_by`
-        // NULL, the tool's `created_via`) plus its sequence companion
-        // row (actor-bound `created_by`, unlike the mirror's NULL pair).
-        // Full-text pins: the statements moved byte-for-byte.
-        assert_eq!(
-            TOOL_ISSUE_INSERT_SQL,
-            "INSERT INTO issues (id, created_at, updated_at, deleted_at, point, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, git_work_branch, workpad, created_via, agent_executor, created_by_id, updated_by_id, project_id, workspace_id, parent_id, state_id, estimate_point_id, type_id, assigned_pod_id) VALUES ($1, $2, $3, NULL, NULL, $4, $5, $6, $7, NULL, $8, 0, NULL, NULL, $9, $10, $11, NULL, FALSE, NULL, NULL, '', '', $12, NULL, $13, NULL, $14, $15, $16, $17, NULL, NULL, $18)"
+        let git = render(
+            git_mirror_update(&GitMirrorIssueUpdate {
+                issue_id: uid(1),
+                name: "n".to_owned(),
+                description_html: "h".to_owned(),
+                description_stripped: "s".to_owned(),
+                workspace_id: uid(4),
+                actor_id: uid(2),
+                external_source: "gitlab".to_owned(),
+                external_id: "9".to_owned(),
+                now: pin_time(),
+            })
+            .build(DbBackend::Postgres),
         );
         assert_eq!(
-            TOOL_ISSUE_SEQUENCE_INSERT_SQL,
-            "INSERT INTO issue_sequences (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, sequence, deleted) VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, FALSE)"
+            git,
+            format!(
+                r#"UPDATE "issues" SET "name" = 'n', "description_html" = 'h', "description_stripped" = 's', "description_json" = '{{}}', "workspace_id" = '{}', "created_by_id" = '{}', "updated_by_id" = '{}', "external_source" = 'gitlab', "external_id" = '9', "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "issues"."id" = '{}'"#,
+                uid(4),
+                uid(2),
+                uid(2),
+                uid(1)
+            )
         );
-    }
-
-    #[test]
-    fn ticker_and_automation_bare_sql_shapes() {
-        // Moved verbatim from the retired `orchestration::dispatch`
-        // ticker const and the `automation` bulk consts.
-        assert_eq!(
-            TICKER_STATE_UPDATE_SQL,
-            "UPDATE issues SET state_id = $1, updated_at = $2 WHERE id = $3"
-        );
-        assert!(!TICKER_STATE_UPDATE_SQL.contains("updated_by_id"));
-        // Bulk writes touch exactly one column each.
-        assert_eq!(
-            BULK_ARCHIVE_SQL,
-            "UPDATE issues SET archived_at = $1 WHERE id = ANY($2)"
+        // Github arm: the audit restamp on both columns, completed carried.
+        let github = render(
+            github_mirror_update(&GithubMirrorIssueUpdate {
+                issue_id: uid(1),
+                name: "n".to_owned(),
+                description_html: "h".to_owned(),
+                description_stripped: "s".to_owned(),
+                actor_id: uid(2),
+                completed_at: None,
+                now: pin_time(),
+            })
+            .build(DbBackend::Postgres),
         );
         assert_eq!(
-            BULK_CLOSE_SQL,
-            "UPDATE issues SET state_id = $1 WHERE id = ANY($2)"
-        );
-        assert_eq!(
-            REASSIGN_ESTIMATE_POINT_SQL,
-            "UPDATE issues SET estimate_point_id = $1 WHERE id IN (\n                     SELECT i.id FROM issues i JOIN workspaces w ON w.id = i.workspace_id\n                     WHERE i.deleted_at IS NULL AND i.project_id = $2 AND w.slug = $3\n                       AND i.estimate_point_id = $4\n                   )"
+            github,
+            format!(
+                r#"UPDATE "issues" SET "name" = 'n', "description_html" = 'h', "description_stripped" = 's', "description_json" = '{{}}', "created_by_id" = '{}', "updated_by_id" = '{}', "completed_at" = NULL, "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "issues"."id" = '{}'"#,
+                uid(2),
+                uid(2),
+                uid(1)
+            )
         );
     }
 
     #[test]
-    fn app_bulk_writes_sql_shapes() {
-        // Moved verbatim from the retired app bulk drivers: the
-        // bulk-dates CASE (`apply_bulk_dates`) and the sub-issues
-        // parent link (`link_sub_issues`). Full-text pins: the
-        // statements moved byte-for-byte.
-        let id = Uuid::from_u128(11);
-        let other = Uuid::from_u128(12);
+    fn tool_rows_and_update_shapes() {
+        // The tool create: impersonated `created_by`, `updated_by` NULL,
+        // the tool's `created_via`, the `''` model defaults.
+        let row = tool_issue_row(&ToolIssueInsert {
+            issue_id: uid(1),
+            now: pin_time(),
+            name: "n",
+            description_html: "",
+            description_stripped: None,
+            priority: "high",
+            sequence_id: 3,
+            sort_order: 1.0,
+            completed_at: None,
+            created_via: "assistant",
+            created_by: uid(2),
+            project_id: uid(3),
+            workspace_id: uid(4),
+            parent_id: None,
+            state_id: Some(uid(5)),
+            pod_id: None,
+        })
+        .expect("row");
+        assert_eq!(row.created_by_id, Set(Some(uid(2))));
+        assert_eq!(row.updated_by_id, Set(None));
+        assert_eq!(row.created_via, Set(Some("assistant".to_owned())));
+        assert_eq!(row.external_source, Set(None));
+        assert_eq!(row.description_stripped, Set(None));
+        let seq = tool_sequence_row(&ToolIssueSequence {
+            project_id: uid(3),
+            workspace_id: uid(4),
+            issue_id: uid(1),
+            sequence: 3,
+            created_by: uid(2),
+            now: pin_time(),
+        });
+        assert_eq!(seq.created_by_id, Set(Some(uid(2))));
+        assert_eq!(seq.updated_by_id, Set(None));
+        // The tool save: only the touched arms, then the audit pair.
+        let only_audit = ToolIssueUpdate {
+            issue_id: uid(1),
+            name: None,
+            description_html: None,
+            priority: None,
+            state_given: false,
+            state_id: None,
+            parent_touched: false,
+            parent_id: None,
+            updated_by_id: uid(2),
+            now: pin_time(),
+        };
+        assert_eq!(
+            render(tool_issue_update(&only_audit).build(DbBackend::Postgres)),
+            format!(
+                r#"UPDATE "issues" SET "updated_at" = '2026-11-05 10:00:00.000000 +00:00', "updated_by_id" = '{}' WHERE "issues"."id" = '{}'"#,
+                uid(2),
+                uid(1)
+            )
+        );
+        let every_arm = ToolIssueUpdate {
+            name: Some("n"),
+            description_html: Some("<p>d</p>"),
+            priority: Some("low"),
+            state_given: true,
+            state_id: None,
+            parent_touched: true,
+            parent_id: Some(uid(6)),
+            ..only_audit
+        };
+        assert_eq!(
+            render(tool_issue_update(&every_arm).build(DbBackend::Postgres)),
+            format!(
+                r#"UPDATE "issues" SET "name" = 'n', "description_html" = '<p>d</p>', "description_json" = '{{}}', "priority" = 'low', "state_id" = NULL, "parent_id" = '{}', "updated_at" = '2026-11-05 10:00:00.000000 +00:00', "updated_by_id" = '{}' WHERE "issues"."id" = '{}'"#,
+                uid(6),
+                uid(2),
+                uid(1)
+            )
+        );
+    }
+
+    #[test]
+    fn estimate_and_bulk_update_shapes() {
+        assert_eq!(
+            render(
+                reassign_estimate_point_update(uid(1), uid(2), "ws", uid(3))
+                    .build(DbBackend::Postgres)
+            ),
+            format!(
+                r#"UPDATE "issues" SET "estimate_point_id" = '{}' WHERE "issues"."id" IN (SELECT "i"."id" FROM "issues" AS "i" INNER JOIN "workspaces" AS "w" ON "w"."id" = "i"."workspace_id" WHERE "i"."deleted_at" IS NULL AND "i"."project_id" = '{}' AND "w"."slug" = 'ws' AND "i"."estimate_point_id" = '{}')"#,
+                uid(1),
+                uid(2),
+                uid(3)
+            )
+        );
         let date = NaiveDate::from_ymd_opt(2026, 10, 1).expect("date");
+        let start_only = [BulkIssueDates {
+            id: uid(11),
+            start_date: Some(date),
+            target_date: None,
+        }];
         assert_eq!(
-            bulk_issue_dates_sql(&[(id, date)], &[], &[id]),
-            "UPDATE issues SET start_date = CASE id WHEN $1 THEN $2 ELSE start_date END WHERE id IN ($3)"
+            render(
+                bulk_issue_dates_update(&start_only)
+                    .expect("writes")
+                    .build(DbBackend::Postgres)
+            ),
+            format!(
+                r#"UPDATE "issues" SET "start_date" = (CASE WHEN ("issues"."id" = '{0}') THEN '2026-10-01' ELSE "start_date" END) WHERE "issues"."id" IN ('{0}')"#,
+                uid(11)
+            )
         );
-        // Target-only: the start side is omitted, placeholders restart
-        // at the target arms.
+        // Both sides: start arms, then target arms, then the id list; a
+        // write with no date on a side contributes no arm there.
+        let both = [
+            BulkIssueDates {
+                id: uid(11),
+                start_date: Some(date),
+                target_date: None,
+            },
+            BulkIssueDates {
+                id: uid(12),
+                start_date: None,
+                target_date: Some(date),
+            },
+        ];
         assert_eq!(
-            bulk_issue_dates_sql(&[], &[(other, date)], &[other]),
-            "UPDATE issues SET target_date = CASE id WHEN $1 THEN $2 ELSE target_date END WHERE id IN ($3)"
+            render(
+                bulk_issue_dates_update(&both)
+                    .expect("writes")
+                    .build(DbBackend::Postgres)
+            ),
+            format!(
+                r#"UPDATE "issues" SET "start_date" = (CASE WHEN ("issues"."id" = '{0}') THEN '2026-10-01' ELSE "start_date" END), "target_date" = (CASE WHEN ("issues"."id" = '{1}') THEN '2026-10-01' ELSE "target_date" END) WHERE "issues"."id" IN ('{0}', '{1}')"#,
+                uid(11),
+                uid(12)
+            )
         );
-        // Both sides: start arms, then target arms, then the id list.
+        assert!(bulk_issue_dates_update(&[]).is_none());
         assert_eq!(
-            bulk_issue_dates_sql(&[(id, date)], &[(other, date)], &[id, other]),
-            "UPDATE issues SET start_date = CASE id WHEN $1 THEN $2 ELSE start_date END, target_date = CASE id WHEN $3 THEN $4 ELSE target_date END WHERE id IN ($5,$6)"
+            render(
+                link_sub_issue_parents_update(uid(1), &[uid(2), uid(3)]).build(DbBackend::Postgres)
+            ),
+            format!(
+                r#"UPDATE "issues" SET "parent_id" = '{}' WHERE "issues"."id" IN ('{}', '{}')"#,
+                uid(1),
+                uid(2),
+                uid(3)
+            )
         );
-        // The parent binds $1, the linked ids $2… in input order.
         assert_eq!(
-            link_sub_issue_parents_sql(2),
-            "UPDATE issues SET parent_id = $1 WHERE id IN ($2,$3)"
+            render(
+                bulk_issue_scalars_update(
+                    &BulkIssueScalars {
+                        id: uid(1),
+                        state_id: None,
+                        priority: "high".to_owned(),
+                        start_date: None,
+                        target_date: Some(date),
+                        estimate_point_id: None,
+                    },
+                    pin_time()
+                )
+                .build(DbBackend::Postgres)
+            ),
+            format!(
+                r#"UPDATE "issues" SET "state_id" = NULL, "priority" = 'high', "start_date" = NULL, "target_date" = '2026-10-01', "estimate_point_id" = NULL, "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "issues"."id" = '{}'"#,
+                uid(1)
+            )
         );
+    }
+
+    #[test]
+    fn bulk_soft_delete_and_workpad_select_shapes() {
+        assert_eq!(
+            render(
+                bulk_soft_delete_update(&[uid(1)], uid(2), "ws", pin_time())
+                    .build(DbBackend::Postgres)
+            ),
+            format!(
+                r#"UPDATE "issues" SET "deleted_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "issues"."deleted_at" IS NULL AND "issues"."id" IN ('{}') AND "issues"."project_id" = '{}' AND "issues"."project_id" IN (SELECT "id" FROM "projects" WHERE "projects"."archived_at" IS NULL) AND "issues"."workspace_id" IN (SELECT "id" FROM "workspaces" WHERE "workspaces"."slug" = 'ws') AND (NOT EXISTS(SELECT 1 FROM "states" WHERE "states"."id" = "issues"."state_id" AND "states"."deleted_at" IS NULL AND "states"."group" = 'triage')) AND "issues"."archived_at" IS NULL AND "issues"."is_draft" = FALSE"#,
+                uid(1),
+                uid(2)
+            )
+        );
+        assert_eq!(
+            render(DbBackend::Postgres.build(&workpad_select(uid(1), uid(2), "ws"))),
+            format!(
+                r#"SELECT "issues"."description_html", "issues"."state_id", "issues"."completed_at", "states"."group" AS "state_group" FROM "issues" LEFT JOIN "states" ON "issues"."state_id" = "states"."id" INNER JOIN "projects" ON "issues"."project_id" = "projects"."id" INNER JOIN "workspaces" ON "issues"."workspace_id" = "workspaces"."id" WHERE "issues"."deleted_at" IS NULL AND (NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)) AND "issues"."archived_at" IS NULL AND "projects"."archived_at" IS NULL AND (NOT "issues"."is_draft") AND "issues"."id" = '{}' AND "issues"."project_id" = '{}' AND "workspaces"."slug" = 'ws' LIMIT 21 FOR UPDATE OF "issues""#,
+                uid(1),
+                uid(2)
+            )
+        );
+    }
+
+    #[test]
+    fn chain_leg_statement_shapes() {
+        // The v1 create second save: `created_at` + `created_by` only.
+        assert_eq!(
+            render(
+                created_override_update(uid(1), Some(pin_time()), None).build(DbBackend::Postgres)
+            ),
+            format!(
+                r#"UPDATE "issues" SET "created_at" = '2026-11-05 10:00:00.000000 +00:00', "created_by_id" = NULL WHERE "issues"."id" = '{}'"#,
+                uid(1)
+            )
+        );
+        assert_eq!(
+            render(recent_visit_delete(uid(1), "ws", uid(2)).build(DbBackend::Postgres)),
+            format!(
+                r#"DELETE FROM "user_recent_visits" WHERE "user_recent_visits"."workspace_id" IN (SELECT "id" FROM "workspaces" WHERE "workspaces"."slug" = 'ws') AND "user_recent_visits"."project_id" = '{}' AND "user_recent_visits"."entity_identifier" = '{}' AND "user_recent_visits"."entity_name" = 'issue'"#,
+                uid(1),
+                uid(2)
+            )
+        );
+        assert_eq!(
+            render(DbBackend::Postgres.build(&default_assignee_member_select(uid(1), uid(2)))),
+            format!(
+                r#"SELECT "project_members"."id" FROM "project_members" WHERE "project_members"."member_id" = '{}' AND "project_members"."project_id" = '{}' AND "project_members"."role" >= 15 AND "project_members"."is_active" = TRUE AND "project_members"."deleted_at" IS NULL LIMIT 1"#,
+                uid(1),
+                uid(2)
+            )
+        );
+        let scope = M2mScope {
+            issue_id: uid(1),
+            project_id: uid(2),
+            workspace_id: uid(3),
+            created_by_id: Some(uid(4)),
+            updated_by_id: None,
+        };
+        let plain = render(DbBackend::Postgres.build(&m2m_insert_statement(
+            M2mTable::Labels,
+            &[uid(5), uid(6)],
+            scope,
+            false,
+        )));
+        assert!(plain.starts_with(r#"INSERT INTO "issue_labels" ("created_at", "updated_at", "id", "created_by_id", "issue_id", "label_id", "project_id", "updated_by_id", "workspace_id", "deleted_at") VALUES ("#), "{plain}");
+        assert_eq!(plain.matches("), (").count(), 1, "two rows: {plain}");
+        assert!(!plain.contains("ON CONFLICT"), "{plain}");
+        let ignoring = render(DbBackend::Postgres.build(&m2m_insert_statement(
+            M2mTable::Assignees,
+            &[uid(5)],
+            scope,
+            true,
+        )));
+        assert!(
+            ignoring.starts_with(r#"INSERT INTO "issue_assignees" ("#),
+            "{ignoring}"
+        );
+        assert!(ignoring.contains(r#""id", "assignee_id", "#), "{ignoring}");
+        assert!(ignoring.ends_with(" ON CONFLICT  DO NOTHING"), "{ignoring}");
     }
 
     #[test]
@@ -4496,16 +4917,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn created_override_sql_is_the_ported_update() {
-        // The v1 create second save, moved verbatim — the guard fails on
-        // drift, this test fails on silent reshaping.
-        assert_eq!(
-            CREATED_OVERRIDE_SQL,
-            r#"UPDATE "issues" SET "created_at" = $1, "created_by_id" = $2 WHERE "id" = $3"#
-        );
-    }
-
     /// End-to-end through `domain::run` with recording hooks: a workpad
     /// write on a live issue lands the text + audit + hook recomputes with
     /// no completion leg, a NULL-state write takes the default state and
@@ -4853,7 +5264,7 @@ mod tests {
         let t0 = now_micros();
         let issue_id = Uuid::new_v4();
         let rows = insert_mirror_issue(
-            &pool,
+            &pidash_db::pool::sea_orm_connection(&pool),
             &MirrorIssueInsert {
                 issue_id,
                 now: t0,
@@ -4909,7 +5320,7 @@ mod tests {
         assert_eq!(stamps, (t0, t0));
 
         let rows = insert_issue_sequence(
-            &pool,
+            &pidash_db::pool::sea_orm_connection(&pool),
             &MirrorIssueSequence {
                 project_id,
                 workspace_id,
@@ -4934,7 +5345,7 @@ mod tests {
         // Github arm: render triple + completed + auto_now; state kept.
         let t1 = now_micros();
         let rows = update_github_mirror_issue(
-            &pool,
+            &pidash_db::pool::sea_orm_connection(&pool),
             &GithubMirrorIssueUpdate {
                 issue_id,
                 name: "gh-name".to_owned(),
@@ -4971,7 +5382,7 @@ mod tests {
         // Git arm: absolute values, stripped passed through, state kept.
         let t2 = now_micros();
         let rows = update_git_mirror_issue(
-            &pool,
+            &pidash_db::pool::sea_orm_connection(&pool),
             &GitMirrorIssueUpdate {
                 issue_id,
                 name: "git-name".to_owned(),
@@ -5008,9 +5419,14 @@ mod tests {
 
         // Ticker move: state + `updated_at` only; audit untouched.
         let t3 = now_micros();
-        let rows = update_issue_state_no_audit(&pool, issue_id, backlog_id, t3)
-            .await
-            .expect("ticker move");
+        let rows = update_issue_state_no_audit(
+            &pidash_db::pool::sea_orm_connection(&pool),
+            issue_id,
+            backlog_id,
+            t3,
+        )
+        .await
+        .expect("ticker move");
         assert_eq!(rows, 1);
         let moved: (Option<Uuid>, DateTime<Utc>, Option<Uuid>) =
             sqlx::query_as("SELECT state_id, updated_at, updated_by_id FROM issues WHERE id = $1")
@@ -5022,13 +5438,21 @@ mod tests {
 
         // Automation bulks: one column each, NULL close included.
         let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 2).expect("bulk day");
-        let rows = bulk_set_archived_at(&pool, &[issue_id], day)
-            .await
-            .expect("bulk archive");
+        let rows = bulk_set_archived_at(
+            &pidash_db::pool::sea_orm_connection(&pool),
+            &[issue_id],
+            day,
+        )
+        .await
+        .expect("bulk archive");
         assert_eq!(rows, 1);
-        let rows = bulk_set_state(&pool, &[issue_id], None)
-            .await
-            .expect("bulk close null");
+        let rows = bulk_set_state(
+            &pidash_db::pool::sea_orm_connection(&pool),
+            &[issue_id],
+            None,
+        )
+        .await
+        .expect("bulk close null");
         assert_eq!(rows, 1);
         let bulked: (Option<NaiveDate>, Option<Uuid>) =
             sqlx::query_as("SELECT archived_at, state_id FROM issues WHERE id = $1")
@@ -5071,31 +5495,26 @@ mod tests {
             .expect("cleanup user");
     }
 
-    #[test]
-    fn repair_fix_updates_pin_single_column() {
-        // Moved with the consts from `pidash_db::ops::repair`
-        // (PIDASHCONV-1630); assertions verbatim.
-        assert!(!UPDATE_ISSUE_SEQUENCE_ID_SQL.contains("updated_at"));
-        assert!(!UPDATE_SEQUENCE_SQL.contains("updated_at"));
-    }
-
     static WORKPAD_FIXTURE: &str =
         include_str!("../../../../fixtures/orchestration/fx02_reads/workpad.golden.json");
 
     #[test]
-    fn workpad_save_sql_sets_both_update_fields() {
-        // Moved with the const from `pidash_db::orchestration::workpad`
-        // (PIDASHCONV-1630); assertions verbatim.
+    fn workpad_save_update_sets_both_update_fields() {
+        // The fixture's `update_fields` order (`updated_at`, then
+        // `workpad`) on the built statement.
         let parsed: Value = serde_json::from_str(WORKPAD_FIXTURE).expect("fixture parses");
         let rendered = parsed["set_update_sql"][0]
             .as_str()
             .expect("set_update_sql");
         assert!(rendered.starts_with("UPDATE \"issues\" SET \"updated_at\" = "));
         assert!(rendered.contains(", \"workpad\" = "));
-        assert_eq!(
-            WORKPAD_SAVE_UPDATE_SQL,
-            "UPDATE issues SET updated_at = $1, workpad = $2 WHERE id = $3"
+        let built =
+            render(workpad_save_update(uid(1), Some("w"), pin_time()).build(DbBackend::Postgres));
+        assert!(
+            built.starts_with("UPDATE \"issues\" SET \"updated_at\" = "),
+            "{built}"
         );
+        assert!(built.contains(", \"workpad\" = 'w'"), "{built}");
     }
 
     const WORKPAD_ISSUES_DDL: &str = "CREATE TEMPORARY TABLE issues (
@@ -5134,7 +5553,7 @@ mod tests {
         assert_eq!(fetch_workpad(&mut *tx, issue).await.expect("get fresh"), "");
         let now: chrono::DateTime<chrono::Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
         update_workpad_save(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             issue,
             Some("## Agent Workpad\n\n- implementing\n"),
             now,
@@ -5154,21 +5573,31 @@ mod tests {
                 .try_get("updated_at")
                 .expect("updated_at");
         assert_eq!(stamp, now);
-        update_workpad_save(&mut *tx, issue, Some("second"), now)
-            .await
-            .expect("overwrite");
+        update_workpad_save(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            issue,
+            Some("second"),
+            now,
+        )
+        .await
+        .expect("overwrite");
         assert_eq!(
             fetch_workpad(&mut *tx, issue).await.expect("get overwrite"),
             "second"
         );
-        update_workpad_save(&mut *tx, issue, Some(""), now)
-            .await
-            .expect("clear");
+        update_workpad_save(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            issue,
+            Some(""),
+            now,
+        )
+        .await
+        .expect("clear");
         assert_eq!(
             fetch_workpad(&mut *tx, issue).await.expect("get cleared"),
             ""
         );
-        update_workpad_save(&mut *tx, issue, None, now)
+        update_workpad_save(&pidash_db::orm_tx::TxConn::new(&mut tx), issue, None, now)
             .await
             .expect("set none");
         assert_eq!(fetch_workpad(&mut *tx, issue).await.expect("get none"), "");
@@ -5184,5 +5613,770 @@ mod tests {
             fetch_workpad(&mut *tx, live_workpad_uuid("000000009999")).await,
             Err(sqlx::Error::RowNotFound)
         ));
+    }
+
+    /// A one-connection pool whose session temp copies (no constraints)
+    /// shadow the `public` tables the SeaORM writes below touch; `None`
+    /// without `DATABASE_URL`.
+    async fn temp_table_pool() -> Option<PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return None;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        for table in [
+            "issues",
+            "issue_sequences",
+            "issue_assignees",
+            "issue_labels",
+            "states",
+            "projects",
+            "workspaces",
+            "project_members",
+            "user_recent_visits",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        Some(pool)
+    }
+
+    /// Live: the bare-column issue / sequence / assignee writes on temp
+    /// tables — tool, seed and demo rows, the dynamic tool save, the
+    /// touches, the workpad/state saves, the estimate reassign (spanning
+    /// subquery), the bulk CASE dates, the parent link, the scalars, the
+    /// automation bulks, the repair plan, the bulk archive and the scoped
+    /// bulk soft delete.
+    #[tokio::test]
+    async fn live_bare_issue_writes() {
+        let Some(pool) = temp_table_pool().await else {
+            return;
+        };
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let (ws, project, actor, state) = (uid(901), uid(902), uid(903), uid(904));
+        sqlx::query("INSERT INTO workspaces (id, slug) VALUES ($1, 'live-ws'), ($2, 'other-ws')")
+            .bind(ws)
+            .bind(uid(905))
+            .execute(&pool)
+            .await
+            .expect("seed workspaces");
+        sqlx::query("INSERT INTO projects (id, archived_at) VALUES ($1, NULL)")
+            .bind(project)
+            .execute(&pool)
+            .await
+            .expect("seed project");
+        let now = now_micros();
+
+        // Tool create + sequence row, then the dynamic save.
+        let tool = uid(1);
+        let rows = insert_tool_issue(
+            &db,
+            &ToolIssueInsert {
+                issue_id: tool,
+                now,
+                name: "tool",
+                description_html: "<p>t</p>",
+                description_stripped: Some("t"),
+                priority: "high",
+                sequence_id: 5,
+                sort_order: 65535.0,
+                completed_at: None,
+                created_via: "assistant",
+                created_by: actor,
+                project_id: project,
+                workspace_id: ws,
+                parent_id: None,
+                state_id: Some(state),
+                pod_id: None,
+            },
+        )
+        .await
+        .expect("tool insert");
+        assert_eq!(rows, 1);
+        let rows = insert_tool_issue_sequence(
+            &db,
+            &ToolIssueSequence {
+                project_id: project,
+                workspace_id: ws,
+                issue_id: tool,
+                sequence: 5,
+                created_by: actor,
+                now,
+            },
+        )
+        .await
+        .expect("tool sequence");
+        assert_eq!(rows, 1);
+        let seq: (i64, Option<Uuid>, Option<Uuid>, bool) = sqlx::query_as(
+            "SELECT sequence, created_by_id, updated_by_id, deleted FROM issue_sequences \
+             WHERE issue_id = $1",
+        )
+        .bind(tool)
+        .fetch_one(&pool)
+        .await
+        .expect("tool sequence reread");
+        assert_eq!(seq, (5, Some(actor), None, false));
+        let later = now + chrono::Duration::seconds(5);
+        let rows = update_tool_issue(
+            &db,
+            &ToolIssueUpdate {
+                issue_id: tool,
+                name: Some("renamed"),
+                description_html: None,
+                priority: None,
+                state_given: true,
+                state_id: None,
+                parent_touched: false,
+                parent_id: None,
+                updated_by_id: actor,
+                now: later,
+            },
+        )
+        .await
+        .expect("tool update");
+        assert_eq!(rows, 1);
+        type ToolRow = (
+            String,
+            String,
+            Option<Uuid>,
+            Option<Uuid>,
+            Option<String>,
+            i32,
+            DateTime<Utc>,
+            Option<Uuid>,
+        );
+        let row: ToolRow = sqlx::query_as(
+            "SELECT name, priority, state_id, created_by_id, created_via, sequence_id, \
+             updated_at, updated_by_id FROM issues WHERE id = $1",
+        )
+        .bind(tool)
+        .fetch_one(&pool)
+        .await
+        .expect("tool reread");
+        assert_eq!(
+            row,
+            (
+                "renamed".to_owned(),
+                "high".to_owned(),
+                None,
+                Some(actor),
+                Some("assistant".to_owned()),
+                5,
+                later,
+                Some(actor),
+            )
+        );
+
+        // Seed issue + sequence: client ids returned.
+        let seed = insert_seed_issue(
+            &db,
+            &SeedIssue {
+                workspace_id: ws,
+                project_id: project,
+                state_id: state,
+                created_by: actor,
+                name: "seed",
+                description_html: "<p>s</p>",
+                description_stripped: None,
+                priority: "none",
+                sequence_id: 6,
+                sort_order: 1.0,
+                completed_at: Some(now),
+                assigned_pod_id: None,
+                now,
+            },
+        )
+        .await
+        .expect("seed insert");
+        let seeded: (String, Option<Uuid>, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT name, updated_by_id, completed_at FROM issues WHERE id = $1")
+                .bind(seed)
+                .fetch_one(&pool)
+                .await
+                .expect("seed reread");
+        assert_eq!(seeded, ("seed".to_owned(), None, Some(now)));
+        let seed_seq = insert_seed_issue_sequence(
+            &db,
+            &SeedIssueSequence {
+                issue_id: seed,
+                project_id: project,
+                workspace_id: ws,
+                sequence: 6,
+                now,
+            },
+        )
+        .await
+        .expect("seed sequence");
+        let seq: (Option<Uuid>, i64) =
+            sqlx::query_as("SELECT issue_id, sequence FROM issue_sequences WHERE id = $1")
+                .bind(seed_seq)
+                .fetch_one(&pool)
+                .await
+                .expect("seed sequence reread");
+        assert_eq!(seq, (Some(seed), 6));
+
+        // Demo rows from `::uuid` strings; a malformed id fails up front.
+        let (ws_s, project_s, actor_s, state_s) = (
+            ws.to_string(),
+            project.to_string(),
+            actor.to_string(),
+            state.to_string(),
+        );
+        let demo = DemoIssue {
+            state_id: &state_s,
+            project_id: &project_s,
+            workspace_id: &ws_s,
+            created_by: &actor_s,
+            name: "demo",
+            description_html: "<p>d</p>",
+            description_stripped: "d",
+            sequence_id: 7,
+            sort_order: 2.0,
+            start_date: None,
+            target_date: None,
+            priority: "low",
+            now,
+        };
+        let demo_id = insert_demo_issue(&db, &demo).await.expect("demo insert");
+        let demo_uuid = Uuid::parse_str(&demo_id).expect("demo id");
+        let demo_row: (String, i32, Option<Uuid>) =
+            sqlx::query_as("SELECT name, sequence_id, created_by_id FROM issues WHERE id = $1")
+                .bind(demo_uuid)
+                .fetch_one(&pool)
+                .await
+                .expect("demo reread");
+        assert_eq!(demo_row, ("demo".to_owned(), 7, Some(actor)));
+        assert!(matches!(
+            insert_demo_issue(
+                &db,
+                &DemoIssue {
+                    state_id: "not-a-uuid",
+                    ..demo
+                }
+            )
+            .await,
+            Err(sqlx::Error::Encode(_))
+        ));
+        insert_demo_issue_sequence(
+            &db,
+            &DemoIssueSequence {
+                issue_id: &demo_id,
+                project_id: &project_s,
+                workspace_id: &ws_s,
+                sequence: 7,
+                now,
+            },
+        )
+        .await
+        .expect("demo sequence");
+        insert_demo_issue_assignee(
+            &db,
+            &DemoIssueAssignee {
+                issue_id: &demo_id,
+                assignee_id: &actor_s,
+                project_id: &project_s,
+                workspace_id: &ws_s,
+                now,
+            },
+        )
+        .await
+        .expect("demo assignee");
+        let demo_links: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM issue_sequences WHERE issue_id = $1), \
+             (SELECT count(*) FROM issue_assignees WHERE issue_id = $1 AND assignee_id = $2)",
+        )
+        .bind(demo_uuid)
+        .bind(actor)
+        .fetch_one(&pool)
+        .await
+        .expect("demo links");
+        assert_eq!(demo_links, (1, 1));
+
+        // Workpad + agent-tool state saves (bare columns).
+        assert_eq!(
+            update_workpad(&db, tool, project, "pad", later)
+                .await
+                .expect("workpad"),
+            1
+        );
+        assert_eq!(
+            update_workpad(&db, tool, uid(999), "pad", later)
+                .await
+                .expect("workpad other project"),
+            0
+        );
+        assert_eq!(
+            update_issue_state(&db, tool, state, later, uid(906))
+                .await
+                .expect("state save"),
+            1
+        );
+        let pad: (String, Option<Uuid>, Option<Uuid>) =
+            sqlx::query_as("SELECT workpad, state_id, updated_by_id FROM issues WHERE id = $1")
+                .bind(tool)
+                .fetch_one(&pool)
+                .await
+                .expect("workpad reread");
+        assert_eq!(pad, ("pad".to_owned(), Some(state), Some(uid(906))));
+
+        // Touches: the bare touch ignores soft-delete, the set touch
+        // honors it.
+        sqlx::query("UPDATE issues SET updated_at = $1")
+            .bind(now)
+            .execute(&pool)
+            .await
+            .expect("reset stamps");
+        sqlx::query("UPDATE issues SET deleted_at = $1 WHERE id = $2")
+            .bind(now)
+            .bind(seed)
+            .execute(&pool)
+            .await
+            .expect("soft delete seed");
+        touch_issues(&db, &[tool, seed]).await.expect("touch set");
+        let touched: Vec<(Uuid,)> =
+            sqlx::query_as("SELECT id FROM issues WHERE updated_at > $1 ORDER BY id")
+                .bind(now)
+                .fetch_all(&pool)
+                .await
+                .expect("touched");
+        assert_eq!(touched, vec![(tool,)]);
+        touch_issue(&db, seed).await.expect("touch one");
+        let seed_touched: (bool,) =
+            sqlx::query_as("SELECT updated_at > $1 FROM issues WHERE id = $2")
+                .bind(now)
+                .bind(seed)
+                .fetch_one(&pool)
+                .await
+                .expect("seed touched");
+        assert_eq!(seed_touched, (true,));
+        sqlx::query("UPDATE issues SET deleted_at = NULL WHERE id = $1")
+            .bind(seed)
+            .execute(&pool)
+            .await
+            .expect("restore seed");
+
+        // Estimate reassign: only the live issues in the project + slug
+        // on the old point move; `updated_at` untouched.
+        let (old_point, new_point) = (uid(910), uid(911));
+        sqlx::query("UPDATE issues SET estimate_point_id = $1, updated_at = $2")
+            .bind(old_point)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .expect("set old point");
+        sqlx::query("UPDATE issues SET deleted_at = $1 WHERE id = $2")
+            .bind(now)
+            .bind(demo_uuid)
+            .execute(&pool)
+            .await
+            .expect("soft delete demo");
+        reassign_estimate_point(&db, new_point, project, "other-ws", old_point)
+            .await
+            .expect("reassign wrong slug");
+        reassign_estimate_point(&db, new_point, project, "live-ws", old_point)
+            .await
+            .expect("reassign");
+        let points: Vec<(Uuid, Option<Uuid>, DateTime<Utc>)> =
+            sqlx::query_as("SELECT id, estimate_point_id, updated_at FROM issues ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .expect("points");
+        for (id, point, stamp) in &points {
+            let expected = if *id == demo_uuid {
+                old_point
+            } else {
+                new_point
+            };
+            assert_eq!((*point, *stamp), (Some(expected), now), "{id}");
+        }
+        sqlx::query("UPDATE issues SET deleted_at = NULL WHERE id = $1")
+            .bind(demo_uuid)
+            .execute(&pool)
+            .await
+            .expect("restore demo");
+
+        // Bulk CASE dates: per-side arms, untouched sides kept.
+        let (d1, d2) = (
+            NaiveDate::from_ymd_opt(2026, 1, 1).expect("d1"),
+            NaiveDate::from_ymd_opt(2026, 2, 2).expect("d2"),
+        );
+        sqlx::query("UPDATE issues SET start_date = $1, target_date = $1")
+            .bind(d2)
+            .execute(&pool)
+            .await
+            .expect("preset dates");
+        bulk_update_issue_dates(
+            &db,
+            &[
+                BulkIssueDates {
+                    id: tool,
+                    start_date: Some(d1),
+                    target_date: None,
+                },
+                BulkIssueDates {
+                    id: seed,
+                    start_date: None,
+                    target_date: Some(d1),
+                },
+            ],
+        )
+        .await
+        .expect("bulk dates");
+        bulk_update_issue_dates(&db, &[]).await.expect("no writes");
+        let dates: Vec<(Uuid, Option<NaiveDate>, Option<NaiveDate>)> = sqlx::query_as(
+            "SELECT id, start_date, target_date FROM issues WHERE id IN ($1, $2, $3) ORDER BY id",
+        )
+        .bind(tool)
+        .bind(seed)
+        .bind(demo_uuid)
+        .fetch_all(&pool)
+        .await
+        .expect("dates");
+        for (id, start, target) in dates {
+            let expected = if id == tool {
+                (Some(d1), Some(d2))
+            } else if id == seed {
+                (Some(d2), Some(d1))
+            } else {
+                (Some(d2), Some(d2))
+            };
+            assert_eq!((start, target), expected, "{id}");
+        }
+
+        // Parent link + scalars + automation bulks.
+        link_sub_issue_parents(&db, tool, &[seed, demo_uuid])
+            .await
+            .expect("link");
+        bulk_update_issue_scalars(
+            &db,
+            &BulkIssueScalars {
+                id: seed,
+                state_id: None,
+                priority: "urgent".to_owned(),
+                start_date: None,
+                target_date: Some(d1),
+                estimate_point_id: None,
+            },
+            later,
+        )
+        .await
+        .expect("scalars");
+        type ScalarRow = (
+            Option<Uuid>,
+            Option<Uuid>,
+            String,
+            Option<NaiveDate>,
+            Option<Uuid>,
+            DateTime<Utc>,
+        );
+        let scalar: ScalarRow = sqlx::query_as(
+            "SELECT parent_id, state_id, priority, start_date, estimate_point_id, updated_at \
+             FROM issues WHERE id = $1",
+        )
+        .bind(seed)
+        .fetch_one(&pool)
+        .await
+        .expect("scalar reread");
+        assert_eq!(
+            scalar,
+            (Some(tool), None, "urgent".to_owned(), None, None, later)
+        );
+
+        // Repair plan: single-column renumbers on both tables.
+        apply_fix_plan(&db, &[(tool, 50)], &[(seed_seq, 60)])
+            .await
+            .expect("fix plan");
+        let renumbered: (i32, i64) = sqlx::query_as(
+            "SELECT (SELECT sequence_id FROM issues WHERE id = $1), \
+             (SELECT sequence FROM issue_sequences WHERE id = $2)",
+        )
+        .bind(tool)
+        .bind(seed_seq)
+        .fetch_one(&pool)
+        .await
+        .expect("renumbered");
+        assert_eq!(renumbered, (50, 60));
+
+        // Bulk archive (pool-based).
+        let today = NaiveDate::from_ymd_opt(2026, 11, 5).expect("today");
+        bulk_archive_update(&pool, &[demo_uuid], today)
+            .await
+            .expect("bulk archive");
+        bulk_archive_update(&pool, &[], today)
+            .await
+            .expect("bulk archive empty");
+        let archived: (Option<NaiveDate>,) =
+            sqlx::query_as("SELECT archived_at FROM issues WHERE id = $1")
+                .bind(demo_uuid)
+                .fetch_one(&pool)
+                .await
+                .expect("archived reread");
+        assert_eq!(archived, (Some(today),));
+
+        // Bulk soft delete: triage (live state), archived, draft, other
+        // slug and archived-project rows are out of scope; a stateless
+        // issue and a deleted triage state pass.
+        let (triage, dead_triage) = (uid(920), uid(921));
+        sqlx::query(
+            "INSERT INTO states (id, \"group\", deleted_at) VALUES ($1, 'triage', NULL), \
+             ($2, 'triage', $3)",
+        )
+        .bind(triage)
+        .bind(dead_triage)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("seed states");
+        let scoped = [uid(30), uid(31), uid(32), uid(33), uid(34)];
+        for (id, state_id, is_draft) in [
+            (scoped[0], None, false),
+            (scoped[1], Some(triage), false),
+            (scoped[2], Some(dead_triage), false),
+            (scoped[3], None, true),
+            (scoped[4], Some(state), false),
+        ] {
+            sqlx::query(
+                "INSERT INTO issues (id, project_id, workspace_id, state_id, is_draft) \
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(id)
+            .bind(project)
+            .bind(ws)
+            .bind(state_id)
+            .bind(is_draft)
+            .execute(&pool)
+            .await
+            .expect("seed scoped issue");
+        }
+        bulk_soft_delete_issues(&pool, &scoped, &project, "other-ws")
+            .await
+            .expect("soft delete wrong slug");
+        bulk_soft_delete_issues(&pool, &scoped, &project, "live-ws")
+            .await
+            .expect("soft delete");
+        let deleted: Vec<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM issues WHERE id = ANY($1) AND deleted_at IS NOT NULL ORDER BY id",
+        )
+        .bind(&scoped[..])
+        .fetch_all(&pool)
+        .await
+        .expect("deleted");
+        assert_eq!(deleted, vec![(scoped[0],), (scoped[2],), (scoped[4],)]);
+        sqlx::query("UPDATE projects SET archived_at = now()")
+            .execute(&pool)
+            .await
+            .expect("archive project");
+        sqlx::query("UPDATE issues SET deleted_at = NULL")
+            .execute(&pool)
+            .await
+            .expect("undelete");
+        bulk_soft_delete_issues(&pool, &scoped, &project, "live-ws")
+            .await
+            .expect("soft delete archived project");
+        let none: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM issues WHERE deleted_at IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .expect("none deleted");
+        assert_eq!(none, (0,));
+    }
+
+    /// Live: the chain legs on temp tables — the m2m batches (an
+    /// integrity violation swallows the rest), the update leg's soft
+    /// clear + ignore-conflicts re-insert, the default-assignee gate, the
+    /// created override and the recent-visit delete — plus the workpad
+    /// lock read's scope.
+    #[tokio::test]
+    async fn live_chain_leg_writes() {
+        let Some(pool) = temp_table_pool().await else {
+            return;
+        };
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        sqlx::query("CREATE UNIQUE INDEX ON issue_labels (issue_id, label_id)")
+            .execute(&pool)
+            .await
+            .expect("label unique");
+        let (issue, project, ws, actor) = (uid(1), uid(2), uid(3), uid(4));
+        let scope = M2mScope {
+            issue_id: issue,
+            project_id: project,
+            workspace_id: ws,
+            created_by_id: Some(actor),
+            updated_by_id: None,
+        };
+        // 12 labels = two batches; the second repeats a first-batch id,
+        // so it violates and is swallowed (first batch kept).
+        let mut labels: Vec<Uuid> = (100..111).map(uid).collect();
+        labels.push(uid(100));
+        write_m2m_batches(&db, M2mTable::Labels, &labels, scope, false)
+            .await
+            .expect("swallowed");
+        let count = |sql: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_as::<_, (i64,)>(sql)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("count")
+                    .0
+            }
+        };
+        assert_eq!(count("SELECT count(*) FROM issue_labels").await, 10);
+        assert_eq!(
+            count("SELECT count(*) FROM issue_labels WHERE created_by_id IS NOT NULL AND updated_by_id IS NULL AND deleted_at IS NULL").await,
+            10
+        );
+        // The update leg: soft-clear the live links, then re-insert with
+        // ON CONFLICT DO NOTHING (the unique index keeps the old rows).
+        update_m2m_leg(&db, M2mTable::Labels, &[uid(100), uid(200)], scope)
+            .await
+            .expect("update leg");
+        assert_eq!(
+            count("SELECT count(*) FROM issue_labels WHERE deleted_at IS NOT NULL").await,
+            10
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM issue_labels WHERE deleted_at IS NULL").await,
+            1
+        );
+        // Default assignee: no qualifying member, no row; then a member.
+        let member = uid(5);
+        write_default_assignee(&db, member, scope)
+            .await
+            .expect("no member");
+        assert_eq!(count("SELECT count(*) FROM issue_assignees").await, 0);
+        sqlx::query(
+            "INSERT INTO project_members (id, member_id, project_id, role, is_active) \
+             VALUES ($1, $2, $3, 10, true), ($4, $2, $3, 20, true)",
+        )
+        .bind(uid(6))
+        .bind(member)
+        .bind(project)
+        .bind(uid(7))
+        .execute(&pool)
+        .await
+        .expect("seed members");
+        write_default_assignee(&db, member, scope)
+            .await
+            .expect("member");
+        let assignee: (Uuid, Option<Uuid>, Option<Uuid>) =
+            sqlx::query_as("SELECT assignee_id, created_by_id, updated_by_id FROM issue_assignees")
+                .fetch_one(&pool)
+                .await
+                .expect("assignee");
+        assert_eq!(assignee, (member, Some(actor), None));
+        update_m2m_leg(&db, M2mTable::Assignees, &[], scope)
+            .await
+            .expect("assignee clear");
+        assert_eq!(
+            count("SELECT count(*) FROM issue_assignees WHERE deleted_at IS NULL").await,
+            0
+        );
+
+        // Created override: two columns only.
+        let stamp = now_micros();
+        sqlx::query(
+            "INSERT INTO issues (id, project_id, workspace_id, updated_at, is_draft) \
+             VALUES ($1, $2, $3, $4, false)",
+        )
+        .bind(issue)
+        .bind(project)
+        .bind(ws)
+        .bind(stamp)
+        .execute(&pool)
+        .await
+        .expect("seed issue");
+        let created = stamp - chrono::Duration::days(1);
+        created_override_update(issue, Some(created), Some(actor))
+            .exec(&db)
+            .await
+            .expect("override");
+        let over: (DateTime<Utc>, Option<Uuid>, DateTime<Utc>) =
+            sqlx::query_as("SELECT created_at, created_by_id, updated_at FROM issues")
+                .fetch_one(&pool)
+                .await
+                .expect("override reread");
+        assert_eq!(over, (created, Some(actor), stamp));
+
+        // Recent visits: only the slug's workspace, the project, the
+        // issue and `entity_name = 'issue'` rows go.
+        sqlx::query("INSERT INTO workspaces (id, slug) VALUES ($1, 'live-ws'), ($2, 'other')")
+            .bind(ws)
+            .bind(uid(8))
+            .execute(&pool)
+            .await
+            .expect("seed workspaces");
+        for (id, workspace, name) in [
+            (uid(40), ws, "issue"),
+            (uid(41), ws, "page"),
+            (uid(42), uid(8), "issue"),
+        ] {
+            sqlx::query(
+                "INSERT INTO user_recent_visits (id, workspace_id, project_id, \
+                 entity_identifier, entity_name) VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(id)
+            .bind(workspace)
+            .bind(project)
+            .bind(issue)
+            .bind(name)
+            .execute(&pool)
+            .await
+            .expect("seed visit");
+        }
+        let gone = recent_visit_delete(project, "live-ws", issue)
+            .exec(&db)
+            .await
+            .expect("visit delete");
+        assert_eq!(gone.rows_affected, 1);
+        assert_eq!(count("SELECT count(*) FROM user_recent_visits").await, 2);
+
+        // Workpad lock read: LEFT state join (stateless issue matches),
+        // a triage state or an archived project 404s.
+        sqlx::query("INSERT INTO projects (id, archived_at) VALUES ($1, NULL)")
+            .bind(project)
+            .execute(&pool)
+            .await
+            .expect("seed project");
+        let read = |slug: &'static str| {
+            let db = db.clone();
+            async move {
+                db.query_one(DbBackend::Postgres.build(&workpad_select(issue, project, slug)))
+                    .await
+                    .expect("workpad read")
+                    .is_some()
+            }
+        };
+        assert!(read("live-ws").await);
+        assert!(!read("other").await);
+        sqlx::query("INSERT INTO states (id, \"group\") VALUES ($1, 'triage')")
+            .bind(uid(9))
+            .execute(&pool)
+            .await
+            .expect("seed triage");
+        sqlx::query("UPDATE issues SET state_id = $1")
+            .bind(uid(9))
+            .execute(&pool)
+            .await
+            .expect("to triage");
+        assert!(!read("live-ws").await);
+        sqlx::query("UPDATE states SET \"group\" = 'started'")
+            .execute(&pool)
+            .await
+            .expect("to started");
+        assert!(read("live-ws").await);
+        sqlx::query("UPDATE projects SET archived_at = now()")
+            .execute(&pool)
+            .await
+            .expect("archive project");
+        assert!(!read("live-ws").await);
     }
 }

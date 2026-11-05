@@ -1518,7 +1518,7 @@ impl ToolStore for PgToolStore {
         };
         let issue_id = Uuid::new_v4();
         issue_domain::insert_tool_issue(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             &issue_domain::ToolIssueInsert {
                 issue_id,
                 now: *now,
@@ -1540,7 +1540,7 @@ impl ToolStore for PgToolStore {
         )
         .await?;
         issue_domain::insert_tool_issue_sequence(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             &issue_domain::ToolIssueSequence {
                 project_id: input.project_id,
                 workspace_id: input.workspace_id,
@@ -1642,7 +1642,7 @@ impl ToolStore for PgToolStore {
         // exactly the tool's columns (the write itself lives in
         // `domain::issues`, on this same fused transaction).
         issue_domain::update_tool_issue(
-            &mut **tx.inner(),
+            &pidash_db::orm_tx::TxConn::new(tx.inner()),
             &issue_domain::ToolIssueUpdate {
                 issue_id: *issue_id,
                 name: patch.name.as_deref(),

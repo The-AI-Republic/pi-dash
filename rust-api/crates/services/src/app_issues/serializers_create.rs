@@ -1371,14 +1371,6 @@ pub fn m2m_insert_sql(
     sql
 }
 
-/// Label twin of the assignee clear
-/// ([`ASSIGNEE_CLEAR_SQL`](crate::domain::issues::ASSIGNEE_CLEAR_SQL),
-/// `:496`): the assignee statement moved to domain/ (PIDASHCONV-1630)
-/// — `issue_assignees` is a covered table, `issue_labels` is not.
-/// Params: `$1` deletion timestamp, `$2` issue id (uuid).
-pub const LABEL_CLEAR_SQL: &str =
-    "UPDATE issue_labels SET deleted_at = $1 WHERE issue_id = $2 AND deleted_at IS NULL";
-
 /// The create default-assignee fallback (`:420-441`): when the validated
 /// (post-filter) assignee list is `None` or empty AND
 /// `context["default_assignee_id"]` is `Some` AND that member passes
@@ -1418,11 +1410,10 @@ pub const CREATE_CONTRACT: &str = "context keys, issue row (models), assignee ba
 
 /// `update()` (`:464-518`) execution contract: (1) when `assignee_ids` is
 /// present (even `[]`):
-/// [`ASSIGNEE_CLEAR_SQL`](crate::domain::issues::ASSIGNEE_CLEAR_SQL),
-/// then [`m2m_batches`] inserts
-/// via [`m2m_insert_sql`] WITH `ignore_conflicts`, `IntegrityError`
-/// swallowed; absent key leaves rows untouched; (2) same for `label_ids`
-/// with [`LABEL_CLEAR_SQL`]; (3) `instance.updated_at = now()` runs BEFORE
+/// the live links are soft-cleared (the domain m2m leg,
+/// `crate::domain::issues`), then [`m2m_batches`] inserts WITH
+/// `ignore_conflicts`, `IntegrityError` swallowed; absent key leaves rows
+/// untouched; (2) same for `label_ids`; (3) `instance.updated_at = now()` runs BEFORE
 /// the issue-row `UPDATE` even when only m2m keys changed (`:517-518`) —
 /// the row write always carries a fresh `updated_at`.
 pub const UPDATE_CONTRACT: &str = "per present m2m key: soft-clear then ignore-conflicts batches (swallowed); updated_at bumped before the issue UPDATE even for m2m-only writes";
@@ -1430,7 +1421,6 @@ pub const UPDATE_CONTRACT: &str = "per present m2m key: soft-clear then ignore-c
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::issues::ASSIGNEE_CLEAR_SQL;
     use serde_json::Value;
     use std::cell::Cell;
     use std::rc::Rc;
@@ -2917,21 +2907,6 @@ mod tests {
         assert!(
             DEFAULT_ASSIGNEE_EXISTS_SQL.contains("is_active"),
             "{DEFAULT_ASSIGNEE_EXISTS_SQL}"
-        );
-        // Update clears are soft deletes scoped to live rows.
-        for sql in [ASSIGNEE_CLEAR_SQL, LABEL_CLEAR_SQL] {
-            assert!(sql.starts_with("UPDATE "), "{sql}");
-            assert!(sql.contains("SET deleted_at = $1"), "{sql}");
-            assert!(sql.contains("deleted_at IS NULL"), "{sql}");
-            assert!(!sql.contains("updated_at"), "auto_now untouched: {sql}");
-        }
-        assert!(
-            ASSIGNEE_CLEAR_SQL.contains("issue_assignees"),
-            "{ASSIGNEE_CLEAR_SQL}"
-        );
-        assert!(
-            LABEL_CLEAR_SQL.contains("issue_labels"),
-            "{LABEL_CLEAR_SQL}"
         );
         // Assignee/label filters: guards, order, IN-list forms.
         let member_sql = assignee_member_filter_sql(2);

@@ -2908,7 +2908,11 @@ async fn point_destroy(
                 _ => return Err(Denial::BadValidation),
             };
             pidash_services::domain::issues::reassign_estimate_point(
-                &pool, new_uuid, project_id, &slug, point_id,
+                &pidash_db::pool::sea_orm_connection(&pool),
+                new_uuid,
+                project_id,
+                &slug,
+                point_id,
             )
             .await
             .map_err(db_denial)?;

@@ -1151,7 +1151,7 @@ async fn apply_bulk_operation(
     if !issues.is_empty() {
         for issue in issues {
             bulk_update_issue_scalars(
-                &mut *txn,
+                &pidash_db::orm_tx::TxConn::new(&mut txn),
                 &BulkIssueScalars {
                     id: issue.id,
                     state_id: properties.state_id.unwrap_or(issue.state_id),

@@ -1076,7 +1076,7 @@ async fn op_update_current_issue_workpad(
             });
         };
         let _ = domain_issues::update_workpad(
-            &mut **tx.inner(),
+            &pidash_db::orm_tx::TxConn::new(tx.inner()),
             work_item_id,
             issue.project_id,
             body,
@@ -2055,7 +2055,7 @@ async fn op_transition_current_issue<'a>(
     // today. Inside the audit transaction, under the row lock above (a
     // separate domain transaction would deadlock against it).
     if let Err(error) = domain_issues::update_issue_state(
-        &mut **tx.inner(),
+        &pidash_db::orm_tx::TxConn::new(tx.inner()),
         issue_id,
         target_id,
         now,

@@ -216,7 +216,6 @@ crates/services/src/dispatch/execution.rs 7
 crates/services/src/domain/assistant.rs 21
 crates/services/src/domain/comments.rs 24
 crates/services/src/domain/identity.rs 43
-crates/services/src/domain/issues.rs 35
 crates/services/src/domain/issues_move.rs 3
 crates/services/src/domain/issues_move_creation.rs 4
 crates/services/src/domain/projects.rs 66
@@ -226,7 +225,6 @@ crates/services/src/operations/comments.rs 3
 crates/services/src/operations/issues.rs 18
 crates/services/src/operations/pull_requests.rs 1
 crates/services/src/operations/relations.rs 6
-crates/services/src/operations/workpad.rs 1
 crates/services/src/ops/boot.rs 1
 crates/services/src/read/comment.rs 5
 crates/services/src/read/identity.rs 3

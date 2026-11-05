@@ -279,7 +279,6 @@ mod tests {
         assert!(stored.pending_entry);
         assert_eq!(stored.used, 0, "Update never writes `used`");
         assert_eq!(stored.updated_at.with_timezone(&Utc), later);
-        drop(conn);
         tx.rollback().await.expect("rollback");
     }
 }

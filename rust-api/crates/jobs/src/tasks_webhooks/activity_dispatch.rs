@@ -1725,7 +1725,7 @@ async fn persist(
         // (`activity_issue::CycleOutcome::touched_issue_ids`): one statement
         // over the soft-filtered set — same final rows as the per-record
         // guarded saves.
-        touch_issues(pool, &touched)
+        touch_issues(&pidash_db::pool::sea_orm_connection(pool), &touched)
             .await
             .map_err(|error| DispatchError::Log(format!("record touches: {error}")))?;
     }
@@ -1798,7 +1798,7 @@ pub async fn run_activity<R: RedisOrigin>(
             .is_some();
         if found {
             // Own try/except-pass: touch failures never abort the build.
-            let _ = touch_issue(pool, touch_id).await;
+            let _ = touch_issue(&pidash_db::pool::sea_orm_connection(pool), touch_id).await;
         }
     }
     let collected = collect_rows(pool, &frame, call, project_id).await?;
