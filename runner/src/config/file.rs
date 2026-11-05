@@ -46,9 +46,12 @@ pub fn load_config(paths: &Paths) -> Result<Config> {
     // §4.3) are filled in here, so every reader sees the same `[cli]` it
     // would with `credentials_store = "file"`.
     if let Err(e) = super::secrets::hydrate(paths, &mut cfg) {
+        // The unread items are recorded on `cfg.auth`, so a later write of
+        // this config is refused instead of dropping them.
         tracing::warn!(
             "the OS keychain holding the Pi Dash credentials is not answering ({e}); \
-             continuing signed out"
+             continuing without those credentials, and config writes are refused \
+             until it answers"
         );
     }
     Ok(cfg)

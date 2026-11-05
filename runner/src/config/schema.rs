@@ -88,11 +88,19 @@ pub struct AuthSection {
     /// signed-out workspace can be deleted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keyring_items: Vec<String>,
+    /// In memory only: the keychain items that [`crate::config::secrets::hydrate`]
+    /// could not read when this config was loaded. While it is not empty
+    /// the config is missing secrets that are still in the keychain, so
+    /// writing it is refused (it would drop or delete them).
+    #[serde(skip)]
+    pub unread_keyring_items: Vec<String>,
 }
 
 impl AuthSection {
     pub fn is_default(&self) -> bool {
-        self == &Self::default()
+        self.credentials_store == CredentialsStoreMode::default()
+            && self.secrets_in.is_none()
+            && self.keyring_items.is_empty()
     }
 
     /// Whether the `[cli]` secrets are in the keychain rather than this file.
