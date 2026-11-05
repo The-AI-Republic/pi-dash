@@ -109,6 +109,18 @@ impl ConnectionTrait for TxConn<'_> {
     }
 }
 
+/// Django's `IntegrityError` for a SeaORM failure: the wrapped sqlx error
+/// is a SQLSTATE class 23 violation (unique, foreign key, not null, check),
+/// as [`pidash_compat::db::is_integrity_error`] decides for sqlx errors.
+pub fn is_integrity_violation(error: &DbErr) -> bool {
+    match error {
+        DbErr::Exec(RuntimeErr::SqlxError(inner)) | DbErr::Query(RuntimeErr::SqlxError(inner)) => {
+            pidash_compat::db::is_integrity_error(inner)
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
