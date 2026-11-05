@@ -127,9 +127,25 @@ Writes to the design §4 tables go through `pidash_services::domain`
 `delete_many()` with a filter.
 
 **Transactions:** a SeaORM transaction cannot adopt an `sqlx::Transaction`,
-and sqlx cannot join a SeaORM one (`.ai_design/rust_orm/design.md`). Migrate a transaction's whole
-body together, or keep it on one side. Never split one transaction across
-the two.
+and sqlx cannot join a SeaORM one (`.ai_design/rust_orm/design.md`). Never
+split one transaction across the two. Code that already holds an
+`sqlx::Transaction` (row locks, shared kernels taking `&mut tx`) keeps it
+and runs SeaORM-built statements on it through `pidash_db::orm_tx`:
+
+```rust
+let runner: Option<runner::Model> =
+    orm_tx::fetch_optional(&mut *tx, &runner::Entity::find_by_id(id).lock_exclusive().into_query()).await?;
+orm_tx::execute(&mut *tx, &runner::Entity::update_many()
+    .col_expr(runner::Column::RevokedAt, Expr::value(now))
+    .filter(runner::Column::Id.eq(id))
+    .into_query()).await?;
+```
+
+Rows decode by name through `FromQueryResult` (entity `Model`s or
+`#[derive(FromQueryResult)]` structs); `orm_tx` holds the only `raw-sql:`
+reasons this needs, so call sites count as migrated. Move a whole
+transaction onto a SeaORM `DatabaseTransaction` instead only when every
+statement in it, and every kernel it is passed to, moves too.
 
 ## 4. Output parity
 
