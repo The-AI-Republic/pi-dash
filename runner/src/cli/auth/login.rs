@@ -102,7 +102,10 @@ struct TokenSuccess {
     /// built-in engine (design §4.3).
     #[serde(default)]
     engine_credential: Option<IssuedEngineCredential>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::engine::api::lenient_sign_in_state"
+    )]
     engine_sign_in_state: Option<EngineSignInState>,
     // The server also returns `workspace_slug` here (the workspace the
     // approve step auto-picked), but the CLI deliberately ignores it
@@ -119,7 +122,10 @@ struct MachineTokenResponse {
     /// token rather than with the device token.
     #[serde(default)]
     engine_credential: Option<IssuedEngineCredential>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::engine::api::lenient_sign_in_state"
+    )]
     engine_sign_in_state: Option<EngineSignInState>,
 }
 
@@ -129,6 +135,16 @@ struct TokenError {
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
+    // Signing in replaces keychain items the keychain can never return:
+    // the ones this sign-in stores a new value for. Other credentials'
+    // broken items are kept as they are.
+    use crate::config::secrets::{ForgetScope, ITEM_ENGINE_CREDENTIAL, forget_unreadable};
+    let scope = if args.engine {
+        vec![ITEM_ENGINE_CREDENTIAL.to_string()]
+    } else {
+        Vec::new()
+    };
+    let _forget = forget_unreadable(paths, ForgetScope::Items(scope));
     if args.engine {
         return engine_login(&args, paths).await;
     }
@@ -140,6 +156,10 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
 }
 
 pub async fn run_auth_only(args: Args, paths: &Paths) -> Result<()> {
+    let _forget = crate::config::secrets::forget_unreadable(
+        paths,
+        crate::config::secrets::ForgetScope::Items(Vec::new()),
+    );
     login_and_bind_workspace(&args, paths).await.map(|_| ())
 }
 
@@ -235,6 +255,15 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         &host_label,
     )
     .await?;
+    // This workspace's own item is replaced (or, when it becomes the
+    // default, superseded) by this write, so a broken copy of it may go.
+    let _forget_own = crate::config::secrets::forget_unreadable(
+        paths,
+        crate::config::secrets::ForgetScope::Items(crate::config::secrets::ForgetScope::workspace(
+            &machine_token.workspace_slug,
+            false,
+        )),
+    );
     let cfg = runner_ops::store_workspace_token(
         paths,
         &cloud_url,
@@ -402,11 +431,17 @@ pub(crate) async fn poll_engine_grant(
     interval: Duration,
     within: Duration,
 ) -> Result<crate::engine::api::EngineGrantResponse> {
+    use crate::engine::api::GrantPoll;
     let deadline = std::time::Instant::now() + within;
+    let mut interval = interval;
     loop {
         match api.redeem_engine_grant(device_code, machine_token).await {
-            Ok(Some(granted)) => return Ok(granted),
-            Ok(None) => {}
+            Ok(GrantPoll::Granted(granted)) => return Ok(granted),
+            Ok(GrantPoll::Pending) => {}
+            // RFC 8628 §3.5: add 5 seconds to the interval.
+            Ok(GrantPoll::SlowDown) => {
+                interval = (interval + Duration::from_secs(5)).min(Duration::from_secs(30));
+            }
             Err(e) => match e.reason_code() {
                 Some("expired_token") => {
                     anyhow::bail!(
@@ -544,8 +579,13 @@ async fn poll_for_token(
         let body_text = resp.text().await.unwrap_or_default();
 
         if status.is_success() {
-            return serde_json::from_str::<TokenSuccess>(&body_text)
-                .with_context(|| format!("parsing device-code token response: {body_text}"));
+            // Not quoting the body: it holds the access token.
+            return serde_json::from_str::<TokenSuccess>(&body_text).map_err(|e| {
+                anyhow::anyhow!(
+                    "parsing device-code token response: {}",
+                    crate::engine::api::unparsable(&e)
+                )
+            });
         }
 
         // Parse the RFC 8628 error code. Anything we don't recognise is
@@ -713,9 +753,22 @@ async fn exchange_for_machine_token(
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("machine-token exchange failed: HTTP {status}: {body}");
     }
-    resp.json::<MachineTokenResponse>()
+    // Read as text and parse here: serde's own message can quote a value,
+    // and this response carries the `mt_` and `ec_` credentials.
+    let body = resp
+        .text()
         .await
-        .context("parsing machine-token exchange response")
+        .context("reading machine-token exchange response")?;
+    parse_machine_token_response(&body)
+}
+
+fn parse_machine_token_response(body: &str) -> Result<MachineTokenResponse> {
+    serde_json::from_str::<MachineTokenResponse>(body).map_err(|e| {
+        anyhow::anyhow!(
+            "parsing machine-token exchange response: {}",
+            crate::engine::api::unparsable(&e)
+        )
+    })
 }
 
 fn pick_workspace(workspaces: &[WorkspaceRow]) -> Result<&WorkspaceRow> {
@@ -743,6 +796,19 @@ fn pick_workspace(workspaces: &[WorkspaceRow]) -> Result<&WorkspaceRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_machine_token_parse_error_never_prints_the_credentials() {
+        let body = r#"{"machine_token":"mt_secret","workspace_slug":"acme","engine_credential":"ec_secret"}"#;
+        let err = parse_machine_token_response(body).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(!msg.contains("ec_secret"), "{msg}");
+        assert!(!msg.contains("mt_secret"), "{msg}");
+        assert!(
+            msg.contains("parsing machine-token exchange response"),
+            "{msg}"
+        );
+    }
     use tempfile::tempdir;
 
     fn paths_for(root: &std::path::Path) -> Paths {

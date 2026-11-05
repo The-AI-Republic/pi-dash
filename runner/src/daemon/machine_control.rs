@@ -297,17 +297,34 @@ impl MachineControl {
         } else {
             None
         };
+        // One engine runner per machine and project (design §5): when this
+        // computer already runs the engine for the project, the command is
+        // already satisfied. Answer with that runner instead of creating
+        // (and possibly rolling back) another.
+        if agent_kind == AgentKind::Engine
+            && !cmd.workspace_slug.is_empty()
+            && let Some(existing) =
+                existing_engine_runner(&self.spawn_ctx.paths, &cmd.workspace_slug, &cmd.project)?
+        {
+            tracing::info!(
+                runner_id = %existing.runner_id,
+                project = %cmd.project,
+                "create_runner: the engine is already on for this project; reusing it"
+            );
+            self.spawn_ctx
+                .add_runner(existing.clone())
+                .await
+                .context("bringing up the existing engine runner")?;
+            return Ok((existing.runner_id, existing.name));
+        }
         if is_engine {
             // Same checks as `EngineRunnerAdd`, before the server is called.
             crate::engine::provision::ensure_engine_can_run(&self.spawn_ctx.engine.status())?;
         }
-        let cfg = crate::config::file::load_config(&self.spawn_ctx.paths)?;
-        if cfg.runners.len() >= crate::config::schema::MAX_RUNNERS_PER_DAEMON {
-            anyhow::bail!(
-                "this computer already hosts {} runners, the most one daemon runs",
-                crate::config::schema::MAX_RUNNERS_PER_DAEMON
-            );
-        }
+        // The per-computer runner limit fails before anything is registered
+        // (design §5): a cloud row created first and rolled back on the
+        // local `validate()` failure is left behind if the rollback fails.
+        ensure_below_runner_cap(&self.spawn_ctx.paths)?;
         let host_label = hostname().unwrap_or_else(|| "unknown-host".to_string());
 
         // The command names its workspace; answer it with that workspace's
@@ -317,6 +334,7 @@ impl MachineControl {
 
         // 1. Cloud registration — same X-Api-Key surface as
         //    `pidash runner add`.
+        let before = crate::cli::runner_ops::runner_ids_before_create(&self.spawn_ctx.paths);
         let resp = create_runner(
             &self.transport,
             CreateRunnerRequest {
@@ -355,6 +373,13 @@ impl MachineControl {
         };
         let applied = match persisted.await.context("persisting [[runner]] block") {
             Ok(applied) => applied,
+            // The runner was already on this computer, or the server
+            // returned one it already had: never roll back a working one.
+            Err(persist_err)
+                if !crate::cli::runner_ops::may_roll_back_create(&persist_err, &resp, &before) =>
+            {
+                return Err(persist_err);
+            }
             Err(persist_err) => {
                 // Roll the cloud-side row back so a failed local write
                 // doesn't leave an orphan runner (mirrors `pidash
@@ -415,6 +440,25 @@ fn create_working_dir(
     crate::engine::workdir::allocate_engine_folder(paths, workspace, project).map(Some)
 }
 
+/// The engine runner this computer already has for `workspace`/`project`.
+fn existing_engine_runner(
+    paths: &crate::util::paths::Paths,
+    workspace: &str,
+    project: &str,
+) -> Result<Option<crate::config::schema::RunnerConfig>> {
+    if !paths.config_path().exists() {
+        return Ok(None);
+    }
+    let cfg = crate::config::file::load_config(paths)?;
+    Ok(cfg.runners.into_iter().find(|r| {
+        r.agent.kind == AgentKind::Engine
+            && r.workspace_slug.as_deref() == Some(workspace)
+            && r.project_slug
+                .as_deref()
+                .is_some_and(|p| p.eq_ignore_ascii_case(project))
+    }))
+}
+
 /// Kebab-case wire value → AgentKind, via the same clap ValueEnum
 /// parser `--agent` uses, so web and CLI accept identical spellings.
 fn parse_agent_kind(raw: &str) -> Result<AgentKind> {
@@ -465,9 +509,75 @@ fn hostname() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Refuse a new runner when this daemon already has
+/// [`MAX_RUNNERS_PER_DAEMON`] configured. Local and cheap, so it runs
+/// before any network call.
+fn ensure_below_runner_cap(paths: &crate::util::paths::Paths) -> Result<()> {
+    let existing = if paths.config_path().exists() {
+        crate::config::file::load_config(paths)?.runners.len()
+    } else {
+        0
+    };
+    if existing >= crate::config::schema::MAX_RUNNERS_PER_DAEMON {
+        anyhow::bail!(
+            "this computer already has the maximum of {} runners; remove one first",
+            crate::config::schema::MAX_RUNNERS_PER_DAEMON
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Design §5 / PIDESKAPP-118: the cloud-driven add fails on the
+    /// 50-runner limit before anything is registered on the server.
+    #[test]
+    fn runner_cap_is_checked_before_registration() {
+        use crate::config::schema::*;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = crate::util::paths::Paths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            runtime_dir: tmp.path().join("runtime"),
+            machine_context_dir: tmp.path().join("config"),
+        };
+        paths.ensure().unwrap();
+        ensure_below_runner_cap(&paths).expect("no config yet");
+        let runner = |i: usize| RunnerConfig {
+            name: format!("r{i}"),
+            runner_id: Uuid::new_v4(),
+            workspace_slug: Some("acme".into()),
+            project_slug: Some("WEB".into()),
+            pod_id: None,
+            workspace: WorkspaceSection {
+                working_dir: tmp.path().join(format!("w{i}")),
+            },
+            agent: AgentSection::default(),
+            codex: CodexSection::default(),
+            claude_code: ClaudeCodeSection::default(),
+            cursor_agent: CursorAgentSection::default(),
+            openclaw: OpenClawSection::default(),
+            grok: GrokSection::default(),
+            muse_code: MuseCodeSection::default(),
+            approval_policy: ApprovalPolicySection::default(),
+        };
+        let mut cfg = Config {
+            version: 2,
+            daemon: Default::default(),
+            runners: (0..MAX_RUNNERS_PER_DAEMON - 1).map(runner).collect(),
+            cli: None,
+            engine: Default::default(),
+            auth: Default::default(),
+        };
+        crate::config::file::write_config(&paths, &cfg).unwrap();
+        ensure_below_runner_cap(&paths).expect("one slot left");
+        cfg.runners.push(runner(MAX_RUNNERS_PER_DAEMON));
+        crate::config::file::write_config(&paths, &cfg).unwrap();
+        let err = ensure_below_runner_cap(&paths).unwrap_err().to_string();
+        assert!(err.contains("maximum of 50 runners"), "{err}");
+    }
 
     #[test]
     fn parses_kebab_case_agent_kinds() {
@@ -858,16 +968,24 @@ mod tests {
             reasoning_effort: String::new(),
         };
 
+        // A folder already in use under the task root is not taken over:
+        // the new runner gets the next free one (design §10).
+        let root = paths.data_dir.join("engine/workdirs/acme");
+        std::fs::create_dir_all(root.join("WEB")).unwrap();
+        std::fs::write(root.join("WEB/notes.txt"), "someone else's").unwrap();
+
         let (first, _) = control
             .create_runner_inner(&session, cmd("ignored-name"))
             .await
             .unwrap();
-        // A second engine runner for the same project (another pod) takes
-        // the next free folder.
+        // One engine runner per machine and project (design §5): a second
+        // command for the same project answers with the first runner and
+        // registers nothing.
         let (second, _) = control
             .create_runner_inner(&session, cmd(""))
             .await
             .unwrap();
+        assert_eq!(second, first);
 
         let cfg = crate::config::file::load_config(&paths).unwrap();
         let dir_of = |id: Uuid| {
@@ -879,11 +997,11 @@ mod tests {
                 .working_dir
                 .clone()
         };
-        let root = paths.data_dir.join("engine/workdirs/acme");
-        assert_eq!(dir_of(first), root.join("WEB"));
-        assert_eq!(dir_of(second), root.join("WEB-2"));
-        assert!(root.join("WEB").is_dir() && root.join("WEB-2").is_dir());
+        assert_eq!(cfg.runners.len(), 1);
+        assert_eq!(dir_of(first), root.join("WEB-2"));
+        assert!(root.join("WEB-2").is_dir());
         let sent = server.requests_to("/api/v1/runner/runners/");
+        assert_eq!(sent.len(), 1, "the reused runner is not registered again");
         assert_eq!(sent[0].json()["agent_kind"], "engine");
         assert!(
             sent[0].json().get("name").is_none(),
@@ -952,5 +1070,64 @@ mod tests {
         assert_eq!(command_token(&tokens, &session, "acme").unwrap(), "mt_acme");
         assert_eq!(command_token(&tokens, &session, "").unwrap(), "mt_acme");
         assert!(command_token(&tokens, &session, "gamma").is_err());
+    }
+
+    #[tokio::test]
+    async fn an_engine_already_on_for_the_project_is_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = crate::util::paths::Paths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            runtime_dir: tmp.path().join("runtime"),
+            machine_context_dir: tmp.path().join("config"),
+        };
+        assert!(
+            existing_engine_runner(&paths, "acme", "WEB")
+                .unwrap()
+                .is_none()
+        );
+        let resp = crate::cloud::http::EnrollResponse {
+            runner_id: Uuid::new_v4(),
+            runner_name: "builtin-acme-web".into(),
+            refresh_token: "rt".into(),
+            access_token: String::new(),
+            access_token_expires_at: String::new(),
+            refresh_token_generation: 1,
+            workspace_slug: "acme".into(),
+            pod_slug: String::new(),
+            project_identifier: "WEB".into(),
+            long_poll_interval_secs: 25,
+            protocol_version: 4,
+            machine_token: None,
+            machine_token_minted: false,
+            created: None,
+        };
+        apply_enroll_response(
+            &paths,
+            &resp,
+            "https://example.com",
+            ApplyEnrollOptions {
+                working_dir: Some(tmp.path().join("wd")),
+                agent_kind: AgentKind::Engine,
+                model: None,
+                reasoning_effort: None,
+            },
+        )
+        .await
+        .unwrap();
+        let found = existing_engine_runner(&paths, "acme", "web")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.runner_id, resp.runner_id);
+        assert!(
+            existing_engine_runner(&paths, "beta", "WEB")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            existing_engine_runner(&paths, "acme", "API")
+                .unwrap()
+                .is_none()
+        );
     }
 }

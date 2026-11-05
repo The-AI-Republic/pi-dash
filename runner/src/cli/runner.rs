@@ -92,7 +92,12 @@ pub async fn set_working_dir(args: SetWorkingDirArgs, paths: &Paths) -> Result<(
                 );
                 Ok(())
             }
-            Response::Error(e) => anyhow::bail!("daemon refused: {}", e.message),
+            Response::Error(e) => {
+                match crate::service::reload::outdated_daemon_warning(paths).await {
+                    Some(warning) => anyhow::bail!("daemon refused: {}\n{warning}", e.message),
+                    None => anyhow::bail!("daemon refused: {}", e.message),
+                }
+            }
             other => anyhow::bail!("unexpected daemon response: {other:?}"),
         };
     }
@@ -293,6 +298,7 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         .workspace
         .clone()
         .or(runner_ops::load_cli_workspace(paths)?);
+    let before = runner_ops::runner_ids_before_create(paths);
     let resp = create_runner(
         &transport,
         CreateRunnerRequest {
@@ -329,6 +335,11 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     .await
     {
         Ok(applied) => applied,
+        // The runner was already on this computer, or the server returned
+        // one it already had: leave it as it is.
+        Err(persist_err) if !runner_ops::may_roll_back_create(&persist_err, &resp, &before) => {
+            return Err(persist_err.context("persisting new runner to config.toml"));
+        }
         Err(persist_err) => {
             // Best-effort local cleanup before unwinding the cloud row.
             // `apply_enroll_response` may have written either nothing
@@ -413,6 +424,9 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         }
         ActivateOutcome::Failed(why) => {
             println!("(The running daemon did not activate the runner: {why})");
+            if let Some(warning) = crate::service::reload::outdated_daemon_warning(paths).await {
+                println!("{warning}");
+            }
             println!("The runner block was written; `pidash restart` loads it.");
         }
     }
