@@ -96,10 +96,8 @@ crates/api/src/orchestration.rs 5
 crates/api/src/prompting/mod.rs 35
 crates/api/src/runner_enroll/auth.rs 5
 crates/api/src/runner_enroll/delete_cmds.rs 17
-crates/api/src/runner_enroll/desktop.rs 9
 crates/api/src/runner_enroll/enroll.rs 47
 crates/api/src/runner_enroll/manage.rs 49
-crates/api/src/runner_enroll/projects.rs 9
 crates/api/src/runner_enroll/teardown.rs 116
 crates/api/src/runner_runs/approvals.rs 1
 crates/api/src/runner_runs/chat.rs 84

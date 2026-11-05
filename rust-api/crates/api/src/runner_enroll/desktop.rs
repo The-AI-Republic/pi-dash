@@ -81,10 +81,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::Router;
-use chrono::DateTime;
-use chrono::Utc;
 use serde::Serialize;
-use sqlx::Row;
 use uuid::Uuid;
 
 use pidash_services::runner_enroll::queries::catalog_reads;
@@ -356,35 +353,6 @@ fn desktop_denied() -> Response {
 // Own SQL (statements the queries layer did not cover)
 // ---------------------------------------------------------------------------
 
-/// Workspace by slug (`desktop.py:102`):
-/// `Workspace.objects.filter(slug=…).first()` — manager scope, `Meta`
-/// ordering (`-created_at`), `.first()` → `LIMIT 1`. Slug is unique, so
-/// the order never breaks a tie; it is kept for statement fidelity.
-///
-/// `$1` = slug. Returns `(id, slug)`.
-fn workspace_by_slug_sql() -> String {
-    "SELECT \"workspaces\".\"id\", \"workspaces\".\"slug\" FROM \"workspaces\" \
-     WHERE (\"workspaces\".\"deleted_at\" IS NULL AND \"workspaces\".\"slug\" = $1) \
-     ORDER BY \"workspaces\".\"created_at\" DESC LIMIT 1"
-        .to_string()
-}
-
-/// `is_workspace_member` (`core/permissions.py:28-34`):
-/// `WorkspaceMember.objects.filter(workspace_id, member=user,
-/// is_active=True).exists()` — manager scope applies. Spelled after the
-/// J2 probe plus the `is_active` conjunct (same semantics as Django's
-/// single-filter `AND`).
-///
-/// `$1` = member (user) id, `$2` = workspace id.
-fn workspace_member_sql() -> String {
-    "SELECT 1 AS \"a\" FROM \"workspace_members\" \
-     WHERE (\"workspace_members\".\"deleted_at\" IS NULL \
-     AND \"workspace_members\".\"member_id\" = $1 \
-     AND \"workspace_members\".\"workspace_id\" = $2 \
-     AND \"workspace_members\".\"is_active\") LIMIT 1"
-        .to_string()
-}
-
 // ---------------------------------------------------------------------------
 // POST (`desktop.py:80-166`)
 // ---------------------------------------------------------------------------
@@ -474,27 +442,19 @@ async fn post_desktop_enroll(
         Ok(slug) => slug,
         Err(failure) => return failure,
     };
-    let workspace: Option<(Uuid, String)> = match sqlx::query_as(&workspace_by_slug_sql())
-        .bind(&workspace_slug)
-        .fetch_optional(&pool)
-        .await
-    {
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let workspace = match catalog_reads::workspace_by_slug(&db, &workspace_slug).await {
         Ok(row) => row,
         Err(_) => return server_error(),
     };
     let Some((workspace_id, slug)) = workspace else {
         return json_response(StatusCode::NOT_FOUND, WORKSPACE_NOT_FOUND_BODY.to_owned());
     };
-    let member: Option<i32> = match sqlx::query_scalar(&workspace_member_sql())
-        .bind(user_id)
-        .bind(workspace_id)
-        .fetch_optional(&pool)
-        .await
-    {
-        Ok(row) => row,
+    let member = match catalog_reads::is_active_workspace_member(&db, user_id, workspace_id).await {
+        Ok(member) => member,
         Err(_) => return server_error(),
     };
-    if member.is_none() {
+    if !member {
         return json_response(StatusCode::NOT_FOUND, WORKSPACE_NOT_FOUND_BODY.to_owned());
     }
 
@@ -508,64 +468,50 @@ async fn post_desktop_enroll(
         Ok(tx) => tx,
         Err(_) => return server_error(),
     };
-    // K1 lookup: `$1` host, `$2` workspace, `$3` owner, `$4` provisioning.
-    // Only the id (column 0) is read; the rest of the row is never
-    // touched on this path.
-    let found: Option<Uuid> = match sqlx::query(&catalog_reads::bundled_machine_lookup_sql())
-        .bind(&host_label)
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(PROVISIONING_DESKTOP_BUNDLED)
-        .fetch_optional(&mut *tx)
+    // K1 lookup, touch-or-insert on the transaction (SeaORM over `TxConn`).
+    let dev_machine_id = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let found = match catalog_reads::bundled_machine_for_update(
+            &conn,
+            &host_label,
+            workspace_id,
+            user_id,
+            PROVISIONING_DESKTOP_BUNDLED,
+        )
         .await
-    {
-        Ok(row) => match row {
-            None => None,
-            Some(row) => match row.try_get::<Uuid, _>(0) {
-                Ok(id) => Some(id),
-                Err(_) => return server_error(),
-            },
-        },
-        Err(_) => return server_error(),
-    };
-    let dev_machine_id = match found {
-        Some(id) => {
-            // Touch (`:128-130`): two `now()`s, like the explicit
-            // assignment plus `auto_now`.
-            if sqlx::query(&catalog_reads::dev_machine_touch_sql())
-                .bind(now_micros())
-                .bind(now_micros())
-                .bind(id)
-                .execute(&mut *tx)
+        {
+            Ok(found) => found,
+            Err(_) => return server_error(),
+        };
+        match found {
+            Some(id) => {
+                // Touch (`:128-130`).
+                if catalog_reads::touch_dev_machine(&conn, id, now_micros())
+                    .await
+                    .is_err()
+                {
+                    return server_error();
+                }
+                id
+            }
+            None => {
+                // Insert (`:121-127`).
+                let id = Uuid::new_v4();
+                if catalog_reads::insert_bundled_dev_machine(
+                    &conn,
+                    id,
+                    user_id,
+                    &host_label,
+                    PROVISIONING_DESKTOP_BUNDLED,
+                    now_micros(),
+                )
                 .await
                 .is_err()
-            {
-                return server_error();
+                {
+                    return server_error();
+                }
+                id
             }
-            id
-        }
-        None => {
-            // Insert (`:121-127`): `$1..$10` in column order.
-            let id = Uuid::new_v4();
-            let label = catalog_reads::dev_machine_label(&host_label);
-            if sqlx::query(&catalog_reads::dev_machine_insert_sql())
-                .bind(id)
-                .bind(user_id)
-                .bind(&host_label)
-                .bind(label)
-                .bind(0i16)
-                .bind(PROVISIONING_DESKTOP_BUNDLED)
-                .bind(now_micros())
-                .bind(Option::<DateTime<Utc>>::None)
-                .bind(now_micros())
-                .bind(now_micros())
-                .execute(&mut *tx)
-                .await
-                .is_err()
-            {
-                return server_error();
-            }
-            id
         }
     };
 
@@ -673,11 +619,9 @@ async fn delete_desktop_enroll(
     };
     // The empty selection short-circuits to 204 with no transaction
     // (`:179-180`).
+    let db = pidash_db::pool::sea_orm_connection(&pool);
     let machine_ids: Vec<Uuid> = if host_label.is_empty() {
-        match sqlx::query_scalar(&catalog_reads::bundled_machine_ids_sql(false))
-            .bind(user_id)
-            .bind(PROVISIONING_DESKTOP_BUNDLED)
-            .fetch_all(&pool)
+        match catalog_reads::bundled_machine_ids(&db, user_id, PROVISIONING_DESKTOP_BUNDLED, None)
             .await
         {
             Ok(ids) => ids,
@@ -696,12 +640,13 @@ async fn delete_desktop_enroll(
                 Err(failure) => return failure,
             }
         }
-        match sqlx::query_scalar(&catalog_reads::bundled_machine_ids_sql(true))
-            .bind(user_id)
-            .bind(PROVISIONING_DESKTOP_BUNDLED)
-            .bind(&host_label)
-            .fetch_all(&pool)
-            .await
+        match catalog_reads::bundled_machine_ids(
+            &db,
+            user_id,
+            PROVISIONING_DESKTOP_BUNDLED,
+            Some(&host_label),
+        )
+        .await
         {
             Ok(ids) => ids,
             Err(_) => return server_error(),
@@ -726,16 +671,16 @@ async fn delete_desktop_enroll(
     {
         return server_error();
     }
-    // `$1` status, `$2..` ids, `$N+2` provisioning, `$N+3` revoked.
-    let sweep_sql = catalog_reads::signout_offline_runners_sql(machine_ids.len());
-    let mut sweep = sqlx::query(&sweep_sql).bind(STATUS_OFFLINE);
-    for id in &machine_ids {
-        sweep = sweep.bind(id);
-    }
-    sweep = sweep
-        .bind(PROVISIONING_DESKTOP_BUNDLED)
-        .bind(STATUS_REVOKED);
-    if sweep.execute(&mut *tx).await.is_err() {
+    if catalog_reads::signout_offline_runners(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        &machine_ids,
+        PROVISIONING_DESKTOP_BUNDLED,
+        STATUS_OFFLINE,
+        STATUS_REVOKED,
+    )
+    .await
+    .is_err()
+    {
         return server_error();
     }
     if tx.commit().await.is_err() {
@@ -994,27 +939,6 @@ mod tests {
             body,
             "{\"dev_machine_id\":\"00000000-0000-0000-0000-000000000000\",\"machine_token\":\"mt_raw\",\"workspace_slug\":\"ws\",\"managed_runner_enabled\":true,\"graceful_stop_seconds\":30}"
         );
-    }
-
-    /// The two own-SQL statements keep the J2 spelling: manager scope,
-    /// binds, ordering, limit.
-    #[test]
-    fn own_sql_shapes() {
-        let workspace = workspace_by_slug_sql();
-        assert!(workspace.contains("FROM \"workspaces\""), "{workspace}");
-        assert!(workspace.contains("\"deleted_at\" IS NULL"), "{workspace}");
-        assert!(workspace.contains("\"slug\" = $1"), "{workspace}");
-        assert!(
-            workspace.contains("ORDER BY \"workspaces\".\"created_at\" DESC LIMIT 1"),
-            "{workspace}"
-        );
-        let member = workspace_member_sql();
-        assert!(member.contains("FROM \"workspace_members\""), "{member}");
-        assert!(member.contains("\"deleted_at\" IS NULL"), "{member}");
-        assert!(member.contains("\"member_id\" = $1"), "{member}");
-        assert!(member.contains("\"workspace_id\" = $2"), "{member}");
-        assert!(member.contains("\"is_active\""), "{member}");
-        assert!(member.contains("LIMIT 1"), "{member}");
     }
 
     fn query_map(pairs: &[(&str, &str)]) -> crate::license::QueryMap {
