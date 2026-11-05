@@ -364,9 +364,8 @@ pub const PROJECT_SEQUENCES_SQL: &str = "SELECT id, issue_id, sequence \
 // (PIDASHCONV-1630) — covered tables write only from domain/ per
 // design D7. `LINK_COMMENT_SQL`, `descriptions_insert_sql` and
 // `apply_copy_batch` live in `domain::comments`;
-// `UPDATE_ISSUE_SEQUENCE_ID_SQL`, `UPDATE_SEQUENCE_SQL` and the
-// `FixTx::commit_plan` body (as `domain::issues::apply_fix_plan`) in
-// `domain::issues`. This module keeps reads, plans and pure helpers.
+// the two renumber writes and the `FixTx::commit_plan` body (as
+// `domain::issues::apply_fix_plan`, on SeaORM) in `domain::issues`. This module keeps reads, plans and pure helpers.
 
 /// `Workspace.all_objects.get(slug=...)`
 /// (`update_deleted_workspace_slug.py:31`): the unfiltered manager, so no

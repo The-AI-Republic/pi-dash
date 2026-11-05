@@ -17,18 +17,11 @@ def execution_fields(
     actor=None,
     automatic: bool = False,
     requested=None,
-    issue=None,
 ):
     """Resolve the executor-specific AgentRun fields for one run creation.
 
     ``requested`` is the per-issue execution-target override
     (``Issue.agent_executor``); ``None`` inherits the project default.
-
-    ``issue`` is the issue the run is for, when there is one. If it has an
-    ``assigned_runner`` the run is strictly pinned to it, or refused with
-    ``AssignedRunnerUnavailable`` when that runner could never or cannot now
-    take it (``built_engine_as_runner`` design §7, §9). Every issue-run
-    creation path passes it, so the rule lives here once.
     """
     executor = resolve_executor_kind(project=project, requested=requested)
     if executor == AgentExecutorKind.CLOUD_AGENT:
@@ -91,16 +84,12 @@ def execution_fields(
         if admission_error:
             fields["_cloud_admission_error"] = admission_error
         return fields
-    # Runner is the only executor for new machine work (design §6): which
-    # machine runs it is a dispatch question answered by the pod and, when the
-    # issue names one, its assigned runner. The ``waiting`` error code on an
-    # automatic run to an offline runner lands on the row itself through
-    # ``error_details``, which every creation site splats into ``create``.
-    from pi_dash.runner.services.dispatch_rules import strict_pin_fields
-
-    fields = {"executor_kind": AgentExecutorKind.LOCAL_RUNNER, "tool_plan": {}}
-    fields.update(strict_pin_fields(issue=issue, actor=actor, automatic=automatic))
-    return fields
+    # Runner is the only executor for new machine work
+    # (``built_engine_as_runner`` design §6): which machine runs it is a
+    # dispatch question answered by the pod (§7). No run names a runner here;
+    # locality pins are added by the continuation path. A legacy
+    # ``managed_runner`` value resolves to ``local_runner`` above.
+    return {"executor_kind": AgentExecutorKind.LOCAL_RUNNER, "tool_plan": {}}
 
 
 def dispatch_after_commit(run_id):

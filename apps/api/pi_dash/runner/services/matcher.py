@@ -24,6 +24,7 @@ from django.utils import timezone
 
 from pi_dash.core.agent_execution import (
     MACHINE_EXECUTORS,
+    AgentExecutorKind,
 )
 
 from pi_dash.runner.models import (
@@ -148,35 +149,33 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
 
     Must be called inside a ``transaction.atomic()`` block.
 
-    What a runner may take (``built_engine_as_runner`` design §7):
+    What a runner may take (``built_engine_as_runner`` design §7, §13):
 
-    - every runner takes runs strictly pinned to it (an issue's
-      ``assigned_runner``), whatever its ``pod_dispatch``;
-    - an own-agent runner also takes its non-strict pins and, as a
-      ``pod_member``, the unpinned pod queue (today's behaviour);
-    - an engine takes non-strict pins to itself and the unpinned pod queue
+    - an own-agent runner takes ``local_runner`` runs pinned to it for repo
+      locality and, as a ``pod_member``, the unpinned pod queue (today's
+      behaviour);
+    - an engine takes locality pins to itself and the unpinned pod queue
       only while it is a ``pod_member`` and its machine's engine is not
-      paused.
+      paused (it then ranks equally with ordinary runners, PO-4);
+    - an engine, ``pinned_only`` or not, still takes the legacy queued
+      ``managed_runner`` runs pinned to it. No new run has that kind.
 
     All of it must also pass the usage rule
     (:func:`~pi_dash.runner.services.permissions.filter_runs_usable_by_runner`).
-    Legacy ``managed_runner`` runs still queued are served to the runner they
-    are pinned to, like any other machine run.
     """
     from pi_dash.runner.models import RunnerPodDispatch
     from pi_dash.runner.services.dispatch_rules import engine_takes_pod_work
 
-    takes_pod_work = runner.pod_dispatch == RunnerPodDispatch.POD_MEMBER
+    local = Q(executor_kind=AgentExecutorKind.LOCAL_RUNNER)
     if runner.is_engine:
-        takes_pod_work = engine_takes_pod_work(runner)
-        takes_own_nonstrict = takes_pod_work
+        eligible = Q(executor_kind=AgentExecutorKind.MANAGED_RUNNER, pinned_runner=runner)
+        if engine_takes_pod_work(runner):
+            eligible |= local & (Q(pinned_runner=runner) | Q(pinned_runner__isnull=True))
     else:
-        takes_own_nonstrict = True
-    eligible = Q(pinned_runner=runner, pin_strict=True)
-    if takes_own_nonstrict:
-        eligible |= Q(pinned_runner=runner)
-    if takes_pod_work:
-        eligible |= Q(pinned_runner__isnull=True)
+        mine_or_pod = Q(pinned_runner=runner)
+        if runner.pod_dispatch == RunnerPodDispatch.POD_MEMBER:
+            mine_or_pod |= Q(pinned_runner__isnull=True)
+        eligible = local & mine_or_pod
     qs = (
         AgentRun.objects.select_for_update(skip_locked=True)
         .filter(
@@ -405,35 +404,21 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id, *, human: boo
     serve this" case, not transient unavailability. See
     ``.ai_design/issue_runner/design.md`` §6.6.
 
-    Built-in engines (``built_engine_as_runner`` design §8, §9):
-
-    - an issue with ``assigned_runner`` is served by that runner alone, so it
-      is the only one counted, whatever its ``pod_dispatch`` (an assigned
-      ``pinned_only`` engine is eligible). For an automatic run (``human`` is
-      False) the usage rule must admit it, or the issue is bounced. A
-      person's run is not checked here: run creation refuses it with
-      ``assigned_runner_not_owner`` instead of bouncing the issue;
-    - otherwise an engine counts only as a ``pod_member``, and only for its
-      owner's own work: runs its owner starts, automatic runs on the owner's
-      issues, or anyone's run when the owner opted in to teammates' runs.
-      ``pinned_only`` runners of either kind never take unpinned work and are
-      not counted.
+    Built-in engines (``built_engine_as_runner`` design §8, §9): an engine
+    counts only as a ``pod_member``, and only for its owner's own work: runs
+    its owner starts, automatic runs (``human`` is False) on the owner's
+    issues, or any such run when the owner opted in to teammates' runs
+    (``DevMachine.engine_team_runs``). An offline or paused pod-member engine
+    still counts (transient), so its owner's run waits in the pod rather than
+    bouncing. ``pinned_only`` runners of either kind never take unpinned work
+    and are not counted, so a pod whose only engine is ``pinned_only``
+    bounces.
 
     ``human`` defaults to True (the stricter engine rule) for callers that do
     not know the trigger.
     """
     from pi_dash.db.models.issue import IssueAssignee
     from pi_dash.runner.models import RunnerPodDispatch, RunnerProvisioning
-    from pi_dash.runner.services.dispatch_rules import live_assigned_runner, runner_may_take
-
-    if getattr(issue, "assigned_runner_id", None) is not None:
-        assigned = live_assigned_runner(issue)
-        if assigned is not None:
-            if assigned.pod_id != pod.id:
-                return False
-            if human:
-                return True
-            return runner_may_take(assigned, created_by_id=run_creator_id, human=False, issue=issue)
 
     issue_people: set = set()
     if issue.created_by_id is not None:

@@ -1047,6 +1047,775 @@ pub async fn attach_code_review<S: CodeReviewStore>(
     }
 }
 
+/// SeaORM twins of the code-review statements above, for store
+/// implementations on a SeaORM connection. Same filters, ordering,
+/// column sets and write shapes.
+pub mod orm {
+    use chrono::{DateTime, Utc};
+    use pidash_db::entity::{
+        git_code_review_links, git_provider_accounts, git_repositories, git_repository_bindings,
+        github_pull_request_links, issues, projects,
+    };
+    use pidash_db::integrations::git_models::git_code_review_link::GitCodeReviewLink;
+    use pidash_db::integrations::git_models::git_provider_account::GitProviderAccount;
+    use pidash_db::integrations::git_models::git_repository::GitRepository;
+    use pidash_db::integrations::github_models::github_pull_request_link::GithubPullRequestLink;
+    use sea_orm::sea_query::{Expr, Func, IntoCondition};
+    use sea_orm::{
+        ColumnTrait, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+        QueryOrder, QueryResult, QuerySelect, RelationTrait, Set,
+    };
+    use uuid::Uuid;
+
+    use super::super::accounts::orm::{select_prefixed, workspace_id_of_slug};
+    use super::LegacyLinkUpdate;
+
+    /// `ISSUE_EXISTS_SQL`: a live issue in the project and slug's workspace.
+    pub async fn issue_exists(
+        db: &impl ConnectionTrait,
+        issue_id: Uuid,
+        project_id: Uuid,
+        workspace_slug: &str,
+    ) -> Result<bool, DbErr> {
+        let hit: Option<Uuid> = issues::Entity::find()
+            .select_only()
+            .column(issues::Column::Id)
+            .filter(issues::Column::Id.eq(issue_id))
+            .filter(issues::Column::ProjectId.eq(project_id))
+            .filter(
+                Expr::col((issues::Entity, issues::Column::WorkspaceId))
+                    .eq(workspace_id_of_slug(workspace_slug)),
+            )
+            .filter(issues::Column::DeletedAt.is_null())
+            .limit(1)
+            .into_tuple()
+            .one(db)
+            .await?;
+        Ok(hit.is_some())
+    }
+
+    /// `REVIEW_ISSUE_WORKSPACE_SQL`: any live issue's workspace id.
+    pub async fn review_issue_workspace(
+        db: &impl ConnectionTrait,
+        project_id: Uuid,
+        workspace_slug: &str,
+    ) -> Result<Option<Uuid>, DbErr> {
+        issues::Entity::find()
+            .select_only()
+            .column(issues::Column::WorkspaceId)
+            .filter(issues::Column::ProjectId.eq(project_id))
+            .filter(
+                Expr::col((issues::Entity, issues::Column::WorkspaceId))
+                    .eq(workspace_id_of_slug(workspace_slug)),
+            )
+            .filter(issues::Column::DeletedAt.is_null())
+            .limit(1)
+            .into_tuple()
+            .one(db)
+            .await
+    }
+
+    /// `REVIEW_PROJECT_WORKSPACE_SQL`: a live project's workspace id.
+    pub async fn review_project_workspace(
+        db: &impl ConnectionTrait,
+        project_id: Uuid,
+    ) -> Result<Option<Uuid>, DbErr> {
+        projects::Entity::find()
+            .select_only()
+            .column(projects::Column::WorkspaceId)
+            .filter(projects::Column::Id.eq(project_id))
+            .filter(projects::Column::DeletedAt.is_null())
+            .limit(1)
+            .into_tuple()
+            .one(db)
+            .await
+    }
+
+    /// `LEGACY_LINK_FIND_SQL`: the live legacy link, lowest pk.
+    pub async fn find_legacy_link(
+        db: &impl ConnectionTrait,
+        repo_owner_lower: &str,
+        repo_name_lower: &str,
+        pr_number: i32,
+    ) -> Result<Option<GithubPullRequestLink>, DbErr> {
+        let row = github_pull_request_links::Entity::find()
+            .filter(github_pull_request_links::Column::RepoOwner.eq(repo_owner_lower))
+            .filter(github_pull_request_links::Column::RepoName.eq(repo_name_lower))
+            .filter(github_pull_request_links::Column::PrNumber.eq(pr_number))
+            .filter(github_pull_request_links::Column::DeletedAt.is_null())
+            .order_by_asc(github_pull_request_links::Column::Id)
+            .limit(1)
+            .one(db)
+            .await?;
+        Ok(row.map(GithubPullRequestLink::from))
+    }
+
+    /// A legacy link by id, any manager scope (the post-save reread).
+    pub async fn legacy_link_by_id(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<GithubPullRequestLink>, DbErr> {
+        let row = github_pull_request_links::Entity::find_by_id(id)
+            .one(db)
+            .await?;
+        Ok(row.map(GithubPullRequestLink::from))
+    }
+
+    /// A review link by id, any manager scope (the post-save reread).
+    pub async fn review_link_by_id(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<GitCodeReviewLink>, DbErr> {
+        let row = git_code_review_links::Entity::find_by_id(id)
+            .one(db)
+            .await?;
+        Ok(row.map(GitCodeReviewLink::from))
+    }
+
+    fn live_review_links(
+        provider: &str,
+        host_url: &str,
+        external_iid: &str,
+    ) -> sea_orm::Select<git_code_review_links::Entity> {
+        git_code_review_links::Entity::find()
+            .filter(git_code_review_links::Column::Provider.eq(provider))
+            .filter(git_code_review_links::Column::HostUrl.eq(host_url))
+            .filter(git_code_review_links::Column::ExternalIid.eq(external_iid))
+            .filter(git_code_review_links::Column::DeletedAt.is_null())
+    }
+
+    /// `PATH_REVIEW_LINK_FIND_SQL`: newest live link on the path.
+    pub async fn find_path_review_link(
+        db: &impl ConnectionTrait,
+        provider: &str,
+        host_url: &str,
+        namespace_lower: &str,
+        repo_name_lower: &str,
+        external_iid: &str,
+    ) -> Result<Option<GitCodeReviewLink>, DbErr> {
+        let row = live_review_links(provider, host_url, external_iid)
+            .filter(git_code_review_links::Column::Namespace.eq(namespace_lower))
+            .filter(git_code_review_links::Column::RepoName.eq(repo_name_lower))
+            .order_by_desc(git_code_review_links::Column::CreatedAt)
+            .limit(1)
+            .one(db)
+            .await?;
+        Ok(row.map(GitCodeReviewLink::from))
+    }
+
+    /// `REPO_SCOPE_LINK_FIND_SQL`: lowest-pk live link on the repo scope.
+    pub async fn find_repo_scope_link(
+        db: &impl ConnectionTrait,
+        provider: &str,
+        host_url: &str,
+        external_iid: &str,
+        repo_external_id: &str,
+    ) -> Result<Option<GitCodeReviewLink>, DbErr> {
+        let row = live_review_links(provider, host_url, external_iid)
+            .filter(git_code_review_links::Column::RepoExternalId.eq(repo_external_id))
+            .order_by_asc(git_code_review_links::Column::Id)
+            .limit(1)
+            .one(db)
+            .await?;
+        Ok(row.map(GitCodeReviewLink::from))
+    }
+
+    /// `PATH_EMPTY_REPO_LINK_FIND_SQL`: lowest-pk live link on the path
+    /// with no repo external id.
+    pub async fn find_path_empty_repo_link(
+        db: &impl ConnectionTrait,
+        provider: &str,
+        host_url: &str,
+        external_iid: &str,
+        namespace_lower: &str,
+        repo_name_lower: &str,
+    ) -> Result<Option<GitCodeReviewLink>, DbErr> {
+        let row = live_review_links(provider, host_url, external_iid)
+            .filter(git_code_review_links::Column::Namespace.eq(namespace_lower))
+            .filter(git_code_review_links::Column::RepoName.eq(repo_name_lower))
+            .filter(git_code_review_links::Column::RepoExternalId.eq(""))
+            .order_by_asc(git_code_review_links::Column::Id)
+            .limit(1)
+            .one(db)
+            .await?;
+        Ok(row.map(GitCodeReviewLink::from))
+    }
+
+    /// `LOWER(git_repositories.<column>) = LOWER(<value>)` (Django `iexact`),
+    /// table-qualified so the joined binding select stays unambiguous.
+    fn iexact(column: git_repositories::Column, value: &str) -> sea_orm::sea_query::SimpleExpr {
+        Expr::expr(Func::lower(Expr::col((git_repositories::Entity, column))))
+            .eq(Func::lower(Expr::val(value)))
+    }
+
+    /// `REVIEW_REPOSITORY_FIND_SQL`: lowest-pk live repository on the
+    /// provider/host with `iexact` namespace and name.
+    pub async fn find_review_repository(
+        db: &impl ConnectionTrait,
+        provider: &str,
+        host_url: &str,
+        namespace: &str,
+        repo_name: &str,
+    ) -> Result<Option<GitRepository>, DbErr> {
+        let row = git_repositories::Entity::find()
+            .filter(git_repositories::Column::Provider.eq(provider))
+            .filter(git_repositories::Column::HostUrl.eq(host_url))
+            .filter(iexact(git_repositories::Column::Namespace, namespace))
+            .filter(iexact(git_repositories::Column::Name, repo_name))
+            .filter(git_repositories::Column::DeletedAt.is_null())
+            .order_by_asc(git_repositories::Column::Id)
+            .limit(1)
+            .one(db)
+            .await?;
+        Ok(row.map(GitRepository::from))
+    }
+
+    /// The account and repository halves of one binding row, decoded by
+    /// the `pa_` / `r_` prefixes.
+    struct AccountRepository(GitProviderAccount, GitRepository);
+
+    impl FromQueryResult for AccountRepository {
+        fn from_query_result(row: &QueryResult, _pre: &str) -> Result<Self, DbErr> {
+            Ok(Self(
+                git_provider_accounts::Model::from_query_result(row, "pa_")?.into(),
+                git_repositories::Model::from_query_result(row, "r_")?.into(),
+            ))
+        }
+    }
+
+    fn binding_for_review_select(
+        workspace_slug: &str,
+        project_id: Uuid,
+        provider: &str,
+        host_url: &str,
+        namespace: &str,
+        repo_name: &str,
+    ) -> sea_orm::Select<git_repository_bindings::Entity> {
+        let select = git_repository_bindings::Entity::find().select_only();
+        let select = select_prefixed::<git_provider_accounts::Entity, _>(select, "pa_");
+        let select = select_prefixed::<git_repositories::Entity, _>(select, "r_");
+        select
+            .join(
+                JoinType::InnerJoin,
+                git_repository_bindings::Relation::GitRepositories
+                    .def()
+                    .on_condition(|_, repository| {
+                        Expr::col((repository, git_repositories::Column::DeletedAt))
+                            .is_null()
+                            .into_condition()
+                    }),
+            )
+            .join(
+                JoinType::InnerJoin,
+                git_repository_bindings::Relation::GitProviderAccounts
+                    .def()
+                    .on_condition(|_, account| {
+                        Expr::col((account, git_provider_accounts::Column::DeletedAt))
+                            .is_null()
+                            .into_condition()
+                    }),
+            )
+            .filter(
+                Expr::col((
+                    git_repository_bindings::Entity,
+                    git_repository_bindings::Column::WorkspaceId,
+                ))
+                .eq(workspace_id_of_slug(workspace_slug)),
+            )
+            .filter(git_repository_bindings::Column::ProjectId.eq(project_id))
+            .filter(git_repositories::Column::Provider.eq(provider))
+            .filter(git_repositories::Column::HostUrl.eq(host_url))
+            .filter(iexact(git_repositories::Column::Namespace, namespace))
+            .filter(iexact(git_repositories::Column::Name, repo_name))
+            .filter(git_repository_bindings::Column::DeletedAt.is_null())
+            .limit(1)
+    }
+
+    /// `BINDING_FOR_REVIEW_SQL`: the project's live binding to a live
+    /// repository (`iexact` path) with its live account.
+    pub async fn find_binding_review(
+        db: &impl ConnectionTrait,
+        workspace_slug: &str,
+        project_id: Uuid,
+        provider: &str,
+        host_url: &str,
+        namespace: &str,
+        repo_name: &str,
+    ) -> Result<Option<(GitProviderAccount, GitRepository)>, DbErr> {
+        let row = binding_for_review_select(
+            workspace_slug,
+            project_id,
+            provider,
+            host_url,
+            namespace,
+            repo_name,
+        )
+        .into_model::<AccountRepository>()
+        .one(db)
+        .await?;
+        Ok(row.map(|AccountRepository(account, repository)| (account, repository)))
+    }
+
+    /// `CODE_REVIEW_LINK_INSERT_SQL`: every column but `deleted_at`.
+    pub async fn insert_code_review_link(
+        db: &impl ConnectionTrait,
+        row: &GitCodeReviewLink,
+    ) -> Result<(), DbErr> {
+        git_code_review_links::Entity::insert(git_code_review_links::ActiveModel {
+            id: Set(row.id),
+            created_at: Set(row.created_at.into()),
+            updated_at: Set(row.updated_at.into()),
+            created_by_id: Set(row.created_by_id),
+            updated_by_id: Set(row.updated_by_id),
+            project_id: Set(row.project_id),
+            workspace_id: Set(row.workspace_id),
+            issue_id: Set(row.issue_id),
+            provider: Set(row.provider.clone()),
+            host_url: Set(row.host_url.clone()),
+            namespace: Set(row.namespace.clone()),
+            repo_name: Set(row.repo_name.clone()),
+            repo_external_id: Set(row.repo_external_id.clone()),
+            external_id: Set(row.external_id.clone()),
+            external_iid: Set(row.external_iid.clone()),
+            url: Set(row.url.clone()),
+            title: Set(row.title.clone()),
+            state: Set(row.state.clone()),
+            merged: Set(row.merged),
+            draft: Set(row.draft),
+            remote_updated_at: Set(row.remote_updated_at.map(Into::into)),
+            metadata: Set(row.metadata.clone()),
+            ..Default::default()
+        })
+        .exec_without_returning(db)
+        .await?;
+        Ok(())
+    }
+
+    /// `LEGACY_LINK_INSERT_SQL`: every column but `deleted_at`.
+    pub async fn insert_legacy_link(
+        db: &impl ConnectionTrait,
+        row: &GithubPullRequestLink,
+    ) -> Result<(), DbErr> {
+        github_pull_request_links::Entity::insert(github_pull_request_links::ActiveModel {
+            id: Set(row.id),
+            created_at: Set(row.created_at.into()),
+            updated_at: Set(row.updated_at.into()),
+            created_by_id: Set(row.created_by_id),
+            updated_by_id: Set(row.updated_by_id),
+            project_id: Set(row.project_id),
+            workspace_id: Set(row.workspace_id),
+            issue_id: Set(row.issue_id),
+            repo_owner: Set(row.repo_owner.clone()),
+            repo_name: Set(row.repo_name.clone()),
+            pr_number: Set(row.pr_number),
+            url: Set(row.url.clone()),
+            title: Set(row.title.clone()),
+            state: Set(row.state.clone()),
+            merged: Set(row.merged),
+            draft: Set(row.draft),
+            pr_updated_at: Set(row.pr_updated_at.map(Into::into)),
+            ..Default::default()
+        })
+        .exec_without_returning(db)
+        .await?;
+        Ok(())
+    }
+
+    /// `LEGACY_LINK_UPDATE_SQL`: the `save(update_fields=...)` sync.
+    pub async fn update_legacy_link(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+        update: &LegacyLinkUpdate,
+    ) -> Result<(), DbErr> {
+        github_pull_request_links::Entity::update_many()
+            .col_expr(
+                github_pull_request_links::Column::Url,
+                Expr::value(update.url.clone()),
+            )
+            .col_expr(
+                github_pull_request_links::Column::Title,
+                Expr::value(update.title.clone()),
+            )
+            .col_expr(
+                github_pull_request_links::Column::State,
+                Expr::value(update.state.clone()),
+            )
+            .col_expr(
+                github_pull_request_links::Column::Merged,
+                Expr::value(update.merged),
+            )
+            .col_expr(
+                github_pull_request_links::Column::Draft,
+                Expr::value(update.draft),
+            )
+            .col_expr(
+                github_pull_request_links::Column::PrUpdatedAt,
+                Expr::value(update.pr_updated_at),
+            )
+            .col_expr(
+                github_pull_request_links::Column::UpdatedAt,
+                Expr::value(update.updated_at),
+            )
+            .filter(github_pull_request_links::Column::Id.eq(id))
+            .exec(db)
+            .await?;
+        Ok(())
+    }
+
+    /// Instance `.delete()` on a review link (`mixins.py:71-78`): the
+    /// soft-delete stamp (`deleted_at`, `updated_at`, `updated_by`).
+    pub async fn soft_delete_code_review_link(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+        actor: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<u64, DbErr> {
+        let done = git_code_review_links::Entity::update_many()
+            .col_expr(git_code_review_links::Column::DeletedAt, Expr::value(now))
+            .col_expr(git_code_review_links::Column::UpdatedAt, Expr::value(now))
+            .col_expr(
+                git_code_review_links::Column::UpdatedById,
+                Expr::value(actor),
+            )
+            .filter(git_code_review_links::Column::Id.eq(id))
+            .exec(db)
+            .await?;
+        Ok(done.rows_affected)
+    }
+
+    /// Instance `.delete()` on a legacy link: the same soft-delete stamp.
+    pub async fn soft_delete_legacy_link(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+        actor: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<u64, DbErr> {
+        let done = github_pull_request_links::Entity::update_many()
+            .col_expr(
+                github_pull_request_links::Column::DeletedAt,
+                Expr::value(now),
+            )
+            .col_expr(
+                github_pull_request_links::Column::UpdatedAt,
+                Expr::value(now),
+            )
+            .col_expr(
+                github_pull_request_links::Column::UpdatedById,
+                Expr::value(actor),
+            )
+            .filter(github_pull_request_links::Column::Id.eq(id))
+            .exec(db)
+            .await?;
+        Ok(done.rows_affected)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use sea_orm::{DbBackend, QueryTrait};
+
+        #[test]
+        fn binding_for_review_pins_joins_and_unique_names() {
+            let sql = binding_for_review_select(
+                "acme",
+                Uuid::nil(),
+                "gitlab",
+                "https://gitlab.com",
+                "Group",
+                "Repo",
+            )
+            .build(DbBackend::Postgres)
+            .to_string();
+            assert!(sql.contains(r#""git_provider_accounts"."id" AS "pa_id""#));
+            assert!(sql.contains(r#""git_repositories"."id" AS "r_id""#));
+            assert!(sql.contains(r#""git_repositories"."deleted_at" IS NULL"#));
+            assert!(sql.contains(r#""git_provider_accounts"."deleted_at" IS NULL"#));
+            assert!(sql.contains(r#"LOWER("git_repositories"."namespace") = LOWER('Group')"#));
+            assert!(sql.contains(
+                r#"(SELECT "workspaces"."id" FROM "workspaces" WHERE "workspaces"."slug" = 'acme')"#
+            ));
+            assert!(sql.ends_with("LIMIT 1"));
+            let select = sql.split(" FROM ").next().expect("select list");
+            let mut names: Vec<&str> = select
+                .split(" AS ")
+                .skip(1)
+                .map(|tail| tail.split(',').next().unwrap_or(""))
+                .collect();
+            let total = names.len();
+            names.sort();
+            names.dedup();
+            assert_eq!(names.len(), total, "duplicate output names");
+        }
+
+        /// The code-review store statements against constraint-free temp
+        /// tables on a one-connection pool.
+        #[tokio::test]
+        async fn live_code_review_statements() {
+            let Ok(url) = std::env::var("DATABASE_URL") else {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                return;
+            };
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&url)
+                .await
+                .expect("connect");
+            for table in [
+                "workspaces",
+                "projects",
+                "issues",
+                "git_repositories",
+                "git_provider_accounts",
+                "git_repository_bindings",
+                "git_code_review_links",
+                "github_pull_request_links",
+            ] {
+                sqlx::query(&format!(
+                    "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+                ))
+                .execute(&pool)
+                .await
+                .expect("temp table");
+            }
+            let db = pidash_db::pool::sea_orm_connection(&pool);
+            let (ws, project, issue) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+            let (repo, gone_repo, account, gone_account) = (
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+            );
+            let repo_row = |id: Uuid, namespace: &str, gone: bool| {
+                format!(
+                    "INSERT INTO git_repositories (id, created_at, updated_at, provider, host_url, \
+                     external_id, namespace, name, full_name, web_url, clone_url_http, \
+                     clone_url_ssh, default_branch, is_private, metadata, deleted_at) VALUES \
+                     ('{id}', now(), now(), 'gitlab', 'https://gitlab.com', '9', '{namespace}', \
+                     'Repo', 'x', '', '', '', 'main', false, '{{}}', {})",
+                    if gone { "now()" } else { "NULL" }
+                )
+            };
+            let account_row = |id: Uuid, gone: bool| {
+                format!(
+                    "INSERT INTO git_provider_accounts (id, created_at, updated_at, provider, \
+                     host_url, auth_type, external_account_id, external_account_login, \
+                     display_name, capabilities, credential_config, status, last_check_error, \
+                     metadata, workspace_id, deleted_at) VALUES ('{id}', now(), now(), 'gitlab', \
+                     'https://gitlab.com', 'pat', '1', 'me', 'Me', '{{}}', '{{\"k\": 2}}', \
+                     'connected', '', '{{}}', '{ws}', {})",
+                    if gone { "now()" } else { "NULL" }
+                )
+            };
+            for sql in [
+                format!("INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme')"),
+                format!(
+                    "INSERT INTO projects (id, workspace_id, deleted_at) VALUES ('{project}', '{ws}', NULL)"
+                ),
+                format!(
+                    "INSERT INTO issues (id, project_id, workspace_id, deleted_at) VALUES \
+                     ('{issue}', '{project}', '{ws}', NULL)"
+                ),
+                repo_row(repo, "Group", false),
+                repo_row(gone_repo, "group", true),
+                account_row(account, false),
+                account_row(gone_account, true),
+                // A live binding to a live repo + account, and one through
+                // the tombstoned pair that must never match.
+                format!(
+                    "INSERT INTO git_repository_bindings (id, created_at, updated_at, project_id, \
+                     workspace_id, repository_id, provider_account_id, actor_id, is_sync_enabled, \
+                     clone_auth_mode, last_sync_error, metadata, deleted_at) VALUES \
+                     (gen_random_uuid(), now(), now(), '{project}', '{ws}', '{gone_repo}', '{gone_account}', \
+                     '{account}', false, 'token', '', '{{}}', NULL), \
+                     (gen_random_uuid(), now(), now(), '{project}', '{ws}', '{repo}', '{account}', \
+                     '{account}', false, 'token', '', '{{}}', NULL)"
+                ),
+            ] {
+                sqlx::query(&sql).execute(&pool).await.expect("seed");
+            }
+            assert!(issue_exists(&db, issue, project, "acme")
+                .await
+                .expect("exists"));
+            assert!(!issue_exists(&db, issue, project, "other")
+                .await
+                .expect("slug"));
+            assert_eq!(
+                review_issue_workspace(&db, project, "acme")
+                    .await
+                    .expect("ws"),
+                Some(ws)
+            );
+            assert_eq!(
+                review_project_workspace(&db, project).await.expect("pws"),
+                Some(ws)
+            );
+            let (found_account, found_repo) = find_binding_review(
+                &db,
+                "acme",
+                project,
+                "gitlab",
+                "https://gitlab.com",
+                "GROUP",
+                "repo",
+            )
+            .await
+            .expect("binding")
+            .expect("found");
+            assert_eq!((found_account.id, found_repo.id), (account, repo));
+            assert_eq!(found_account.credential_config, serde_json::json!({"k": 2}));
+            assert_eq!(
+                find_review_repository(&db, "gitlab", "https://gitlab.com", "group", "REPO")
+                    .await
+                    .expect("repo")
+                    .map(|row| row.id),
+                Some(repo)
+            );
+
+            // Review link insert, path / repo-scope finds, soft delete.
+            let now = Utc::now();
+            let link = GitCodeReviewLink {
+                id: Uuid::new_v4(),
+                created_at: now,
+                updated_at: now,
+                created_by_id: Some(account),
+                updated_by_id: None,
+                deleted_at: None,
+                project_id: project,
+                workspace_id: ws,
+                issue_id: issue,
+                provider: "gitlab".to_owned(),
+                host_url: "https://gitlab.com".to_owned(),
+                namespace: "group".to_owned(),
+                repo_name: "repo".to_owned(),
+                repo_external_id: String::new(),
+                external_id: "77".to_owned(),
+                external_iid: "3".to_owned(),
+                url: "https://gitlab.com/group/repo/-/merge_requests/3".to_owned(),
+                title: "MR".to_owned(),
+                state: "open".to_owned(),
+                merged: false,
+                draft: true,
+                remote_updated_at: Some(now),
+                metadata: serde_json::json!({"m": true}),
+            };
+            insert_code_review_link(&db, &link)
+                .await
+                .expect("insert review");
+            let path =
+                find_path_review_link(&db, "gitlab", "https://gitlab.com", "group", "repo", "3")
+                    .await
+                    .expect("path")
+                    .expect("found");
+            assert_eq!(path.id, link.id);
+            assert_eq!(path.metadata, serde_json::json!({"m": true}));
+            assert!(find_path_empty_repo_link(
+                &db,
+                "gitlab",
+                "https://gitlab.com",
+                "3",
+                "group",
+                "repo"
+            )
+            .await
+            .expect("empty repo")
+            .is_some());
+            assert!(
+                find_repo_scope_link(&db, "gitlab", "https://gitlab.com", "3", "9")
+                    .await
+                    .expect("repo scope")
+                    .is_none()
+            );
+            assert_eq!(
+                review_link_by_id(&db, link.id)
+                    .await
+                    .expect("by id")
+                    .map(|row| row.draft),
+                Some(true)
+            );
+            assert_eq!(
+                soft_delete_code_review_link(&db, link.id, account, now)
+                    .await
+                    .expect("soft delete"),
+                1
+            );
+            assert!(find_path_review_link(
+                &db,
+                "gitlab",
+                "https://gitlab.com",
+                "group",
+                "repo",
+                "3"
+            )
+            .await
+            .expect("path gone")
+            .is_none());
+
+            // Legacy link insert, find, update, reread, soft delete.
+            let legacy = GithubPullRequestLink {
+                id: Uuid::new_v4(),
+                created_at: now,
+                updated_at: now,
+                created_by_id: Some(account),
+                updated_by_id: None,
+                deleted_at: None,
+                project_id: project,
+                workspace_id: ws,
+                issue_id: issue,
+                repo_owner: "o".to_owned(),
+                repo_name: "r".to_owned(),
+                pr_number: 5,
+                url: "https://github.com/o/r/pull/5".to_owned(),
+                title: "PR".to_owned(),
+                state: "open".to_owned(),
+                merged: false,
+                draft: false,
+                pr_updated_at: None,
+            };
+            insert_legacy_link(&db, &legacy)
+                .await
+                .expect("insert legacy");
+            assert_eq!(
+                find_legacy_link(&db, "o", "r", 5)
+                    .await
+                    .expect("find")
+                    .map(|row| row.id),
+                Some(legacy.id)
+            );
+            update_legacy_link(
+                &db,
+                legacy.id,
+                &LegacyLinkUpdate {
+                    url: legacy.url.clone(),
+                    title: "Renamed".to_owned(),
+                    state: "closed".to_owned(),
+                    merged: true,
+                    draft: false,
+                    pr_updated_at: Some(now),
+                    updated_at: now,
+                },
+            )
+            .await
+            .expect("update legacy");
+            let reread = legacy_link_by_id(&db, legacy.id)
+                .await
+                .expect("reread")
+                .expect("row");
+            assert_eq!((reread.title.as_str(), reread.merged), ("Renamed", true));
+            assert!(reread.pr_updated_at.is_some());
+            assert_eq!(
+                soft_delete_legacy_link(&db, legacy.id, account, now)
+                    .await
+                    .expect("legacy delete"),
+                1
+            );
+            assert!(find_legacy_link(&db, "o", "r", 5)
+                .await
+                .expect("gone")
+                .is_none());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::accounts::{PROVIDER_ACCOUNT_LIST_SQL, PROVIDER_ACCOUNT_SCOPE_SQL};

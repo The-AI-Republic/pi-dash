@@ -225,18 +225,6 @@ class Issue(ProjectBaseModel):
         null=True,
         blank=True,
     )
-    # One specific runner this issue's runs go to (design
-    # ``.ai_design/built_engine_as_runner/design.md`` §7). When set, the
-    # issue is dispatched in that runner's current pod (``assigned_pod`` is
-    # kept equal to ``assigned_runner.pod``) and its runs are strictly pinned.
-    # Only the runner's owner can set it. NULL means pod-level dispatch.
-    assigned_runner = models.ForeignKey(
-        "runner.Runner",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="assigned_issues",
-    )
 
     issue_objects = IssueManager()
 

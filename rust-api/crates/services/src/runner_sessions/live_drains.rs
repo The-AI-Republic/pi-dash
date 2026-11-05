@@ -146,9 +146,14 @@ impl PubsubStore for PoolPubsubStore {
         session_id: Uuid,
         reason: &str,
     ) -> Result<(), OutboxError> {
-        crate::domain::tokens::revoke_runner_session(&self.pool, session_id, now_micros(), reason)
-            .await
-            .map_err(OutboxError::Db)?;
+        crate::domain::tokens::revoke_runner_session(
+            &pidash_db::pool::sea_orm_connection(&self.pool),
+            session_id,
+            now_micros(),
+            reason,
+        )
+        .await
+        .map_err(OutboxError::Db)?;
         Ok(())
     }
 

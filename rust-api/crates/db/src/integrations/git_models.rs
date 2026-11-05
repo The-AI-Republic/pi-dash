@@ -305,6 +305,34 @@ pub mod git_provider_account {
         pub last_check_error: String,
         pub metadata: serde_json::Value,
     }
+
+    impl From<crate::entity::git_provider_accounts::Model> for GitProviderAccount {
+        fn from(row: crate::entity::git_provider_accounts::Model) -> Self {
+            let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+            Self {
+                id: row.id,
+                created_at: at(row.created_at),
+                updated_at: at(row.updated_at),
+                created_by_id: row.created_by_id,
+                updated_by_id: row.updated_by_id,
+                deleted_at: row.deleted_at.map(at),
+                workspace_id: row.workspace_id,
+                provider: row.provider,
+                host_url: row.host_url,
+                auth_type: row.auth_type,
+                external_account_id: row.external_account_id,
+                external_account_login: row.external_account_login,
+                display_name: row.display_name,
+                capabilities: row.capabilities,
+                credential_config: row.credential_config,
+                workspace_integration_id: row.workspace_integration_id,
+                status: row.status,
+                verified_at: row.verified_at.map(at),
+                last_check_error: row.last_check_error,
+                metadata: row.metadata,
+            }
+        }
+    }
 }
 
 /// `git_repositories` table (`git.py:65-107`).
@@ -382,6 +410,32 @@ pub mod git_repository {
         pub default_branch: String,
         pub is_private: bool,
         pub metadata: serde_json::Value,
+    }
+
+    impl From<crate::entity::git_repositories::Model> for GitRepository {
+        fn from(row: crate::entity::git_repositories::Model) -> Self {
+            let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+            Self {
+                id: row.id,
+                created_at: at(row.created_at),
+                updated_at: at(row.updated_at),
+                created_by_id: row.created_by_id,
+                updated_by_id: row.updated_by_id,
+                deleted_at: row.deleted_at.map(at),
+                provider: row.provider,
+                host_url: row.host_url,
+                external_id: row.external_id,
+                namespace: row.namespace,
+                name: row.name,
+                full_name: row.full_name,
+                web_url: row.web_url,
+                clone_url_http: row.clone_url_http,
+                clone_url_ssh: row.clone_url_ssh,
+                default_branch: row.default_branch,
+                is_private: row.is_private,
+                metadata: row.metadata,
+            }
+        }
     }
 }
 
@@ -481,6 +535,30 @@ pub mod git_repository_binding {
         pub last_synced_at: Option<chrono::DateTime<chrono::Utc>>,
         pub last_sync_error: String,
         pub metadata: serde_json::Value,
+    }
+
+    impl From<crate::entity::git_repository_bindings::Model> for GitRepositoryBinding {
+        fn from(row: crate::entity::git_repository_bindings::Model) -> Self {
+            let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+            Self {
+                id: row.id,
+                created_at: at(row.created_at),
+                updated_at: at(row.updated_at),
+                created_by_id: row.created_by_id,
+                updated_by_id: row.updated_by_id,
+                deleted_at: row.deleted_at.map(at),
+                project_id: row.project_id,
+                workspace_id: row.workspace_id,
+                repository_id: row.repository_id,
+                provider_account_id: row.provider_account_id,
+                actor_id: row.actor_id,
+                is_sync_enabled: row.is_sync_enabled,
+                clone_auth_mode: row.clone_auth_mode,
+                last_synced_at: row.last_synced_at.map(at),
+                last_sync_error: row.last_sync_error,
+                metadata: row.metadata,
+            }
+        }
     }
 }
 
@@ -798,6 +876,37 @@ pub mod git_code_review_link {
         pub draft: bool,
         pub remote_updated_at: Option<chrono::DateTime<chrono::Utc>>,
         pub metadata: serde_json::Value,
+    }
+
+    impl From<crate::entity::git_code_review_links::Model> for GitCodeReviewLink {
+        fn from(row: crate::entity::git_code_review_links::Model) -> Self {
+            let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+            Self {
+                id: row.id,
+                created_at: at(row.created_at),
+                updated_at: at(row.updated_at),
+                created_by_id: row.created_by_id,
+                updated_by_id: row.updated_by_id,
+                deleted_at: row.deleted_at.map(at),
+                project_id: row.project_id,
+                workspace_id: row.workspace_id,
+                issue_id: row.issue_id,
+                provider: row.provider,
+                host_url: row.host_url,
+                namespace: row.namespace,
+                repo_name: row.repo_name,
+                repo_external_id: row.repo_external_id,
+                external_id: row.external_id,
+                external_iid: row.external_iid,
+                url: row.url,
+                title: row.title,
+                state: row.state,
+                merged: row.merged,
+                draft: row.draft,
+                remote_updated_at: row.remote_updated_at.map(at),
+                metadata: row.metadata,
+            }
+        }
     }
 }
 

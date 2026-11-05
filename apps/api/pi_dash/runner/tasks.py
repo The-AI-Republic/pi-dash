@@ -124,15 +124,21 @@ def mark_offline_runners() -> int:
 def _pinned_runner_gone_q(cutoff) -> Q:
     """Pinned runner that will not take its pinned runs: silent past
     ``cutoff`` or operator-paused (it keeps heartbeating but takes no work)."""
-    from pi_dash.runner.models import engine_paused_q
+    from pi_dash.runner.models import RunnerPodDispatch, RunnerProvisioning, engine_paused_q
 
     return (
         Q(pinned_runner__last_heartbeat_at__lt=cutoff)
         | Q(pinned_runner__last_heartbeat_at__isnull=True)
         | Q(pinned_runner__paused_at__isnull=False)
-        # An engine whose machine is paused takes no work either; pausing
-        # releases its pins at once, this is the backstop.
+        # An engine whose machine is paused, or whose pod work is off, takes
+        # no locality pins either (built_engine_as_runner §7). Pausing and
+        # turning pod work off release its pins at once; this is the
+        # backstop.
         | engine_paused_q("pinned_runner__")
+        | Q(
+            pinned_runner__provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
+            pinned_runner__pod_dispatch=RunnerPodDispatch.PINNED_ONLY,
+        )
     )
 
 
@@ -149,7 +155,7 @@ def _release_pins(candidates, still_stuck_q: Q) -> int:
             run = (
                 AgentRun.objects.select_for_update(of=("self",))
                 .select_related("parent_run")
-                .filter(id=run_id, status=AgentRunStatus.QUEUED, pinned_runner__isnull=False, pin_strict=False)
+                .filter(id=run_id, status=AgentRunStatus.QUEUED, pinned_runner__isnull=False)
                 .filter(still_stuck_q)
                 .first()
             )
@@ -176,17 +182,12 @@ def _release_pins(candidates, still_stuck_q: Q) -> int:
 
 
 def _releasable_pins():
-    # Strict pins are skipped: they are the run's execution target (an
-    # issue's assigned runner), never released to the pod, and
-    # ``managed_runner.expire_waiting_runs`` owns their timeout
-    # (built_engine_as_runner design §7, §9). Legacy managed runs got
-    # ``pin_strict`` in migration 0035; the executor filter keeps any that
-    # predate it out as well.
+    # Managed runs are skipped: their pin is the execution target, and
+    # ``managed_runner.expire_waiting_runs`` owns their timeout.
     return AgentRun.objects.filter(
         status=AgentRunStatus.QUEUED,
         executor_kind=AgentExecutorKind.LOCAL_RUNNER,
         pinned_runner__isnull=False,
-        pin_strict=False,
     )
 
 
@@ -209,8 +210,7 @@ def release_pins_on_offline_runners() -> int:
     Pinning is a repo-locality preference, but only the pinned runner may
     take a pinned run. Pausing releases pins immediately
     (:func:`release_pins_for_paused_runner`); this sweep is the backstop for
-    a pin that raced the pause. Strict pins (an issue's assigned runner,
-    including legacy managed runs) are skipped.
+    a pin that raced the pause. Managed runs are skipped.
     ``RUNNER_OFFLINE_PIN_RELEASE_SECS <= 0`` disables the sweep.
     """
     grace = int(getattr(settings, "RUNNER_OFFLINE_PIN_RELEASE_SECS", 300))

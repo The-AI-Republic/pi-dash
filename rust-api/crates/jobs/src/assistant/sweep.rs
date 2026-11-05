@@ -310,10 +310,14 @@ impl SweepStore for LiveSweepStore {
             .execute(&mut *tx)
             .await
             .map_err(|e| SeamError(e.to_string()))?;
-        let won =
-            pidash_services::domain::assistant::fail_turn(&mut *tx, ctx.turn_id, &code, &detail)
-                .await
-                .map_err(|e| SeamError(e.to_string()))?;
+        let won = pidash_services::domain::assistant::fail_turn(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            ctx.turn_id,
+            &code,
+            &detail,
+        )
+        .await
+        .map_err(|e| SeamError(e.to_string()))?;
         if won == 0 {
             // The turn left `running` between the sweep's load and its lock
             // (a concurrent terminal write won): roll back and emit nothing,
@@ -321,7 +325,7 @@ impl SweepStore for LiveSweepStore {
             return Ok(false);
         }
         pidash_services::domain::assistant::finalize_open_messages(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             ctx.turn_id,
             MSG_FAILED,
         )
@@ -348,7 +352,7 @@ impl SweepStore for LiveSweepStore {
             detail.clone()
         };
         pidash_services::domain::assistant::record_error_message(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             message_id,
             ctx.thread_id,
             ctx.turn_id,
@@ -363,7 +367,7 @@ impl SweepStore for LiveSweepStore {
             "detail": detail,
         });
         let event_id: i64 = pidash_services::domain::assistant::append_turn_failed_event(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             ctx.thread_id,
             ctx.turn_id,
             message_id,
@@ -372,9 +376,12 @@ impl SweepStore for LiveSweepStore {
         )
         .await
         .map_err(|e| SeamError(e.to_string()))?;
-        pidash_services::domain::assistant::prune_turn_deltas(&mut *tx, ctx.turn_id)
-            .await
-            .map_err(|e| SeamError(e.to_string()))?;
+        pidash_services::domain::assistant::prune_turn_deltas(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            ctx.turn_id,
+        )
+        .await
+        .map_err(|e| SeamError(e.to_string()))?;
         tx.commit().await.map_err(|e| SeamError(e.to_string()))?;
         // Post-commit publish (`events.append_event`'s `on_commit`): the
         // event above reaches the thread channel like Django's.

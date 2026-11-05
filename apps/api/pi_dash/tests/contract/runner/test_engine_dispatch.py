@@ -5,9 +5,12 @@
 """Dispatch core of "the built-in engine as a first-class runner" (PIDESKAPP-123).
 
 Contract tests for ``.ai_design/built_engine_as_runner/design.md`` §6-§9 and
-the server data migration of §13: the single Runner executor, strict pins from
-``Issue.assigned_runner`` and every path that must not release them, engine
-pod membership, the engine usage rule, and the 12 h expiry of waiting runs.
+the server data migration of §13 (revision 4.0, pods only): the single Runner
+executor with pod-level translation of the legacy values, engine pod
+membership (``pod_dispatch``), locality pins to engines, the unchanged
+pod-move guard, the machine pause fields, and the engine usage rule in
+dispatch and preflight. Nothing here names a runner for an issue: that is
+the dedicated-runner design (HA §23).
 Web-app endpoints are exercised with ``session_client`` (``pi_dash.app`` /
 ``/api/``).
 """
@@ -27,7 +30,7 @@ from django.utils import timezone
 
 from pi_dash.cloud_agent.creation import execution_fields
 from pi_dash.core.agent_execution import AgentExecutorKind
-from pi_dash.db.models import Issue, IssueActivity, Project, ProjectMember, State, User, WorkspaceMember
+from pi_dash.db.models import Issue, Project, ProjectMember, State, User, WorkspaceMember
 from pi_dash.runner.models import (
     AgentRun,
     AgentRunStatus,
@@ -40,13 +43,6 @@ from pi_dash.runner.models import (
     RunnerStatus,
 )
 from pi_dash.runner.services import matcher
-from pi_dash.runner.services.dispatch_rules import (
-    ASSIGNED_RUNNER_NOT_OWNER,
-    ASSIGNED_RUNNER_OFFLINE,
-    ASSIGNED_RUNNER_REMOVED,
-    WAITING_FOR_RUNNER,
-    AssignedRunnerUnavailable,
-)
 
 pytestmark = pytest.mark.contract
 
@@ -137,24 +133,41 @@ def issue(project, create_user, member):
     return created
 
 
-def _assign(issue, runner):
-    Issue.objects.filter(pk=issue.pk).update(assigned_runner=runner, assigned_pod=runner.pod)
-    issue.refresh_from_db()
-    return issue
+def _pod_member(runner):
+    Runner.objects.filter(pk=runner.pk).update(pod_dispatch=RunnerPodDispatch.POD_MEMBER)
+    runner.refresh_from_db()
+    return runner
 
 
-def _queued(issue, *, created_by, pinned_runner=None, strict=False, trigger=AgentRunTrigger.RUN_AI, pod=None):
+def _queued(
+    issue,
+    *,
+    created_by,
+    pinned_runner=None,
+    trigger=AgentRunTrigger.RUN_AI,
+    pod=None,
+    executor_kind=AgentExecutorKind.LOCAL_RUNNER,
+):
     return AgentRun.objects.create(
         workspace=issue.workspace,
         created_by=created_by,
         pod=pod or (pinned_runner.pod if pinned_runner else issue.assigned_pod),
         work_item=issue,
         pinned_runner=pinned_runner,
-        pin_strict=strict,
+        executor_kind=executor_kind,
         trigger=trigger,
         status=AgentRunStatus.QUEUED,
         prompt="x",
     )
+
+
+def _sibling(issue, name="Other task"):
+    """Another issue of the same creator and project (one active run per
+    issue is a DB constraint)."""
+    other = Issue.objects.create(workspace=issue.workspace, project=issue.project, state=issue.state, name=name)
+    Issue.objects.filter(pk=other.pk).update(created_by=issue.created_by)
+    other.refresh_from_db()
+    return other
 
 
 def _issue_url(workspace, project, issue):
@@ -199,21 +212,34 @@ def test_issue_cloud_agent_write_becomes_pod_level_runner(session_client, worksp
     assert resp.status_code in (200, 204), resp.content
     issue.refresh_from_db()
     assert issue.agent_executor == AgentExecutorKind.LOCAL_RUNNER
-    assert issue.assigned_runner_id is None
+    assert not hasattr(issue, "assigned_runner_id")
 
 
-@pytest.mark.parametrize("online", [True, False])
-def test_issue_managed_write_assigns_callers_engine(session_client, workspace, project, issue, engine, online):
-    if not online:
-        Runner.objects.filter(pk=engine.pk).update(status=RunnerStatus.OFFLINE, last_heartbeat_at=None)
+def test_issue_managed_write_from_old_build_is_pod_level(session_client, workspace, project, issue, engine, other_pod):
+    """Scenario 16: an old desktop build sets "Pi Dash Agent (desktop)"; the
+    server stores ``local_runner`` and keeps the issue's pod. No runner is
+    named, even though the caller has an engine in the project."""
+    Issue.objects.filter(pk=issue.pk).update(assigned_pod=other_pod)
     resp = session_client.patch(
         _issue_url(workspace, project, issue), {"agent_executor": "managed_runner"}, format="json"
     )
     assert resp.status_code in (200, 204), resp.content
     issue.refresh_from_db()
     assert issue.agent_executor == AgentExecutorKind.LOCAL_RUNNER
-    assert issue.assigned_runner_id == engine.id
-    assert issue.assigned_pod_id == engine.pod_id
+    assert issue.assigned_pod_id == other_pod.id
+    fields = execution_fields(project=issue.project, run_kind="issue", has_issue=True, actor=engine.owner)
+    assert fields == {"executor_kind": AgentExecutorKind.LOCAL_RUNNER, "tool_plan": {}}
+
+
+def test_issue_executor_write_refused_under_a_live_run(session_client, workspace, project, issue, create_user, pod):
+    Issue.objects.filter(pk=issue.pk).update(agent_executor=AgentExecutorKind.CLOUD_AGENT)
+    issue.refresh_from_db()
+    _queued(issue, created_by=create_user, pod=pod)
+    resp = session_client.patch(
+        _issue_url(workspace, project, issue), {"agent_executor": "local_runner"}, format="json"
+    )
+    assert resp.status_code == 400, resp.content
+    assert "agent_executor" in resp.json()
 
 
 @override_settings(CLOUD_AGENT_ENABLED=True)
@@ -233,88 +259,84 @@ def test_queued_cloud_agent_runs_are_still_readable(project, create_user):
 
 
 # --------------------------------------------------------------------------
-# §7 Assigned runner and the dispatch-pod invariant
+# §7 Pods, pod work and the pod-move guard
 # --------------------------------------------------------------------------
 
 
-def test_setting_assigned_runner_sets_pod_and_choosing_pod_clears_it(
-    session_client, workspace, project, issue, other_pod, create_user
-):
-    runner = _runner(create_user, other_pod, name="mini")
-    url = _issue_url(workspace, project, issue)
-    resp = session_client.patch(url, {"assigned_runner_id": str(runner.id)}, format="json")
-    assert resp.status_code in (200, 204), resp.content
-    issue.refresh_from_db()
-    assert issue.assigned_runner_id == runner.id
-    assert issue.assigned_pod_id == other_pod.id
-
-    # Re-sending the current pod (the web form re-PATCHes on blur) is a no-op.
-    resp = session_client.patch(url, {"assigned_pod_id": str(other_pod.id)}, format="json")
-    assert resp.status_code in (200, 204), resp.content
-    issue.refresh_from_db()
-    assert issue.assigned_runner_id == runner.id
-
-    default_pod = Pod.default_for_project(project)
-    resp = session_client.patch(url, {"assigned_pod_id": str(default_pod.id)}, format="json")
-    assert resp.status_code in (200, 204), resp.content
-    issue.refresh_from_db()
-    assert issue.assigned_runner_id is None
-    assert issue.assigned_pod_id == default_pod.id
-
-
-def test_only_the_owner_can_assign_an_issue_to_a_runner(session_client, workspace, project, issue, pod, teammate):
-    theirs = _runner(teammate, pod, name="their-engine", engine=True)
-    resp = session_client.patch(
-        _issue_url(workspace, project, issue), {"assigned_runner_id": str(theirs.id)}, format="json"
-    )
-    assert resp.status_code == 400, resp.content
-    assert "assigned_runner_id" in resp.json()
-
-
-def test_reassignment_repins_queued_runs(session_client, workspace, project, issue, engine, other_pod, create_user):
-    _assign(issue, engine)
-    run = _queued(issue, created_by=create_user, pinned_runner=engine, strict=True)
-    mini = _runner(create_user, other_pod, name="mini")
-    resp = session_client.patch(
-        _issue_url(workspace, project, issue), {"assigned_runner_id": str(mini.id)}, format="json"
-    )
-    assert resp.status_code in (200, 204), resp.content
-    run.refresh_from_db()
-    assert run.pinned_runner_id == mini.id
-    assert run.pin_strict is True
-    assert run.pod_id == other_pod.id
-
-
-def test_pod_move_rehomes_assigned_issues_and_strict_runs(session_client, issue, engine, other_pod, create_user):
-    _assign(issue, engine)
-    run = _queued(issue, created_by=create_user, pinned_runner=engine, strict=True)
-    resp = session_client.patch(
-        reverse("runner-detail", kwargs={"runner_id": engine.id}), {"pod": str(other_pod.id)}, format="json"
-    )
-    assert resp.status_code == 200, resp.content
-    issue.refresh_from_db()
-    run.refresh_from_db()
-    assert issue.assigned_pod_id == other_pod.id
-    assert run.pod_id == other_pod.id
-    # The next dispatch happens in the new pod.
-    engine.refresh_from_db()
+def test_pinned_only_engine_takes_no_pod_work(issue, engine, pod, create_user):
+    run = _queued(issue, created_by=create_user, pod=pod)
+    assert engine.pod_dispatch == RunnerPodDispatch.PINNED_ONLY
+    with transaction.atomic():
+        assert matcher.next_for_runner(engine) is None
+        assert matcher.select_runner_in_pod(pod) is None
+    _pod_member(engine)
     with transaction.atomic():
         assert matcher.next_for_runner(engine).id == run.id
 
 
-def test_cross_project_move_refused_while_issues_are_assigned(
-    session_client, workspace, issue, pod, create_user
-):
-    other_project = Project.objects.create(name="Other", identifier="OTH", workspace=workspace)
-    target = Pod.default_for_project(other_project)
-    runner = _runner(create_user, pod, name="mini")
-    _assign(issue, runner)
-    url = reverse("runner-detail", kwargs={"runner_id": runner.id})
-    resp = session_client.patch(url, {"pod": str(target.id)}, format="json")
+def test_pod_member_engine_ranks_equally(issue, engine, pod, create_user):
+    """PO-4: an idle pod-member engine is a candidate like any own-agent
+    runner; the matcher's existing order picks between them."""
+    _pod_member(engine)
+    mini = _runner(create_user, pod, name="mini")
+    candidates = set(
+        Runner.objects.assignable().filter(pod=pod).exclude(pod_dispatch=RunnerPodDispatch.PINNED_ONLY)
+    )
+    assert candidates == {engine, mini}
+    run = _queued(issue, created_by=create_user, pod=pod)
+    assert matcher.drain_pod(pod) == 1
+    run.refresh_from_db()
+    assert run.runner_id in (engine.id, mini.id)
+
+
+def test_legacy_managed_run_is_served_only_to_its_engine(issue, engine, pod, create_user):
+    """§13: queued legacy ``managed_runner`` runs keep their pin and are served
+    to that engine, even while it is ``pinned_only``; nothing else takes
+    them."""
+    legacy = _queued(
+        issue, created_by=create_user, pinned_runner=engine, executor_kind=AgentExecutorKind.MANAGED_RUNNER
+    )
+    mini = _runner(create_user, pod, name="mini")
+    with transaction.atomic():
+        assert matcher.next_for_runner(mini) is None
+        assert matcher.next_for_runner(engine).id == legacy.id
+
+
+def test_own_agent_runner_never_takes_unpinned_legacy_managed_runs(issue, pod, create_user):
+    _queued(issue, created_by=create_user, pod=pod, executor_kind=AgentExecutorKind.MANAGED_RUNNER)
+    mini = _runner(create_user, pod, name="mini")
+    with transaction.atomic():
+        assert matcher.next_for_runner(mini) is None
+
+
+def test_pod_move_refused_while_a_run_is_pinned_to_the_runner(session_client, issue, engine, other_pod, create_user):
+    """Scenario 9: the guard is main's ``409 runner_busy``; no run's ``pod``
+    is ever rewritten. After the run is released, the move succeeds."""
+    _pod_member(engine)
+    run = _queued(issue, created_by=create_user, pinned_runner=engine)
+    url = reverse("runner-detail", kwargs={"runner_id": engine.id})
+    resp = session_client.patch(url, {"pod": str(other_pod.id)}, format="json")
     assert resp.status_code == 409, resp.content
-    body = resp.json()
-    assert body["code"] == "runner_has_assigned_issues"
-    assert [row["id"] for row in body["issues"]] == [str(issue.id)]
+    assert resp.json()["code"] == "runner_busy"
+    run.refresh_from_db()
+    assert run.pod_id == engine.pod_id
+
+    resp = session_client.post(reverse("runner-run-release-pin", kwargs={"run_id": run.id}))
+    assert resp.status_code == 200, resp.content
+    resp = session_client.patch(url, {"pod": str(other_pod.id)}, format="json")
+    assert resp.status_code == 200, resp.content
+    old_pod = engine.pod_id
+    engine.refresh_from_db()
+    run.refresh_from_db()
+    assert engine.pod_id == other_pod.id
+    assert run.pod_id == old_pod
+
+
+def test_pod_dispatch_rejects_unknown_values(session_client, engine):
+    resp = session_client.patch(
+        reverse("runner-detail", kwargs={"runner_id": engine.id}), {"pod_dispatch": "dedicated"}, format="json"
+    )
+    assert resp.status_code == 400, resp.content
 
 
 def test_engine_moves_only_within_its_project(session_client, workspace, engine):
@@ -329,95 +351,7 @@ def test_engine_moves_only_within_its_project(session_client, workspace, engine)
 
 
 # --------------------------------------------------------------------------
-# §7 Strict pins are never released
-# --------------------------------------------------------------------------
-
-
-def test_strict_pin_survives_busy_rejection(issue, engine, pod, create_user):
-    from pi_dash.runner.services.run_lifecycle import apply_assign_rejected_busy
-
-    _assign(issue, engine)
-    run = _queued(issue, created_by=create_user, pinned_runner=engine, strict=True)
-    AgentRun.objects.filter(pk=run.pk).update(
-        runner=engine, status=AgentRunStatus.ASSIGNED, assigned_at=timezone.now()
-    )
-    bystander = _runner(create_user, pod, name="idle-mini")
-    with transaction.atomic():
-        apply_assign_rejected_busy(engine, run.id)
-    run.refresh_from_db()
-    assert run.status == AgentRunStatus.QUEUED
-    assert run.runner_id is None
-    assert run.pinned_runner_id == engine.id
-    # The idle own-agent runner in the same pod never takes it.
-    matcher.drain_pod(pod)
-    run.refresh_from_db()
-    assert run.runner_id is None
-    with transaction.atomic():
-        assert matcher.next_for_runner(bystander) is None
-
-
-def test_non_strict_pin_is_still_released_on_busy_rejection(issue, pod, create_user):
-    from pi_dash.runner.services.run_lifecycle import apply_assign_rejected_busy
-
-    mini = _runner(create_user, pod, name="mini")
-    run = _queued(issue, created_by=create_user, pinned_runner=mini, strict=False)
-    AgentRun.objects.filter(pk=run.pk).update(runner=mini, status=AgentRunStatus.ASSIGNED)
-    with transaction.atomic():
-        apply_assign_rejected_busy(mini, run.id)
-    run.refresh_from_db()
-    assert run.pinned_runner_id is None
-
-
-def test_release_pin_endpoint_refuses_a_strict_pin(session_client, issue, engine, create_user):
-    _assign(issue, engine)
-    run = _queued(issue, created_by=create_user, pinned_runner=engine, strict=True)
-    resp = session_client.post(reverse("runner-run-release-pin", kwargs={"run_id": run.id}))
-    assert resp.status_code == 409, resp.content
-    assert resp.json()["code"] == "pin_strict"
-    run.refresh_from_db()
-    assert run.pinned_runner_id == engine.id
-
-
-def test_offline_sweep_skips_strict_pins(issue, engine, create_user):
-    from pi_dash.runner.tasks import release_pins_on_offline_runners
-
-    _assign(issue, engine)
-    run = _queued(issue, created_by=create_user, pinned_runner=engine, strict=True)
-    Runner.objects.filter(pk=engine.pk).update(status=RunnerStatus.OFFLINE, last_heartbeat_at=None)
-    AgentRun.objects.filter(pk=run.pk).update(created_at=timezone.now() - timedelta(hours=1))
-    assert release_pins_on_offline_runners() == 0
-    run.refresh_from_db()
-    assert run.pinned_runner_id == engine.id
-
-
-def test_revoke_fails_strict_runs_and_makes_issues_pod_level(session_client, issue, engine, create_user):
-    _assign(issue, engine)
-    pod_before = issue.assigned_pod_id
-    strict = _queued(issue, created_by=create_user, pinned_runner=engine, strict=True)
-    resp = session_client.post(reverse("runner-revoke", kwargs={"runner_id": engine.id}))
-    assert resp.status_code == 200, resp.content
-    strict.refresh_from_db()
-    issue.refresh_from_db()
-    assert strict.status == AgentRunStatus.FAILED
-    assert strict.error_code == ASSIGNED_RUNNER_REMOVED
-    assert issue.assigned_runner_id is None
-    assert issue.assigned_pod_id == pod_before
-    assert IssueActivity.objects.filter(issue=issue, field="assigned_runner").exists()
-
-
-def test_hard_delete_never_turns_a_strict_run_into_a_pod_run(issue, engine, create_user):
-    _assign(issue, engine)
-    strict = _queued(issue, created_by=create_user, pinned_runner=engine, strict=True)
-    Runner.objects.filter(pk=engine.pk).delete()
-    strict.refresh_from_db()
-    issue.refresh_from_db()
-    assert strict.status == AgentRunStatus.FAILED
-    assert strict.error_code == ASSIGNED_RUNNER_REMOVED
-    assert issue.assigned_runner_id is None
-
-
-# --------------------------------------------------------------------------
-# §7 Non-strict pins and engine pod membership
+# §7 Locality pins to engines
 # --------------------------------------------------------------------------
 
 
@@ -445,7 +379,7 @@ def test_continuation_pins_to_pod_member_engine_and_is_released_when_pod_work_of
     engine.refresh_from_db()
     assert _pinned_runner_for(parent, pod) == engine
 
-    continuation = _queued(issue, created_by=create_user, pinned_runner=engine, strict=False, pod=pod)
+    continuation = _queued(issue, created_by=create_user, pinned_runner=engine, pod=pod)
     with transaction.atomic():
         assert matcher.next_for_runner(engine).id == continuation.id
 
@@ -453,19 +387,49 @@ def test_continuation_pins_to_pod_member_engine_and_is_released_when_pod_work_of
     assert resp.status_code == 200, resp.content
     continuation.refresh_from_db()
     assert continuation.pinned_runner_id is None
+    assert continuation.pod_id == pod.id
 
 
-def test_owner_pause_releases_non_strict_pins_and_blocks_matching(
+def test_continuation_is_not_pinned_to_a_paused_pod_member_engine(issue, engine, machine, pod, create_user):
+    from pi_dash.orchestration.service import _pinned_runner_for
+
+    _pod_member(engine)
+    parent = AgentRun.objects.create(
+        workspace=issue.workspace,
+        created_by=create_user,
+        pod=pod,
+        work_item=issue,
+        runner=engine,
+        status=AgentRunStatus.COMPLETED,
+        prompt="x",
+    )
+    assert _pinned_runner_for(parent, pod) == engine
+    DevMachine.objects.filter(pk=machine.pk).update(engine_paused_by_owner=True)
+    parent.refresh_from_db()
+    assert _pinned_runner_for(parent, pod) is None
+
+
+def test_owner_pause_releases_locality_pins_and_blocks_matching(
     session_client, workspace, issue, engine, machine, pod, create_user
 ):
-    Runner.objects.filter(pk=engine.pk).update(pod_dispatch=RunnerPodDispatch.POD_MEMBER)
-    nonstrict = _queued(issue, created_by=create_user, pinned_runner=engine, strict=False, pod=pod)
+    _pod_member(engine)
+    nonstrict = _queued(issue, created_by=create_user, pinned_runner=engine, pod=pod)
+    legacy = _queued(
+        _sibling(issue),
+        created_by=create_user,
+        pinned_runner=engine,
+        executor_kind=AgentExecutorKind.MANAGED_RUNNER,
+    )
     url = reverse("dev-machine-delete", kwargs={"machine_id": machine.id})
     resp = session_client.patch(url, {"workspace": str(workspace.id), "engine_paused_by_owner": True}, format="json")
     assert resp.status_code == 200, resp.content
     assert resp.json()["engine_paused_by_owner"] is True
     nonstrict.refresh_from_db()
+    legacy.refresh_from_db()
     assert nonstrict.pinned_runner_id is None
+    assert nonstrict.pod_id == pod.id
+    # Only that engine serves a legacy managed run, so its pin stays.
+    assert legacy.pinned_runner_id == engine.id
     assert not Runner.objects.assignable().filter(pk=engine.pk).exists()
 
     resp = session_client.patch(url, {"workspace": str(workspace.id), "engine_paused_by_owner": False}, format="json")
@@ -473,11 +437,17 @@ def test_owner_pause_releases_non_strict_pins_and_blocks_matching(
     assert Runner.objects.assignable().filter(pk=engine.pk).exists()
 
 
-def test_auto_pause_reason_blocks_matching(engine, machine):
+def test_auto_pause_reason_blocks_matching_and_releases_pins(issue, engine, machine, pod, create_user):
     from pi_dash.runner.services.dispatch_rules import set_engine_auto_pause_reason
 
+    _pod_member(engine)
+    pinned = _queued(issue, created_by=create_user, pinned_runner=engine, pod=pod)
     assert set_engine_auto_pause_reason(machine, "wallet_empty") is True
+    pinned.refresh_from_db()
+    assert pinned.pinned_runner_id is None
     assert not Runner.objects.assignable().filter(pk=engine.pk).exists()
+    with pytest.raises(ValueError):
+        set_engine_auto_pause_reason(machine, "bogus")
     assert set_engine_auto_pause_reason(machine, "") is True
     assert Runner.objects.assignable().filter(pk=engine.pk).exists()
 
@@ -489,6 +459,27 @@ def test_machine_patch_is_owner_only_and_engine_fields_only(api_client, workspac
     assert resp.status_code == 404
     machine.refresh_from_db()
     assert machine.engine_team_runs is False
+
+
+def test_offline_sweep_releases_locality_pin_on_pinned_only_engine(issue, engine, pod, create_user):
+    """Backstop: a locality pin left on an engine whose pod work is off goes
+    back to the pod; a legacy managed run pinned to it does not."""
+    from pi_dash.runner.tasks import release_pins_on_offline_runners
+
+    pinned = _queued(issue, created_by=create_user, pinned_runner=engine, pod=pod)
+    legacy = _queued(
+        _sibling(issue),
+        created_by=create_user,
+        pinned_runner=engine,
+        executor_kind=AgentExecutorKind.MANAGED_RUNNER,
+    )
+    AgentRun.objects.filter(pk__in=[pinned.pk, legacy.pk]).update(created_at=timezone.now() - timedelta(hours=1))
+    with override_settings(RUNNER_OFFLINE_PIN_RELEASE_SECS=60):
+        assert release_pins_on_offline_runners() == 1
+    pinned.refresh_from_db()
+    legacy.refresh_from_db()
+    assert pinned.pinned_runner_id is None
+    assert legacy.pinned_runner_id == engine.id
 
 
 def test_machine_patch_rejects_server_set_fields(session_client, workspace, engine, machine):
@@ -505,8 +496,8 @@ def test_machine_patch_rejects_server_set_fields(session_client, workspace, engi
 
 
 def test_teammate_click_not_admitted_to_engine_without_opt_in(issue, engine, machine, pod, teammate, create_user):
-    Runner.objects.filter(pk=engine.pk).update(pod_dispatch=RunnerPodDispatch.POD_MEMBER)
-    engine.refresh_from_db()
+    """Scenario 7."""
+    _pod_member(engine)
     run = _queued(issue, created_by=teammate, trigger=AgentRunTrigger.RUN_AI, pod=pod)
     with transaction.atomic():
         assert matcher.next_for_runner(engine) is None
@@ -524,18 +515,10 @@ def test_teammate_click_not_admitted_to_engine_without_opt_in(issue, engine, mac
 
 
 def test_automatic_run_on_owners_issue_is_admitted_to_engine(issue, engine, pod, create_bot_user):
-    Runner.objects.filter(pk=engine.pk).update(pod_dispatch=RunnerPodDispatch.POD_MEMBER)
-    engine.refresh_from_db()
+    _pod_member(engine)
     run = _queued(issue, created_by=create_bot_user, trigger=AgentRunTrigger.TICK, pod=pod)
     with transaction.atomic():
         assert matcher.next_for_runner(engine).id == run.id
-
-
-def test_teammate_click_is_refused_at_creation_for_assigned_engine(issue, engine, teammate):
-    _assign(issue, engine)
-    with pytest.raises(AssignedRunnerUnavailable) as exc:
-        execution_fields(project=issue.project, run_kind="issue", has_issue=True, actor=teammate, issue=issue)
-    assert exc.value.code == ASSIGNED_RUNNER_NOT_OWNER
 
 
 def test_preflight_bounce_does_not_count_engine_for_teammate_click(issue, engine, pod, teammate):
@@ -544,77 +527,55 @@ def test_preflight_bounce_does_not_count_engine_for_teammate_click(issue, engine
     assert matcher.pod_has_runner_for_issue_principal(pod, issue, None, human=False) is True
 
 
-def test_tick_on_assigned_pinned_only_engine_is_allowed(issue, engine, pod, create_user):
+def test_teammate_run_on_someone_elses_issue_not_admitted_even_with_opt_in(issue, engine, machine, pod, teammate):
+    """The opt-in restores the ordinary rule, which still needs the owner to
+    be involved in the issue."""
+    _pod_member(engine)
+    other = Issue.objects.create(workspace=issue.workspace, project=issue.project, state=issue.state, name="Theirs")
+    Issue.objects.filter(pk=other.pk).update(created_by=teammate)
+    other.refresh_from_db()
+    _queued(other, created_by=teammate, pod=pod)
+    DevMachine.objects.filter(pk=machine.pk).update(engine_team_runs=True)
+    engine.refresh_from_db()
+    with transaction.atomic():
+        assert matcher.next_for_runner(engine) is None
+
+
+def test_tick_preflight_counts_pod_member_engine_only(issue, engine, pod, create_user):
+    """Scenario 20: a tick on the owner's issue where the owner's engine is
+    the only member passes preflight; with the engine ``pinned_only`` it
+    bounces."""
+    assert engine.pod_dispatch == RunnerPodDispatch.PINNED_ONLY
+    assert matcher.pod_has_runner_for_issue_principal(pod, issue, None, human=False) is False
+    _pod_member(engine)
+    assert matcher.pod_has_runner_for_issue_principal(pod, issue, None, human=False) is True
+
+
+def test_preflight_counts_offline_pod_member_engine(issue, engine, pod, create_user):
+    """Scenario 10: an offline engine is an offline runner; the run waits in
+    the pod rather than the issue bouncing."""
+    _pod_member(engine)
+    Runner.objects.filter(pk=engine.pk).update(status=RunnerStatus.OFFLINE, last_heartbeat_at=None)
+    assert matcher.pod_has_runner_for_issue_principal(pod, issue, create_user.id, human=True) is True
+
+
+def test_preflight_bounce_on_teammate_state_move(issue, engine, machine, pod, teammate):
+    """Scenario 24: a teammate's human event in a pod whose only member is
+    the owner's engine bounces; with the opt-in on, it does not."""
     from pi_dash.orchestration import scheduling
 
-    _assign(issue, engine)
-    assert engine.pod_dispatch == RunnerPodDispatch.PINNED_ONLY
-    creator = scheduling._resolve_creator_for_trigger(issue, triggered_by=scheduling.TRIGGER_TICK)
-    assert creator == create_user
-    assert scheduling.preflight_eligibility_or_bounce(
-        issue, run_creator=creator, pod=pod, triggered_by=scheduling.TRIGGER_TICK
-    )
-    fields = execution_fields(
-        project=issue.project, run_kind="issue", has_issue=True, actor=creator, automatic=True, issue=issue
-    )
-    assert fields["pinned_runner"] == engine and fields["pin_strict"] is True
-    run = AgentRun.objects.create(
-        workspace=issue.workspace,
-        created_by=creator,
-        pod=pod,
-        work_item=issue,
-        trigger=AgentRunTrigger.TICK,
-        status=AgentRunStatus.QUEUED,
-        prompt="x",
-        **fields,
-    )
-    with transaction.atomic():
-        assert matcher.next_for_runner(engine).id == run.id
-
-
-# --------------------------------------------------------------------------
-# §9 Availability and the waiting queue
-# --------------------------------------------------------------------------
-
-
-def test_run_ai_on_offline_assigned_runner_is_refused(session_client, issue, engine):
-    _assign(issue, engine)
-    Runner.objects.filter(pk=engine.pk).update(status=RunnerStatus.OFFLINE, last_heartbeat_at=None)
-    resp = session_client.post(
-        reverse("runner-runs"), {"triggered_by": "run_ai", "work_item": str(issue.id)}, format="json"
-    )
-    assert resp.status_code == 409, resp.content
-    body = resp.json()
-    assert body["code"] == ASSIGNED_RUNNER_OFFLINE
-    assert body["error"] == "Rich's MacBook is offline"
-    assert not AgentRun.objects.filter(work_item=issue).exists()
-
-
-def test_automatic_run_waits_for_offline_runner(issue, engine, create_user):
-    _assign(issue, engine)
-    Runner.objects.filter(pk=engine.pk).update(status=RunnerStatus.OFFLINE, last_heartbeat_at=None)
-    fields = execution_fields(
-        project=issue.project, run_kind="issue", has_issue=True, actor=create_user, automatic=True, issue=issue
-    )
-    assert fields["error_details"] == {"code": WAITING_FOR_RUNNER}
-
-
-@override_settings(MANAGED_RUNNER_QUEUED_MAX_AGE_SECS=3600)
-def test_expiry_sweep_selects_by_pin_strict(issue, pod, create_user):
-    """An automatic run strictly pinned to an offline own-agent runner
-    expires too (§9), and a non-strict pin is left to the offline-pin sweep."""
-    from pi_dash.managed_runner.tasks import expire_waiting_runs
-
-    mini = _runner(create_user, pod, name="mini", status=RunnerStatus.OFFLINE)
-    mini.dev_machine = DevMachine.objects.create(owner=create_user, label="Studio")
-    mini.save(update_fields=["dev_machine"])
-    strict = _queued(issue, created_by=create_user, pinned_runner=mini, strict=True, trigger=AgentRunTrigger.TICK)
-    AgentRun.objects.filter(pk=strict.pk).update(created_at=timezone.now() - timedelta(hours=2))
-    assert expire_waiting_runs() == 1
-    strict.refresh_from_db()
-    assert strict.status == AgentRunStatus.FAILED
-    assert strict.error_code == WAITING_FOR_RUNNER
-    assert strict.error.startswith("Studio is offline")
+    _pod_member(engine)
+    with patch.object(scheduling, "_bounce_issue_no_eligible_runner") as bounce:
+        assert not scheduling.preflight_eligibility_or_bounce(
+            issue, run_creator=teammate, pod=pod, triggered_by=AgentRunTrigger.STATE_TRANSITION.value
+        )
+    bounce.assert_called_once()
+    DevMachine.objects.filter(pk=machine.pk).update(engine_team_runs=True)
+    with patch.object(scheduling, "_bounce_issue_no_eligible_runner") as bounce:
+        assert scheduling.preflight_eligibility_or_bounce(
+            issue, run_creator=teammate, pod=pod, triggered_by=AgentRunTrigger.STATE_TRANSITION.value
+        )
+    bounce.assert_not_called()
 
 
 # --------------------------------------------------------------------------
@@ -626,7 +587,7 @@ def _data_migration():
     return importlib.import_module("pi_dash.runner.migrations.0035_engine_dispatch_data")
 
 
-def test_data_migration_executors_backfill_and_prune(workspace, project, pod, create_user, machine, teammate):
+def test_data_migration_executors_and_prune(workspace, project, pod, other_pod, create_user, machine, teammate):
     mig = _data_migration()
     state = State.objects.create(name="Todo", group="unstarted", project=project)
 
@@ -638,70 +599,81 @@ def test_data_migration_executors_backfill_and_prune(workspace, project, pod, cr
 
     # Engines as the migration finds them: every row on the 0034 default.
     used_engine = _runner(create_user, pod, name="e-used", engine=True, machine=machine, pod_dispatch="pod_member")
-    creator_engine = _runner(
-        create_user, managed_pod, name="e-creator", engine=True, machine=machine, pod_dispatch="pod_member"
+    managed_engine = _runner(
+        create_user, managed_pod, name="e-managed", engine=True, machine=machine, pod_dispatch="pod_member"
     )
     never_used = _runner(teammate, pod, name="e-never", engine=True, pod_dispatch="pod_member")
     manual = _runner(create_user, pod, name="mini")
 
-    def _issue(name, proj, executor, st=None):
+    def _issue(name, proj, executor, st=None, assigned_pod=None):
         st = st or State.objects.create(name="S", group="unstarted", project=proj)
         created = Issue.objects.create(workspace=workspace, project=proj, state=st, name=name)
-        Issue.objects.filter(pk=created.pk).update(agent_executor=executor, created_by=create_user)
+        Issue.objects.filter(pk=created.pk).update(
+            agent_executor=executor, created_by=create_user, assigned_pod=assigned_pod
+        )
         created.refresh_from_db()
         return created
 
-    from_latest_run = _issue("latest", project, "managed_runner", state)
-    AgentRun.objects.create(
+    managed_issue = _issue("managed", project, "managed_runner", state, assigned_pod=other_pod)
+    legacy_run = AgentRun.objects.create(
         workspace=workspace,
         created_by=create_user,
         pod=pod,
-        work_item=from_latest_run,
+        work_item=managed_issue,
         executor_kind="managed_runner",
         pinned_runner=used_engine,
         status=AgentRunStatus.QUEUED,
         prompt="x",
     )
-    from_creator = _issue("creator", managed_project, "managed_runner")
-    nothing = _issue("nothing", cloud_project, "managed_runner")
-    cloud_issue = _issue("cloud", project, "cloud_agent", state)
+    # Gives ``managed_engine`` a (finished) run, so it is not pruned.
+    AgentRun.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        pod=managed_pod,
+        runner=managed_engine,
+        executor_kind="managed_runner",
+        status=AgentRunStatus.COMPLETED,
+        prompt="x",
+    )
+    managed_no_pod = _issue("managed-no-pod", managed_project, "managed_runner")
+    cloud_issue = _issue("cloud", project, "cloud_agent", state, assigned_pod=pod)
 
     mig.migrate_executors(django_apps)
-    mig.backfill_assigned_runner(django_apps)
+    mig.migrate_issue_executors(django_apps)
     mig.prune_never_used_engine_runners(django_apps)
 
-    for obj in (managed_project, cloud_project, from_latest_run, from_creator, nothing, cloud_issue):
+    for obj in (managed_project, cloud_project, managed_issue, managed_no_pod, cloud_issue, legacy_run):
         obj.refresh_from_db()
-    for obj in (used_engine, creator_engine, never_used, manual):
+    for obj in (used_engine, managed_engine, never_used, manual):
         obj.refresh_from_db()
 
     assert managed_project.default_agent_executor == "local_runner"
     assert cloud_project.default_agent_executor == "local_runner"
-    # Engines take exactly what they took before, except in projects whose
-    # default was the built-in engine (PO-11).
+    # Engines take no new issue work, except in projects whose default was
+    # the built-in engine (PO-11).
     assert used_engine.pod_dispatch == RunnerPodDispatch.PINNED_ONLY
-    assert creator_engine.pod_dispatch == RunnerPodDispatch.POD_MEMBER
+    assert managed_engine.pod_dispatch == RunnerPodDispatch.POD_MEMBER
     assert manual.pod_dispatch == RunnerPodDispatch.POD_MEMBER
-    # Queued engine-pinned runs become strict.
-    assert AgentRun.objects.get(work_item=from_latest_run).pin_strict is True
-    # Backfill: latest engine run, else the creator's engine, else pod-level.
-    assert (from_latest_run.agent_executor, from_latest_run.assigned_runner_id) == ("local_runner", used_engine.id)
-    assert from_latest_run.assigned_pod_id == used_engine.pod_id
-    assert (from_creator.assigned_runner_id, from_creator.assigned_pod_id) == (creator_engine.id, managed_pod.id)
-    assert (nothing.agent_executor, nothing.assigned_runner_id) == ("local_runner", None)
-    assert (cloud_issue.agent_executor, cloud_issue.assigned_runner_id) == ("local_runner", None)
-    # Prune: only the engine with no run and no assigned issue.
+    # Issues become pod-level ``local_runner``: their pod is kept, or the
+    # project's default pod when they had none.
+    assert (managed_issue.agent_executor, managed_issue.assigned_pod_id) == ("local_runner", other_pod.id)
+    assert (managed_no_pod.agent_executor, managed_no_pod.assigned_pod_id) == ("local_runner", managed_pod.id)
+    assert (cloud_issue.agent_executor, cloud_issue.assigned_pod_id) == ("local_runner", pod.id)
+    # Runs are not touched: the legacy run keeps its kind, pin and pod.
+    assert legacy_run.executor_kind == "managed_runner"
+    assert (legacy_run.pinned_runner_id, legacy_run.pod_id) == (used_engine.id, pod.id)
+    # Prune: only the engine with no run at all.
     assert never_used.revoked_at is not None and never_used.status == RunnerStatus.REVOKED
-    assert used_engine.revoked_at is None and creator_engine.revoked_at is None
+    assert used_engine.revoked_at is None and managed_engine.revoked_at is None
     assert manual.revoked_at is None
 
-    # A second pass over the issue, run and pruning steps changes nothing.
-    mig.backfill_assigned_runner(django_apps)
+    # A second pass over the issue and pruning steps changes nothing.
+    mig.migrate_issue_executors(django_apps)
     mig.prune_never_used_engine_runners(django_apps)
-    from_creator.refresh_from_db()
-    creator_engine.refresh_from_db()
-    assert from_creator.assigned_runner_id == creator_engine.id
-    assert creator_engine.revoked_at is None
+    managed_issue.refresh_from_db()
+    used_engine.refresh_from_db()
+    assert managed_issue.assigned_pod_id == other_pod.id
+    assert used_engine.revoked_at is None
 
 
 def test_new_engine_runner_defaults_to_pinned_only(create_user, pod):

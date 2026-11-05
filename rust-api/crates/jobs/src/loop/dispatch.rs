@@ -405,7 +405,7 @@ async fn dispatch_inner(pool: &PgPool, target_id: &Uuid) -> Result<Inner, Error>
         .await?;
     let message_id = Uuid::new_v4();
     pidash_services::domain::assistant::create_prompt_message(
-        &mut *tx,
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         message_id,
         thread_id,
         turn_id,
