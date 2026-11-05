@@ -214,6 +214,40 @@ and the agent drives Git itself. Files are always preserved, and the runner
 never initializes Git for you. Branch checkout is the agent's job, not the
 platform's (PDASHOSS01-136).
 
+## Built-in engine
+
+Each release ships the built-in agent engine — the open-source
+[OpenAI Codex](https://github.com/openai/codex) (Apache-2.0), unmodified and
+renamed `pidash-agent-engine` — pinned in `runner/ENGINE_VERSION`. It is
+installed next to `pidash` in a directory per engine version and is **never
+on `PATH`**:
+
+| Installed with                         | Engine directory                                |
+| -------------------------------------- | ----------------------------------------------- |
+| `install.sh` / `pidash-installer.sh`   | `~/.local/lib/pidash/engine/<version>/`         |
+| `install.ps1` / `pidash-installer.ps1` | `%USERPROFILE%\.local\bin\engine\<version>\`    |
+| MSI                                    | `C:\Program Files\pidash\bin\engine\<version>\` |
+| extracted archive                      | `engine/<version>/` beside `pidash`             |
+
+The cargo-dist installers only install executables, so `install.sh` and
+`install.ps1` run `pidash engine install` right after them; it downloads the
+same release's archive, checks its `.sha256`, and places the engine directory.
+After a bare `pidash-installer.sh` / `.ps1` install, run it yourself. The MSI
+installs the engine itself. `pidash engine path` prints the engine the daemon
+would use.
+
+The daemon resolves the engine once at start and keeps that path.
+`pidash update` installs the new release's engine version directory beside the
+old one before replacing `pidash`, so runs in flight keep their binary; older
+versions are left for the daemon to remove once no run uses them.
+
+For development, point the daemon at another build in `config.toml`:
+
+```toml
+[engine]
+binary = "~/src/codex/codex-rs/target/debug/codex"
+```
+
 ## Auto-update
 
 `pidash` keeps itself current. When the cloud announces a newer `latest_runner_version` in the welcome frame, the running daemon swaps the on-disk `pidash` binary in place. The currently-running process is **never disturbed** — it keeps its loaded copy until the next natural restart (`pidash restart`, host reboot, or a service-manager respawn after a crash). This gives you the Claude-Code-style "always current" experience without ever killing in-flight work.

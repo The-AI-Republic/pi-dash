@@ -201,6 +201,7 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str, force: bool)
         file::load_config(paths)?
     } else {
         Config {
+            engine: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: cloud_url.to_string(),
@@ -449,6 +450,7 @@ pub async fn apply_enroll_response(
     let bootstrap_cloud_url = cloud_url.to_string();
     let init_cfg = move || {
         Some(Config {
+            engine: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: bootstrap_cloud_url.clone(),

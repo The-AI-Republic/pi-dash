@@ -7,7 +7,18 @@
 set -euo pipefail
 desktop_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 oss_dir="$(cd -- "$desktop_dir/.." && pwd)"
-engine_tag="${CODEX_BUNDLE_VERSION:-rust-v0.153.4}"
+# The pinned engine release lives in runner/ENGINE_VERSION, shared with the CLI
+# release pipeline (runner/scripts/stage_engine.py) and the runner itself.
+# CODEX_BUNDLE_VERSION still overrides it for a one-off build.
+engine_version_file="$oss_dir/runner/ENGINE_VERSION"
+if [[ -n "${CODEX_BUNDLE_VERSION:-}" ]]; then
+  engine_tag="$CODEX_BUNDLE_VERSION"
+elif [[ -f "$engine_version_file" ]]; then
+  engine_tag="$(tr -d "[:space:]" < "$engine_version_file")"
+else
+  echo "Missing $engine_version_file (the pinned agent-engine release)" >&2
+  exit 1
+fi
 # dev-prep.sh runs this for both beforeDevCommand and beforeBuildCommand, and
 # whatever lands in src-tauri/bin/ is sealed into the bundle as the daemon the
 # app spawns, so the default profile follows the build being served. The Tauri

@@ -67,6 +67,11 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets --locked
 
+      # Offline tests of the release workflow's engine staging (asset mapping,
+      # checksum, rename, licence files, MSI version define).
+      - name: Test release engine staging
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+
   install-ps1:
     # install.ps1 is documented as `irm .../install.ps1 | iex`, which runs it
     # inside the user's own session: a bare `exit` there closes their window

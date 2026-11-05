@@ -14,6 +14,14 @@ import tarfile
 import tempfile
 import zipfile
 
+# The pinned agent-engine release, shared with prepare-agent.sh, the CLI
+# release pipeline (runner/scripts/stage_engine.py) and the runner itself.
+ENGINE_VERSION_FILE = Path(__file__).resolve().parents[2] / "runner/ENGINE_VERSION"
+
+
+def default_engine_tag(path=ENGINE_VERSION_FILE):
+    return Path(path).read_text().strip()
+
 
 def targets(target):
     if target == "universal-apple-darwin":
@@ -131,10 +139,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True)
     parser.add_argument("--runner-tag", required=True)
-    parser.add_argument("--engine-tag", required=True)
+    parser.add_argument(
+        "--engine-tag",
+        help="upstream openai/codex tag; defaults to runner/ENGINE_VERSION",
+    )
     parser.add_argument("--output", type=Path, default=Path("bin"))
     args = parser.parse_args()
-    stage(args.target, args.runner_tag, args.engine_tag, args.output)
+    engine_tag = args.engine_tag or default_engine_tag()
+    stage(args.target, args.runner_tag, engine_tag, args.output)
 
 
 if __name__ == "__main__":
