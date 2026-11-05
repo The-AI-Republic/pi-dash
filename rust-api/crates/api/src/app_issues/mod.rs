@@ -42,7 +42,7 @@
 //! - the manager's triage exclusion keeps NULL-state rows (Django
 //!   negates null-safely: `NOT (group = 'triage' AND group IS NOT NULL)`).
 
-mod access;
+pub(crate) mod access;
 pub mod expand;
 pub mod handlers_archive;
 pub mod handlers_bulk;
