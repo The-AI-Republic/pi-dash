@@ -34,6 +34,7 @@ from pi_dash.runner.authentication import (
     RunnerRefreshTokenAuthentication,
 )
 from pi_dash.runner.models import (
+    DESKTOP_MACHINE_TOKEN_LABEL_PREFIX,
     DevMachine,
     MachineToken,
     Pod,
@@ -41,90 +42,27 @@ from pi_dash.runner.models import (
     RunnerForceRefresh,
     RunnerProvisioning,
     RunnerStatus,
+    desktop_machine_token_q,
 )
 from pi_dash.runner.serializers import RunnerEnrollRequestSerializer
 from pi_dash.runner.services import tokens
+from pi_dash.runner.services.dev_machines import (
+    DevMachineOwnershipError,
+    InvalidMachineFingerprint,
+    parse_machine_fingerprint,
+    resolve_dev_machine,
+)
 from pi_dash.runner.services.permissions import is_workspace_member
 from pi_dash.runner.services.pubsub import close_runner_session, send_to_runner
 
 logger = logging.getLogger(__name__)
 
 
-class DevMachineOwnershipError(Exception):
-    pass
-
-
-def _touch_dev_machine(machine: DevMachine, *, host_label: str) -> DevMachine:
-    host_label = (host_label or "").strip()[:255]
-    now = timezone.now()
-    update_fields = ["last_seen_at", "updated_at"]
-    machine.last_seen_at = now
-    if host_label and machine.host_label != host_label:
-        machine.host_label = host_label
-        update_fields.append("host_label")
-    if host_label and not machine.label:
-        machine.label = host_label[:128]
-        update_fields.append("label")
-    machine.save(update_fields=update_fields)
-    return machine
-
-
-def _get_or_create_dev_machine(
-    *,
-    user,
-    dev_machine_id: Optional[_uuid.UUID],
-    host_label: str,
-) -> Optional[DevMachine]:
-    host_label = (host_label or "").strip()[:255]
-    now = timezone.now()
-    if dev_machine_id is not None:
-        locked = DevMachine.objects.select_for_update().filter(pk=dev_machine_id).first()
-        if locked is not None:
-            if locked.owner_id != user.id:
-                raise DevMachineOwnershipError
-            return _touch_dev_machine(locked, host_label=host_label)
-        try:
-            with transaction.atomic():
-                return DevMachine.objects.create(
-                    id=dev_machine_id,
-                    owner=user,
-                    host_label=host_label,
-                    label=host_label[:128],
-                    last_seen_at=now,
-                )
-        except IntegrityError:
-            locked = DevMachine.objects.select_for_update().filter(pk=dev_machine_id).first()
-            if locked is None or locked.owner_id != user.id:
-                raise DevMachineOwnershipError
-            return _touch_dev_machine(locked, host_label=host_label)
-
-    if not host_label:
-        return None
-    locked = (
-        DevMachine.objects.select_for_update()
-        .filter(owner=user, host_label=host_label, revoked_at__isnull=True)
-        .order_by("created_at")
-        .first()
+def _bad_fingerprint_response() -> Response:
+    return Response(
+        {"error": "invalid_machine_fingerprint"},
+        status=status.HTTP_400_BAD_REQUEST,
     )
-    if locked is not None:
-        return _touch_dev_machine(locked, host_label=host_label)
-    try:
-        with transaction.atomic():
-            return DevMachine.objects.create(
-                owner=user,
-                host_label=host_label,
-                label=host_label[:128],
-                last_seen_at=now,
-            )
-    except IntegrityError:
-        # Legacy callers without a stable id can still race on old database
-        # states that have the prior owner/host constraint. Reuse the winner.
-        return (
-            DevMachine.objects.select_for_update()
-            .filter(owner=user, host_label=host_label, revoked_at__isnull=True)
-            .order_by("created_at")
-            .first()
-        )
 
 
 def _maybe_mint_machine_token(
@@ -150,7 +88,9 @@ def _maybe_mint_machine_token(
     else:
         filters["host_label"] = host_label
         filters["dev_machine__isnull"] = True
-    locked = MachineToken.objects.select_for_update().filter(**filters).first()
+    # A desktop-issued token on the same record is a different kind; it
+    # neither satisfies nor blocks the CLI's own token.
+    locked = MachineToken.objects.select_for_update().filter(**filters).exclude(desktop_machine_token_q()).first()
     if locked is not None:
         return None
     minted = tokens.mint_machine_token()
@@ -188,7 +128,10 @@ def _rotate_machine_token(
         filters["user"] = user
         filters["host_label"] = host_label
         filters["dev_machine__isnull"] = True
-    MachineToken.objects.select_for_update().filter(**filters).update(revoked_at=timezone.now())
+    # CLI-issued tokens only; never revoke the desktop's (``desktop:``).
+    MachineToken.objects.select_for_update().filter(**filters).exclude(desktop_machine_token_q()).update(
+        revoked_at=timezone.now()
+    )
     minted = tokens.mint_machine_token()
     MachineToken.objects.create(
         user=user,
@@ -272,6 +215,10 @@ class RunnerEnrollEndpoint(APIView):
     # protection that won't break legitimate one-off enrollments.
 
     def post(self, request):
+        try:
+            fingerprint = parse_machine_fingerprint(request.data.get("machine_fingerprint"))
+        except InvalidMachineFingerprint:
+            return _bad_fingerprint_response()
         serializer = RunnerEnrollRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -312,10 +259,11 @@ class RunnerEnrollEndpoint(APIView):
                 rtg=1,
             )
             try:
-                dev_machine = _get_or_create_dev_machine(
+                dev_machine = resolve_dev_machine(
                     user=runner.owner,
                     dev_machine_id=dev_machine_id,
                     host_label=host_label,
+                    fingerprint=fingerprint,
                 )
             except DevMachineOwnershipError:
                 return Response(
@@ -371,6 +319,7 @@ class RunnerEnrollEndpoint(APIView):
             "long_poll_interval_secs": 25,
             "protocol_version": 4,
             "machine_token_minted": machine_minted is not None,
+            "dev_machine_id": str(dev_machine.id) if dev_machine is not None else None,
         }
         if machine_minted is not None:
             body["machine_token"] = machine_minted.raw
@@ -542,6 +491,18 @@ _RUNNER_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]{0,127}$")
 _MAX_AUTO_NAME_RETRIES = 5
 
 
+class _TokenMachineMismatch(Exception):
+    pass
+
+
+# Values a ``POST /runners/`` body may name in ``provisioning``.
+_REQUESTABLE_PROVISIONING = frozenset({RunnerProvisioning.MANUAL.value, RunnerProvisioning.DESKTOP_BUNDLED.value})
+
+
+def _is_desktop_issued(machine_token) -> bool:
+    return machine_token is not None and machine_token.label.startswith(DESKTOP_MACHINE_TOKEN_LABEL_PREFIX)
+
+
 class RunnerCreateEndpoint(APIView):
     """``POST /api/v1/runner/runners/`` — CLI-initiated runner creation.
 
@@ -579,6 +540,30 @@ class RunnerCreateEndpoint(APIView):
         host_label = (request.data.get("host_label") or "").strip()[:255]
         body_name = (request.data.get("name") or "").strip()[:128]
         pod_name = (request.data.get("pod") or "").strip()
+        try:
+            fingerprint = parse_machine_fingerprint(request.data.get("machine_fingerprint"))
+        except InvalidMachineFingerprint:
+            return _bad_fingerprint_response()
+        # A runner's provisioning comes from whoever enrolls it, not from the
+        # computer's shared DevMachine (also used by the other client).
+        # ``pidash __managed enroll`` sends ``desktop_bundled``; a token
+        # minted by the desktop enroll endpoint implies it for older
+        # bundled daemons that send nothing; everything else is MANUAL.
+        provisioning = request.data.get("provisioning")
+        if provisioning is None:
+            provisioning = (
+                RunnerProvisioning.DESKTOP_BUNDLED
+                if _is_desktop_issued(auth_machine_token)
+                else RunnerProvisioning.MANUAL
+            )
+        elif not isinstance(provisioning, str) or provisioning not in _REQUESTABLE_PROVISIONING:
+            return Response(
+                {
+                    "error": "invalid_provisioning",
+                    "error_description": "provisioning must be one of: " + ", ".join(sorted(_REQUESTABLE_PROVISIONING)),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         if not project_identifier:
             return Response(
@@ -693,15 +678,26 @@ class RunnerCreateEndpoint(APIView):
             name = body_name or _next_auto_runner_name(pod)
             try:
                 with transaction.atomic():
-                    dev_machine = _get_or_create_dev_machine(
+                    dev_machine = resolve_dev_machine(
                         user=request.user,
                         dev_machine_id=dev_machine_id,
                         host_label=host_label,
+                        fingerprint=fingerprint,
                     )
-                    # Provisioning is inherited from the machine, never read
-                    # from the body: a client must not be able to claim it is
-                    # Pi Dash-managed and thereby take pinned desktop work.
-                    provisioning = getattr(dev_machine, "provisioning", RunnerProvisioning.MANUAL)
+                    if (
+                        auth_machine_token is not None
+                        and auth_machine_token.dev_machine_id is not None
+                        and (dev_machine is None or dev_machine.id != auth_machine_token.dev_machine_id)
+                    ):
+                        # The fingerprint says this token's config was
+                        # copied from another computer. Refuse rather than
+                        # attach a runner to a machine the token can't drive;
+                        # `pidash auth login` re-binds this computer.
+                        raise _TokenMachineMismatch
+                    # ``provisioning`` was decided above from the request; the
+                    # machine's own value is never copied. Bundled runners
+                    # are owner-scoped (only this user's pinned work), so a
+                    # client naming it cannot reach anyone else's runs.
                     if provisioning == RunnerProvisioning.DESKTOP_BUNDLED:
                         # Sign-out removes the local config, but the server row
                         # deliberately survives. Re-enrollment must recover it
@@ -747,6 +743,11 @@ class RunnerCreateEndpoint(APIView):
                     {"error": "dev_machine_not_found"},
                     status=status.HTTP_404_NOT_FOUND,
                 )
+            except _TokenMachineMismatch:
+                return Response(
+                    {"error": "dev_machine_token_mismatch"},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
             except IntegrityError as exc:
                 last_exc = exc
                 if body_name:
@@ -781,6 +782,7 @@ class RunnerCreateEndpoint(APIView):
             "long_poll_interval_secs": 25,
             "protocol_version": 4,
             "machine_token_minted": machine_minted is not None,
+            "dev_machine_id": str(runner.dev_machine_id) if runner.dev_machine_id else None,
         }
         if machine_minted is not None:
             body["machine_token"] = machine_minted.raw

@@ -27,11 +27,14 @@ class DevMachineAdmin(admin.ModelAdmin):
         "owner",
         "host_label",
         "visibility",
+        "supervisor",
+        "merged_into",
         "last_seen_at",
         "revoked_at",
     )
-    list_filter = ("visibility", "revoked_at")
-    search_fields = ("owner__email", "host_label", "label")
+    list_filter = ("visibility", "revoked_at", "supervisor")
+    search_fields = ("owner__email", "host_label", "label", "fingerprint")
+    raw_id_fields = ("merged_into",)
     readonly_fields = ("created_at", "updated_at")
 
 

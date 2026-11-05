@@ -17,3 +17,14 @@ def deactivate_api_token(raw_token: str | None, *, only_cli_device_tokens: bool 
     if only_cli_device_tokens:
         qs = qs.filter(description=CLI_DEVICE_API_TOKEN_DESCRIPTION)
     return qs.update(is_active=False, updated_at=timezone.now())
+
+
+def is_cli_device_api_token(raw_token: str | None) -> bool:
+    """True when ``raw_token`` is an active APIToken from the device-code flow."""
+    if not raw_token:
+        return False
+    return APIToken.objects.filter(
+        token=raw_token,
+        is_active=True,
+        description=CLI_DEVICE_API_TOKEN_DESCRIPTION,
+    ).exists()
