@@ -470,3 +470,89 @@ def test_signout_anonymous_with_token_still_redirects(anon_api):
     assert res.status_code == 302
     assert res.headers["location"] == _admin_base().rstrip("/")
     assert res.headers["content-type"] == "text/html; charset=utf-8"
+
+
+# ---------------------------------------------------------------------------
+# Origin verification (NEWPIDASH-40)
+#
+# ``CsrfViewMiddleware.process_view`` verifies ``Origin`` before the token
+# (``_origin_verified``): an Origin that is neither the request's own
+# ``scheme://host`` nor in ``CSRF_TRUSTED_ORIGINS`` is rejected even when
+# the cookie and the request token match. These plain Views answer the
+# ``csrf_failure`` page (200), byte-identical to the token-less reference —
+# mirroring auth_session/test_csrf.py's plain-view cases (NEWPIDASH-12).
+# ---------------------------------------------------------------------------
+
+EVIL_ORIGIN = "https://evil.example"
+
+ADMIN_FORM_POSTS = [
+    (
+        "/api/instances/admins/sign-in/",
+        {"email": "admin@example.com", "password": "ContractPass123!"},
+    ),
+    (
+        "/api/instances/admins/sign-up/",
+        {
+            "email": "fresh@example.com",
+            "password": STRONG_PASSWORD,
+            "first_name": "Fresh",
+        },
+    ),
+    ("/api/instances/admins/sign-out/", {}),
+]
+
+
+def _admin_session_set(res) -> bool:
+    return any(
+        c.startswith("admin-session-id=") for c in res.headers.get_list("set-cookie")
+    )
+
+
+@pytest.mark.parametrize(("path", "form"), ADMIN_FORM_POSTS)
+def test_admin_form_cross_origin_with_valid_token_hits_failure_page(world, path, form):
+    # Reference page: the same View's CSRF failure for a token-less POST.
+    bare = _primed_client()
+    bare.headers.pop("X-CSRFToken")
+    reference = bare.post(path, data=form)
+    assert reference.status_code == 200, reference.text[:200]
+    assert "templates/csrf_failure.html" in reference.text
+
+    res = _primed_client().post(path, data=form, headers={"Origin": EVIL_ORIGIN})
+    assert res.status_code == 200, (res.status_code, res.headers.get("location"))
+    assert res.headers["content-type"] == "text/html; charset=utf-8"
+    assert res.content == reference.content
+    assert not _admin_session_set(res), res.headers.get_list("set-cookie")
+
+
+def test_signin_cross_origin_does_not_sign_in(world):
+    client = _primed_client()
+    res = client.post(
+        "/api/instances/admins/sign-in/",
+        data={"email": "admin@example.com", "password": "ContractPass123!"},
+        headers={"Origin": EVIL_ORIGIN},
+    )
+    assert res.status_code == 200
+    assert "location" not in res.headers
+    assert client.get("/api/instances/admins/session/").json() == {"is_authenticated": False}
+
+
+def test_signout_cross_origin_keeps_the_session(world):
+    client = _primed_client(cookies={"admin-session-id": world["admin_key"]})
+    res = client.post("/api/instances/admins/sign-out/", headers={"Origin": EVIL_ORIGIN})
+    assert res.status_code == 200, (res.status_code, res.headers.get("location"))
+    assert "templates/csrf_failure.html" in res.text
+    # The view never ran, so the session still authenticates.
+    assert (
+        client.get("/api/instances/admins/session/").json()["is_authenticated"] is True
+    )
+
+
+def test_signin_same_origin_succeeds(world):
+    res = _primed_client().post(
+        "/api/instances/admins/sign-in/",
+        data={"email": "admin@example.com", "password": "ContractPass123!"},
+        headers={"Origin": base_url()},
+    )
+    assert res.status_code == 302, res.text[:200]
+    assert res.headers["location"] == _admin_base() + "general/"
+    assert _admin_session_set(res)
