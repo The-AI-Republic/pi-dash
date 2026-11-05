@@ -17,8 +17,11 @@
 //!
 //! The wait task keeps the tree after the leader exits: whatever the agent
 //! started stays owned until the bridge is finished (a chat runtime's dev
-//! server lives until the runtime ends). Design:
-//! `.ai_design/runner_cleanup/design.md` §4.1.
+//! server lives until the runtime ends). It notices the leader's exit before
+//! reaping it, and has the tree observe the group then: the zombie leader
+//! still holds the pgid, so the children it leaves are provably ours and
+//! anchor the group's ownership after the reap (`proctree::MemberId`).
+//! Design: `.ai_design/runner_cleanup/design.md` §4.1.
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -31,6 +34,44 @@ use crate::util::proctree::{self, FinishOutcome, PROC_TAG_ENV, ProcessTree, Tree
 
 /// Grace a dropped (unfinished) bridge gives its agent.
 pub const DROP_GRACE: Duration = Duration::from_secs(2);
+/// Fallback poll for the leader's exit between SIGCHLD wake-ups.
+const LEADER_POLL: Duration = Duration::from_millis(250);
+
+/// Resolves once the leader `pid` has exited, without reaping it (it is a
+/// zombie, or already gone). Woken by SIGCHLD, with a [`LEADER_POLL`]
+/// fallback. Never resolves on platforms without process groups, where the
+/// wait task reaps directly.
+async fn leader_exited(pid: Option<u32>) {
+    #[cfg(unix)]
+    {
+        let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) else {
+            return;
+        };
+        let exited = || crate::util::procinfo::info(pid).is_none_or(|p| p.zombie);
+        let mut sigchld =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).ok();
+        loop {
+            if exited() {
+                return;
+            }
+            let poll = tokio::time::sleep(LEADER_POLL);
+            match sigchld.as_mut() {
+                Some(s) => {
+                    tokio::select! {
+                        _ = s.recv() => {}
+                        _ = poll => {}
+                    }
+                }
+                None => poll.await,
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        std::future::pending::<()>().await
+    }
+}
 
 enum Ctl {
     /// Force-kill the leader only (interrupt fallback; unchanged behaviour).
@@ -152,6 +193,12 @@ async fn wait_task(
     exit_tx: watch::Sender<Option<ExitSnapshot>>,
 ) {
     let mut exited = false;
+    // Unix: the leader is reaped only after its exit was seen unreaped and
+    // the tree observed the group (see the module docs). Elsewhere it is
+    // reaped directly.
+    let mut seen = !cfg!(unix);
+    let exit_seen = leader_exited(child.id());
+    tokio::pin!(exit_seen);
     // Publish the exit and tell the tree its leader is reaped: from here an
     // emptied group's pgid may be reused, so the tree re-proves ownership
     // before any later signal.
@@ -172,7 +219,11 @@ async fn wait_task(
                 // Every handle dropped without finishing: a dropped bridge.
                 None => break (DROP_GRACE, None),
             },
-            res = child.wait(), if !exited => {
+            () = &mut exit_seen, if !seen => {
+                tree.observe();
+                seen = true;
+            }
+            res = child.wait(), if !exited && seen => {
                 publish(res);
                 exited = true;
             }
@@ -180,9 +231,19 @@ async fn wait_task(
     };
 
     // 1. Graceful: wait for the leader, bounded by `grace`.
-    if !exited && let Ok(res) = tokio::time::timeout(grace, child.wait()).await {
-        publish(res);
-        exited = true;
+    if !exited {
+        let graceful = async {
+            if !seen {
+                (&mut exit_seen).await;
+                tree.observe();
+                seen = true;
+            }
+            child.wait().await
+        };
+        if let Ok(res) = tokio::time::timeout(grace, graceful).await {
+            publish(res);
+            exited = true;
+        }
     }
 
     // 2. Finish the group, reaping the leader concurrently so its zombie does
@@ -193,7 +254,11 @@ async fn wait_task(
         loop {
             tokio::select! {
                 o = &mut fin => break o,
-                res = child.wait(), if !exited => {
+                () = &mut exit_seen, if !seen => {
+                    tree.observe();
+                    seen = true;
+                }
+                res = child.wait(), if !exited && seen => {
                     publish(res);
                     exited = true;
                 }

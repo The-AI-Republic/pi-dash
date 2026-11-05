@@ -36,8 +36,9 @@ impl ProcOwnership {
     }
 
     /// Start rewriting `data_dir/proc/alive` now and every
-    /// [`proctree::ALIVE_INTERVAL`] (lock holder only). Call after recovery,
-    /// which needs the previous daemon's mark.
+    /// [`proctree::ALIVE_INTERVAL`] (lock holder only), refreshing every live
+    /// tree's observed members on the same tick. Call after recovery, which
+    /// needs the previous daemon's mark.
     pub fn start_heartbeat(&mut self) {
         let Some(ctx) = self.ctx.clone() else {
             return;
@@ -54,6 +55,10 @@ impl ProcOwnership {
                 {
                     tracing::warn!("failed to write the last-alive mark: {e}");
                 }
+                // Observe (and persist) the members of every live tree, so
+                // children an agent started are known before its leader or
+                // older children exit (see `proctree::MemberId`).
+                let _ = tokio::task::spawn_blocking(proctree::refresh_observed).await;
             }
         }));
     }
@@ -174,6 +179,7 @@ mod tests {
                 pgid,
                 leader_start_time_ms,
                 owner_alive_until_ms: None,
+                observed_members: Vec::new(),
             },
         )
         .unwrap();

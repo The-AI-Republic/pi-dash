@@ -17,9 +17,12 @@
 //! * crash recovery acts only on records of this daemon's instance id, and
 //!   only on a group proven ours (see [`group_identity`]): a member carries
 //!   our tag (Linux), or the recorded leader is still alive with its recorded
-//!   start time, or the group is leaderless and every member started inside
-//!   the owner's lifetime (at or after the leader, at or before the owning
-//!   daemon's last-alive mark, `data_dir/proc/alive`).
+//!   start time, or the group is leaderless, still holds a member this tree
+//!   observed (group continuity, see [`MemberId`]), and every member started
+//!   inside the owner's lifetime (at or after the leader, at or before the
+//!   owning daemon's last-alive mark, `data_dir/proc/alive`);
+//! * the same proof guards every signal of a live tree once its leader has
+//!   been reaped (with the lifetime running until now).
 //!
 //! Windows keeps today's leader-only behaviour behind the same API: no group
 //! exists, so every group operation is a no-op there.
@@ -51,6 +54,55 @@ pub const START_TOLERANCE_MS: u64 = 2_000;
 pub const ALIVE_INTERVAL: Duration = Duration::from_secs(5);
 /// File holding the lock holder's last-alive mark, beside the records.
 pub const ALIVE_FILE: &str = "alive";
+/// How many observed members a tree keeps (and persists in its record).
+pub const MAX_OBSERVED: usize = 64;
+
+/// One process seen in a tree's group while the group was provably ours.
+///
+/// Group continuity: a process group exists while it has a member, and its
+/// pgid can be reused only after it emptied. A reused group therefore never
+/// contains a process seen in ours (same pid and start time), so a current
+/// member matching an observed one proves the group never emptied, i.e. it is
+/// still ours. Every member seen at that moment is ours too, which is how the
+/// observed set is refreshed: only while it still anchors the group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberId {
+    pub pid: i32,
+    pub start_ms: u64,
+}
+
+impl MemberId {
+    fn of(m: &crate::util::procinfo::ProcInfo) -> Self {
+        Self {
+            pid: m.pid,
+            start_ms: m.start_time_ms,
+        }
+    }
+
+    fn is(&self, m: &crate::util::procinfo::ProcInfo) -> bool {
+        self.pid == m.pid && self.start_ms.abs_diff(m.start_time_ms) <= START_TOLERANCE_MS
+    }
+}
+
+/// True when some member of `members` (zombies included: a zombie still
+/// holds its group) is one of `observed`.
+fn continuous(members: &[crate::util::procinfo::ProcInfo], observed: &[MemberId]) -> bool {
+    members.iter().any(|m| observed.iter().any(|o| o.is(m)))
+}
+
+/// The live members of `members` to remember, oldest first (the longest
+/// lived are the likeliest to still anchor the group later), bounded by
+/// [`MAX_OBSERVED`].
+fn observed_from(members: &[crate::util::procinfo::ProcInfo]) -> Vec<MemberId> {
+    let mut ids: Vec<MemberId> = members
+        .iter()
+        .filter(|m| !m.zombie)
+        .map(MemberId::of)
+        .collect();
+    ids.sort_by_key(|m| (m.start_ms, m.pid));
+    ids.truncate(MAX_OBSERVED);
+    ids
+}
 
 /// What a tree belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +198,11 @@ pub struct ProcRecord {
     /// checked against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_alive_until_ms: Option<u64>,
+    /// Members last observed in the group while it was provably ours (see
+    /// [`MemberId`]); recovery needs one of them alive to prove a leaderless
+    /// group ours.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_members: Vec<MemberId>,
 }
 
 fn record_path(dir: &Path, id: Uuid) -> PathBuf {
@@ -462,6 +519,9 @@ struct TreeInner {
     /// Set once the leader has been reaped. From then on an empty group's
     /// pgid can be reused, so every signal first re-proves the group is ours.
     leader_reaped: AtomicBool,
+    /// Members seen in the group while it was provably ours (see
+    /// [`MemberId`]), mirrored into the record.
+    observed: Mutex<Vec<MemberId>>,
     finish_lock: tokio::sync::Mutex<()>,
 }
 
@@ -490,15 +550,17 @@ impl TreeInner {
                 .leader_start_ms
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
+            let observed = self.observed_snapshot();
             let proof = Ownership {
                 tag: self.tag.as_deref(),
                 leader_start,
                 leader_dead: true,
                 alive_until_ms: now_ms(),
                 env_proof: self.env_proof,
+                observed: &observed,
             };
             match group_identity(pgid, &proof) {
-                Some(true) => {}
+                Some(true) => self.observe_group(pgid),
                 Some(false) => {
                     *phase = Phase::Gone;
                     return Signalled::Gone;
@@ -522,11 +584,58 @@ impl TreeInner {
         }
     }
 
+    fn observed_snapshot(&self) -> Vec<MemberId> {
+        self.observed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Refresh the observed members of group `pgid` (see [`MemberId`]): the
+    /// current members replace the old set, but only while the group is
+    /// provably still ours: one of its members was observed before, or the
+    /// leader (which holds the pgid until it is reaped) has not been reaped
+    /// and its start time could not be read at attach. The record is
+    /// rewritten when the set changes. Never signals.
+    fn observe_group(&self, pgid: i32) {
+        let members = crate::util::procinfo::group_members(pgid);
+        let mut observed = self.observed.lock().unwrap_or_else(|e| e.into_inner());
+        let anchored = continuous(&members, &observed)
+            || (observed.is_empty() && !self.leader_reaped.load(Ordering::SeqCst));
+        if !anchored {
+            return;
+        }
+        let next = observed_from(&members);
+        if next.is_empty() || next == *observed {
+            // Only zombies left (the group is ending), or nothing new.
+            return;
+        }
+        *observed = next;
+        let mut rec = self.record.lock().unwrap_or_else(|e| e.into_inner());
+        if let (Some(rec), Some(dir)) = (rec.as_mut(), &self.record_dir) {
+            rec.observed_members = observed.clone();
+            if let Err(e) = write_record(dir, rec) {
+                tracing::warn!("failed to update proc record {}: {e}", rec.record_id);
+            }
+        }
+    }
+
+    fn observe(&self) {
+        if let Some(pgid) = self.pgid() {
+            self.observe_group(pgid);
+        }
+    }
+
     fn mark_gone(&self) {
         *self.phase.lock().unwrap_or_else(|e| e.into_inner()) = Phase::Gone;
+        // Under the record lock, and forgetting the record, so a concurrent
+        // `observe_group` cannot write it back after the delete.
+        let mut rec = self.record.lock().unwrap_or_else(|e| e.into_inner());
+        *rec = None;
         if let Some(dir) = &self.record_dir {
             let _ = std::fs::remove_file(record_path(dir, self.record_id));
         }
+        drop(rec);
         REGISTRY.forget(self.record_id);
         REGISTRY.release(self.record_id);
     }
@@ -543,12 +652,14 @@ impl TreeInner {
                 .leader_start_ms
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
+            let observed = self.observed_snapshot();
             let proof = Ownership {
                 tag: self.tag.as_deref(),
                 leader_start,
                 leader_dead: true,
                 alive_until_ms: now_ms(),
                 env_proof: self.env_proof,
+                observed: &observed,
             };
             if group_identity(pgid, &proof) == Some(false) {
                 // Our group is gone and its pgid belongs to someone else.
@@ -571,6 +682,7 @@ impl TreeInner {
             self.mark_gone();
             return FinishOutcome::Gone;
         };
+        self.observe_group(pgid);
         let mut outcome = match probe_group(pgid) {
             Probe::Gone => None,
             Probe::Denied => Some("EPERM probing group".to_string()),
@@ -681,6 +793,19 @@ impl Registry {
         }
     }
 
+    /// Every tree that may still own a group: live ones and held ones.
+    fn all_trees(&self) -> Vec<Arc<TreeInner>> {
+        let mut trees = self.snapshot(|_| true);
+        if let Ok(m) = self.held.lock() {
+            for t in m.values() {
+                if !trees.iter().any(|l| l.record_id == t.record_id) {
+                    trees.push(t.clone());
+                }
+            }
+        }
+        trees
+    }
+
     fn snapshot(&self, filter: impl Fn(&TreeInner) -> bool) -> Vec<Arc<TreeInner>> {
         let Ok(m) = self.live.lock() else {
             return Vec::new();
@@ -716,6 +841,17 @@ pub fn admit() -> std::io::Result<SpawnAdmission> {
         ));
     }
     Ok(SpawnAdmission { _gate: guard })
+}
+
+/// Refresh the observed members of every tree (see [`MemberId`]). The
+/// instance-lock holder calls this from its heartbeat, every
+/// [`ALIVE_INTERVAL`], so children an agent starts are observed (and
+/// persisted) while an older member still anchors the group. Blocking (it
+/// lists processes); never signals.
+pub fn refresh_observed() {
+    for t in REGISTRY.all_trees() {
+        t.observe();
+    }
 }
 
 /// Daemon shutdown: stop accepting spawns, snapshot every live tree and
@@ -854,6 +990,7 @@ impl ProcessTree {
                     pgid: None,
                     leader_start_time_ms: None,
                     owner_alive_until_ms: None,
+                    observed_members: Vec::new(),
                 };
                 write_record(&ctx.proc_dir, &rec)?;
                 (Some(tag), Some(ctx.proc_dir.clone()), Some(rec))
@@ -870,6 +1007,7 @@ impl ProcessTree {
             phase: Mutex::new(Phase::Provisional),
             leader_start_ms: Mutex::new(None),
             leader_reaped: AtomicBool::new(false),
+            observed: Mutex::new(Vec::new()),
             finish_lock: tokio::sync::Mutex::new(()),
         });
         REGISTRY.remember(&inner);
@@ -934,10 +1072,24 @@ impl ProcessTree {
             .leader_start_ms
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = start;
+        // The leader is the first anchor of the group's continuity.
+        let observed: Vec<MemberId> = start
+            .map(|start_ms| MemberId {
+                pid: pgid,
+                start_ms,
+            })
+            .into_iter()
+            .collect();
+        *self
+            .inner
+            .observed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = observed.clone();
         let mut rec = self.inner.record.lock().unwrap_or_else(|e| e.into_inner());
         if let (Some(rec), Some(dir)) = (rec.as_mut(), &self.inner.record_dir) {
             rec.pgid = Some(pgid);
             rec.leader_start_time_ms = start;
+            rec.observed_members = observed;
             if let Err(e) = write_record(dir, rec) {
                 tracing::warn!("failed to update proc record {}: {e}", rec.record_id);
             }
@@ -950,11 +1102,22 @@ impl ProcessTree {
     /// later signal (see `TreeInner::signal`).
     pub fn leader_reaped(&self) {
         self.inner.leader_reaped.store(true, Ordering::SeqCst);
-        if let Some(pgid) = self.inner.pgid()
-            && probe_group(pgid) == Probe::Gone
-        {
-            self.inner.mark_gone();
+        if let Some(pgid) = self.inner.pgid() {
+            if probe_group(pgid) == Probe::Gone {
+                self.inner.mark_gone();
+            } else {
+                self.inner.observe_group(pgid);
+            }
         }
+    }
+
+    /// Observe the group's current members (see [`MemberId`]). Call it when
+    /// the leader has exited but is not yet reaped: its zombie still holds
+    /// the pgid, so every member is ours, and the children it leaves behind
+    /// become the anchors that prove the group ours after the reap. Never
+    /// signals.
+    pub fn observe(&self) {
+        self.inner.observe();
     }
 
     /// Test-only: simulate a daemon crash. The record stays on disk exactly
@@ -1118,6 +1281,8 @@ struct Ownership<'a> {
     alive_until_ms: u64,
     /// Environment reads may be used (Linux; see `procinfo`).
     env_proof: bool,
+    /// Members observed while the group was provably ours ([`MemberId`]).
+    observed: &'a [MemberId],
 }
 
 /// Is the live group `pgid` still ours? Used by crash recovery and, once the
@@ -1126,18 +1291,20 @@ struct Ownership<'a> {
 /// * `Some(true)`: a member carries our tag (only where environments are
 ///   readable); or the process with pid == pgid is our original leader (its
 ///   start time matches the recorded one, and no member was readable without
-///   our tag); or the group is leaderless and
-///   every member started inside the owner's lifetime (at or after the
-///   recorded leader start, at or before `alive_until_ms`) and, where
-///   environments are readable, none was readable without our tag.
+///   our tag); or the group is leaderless, a member (zombies included) is
+///   one we observed while the group was provably ours (continuity, see
+///   [`MemberId`]), every member started inside the owner's lifetime (at or
+///   after the recorded leader start, at or before `alive_until_ms`) and,
+///   where environments are readable, none was readable without our tag.
 /// * `Some(false)`: the pgid provably belongs to another group now: its
 ///   leader is a different process, or a member is older than our leader.
 /// * `None`: cannot prove either way (or no live member is left). Never
 ///   signal; keep the record.
 ///
 /// A group created after our group emptied has every member started after
-/// our leader, so the leader start alone cannot tell it apart; the leader
-/// identity and the lifetime upper bound can.
+/// our leader, and (for a live tree) before now, so start times alone cannot
+/// tell it apart; the leader identity and group continuity can. The lifetime
+/// window is only an extra constraint, never sufficient on its own.
 fn group_identity(pgid: i32, o: &Ownership<'_>) -> Option<bool> {
     let all = crate::util::procinfo::group_members(pgid);
     let live: Vec<_> = all.iter().filter(|m| !m.zombie).collect();
@@ -1180,12 +1347,12 @@ fn group_identity(pgid: i32, o: &Ownership<'_>) -> Option<bool> {
         // way. Keep the record and retry later.
         return None;
     }
-    // Leaderless: every member must have started while the owner was alive.
-    // A member started later belongs to a group that reused the pgid after
-    // the crash, or to ours started after the last mark; we cannot tell, so
-    // do not signal.
-    live.iter()
-        .all(|m| m.start_time_ms <= o.alive_until_ms)
+    // Leaderless: the group must still hold a member we observed (it never
+    // emptied, so its pgid was never reused), and every member must have
+    // started while the owner was alive. Otherwise it may be a group that
+    // reused the pgid, or ours with only members we never saw; we cannot
+    // tell, so do not signal.
+    (continuous(&all, o.observed) && live.iter().all(|m| m.start_time_ms <= o.alive_until_ms))
         .then_some(true)
 }
 
@@ -1268,6 +1435,7 @@ async fn recover_one((path, mut rec): (PathBuf, ProcRecord), opts: RecoverOpts) 
                     leader_dead: false,
                     alive_until_ms,
                     env_proof: opts.env_proof,
+                    observed: &rec.observed_members,
                 };
                 match group_identity(pgid, &proof) {
                     Some(true) => {
@@ -1345,6 +1513,7 @@ mod tests {
             pgid: Some(999_999),
             leader_start_time_ms: Some(0),
             owner_alive_until_ms: None,
+            observed_members: Vec::new(),
         };
         write_record(&mine.proc_dir, &rec("mine")).unwrap();
         write_record(&mine.proc_dir, &rec("theirs")).unwrap();
@@ -1417,6 +1586,7 @@ mod tests {
             pgid,
             leader_start_time_ms: leader_start,
             owner_alive_until_ms: None,
+            observed_members: Vec::new(),
         };
         write_record(&ctx.proc_dir, &rec).unwrap()
     }
@@ -1453,6 +1623,7 @@ mod tests {
             leader_dead: false,
             alive_until_ms: 0,
             env_proof: false,
+            observed: &[],
         };
         assert_eq!(group_identity(pgid, &proof), None);
         assert_eq!(still_ours(pgid, &proof, &[(orphan, start)]), Some(true));
@@ -1479,13 +1650,18 @@ mod tests {
         );
     }
 
-    async fn leaderless_group_left_by_a_crashed_daemon_is_cleaned(env_proof: bool) {
+    /// A crashed daemon's agent started a child and then exited (as on stdin
+    /// EOF when the daemon dies): a leaderless group. With `observed`, the
+    /// daemon observed the child (heartbeat, or the leader's exit) before
+    /// the crash. Returns the recovery report and whether the child is gone.
+    async fn crash_with_a_leaderless_group(
+        env_proof: bool,
+        observed: bool,
+    ) -> (RecoveryReport, bool) {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ctx_env(dir.path(), "test-instance-crash", env_proof);
         let pf = dir.path().join("pids");
         let tree = ProcessTree::prepare(Some(scope("run-crash")), Some(ctx.clone())).unwrap();
-        // The agent starts a child, then exits (as on stdin EOF when the
-        // daemon dies): a leaderless group.
         let mut child = session_cmd(
             &format!("sleep 300 & echo $! > {}; exit 0", pf.display()),
             tree.tag(),
@@ -1494,9 +1670,13 @@ mod tests {
         .unwrap();
         tree.attach(child.id());
         let pgid = tree.pgid().expect("leader owns its group");
-        child.wait().await.unwrap();
         let orphan = read_pids(&pf, 1).await[0];
         assert!(alive(orphan));
+        if observed {
+            // The leader is not reaped yet: its group is provably ours.
+            tree.observe();
+        }
+        child.wait().await.unwrap();
         // Crash: no finish, no drop backstop. The daemon's last heartbeat
         // came after the orphan started.
         tree.abandon();
@@ -1505,10 +1685,40 @@ mod tests {
         let records = list_records(&ctx.proc_dir, &ctx.instance_id);
         assert_eq!(records.len(), 1, "unresolved record survives the crash");
         assert_eq!(records[0].1.pgid, Some(pgid));
+        assert_eq!(
+            records[0]
+                .1
+                .observed_members
+                .iter()
+                .any(|m| m.pid == orphan),
+            observed,
+            "the observed child is persisted in the record"
+        );
         let report = recover(records, opts(&ctx, Some(last_alive))).await;
+        let gone = wait_all_gone(&[orphan], Duration::from_secs(1)).await;
+        if gone {
+            assert!(list_records(&ctx.proc_dir, &ctx.instance_id).is_empty());
+        } else {
+            assert_eq!(list_records(&ctx.proc_dir, &ctx.instance_id).len(), 1);
+            kill_now(orphan);
+        }
+        (report, gone)
+    }
+
+    async fn leaderless_group_left_by_a_crashed_daemon_is_cleaned(env_proof: bool) {
+        let (report, gone) = crash_with_a_leaderless_group(env_proof, true).await;
         assert_eq!(report.cleaned, 1, "{report:?}");
-        assert!(wait_all_gone(&[orphan], Duration::from_secs(1)).await);
-        assert!(list_records(&ctx.proc_dir, &ctx.instance_id).is_empty());
+        assert!(gone);
+    }
+
+    #[tokio::test]
+    async fn recovery_does_not_signal_a_leaderless_group_whose_members_were_never_observed() {
+        // Without environments, a leaderless group is ours only if it still
+        // holds a member we observed: the start-time window alone cannot
+        // tell our group from one that reused the pgid.
+        let (report, gone) = crash_with_a_leaderless_group(false, false).await;
+        assert_eq!(report.kept, 1, "{report:?}");
+        assert!(!gone, "never signalled");
     }
 
     #[cfg(target_os = "linux")]
@@ -1926,9 +2136,11 @@ mod tests {
         .spawn()
         .unwrap();
         tree.attach(child.id());
+        let orphan = read_pids(&pf, 1).await[0];
+        // What the wait task does when the leader exits, before the reap.
+        tree.observe();
         child.wait().await.unwrap();
         tree.leader_reaped();
-        let orphan = read_pids(&pf, 1).await[0];
         assert_eq!(tree.finish_group().await, FinishOutcome::Gone);
         assert!(wait_all_gone(&[orphan], Duration::from_secs(1)).await);
     }
@@ -1940,8 +2152,145 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_group_kept_after_its_leader_was_reaped_is_cleaned_by_start_times() {
+    async fn a_group_kept_after_its_leader_was_reaped_is_cleaned_by_its_observed_members() {
         tagged_group_kept_after_the_leader_was_reaped_is_cleaned(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_reused_pgid_whose_new_leader_exited_leaving_unobserved_children_is_not_signalled() {
+        // Our tree's group emptied and its pgid went to another group, whose
+        // leader then exited and left children. Those children started after
+        // our leader and before now, so the start-time window alone would
+        // call them ours; none of them was ever observed in our group, so
+        // they are never signalled. Modelled with the tree armed on that
+        // other group from the start, its leader the only member observed.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_env(dir.path(), "test-instance-reused-children", false);
+        let pf = dir.path().join("pids");
+        let tree = ProcessTree::prepare(Some(scope("run-reused")), Some(ctx.clone())).unwrap();
+        let mut other = session_cmd(
+            &format!("sleep 1; sleep 300 & echo $! > {}; exit 0", pf.display()),
+            None,
+        )
+        .spawn()
+        .unwrap();
+        tree.attach(other.id());
+        other.wait().await.unwrap();
+        tree.leader_reaped();
+        let orphan = read_pids(&pf, 1).await[0];
+        assert!(tree.pgid().is_some(), "the group still has a member");
+        let outcome = tree.finish_group().await;
+        assert!(
+            matches!(outcome, FinishOutcome::Unresolved(_)),
+            "{outcome:?}"
+        );
+        assert!(alive(orphan), "never signalled by finish");
+        let record = tree.record_path().unwrap();
+        drop(tree);
+        assert!(alive(orphan), "nor by the drop backstop");
+        assert!(record.exists(), "the record is kept");
+        kill_now(orphan);
+        assert!(wait_all_gone(&[orphan], Duration::from_secs(10)).await);
+    }
+
+    #[tokio::test]
+    async fn a_long_lived_tree_whose_first_children_were_replaced_is_still_cleaned() {
+        // A chat agent's first child (A) is observed when the leader exits.
+        // Later A starts B and exits. The heartbeat refresh observed B while
+        // A still anchored the group, so the group is still provably ours.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_env(dir.path(), "test-instance-replaced", false);
+        let d = dir.path().display();
+        let tree = ProcessTree::prepare(
+            Some(ProcScope {
+                kind: ScopeKind::Chat,
+                id: format!("chat-replaced-{}", Uuid::new_v4()),
+                runner_id: None,
+            }),
+            Some(ctx.clone()),
+        )
+        .unwrap();
+        let a_script = format!(
+            "while [ ! -f {d}/go1 ]; do sleep 0.05; done; sleep 300 & echo $! > {d}/b; \
+             while [ ! -f {d}/go2 ]; do sleep 0.05; done; exit 0"
+        );
+        let mut leader = session_cmd(
+            &format!("sh -c '{a_script}' & echo $! > {d}/a; exit 0"),
+            None,
+        )
+        .spawn()
+        .unwrap();
+        tree.attach(leader.id());
+        let pgid = tree.pgid().unwrap();
+        let a = read_pids(&dir.path().join("a"), 1).await[0];
+        tree.observe();
+        leader.wait().await.unwrap();
+        tree.leader_reaped();
+        let after_reap = tree.inner.observed_snapshot();
+        std::fs::write(dir.path().join("go1"), b"").unwrap();
+        let b = read_pids(&dir.path().join("b"), 1).await[0];
+        // The heartbeat's refresh, while A still anchors the group.
+        refresh_observed();
+        std::fs::write(dir.path().join("go2"), b"").unwrap();
+        assert!(wait_all_gone(&[a], Duration::from_secs(10)).await);
+        assert!(alive(b));
+        // Without the refresh only A was known, and A is gone: unprovable.
+        let leader_start = *tree.inner.leader_start_ms.lock().unwrap();
+        let stale_view = Ownership {
+            tag: None,
+            leader_start,
+            leader_dead: true,
+            alive_until_ms: now_ms(),
+            env_proof: false,
+            observed: &after_reap,
+        };
+        assert_eq!(group_identity(pgid, &stale_view), None);
+        let rec: ProcRecord =
+            serde_json::from_slice(&std::fs::read(tree.record_path().unwrap()).unwrap()).unwrap();
+        assert!(
+            rec.observed_members.iter().any(|m| m.pid == b),
+            "the refresh is persisted: {rec:?}"
+        );
+        assert_eq!(tree.finish_group().await, FinishOutcome::Gone);
+        assert!(wait_all_gone(&[b], Duration::from_secs(1)).await);
+    }
+
+    #[tokio::test]
+    async fn observed_members_prove_a_leaderless_group_only_inside_the_owner_lifetime() {
+        let dir = tempfile::tempdir().unwrap();
+        let (pgid, orphan) = leaderless_group(dir.path(), None).await;
+        let start = crate::util::procinfo::info(orphan).unwrap().start_time_ms;
+        let observed = [MemberId {
+            pid: orphan,
+            start_ms: start,
+        }];
+        let proof = Ownership {
+            tag: None,
+            leader_start: Some(start),
+            leader_dead: true,
+            alive_until_ms: now_ms(),
+            env_proof: false,
+            observed: &observed,
+        };
+        assert_eq!(group_identity(pgid, &proof), Some(true));
+        // The window stays an extra constraint.
+        let before = Ownership {
+            alive_until_ms: start - 10 * START_TOLERANCE_MS,
+            ..proof
+        };
+        assert_eq!(group_identity(pgid, &before), None);
+        // Same pid, different start: another process.
+        let other = [MemberId {
+            pid: orphan,
+            start_ms: start - 10 * START_TOLERANCE_MS,
+        }];
+        let reused = Ownership {
+            observed: &other,
+            ..proof
+        };
+        assert_eq!(group_identity(pgid, &reused), None);
+        kill_now(orphan);
+        assert!(wait_all_gone(&[orphan], Duration::from_secs(10)).await);
     }
 
     fn member(pid: i32, zombie: bool) -> crate::util::procinfo::ProcInfo {
