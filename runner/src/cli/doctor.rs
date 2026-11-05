@@ -612,21 +612,120 @@ async fn claude_auth_status(binary: &str) -> Option<ClaudeStatus> {
     parse_claude_status(&out)
 }
 
-async fn gather_claude_auth_probe(binary: &str) -> ClaudeAuthProbe {
+/// What the agent's environment holds, as far as the Claude auth fallback
+/// cares. Read from the same login shell the daemon spawns the agent
+/// through, so keys exported by shell rc files count. Values of credential
+/// variables are never read back, only whether they are set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AgentEnvSnapshot {
+    /// Names from [`CLAUDE_AUTH_ENV_VARS`] / [`CLAUDE_THIRD_PARTY_ENV_VARS`]
+    /// that are set and non-blank.
+    set_vars: Vec<String>,
+    config_dir: Option<String>,
+    home: Option<String>,
+}
+
+const ENV_SET_MARK: &str = "__pidash_doctor_set ";
+const ENV_CFG_MARK: &str = "__pidash_doctor_cfg ";
+const ENV_HOME_MARK: &str = "__pidash_doctor_home ";
+
+/// POSIX sh script printing [`AgentEnvSnapshot`] as marked lines. Marker
+/// prefixes let us ignore whatever the user's rc files print.
+fn agent_env_script() -> String {
+    let vars: Vec<&str> = CLAUDE_AUTH_ENV_VARS
+        .iter()
+        .chain(CLAUDE_THIRD_PARTY_ENV_VARS)
+        .copied()
+        .collect();
+    format!(
+        "for v in {vars}; do eval \"x=\\${{$v-}}\"; case \"$x\" in *[![:space:]]*) \
+         printf '{ENV_SET_MARK}%s\\n' \"$v\";; esac; done; \
+         printf '{ENV_CFG_MARK}%s\\n' \"${{CLAUDE_CONFIG_DIR-}}\"; \
+         printf '{ENV_HOME_MARK}%s\\n' \"${{HOME-}}\"",
+        vars = vars.join(" ")
+    )
+}
+
+/// Parse [`agent_env_script`] output. `None` unless the script clearly ran
+/// (the HOME marker is present), so a broken shell falls back rather than
+/// reading as "nothing set".
+fn parse_agent_env(stdout: &str) -> Option<AgentEnvSnapshot> {
+    let mut snap = AgentEnvSnapshot::default();
+    let mut saw_home = false;
+    let non_empty = |v: &str| (!v.is_empty()).then(|| v.to_string());
+    for line in stdout.lines() {
+        if let Some(v) = line.strip_prefix(ENV_SET_MARK) {
+            snap.set_vars.push(v.trim().to_string());
+        } else if let Some(v) = line.strip_prefix(ENV_CFG_MARK) {
+            snap.config_dir = non_empty(v);
+        } else if let Some(v) = line.strip_prefix(ENV_HOME_MARK) {
+            snap.home = non_empty(v);
+            saw_home = true;
+        }
+    }
+    saw_home.then_some(snap)
+}
+
+/// The doctor process's own environment, used when the login shell cannot
+/// be read (and on Windows, where agents are spawned without a shell).
+fn process_env_snapshot() -> AgentEnvSnapshot {
     let set = |var: &&str| std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
+    AgentEnvSnapshot {
+        set_vars: CLAUDE_AUTH_ENV_VARS
+            .iter()
+            .chain(CLAUDE_THIRD_PARTY_ENV_VARS)
+            .filter(|v| set(v))
+            .map(|v| v.to_string())
+            .collect(),
+        config_dir: std::env::var("CLAUDE_CONFIG_DIR")
+            .ok()
+            .filter(|v| !v.is_empty()),
+        home: directories::BaseDirs::new().map(|b| b.home_dir().display().to_string()),
+    }
+}
+
+async fn agent_env_snapshot() -> AgentEnvSnapshot {
+    if cfg!(target_os = "windows") {
+        return process_env_snapshot();
+    }
+    let script = agent_env_script();
+    match run_claude_quietly("sh", &["-c", &script]).await {
+        Some((out, _)) => parse_agent_env(&out).unwrap_or_else(process_env_snapshot),
+        None => process_env_snapshot(),
+    }
+}
+
+/// Build the probe from Claude's status answer (if any) and the agent's
+/// environment.
+fn build_claude_probe(
+    status: Option<ClaudeStatus>,
+    env: &AgentEnvSnapshot,
+    is_macos: bool,
+) -> ClaudeAuthProbe {
+    let find = |list: &[&'static str]| {
+        list.iter()
+            .copied()
+            .find(|v| env.set_vars.iter().any(|s| s == v))
+    };
     let credentials = claude_credentials_path(
-        std::env::var_os("CLAUDE_CONFIG_DIR"),
-        directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()),
+        env.config_dir.clone().map(Into::into),
+        env.home.clone().map(PathBuf::from),
     )
     .map(|p| read_credentials_file(&p))
     .unwrap_or(CredentialsFile::Missing);
     ClaudeAuthProbe {
-        status: claude_auth_status(binary).await,
-        env_var: CLAUDE_AUTH_ENV_VARS.iter().copied().find(|v| set(v)),
-        third_party_provider: CLAUDE_THIRD_PARTY_ENV_VARS.iter().copied().find(|v| set(v)),
+        status,
+        env_var: find(CLAUDE_AUTH_ENV_VARS),
+        third_party_provider: find(CLAUDE_THIRD_PARTY_ENV_VARS),
         credentials,
-        is_macos: cfg!(target_os = "macos"),
+        is_macos,
     }
+}
+
+async fn gather_claude_auth_probe(binary: &str) -> ClaudeAuthProbe {
+    let status = claude_auth_status(binary).await;
+    let env = agent_env_snapshot().await;
+    build_claude_probe(status, &env, cfg!(target_os = "macos"))
 }
 
 async fn check_git() -> Result<String> {
@@ -1092,5 +1191,76 @@ mod tests {
         assert!(matches!(unset, AuthStatus::Unknown(ref d) if d == "hint"));
         let empty = env_key_auth("XAI_API_KEY", Some("  ".into()), "hint".into());
         assert!(matches!(empty, AuthStatus::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_agent_env_reads_markers_and_ignores_rc_noise() {
+        let out = "welcome from .bashrc\n__pidash_doctor_set ANTHROPIC_API_KEY\n\
+                   __pidash_doctor_cfg /cfg\n__pidash_doctor_home /home/u\n";
+        assert_eq!(
+            parse_agent_env(out),
+            Some(AgentEnvSnapshot {
+                set_vars: vec!["ANTHROPIC_API_KEY".into()],
+                config_dir: Some("/cfg".into()),
+                home: Some("/home/u".into()),
+            })
+        );
+        let empty = "__pidash_doctor_cfg \n__pidash_doctor_home /home/u\n";
+        assert_eq!(parse_agent_env(empty).unwrap().config_dir, None);
+        // The script did not run (no HOME marker): fall back, don't read as unset.
+        assert_eq!(parse_agent_env("bash: sh: not found"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_env_script_reports_set_names_only() {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(agent_env_script())
+            .env_clear()
+            .env("HOME", "/home/u")
+            .env("ANTHROPIC_AUTH_TOKEN", "secret-value")
+            .env("ANTHROPIC_API_KEY", "   ")
+            .env("CLAUDE_CONFIG_DIR", "/cfg dir")
+            .output()
+            .unwrap();
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(!text.contains("secret-value"), "{text}");
+        assert_eq!(
+            parse_agent_env(&text),
+            Some(AgentEnvSnapshot {
+                set_vars: vec!["ANTHROPIC_AUTH_TOKEN".into()],
+                config_dir: Some("/cfg dir".into()),
+                home: Some("/home/u".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn build_claude_probe_uses_agent_env_for_fallback() {
+        // Old CLI (no status): a key exported only by the login shell counts.
+        let env = AgentEnvSnapshot {
+            set_vars: vec!["CLAUDE_CODE_USE_VERTEX".into(), "ANTHROPIC_API_KEY".into()],
+            config_dir: None,
+            home: None,
+        };
+        let p = build_claude_probe(None, &env, false);
+        assert_eq!(p.env_var, Some("ANTHROPIC_API_KEY"));
+        assert_eq!(p.third_party_provider, Some("CLAUDE_CODE_USE_VERTEX"));
+        assert!(matches!(classify_claude_auth(&p), AuthStatus::LoggedIn(_)));
+
+        // CLAUDE_CONFIG_DIR from the agent env locates the credentials file.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"t"}}"#,
+        )
+        .unwrap();
+        let env = AgentEnvSnapshot {
+            config_dir: Some(dir.path().display().to_string()),
+            ..AgentEnvSnapshot::default()
+        };
+        let p = build_claude_probe(None, &env, false);
+        assert!(matches!(p.credentials, CredentialsFile::Found(_)));
     }
 }
