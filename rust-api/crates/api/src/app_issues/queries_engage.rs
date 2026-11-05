@@ -3,10 +3,11 @@
 //! Activity / comment / version / meta / identifier read querysets (D-26 queries-B).
 //!
 //! Ports the annotated read querysets behind the issue history, comment,
-//! version, meta and identifier endpoints to SQL text, extending pilot-2's
-//! api-crate query pattern (`super::queries_core` fragments, [`Binder`] `$n`
-//! binds). Each builder returns a fragment
-//! or a complete statement the handler executes; handlers own auth gates,
+//! version, meta and identifier endpoints. Every builder is SeaORM / sea-query
+//! (history and comments since batch 2h, meta and identifier since Batch L2,
+//! which moved the old text builders to the `reads_oracle` differential
+//! oracle). Each builder returns an expression or a complete statement the
+//! handler executes; handlers own auth gates,
 //! filter stacks, ordering variants, pagination envelopes and response shaping.
 //!
 //! Sources (drift baseline `01a93e17`):
@@ -56,7 +57,7 @@
 //! identifier lite/full lookups use the plain `Issue.objects` manager, so
 //! triage-state, archived and draft rows ARE visible there; only the meta
 //! lookup uses the scoped `issue_objects` manager (triage/archived/draft
-//! exclusions). [`meta_sql`] carries the scope, the identifier builders
+//! exclusions). [`meta_select`] carries the scope, the identifier builders
 //! carry none.
 //!
 //! Existing bugs ported as-is (translation, don't redesign):
@@ -82,7 +83,7 @@
 //! - Meta: Django's `.only("sequence_id", "project__identifier")` selects
 //!   three issue columns and lazy-loads `project.identifier` in a second
 //!   query (a spanning `.only()` without `select_related` never joins).
-//!   [`meta_sql`] is one statement selecting both values over the join the
+//!   [`meta_select`] is one statement selecting both values over the join the
 //!   manager scope already requires.
 //! - `.get()` lookups port `LIMIT 21` as `LIMIT 1`: every one is over a
 //!   unique key (version pk; project `(identifier, workspace)` partial
@@ -104,66 +105,25 @@
 //! archive precedent). Queryset-adjacent constants handlers need (the
 //! `.values()` key orders) ARE in scope and marked.
 
-use super::queries_core::{
-    attachment_count_select, is_subscribed_select, link_count_select, sub_issues_count_select,
-    ASSIGNEE_IDS_ACTIVE_SELECT, CYCLE_ID_SELECT, ISSUE_COLUMNS, LABEL_IDS_SELECT,
-    MODULE_IDS_SELECT, PROJECT_COLUMNS, STATE_COLUMNS,
+use super::list_engine::{
+    a, attachment_count, col, cycle_id_subquery, label_ids, link_count, select_one_from,
+    sub_issues_count,
 };
-use super::Binder;
+use super::queries_core::{
+    assignee_ids_active, coalesce_zero, is_subscribed, module_ids_unarchived, scoped_issues,
+    select_fields, workspace_slug, ISSUE_FIELDS, PROJECT_FIELDS, STATE_FIELDS,
+};
 
 use pidash_db::entity::{
-    comment_reactions, intake_issues, issue_activities, issue_comments, issues, project_members,
-    projects, users, workspaces,
+    comment_reactions, git_issue_syncs, intake_issues, issue_activities, issue_agent_ticker,
+    issue_comments, issue_types, issues, project_members, projects, states, users, workspaces,
 };
-use sea_orm::sea_query::{Alias, Expr, Query, SimpleExpr};
+use sea_orm::sea_query::{Alias, Expr, Func, Order, Query, SelectStatement, SimpleExpr};
 use sea_orm::{
-    ColumnTrait, EntityTrait, IdenStatic, JoinType, QueryFilter, QueryOrder, QuerySelect,
-    RelationDef, RelationTrait, Select,
+    ColumnTrait, EntityTrait, FromQueryResult, IdenStatic, JoinType, QueryFilter, QueryOrder,
+    QuerySelect, RelationDef, RelationTrait, Select,
 };
-
-// ---------------------------------------------------------------------------
-// Shared column lists (Django concrete-field order, live-compiled)
-// ---------------------------------------------------------------------------
-
-/// All 14 concrete `workspaces` columns (`select_related("workspace")` order).
-pub const WORKSPACE_COLUMNS: &str = "workspaces.created_at, workspaces.updated_at, \
-    workspaces.created_by_id, workspaces.updated_by_id, workspaces.deleted_at, workspaces.id, \
-    workspaces.name, workspaces.logo, workspaces.logo_asset_id, workspaces.owner_id, \
-    workspaces.slug, workspaces.organization_size, workspaces.timezone, \
-    workspaces.background_color";
-
-/// All 20 concrete `issue_agent_ticker` columns (`select_related("agent_ticker")`
-/// order; matches D-10 `tasks_ticker::models::issue_agent_ticker::COLUMNS`).
-pub const TICKER_COLUMNS: &str = "issue_agent_ticker.created_at, issue_agent_ticker.updated_at, \
-    issue_agent_ticker.created_by_id, issue_agent_ticker.updated_by_id, \
-    issue_agent_ticker.deleted_at, issue_agent_ticker.id, issue_agent_ticker.issue_id, \
-    issue_agent_ticker.used, issue_agent_ticker.granted, issue_agent_ticker.waited, \
-    issue_agent_ticker.user_disabled, issue_agent_ticker.next_run_at, \
-    issue_agent_ticker.last_tick_at, issue_agent_ticker.enabled, \
-    issue_agent_ticker.disarm_reason, issue_agent_ticker.pending_entry, \
-    issue_agent_ticker.pending_entry_free, issue_agent_ticker.pending_entry_actor_id, \
-    issue_agent_ticker.pending_entry_trigger, issue_agent_ticker.resume_parent_run_id";
-
-/// All 34 concrete `issues` columns under the `parent` self-join alias
-/// (identifier-full `select_related("parent")`; Django renders `T4`).
-pub const PARENT_ISSUE_COLUMNS: &str = "parent.created_at, parent.updated_at, \
-    parent.created_by_id, parent.updated_by_id, parent.deleted_at, parent.id, \
-    parent.project_id, parent.workspace_id, parent.parent_id, parent.state_id, parent.point, \
-    parent.estimate_point_id, parent.name, parent.description_json, parent.description_html, \
-    parent.description_stripped, parent.description_binary, parent.priority, \
-    parent.complexity_score, parent.start_date, parent.target_date, parent.sequence_id, \
-    parent.sort_order, parent.completed_at, parent.archived_at, parent.is_draft, \
-    parent.external_source, parent.external_id, parent.type_id, parent.git_work_branch, \
-    parent.workpad, parent.created_via, parent.assigned_pod_id, parent.agent_executor";
-
-/// Identifier-lite `.only()` select list in Django's RENDER order: `.only()`
-/// honors model field order, not the call order. `external_source` rides
-/// along for the `_issue_is_actively_synced` short-circuit (serializers
-/// own the predicate; the queries layer keeps its inputs loaded).
-pub const LITE_ISSUE_COLUMNS: &str = "issue.created_at, issue.updated_at, issue.created_by_id, \
-    issue.updated_by_id, issue.id, issue.project_id, issue.workspace_id, issue.name, \
-    issue.description_html, issue.sequence_id, issue.sort_order, issue.archived_at, \
-    issue.is_draft, issue.external_source";
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // History (activity.py:30-86)
@@ -547,44 +507,35 @@ pub const VERSION_PAGE_KEYS: &[&str] = &[
 // Meta (base.py:1199-1211)
 // ---------------------------------------------------------------------------
 
-/// Full meta statement (`base.py:1201-1211`): the issue's `sequence_id`
-/// plus its project's `identifier`, over the `issue_objects` manager
-/// scope (triage/archived/draft rows are NOT visible here — the only
-/// lookup in this module on the scoped manager).
+/// One meta row.
+#[derive(Debug, FromQueryResult)]
+pub struct MetaRow {
+    pub sequence_id: i32,
+    pub identifier: String,
+}
+
+/// Meta statement (`base.py:1201-1211`): the issue's `sequence_id` plus
+/// its project's `identifier`, over the `issue_objects` manager scope
+/// (triage/archived/draft rows are NOT visible here — the only lookup in
+/// this module on the scoped manager).
 ///
 /// Django fires two queries — the `.only("sequence_id",
 /// "project__identifier")` main select plus a lazy `project.identifier`
 /// load, because a spanning `.only()` without `select_related` never
 /// joins — and this builder is their single-statement consolidation over
 /// the join the scope already requires. Same two values, one round trip.
-/// Binds, in order: issue id, project id, workspace slug.
-pub fn meta_sql(
-    binder: &mut Binder,
-    slug: &str,
-    project_id: uuid::Uuid,
-    issue_id: uuid::Uuid,
-) -> String {
-    let issue = binder.bind_uuid(issue_id);
-    let project = binder.bind_uuid(project_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    format!(
-        "SELECT issues.sequence_id, projects.identifier FROM issues \
-        LEFT OUTER JOIN states ON issues.state_id = states.id \
-        INNER JOIN projects ON issues.project_id = projects.id \
-        INNER JOIN workspaces ON issues.workspace_id = workspaces.id \
-        WHERE issues.deleted_at IS NULL \
-        AND NOT (states.\"group\" = 'triage' AND states.\"group\" IS NOT NULL) \
-        AND issues.archived_at IS NULL AND projects.archived_at IS NULL \
-        AND issues.is_draft = FALSE \
-        AND issues.id = {issue} AND issues.project_id = {project} \
-        AND workspaces.slug = {slug_holder} \
-        ORDER BY issues.created_at DESC LIMIT 1"
-    )
+pub fn meta_select(slug: &str, project_id: Uuid, issue_id: Uuid) -> SelectStatement {
+    let mut stmt = Query::select();
+    stmt.column((a("issue"), issues::Column::SequenceId))
+        .column((a("project"), projects::Column::Identifier));
+    scoped_issues(&mut stmt);
+    workspace_slug(&mut stmt, slug);
+    stmt.and_where(col("issue", issues::Column::Id).eq(issue_id))
+        .and_where(col("issue", issues::Column::ProjectId).eq(project_id))
+        .order_by((a("issue"), issues::Column::CreatedAt), Order::Desc)
+        .limit(1);
+    stmt
 }
-
-// ---------------------------------------------------------------------------
-// Identifier (base.py:1214-1489)
-// ---------------------------------------------------------------------------
 
 /// The 15 lite wire keys in `serialize_lite_issue` order
 /// (`base.py:1223-1240`) — the key order handlers render. `created_by` /
@@ -608,145 +559,282 @@ pub const LITE_KEYS: &[&str] = &[
     "archived_at",
 ];
 
+/// All 14 concrete `workspaces` columns (`select_related("workspace")` order).
+pub const WORKSPACE_FIELDS: [workspaces::Column; 14] = [
+    workspaces::Column::CreatedAt,
+    workspaces::Column::UpdatedAt,
+    workspaces::Column::CreatedById,
+    workspaces::Column::UpdatedById,
+    workspaces::Column::DeletedAt,
+    workspaces::Column::Id,
+    workspaces::Column::Name,
+    workspaces::Column::Logo,
+    workspaces::Column::LogoAssetId,
+    workspaces::Column::OwnerId,
+    workspaces::Column::Slug,
+    workspaces::Column::OrganizationSize,
+    workspaces::Column::Timezone,
+    workspaces::Column::BackgroundColor,
+];
+
+/// All 20 concrete `issue_agent_ticker` columns (`select_related("agent_ticker")`
+/// order; matches D-10 `tasks_ticker::models::issue_agent_ticker::COLUMNS`).
+pub const TICKER_FIELDS: [issue_agent_ticker::Column; 20] = [
+    issue_agent_ticker::Column::CreatedAt,
+    issue_agent_ticker::Column::UpdatedAt,
+    issue_agent_ticker::Column::CreatedById,
+    issue_agent_ticker::Column::UpdatedById,
+    issue_agent_ticker::Column::DeletedAt,
+    issue_agent_ticker::Column::Id,
+    issue_agent_ticker::Column::IssueId,
+    issue_agent_ticker::Column::Used,
+    issue_agent_ticker::Column::Granted,
+    issue_agent_ticker::Column::Waited,
+    issue_agent_ticker::Column::UserDisabled,
+    issue_agent_ticker::Column::NextRunAt,
+    issue_agent_ticker::Column::LastTickAt,
+    issue_agent_ticker::Column::Enabled,
+    issue_agent_ticker::Column::DisarmReason,
+    issue_agent_ticker::Column::PendingEntry,
+    issue_agent_ticker::Column::PendingEntryFree,
+    issue_agent_ticker::Column::PendingEntryActorId,
+    issue_agent_ticker::Column::PendingEntryTrigger,
+    issue_agent_ticker::Column::ResumeParentRunId,
+];
+
+/// Identifier-lite `.only()` columns in Django's RENDER order: `.only()`
+/// honors model field order, not the call order. `external_source` rides
+/// along for the `_issue_is_actively_synced` short-circuit (serializers
+/// own the predicate; the queries layer keeps its inputs loaded).
+pub const LITE_ISSUE_FIELDS: [issues::Column; 14] = [
+    issues::Column::CreatedAt,
+    issues::Column::UpdatedAt,
+    issues::Column::CreatedById,
+    issues::Column::UpdatedById,
+    issues::Column::Id,
+    issues::Column::ProjectId,
+    issues::Column::WorkspaceId,
+    issues::Column::Name,
+    issues::Column::DescriptionHtml,
+    issues::Column::SequenceId,
+    issues::Column::SortOrder,
+    issues::Column::ArchivedAt,
+    issues::Column::IsDraft,
+    issues::Column::ExternalSource,
+];
+
+/// Identifier-full output-name prefixes, one per joined table.
+pub const FULL_ISSUE_PREFIX: &str = "i_";
+pub const FULL_PROJECT_PREFIX: &str = "p_";
+pub const FULL_WORKSPACE_PREFIX: &str = "w_";
+pub const FULL_PARENT_PREFIX: &str = "par_";
+pub const FULL_STATE_PREFIX: &str = "s_";
+pub const FULL_TICKER_PREFIX: &str = "t_";
+
 /// Project lookup by workspace-scoped identifier (`base.py:1253`):
-/// `identifier__iexact` renders `UPPER(identifier::text) = UPPER($n)`.
+/// `identifier__iexact` is `UPPER(identifier::text) = UPPER(<value>)`.
 /// Unique per `(identifier, workspace)` among live rows (partial unique
 /// plus `save()` upper-normalization), so `LIMIT 1` matches `.get()`.
-/// Binds, in order: project identifier, workspace slug.
-pub fn identifier_project_sql(binder: &mut Binder, slug: &str, project_identifier: &str) -> String {
-    let identifier = binder.bind_string(project_identifier.to_owned());
-    let slug_holder = binder.bind_string(slug.to_owned());
-    format!(
-        "SELECT {PROJECT_COLUMNS} FROM projects \
-        INNER JOIN workspaces ON projects.workspace_id = workspaces.id \
-        WHERE projects.deleted_at IS NULL AND UPPER(projects.identifier::text) = UPPER({identifier}) \
-        AND workspaces.slug = {slug_holder} \
-        ORDER BY projects.created_at DESC LIMIT 1"
-    )
+pub fn identifier_project_select(slug: &str, project_identifier: &str) -> SelectStatement {
+    let mut stmt = Query::select();
+    select_fields(&mut stmt, "projects", &PROJECT_FIELDS, "");
+    stmt.from(projects::Entity)
+        .join(
+            JoinType::InnerJoin,
+            workspaces::Entity,
+            Expr::col((projects::Entity, projects::Column::WorkspaceId))
+                .equals((workspaces::Entity, workspaces::Column::Id)),
+        )
+        .and_where(Expr::col((projects::Entity, projects::Column::DeletedAt)).is_null())
+        .and_where(
+            Expr::expr(Func::upper(
+                Expr::col((projects::Entity, projects::Column::Identifier))
+                    .cast_as(Alias::new("text")),
+            ))
+            .eq(Func::upper(Expr::val(project_identifier.to_owned()))),
+        )
+        .and_where(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug))
+        .order_by((projects::Entity, projects::Column::CreatedAt), Order::Desc)
+        .limit(1);
+    stmt
 }
 
-/// Identifier member gate `Exists` (`base.py:1256-1265`): ANY active
-/// membership (no role filter — unlike the guest-view gate, which is
-/// `queries_core::guest_view_exists_sql`). Django's `.exists()` renders
-/// `SELECT 1 ... LIMIT 1` with no `ORDER BY`. Binds, in order: user id,
-/// project id, workspace slug.
-pub fn identifier_member_exists_sql(
-    binder: &mut Binder,
+/// Identifier member gate (`base.py:1256-1265`): ANY active membership
+/// (no role filter — unlike the guest-view gate,
+/// `queries_core::guest_view_select`). Reads one id; Django's `.exists()`.
+pub fn identifier_member_select(
     slug: &str,
-    project_id: uuid::Uuid,
-    user_id: uuid::Uuid,
-) -> String {
-    let user = binder.bind_uuid(user_id);
-    let project = binder.bind_uuid(project_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    format!(
-        "SELECT 1 AS a FROM project_members \
-        INNER JOIN workspaces ON project_members.workspace_id = workspaces.id \
-        WHERE project_members.deleted_at IS NULL AND project_members.is_active \
-        AND project_members.member_id = {user} AND project_members.project_id = {project} \
-        AND workspaces.slug = {slug_holder} LIMIT 1"
-    )
+    project_id: Uuid,
+    user_id: Uuid,
+) -> Select<project_members::Entity> {
+    project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(project_members::Column::DeletedAt.is_null())
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .limit(1)
 }
 
 /// `is_intake` `Exists`, shared by the lite (`base.py:1294-1301`) and
 /// full (`base.py:1436-1445`) lookups: a pending (`-2`) or snoozed (`0`)
-/// intake row for this issue. Correlated to the `issue` alias both
-/// statements use. Binds, in order: project id, workspace slug.
-pub fn is_intake_exists_select(binder: &mut Binder, slug: &str, project_id: uuid::Uuid) -> String {
-    let project = binder.bind_uuid(project_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    format!(
-        "EXISTS(SELECT 1 AS a FROM intake_issues ii \
-        INNER JOIN workspaces iiw ON ii.workspace_id = iiw.id \
-        WHERE ii.deleted_at IS NULL AND ii.issue_id = issue.id AND ii.project_id = {project} \
-        AND ii.status IN (-2, 0) AND iiw.slug = {slug_holder} LIMIT 1) AS is_intake"
+/// intake row for this issue, correlated to the `issue` alias.
+pub fn is_intake_exists(slug: &str, project_id: Uuid) -> SimpleExpr {
+    let mut stmt = select_one_from(intake_issues::Entity, "ii");
+    stmt.join_as(
+        JoinType::InnerJoin,
+        workspaces::Entity,
+        a("iiw"),
+        col("ii", intake_issues::Column::WorkspaceId).equals((a("iiw"), workspaces::Column::Id)),
     )
+    .and_where(col("ii", intake_issues::Column::DeletedAt).is_null())
+    .and_where(col("ii", intake_issues::Column::IssueId).equals((a("issue"), issues::Column::Id)))
+    .and_where(col("ii", intake_issues::Column::ProjectId).eq(project_id))
+    .and_where(col("ii", intake_issues::Column::Status).is_in([-2, 0]))
+    .and_where(col("iiw", workspaces::Column::Slug).eq(slug))
+    .limit(1);
+    Expr::exists(stmt)
 }
 
 /// Lite `is_synced` `Exists` (`base.py:1303-1309`): bug 2 — git syncs
-/// only, unscoped. No binds, so a plain const.
-pub const LITE_IS_SYNCED_SELECT: &str = "EXISTS(SELECT 1 AS a FROM git_issue_syncs gs \
-    WHERE gs.deleted_at IS NULL AND gs.issue_id = issue.id LIMIT 1) AS is_synced";
-
-/// Lite `is_epic` (`base.py:1288-1293`): the nullable type flag coalesced
-/// to `FALSE`, over the `issue_types` left join. No binds.
-pub const LITE_IS_EPIC_SELECT: &str = "COALESCE(issue_types.is_epic, FALSE) AS is_epic";
-
-/// Bind a 32-bit integer (issue `sequence_id`) for a `$n` placeholder.
-fn bind_sequence_id(binder: &mut Binder, sequence_id: i32) -> String {
-    binder.bind(sea_query::Value::Int(Some(sequence_id)))
+/// only, unscoped.
+fn lite_is_synced() -> SimpleExpr {
+    let mut stmt = select_one_from(git_issue_syncs::Entity, "gs");
+    stmt.and_where(col("gs", git_issue_syncs::Column::DeletedAt).is_null())
+        .and_where(
+            col("gs", git_issue_syncs::Column::IssueId).equals((a("issue"), issues::Column::Id)),
+        )
+        .limit(1);
+    Expr::exists(stmt)
 }
 
-/// Full lite statement (`base.py:1267-1310`): the deferred 14-column row
-/// plus `is_epic` / `is_intake` / `is_synced`, over plain
-/// `Issue.objects` (triage/archived/draft rows visible). Binds, in order:
-/// project id, workspace slug, sequence id (outer `WHERE`), then the
-/// `is_intake` binds (project id, slug).
-pub fn identifier_lite_sql(
-    binder: &mut Binder,
+/// `FROM issues AS issue INNER JOIN workspaces` over plain `Issue.objects`
+/// (triage/archived/draft rows visible), this project, slug and sequence
+/// id, newest first, one row.
+fn identifier_issue_scope(
+    stmt: &mut SelectStatement,
     slug: &str,
-    project_id: uuid::Uuid,
+    project_id: Uuid,
     sequence_id: i32,
-) -> String {
-    let project = binder.bind_uuid(project_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    let sequence = bind_sequence_id(binder, sequence_id);
-    let is_intake = is_intake_exists_select(binder, slug, project_id);
-    format!(
-        "SELECT {LITE_ISSUE_COLUMNS}, {LITE_IS_EPIC_SELECT}, {is_intake}, {LITE_IS_SYNCED_SELECT} \
-        FROM issues AS issue \
-        INNER JOIN workspaces ON issue.workspace_id = workspaces.id \
-        LEFT OUTER JOIN issue_types ON issue.type_id = issue_types.id \
-        WHERE issue.deleted_at IS NULL AND issue.project_id = {project} \
-        AND workspaces.slug = {slug_holder} AND issue.sequence_id = {sequence} \
-        ORDER BY issue.created_at DESC LIMIT 1"
+) {
+    stmt.and_where(col("issue", issues::Column::DeletedAt).is_null())
+        .and_where(col("issue", issues::Column::ProjectId).eq(project_id))
+        .and_where(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug))
+        .and_where(col("issue", issues::Column::SequenceId).eq(sequence_id))
+        .order_by((a("issue"), issues::Column::CreatedAt), Order::Desc)
+        .limit(1);
+}
+
+fn join_issue_workspace(stmt: &mut SelectStatement) {
+    stmt.join(
+        JoinType::InnerJoin,
+        workspaces::Entity,
+        col("issue", issues::Column::WorkspaceId)
+            .equals((workspaces::Entity, workspaces::Column::Id)),
+    );
+}
+
+/// Lite statement (`base.py:1267-1310`): the deferred 14-column row plus
+/// `is_epic` / `is_intake` / `is_synced`.
+pub fn identifier_lite_select(slug: &str, project_id: Uuid, sequence_id: i32) -> SelectStatement {
+    let mut stmt = Query::select();
+    select_fields(&mut stmt, "issue", &LITE_ISSUE_FIELDS, "");
+    stmt.expr_as(
+        Func::coalesce([
+            Expr::col((issue_types::Entity, issue_types::Column::IsEpic)).into(),
+            Expr::val(false).into(),
+        ]),
+        a("is_epic"),
     )
+    .expr_as(is_intake_exists(slug, project_id), a("is_intake"))
+    .expr_as(lite_is_synced(), a("is_synced"))
+    .from_as(issues::Entity, a("issue"));
+    join_issue_workspace(&mut stmt);
+    stmt.join(
+        JoinType::LeftJoin,
+        issue_types::Entity,
+        col("issue", issues::Column::TypeId).equals((issue_types::Entity, issue_types::Column::Id)),
+    );
+    identifier_issue_scope(&mut stmt, slug, project_id, sequence_id);
+    stmt
 }
 
 /// Full identifier statement (`base.py:1312-1446`): all issue columns, the
-/// seven annotations in `annotate()` order (counts coalesced to `0`,
-/// arrays over the doubled-guard single-port form), `is_subscribed` and
-/// `is_intake`, then the `select_related("workspace", "project",
-/// "state", "parent", "agent_ticker")` columns in Django's field-order
-/// rendering (projects, workspaces, parent, states, ticker) — Django's
-/// exact select order. The `assignees` / `labels` / `issue_module__module`
-/// M2M prefetches are separate queries, handler-owned; the
-/// reaction/link prefetches reuse
-/// `queries_core::{reaction_prefetch_sql, link_prefetch_sql}`. Binds, in
-/// order: project id, workspace slug, sequence id (outer `WHERE`), then
-/// the `is_subscribed` binds (project id, subscriber id, slug), then the
-/// `is_intake` binds (project id, slug).
-pub fn identifier_full_sql(
-    binder: &mut Binder,
+/// seven annotations in `annotate()` order (counts coalesced to `0`),
+/// `is_subscribed` and `is_intake`, then the `select_related("workspace",
+/// "project", "state", "parent", "agent_ticker")` columns in Django's
+/// rendering order (projects, workspaces, parent, states, ticker), each
+/// table's columns under its `FULL_*_PREFIX`. The `assignees` / `labels` /
+/// `issue_module__module` M2M prefetches are handler-owned.
+pub fn identifier_full_select(
     slug: &str,
-    project_id: uuid::Uuid,
+    project_id: Uuid,
     sequence_id: i32,
-    user_id: uuid::Uuid,
-) -> String {
-    let project = binder.bind_uuid(project_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    let sequence = bind_sequence_id(binder, sequence_id);
-    let subscribed = is_subscribed_select(binder, slug, project_id, user_id);
-    let is_intake = is_intake_exists_select(binder, slug, project_id);
-    let link = link_count_select(true);
-    let attachment = attachment_count_select(true);
-    let sub = sub_issues_count_select(true);
-    format!(
-        "SELECT {ISSUE_COLUMNS}, {CYCLE_ID_SELECT}, {link}, {attachment}, {sub}, \
-        {LABEL_IDS_SELECT}, {ASSIGNEE_IDS_ACTIVE_SELECT}, {MODULE_IDS_SELECT}, \
-        {subscribed}, {is_intake}, \
-        {PROJECT_COLUMNS}, {WORKSPACE_COLUMNS}, {PARENT_ISSUE_COLUMNS}, {STATE_COLUMNS}, \
-        {TICKER_COLUMNS} \
-        FROM issues AS issue \
-        INNER JOIN projects ON issue.project_id = projects.id \
-        INNER JOIN workspaces ON issue.workspace_id = workspaces.id \
-        LEFT OUTER JOIN issues AS parent ON issue.parent_id = parent.id \
-        LEFT OUTER JOIN states AS state ON issue.state_id = state.id \
-        LEFT OUTER JOIN issue_agent_ticker ON issue.id = issue_agent_ticker.issue_id \
-        WHERE issue.deleted_at IS NULL AND issue.project_id = {project} \
-        AND workspaces.slug = {slug_holder} AND issue.sequence_id = {sequence} \
-        ORDER BY issue.created_at DESC LIMIT 1"
+    user_id: Uuid,
+) -> SelectStatement {
+    let mut stmt = Query::select();
+    select_fields(&mut stmt, "issue", &ISSUE_FIELDS, FULL_ISSUE_PREFIX);
+    stmt.expr_as(cycle_id_subquery(), a("cycle_id"))
+        .expr_as(coalesce_zero(link_count(true)), a("link_count"))
+        .expr_as(coalesce_zero(attachment_count(true)), a("attachment_count"))
+        .expr_as(
+            coalesce_zero(sub_issues_count(true, false)),
+            a("sub_issues_count"),
+        )
+        .expr_as(label_ids(), a("label_ids"))
+        .expr_as(assignee_ids_active(), a("assignee_ids"))
+        .expr_as(module_ids_unarchived(), a("module_ids"))
+        .expr_as(is_subscribed(slug, project_id, user_id), a("is_subscribed"))
+        .expr_as(is_intake_exists(slug, project_id), a("is_intake"));
+    select_fields(&mut stmt, "projects", &PROJECT_FIELDS, FULL_PROJECT_PREFIX);
+    select_fields(
+        &mut stmt,
+        "workspaces",
+        &WORKSPACE_FIELDS,
+        FULL_WORKSPACE_PREFIX,
+    );
+    select_fields(&mut stmt, "parent", &ISSUE_FIELDS, FULL_PARENT_PREFIX);
+    select_fields(&mut stmt, "state", &STATE_FIELDS, FULL_STATE_PREFIX);
+    select_fields(
+        &mut stmt,
+        "issue_agent_ticker",
+        &TICKER_FIELDS,
+        FULL_TICKER_PREFIX,
+    );
+    stmt.from_as(issues::Entity, a("issue")).join(
+        JoinType::InnerJoin,
+        projects::Entity,
+        col("issue", issues::Column::ProjectId).equals((projects::Entity, projects::Column::Id)),
+    );
+    join_issue_workspace(&mut stmt);
+    stmt.join_as(
+        JoinType::LeftJoin,
+        issues::Entity,
+        a("parent"),
+        col("issue", issues::Column::ParentId).equals((a("parent"), issues::Column::Id)),
     )
+    .join_as(
+        JoinType::LeftJoin,
+        states::Entity,
+        a("state"),
+        col("issue", issues::Column::StateId).equals((a("state"), states::Column::Id)),
+    )
+    .join(
+        JoinType::LeftJoin,
+        issue_agent_ticker::Entity,
+        col("issue", issues::Column::Id).equals((
+            issue_agent_ticker::Entity,
+            issue_agent_ticker::Column::IssueId,
+        )),
+    );
+    identifier_issue_scope(&mut stmt, slug, project_id, sequence_id);
+    stmt
 }
 
 #[cfg(test)]
@@ -759,56 +847,11 @@ mod tests {
     const USER: uuid::Uuid = uuid::Uuid::from_u128(0x22222222_2222_2222_2222_222222222222);
     const COMMENT: uuid::Uuid = uuid::Uuid::from_u128(0x44444444_4444_4444_4444_444444444444);
 
-    /// Collapse runs of whitespace so multi-line builders compare cleanly.
-    fn flat(sql: &str) -> String {
-        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    fn stmt_sql(stmt: &SelectStatement) -> String {
+        stmt.to_string(sea_orm::sea_query::PostgresQueryBuilder)
     }
 
     // -- reuse pins ----------------------------------------------------------
-
-    #[test]
-    fn shared_fragments_are_queries_core_text() {
-        // Referenced, not copied: the full statement embeds the shared
-        // fragments byte-identically, so a fix in queries_core lands here
-        // with no second edit.
-        let mut binder = Binder::new();
-        let sql = identifier_full_sql(&mut binder, SLUG, PROJECT, 42, USER);
-        for fragment in [
-            CYCLE_ID_SELECT,
-            &link_count_select(true),
-            &attachment_count_select(true),
-            &sub_issues_count_select(true),
-            LABEL_IDS_SELECT,
-            ASSIGNEE_IDS_ACTIVE_SELECT,
-            MODULE_IDS_SELECT,
-            ISSUE_COLUMNS,
-            STATE_COLUMNS,
-            PROJECT_COLUMNS,
-        ] {
-            assert!(
-                flat(&sql).contains(&flat(fragment)),
-                "full statement drifted from shared fragment: {fragment}"
-            );
-        }
-    }
-
-    #[test]
-    fn shared_prefetches_and_guest_gate_are_reused() {
-        // The identifier reaction/link prefetches and the guest-view gate
-        // are queries_core builders — assert the reuse compiles to the
-        // same text the retrieve path uses.
-        let mut binder = Binder::new();
-        let reactions = super::super::queries_core::reaction_prefetch_sql(&mut binder, &[ISSUE]);
-        assert!(reactions.contains("issue_reactions.issue_id IN ($1)"));
-        let mut binder = Binder::new();
-        let links = super::super::queries_core::link_prefetch_sql(&mut binder, &[ISSUE]);
-        assert!(links.contains("issue_links.issue_id IN ($1)"));
-        let mut binder = Binder::new();
-        let guest =
-            super::super::queries_core::guest_view_exists_sql(&mut binder, SLUG, PROJECT, USER);
-        assert!(guest.contains("project_members.role = 5"));
-        assert_eq!(binder.values().len(), 3);
-    }
 
     // -- history -------------------------------------------------------------
 
@@ -964,75 +1007,112 @@ mod tests {
 
     #[test]
     fn meta_selects_both_values_over_manager_scope() {
-        let mut binder = Binder::new();
-        let sql = meta_sql(&mut binder, SLUG, PROJECT, ISSUE);
-        // Single-statement consolidation of Django's two queries.
-        assert!(flat(&sql).starts_with("SELECT issues.sequence_id, projects.identifier FROM"));
-        // issue_objects scope: triage exclusion, both archived guards, drafts.
-        assert!(sql.contains("NOT (states.\"group\" = 'triage' AND states.\"group\" IS NOT NULL)"));
-        assert!(sql.contains("issues.archived_at IS NULL"));
-        assert!(sql.contains("projects.archived_at IS NULL"));
-        assert!(sql.contains("issues.is_draft = FALSE"));
-        assert!(sql.ends_with("ORDER BY issues.created_at DESC LIMIT 1"));
-        assert_eq!(binder.values().len(), 3);
+        let sql = stmt_sql(&meta_select(SLUG, PROJECT, ISSUE));
+        assert!(sql.starts_with(r#"SELECT "issue"."sequence_id", "project"."identifier" FROM"#));
+        assert!(sql.contains(r#"NOT ("state"."group" = 'triage' AND "state"."group" IS NOT NULL)"#));
+        assert!(sql.contains(r#""issue"."archived_at" IS NULL"#));
+        assert!(sql.contains(r#""project"."archived_at" IS NULL"#));
+        assert!(sql.contains(r#""issue"."is_draft" = FALSE"#));
+        assert!(sql.ends_with(r#"ORDER BY "issue"."created_at" DESC LIMIT 1"#));
     }
 
     // -- identifier ----------------------------------------------------------
 
     #[test]
     fn identifier_project_uses_iexact_and_limit_1() {
-        let mut binder = Binder::new();
-        let sql = identifier_project_sql(&mut binder, SLUG, "ENG");
-        assert!(sql.contains("UPPER(projects.identifier::text) = UPPER($1)"));
-        assert!(sql.contains("workspaces.slug = $2"));
-        assert!(sql.ends_with("ORDER BY projects.created_at DESC LIMIT 1"));
-        assert_eq!(binder.values().len(), 2);
+        let sql = stmt_sql(&identifier_project_select(SLUG, "ENG"));
+        assert!(
+            sql.contains(r#"UPPER(CAST("projects"."identifier" AS text)) = UPPER('ENG')"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""workspaces"."slug" = 'ws-slug'"#));
+        assert!(sql.ends_with(r#"ORDER BY "projects"."created_at" DESC LIMIT 1"#));
     }
 
     #[test]
     fn identifier_member_gate_has_no_role_filter() {
-        let mut binder = Binder::new();
-        let sql = identifier_member_exists_sql(&mut binder, SLUG, PROJECT, USER);
-        assert!(sql.starts_with("SELECT 1 AS a"));
+        use sea_orm::QueryTrait;
+        let sql = identifier_member_select(SLUG, PROJECT, USER)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
         assert!(!sql.contains("role"));
         assert!(!sql.contains("ORDER BY"));
         assert!(sql.ends_with("LIMIT 1"));
-        assert_eq!(binder.values().len(), 3);
     }
 
     #[test]
     fn identifier_lite_selects_deferred_row_plus_three_flags() {
-        let mut binder = Binder::new();
-        let sql = identifier_lite_sql(&mut binder, SLUG, PROJECT, 42);
-        // Select order: deferred columns, then annotations in annotate() order.
-        let base_pos = sql.find("issue.created_at").expect("base");
-        let epic_pos = sql.find("AS is_epic").expect("epic");
-        let intake_pos = sql.find("AS is_intake").expect("intake");
-        let synced_pos = sql.find("AS is_synced").expect("synced");
+        let sql = stmt_sql(&identifier_lite_select(SLUG, PROJECT, 42));
+        let pos = |needle: &str| {
+            sql.find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {sql}"))
+        };
+        assert!(pos(r#""issue"."external_source""#) < pos(r#"AS "is_epic""#));
+        assert!(pos(r#"AS "is_epic""#) < pos(r#"AS "is_intake""#));
+        assert!(pos(r#"AS "is_intake""#) < pos(r#"AS "is_synced""#));
+        assert!(!sql.contains(r#""issue"."priority""#));
+        assert!(sql.contains(r#"COALESCE("issue_types"."is_epic", FALSE) AS "is_epic""#));
         assert!(
-            base_pos < epic_pos && epic_pos < intake_pos && intake_pos < synced_pos,
-            "lite select order wrong: {sql}"
+            sql.contains(r#"LEFT JOIN "issue_types" ON "issue"."type_id" = "issue_types"."id""#)
         );
-        // Deferred shape: 14 columns incl. external_source (predicate input).
-        assert!(sql.contains("issue.external_source, COALESCE"));
-        assert!(!sql.contains("issue.priority"));
-        // is_epic over the type left join; is_intake pending/snoozed only.
-        assert!(sql.contains("COALESCE(issue_types.is_epic, FALSE) AS is_epic"));
-        assert!(sql.contains("LEFT OUTER JOIN issue_types ON issue.type_id = issue_types.id"));
-        assert!(sql.contains("ii.status IN (-2, 0)"));
-        // Bug 2: git-only, unscoped — no Github table, no project predicate.
-        assert!(sql.contains("FROM git_issue_syncs gs"));
-        assert!(!flat(&sql).contains("github"));
-        let synced_from = sql.find("FROM git_issue_syncs").expect("sync from");
-        let synced_end = sql.find("AS is_synced").expect("sync end");
-        assert!(!sql[synced_from..synced_end].contains("project_id"));
-        // Plain manager: no triage/archived/draft guards on the outer query.
-        let outer = sql.split("FROM issues AS issue").nth(1).expect("outer");
-        assert!(!outer.contains("triage"));
-        assert!(!outer.contains("archived_at"));
-        assert!(!outer.contains("is_draft"));
-        assert!(sql.ends_with("ORDER BY issue.created_at DESC LIMIT 1"));
-        assert_eq!(binder.values().len(), 5);
+        assert!(sql.contains(r#""ii"."status" IN (-2, 0)"#));
+        // Bug 2: git-only, unscoped.
+        assert!(sql.contains(r#"FROM "git_issue_syncs" AS "gs""#));
+        assert!(!sql.contains("github"));
+        let outer = sql.rsplit(r#"AS "is_synced""#).next().expect("outer");
+        assert!(
+            !outer.contains("triage")
+                && !outer.contains("archived_at")
+                && !outer.contains("is_draft")
+        );
+        assert!(sql.ends_with(r#"ORDER BY "issue"."created_at" DESC LIMIT 1"#));
+    }
+
+    #[test]
+    fn identifier_full_selects_row_annotations_and_related_in_order() {
+        let sql = stmt_sql(&identifier_full_select(SLUG, PROJECT, 42, USER));
+        let pos = |needle: &str| {
+            sql.find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {sql}"))
+        };
+        let order = [
+            r#"AS "i_created_at""#,
+            r#"AS "i_agent_executor""#,
+            r#"AS "cycle_id""#,
+            r#"AS "link_count""#,
+            r#"AS "attachment_count""#,
+            r#"AS "sub_issues_count""#,
+            r#"AS "label_ids""#,
+            r#"AS "assignee_ids""#,
+            r#"AS "module_ids""#,
+            r#"AS "is_subscribed""#,
+            r#"AS "is_intake""#,
+            r#"AS "p_created_at""#,
+            r#"AS "w_created_at""#,
+            r#"AS "par_created_at""#,
+            r#"AS "s_created_at""#,
+            r#"AS "t_resume_parent_run_id""#,
+        ];
+        for pair in order.windows(2) {
+            assert!(
+                pos(pair[0]) < pos(pair[1]),
+                "{} before {}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert!(sql.contains(r#"INNER JOIN "projects" ON "issue"."project_id" = "projects"."id""#));
+        assert!(sql
+            .contains(r#"INNER JOIN "workspaces" ON "issue"."workspace_id" = "workspaces"."id""#));
+        assert!(sql
+            .contains(r#"LEFT JOIN "issues" AS "parent" ON "issue"."parent_id" = "parent"."id""#));
+        assert!(
+            sql.contains(r#"LEFT JOIN "states" AS "state" ON "issue"."state_id" = "state"."id""#)
+        );
+        assert!(sql.contains(
+            r#"LEFT JOIN "issue_agent_ticker" ON "issue"."id" = "issue_agent_ticker"."issue_id""#
+        ));
+        assert!(sql.ends_with(r#"ORDER BY "issue"."created_at" DESC LIMIT 1"#));
     }
 
     #[test]
@@ -1057,97 +1137,5 @@ mod tests {
                 "archived_at",
             ]
         );
-    }
-
-    /// Dump every builder plus the column consts for the `/tmp/replay-649`
-    /// fixture replay (live Django 4.2.30 SQL vs these builders). Prints
-    /// `@@ name @@` / SQL / `@@ binds: N @@` per statement (queries-A
-    /// precedent); the replay script, not this test, compares.
-    #[test]
-    fn dump_statements_for_fixture_replay() {
-        let mut statements: Vec<(&str, String, usize)> = Vec::new();
-        macro_rules! dump {
-            ($name:expr, $call:expr) => {{
-                let mut binder = Binder::new();
-                let sql = $call(&mut binder);
-                statements.push(($name, sql, binder.values().len()));
-            }};
-        }
-        dump!("meta", |binder: &mut Binder| {
-            meta_sql(binder, SLUG, PROJECT, ISSUE)
-        });
-        dump!("identifier_project", |binder: &mut Binder| {
-            identifier_project_sql(binder, SLUG, "ENG")
-        });
-        dump!("identifier_member_exists", |binder: &mut Binder| {
-            identifier_member_exists_sql(binder, SLUG, PROJECT, USER)
-        });
-        dump!("identifier_lite", |binder: &mut Binder| {
-            identifier_lite_sql(binder, SLUG, PROJECT, 42)
-        });
-        dump!("identifier_full", |binder: &mut Binder| {
-            identifier_full_sql(binder, SLUG, PROJECT, 42, USER)
-        });
-        for (name, sql, binds) in &statements {
-            println!("@@ {name} @@\n{sql}\n@@ binds: {binds} @@");
-        }
-        for (name, cols) in [
-            ("cols_workspace", WORKSPACE_COLUMNS),
-            ("cols_ticker", TICKER_COLUMNS),
-            ("cols_parent_issue", PARENT_ISSUE_COLUMNS),
-            ("cols_lite_issue", LITE_ISSUE_COLUMNS),
-        ] {
-            println!("@@ {name} @@\n{cols}");
-        }
-    }
-
-    #[test]
-    fn identifier_full_selects_row_annotations_and_related_in_order() {
-        let mut binder = Binder::new();
-        let sql = identifier_full_sql(&mut binder, SLUG, PROJECT, 42, USER);
-        let issue_pos = sql.find("issue.created_at").expect("issue");
-        let cycle_pos = sql.find("AS cycle_id").expect("cycle");
-        let link_pos = sql.find("AS link_count").expect("link");
-        let attach_pos = sql.find("AS attachment_count").expect("attach");
-        let sub_pos = sql.find("AS sub_issues_count").expect("sub");
-        let label_pos = sql.find("AS label_ids").expect("labels");
-        let assignee_pos = sql.find("AS assignee_ids").expect("assignees");
-        let module_pos = sql.find("AS module_ids").expect("modules");
-        let subscribed_pos = sql.find("AS is_subscribed").expect("subscribed");
-        let intake_pos = sql.find("AS is_intake").expect("intake");
-        let proj_pos = sql.find("projects.created_at").expect("projects");
-        let ws_pos = sql.find("workspaces.created_at").expect("workspaces");
-        let parent_pos = sql.find("parent.created_at").expect("parent");
-        let state_pos = sql.find("state.created_at").expect("state");
-        let ticker_pos = sql.find("issue_agent_ticker.created_at").expect("ticker");
-        assert!(
-            issue_pos < cycle_pos
-                && cycle_pos < link_pos
-                && link_pos < attach_pos
-                && attach_pos < sub_pos
-                && sub_pos < label_pos
-                && label_pos < assignee_pos
-                && assignee_pos < module_pos
-                && module_pos < subscribed_pos
-                && subscribed_pos < intake_pos
-                && intake_pos < proj_pos
-                && proj_pos < ws_pos
-                && ws_pos < parent_pos
-                && parent_pos < state_pos
-                && state_pos < ticker_pos,
-            "full select order wrong: {sql}"
-        );
-        // Counts coalesce to 0 on this path (unlike retrieve's NULL).
-        assert!(sql.contains("COALESCE((SELECT NULLIF(COUNT(*), 0)"));
-        // Joins: projects/workspaces INNER, parent/state/ticker LEFT.
-        assert!(sql.contains("INNER JOIN projects ON issue.project_id = projects.id"));
-        assert!(sql.contains("INNER JOIN workspaces ON issue.workspace_id = workspaces.id"));
-        assert!(sql.contains("LEFT OUTER JOIN issues AS parent ON issue.parent_id = parent.id"));
-        assert!(sql.contains("LEFT OUTER JOIN states AS state ON issue.state_id = state.id"));
-        assert!(sql.contains(
-            "LEFT OUTER JOIN issue_agent_ticker ON issue.id = issue_agent_ticker.issue_id"
-        ));
-        assert!(sql.ends_with("ORDER BY issue.created_at DESC LIMIT 1"));
-        assert_eq!(binder.values().len(), 8);
     }
 }

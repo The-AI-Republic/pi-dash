@@ -93,11 +93,10 @@ use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
 use pidash_types::orchestration::StateRef;
 
-use super::queries_core::archive_retrieve_sql;
+use super::queries_core::archive_retrieve_select;
 use super::{
-    actor_user_id, denial_from_param, fetch_json_rows, flat_paginated_response, grouped_response,
-    json_response, multi_map, query_last, resolve_project_id, Binder, Denial, Gate, HandlerResult,
-    ListContext, QueryMap,
+    actor_user_id, denial_from_param, flat_paginated_response, grouped_response, json_response,
+    multi_map, query_last, resolve_project_id, Denial, Gate, HandlerResult, ListContext, QueryMap,
 };
 use crate::domain_hooks::AppTaskEnqueueHook;
 use crate::issue_transition::AppTransitionHook;
@@ -410,15 +409,13 @@ pub async fn archive_retrieve(
     let context = archive_context(&state, &slug, &project_raw, extension).await?;
     let expands: Option<Vec<String>> =
         super::expand::split_expand(query_last(&query, "expand").as_deref());
-    let mut binder = Binder::new();
-    let sql = archive_retrieve_sql(
-        &mut binder,
+    let stmt = archive_retrieve_select(
         &slug,
         context.gate.project_id,
         issue_id,
         context.gate.user_id,
     );
-    let rows = fetch_json_rows(&context.pool, &sql, binder.values()).await?;
+    let rows = super::list_engine::fetch_rows(&context.pool, stmt).await?;
     let Some(row) = rows.into_iter().next() else {
         return Err(Denial::NotFound);
     };
