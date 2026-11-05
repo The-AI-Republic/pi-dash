@@ -328,24 +328,6 @@ pub use pidash_compat::http::{fields_param, query_last, OneOrMany, QueryMap};
 // Authentication
 // ---------------------------------------------------------------------------
 
-/// Decoded `api_tokens` row for [`resolve_api_token`].
-type ApiTokenLookup = (
-    String,
-    bool,
-    Option<chrono::DateTime<chrono::Utc>>,
-    uuid::Uuid,
-);
-
-/// Decoded `machine_token` row for [`resolve_machine_token`].
-type MachineTokenLookup = (
-    String,
-    uuid::Uuid,
-    Option<uuid::Uuid>,
-    uuid::Uuid,
-    Option<chrono::DateTime<chrono::Utc>>,
-    Option<bool>,
-);
-
 /// The authenticated actor: user id plus the stored time zone name, loaded
 /// but NOT parsed — parsing happens after the gate in
 /// [`activate_timezone`] (the PIDASHCONV-737 fixed preamble).
@@ -398,14 +380,16 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
 /// (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
 /// rows, so a soft-deleted token 403s instead of authenticating.
 async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid, Denial> {
-    let row: Option<ApiTokenLookup> = sqlx::query_as(
-        r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(presented)
-    .fetch_optional(pool)
-    .await
+    let row = super::auth_reads::live_api_token(&pidash_db::pool::sea_orm_connection(pool), presented)
+        .await
     .map_err(|error| db_error(error, "api-token-lookup"))?;
-    let Some((token, is_active, expired_at, user_id)) = row else {
+    let Some(super::auth_reads::ApiTokenLookup {
+        token,
+        is_active,
+        expired_at,
+        user_id,
+    }) = row
+    else {
         return Err(Denial::InvalidToken);
     };
     let now_unix = chrono::Utc::now().timestamp();
@@ -432,17 +416,17 @@ async fn resolve_machine_token(
     secret_key: &[u8],
 ) -> Result<uuid::Uuid, Denial> {
     let presented_hash = pidash_auth::token::hash_token(presented, secret_key);
-    let row: Option<MachineTokenLookup> = sqlx::query_as(
-        r#"SELECT mt."token_hash", mt."user_id", mt."dev_machine_id", mt."workspace_id", mt."revoked_at",
-                  dm."revoked_at" IS NOT NULL AS "dev_revoked"
-           FROM "machine_token" mt LEFT OUTER JOIN "dev_machine" dm ON dm."id" = mt."dev_machine_id"
-           WHERE mt."token_hash" = $1"#,
-    )
-    .bind(&presented_hash)
-    .fetch_optional(pool)
-    .await
+    let row = super::auth_reads::machine_token_with_device(&pidash_db::pool::sea_orm_connection(pool), &presented_hash)
+        .await
     .map_err(|error| db_error(error, "machine-token-lookup"))?;
-    let Some((token_hash, user_id, _dev_machine_id, workspace_id, revoked_at, dev_revoked)) = row
+    let Some(super::auth_reads::MachineTokenLookup {
+        token_hash,
+        user_id,
+        workspace_id,
+        revoked_at,
+        dev_revoked,
+        ..
+    }) = row
     else {
         return Err(Denial::InvalidToken);
     };
@@ -457,15 +441,9 @@ async fn resolve_machine_token(
         .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`);
     // a `false` revokes the token, then denies.
-    let member: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "workspace_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "is_active" AND "deleted_at" IS NULL)"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "machine-token-member"))?
-    .unwrap_or(false);
+    let member = super::auth_reads::is_active_workspace_member(&pidash_db::pool::sea_orm_connection(pool), workspace_id, user_id)
+        .await
+    .map_err(|error| db_error(error, "machine-token-member"))?;
     if !member {
         // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
         // `last_used_at` is stamped on success only.
@@ -488,13 +466,9 @@ async fn resolve_machine_token(
 /// name, loaded but NOT parsed — parsing happens after the gate in
 /// [`activate_timezone`].
 async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<String>, Denial> {
-    let name: Option<Option<String>> =
-        sqlx::query_scalar(r#"SELECT "user_timezone" FROM "users" WHERE "id" = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "request-timezone"))?;
-    Ok(name.unwrap_or(None))
+    super::auth_reads::user_timezone(&pidash_db::pool::sea_orm_connection(pool), *user_id)
+        .await
+        .map_err(|error| db_error(error, "request-timezone"))
 }
 
 /// `posixpath.normpath` (`CPython/Lib/posixpath.py`) for relative keys
@@ -588,13 +562,10 @@ pub async fn preamble(
     }
     let pool = pool_of(state)?;
     let actor = actor(&pool, headers, state.settings().secret_key.as_bytes()).await?;
-    let workspace_id: Option<uuid::Uuid> =
-        sqlx::query_scalar(r#"SELECT "id" FROM "workspaces" WHERE "slug" = $1"#)
-            .bind(slug)
-            .fetch_optional(&pool)
+    let workspace_id =
+        super::auth_reads::workspace_id_by_slug(&pidash_db::pool::sea_orm_connection(&pool), slug)
             .await
-            .map_err(|error| db_error(error, "preamble-workspace"))?
-            .flatten();
+            .map_err(|error| db_error(error, "preamble-workspace"))?;
     Ok(Preamble {
         pool,
         actor,
@@ -644,13 +615,12 @@ async fn entity_facts(
     // `role` is `smallint`: sqlx does not widen `INT2` into `i32` on
     // decode, so read `i16` and compare as integers. `deleted_at IS NULL`
     // is the `SoftDeletionManager` scope (`db/mixins.py:56-58`).
-    let roles: Vec<i16> = sqlx::query_scalar(
-        r#"SELECT "role" FROM "project_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "project_id" = $3 AND "is_active" AND "deleted_at" IS NULL"#,
+    let roles = super::auth_reads::project_member_roles(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *workspace_id,
+        *user_id,
+        *project_id,
     )
-    .bind(workspace_id)
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_all(pool)
     .await
     .map_err(|error| db_error(error, "entity-roles"))?;
     Ok(project::ProjectFacts {
