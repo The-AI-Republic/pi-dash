@@ -12,7 +12,8 @@
 //! Safety rules, enforced here and nowhere else:
 //! * a pgid is signalled only while this owner has observed it alive and not
 //!   yet observed it gone; after ESRCH it is never signalled again;
-//! * EPERM means "could not clean", never "empty";
+//! * EPERM means "could not clean", never "empty" (unless every member is a
+//!   zombie, which is how macOS reports a dead, unreaped group);
 //! * crash recovery acts only on records of this daemon's instance id, and
 //!   only on a group proven ours (see [`group_identity`]): a member carries
 //!   our tag (Linux), or the recorded leader is still alive with its recorded
@@ -245,29 +246,83 @@ pub enum Probe {
     Denied,
 }
 
-/// `kill(-pgid, 0)`, refined so a group holding only zombies counts as gone
-/// (they cannot run again, and waiting on them would only time out).
+/// What `kill(-pgid, …)` returned, before zombies are taken into account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
+enum KillResult {
+    Delivered,
+    /// ESRCH.
+    NoSuchGroup,
+    /// EPERM.
+    NotPermitted,
+    /// Any other error (or an invalid pgid).
+    Failed,
+}
+
+#[cfg(unix)]
+fn kill_result(res: nix::Result<()>) -> KillResult {
+    use nix::errno::Errno;
+    match res {
+        Ok(()) => KillResult::Delivered,
+        Err(Errno::ESRCH) => KillResult::NoSuchGroup,
+        Err(Errno::EPERM) => KillResult::NotPermitted,
+        Err(_) => KillResult::Failed,
+    }
+}
+
+/// The group has members and every one of them is a zombie: nothing in it
+/// can run again.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn only_zombies(members: &[crate::util::procinfo::ProcInfo]) -> bool {
+    !members.is_empty() && members.iter().all(|m| m.zombie)
+}
+
+/// Refine a `kill(-pgid, …)` result with the group's members, so a group
+/// holding only zombies counts as gone (they cannot run again, and waiting on
+/// them would only time out).
+///
+/// Linux delivers to a zombie-only group (`Ok`). macOS instead returns EPERM
+/// for it until the zombies are reaped, so EPERM is not "could not clean"
+/// until the members show a live process we may not signal. Our own leader
+/// is reaped by its bridge's wait task; orphans by init/launchd.
+/// `members` is only called when the answer depends on it.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn classify_kill(
+    res: KillResult,
+    members: impl FnOnce() -> Vec<crate::util::procinfo::ProcInfo>,
+) -> Probe {
+    match res {
+        KillResult::NoSuchGroup => Probe::Gone,
+        KillResult::Failed => Probe::Denied,
+        KillResult::Delivered => {
+            if only_zombies(&members()) {
+                Probe::Gone
+            } else {
+                Probe::Alive
+            }
+        }
+        KillResult::NotPermitted => {
+            if only_zombies(&members()) {
+                Probe::Gone
+            } else {
+                Probe::Denied
+            }
+        }
+    }
+}
+
+/// `kill(-pgid, 0)`, refined by [`classify_kill`].
 pub fn probe_group(pgid: i32) -> Probe {
     #[cfg(unix)]
     {
-        use nix::errno::Errno;
         use nix::sys::signal::kill;
         use nix::unistd::Pid;
         if pgid <= 1 {
             return Probe::Denied;
         }
-        match kill(Pid::from_raw(-pgid), None) {
-            Ok(()) => {
-                let members = crate::util::procinfo::group_members(pgid);
-                if !members.is_empty() && members.iter().all(|m| m.zombie) {
-                    Probe::Gone
-                } else {
-                    Probe::Alive
-                }
-            }
-            Err(Errno::ESRCH) => Probe::Gone,
-            Err(_) => Probe::Denied,
-        }
+        classify_kill(kill_result(kill(Pid::from_raw(-pgid), None)), || {
+            crate::util::procinfo::group_members(pgid)
+        })
     }
     #[cfg(not(unix))]
     {
@@ -293,11 +348,26 @@ enum Signalled {
     Refused(&'static str),
 }
 
-/// Signal a whole group. `Err(true)` on ESRCH (gone), `Err(false)` otherwise.
+/// Map a group signal's result: `Err(true)` when the group is gone (ESRCH,
+/// or EPERM because only zombies remain; see [`classify_kill`]),
+/// `Err(false)` when it could not be signalled.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn signal_result(
+    res: KillResult,
+    members: impl FnOnce() -> Vec<crate::util::procinfo::ProcInfo>,
+) -> Result<(), bool> {
+    match res {
+        // Delivered: the caller polls for the group to empty.
+        KillResult::Delivered => Ok(()),
+        other => Err(classify_kill(other, members) == Probe::Gone),
+    }
+}
+
+/// Signal a whole group. `Err(true)` when it is gone, `Err(false)` when it
+/// could not be signalled (see [`signal_result`]).
 fn signal_group(pgid: i32, sig: Sig) -> Result<(), bool> {
     #[cfg(unix)]
     {
-        use nix::errno::Errno;
         use nix::sys::signal::{Signal, killpg};
         use nix::unistd::Pid;
         if pgid <= 1 {
@@ -307,11 +377,9 @@ fn signal_group(pgid: i32, sig: Sig) -> Result<(), bool> {
             Sig::Term => Signal::SIGTERM,
             Sig::Kill => Signal::SIGKILL,
         };
-        match killpg(Pid::from_raw(pgid), s) {
-            Ok(()) => Ok(()),
-            Err(Errno::ESRCH) => Err(true),
-            Err(_) => Err(false),
-        }
+        signal_result(kill_result(killpg(Pid::from_raw(pgid), s)), || {
+            crate::util::procinfo::group_members(pgid)
+        })
     }
     #[cfg(not(unix))]
     {
@@ -1578,6 +1646,59 @@ mod tests {
     #[tokio::test]
     async fn a_group_kept_after_its_leader_was_reaped_is_cleaned_by_start_times() {
         tagged_group_kept_after_the_leader_was_reaped_is_cleaned(false).await;
+    }
+
+    fn member(pid: i32, zombie: bool) -> crate::util::procinfo::ProcInfo {
+        crate::util::procinfo::ProcInfo {
+            pid,
+            pgid: 4242,
+            uid: crate::util::procinfo::current_uid(),
+            start_time_ms: 1,
+            zombie,
+        }
+    }
+
+    #[test]
+    fn eperm_with_zombie_only_members_is_gone() {
+        // macOS: kill(-pgid) is EPERM while only unreaped zombies remain.
+        let zombies = || vec![member(4242, true), member(4243, true)];
+        assert_eq!(
+            classify_kill(KillResult::NotPermitted, zombies),
+            Probe::Gone
+        );
+        assert_eq!(signal_result(KillResult::NotPermitted, zombies), Err(true));
+    }
+
+    #[test]
+    fn eperm_with_a_live_member_is_still_could_not_clean() {
+        let mixed = || vec![member(4242, true), member(4243, false)];
+        assert_eq!(
+            classify_kill(KillResult::NotPermitted, mixed),
+            Probe::Denied
+        );
+        assert_eq!(signal_result(KillResult::NotPermitted, mixed), Err(false));
+        // Members we cannot see prove nothing: still EPERM.
+        assert_eq!(
+            classify_kill(KillResult::NotPermitted, Vec::new),
+            Probe::Denied
+        );
+        assert_eq!(
+            signal_result(KillResult::NotPermitted, Vec::new),
+            Err(false)
+        );
+    }
+
+    #[test]
+    fn other_kill_results_keep_their_meaning() {
+        let zombies = || vec![member(4242, true)];
+        let live = || vec![member(4242, false)];
+        assert_eq!(classify_kill(KillResult::Delivered, zombies), Probe::Gone);
+        assert_eq!(classify_kill(KillResult::Delivered, live), Probe::Alive);
+        assert_eq!(classify_kill(KillResult::NoSuchGroup, live), Probe::Gone);
+        assert_eq!(classify_kill(KillResult::Failed, zombies), Probe::Denied);
+        assert_eq!(signal_result(KillResult::Delivered, zombies), Ok(()));
+        assert_eq!(signal_result(KillResult::NoSuchGroup, live), Err(true));
+        assert_eq!(signal_result(KillResult::Failed, zombies), Err(false));
     }
 
     #[tokio::test]
