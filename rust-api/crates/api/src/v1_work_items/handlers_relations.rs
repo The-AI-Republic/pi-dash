@@ -896,15 +896,18 @@ async fn relation_post_inner(
                 relation_type: &stored,
             });
         }
-        relation_domain::relate_rows_or_nothing(&pre.pool, &rows)
-            .await
-            .map_err(|error| {
-                if is_fk_violation(&error) {
-                    Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
-                } else {
-                    db_error(error, "relation-post-insert")
-                }
-            })?;
+        relation_domain::relate_rows_or_nothing(
+            &pidash_db::pool::sea_orm_connection(&pre.pool),
+            &rows,
+        )
+        .await
+        .map_err(|error| {
+            if is_fk_violation(&error) {
+                Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
+            } else {
+                db_error(error, "relation-post-insert")
+            }
+        })?;
     }
     // The activity fan-out (`:3096-3106`): `requested_data` dumps the
     // parsed request body, `origin` resolves after the insert (a missing

@@ -857,9 +857,13 @@ pub async fn dev_machine_revoke(
         stamped = Some((now, auto_now));
     }
     // Token revoke-all (`:198`).
-    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(&mut *tx, machine_id, now)
-        .await
-        .is_err()
+    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        machine_id,
+        now,
+    )
+    .await
+    .is_err()
     {
         return server_error();
     }
@@ -988,9 +992,13 @@ pub async fn dev_machine_rotate(
 
     // Token revoke-all (`:238`).
     let now = now_micros();
-    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(&mut *tx, machine_id, now)
-        .await
-        .is_err()
+    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        machine_id,
+        now,
+    )
+    .await
+    .is_err()
     {
         return server_error();
     }
@@ -2039,7 +2047,7 @@ impl PubsubStore for PoolPubsubStore<'_, '_> {
         reason: &str,
     ) -> Result<(), SessionOutboxError> {
         pidash_services::domain::tokens::revoke_runner_session(
-            self.pool,
+            &pidash_db::pool::sea_orm_connection(self.pool),
             session_id,
             now_micros(),
             reason,
@@ -2156,7 +2164,7 @@ impl PubsubStore for TxPubsub<'_, '_, '_> {
         let mut guard = self.tx.lock().await;
         let tx: &mut sqlx::Transaction<'_, sqlx::Postgres> = &mut guard;
         pidash_services::domain::tokens::revoke_runner_session(
-            &mut **tx,
+            &pidash_db::orm_tx::TxConn::new(tx),
             session_id,
             now_micros(),
             reason,
@@ -2336,9 +2344,12 @@ async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), (
                 .await
                 .map_err(|_| ())?;
         }
-        pidash_services::domain::tokens::delete_runner_sessions_for_runners(&mut *tx, &runners)
-            .await
-            .map_err(|_| ())?;
+        pidash_services::domain::tokens::delete_runner_sessions_for_runners(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            &runners,
+        )
+        .await
+        .map_err(|_| ())?;
         let conn = TxConn::new(&mut tx);
         delete_kernel::delete_force_refresh(&conn, &runners)
             .await

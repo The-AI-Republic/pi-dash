@@ -372,7 +372,7 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
         stored_reason: &str,
     ) -> Result<(), RevokeError> {
         pidash_services::domain::tokens::revoke_runner_sessions_for_runner(
-            &mut **self.tx,
+            &pidash_db::orm_tx::TxConn::new(self.tx),
             runner_id,
             now,
             stored_reason,
@@ -617,7 +617,7 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
                 let session = runner_session::runner_session_from_row(&row).map_err(store_err)?;
                 let sid = session.id.to_string();
                 pidash_services::domain::tokens::revoke_runner_session(
-                    &mut **self.tx,
+                    &pidash_db::orm_tx::TxConn::new(self.tx),
                     session.id,
                     now_micros(),
                     pubsub_svc::FORCE_CLOSE_REASON,
@@ -672,7 +672,7 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
         now: DateTime<Utc>,
     ) -> Result<(), RevokeError> {
         pidash_services::domain::tokens::revoke_tokens_for_dev_machine(
-            &mut **self.tx,
+            &pidash_db::orm_tx::TxConn::new(self.tx),
             machine_id,
             now,
         )
@@ -736,7 +736,7 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
 
     async fn delete_runner_sessions(&mut self, runner_ids: &[Uuid]) -> Result<(), RevokeError> {
         pidash_services::domain::tokens::delete_runner_sessions_for_runners(
-            &mut **self.tx,
+            &pidash_db::orm_tx::TxConn::new(self.tx),
             runner_ids,
         )
         .await
@@ -810,9 +810,12 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
     }
 
     async fn null_token_machines(&mut self, machine_id: Uuid) -> Result<(), RevokeError> {
-        pidash_services::domain::tokens::clear_token_dev_machines(&mut **self.tx, machine_id)
-            .await
-            .map_err(store_err)
+        pidash_services::domain::tokens::clear_token_dev_machines(
+            &pidash_db::orm_tx::TxConn::new(self.tx),
+            machine_id,
+        )
+        .await
+        .map_err(store_err)
     }
 
     async fn delete_machine_row(&mut self, machine_id: Uuid) -> Result<(), RevokeError> {
@@ -876,7 +879,7 @@ impl PubsubStore for PoolPubsub<'_> {
         reason: &str,
     ) -> Result<(), OutboxError> {
         pidash_services::domain::tokens::revoke_runner_session(
-            self.pool,
+            &pidash_db::pool::sea_orm_connection(self.pool),
             session_id,
             Utc::now(),
             reason,

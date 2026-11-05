@@ -851,7 +851,9 @@ async fn insert_relation_row(
         related_issue_id: related_id,
         relation_type: stored,
     };
-    match relation_domain::relate_row_or_nothing(pool, &row).await {
+    match relation_domain::relate_row_or_nothing(&pidash_db::pool::sea_orm_connection(pool), &row)
+        .await
+    {
         Ok(created) => Ok(created),
         Err(error) if is_unique_violation(&error) => Ok(false),
         Err(error) => Err(db_error(error, "relate-insert")),
@@ -1048,7 +1050,7 @@ async fn unrelate_op(
         }
         for row in matching {
             relation_domain::soft_delete_relation_row(
-                pool,
+                &pidash_db::pool::sea_orm_connection(pool),
                 row.id,
                 *actor_id,
                 now_utc(),
