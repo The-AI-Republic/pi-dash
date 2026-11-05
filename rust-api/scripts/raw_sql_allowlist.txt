@@ -124,7 +124,6 @@ crates/api/src/v1_work_items/handlers_activity.rs 29
 crates/api/src/v1_work_items/handlers_core.rs 17
 crates/api/src/v1_work_items/handlers_labels_pages.rs 47
 crates/api/src/v1_work_items/handlers_move_search.rs 22
-crates/api/src/v1_work_items/handlers_pr_links.rs 38
 crates/api/src/v1_work_items/handlers_relations.rs 3
 crates/api/src/v1_work_items/handlers_social.rs 29
 crates/compat/src/db.rs 1
