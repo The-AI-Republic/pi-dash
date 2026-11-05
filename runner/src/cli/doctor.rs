@@ -1156,7 +1156,7 @@ mod tests {
         assert!(muse_checks.iter().any(|c| c.name == "muse-auth"));
     }
 
-    // ---- Claude Code auth classification (PIDASH-7) ----
+    // ---- Claude Code auth classification ----
 
     fn probe() -> ClaudeAuthProbe {
         ClaudeAuthProbe {
