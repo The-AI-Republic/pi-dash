@@ -22,6 +22,9 @@ const mocks = vi.hoisted(() => ({
   store: { notices: { legacy_folders: [], pod_member_projects: [] } as Notices, dismissed: [] as string[] },
   listeners: new Set<() => void>(),
   setPodWork: vi.fn(),
+  getRunner: vi.fn(),
+  replaceOpen: false,
+  replaceListeners: new Set<() => void>(),
   folderKey: (n: { path: string }) => `folder:${n.path}`,
   podKey: (n: { runner_id: string }) => `pod:${n.runner_id}`,
 }));
@@ -46,14 +49,26 @@ vi.mock("@/services/desktop-notices", () => {
       return () => mocks.listeners.delete(listener);
     },
     setPodWork: mocks.setPodWork,
+    getRunner: mocks.getRunner,
   };
 });
+
+vi.mock("@/services/desktop-replace", () => ({
+  replacePromptOpen: () => mocks.replaceOpen,
+  subscribeReplacePromptOpen: (listener: () => void) => {
+    mocks.replaceListeners.add(listener);
+    return () => mocks.replaceListeners.delete(listener);
+  },
+}));
 
 import { DesktopMigrationNotices } from "../../core/components/desktop-migration-notices";
 
 beforeEach(() => {
   vi.resetAllMocks();
   mocks.setPodWork.mockResolvedValue({});
+  mocks.getRunner.mockResolvedValue({ id: "r-api", pod_dispatch: "pod_member" });
+  mocks.replaceOpen = false;
+  mocks.replaceListeners.clear();
   mocks.listeners.clear();
   mocks.store = {
     notices: {
@@ -84,9 +99,33 @@ describe("migration notices", () => {
     expect(screen.getByRole<HTMLInputElement>("switch", { name: "Pod work in API" }).checked).toBe(true);
   });
 
+  it("the switch shows the server's current pod work", async () => {
+    mocks.getRunner.mockResolvedValue({ id: "r-api", pod_dispatch: "pinned_only" });
+    render(<DesktopMigrationNotices account="u-1" />);
+    await screen.findByText(HEADING);
+    await act(async () => {});
+    expect(mocks.getRunner).toHaveBeenCalledWith("r-api");
+    const toggle = screen.getByRole<HTMLInputElement>("switch", { name: "Pod work in API" });
+    expect(toggle.checked).toBe(false);
+    expect(toggle.disabled).toBe(false);
+  });
+
+  it("waits while the Replace it dialog is open instead of stacking on it", async () => {
+    mocks.replaceOpen = true;
+    render(<DesktopMigrationNotices account="u-1" />);
+    await act(async () => {});
+    expect(screen.queryByText(HEADING)).toBeNull();
+    await act(async () => {
+      mocks.replaceOpen = false;
+      mocks.replaceListeners.forEach((l) => l());
+    });
+    await screen.findByText(HEADING);
+  });
+
   it("the switch turns pod work off for that project's engine", async () => {
     render(<DesktopMigrationNotices account="u-1" />);
     const toggle = await screen.findByRole<HTMLInputElement>("switch", { name: "Pod work in API" });
+    await act(async () => {});
     await act(async () => {
       fireEvent.click(toggle);
     });

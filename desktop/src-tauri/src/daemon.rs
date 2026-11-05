@@ -682,11 +682,18 @@ pub async fn daemon_engine_runner_rebind(runner: String) -> Result<PathBuf, Stri
         target.project_slug.as_deref().unwrap_or(&target.name),
         &taken,
     );
+    set_runner_working_dir(runner, folder.clone()).await?;
+    Ok(folder)
+}
+
+/// Point `runner` at `folder` (per-runner reconfigure: only that runner
+/// restarts, refused while it is busy). Callers confine `folder`.
+pub(crate) async fn set_runner_working_dir(runner: String, folder: PathBuf) -> Result<(), String> {
     let changes = RunnerChanges {
-        working_dir: Some(folder.clone()),
+        working_dir: Some(folder),
     };
     match call(Request::RunnerReconfigure { runner, changes }, CALL_TIMEOUT).await? {
-        Response::Ack => Ok(folder),
+        Response::Ack => Ok(()),
         other => Err(unexpected(&other)),
     }
 }

@@ -228,6 +228,50 @@ describe("desktop migration", () => {
     ]);
   });
 
+  it("gives a runner the reconcile re-added with a fresh folder its legacy folder back, with no notice", async () => {
+    const computer = fakeComputer({
+      discovery: compatible([{ slug: "acme", signed_in: true, runners: 1 }]),
+      runners: [
+        {
+          name: "builtin-mac-acme-web",
+          runner_id: "r-1",
+          workspace_slug: "acme",
+          project_slug: "WEB",
+          working_dir: "/home/u/pidash/acme/WEB",
+          agent: "engine",
+        },
+      ],
+    });
+    await migrateLegacyTrees("u-1", computer.deps);
+    expect(computer.log).toContain(
+      'legacy_restore_folder {"runner":"builtin-mac-acme-web","workingDir":"/app/managed/workdirs/acme/WEB"}'
+    );
+    expect(computer.log.filter((line) => line.startsWith("daemon_engine_runner_add"))).toHaveLength(1);
+    expect(computer.recorded).toEqual([]);
+  });
+
+  it("matches the daemon's engine to a legacy block whatever the project's letter case", async () => {
+    const computer = fakeComputer({
+      discovery: compatible([{ slug: "acme", signed_in: true, runners: 1 }]),
+      runners: [
+        {
+          name: "builtin-web",
+          runner_id: "daemon-web",
+          workspace_slug: "acme",
+          project_slug: "web",
+          working_dir: "/home/u/pidash/acme/web",
+          agent: "engine",
+        },
+      ],
+    });
+    const outcome = await migrateLegacyTrees("u-1", computer.deps);
+    expect(outcome).toEqual({ status: "done", migrated: ["acme"], failed: [] });
+    const adds = computer.log.filter((line) => line.startsWith("daemon_engine_runner_add"));
+    expect(adds).toEqual([
+      'daemon_engine_runner_add {"workspace":"acme","project":"API","workingDir":"/app/managed/workdirs/acme/API"}',
+    ]);
+  });
+
   it("names the projects whose engine the server made a pod member (PO-11), before finishing", async () => {
     const computer = fakeComputer({
       discovery: compatible([{ slug: "acme", signed_in: true, runners: 0 }]),

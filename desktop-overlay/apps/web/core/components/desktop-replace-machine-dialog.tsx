@@ -9,7 +9,9 @@ import { Button } from "@pi-dash/propel/button";
 import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
 import {
   declineReplace,
+  errorText,
   registerReplacePrompt,
+  setReplacePromptOpen,
   replaceMachine,
   type ReplaceOutcome,
   type ReplacePrompt,
@@ -19,12 +21,6 @@ function lastSeen(at: string | null): string {
   if (!at) return "never";
   const date = new Date(at);
   return Number.isNaN(date.getTime()) ? "never" : date.toLocaleDateString();
-}
-
-function message(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  const data = (error as { error?: string } | null) ?? null;
-  return data?.error ?? String(error);
 }
 
 function resultText(outcome: ReplaceOutcome): string {
@@ -60,6 +56,11 @@ export function DesktopReplaceMachineDialog() {
     return () => registerReplacePrompt(null);
   }, []);
 
+  useEffect(() => {
+    setReplacePromptOpen(state !== null);
+  }, [state]);
+  useEffect(() => () => setReplacePromptOpen(false), []);
+
   const close = () => !busy && setState(null);
 
   const run = async (action: () => Promise<void>) => {
@@ -68,7 +69,7 @@ export function DesktopReplaceMachineDialog() {
     try {
       await action();
     } catch (e) {
-      setError(message(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }

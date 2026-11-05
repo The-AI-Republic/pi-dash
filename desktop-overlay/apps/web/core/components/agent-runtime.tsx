@@ -62,7 +62,10 @@ export const AgentRuntime = observer(function AgentRuntime() {
       const machineId = compatibleHello()?.machine_id;
       if (!active || !migrated || !machineId || askedFor.has(machineId)) return;
       askedFor.add(machineId);
-      await offerReplace(user.id);
+      // A failed lookup (offline) is not an answer: ask again next refresh.
+      await offerReplace(user.id).catch(() => {
+        askedFor.delete(machineId);
+      });
     };
     const tick = () => void refresh().catch(() => {});
     tick();

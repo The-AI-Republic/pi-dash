@@ -10,6 +10,7 @@ import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
 import {
   dismissNotices,
   folderKey,
+  getRunner,
   hasNotices,
   loadNotices,
   podKey,
@@ -17,6 +18,7 @@ import {
   subscribeNotices,
   type Notices,
 } from "@/services/desktop-notices";
+import { replacePromptOpen, subscribeReplacePromptOpen } from "@/services/desktop-replace";
 
 /**
  * The one-time notices after moving to Pi Dash on this computer (design §13):
@@ -27,8 +29,11 @@ import {
 export function DesktopMigrationNotices(props: { account: string }) {
   const { account } = props;
   const [notices, setNotices] = useState<Notices | null>(null);
-  /** Pod work per runner id, as the switches show it (on until turned off). */
+  /** Pod work per runner id, as the server has it; absent until read. */
   const [podWork, setPodWorkState] = useState<Record<string, boolean>>({});
+  /** Wait while the "Replace it" dialog is open rather than stack on it. */
+  const [replaceOpen, setReplaceOpen] = useState(replacePromptOpen());
+  useEffect(() => subscribeReplacePromptOpen(() => setReplaceOpen(replacePromptOpen())), []);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,6 +50,26 @@ export function DesktopMigrationNotices(props: { account: string }) {
     void refresh();
     return subscribeNotices(() => void refresh());
   }, [refresh]);
+
+  // The switches show the server's current pod work, not an assumed "on".
+  const podRunnerIds = notices?.pod_member_projects.map((n) => n.runner_id).join(",") ?? "";
+  useEffect(() => {
+    if (!podRunnerIds) return;
+    let current = true;
+    for (const runnerId of podRunnerIds.split(",")) {
+      void getRunner(runnerId)
+        .then((row) => {
+          if (current) setPodWorkState((s) => ({ ...s, [runnerId]: row.pod_dispatch === "pod_member" }));
+        })
+        // Unreadable: the switch stays as the notice recorded it (on).
+        .catch(() => {
+          if (current) setPodWorkState((s) => (runnerId in s ? s : { ...s, [runnerId]: true }));
+        });
+    }
+    return () => {
+      current = false;
+    };
+  }, [podRunnerIds]);
 
   const toggle = async (runnerId: string, on: boolean) => {
     setPending(runnerId);
@@ -68,7 +93,7 @@ export function DesktopMigrationNotices(props: { account: string }) {
 
   return (
     <ModalCore
-      isOpen={notices !== null}
+      isOpen={notices !== null && !replaceOpen}
       handleClose={() => void dismiss()}
       position={EModalPosition.CENTER}
       width={EModalWidth.XXL}
@@ -85,6 +110,7 @@ export function DesktopMigrationNotices(props: { account: string }) {
               </p>
               <ul className="flex flex-col gap-1">
                 {notices.pod_member_projects.map((n) => {
+                  const known = n.runner_id in podWork;
                   const on = podWork[n.runner_id] ?? true;
                   return (
                     <li key={n.runner_id} className="flex items-center justify-between gap-2 text-13 text-primary">
@@ -97,7 +123,7 @@ export function DesktopMigrationNotices(props: { account: string }) {
                           role="switch"
                           aria-label={`Pod work in ${n.project}`}
                           checked={on}
-                          disabled={pending === n.runner_id}
+                          disabled={!known || pending === n.runner_id}
                           onChange={(e) => void toggle(n.runner_id, e.target.checked)}
                         />
                         Pod work

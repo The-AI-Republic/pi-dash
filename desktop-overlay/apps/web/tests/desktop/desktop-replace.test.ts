@@ -28,6 +28,7 @@ import type { Discovery, LocalRunner } from "@/services/desktop-daemon";
 import { mergePath } from "@/services/desktop-migration";
 import {
   declineReplace,
+  errorText,
   findReplacePrompt,
   MY_WORKSPACES_PATH,
   offerReplace,
@@ -273,5 +274,16 @@ describe("replace-machine prompt", () => {
     await expect(offerReplace("u-1", fakeWorld({ candidates: [candidate("old-1")] }).deps)).resolves.toBe(true);
     expect(shown).toEqual([{ account: "u-1", prompt: { machineId: THIS_MACHINE, candidate: candidate("old-1") } }]);
     registerReplacePrompt(null);
+  });
+
+  it("turns the merge endpoint's error codes into plain text", () => {
+    const axiosLike = (code: string) =>
+      Object.assign(new Error("Request failed with status code 409"), { response: { data: { error: code } } });
+    expect(errorText(axiosLike("source_machine_has_live_session"))).toMatch(/still connected/);
+    expect(errorText(axiosLike("already_merged_into_another_machine"))).toMatch(/already replaced/);
+    expect(errorText(axiosLike("target_machine_not_live"))).toMatch(/not connected right now/);
+    expect(errorText(axiosLike("something_new"))).toBe("something_new");
+    expect(errorText(new Error("disk busy"))).toBe("disk busy");
+    expect(errorText({ detail: "Not allowed" })).toBe("Not allowed");
   });
 });

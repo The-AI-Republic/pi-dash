@@ -507,6 +507,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Moving older builds' private daemon trees to the shared daemon.
             migration::legacy_scan,
             migration::legacy_finish,
+            migration::legacy_restore_folder,
             desktop_clear_web_data,
             updates::desktop_pending_update,
             updates::desktop_install_update,

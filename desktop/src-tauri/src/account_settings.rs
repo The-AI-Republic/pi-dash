@@ -128,11 +128,21 @@ pub async fn chat_approval_modes_load<R: Runtime>(
     load_approval_modes(&AppPaths::resolve(&app)?, &account)
 }
 
+/// Serialises every read-modify-write of an account's `settings.json`:
+/// Tauri runs async commands concurrently, and two unlocked updates (a
+/// dismissal and a new notice, say) would lose one of them.
+static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn settings_lock() -> std::sync::MutexGuard<'static, ()> {
+    SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn save_approval_modes(
     paths: &AppPaths,
     account: &str,
     modes: BTreeMap<String, String>,
 ) -> Result<(), String> {
+    let _guard = settings_lock();
     let mut settings = read(paths, account)?;
     for (runner, mode) in modes {
         if !valid_runner(&runner) {
@@ -226,6 +236,7 @@ fn record_notices(
     account: &str,
     notices: Notices,
 ) -> Result<NoticesView, String> {
+    let _guard = settings_lock();
     let mut settings = read(paths, account)?;
     settings
         .notices
@@ -248,6 +259,7 @@ fn dismiss_notices(
     if let Some(bad) = keys.iter().find(|k| !valid_field(k)) {
         return Err(format!("invalid notice key {bad:?}"));
     }
+    let _guard = settings_lock();
     let mut settings = read(paths, account)?;
     settings.dismissed.extend(keys);
     sanitize(&mut settings);
@@ -461,6 +473,36 @@ mod tests {
         let replay = record_notices(&paths, "user-a", notices).unwrap();
         assert_eq!(replay.notices, Notices::default());
         assert_eq!(replay.dismissed, vec!["folder:/old/acme/WEB", "pod:r-1"]);
+    }
+
+    /// Concurrent updates (Tauri runs commands in parallel) lose nothing.
+    #[test]
+    fn concurrent_records_and_dismissals_all_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::thread::scope(|scope| {
+            for i in 0..16 {
+                let paths = &paths;
+                scope.spawn(move || {
+                    if i % 2 == 0 {
+                        record_notices(
+                            paths,
+                            "user-a",
+                            Notices {
+                                legacy_folders: vec![],
+                                pod_member_projects: vec![pod(&format!("r-{i}"))],
+                            },
+                        )
+                        .unwrap();
+                    } else {
+                        dismiss_notices(paths, "user-a", vec![format!("pod:x-{i}")]).unwrap();
+                    }
+                });
+            }
+        });
+        let view = load_notices(&paths, "user-a").unwrap();
+        assert_eq!(view.notices.pod_member_projects.len(), 8);
+        assert_eq!(view.dismissed.len(), 8);
     }
 
     #[test]

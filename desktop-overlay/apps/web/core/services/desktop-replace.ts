@@ -90,19 +90,20 @@ export async function findReplacePrompt(
   account: string,
   deps: ReplaceDeps = defaultDeps
 ): Promise<ReplacePrompt | null> {
+  return lookupReplacePrompt(account, deps).catch(() => null);
+}
+
+/** {@link findReplacePrompt}, but a failed lookup (offline) rejects. */
+async function lookupReplacePrompt(account: string, deps: ReplaceDeps): Promise<ReplacePrompt | null> {
   const machineId = compatibleHello(deps.discovery())?.machine_id;
   if (!machineId) return null;
-  try {
-    const { candidates } = await deps.get<{ candidates: ReplaceCandidate[] }>(replaceCandidatesPath(machineId));
-    const { dismissed } = await loadNotices(account, deps.invoke);
-    // The server orders them most recently seen first.
-    const candidate = (candidates ?? []).find(
-      (c) => c.id !== machineId && c.provisioning !== "desktop_bundled" && !dismissed.includes(replaceKey(c.id))
-    );
-    return candidate ? { machineId, candidate } : null;
-  } catch {
-    return null;
-  }
+  const { candidates } = await deps.get<{ candidates: ReplaceCandidate[] }>(replaceCandidatesPath(machineId));
+  const { dismissed } = await loadNotices(account, deps.invoke);
+  // The server orders them most recently seen first.
+  const candidate = (candidates ?? []).find(
+    (c) => c.id !== machineId && c.provisioning !== "desktop_bundled" && !dismissed.includes(replaceKey(c.id))
+  );
+  return candidate ? { machineId, candidate } : null;
 }
 
 export interface ReplaceOutcome {
@@ -115,10 +116,32 @@ export interface ReplaceOutcome {
   ownAgentRunners: number;
 }
 
-function errorText(error: unknown): string {
+/** The merge endpoint's error codes, in the user's words. */
+const MERGE_ERRORS: Record<string, string> = {
+  source_machine_has_live_session:
+    "That computer is still connected to Pi Dash. Quit Pi Dash there, or sign it out, then try again.",
+  already_merged_into_another_machine: "That computer was already replaced by another one.",
+  target_machine_not_live: "Pi Dash on this computer is not connected right now. Try again in a moment.",
+  source_machine_revoked: "That computer was removed from Pi Dash, so there is nothing to replace.",
+  dev_machine_not_found: "That computer is no longer in Pi Dash.",
+  cannot_merge_into_self: "This is already that computer.",
+  dev_machine_mismatch: "That computer belongs to another account.",
+};
+
+/**
+ * Plain text for an error from the server or the daemon. An Axios error
+ * carries the server's `{error}` code in `response.data`; known codes are
+ * mapped to plain text instead of "Request failed with status code 409".
+ */
+export function errorText(error: unknown): string {
+  const response = (error as { response?: { data?: { error?: string; detail?: string } } } | null)?.response;
+  const data =
+    response?.data ?? (error instanceof Error ? null : (error as { error?: string; detail?: string } | null));
+  const code = data?.error;
+  if (code && MERGE_ERRORS[code]) return MERGE_ERRORS[code];
+  if (code || data?.detail) return (data?.detail ?? code) as string;
   if (error instanceof Error) return error.message;
-  const data = (error as { error?: string; detail?: string } | null) ?? null;
-  return data?.error ?? data?.detail ?? String(error);
+  return String(error);
 }
 
 interface MovedEngine {
@@ -211,14 +234,39 @@ export async function declineReplace(
 type PromptListener = (prompt: { account: string; prompt: ReplacePrompt } | null) => void;
 let promptListener: PromptListener | null = null;
 
+/** Whether the "Replace it" dialog is showing, so other one-time dialogs
+ * (the migration notices) wait instead of stacking on top of it. */
+let promptOpen = false;
+const openListeners = new Set<() => void>();
+
+export function setReplacePromptOpen(open: boolean) {
+  if (promptOpen === open) return;
+  promptOpen = open;
+  openListeners.forEach((listener) => listener());
+}
+
+export function replacePromptOpen(): boolean {
+  return promptOpen;
+}
+
+export function subscribeReplacePromptOpen(listener: () => void): () => void {
+  openListeners.add(listener);
+  return () => {
+    openListeners.delete(listener);
+  };
+}
+
 /** The dialog registers here; `null` unregisters. */
 export function registerReplacePrompt(listener: PromptListener | null) {
   promptListener = listener;
 }
 
-/** Find a candidate and, when there is one, show the prompt. Resolves whether it did. */
+/**
+ * Find a candidate and, when there is one, show the prompt. Resolves whether
+ * it did; rejects when the lookup failed (offline), so the caller asks again.
+ */
 export async function offerReplace(account: string, deps: ReplaceDeps = defaultDeps): Promise<boolean> {
-  const prompt = await findReplacePrompt(account, deps);
+  const prompt = await lookupReplacePrompt(account, deps);
   if (!prompt || !promptListener) return false;
   promptListener({ account, prompt });
   return true;

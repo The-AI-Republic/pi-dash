@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   listener: null as Listener | null,
   replace: vi.fn(),
   decline: vi.fn(),
+  setOpen: vi.fn(),
 }));
 
 vi.mock("@/services/desktop-replace", () => ({
@@ -21,6 +22,12 @@ vi.mock("@/services/desktop-replace", () => ({
   },
   replaceMachine: mocks.replace,
   declineReplace: mocks.decline,
+  setReplacePromptOpen: mocks.setOpen,
+  errorText: (e: unknown) => {
+    const code = (e as { response?: { data?: { error?: string } } }).response?.data?.error;
+    if (code === "source_machine_has_live_session") return "That computer is still connected to Pi Dash.";
+    return e instanceof Error ? e.message : String(e);
+  },
 }));
 
 import { DesktopReplaceMachineDialog } from "../../core/components/desktop-replace-machine-dialog";
@@ -69,11 +76,16 @@ describe("replace-machine dialog", () => {
   });
 
   it("a failed merge says so and offers to try again", async () => {
-    mocks.replace.mockRejectedValue(new Error("source_machine_has_live_session"));
+    mocks.replace.mockRejectedValue(
+      Object.assign(new Error("Request failed with status code 409"), {
+        response: { data: { error: "source_machine_has_live_session" } },
+      })
+    );
     render(<DesktopReplaceMachineDialog />);
     await open();
+    expect(mocks.setOpen).toHaveBeenLastCalledWith(true);
     fireEvent.click(screen.getByRole("button", { name: "Replace it" }));
-    await screen.findByText("Replacing it did not finish: source_machine_has_live_session");
+    await screen.findByText("Replacing it did not finish: That computer is still connected to Pi Dash.");
     expect(screen.getByRole("button", { name: "Replace it" })).toBeTruthy();
   });
 

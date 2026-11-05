@@ -127,8 +127,15 @@ async function migrateTree(tree: LegacyTree, account: string, hello: HelloInfo, 
   // Step 3: the engine runners, unless the daemon already runs the engine for
   // that project (a resumed migration, or a CLI that turned it on first).
   const runners = await deps.invoke<LocalRunner[]>("daemon_runners");
+  // Case-insensitive, as the daemon refuses a second engine for a project
+  // (`runner/src/engine/provision.rs`): `web` and `WEB` are one project.
   const servedBy = (project: string) =>
-    runners.find((r) => r.agent === "engine" && r.workspace_slug === tree.workspace && r.project_slug === project);
+    runners.find(
+      (r) =>
+        r.agent === "engine" &&
+        r.workspace_slug === tree.workspace &&
+        r.project_slug?.toLowerCase() === project.toLowerCase()
+    );
   const notices = emptyNotices();
   // The tree's runners now on the daemon: re-added here, or by an earlier
   // run of a migration that stopped before step 5 (same folder).
@@ -137,6 +144,13 @@ async function migrateTree(tree: LegacyTree, account: string, hello: HelloInfo, 
     const served = servedBy(block.project);
     if (served) {
       if (served.working_dir === block.working_dir) {
+        added.push({ runnerId: served.runner_id, project: block.project });
+      } else if (block.runner_id && served.runner_id === block.runner_id) {
+        // The same runner, re-added by the daemon's reconcile with a fresh
+        // folder after an interrupted migration: it keeps its own folder
+        // (§13 step 3), so point it back there.
+        // eslint-disable-next-line no-await-in-loop -- one runner at a time
+        await deps.invoke("legacy_restore_folder", { runner: served.name, workingDir: block.working_dir });
         added.push({ runnerId: served.runner_id, project: block.project });
       } else {
         // The daemon's own runner survived the merge; the legacy folder is unused.
