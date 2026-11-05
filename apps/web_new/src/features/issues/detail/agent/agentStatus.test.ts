@@ -71,7 +71,6 @@ function runFixture(overrides: Partial<AgentRunSummary> = {}): AgentRunSummary {
     id: "223e4567-e89b-12d3-a456-426614174001",
     status: "running",
     executor_kind: "local_runner",
-    queue_position: null,
     runner: null,
     runner_name: "runner-1",
     created_at: "2026-05-01T11:50:00Z",

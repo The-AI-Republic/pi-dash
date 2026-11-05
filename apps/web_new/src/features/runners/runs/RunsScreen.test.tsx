@@ -155,6 +155,19 @@ describe("selection", () => {
   });
 });
 
+describe("list load failure (PIDASH-3)", () => {
+  it("shows the error state when the runs page fails to load or parse", async () => {
+    const { RUNS_EMPTY_TEXT, RUNS_LOAD_FAILED_TEXT } = await import("./RunsList.js");
+    const refetch = vi.fn();
+    stubQueries({ list: { data: undefined, isPending: false, isError: true, refetch } });
+    renderScreen(1);
+    expect(screen.getByRole("alert")).toHaveTextContent(RUNS_LOAD_FAILED_TEXT);
+    expect(screen.queryByText(RUNS_EMPTY_TEXT)).toBeNull();
+    screen.getByRole("button", { name: "Try again" }).click();
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("detail states", () => {
   it("shows none without a selection", () => {
     renderScreen(1, null);

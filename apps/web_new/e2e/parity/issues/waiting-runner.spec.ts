@@ -67,7 +67,6 @@ async function stubWaitingDetail(
         id: runId,
         status: "queued",
         executor_kind: "local_runner",
-        queue_position: null,
         runner: null,
         runner_name: null,
         pinned_runner: "5b0f1cc0-3f5a-4a43-9a1f-1f6f5b7d0a11",
