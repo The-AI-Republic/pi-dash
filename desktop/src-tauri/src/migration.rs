@@ -326,8 +326,20 @@ pub async fn legacy_restore_folder<R: Runtime>(
     working_dir: String,
 ) -> Result<(), String> {
     let paths = AppPaths::resolve(&app)?;
-    let folder = confine_legacy_folder(&paths, Path::new(&working_dir))?;
-    crate::daemon::set_runner_working_dir(runner, folder).await
+    match restore_target(&paths, Path::new(&working_dir))? {
+        Some(folder) => crate::daemon::set_runner_working_dir(runner, folder).await,
+        None => Ok(()),
+    }
+}
+
+/// The folder to give back, or `None` when the legacy folder no longer
+/// exists: the runner keeps the fresh folder the reconcile gave it, rather
+/// than the migration failing on every launch.
+fn restore_target(paths: &AppPaths, folder: &Path) -> Result<Option<PathBuf>, String> {
+    if !folder.exists() {
+        return Ok(None);
+    }
+    confine_legacy_folder(paths, folder).map(Some)
 }
 
 #[cfg(test)]
@@ -346,6 +358,13 @@ mod tests {
         assert!(confine_legacy_folder(&paths, &paths.legacy_workdirs()).is_err());
         assert!(confine_legacy_folder(&paths, &elsewhere).is_err());
         assert!(confine_legacy_folder(&paths, &task.join("../../../elsewhere")).is_err());
+        // A legacy folder deleted since: nothing to restore, not an error.
+        let gone = paths.legacy_workdirs().join("acme/GONE");
+        assert_eq!(restore_target(&paths, &gone), Ok(None));
+        assert_eq!(
+            restore_target(&paths, &task),
+            Ok(Some(task.canonicalize().unwrap()))
+        );
     }
 
     const MACHINE: &str = "11111111-2222-3333-4444-555555555555";
