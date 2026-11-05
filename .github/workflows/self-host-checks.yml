@@ -14,6 +14,8 @@ on:
       - "deployments/**"
       - "docker-compose*.yml"
       - "apps/web_new/nginx/**"
+      - "apps/web_new/public/**"
+      - "apps/proxy/**"
       - "apps/web_new/e2e/parity/stack/docker-compose.yml"
       - ".github/workflows/self-host-checks.yml"
   push:
@@ -22,6 +24,8 @@ on:
       - "deployments/**"
       - "docker-compose*.yml"
       - "apps/web_new/nginx/**"
+      - "apps/web_new/public/**"
+      - "apps/proxy/**"
       - "apps/web_new/e2e/parity/stack/docker-compose.yml"
       - ".github/workflows/self-host-checks.yml"
 
