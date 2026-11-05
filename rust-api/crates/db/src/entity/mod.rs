@@ -17,14 +17,21 @@
 //!   --output-dir <staging-dir> --tables "$TABLES"
 //! ```
 //!
-//! A table added to an existing entity file keeps that file's hand edits
-//! below: copy only new tables from the staging dir, and diff the rest.
+//! Regenerate into a staging directory, then:
 //!
-//! The generator output is committed verbatim except for the cleanups below,
-//! all re-applied on every regeneration. With every table generated, nothing
-//! is left unresolved for the compiler to flag, so run
-//! `git diff crates/db/src/entity/` after copying and re-apply each item
-//! here by hand; the parity test catches the `unique` ones.
+//! 1. Copy over only the files for tables that have no entity yet.
+//! 2. For every table that already has one, do not copy: diff the staging
+//!    file against the committed one and port only real schema changes
+//!    (new or changed columns), keeping the hand edits listed below.
+//! 3. Re-apply the cleanups below to the newly copied files. The compiler
+//!    flags some of them (relations into `auth_*` and the `has_many` edges
+//!    whose reverse is deleted fail with unresolved paths or unsatisfied
+//!    `Related` bounds); the parity test flags the `unique`, `has_one` and
+//!    coverage ones; the rest are on this list only.
+//! 4. Run the parity test against the migrated database, then `cargo fmt`
+//!    and clippy.
+//!
+//! The cleanups:
 //!
 //! * These `belongs_to` relations (and their `Related` impls) stay deleted
 //!   (they were outside the original §4 set and nothing joins them yet):
@@ -55,6 +62,17 @@
 //!   the parity test fails on any `unique` flag without a full unique index.
 //!   The matching reverse edges are `has_many`, not the generated `has_one`:
 //!   `workspaces` -> `projects` and `dev_machine` -> `machine_session`.
+//! * Save hooks are not generated. Django `save()` has side effects on
+//!   every `BaseModel` (actor stamps), `ProjectBaseModel` and
+//!   `WorkspaceBaseModel` (workspace derived from the project) row, and its
+//!   own logic on: `agent_run`, `cycles`, `description_versions`,
+//!   `descriptions`, `draft_issues`, `issue_comments`, `issue_views`,
+//!   `issues`, `labels`, `modules`, `page_versions`, `pages`, `pod`,
+//!   `project_members`, `projects`, `runner`, `states`, `stickies`,
+//!   `user_favorites` and `users`. Only `issues`, `issue_comments`,
+//!   `descriptions` and `users` have hand-written `ActiveModelBehavior`
+//!   impls (and the domain write services); a write moved onto any other
+//!   entity must port its model's `save()` first.
 //! * The two Postgres `inet` columns (`api_activity_logs.ip_address`,
 //!   `device_sessions.ip_address`) carry `select_as = "text"` and
 //!   `save_as = "inet"`, so they decode into and bind from a `String`.

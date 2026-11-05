@@ -419,9 +419,10 @@ not repeat it. Finish with `cargo fmt`, the parity test below, and clippy.
 
 Schema parity: `crates/db/src/entity/parity.rs` compares every entity's
 table name, column names, column types and nullability with
-`information_schema.columns`, and each `unique` flag with a full
-(non-partial) single-column unique index in `pg_index`, on the migrated
-database. One test covers every entity and lists all drift.
+`information_schema.columns`; checks `unique` flags both ways against full
+(non-partial) single-column unique indexes in `pg_index`, and every
+`has_one` edge's child column likewise; and fails when an OSS base table has
+no entity. It reads the catalog once and lists all drift in one failure.
 Like every live-db test it skips when `DATABASE_URL` is unset and runs
 for real otherwise:
 

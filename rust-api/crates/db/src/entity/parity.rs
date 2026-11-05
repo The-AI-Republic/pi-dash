@@ -1,8 +1,10 @@
 //! `information_schema` parity test for the generated entities.
 //!
-//! For each covered table this compares the entity's declared table name,
-//! column names, column types and nullability with a database migrated by
-//! `apps/api`, and fails on any drift. Django stays the schema owner: after
+//! Compares every entity with a database migrated by `apps/api`: declared
+//! table name, column names, types and nullability, `unique` flags both ways
+//! against full single-column unique indexes, every `has_one` edge's target
+//! column, and that every OSS table has an entity. All drift is listed in
+//! one failure. Django stays the schema owner: after
 //! a Django sync the entities are regenerated (see `super`'s module doc and
 //! `rust-api/README.md`) and this test proves the regen matches.
 //!
@@ -14,15 +16,16 @@
 //! compare the `varchar` family only, while a pinned `StringLen::N(n)`
 //! compares the length too.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sea_orm::strum::IntoEnumIterator;
-use sea_orm::{ColumnTrait, EntityName, EntityTrait, IdenStatic};
-use sea_query::{ColumnType, RcOrArc, StringLen};
+use sea_orm::{ColumnTrait, EntityName, EntityTrait, IdenStatic, RelationTrait, RelationType};
+use sea_query::{ColumnType, RcOrArc, StringLen, TableRef};
 
-/// One `information_schema.columns` row: name, udt, char length,
+/// One `information_schema.columns` row: table, name, udt, char length,
 /// numeric precision, numeric scale, `YES`/`NO` nullability.
 type InfoSchemaRow = (
+    String,
     String,
     String,
     Option<i32>,
@@ -149,47 +152,25 @@ fn expected_type(col: &ColumnType) -> Option<ExpectedType> {
     }
 }
 
-/// Compare entity `E`'s columns with `table` in `information_schema`, and
-/// its `unique` flags with the table's single-column unique indexes. Returns
-/// one line per drifted column.
-async fn entity_drift<E>(pool: &sqlx::PgPool, table: &str) -> Vec<String>
-where
-    E: EntityTrait,
-    E::Column: IntoEnumIterator,
-{
-    let mut expected = BTreeMap::new();
-    let mut unique = Vec::new();
-    for col in E::Column::iter() {
-        let name = col.as_str().to_owned();
-        let def = col.def();
-        let col_type = def.get_column_type();
-        let exp = expected_type(col_type)
-            .unwrap_or_else(|| panic!("{table}.{name}: unmapped entity type {col_type:?}"));
-        if def.is_unique() {
-            unique.push(name.clone());
-        }
-        expected.insert(name, (exp, def.is_null()));
-    }
+/// The migrated database's catalog, read once: every public column, every
+/// full (non-partial) single-column unique index, and the OSS base tables.
+struct Catalog {
+    columns: BTreeMap<String, BTreeMap<String, DbColumn>>,
+    unique: BTreeMap<String, BTreeSet<String>>,
+    tables: BTreeSet<String>,
+}
 
+async fn load_catalog(pool: &sqlx::PgPool) -> Result<Catalog, sqlx::Error> {
     let rows: Vec<InfoSchemaRow> = sqlx::query_as(
-        "SELECT column_name, udt_name, character_maximum_length, \
-             numeric_precision, numeric_scale, is_nullable \
-             FROM information_schema.columns \
-             WHERE table_schema = 'public' AND table_name = $1 \
-             ORDER BY ordinal_position",
+        "SELECT table_name::text, column_name::text, udt_name::text, \
+             character_maximum_length, numeric_precision, numeric_scale, is_nullable::text \
+             FROM information_schema.columns WHERE table_schema = 'public'",
     )
-    .bind(table)
     .fetch_all(pool)
-    .await
-    .expect("information_schema query");
-    if rows.is_empty() {
-        return vec![format!(
-            "table {table} missing from information_schema on the migrated database"
-        )];
-    }
-    let mut db = BTreeMap::new();
-    for (name, udt, char_len, num_prec, num_scale, is_nullable) in rows {
-        db.insert(
+    .await?;
+    let mut columns: BTreeMap<String, BTreeMap<String, DbColumn>> = BTreeMap::new();
+    for (table, name, udt, char_len, num_prec, num_scale, is_nullable) in rows {
+        columns.entry(table).or_default().insert(
             name,
             DbColumn {
                 udt,
@@ -200,8 +181,97 @@ where
             },
         );
     }
+    let indexed: Vec<(String, String)> = sqlx::query_as(
+        "SELECT t.relname::text, a.attname::text FROM pg_index i \
+             JOIN pg_class t ON t.oid = i.indrelid \
+             JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = i.indkey[0] \
+             WHERE t.relnamespace = 'public'::regnamespace \
+             AND i.indisunique AND i.indnatts = 1 AND i.indpred IS NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut unique: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (table, column) in indexed {
+        unique.entry(table).or_default().insert(column);
+    }
+    let tables: Vec<(String,)> = sqlx::query_as(
+        "SELECT table_name::text FROM information_schema.tables \
+             WHERE table_schema = 'public' AND table_type = 'BASE TABLE' \
+             AND table_name !~ '^(django_|auth_|cloud_)'",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(Catalog {
+        columns,
+        unique,
+        tables: tables.into_iter().map(|(table,)| table).collect(),
+    })
+}
 
+fn table_name(table: &TableRef) -> Option<String> {
+    match table {
+        TableRef::Table(name) | TableRef::TableAlias(name, _) => Some(name.to_string()),
+        TableRef::SchemaTable(_, name) | TableRef::SchemaTableAlias(_, name, _) => {
+            Some(name.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Entity `E` against `table` in the catalog. Returns one line per drift.
+fn entity_drift<E>(catalog: &Catalog, table: &str) -> Vec<String>
+where
+    E: EntityTrait,
+    E::Column: IntoEnumIterator,
+    E::PrimaryKey: IntoEnumIterator,
+    E::Relation: IntoEnumIterator,
+{
     let mut diffs = Vec::new();
+    let Some(db) = catalog.columns.get(table) else {
+        return vec![format!(
+            "table {table} missing from information_schema on the migrated database"
+        )];
+    };
+    let primary: BTreeSet<String> = E::PrimaryKey::iter()
+        .map(|key| {
+            sea_orm::PrimaryKeyToColumn::into_column(key)
+                .as_str()
+                .to_owned()
+        })
+        .collect();
+    let fully_unique = catalog.unique.get(table).cloned().unwrap_or_default();
+    let mut expected = BTreeMap::new();
+    let mut unmapped = BTreeSet::new();
+    for col in E::Column::iter() {
+        let name = col.as_str().to_owned();
+        let def = col.def();
+        let col_type = def.get_column_type();
+        match expected_type(col_type) {
+            Some(exp) => {
+                expected.insert(name.clone(), (exp, def.is_null()));
+            }
+            None => {
+                unmapped.insert(name.clone());
+                diffs.push(format!("{table}.{name}: unmapped entity type {col_type:?}"));
+            }
+        }
+        if primary.contains(&name) {
+            continue;
+        }
+        // Both ways: `unique` must mean a full single-column unique index (the
+        // generator also reads a partial one as a column constraint, making a
+        // one-to-many edge look one-to-one), and such an index must be flagged.
+        match (def.is_unique(), fully_unique.contains(&name)) {
+            (true, false) => diffs.push(format!(
+                "column {table}.{name} is `unique` in the entity but has no full \
+                 single-column unique index (a partial index does not count)"
+            )),
+            (false, true) => diffs.push(format!(
+                "column {table}.{name} has a full unique index but is not `unique` in the entity"
+            )),
+            _ => {}
+        }
+    }
     for (name, (exp, nullable)) in &expected {
         match db.get(name) {
             None => diffs.push(format!(
@@ -249,40 +319,42 @@ where
         }
     }
     for name in db.keys() {
-        if !expected.contains_key(name) {
+        if !expected.contains_key(name) && !unmapped.contains(name) {
             diffs.push(format!(
                 "column {table}.{name} in database but missing from entity"
             ));
         }
     }
-    // A `unique` flag must stand for a full (non-partial) single-column
-    // unique index: the generator also reads a partial one (`WHERE ...`) as a
-    // column constraint, which would make a one-to-many edge look one-to-one.
-    let fully_unique: Vec<(String,)> = sqlx::query_as(
-        "SELECT a.attname::text FROM pg_index i \
-             JOIN pg_class t ON t.oid = i.indrelid \
-             JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = i.indkey[0] \
-             WHERE t.relname = $1 AND t.relnamespace = 'public'::regnamespace \
-             AND i.indisunique AND i.indnatts = 1 AND i.indpred IS NULL",
-    )
-    .bind(table)
-    .fetch_all(pool)
-    .await
-    .expect("pg_index query");
-    for name in &unique {
-        if !fully_unique.iter().any(|(column,)| column == name) {
+    // A `has_one` edge says the child's join column is unique; check it is.
+    for relation in E::Relation::iter() {
+        let def = relation.def();
+        if def.rel_type != RelationType::HasOne {
+            continue;
+        }
+        let (Some(child), sea_orm::Identity::Unary(column)) =
+            (table_name(&def.to_tbl), &def.to_col)
+        else {
+            continue;
+        };
+        let column = column.to_string();
+        let child_unique = catalog
+            .unique
+            .get(&child)
+            .is_some_and(|set| set.contains(&column));
+        if !child_unique {
             diffs.push(format!(
-                "column {table}.{name} is `unique` in the entity but has no full \
-                 single-column unique index (a partial index does not count)"
+                "{table} has_one {child}, but {child}.{column} has no full unique index: \
+                 make it has_many"
             ));
         }
     }
     diffs
 }
 
-/// One live test over every entity, sharing one connection: each entity's
-/// declared table name is its module name, and its columns match
-/// `information_schema`. All drift is reported together.
+/// One live test over every entity, sharing one connection and one catalog
+/// read: each entity's declared table name is its module name, it matches
+/// the catalog, and every OSS base table has an entity. All drift is
+/// reported together.
 macro_rules! parity_tests {
     ($($entity:ident),+ $(,)?) => {
         #[tokio::test]
@@ -299,15 +371,21 @@ macro_rules! parity_tests {
                 .connect(&url)
                 .await
                 .expect("connect to scratch DATABASE_URL");
+            let catalog = load_catalog(&pool).await.expect("read the database catalog");
             let mut drift = Vec::new();
+            let mut covered = BTreeSet::new();
             $(
                 let table = stringify!($entity);
+                covered.insert(table.to_owned());
                 let declared = super::$entity::Entity.table_name();
                 if declared != table {
                     drift.push(format!("entity {table} declares table_name {declared}"));
                 }
-                drift.extend(entity_drift::<super::$entity::Entity>(&pool, table).await);
+                drift.extend(entity_drift::<super::$entity::Entity>(&catalog, table));
             )+
+            for table in catalog.tables.difference(&covered) {
+                drift.push(format!("table {table} has no entity (or is missing from parity_tests!)"));
+            }
             assert!(drift.is_empty(), "schema drift:\n{}", drift.join("\n"));
         }
     };
@@ -489,7 +567,8 @@ fn year_is_unmapped() {
 }
 
 /// The two `inet` columns read as text and write back as inet, so a `String`
-/// decodes and binds (sqlx has no text <-> inet coercion).
+/// decodes and binds (sqlx has no text <-> inet coercion). Postgres names an
+/// unaliased cast after its inner column, so the row still decodes by name.
 #[test]
 fn inet_columns_cast_through_text() {
     use sea_orm::{ActiveValue::Set, DbBackend, QueryTrait};
@@ -497,15 +576,14 @@ fn inet_columns_cast_through_text() {
         .build(DbBackend::Postgres)
         .to_string();
     assert!(
-        read.contains(r#"CAST("device_sessions"."ip_address" AS "text")"#)
-            || read.contains(r#"CAST("device_sessions"."ip_address" AS text)"#),
+        read.contains(r#"CAST("device_sessions"."ip_address" AS text)"#),
         "{read}"
     );
     let read = super::api_activity_logs::Entity::find()
         .build(DbBackend::Postgres)
         .to_string();
     assert!(
-        read.contains(r#""ip_address" AS"#) && read.contains("CAST("),
+        read.contains(r#"CAST("api_activity_logs"."ip_address" AS text)"#),
         "{read}"
     );
     let insert = super::device_sessions::Entity::insert(super::device_sessions::ActiveModel {
@@ -515,4 +593,11 @@ fn inet_columns_cast_through_text() {
     .build(DbBackend::Postgres)
     .to_string();
     assert!(insert.contains("CAST('10.0.0.1' AS inet)"), "{insert}");
+    let insert = super::api_activity_logs::Entity::insert(super::api_activity_logs::ActiveModel {
+        ip_address: Set(Some("10.0.0.2".to_owned())),
+        ..Default::default()
+    })
+    .build(DbBackend::Postgres)
+    .to_string();
+    assert!(insert.contains("CAST('10.0.0.2' AS inet)"), "{insert}");
 }
