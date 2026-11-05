@@ -201,6 +201,8 @@ describe("buildAioLines", () => {
       "    }",
       "    handle @web_new_static {",
       "        root * /app/web_new",
+      "        @web_new_webmanifest path *.webmanifest",
+      "        header @web_new_webmanifest Content-Type application/manifest+json",
       "        file_server",
       "    }",
     ]);
@@ -209,7 +211,17 @@ describe("buildAioLines", () => {
   it("serves web_new's public files the same way (PIDASH-2)", () => {
     const lines = buildAioLines(["/{ws}"], [], ["/icon.svg", "/logos/*"]);
     assert.ok(lines.includes("        path /assets/* /icon.svg /logos/*"), lines.join("\n"));
-    assert.deepEqual(lines.slice(-11), buildAioAssetLines(["/icon.svg", "/logos/*"]));
+    assert.deepEqual(lines.slice(-13), buildAioAssetLines(["/icon.svg", "/logos/*"]));
+  });
+
+  it("labels web manifests application/manifest+json (PIDASH-2)", () => {
+    // Caddy's file_server has no .webmanifest type and the AIO image ships
+    // no mime table, so without this the manifest goes out untyped.
+    const lines = buildAioAssetLines(["/manifest.webmanifest"]);
+    const matcher = lines.indexOf("        @web_new_webmanifest path *.webmanifest");
+    const header = lines.indexOf("        header @web_new_webmanifest Content-Type application/manifest+json");
+    assert.ok(matcher !== -1 && header > matcher, lines.join("\n"));
+    assert.ok(header < lines.indexOf("        file_server"), "header must be set before file_server");
   });
 
   it("adds no asset route when nothing or everything has migrated", () => {

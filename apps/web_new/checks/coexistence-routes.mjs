@@ -281,6 +281,10 @@ export function buildAioAssetLines(publicPaths = []) {
     "    }",
     "    handle @web_new_static {",
     "        root * /app/web_new",
+    // file_server knows no .webmanifest type and the AIO image ships no
+    // mime table, so the manifest would go out with no Content-Type.
+    "        @web_new_webmanifest path *.webmanifest",
+    "        header @web_new_webmanifest Content-Type application/manifest+json",
     "        file_server",
     "    }",
   ];

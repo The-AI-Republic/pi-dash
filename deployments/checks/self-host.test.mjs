@@ -182,6 +182,16 @@ describe("web_new nginx", () => {
     assert.match(block[1], /try_files\s+\$uri\s+=404;/);
   });
 
+  it("serves .webmanifest as application/manifest+json (PIDASH-2)", () => {
+    // nginx's stock mime.types has no webmanifest entry, so web_new's
+    // manifests would go out as application/octet-stream.
+    const conf = readFileSync(join(root, "apps", "web_new", "nginx", "nginx.conf"), "utf8");
+    const http = /^http\s*\{([\s\S]*?)^\s*server\s*\{/m.exec(conf);
+    assert.ok(http !== null, "web_new nginx has no http block before its server block");
+    assert.match(http[1], /include\s+mime\.types;/);
+    assert.match(http[1], /types\s*\{[^}]*application\/manifest\+json\s+webmanifest;[^}]*\}/);
+  });
+
   it("answers 404 for a missing file under every public directory (PIDASH-2)", () => {
     // The proxy sends web_new's public directories (illustrations/, logos/,
     // ...) here first, with the same 404 retry of the old app as /assets/.

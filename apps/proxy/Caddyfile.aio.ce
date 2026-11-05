@@ -469,6 +469,8 @@
     }
     handle @web_new_static {
         root * /app/web_new
+        @web_new_webmanifest path *.webmanifest
+        header @web_new_webmanifest Content-Type application/manifest+json
         file_server
     }
     # END MIGRATED ROUTES
