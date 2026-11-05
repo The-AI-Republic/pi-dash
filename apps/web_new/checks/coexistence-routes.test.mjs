@@ -14,7 +14,9 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  buildAioAssetLines,
   buildAioLines,
+  buildCeAssetLines,
   buildCeLines,
   entryRegex,
   findShadowingRoutes,
@@ -108,6 +110,7 @@ describe("buildCeLines", () => {
     assert.deepEqual(buildCeLines(["/sign-in"]), [
       "\tredir /sign-in /sign-in/ permanent",
       "\treverse_proxy /sign-in/* web_new:3000",
+      ...buildCeAssetLines(),
     ]);
   });
 
@@ -124,7 +127,29 @@ describe("buildCeLines", () => {
       "\t    not path /api /api/* /settings /settings/* /sign-in /sign-in/*",
       "\t}",
       "\treverse_proxy @web_new_1 web_new:3000",
+      ...buildCeAssetLines(),
     ]);
+  });
+
+  it("sends /assets/* to web_new first and retries the old app on a 404 (PIDASH-2)", () => {
+    // Both apps build their bundles into /assets/, and a web_new page shell
+    // is useless without its own. The old app's bundles fall through.
+    assert.deepEqual(buildCeAssetLines(), [
+      "\t# Both apps serve their bundles from /assets/: web_new first, then the old app.",
+      "\treverse_proxy /assets/* web_new:3000 {",
+      "\t\t@web_new_asset_missing status 404",
+      "\t\thandle_response @web_new_asset_missing {",
+      "\t\t\treverse_proxy web:3000",
+      "\t\t}",
+      "\t}",
+    ]);
+    assert.deepEqual(buildCeLines(["/{ws}"]).slice(-buildCeAssetLines().length), buildCeAssetLines());
+  });
+
+  it("adds no asset route when nothing or everything has migrated", () => {
+    for (const entries of [[], ["/"]]) {
+      assert.ok(!buildCeLines(entries).some((line) => line.includes("/assets/")), JSON.stringify(entries));
+    }
   });
 });
 
@@ -136,6 +161,7 @@ describe("buildAioLines", () => {
       "        try_files {path} {path}/ /index.html",
       "        file_server",
       "    }",
+      ...buildAioAssetLines(),
     ]);
   });
 
@@ -150,7 +176,32 @@ describe("buildAioLines", () => {
       "        try_files {path} {path}/ /index.html",
       "        file_server",
       "    }",
+      ...buildAioAssetLines(),
     ]);
+  });
+
+  it("serves /assets/* from web_new only when the file exists there (PIDASH-2)", () => {
+    // A bundle web_new does not have falls through to the old app's
+    // static root below, instead of a 404 or web_new's index.html.
+    assert.deepEqual(buildAioAssetLines(), [
+      "    # Both apps serve their bundles from /assets/: web_new first, then the old app.",
+      "    @web_new_assets {",
+      "        path /assets/*",
+      "        file {",
+      "            root /app/web_new",
+      "        }",
+      "    }",
+      "    handle @web_new_assets {",
+      "        root * /app/web_new",
+      "        file_server",
+      "    }",
+    ]);
+  });
+
+  it("adds no asset route when nothing or everything has migrated", () => {
+    for (const entries of [[], ["/"]]) {
+      assert.ok(!buildAioLines(entries).some((line) => line.includes("/assets/")), JSON.stringify(entries));
+    }
   });
 
   it("serves everything from web_new for the catch-all", () => {
@@ -444,5 +495,24 @@ describe("main", () => {
     lines.splice(at, 0, "\treverse_proxy /* old:3000");
     writeFileSync(ce, lines.join("\n"));
     assert.throws(() => runMain([...argv, "--check"]), /shadows migrated routes \/sign-in, \/god-mode/);
+  });
+});
+
+describe("the repo's generated Caddyfiles", () => {
+  const proxyDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "proxy");
+
+  it("route web_new's /assets/* bundles before the old app's catch-all (PIDASH-2)", () => {
+    for (const [name, assetLines, anchor] of [
+      ["Caddyfile.ce", buildCeAssetLines(), CE_ANCHOR],
+      ["Caddyfile.aio.ce", buildAioAssetLines(), AIO_ANCHOR],
+    ]) {
+      const text = readFileSync(join(proxyDir, name), "utf8");
+      const block = assetLines.join("\n");
+      assert.ok(text.includes(block), `${name} is missing the generated /assets/* route`);
+      assert.ok(
+        text.indexOf(block) < text.indexOf(anchor),
+        `${name}: /assets/* must sit above the old app's catch-all`
+      );
+    }
   });
 });

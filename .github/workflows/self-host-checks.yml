@@ -1,0 +1,37 @@
+# Copyright (c) Pi Dash contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# See the LICENSE file for details.
+# Self-host smoke checks (PIDASH-2): compose images that can no longer be
+# pulled, variables.env values that break interpolation, and the web_new
+# nginx 404 the community proxy's /assets/* fallback depends on. Plain
+# node:test over the shipped files, so no install step.
+name: self-host-checks
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "deployments/**"
+      - "docker-compose*.yml"
+      - "apps/web_new/nginx/**"
+      - "apps/web_new/e2e/parity/stack/docker-compose.yml"
+      - ".github/workflows/self-host-checks.yml"
+  push:
+    branches: [main]
+    paths:
+      - "deployments/**"
+      - "docker-compose*.yml"
+      - "apps/web_new/nginx/**"
+      - "apps/web_new/e2e/parity/stack/docker-compose.yml"
+      - ".github/workflows/self-host-checks.yml"
+
+jobs:
+  self-host-checks:
+    name: self-host checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test deployments/checks/*.test.mjs

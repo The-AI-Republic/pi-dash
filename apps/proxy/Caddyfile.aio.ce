@@ -460,6 +460,17 @@
         try_files {path} {path}/ /index.html
         file_server
     }
+    # Both apps serve their bundles from /assets/: web_new first, then the old app.
+    @web_new_assets {
+        path /assets/*
+        file {
+            root /app/web_new
+        }
+    }
+    handle @web_new_assets {
+        root * /app/web_new
+        file_server
+    }
     # END MIGRATED ROUTES
     # Legacy /auth/* fallback. It stays below the generated block on purpose:
     # a migrated /auth/* subpath (today /auth/device) must win, and Caddy

@@ -141,11 +141,9 @@ jobs:
           --health-interval 10s
           --health-timeout 10s
           --health-retries 10
-    # No minio service container: Docker Hub no longer serves minio/minio,
-    # and service containers cannot pass the required `server /data`
-    # command. The "Start minio" step below runs quay.io/minio/minio
-    # (MinIO's canonical registry) with the same invocation as
-    # docker-compose.yml's pi-dash-minio service.
+    # No minio service container: Docker Hub no longer serves minio/minio
+    # and quay.io rejects anonymous pulls. The "Start S3 (LocalStack)" step
+    # below provides the S3 endpoint instead.
     env:
       DJANGO_SETTINGS_MODULE: pi_dash.settings.local
       POSTGRES_USER: pi_dash

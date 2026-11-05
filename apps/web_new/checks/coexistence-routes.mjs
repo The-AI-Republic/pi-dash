@@ -41,6 +41,8 @@ const CADDY_AIO = join(root, "apps", "proxy", "Caddyfile.aio.ce");
 // Upstream name the web_new service will be known by (Docker convention,
 // mirroring `web:3000`).
 const WEB_NEW_UPSTREAM = "web_new:3000";
+// The old app's upstream, the CE catch-all below the generated block.
+const WEB_UPSTREAM = "web:3000";
 
 const MARK_BEGIN =
   "BEGIN MIGRATED ROUTES (generated from apps/web_new/migrated-routes.json — do not edit; run `pnpm --filter web_new coexistence:generate`)";
@@ -50,6 +52,7 @@ const CE_ANCHOR = "\treverse_proxy /* web:3000";
 const AIO_ANCHOR = "    handle_path /* {";
 
 const EMPTY_NOTE = "(none — the list is empty, so every path routes to the old app)";
+const ASSET_NOTE = "Both apps serve their bundles from /assets/: web_new first, then the old app.";
 
 const VARIABLE_SEGMENT = /^\{([A-Za-z][A-Za-z0-9]*)\}$/;
 const RESERVED_ENTRY = /^[a-z0-9][a-z0-9-]*$/;
@@ -211,6 +214,53 @@ function matcherBlock(route, indent) {
 }
 
 /**
+ * True when the generated block must route /assets/*: some, but not all,
+ * paths are migrated. Both apps build their hashed bundles into /assets/,
+ * so without this route a web_new page shell would load the old app's
+ * catch-all for its bundles and render blank (PIDASH-2). With nothing
+ * migrated the old app owns /assets/*; with the catch-all web_new does.
+ */
+function needsAssetRoute(entries) {
+  return entries.length > 0 && !entries.includes("/");
+}
+
+/**
+ * CE /assets/* route: web_new first; its nginx answers a real 404 for a
+ * bundle it does not have, and the proxy then retries the old app.
+ */
+export function buildCeAssetLines() {
+  return [
+    `\t# ${ASSET_NOTE}`,
+    `\treverse_proxy /assets/* ${WEB_NEW_UPSTREAM} {`,
+    "\t\t@web_new_asset_missing status 404",
+    "\t\thandle_response @web_new_asset_missing {",
+    `\t\t\treverse_proxy ${WEB_UPSTREAM}`,
+    "\t\t}",
+    "\t}",
+  ];
+}
+
+/**
+ * AIO /assets/* route: serve the file from web_new's static root when it
+ * exists there; otherwise fall through to the old app's static root.
+ */
+export function buildAioAssetLines() {
+  return [
+    `    # ${ASSET_NOTE}`,
+    "    @web_new_assets {",
+    "        path /assets/*",
+    "        file {",
+    "            root /app/web_new",
+    "        }",
+    "    }",
+    "    handle @web_new_assets {",
+    "        root * /app/web_new",
+    "        file_server",
+    "    }",
+  ];
+}
+
+/**
  * Route lines for the CE Caddyfile (tab-indented, matcher style). The block
  * sits above the old app's catch-all; earlier handlers win.
  */
@@ -230,6 +280,7 @@ export function buildCeLines(entries, reservedTopLevel = []) {
     lines.push(...matcherBlock(route, "\t"));
     lines.push(`\treverse_proxy ${route.name} ${WEB_NEW_UPSTREAM}`);
   }
+  if (needsAssetRoute(entries)) lines.push(...buildCeAssetLines());
   return lines;
 }
 
@@ -260,6 +311,7 @@ export function buildAioLines(entries, reservedTopLevel = []) {
     // and stripping the workspace segment would break the SPA's own routes.
     lines.push(...serve("    ", route.name));
   }
+  if (needsAssetRoute(entries)) lines.push(...buildAioAssetLines());
   return lines;
 }
 
