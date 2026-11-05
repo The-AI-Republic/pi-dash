@@ -24,7 +24,7 @@
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use serde::Deserialize;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::time::Duration;
 
 use crate::cli::runner_ops;
@@ -198,6 +198,11 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         .filter(|s| !s.is_empty());
     let workspace_slug =
         choose_workspace(paths, &cloud_url, &token.access_token, explicit_workspace).await?;
+    // A login that mints the machine id creates a new machine on the
+    // server: the case where it may replace an old one (design §4.10).
+    let minted_machine_id = file::load_config(paths)
+        .map(|c| c.daemon.dev_machine_id.is_none())
+        .unwrap_or(true);
     let dev_machine_id =
         runner_ops::ensure_dev_machine_id(paths).context("ensuring local dev-machine identity")?;
     let host_label = crate::util::hostname::default_hostname();
@@ -239,6 +244,20 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     // restart. Best-effort: no daemon, or an older one, just means the
     // token is used from the next start.
     crate::service::reload::notify_credentials_changed(paths).await;
+
+    // "Is this <label>, last seen <date>? Replace it" (design §4.10). Only
+    // for a new machine and only with someone at the terminal: the desktop
+    // app's pre-approved sign-in (`--device-code-stdin`) asks in its own
+    // window.
+    if minted_machine_id && !args.device_code_stdin && std::io::stdin().is_terminal() {
+        super::replace::offer_replace_after_login(
+            &client,
+            &cloud_url,
+            &machine_token.machine_token,
+            &dev_machine_id,
+        )
+        .await;
+    }
 
     // Best-effort: write the machine-level ~/.pidash/context.md now that the
     // dev-machine token and workspace binding are persisted. A failure here is
