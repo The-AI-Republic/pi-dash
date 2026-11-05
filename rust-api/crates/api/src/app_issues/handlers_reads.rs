@@ -229,16 +229,14 @@ async fn rewrite_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
+    super::access::project_id_by_identifier(
+        &pidash_db::pool::sea_orm_connection(pool),
+        slug,
+        &upper,
     )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
     .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    .map_err(|_| Denial::ServerError)?
+    .ok_or(Denial::ProjectNotFound)
 }
 
 /// `allow_permission(allowed)` at `PROJECT` level (`app/permissions/base.py`):
@@ -252,45 +250,16 @@ async fn allow_roles(
     user_id: &uuid::Uuid,
     allowed: &[i32],
 ) -> Result<(), Denial> {
-    let role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
+    let allows = super::access::allows(
+        &pidash_db::pool::sea_orm_connection(pool),
+        slug,
+        *project_id,
+        *user_id,
+        allowed,
     )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    if role.is_some_and(|row| allowed.contains(&i32::from(row.0))) {
-        return Ok(());
-    }
-    let member: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let admin: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2 AND wm.role = 20
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if member.is_some() && admin.is_some() {
+    if allows {
         Ok(())
     } else {
         Err(Denial::Forbidden)
@@ -308,21 +277,17 @@ async fn entity_access(
     user_id: &uuid::Uuid,
     write: bool,
 ) -> Result<(), Response> {
-    let role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
+    let role = super::access::project_role(
+        &pidash_db::pool::sea_orm_connection(pool),
+        slug,
+        *project_id,
+        *user_id,
     )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError.into_response())?;
     let allowed = matches!(
         (write, role),
-        (false, Some(_)) | (true, Some((20,))) | (true, Some((15,)))
+        (false, Some(_)) | (true, Some(20)) | (true, Some(15))
     );
     if allowed {
         Ok(())
@@ -339,12 +304,10 @@ async fn entity_access(
 /// the datetime-free ones — because a garbage zone 500s in `initial()`
 /// before any view code runs.
 async fn actor_timezone(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<Tz, Denial> {
-    let row: Option<(String,)> = sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
+    let name = super::access::user_timezone(&pidash_db::pool::sea_orm_connection(pool), *user_id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    let (name,) = row.ok_or(Denial::ServerError)?;
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
     name.parse().map_err(|_| Denial::ServerError)
 }
 
@@ -794,13 +757,11 @@ async fn fetch_or_create_property(
     if let Some(row) = fetch_property(pool, gate).await? {
         return Ok(row);
     }
-    let workspace: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL")
-            .bind(gate.project_id)
-            .fetch_optional(pool)
+    let workspace =
+        super::access::project_tenant(&pidash_db::pool::sea_orm_connection(pool), gate.project_id)
             .await
             .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id,)) = workspace else {
+    let Some((workspace_id, _)) = workspace else {
         return Err(Denial::NotFound);
     };
     let now = Utc::now();
@@ -2011,12 +1972,10 @@ async fn probe_is_epic(pool: &sqlx::PgPool, type_id: Option<&str>) -> Result<boo
         return Ok(false);
     };
     let id = raw.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?;
-    let row: Option<(bool,)> = sqlx::query_as("SELECT is_epic FROM issue_types WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
+    super::access::issue_type_is_epic(&pidash_db::pool::sea_orm_connection(pool), id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    row.map(|flag| flag.0).ok_or(Denial::ServerError)
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)
 }
 
 /// Shared sync-probe evaluation: `external_source` short-circuits false;
