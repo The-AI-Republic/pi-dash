@@ -78,6 +78,7 @@ use pidash_services::assistant::markdown::to_safe_html;
 use pidash_services::assistant::seams::agent_model_profile_for_user;
 use pidash_services::assistant::tools_issues::{escape_icontains, PROJECT_WRITE_GATE_SQL};
 use pidash_services::dispatch::policy::UserFlags;
+use pidash_services::dispatch::tool_issues::{self, ToolIssueRow};
 use pidash_services::dispatch::tools as plan;
 use pidash_services::dispatch::{
     admission::AdmissionCache, consume_admission_token, DeferredConsume, LlmProfile,
@@ -729,65 +730,31 @@ async fn emit_completed(
 // Shared reads
 // ---------------------------------------------------------------------------
 
-/// The bound-issue `select_related("project", "state")` mirror: a plain
-/// PK lookup joining the project (inner) and state (outer), with NO
-/// soft-delete predicate — FK follows do not apply the related
-/// manager's filter, so a soft-deleted bound issue still reads (unlike
-/// [`plan::GET_PROJECT_ISSUE_SQL`], which serves the by-id tool's
-/// manager-filtered `.get()`). `$1` is the bound issue id.
-pub const BOUND_ISSUE_SQL: &str = "SELECT issues.id, issues.workspace_id, issues.project_id, \
-     issues.state_id, issues.sequence_id, issues.name, issues.priority, \
-     issues.description_stripped, issues.workpad, states.name, states.group, \
-     projects.identifier FROM issues \
-     INNER JOIN projects ON projects.id = issues.project_id \
-     LEFT OUTER JOIN states ON states.id = issues.state_id \
-     WHERE issues.id = $1 LIMIT 1";
+// The bound-issue `select_related("project", "state")` read lives in
+// `pidash_services::dispatch::tool_issues` (SeaORM): a plain PK lookup joining
+// the project (inner) and state (outer), with NO soft-delete predicate (FK
+// follows do not apply the related manager's filter), every joined column
+// under its own alias.
 
 /// One bound-issue row: the `_issue_data` inputs.
-pub struct BoundIssue {
-    /// `str(issue.id)`.
-    pub id: Uuid,
-    /// `issue.workspace_id` (the relations default source reads it
-    /// off the issue, not the run).
-    pub workspace_id: Uuid,
-    /// `issue.project_id`.
-    pub project_id: Uuid,
-    /// `issue.sequence_id`.
-    pub sequence_id: i32,
-    /// `issue.name`.
-    pub name: String,
-    /// `issue.priority`.
-    pub priority: String,
-    /// `issue.description_stripped` (may be NULL).
-    pub description_stripped: Option<String>,
-    /// `issue.workpad` (may be NULL).
-    pub workpad: Option<String>,
-    /// `issue.state.name` (None when stateless).
-    pub state_name: Option<String>,
-    /// `issue.state.group` (None when stateless).
-    pub state_group: Option<String>,
-    /// `issue.project.identifier`.
-    pub project_identifier: String,
-}
+pub type BoundIssue = ToolIssueRow;
 
-impl BoundIssue {
-    /// `_issue_data(issue, detail=True)` (`tools.py:160-171`).
-    fn detail_value(&self) -> Value {
-        let detail = plan::issue_data(
-            &self.id.to_string(),
-            &self.project_identifier,
-            i64::from(self.sequence_id),
-            &self.name,
-            self.state_name.as_deref(),
-            self.state_group.as_deref(),
-            &self.priority,
-            Some((
-                self.description_stripped.as_deref().unwrap_or(""),
-                self.workpad.as_deref().unwrap_or(""),
-            )),
-        );
-        serde_json::to_value(detail).expect("issue detail serializes")
-    }
+/// `_issue_data(issue, detail=True)` (`tools.py:160-171`).
+fn issue_detail(issue: &ToolIssueRow) -> Value {
+    let detail = plan::issue_data(
+        &issue.id.to_string(),
+        &issue.project_identifier,
+        i64::from(issue.sequence_id),
+        &issue.name,
+        issue.state_name.as_deref(),
+        issue.state_group.as_deref(),
+        &issue.priority,
+        Some((
+            issue.description_stripped.as_deref().unwrap_or(""),
+            issue.workpad.as_str(),
+        )),
+    );
+    serde_json::to_value(detail).expect("issue detail serializes")
 }
 
 /// Read the bound issue, if the run has one. A missing row reads as
@@ -795,35 +762,16 @@ impl BoundIssue {
 /// bound issue — callers that dereference it raise the
 /// `AttributeError` Python's attribute access raises.
 async fn bound_issue(
-    pool: &PgPool,
+    db: &pidash_db::DatabaseConnection,
     work_item_id: Option<Uuid>,
 ) -> Result<Option<BoundIssue>, ToolExecError> {
     let Some(issue_id) = work_item_id else {
         return Ok(None);
     };
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(BOUND_ISSUE_SQL)
-        .bind(issue_id)
-        .fetch_optional(pool)
-        .await?;
-    row.map(|row| {
-        // `name` collides (issue 5, state 9): the state pair reads
-        // positionally, the rest by (unique) name.
-        Ok(BoundIssue {
-            id: row.try_get("id")?,
-            workspace_id: row.try_get("workspace_id")?,
-            project_id: row.try_get("project_id")?,
-            sequence_id: row.try_get("sequence_id")?,
-            name: row.try_get("name")?,
-            priority: row.try_get("priority")?,
-            description_stripped: row.try_get("description_stripped")?,
-            workpad: row.try_get("workpad")?,
-            state_name: row.try_get(9)?,
-            state_group: row.try_get(10)?,
-            project_identifier: row.try_get("identifier")?,
-        })
-    })
-    .transpose()
-    .map_err(ToolExecError::Db)
+    let row = tool_issues::bound_issue(db, issue_id)
+        .await
+        .map_err(orm_error)?;
+    Ok(row)
 }
 
 // ---------------------------------------------------------------------------
@@ -832,11 +780,11 @@ async fn bound_issue(
 
 /// `pidash_get_current_issue` (`tools.py:200-202`).
 async fn op_get_current_issue(ctx: &ToolCtx, scope: &ToolScope) -> Result<Value, ToolExecError> {
-    let issue = bound_issue(&ctx.pool, scope.work_item_id).await?;
+    let issue = bound_issue(&ctx.orm, scope.work_item_id).await?;
     let Some(issue) = issue else {
         return Err(ToolExecError::AttributeError { attribute: "id" });
     };
-    Ok(issue.detail_value())
+    Ok(issue_detail(&issue))
 }
 
 /// `pidash_list_current_issue_comments` (`tools.py:204-213`).
@@ -899,29 +847,24 @@ async fn op_search_project_issues(
     query: &str,
     limit: i64,
 ) -> Result<Value, ToolExecError> {
-    let rows = sqlx::query(plan::SEARCH_ISSUES_SQL)
-        .bind(scope.project_id)
-        .bind(escape_icontains(query))
-        .bind(limit)
-        .fetch_all(&ctx.pool)
-        .await?;
+    let rows = tool_issues::search_project_issues(
+        &ctx.orm,
+        scope.project_id,
+        &escape_icontains(query),
+        u64::try_from(limit).unwrap_or(0),
+    )
+    .await
+    .map_err(orm_error)?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        let id: Uuid = row.try_get("id").map_err(ToolExecError::Db)?;
-        let sequence_id: i32 = row.try_get("sequence_id").map_err(ToolExecError::Db)?;
-        let name: String = row.try_get("name").map_err(ToolExecError::Db)?;
-        let priority: String = row.try_get("priority").map_err(ToolExecError::Db)?;
-        let state_name: Option<String> = row.try_get(6).map_err(ToolExecError::Db)?;
-        let state_group: Option<String> = row.try_get(7).map_err(ToolExecError::Db)?;
-        let project_identifier: String = row.try_get("identifier").map_err(ToolExecError::Db)?;
         let detail = plan::issue_data(
-            &id.to_string(),
-            &project_identifier,
-            i64::from(sequence_id),
-            &name,
-            state_name.as_deref(),
-            state_group.as_deref(),
-            &priority,
+            &row.id.to_string(),
+            &row.project_identifier,
+            i64::from(row.sequence_id),
+            &row.name,
+            row.state_name.as_deref(),
+            row.state_group.as_deref(),
+            &row.priority,
             None,
         );
         out.push(plan::issue_brief(&detail));
@@ -941,38 +884,13 @@ async fn op_get_project_issue(
             value: issue_id.to_owned(),
         });
     };
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(plan::GET_PROJECT_ISSUE_SQL)
-        .bind(id)
-        .bind(scope.project_id)
-        .fetch_optional(&ctx.pool)
-        .await?;
+    let row = tool_issues::project_issue(&ctx.orm, id, scope.project_id)
+        .await
+        .map_err(orm_error)?;
     let Some(row) = row else {
         return Err(ToolExecError::Missing { model: "Issue" });
     };
-    let found: Uuid = row.try_get("id")?;
-    let sequence_id: i32 = row.try_get("sequence_id")?;
-    let name: String = row.try_get("name")?;
-    let priority: String = row.try_get("priority")?;
-    let description_stripped: Option<String> = row.try_get("description_stripped")?;
-    let workpad: Option<String> = row.try_get("workpad")?;
-    let state_name: Option<String> = row.try_get(8)?;
-    let state_group: Option<String> = row.try_get(9)?;
-    let project_identifier: String = row.try_get("identifier")?;
-    let detail = plan::issue_data(
-        &found.to_string(),
-        &project_identifier,
-        i64::from(sequence_id),
-        &name,
-        state_name.as_deref(),
-        state_group.as_deref(),
-        &priority,
-        Some((
-            description_stripped.as_deref().unwrap_or(""),
-            workpad.as_deref().unwrap_or(""),
-        )),
-    );
-    serde_json::to_value(detail)
-        .map_err(|error| ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string())))
+    Ok(issue_detail(&row))
 }
 
 /// `pidash_list_linked_code_reviews` (`tools.py:253-272`): a run with
@@ -1093,27 +1011,12 @@ async fn bound_issue_tx(
     let Some(issue_id) = work_item_id else {
         return Ok(None);
     };
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(BOUND_ISSUE_SQL)
+    // raw-sql: runs on the tool's sqlx audit transaction, which a SeaORM call cannot join; SeaORM builds the statement (tool_issues::bound_issue_sql), so its output names are unique.
+    let row: Option<ToolIssueRow> = sqlx::query_as(tool_issues::bound_issue_sql())
         .bind(issue_id)
         .fetch_optional(&mut **tx.inner())
         .await?;
-    row.map(|row| {
-        Ok(BoundIssue {
-            id: row.try_get("id")?,
-            workspace_id: row.try_get("workspace_id")?,
-            project_id: row.try_get("project_id")?,
-            sequence_id: row.try_get("sequence_id")?,
-            name: row.try_get("name")?,
-            priority: row.try_get("priority")?,
-            description_stripped: row.try_get("description_stripped")?,
-            workpad: row.try_get("workpad")?,
-            state_name: row.try_get(9)?,
-            state_group: row.try_get(10)?,
-            project_identifier: row.try_get("identifier")?,
-        })
-    })
-    .transpose()
-    .map_err(ToolExecError::Db)
+    Ok(row)
 }
 
 /// Map a domain-write failure onto the tool errors: the model only
@@ -1122,6 +1025,24 @@ async fn bound_issue_tx(
 /// `OperationalError`/`IntegrityError` arrive stringified instead.
 fn domain_error(error: domain::DomainError) -> ToolExecError {
     ToolExecError::Db(sqlx::Error::Protocol(error.to_string()))
+}
+
+/// A SeaORM read failure as the tool error the old sqlx read raised: the
+/// wrapped sqlx error when there is one (so Postgres codes still classify),
+/// otherwise its message.
+fn orm_error(error: sea_orm::DbErr) -> ToolExecError {
+    match error {
+        sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(inner)) => ToolExecError::Db(inner),
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::Timeout) => {
+            ToolExecError::Db(sqlx::Error::PoolTimedOut)
+        }
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::ConnectionClosed) => {
+            ToolExecError::Db(sqlx::Error::PoolClosed)
+        }
+        other => ToolExecError::Db(sqlx::Error::Protocol(other.to_string())),
+    }
 }
 
 fn write_ctx(scope: &ToolScope, project_id: Uuid) -> WriteCtx {
@@ -2774,7 +2695,7 @@ async fn op_list_issue_relations(
             found.into_iter().next().expect("one ref resolves one row")
         }
         plan::RelationsSource::CurrentIssue => {
-            let issue = bound_issue(&ctx.pool, scope.work_item_id).await?;
+            let issue = bound_issue(&ctx.orm, scope.work_item_id).await?;
             let Some(issue) = issue else {
                 // `relations.identifier(None)` reads `.project`
                 // before `.sequence_id`.

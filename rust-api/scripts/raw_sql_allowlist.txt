@@ -94,12 +94,9 @@ crates/api/src/loop/user.rs 2
 crates/api/src/middleware/session.rs 5
 crates/api/src/orchestration.rs 5
 crates/api/src/prompting/mod.rs 35
-crates/api/src/runner_enroll/auth.rs 5
-crates/api/src/runner_enroll/delete_cmds.rs 17
-crates/api/src/runner_enroll/desktop.rs 9
+crates/api/src/runner_enroll/delete_cmds.rs 1
 crates/api/src/runner_enroll/enroll.rs 47
 crates/api/src/runner_enroll/manage.rs 49
-crates/api/src/runner_enroll/projects.rs 9
 crates/api/src/runner_enroll/teardown.rs 116
 crates/api/src/runner_runs/approvals.rs 1
 crates/api/src/runner_runs/chat.rs 84
@@ -195,7 +192,7 @@ crates/jobs/src/orchestration/runner_seams.rs 9
 crates/jobs/src/orchestration/scheduler_dispatch.rs 10
 crates/jobs/src/oss_worker/execute_seams.rs 6
 crates/jobs/src/oss_worker/model_runtime/invoke.rs 1
-crates/jobs/src/oss_worker/model_runtime/tools_exec.rs 69
+crates/jobs/src/oss_worker/model_runtime/tools_exec.rs 57
 crates/jobs/src/queue.rs 11
 crates/jobs/src/runner_enroll.rs 32
 crates/jobs/src/runner_runs/offline_recovery.rs 15
@@ -273,13 +270,10 @@ crates/api/src/v1_assets/intake.rs | e6dc5d83f1e3
 crates/api/src/v1_assets/sticky.rs | e6dc5d83f1e3
 crates/api/src/v1_cli_auth/runner.rs | e6dc5d83f1e3
 crates/jobs/src/assistant/sweep.rs | c3d8cccf610b
-crates/jobs/src/oss_worker/model_runtime/tools_exec.rs | 48d8df317dab
 crates/jobs/src/tasks_mail/notifications.rs | c6d50deb8e37
 crates/services/src/app_scheduler/queries.rs | b962acd7acf6
 crates/services/src/app_views_search/queries_search.rs | c53567bfb131
-crates/services/src/dispatch/tools.rs | 8d3374cbb249
 crates/services/src/dispatch/tools.rs | a0222fd82904
-crates/services/src/dispatch/tools.rs | a456708bec32
 crates/services/src/dispatch/tools.rs | cff6c3ac1988
 crates/services/src/orchestration/creation.rs | d83ad2c2db97
 crates/services/src/orchestration/creation.rs | e6ca9f0c88d3

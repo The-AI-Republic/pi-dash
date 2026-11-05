@@ -109,7 +109,7 @@
 //! * The J1 row-assembly loop (`default_pod_ids` first-win,
 //!   `pod_count`, embedding order) — pure handlers-E logic over the
 //!   two queries' rows; the rule is quoted on
-//!   [`workspace_pods_values_sql`].
+//!   [`workspace_pods_query`].
 //!
 //! # Ported bugs and quirks (translate, don't redesign)
 //!
@@ -187,9 +187,18 @@
 
 use pidash_compat::py::py_strip;
 use pidash_db::app_project::models::project as project_cols;
+use pidash_db::entity::{
+    dev_machine, machine_token, pod, projects, runner, workspace_members, workspaces,
+};
 use pidash_db::runner_enroll::columns::{
     dev_machine as dm_cols, pod as pod_cols, runner as r_cols,
 };
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QueryOrder, QuerySelect, RelationDef, Select, Set,
+};
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Cross-domain table pins (own SQL; D-14/D-15 own these tables' ports)
@@ -618,28 +627,72 @@ pub fn issue_assigned_pod_clear_sql() -> String {
 /// not in default_pod_ids` — a second default row does NOT overwrite);
 /// `pod_count` is the group length. Projects without pods get
 /// `default_pod_id: None`, `pod_count: 0`, `pods: []`.
-pub fn workspace_pods_values_sql() -> String {
-    "SELECT \"pod\".\"project_id\", \"pod\".\"is_default\", \"pod\".\"id\", \"pod\".\"name\" \
-     FROM \"pod\" WHERE (\"pod\".\"deleted_at\" IS NULL AND \"pod\".\"workspace_id\" = $1) \
-     ORDER BY \"pod\".\"is_default\" DESC, \"pod\".\"name\" ASC"
-        .to_string()
+pub fn workspace_pods_query(workspace_id: Uuid) -> Select<pod::Entity> {
+    pod::Entity::find()
+        .select_only()
+        .columns([
+            pod::Column::ProjectId,
+            pod::Column::IsDefault,
+            pod::Column::Id,
+            pod::Column::Name,
+        ])
+        .filter(pod::Column::DeletedAt.is_null())
+        .filter(pod::Column::WorkspaceId.eq(workspace_id))
+        .order_by_desc(pod::Column::IsDefault)
+        .order_by_asc(pod::Column::Name)
+}
+
+/// [`workspace_pods_query`] rows: `(project_id, is_default, id, name)`.
+pub async fn workspace_pods(
+    db: &impl ConnectionTrait,
+    workspace_id: Uuid,
+) -> Result<Vec<(Uuid, bool, Uuid, String)>, DbErr> {
+    workspace_pods_query(workspace_id)
+        .into_tuple()
+        .all(db)
+        .await
 }
 
 /// J1 — workspace project query (`projects.py:74-76`).
 ///
 /// `Project.objects.filter(workspace_id).order_by("identifier")`:
-/// full-row select, `SoftDeletionManager` scope, identifier order. No
-/// limit. Each row becomes `{id: str, identifier, name, description,
-/// is_default, default_pod_id, pod_count, pods}` (handlers-owned).
-///
-/// `$1` = workspace id.
-pub fn workspace_projects_sql() -> String {
-    format!(
-        "SELECT {} FROM \"projects\" \
-         WHERE (\"projects\".\"deleted_at\" IS NULL AND \"projects\".\"workspace_id\" = $1) \
-         ORDER BY \"projects\".\"identifier\" ASC",
-        qualified(project_cols::TABLE, project_cols::COLUMNS),
-    )
+/// `SoftDeletionManager` scope, identifier order, no limit; only the five
+/// columns the serializer reads are selected. Each row becomes `{id: str,
+/// identifier, name, description, is_default, default_pod_id, pod_count,
+/// pods}` (handlers-owned).
+pub fn workspace_projects_query(workspace_id: Uuid) -> Select<projects::Entity> {
+    projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::Name,
+            projects::Column::Description,
+            projects::Column::Identifier,
+            projects::Column::IsDefault,
+        ])
+        .filter(projects::Column::DeletedAt.is_null())
+        .filter(projects::Column::WorkspaceId.eq(workspace_id))
+        .order_by_asc(projects::Column::Identifier)
+}
+
+/// The project columns `_serialize_projects` reads.
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+pub struct ProjectSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub identifier: String,
+    pub is_default: bool,
+}
+
+pub async fn workspace_projects(
+    db: &impl ConnectionTrait,
+    workspace_id: Uuid,
+) -> Result<Vec<ProjectSummary>, DbErr> {
+    workspace_projects_query(workspace_id)
+        .into_model::<ProjectSummary>()
+        .all(db)
+        .await
 }
 
 // ---------------------------------------------------------------------------
@@ -651,21 +704,35 @@ pub fn workspace_projects_sql() -> String {
 /// `WorkspaceMember.objects.filter(workspace_id=ws,
 /// member=user).exists()`: RAW filter — NO `is_active` conjunct
 /// (BUG-membership-no-active, ported as-is) — but the
-/// `SoftDeletionManager` scope DOES apply. `Q`-sorted: `member_id`
-/// binds first although the source passes `workspace_id` first.
-///
-/// `$1` = member (user) id, `$2` = workspace id.
+/// `SoftDeletionManager` scope DOES apply.
 ///
 /// False → 403 `forbidden` (handlers-owned). Anonymous (either
 /// mode 2/3 path) → 401 `authentication required` before any SQL.
 /// Mode 1 (runner access-token, `request.auth_runner` set) skips all
 /// of J2 and serializes `runner.workspace_id` directly.
-pub fn workspace_membership_probe_sql() -> String {
-    "SELECT 1 AS \"a\" FROM \"workspace_members\" \
-     WHERE (\"workspace_members\".\"deleted_at\" IS NULL \
-     AND \"workspace_members\".\"member_id\" = $1 \
-     AND \"workspace_members\".\"workspace_id\" = $2) LIMIT 1"
-        .to_string()
+pub fn workspace_membership_query(
+    member_id: Uuid,
+    workspace_id: Uuid,
+) -> Select<workspace_members::Entity> {
+    workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspace_members::Column::MemberId.eq(member_id))
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .limit(1)
+}
+
+pub async fn is_workspace_member(
+    db: &impl ConnectionTrait,
+    member_id: Uuid,
+    workspace_id: Uuid,
+) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = workspace_membership_query(member_id, workspace_id)
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
 }
 
 /// J2 — caller's membership workspace ids (`projects.py:116-120`).
@@ -676,52 +743,199 @@ pub fn workspace_membership_probe_sql() -> String {
 /// `Meta.ordering` (`-created_at`) is KEPT (fixture deviation — the
 /// fixture spells "no ORDER BY"). No limit. Handlers serialize EVERY
 /// listed workspace and concatenate.
-///
-/// `$1` = member (user) id.
-pub fn member_workspace_ids_sql() -> String {
-    "SELECT \"workspace_members\".\"workspace_id\" FROM \"workspace_members\" \
-     WHERE (\"workspace_members\".\"deleted_at\" IS NULL \
-     AND \"workspace_members\".\"member_id\" = $1) \
-     ORDER BY \"workspace_members\".\"created_at\" DESC"
-        .to_string()
+pub fn member_workspace_ids_query(member_id: Uuid) -> Select<workspace_members::Entity> {
+    workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::WorkspaceId)
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspace_members::Column::MemberId.eq(member_id))
+        .order_by_desc(workspace_members::Column::CreatedAt)
+}
+
+pub async fn member_workspace_ids(
+    db: &impl ConnectionTrait,
+    member_id: Uuid,
+) -> Result<Vec<Uuid>, DbErr> {
+    member_workspace_ids_query(member_id)
+        .into_tuple()
+        .all(db)
+        .await
 }
 
 // ---------------------------------------------------------------------------
 // K1. Desktop enroll: bundled-machine lookup + create-or-touch
 // ---------------------------------------------------------------------------
 
-/// K1 — bundled-machine lookup (`desktop.py:108-119`), inside the tx.
-///
-/// `DevMachine.objects.select_for_update().filter(owner, host_label,
-/// provisioning=DESKTOP_BUNDLED, revoked_at__isnull=True,
-/// machine_tokens__workspace=workspace).order_by("-created_at").first()`:
-/// the reverse-FK span becomes an `INNER JOIN` (the `DevMachine`
-/// default manager carries no scope); the joined `machine_token` row
-/// carries NO `revoked_at` filter
-/// (QUIRK-desktop-join-ignores-token-revoked). `WHERE` order is
-/// Django's join-aware `Q`-sort, not the Python kwarg order.
-///
-/// `$1` = host_label (stripped `[:255]`), `$2` = workspace id, `$3` =
-/// owner id, `$4` = provisioning (`'desktop_bundled'`).
-///
-/// Miss → [`dev_machine_insert_sql`]; hit → [`dev_machine_touch_sql`].
-/// Guards before the tx (handlers-owned): blank `workspace_slug` /
-/// `host_label` → 400, version floor → 409 `desktop_update_required`,
-/// workspace miss/non-member → 404 `workspace_not_found` (same body —
-/// no leak).
-pub fn bundled_machine_lookup_sql() -> String {
-    format!(
-        "SELECT {} FROM \"dev_machine\" \
-         INNER JOIN \"machine_token\" \
-         ON (\"dev_machine\".\"id\" = \"machine_token\".\"dev_machine_id\") \
-         WHERE (\"dev_machine\".\"host_label\" = $1 \
-         AND \"machine_token\".\"workspace_id\" = $2 \
-         AND \"dev_machine\".\"owner_id\" = $3 \
-         AND \"dev_machine\".\"provisioning\" = $4 \
-         AND \"dev_machine\".\"revoked_at\" IS NULL) \
-         ORDER BY \"dev_machine\".\"created_at\" DESC LIMIT 1 FOR UPDATE",
-        qualified(dm_cols::TABLE, dm_cols::COLUMNS),
-    )
+/// SeaORM form of [`bundled_machine_lookup_sql`], run on the enroll
+/// transaction (`TxConn`): the newest unrevoked bundled machine of this
+/// owner + host with a token in the workspace, row-locked (`FOR UPDATE`
+/// over the join, as Django's `select_for_update()` locks every joined
+/// row). Only the id is read.
+pub async fn bundled_machine_for_update(
+    db: &impl ConnectionTrait,
+    host_label: &str,
+    workspace_id: Uuid,
+    owner_id: Uuid,
+    provisioning: &str,
+) -> Result<Option<Uuid>, DbErr> {
+    bundled_machine_lookup_query(host_label, workspace_id, owner_id, provisioning)
+        .into_tuple()
+        .one(db)
+        .await
+}
+
+pub fn bundled_machine_lookup_query(
+    host_label: &str,
+    workspace_id: Uuid,
+    owner_id: Uuid,
+    provisioning: &str,
+) -> Select<dev_machine::Entity> {
+    // The entities omit dev_machine -> machine_token (see entity/mod.rs);
+    // the join is spelled here: `dev_machine.id = machine_token.dev_machine_id`.
+    let tokens: RelationDef = dev_machine::Entity::belongs_to(machine_token::Entity)
+        .from(dev_machine::Column::Id)
+        .to(machine_token::Column::DevMachineId)
+        .into();
+    dev_machine::Entity::find()
+        .select_only()
+        .column(dev_machine::Column::Id)
+        .join(JoinType::InnerJoin, tokens)
+        .filter(dev_machine::Column::HostLabel.eq(host_label))
+        .filter(machine_token::Column::WorkspaceId.eq(workspace_id))
+        .filter(dev_machine::Column::OwnerId.eq(owner_id))
+        .filter(dev_machine::Column::Provisioning.eq(provisioning))
+        .filter(dev_machine::Column::RevokedAt.is_null())
+        .order_by_desc(dev_machine::Column::CreatedAt)
+        .limit(1)
+        .lock_exclusive()
+}
+
+/// `DevMachine.objects.create(owner, host_label, label, provisioning,
+/// last_seen_at)` for the desktop enroll (`desktop.py:121-127`):
+/// visibility `0`, no revocation, every timestamp `now`.
+pub async fn insert_bundled_dev_machine(
+    db: &impl ConnectionTrait,
+    id: Uuid,
+    owner_id: Uuid,
+    host_label: &str,
+    provisioning: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), DbErr> {
+    dev_machine::Entity::insert(dev_machine::ActiveModel {
+        id: Set(id),
+        owner_id: Set(owner_id),
+        host_label: Set(host_label.to_owned()),
+        label: Set(dev_machine_label(host_label)),
+        visibility: Set(0),
+        provisioning: Set(provisioning.to_owned()),
+        last_seen_at: Set(Some(now.into())),
+        revoked_at: Set(None),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+    })
+    .exec_without_returning(db)
+    .await
+    .map(drop)
+}
+
+/// `dev_machine.save(update_fields=["last_seen_at", "updated_at"])`
+/// (`desktop.py:128-130`).
+pub async fn touch_dev_machine(
+    db: &impl ConnectionTrait,
+    id: Uuid,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), DbErr> {
+    dev_machine::Entity::update_many()
+        .col_expr(dev_machine::Column::LastSeenAt, Expr::value(now))
+        .col_expr(dev_machine::Column::UpdatedAt, Expr::value(now))
+        .filter(dev_machine::Column::Id.eq(id))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// SeaORM form of [`bundled_machine_ids_sql`]: the owner's unrevoked
+/// bundled machine ids, optionally for one host, in `Meta.ordering`.
+pub fn bundled_machine_ids_query(
+    owner_id: Uuid,
+    provisioning: &str,
+    host_label: Option<&str>,
+) -> Select<dev_machine::Entity> {
+    let query = dev_machine::Entity::find()
+        .select_only()
+        .column(dev_machine::Column::Id)
+        .filter(dev_machine::Column::OwnerId.eq(owner_id))
+        .filter(dev_machine::Column::Provisioning.eq(provisioning))
+        .filter(dev_machine::Column::RevokedAt.is_null());
+    match host_label {
+        Some(host) => query.filter(dev_machine::Column::HostLabel.eq(host)),
+        None => query,
+    }
+    .order_by_desc(dev_machine::Column::LastSeenAt)
+    .order_by_desc(dev_machine::Column::CreatedAt)
+}
+
+pub async fn bundled_machine_ids(
+    db: &impl ConnectionTrait,
+    owner_id: Uuid,
+    provisioning: &str,
+    host_label: Option<&str>,
+) -> Result<Vec<Uuid>, DbErr> {
+    bundled_machine_ids_query(owner_id, provisioning, host_label)
+        .into_tuple()
+        .all(db)
+        .await
+}
+
+/// SeaORM form of [`signout_offline_runners_sql`]: non-revoked bundled
+/// runners on these machines go offline (the rows survive).
+pub async fn signout_offline_runners(
+    db: &impl ConnectionTrait,
+    machine_ids: &[Uuid],
+    provisioning: &str,
+    offline: &str,
+    revoked: &str,
+) -> Result<(), DbErr> {
+    runner::Entity::update_many()
+        .col_expr(runner::Column::Status, Expr::value(offline))
+        .filter(runner::Column::DevMachineId.is_in(machine_ids.iter().copied()))
+        .filter(runner::Column::Provisioning.eq(provisioning))
+        .filter(runner::Column::Status.ne(revoked))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// `Workspace.objects.filter(slug).first()` for the desktop enroll
+/// (`desktop.py:100-103`): live workspace, `Meta.ordering` `-created_at`.
+pub async fn workspace_by_slug(
+    db: &impl ConnectionTrait,
+    slug: &str,
+) -> Result<Option<(Uuid, String)>, DbErr> {
+    workspaces::Entity::find()
+        .select_only()
+        .columns([workspaces::Column::Id, workspaces::Column::Slug])
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .order_by_desc(workspaces::Column::CreatedAt)
+        .into_tuple()
+        .one(db)
+        .await
+}
+
+/// `is_workspace_member` (`core/permissions.py:28-34`): like
+/// [`is_workspace_member`] plus `is_active=True`.
+pub async fn is_active_workspace_member(
+    db: &impl ConnectionTrait,
+    member_id: Uuid,
+    workspace_id: Uuid,
+) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = workspace_membership_query(member_id, workspace_id)
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
 }
 
 /// K1 — bundled-machine insert (`desktop.py:121-127`), inside the tx.
@@ -750,21 +964,6 @@ pub fn dev_machine_insert_sql() -> String {
     )
 }
 
-/// K1 — bundled-machine touch (`desktop.py:128-130`), inside the tx.
-///
-/// `dev_machine.save(update_fields=["last_seen_at", "updated_at"])`.
-///
-/// `$1` = last_seen_at (`now()`), `$2` = updated_at (`now()`), `$3` =
-/// dev-machine id.
-///
-/// Twin of queries-A `touch_dev_machine_sql(false, false)` (identical
-/// text); owned here so this module has no compile edge on queries-A.
-pub fn dev_machine_touch_sql() -> String {
-    "UPDATE \"dev_machine\" SET \"last_seen_at\" = $1, \"updated_at\" = $2 \
-     WHERE \"dev_machine\".\"id\" = $3"
-        .to_string()
-}
-
 // ---------------------------------------------------------------------------
 // K2. Desktop enroll: token rotate + mint
 // ---------------------------------------------------------------------------
@@ -781,81 +980,10 @@ pub fn dev_machine_touch_sql() -> String {
 // K3. Desktop delete (sign-out)
 // ---------------------------------------------------------------------------
 
-/// K3 — bundled-machine id select (`desktop.py:170-178`, no tx).
-///
-/// `DevMachine.objects.filter(owner, provisioning=DESKTOP_BUNDLED,
-/// revoked_at__isnull=True)[.filter(host_label)].values_list("id",
-/// flat=True)`: `Meta.ordering` (`-last_seen_at, -created_at`) is KEPT
-/// (fixture deviation — the fixture spells no `ORDER BY`). The host
-/// label comes from body OR query params, stripped `[:255]`; empty
-/// means all machines. No ids → 204 immediately, no tx (handlers map).
-///
-/// Without host label — `$1` owner_id, `$2` provisioning
-/// (`'desktop_bundled'`). With host label — `$1` owner_id, `$2`
-/// provisioning, `$3` host_label: `Q`-sort applies within ONE
-/// `.filter()` call, so the chained `.filter(host_label=…)` (`:176`)
-/// appends AFTER the base filter's conjuncts (verified against
-/// Django 4.2.30 in review).
-pub fn bundled_machine_ids_sql(with_host_label: bool) -> String {
-    if with_host_label {
-        "SELECT \"dev_machine\".\"id\" FROM \"dev_machine\" \
-         WHERE (\"dev_machine\".\"owner_id\" = $1 \
-         AND \"dev_machine\".\"provisioning\" = $2 \
-         AND \"dev_machine\".\"revoked_at\" IS NULL \
-         AND \"dev_machine\".\"host_label\" = $3) \
-         ORDER BY \"dev_machine\".\"last_seen_at\" DESC, \"dev_machine\".\"created_at\" DESC"
-            .to_string()
-    } else {
-        "SELECT \"dev_machine\".\"id\" FROM \"dev_machine\" \
-         WHERE (\"dev_machine\".\"owner_id\" = $1 \
-         AND \"dev_machine\".\"provisioning\" = $2 \
-         AND \"dev_machine\".\"revoked_at\" IS NULL) \
-         ORDER BY \"dev_machine\".\"last_seen_at\" DESC, \"dev_machine\".\"created_at\" DESC"
-            .to_string()
-    }
-}
-
 // NOTE: the K3 sign-out revoke builder lived here; the statement moved
 // to `crate::domain::tokens::revoke_tokens_for_dev_machines`
 // (PIDASHCONV-1520), whose tests carry the pins (including the
 // empty-list panic).
-
-/// K3 — sign-out bundled-runner offline sweep (`desktop.py:186-191`),
-/// inside the tx.
-///
-/// `Runner.objects.filter(dev_machine_id__in=machine_ids,
-/// provisioning=DESKTOP_BUNDLED).exclude(status=REVOKED).update(status=OFFLINE)`:
-/// the runner rows SURVIVE (the next sign-in reuses the pod binding);
-/// only non-revoked bundled rows flip to offline, which is what stops
-/// dispatch. `.exclude()` renders `NOT (…)`.
-///
-/// `$1` = status (`'offline'`), `$2..$N+1` = machine ids in list
-/// order, `$N+2` = provisioning (`'desktop_bundled'`), `$N+3` = status
-/// (`'revoked'`).
-///
-/// # Panics
-///
-/// Panics when `machine_count == 0`, for the same reason as the
-/// domain `revoke_tokens_for_dev_machines` (the source returns 204
-/// with no SQL when no machines match).
-pub fn signout_offline_runners_sql(machine_count: usize) -> String {
-    assert!(
-        machine_count > 0,
-        "signout_offline_runners_sql: machine_count must be > 0 \
-         (the source returns 204 with no SQL when no machines match)"
-    );
-    let first = 2u32;
-    let after_ids = first + machine_count as u32;
-    format!(
-        "UPDATE \"{t}\" SET \"status\" = $1 \
-         WHERE (\"{t}\".\"dev_machine_id\" IN ({}) \
-         AND \"{t}\".\"provisioning\" = ${after_ids} \
-         AND NOT (\"{t}\".\"status\" = ${}))",
-        in_placeholders(first, machine_count),
-        after_ids + 1,
-        t = r_cols::TABLE,
-    )
-}
 
 // ---------------------------------------------------------------------------
 // Bind helpers (pure; the SQL above names the slots, these compute values)
@@ -1372,121 +1500,190 @@ mod tests {
         }
     }
 
-    // -- J1 --
+    // -- J1 / J2 (SeaORM) --
+
+    fn built(query: impl sea_orm::QueryTrait) -> String {
+        query.build(sea_orm::DbBackend::Postgres).to_string()
+    }
 
     #[test]
-    fn workspace_pods_values_keep_values_order() {
-        let sql = workspace_pods_values_sql();
-        let list = assert_suffix(
-            &sql,
-            "FROM \"pod\" WHERE (\"pod\".\"deleted_at\" IS NULL AND \"pod\".\"workspace_id\" = $1) \
-             ORDER BY \"pod\".\"is_default\" DESC, \"pod\".\"name\" ASC",
+    fn workspace_pods_keep_values_order_default_first() {
+        let sql = built(workspace_pods_query(Uuid::nil()));
+        // `.values()` order, NOT table order: the tuple decodes by it.
+        assert!(
+            sql.starts_with(
+                r#"SELECT "pod"."project_id", "pod"."is_default", "pod"."id", "pod"."name" FROM "pod""#
+            ),
+            "{sql}"
         );
-        // `.values()` order, NOT table order.
-        assert_eq!(
-            list,
-            "\"pod\".\"project_id\", \"pod\".\"is_default\", \"pod\".\"id\", \"pod\".\"name\""
+        assert!(sql.contains(r#""pod"."deleted_at" IS NULL"#), "{sql}");
+        assert!(
+            sql.ends_with(r#"ORDER BY "pod"."is_default" DESC, "pod"."name" ASC"#),
+            "{sql}"
         );
-        for fragment in [
-            fixture_fragment("\"project_id\""),
-            fixture_fragment("\"name\" FROM \"pod\""),
-            fixture_fragment("\"is_default\" DESC"),
-            fixture_fragment("\"name\" ASC"),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
     }
 
     #[test]
     fn workspace_projects_order_by_identifier() {
-        let sql = workspace_projects_sql();
-        let list = assert_suffix(
-            &sql,
-            "FROM \"projects\" WHERE (\"projects\".\"deleted_at\" IS NULL \
-             AND \"projects\".\"workspace_id\" = $1) ORDER BY \"projects\".\"identifier\" ASC",
+        let sql = built(workspace_projects_query(Uuid::nil()));
+        assert!(sql.contains(r#""projects"."deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""projects"."workspace_id" = '"#), "{sql}");
+        assert!(
+            sql.ends_with(r#"ORDER BY "projects"."identifier" ASC"#),
+            "{sql}"
         );
-        assert_eq!(list, expected_list("projects", project_cols::COLUMNS));
-        for fragment in [
-            fixture_fragment("FROM \"projects\""),
-            fixture_fragment("\"workspace_id\" = $1"),
-            fixture_fragment("\"identifier\" ASC"),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
     }
 
-    // -- J2 --
-
     #[test]
-    fn membership_probe_binds_member_first_without_active() {
-        let sql = workspace_membership_probe_sql();
-        assert_eq!(
-            squashed(&sql),
-            "SELECT 1 AS \"a\" FROM \"workspace_members\" \
-             WHERE (\"workspace_members\".\"deleted_at\" IS NULL \
-             AND \"workspace_members\".\"member_id\" = $1 \
-             AND \"workspace_members\".\"workspace_id\" = $2) LIMIT 1"
+    fn membership_probe_has_no_active_filter() {
+        let sql = built(workspace_membership_query(Uuid::nil(), Uuid::nil()));
+        assert!(
+            sql.contains(r#""workspace_members"."deleted_at" IS NULL"#),
+            "{sql}"
         );
-        for fragment in [
-            fixture_fragment("FROM \"workspace_members\""),
-            fixture_fragment("\"member_id\" = "),
-            fixture_fragment("\"workspace_id\" = "),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
+        assert!(
+            sql.contains(r#""workspace_members"."member_id" = "#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#""workspace_members"."workspace_id" = "#),
+            "{sql}"
+        );
+        assert!(sql.ends_with("LIMIT 1"), "{sql}");
         // BUG-membership-no-active: raw filter, no is_active conjunct.
-        assert!(!sql.contains("is_active"));
+        assert!(!sql.contains("is_active"), "{sql}");
     }
 
     #[test]
     fn member_workspace_ids_keep_default_ordering() {
-        let sql = member_workspace_ids_sql();
-        assert_eq!(
-            squashed(&sql),
-            "SELECT \"workspace_members\".\"workspace_id\" FROM \"workspace_members\" \
-             WHERE (\"workspace_members\".\"deleted_at\" IS NULL \
-             AND \"workspace_members\".\"member_id\" = $1) \
-             ORDER BY \"workspace_members\".\"created_at\" DESC"
+        let sql = built(member_workspace_ids_query(Uuid::nil()));
+        assert!(
+            sql.starts_with(
+                r#"SELECT "workspace_members"."workspace_id" FROM "workspace_members""#
+            ),
+            "{sql}"
         );
-        for fragment in [
-            fixture_fragment("FROM \"workspace_members\""),
-            fixture_fragment("\"workspace_id\" FROM \"workspace_members\""),
-        ] {
-            assert_builder_contains(&sql, &fragment);
+        assert!(
+            sql.ends_with(r#"ORDER BY "workspace_members"."created_at" DESC"#),
+            "{sql}"
+        );
+        assert!(!sql.contains("is_active"), "{sql}");
+    }
+
+    /// The four J1/J2 reads against a seeded world: soft-deleted rows are
+    /// out, membership ignores `is_active`, pods come default-first.
+    #[tokio::test]
+    async fn live_projects_serialize_reads() {
+        use sea_orm::{ActiveModelTrait, Set};
+        let Some(pool) = crate::read::test_support::pool().await else {
+            return;
+        };
+        let world = crate::read::test_support::seed_world(&pool).await;
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let now = chrono::Utc::now();
+        let empty = || serde_json::json!({});
+        workspace_members::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            role: Set(20),
+            member_id: Set(world.user_id),
+            workspace_id: Set(world.workspace_id),
+            view_props: Set(empty()),
+            default_props: Set(empty()),
+            issue_props: Set(empty()),
+            is_active: Set(false),
+            explored_features: Set(empty()),
+            getting_started_checklist: Set(empty()),
+            tips: Set(empty()),
+            ..Default::default()
         }
-        assert!(!sql.contains("is_active"));
+        .insert(&db)
+        .await
+        .expect("member");
+        let pod = |name: &str, is_default: bool, deleted: bool| pod::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            name: Set(name.to_owned()),
+            description: Set(String::new()),
+            is_default: Set(is_default),
+            deleted_at: Set(deleted.then(|| now.into())),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            workspace_id: Set(world.workspace_id),
+            project_id: Set(world.project_id),
+            ..Default::default()
+        };
+        let a = pod("a-pod", false, false).insert(&db).await.expect("pod a");
+        let z = pod("z-pod", true, false).insert(&db).await.expect("pod z");
+        pod("gone", false, true)
+            .insert(&db)
+            .await
+            .expect("deleted pod");
+
+        // Inactive membership still counts (BUG-membership-no-active).
+        assert!(is_workspace_member(&db, world.user_id, world.workspace_id)
+            .await
+            .expect("probe"));
+        assert!(
+            !is_workspace_member(&db, Uuid::new_v4(), world.workspace_id)
+                .await
+                .expect("probe")
+        );
+        assert_eq!(
+            member_workspace_ids(&db, world.user_id).await.expect("ids"),
+            vec![world.workspace_id]
+        );
+        assert_eq!(
+            workspace_pods(&db, world.workspace_id).await.expect("pods"),
+            vec![
+                (world.project_id, true, z.id, "z-pod".to_owned()),
+                (world.project_id, false, a.id, "a-pod".to_owned()),
+            ]
+        );
+        let projects = workspace_projects(&db, world.workspace_id)
+            .await
+            .expect("projects");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id, world.project_id);
+        assert_eq!(projects[0].identifier, world.project_identifier);
     }
 
     // -- K1 --
 
     #[test]
     fn bundled_lookup_joins_token_and_locks() {
-        let sql = bundled_machine_lookup_sql();
-        let list = assert_suffix(
-            &sql,
-            "FROM \"dev_machine\" INNER JOIN \"machine_token\" \
-             ON (\"dev_machine\".\"id\" = \"machine_token\".\"dev_machine_id\") \
-             WHERE (\"dev_machine\".\"host_label\" = $1 \
-             AND \"machine_token\".\"workspace_id\" = $2 \
-             AND \"dev_machine\".\"owner_id\" = $3 \
-             AND \"dev_machine\".\"provisioning\" = $4 \
-             AND \"dev_machine\".\"revoked_at\" IS NULL) \
-             ORDER BY \"dev_machine\".\"created_at\" DESC LIMIT 1 FOR UPDATE",
+        let sql = built(bundled_machine_lookup_query(
+            "host",
+            Uuid::nil(),
+            Uuid::nil(),
+            "desktop_bundled",
+        ));
+        assert!(
+            sql.starts_with(r#"SELECT "dev_machine"."id" FROM "dev_machine""#),
+            "{sql}"
         );
-        assert_eq!(list, expected_list("dev_machine", MACHINE_COLS));
+        assert!(
+            sql.contains(
+                r#"INNER JOIN "machine_token" ON "dev_machine"."id" = "machine_token"."dev_machine_id""#
+            ),
+            "{sql}"
+        );
         for fragment in [
-            fixture_fragment("FROM \"dev_machine\""),
-            fixture_fragment("\"machine_token\""),
-            fixture_fragment("\"host_label\" = "),
-            fixture_fragment("\"revoked_at\" IS NULL"),
-            fixture_fragment("\"created_at\" DESC"),
-            fixture_fragment("LIMIT 1 FOR UPDATE"),
+            r#""dev_machine"."host_label" = 'host'"#,
+            r#""machine_token"."workspace_id" = "#,
+            r#""dev_machine"."owner_id" = "#,
+            r#""dev_machine"."provisioning" = 'desktop_bundled'"#,
+            r#""dev_machine"."revoked_at" IS NULL"#,
         ] {
-            assert_builder_contains(&sql, &fragment);
+            assert!(sql.contains(fragment), "{fragment}: {sql}");
         }
+        assert!(
+            sql.ends_with(r#"ORDER BY "dev_machine"."created_at" DESC LIMIT 1 FOR UPDATE"#),
+            "{sql}"
+        );
         // QUIRK-desktop-join-ignores-token-revoked: the joined table
         // carries no revoked_at conjunct.
-        assert!(!squashed(&sql).contains("\"machine_token\".\"revoked_at\""));
+        assert!(!sql.contains(r#""machine_token"."revoked_at""#), "{sql}");
     }
 
     #[test]
@@ -1501,89 +1698,123 @@ mod tests {
     }
 
     #[test]
-    fn dev_machine_touch_writes_timestamps_only() {
-        assert_eq!(
-            dev_machine_touch_sql(),
-            "UPDATE \"dev_machine\" SET \"last_seen_at\" = $1, \"updated_at\" = $2 \
-             WHERE \"dev_machine\".\"id\" = $3"
+    fn bundled_ids_keep_ordering_with_host_last() {
+        let plain = built(bundled_machine_ids_query(
+            Uuid::nil(),
+            "desktop_bundled",
+            None,
+        ));
+        assert!(!plain.contains("host_label"), "{plain}");
+        let hosted = built(bundled_machine_ids_query(
+            Uuid::nil(),
+            "desktop_bundled",
+            Some("h"),
+        ));
+        assert!(
+            hosted.contains(
+                r#""dev_machine"."revoked_at" IS NULL AND "dev_machine"."host_label" = 'h'"#
+            ),
+            "{hosted}"
         );
-    }
-
-    // -- K2 --
-    // (The K2 SQL pins moved with the statements to
-    // `crate::domain::tokens`.)
-
-    // -- K3 --
-
-    #[test]
-    fn bundled_ids_keep_ordering_with_host_appended_last() {
-        let plain = bundled_machine_ids_sql(false);
-        assert_eq!(
-            squashed(&plain),
-            "SELECT \"dev_machine\".\"id\" FROM \"dev_machine\" \
-             WHERE (\"dev_machine\".\"owner_id\" = $1 \
-             AND \"dev_machine\".\"provisioning\" = $2 \
-             AND \"dev_machine\".\"revoked_at\" IS NULL) \
-             ORDER BY \"dev_machine\".\"last_seen_at\" DESC, \"dev_machine\".\"created_at\" DESC"
-        );
-        let hosted = bundled_machine_ids_sql(true);
-        assert_eq!(
-            squashed(&hosted),
-            "SELECT \"dev_machine\".\"id\" FROM \"dev_machine\" \
-             WHERE (\"dev_machine\".\"owner_id\" = $1 \
-             AND \"dev_machine\".\"provisioning\" = $2 \
-             AND \"dev_machine\".\"revoked_at\" IS NULL \
-             AND \"dev_machine\".\"host_label\" = $3) \
-             ORDER BY \"dev_machine\".\"last_seen_at\" DESC, \"dev_machine\".\"created_at\" DESC"
-        );
-        for fragment in [
-            fixture_fragment("FROM \"dev_machine\""),
-            fixture_fragment("\"owner_id\" = "),
-            fixture_fragment("\"revoked_at\" IS NULL"),
-        ] {
-            assert_builder_contains(&plain, &fragment);
-            assert_builder_contains(&hosted, &fragment);
-        }
-        assert_builder_contains(&hosted, &fixture_fragment("\"host_label\" = "));
-    }
-
-    // (The signout-revoke SQL pins moved with the statement to
-    // `crate::domain::tokens`.)
-
-    #[test]
-    fn signout_offline_numbers_binds_after_ids() {
-        assert_eq!(
-            squashed(&signout_offline_runners_sql(1)),
-            "UPDATE \"runner\" SET \"status\" = $1 \
-             WHERE (\"runner\".\"dev_machine_id\" IN ($2) \
-             AND \"runner\".\"provisioning\" = $3 AND NOT (\"runner\".\"status\" = $4))"
-        );
-        assert_eq!(
-            squashed(&signout_offline_runners_sql(2)),
-            "UPDATE \"runner\" SET \"status\" = $1 \
-             WHERE (\"runner\".\"dev_machine_id\" IN ($2, $3) \
-             AND \"runner\".\"provisioning\" = $4 AND NOT (\"runner\".\"status\" = $5))"
-        );
-        for fragment in [
-            fixture_fragment("UPDATE \"runner\" SET \"status\" = "),
-            fixture_fragment("\"dev_machine_id\" IN ("),
-            fixture_fragment("\"provisioning\" = "),
-            fixture_fragment("\"status\" = "),
-        ] {
-            assert_builder_contains(&signout_offline_runners_sql(2), &fragment);
+        for sql in [plain, hosted] {
+            assert!(
+                sql.ends_with(
+                    r#"ORDER BY "dev_machine"."last_seen_at" DESC, "dev_machine"."created_at" DESC"#
+                ),
+                "{sql}"
+            );
         }
     }
 
-    // (The signout-revoke empty-list panic pin moved with the builder
-    // to `crate::domain::tokens`.)
-
-    #[test]
-    #[should_panic(expected = "machine_count must be > 0")]
-    fn signout_offline_panics_on_empty() {
-        let _ = signout_offline_runners_sql(0);
+    /// The desktop enroll and sign-out writes on one sqlx transaction
+    /// through `TxConn`: insert, locked lookup through the token join,
+    /// touch, id list, and the offline sweep that spares revoked runners.
+    #[tokio::test]
+    async fn live_desktop_machine_flow() {
+        let Some(pool) = crate::read::test_support::pool().await else {
+            return;
+        };
+        let world = crate::read::test_support::seed_world(&pool).await;
+        let mut tx = pool.begin().await.expect("begin");
+        let machine = Uuid::new_v4();
+        let then = chrono::Utc::now() - chrono::Duration::hours(1);
+        {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            insert_bundled_dev_machine(
+                &conn,
+                machine,
+                world.user_id,
+                "host-1",
+                "desktop_bundled",
+                then,
+            )
+            .await
+            .expect("insert");
+            // No token in the workspace yet: the join finds nothing.
+            assert_eq!(
+                bundled_machine_for_update(
+                    &conn,
+                    "host-1",
+                    world.workspace_id,
+                    world.user_id,
+                    "desktop_bundled"
+                )
+                .await
+                .expect("lookup"),
+                None
+            );
+        }
+        sqlx::query(
+            "INSERT INTO machine_token (id, user_id, dev_machine_id, workspace_id, host_label, \
+             token_hash, token_fingerprint, label, is_service, created_at, last_used_at, revoked_at) \
+             VALUES ($1, $2, $3, $4, 'host-1', $5, '', '', true, now(), NULL, now())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(world.user_id)
+        .bind(machine)
+        .bind(world.workspace_id)
+        .bind(Uuid::new_v4().to_string())
+        .execute(&mut *tx)
+        .await
+        .expect("revoked token");
+        {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            // QUIRK-desktop-join-ignores-token-revoked: a revoked token still joins.
+            assert_eq!(
+                bundled_machine_for_update(
+                    &conn,
+                    "host-1",
+                    world.workspace_id,
+                    world.user_id,
+                    "desktop_bundled"
+                )
+                .await
+                .expect("lookup"),
+                Some(machine)
+            );
+            let now = chrono::Utc::now();
+            touch_dev_machine(&conn, machine, now).await.expect("touch");
+            let touched = dev_machine::Entity::find_by_id(machine)
+                .one(&conn)
+                .await
+                .expect("read")
+                .expect("row");
+            assert!(touched.last_seen_at.expect("seen") > then);
+            assert_eq!(
+                bundled_machine_ids(&conn, world.user_id, "desktop_bundled", Some("host-1"))
+                    .await
+                    .expect("ids"),
+                vec![machine]
+            );
+            assert!(
+                bundled_machine_ids(&conn, world.user_id, "desktop_bundled", Some("other"))
+                    .await
+                    .expect("ids")
+                    .is_empty()
+            );
+        }
+        tx.rollback().await.expect("rollback");
     }
-
-    // -- Bind helpers --
 
     #[test]
     fn host_label_strips_and_truncates() {

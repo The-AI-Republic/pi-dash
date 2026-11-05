@@ -127,9 +127,29 @@ Writes to the design §4 tables go through `pidash_services::domain`
 `delete_many()` with a filter.
 
 **Transactions:** a SeaORM transaction cannot adopt an `sqlx::Transaction`,
-and sqlx cannot join a SeaORM one (`.ai_design/rust_orm/design.md`). Migrate a transaction's whole
-body together, or keep it on one side. Never split one transaction across
-the two.
+and sqlx cannot join a SeaORM one (`.ai_design/rust_orm/design.md`). Never
+split one transaction across the two. Code that already holds an
+`sqlx::Transaction` (row locks, shared kernels taking `&mut tx`) keeps it
+and runs SeaORM on it through `pidash_db::orm_tx::TxConn`, a SeaORM
+`ConnectionTrait` over the transaction's connection:
+
+```rust
+let conn = orm_tx::TxConn::new(&mut tx);
+let runner = runner::Entity::find_by_id(id).lock_exclusive().one(&conn).await?;
+runner::Entity::update_many()
+    .col_expr(runner::Column::RevokedAt, Expr::value(now))
+    .filter(runner::Column::Id.eq(id))
+    .exec(&conn)
+    .await?;
+comment.insert(&conn).await?; // ActiveModelBehavior hooks and RETURNING run
+```
+
+The full SeaORM API works unchanged, so a later move to a SeaORM
+`DatabaseTransaction` changes only where `conn` comes from. Drop `conn` to
+use `tx` directly again. Writes to the design §4 tables still belong in
+`pidash_services::domain`: the write guard flags `<table>::Entity::insert /
+update / delete…(` and `<table>::ActiveModel { .. }` outside it, on any
+connection.
 
 ## 4. Output parity
 
