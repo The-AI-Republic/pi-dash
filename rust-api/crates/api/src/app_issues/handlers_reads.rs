@@ -81,19 +81,18 @@ use crate::state::AppState;
 use super::queries_core;
 use super::queries_engage;
 use super::{
-    fetch_count, fetch_json_rows, order_key, query_last, shape_row, Binder, Denial, QueryMap,
-    NOT_FOUND_BODY,
+    fetch_json_rows, order_key, query_last, shape_row, Binder, Denial, QueryMap, NOT_FOUND_BODY,
 };
 use pidash_compat::response::json_response;
 use pidash_db::tasks_ticker::IssueAgentTicker;
+use pidash_services::app_issues::agent_runs::{self, RenderedAgentRun};
 use pidash_services::app_issues::serializers_assoc::{
     project_user_property_to_representation, ProjectUserPropertyRow,
 };
 use pidash_services::app_issues::{
     issue_detail_base_to_representation, issue_detail_to_representation, issue_is_actively_synced,
-    order_sql, AgentLiveStateRow, AgentRunDetailRow, AgentTickerInput, IssueDetailBaseRow,
-    IssueDetailRow, ACTIVE_AGENT_RUN_SQL, AGENT_RUN_COUNT_SQL, GITHUB_ISSUE_SYNC_PROBE_SQL,
-    GIT_ISSUE_SYNC_PROBE_SQL, LATEST_AGENT_RUN_SQL,
+    order_sql, AgentTickerInput, IssueDetailBaseRow, IssueDetailRow, GITHUB_ISSUE_SYNC_PROBE_SQL,
+    GIT_ISSUE_SYNC_PROBE_SQL,
 };
 use pidash_services::orchestration::blockers::{
     blockers_sql, dependents_sql, has_open_blockers_sql, relations_summary, BlockerRow,
@@ -1806,96 +1805,6 @@ async fn full_is_synced(
     ))
 }
 
-/// An agent-run row plus its pre-rendered datetimes (plain `isoformat` —
-/// NOT DRF's format — via the services renderer).
-struct AgentRunOwned {
-    row: Map<String, Value>,
-    created_at: String,
-    assigned_at: Option<String>,
-    started_at: Option<String>,
-    ended_at: Option<String>,
-    live_last_event_at: Option<String>,
-    live_agent_last_activity_at: Option<String>,
-    live_updated_at: Option<String>,
-}
-
-/// The merged run statements select `runner.name`, which `row_to_json`
-/// would report as `name`; alias it (pinned by unit test). The live-state
-/// `llm_model` is already `live_llm_model` in the statement itself.
-fn agent_run_sql_aliased(sql: &str) -> String {
-    sql.replace("runner.name", "runner.name AS runner_name")
-}
-
-fn render_iso_moment(row: &Map<String, Value>, key: &str) -> Option<String> {
-    get_moment(row, key).map(pidash_services::app_issues::serialize_iso_datetime)
-}
-
-async fn fetch_agent_run(
-    pool: &sqlx::PgPool,
-    sql: &str,
-    issue_id: &uuid::Uuid,
-) -> Result<Option<AgentRunOwned>, Denial> {
-    let mut binder = Binder::new();
-    binder.bind_uuid(*issue_id);
-    let mut rows = fetch_json_rows(pool, &agent_run_sql_aliased(sql), binder.values()).await?;
-    let Some(row) = rows.pop() else {
-        return Ok(None);
-    };
-    let created_at = render_iso_moment(&row, "created_at").ok_or(Denial::ServerError)?;
-    let live_updated_at = render_iso_moment(&row, "updated_at");
-    Ok(Some(AgentRunOwned {
-        assigned_at: render_iso_moment(&row, "assigned_at"),
-        started_at: render_iso_moment(&row, "started_at"),
-        ended_at: render_iso_moment(&row, "ended_at"),
-        live_last_event_at: render_iso_moment(&row, "last_event_at"),
-        live_agent_last_activity_at: render_iso_moment(&row, "agent_last_activity_at"),
-        live_updated_at,
-        created_at,
-        row,
-    }))
-}
-
-fn agent_run_detail_row(run: &AgentRunOwned) -> AgentRunDetailRow<'_> {
-    let row = &run.row;
-    let live_state = run.live_updated_at.as_deref().map(|updated_at| {
-        let usage = row.get("usage").unwrap_or(&Value::Null);
-        AgentLiveStateRow {
-            observed_run_id: get_str(row, "observed_run_id"),
-            last_event_at: run.live_last_event_at.as_deref(),
-            last_event_kind: get_str(row, "last_event_kind"),
-            last_event_summary: get_str(row, "last_event_summary"),
-            agent_pid: get_i32(row, "agent_pid"),
-            agent_subprocess_alive: get_bool(row, "agent_subprocess_alive"),
-            approvals_pending: get_i32(row, "approvals_pending"),
-            usage,
-            llm_model: get_str(row, "live_llm_model"),
-            turn_count: get_i32(row, "turn_count"),
-            agent_health: get_str(row, "agent_health"),
-            agent_last_activity_at: run.live_agent_last_activity_at.as_deref(),
-            updated_at,
-        }
-    });
-    AgentRunDetailRow {
-        id: get_str(row, "id").unwrap_or_default(),
-        status: get_str(row, "status").unwrap_or_default(),
-        executor_kind: get_str(row, "executor_kind").unwrap_or_default(),
-        runner_id: get_str(row, "runner_id"),
-        runner_name: get_str(row, "runner_name"),
-        created_at: &run.created_at,
-        assigned_at: run.assigned_at.as_deref(),
-        started_at: run.started_at.as_deref(),
-        ended_at: run.ended_at.as_deref(),
-        done_payload: row.get("done_payload").filter(|value| !value.is_null()),
-        error: get_str(row, "error").unwrap_or_default(),
-        error_code: get_str(row, "error_code").unwrap_or_default(),
-        llm_model: get_str(row, "llm_model").unwrap_or_default(),
-        input_tokens: get_i64(row, "input_tokens"),
-        output_tokens: get_i64(row, "output_tokens"),
-        total_tokens: get_i64(row, "total_tokens"),
-        live_state,
-    }
-}
-
 /// One direction of the blocker fetch: the merged statement with its two
 /// `:issue_id` placeholders bound to one positional.
 async fn fetch_blocker_rows(
@@ -2007,11 +1916,10 @@ async fn render_full(
     let assignee_ids = get_id_list(row, "assignee_ids");
     let is_synced = full_is_synced(pool, row, issue_id).await?;
     let is_epic = probe_is_epic(pool, get_str(row, "i_type_id")).await?;
-    let latest = fetch_agent_run(pool, LATEST_AGENT_RUN_SQL, issue_id).await?;
-    let active = fetch_agent_run(pool, ACTIVE_AGENT_RUN_SQL, issue_id).await?;
-    let mut count_binder = Binder::new();
-    count_binder.bind_uuid(*issue_id);
-    let run_count = fetch_count(pool, AGENT_RUN_COUNT_SQL, count_binder.values()).await?;
+    let runs = agent_runs::issue_agent_runs(pool, *issue_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let (latest, active, run_count) = (runs.latest, runs.active, runs.count);
     let blockers = fetch_relations_summary(pool, issue_id).await?;
     let ticker_row = decode_ticker(row)?;
     let policy = ProjectClockPolicy {
@@ -2043,8 +1951,8 @@ async fn render_full(
         policy: &policy,
         state,
     });
-    let latest_row = latest.as_ref().map(agent_run_detail_row);
-    let active_row = active.as_ref().map(agent_run_detail_row);
+    let latest_row = latest.as_ref().map(RenderedAgentRun::detail_row);
+    let active_row = active.as_ref().map(RenderedAgentRun::detail_row);
     let base = IssueDetailBaseRow {
         id: req_str(row, "i_id")?,
         name: req_str(row, "i_name")?,
@@ -3012,20 +2920,6 @@ mod tests {
         unique.sort();
         unique.dedup();
         assert_eq!(unique.len(), actual.len());
-    }
-
-    #[test]
-    fn agent_run_aliases_break_collisions() {
-        for sql in [LATEST_AGENT_RUN_SQL, ACTIVE_AGENT_RUN_SQL] {
-            let aliased = agent_run_sql_aliased(sql);
-            assert!(aliased.contains("runner.name AS runner_name"));
-            assert!(aliased.contains("runner_live_state.llm_model AS live_llm_model"));
-            // The run's own `llm_model` keeps its bare name.
-            assert!(
-                aliased.contains("agent_run.llm_model,")
-                    || aliased.contains("agent_run.llm_model ")
-            );
-        }
     }
 
     #[test]

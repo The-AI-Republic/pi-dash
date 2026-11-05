@@ -10,7 +10,8 @@
 //!   --tables issues,issue_sequences,issue_assignees,issue_comments,descriptions,\
 //! issue_relations,users,profiles,accounts,user_notification_preferences,workspaces,\
 //! workspace_members,projects,project_members,states,api_tokens,machine_token,\
-//! runner_session,assistant_user_llm_config,assistant_message
+//! runner_session,assistant_user_llm_config,assistant_message,agent_run,runner,\
+//! runner_live_state
 //! ```
 //!
 //! The generator output is committed verbatim except for four mechanical
@@ -22,8 +23,22 @@
 //!   unresolved `super::<table>` paths. At generation time these were the
 //!   `assistant_thread` / `assistant_turn` relations of `assistant_message`,
 //!   `estimate_points` / `issue_types` / `pod` of `issues`, `dev_machine` of
-//!   `machine_token`, `estimates` / `file_assets` of `projects`, `runner` of
-//!   `runner_session`, `file_assets` of `users` (two) and of `workspaces`.
+//!   `machine_token`, `estimates` / `file_assets` of `projects`,
+//!   `file_assets` of `users` (two) and of `workspaces`.
+//! * The agent-run read set (`agent_run`, `runner`, `runner_live_state`,
+//!   added for `pidash_services::app_issues::agent_runs`) keeps only the
+//!   edges that reader joins: `agent_run` -> `runner` (`runner_id`),
+//!   `runner` -> `runner_live_state` and `runner_live_state` -> `runner`.
+//!   Every other edge the
+//!   generator emits for these three tables is deleted: the out-of-set
+//!   `pod`, `scheduler_bindings` and `dev_machine` relations, and the
+//!   in-set ones a reader would trip over (`agent_run` has two `runner`
+//!   edges and two `users` edges, so a `Related` impl for either would be
+//!   ambiguous). The `runner` relation of `runner_session` stays deleted
+//!   too: nothing joins it. The `issues` / `workspaces` edges are not
+//!   kept: nothing joins through them.
+//! * `work_item_id` loses the `#[sea_orm(unique)]` the generator infers
+//!   from the partial unique index `agent_run_one_active_per_work_item`.
 //! * This module doc is restored on top of the regenerated `mod.rs`.
 //! * The `#[cfg(test)] mod parity;` declaration at the bottom of this file
 //!   is restored (the parity test itself is hand-written).
@@ -48,6 +63,7 @@
 pub mod prelude;
 
 pub mod accounts;
+pub mod agent_run;
 pub mod api_tokens;
 pub mod assistant_message;
 pub mod assistant_user_llm_config;
@@ -63,6 +79,8 @@ pub mod machine_token;
 pub mod profiles;
 pub mod project_members;
 pub mod projects;
+pub mod runner;
+pub mod runner_live_state;
 pub mod runner_session;
 pub mod states;
 pub mod user_notification_preferences;
