@@ -250,8 +250,6 @@ def test_engine_grant_named_machine_must_match_token(db, web, create_user, works
 
 @override_settings(**ENABLED)
 def test_silent_approval_needs_own_machine(db, web, workspace, machine, lane):
-    start = _start("engine")
-    assert _approve(web, start["user_code"], interactive=False).status_code == 400  # no machine named
     stranger = User.objects.create(email="s2@example.com", username="s2")
     theirs = DevMachine.objects.create(owner=stranger, host_label="x")
     other = _start("engine")
@@ -296,6 +294,25 @@ def test_silent_approval_renews_an_expiring_engine(db, web, create_user, machine
     resp = _engine_login(web, mt, interactive=False, dev_machine_id=machine.id)
     assert resp.status_code == 200, resp.data
     assert resp.data["engine_sign_in_state"] == EngineSignInState.ACTIVE
+
+
+@override_settings(**ENABLED)
+def test_silent_approval_without_machine_is_checked_at_redemption(db, web, create_user, workspace, machine, mt, lane):
+    """The canonical silent body ``{user_code, workspace_slug, interactive:
+    false}`` names no machine; the redeeming token's machine is checked."""
+    _sign_in(create_user, machine)
+    start = _start("engine")
+    body = {"workspace_slug": "test-workspace", "interactive": False}
+    assert _approve(web, start["user_code"], **body).status_code == 200
+    ok = _poll(start["device_code"], bearer=mt)
+    assert ok.status_code == 200, ok.data
+
+    _client(bearer=mt).post("/api/v1/runner/engine/credential/revoke/", {}, format="json")
+    again = _start("engine")
+    assert _approve(web, again["user_code"], **body).status_code == 200
+    refused = _poll(again["device_code"], bearer=mt)
+    assert refused.status_code == 409
+    assert refused.data["error"] == "engine_silent_renewal_refused"
 
 
 @override_settings(**ENABLED)

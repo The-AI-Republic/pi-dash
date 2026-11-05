@@ -148,9 +148,11 @@ def _check_engine_grant_approval(row, user, *, requested_machine_id, interactive
     """Approval rules for an ``engine`` grant (design §4.3, §4.6).
 
     The machine (named at start by the CLI, or now by the app) must be the
-    approver's own. A silent approval must name it, and is refused when the
-    machine's engine was explicitly signed out or revoked: only an explicit
-    sign-in clears those. Returns ``(refusal_response, machine)``.
+    approver's own. A silent approval is refused when the machine's engine
+    was explicitly signed out or revoked: only an explicit sign-in clears
+    those. When no machine is named yet, the same rule is applied at
+    redemption to the redeeming token's machine. Returns
+    ``(refusal_response, machine)``.
     """
     machine_id = requested_machine_id or row.dev_machine_id
     if requested_machine_id and row.dev_machine_id and requested_machine_id != row.dev_machine_id:
@@ -160,19 +162,10 @@ def _check_engine_grant_approval(row, user, *, requested_machine_id, interactive
         machine = DevMachine.objects.filter(pk=machine_id).first()
         if machine is None or machine.owner_id != user.id or machine.revoked_at is not None:
             return Response({"error": "dev_machine_not_found"}, status=status.HTTP_404_NOT_FOUND), None
-    if interactive:
+    if interactive or machine is None:
+        # A silent approval that names no machine is checked at redemption,
+        # against the redeeming machine token's machine (same rules).
         return None, machine
-    if machine is None:
-        return (
-            Response(
-                {
-                    "error": "dev_machine_id_required",
-                    "error_description": "A silent engine approval must name the computer it is for.",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            ),
-            None,
-        )
     state = machine.current_engine_sign_in_state()
     if state in SILENT_RENEWAL_REFUSED_STATES:
         logger.info(
