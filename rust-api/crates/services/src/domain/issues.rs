@@ -2495,6 +2495,21 @@ where
 
 const TOUCH_ISSUE_SQL: &str = "UPDATE issues SET updated_at = NOW() WHERE id = $1";
 
+/// The pod-delete sweep (`pods.py:262-264`):
+/// `Issue.objects.filter(assigned_pod=pod).update(assigned_pod=None)`, a
+/// `QuerySet.update` (no `save()` hooks) over the live issues.
+pub async fn clear_assigned_pod(db: &impl ConnectionTrait, pod_id: Uuid) -> Result<u64, DbErr> {
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    issues::Entity::update_many()
+        .col_expr(issues::Column::AssignedPodId, Expr::value(None::<Uuid>))
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(issues::Column::AssignedPodId.eq(pod_id))
+        .exec(db)
+        .await
+        .map(|done| done.rows_affected)
+}
+
 /// The `issue_activity` issue touch (`issue.updated_at =
 /// timezone.now(); save(update_fields=["updated_at"])`,
 /// `issue_activities_task.py:1535-1536`): no soft-delete guard —
