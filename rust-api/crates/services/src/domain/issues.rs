@@ -717,8 +717,9 @@ pub struct FireSpec {
 /// An `issue_activity` enqueue with its origin pre-resolved by the driver
 /// at the original point (`base_host` raises past the save). `notification`
 /// is `Some(true)` on the app paths and `None` (key omitted) on the v1
-/// paths; `require_origin` keeps the app stop-on-`None` while the v1 legs
-/// enqueue with the key omitted.
+/// paths; `require_origin` is the per-view key shape — `true` keeps the
+/// app stop-on-`None`, `false` omits the key even when `origin` is `Some`
+/// (a driver threading its model-leg origin through the shared field).
 #[derive(Debug, Clone)]
 pub struct IssueActivitySpec {
     pub event: String,
@@ -1020,13 +1021,18 @@ pub(crate) async fn run_chain(
                 }
             }
             ChainEffect::IssueActivity(spec) => {
-                let origin = match spec.origin {
-                    Some(origin) => Some(origin),
-                    None if spec.require_origin => {
+                // `require_origin` is the per-view key shape, not just
+                // the stop-on-`None`: a `false` leg omits `origin` even
+                // when the driver threaded its model-leg origin through
+                // the shared spec field (the v1 patch's
+                // `UpdateActivity.origin`, NEWPIDASH-47).
+                let origin = match (spec.require_origin, spec.origin) {
+                    (true, Some(origin)) => Some(origin),
+                    (true, None) => {
                         outcome.record(ChainStop::Origin);
                         break;
                     }
-                    None => None,
+                    (false, _) => None,
                 };
                 let kwargs = issue_activity_kwargs(
                     &spec.event,
@@ -1405,6 +1411,9 @@ pub async fn update(
 /// enqueue no version task (`api/views/issue.py:844-865`) and omit the
 /// `issue_activity` notification/origin keys — `emit_version`,
 /// `notification` and `require_origin` carry those per-view shapes.
+/// `origin` feeds the `model_activity` leg on every path; the issue leg
+/// drops it unless `require_origin` (the v1 patch shares one
+/// pre-resolved `base_host` origin for the model leg only).
 pub struct UpdateActivity {
     pub origin: Option<String>,
     pub requested: String,
@@ -4646,6 +4655,53 @@ mod tests {
                 current: Value::Null,
                 notification: None,
                 origin: None,
+                require_origin: false,
+                subscriber: None,
+            })],
+            &outcome,
+        )
+        .await;
+        assert!(outcome.stopped().is_none());
+        let calls = enqueue.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, ISSUE_ACTIVITY_TASK);
+        assert!(!calls[0].2.contains_key("notification"));
+        assert!(!calls[0].2.contains_key("origin"));
+    }
+
+    #[tokio::test]
+    async fn v1_updated_leg_drops_shared_model_origin() {
+        // The v1 patch (`api/views/issue.py:843-865`) sends `origin`
+        // only to `model_activity`; its `issue_activity` carries
+        // neither key. The driver threads one pre-resolved `base_host`
+        // origin through `UpdateActivity` for the model leg, so the
+        // issue leg must drop it (NEWPIDASH-47).
+        let pool = lazy_pool();
+        let transition = Arc::new(RecordingTransition {
+            comments: Mutex::new(Vec::new()),
+            fires: Mutex::new(Vec::new()),
+            fire_result: Mutex::new(Ok(FireOutcome::NoTransition)),
+        });
+        let erased_transition: Arc<dyn IssueTransitionHook> = transition.clone();
+        let enqueue = Arc::new(RecordingEnqueue {
+            calls: Mutex::new(Vec::new()),
+        });
+        let erased_enqueue: Arc<dyn TaskEnqueueHook> = enqueue.clone();
+        let outcome = ChainOutcome::new();
+        run_chain(
+            &pool,
+            &erased_transition,
+            &erased_enqueue,
+            None,
+            vec![ChainEffect::IssueActivity(IssueActivitySpec {
+                event: "issue.activity.updated".to_owned(),
+                requested: Value::String("req".to_owned()),
+                actor: uid(1),
+                issue: uid(2),
+                project: uid(3),
+                current: Value::String("cur".to_owned()),
+                notification: None,
+                origin: Some("https://app.example".to_owned()),
                 require_origin: false,
                 subscriber: None,
             })],
