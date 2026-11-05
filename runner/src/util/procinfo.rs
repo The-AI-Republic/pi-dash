@@ -38,8 +38,8 @@ pub struct ProcInfo {
     /// Process start time, milliseconds since the Unix epoch. Comparable
     /// across processes on the same boot.
     pub start_time_ms: u64,
-    /// Exited but not yet reaped. Counts as a group member for `kill(2)`,
-    /// but can never run again.
+    /// Exited but not yet reaped, or already exiting (macOS `P_WEXIT`).
+    /// Counts as a group member for `kill(2)`, but can never run again.
     pub zombie: bool,
 }
 
@@ -165,19 +165,36 @@ pub fn parse_linux_stat(stat: &str) -> Option<(char, i32, u64)> {
     Some((state, pgid, start))
 }
 
+/// `SZOMB` from macOS `<sys/proc.h>`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const MACOS_SZOMB: u32 = 5;
+/// `P_WEXIT` from macOS `<sys/proc.h>`: the process is working on exiting.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) const MACOS_P_WEXIT: i32 = 0x0000_2000;
+
+/// Whether a macOS `kinfo_proc` entry can never run again: a zombie, or a
+/// process that is still exiting. Right after SIGKILL macOS shows the
+/// process as `SRUN` with `P_WEXIT` set before it turns into `SZOMB`, and
+/// `kill(-pgid, _)` already answers EPERM in that state.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn macos_exited_or_exiting(p_stat: u32, p_flag: i32) -> bool {
+    p_stat == MACOS_SZOMB || p_flag & MACOS_P_WEXIT != 0
+}
+
 /// Combine a kernel group listing that includes zombies (macOS
 /// `KERN_PROC_PGRP`) with per-process details that only exist for live
 /// processes (macOS `proc_pidinfo`).
 ///
-/// * A zombie keeps its listed values: it can never run again, and the live
-///   lookup cannot see it.
+/// * A zombie or exiting entry keeps its listed values: it can never run
+///   again, and the live lookup either cannot see it or would still report
+///   it as running.
 /// * A live entry takes the live details when the lookup still places it in
 ///   `pgid`, and is dropped when it has moved to another group since.
 /// * A live entry the lookup cannot read (it exited or became a zombie in
 ///   between) keeps its listed values and stays live, so a caller never
 ///   mistakes it for gone; the next poll sees its new state.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn merge_group_members(
+pub(crate) fn merge_group_members(
     pgid: i32,
     listed: Vec<ProcInfo>,
     live: impl Fn(i32) -> Option<ProcInfo>,
@@ -330,7 +347,7 @@ mod imp {
 
     /// `struct extern_proc` from `<sys/proc.h>` (64-bit layout). `libc` does
     /// not export `kinfo_proc` for Apple targets; only `p_starttime`,
-    /// `p_stat` and `p_pid` are read, the rest is layout.
+    /// `p_flag`, `p_stat` and `p_pid` are read, the rest is layout.
     #[repr(C)]
     struct ExternProc {
         p_starttime: libc::timeval,
@@ -440,7 +457,9 @@ mod imp {
     // `sizeof(struct kinfo_proc)` is 648 on 64-bit macOS (x86_64 and arm64).
     const _: () = assert!(std::mem::size_of::<KinfoProc>() == 648);
     const _: () = assert!(std::mem::offset_of!(KinfoProc, kp_eproc) == 296);
+    const _: () = assert!(std::mem::offset_of!(ExternProc, p_flag) == 32);
     const _: () = assert!(std::mem::offset_of!(ExternProc, p_stat) == 36);
+    const _: () = assert!(super::MACOS_SZOMB == libc::SZOMB);
     const _: () = assert!(std::mem::offset_of!(ExternProc, p_pid) == 40);
     const _: () = assert!(std::mem::offset_of!(Eproc, e_ucred) == 120);
     const _: () = assert!(std::mem::offset_of!(Eproc, e_pgid) == 268);
@@ -497,7 +516,10 @@ mod imp {
                     pgid: k.kp_eproc.e_pgid,
                     uid: k.kp_eproc.e_ucred.cr_uid,
                     start_time_ms: (tv.tv_sec as u64) * 1000 + (tv.tv_usec as u64) / 1000,
-                    zombie: k.kp_proc.p_stat as u32 == libc::SZOMB,
+                    zombie: super::macos_exited_or_exiting(
+                        k.kp_proc.p_stat as u32,
+                        k.kp_proc.p_flag,
+                    ),
                 }
             })
             .collect();
@@ -635,6 +657,37 @@ mod tests {
                 proc(13, 10, 4_000, false),
             ]
         );
+    }
+
+    #[test]
+    fn an_exiting_macos_entry_counts_as_unable_to_run() {
+        // States seen on macOS after SIGKILL: (SRUN, P_WEXIT), then
+        // (SZOMB, P_WEXIT). Both can never run again; plain SRUN can.
+        const SRUN: u32 = 2;
+        assert!(macos_exited_or_exiting(SRUN, MACOS_P_WEXIT));
+        assert!(macos_exited_or_exiting(MACOS_SZOMB, MACOS_P_WEXIT));
+        assert!(macos_exited_or_exiting(MACOS_SZOMB, 0));
+        assert!(!macos_exited_or_exiting(SRUN, 0));
+        // Other flags alone do not make a process exiting.
+        assert!(!macos_exited_or_exiting(SRUN, 0x0000_0004));
+    }
+
+    #[test]
+    fn an_exiting_entry_stays_exiting_whatever_the_live_lookup_says() {
+        // An entry listed as (SRUN, P_WEXIT): the live lookup either cannot
+        // read it, or still reports it as running. Either way it is treated
+        // as exiting, so an EPERM group of such members resolves to Gone.
+        const SRUN: u32 = 2;
+        let exiting = |pid| ProcInfo {
+            zombie: macos_exited_or_exiting(SRUN, MACOS_P_WEXIT),
+            ..proc(pid, 10, 1_000, false)
+        };
+        let unreadable = merge_group_members(10, vec![exiting(10)], |_| None);
+        assert_eq!(unreadable, vec![proc(10, 10, 1_000, true)]);
+        let still_running = merge_group_members(10, vec![exiting(10)], |pid| {
+            Some(proc(pid, 10, 1_000, false))
+        });
+        assert_eq!(still_running, vec![proc(10, 10, 1_000, true)]);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

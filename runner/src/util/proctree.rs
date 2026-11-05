@@ -1734,6 +1734,39 @@ mod tests {
     }
 
     #[test]
+    fn eperm_with_only_exiting_members_is_gone() {
+        // macOS right after SIGKILL: the member is listed as SRUN with
+        // P_WEXIT, the live lookup may still read it as running, and
+        // kill(-pgid) is already EPERM. It can never run again: Gone.
+        use crate::util::procinfo::{MACOS_P_WEXIT, macos_exited_or_exiting, merge_group_members};
+        const SRUN: u32 = 2;
+        let exiting = || {
+            let listed = vec![crate::util::procinfo::ProcInfo {
+                zombie: macos_exited_or_exiting(SRUN, MACOS_P_WEXIT),
+                ..member(4242, false)
+            }];
+            merge_group_members(4242, listed, |pid| Some(member(pid, false)))
+        };
+        assert_eq!(
+            classify_kill(KillResult::NotPermitted, exiting),
+            Probe::Gone
+        );
+        assert_eq!(signal_result(KillResult::NotPermitted, exiting), Err(true));
+        // A plain running member (no P_WEXIT) is still could-not-clean.
+        let running = || {
+            let listed = vec![crate::util::procinfo::ProcInfo {
+                zombie: macos_exited_or_exiting(SRUN, 0),
+                ..member(4242, false)
+            }];
+            merge_group_members(4242, listed, |pid| Some(member(pid, false)))
+        };
+        assert_eq!(
+            classify_kill(KillResult::NotPermitted, running),
+            Probe::Denied
+        );
+    }
+
+    #[test]
     fn eperm_with_a_live_member_is_still_could_not_clean() {
         let mixed = || vec![member(4242, true), member(4243, false)];
         assert_eq!(
