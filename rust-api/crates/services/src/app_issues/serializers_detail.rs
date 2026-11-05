@@ -602,8 +602,8 @@ pub struct AgentStatusView<'a> {
 ///
 /// `ticker` is the already-rendered `agent_ticker` block (or `None` without
 /// a ticker row); `active_run` / `latest_run` are the
-/// [`ACTIVE_AGENT_RUN_SQL`] / [`LATEST_AGENT_RUN_SQL`] rows (or `None`
-/// without one); `run_count` is the [`AGENT_RUN_COUNT_SQL`] verdict.
+/// runs from [`super::agent_runs::issue_agent_runs`] (or `None` without
+/// one); `run_count` is its [`super::agent_runs::IssueAgentRuns::count`].
 /// Returns `None` when the ticker block is `None` and there is no latest
 /// run (`:1404-1405`). The active run always carries live state; the latest
 /// carries it only when there is no active run (`:1410-1411`).
@@ -1096,24 +1096,6 @@ pub const ACTIVE_RUN_STATUSES: [&str; 8] = [
     "awaiting_reauth",
     "paused_awaiting_input",
 ];
-
-/// `runs.select_related("runner__live_state").order_by("-created_at").first()`
-/// (`issue.py:1385`): newest run for the issue, whatever its status. `$1`
-/// is the issue id. No tiebreak — Django emits none either. No
-/// soft-delete guard — `AgentRun` is a plain `Model`. The projection is
-/// the 15 `agent_run` columns the serializer reads, the joined
-/// `runner.name`, and the 13 `runner_live_state` columns (Django would
-/// select whole rows; this is the serializer-read subset, same rows).
-pub const LATEST_AGENT_RUN_SQL: &str = "SELECT agent_run.id, agent_run.status, agent_run.executor_kind, agent_run.runner_id, agent_run.created_at, agent_run.assigned_at, agent_run.started_at, agent_run.ended_at, agent_run.done_payload, COALESCE(agent_run.error_details->>'message', '') AS error, COALESCE(agent_run.error_details->>'code', '') AS error_code, agent_run.llm_model, agent_run.input_tokens, agent_run.output_tokens, agent_run.total_tokens, runner.name, runner_live_state.observed_run_id, runner_live_state.last_event_at, runner_live_state.last_event_kind, runner_live_state.last_event_summary, runner_live_state.agent_pid, runner_live_state.agent_subprocess_alive, runner_live_state.approvals_pending, runner_live_state.usage, runner_live_state.llm_model AS live_llm_model, runner_live_state.turn_count, runner_live_state.agent_health, runner_live_state.agent_last_activity_at, runner_live_state.updated_at FROM agent_run LEFT JOIN runner ON runner.id = agent_run.runner_id LEFT JOIN runner_live_state ON runner_live_state.runner_id = runner.id WHERE agent_run.work_item_id = $1 ORDER BY agent_run.created_at DESC LIMIT 1";
-
-/// The active run (`issue.py:1386-1402`): the newest run in one of the
-/// [`ACTIVE_RUN_STATUSES`]. Same projection and joins as
-/// [`LATEST_AGENT_RUN_SQL`]; the `IN` list carries the verbatim values.
-pub const ACTIVE_AGENT_RUN_SQL: &str = "SELECT agent_run.id, agent_run.status, agent_run.executor_kind, agent_run.runner_id, agent_run.created_at, agent_run.assigned_at, agent_run.started_at, agent_run.ended_at, agent_run.done_payload, COALESCE(agent_run.error_details->>'message', '') AS error, COALESCE(agent_run.error_details->>'code', '') AS error_code, agent_run.llm_model, agent_run.input_tokens, agent_run.output_tokens, agent_run.total_tokens, runner.name, runner_live_state.observed_run_id, runner_live_state.last_event_at, runner_live_state.last_event_kind, runner_live_state.last_event_summary, runner_live_state.agent_pid, runner_live_state.agent_subprocess_alive, runner_live_state.approvals_pending, runner_live_state.usage, runner_live_state.llm_model AS live_llm_model, runner_live_state.turn_count, runner_live_state.agent_health, runner_live_state.agent_last_activity_at, runner_live_state.updated_at FROM agent_run LEFT JOIN runner ON runner.id = agent_run.runner_id LEFT JOIN runner_live_state ON runner_live_state.runner_id = runner.id WHERE agent_run.work_item_id = $1 AND agent_run.status IN ('queued', 'assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth', 'paused_awaiting_input') ORDER BY agent_run.created_at DESC LIMIT 1";
-
-/// `runs.count()` (`issue.py:1412`): every run for the issue, all statuses,
-/// no join. `$1` is the issue id.
-pub const AGENT_RUN_COUNT_SQL: &str = "SELECT COUNT(*) FROM agent_run WHERE work_item_id = $1";
 
 #[cfg(test)]
 mod tests {
@@ -1816,79 +1798,6 @@ mod tests {
         let bytes = serde_json::to_string(&view).expect("serializes");
         assert!(bytes.contains("\"state\":null"), "{bytes}");
         assert!(bytes.contains("\"state_detail\":null"), "{bytes}");
-    }
-
-    #[test]
-    fn run_sql_pins_tables_joins_and_predicates() {
-        // TRACE: issue.py:1384-1385 (latest), :1386-1402 (active),
-        // :1412 (count); runner/models.py tables.
-        for sql in [LATEST_AGENT_RUN_SQL, ACTIVE_AGENT_RUN_SQL] {
-            assert!(sql.starts_with("SELECT agent_run.id"), "{sql}");
-            assert!(
-                sql.contains(
-                    "FROM agent_run LEFT JOIN runner ON runner.id = agent_run.runner_id \
-                     LEFT JOIN runner_live_state ON runner_live_state.runner_id = runner.id"
-                ),
-                "{sql}"
-            );
-            assert!(sql.contains("agent_run.work_item_id = $1"), "{sql}");
-            assert!(sql.contains("runner_live_state.usage"), "{sql}");
-            // sqlx resolves a duplicated output name to the LAST column, so
-            // a bare second `llm_model` shadows the run's own (and a NULL
-            // live model then fails the run's non-null decode).
-            let select = sql
-                .strip_prefix("SELECT ")
-                .and_then(|rest| rest.split(" FROM agent_run ").next())
-                .expect("select list");
-            // Split on top-level commas only (`COALESCE(x, '')` has one).
-            let mut columns = Vec::new();
-            let (mut depth, mut start) = (0usize, 0usize);
-            for (at, ch) in select.char_indices() {
-                match ch {
-                    '(' => depth += 1,
-                    ')' => depth -= 1,
-                    ',' if depth == 0 => {
-                        columns.push(select[start..at].trim());
-                        start = at + 1;
-                    }
-                    _ => {}
-                }
-            }
-            columns.push(select[start..].trim());
-            let mut names: Vec<&str> = columns
-                .into_iter()
-                .map(|col| {
-                    col.rsplit(" AS ")
-                        .next()
-                        .and_then(|name| name.rsplit('.').next())
-                        .expect("column name")
-                })
-                .collect();
-            assert_eq!(names.len(), 29, "{sql}");
-            names.sort_unstable();
-            let total = names.len();
-            names.dedup();
-            assert_eq!(names.len(), total, "duplicate output column in {sql}");
-            assert!(!sql.contains("deleted_at"), "{sql}");
-            assert!(
-                sql.ends_with("ORDER BY agent_run.created_at DESC LIMIT 1"),
-                "{sql}"
-            );
-        }
-        assert!(
-            !LATEST_AGENT_RUN_SQL.contains("agent_run.status IN"),
-            "latest is unfiltered"
-        );
-        for status in ACTIVE_RUN_STATUSES {
-            assert!(
-                ACTIVE_AGENT_RUN_SQL.contains(&format!("'{status}'")),
-                "active filters {status}"
-            );
-        }
-        assert_eq!(
-            AGENT_RUN_COUNT_SQL,
-            "SELECT COUNT(*) FROM agent_run WHERE work_item_id = $1"
-        );
     }
 
     #[test]

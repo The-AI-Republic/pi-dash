@@ -77,10 +77,10 @@ use sqlx::Row;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS, TABLE as TICKER_TABLE,
 };
+use pidash_services::app_issues::agent_runs::{self, RenderedAgentRun};
 use pidash_services::app_issues::{
     issue_detail_base_to_representation, issue_detail_to_representation, issue_is_actively_synced,
-    on_results_fields, order_sql, raw_group_mismatch, serialize_drf_datetime,
-    serialize_iso_datetime, AgentLiveStateRow, AgentRunDetailRow, AgentTickerInput,
+    on_results_fields, order_sql, raw_group_mismatch, serialize_drf_datetime, AgentTickerInput,
     IssueDetailBaseRow, IssueDetailRow, ListParams, ParseOptions, GITHUB_ISSUE_SYNC_PROBE_SQL,
     GIT_ISSUE_SYNC_PROBE_SQL,
 };
@@ -696,48 +696,10 @@ struct DetailOwned {
     policy: ProjectClockPolicy,
     state_name: Option<String>,
     state_group: Option<String>,
-    latest_run: Option<OwnedRun>,
-    active_run: Option<OwnedRun>,
+    latest_run: Option<RenderedAgentRun>,
+    active_run: Option<RenderedAgentRun>,
     run_count: i64,
     blockers: pidash_services::orchestration::blockers::RelationsSummary,
-}
-
-/// An agent-run row with its joined runner/live facts, all owned.
-struct OwnedRun {
-    id: String,
-    status: String,
-    executor_kind: String,
-    runner_id: Option<String>,
-    runner_name: Option<String>,
-    created_at: String,
-    assigned_at: Option<String>,
-    started_at: Option<String>,
-    ended_at: Option<String>,
-    done_payload: Option<Value>,
-    error: String,
-    error_code: String,
-    llm_model: String,
-    input_tokens: Option<i64>,
-    output_tokens: Option<i64>,
-    total_tokens: Option<i64>,
-    live_state: Option<OwnedLiveState>,
-}
-
-/// A joined live-state row, all owned.
-struct OwnedLiveState {
-    observed_run_id: Option<String>,
-    last_event_at: Option<String>,
-    last_event_kind: Option<String>,
-    last_event_summary: Option<String>,
-    agent_pid: Option<i32>,
-    agent_subprocess_alive: Option<bool>,
-    approvals_pending: Option<i32>,
-    usage: Value,
-    llm_model: Option<String>,
-    turn_count: Option<i32>,
-    agent_health: Option<String>,
-    agent_last_activity_at: Option<String>,
-    updated_at: String,
 }
 
 impl DetailOwned {
@@ -766,9 +728,10 @@ impl DetailOwned {
                 }
             }
         };
-        let latest_run = fetch_agent_run(pool, true, issue_id).await?;
-        let active_run = fetch_agent_run(pool, false, issue_id).await?;
-        let run_count = fetch_run_count(pool, issue_id).await?;
+        let runs = agent_runs::issue_agent_runs(pool, issue_id)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        let (latest_run, active_run, run_count) = (runs.latest, runs.active, runs.count);
         let blockers = fetch_blockers(pool, issue_id).await?;
         Ok(Self {
             id,
@@ -859,48 +822,10 @@ impl DetailOwned {
                 policy: &self.policy,
                 state,
             }),
-            latest_run: self.latest_run.as_ref().map(OwnedRun::view),
-            active_run: self.active_run.as_ref().map(OwnedRun::view),
+            latest_run: self.latest_run.as_ref().map(RenderedAgentRun::detail_row),
+            active_run: self.active_run.as_ref().map(RenderedAgentRun::detail_row),
             run_count: self.run_count,
             blockers: &self.blockers,
-        }
-    }
-}
-
-impl OwnedRun {
-    fn view(&self) -> AgentRunDetailRow<'_> {
-        AgentRunDetailRow {
-            id: &self.id,
-            status: &self.status,
-            executor_kind: &self.executor_kind,
-            runner_id: self.runner_id.as_deref(),
-            runner_name: self.runner_name.as_deref(),
-            created_at: &self.created_at,
-            assigned_at: self.assigned_at.as_deref(),
-            started_at: self.started_at.as_deref(),
-            ended_at: self.ended_at.as_deref(),
-            done_payload: self.done_payload.as_ref(),
-            error: &self.error,
-            error_code: &self.error_code,
-            llm_model: &self.llm_model,
-            input_tokens: self.input_tokens,
-            output_tokens: self.output_tokens,
-            total_tokens: self.total_tokens,
-            live_state: self.live_state.as_ref().map(|live| AgentLiveStateRow {
-                observed_run_id: live.observed_run_id.as_deref(),
-                last_event_at: live.last_event_at.as_deref(),
-                last_event_kind: live.last_event_kind.as_deref(),
-                last_event_summary: live.last_event_summary.as_deref(),
-                agent_pid: live.agent_pid,
-                agent_subprocess_alive: live.agent_subprocess_alive,
-                approvals_pending: live.approvals_pending,
-                usage: &live.usage,
-                llm_model: live.llm_model.as_deref(),
-                turn_count: live.turn_count,
-                agent_health: live.agent_health.as_deref(),
-                agent_last_activity_at: live.agent_last_activity_at.as_deref(),
-                updated_at: &live.updated_at,
-            }),
         }
     }
 }
@@ -1074,115 +999,6 @@ async fn fetch_state(
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(row.map(|(_, name, group)| (name, group)))
-}
-
-/// `LATEST_AGENT_RUN_SQL` / `ACTIVE_AGENT_RUN_SQL`, mapped positionally:
-/// both `llm_model` columns share one name, so name lookup cannot tell
-/// the run's from the live row's. Positions follow the consts' select
-/// order (29 columns; anything else is a 500). A NULL live `updated_at`
-/// means the join missed, so there is no live row.
-async fn fetch_agent_run(
-    pool: &sqlx::PgPool,
-    latest: bool,
-    issue_id: uuid::Uuid,
-) -> Result<Option<OwnedRun>, Denial> {
-    use pidash_services::app_issues::{ACTIVE_AGENT_RUN_SQL, LATEST_AGENT_RUN_SQL};
-    let sql = if latest {
-        LATEST_AGENT_RUN_SQL
-    } else {
-        ACTIVE_AGENT_RUN_SQL
-    };
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(sql)
-        .bind(issue_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    if row.len() != 29 {
-        return Err(Denial::ServerError);
-    }
-    let id: uuid::Uuid = row.try_get(0).map_err(|_| Denial::ServerError)?;
-    let status: String = row.try_get(1).map_err(|_| Denial::ServerError)?;
-    let executor_kind: String = row.try_get(2).map_err(|_| Denial::ServerError)?;
-    let runner_id: Option<uuid::Uuid> = row.try_get(3).map_err(|_| Denial::ServerError)?;
-    let created_at: chrono::DateTime<chrono::Utc> =
-        row.try_get(4).map_err(|_| Denial::ServerError)?;
-    let assigned_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get(5).map_err(|_| Denial::ServerError)?;
-    let started_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get(6).map_err(|_| Denial::ServerError)?;
-    let ended_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get(7).map_err(|_| Denial::ServerError)?;
-    let done_payload: Option<Value> = row.try_get(8).map_err(|_| Denial::ServerError)?;
-    let error: String = row.try_get(9).map_err(|_| Denial::ServerError)?;
-    let error_code: String = row.try_get(10).map_err(|_| Denial::ServerError)?;
-    let llm_model: String = row.try_get(11).map_err(|_| Denial::ServerError)?;
-    let input_tokens: Option<i64> = row.try_get(12).map_err(|_| Denial::ServerError)?;
-    let output_tokens: Option<i64> = row.try_get(13).map_err(|_| Denial::ServerError)?;
-    let total_tokens: Option<i64> = row.try_get(14).map_err(|_| Denial::ServerError)?;
-    let runner_name: Option<String> = row.try_get(15).map_err(|_| Denial::ServerError)?;
-    let observed_run_id: Option<uuid::Uuid> = row.try_get(16).map_err(|_| Denial::ServerError)?;
-    let last_event_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get(17).map_err(|_| Denial::ServerError)?;
-    let last_event_kind: Option<String> = row.try_get(18).map_err(|_| Denial::ServerError)?;
-    let last_event_summary: Option<String> = row.try_get(19).map_err(|_| Denial::ServerError)?;
-    let agent_pid: Option<i32> = row.try_get(20).map_err(|_| Denial::ServerError)?;
-    let agent_subprocess_alive: Option<bool> = row.try_get(21).map_err(|_| Denial::ServerError)?;
-    let approvals_pending: Option<i32> = row.try_get(22).map_err(|_| Denial::ServerError)?;
-    let usage: Option<Value> = row.try_get(23).map_err(|_| Denial::ServerError)?;
-    let live_llm_model: Option<String> = row.try_get(24).map_err(|_| Denial::ServerError)?;
-    let turn_count: Option<i32> = row.try_get(25).map_err(|_| Denial::ServerError)?;
-    let agent_health: Option<String> = row.try_get(26).map_err(|_| Denial::ServerError)?;
-    let agent_last_activity_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get(27).map_err(|_| Denial::ServerError)?;
-    let live_updated_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get(28).map_err(|_| Denial::ServerError)?;
-    Ok(Some(OwnedRun {
-        id: id.to_string(),
-        status,
-        executor_kind,
-        runner_id: runner_id.map(|id| id.to_string()),
-        runner_name,
-        created_at: serialize_iso_datetime(created_at),
-        assigned_at: assigned_at.map(serialize_iso_datetime),
-        started_at: started_at.map(serialize_iso_datetime),
-        ended_at: ended_at.map(serialize_iso_datetime),
-        done_payload,
-        error,
-        error_code,
-        llm_model,
-        input_tokens,
-        output_tokens,
-        total_tokens,
-        live_state: live_updated_at.map(|updated_at| OwnedLiveState {
-            observed_run_id: observed_run_id.map(|id| id.to_string()),
-            last_event_at: last_event_at.map(serialize_iso_datetime),
-            last_event_kind,
-            last_event_summary,
-            agent_pid,
-            agent_subprocess_alive,
-            approvals_pending,
-            usage: usage.unwrap_or(Value::Null),
-            llm_model: live_llm_model,
-            turn_count,
-            agent_health,
-            agent_last_activity_at: agent_last_activity_at.map(serialize_iso_datetime),
-            updated_at: serialize_iso_datetime(updated_at),
-        }),
-    }))
-}
-
-/// `AGENT_RUN_COUNT_SQL`.
-async fn fetch_run_count(pool: &sqlx::PgPool, issue_id: uuid::Uuid) -> Result<i64, Denial> {
-    use pidash_services::app_issues::AGENT_RUN_COUNT_SQL;
-    let row: Option<(i64,)> = sqlx::query_as(AGENT_RUN_COUNT_SQL)
-        .bind(issue_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ServerError)
 }
 
 /// One cached `relations_summary` over the two summary statements plus

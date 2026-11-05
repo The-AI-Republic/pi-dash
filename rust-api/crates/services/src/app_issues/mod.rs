@@ -30,6 +30,7 @@
 //!   "state__group"]` is always true on that branch, so the `[::-1]`
 //!   alternative is dead. [`order_sql`] copies the dead branch.
 
+pub mod agent_runs;
 /// Work-item move (`utils/issue_move.py`, PIDASHCONV-650). `move` is a
 /// Rust keyword, so the module lives at `move.rs` via an explicit path
 /// (the `loop_scan` precedent).
@@ -102,11 +103,11 @@ pub use serializers_detail::{
     AgentRunDetailRow, AgentRunView, AgentStatusView, AgentTickerInput, AgentTickerView,
     AppIssueReactionRow, AppIssueReactionView, AppIssueVoteRow, AppIssueVoteView,
     IssueDetailBaseRow, IssueDetailBaseView, IssueDetailRow, IssueDetailView, IssueLiteRow,
-    IssueLiteView, IssuePublicRow, IssuePublicView, ACTIVE_AGENT_RUN_SQL, ACTIVE_RUN_STATUSES,
-    AGENT_LIVE_STATE_FIELDS, AGENT_RUN_COUNT_SQL, AGENT_RUN_FIELDS, AGENT_STATUS_FIELDS,
-    AGENT_TICKER_FIELDS, APP_ISSUE_REACTION_FIELDS, APP_ISSUE_VOTE_FIELDS, ERROR_DIAGNOSTIC_FIELDS,
-    ISSUE_DETAIL_ARCHIVE_FIELDS, ISSUE_DETAIL_BASE_FIELDS, ISSUE_DETAIL_FIELDS,
-    ISSUE_DETAIL_RETRIEVE_FIELDS, ISSUE_LITE_FIELDS, ISSUE_PUBLIC_FIELDS, LATEST_AGENT_RUN_SQL,
+    IssueLiteView, IssuePublicRow, IssuePublicView, ACTIVE_RUN_STATUSES, AGENT_LIVE_STATE_FIELDS,
+    AGENT_RUN_FIELDS, AGENT_STATUS_FIELDS, AGENT_TICKER_FIELDS, APP_ISSUE_REACTION_FIELDS,
+    APP_ISSUE_VOTE_FIELDS, ERROR_DIAGNOSTIC_FIELDS, ISSUE_DETAIL_ARCHIVE_FIELDS,
+    ISSUE_DETAIL_BASE_FIELDS, ISSUE_DETAIL_FIELDS, ISSUE_DETAIL_RETRIEVE_FIELDS, ISSUE_LITE_FIELDS,
+    ISSUE_PUBLIC_FIELDS,
 };
 pub use serializers_engage::{
     app_issue_flat_to_representation, comment_is_actively_synced, issue_activity_to_representation,
