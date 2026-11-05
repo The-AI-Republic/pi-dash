@@ -93,10 +93,11 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
-use sea_orm::sea_query::Expr;
+use sea_orm::sea_query::extension::postgres::PgFunc;
+use sea_orm::sea_query::{Alias, Asterisk, Expr, Func, Query, SelectStatement, SimpleExpr};
 use sea_orm::{
-    ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, JoinType, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    ColumnTrait, Condition, DbErr, EntityTrait, FromQueryResult, JoinType, PaginatorTrait,
+    QueryFilter, QueryOrder, QueryResult, QuerySelect, RelationTrait,
 };
 use serde_json::{Map, Value};
 use uuid::Uuid;
@@ -140,7 +141,6 @@ use pidash_services::domain::issues::IssueFieldSet as IssueSaveRow;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
-use pidash_services::orchestration::creation::state_name_group;
 use pidash_services::read;
 use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
 use pidash_types::orchestration::StateRef;
@@ -3145,128 +3145,288 @@ struct IssueAnnotations {
 }
 
 /// Django's grouped `COUNT(id)` subquery yields no row (SQL `NULL`) when
-/// nothing matches.
-fn null_if_zero(count: u64) -> Option<i64> {
-    (count > 0).then_some(count as i64)
+/// nothing matches; the subquery here counts, and zero reads as `None`.
+fn null_if_zero(count: i64) -> Option<i64> {
+    (count > 0).then_some(count)
 }
 
-/// `ArrayAgg(..., distinct=True)` with the empty-array default: distinct
-/// ids in ascending order (Postgres sorts a `DISTINCT` aggregate's input;
-/// `Uuid` orders by bytes, as Postgres's `uuid` does).
-fn distinct_ids(ids: Vec<Uuid>) -> Vec<Uuid> {
-    ids.into_iter()
+/// `ArrayAgg(..., distinct=True)` with the empty-array default: an empty
+/// aggregate is SQL `NULL` → `[]`. Postgres sorts a `DISTINCT` aggregate's
+/// input; the re-sort pins that order (`Uuid` orders by bytes, as
+/// Postgres's `uuid` does) without relying on the executor.
+fn distinct_ids(ids: Option<Vec<Uuid>>) -> Vec<Uuid> {
+    ids.unwrap_or_default()
+        .into_iter()
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect()
 }
 
-async fn fetch_issue_annotations(
-    db: &impl ConnectionTrait,
-    issue_id: Uuid,
+/// The outer row's `issues.id`, the correlation key of every annotation.
+fn outer_issue_id() -> SimpleExpr {
+    Expr::col((issues::Entity, issues::Column::Id)).into()
+}
+
+fn scalar(query: SelectStatement) -> SimpleExpr {
+    SimpleExpr::SubQuery(None, Box::new(query.into_sub_query_statement()))
+}
+
+/// `(SELECT COUNT(*) FROM <query>)` as a scalar subquery.
+fn count_of(mut query: SelectStatement) -> SimpleExpr {
+    query.expr(Func::count(Expr::col(Asterisk)));
+    scalar(query)
+}
+
+/// `(SELECT ARRAY_AGG(DISTINCT <column>) FROM <query>)`.
+fn distinct_array_of(mut query: SelectStatement, column: SimpleExpr) -> SimpleExpr {
+    query.expr(PgFunc::array_agg_distinct(column));
+    scalar(query)
+}
+
+/// Appends the seven annotations to an issue select as correlated
+/// subqueries on the outer `issues.id`, so the lookup stays one statement.
+fn annotate_issue_select(
+    query: sea_orm::Select<issues::Entity>,
     assignees: AssigneeLeg,
-) -> Result<IssueAnnotations, DbErr> {
+) -> sea_orm::Select<issues::Entity> {
     // `cycle_id`: at most one live link per issue (the cycle write paths
     // move links), so the dropped model ordering cannot change the row.
-    let cycle_id: Option<Uuid> = cycle_issues::Entity::find()
-        .select_only()
-        .column(cycle_issues::Column::CycleId)
-        .filter(cycle_issues::Column::IssueId.eq(issue_id))
-        .filter(cycle_issues::Column::DeletedAt.is_null())
-        .into_tuple()
-        .one(db)
-        .await?;
-    let link_count = issue_links::Entity::find()
-        .filter(issue_links::Column::IssueId.eq(issue_id))
-        .filter(issue_links::Column::DeletedAt.is_null())
-        .count(db)
-        .await?;
-    let attachment_count = file_assets::Entity::find()
-        .filter(file_assets::Column::IssueId.eq(issue_id))
-        .filter(file_assets::Column::EntityType.eq("ISSUE_ATTACHMENT"))
-        .filter(file_assets::Column::DeletedAt.is_null())
-        .count(db)
-        .await?;
-    // `sub_issues_count` over the children's `issue_objects` scope.
-    let sub_issues_count = issues::Entity::find()
-        .join(JoinType::LeftJoin, issues::Relation::States.def())
-        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
-        .filter(issues::Column::ParentId.eq(issue_id))
-        .filter(issues::Column::DeletedAt.is_null())
-        .filter(issue_objects_condition())
-        .count(db)
-        .await?;
-    let label_ids: Vec<Uuid> = issue_labels::Entity::find()
-        .select_only()
-        .column(issue_labels::Column::LabelId)
-        .filter(issue_labels::Column::IssueId.eq(issue_id))
-        .filter(issue_labels::Column::DeletedAt.is_null())
-        .into_tuple()
-        .all(db)
-        .await?;
-    let mut assignee_query = issue_assignees::Entity::find()
-        .select_only()
-        .column(issue_assignees::Column::AssigneeId)
-        .filter(issue_assignees::Column::IssueId.eq(issue_id))
-        .filter(issue_assignees::Column::DeletedAt.is_null());
+    let cycle_id = scalar(
+        Query::select()
+            .column((cycle_issues::Entity, cycle_issues::Column::CycleId))
+            .from(cycle_issues::Entity)
+            .and_where(
+                Expr::col((cycle_issues::Entity, cycle_issues::Column::IssueId))
+                    .eq(outer_issue_id()),
+            )
+            .and_where(Expr::col((cycle_issues::Entity, cycle_issues::Column::DeletedAt)).is_null())
+            .limit(1)
+            .to_owned(),
+    );
+    let link_count = count_of(
+        Query::select()
+            .from(issue_links::Entity)
+            .and_where(
+                Expr::col((issue_links::Entity, issue_links::Column::IssueId)).eq(outer_issue_id()),
+            )
+            .and_where(Expr::col((issue_links::Entity, issue_links::Column::DeletedAt)).is_null())
+            .to_owned(),
+    );
+    let attachment_count = count_of(
+        Query::select()
+            .from(file_assets::Entity)
+            .and_where(
+                Expr::col((file_assets::Entity, file_assets::Column::IssueId)).eq(outer_issue_id()),
+            )
+            .and_where(
+                Expr::col((file_assets::Entity, file_assets::Column::EntityType))
+                    .eq("ISSUE_ATTACHMENT"),
+            )
+            .and_where(Expr::col((file_assets::Entity, file_assets::Column::DeletedAt)).is_null())
+            .to_owned(),
+    );
+    // `sub_issues_count` over the children's `issue_objects` scope; the
+    // child tables are aliased off the outer `issues`/`states`/`projects`.
+    let (child, child_state, child_project) = (Alias::new("c"), Alias::new("cs"), Alias::new("cp"));
+    let sub_issues_count = count_of(
+        Query::select()
+            .from_as(issues::Entity, child.clone())
+            .join_as(
+                JoinType::LeftJoin,
+                states::Entity,
+                child_state.clone(),
+                Expr::col((child_state.clone(), states::Column::Id))
+                    .equals((child.clone(), issues::Column::StateId)),
+            )
+            .join_as(
+                JoinType::InnerJoin,
+                projects::Entity,
+                child_project.clone(),
+                Expr::col((child_project.clone(), projects::Column::Id))
+                    .equals((child.clone(), issues::Column::ProjectId)),
+            )
+            .and_where(Expr::col((child.clone(), issues::Column::ParentId)).eq(outer_issue_id()))
+            .and_where(Expr::col((child.clone(), issues::Column::DeletedAt)).is_null())
+            .cond_where(
+                Condition::all()
+                    .add(
+                        Condition::all()
+                            .add(
+                                Expr::col((child_state.clone(), states::Column::Group))
+                                    .eq("triage"),
+                            )
+                            .add(
+                                Expr::col((child_state.clone(), states::Column::Group))
+                                    .is_not_null(),
+                            )
+                            .not(),
+                    )
+                    .add(Expr::col((child.clone(), issues::Column::ArchivedAt)).is_null())
+                    .add(Expr::col((child_project, projects::Column::ArchivedAt)).is_null())
+                    .add(Expr::col((child, issues::Column::IsDraft)).eq(false)),
+            )
+            .to_owned(),
+    );
+    let label_ids = distinct_array_of(
+        Query::select()
+            .from(issue_labels::Entity)
+            .and_where(
+                Expr::col((issue_labels::Entity, issue_labels::Column::IssueId))
+                    .eq(outer_issue_id()),
+            )
+            .and_where(Expr::col((issue_labels::Entity, issue_labels::Column::DeletedAt)).is_null())
+            .to_owned(),
+        Expr::col((issue_labels::Entity, issue_labels::Column::LabelId)).into(),
+    );
+    let mut assignee_query = Query::select()
+        .from(issue_assignees::Entity)
+        .and_where(
+            Expr::col((issue_assignees::Entity, issue_assignees::Column::IssueId))
+                .eq(outer_issue_id()),
+        )
+        .and_where(
+            Expr::col((issue_assignees::Entity, issue_assignees::Column::DeletedAt)).is_null(),
+        )
+        .to_owned();
     if assignees == AssigneeLeg::ActiveMember {
-        let member_of_user: sea_orm::RelationDef =
-            project_members::Entity::belongs_to(users::Entity)
-                .from(project_members::Column::MemberId)
-                .to(users::Column::Id)
-                .into();
-        assignee_query = assignee_query
-            .join(JoinType::InnerJoin, issue_assignees::Relation::Users3.def())
-            .join(JoinType::InnerJoin, member_of_user.rev())
-            .filter(project_members::Column::IsActive.eq(true));
+        assignee_query
+            .inner_join(
+                users::Entity,
+                Expr::col((users::Entity, users::Column::Id))
+                    .equals((issue_assignees::Entity, issue_assignees::Column::AssigneeId)),
+            )
+            .inner_join(
+                project_members::Entity,
+                Expr::col((project_members::Entity, project_members::Column::MemberId))
+                    .equals((users::Entity, users::Column::Id)),
+            )
+            .and_where(
+                Expr::col((project_members::Entity, project_members::Column::IsActive)).eq(true),
+            );
     }
-    let assignee_ids: Vec<Uuid> = assignee_query.into_tuple().all(db).await?;
+    let assignee_ids = distinct_array_of(
+        assignee_query,
+        Expr::col((issue_assignees::Entity, issue_assignees::Column::AssigneeId)).into(),
+    );
     // `module_ids`: archived modules drop; no `modules.deleted_at` guard.
-    let module_ids: Vec<Uuid> = module_issues::Entity::find()
-        .select_only()
-        .column(module_issues::Column::ModuleId)
-        .join(JoinType::InnerJoin, module_issues::Relation::Modules.def())
-        .filter(module_issues::Column::IssueId.eq(issue_id))
-        .filter(module_issues::Column::DeletedAt.is_null())
-        .filter(modules::Column::ArchivedAt.is_null())
-        .into_tuple()
-        .all(db)
-        .await?;
-    Ok(IssueAnnotations {
-        cycle_id,
-        link_count: null_if_zero(link_count),
-        attachment_count: null_if_zero(attachment_count),
-        sub_issues_count: null_if_zero(sub_issues_count),
-        label_ids: distinct_ids(label_ids),
-        assignee_ids: distinct_ids(assignee_ids),
-        module_ids: distinct_ids(module_ids),
-    })
+    let module_ids = distinct_array_of(
+        Query::select()
+            .from(module_issues::Entity)
+            .inner_join(
+                modules::Entity,
+                Expr::col((modules::Entity, modules::Column::Id))
+                    .equals((module_issues::Entity, module_issues::Column::ModuleId)),
+            )
+            .and_where(
+                Expr::col((module_issues::Entity, module_issues::Column::IssueId))
+                    .eq(outer_issue_id()),
+            )
+            .and_where(
+                Expr::col((module_issues::Entity, module_issues::Column::DeletedAt)).is_null(),
+            )
+            .and_where(Expr::col((modules::Entity, modules::Column::ArchivedAt)).is_null())
+            .to_owned(),
+        Expr::col((module_issues::Entity, module_issues::Column::ModuleId)).into(),
+    );
+    query
+        .expr_as(cycle_id, "cycle_id")
+        .expr_as(link_count, "link_count")
+        .expr_as(attachment_count, "attachment_count")
+        .expr_as(sub_issues_count, "sub_issues_count")
+        .expr_as(label_ids, "label_ids")
+        .expr_as(assignee_ids, "assignee_ids")
+        .expr_as(module_ids, "module_ids")
 }
 
 /// Retrieve's `is_subscribed` `Exists` (`base.py:571-580`): a live
-/// subscription in this project and workspace slug.
-async fn fetch_is_subscribed(
-    db: &impl ConnectionTrait,
-    slug: &str,
-    project_id: Uuid,
-    issue_id: Uuid,
-    user_id: Uuid,
-) -> Result<bool, DbErr> {
-    let hit: Option<Uuid> = issue_subscribers::Entity::find()
-        .select_only()
-        .column(issue_subscribers::Column::Id)
-        .join(
-            JoinType::InnerJoin,
-            issue_subscribers::Relation::Workspaces.def(),
-        )
-        .filter(issue_subscribers::Column::DeletedAt.is_null())
-        .filter(issue_subscribers::Column::IssueId.eq(issue_id))
-        .filter(issue_subscribers::Column::ProjectId.eq(project_id))
-        .filter(issue_subscribers::Column::SubscriberId.eq(user_id))
-        .filter(workspaces::Column::Slug.eq(slug))
-        .into_tuple()
-        .one(db)
-        .await?;
-    Ok(hit.is_some())
+/// subscription in this project and workspace slug, correlated on the
+/// outer issue (the subscriber's workspace aliased off the outer join).
+fn is_subscribed_expr(slug: &str, project_id: Uuid, user_id: Uuid) -> SimpleExpr {
+    let sub_ws = Alias::new("sw");
+    Expr::exists(
+        Query::select()
+            .expr(Expr::val(1))
+            .from(issue_subscribers::Entity)
+            .join_as(
+                JoinType::InnerJoin,
+                workspaces::Entity,
+                sub_ws.clone(),
+                Expr::col((sub_ws.clone(), workspaces::Column::Id)).equals((
+                    issue_subscribers::Entity,
+                    issue_subscribers::Column::WorkspaceId,
+                )),
+            )
+            .and_where(
+                Expr::col((
+                    issue_subscribers::Entity,
+                    issue_subscribers::Column::DeletedAt,
+                ))
+                .is_null(),
+            )
+            .and_where(
+                Expr::col((
+                    issue_subscribers::Entity,
+                    issue_subscribers::Column::IssueId,
+                ))
+                .eq(outer_issue_id()),
+            )
+            .and_where(
+                Expr::col((
+                    issue_subscribers::Entity,
+                    issue_subscribers::Column::ProjectId,
+                ))
+                .eq(project_id),
+            )
+            .and_where(
+                Expr::col((
+                    issue_subscribers::Entity,
+                    issue_subscribers::Column::SubscriberId,
+                ))
+                .eq(user_id),
+            )
+            .and_where(Expr::col((sub_ws, workspaces::Column::Slug)).eq(slug))
+            .limit(1)
+            .to_owned(),
+    )
+}
+
+/// One annotated lookup row, decoded by name: the issue model plus the
+/// aliased annotation columns (`is_subscribed` / state pair only when
+/// selected).
+struct AnnotatedIssueRow {
+    issue: issues::Model,
+    annotations: IssueAnnotations,
+    is_subscribed: Option<bool>,
+    state_group: Option<String>,
+    state_name: Option<String>,
+}
+
+impl FromQueryResult for AnnotatedIssueRow {
+    fn from_query_result(res: &QueryResult, pre: &str) -> Result<Self, DbErr> {
+        let count = |name: &str| -> Result<Option<i64>, DbErr> {
+            Ok(res
+                .try_get::<Option<i64>>(pre, name)?
+                .and_then(null_if_zero))
+        };
+        let ids = |name: &str| -> Result<Vec<Uuid>, DbErr> {
+            Ok(distinct_ids(res.try_get::<Option<Vec<Uuid>>>(pre, name)?))
+        };
+        Ok(Self {
+            issue: issues::Model::from_query_result(res, pre)?,
+            annotations: IssueAnnotations {
+                cycle_id: res.try_get(pre, "cycle_id")?,
+                link_count: count("link_count")?,
+                attachment_count: count("attachment_count")?,
+                sub_issues_count: count("sub_issues_count")?,
+                label_ids: ids("label_ids")?,
+                assignee_ids: ids("assignee_ids")?,
+                module_ids: ids("module_ids")?,
+            },
+            is_subscribed: res.try_get(pre, "is_subscribed").ok(),
+            state_group: res.try_get(pre, "state_group").ok().flatten(),
+            state_name: res.try_get(pre, "state_name").ok().flatten(),
+        })
+    }
 }
 
 /// One looked-up issue: the 34 storable columns, the scalar annotations
@@ -3286,11 +3446,46 @@ struct CoreIssueRow {
     state_name: Option<String>,
 }
 
-/// The annotated issue lookup: retrieve's queryset (live-only scope +
-/// member-active assignees + `is_subscribed`) or the PATCH shape
-/// (`issue_objects` scope, no `is_subscribed`). The annotations load per
-/// leg after the row; the state pair is the row's state (the old LEFT
-/// JOIN carried no soft-delete guard, and neither does the by-id read).
+/// The annotated issue lookup as one statement: retrieve's queryset
+/// (live-only scope + member-active assignees + `is_subscribed`) or the
+/// PATCH shape (`issue_objects` scope, no `is_subscribed`). The state pair
+/// comes off the `states` LEFT JOIN (no soft-delete guard, as Django
+/// compiles it).
+fn annotated_issue_select(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    user_id: Uuid,
+    issue_objects: bool,
+) -> sea_orm::Select<issues::Entity> {
+    let scope = if issue_objects {
+        IssueScope::IssueObjects
+    } else {
+        IssueScope::Live
+    };
+    let mut query = scoped_issue_select(slug, project_id, issue_id, scope);
+    if !issue_objects {
+        // The `issue_objects` scope already LEFT JOINs `states`.
+        query = query.join(JoinType::LeftJoin, issues::Relation::States.def());
+    }
+    query = annotate_issue_select(query, AssigneeLeg::ActiveMember)
+        .expr_as(
+            Expr::col((states::Entity, states::Column::Group)),
+            "state_group",
+        )
+        .expr_as(
+            Expr::col((states::Entity, states::Column::Name)),
+            "state_name",
+        );
+    if !issue_objects {
+        query = query.expr_as(
+            is_subscribed_expr(slug, project_id, user_id),
+            "is_subscribed",
+        );
+    }
+    query
+}
+
 async fn fetch_annotated_issue(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -3299,34 +3494,17 @@ async fn fetch_annotated_issue(
     user_id: &Uuid,
     issue_objects: bool,
 ) -> Result<Option<CoreIssueRow>, Denial> {
-    let scope = if issue_objects {
-        IssueScope::IssueObjects
-    } else {
-        IssueScope::Live
-    };
-    let Some(save) = fetch_scoped_issue(pool, slug, project_id, issue_id, scope).await? else {
-        return Ok(None);
-    };
-    let db = orm(pool);
-    let annotations = fetch_issue_annotations(&db, save.id, AssigneeLeg::ActiveMember)
+    let row = annotated_issue_select(slug, *project_id, *issue_id, *user_id, issue_objects)
+        .into_model::<AnnotatedIssueRow>()
+        .one(&orm(pool))
         .await
         .map_err(|_| Denial::ServerError)?;
-    let is_subscribed = if issue_objects {
-        false
-    } else {
-        fetch_is_subscribed(&db, slug, *project_id, save.id, *user_id)
-            .await
-            .map_err(|_| Denial::ServerError)?
+    let Some(row) = row else {
+        return Ok(None);
     };
-    let state = match save.state_id {
-        Some(state_id) => state_name_group(&db, state_id)
-            .await
-            .map_err(|_| Denial::ServerError)?,
-        None => None,
-    };
-    let (state_name, state_group) = state.unzip();
+    let annotations = row.annotations;
     Ok(Some(CoreIssueRow {
-        save,
+        save: IssueSaveRow::from(&row.issue),
         cycle_id: annotations.cycle_id,
         link_count: annotations.link_count,
         attachment_count: annotations.attachment_count,
@@ -3334,9 +3512,9 @@ async fn fetch_annotated_issue(
         label_ids: annotations.label_ids,
         assignee_ids: annotations.assignee_ids,
         module_ids: annotations.module_ids,
-        is_subscribed,
-        state_group,
-        state_name,
+        is_subscribed: row.is_subscribed.unwrap_or(false),
+        state_group: row.state_group,
+        state_name: row.state_name,
     }))
 }
 
@@ -3981,15 +4159,13 @@ async fn fetch_create_response_row(
     project_id: &Uuid,
     issue_id: &Uuid,
 ) -> Result<Option<(IssueSaveRow, IssueAnnotations)>, Denial> {
-    let Some(save) =
-        fetch_scoped_issue(pool, slug, project_id, issue_id, IssueScope::IssueObjects).await?
-    else {
-        return Ok(None);
-    };
-    let annotations = fetch_issue_annotations(&orm(pool), save.id, AssigneeLeg::Plain)
+    let query = scoped_issue_select(slug, *project_id, *issue_id, IssueScope::IssueObjects);
+    let row = annotate_issue_select(query, AssigneeLeg::Plain)
+        .into_model::<AnnotatedIssueRow>()
+        .one(&orm(pool))
         .await
         .map_err(|_| Denial::ServerError)?;
-    Ok(Some((save, annotations)))
+    Ok(row.map(|row| (IssueSaveRow::from(&row.issue), row.annotations)))
 }
 
 /// Render one `.values()` row in [`CREATE_RESPONSE_FIELDS`] wire order:
@@ -5559,6 +5735,47 @@ mod tests {
         );
     }
 
+    /// Retrieve / PATCH / create each compile to ONE statement: the
+    /// annotations ride as correlated subqueries on the outer issue id.
+    #[test]
+    fn annotated_lookups_are_one_statement() {
+        use sea_orm::QueryTrait;
+        let id = Uuid::nil();
+        let retrieve = annotated_issue_select("acme", id, id, id, false)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        for needle in [
+            r#"(SELECT "cycle_issues"."cycle_id" FROM "cycle_issues" WHERE "cycle_issues"."issue_id" = "issues"."id""#,
+            r#"(SELECT COUNT(*) FROM "issue_links" WHERE "issue_links"."issue_id" = "issues"."id""#,
+            r#"(SELECT COUNT(*) FROM "issues" AS "c" LEFT JOIN "states" AS "cs""#,
+            r#"(SELECT ARRAY_AGG(DISTINCT "issue_labels"."label_id") FROM "issue_labels""#,
+            r#"INNER JOIN "project_members" ON "project_members"."member_id" = "users"."id""#,
+            r#"(SELECT ARRAY_AGG(DISTINCT "module_issues"."module_id") FROM "module_issues""#,
+            r#"EXISTS(SELECT 1 FROM "issue_subscribers" INNER JOIN "workspaces" AS "sw""#,
+            r#""states"."group" AS "state_group""#,
+            r#"LEFT JOIN "states" ON"#,
+        ] {
+            assert!(retrieve.contains(needle), "{needle}\n{retrieve}");
+        }
+        let patch = annotated_issue_select("acme", id, id, id, true)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(!patch.contains("is_subscribed"), "{patch}");
+        assert_eq!(
+            patch.matches(r#"LEFT JOIN "states" ON"#).count(),
+            1,
+            "{patch}"
+        );
+        let create = annotate_issue_select(
+            scoped_issue_select("acme", id, id, IssueScope::IssueObjects),
+            AssigneeLeg::Plain,
+        )
+        .build(sea_orm::DbBackend::Postgres)
+        .to_string();
+        assert!(!create.contains("project_members"), "{create}");
+        assert!(create.contains(r#"AS "assignee_ids""#), "{create}");
+    }
+
     /// The core reads against constraint-free temp tables on a
     /// one-connection pool: gates, tenant facts, field and validate
     /// probes, scoped lookups, annotations, detail legs, the PUT m2m read,
@@ -5981,6 +6198,27 @@ mod tests {
             (None, None, None, false)
         );
         assert!(row.label_ids.is_empty() && row.assignee_ids.is_empty());
+        assert!(row.module_ids.is_empty() && row.cycle_id.is_none());
+        assert_eq!(row.attachment_count, None);
+        // The PATCH shape over the fully-annotated issue: same annotations
+        // as retrieve, `is_subscribed` never selected.
+        let row = fetch_annotated_issue(&pool, "acme", &project, &open, &member, true)
+            .await
+            .expect("patch")
+            .expect("row");
+        assert_eq!(row.cycle_id, Some(cycle));
+        assert_eq!(
+            (row.link_count, row.attachment_count, row.sub_issues_count),
+            (Some(2), None, Some(1))
+        );
+        assert_eq!(row.label_ids, labels);
+        assert_eq!(row.assignee_ids, assignees);
+        assert_eq!(row.module_ids, vec![module_live]);
+        assert!(!row.is_subscribed);
+        assert_eq!(
+            (row.state_group.as_deref(), row.state_name.as_deref()),
+            (Some("unstarted"), Some("Todo"))
+        );
         for hidden in [draft, archived, triage_child] {
             assert!(
                 fetch_annotated_issue(&pool, "acme", &project, &hidden, &member, true)
@@ -6018,7 +6256,37 @@ mod tests {
             .await
             .expect("post")
             .expect("row");
+        assert_eq!(post.0.id, open);
+        assert_eq!(post.1.cycle_id, Some(cycle));
+        assert_eq!(
+            (
+                post.1.link_count,
+                post.1.attachment_count,
+                post.1.sub_issues_count
+            ),
+            (Some(2), None, Some(1))
+        );
+        assert_eq!(post.1.label_ids, labels);
         assert_eq!(post.1.assignee_ids, assignees);
+        assert_eq!(post.1.module_ids, vec![module_live]);
+        let empty = fetch_create_response_row(&pool, "acme", &project, &child)
+            .await
+            .expect("post")
+            .expect("row");
+        assert_eq!(
+            (
+                empty.1.cycle_id,
+                empty.1.link_count,
+                empty.1.attachment_count,
+                empty.1.sub_issues_count
+            ),
+            (None, None, None, None)
+        );
+        assert!(
+            empty.1.label_ids.is_empty()
+                && empty.1.assignee_ids.is_empty()
+                && empty.1.module_ids.is_empty()
+        );
         let body = render_create_response_body(&post, &chrono_tz::UTC).expect("body");
         assert!(
             body.starts_with(&format!("{{\"id\":\"{open}\",\"name\":\"n\",\"state_id\":\"{state}\",\"sort_order\":65535.0,")),
