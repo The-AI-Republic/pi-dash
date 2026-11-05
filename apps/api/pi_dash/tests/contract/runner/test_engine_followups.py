@@ -7,8 +7,9 @@
 - ``0038_rename_engine_runners``: existing engine runners get the
   server-assigned ``builtin-<machine>-<workspace>-<project>`` names,
   deterministically and idempotently.
-- ``auth/revoke/`` (the CLI's full ``pidash auth logout``) also signs the
-  machine's engine out server-side.
+- ``auth/revoke/`` signs the machine's engine out server-side when it
+  revokes the machine's last live machine token (the CLI's full ``pidash
+  auth logout``), not on ``pidash auth logout --workspace X``.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 
-from pi_dash.db.models import APIToken, Project
+from pi_dash.db.models import APIToken, CLIDeviceCode, Project
 from pi_dash.runner.models import (
     DevMachine,
     EngineAutoPauseReason,
@@ -208,6 +209,106 @@ def test_personal_api_token_logout_leaves_engines_alone(db, create_user, workspa
     assert token.is_active is False
     machine.refresh_from_db()
     assert machine.engine_sign_in_state == EngineSignInState.ACTIVE
+
+
+def _device_start(scope=None):
+    body = {"scope": scope} if scope else {}
+    resp = _client().post("/api/v1/auth/device/start/", body, format="json")
+    assert resp.status_code == 200, resp.data
+    return resp.data
+
+
+def _device_poll(device_code, bearer=None):
+    CLIDeviceCode.objects.filter(device_code=device_code).update(last_polled_at=timezone.now() - timedelta(seconds=30))
+    return _client(bearer=bearer).post("/api/v1/auth/device/token/", {"device_code": device_code}, format="json")
+
+
+@override_settings(**ENABLED)
+def test_workspace_logout_leaves_the_engine_signed_in(db, create_user, workspace, workspace_b, machine, mt, lane):
+    """``pidash auth logout --workspace second-ws``: the machine still has a
+    live token for another workspace, so its engine keeps serving it."""
+    issued = issue_engine_credential(user=create_user, dev_machine=machine)
+    mt_b = _mint_mt(create_user, workspace_b, machine)
+
+    assert _logout(mt_b).status_code == 200
+    machine.refresh_from_db()
+    assert machine.engine_sign_in_state == EngineSignInState.ACTIVE
+    assert machine.engine_auto_pause_reason == ""
+    assert EngineCredential.objects.get().revoked_at is None
+    assert _client(bearer=issued.raw).post("/api/v1/runner/engine/model-token/", {}, format="json").status_code != 401
+
+    # Signing out the last workspace too is a full logout: the engine goes.
+    assert _logout(mt).status_code == 200
+    machine.refresh_from_db()
+    assert machine.engine_sign_in_state == EngineSignInState.SIGNED_OUT
+    assert machine.engine_auto_pause_reason == EngineAutoPauseReason.ENGINE_SIGN_IN_REQUIRED
+
+
+@override_settings(**ENABLED)
+def test_expired_sibling_token_does_not_keep_the_engine_signed_in(
+    db, create_user, workspace, workspace_b, machine, mt, lane
+):
+    issue_engine_credential(user=create_user, dev_machine=machine)
+    _mint_mt(create_user, workspace_b, machine)
+    MachineToken.objects.filter(workspace=workspace_b).update(expires_at=timezone.now() - timedelta(minutes=1))
+    assert _logout(mt).status_code == 200
+    machine.refresh_from_db()
+    assert machine.engine_sign_in_state == EngineSignInState.SIGNED_OUT
+
+
+@override_settings(**ENABLED)
+def test_explicit_sign_in_after_full_logout_restores_the_engine(db, web, create_user, workspace, machine, mt, lane):
+    issue_engine_credential(user=create_user, dev_machine=machine)
+    assert _logout(mt).status_code == 200
+    # Every machine token is gone, so the way back is ``pidash auth login``
+    # with a person approving in the browser (interactive).
+    start = _device_start()
+    approve = web.post(
+        "/api/v1/auth/device/approve/", {"user_code": start["user_code"], "interactive": True}, format="json"
+    )
+    assert approve.status_code == 200, approve.data
+    access = _device_poll(start["device_code"]).data["access_token"]
+    resp = _client(api_key=access).post(
+        "/api/v1/auth/machine-token/",
+        {"workspace_slug": "test-workspace", "dev_machine_id": str(machine.id), "host_label": "rich-mbp"},
+        format="json",
+    )
+    assert resp.status_code == 201, resp.data
+    assert resp.data["engine_credential"]["token"].startswith("ec_")
+    machine.refresh_from_db()
+    assert machine.current_engine_sign_in_state() == EngineSignInState.ACTIVE
+    assert machine.engine_auto_pause_reason == ""
+
+
+@override_settings(**ENABLED)
+def test_grant_approved_before_full_logout_cannot_be_redeemed_after(
+    db, web, create_user, workspace, machine, mt, lane
+):
+    issue_engine_credential(user=create_user, dev_machine=machine)
+    soon = timezone.now() + timedelta(days=1)
+    EngineCredential.objects.update(expires_at=soon)
+    DevMachine.objects.filter(pk=machine.pk).update(engine_credential_expires_at=soon)
+    # The app approves a silent renewal while the engine is expiring ...
+    start = _device_start("engine")
+    approve = web.post(
+        "/api/v1/auth/device/approve/",
+        {"user_code": start["user_code"], "interactive": False, "dev_machine_id": str(machine.id)},
+        format="json",
+    )
+    assert approve.status_code == 200, approve.data
+    # ... then the user logs out fully before the daemon redeems it.
+    assert _logout(mt).status_code == 200
+
+    # The old machine token no longer redeems anything.
+    stale = _device_poll(start["device_code"], bearer=mt)
+    assert stale.status_code in (401, 403), stale.data
+    # Nor does a fresh machine token: the engine is signed out, and a silent
+    # grant cannot clear that.
+    fresh = _mint_mt(create_user, workspace, machine)
+    refused = _device_poll(start["device_code"], bearer=fresh)
+    assert refused.status_code == 409, refused.data
+    assert refused.data["error"] == "engine_silent_renewal_refused"
+    assert not EngineCredential.objects.filter(revoked_at__isnull=True).exists()
 
 
 # --------------------------------------------------------------------------
