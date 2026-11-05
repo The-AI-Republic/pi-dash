@@ -155,7 +155,7 @@ describe("selection", () => {
   });
 });
 
-describe("list load failure (PIDASH-3)", () => {
+describe("list load failure", () => {
   it("shows the error state when the runs page fails to load or parse", async () => {
     const { RUNS_EMPTY_TEXT, RUNS_LOAD_FAILED_TEXT } = await import("./RunsList.js");
     const refetch = vi.fn();

@@ -5,7 +5,7 @@
 // address, every row preserves the page query when selected, and the
 // footer turns pages with history-replace so Back leaves the tab. A
 // failed read (transport or contract) shows an error with a retry rather
-// than the empty text (PIDASH-3).
+// than the empty text.
 
 import { Button, Spinner } from "@pidash/kit";
 import * as React from "react";

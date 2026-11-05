@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Run payloads as the backend sends them today (PIDASH-3). Migration
+// Run payloads as the backend sends them today. Migration
 // runner/0032 dropped AgentRun.queue_position, so neither the issue
 // detail's embedded run nor a runs-list item carries it. Each wire key
 // list mirrors the serializer it names; the guard fails when a contract
@@ -146,7 +146,7 @@ function requiredKeys(schema: { shape: Record<string, z.ZodMiniType> }): string[
     .map(([key]) => key);
 }
 
-describe("run payloads without queue_position (PIDASH-3)", () => {
+describe("run payloads without queue_position", () => {
   it("fixtures carry exactly the wire keys", () => {
     expect(Object.keys(issueRun)).toEqual([...ISSUE_RUN_WIRE_KEYS]);
     expect(Object.keys(listRun)).toEqual([...RUN_LIST_WIRE_KEYS]);

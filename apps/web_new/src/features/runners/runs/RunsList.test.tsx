@@ -116,7 +116,7 @@ describe("RunsList", () => {
     expect(screen.queryByTestId("runs-pager")).toBeNull();
   });
 
-  it("shows a load error with a retry instead of the empty text when the page failed (PIDASH-3)", async () => {
+  it("shows a load error with a retry instead of the empty text when the page failed", async () => {
     const { onRetry } = renderList(undefined, 1, false, true);
     expect(screen.getByRole("alert")).toHaveTextContent(RUNS_LOAD_FAILED_TEXT);
     expect(screen.queryByText(RUNS_EMPTY_TEXT)).toBeNull();
