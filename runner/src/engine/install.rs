@@ -38,6 +38,15 @@ pub const DEFAULT_RELEASE_DOWNLOAD_URL: &str =
 /// tests).
 pub const RELEASE_DOWNLOAD_URL_ENV: &str = "PIDASH_RELEASE_DOWNLOAD_URL";
 
+/// Base of the raw-file URLs used to read a release's pinned engine version
+/// before downloading anything: `<base>/pidash-v<version>/runner/ENGINE_VERSION`.
+pub const DEFAULT_RELEASE_SOURCE_URL: &str =
+    "https://raw.githubusercontent.com/The-AI-Republic/pi-dash";
+
+/// Overrides [`DEFAULT_RELEASE_SOURCE_URL`] (a mirror, or a local server in
+/// tests).
+pub const RELEASE_SOURCE_URL_ENV: &str = "PIDASH_RELEASE_SOURCE_URL";
+
 /// Target triple this binary was built for (`build.rs`).
 pub const BUILD_TARGET: &str = env!("PIDASH_BUILD_TARGET");
 
@@ -60,11 +69,39 @@ pub fn release_archive_url(base: &str, cli_version: &str, target: &str) -> Strin
     )
 }
 
+/// URL of the `runner/ENGINE_VERSION` file at a CLI release's tag.
+pub fn release_engine_version_url(base: &str, cli_version: &str) -> String {
+    format!(
+        "{}/pidash-v{}/runner/ENGINE_VERSION",
+        base.trim_end_matches('/'),
+        cli_version.trim_start_matches('v')
+    )
+}
+
+/// `std::fs::canonicalize` returns `\\?\C:\...` verbatim paths on Windows,
+/// which some programs (notably `tar.exe -C`) do not accept. Turn a verbatim
+/// drive path back into an ordinary one; leave anything else (UNC verbatim
+/// paths, non-Windows paths) as it is.
+pub fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let Some(s) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        let b = rest.as_bytes();
+        if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
 /// The engine root for the running executable: where a fresh install goes.
 pub fn install_root_for_current_exe() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("locating the pidash executable")?;
     // Follow a symlinked `pidash` to the install it belongs to.
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let exe = std::fs::canonicalize(&exe)
+        .map(|p| strip_verbatim_prefix(&p))
+        .unwrap_or(exe);
     let dir = exe
         .parent()
         .context("pidash executable has no parent directory")?;
@@ -79,23 +116,79 @@ pub struct InstallOutcome {
     pub already_present: Vec<String>,
 }
 
-/// Download the release archive of `cli_version` for this build's target and
-/// install its engine version directories under `root`.
-pub async fn install_release(cli_version: &str, root: &Path) -> Result<InstallOutcome> {
-    let base = std::env::var(RELEASE_DOWNLOAD_URL_ENV)
+fn env_or(var: &str, default: &str) -> String {
+    std::env::var(var)
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_RELEASE_DOWNLOAD_URL.to_string());
-    install_release_from(&base, cli_version, BUILD_TARGET, root, cfg!(windows)).await
+        .unwrap_or_else(|| default.to_string())
+}
+
+/// Whether `root/<version>/` already holds an engine binary.
+pub fn is_installed(root: &Path, version: &str, windows: bool) -> bool {
+    root.join(version)
+        .join(super::binary_name(windows))
+        .is_file()
+}
+
+/// Download the release archive of `cli_version` for this build's target and
+/// install its engine version directories under `root`.
+///
+/// The archive (~95 MB) is skipped when the release's pinned engine version,
+/// read from its tag's `runner/ENGINE_VERSION` (a few bytes), is already
+/// installed: most CLI releases keep the engine they had, and `pidash update`
+/// would otherwise download the whole archive twice for nothing. If that
+/// small file cannot be read (offline mirror, older tag), the archive is
+/// downloaded as before.
+pub async fn install_release(cli_version: &str, root: &Path) -> Result<InstallOutcome> {
+    let downloads = env_or(RELEASE_DOWNLOAD_URL_ENV, DEFAULT_RELEASE_DOWNLOAD_URL);
+    let sources = env_or(RELEASE_SOURCE_URL_ENV, DEFAULT_RELEASE_SOURCE_URL);
+    install_release_from(
+        &downloads,
+        &sources,
+        cli_version,
+        BUILD_TARGET,
+        root,
+        cfg!(windows),
+    )
+    .await
+}
+
+/// The engine version a CLI release pins, from its tag's
+/// `runner/ENGINE_VERSION`. `None` when it can't be read or parsed.
+async fn release_engine_version(source_base: &str, cli_version: &str) -> Option<String> {
+    let url = release_engine_version_url(source_base, cli_version);
+    let client = http_client().ok()?;
+    let body = client
+        .get(&url)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+    let version = super::version_from_tag(body.trim()).to_string();
+    super::parse_version(&version).map(|_| version)
 }
 
 async fn install_release_from(
     base: &str,
+    source_base: &str,
     cli_version: &str,
     target: &str,
     root: &Path,
     windows: bool,
 ) -> Result<InstallOutcome> {
+    if let Some(version) = release_engine_version(source_base, cli_version).await
+        && is_installed(root, &version, windows)
+    {
+        return Ok(InstallOutcome {
+            installed: Vec::new(),
+            already_present: vec![version],
+        });
+    }
+
     let url = release_archive_url(base, cli_version, target);
 
     std::fs::create_dir_all(root)
@@ -588,7 +681,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("lib/pidash/engine");
-        let outcome = install_release_from(&base, "0.1.30", target, &root, false)
+        let outcome = install_release_from(&base, &base, "0.1.30", target, &root, false)
             .await
             .unwrap();
         assert_eq!(outcome.installed, vec!["0.153.4".to_string()]);
@@ -615,10 +708,87 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("engine");
-        let err = install_release_from(&base, "0.1.30", target, &root, false)
+        let err = install_release_from(&base, &base, "0.1.30", target, &root, false)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("checksum mismatch"), "{err:#}");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn install_release_skips_the_archive_when_its_engine_is_installed() {
+        let target = "x86_64-unknown-linux-gnu";
+        // Only ENGINE_VERSION is served: a download attempt would 404 and fail.
+        let base = serve(vec![(
+            "/pidash-v0.1.31/runner/ENGINE_VERSION".to_string(),
+            b"rust-v0.153.4\n".to_vec(),
+        )])
+        .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("engine");
+        fs::create_dir_all(root.join("0.153.4")).unwrap();
+        fs::write(root.join("0.153.4/pidash-agent-engine"), b"running").unwrap();
+
+        let outcome = install_release_from(&base, &base, "0.1.31", target, &root, false)
+            .await
+            .unwrap();
+        assert_eq!(outcome.already_present, vec!["0.153.4".to_string()]);
+        assert!(outcome.installed.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn install_release_downloads_when_the_release_pins_a_new_engine() {
+        let target = "x86_64-unknown-linux-gnu";
+        let body = tarball(target, "0.154.0");
+        let digest = format!("{:x}", Sha256::digest(&body));
+        let asset = format!("/pidash-v0.1.31/{}", archive_name(target));
+        let base = serve(vec![
+            (
+                "/pidash-v0.1.31/runner/ENGINE_VERSION".to_string(),
+                b"rust-v0.154.0\n".to_vec(),
+            ),
+            (asset.clone(), body),
+            (
+                format!("{asset}.sha256"),
+                format!("{digest} *x\n").into_bytes(),
+            ),
+        ])
+        .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("engine");
+        fs::create_dir_all(root.join("0.153.4")).unwrap();
+        fs::write(root.join("0.153.4/pidash-agent-engine"), b"old").unwrap();
+
+        let outcome = install_release_from(&base, &base, "0.1.31", target, &root, false)
+            .await
+            .unwrap();
+        assert_eq!(outcome.installed, vec!["0.154.0".to_string()]);
+    }
+
+    #[test]
+    fn engine_version_url_is_the_release_tag() {
+        assert_eq!(
+            release_engine_version_url(DEFAULT_RELEASE_SOURCE_URL, "v0.1.30"),
+            "https://raw.githubusercontent.com/The-AI-Republic/pi-dash/pidash-v0.1.30/runner/ENGINE_VERSION"
+        );
+    }
+
+    #[test]
+    fn verbatim_drive_paths_are_made_ordinary() {
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\C:\Users\me\.local\bin\engine")),
+            PathBuf::from(r"C:\Users\me\.local\bin\engine")
+        );
+        // UNC verbatim paths have no ordinary drive form; keep them.
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\UNC\server\share")),
+            PathBuf::from(r"\\?\UNC\server\share")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new("/home/me/.local/lib")),
+            PathBuf::from("/home/me/.local/lib")
+        );
     }
 }

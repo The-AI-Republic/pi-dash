@@ -163,6 +163,14 @@ pub async fn check_or_swap(check: bool, paths: &Paths) -> Result<SwapOutcome> {
         new_version.context("the release service reported an update but no version for it")?;
     install_engine_for(&new_version).await?;
 
+    // Install exactly the release whose engine was just placed. `run` reuses
+    // the release `query_new_version` fetched, but pinning the version keeps
+    // that true if axoupdater ever re-queries "latest" (a release published
+    // in between would otherwise get a `pidash` without its engine).
+    updater.configure_version_specifier(axoupdater::UpdateRequest::SpecificVersion(
+        new_version.clone(),
+    ));
+
     let result = updater
         .run()
         .await
@@ -190,6 +198,9 @@ async fn install_engine_for(new_version: &str) -> Result<()> {
         })?;
     for v in &outcome.installed {
         tracing::info!(version = %v, root = %root.display(), "installed built-in engine for update");
+    }
+    for v in &outcome.already_present {
+        tracing::info!(version = %v, root = %root.display(), "built-in engine for update already installed");
     }
     Ok(())
 }

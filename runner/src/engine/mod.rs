@@ -16,12 +16,16 @@
 //!   `[engine] binary` config override) once, at daemon start.
 //! - [`install`] places a release's engine directory, for `pidash engine
 //!   install` and for `pidash update` before it replaces `pidash`.
+//! - [`auto_install`] installs a missing engine at daemon start on an
+//!   updater-managed install, for installs updated in place from a `pidash`
+//!   that predates the engine (its `pidash update` had no engine step).
 //! - [`cleanup`] removes engine versions older than the running one.
 //!
 //! The pinned engine release is `runner/ENGINE_VERSION`, the single source of
 //! truth shared with the CLI release pipeline (`runner/scripts/stage_engine.py`)
 //! and the desktop build scripts.
 
+pub mod auto_install;
 pub mod cleanup;
 pub mod install;
 pub mod locate;
