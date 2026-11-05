@@ -107,40 +107,23 @@
 use super::queries_core::{
     attachment_count_select, is_subscribed_select, link_count_select, sub_issues_count_select,
     ASSIGNEE_IDS_ACTIVE_SELECT, CYCLE_ID_SELECT, ISSUE_COLUMNS, LABEL_IDS_SELECT,
-    MODULE_IDS_SELECT, PREFETCH_ISSUE_COLUMNS, PROJECT_COLUMNS, STATE_COLUMNS, USER_COLUMNS,
+    MODULE_IDS_SELECT, PROJECT_COLUMNS, STATE_COLUMNS,
 };
 use super::Binder;
+
+use pidash_db::entity::{
+    comment_reactions, intake_issues, issue_activities, issue_comments, issues, project_members,
+    projects, users, workspaces,
+};
+use sea_orm::sea_query::{Alias, Expr, Query, SimpleExpr};
+use sea_orm::{
+    ColumnTrait, EntityTrait, IdenStatic, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    RelationDef, RelationTrait, Select,
+};
 
 // ---------------------------------------------------------------------------
 // Shared column lists (Django concrete-field order, live-compiled)
 // ---------------------------------------------------------------------------
-
-/// All 20 concrete `issue_activities` columns (history base-table order).
-pub const ACTIVITY_COLUMNS: &str = "issue_activities.created_at, issue_activities.updated_at, \
-    issue_activities.created_by_id, issue_activities.updated_by_id, issue_activities.deleted_at, \
-    issue_activities.id, issue_activities.project_id, issue_activities.workspace_id, \
-    issue_activities.issue_id, issue_activities.verb, issue_activities.field, \
-    issue_activities.old_value, issue_activities.new_value, issue_activities.comment, \
-    issue_activities.attachments, issue_activities.issue_comment_id, issue_activities.actor_id, \
-    issue_activities.old_identifier, issue_activities.new_identifier, issue_activities.epoch";
-
-/// All 24 concrete `issue_comments` columns (history / comment base order).
-pub const COMMENT_COLUMNS: &str = "issue_comments.created_at, issue_comments.updated_at, \
-    issue_comments.created_by_id, issue_comments.updated_by_id, issue_comments.deleted_at, \
-    issue_comments.id, issue_comments.project_id, issue_comments.workspace_id, \
-    issue_comments.comment_stripped, issue_comments.comment_json, issue_comments.comment_html, \
-    issue_comments.description_id, issue_comments.attachments, issue_comments.labels, \
-    issue_comments.issue_id, issue_comments.actor_id, issue_comments.access, \
-    issue_comments.external_source, issue_comments.external_id, issue_comments.speaker_type, \
-    issue_comments.speaker_label, issue_comments.speaker_agent_run_id, issue_comments.edited_at, \
-    issue_comments.parent_id";
-
-/// All 11 concrete `comment_reactions` columns (prefetch / list base order).
-pub const COMMENT_REACTION_COLUMNS: &str = "comment_reactions.created_at, \
-    comment_reactions.updated_at, comment_reactions.created_by_id, \
-    comment_reactions.updated_by_id, comment_reactions.deleted_at, comment_reactions.id, \
-    comment_reactions.project_id, comment_reactions.workspace_id, comment_reactions.actor_id, \
-    comment_reactions.comment_id, comment_reactions.reaction";
 
 /// All 14 concrete `workspaces` columns (`select_related("workspace")` order).
 pub const WORKSPACE_COLUMNS: &str = "workspaces.created_at, workspaces.updated_at, \
@@ -182,158 +165,253 @@ pub const LITE_ISSUE_COLUMNS: &str = "issue.created_at, issue.updated_at, issue.
     issue.description_html, issue.sequence_id, issue.sort_order, issue.archived_at, \
     issue.is_draft, issue.external_source";
 
-/// History intake prefetch `.only("source_email", "source", "extra")` in
-/// Django's RENDER order — model field order (`source` before
-/// `source_email`), plus the always-selected pk.
-pub const INTAKE_SOURCE_SELECTS: &str = "intake_issues.id, intake_issues.source, \
-    intake_issues.source_email, intake_issues.extra";
-
 // ---------------------------------------------------------------------------
 // History (activity.py:30-86)
 // ---------------------------------------------------------------------------
+//
+// SeaORM selects (batch 2h). The base table's own columns come back
+// unprefixed (`Entity::find()` selects them all, decoded through the
+// entity `Model`); every joined nest is aliased `<prefix><column>`
+// ([`PROJECT_PREFIX`] and friends), so output names are unique by
+// construction and the handlers decode by name, never by position. Only
+// the nest columns the serializers read are selected.
 
-/// `select_related` column order for the history paths: Django renders
-/// related tables in model field order (inherited `project`, `workspace`
-/// first, then declared FKs), not in `select_related()` call order — so
-/// `("actor", "workspace", "issue", "project")` and
-/// `("actor", "issue", "project", "workspace")` both render projects,
-/// workspaces, issues, users.
-fn history_related_selects() -> String {
-    format!("{PROJECT_COLUMNS}, {WORKSPACE_COLUMNS}, {PREFETCH_ISSUE_COLUMNS}, {USER_COLUMNS}")
-}
+/// Output-name prefix of the joined project-lite columns.
+pub const PROJECT_PREFIX: &str = "p_";
+/// Output-name prefix of the joined workspace-lite columns.
+pub const WORKSPACE_PREFIX: &str = "w_";
+/// Output-name prefix of the joined issue-flat columns.
+pub const ISSUE_PREFIX: &str = "i_";
+/// Output-name prefix of the joined actor-lite columns.
+pub const USER_PREFIX: &str = "u_";
 
-/// History member-gate joins, shared by both history querysets
-/// (`activity.py:35-55`): project membership (unguarded — bug 4), the
-/// archived-project exclusion and the workspace slug.
-fn history_joins(base_table: &str) -> String {
-    format!(
-        "FROM {base_table} \
-        INNER JOIN issues ON {base_table}.issue_id = issues.id \
-        INNER JOIN projects ON {base_table}.project_id = projects.id \
-        INNER JOIN project_members ON projects.id = project_members.project_id \
-        INNER JOIN workspaces ON {base_table}.workspace_id = workspaces.id \
-        LEFT OUTER JOIN users ON {base_table}.actor_id = users.id"
-    )
-}
+/// `ProjectLiteSerializer` inputs (`project.py:120-133`).
+const PROJECT_LITE: [projects::Column; 8] = [
+    projects::Column::Id,
+    projects::Column::Identifier,
+    projects::Column::Name,
+    projects::Column::CoverImage,
+    projects::Column::CoverImageAssetId,
+    projects::Column::LogoProps,
+    projects::Column::Description,
+    projects::Column::IsDefault,
+];
 
-/// History member-gate predicates. Binds: issue id, user id, workspace slug.
-fn history_where(
-    binder: &mut Binder,
-    base_table: &str,
-    slug: &str,
-    issue_id: uuid::Uuid,
-    user_id: uuid::Uuid,
-) -> String {
-    let issue = binder.bind_uuid(issue_id);
-    let user = binder.bind_uuid(user_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    format!(
-        "{base_table}.deleted_at IS NULL AND {base_table}.issue_id = {issue} \
-        AND projects.archived_at IS NULL AND project_members.is_active \
-        AND project_members.member_id = {user} AND workspaces.slug = {slug_holder}"
-    )
-}
+/// `WorkspaceLiteSerializer` inputs (`workspace.py:79-83`).
+const WORKSPACE_LITE: [workspaces::Column; 5] = [
+    workspaces::Column::Id,
+    workspaces::Column::Name,
+    workspaces::Column::Slug,
+    workspaces::Column::Logo,
+    workspaces::Column::LogoAssetId,
+];
 
-/// Optional `?created_at__gt=` passthrough (`activity.py:31-33`): Django
-/// parses the raw query string into a timestamptz comparison. The builder
-/// takes the raw value and binds it as text; Postgres coerces
-/// text→timestamptz in the comparison, yielding the same rows for valid
-/// inputs. Invalid inputs raise in Django (generic 500); the handler
-/// validates before calling.
-fn created_after_predicate(
-    binder: &mut Binder,
-    base_table: &str,
-    created_after: Option<&str>,
-) -> String {
-    match created_after {
-        None => String::new(),
-        Some(raw) => {
-            let holder = binder.bind_string(raw.to_owned());
-            format!(" AND {base_table}.created_at > {holder}")
-        }
+/// `IssueFlatSerializer` inputs (`issue.py:105-123`).
+const ISSUE_FLAT: [issues::Column; 11] = [
+    issues::Column::Id,
+    issues::Column::Name,
+    issues::Column::DescriptionJson,
+    issues::Column::DescriptionHtml,
+    issues::Column::Priority,
+    issues::Column::ComplexityScore,
+    issues::Column::StartDate,
+    issues::Column::TargetDate,
+    issues::Column::SequenceId,
+    issues::Column::SortOrder,
+    issues::Column::IsDraft,
+];
+
+/// `UserLiteSerializer` inputs (`user.py:141-153`).
+const USER_LITE: [users::Column; 7] = [
+    users::Column::Id,
+    users::Column::FirstName,
+    users::Column::LastName,
+    users::Column::Avatar,
+    users::Column::AvatarAssetId,
+    users::Column::IsBot,
+    users::Column::DisplayName,
+];
+
+/// Add `columns` aliased `<prefix><column>`.
+fn select_prefixed<E, C, I>(mut select: Select<E>, columns: I, prefix: &str) -> Select<E>
+where
+    E: EntityTrait,
+    C: ColumnTrait,
+    I: IntoIterator<Item = C>,
+{
+    for column in columns {
+        select = select.column_as(column, format!("{prefix}{}", column.as_str()));
     }
+    select
 }
 
-/// Full history-activities statement (`activity.py:35-46`): the property
-/// feed minus the `comment`/`vote`/`reaction`/`draft` fields, oldest
-/// first. The negated `IN` keeps Django's exact null semantics — `NOT
-/// (field IN (...) AND field IS NOT NULL)` INCLUDES null-field rows,
-/// where a bare `NOT IN` would drop them. Binds, in order: issue id, user
-/// id, workspace slug, then the optional `created_at__gt` value.
-pub fn history_activities_sql(
-    binder: &mut Binder,
+/// The project / workspace / issue nests (`select_related`), prefixed.
+fn select_nests<E: EntityTrait>(select: Select<E>) -> Select<E> {
+    let select = select_prefixed(select, PROJECT_LITE, PROJECT_PREFIX);
+    let select = select_prefixed(select, WORKSPACE_LITE, WORKSPACE_PREFIX);
+    select_prefixed(select, ISSUE_FLAT, ISSUE_PREFIX)
+}
+
+/// The actor nest (`select_related("actor")`), prefixed.
+fn select_actor<E: EntityTrait>(select: Select<E>) -> Select<E> {
+    select_prefixed(select, USER_LITE, USER_PREFIX)
+}
+
+/// History member-gate joins and predicates (`activity.py:35-55`),
+/// shared by both history querysets: project membership (unguarded —
+/// bug 4), the archived-project exclusion, the workspace slug, the
+/// optional `?created_at__gt=` bound, and the oldest-first order.
+/// `created_after` binds as text cast to `timestamptz` (Postgres parses
+/// it, the same rows Django's timestamptz bind returns).
+#[allow(clippy::too_many_arguments)]
+fn history_gate<E: EntityTrait>(
+    select: Select<E>,
+    columns: HistoryColumns<E::Column>,
     slug: &str,
     issue_id: uuid::Uuid,
     user_id: uuid::Uuid,
     created_after: Option<&str>,
-) -> String {
-    let related = history_related_selects();
-    let joins = history_joins("issue_activities");
-    let gate = history_where(binder, "issue_activities", slug, issue_id, user_id);
-    let after = created_after_predicate(binder, "issue_activities", created_after);
-    format!(
-        "SELECT {ACTIVITY_COLUMNS}, {related} {joins} \
-        WHERE {gate} \
-        AND NOT (issue_activities.field IN ('comment', 'vote', 'reaction', 'draft') \
-        AND issue_activities.field IS NOT NULL){after} \
-        ORDER BY issue_activities.created_at ASC"
+) -> Select<E> {
+    let select = select
+        .join(JoinType::InnerJoin, columns.issue)
+        .join(JoinType::InnerJoin, columns.project)
+        .join(
+            JoinType::InnerJoin,
+            projects::Relation::ProjectMembers.def(),
+        )
+        .join(JoinType::InnerJoin, columns.workspace)
+        .join(JoinType::LeftJoin, columns.actor)
+        .filter(columns.deleted_at.is_null())
+        .filter(columns.issue_id.eq(issue_id))
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .filter(workspaces::Column::Slug.eq(slug));
+    let select = match created_after {
+        None => select,
+        Some(raw) => select.filter(
+            Expr::col((E::default(), columns.created_at))
+                .gt(Expr::val(raw.to_owned()).cast_as(Alias::new("timestamptz"))),
+        ),
+    };
+    select.order_by_asc(columns.created_at)
+}
+
+/// The base-table edges and columns [`history_gate`] references.
+struct HistoryColumns<C> {
+    issue: RelationDef,
+    project: RelationDef,
+    workspace: RelationDef,
+    actor: RelationDef,
+    issue_id: C,
+    deleted_at: C,
+    created_at: C,
+}
+
+/// History-activities select (`activity.py:35-46`): the property feed
+/// minus the `comment`/`vote`/`reaction`/`draft` fields, oldest first.
+/// The negated `IN` keeps Django's exact null semantics — `NOT (field IN
+/// (...) AND field IS NOT NULL)` INCLUDES null-field rows, where a bare
+/// `NOT IN` would drop them. Base columns unprefixed; project, workspace,
+/// issue and actor nests prefixed.
+pub fn history_activities_select(
+    slug: &str,
+    issue_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+    created_after: Option<&str>,
+) -> Select<issue_activities::Entity> {
+    use issue_activities::Column as A;
+    let select = select_actor(select_nests(issue_activities::Entity::find()));
+    let field = || Expr::col((issue_activities::Entity, A::Field));
+    history_gate(
+        select,
+        HistoryColumns {
+            issue: issue_activities::Relation::Issues.def(),
+            project: issue_activities::Relation::Projects.def(),
+            workspace: issue_activities::Relation::Workspaces.def(),
+            actor: issue_activities::Relation::Users3.def(),
+            issue_id: A::IssueId,
+            deleted_at: A::DeletedAt,
+            created_at: A::CreatedAt,
+        },
+        slug,
+        issue_id,
+        user_id,
+        created_after,
+    )
+    .filter(
+        field()
+            .is_in(["comment", "vote", "reaction", "draft"])
+            .and(field().is_not_null())
+            .not(),
     )
 }
 
-/// Full history-comments statement (`activity.py:47-64`): same gate and
-/// order as [`history_activities_sql`], no field exclusion. The
-/// `comment_reactions` prefetch is a separate statement
-/// ([`history_reactions_prefetch_sql`]). Same binds.
-pub fn history_comments_sql(
-    binder: &mut Binder,
+/// History-comments select (`activity.py:47-64`): same gate and order as
+/// [`history_activities_select`], no field exclusion. The
+/// `comment_reactions` prefetch is [`history_reactions_prefetch_select`].
+pub fn history_comments_select(
     slug: &str,
     issue_id: uuid::Uuid,
     user_id: uuid::Uuid,
     created_after: Option<&str>,
-) -> String {
-    let related = history_related_selects();
-    let joins = history_joins("issue_comments");
-    let gate = history_where(binder, "issue_comments", slug, issue_id, user_id);
-    let after = created_after_predicate(binder, "issue_comments", created_after);
-    format!(
-        "SELECT {COMMENT_COLUMNS}, {related} {joins} WHERE {gate}{after} \
-        ORDER BY issue_comments.created_at ASC"
+) -> Select<issue_comments::Entity> {
+    use issue_comments::Column as C;
+    let select = select_actor(select_nests(issue_comments::Entity::find()));
+    history_gate(
+        select,
+        HistoryColumns {
+            issue: issue_comments::Relation::Issues.def(),
+            project: issue_comments::Relation::Projects.def(),
+            workspace: issue_comments::Relation::Workspaces.def(),
+            actor: issue_comments::Relation::Users3.def(),
+            issue_id: C::IssueId,
+            deleted_at: C::DeletedAt,
+            created_at: C::CreatedAt,
+        },
+        slug,
+        issue_id,
+        user_id,
+        created_after,
     )
 }
 
 /// History reaction prefetch (`Prefetch("comment_reactions",
 /// CommentReaction.objects.select_related("actor"))`, `activity.py:58-63`).
-/// The actor FK is non-null, so the users join is `INNER`. One bind per
-/// parent id, in order; Django passes the page's comment ids.
-pub fn history_reactions_prefetch_sql(binder: &mut Binder, comment_ids: &[uuid::Uuid]) -> String {
-    let list = comment_ids
-        .iter()
-        .map(|id| binder.bind_uuid(*id))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "SELECT {COMMENT_REACTION_COLUMNS}, {USER_COLUMNS} \
-        FROM comment_reactions \
-        INNER JOIN users ON comment_reactions.actor_id = users.id \
-        WHERE comment_reactions.deleted_at IS NULL AND comment_reactions.comment_id IN ({list}) \
-        ORDER BY comment_reactions.created_at DESC"
-    )
+/// The actor FK is non-null, so the users join is `INNER`; only the
+/// actor's `display_name` is read (`u_display_name`).
+pub fn history_reactions_prefetch_select(
+    comment_ids: &[uuid::Uuid],
+) -> Select<comment_reactions::Entity> {
+    comment_reactions::Entity::find()
+        .column_as(
+            users::Column::DisplayName,
+            format!("{USER_PREFIX}{}", users::Column::DisplayName.as_str()),
+        )
+        .join(
+            JoinType::InnerJoin,
+            comment_reactions::Relation::Users3.def(),
+        )
+        .filter(comment_reactions::Column::DeletedAt.is_null())
+        .filter(comment_reactions::Column::CommentId.is_in(comment_ids.iter().copied()))
+        .order_by_desc(comment_reactions::Column::CreatedAt)
 }
 
 /// `issue-property` intake prefetch (`activity.py:67-73`):
-/// `issue__issue_intake` deferred to the three source columns (`to_attr`
-/// is fetch-shape only — no SQL). One bind per parent id, in order.
-pub fn history_intake_prefetch_sql(binder: &mut Binder, issue_ids: &[uuid::Uuid]) -> String {
-    let list = issue_ids
-        .iter()
-        .map(|id| binder.bind_uuid(*id))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "SELECT {INTAKE_SOURCE_SELECTS} FROM intake_issues \
-        WHERE intake_issues.deleted_at IS NULL AND intake_issues.issue_id IN ({list}) \
-        ORDER BY intake_issues.created_at DESC"
-    )
+/// `issue__issue_intake` deferred to the three source columns, newest
+/// first (`to_attr` is fetch-shape only — no SQL).
+pub fn history_intake_prefetch_select(issue_ids: &[uuid::Uuid]) -> Select<intake_issues::Entity> {
+    intake_issues::Entity::find()
+        .select_only()
+        .columns([
+            intake_issues::Column::Id,
+            intake_issues::Column::Source,
+            intake_issues::Column::SourceEmail,
+            intake_issues::Column::Extra,
+        ])
+        .filter(intake_issues::Column::DeletedAt.is_null())
+        .filter(intake_issues::Column::IssueId.is_in(issue_ids.iter().copied()))
+        .order_by_desc(intake_issues::Column::CreatedAt)
 }
 
 // ---------------------------------------------------------------------------
@@ -341,87 +419,108 @@ pub fn history_intake_prefetch_sql(binder: &mut Binder, issue_ids: &[uuid::Uuid]
 // ---------------------------------------------------------------------------
 
 /// `is_member` `Exists` (`comment.py:58-67`): an active membership of the
-/// caller in this project. Uncorrelated — every predicate is a literal.
-/// Binds, in order: user id, project id, workspace slug.
-pub fn comment_is_member_select(
-    binder: &mut Binder,
+/// caller in this project. Uncorrelated — every predicate is a literal;
+/// the `pm` / `pmw` aliases keep it apart from the outer joins.
+pub fn comment_is_member_expr(
     slug: &str,
     project_id: uuid::Uuid,
     user_id: uuid::Uuid,
-) -> String {
-    let user = binder.bind_uuid(user_id);
-    let project = binder.bind_uuid(project_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    format!(
-        "EXISTS(SELECT 1 AS a FROM project_members pm \
-        INNER JOIN workspaces pmw ON pm.workspace_id = pmw.id \
-        WHERE pm.deleted_at IS NULL AND pm.is_active AND pm.member_id = {user} \
-        AND pm.project_id = {project} AND pmw.slug = {slug_holder} LIMIT 1) AS is_member"
+) -> SimpleExpr {
+    let pm = || Alias::new("pm");
+    let pmw = || Alias::new("pmw");
+    Expr::exists(
+        Query::select()
+            .expr(Expr::val(1))
+            .from_as(project_members::Entity, pm())
+            .join_as(
+                JoinType::InnerJoin,
+                workspaces::Entity,
+                pmw(),
+                Expr::col((pm(), project_members::Column::WorkspaceId))
+                    .equals((pmw(), workspaces::Column::Id)),
+            )
+            .and_where(Expr::col((pm(), project_members::Column::DeletedAt)).is_null())
+            .and_where(Expr::col((pm(), project_members::Column::IsActive)).eq(true))
+            .and_where(Expr::col((pm(), project_members::Column::MemberId)).eq(user_id))
+            .and_where(Expr::col((pm(), project_members::Column::ProjectId)).eq(project_id))
+            .and_where(Expr::col((pmw(), workspaces::Column::Slug)).eq(slug))
+            .limit(1)
+            .to_owned(),
     )
 }
 
-/// Full comment-list statement (`comment.py:43-69`): `DISTINCT` (the member
-/// join can fan out), model-ordered newest first. The annotation selects
-/// between the base columns and the `select_related` columns — Django's
-/// exact select order. `filter_queryset` splices the optional
-/// `filterset_fields` (`issue__id`, `workspace__id`) into the `WHERE`;
-/// handler-owned. Binds, in order: workspace slug, project id, issue id,
-/// user id (outer `WHERE`), then the `is_member` binds (user id, project
-/// id, slug).
-pub fn comment_list_sql(
-    binder: &mut Binder,
+/// Comment-list select (`comment.py:43-69`): `DISTINCT` (the member join
+/// can fan out), model-ordered newest first. Base columns unprefixed,
+/// then `is_member`, then the project / workspace / issue nests (no actor
+/// join: the actor loads lazily). `filter_queryset`'s optional
+/// `filterset_fields` (`issue__id`, `workspace__id`) and `get_object`'s
+/// pk narrow the result through `.filter` (handler-owned).
+pub fn comment_list_select(
     slug: &str,
     project_id: uuid::Uuid,
     issue_id: uuid::Uuid,
     user_id: uuid::Uuid,
-) -> String {
-    let slug_holder = binder.bind_string(slug.to_owned());
-    let project = binder.bind_uuid(project_id);
-    let issue = binder.bind_uuid(issue_id);
-    let user = binder.bind_uuid(user_id);
-    let is_member = comment_is_member_select(binder, slug, project_id, user_id);
-    format!(
-        "SELECT DISTINCT {COMMENT_COLUMNS}, {is_member}, {PROJECT_COLUMNS}, {WORKSPACE_COLUMNS}, \
-        {PREFETCH_ISSUE_COLUMNS} \
-        FROM issue_comments \
-        INNER JOIN workspaces ON issue_comments.workspace_id = workspaces.id \
-        INNER JOIN projects ON issue_comments.project_id = projects.id \
-        INNER JOIN issues ON issue_comments.issue_id = issues.id \
-        INNER JOIN project_members ON projects.id = project_members.project_id \
-        WHERE issue_comments.deleted_at IS NULL AND workspaces.slug = {slug_holder} \
-        AND issue_comments.project_id = {project} AND issue_comments.issue_id = {issue} \
-        AND projects.archived_at IS NULL AND project_members.is_active \
-        AND project_members.member_id = {user} \
-        ORDER BY issue_comments.created_at DESC"
-    )
+) -> Select<issue_comments::Entity> {
+    use issue_comments::Column as C;
+    let select = issue_comments::Entity::find().distinct().expr_as(
+        comment_is_member_expr(slug, project_id, user_id),
+        "is_member",
+    );
+    select_nests(select)
+        .join(
+            JoinType::InnerJoin,
+            issue_comments::Relation::Workspaces.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            issue_comments::Relation::Projects.def(),
+        )
+        .join(JoinType::InnerJoin, issue_comments::Relation::Issues.def())
+        .join(
+            JoinType::InnerJoin,
+            projects::Relation::ProjectMembers.def(),
+        )
+        .filter(C::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(C::ProjectId.eq(project_id))
+        .filter(C::IssueId.eq(issue_id))
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .order_by_desc(C::CreatedAt)
 }
 
-/// Full comment-reaction-list statement (`comment.py:186-200`): `DISTINCT`,
-/// newest first, no `select_related`. Binds, in order: workspace slug,
-/// project id, comment id, user id.
-pub fn comment_reaction_list_sql(
-    binder: &mut Binder,
+/// Comment-reaction-list select (`comment.py:186-200`): `DISTINCT`,
+/// newest first, no `select_related`.
+pub fn comment_reaction_list_select(
     slug: &str,
     project_id: uuid::Uuid,
     comment_id: uuid::Uuid,
     user_id: uuid::Uuid,
-) -> String {
-    let slug_holder = binder.bind_string(slug.to_owned());
-    let project = binder.bind_uuid(project_id);
-    let comment = binder.bind_uuid(comment_id);
-    let user = binder.bind_uuid(user_id);
-    format!(
-        "SELECT DISTINCT {COMMENT_REACTION_COLUMNS} \
-        FROM comment_reactions \
-        INNER JOIN workspaces ON comment_reactions.workspace_id = workspaces.id \
-        INNER JOIN projects ON comment_reactions.project_id = projects.id \
-        INNER JOIN project_members ON projects.id = project_members.project_id \
-        WHERE comment_reactions.deleted_at IS NULL AND workspaces.slug = {slug_holder} \
-        AND comment_reactions.project_id = {project} AND comment_reactions.comment_id = {comment} \
-        AND projects.archived_at IS NULL AND project_members.is_active \
-        AND project_members.member_id = {user} \
-        ORDER BY comment_reactions.created_at DESC"
-    )
+) -> Select<comment_reactions::Entity> {
+    use comment_reactions::Column as R;
+    comment_reactions::Entity::find()
+        .distinct()
+        .join(
+            JoinType::InnerJoin,
+            comment_reactions::Relation::Workspaces.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            comment_reactions::Relation::Projects.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            projects::Relation::ProjectMembers.def(),
+        )
+        .filter(R::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(R::ProjectId.eq(project_id))
+        .filter(R::CommentId.eq(comment_id))
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .order_by_desc(R::CreatedAt)
 }
 
 // ---------------------------------------------------------------------------
@@ -691,17 +790,6 @@ mod tests {
                 "full statement drifted from shared fragment: {fragment}"
             );
         }
-        // The actor/issue related selects ride the history paths instead
-        // (the full statement has no actor select; its parent select is
-        // `parent.`-qualified).
-        let mut binder = Binder::new();
-        let history = history_activities_sql(&mut binder, SLUG, ISSUE, USER, None);
-        for fragment in [USER_COLUMNS, PREFETCH_ISSUE_COLUMNS, PROJECT_COLUMNS] {
-            assert!(
-                flat(&history).contains(&flat(fragment)),
-                "history statement drifted from shared fragment: {fragment}"
-            );
-        }
     }
 
     #[test]
@@ -724,122 +812,152 @@ mod tests {
 
     // -- history -------------------------------------------------------------
 
-    #[test]
-    fn history_activities_matches_django_shape() {
-        let mut binder = Binder::new();
-        let sql = history_activities_sql(&mut binder, SLUG, ISSUE, USER, None);
-        // Select order: base columns, then related tables in model field
-        // order (projects, workspaces, issues, users) — not the
-        // select_related() call order.
-        let base_pos = sql.find("issue_activities.created_at").expect("base");
-        let proj_pos = sql.find("projects.created_at").expect("projects");
-        let ws_pos = sql.find("workspaces.created_at").expect("workspaces");
-        let issue_pos = sql.find("issues.created_at").expect("issues");
-        let user_pos = sql.find("users.password").expect("users");
-        assert!(
-            base_pos < proj_pos && proj_pos < ws_pos && ws_pos < issue_pos && issue_pos < user_pos,
-            "history select order wrong: {sql}"
+    fn built<E: sea_orm::EntityTrait>(select: Select<E>) -> String {
+        use sea_orm::QueryTrait;
+        select.build(sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    /// Every `AS "<name>"` output alias of a built statement, in order.
+    fn aliases(sql: &str) -> Vec<String> {
+        sql.split(" AS \"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    fn assert_unique(names: &[String]) {
+        let mut sorted = names.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            names.len(),
+            "duplicate output names: {names:?}"
         );
-        // The negated IN keeps Django's null semantics verbatim.
-        assert!(sql.contains(
-            "NOT (issue_activities.field IN ('comment', 'vote', 'reaction', 'draft') \
-            AND issue_activities.field IS NOT NULL)"
-        ));
-        // Joins: issues/projects/members/workspaces INNER, nullable actor LEFT.
-        assert!(sql.contains("INNER JOIN issues ON issue_activities.issue_id = issues.id"));
-        assert!(sql.contains("INNER JOIN projects ON issue_activities.project_id = projects.id"));
-        assert!(
-            sql.contains("INNER JOIN project_members ON projects.id = project_members.project_id")
-        );
-        assert!(
-            sql.contains("INNER JOIN workspaces ON issue_activities.workspace_id = workspaces.id")
-        );
-        assert!(sql.contains("LEFT OUTER JOIN users ON issue_activities.actor_id = users.id"));
-        // Gate: archived-project exclusion, active membership, slug. The
-        // member join carries no deleted_at guard (bug 4).
-        assert!(sql.contains("projects.archived_at IS NULL"));
-        assert!(sql.contains("project_members.is_active"));
-        assert!(!sql.contains("project_members.deleted_at"));
-        assert!(sql.ends_with("ORDER BY issue_activities.created_at ASC"));
-        assert!(!sql.contains("DISTINCT"));
-        assert_eq!(binder.values().len(), 3);
     }
 
     #[test]
-    fn history_created_after_appends_gt_bind() {
-        let mut binder = Binder::new();
-        let sql = history_activities_sql(
-            &mut binder,
+    fn history_activities_matches_django_shape() {
+        let sql = built(history_activities_select(SLUG, ISSUE, USER, None));
+        // Base columns unprefixed, nests prefixed: unique by construction.
+        assert!(sql.starts_with(r#"SELECT "issue_activities"."created_at","#));
+        let names = aliases(&sql);
+        assert_eq!(names.first().map(String::as_str), Some("p_id"));
+        assert!(names.iter().any(|n| n == "w_slug"));
+        assert!(names.iter().any(|n| n == "i_description_html"));
+        assert_eq!(names.last().map(String::as_str), Some("u_display_name"));
+        assert_unique(&names);
+        // The negated IN keeps Django's null semantics.
+        assert!(sql.contains(
+            r#"NOT ("issue_activities"."field" IN ('comment', 'vote', 'reaction', 'draft') AND "issue_activities"."field" IS NOT NULL)"#
+        ));
+        // Joins: issues/projects/members/workspaces INNER, nullable actor LEFT.
+        assert!(
+            sql.contains(r#"INNER JOIN "issues" ON "issue_activities"."issue_id" = "issues"."id""#)
+        );
+        assert!(sql.contains(
+            r#"INNER JOIN "projects" ON "issue_activities"."project_id" = "projects"."id""#
+        ));
+        assert!(sql.contains(
+            r#"INNER JOIN "project_members" ON "projects"."id" = "project_members"."project_id""#
+        ));
+        assert!(sql.contains(
+            r#"INNER JOIN "workspaces" ON "issue_activities"."workspace_id" = "workspaces"."id""#
+        ));
+        assert!(
+            sql.contains(r#"LEFT JOIN "users" ON "issue_activities"."actor_id" = "users"."id""#)
+        );
+        // Gate: archived-project exclusion, active membership, slug. The
+        // member join carries no deleted_at guard (bug 4).
+        assert!(sql.contains(r#""issue_activities"."deleted_at" IS NULL"#));
+        assert!(sql.contains(r#""projects"."archived_at" IS NULL"#));
+        assert!(sql.contains(r#""project_members"."is_active" = TRUE"#));
+        assert!(sql.contains(&format!(r#""project_members"."member_id" = '{USER}'"#)));
+        assert!(sql.contains(r#""workspaces"."slug" = 'ws-slug'"#));
+        assert!(!sql.contains(r#""project_members"."deleted_at""#));
+        assert!(sql.ends_with(r#"ORDER BY "issue_activities"."created_at" ASC"#));
+        assert!(!sql.contains("DISTINCT"));
+    }
+
+    #[test]
+    fn history_created_after_casts_to_timestamptz() {
+        let sql = built(history_activities_select(
             SLUG,
             ISSUE,
             USER,
             Some("2026-01-02T03:04:05+00:00"),
-        );
-        assert!(sql.contains("AND issue_activities.created_at > $4"));
-        assert_eq!(binder.values().len(), 4);
-
-        let mut binder = Binder::new();
-        let sql = history_comments_sql(&mut binder, SLUG, ISSUE, USER, None);
-        assert!(!sql.contains("created_at >"));
-        assert!(!sql.contains("issue_comments.field"));
-        assert!(sql.ends_with("ORDER BY issue_comments.created_at ASC"));
-        assert_eq!(binder.values().len(), 3);
+        ));
+        assert!(sql.contains(
+            r#""issue_activities"."created_at" > CAST('2026-01-02T03:04:05+00:00' AS timestamptz)"#
+        ));
+        let sql = built(history_comments_select(SLUG, ISSUE, USER, None));
+        assert!(!sql.contains("created_at\" >"));
+        assert!(!sql.contains("\"field\""));
+        assert!(sql.contains(r#"LEFT JOIN "users" ON "issue_comments"."actor_id" = "users"."id""#));
+        assert!(sql.ends_with(r#"ORDER BY "issue_comments"."created_at" ASC"#));
+        assert_unique(&aliases(&sql));
     }
 
     #[test]
     fn history_prefetches_match_django_shapes() {
-        let mut binder = Binder::new();
-        let reactions = history_reactions_prefetch_sql(&mut binder, &[COMMENT]);
+        let reactions = built(history_reactions_prefetch_select(&[COMMENT]));
         // Non-null actor FK: INNER join; IN-list; model ordering.
-        assert!(reactions.contains("INNER JOIN users ON comment_reactions.actor_id = users.id"));
-        assert!(reactions.contains("comment_reactions.comment_id IN ($1)"));
-        assert!(reactions.ends_with("ORDER BY comment_reactions.created_at DESC"));
-        assert_eq!(binder.values().len(), 1);
+        assert!(reactions
+            .contains(r#"INNER JOIN "users" ON "comment_reactions"."actor_id" = "users"."id""#));
+        assert!(reactions.contains(r#""users"."display_name" AS "u_display_name""#));
+        assert!(reactions.contains(&format!(
+            r#""comment_reactions"."comment_id" IN ('{COMMENT}')"#
+        )));
+        assert!(reactions.contains(r#""comment_reactions"."deleted_at" IS NULL"#));
+        assert!(reactions.ends_with(r#"ORDER BY "comment_reactions"."created_at" DESC"#));
 
-        let mut binder = Binder::new();
-        let intake = history_intake_prefetch_sql(&mut binder, &[ISSUE]);
-        // .only() renders model field order (source before source_email).
-        assert!(flat(&intake).contains(
-            "SELECT intake_issues.id, intake_issues.source, intake_issues.source_email, \
-            intake_issues.extra FROM"
+        let intake = built(history_intake_prefetch_select(&[ISSUE]));
+        assert!(intake.starts_with(
+            r#"SELECT "intake_issues"."id", "intake_issues"."source", "intake_issues"."source_email", "intake_issues"."extra" FROM "intake_issues""#
         ));
-        assert!(intake.contains("intake_issues.issue_id IN ($1)"));
-        assert!(intake.ends_with("ORDER BY intake_issues.created_at DESC"));
-        assert_eq!(binder.values().len(), 1);
+        assert!(intake.contains(&format!(r#""intake_issues"."issue_id" IN ('{ISSUE}')"#)));
+        assert!(intake.contains(r#""intake_issues"."deleted_at" IS NULL"#));
+        assert!(intake.ends_with(r#"ORDER BY "intake_issues"."created_at" DESC"#));
     }
 
     // -- comments ------------------------------------------------------------
 
     #[test]
     fn comment_list_has_distinct_member_annotation_and_related() {
-        let mut binder = Binder::new();
-        let sql = comment_list_sql(&mut binder, SLUG, PROJECT, ISSUE, USER);
+        let sql = built(comment_list_select(SLUG, PROJECT, ISSUE, USER));
         assert!(sql.starts_with("SELECT DISTINCT"));
         // Annotation between base and select_related columns.
-        let base_pos = sql.find("issue_comments.created_at").expect("base");
-        let member_pos = sql.find("AS is_member").expect("is_member");
-        let proj_pos = sql.find("projects.created_at").expect("projects");
+        let base_pos = sql.find(r#""issue_comments"."created_at""#).expect("base");
+        let member_pos = sql.find(r#"AS "is_member""#).expect("is_member");
+        let proj_pos = sql.find(r#"AS "p_id""#).expect("projects");
         assert!(
             base_pos < member_pos && member_pos < proj_pos,
             "comment select order wrong: {sql}"
         );
-        assert!(sql.contains("pm.member_id = $5"));
-        assert!(sql.contains("pm.project_id = $6"));
-        assert!(sql.contains("pmw.slug = $7"));
-        assert!(sql.ends_with("ORDER BY issue_comments.created_at DESC"));
-        assert_eq!(binder.values().len(), 7);
+        assert!(sql.contains(&format!(r#""pm"."member_id" = '{USER}'"#)));
+        assert!(sql.contains(&format!(r#""pm"."project_id" = '{PROJECT}'"#)));
+        assert!(sql.contains(r#""pmw"."slug" = 'ws-slug'"#));
+        assert!(sql.contains(r#""pm"."deleted_at" IS NULL"#));
+        // No actor join on the list statement.
+        assert!(!sql.contains(r#"JOIN "users""#));
+        assert!(!aliases(&sql).iter().any(|name| name.starts_with("u_")));
+        assert_unique(&aliases(&sql));
+        assert!(sql.ends_with(r#"ORDER BY "issue_comments"."created_at" DESC"#));
     }
 
     #[test]
     fn comment_reaction_list_is_distinct_newest_first() {
-        let mut binder = Binder::new();
-        let sql = comment_reaction_list_sql(&mut binder, SLUG, PROJECT, COMMENT, USER);
-        assert!(sql.starts_with("SELECT DISTINCT"));
-        assert!(sql.contains("comment_reactions.comment_id = $3"));
-        assert!(sql.contains("project_members.member_id = $4"));
-        assert!(!sql.contains("select_related"));
-        assert!(sql.ends_with("ORDER BY comment_reactions.created_at DESC"));
-        assert_eq!(binder.values().len(), 4);
+        let sql = built(comment_reaction_list_select(SLUG, PROJECT, COMMENT, USER));
+        assert!(sql.starts_with(r#"SELECT DISTINCT "comment_reactions"."created_at""#));
+        assert!(sql.contains(&format!(
+            r#""comment_reactions"."comment_id" = '{COMMENT}'"#
+        )));
+        assert!(sql.contains(&format!(r#""project_members"."member_id" = '{USER}'"#)));
+        assert!(sql.contains(
+            r#"INNER JOIN "project_members" ON "projects"."id" = "project_members"."project_id""#
+        ));
+        assert!(!sql.contains(" AS \""));
+        assert!(sql.ends_with(r#"ORDER BY "comment_reactions"."created_at" DESC"#));
     }
 
     // -- meta ----------------------------------------------------------------
@@ -955,27 +1073,6 @@ mod tests {
                 statements.push(($name, sql, binder.values().len()));
             }};
         }
-        dump!("history_activities", |binder: &mut Binder| {
-            history_activities_sql(binder, SLUG, ISSUE, USER, None)
-        });
-        dump!("history_activities_gt", |binder: &mut Binder| {
-            history_activities_sql(binder, SLUG, ISSUE, USER, Some("2026-01-02T03:04:05+00:00"))
-        });
-        dump!("history_comments", |binder: &mut Binder| {
-            history_comments_sql(binder, SLUG, ISSUE, USER, None)
-        });
-        dump!("history_prefetch_reactions", |binder: &mut Binder| {
-            history_reactions_prefetch_sql(binder, &[COMMENT])
-        });
-        dump!("history_prefetch_intake", |binder: &mut Binder| {
-            history_intake_prefetch_sql(binder, &[ISSUE])
-        });
-        dump!("comment_list", |binder: &mut Binder| {
-            comment_list_sql(binder, SLUG, PROJECT, ISSUE, USER)
-        });
-        dump!("comment_reaction_list", |binder: &mut Binder| {
-            comment_reaction_list_sql(binder, SLUG, PROJECT, COMMENT, USER)
-        });
         dump!("meta", |binder: &mut Binder| {
             meta_sql(binder, SLUG, PROJECT, ISSUE)
         });
@@ -995,14 +1092,10 @@ mod tests {
             println!("@@ {name} @@\n{sql}\n@@ binds: {binds} @@");
         }
         for (name, cols) in [
-            ("cols_activity", ACTIVITY_COLUMNS),
-            ("cols_comment", COMMENT_COLUMNS),
-            ("cols_comment_reaction", COMMENT_REACTION_COLUMNS),
             ("cols_workspace", WORKSPACE_COLUMNS),
             ("cols_ticker", TICKER_COLUMNS),
             ("cols_parent_issue", PARENT_ISSUE_COLUMNS),
             ("cols_lite_issue", LITE_ISSUE_COLUMNS),
-            ("cols_intake_source", INTAKE_SOURCE_SELECTS),
         ] {
             println!("@@ {name} @@\n{cols}");
         }

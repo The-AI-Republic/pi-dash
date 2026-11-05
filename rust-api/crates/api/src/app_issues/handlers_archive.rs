@@ -90,9 +90,6 @@ use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
-use pidash_services::orchestration::blockers::{
-    has_open_blockers_sql, relations_summary, summary_sql, BlockerRow,
-};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
 use pidash_types::orchestration::StateRef;
 
@@ -860,9 +857,6 @@ async fn fetch_ticker(
     }
 }
 
-/// One summary-statement row plus the ignored full-set flag column.
-type BlockerTuple = (uuid::Uuid, i32, String, Option<String>, Option<String>, i32);
-
 /// The project clock-policy columns behind `effective_max_ticks` and the
 /// stage interval (reached through the cached `issue.project`: no
 /// soft-delete guard, and a missing row is a 500).
@@ -907,49 +901,12 @@ async fn fetch_blockers(
     pool: &sqlx::PgPool,
     issue_id: uuid::Uuid,
 ) -> Result<pidash_services::orchestration::blockers::RelationsSummary, Denial> {
-    let blocked_sql = summary_sql(false).replace(":issue_id", "$1");
-    let blocking_sql = summary_sql(true).replace(":issue_id", "$1");
-    let open_sql = has_open_blockers_sql().replace(":issue_id", "$1");
-    let blocked: Vec<BlockerTuple> = sqlx::query_as(&blocked_sql)
-        .bind(issue_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let blocking: Vec<BlockerTuple> = sqlx::query_as(&blocking_sql)
-        .bind(issue_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let open: Option<(i32,)> = sqlx::query_as(&open_sql)
-        .bind(issue_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let blocked: Vec<BlockerRow> = blocked
-        .into_iter()
-        .map(
-            |(issue_id, sequence_id, project_identifier, state_name, state_group, _)| BlockerRow {
-                issue_id,
-                sequence_id,
-                project_identifier,
-                state_name,
-                state_group,
-            },
-        )
-        .collect();
-    let blocking: Vec<BlockerRow> = blocking
-        .into_iter()
-        .map(
-            |(issue_id, sequence_id, project_identifier, state_name, state_group, _)| BlockerRow {
-                issue_id,
-                sequence_id,
-                project_identifier,
-                state_name,
-                state_group,
-            },
-        )
-        .collect();
-    Ok(relations_summary(&blocked, &blocking, open.is_some()))
+    pidash_services::orchestration::blockers::fetch_relations_summary(
+        &pidash_db::pool::sea_orm_connection(pool),
+        issue_id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)
 }
 
 // ---------------------------------------------------------------------------

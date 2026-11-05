@@ -101,10 +101,7 @@ use pidash_services::app_issues::{
     issue_detail_base_to_representation, issue_detail_to_representation, issue_is_actively_synced,
     order_sql, AgentTickerInput, IssueDetailBaseRow, IssueDetailRow,
 };
-use pidash_services::orchestration::blockers::{
-    blockers_sql, dependents_sql, has_open_blockers_sql, relations_summary, BlockerRow,
-    RelationsSummary,
-};
+use pidash_services::orchestration::blockers::RelationsSummary;
 use pidash_services::orchestration::clock::ProjectClockPolicy;
 use pidash_types::orchestration::StateRef;
 
@@ -1782,47 +1779,20 @@ async fn full_is_synced(
     ))
 }
 
-/// One direction of the blocker fetch: the merged statement with its two
-/// `:issue_id` placeholders bound to one positional.
-async fn fetch_blocker_rows(
-    pool: &sqlx::PgPool,
-    sql: &str,
-    issue_id: &uuid::Uuid,
-) -> Result<Vec<BlockerRow>, Denial> {
-    let mut binder = Binder::new();
-    let holder = binder.bind_uuid(*issue_id);
-    let sql = sql.replace(":issue_id", &holder);
-    let rows = fetch_json_rows(pool, &sql, binder.values()).await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        out.push(BlockerRow {
-            issue_id: get_str(row, "id")
-                .and_then(|text| text.parse::<uuid::Uuid>().ok())
-                .ok_or(Denial::ServerError)?,
-            sequence_id: get_i32(row, "sequence_id").ok_or(Denial::ServerError)?,
-            project_identifier: get_str(row, "identifier")
-                .ok_or(Denial::ServerError)?
-                .to_owned(),
-            state_name: get_str(row, "name").map(str::to_owned),
-            state_group: get_str(row, "group").map(str::to_owned),
-        });
-    }
-    Ok(out)
-}
-
 /// The per-instance `_blocker_summary_cache` (`:1250-1258`): one
-/// `relations_summary` call whose halves feed both blocker fields.
+/// `relations_summary` call whose halves feed both blocker fields (the
+/// SeaORM builder form in `orchestration::blockers`: both open-first
+/// capped lists plus the full-set open check, 3 statements as before).
 async fn fetch_relations_summary(
     pool: &sqlx::PgPool,
     issue_id: &uuid::Uuid,
 ) -> Result<RelationsSummary, Denial> {
-    let blocked_by = fetch_blocker_rows(pool, &blockers_sql(), issue_id).await?;
-    let blocking = fetch_blocker_rows(pool, &dependents_sql(), issue_id).await?;
-    let mut binder = Binder::new();
-    let holder = binder.bind_uuid(*issue_id);
-    let sql = has_open_blockers_sql().replace(":issue_id", &holder);
-    let open = fetch_json_rows(pool, &sql, binder.values()).await?;
-    Ok(relations_summary(&blocked_by, &blocking, !open.is_empty()))
+    pidash_services::orchestration::blockers::fetch_relations_summary(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *issue_id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)
 }
 
 fn decode_ticker(row: &Map<String, Value>) -> Result<Option<IssueAgentTicker>, Denial> {
@@ -2925,13 +2895,6 @@ mod tests {
         unique.sort();
         unique.dedup();
         assert_eq!(unique.len(), actual.len());
-    }
-
-    #[test]
-    fn blocker_statements_bind_one_issue() {
-        for sql in [blockers_sql(), dependents_sql(), has_open_blockers_sql()] {
-            assert_eq!(sql.matches(":issue_id").count(), 2);
-        }
     }
 
     #[test]
