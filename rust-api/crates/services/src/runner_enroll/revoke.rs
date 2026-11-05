@@ -14,7 +14,7 @@
 //! [`RunCreationStore`](super::validation::RunCreationStore) precedent,
 //! the reads/writes live behind [`RevokeStore`]: one async method per
 //! Django ORM call, with the SQL text in the adjacent `*_SQL` consts
-//! (plus [`active_runs_lock_sql`]). Each write leg has one
+//! (plus `active_runs_lock_sql`). Each write leg has one
 //! executor-generic performer — S2 in
 //! [`domain::tokens`](crate::domain::tokens), the rest below — which
 //! every pool implementation calls, so the executing layers issue
@@ -92,6 +92,11 @@
 //! Ported bugs: none found in this unit on read-through.
 
 use chrono::{DateTime, Utc};
+use pidash_db::entity::{agent_run, runner};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+};
 use uuid::Uuid;
 
 use pidash_db::runner_enroll::columns::revoke_reasons::{
@@ -163,46 +168,10 @@ pub fn check_revoke_reason(reason: &str) -> (String, Vec<String>) {
 // SQL (`models.py:597-651`, probe-verified on Django 4.2.30)
 // ---------------------------------------------------------------------------
 
-/// S1 — mark the runner revoked (`:599-603`).
-///
-/// `QuerySet.update`, so `updated_at` is UNCHANGED (no such column here).
-/// `$1` = now, `$2` = stored reason, `$3` = runner. `status` is the
-/// `RUNNER_STATUS_REVOKED` literal (fixed enum, rendered literally like
-/// the D-14 drain consts).
-pub const MARK_RUNNER_REVOKED_SQL: &str = "UPDATE \"runner\" SET \"status\" = 'revoked', \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \"runner\".\"id\" = $3";
-
 // NOTE: the S2 revoke const lived here; the statement moved to
 // `crate::domain::tokens::revoke_runner_sessions_for_runner`
 // (PIDASHCONV-1520), whose test carries the pin (including the
 // Q-sorted WHERE order).
-
-/// S3 — lock + list non-terminal runs (`:622-626`).
-///
-/// `$1` = runner. The `IN` list renders
-/// [`NON_TERMINAL_STATUSES`](guards::NON_TERMINAL_STATUSES) in
-/// source-tuple order (called, not copied — the D-14
-/// `next_for_runner_sql` precedent); the `ORDER BY` is the `AgentRun`
-/// default ordering. Rows come back `(run_id, pod_id)` in listed order.
-pub fn active_runs_lock_sql() -> String {
-    let statuses = guards::NON_TERMINAL_STATUSES
-        .iter()
-        .map(|status| format!("'{}'", status.value()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "SELECT \"agent_run\".\"id\", \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"runner_id\" = $1 AND \"agent_run\".\"status\" IN ({statuses})) ORDER BY \"agent_run\".\"created_at\" DESC FOR UPDATE"
-    )
-}
-
-/// S4a — queued-run pod ids for the unpin (`:644-648`).
-///
-/// `$1` = runner. `'queued'` is the `AgentRunStatus::Queued` literal.
-pub const PINNED_QUEUED_PODS_SQL: &str = "SELECT \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"pinned_runner_id\" = $1 AND \"agent_run\".\"status\" = 'queued') ORDER BY \"agent_run\".\"created_at\" DESC";
-
-/// S4b — unpin QUEUED follow-ups (`:650`), only when S4a is non-empty.
-///
-/// `$1` = runner.
-pub const UNPIN_QUEUED_RUNS_SQL: &str = "UPDATE \"agent_run\" SET \"pinned_runner_id\" = NULL WHERE (\"agent_run\".\"pinned_runner_id\" = $1 AND \"agent_run\".\"status\" = 'queued')";
 
 /// Per-run finalize target (`:631-640`): `AgentRunStatus.CANCELLED`.
 pub const FINALIZE_TO_STATUS: &str = "cancelled";
@@ -223,40 +192,82 @@ pub const FINALIZE_ERROR_CODE: &str = "runner_revoked";
 // replace; the savepoint/race/cloud-event flow stays with the driver.
 // ---------------------------------------------------------------------------
 
-/// S1 performer: mark the runner revoked ([`MARK_RUNNER_REVOKED_SQL`]).
-///
-/// Params: `$1` now, `$2` stored reason, `$3` runner.
-pub async fn stamp_runner_revoked<'e, E>(
-    ex: E,
+/// S1 performer (`models.py:599-603`): `QuerySet.update(status=REVOKED,
+/// revoked_at, revoked_reason)`, so `updated_at` is untouched.
+pub async fn stamp_runner_revoked(
+    db: &impl ConnectionTrait,
     runner_id: Uuid,
     now: DateTime<Utc>,
     stored_reason: &str,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(MARK_RUNNER_REVOKED_SQL)
-        .bind(now)
-        .bind(stored_reason)
-        .bind(runner_id)
-        .execute(ex)
+) -> Result<(), DbErr> {
+    runner::Entity::update_many()
+        .col_expr(runner::Column::Status, Expr::value("revoked"))
+        .col_expr(runner::Column::RevokedAt, Expr::value(now))
+        .col_expr(runner::Column::RevokedReason, Expr::value(stored_reason))
+        .filter(runner::Column::Id.eq(runner_id))
+        .exec(db)
         .await
-        .map(|_| ())
+        .map(drop)
 }
 
-/// S4b performer: unpin QUEUED follow-ups ([`UNPIN_QUEUED_RUNS_SQL`]).
-///
-/// Param: `$1` runner. The driver calls this only when S4a is
-/// non-empty.
-pub async fn unpin_queued_runs_for_runner<'e, E>(ex: E, runner_id: Uuid) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(UNPIN_QUEUED_RUNS_SQL)
-        .bind(runner_id)
-        .execute(ex)
+/// S3 (`models.py:622-626`): `(run_id, pod_id)` of the runner's runs in a
+/// non-terminal status, newest first, `FOR UPDATE`.
+pub async fn lock_active_runs(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<Vec<(Uuid, Option<Uuid>)>, DbErr> {
+    agent_run::Entity::find()
+        .select_only()
+        .columns([agent_run::Column::Id, agent_run::Column::PodId])
+        .filter(agent_run::Column::RunnerId.eq(runner_id))
+        .filter(
+            agent_run::Column::Status.is_in(
+                guards::NON_TERMINAL_STATUSES
+                    .iter()
+                    .map(|status| status.value()),
+            ),
+        )
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .lock_exclusive()
+        .into_tuple()
+        .all(db)
         .await
-        .map(|_| ())
+}
+
+/// S4a (`models.py:644-648`): pod ids of the QUEUED runs pinned to the
+/// runner, newest first.
+pub async fn pinned_queued_pod_ids(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<Vec<Option<Uuid>>, DbErr> {
+    pinned_queued(runner_id)
+        .select_only()
+        .column(agent_run::Column::PodId)
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .into_tuple()
+        .all(db)
+        .await
+}
+
+/// S4b (`models.py:650`): unpin the QUEUED follow-ups. The driver calls
+/// this only when S4a is non-empty.
+pub async fn unpin_queued_runs_for_runner(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<(), DbErr> {
+    agent_run::Entity::update_many()
+        .col_expr(agent_run::Column::PinnedRunnerId, Expr::value(None::<Uuid>))
+        .filter(agent_run::Column::PinnedRunnerId.eq(runner_id))
+        .filter(agent_run::Column::Status.eq("queued"))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+fn pinned_queued(runner_id: Uuid) -> sea_orm::Select<agent_run::Entity> {
+    agent_run::Entity::find()
+        .filter(agent_run::Column::PinnedRunnerId.eq(runner_id))
+        .filter(agent_run::Column::Status.eq("queued"))
 }
 
 /// Revoke-finalize `UPDATE` performer: render
@@ -522,10 +533,6 @@ mod tests {
         serde_json::from_str(text).expect("flows.golden.json parses")
     }
 
-    fn f5_sql() -> &'static str {
-        include_str!("../../../../fixtures/runner_enroll/queries/revoke_cascade.sql")
-    }
-
     fn frozen_now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, 4, 7, 0, 0).unwrap()
     }
@@ -613,60 +620,8 @@ mod tests {
 
     // -- SQL text -----------------------------------------------------------
 
-    #[test]
-    fn s1_marks_revoked_without_touching_updated_at() {
-        assert_eq!(
-            MARK_RUNNER_REVOKED_SQL,
-            "UPDATE \"runner\" SET \"status\" = 'revoked', \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \"runner\".\"id\" = $3"
-        );
-        assert!(
-            !MARK_RUNNER_REVOKED_SQL.contains("updated_at"),
-            "QuerySet.update leaves updated_at alone (F5 S1 note)"
-        );
-        let sql = f5_sql();
-        assert!(sql.contains("UPDATE \"runner\""), "F5 names the S1 table");
-        assert!(sql.contains("updated_at UNCHANGED"), "F5 pins the note");
-    }
-
     // (The S2 pin moved with the statement to
     // `crate::domain::tokens`.)
-
-    #[test]
-    fn s3_renders_non_terminal_statuses_from_guards() {
-        let values: Vec<&str> = guards::NON_TERMINAL_STATUSES
-            .iter()
-            .map(|status| status.value())
-            .collect();
-        assert_eq!(
-            values,
-            vec![
-                "queued",
-                "assigned",
-                "waiting_for_worktree",
-                "running",
-                "cancel_requested",
-                "awaiting_approval",
-                "awaiting_reauth",
-                "paused_awaiting_input",
-            ]
-        );
-        assert_eq!(
-            active_runs_lock_sql(),
-            "SELECT \"agent_run\".\"id\", \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"runner_id\" = $1 AND \"agent_run\".\"status\" IN ('queued', 'assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth', 'paused_awaiting_input')) ORDER BY \"agent_run\".\"created_at\" DESC FOR UPDATE"
-        );
-    }
-
-    #[test]
-    fn s4_select_and_conditional_update() {
-        assert_eq!(
-            PINNED_QUEUED_PODS_SQL,
-            "SELECT \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"pinned_runner_id\" = $1 AND \"agent_run\".\"status\" = 'queued') ORDER BY \"agent_run\".\"created_at\" DESC"
-        );
-        assert_eq!(
-            UNPIN_QUEUED_RUNS_SQL,
-            "UPDATE \"agent_run\" SET \"pinned_runner_id\" = NULL WHERE (\"agent_run\".\"pinned_runner_id\" = $1 AND \"agent_run\".\"status\" = 'queued')"
-        );
-    }
 
     #[test]
     fn finalize_literals_match_source() {
@@ -674,16 +629,6 @@ mod tests {
         assert_eq!(FINALIZE_TO_STATUS, AgentRunStatus::Cancelled.value());
         assert_eq!(FINALIZE_ERROR, "runner revoked");
         assert_eq!(FINALIZE_ERROR_CODE, "runner_revoked");
-    }
-
-    #[test]
-    fn embedded_status_literals_match_their_owners() {
-        use pidash_db::runner_enroll::columns::enums::RUNNER_STATUS_REVOKED;
-        use pidash_types::runner_runs::AgentRunStatus;
-        assert!(MARK_RUNNER_REVOKED_SQL.contains(&format!("'{RUNNER_STATUS_REVOKED}'")));
-        assert_eq!(RUNNER_STATUS_REVOKED, "revoked");
-        assert!(PINNED_QUEUED_PODS_SQL.contains(&format!("'{}'", AgentRunStatus::Queued.value())));
-        assert!(UNPIN_QUEUED_RUNS_SQL.contains(&format!("'{}'", AgentRunStatus::Queued.value())));
     }
 
     #[test]

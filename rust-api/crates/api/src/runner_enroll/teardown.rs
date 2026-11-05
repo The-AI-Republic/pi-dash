@@ -2309,94 +2309,66 @@ async fn fire_bundle(
 /// pool left partial deletes committed when a later one failed.
 async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), ()> {
     let mut tx = pool.begin().await.map_err(|_| ())?;
-    let root: Option<sqlx::postgres::PgRow> = sqlx::query(delete_kernel::COLLECT_RUNNER_BY_ID_SQL)
-        .bind(runner_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    if root.is_none() {
-        return Ok(());
-    }
-    let chat_ids: Vec<Uuid> = sqlx::query_scalar(&delete_kernel::collect_chat_ids_sql(1))
-        .bind(runner_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    let mut message_ids: Vec<Uuid> = Vec::new();
-    if !chat_ids.is_empty() {
-        let fetch_sql = delete_kernel::collect_message_ids_sql(chat_ids.len());
-        let mut fetched = sqlx::query_scalar(&fetch_sql);
-        for chat_id in &chat_ids {
-            fetched = fetched.bind(*chat_id);
+    let runners = [runner_id];
+    {
+        let conn = TxConn::new(&mut tx);
+        if !delete_kernel::runner_exists(&conn, runner_id)
+            .await
+            .map_err(|_| ())?
+        {
+            return Ok(());
         }
-        message_ids = fetched.fetch_all(&mut *tx).await.map_err(|_| ())?;
-        let events_sql = delete_kernel::delete_chat_events_sql(chat_ids.len());
-        let approvals_sql = delete_kernel::delete_chat_approvals_sql(chat_ids.len());
-        let dedupes_sql = delete_kernel::delete_chat_dedupes_sql(chat_ids.len());
-        let mut events = sqlx::query(&events_sql);
-        let mut approvals = sqlx::query(&approvals_sql);
-        let mut dedupes = sqlx::query(&dedupes_sql);
-        for chat_id in &chat_ids {
-            events = events.bind(*chat_id);
-            approvals = approvals.bind(*chat_id);
-            dedupes = dedupes.bind(*chat_id);
+        let chat_ids = delete_kernel::chat_ids_for_runners(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        let mut message_ids: Vec<Uuid> = Vec::new();
+        if !chat_ids.is_empty() {
+            message_ids = delete_kernel::message_ids_for_chats(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
+            delete_kernel::delete_chat_events(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
+            delete_kernel::delete_chat_approvals(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
+            delete_kernel::delete_chat_dedupes(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
         }
-        events.execute(&mut *tx).await.map_err(|_| ())?;
-        approvals.execute(&mut *tx).await.map_err(|_| ())?;
-        dedupes.execute(&mut *tx).await.map_err(|_| ())?;
-    }
-    pidash_services::domain::tokens::delete_runner_sessions_for_runners(&mut *tx, &[runner_id])
-        .await
-        .map_err(|_| ())?;
-    sqlx::query(&delete_kernel::delete_force_refresh_sql(1))
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    sqlx::query(&delete_kernel::delete_live_state_sql(1))
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    sqlx::query(&delete_kernel::null_run_runners_sql(1))
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    sqlx::query(&delete_kernel::null_run_pins_sql(1))
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    if !message_ids.is_empty() {
-        let null_sql = delete_kernel::null_event_messages_sql(message_ids.len());
-        let mut nulls = sqlx::query(&null_sql);
-        for message_id in &message_ids {
-            nulls = nulls.bind(*message_id);
+        pidash_services::domain::tokens::delete_runner_sessions_for_runners(&mut *tx, &runners)
+            .await
+            .map_err(|_| ())?;
+        let conn = TxConn::new(&mut tx);
+        delete_kernel::delete_force_refresh(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        delete_kernel::delete_live_state(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        delete_kernel::null_run_runners(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        delete_kernel::null_run_pins(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        if !message_ids.is_empty() {
+            delete_kernel::null_event_messages(&conn, &message_ids)
+                .await
+                .map_err(|_| ())?;
+            delete_kernel::delete_chat_messages(&conn, &message_ids)
+                .await
+                .map_err(|_| ())?;
         }
-        nulls.execute(&mut *tx).await.map_err(|_| ())?;
-    }
-    if !message_ids.is_empty() {
-        let deletes_sql = delete_kernel::delete_chat_messages_sql(message_ids.len());
-        let mut deletes = sqlx::query(&deletes_sql);
-        for message_id in &message_ids {
-            deletes = deletes.bind(*message_id);
+        if !chat_ids.is_empty() {
+            delete_kernel::delete_chat_sessions(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
         }
-        deletes.execute(&mut *tx).await.map_err(|_| ())?;
+        delete_kernel::delete_runner_rows(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
     }
-    if !chat_ids.is_empty() {
-        let deletes_sql = delete_kernel::delete_chat_sessions_sql(chat_ids.len());
-        let mut deletes = sqlx::query(&deletes_sql);
-        for chat_id in &chat_ids {
-            deletes = deletes.bind(*chat_id);
-        }
-        deletes.execute(&mut *tx).await.map_err(|_| ())?;
-    }
-    sqlx::query(&delete_kernel::delete_runner_rows_sql(1))
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
     if tx.commit().await.is_err() {
         return Err(());
     }
