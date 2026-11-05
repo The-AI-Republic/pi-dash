@@ -299,12 +299,17 @@ def engine_runner_ids_for_machine(machine_id) -> list:
     )
 
 
-def set_engine_auto_pause_reason(machine, reason: str) -> bool:
+def set_engine_auto_pause_reason(machine, reason: str, *, keep=(), only_from=None) -> bool:
     """Set or clear (``""``) a machine's automatic engine pause.
 
     The seam for the heartbeat report and the model-token endpoint (§8).
     Pausing releases the engines' queued non-strict pins in the same
     transaction; clearing drains them. Returns True when the value changed.
+
+    The conditions are checked on the locked row, so a caller that decided
+    on an unlocked read cannot overwrite a reason set meanwhile: nothing
+    changes when the current reason is in ``keep``, or, with ``only_from``,
+    when it is not in ``only_from``.
     """
     from pi_dash.runner.models import DevMachine, EngineAutoPauseReason
 
@@ -313,7 +318,10 @@ def set_engine_auto_pause_reason(machine, reason: str) -> bool:
         raise ValueError(f"unknown engine auto-pause reason {reason!r}")
     with transaction.atomic():
         locked = DevMachine.objects.select_for_update().get(pk=machine.pk)
-        if locked.engine_auto_pause_reason == reason:
+        current = locked.engine_auto_pause_reason
+        if current == reason or current in keep:
+            return False
+        if only_from is not None and current not in only_from:
             return False
         was_paused = locked.engine_paused
         locked.engine_auto_pause_reason = reason

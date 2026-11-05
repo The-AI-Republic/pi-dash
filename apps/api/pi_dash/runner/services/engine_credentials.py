@@ -55,6 +55,31 @@ def silent_renewal_allowed(state: str) -> bool:
     """True when a non-interactive approval may (re)issue the engine credential."""
     return state in SILENT_RENEWAL_ALLOWED_STATES
 
+
+#: Sign-in states a daemon reports when it holds no engine credential of its own.
+_DAEMON_HOLDS_NO_CREDENTIAL = frozenset(
+    {EngineSignInState.NEVER, EngineSignInState.SIGNED_OUT, EngineSignInState.REVOKED, EngineSignInState.EXPIRED}
+)
+
+
+def silent_issue_allowed(machine: DevMachine, now=None) -> bool:
+    """True when a non-interactive approval may (re)issue ``machine``'s engine credential.
+
+    ``expiring`` / ``expired``, as :func:`silent_renewal_allowed` says. Also
+    ``active`` when the daemon's last report says it holds no credential (its
+    keychain was wiped, or Pi Dash was reinstalled): the user already turned
+    the engine on for this machine, so re-issuing the lost credential is a
+    renewal, not a new consent. Without this the engine stayed off until the
+    server's credential reached ``expiring``, about 11 days.
+    """
+    state = machine.current_engine_sign_in_state(now)
+    if silent_renewal_allowed(state):
+        return True
+    if state != EngineSignInState.ACTIVE:
+        return False
+    reported = (machine.engine_state or {}).get("sign_in_state")
+    return reported in _DAEMON_HOLDS_NO_CREDENTIAL
+
 #: Revocation reason → stored machine sign-in state.
 _STATE_FOR_REASON = {
     EngineCredentialRevokeReason.SIGNED_OUT: EngineSignInState.SIGNED_OUT,
@@ -136,7 +161,7 @@ def issue_engine_credential(*, user, dev_machine: DevMachine, silent: bool = Fal
     now = timezone.now()
     with transaction.atomic():
         machine = DevMachine.objects.select_for_update().get(pk=dev_machine.pk)
-        if silent and not silent_renewal_allowed(machine.current_engine_sign_in_state(now)):
+        if silent and not silent_issue_allowed(machine, now):
             raise EngineCredentialError(SILENT_RENEWAL_REFUSED)
         superseded = EngineCredential.objects.filter(dev_machine=machine, revoked_at__isnull=True).update(
             revoked_at=now, revoked_reason=EngineCredentialRevokeReason.SUPERSEDED
