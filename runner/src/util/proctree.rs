@@ -854,9 +854,9 @@ pub fn refresh_observed() {
     }
 }
 
-/// Daemon shutdown: stop accepting spawns, snapshot every live tree and
-/// finish them in parallel, bounded by `bound`. Returns how many trees were
-/// still unresolved.
+/// Daemon shutdown: stop accepting spawns, snapshot every tree (live ones
+/// and held ones, see [`scope_unresolved`]) and finish them in parallel,
+/// bounded by `bound`. Returns how many trees were still unresolved.
 pub async fn shutdown_all(bound: Duration) -> usize {
     // Wait (briefly: admissions span one synchronous prepare/spawn/attach)
     // for admitted spawns to attach, then refuse new ones.
@@ -867,7 +867,7 @@ pub async fn shutdown_all(bound: Duration) -> usize {
     if stop.await.is_err() {
         REGISTRY.accepting.store(false, Ordering::SeqCst);
     }
-    let trees = REGISTRY.snapshot(|_| true);
+    let trees = REGISTRY.all_trees();
     let n = trees.len();
     let finishes = trees
         .into_iter()
