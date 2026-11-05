@@ -40,10 +40,20 @@ logger = logging.getLogger("pi_dash.runner.engine_credential")
 
 ENGINE_CREDENTIAL_PREFIX = "ec_"
 
-#: Sign-in states in which the desktop app may NOT renew the engine
-#: credential silently (design §4.3 table): only an explicit sign-in clears
-#: them.
-SILENT_RENEWAL_REFUSED_STATES = frozenset({EngineSignInState.SIGNED_OUT, EngineSignInState.REVOKED})
+#: The only sign-in states in which an engine credential may be issued on a
+#: silent (non-interactive) approval, e.g. the desktop app's renewal (design
+#: §4.3 table). An allow-list on purpose: ``never`` needs an explicit "Turn
+#: on the built-in engine", ``active`` is not yet due for renewal (renewing it
+#: silently would extend the fixed 14-day lifetime forever), and
+#: ``signed_out`` / ``revoked`` are cleared only by an explicit sign-in.
+SILENT_RENEWAL_ALLOWED_STATES = frozenset({EngineSignInState.EXPIRING, EngineSignInState.EXPIRED})
+
+SILENT_RENEWAL_REFUSED = "engine_silent_renewal_refused"
+
+
+def silent_renewal_allowed(state: str) -> bool:
+    """True when a non-interactive approval may (re)issue the engine credential."""
+    return state in SILENT_RENEWAL_ALLOWED_STATES
 
 #: Revocation reason → stored machine sign-in state.
 _STATE_FOR_REASON = {
@@ -106,13 +116,18 @@ def _mint_raw() -> str:
     return ENGINE_CREDENTIAL_PREFIX + secrets.token_urlsafe(32)
 
 
-def issue_engine_credential(*, user, dev_machine: DevMachine) -> IssuedEngineCredential:
+def issue_engine_credential(*, user, dev_machine: DevMachine, silent: bool = False) -> IssuedEngineCredential:
     """Issue a new engine credential for ``dev_machine``, revoking the live one.
 
     Must run inside the caller's transaction when it is part of a larger
     exchange (the device flow issues the machine token in the same one).
     Clears an ``engine_sign_in_required`` automatic pause on a new-path
     machine: the engine has a valid credential again.
+
+    ``silent``: the issue comes from a non-interactive approval. The sign-in
+    state is then re-checked on the locked row, so a sign-out that committed
+    after the caller's unlocked check is never overwritten; raises
+    :class:`EngineCredentialError` (``engine_silent_renewal_refused``).
     """
     if dev_machine.owner_id != user.id:
         raise ValueError("engine credentials are issued only to the machine's owner")
@@ -121,6 +136,8 @@ def issue_engine_credential(*, user, dev_machine: DevMachine) -> IssuedEngineCre
     now = timezone.now()
     with transaction.atomic():
         machine = DevMachine.objects.select_for_update().get(pk=dev_machine.pk)
+        if silent and not silent_renewal_allowed(machine.current_engine_sign_in_state(now)):
+            raise EngineCredentialError(SILENT_RENEWAL_REFUSED)
         superseded = EngineCredential.objects.filter(dev_machine=machine, revoked_at__isnull=True).update(
             revoked_at=now, revoked_reason=EngineCredentialRevokeReason.SUPERSEDED
         )

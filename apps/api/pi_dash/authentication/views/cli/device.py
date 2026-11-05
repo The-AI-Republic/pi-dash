@@ -49,12 +49,14 @@ from pi_dash.authentication.utils.host import base_host
 from pi_dash.runner.models import DevMachine, EngineCredentialRevokeReason, MachineToken
 from pi_dash.runner.services import tokens as runner_tokens
 from pi_dash.runner.services.engine_credentials import (
-    SILENT_RENEWAL_REFUSED_STATES,
+    SILENT_RENEWAL_REFUSED,
+    EngineCredentialError,
     IssuedEngineCredential,
     engine_profile_for_user,
     instance_can_serve_engine,
     issue_engine_credential,
     revoke_engine_credential,
+    silent_renewal_allowed,
 )
 from pi_dash.runner.services.permissions import is_workspace_member
 
@@ -149,11 +151,12 @@ def _check_engine_grant_approval(row, user, *, requested_machine_id, interactive
     """Approval rules for an ``engine`` grant (design §4.3, §4.6).
 
     The machine (named at start by the CLI, or now by the app) must be the
-    approver's own. A silent approval is refused when the machine's engine
-    was explicitly signed out or revoked: only an explicit sign-in clears
-    those. When no machine is named yet, the same rule is applied at
-    redemption to the redeeming token's machine. Returns
-    ``(refusal_response, machine)``.
+    approver's own. A silent approval is allowed only while the machine's
+    engine credential is ``expiring`` or ``expired``: ``never`` needs an
+    explicit "Turn on the built-in engine", ``active`` is not due yet, and
+    ``signed_out`` / ``revoked`` are cleared only by an explicit sign-in.
+    When no machine is named yet, the same rule is applied at redemption to
+    the redeeming token's machine. Returns ``(refusal_response, machine)``.
     """
     machine_id = requested_machine_id or row.dev_machine_id
     if requested_machine_id and row.dev_machine_id and requested_machine_id != row.dev_machine_id:
@@ -168,7 +171,7 @@ def _check_engine_grant_approval(row, user, *, requested_machine_id, interactive
         # against the redeeming machine token's machine (same rules).
         return None, machine
     state = machine.current_engine_sign_in_state()
-    if state in SILENT_RENEWAL_REFUSED_STATES:
+    if not silent_renewal_allowed(state):
         logger.info(
             "engine_credential.silent_approval_refused user=%s dev_machine=%s state=%s",
             user.id,
@@ -178,15 +181,23 @@ def _check_engine_grant_approval(row, user, *, requested_machine_id, interactive
         return (
             Response(
                 {
-                    "error": "engine_silent_renewal_refused",
+                    "error": SILENT_RENEWAL_REFUSED,
                     "engine_sign_in_state": state,
-                    "error_description": "The built-in engine was signed out on this computer; sign it in explicitly.",
+                    "error_description": _silent_refusal_description(state),
                 },
                 status=status.HTTP_409_CONFLICT,
             ),
             None,
         )
     return None, machine
+
+
+def _silent_refusal_description(state: str) -> str:
+    if state == "never":
+        return "The built-in engine is not turned on for this computer; turn it on explicitly."
+    if state == "active":
+        return "The built-in engine credential on this computer is not due for renewal yet."
+    return "The built-in engine was signed out on this computer; sign it in explicitly."
 
 
 def _bearer_machine_token(request):
@@ -203,16 +214,36 @@ def _maybe_issue_engine_credential(*, user, dev_machine: DevMachine, grant) -> "
 
     Issued only for a human-approved device grant (never for a bare machine
     token or a personal API token, so neither can mint one), when the
-    instance can serve the engine, and — when the machine's engine was
-    signed out or revoked — only if a person approved interactively.
+    instance can serve the engine. A person approving on the browser page
+    (``interactive``) always signs the engine in. A silent approval (the
+    desktop app) renews it only when it is ``expiring`` or ``expired``, the
+    same rule as an ``engine`` grant: on a ``never`` machine the app offers
+    "Turn on the built-in engine" instead, and an ``active`` credential is
+    left as it is (the daemon keeps it; the response carries none).
     """
     if grant is None or dev_machine.revoked_at is not None:
         return None
-    if dev_machine.current_engine_sign_in_state() in SILENT_RENEWAL_REFUSED_STATES and not grant.interactive_approval:
+    silent = not grant.interactive_approval
+    if silent and not silent_renewal_allowed(dev_machine.current_engine_sign_in_state()):
         return None
     if not instance_can_serve_engine(user):
         return None
-    return issue_engine_credential(user=user, dev_machine=dev_machine)
+    try:
+        return issue_engine_credential(user=user, dev_machine=dev_machine, silent=silent)
+    except EngineCredentialError:
+        # A sign-out committed after the check above: leave it signed out.
+        return None
+
+
+def _silent_redemption_refused(state: str) -> Response:
+    return Response(
+        {
+            "error": SILENT_RENEWAL_REFUSED,
+            "engine_sign_in_state": state,
+            "error_description": _silent_refusal_description(state),
+        },
+        status=status.HTTP_409_CONFLICT,
+    )
 
 
 def _redeem_engine_grant(row, machine_token: MachineToken) -> Response:
@@ -242,11 +273,9 @@ def _redeem_engine_grant(row, machine_token: MachineToken) -> Response:
     # Re-checked here, not only at approval: the user may have signed the
     # engine out between a silent approval and its redemption.
     state = machine.current_engine_sign_in_state()
-    if not row.interactive_approval and state in SILENT_RENEWAL_REFUSED_STATES:
-        return Response(
-            {"error": "engine_silent_renewal_refused", "engine_sign_in_state": state},
-            status=status.HTTP_409_CONFLICT,
-        )
+    silent = not row.interactive_approval
+    if silent and not silent_renewal_allowed(state):
+        return _silent_redemption_refused(state)
     available, _profile, pause_reason = engine_profile_for_user(row.user)
     if not available:
         return Response(
@@ -258,7 +287,13 @@ def _redeem_engine_grant(row, machine_token: MachineToken) -> Response:
             },
             status=status.HTTP_409_CONFLICT,
         )
-    issued = issue_engine_credential(user=row.user, dev_machine=machine)
+    try:
+        # ``silent`` re-checks the state on the locked machine row, so a
+        # sign-out racing this redemption is never overwritten.
+        issued = issue_engine_credential(user=row.user, dev_machine=machine, silent=silent)
+    except EngineCredentialError:
+        machine.refresh_from_db()
+        return _silent_redemption_refused(machine.current_engine_sign_in_state())
     row.consumed = True
     row.dev_machine_id = machine.pk
     row.save(update_fields=["consumed", "last_polled_at", "dev_machine_id", "updated_at"])
@@ -726,6 +761,17 @@ class DeviceMachineTokenEndpoint(APIView):
         return Response(body, status=status.HTTP_201_CREATED)
 
 
+def _machine_has_live_token(machine: DevMachine) -> bool:
+    """True while any machine token of ``machine`` can still authenticate."""
+    from django.db.models import Q
+
+    return (
+        MachineToken.objects.filter(dev_machine=machine, revoked_at__isnull=True)
+        .filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
+        .exists()
+    )
+
+
 class DeviceCodeRevokeEndpoint(APIView):
     """Invalidate the caller's CLI token. Idempotent.
 
@@ -733,11 +779,18 @@ class DeviceCodeRevokeEndpoint(APIView):
     current token (which we then mark inactive). Subsequent requests
     with that token will 401.
 
-    For a daemon credential bound to a computer this is the full logout
-    (design §4.3): the machine's engine is signed out too, in the same
-    transaction (credential revoked, state ``signed_out``), so the app's
-    silent renewal is refused until an explicit sign-in.
-    ``engine/credential/revoke/`` stays for ``pidash auth logout --engine``.
+    For a daemon credential bound to a computer, the machine's engine is
+    signed out too (credential revoked, state ``signed_out``, so the app's
+    silent renewal is refused until an explicit sign-in) — but only when
+    this was the machine's **last** live machine token. ``pidash auth
+    logout --workspace X`` revokes one workspace's token and must leave the
+    engine serving the workspaces still signed in (design §4.3: one
+    workspace's sign-out stops only that workspace's runners). A full
+    ``pidash auth logout`` revokes every token, so its last revocation
+    signs the engine out, as does signing out each workspace in turn. The
+    runner's full logout also calls ``engine/credential/revoke/`` first
+    (as ``pidash auth logout --engine`` does); this rule is the server's
+    backstop for clients that do not.
     """
 
     permission_classes = [IsAuthenticated]
@@ -747,9 +800,14 @@ class DeviceCodeRevokeEndpoint(APIView):
         machine_token = getattr(request, "auth_machine_token", None)
         if machine_token is not None:
             with transaction.atomic():
+                machine = None
                 if machine_token.dev_machine_id is not None:
-                    revoke_engine_credential(machine_token.dev_machine, reason=EngineCredentialRevokeReason.SIGNED_OUT)
+                    # Serializes concurrent revocations of one machine's
+                    # tokens, so the "last live token" check below is exact.
+                    machine = DevMachine.objects.select_for_update().filter(pk=machine_token.dev_machine_id).first()
                 machine_token.revoke()
+                if machine is not None and not _machine_has_live_token(machine):
+                    revoke_engine_credential(machine, reason=EngineCredentialRevokeReason.SIGNED_OUT)
             return Response({"ok": True}, status=status.HTTP_200_OK)
         # request.auth is the raw token string (see APIKeyAuthentication).
         raw_token = request.auth

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 
+from django.db import transaction
 from django.utils import timezone
 
 from pi_dash.runner.models import DevMachine, EngineAutoPauseReason, RunnerProvisioning
@@ -97,7 +98,12 @@ def record_engine_state_report(machine: DevMachine, report: dict) -> None:
     fresh = DevMachine.objects.filter(pk=machine.pk).first()
     if fresh is None:
         return
-    if reason_code in _REPORTABLE:
+    if fresh.engine_auto_pause_reason == R.ENGINE_DISABLED:
+        # The instance switched the engine off. That is the profile
+        # endpoint's to set and clear; a daemon report never replaces it,
+        # or the machine page would ask for a sign-in that cannot help.
+        pass
+    elif reason_code in _REPORTABLE:
         _apply(fresh, reason_code)
     elif state == "signed_out" or stored.get("sign_in_state") in _SIGNED_OUT_STATES:
         _apply(fresh, R.ENGINE_SIGN_IN_REQUIRED)
@@ -117,9 +123,23 @@ def pause_engines_with_expired_credentials() -> int:
         revoked_at__isnull=True,
     ).exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
     paused = 0
-    for machine in expired:
-        if _apply(machine, R.ENGINE_SIGN_IN_REQUIRED):
-            paused += 1
+    for machine_id in expired.values_list("pk", flat=True):
+        with transaction.atomic():
+            # Re-checked on the locked row: a renewal that committed after
+            # the query above must not be paused.
+            machine = (
+                DevMachine.objects.select_for_update()
+                .filter(
+                    pk=machine_id,
+                    engine_sign_in_state="active",
+                    engine_credential_expires_at__lte=timezone.now(),
+                    engine_auto_pause_reason="",
+                    revoked_at__isnull=True,
+                )
+                .first()
+            )
+            if machine is not None and _apply(machine, R.ENGINE_SIGN_IN_REQUIRED):
+                paused += 1
     return paused
 
 

@@ -113,6 +113,18 @@ def _sign_in(user, machine):
     return issue_engine_credential(user=user, dev_machine=machine)
 
 
+def _set_expiry(machine, when):
+    """Move the machine's live engine credential to expire at ``when``."""
+    EngineCredential.objects.filter(dev_machine=machine, revoked_at__isnull=True).update(expires_at=when)
+    DevMachine.objects.filter(pk=machine.pk).update(engine_credential_expires_at=when)
+    machine.refresh_from_db()
+
+
+def _make_expiring(machine):
+    _set_expiry(machine, timezone.now() + timedelta(days=1))
+    assert machine.current_engine_sign_in_state() == EngineSignInState.EXPIRING
+
+
 # --------------------------------------------------------------------------
 # Device flow: login issues the engine credential (§4.3)
 # --------------------------------------------------------------------------
@@ -301,11 +313,19 @@ def test_silent_approval_without_machine_is_checked_at_redemption(db, web, creat
     """The canonical silent body ``{user_code, workspace_slug, interactive:
     false}`` names no machine; the redeeming token's machine is checked."""
     _sign_in(create_user, machine)
+    _make_expiring(machine)
     start = _start("engine")
     body = {"workspace_slug": "test-workspace", "interactive": False}
     assert _approve(web, start["user_code"], **body).status_code == 200
     ok = _poll(start["device_code"], bearer=mt)
     assert ok.status_code == 200, ok.data
+
+    # Now ``active`` again: a further silent renewal is not due.
+    early = _start("engine")
+    assert _approve(web, early["user_code"], **body).status_code == 200
+    refused_early = _poll(early["device_code"], bearer=mt)
+    assert refused_early.status_code == 409
+    assert refused_early.data["engine_sign_in_state"] == EngineSignInState.ACTIVE
 
     _client(bearer=mt).post("/api/v1/runner/engine/credential/revoke/", {}, format="json")
     again = _start("engine")
@@ -318,6 +338,7 @@ def test_silent_approval_without_machine_is_checked_at_redemption(db, web, creat
 @override_settings(**ENABLED)
 def test_signed_out_between_silent_approval_and_redemption_is_refused(db, web, create_user, machine, mt, lane):
     _sign_in(create_user, machine)
+    _make_expiring(machine)
     start = _start("engine")
     assert _approve(web, start["user_code"], interactive=False, dev_machine_id=str(machine.id)).status_code == 200
     _client(bearer=mt).post("/api/v1/runner/engine/credential/revoke/", {}, format="json")
@@ -847,3 +868,116 @@ def test_cap_setting_is_gone():
 
     assert not hasattr(settings, "MANAGED_RUNNER_MAX_PER_USER_PROJECT")
     assert "MANAGED_RUNNER_MAX_PER_USER_PROJECT" not in open(registry.__file__).read()
+
+
+# --------------------------------------------------------------------------
+# Silent renewal is an allow-list: expiring / expired only (§4.3 table)
+# --------------------------------------------------------------------------
+
+
+@override_settings(**ENABLED)
+def test_silent_engine_approval_refused_for_never_machine(db, web, machine, mt, lane):
+    assert machine.current_engine_sign_in_state() == EngineSignInState.NEVER
+    resp = _engine_login(web, mt, interactive=False, dev_machine_id=machine.id)
+    assert resp.status_code == 409
+    assert resp.data["error"] == "engine_silent_renewal_refused"
+    assert resp.data["engine_sign_in_state"] == EngineSignInState.NEVER
+    assert not EngineCredential.objects.exists()
+    # "Turn on the built-in engine" is an explicit sign-in.
+    explicit = _engine_login(web, mt, interactive=True, dev_machine_id=machine.id)
+    assert explicit.status_code == 200, explicit.data
+    assert explicit.data["engine_credential"]["token"].startswith("ec_")
+
+
+@override_settings(**ENABLED)
+def test_silent_engine_approval_refused_for_active_machine(db, web, create_user, machine, mt, lane):
+    issued = _sign_in(create_user, machine)
+    resp = _engine_login(web, mt, interactive=False, dev_machine_id=machine.id)
+    assert resp.status_code == 409
+    assert resp.data["engine_sign_in_state"] == EngineSignInState.ACTIVE
+    # The live credential is untouched: nothing extends the 14 days.
+    live = EngineCredential.objects.get(revoked_at__isnull=True)
+    assert live.pk == issued.credential.pk
+
+
+@override_settings(**ENABLED)
+def test_silent_engine_approval_renews_an_expired_engine(db, web, create_user, machine, mt, lane):
+    _sign_in(create_user, machine)
+    _set_expiry(machine, timezone.now() - timedelta(minutes=1))
+    assert machine.current_engine_sign_in_state() == EngineSignInState.EXPIRED
+    resp = _engine_login(web, mt, interactive=False, dev_machine_id=machine.id)
+    assert resp.status_code == 200, resp.data
+    assert resp.data["engine_sign_in_state"] == EngineSignInState.ACTIVE
+
+
+@override_settings(**ENABLED)
+def test_silent_cli_login_issues_engine_only_when_due(db, web, create_user, workspace, lane):
+    machine_id = "6f1c7d1e-1111-4a2b-9c3d-0000000000a1"
+    # ``never``: a silent (app) sign-in does not turn the engine on.
+    first = _cli_login(web, machine_id, interactive=False)
+    assert first.status_code == 201, first.data
+    assert "engine_credential" not in first.data
+    assert first.data["engine_sign_in_state"] == EngineSignInState.NEVER
+    # A person approving turns it on.
+    on = _cli_login(web, machine_id, interactive=True)
+    token = on.data["engine_credential"]["token"]
+    # ``active``: a silent sign-in leaves the live credential alone.
+    again = _cli_login(web, machine_id, interactive=False)
+    assert "engine_credential" not in again.data
+    assert EngineCredential.objects.get(revoked_at__isnull=True).token_hash == tokens.hash_token(token)
+    # ``expiring``: renewed silently.
+    machine = DevMachine.objects.get(pk=machine_id)
+    _make_expiring(machine)
+    renewed = _cli_login(web, machine_id, interactive=False)
+    assert renewed.data["engine_credential"]["token"].startswith("ec_")
+
+
+@override_settings(**ENABLED)
+def test_silent_issue_rechecks_state_on_locked_row(db, create_user, machine):
+    """A sign-out committed after the caller's unlocked check wins."""
+    from pi_dash.runner.services.engine_credentials import EngineCredentialError, revoke_engine_credential
+
+    _sign_in(create_user, machine)
+    _make_expiring(machine)
+    stale = DevMachine.objects.get(pk=machine.pk)  # the caller's earlier read
+    revoke_engine_credential(DevMachine.objects.get(pk=machine.pk), reason="signed_out")
+    with pytest.raises(EngineCredentialError) as err:
+        issue_engine_credential(user=create_user, dev_machine=stale, silent=True)
+    assert err.value.code == "engine_silent_renewal_refused"
+    machine.refresh_from_db()
+    assert machine.engine_sign_in_state == EngineSignInState.SIGNED_OUT
+    assert not EngineCredential.objects.filter(revoked_at__isnull=True).exists()
+
+
+@override_settings(**ENABLED)
+def test_expiry_sweep_skips_machine_renewed_after_the_query(db, create_user, machine, lane, monkeypatch):
+    from pi_dash.runner.services import engine_state
+
+    _sign_in(create_user, machine)
+    _set_expiry(machine, timezone.now() - timedelta(seconds=1))
+    real_filter = DevMachine.objects.select_for_update
+
+    def renew_then_lock(*args, **kwargs):
+        # The renewal commits between the sweep's query and its lock.
+        DevMachine.objects.filter(pk=machine.pk).update(
+            engine_credential_expires_at=timezone.now() + timedelta(days=14)
+        )
+        return real_filter(*args, **kwargs)
+
+    monkeypatch.setattr(DevMachine.objects, "select_for_update", renew_then_lock)
+    assert engine_state.pause_engines_with_expired_credentials() == 0
+    machine.refresh_from_db()
+    assert machine.engine_auto_pause_reason == ""
+
+
+def test_heartbeat_does_not_replace_engine_disabled(db, machine, mt):
+    DevMachine.objects.filter(pk=machine.pk).update(engine_auto_pause_reason="engine_disabled")
+    sid = _open_session(mt, machine)
+    _session_poll(mt, machine, sid, {"engine_state": {"state": "signed_out"}})
+    machine.refresh_from_db()
+    assert machine.engine_auto_pause_reason == "engine_disabled"
+    _session_poll(
+        mt, machine, sid, {"engine_state": {"state": "unavailable", "reason_code": "engine_sign_in_required"}}
+    )
+    machine.refresh_from_db()
+    assert machine.engine_auto_pause_reason == "engine_disabled"
