@@ -125,10 +125,9 @@ pub use serializers_expand::{
     INTAKE_ISSUE_LITE_FIELDS, ISSUE_RELATION_FIELDS, RELATED_ISSUE_FIELDS,
 };
 pub use serializers_label::{
-    app_label_to_representation, validate_label_name, AppLabelRow, AppLabelView, APP_LABEL_FIELDS,
-    APP_LABEL_READONLY_INPUT_FIELDS, APP_LABEL_WRITABLE_FIELDS, LABEL_NAME_ALREADY_EXISTS,
-    LABEL_NAME_CONFLICT_BODY, LABEL_NAME_CONFLICT_EXCLUDING_SELF_PROBE_SQL,
-    LABEL_NAME_CONFLICT_PROBE_SQL,
+    app_label_to_representation, label_name_conflict, validate_label_name, AppLabelRow,
+    AppLabelView, APP_LABEL_FIELDS, APP_LABEL_READONLY_INPUT_FIELDS, APP_LABEL_WRITABLE_FIELDS,
+    LABEL_NAME_ALREADY_EXISTS, LABEL_NAME_CONFLICT_BODY,
 };
 pub use serializers_links::{
     git_code_review_link_to_representation, github_pull_request_link_to_representation,
