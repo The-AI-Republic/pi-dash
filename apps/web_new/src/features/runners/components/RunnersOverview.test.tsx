@@ -444,3 +444,105 @@ describe("RunnersOverview pods wiring", () => {
     expect(screen.getByRole("table")).toBeInTheDocument();
   });
 });
+
+describe("engine runners in the table", () => {
+  it("names engines by machine with a Built-in badge, and shows each own-agent runner's machine", () => {
+    const machine = { id: "m-1", label: "Work laptop", host_label: "rich-mbp" };
+    renderTable([
+      runner({ id: "r-engine", name: "builtin-x", provisioning: "desktop_bundled", dev_machine_detail: machine }),
+      runner({ id: "r-own", name: "codex-1", provisioning: "manual", dev_machine_detail: machine }),
+    ]);
+    expect(screen.getByText("Built-in engine · Work laptop")).toBeInTheDocument();
+    expect(screen.getAllByTestId("runner-built-in-badge")).toHaveLength(1);
+    expect(screen.getByText("codex-1")).toBeInTheDocument();
+    expect(screen.getByTestId("runner-machine")).toHaveTextContent("Work laptop");
+  });
+});
+
+describe("pod members panel", () => {
+  const pod = {
+    id: "p-1",
+    name: "Alpha pod",
+    description: "",
+    is_default: true,
+    project: "prj",
+    project_identifier: "WEB",
+    runner_count: 2,
+  } as never;
+
+  it("lists the selected pod's runners with their membership and owner actions", async () => {
+    const onUpdateRunner = vi.fn(async () => undefined);
+    const podDetail = { id: "p-1", name: "Alpha pod", project: "prj" } as never;
+    const engine = runner({
+      id: "r-engine",
+      name: "builtin-x",
+      provisioning: "desktop_bundled",
+      pod_dispatch: "pinned_only",
+      owner: "me",
+      revoked_at: null,
+      pod_detail: podDetail,
+      dev_machine_detail: { id: "m-1", label: "Work laptop", host_label: "rich-mbp" },
+    });
+    const theirs = runner({
+      id: "r-theirs",
+      name: "their-runner",
+      owner: "you",
+      revoked_at: null,
+      pod_detail: podDetail,
+    });
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <RunnersOverview
+          scope={{ workspaceSlug: "acme" }}
+          filter={{ ...state([engine, theirs]), selectedPodId: "p-1", selectedPod: pod }}
+          pods={[pod]}
+          podsLoading={false}
+          podsFailed={false}
+          onDelete={vi.fn(async () => undefined)}
+          onRevoke={vi.fn(async () => undefined)}
+          userId="me"
+          onUpdateRunner={onUpdateRunner}
+        />
+      </QueryClientProvider>
+    );
+    const panel = screen.getByTestId("pod-members");
+    expect(panel).toHaveTextContent("Assigned issues only");
+    expect(panel).toHaveTextContent("Takes pod work");
+    // Only the viewer's own runner carries an action.
+    const addButtons = screen.getAllByRole("button", { name: "Add to pod" });
+    expect(addButtons).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Remove from pod" })).toBeNull();
+    await userEvent.click(addButtons[0]!);
+    expect(onUpdateRunner).toHaveBeenCalledWith("r-engine", { pod_dispatch: "pod_member" });
+  });
+
+  it("toasts the reason when the server refuses", async () => {
+    const onUpdateRunner = vi.fn(async () => {
+      throw new Error("offline");
+    });
+    const own = runner({ id: "r-own", owner: "me", revoked_at: null, pod_dispatch: "pod_member" });
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <RunnersOverview
+          scope={{ workspaceSlug: "acme" }}
+          filter={{ ...state([own]), selectedPodId: "p-1", selectedPod: pod }}
+          pods={[pod]}
+          podsLoading={false}
+          podsFailed={false}
+          onDelete={vi.fn(async () => undefined)}
+          onRevoke={vi.fn(async () => undefined)}
+          userId="me"
+          onUpdateRunner={onUpdateRunner}
+        />
+      </QueryClientProvider>
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Remove from pod" }));
+    expect(onUpdateRunner).toHaveBeenCalledWith("r-own", { pod_dispatch: "pinned_only" });
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith(
+        "Couldn't change the runner's pod",
+        "The runner is unchanged. Try again."
+      )
+    );
+  });
+});

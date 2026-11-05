@@ -1263,27 +1263,46 @@ export {
   DevMachine,
   DevMachineList,
   DevMachineMini,
+  ENGINE_AUTO_PAUSE_REASONS,
+  ENGINE_SIGN_IN_STATES,
   createRunnerOnMachine,
   deleteDevMachine,
   getCreateRunnerStatus,
   listDevMachines,
+  mergeDevMachineInto,
   revokeDevMachine,
   rotateDevMachine,
+  signOutDevMachineEngine,
+  updateDevMachine,
 } from "./contracts/dev-machines.js";
-export type { CreateRunnerOnMachineInput, CreateRunnerStatusValue } from "./contracts/dev-machines.js";
+export type {
+  CreateRunnerOnMachineInput,
+  CreateRunnerStatusValue,
+  DevMachinePatch,
+  EngineAutoPauseReason,
+  EngineSignInState,
+} from "./contracts/dev-machines.js";
 export {
   Runner,
   RunnerDevMetadata,
   RunnerList,
   RunnerLiveState,
+  RUNNER_POD_DISPATCHES,
   RUNNER_PROVISIONINGS,
   RUNNER_STATUSES,
   deleteRunner,
   getRunner,
   listRunners,
   revokeRunner,
+  updateRunner,
 } from "./contracts/runners.js";
-export type { RunnerListScope, RunnerProvisioning, RunnerStatus } from "./contracts/runners.js";
+export type {
+  RunnerListScope,
+  RunnerPatch,
+  RunnerPodDispatch,
+  RunnerProvisioning,
+  RunnerStatus,
+} from "./contracts/runners.js";
 export {
   AgentRun,
   AgentRunCreateResult,

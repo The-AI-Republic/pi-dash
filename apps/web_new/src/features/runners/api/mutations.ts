@@ -6,7 +6,7 @@
 // confirmation open until the write settles.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { deleteRunner, revokeRunner } from "@pidash/api-client";
+import { deleteRunner, revokeRunner, updateRunner, type RunnerPatch } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { runnersKeys } from "./keys.js";
@@ -25,6 +25,20 @@ export function useRevokeRunner(workspaceSlug: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (runnerId: string) => revokeRunner(getAppClient(), runnerId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: runnersKeys.all(workspaceSlug) }),
+  });
+}
+
+/**
+ * Change one runner's pod or pod membership (owner-only PATCH, built-in
+ * engine design §7). Re-reads the area so tiles, counts and members agree;
+ * the caller catches the refusal and explains it.
+ */
+export function useUpdateRunner(workspaceSlug: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { runnerId: string; patch: RunnerPatch }) =>
+      updateRunner(getAppClient(), input.runnerId, input.patch),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: runnersKeys.all(workspaceSlug) }),
   });
 }

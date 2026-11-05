@@ -2,7 +2,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import type { DevMachine } from "@pidash/api-client";
+import { ApiError, type DevMachine } from "@pidash/api-client";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -17,8 +17,10 @@ import {
   DEV_MACHINES_PAGE_TITLE,
   MACHINE_ACTION_FAILED_BODY,
   MACHINE_ACTION_FAILED_TITLE,
+  MACHINE_SETTING_FAILED_BODY,
   DevMachinesScreen,
   devMachinesDocumentTitle,
+  settingFailureBody,
 } from "./DevMachinesScreen.js";
 
 function machine(id: string, overrides: Partial<DevMachine> = {}): DevMachine {
@@ -90,8 +92,8 @@ describe("DevMachinesScreen", () => {
 
   it("deletes with the machine id and keeps no dialog afterward", async () => {
     const { onDelete } = setup();
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
-    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove this computer" }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Remove this computer" }));
     await waitFor(() => expect(onDelete).toHaveBeenCalledWith("one"));
   });
 
@@ -115,9 +117,58 @@ describe("DevMachinesScreen", () => {
     expect(screen.getByText("Loading dev machines…")).toBeInTheDocument();
   });
 
+  it("renames through the dialog and closes it on success", async () => {
+    const onUpdate = vi.fn(async () => undefined);
+    setup({ onUpdate });
+    fireEvent.click(screen.getByRole("button", { name: "Show runners and settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Computer name"), { target: { value: "  Studio  " } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledWith("one", { label: "Studio" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("explains a rename the server cannot do yet and keeps the dialog", async () => {
+    const onUpdate = vi.fn(async () => {
+      throw new ApiError({ status: 400, code: "400", message: "only engine controls" });
+    });
+    setup({ onUpdate });
+    fireEvent.click(screen.getByRole("button", { name: "Show runners and settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Computer name"), { target: { value: "Studio" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith(
+        MACHINE_ACTION_FAILED_TITLE,
+        MACHINE_SETTING_FAILED_BODY.renameUnsupported
+      )
+    );
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("toggles the engine pause in place and toasts an owner-only refusal", async () => {
+    const onUpdate = vi.fn(async () => {
+      throw new ApiError({ status: 403, code: "403", message: "forbidden" });
+    });
+    setup({ onUpdate, machines: [machine("one", { engine_paused_by_owner: false })] });
+    fireEvent.click(screen.getByRole("button", { name: "Show runners and settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pause the built-in engine" }));
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledWith("one", { engine_paused_by_owner: true }));
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith(MACHINE_ACTION_FAILED_TITLE, MACHINE_SETTING_FAILED_BODY.forbidden)
+    );
+  });
+
+  it("maps settings failures to their sentences", () => {
+    expect(settingFailureBody(new Error("x"), "fallback")).toBe("fallback");
+    expect(settingFailureBody(new ApiError({ status: 400, code: "400", message: "x" }), "fallback")).toBe("fallback");
+  });
+
   it("cancels the pending action without writing", async () => {
     const { onDelete } = setup();
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove this computer" }));
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
     await act(async () => undefined);
     expect(onDelete).not.toHaveBeenCalled();

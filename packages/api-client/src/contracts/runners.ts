@@ -16,6 +16,13 @@ export type RunnerStatus = (typeof RUNNER_STATUSES)[number];
 export const RUNNER_PROVISIONINGS = ["manual", "desktop_bundled"] as const;
 export type RunnerProvisioning = (typeof RUNNER_PROVISIONINGS)[number];
 
+/**
+ * Whether a runner takes unpinned pod work (design §7): built-in
+ * engines start `pinned_only`, own-agent runners `pod_member`.
+ */
+export const RUNNER_POD_DISPATCHES = ["pinned_only", "pod_member"] as const;
+export type RunnerPodDispatch = (typeof RUNNER_POD_DISPATCHES)[number];
+
 /** Environment facts the runner reports when it opens a session. */
 export const RunnerDevMetadata = z.object({
   working_dir: z.optional(z.string()),
@@ -56,6 +63,8 @@ export const Runner = z.object({
   status: z.enum(RUNNER_STATUSES),
   host_label: z.string(),
   provisioning: z.enum(RUNNER_PROVISIONINGS),
+  /** Absent on servers that predate engine pod membership. */
+  pod_dispatch: z.optional(z.enum(RUNNER_POD_DISPATCHES)),
   os: z.string(),
   arch: z.string(),
   runner_version: z.string(),
@@ -73,6 +82,8 @@ export const Runner = z.object({
   enrolled_at: nullableDateTime(),
   revoked_at: nullableDateTime(),
   revoked_reason: z.string(),
+  /** Per-runner dispatch pause; optional for older servers. */
+  paused_at: z.optional(nullableDateTime()),
   created_at: dateTime(),
   updated_at: dateTime(),
   /**
@@ -93,7 +104,11 @@ export type RunnerList = z.infer<typeof RunnerList>;
 export interface RunnerListScope {
   projectId?: string;
   podId?: string;
-  /** Include desktop-bundled runners; they are hidden by default. */
+  /**
+   * Include built-in engine runners. Servers before the engine-as-runner
+   * change hide them by default; newer ones drop the filter and list
+   * them always, so passing it is harmless there.
+   */
   includeBundled?: boolean;
   /**
    * Hybrid-assignment eligibility read (design §7.4): an issue id, or
@@ -131,6 +146,27 @@ export async function getRunner(client: ApiClient, runnerId: string): Promise<Ru
   const path = `/api/runners/${runnerId}/`;
   const body = await client.getJson<unknown>(path);
   return client.parse(Runner, body, `GET ${path}`);
+}
+
+/** Owner-only runner changes. */
+export interface RunnerPatch {
+  name?: string;
+  /** Move to another pod (engines: only within their project). */
+  pod?: string;
+  /** "Add to pod" = pod_member, "Remove from pod" = pinned_only. */
+  pod_dispatch?: RunnerPodDispatch;
+}
+
+/**
+ * Rename, move between pods, or change pod membership. Owner only.
+ * A move is refused with 409 while a bound run is in flight, or (to
+ * another project) while issues are assigned to the runner
+ * (`runner_has_assigned_issues`, listing them). Answers the runner.
+ */
+export async function updateRunner(client: ApiClient, runnerId: string, patch: RunnerPatch): Promise<Runner> {
+  const path = `/api/runners/${runnerId}/`;
+  const envelope = await client.sendJson<unknown>("PATCH", path, { json: { ...patch } });
+  return client.parse(Runner, envelope.data, `PATCH ${path}`);
 }
 
 /**

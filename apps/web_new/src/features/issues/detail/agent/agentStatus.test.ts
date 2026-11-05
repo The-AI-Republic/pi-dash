@@ -341,6 +341,27 @@ describe("runStatusView", () => {
     expect(bare.detail).toContain("did not finish");
   });
 
+  it("explains a run failed because its assigned runner was removed", () => {
+    const removed = runStatusView(
+      runFixture({ status: "failed", error: "runner revoked", error_code: "assigned_runner_removed" }),
+      null,
+      1,
+      NOW
+    );
+    expect(removed.detail).toBe("The runner this issue was assigned to was removed.");
+  });
+
+  it("says a queued run waits for its offline computer, not the desktop app", () => {
+    const waiting = runStatusView(
+      runFixture({ status: "queued", runner_name: null, error_code: "desktop_not_connected" }),
+      null,
+      1,
+      NOW
+    );
+    expect(waiting.detail).toMatch(/offline/);
+    expect(waiting.detail).not.toMatch(/desktop app/i);
+  });
+
   it("covers cancelled with and without an end stamp", () => {
     const ended = runStatusView(runFixture({ status: "cancelled", ended_at: "2026-05-01T11:00:00Z" }), null, 1, NOW);
     expect(ended).toMatchObject({ title: "Agent run cancelled", badge: "Cancelled" });

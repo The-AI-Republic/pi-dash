@@ -2,49 +2,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Execution-target option shaping (parity/specs/issues.md §17/§21,
-// ISS-218). Agent rows (cloud and managed) come from the project's
-// executor options with availability carried as data; each pod offers
-// an "any runner" row plus its runners, each with a status line, an
-// owner name and an assignability answer. Picks map onto the issue
-// execution-target patch: a pod pins the pod plus the local executor,
-// a runner pins the runner inside its pod, an agent pins its executor
-// and clears the pod. Availability reasons render from the server
-// reason codes; desktop capability detection stays server-side.
-import type {
-  AgentExecutorOption,
-  ExecutorKind,
-  Pod,
-  PodList,
-  Runner,
-  RunnerList,
-  WorkspaceMemberList,
-} from "@pidash/api-client";
+// ISS-218; built-in engine design §6, §7). Runner is the only executor,
+// so the picker offers no agent rows: each pod offers an "any runner"
+// row plus its runners, each named the way every surface names it
+// (engines read "Built-in engine · <machine>"), with the machine, a
+// status line, an owner name and an assignability answer. A pod pick
+// pins the pod and clears the runner; a runner pick pins the runner
+// inside its pod. Both keep the local executor.
+import type { ExecutorKind, Pod, PodList, Runner, RunnerList, WorkspaceMemberList } from "@pidash/api-client";
 
-import { agentReasonMessage } from "../lib/agentReasons.js";
+import { runnerDisplayName, runnerMachineName } from "../lib/runnerIdentity.js";
 
-export const CLOUD_EXECUTOR: ExecutorKind = "cloud_agent";
-export const MANAGED_EXECUTOR: ExecutorKind = "managed_runner";
+/** The one executor issues and projects run on. */
 export const LOCAL_EXECUTOR: ExecutorKind = "local_runner";
 
-/** Agent rows the picker offers; pods cover the local path, so it has no row. */
-export const AGENT_ROW_LABELS = {
-  cloud_agent: "Pi Dash Cloud Agent",
-  managed_runner: "Pi Dash Agent (desktop)",
-} as const;
-export type AgentRowKind = keyof typeof AGENT_ROW_LABELS;
-
-export function isAgentRowKind(kind: string): kind is AgentRowKind {
-  return kind === CLOUD_EXECUTOR || kind === MANAGED_EXECUTOR;
-}
-
-/**
- * Render one reason code. The shared agent vocabulary owns the sentences so
- * the picker and the desktop status notice explain a refusal the same way;
- * unknown codes surface as-is per the contract.
- */
-export function formatAvailabilityReason(reasonCode: string): string {
-  return agentReasonMessage(reasonCode);
-}
+/** The execution-target property name, on every surface. */
+export const EXECUTION_TARGET_LABEL = "Runs on";
 
 /** One plain-language sentence per runner eligibility code (design §7.1). */
 export const RUNNER_NOT_ASSIGNABLE_REASONS: Readonly<Record<string, string>> = {
@@ -52,8 +25,7 @@ export const RUNNER_NOT_ASSIGNABLE_REASONS: Readonly<Record<string, string>> = {
   runner_wrong_project: "This runner belongs to another project.",
   runner_pod_mismatch: "This runner is not in this pod.",
   runner_revoked: "This runner was revoked.",
-  runner_desktop_bundled: "Desktop runners can't take dedicated issues.",
-  executor_not_local: "Dedicated runners need the local runner.",
+  runner_desktop_bundled: "This built-in engine can't take this issue.",
   runner_owner_not_on_issue: "Add the runner's owner as an assignee to choose it.",
   active_run_in_progress: "This issue has a run in progress.",
 };
@@ -152,15 +124,16 @@ export function podOptionLabel(podName: string): string {
   return `Any runner in ${podName}`;
 }
 
-/** One picker row: an agent executor, a pod squad, or one runner. */
+/** One picker row: a pod squad, or one runner. */
 export type ExecutionTarget =
-  | { kind: "agent"; executor: AgentRowKind; label: string; available: boolean; reason: string }
   | { kind: "pod"; podId: string; label: string; isDefault: boolean }
   | {
       kind: "runner";
       runnerId: string;
       podId: string;
       label: string;
+      /** The machine the runner runs on, or "" when it reports none. */
+      machineName: string;
       statusLine: string;
       /** Owner display name, or "" while unknown. */
       ownerName: string;
@@ -170,30 +143,17 @@ export type ExecutionTarget =
     };
 
 /**
- * Ordered picker rows: the offered agent rows first (cloud, then
- * managed — an option absent from the project config renders no
- * row), then each pod in server order with its squad row followed by
- * that pod's runners in server order. Runners read assignable unless
- * the server says otherwise, so plain list rows without eligibility
- * answers stay pickable.
+ * Ordered picker rows: each pod in server order with its squad row
+ * followed by that pod's runners in server order. Runners read
+ * assignable unless the server says otherwise, so plain list rows
+ * without eligibility answers stay pickable.
  */
 export function buildExecutionTargets(
   pods: PodList,
-  options: AgentExecutorOption[],
   runners: RunnerList = [],
   resolveOwnerName: (ownerId: string) => string | null = () => null
 ): ExecutionTarget[] {
   const targets: ExecutionTarget[] = [];
-  for (const option of options) {
-    if (!isAgentRowKind(option.kind)) continue;
-    targets.push({
-      kind: "agent",
-      executor: option.kind,
-      label: AGENT_ROW_LABELS[option.kind],
-      available: option.available,
-      reason: option.available ? "" : formatAvailabilityReason(option.reason_code),
-    });
-  }
   for (const pod of pods) {
     targets.push({ kind: "pod", podId: pod.id, label: pod.name, isDefault: pod.is_default });
     for (const runner of runners) {
@@ -204,7 +164,8 @@ export function buildExecutionTargets(
         kind: "runner",
         runnerId: runner.id,
         podId: pod.id,
-        label: runner.name,
+        label: runnerDisplayName(runner),
+        machineName: runnerMachineName(runner) ?? "",
         statusLine: runnerStatusLine(runner),
         ownerName: resolveOwnerName(runner.owner) ?? "",
         assignable,
@@ -220,16 +181,8 @@ export function selectDefaultPod(pods: PodList): Pod | null {
   return pods.find((pod) => pod.is_default) ?? null;
 }
 
-/** The row label: Runs on once a cloud agent is offered, else Pod. */
-export function executionTargetLabel(options: AgentExecutorOption[]): "Runs on" | "Pod" {
-  return options.some((option) => option.kind === CLOUD_EXECUTOR) ? "Runs on" : "Pod";
-}
-
-/** One picker pick: a pod squad, one runner, or an agent executor. */
-export type ExecutionSelection =
-  | { type: "pod"; podId: string }
-  | { type: "runner"; runnerId: string; podId: string }
-  | { type: "agent"; executor: ExecutorKind };
+/** One picker pick: a pod squad, or one runner. */
+export type ExecutionSelection = { type: "pod"; podId: string } | { type: "runner"; runnerId: string; podId: string };
 
 /** The issue patch a pick writes. */
 export interface ExecutionTargetPatch {
@@ -241,36 +194,32 @@ export interface ExecutionTargetPatch {
 /**
  * Map a pick onto the patch: a pod pins the pod plus the local
  * executor and clears any runner; a runner pins the runner inside its
- * pod plus the local executor; an agent pins its executor and clears
- * the pod and the runner, since agent runs execute off-pod.
+ * pod plus the local executor (the server moves the pod to the
+ * runner's own pod either way).
  */
 export function executionTargetPatch(selection: ExecutionSelection): ExecutionTargetPatch {
   if (selection.type === "pod")
     return { assigned_pod_id: selection.podId, assigned_runner_id: null, agent_executor: LOCAL_EXECUTOR };
-  if (selection.type === "runner")
-    return {
-      assigned_pod_id: selection.podId,
-      assigned_runner_id: selection.runnerId,
-      agent_executor: LOCAL_EXECUTOR,
-    };
-  return { assigned_pod_id: null, assigned_runner_id: null, agent_executor: selection.executor };
+  return {
+    assigned_pod_id: selection.podId,
+    assigned_runner_id: selection.runnerId,
+    agent_executor: LOCAL_EXECUTOR,
+  };
 }
 
-/** Option-id prefixes, keeping pod, runner and agent ids in one namespace. */
+/** Option-id prefixes, keeping pod and runner ids in one namespace. */
 export const POD_OPTION_PREFIX = "pod:";
 export const RUNNER_OPTION_PREFIX = "runner:";
-export const AGENT_OPTION_PREFIX = "agent:";
 
 /** The option id for a selection, or null when nothing is picked. */
 export function executionSelectionId(selection: ExecutionSelection | null): string | null {
   if (selection === null) return null;
   if (selection.type === "pod") return `${POD_OPTION_PREFIX}${selection.podId}`;
-  if (selection.type === "runner") return `${RUNNER_OPTION_PREFIX}${selection.runnerId}`;
-  return `${AGENT_OPTION_PREFIX}${selection.executor}`;
+  return `${RUNNER_OPTION_PREFIX}${selection.runnerId}`;
 }
 
 /**
- * Trigger text for a selection: the pod, runner or agent name. A set
+ * Trigger text for a selection: the pod or runner name. A set
  * pod or runner renders the prompt until the lists load; once loaded,
  * a missing row reads as unknown (every single picker shares the
  * prompt fallback).
@@ -282,9 +231,6 @@ export function selectTriggerText(
   placeholder: string
 ): string {
   if (selection === null) return placeholder;
-  if (selection.type === "agent") {
-    return isAgentRowKind(selection.executor) ? AGENT_ROW_LABELS[selection.executor] : placeholder;
-  }
   if (!listsLoaded) return placeholder;
   if (selection.type === "pod") {
     const pod = targets.find((target) => target.kind === "pod" && target.podId === selection.podId);
@@ -321,10 +267,7 @@ export function parseExecutionSelectionId(
   runners: ReadonlyArray<Pick<Runner, "id" | "pod">> = []
 ): ExecutionSelection {
   if (id.startsWith(POD_OPTION_PREFIX)) return { type: "pod", podId: id.slice(POD_OPTION_PREFIX.length) };
-  if (id.startsWith(RUNNER_OPTION_PREFIX)) {
-    const runnerId = id.slice(RUNNER_OPTION_PREFIX.length);
-    const runner = runners.find((entry) => entry.id === runnerId);
-    return { type: "runner", runnerId, podId: runner?.pod ?? "" };
-  }
-  return { type: "agent", executor: id.slice(AGENT_OPTION_PREFIX.length) as ExecutorKind };
+  const runnerId = id.startsWith(RUNNER_OPTION_PREFIX) ? id.slice(RUNNER_OPTION_PREFIX.length) : id;
+  const runner = runners.find((entry) => entry.id === runnerId);
+  return { type: "runner", runnerId, podId: runner?.pod ?? "" };
 }

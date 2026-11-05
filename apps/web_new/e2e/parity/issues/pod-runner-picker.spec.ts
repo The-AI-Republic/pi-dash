@@ -6,17 +6,21 @@
 // its runners, every runner names its status, owner and — when the server
 // refuses it — the reason it cannot take this issue. A runner pick writes
 // the pod, the runner and the local executor in one PATCH; a pod pick
-// clears the runner; an agent pick clears both.
+// clears the runner. Runner is the only executor (built-in engine design
+// §6, PIDESKAPP-125), so the picker offers no Cloud Agent or desktop
+// agent row.
 //
 // The OSS backend lists runners without the eligibility answers
-// (`assignable`, `not_assignable_code`, `is_busy`, `queue_depth`) and
-// drops `assigned_runner_id` on write — both are PDASHOSS01-297 — so the
-// scenarios answer those two calls through the browser and keep the rest
-// live. Rows: ISS-241, ISS-242.
+// (`assignable`, `not_assignable_code`, `is_busy`, `queue_depth`,
+// PDASHOSS01-297), so the scenarios answer the runner list through the
+// browser. The server now stores `assigned_runner_id` (owner-only,
+// PIDESKAPP-123), but the planted runners belong to the API token's
+// user, so the detail read is still answered from the captured writes
+// to keep the scenarios independent of who owns them. Rows: ISS-241,
+// ISS-242.
 import { test, expect, type Page } from "../fixtures";
 import {
   fetchIssue,
-  getProject,
   parityProjectIdentifier,
   serverCleanupIssueWithSession,
   serverCleanupProject,
@@ -398,7 +402,6 @@ test(
     const tier = await serverCreatePod(projectId, `Tier${Date.now().toString(36)}`, session);
     const issue = await serverCreateIssueFull(seed.workspaceSlug, projectId, `NF907 exec issue ${Date.now()}`, session);
     const detailPath = `/api/workspaces/${seed.workspaceSlug}/projects/${projectId}/issues/${issue.id}/`;
-    const projectPath = `/api/workspaces/${seed.workspaceSlug}/projects/${projectId}/`;
     const pods = await serverProjectPods(projectId, session);
     const auto = pods.find((pod) => pod.isDefault);
     expect(auto).toBeDefined();
@@ -413,7 +416,6 @@ test(
     };
     const written: PatchBody[] = [];
     const base = await fetchIssue(seed.workspaceSlug, projectId, issue.id, session);
-    const projectBase = await getProject(seed.workspaceSlug, projectId, session);
     try {
       await stubRunnerEligibility(driver.page, { [online.name]: { assignable: true, code: "" } });
       await stubIssueTarget(driver.page, detailPath, base, target);
@@ -464,45 +466,16 @@ test(
         expect(await driver.propertyValueText("Runs on")).not.toContain(online.name);
       });
 
-      await test.step("an agent pick clears the pod and the runner", async () => {
-        // The OSS server offers no available agent row, so this scenario
-        // answers the project read with the cloud row on and accepts the
-        // write: the mapping is what ISS-242 proves here.
-        await driver.page.route(`**${projectPath}`, async (route) => {
-          // Read once up front: the reload below must not race a fetch the
-          // stub starts on its own.
-          const body = structuredClone(projectBase);
-          const options = Array.isArray(body["agent_executor_options"]) ? body["agent_executor_options"] : [];
-          body["agent_executor_options"] = (options as Record<string, unknown>[]).map((option) =>
-            option["kind"] === "cloud_agent" ? { ...option, available: true, reason_code: "" } : option
-          );
-          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
-        });
-        // The OSS server refuses an unavailable agent on write too, so the
-        // pick is accepted here and the stored read answers with it.
-        await driver.page.route(`**${detailPath}`, async (route) => {
-          if (route.request().method() !== "PATCH") {
-            await route.fallback();
-            return;
-          }
-          await route.fulfill({ status: 204 });
-        });
-        await driver.page.reload();
-        await expect.poll(() => driver.propertyRowPresent("Runs on"), { timeout: 60_000 }).toBe(true);
+      await test.step("no executor row is offered", async () => {
         await driver.propertyOpenPicker("Runs on");
-        expect(await driver.pickerOptionDisabled("Pi Dash Cloud Agent")).toBe(false);
-        await driver.pickerPick("Pi Dash Cloud Agent");
-        await expect.poll(() => written.length, { timeout: 30_000 }).toBe(3);
-        expect(written[2]).toEqual({ assigned_pod_id: null, assigned_runner_id: null, agent_executor: "cloud_agent" });
-        await expect
-          .poll(() => driver.propertyValueText("Runs on"), { timeout: 30_000 })
-          .toContain("Pi Dash Cloud Agent");
+        const options = await driver.pickerOptionTexts();
+        expect(options.some((option) => /cloud agent|pi dash agent/i.test(option))).toBe(false);
+        await driver.pickerPressEscape();
       });
 
       await test.step("a rejected write shows the API message in place", async () => {
         acceptWrites = false;
         const message = "That runner is already dedicated to another issue.";
-        await driver.page.unroute(`**${projectPath}`).catch(() => {});
         await driver.page.unroute(`**${detailPath}`).catch(() => {});
         await stubIssueTarget(driver.page, detailPath, base, target);
         await driver.page.reload();
@@ -524,9 +497,7 @@ test(
         // A field rejection stays next to the trigger instead of toasting.
         expect(await driver.toastText()).toBeNull();
         // The optimistic value rolled back to the stored target.
-        await expect
-          .poll(() => driver.propertyValueText("Runs on"), { timeout: 30_000 })
-          .toContain("Pi Dash Cloud Agent");
+        await expect.poll(() => driver.propertyValueText("Runs on"), { timeout: 30_000 }).toContain(tier.name);
       });
     } finally {
       await driver.page.unrouteAll({ behavior: "wait" }).catch(() => {});

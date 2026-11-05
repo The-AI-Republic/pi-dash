@@ -1,15 +1,17 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Execution-target picker (parity/specs/issues.md §17, ISS-218).
-// Single-select over the offered cloud/managed agent rows plus each
-// pod's squad row and its runners, with search. Unavailable agents
-// and unassignable runners disable with their reason inline; the
-// default pod carries a tag. Picks map onto the issue execution-target
-// patch. Reads resolve lazily on open; a caller that has to name an
-// existing target before the popup opens preloads them.
+// Execution-target picker (parity/specs/issues.md §17, ISS-218;
+// built-in engine design §6, §7). Single-select over each pod's squad
+// row and its runners ("Specific runner"), with search. There is no
+// executor choice: Runner is the only executor. Runner rows name the
+// runner (engines as "Built-in engine · <machine>"), its machine and
+// whether it is online; unassignable runners disable with their reason
+// inline; the default pod carries a tag. Picks map onto the issue
+// execution-target patch. Reads resolve lazily on open; a caller that
+// has to name an existing target before the popup opens preloads them.
 import { Badge, Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption } from "@pidash/kit";
-import { Cloud, Container, Monitor, Server } from "lucide-react";
+import { Container, Server } from "lucide-react";
 import * as React from "react";
 
 import { useWorkspace } from "../../core/session/hooks.js";
@@ -17,18 +19,16 @@ import { PropertyChip } from "./PropertyChip.js";
 import {
   buildExecutionTargets,
   executionSelectionId,
-  isAgentRowKind,
   parseExecutionSelectionId,
   podOptionLabel,
   selectRunnerOwnerName,
   selectRunnerWaitNote,
   selectTriggerPodName,
   selectTriggerText,
-  type AgentRowKind,
   type ExecutionSelection,
   type ExecutionTarget,
 } from "./pods.js";
-import { usePickerPods, usePickerProject, usePickerRunners, usePickerWorkspaceMembers } from "./reference.js";
+import { usePickerPods, usePickerRunners, usePickerWorkspaceMembers } from "./reference.js";
 
 export interface PodPickerProps {
   workspaceSlug: string;
@@ -71,11 +71,6 @@ function RunnerGlyph(): React.ReactElement {
   return <Server size={16} strokeWidth={1.5} className="text-(--text-muted)" aria-hidden="true" />;
 }
 
-function AgentGlyph({ executor }: { executor: AgentRowKind }): React.ReactElement {
-  const Icon = executor === "cloud_agent" ? Cloud : Monitor;
-  return <Icon size={16} strokeWidth={1.5} className="text-(--text-muted)" aria-hidden="true" />;
-}
-
 function DefaultPill(): React.ReactElement {
   return (
     <span className="text-caption rounded-(--radius-full) bg-(--subtle) px-(--space-2) py-px text-(--text-muted)">
@@ -88,16 +83,16 @@ function ReasonText({ reason }: { reason: string }): React.ReactElement {
   return <span className="text-caption whitespace-nowrap text-(--text-muted)">{reason}</span>;
 }
 
+/** The runner row's caption: machine, status line, then owner. */
+export function runnerCaption(target: Extract<ExecutionTarget, { kind: "runner" }>): string {
+  const label = target.label;
+  // An engine's label already names its machine; repeat it only for
+  // own-agent runners, whose names are their own.
+  const machine = target.machineName !== "" && !label.endsWith(target.machineName) ? target.machineName : "";
+  return [machine, target.statusLine, target.ownerName].filter((part) => part !== "").join(" · ");
+}
+
 function toComboboxOption(target: ExecutionTarget): ComboboxOption {
-  if (target.kind === "agent") {
-    return {
-      id: `agent:${target.executor}`,
-      label: target.label,
-      disabled: !target.available,
-      icon: <AgentGlyph executor={target.executor} />,
-      trailing: target.reason === "" ? undefined : <ReasonText reason={target.reason} />,
-    };
-  }
   if (target.kind === "pod") {
     return {
       id: `pod:${target.podId}`,
@@ -107,11 +102,11 @@ function toComboboxOption(target: ExecutionTarget): ComboboxOption {
       trailing: target.isDefault ? <DefaultPill /> : undefined,
     };
   }
-  const caption = target.ownerName === "" ? target.statusLine : `${target.statusLine} · ${target.ownerName}`;
+  const caption = runnerCaption(target);
   return {
     id: `runner:${target.runnerId}`,
     label: target.label,
-    searchText: `${target.label} ${target.statusLine} ${target.ownerName}`,
+    searchText: `${target.label} ${target.machineName} ${target.statusLine} ${target.ownerName}`,
     disabled: !target.assignable,
     content: (
       <span className="pl-(--space-6)">
@@ -124,9 +119,6 @@ function toComboboxOption(target: ExecutionTarget): ComboboxOption {
 
 function selectionGlyph(selection: ExecutionSelection | null, targets: ExecutionTarget[]): React.ReactNode {
   if (selection === null) return null;
-  if (selection.type === "agent") {
-    return isAgentRowKind(selection.executor) ? <AgentGlyph executor={selection.executor} /> : null;
-  }
   if (selection.type === "pod") {
     const pod = targets.find((target) => target.kind === "pod" && target.podId === selection.podId);
     return pod === undefined ? null : <PodGlyph />;
@@ -166,26 +158,21 @@ export function PodPicker({
   const { workspace } = useWorkspace(workspaceSlug);
   const workspaceId = workspace?.id ?? "";
   const pods = usePickerPods(workspaceSlug, projectId, readsAllowed);
-  const project = usePickerProject(workspaceSlug, projectId, readsAllowed);
   const runners = usePickerRunners(workspaceSlug, workspaceId, projectId, assignableFor, readsAllowed);
   // The directory only names runner owners, so it stays off until a
   // runner row needs it; pod-only projects never pay for the read.
   const directory = usePickerWorkspaceMembers(workspaceSlug, readsAllowed && (runners.data?.length ?? 0) > 0);
   const targets = React.useMemo(
     () =>
-      buildExecutionTargets(
-        pods.data ?? [],
-        project.data?.agent_executor_options ?? [],
-        runners.data ?? [],
-        (ownerId) => selectRunnerOwnerName(directory.data, ownerId)
+      buildExecutionTargets(pods.data ?? [], runners.data ?? [], (ownerId) =>
+        selectRunnerOwnerName(directory.data, ownerId)
       ),
-    [pods.data, project.data, runners.data, directory.data]
+    [pods.data, runners.data, directory.data]
   );
   // Without a workspace id the runner read stays off and the picker
-  // offers pods and agents alone; it must neither spin nor wait for it.
-  const loading =
-    open && !disabled && (pods.isPending || project.isPending || (workspaceId !== "" && runners.isPending));
-  const errorText = pods.isError || project.isError || runners.isError ? "Couldn't load execution targets." : undefined;
+  // offers pods alone; it must neither spin nor wait for it.
+  const loading = open && !disabled && (pods.isPending || (workspaceId !== "" && runners.isPending));
+  const errorText = pods.isError || runners.isError ? "Couldn't load execution targets." : undefined;
 
   function handleSelect(id: string): void {
     onChange(parseExecutionSelectionId(id, runners.data ?? []));

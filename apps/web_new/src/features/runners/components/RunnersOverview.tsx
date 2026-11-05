@@ -7,11 +7,17 @@
 // plus the pods section above it (NEWFRONT-542) and its three dialogs. The
 // add-runner entry arrives with its own slice.
 
-import { Button } from "@pidash/kit";
+import { Badge, Button } from "@pidash/kit";
 import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
-import type { Pod, Runner } from "@pidash/api-client";
+import type { Pod, Runner, RunnerPatch } from "@pidash/api-client";
+import {
+  BUILT_IN_BADGE,
+  isEngineRunner,
+  runnerDisplayName,
+  runnerMachineName,
+} from "../../../shared/lib/runnerIdentity.js";
 import { notifyError } from "../../../shared/shell/index.js";
 import type { PodFilterState } from "../podFilter.js";
 import { runnersBase, type RunnersScopeInput } from "../scope.js";
@@ -19,6 +25,7 @@ import { runnerDisplayStatus } from "../status.js";
 import { CreatePodDialog } from "./CreatePodDialog.js";
 import { DeletePodDialog } from "./DeletePodDialog.js";
 import { EditPodDialog } from "./EditPodDialog.js";
+import { PodMembersPanel } from "./PodMembersPanel.js";
 import { RunnerConfirmDialog } from "./RunnerConfirmDialog.js";
 import { RunnerStatusBadge } from "./RunnerStatusBadge.js";
 import { PodFilterBar } from "./RunnersPodFilter.js";
@@ -56,6 +63,35 @@ export function runnerHeartbeat(
   return runner.last_heartbeat_at === null ? "—" : format(runner.last_heartbeat_at);
 }
 
+/**
+ * Name cell (built-in engine design §11): engines read "Built-in engine ·
+ * <machine>" with a Built-in badge; every row names the machine it runs
+ * on underneath when one is known.
+ */
+export function RunnerNameCell({ runner }: { runner: Runner }): React.ReactElement {
+  const engine = isEngineRunner(runner);
+  const machine = runnerMachineName(runner);
+  return (
+    <div className="flex flex-col gap-(--space-1)">
+      <span className="flex flex-wrap items-center gap-(--space-2)">
+        <span className={engine ? "text-(--text)" : "font-mono text-meta text-(--text)"}>
+          {runnerDisplayName(runner)}
+        </span>
+        {engine ? (
+          <span data-testid="runner-built-in-badge" className="inline-flex">
+            <Badge tone="accent">{BUILT_IN_BADGE}</Badge>
+          </span>
+        ) : null}
+      </span>
+      {machine === null || engine ? null : (
+        <span data-testid="runner-machine" className="text-meta text-(--text-muted)">
+          {machine}
+        </span>
+      )}
+    </div>
+  );
+}
+
 export interface RunnersOverviewProps {
   scope: RunnersScopeInput;
   /** Rows and the pod selection narrowing them (RUN-012). */
@@ -68,6 +104,12 @@ export interface RunnersOverviewProps {
   onRevoke: (runnerId: string) => Promise<void>;
   /** Header action slot (the add-runner entry mounts here). */
   action?: React.ReactNode;
+  /** Every runner of the scope for the pod members panel; the filtered rows when absent. */
+  allRunners?: Runner[] | undefined;
+  /** Signed-in user; pod membership actions are owner-only. */
+  userId?: string | null | undefined;
+  /** Pod membership writer; without it the members panel is read-only. */
+  onUpdateRunner?: ((runnerId: string, patch: RunnerPatch) => Promise<unknown>) | undefined;
 }
 
 /** The confirmation waiting for an answer; the runner row is its target. */
@@ -84,6 +126,9 @@ export function RunnersOverview({
   onDelete,
   onRevoke,
   action,
+  allRunners,
+  userId = null,
+  onUpdateRunner,
 }: RunnersOverviewProps): React.ReactElement {
   const navigate = useNavigate();
   const runners = filter.runners;
@@ -135,6 +180,15 @@ export function RunnersOverview({
         onDelete={(pod) => setPodDialog({ mode: "delete", pod })}
       />
       {filter.selectedPod === null ? null : <PodFilterBar selectedPod={filter.selectedPod} onClear={filter.clear} />}
+      {filter.selectedPod === null ? null : (
+        <PodMembersPanel
+          pod={filter.selectedPod}
+          runners={allRunners ?? runners}
+          pods={pods ?? []}
+          userId={onUpdateRunner === undefined ? null : userId}
+          onUpdate={onUpdateRunner ?? (async () => undefined)}
+        />
+      )}
       <div className="overflow-x-auto rounded-(--radius-control) border border-(--border)">
         <table className="text-body w-full text-left">
           <thead className="bg-(--subtle) text-(--text-muted)">
@@ -165,7 +219,9 @@ export function RunnersOverview({
           <tbody>
             {runners.map((runner) => (
               <tr key={runner.id} data-runner={runner.name} className="border-t border-(--border)">
-                <td className="font-mono text-meta px-(--space-3) py-(--space-2)">{runner.name}</td>
+                <td className="px-(--space-3) py-(--space-2)">
+                  <RunnerNameCell runner={runner} />
+                </td>
                 <td className="px-(--space-3) py-(--space-2)">{runner.pod_detail.name}</td>
                 <td className="px-(--space-3) py-(--space-2)">
                   <RunnerStatusBadge status={runnerDisplayStatus(runner)} />
@@ -220,7 +276,7 @@ export function RunnersOverview({
         <RunnerConfirmDialog
           open
           action={pending.action}
-          runnerName={pending.runner.name}
+          runnerName={runnerDisplayName(pending.runner)}
           pending={working}
           onCancel={() => setPending(null)}
           onConfirm={() => void confirm(pending)}

@@ -8,11 +8,46 @@ import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { dateTime, nullableDateTime, uuid } from "./fields.js";
 
+/**
+ * Why the server paused a machine's built-in engine on its own; "" when
+ * it is not auto-paused. Kept an open string so a new server reason
+ * still parses (and renders as-is).
+ */
+export const ENGINE_AUTO_PAUSE_REASONS = [
+  "",
+  "engine_sign_in_required",
+  "gateway_session_revoked",
+  "wallet_empty",
+  "profile_unavailable",
+  "engine_disabled",
+] as const;
+export type EngineAutoPauseReason = (typeof ENGINE_AUTO_PAUSE_REASONS)[number];
+
+/**
+ * The machine's engine sign-in state (design §4.3). Not served yet: the
+ * second server change adds it, so clients degrade when it is absent.
+ */
+export const ENGINE_SIGN_IN_STATES = ["never", "active", "expiring", "expired", "signed_out", "revoked"] as const;
+export type EngineSignInState = (typeof ENGINE_SIGN_IN_STATES)[number];
+
+/**
+ * Built-in engine controls carried on both machine shapes (design §8):
+ * the owner's pause switch, the server's automatic pause reason and the
+ * "Teammates can start runs on my issues" opt-in. All optional so
+ * servers that predate the engine fields still parse.
+ */
+const engineFields = {
+  engine_paused_by_owner: z.optional(z.boolean()),
+  engine_auto_pause_reason: z.optional(z.string()),
+  engine_team_runs: z.optional(z.boolean()),
+};
+
 /** Machine identity nested inside runner rows. */
 export const DevMachineMini = z.object({
   id: uuid(),
   host_label: z.string(),
   label: z.string(),
+  ...engineFields,
 });
 export type DevMachineMini = z.infer<typeof DevMachineMini>;
 
@@ -35,6 +70,13 @@ export const DevMachine = z.object({
    * "unknown", so clients must not gate anything on them.
    */
   supported_agents: z.optional(z.array(z.string())),
+  ...engineFields,
+  /** Engine sign-in state; absent until the server reports it. */
+  engine_sign_in_state: z.optional(z.string()),
+  /** When the engine credential expires; absent or null when unknown. */
+  engine_credential_expires_at: z.optional(nullableDateTime()),
+  /** Set on a machine merged into another one ("Replaced by"). */
+  merged_into: z.optional(z.nullable(z.string())),
   last_seen_at: nullableDateTime(),
   last_heartbeat_at: nullableDateTime(),
   revoked_at: nullableDateTime(),
@@ -94,6 +136,67 @@ export async function deleteDevMachine(
     query: { workspace: workspaceId, purge_local: purge ? "true" : "false" },
   });
   return response.status;
+}
+
+/**
+ * Owner-only machine settings. `label` is the rename (served by the
+ * second server change; older servers refuse it with 400).
+ */
+export interface DevMachinePatch {
+  /** The owner's "Pause the built-in engine" switch. */
+  engine_paused_by_owner?: boolean;
+  /** "Teammates can start runs on my issues". */
+  engine_team_runs?: boolean;
+  /** User-chosen machine name; defaults to the hostname. */
+  label?: string;
+}
+
+/**
+ * Change a machine's engine controls or name. Owner only: anyone else
+ * gets 403; a revoked machine answers 409. Answers the updated row.
+ */
+export async function updateDevMachine(
+  client: ApiClient,
+  machineId: string,
+  workspaceId: string,
+  patch: DevMachinePatch
+): Promise<DevMachine> {
+  const path = `/api/runners/dev-machines/${machineId}/`;
+  const envelope = await client.sendJson<unknown>("PATCH", path, { json: { ...patch, workspace: workspaceId } });
+  return client.parse(DevMachine, envelope.data, `PATCH ${path}`);
+}
+
+/**
+ * Revoke the machine's engine credential only ("Sign out the engine",
+ * design §4.3); the daemon and its own-agent runners stay signed in.
+ * Served by the second server change; callers offer it only when the
+ * machine reports its engine sign-in state. Answers the updated row.
+ */
+export async function signOutDevMachineEngine(
+  client: ApiClient,
+  machineId: string,
+  workspaceId: string
+): Promise<DevMachine> {
+  const path = `/api/runners/dev-machines/${machineId}/engine-sign-out/`;
+  const envelope = await client.sendJson<unknown>("POST", path, { json: { workspace: workspaceId } });
+  return client.parse(DevMachine, envelope.data, `POST ${path}`);
+}
+
+/**
+ * Merge an offline machine into the computer that replaced it (design
+ * §4.10, §13): its runners, pins and pod membership move to the target
+ * and the source is revoked with `merged_into` set. Both machines must
+ * be the caller's; the source must have no live session. Retrying into
+ * the same target answers the same result. Answers the target row.
+ */
+export async function mergeDevMachineInto(
+  client: ApiClient,
+  sourceMachineId: string,
+  targetMachineId: string
+): Promise<unknown> {
+  const path = `/api/v1/runner/dev-machines/${sourceMachineId}/merge-into/`;
+  const envelope = await client.sendJson<unknown>("POST", path, { json: { target: targetMachineId } });
+  return envelope.data;
 }
 
 export interface CreateRunnerOnMachineInput {

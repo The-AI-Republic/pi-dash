@@ -12,6 +12,7 @@ import { Link } from "@tanstack/react-router";
 import { ArrowLeft, MessageSquare } from "lucide-react";
 import * as React from "react";
 
+import { BUILT_IN_BADGE, isEngineRunner, runnerDisplayName } from "../../../shared/lib/runnerIdentity.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
 import { RUNNER_STATUS_LABELS, RUNNER_STATUS_TONES, runnerDisplayStatus } from "../status.js";
 import { ActivityPanel } from "./ActivityPanel.js";
@@ -22,6 +23,23 @@ export const RUNNER_DETAIL_FAILED = "Failed to load runner";
 export const RUNNER_DETAIL_BACK = "Back to runners";
 export const RUNNER_DETAIL_CHAT = "Open chat";
 export const DASH = "—";
+/** Pod-dispatch row copy (design §7). */
+export const POD_DISPATCH_LABELS = {
+  pod_member: "Takes pod work",
+  pinned_only: "Assigned issues only",
+} as const;
+/** Engines are renamed through their machine, never one by one (design §11). */
+export const ENGINE_RENAME_HINT = "Rename the computer to rename its built-in engine.";
+
+/**
+ * The work dir the runner reported at session attach (design §10), or
+ * null before it has reported one; the row then shows the dash, as the
+ * parity oracle does.
+ */
+export function reportedWorkDir(runner: Pick<Runner, "dev_metadata">): string | null {
+  const dir = runner.dev_metadata.working_dir;
+  return dir === undefined || dir.trim() === "" ? null : dir;
+}
 
 export function runnerDetailDocumentTitle(name: string | undefined): string {
   return name === undefined ? RUNNER_DETAIL_TITLE : `Runner ${name}`;
@@ -77,7 +95,8 @@ export function RunnerDetailScreen({
   loading,
   failed,
 }: RunnerDetailScreenProps): React.ReactElement {
-  useDocumentHead({ title: runnerDetailDocumentTitle(runner?.name), robots: "noindex, nofollow" });
+  const displayName = runner === undefined ? undefined : runnerDisplayName(runner);
+  useDocumentHead({ title: runnerDetailDocumentTitle(displayName), robots: "noindex, nofollow" });
   const base =
     projectId === undefined ? `/${workspaceSlug}/runners` : `/${workspaceSlug}/projects/${projectId}/runners`;
   const chatHref = `${base}/chat/${runnerId}`;
@@ -121,13 +140,25 @@ export function RunnerDetailScreen({
         <>
           <section className="rounded-(--radius-control) border border-(--border) p-(--space-4)">
             <div className="flex items-center gap-(--space-3)">
-              <h1 className="text-emphasis font-mono font-semibold break-all text-(--text)">{runner.name}</h1>
+              <h1
+                className={`text-emphasis font-semibold break-all text-(--text) ${isEngineRunner(runner) ? "" : "font-mono"}`}
+              >
+                {displayName}
+              </h1>
+              {isEngineRunner(runner) ? (
+                <span data-testid="runner-built-in-badge" className="inline-flex">
+                  <Badge tone="accent">{BUILT_IN_BADGE}</Badge>
+                </span>
+              ) : null}
               <span data-testid="runner-status-badge" className="inline-flex">
                 <Badge tone={RUNNER_STATUS_TONES[runnerDisplayStatus(runner)]} dot>
                   {RUNNER_STATUS_LABELS[runnerDisplayStatus(runner)]}
                 </Badge>
               </span>
             </div>
+            {isEngineRunner(runner) ? (
+              <p className="text-meta mt-(--space-2) text-(--text-muted)">{ENGINE_RENAME_HINT}</p>
+            ) : null}
           </section>
 
           <section className="rounded-(--radius-control) border border-(--border) p-(--space-4)">
@@ -139,10 +170,13 @@ export function RunnerDetailScreen({
               <MetaRow label="Pod">{runner.pod_detail.name}</MetaRow>
               <MetaRow label="Project">{runner.pod_detail.project_identifier}</MetaRow>
               <MetaRow label="Dev machine">{machineLabel(runner)}</MetaRow>
+              {runner.pod_dispatch === undefined ? null : (
+                <MetaRow label="Pod work">{POD_DISPATCH_LABELS[runner.pod_dispatch]}</MetaRow>
+              )}
               <MetaRow label="OS / Arch">{platformLabel(runner)}</MetaRow>
               <MetaRow label="Version">{runner.runner_version === "" ? DASH : runner.runner_version}</MetaRow>
               <MetaRow label="Working directory">
-                {runner.dev_metadata.working_dir === undefined || runner.dev_metadata.working_dir === "" ? (
+                {reportedWorkDir(runner) === null ? (
                   DASH
                 ) : (
                   <span className="font-mono text-meta break-all">{runner.dev_metadata.working_dir}</span>
@@ -175,7 +209,7 @@ export function RunnerDetailScreen({
             </dl>
           </section>
 
-          <ActivityPanel runnerName={runner.name} liveState={runner.live_state} />
+          <ActivityPanel runnerName={displayName ?? runner.name} liveState={runner.live_state} />
         </>
       )}
     </div>

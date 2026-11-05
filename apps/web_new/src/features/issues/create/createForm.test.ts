@@ -186,13 +186,6 @@ describe("buildCreatePayload", () => {
     });
   });
 
-  it("pins an agent executor with no pod", () => {
-    const payload = buildCreatePayload(form({ name: "Agent", execution: { type: "agent", executor: "cloud_agent" } }));
-    expect(payload.assigned_pod_id).toBeNull();
-    expect(payload.assigned_runner_id).toBeNull();
-    expect(payload.agent_executor).toBe("cloud_agent");
-  });
-
   it("pins a runner inside its pod", () => {
     const payload = buildCreatePayload(
       form({ name: "Runner", execution: { type: "runner", runnerId: "runner-1", podId: "pod" } })
@@ -430,19 +423,13 @@ describe("default execution target (NEWPIDASH-23)", () => {
     expect(defaultExecutionSelection([])).toBeNull();
   });
 
-  it("starts on no pick when the project runs on an agent by default", () => {
-    expect(defaultExecutionSelection(pods, "cloud_agent")).toBeNull();
-    expect(defaultExecutionSelection(pods, "managed_runner")).toBeNull();
-    expect(defaultExecutionSelection(pods, "local_runner")).toEqual({ type: "pod", podId: "pod-b" });
-  });
-
   it("fills only an empty target", () => {
     const fallback = defaultExecutionSelection(pods);
     const blank = emptyCreateForm(PROJECT);
     expect(withDefaultExecution(blank, fallback).execution).toEqual({ type: "pod", podId: "pod-b" });
     expect(withDefaultExecution(blank, null)).toBe(blank);
-    const agent = { ...blank, execution: { type: "agent", executor: "cloud_agent" } as const };
-    expect(withDefaultExecution(agent, fallback)).toBe(agent);
+    const runner = { ...blank, execution: { type: "runner", runnerId: "runner-1", podId: "pod-a" } as const };
+    expect(withDefaultExecution(runner, fallback)).toBe(runner);
   });
 
   it("sends the preselected pod with the create", () => {

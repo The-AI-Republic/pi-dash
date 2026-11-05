@@ -241,7 +241,9 @@ export function pickerRunnersQueryOptions(
   assignableFor: string
 ) {
   return referenceOptions(pickerKeys.runners(workspaceSlug, projectId, assignableFor), () =>
-    listRunners(client, workspaceId, { projectId, assignableFor })
+    // Engines are runners too (design §11): older servers hide them
+    // unless asked, newer ones list them always.
+    listRunners(client, workspaceId, { projectId, assignableFor, includeBundled: true })
   );
 }
 

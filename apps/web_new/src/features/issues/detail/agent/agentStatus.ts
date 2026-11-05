@@ -12,6 +12,18 @@
 import type { BadgeTone } from "@pidash/kit";
 import type { AgentRunSummary, AgentStatus, AgentTicker, Issue } from "@pidash/api-client";
 
+import { agentReasonMessage } from "../../../../shared/lib/agentReasons.js";
+
+/** A queued run waiting for its runner's offline computer (design §9). */
+const WAITING_FOR_COMPUTER_CODE = "desktop_not_connected";
+
+/** Run error codes whose explanation is the shared reason sentence. */
+const RUNNER_REFUSAL_CODES: ReadonlySet<string> = new Set([
+  "assigned_runner_removed",
+  "assigned_runner_not_owner",
+  "assigned_runner_offline",
+]);
+
 /** Live poll while a run is in flight. */
 export const AGENT_STATUS_POLL_MS = 15_000;
 
@@ -195,7 +207,9 @@ export function runStatusView(
         detail:
           run.executor_kind === "cloud_agent"
             ? "Waiting for cloud agent capacity."
-            : (runner ?? "Waiting for a free runner."),
+            : run.error_code === WAITING_FOR_COMPUTER_CODE
+              ? agentReasonMessage(WAITING_FOR_COMPUTER_CODE)
+              : (runner ?? "Waiting for a free runner."),
         badge: "Queued",
         tone: "neutral",
         icon: "clock",
@@ -261,8 +275,11 @@ export function runStatusView(
       };
     case "failed": {
       const diagnostic = run.error_diagnostic;
-      const failure =
-        diagnostic !== null
+      // A queued run whose assigned runner was removed is failed with a
+      // code, not a runner error (design §7); its sentence says why.
+      const failure = RUNNER_REFUSAL_CODES.has(run.error_code)
+        ? agentReasonMessage(run.error_code)
+        : diagnostic !== null
           ? `${diagnostic.source_label}: ${truncate(diagnostic.summary)}`
           : run.error !== ""
             ? truncate(run.error)

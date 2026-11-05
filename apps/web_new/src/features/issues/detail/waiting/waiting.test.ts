@@ -4,6 +4,12 @@
 import { describe, expect, it } from "vitest";
 import type { AgentRunSummary, DispatchWait, Issue } from "@pidash/api-client";
 import {
+  MACHINE_WAIT_BADGE,
+  UNKNOWN_MACHINE_NAME,
+  machineWaitBannerText,
+  machineWaitLabel,
+  machineWaitName,
+  selectMachineWait,
   selectWaitingBadge,
   selectWaitingRun,
   waitingBadgeLabel,
@@ -123,5 +129,61 @@ describe("selectWaitingBadge", () => {
   it("badges a waiting issue and clears a quiet one", () => {
     expect(selectWaitingBadge(issueWith(runSummary()))).toBe("Offline");
     expect(selectWaitingBadge(issueWith(null))).toBeUndefined();
+  });
+
+  it("badges a run waiting for an offline computer", () => {
+    const machine = runSummary({ dispatch_wait: undefined, error_code: "desktop_not_connected" });
+    expect(selectWaitingBadge(issueWith(machine))).toBe(MACHINE_WAIT_BADGE);
+  });
+});
+
+describe("machine waits (built-in engine design §9)", () => {
+  const RUNNER_ID = "223e4567-e89b-12d3-a456-426614174001";
+  const engine = {
+    id: RUNNER_ID,
+    name: "builtin-x",
+    provisioning: "desktop_bundled",
+    dev_machine_detail: { id: "m", label: "Work laptop", host_label: "rich-mbp" },
+  };
+
+  it("reads a queued run carrying the waiting code, preferring the issue's runner", () => {
+    const run = runSummary({ dispatch_wait: null, error_code: "desktop_not_connected" });
+    expect(selectMachineWait({ ...issueWith(run), assigned_runner_id: "other" })?.runnerId).toBe("other");
+    expect(selectMachineWait(issueWith(run))?.runnerId).toBe(RUNNER_ID);
+    expect(
+      selectMachineWait(
+        issueWith(runSummary({ pinned_runner: undefined, dispatch_wait: null, error_code: "desktop_not_connected" }))
+      )?.runnerId
+    ).toBe(null);
+  });
+
+  it("ignores runs with a computed wait, other codes or other states", () => {
+    expect(selectMachineWait(issueWith(runSummary({ error_code: "desktop_not_connected" })))).toBeNull();
+    expect(selectMachineWait(issueWith(runSummary({ dispatch_wait: null })))).toBeNull();
+    expect(
+      selectMachineWait(
+        issueWith(runSummary({ dispatch_wait: null, status: "running", error_code: "desktop_not_connected" }))
+      )
+    ).toBeNull();
+    expect(selectMachineWait(issueWith(null))).toBeNull();
+  });
+
+  it("names the machine, then the runner, then a neutral fallback", () => {
+    const wait = { run: runSummary(), runnerId: RUNNER_ID };
+    expect(machineWaitName(wait, [engine])).toBe("Work laptop");
+    expect(
+      machineWaitName(wait, [
+        { ...engine, dev_machine_detail: null, host_label: "", provisioning: "manual", name: "gpu-box" },
+      ])
+    ).toBe("gpu-box");
+    expect(machineWaitName(wait, [])).toBe(UNKNOWN_MACHINE_NAME);
+    expect(machineWaitName({ ...wait, runnerId: null }, [engine])).toBe(UNKNOWN_MACHINE_NAME);
+    expect(machineWaitName(wait, undefined)).toBe(UNKNOWN_MACHINE_NAME);
+  });
+
+  it("says Waiting for <machine> and that it is offline", () => {
+    expect(machineWaitLabel("Work laptop")).toBe("Waiting for Work laptop");
+    expect(machineWaitBannerText("Work laptop")).toContain("Waiting for Work laptop — Work laptop is offline.");
+    expect(machineWaitBannerText(UNKNOWN_MACHINE_NAME)).toContain("its computer is offline");
   });
 });

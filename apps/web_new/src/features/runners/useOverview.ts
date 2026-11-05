@@ -5,9 +5,10 @@
 // scopes: it reads the area context, loads the runner list only once access
 // allows it, and hands the screen data plus the two row-action writers.
 
-import type { Pod } from "@pidash/api-client";
+import type { Pod, Runner, RunnerPatch } from "@pidash/api-client";
+import { useMe } from "../../core/session/index.js";
 import { useRunnersArea } from "./area.js";
-import { useDeleteRunner, useRevokeRunner } from "./api/mutations.js";
+import { useDeleteRunner, useRevokeRunner, useUpdateRunner } from "./api/mutations.js";
 import { useRunners, useRunnersPods } from "./api/queries.js";
 import { useRunnerPodFilter, type PodFilterState } from "./podFilter.js";
 
@@ -18,6 +19,11 @@ export interface RunnersOverviewData extends PodFilterState {
   pods: Pod[] | undefined;
   podsLoading: boolean;
   podsFailed: boolean;
+  /** Every runner of the scope, before the pod filter (pod members panel). */
+  allRunners: Runner[];
+  /** The signed-in user's id; pod actions are owner-only. */
+  userId: string | null;
+  onUpdateRunner: (runnerId: string, patch: RunnerPatch) => Promise<unknown>;
 }
 
 export function useRunnersOverview(workspaceSlug: string): RunnersOverviewData {
@@ -27,6 +33,8 @@ export function useRunnersOverview(workspaceSlug: string): RunnersOverviewData {
   const pods = useRunnersPods(workspaceSlug, area.workspaceId, scope, area.allowed);
   const remove = useDeleteRunner(workspaceSlug);
   const revoke = useRevokeRunner(workspaceSlug);
+  const update = useUpdateRunner(workspaceSlug);
+  const me = useMe();
   const filter = useRunnerPodFilter({
     runners: area.allowed ? list.data : undefined,
     pods: pods.data,
@@ -40,5 +48,8 @@ export function useRunnersOverview(workspaceSlug: string): RunnersOverviewData {
     pods: pods.data,
     podsLoading: area.allowed && pods.isPending,
     podsFailed: area.allowed && pods.isError,
+    allRunners: area.allowed ? (list.data ?? []) : [],
+    userId: me.data?.id ?? null,
+    onUpdateRunner: (runnerId, patch) => update.mutateAsync({ runnerId, patch }),
   };
 }

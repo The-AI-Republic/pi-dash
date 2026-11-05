@@ -5,8 +5,10 @@
 // §10.3 and §14.3). Pure: which active run waits for its runner, the
 // banner sentence that names the runner and the reason, and the
 // compact badge the execution-target trigger carries while waiting.
-import type { AgentRunSummary, DispatchWait, Issue } from "@pidash/api-client";
+import type { AgentRunSummary, DispatchWait, Issue, Runner } from "@pidash/api-client";
 
+import { machineOfflineMessage } from "../../../../shared/lib/agentReasons.js";
+import { runnerDisplayName, runnerMachineName, type RunnerIdentity } from "../../../../shared/lib/runnerIdentity.js";
 import { formatRunnerSeenAgo } from "../../../../shared/pickers/index.js";
 
 /** A queued run pinned to a runner, with its computed wait. */
@@ -78,8 +80,69 @@ export function waitingBadgeLabel(wait: WaitingReasonInput): string {
   }
 }
 
+/**
+ * Error code a queued run strictly pinned to an offline runner carries
+ * (built-in engine design §9). The value predates the design; it now
+ * means "waiting for that runner's computer", whatever the runner.
+ */
+export const WAITING_FOR_MACHINE_CODE = "desktop_not_connected";
+
+/** Fallback name when the waited-for runner is not in the loaded list. */
+export const UNKNOWN_MACHINE_NAME = "this runner";
+
+/** A queued run waiting for its runner's computer to come back. */
+export interface MachineWait {
+  run: AgentRunSummary;
+  /** The runner the run is pinned to, when known. */
+  runnerId: string | null;
+}
+
+/**
+ * The issue's run waiting for an offline computer: the active run is
+ * queued with the waiting code. Servers that compute a `dispatch_wait`
+ * use the banner above instead, so a run carrying one never reads here.
+ */
+export function selectMachineWait(issue: Pick<Issue, "agent_status" | "assigned_runner_id">): MachineWait | null {
+  const run = issue.agent_status?.active_run ?? null;
+  if (run === null || run.status !== "queued") return null;
+  if ((run.dispatch_wait ?? null) !== null) return null;
+  if (run.error_code !== WAITING_FOR_MACHINE_CODE) return null;
+  const runnerId = issue.assigned_runner_id ?? run.pinned_runner ?? null;
+  return { run, runnerId };
+}
+
+/** The runner fields the machine name is derived from. */
+type MachineRunner = Pick<Runner, "id"> & RunnerIdentity;
+
+/**
+ * The computer a machine wait is for: the pinned runner's machine,
+ * else the runner's own name, else a neutral fallback while the
+ * runner list is missing it.
+ */
+export function machineWaitName(wait: MachineWait, runners: ReadonlyArray<MachineRunner> | undefined): string {
+  const runner = wait.runnerId === null ? undefined : runners?.find((row) => row.id === wait.runnerId);
+  if (runner === undefined) return UNKNOWN_MACHINE_NAME;
+  return runnerMachineName(runner) ?? runnerDisplayName(runner);
+}
+
+/** "Waiting for <machine>": the label the issue panel shows (design §9). */
+export function machineWaitLabel(machineName: string): string {
+  return `Waiting for ${machineName}`;
+}
+
+/** The banner sentence: what the run waits for, and why. */
+export function machineWaitBannerText(machineName: string): string {
+  return machineName === UNKNOWN_MACHINE_NAME
+    ? `${machineWaitLabel(machineName)} — its computer is offline. The run starts when it reconnects.`
+    : `${machineWaitLabel(machineName)} — ${machineOfflineMessage(machineName)}. The run starts when it reconnects.`;
+}
+
+/** Compact marker the trigger shows while the computer is away. */
+export const MACHINE_WAIT_BADGE = "Offline";
+
 /** The trigger badge for an issue, or undefined while nothing waits. */
-export function selectWaitingBadge(issue: Pick<Issue, "agent_status">): string | undefined {
+export function selectWaitingBadge(issue: Pick<Issue, "agent_status" | "assigned_runner_id">): string | undefined {
   const waiting = selectWaitingRun(issue);
-  return waiting === null ? undefined : waitingBadgeLabel(waiting.wait);
+  if (waiting !== null) return waitingBadgeLabel(waiting.wait);
+  return selectMachineWait(issue) === null ? undefined : MACHINE_WAIT_BADGE;
 }

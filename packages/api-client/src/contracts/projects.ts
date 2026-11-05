@@ -67,6 +67,12 @@ export const AgentExecutorOption = z.object({
   kind: z.string(),
   available: z.boolean(),
   reason_code: z.string(),
+  /**
+   * True for entries kept only for older clients (built-in engine design
+   * §6): Runner is the only executor, so new clients hide these.
+   * Absent on servers that predate the flag.
+   */
+  deprecated: z.optional(z.boolean()),
 });
 export type AgentExecutorOption = z.infer<typeof AgentExecutorOption>;
 

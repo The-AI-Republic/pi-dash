@@ -16,11 +16,16 @@ const harness = vi.hoisted(() => ({
   triggerRun: vi.fn(),
   reTick: vi.fn(),
   refreshCallbacks: [] as Array<(() => Promise<unknown>) | undefined>,
+  onError: undefined as ((error: unknown) => boolean) | undefined,
 }));
 
 vi.mock("../../runners/index.js", () => ({
-  useTriggerAgentRun: (options: { onSettledRefresh?: () => Promise<unknown> }) => {
+  useTriggerAgentRun: (options: {
+    onSettledRefresh?: () => Promise<unknown>;
+    onError?: (error: unknown) => boolean;
+  }) => {
     harness.refreshCallbacks.push(options.onSettledRefresh);
+    harness.onError = options.onError;
     return { triggerRun: harness.triggerRun, isSubmitting: false };
   },
   useReTick: (options: { onSettledRefresh?: () => Promise<unknown> }) => {
@@ -29,6 +34,18 @@ vi.mock("../../runners/index.js", () => ({
   },
 }));
 
+vi.mock("./RunRefusalNotice.js", () => ({
+  RunRefusalNotice: (props: { refusal: { code: string; message: string }; onRetry: () => void }) => (
+    <div role="alert" data-code={props.refusal.code}>
+      {props.refusal.message}
+      <button type="button" onClick={props.onRetry}>
+        retry
+      </button>
+    </div>
+  ),
+}));
+
+const { ApiError } = await import("@pidash/api-client");
 const { IssueAgentActions, IssueReTickAction, IssueRunAIAction, reTickOffered } =
   await import("./IssueAgentActions.js");
 const { issueKeys } = await import("../api/keys.js");
@@ -142,6 +159,43 @@ describe("reTickOffered", () => {
 
   it("does not infer a refill from budget counters without the server flag", () => {
     expect(reTickOffered(issueFixture({ agent_ticker: { ...ticker(true), can_re_tick: false } }))).toBe(false);
+  });
+});
+
+describe("IssueRunAIAction refusals (built-in engine design §7, §9)", () => {
+  function refusal(code: string) {
+    return new ApiError({
+      status: 409,
+      code,
+      message: "refused",
+      body: { error: "This issue is assigned to Work laptop, which only runs its owner's work.", code },
+    });
+  }
+
+  it("answers an assigned-runner refusal in place and skips the generic toast", async () => {
+    const user = userEvent.setup();
+    renderActions();
+    await user.click(screen.getByTestId("issue-run-ai"));
+    let handled = false;
+    React.act(() => {
+      handled = harness.onError?.(refusal("assigned_runner_not_owner")) ?? false;
+    });
+    expect(handled).toBe(true);
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveAttribute("data-code", "assigned_runner_not_owner");
+    expect(notice).toHaveTextContent("Work laptop");
+    await user.click(screen.getByRole("button", { name: "retry" }));
+    expect(harness.triggerRun).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves other failures to the generic toast", () => {
+    renderActions();
+    let handled = true;
+    React.act(() => {
+      handled = harness.onError?.(new Error("boom")) ?? true;
+    });
+    expect(handled).toBe(false);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
 

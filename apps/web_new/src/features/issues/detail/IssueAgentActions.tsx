@@ -15,6 +15,8 @@ import * as React from "react";
 
 import { useReTick, useTriggerAgentRun } from "../../runners/index.js";
 import { issueKeys } from "../api/keys.js";
+import { RunRefusalNotice } from "./RunRefusalNotice.js";
+import { parseRunRefusal, type RunRefusal } from "./runRefusal.js";
 
 interface AgentActionContext {
   workspaceSlug: string;
@@ -55,7 +57,15 @@ export function IssueRunAIAction({
   size = "small",
 }: IssueRunAIActionProps): React.ReactElement {
   const refresh = useIssueRefresh(workspaceSlug, issue.id);
-  const { triggerRun, isSubmitting } = useTriggerAgentRun({ onSettledRefresh: refresh });
+  // An assigned-runner refusal is answered in place with its way out
+  // (design §7, §9), so the generic failure toast stays quiet for it.
+  const [refusal, setRefusal] = React.useState<RunRefusal | null>(null);
+  const onError = React.useCallback((error: unknown): boolean => {
+    const parsed = parseRunRefusal(error);
+    setRefusal(parsed);
+    return parsed !== null;
+  }, []);
+  const { triggerRun, isSubmitting } = useTriggerAgentRun({ onSettledRefresh: refresh, onError });
   // Readiness gates here at render: the handler only exists once the
   // workspace id has resolved on a writable surface, and the button is
   // disabled exactly while it does not. There is no in-handler guard.
@@ -63,6 +73,7 @@ export function IssueRunAIAction({
     workspaceId === null || disabled
       ? undefined
       : (): void => {
+          setRefusal(null);
           void triggerRun({
             workspaceId,
             workspaceSlug,
@@ -72,7 +83,7 @@ export function IssueRunAIAction({
           });
         };
 
-  return (
+  const button = (
     <Button
       variant="secondary"
       size={size}
@@ -86,6 +97,21 @@ export function IssueRunAIAction({
         <span>{label}</span>
       </span>
     </Button>
+  );
+  if (refusal === null || workspaceId === null || startRun === undefined) return button;
+  return (
+    <>
+      {button}
+      <RunRefusalNotice
+        workspaceSlug={workspaceSlug}
+        workspaceId={workspaceId}
+        projectId={projectId}
+        issue={issue}
+        refusal={refusal}
+        onRetry={startRun}
+        onResolved={() => setRefusal(null)}
+      />
+    </>
   );
 }
 
