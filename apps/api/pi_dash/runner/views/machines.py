@@ -179,6 +179,19 @@ class DevMachineReplaceCandidatesEndpoint(APIView):
         return Response({"candidates": [_candidate_payload(m) for m in replace_candidates(machine)]})
 
 
+def _token_may_merge(user, source_id, target_id) -> bool:
+    target = DevMachine.objects.filter(pk=target_id, owner=user).first()
+    source = DevMachine.objects.filter(pk=source_id, owner=user).first()
+    if target is None or source is None:
+        # Let the merge answer 404 the same way for every caller.
+        return True
+    if source.merged_into_id is not None and str(source.merged_into_id) == str(target.pk):
+        return True
+    # Liveness is left to the merge, which answers
+    # ``source_machine_has_live_session`` in plain words.
+    return bool(target.host_label) and source.host_label == target.host_label
+
+
 class DevMachineMergeEndpoint(APIView):
     """``POST dev-machines/<source-id>/merge-into/`` with
     ``{"target_dev_machine_id": "<uuid>"}`` (``target`` accepted too)."""
@@ -201,6 +214,13 @@ class DevMachineMergeEndpoint(APIView):
         token = getattr(request, "auth_machine_token", None)
         if token is not None and str(token.dev_machine_id) != target_id:
             return Response({"error": "dev_machine_mismatch"}, status=status.HTTP_403_FORBIDDEN)
+        # And only a machine the "Replace it" prompt can offer: the same
+        # owner's machine with the same host_label. Any other merge (a
+        # legacy desktop machine, another hostname) needs the owner's
+        # session, so a leaked machine token cannot pull in every offline
+        # machine of the account. A retry of a merge already done passes.
+        if token is not None and not _token_may_merge(request.user, dev_machine_id, target_id):
+            return Response({"error": "not_a_replace_candidate"}, status=status.HTTP_403_FORBIDDEN)
         try:
             result = merge_dev_machine(user=request.user, source_id=dev_machine_id, target_id=target_id)
         except MergeError as exc:

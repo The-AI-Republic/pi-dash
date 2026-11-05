@@ -347,6 +347,25 @@ def test_merge_with_a_machine_token_only_into_its_own_machine(db, create_user, w
     assert s["own"].dev_machine_id == s["target"].id
 
 
+def test_merge_with_a_machine_token_only_of_a_replace_candidate(db, create_user, workspace, merge_setup):
+    s = merge_setup
+    mt_target = _mint_mt(create_user, workspace, s["target"])
+    # Another hostname is not something the prompt offers: session only.
+    DevMachine.objects.filter(pk=s["source"].pk).update(host_label="other-host")
+    resp = _merge_with_token(mt_target, s["source"], s["target"])
+    assert resp.status_code == 403
+    assert resp.data["error"] == "not_a_replace_candidate"
+    s["loser"].refresh_from_db()
+    assert s["loser"].revoked_at is None
+    # Same hostname: allowed, and a retry returns the stored result.
+    DevMachine.objects.filter(pk=s["source"].pk).update(host_label=s["target"].host_label)
+    first = _merge_with_token(mt_target, s["source"], s["target"])
+    assert first.status_code == 200, first.data
+    again = _merge_with_token(mt_target, s["source"], s["target"])
+    assert again.status_code == 200, again.data
+    assert again.data["moved_runner_ids"] == first.data["moved_runner_ids"]
+
+
 def test_merge_needs_authentication(db, merge_setup):
     s = merge_setup
     resp = _client().post(
