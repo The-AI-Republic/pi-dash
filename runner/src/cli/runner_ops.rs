@@ -630,6 +630,30 @@ pub async fn apply_enroll_response(
         if cfg.daemon.cloud_url.is_empty() {
             cfg.daemon.cloud_url = cloud_url.to_string();
         }
+        // One engine runner per machine and project (design §5). The
+        // caller checked before enrolling, but outside this lock: two adds
+        // at the same time both pass that check. (The runner cap is checked
+        // by `Config::validate` on this same write.)
+        if new_runner_for_closure.agent.kind == AgentKind::Engine
+            && let Some(existing) = cfg.runners.iter().find(|r| {
+                r.runner_id != new_runner_for_closure.runner_id
+                    && r.agent.kind == AgentKind::Engine
+                    && r.workspace_slug == new_runner_for_closure.workspace_slug
+                    && r.project_slug.as_deref().is_some_and(|p| {
+                        new_runner_for_closure
+                            .project_slug
+                            .as_deref()
+                            .is_some_and(|q| p.eq_ignore_ascii_case(q))
+                    })
+            })
+        {
+            anyhow::bail!(
+                "the built-in engine is already on for {} in {} (runner {})",
+                existing.project_slug.as_deref().unwrap_or_default(),
+                existing.workspace_slug.as_deref().unwrap_or_default(),
+                existing.name
+            );
+        }
         is_first_runner = cfg.runners.is_empty();
         cfg.runners.push(new_runner_for_closure);
         Ok(())

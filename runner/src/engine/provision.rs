@@ -403,4 +403,40 @@ mod tests {
         assert!(err.to_string().contains("not signed in"), "{err}");
         assert!(server.requests_to("/api/v1/runner/runners/").is_empty());
     }
+
+    #[tokio::test]
+    async fn two_adds_for_one_project_at_once_leave_one_engine_runner() {
+        let server = test_server::start(enrol_handler()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        seed(&paths, &server.url);
+        let req = AddEngineRunner {
+            workspace: "acme".into(),
+            project: "WEB".into(),
+            working_dir: None,
+        };
+        let status = available();
+        let (a, b) = tokio::join!(
+            add_engine_runner(&paths, &req, &status),
+            add_engine_runner(&paths, &req, &status)
+        );
+        // Both passed the early check and enrolled; the write under the
+        // config lock refuses the second.
+        assert_eq!(server.requests_to("/api/v1/runner/runners/").len(), 2);
+        let errs: Vec<String> = [a.err(), b.err()]
+            .into_iter()
+            .flatten()
+            .map(|e| format!("{e:#}"))
+            .collect();
+        assert_eq!(errs.len(), 1, "exactly one add is refused: {errs:?}");
+        assert!(errs[0].contains("already on"), "{}", errs[0]);
+        let cfg = file::load_config(&paths).unwrap();
+        assert_eq!(
+            cfg.runners
+                .iter()
+                .filter(|r| r.agent.kind == AgentKind::Engine)
+                .count(),
+            1
+        );
+    }
 }

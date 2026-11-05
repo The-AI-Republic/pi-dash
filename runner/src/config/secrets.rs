@@ -188,6 +188,7 @@ impl SecretBackend for Disabled {
 pub struct MemoryKeyring {
     items: Mutex<HashMap<String, String>>,
     unavailable: std::sync::atomic::AtomicBool,
+    failing_gets: Mutex<std::collections::HashSet<String>>,
 }
 
 impl MemoryKeyring {
@@ -204,6 +205,18 @@ impl MemoryKeyring {
     pub fn set_available(&self, available: bool) {
         self.unavailable
             .store(!available, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Make reads of `item` fail (or succeed again) while every other call,
+    /// the probe included, keeps answering: a keychain that times out on
+    /// some items only.
+    pub fn fail_get_of(&self, item: &str, fail: bool) {
+        let mut f = self.failing_gets.lock().expect("memory keyring poisoned");
+        if fail {
+            f.insert(item.to_string());
+        } else {
+            f.remove(item);
+        }
     }
 
     /// Snapshot of the stored items.
@@ -226,6 +239,14 @@ impl SecretBackend for MemoryKeyring {
     }
     fn get(&self, item: &str) -> Result<Option<String>, SecretError> {
         self.check()?;
+        if self
+            .failing_gets
+            .lock()
+            .expect("memory keyring poisoned")
+            .contains(item)
+        {
+            return Err(SecretError(format!("reading {item} timed out")));
+        }
         Ok(self
             .items
             .lock()
@@ -348,20 +369,54 @@ fn assign(cfg: &mut Config, item: &str, value: String) {
     }
 }
 
+/// The keychain items [`hydrate`] could not read.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+#[error("{} of {total} keychain item(s) could not be read ({}): {first}", unread.len(), unread.join(", "))]
+pub struct PartialRead {
+    /// Items whose read failed; their secrets are missing from the config.
+    pub unread: Vec<String>,
+    /// How many items the file says the keychain holds.
+    pub total: usize,
+    /// The first error, for the message.
+    pub first: SecretError,
+}
+
 /// Fill the secrets of a freshly parsed `cfg` in from the keychain, when the
-/// file says they are there. A keychain that does not answer leaves them
-/// empty (the daemon then runs signed out) and is reported, not fatal.
-pub fn hydrate(paths: &Paths, cfg: &mut Config) -> Result<(), SecretError> {
+/// file says they are there. Every item is tried, so one item that does not
+/// answer does not hide the others. Items that could not be read are left
+/// empty (the daemon then runs without them) and recorded in
+/// `cfg.auth.unread_keyring_items`, which makes [`plan_write`] refuse to
+/// write this config: it would otherwise drop or delete them.
+pub fn hydrate(paths: &Paths, cfg: &mut Config) -> Result<(), PartialRead> {
+    cfg.auth.unread_keyring_items.clear();
     if !cfg.auth.secrets_in_keyring() {
         return Ok(());
     }
     let backend = backend_for(paths);
-    for item in cfg.auth.keyring_items.clone() {
-        if let Some(value) = backend.get(&item)? {
-            assign(cfg, &item, value);
+    let items = cfg.auth.keyring_items.clone();
+    let mut unread = Vec::new();
+    let mut first = None;
+    for item in &items {
+        match backend.get(item) {
+            Ok(Some(value)) => assign(cfg, item, value),
+            Ok(None) => {}
+            Err(e) => {
+                unread.push(item.clone());
+                first.get_or_insert(e);
+            }
         }
     }
-    Ok(())
+    match first {
+        None => Ok(()),
+        Some(first) => {
+            cfg.auth.unread_keyring_items = unread.clone();
+            Err(PartialRead {
+                unread,
+                total: items.len(),
+                first,
+            })
+        }
+    }
 }
 
 /// What [`super::file::write_config`] writes, and what to clean up after.
@@ -404,6 +459,17 @@ pub fn plan_write(
             "the credentials are stored in the {} and it is not answering ({e}); \
              unlock it (or sign in to the desktop session) and try again",
             backend.name()
+        );
+    }
+    if now_in_keyring && !cfg.auth.unread_keyring_items.is_empty() {
+        // Some secrets were not read when this config was loaded (a locked
+        // keychain, a prompt nobody answered). Writing it would store only
+        // the ones that were read and delete the rest.
+        anyhow::bail!(
+            "the {} did not return every Pi Dash credential when the config was loaded \
+             (unread: {}); unlock it (or sign in to the desktop session) and try again",
+            backend.name(),
+            cfg.auth.unread_keyring_items.join(", ")
         );
     }
     let to_keyring = match mode {
@@ -484,6 +550,20 @@ pub fn describe(paths: &Paths, cfg: &Config) -> StoreReport {
     let mode = cfg.auth.credentials_store;
     let backend = backend_for(paths);
     if cfg.auth.secrets_in_keyring() {
+        if !cfg.auth.unread_keyring_items.is_empty() {
+            return StoreReport {
+                ok: false,
+                detail: format!(
+                    "credentials_store = {}: in the {}, which did not return {} of {} item(s) \
+                     ({}); config writes are refused until it does",
+                    mode.as_str(),
+                    backend.name(),
+                    cfg.auth.unread_keyring_items.len(),
+                    cfg.auth.keyring_items.len(),
+                    cfg.auth.unread_keyring_items.join(", ")
+                ),
+            };
+        }
         return match backend.probe() {
             Ok(()) => StoreReport {
                 ok: true,
@@ -762,6 +842,61 @@ mod tests {
             tokens(&load_config(&p).unwrap()).2.as_deref(),
             Some("ec_secret")
         );
+    }
+
+    #[test]
+    fn a_keychain_that_answers_some_reads_only_is_never_partly_overwritten() {
+        let keyring = MemoryKeyring::new();
+        let (_tmp, p) = setup(CredentialsStoreMode::Auto, keyring.clone());
+        migrate_credentials_store(&p).unwrap();
+        let before = keyring.items();
+        assert_eq!(before.len(), 3);
+        // The probe and the other items answer; the engine credential does not.
+        keyring.fail_get_of(ITEM_ENGINE_CREDENTIAL, true);
+        assert!(keyring.probe().is_ok());
+        let cfg = load_config(&p).unwrap();
+        assert_eq!(
+            tokens(&cfg),
+            (
+                Some("mt_acme".into()),
+                Some("mt_beta".into()),
+                Some(String::new())
+            ),
+        );
+        assert_eq!(cfg.auth.unread_keyring_items, vec![ITEM_ENGINE_CREDENTIAL]);
+        let report = describe(&p, &cfg);
+        assert!(!report.ok);
+        assert!(
+            report.detail.contains("did not return 1 of 3"),
+            "{}",
+            report.detail
+        );
+        // Every kind of write is refused.
+        let err = mutate_config(&p, |_| Ok(())).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("did not return every"),
+            "{err:#}"
+        );
+        let err = write_config(&p, &cfg).unwrap_err();
+        assert!(
+            format!("{err:#}").contains(ITEM_ENGINE_CREDENTIAL),
+            "{err:#}"
+        );
+        let err = migrate_credentials_store(&p).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("did not return every"),
+            "{err:#}"
+        );
+        // Nothing was deleted or changed, and the file still says keyring.
+        assert_eq!(keyring.items(), before);
+        assert!(file_text(&p).contains("secrets_in = \"keyring\""));
+        // Once the keychain answers again, everything is back.
+        keyring.fail_get_of(ITEM_ENGINE_CREDENTIAL, false);
+        let cfg = load_config(&p).unwrap();
+        assert!(cfg.auth.unread_keyring_items.is_empty());
+        assert_eq!(tokens(&cfg).2.as_deref(), Some("ec_secret"));
+        mutate_config(&p, |_| Ok(())).unwrap();
+        assert_eq!(keyring.items(), before);
     }
 
     #[test]

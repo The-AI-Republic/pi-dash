@@ -858,31 +858,36 @@ mod tests {
             reasoning_effort: String::new(),
         };
 
+        // A folder left by an earlier, removed engine runner (removal keeps
+        // the folder) makes the new runner take the next free name.
+        let root = paths.data_dir.join("engine/workdirs/acme");
+        std::fs::create_dir_all(root.join("WEB")).unwrap();
+        std::fs::write(root.join("WEB/notes.md"), b"x").unwrap();
         let (first, _) = control
             .create_runner_inner(&session, cmd("ignored-name"))
             .await
             .unwrap();
-        // A second engine runner for the same project (another pod) takes
-        // the next free folder.
-        let (second, _) = control
-            .create_runner_inner(&session, cmd(""))
-            .await
-            .unwrap();
+        // Design §5: at most one engine runner per machine and project.
+        assert!(
+            control
+                .create_runner_inner(&session, cmd(""))
+                .await
+                .is_err(),
+            "a second engine runner for the same project is refused"
+        );
 
         let cfg = crate::config::file::load_config(&paths).unwrap();
-        let dir_of = |id: Uuid| {
-            cfg.runners
-                .iter()
-                .find(|r| r.runner_id == id)
-                .unwrap()
-                .workspace
-                .working_dir
-                .clone()
-        };
-        let root = paths.data_dir.join("engine/workdirs/acme");
-        assert_eq!(dir_of(first), root.join("WEB"));
-        assert_eq!(dir_of(second), root.join("WEB-2"));
-        assert!(root.join("WEB").is_dir() && root.join("WEB-2").is_dir());
+        let dir = cfg
+            .runners
+            .iter()
+            .find(|r| r.runner_id == first)
+            .unwrap()
+            .workspace
+            .working_dir
+            .clone();
+        assert_eq!(dir, root.join("WEB-2"));
+        assert!(root.join("WEB-2").is_dir());
+        assert_eq!(cfg.runners.len(), 1);
         let sent = server.requests_to("/api/v1/runner/runners/");
         assert_eq!(sent[0].json()["agent_kind"], "engine");
         assert!(

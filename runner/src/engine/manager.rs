@@ -72,6 +72,10 @@ struct State {
     token_failure: Option<String>,
     /// The machine's pause state as the server last reported it, and when.
     pause: Option<(EnginePause, DateTime<Utc>)>,
+    /// Bumped by every credential change. A model-token fetch started
+    /// under an older generation (with the old credential) does not store
+    /// its result.
+    generation: u64,
 }
 
 pub struct EngineManager {
@@ -130,6 +134,7 @@ impl EngineManager {
     pub fn credentials_changed(&self) {
         {
             let mut st = self.state();
+            st.generation += 1;
             st.model_token = None;
             st.token_failure = None;
             st.server_sign_in = self.tokens.engine_sign_in_state();
@@ -207,6 +212,9 @@ impl EngineManager {
         if let Some(t) = self.cached_token(Utc::now()) {
             return Ok(t);
         }
+        // Read together with the credential below: a change after this
+        // point bumps it, and the fetched token is then dropped.
+        let generation = self.state().generation;
         let Some(credential) = self.tokens.engine_credential() else {
             return Err(ModelTokenError {
                 reason_code: reason::ENGINE_SIGN_IN_REQUIRED.into(),
@@ -232,6 +240,17 @@ impl EngineManager {
                     expires_at: resp.expires_at,
                 };
                 let mut st = self.state();
+                if st.generation != generation {
+                    // The credential changed (a sign-out or a new sign-in)
+                    // while this fetch was in flight: its token was minted
+                    // with the old credential.
+                    return Err(ModelTokenError {
+                        reason_code: reason::ENGINE_SIGN_IN_REQUIRED.into(),
+                        message: "the engine credential changed while the model token was \
+                                  being fetched; try again"
+                            .into(),
+                    });
+                }
                 st.model_token = Some(token.clone());
                 st.token_failure = None;
                 Ok(token)
@@ -243,6 +262,12 @@ impl EngineManager {
                     .to_string();
                 if matches!(e, EngineApiError::Refused { .. }) {
                     let mut st = self.state();
+                    if st.generation != generation {
+                        return Err(ModelTokenError {
+                            reason_code,
+                            message: e.to_string(),
+                        });
+                    }
                     st.model_token = None;
                     st.token_failure = Some(reason_code.clone());
                 }
@@ -329,16 +354,32 @@ impl EngineManager {
     }
 
     /// Mirror the server's sign-in state into `config.toml` (best-effort).
+    ///
+    /// The in-memory copy is updated at once, so the next profile pass
+    /// compares equal and does not rewrite the file (and, with the
+    /// credentials in the keychain, every keychain item) again. The write
+    /// itself can block on the keychain for seconds, so it runs off the
+    /// async workers. A failed write is retried after the next reload
+    /// from disk brings the old value back.
     fn mirror_sign_in_state(&self, server: EngineSignInState) {
+        self.tokens.set_engine_sign_in_state(Some(server));
         let paths = self.paths.clone();
-        let result = crate::config::file::mutate_config(&paths, |cfg| {
-            cfg.cli
-                .get_or_insert_with(Default::default)
-                .engine_sign_in_state = Some(server);
-            Ok(())
-        });
-        if let Err(e) = result {
-            tracing::debug!("mirroring the engine sign-in state failed: {e:#}");
+        let write = move || {
+            let result = crate::config::file::mutate_config(&paths, |cfg| {
+                cfg.cli
+                    .get_or_insert_with(Default::default)
+                    .engine_sign_in_state = Some(server);
+                Ok(())
+            });
+            if let Err(e) = result {
+                tracing::debug!("mirroring the engine sign-in state failed: {e:#}");
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                rt.spawn_blocking(write);
+            }
+            Err(_) => write(),
         }
     }
 
@@ -566,6 +607,84 @@ mod tests {
             }
         }
         out
+    }
+
+    #[tokio::test]
+    async fn a_token_fetched_with_a_credential_that_changed_meanwhile_is_dropped() {
+        // The credential changes (a sign-out) while the fetch is in flight.
+        let slot: Arc<std::sync::OnceLock<Arc<EngineManager>>> = Arc::default();
+        let s = slot.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let handler: Handler = Arc::new(move |_req| {
+            if c.fetch_add(1, Ordering::SeqCst) == 0 {
+                s.get().unwrap().credentials_changed();
+            }
+            let body = serde_json::json!({
+                "token": "gw_old",
+                "expires_at": (Utc::now() + chrono::Duration::seconds(600)).to_rfc3339(),
+            });
+            (200, body.to_string())
+        });
+        let server = test_server::start(handler).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let m = manager(&server.url, tmp.path(), cli(chrono::Duration::days(10)));
+        slot.set(m.clone()).ok().unwrap();
+
+        let err = m.model_token().await.unwrap_err();
+        assert_eq!(err.reason_code, reason::ENGINE_SIGN_IN_REQUIRED);
+        assert!(
+            m.cached_token(Utc::now()).is_none(),
+            "stale token not cached"
+        );
+        // The next request fetches afresh.
+        assert_eq!(m.model_token().await.unwrap().token, "gw_old");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn the_mirrored_sign_in_state_is_written_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(tmp.path());
+        let cfg = crate::config::schema::Config {
+            version: 2,
+            daemon: crate::config::schema::DaemonConfig {
+                cloud_url: "https://cloud.invalid".into(),
+                ..Default::default()
+            },
+            runners: vec![],
+            cli: Some(cli(chrono::Duration::days(10))),
+            engine: Default::default(),
+            auth: Default::default(),
+        };
+        crate::config::file::write_config(&p, &cfg).unwrap();
+        let m = manager(
+            "https://cloud.invalid",
+            tmp.path(),
+            cli(chrono::Duration::days(10)),
+        );
+        assert_eq!(m.tokens.engine_sign_in_state(), None);
+        let profile: EngineProfile =
+            serde_json::from_str(&profile_json(false, "engine_disabled")).unwrap();
+        m.apply_profile(profile);
+        // In memory at once, so the next pass does not rewrite.
+        assert_eq!(
+            m.tokens.engine_sign_in_state(),
+            Some(EngineSignInState::Active)
+        );
+        // And on disk once the blocking write ran.
+        for _ in 0..100 {
+            let on_disk = crate::config::file::load_config(&p)
+                .unwrap()
+                .cli
+                .unwrap()
+                .engine_sign_in_state;
+            if on_disk == Some(EngineSignInState::Active) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the sign-in state was not mirrored to config.toml");
     }
 
     #[tokio::test]
