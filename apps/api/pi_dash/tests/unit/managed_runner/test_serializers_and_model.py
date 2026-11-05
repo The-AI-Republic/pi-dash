@@ -112,13 +112,12 @@ def test_issue_serializer_accepts_a_managed_pin_when_available(
 
 
 @override_settings(**MANAGED_SETTINGS)
-def test_issue_serializer_translates_a_managed_pin_to_the_callers_engine(
+def test_issue_serializer_translates_a_managed_pin_to_pod_level(
     project, create_user, byok_lane, bundled_runner, issue_for_project, rf
 ):
     """An older desktop build still writes ``managed_runner``. It is stored as
-    ``local_runner`` assigned to the caller's own engine runner, the old
-    behaviour (built_engine_as_runner §6); availability is the engine's own
-    business now, not a reason to refuse the write."""
+    ``local_runner``, pod-level, naming no runner (built_engine_as_runner §6,
+    rev 4.0); the engine's availability is not a reason to refuse the write."""
     from pi_dash.app.serializers.issue import IssueCreateSerializer as IssueSerializer
 
     request = rf.post("/")
@@ -131,8 +130,7 @@ def test_issue_serializer_translates_a_managed_pin_to_the_callers_engine(
     )
     assert serializer.is_valid(), serializer.errors
     assert serializer.validated_data["agent_executor"] == AgentExecutorKind.LOCAL_RUNNER
-    assert serializer.validated_data["assigned_runner"] == bundled_runner
-    assert serializer.validated_data["assigned_pod"] == bundled_runner.pod
+    assert "assigned_runner" not in serializer.validated_data
 
 
 @override_settings(**MANAGED_SETTINGS)

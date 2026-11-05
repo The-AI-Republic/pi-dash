@@ -39,7 +39,7 @@ export type TEngineAutoPauseReason =
   | "profile_unavailable"
   | "engine_disabled";
 
-/** Whether a runner takes unpinned pod work. Engines start ``pinned_only``. */
+/** Whether a runner takes pod work ("Pod work: off" = ``pinned_only``). Engines start ``pinned_only``. */
 export type TRunnerPodDispatch = "pinned_only" | "pod_member";
 
 /** Owner-only ``PATCH /api/runners/dev-machines/<mid>/`` body. */
@@ -162,7 +162,7 @@ export interface IRunner {
   pod_detail: IPodMini | null;
   /** ``desktop_bundled`` = built-in engine runner. */
   provisioning?: "manual" | "desktop_bundled";
-  /** Whether the runner takes unpinned pod work (owner-only PATCH). */
+  /** Whether the runner takes pod work (owner-only PATCH). */
   pod_dispatch?: TRunnerPodDispatch;
   /** Dev machine this runner runs on. ``null`` on legacy runners. */
   dev_machine_detail: IDevMachineMini | null;

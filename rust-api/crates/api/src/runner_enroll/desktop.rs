@@ -497,7 +497,7 @@ async fn post_desktop_enroll(
             None => {
                 // Insert (`:121-127`).
                 let id = Uuid::new_v4();
-                if catalog_reads::insert_bundled_dev_machine(
+                if catalog_reads::insert_dev_machine(
                     &conn,
                     id,
                     user_id,
@@ -517,7 +517,7 @@ async fn post_desktop_enroll(
 
     // K2 rotate (`:134-138`): `$1` revoked_at, `$2` machine, `$3` workspace.
     if pidash_services::domain::tokens::revoke_tokens_for_machine_in_workspace(
-        &mut *tx,
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         dev_machine_id,
         workspace_id,
         now_micros(),
@@ -531,7 +531,7 @@ async fn post_desktop_enroll(
     // K2 mint (`:139-149`): `$1..$12` in column order.
     let token_label = catalog_reads::desktop_token_label(&host_label);
     if pidash_services::domain::tokens::insert_machine_token(
-        &mut *tx,
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         &pidash_services::domain::tokens::NewMachineToken {
             id: Uuid::new_v4(),
             user_id,
@@ -662,7 +662,7 @@ async fn delete_desktop_enroll(
     };
     // `$1` revoked_at, `$2..` machine ids in list order.
     if pidash_services::domain::tokens::revoke_tokens_for_dev_machines(
-        &mut *tx,
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         &machine_ids,
         now_micros(),
     )

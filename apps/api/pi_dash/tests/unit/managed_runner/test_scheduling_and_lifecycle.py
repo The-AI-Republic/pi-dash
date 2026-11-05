@@ -8,9 +8,6 @@ The rule these tests pin: a closed laptop is *transient* and the work waits
 visibly; anything that waiting cannot fix is *structural* and bounces loudly.
 Getting this backwards either un-schedules people's issues every evening, or
 queues runs forever against a machine that is never coming back.
-
-Since PIDESKAPP-123 the waiting run is one strictly pinned to an issue's
-``assigned_runner`` (``.ai_design/built_engine_as_runner/design.md`` §7-§9).
 """
 
 from __future__ import annotations
@@ -24,23 +21,18 @@ from django.utils import timezone
 from pi_dash.core.agent_execution import AgentExecutorKind
 from pi_dash.managed_runner.errors import ManagedRunnerReason
 from pi_dash.managed_runner.tasks import expire_waiting_runs
-from pi_dash.runner.models import AgentRun, AgentRunStatus, RunnerStatus
+from pi_dash.runner.models import AgentRun, AgentRunStatus, RunnerPodDispatch, RunnerStatus
 
 from .conftest import MANAGED_SETTINGS
 
 pytestmark = pytest.mark.unit
 
 
-def _assigned_issue(issue, runner):
-    """Assign ``issue`` to ``runner``, created by the runner's owner.
-
-    A queryset update, because ``BaseModel.save`` blanks ``created_by``
-    outside a request and the usage rule reads it.
-    """
-    type(issue).objects.filter(pk=issue.pk).update(
-        assigned_runner=runner, assigned_pod=runner.pod, created_by=runner.owner
-    )
-    issue.refresh_from_db()
+def _managed_issue(issue, project):
+    """An issue still carrying the legacy ``managed_runner`` value (one the
+    data migration has not reached, or written by an old path)."""
+    issue.agent_executor = AgentExecutorKind.MANAGED_RUNNER
+    issue.save(update_fields=["agent_executor"])
     return issue
 
 
@@ -60,40 +52,42 @@ def _preflight(issue, user, project, triggered_by="tick"):
 # --------------------------------------------------------------------------
 
 
-def test_preflight_allows_a_closed_laptop(project, create_user, bundled_runner, issue_for_project):
-    """Offline must pass the preflight so the run is created and waits.
+def test_preflight_allows_a_closed_laptop_in_the_pod(project, create_user, bundled_runner, issue_for_project):
+    """A legacy ``managed_runner`` issue is a pod issue now (§13). With the
+    owner's engine a pod member, offline must pass the preflight so the run
+    is created and waits in the pod.
 
     If this bounced, every issue whose owner shut their laptop would be moved
     back to Backlog and the ticker disarmed — losing the schedule, not just
     the run.
     """
-    issue = _assigned_issue(issue_for_project, bundled_runner)
+    issue = _managed_issue(issue_for_project, project)
+    bundled_runner.pod_dispatch = RunnerPodDispatch.POD_MEMBER
     bundled_runner.status = RunnerStatus.OFFLINE
-    bundled_runner.save(update_fields=["status"])
+    bundled_runner.save(update_fields=["pod_dispatch", "status"])
     original_state = issue.state_id
-    assert _preflight(issue, None, project) is True
+    assert _preflight(issue, create_user, project) is True
     issue.refresh_from_db()
     assert issue.state_id == original_state
 
 
-def test_preflight_bounces_a_pod_level_issue_with_only_a_pinned_only_engine(
+def test_preflight_bounces_when_nothing_is_enrolled(project, create_user, issue_for_project):
+    issue = _managed_issue(issue_for_project, project)
+    assert _preflight(issue, create_user, project) is False
+
+
+def test_preflight_bounces_when_the_only_engine_has_pod_work_off(
     project, create_user, bundled_runner, issue_for_project
 ):
-    assert _preflight(issue_for_project, create_user, project) is False
+    """Scenario 18 and 20: a ``pinned_only`` engine never takes new issue
+    work, so counting it would leave the issue queued for ever."""
+    issue = _managed_issue(issue_for_project, project)
+    assert bundled_runner.pod_dispatch == RunnerPodDispatch.PINNED_ONLY
+    assert _preflight(issue, create_user, project) is False
 
 
-def test_preflight_bounces_a_tick_on_someone_elses_engine(
-    project, create_user, create_user2, issue_for_project
-):
-    """The engine's owner is neither the issue's creator nor an assignee: the
-    usage rule would never admit the tick, so bounce instead of queueing."""
-    from .conftest import make_runner
-    from pi_dash.runner.models import RunnerProvisioning
-
-    engine = make_runner(owner=create_user2, project=project, provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
-    issue = _assigned_issue(issue_for_project, engine)
-    type(issue).objects.filter(pk=issue.pk).update(created_by=create_user)
-    issue.refresh_from_db()
+def test_preflight_bounces_without_a_creator(project, bundled_runner, issue_for_project):
+    issue = _managed_issue(issue_for_project, project)
     assert _preflight(issue, None, project) is False
 
 
@@ -107,26 +101,16 @@ def test_local_issues_are_unaffected(project, create_user, manual_runner, issue_
 # --------------------------------------------------------------------------
 
 
-def test_tick_on_an_assigned_issue_runs_as_the_runner_owner(
-    project, create_user, bundled_runner, issue_for_project
-):
-    """§7: for ticks and schedulers the run's principal is the runner's owner
-    when the usage rule allows it."""
+def test_creator_resolution_for_a_legacy_managed_issue_is_the_actor(project, create_user, issue_for_project):
+    """A legacy managed issue resolves like any runner issue: no desktop is
+    required of the principal any more (the pod decides who runs it)."""
     from pi_dash.orchestration import scheduling
 
-    issue = _assigned_issue(issue_for_project, bundled_runner)
-    resolved = scheduling._resolve_creator_for_trigger(issue, triggered_by=scheduling.TRIGGER_TICK)
-    assert resolved == create_user
-
-
-def test_explicit_actor_still_wins(project, create_user, create_user2, bundled_runner, issue_for_project):
-    from pi_dash.orchestration import scheduling
-
-    issue = _assigned_issue(issue_for_project, bundled_runner)
+    issue = _managed_issue(issue_for_project, project)
     resolved = scheduling._resolve_creator_for_trigger(
-        issue, triggered_by=scheduling.TRIGGER_RUN_AI, actor=create_user2
+        issue, triggered_by=scheduling.TRIGGER_RUN_AI, actor=create_user
     )
-    assert resolved == create_user2
+    assert resolved == create_user
 
 
 # --------------------------------------------------------------------------
@@ -141,7 +125,6 @@ def _waiting_run(project, user, runner, *, age=timedelta(0)):
         pod=project.pods.get(is_default=True),
         executor_kind=AgentExecutorKind.MANAGED_RUNNER,
         pinned_runner=runner,
-        pin_strict=True,
         status=AgentRunStatus.QUEUED,
         error_details={"code": ManagedRunnerReason.NOT_CONNECTED},
         prompt="",
@@ -184,10 +167,8 @@ def test_sweep_fails_a_wait_that_outlived_the_bound(project, create_user, bundle
     run.refresh_from_db()
     assert run.status == AgentRunStatus.FAILED
     assert run.error_code == ManagedRunnerReason.NOT_CONNECTED
-    # The message names the machine (the daemon runs without the app, so
-    # "open the desktop app" is no longer the fix) and what to do next.
-    assert run.error.startswith("rich-laptop is offline")
-    assert "run the issue again" in run.error
+    # The message must tell the user what to do, not just what happened.
+    assert "desktop" in run.error.lower()
 
 
 @override_settings(**MANAGED_SETTINGS, MANAGED_RUNNER_QUEUED_MAX_AGE_SECS=3600)

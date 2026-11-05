@@ -1773,7 +1773,7 @@ impl SeedStore for PgSeedStore {
         use pidash_services::domain::issues::{insert_seed_issue, SeedIssue};
         let actor = ctx_actor(ctx)?;
         insert_seed_issue(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &SeedIssue {
                 workspace_id,
                 project_id,
@@ -2137,7 +2137,7 @@ impl SeedStore for PgSeedStore {
         // from the project by `ProjectBaseModel.save`.
         use pidash_services::domain::issues::{insert_seed_issue_sequence, SeedIssueSequence};
         insert_seed_issue_sequence(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &SeedIssueSequence {
                 issue_id,
                 project_id,
@@ -2162,7 +2162,7 @@ impl SeedStore for PgSeedStore {
         // default `sequence = 1`.
         use pidash_services::domain::issues::{insert_seed_issue_sequence, SeedIssueSequence};
         insert_seed_issue_sequence(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &SeedIssueSequence {
                 issue_id,
                 project_id,

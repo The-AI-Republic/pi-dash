@@ -157,9 +157,13 @@ pub async fn run_fix(args: FixArgs) {
         .unwrap_or_else(|message| fail(message));
     let map = db::build_sequence_map(tx.sequences());
     let sequence_updates = db::plan_sequence_updates(&map, &issue_updates);
-    domain_issues::apply_fix_plan(tx.executor(), &issue_updates, &sequence_updates)
-        .await
-        .unwrap_or_else(|e| fail(e));
+    domain_issues::apply_fix_plan(
+        &pidash_db::orm_tx::TxConn::new(tx.executor()),
+        &issue_updates,
+        &sequence_updates,
+    )
+    .await
+    .unwrap_or_else(|e| fail(e));
     tx.commit().await.unwrap_or_else(|e| fail(e));
     println!("{}", decisions::FIX_DONE_LINE);
 }

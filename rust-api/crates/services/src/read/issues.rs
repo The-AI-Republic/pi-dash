@@ -9,47 +9,20 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{DbError, Error};
-use crate::orchestration::blockers::{
-    has_open_blockers_sql, relations_summary, summary_sql, BlockerRow, RelationsSummary,
-};
+use crate::orchestration::blockers::{fetch_relations_summary, RelationsSummary};
 
 /// The cached blocker summary (`relations_summary(obj)`): both direction
 /// lists plus the open-blockers `Exists`, in that order. Moved from
-/// `api::app_issues::handlers_core`.
+/// `api::app_issues::handlers_core`; the statements are the SeaORM
+/// builder form in `orchestration::blockers`.
 pub async fn fetch_blocker_summary(
     pool: &PgPool,
     issue_id: &Uuid,
 ) -> Result<RelationsSummary, Error> {
-    let fetch_list = async |blocking: bool| -> Result<Vec<BlockerRow>, Error> {
-        let sql = summary_sql(blocking).replace(":issue_id", "$1");
-        type BlockerTuple = (Uuid, i32, String, Option<String>, Option<String>);
-        let rows: Vec<BlockerTuple> = sqlx::query_as(&sql)
-            .bind(issue_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| DbError::new("fetch-blocker-summary", error))?;
-        Ok(rows
-            .into_iter()
-            .map(
-                |(issue_id, sequence_id, project_identifier, state_name, state_group)| BlockerRow {
-                    issue_id,
-                    sequence_id,
-                    project_identifier,
-                    state_name,
-                    state_group,
-                },
-            )
-            .collect())
-    };
-    let blocked_by = fetch_list(false).await?;
-    let blocking = fetch_list(true).await?;
-    let open_sql = has_open_blockers_sql().replace(":issue_id", "$1");
-    let open: Option<(i32,)> = sqlx::query_as(&open_sql)
-        .bind(issue_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    fetch_relations_summary(&db, *issue_id)
         .await
-        .map_err(|error| DbError::new("fetch-blocker-summary-open", error))?;
-    Ok(relations_summary(&blocked_by, &blocking, open.is_some()))
+        .map_err(|error| DbError::from_orm("fetch-blocker-summary", error).into())
 }
 
 /// `IssueCommentSerializer.get_url` (`serializers/issue.py:994-999`):

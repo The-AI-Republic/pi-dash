@@ -66,6 +66,7 @@
 use std::future::Future;
 
 use chrono::{DateTime, Utc};
+use pidash_db::orm_tx::TxConn;
 use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -359,7 +360,7 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
         stored_reason: &str,
     ) -> Result<(), RevokeError> {
         self.current_runner = Some(runner_id);
-        revoke::stamp_runner_revoked(&mut **self.tx, runner_id, now, stored_reason)
+        revoke::stamp_runner_revoked(&TxConn::new(self.tx), runner_id, now, stored_reason)
             .await
             .map_err(store_err)
     }
@@ -371,7 +372,7 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
         stored_reason: &str,
     ) -> Result<(), RevokeError> {
         pidash_services::domain::tokens::revoke_runner_sessions_for_runner(
-            &mut **self.tx,
+            &pidash_db::orm_tx::TxConn::new(self.tx),
             runner_id,
             now,
             stored_reason,
@@ -391,9 +392,7 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
         &mut self,
         runner_id: Uuid,
     ) -> Result<Vec<(Uuid, Option<Uuid>)>, RevokeError> {
-        sqlx::query_as::<_, (Uuid, Option<Uuid>)>(&revoke::active_runs_lock_sql())
-            .bind(runner_id)
-            .fetch_all(&mut **self.tx)
+        revoke::lock_active_runs(&TxConn::new(self.tx), runner_id)
             .await
             .map_err(store_err)
     }
@@ -497,15 +496,13 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
         &mut self,
         runner_id: Uuid,
     ) -> Result<Vec<Option<Uuid>>, RevokeError> {
-        sqlx::query_scalar(revoke::PINNED_QUEUED_PODS_SQL)
-            .bind(runner_id)
-            .fetch_all(&mut **self.tx)
+        revoke::pinned_queued_pod_ids(&TxConn::new(self.tx), runner_id)
             .await
             .map_err(store_err)
     }
 
     async fn unpin_queued_runs(&mut self, runner_id: Uuid) -> Result<(), RevokeError> {
-        revoke::unpin_queued_runs_for_runner(&mut **self.tx, runner_id)
+        revoke::unpin_queued_runs_for_runner(&TxConn::new(self.tx), runner_id)
             .await
             .map_err(store_err)
     }
@@ -620,7 +617,7 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
                 let session = runner_session::runner_session_from_row(&row).map_err(store_err)?;
                 let sid = session.id.to_string();
                 pidash_services::domain::tokens::revoke_runner_session(
-                    &mut **self.tx,
+                    &pidash_db::orm_tx::TxConn::new(self.tx),
                     session.id,
                     now_micros(),
                     pubsub_svc::FORCE_CLOSE_REASON,
@@ -675,7 +672,7 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
         now: DateTime<Utc>,
     ) -> Result<(), RevokeError> {
         pidash_services::domain::tokens::revoke_tokens_for_dev_machine(
-            &mut **self.tx,
+            &pidash_db::orm_tx::TxConn::new(self.tx),
             machine_id,
             now,
         )
@@ -687,27 +684,14 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
         &mut self,
         machine_id: Uuid,
     ) -> Result<Vec<delete_svc::LockedRunner>, RevokeError> {
-        let rows = sqlx::query(delete_svc::LOCK_MACHINE_RUNNERS_SQL)
-            .bind(machine_id)
-            .fetch_all(&mut **self.tx)
+        delete_svc::lock_machine_runners(&TxConn::new(self.tx), machine_id)
             .await
-            .map_err(store_err)?;
-        rows.iter()
-            .map(|row| {
-                Ok(delete_svc::LockedRunner {
-                    id: row.try_get(0).map_err(store_err)?,
-                    revoked_at: row.try_get(27).map_err(store_err)?,
-                })
-            })
-            .collect()
+            .map_err(store_err)
     }
 
     async fn fetch_runner_for_delete(&mut self, runner_id: Uuid) -> Result<bool, RevokeError> {
-        sqlx::query(delete_svc::COLLECT_RUNNER_BY_ID_SQL)
-            .bind(runner_id)
-            .fetch_optional(&mut **self.tx)
+        delete_svc::runner_exists(&TxConn::new(self.tx), runner_id)
             .await
-            .map(|row| row.is_some())
             .map_err(store_err)
     }
 
@@ -715,82 +699,44 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
         &mut self,
         machine_id: Uuid,
     ) -> Result<Vec<Uuid>, RevokeError> {
-        let rows = sqlx::query(delete_svc::COLLECT_RUNNERS_BY_MACHINE_SQL)
-            .bind(machine_id)
-            .fetch_all(&mut **self.tx)
+        delete_svc::machine_runner_ids(&TxConn::new(self.tx), machine_id)
             .await
-            .map_err(store_err)?;
-        rows.iter()
-            .map(|row| row.try_get(0).map_err(store_err))
-            .collect()
+            .map_err(store_err)
     }
 
     async fn fetch_chat_ids(&mut self, runner_ids: &[Uuid]) -> Result<Vec<Uuid>, RevokeError> {
-        let sql = delete_svc::collect_chat_ids_sql(runner_ids.len());
-        let mut query = sqlx::query(&sql);
-        for id in runner_ids {
-            query = query.bind(*id);
-        }
-        let rows = query.fetch_all(&mut **self.tx).await.map_err(store_err)?;
-        rows.iter()
-            .map(|row| row.try_get(0).map_err(store_err))
-            .collect()
+        delete_svc::chat_ids_for_runners(&TxConn::new(self.tx), runner_ids)
+            .await
+            .map_err(store_err)
     }
 
     async fn fetch_message_ids(&mut self, chat_ids: &[Uuid]) -> Result<Vec<Uuid>, RevokeError> {
-        let sql = delete_svc::collect_message_ids_sql(chat_ids.len());
-        let mut query = sqlx::query(&sql);
-        for id in chat_ids {
-            query = query.bind(*id);
-        }
-        let rows = query.fetch_all(&mut **self.tx).await.map_err(store_err)?;
-        rows.iter()
-            .map(|row| row.try_get(0).map_err(store_err))
-            .collect()
+        delete_svc::message_ids_for_chats(&TxConn::new(self.tx), chat_ids)
+            .await
+            .map_err(store_err)
     }
 
     async fn delete_chat_events(&mut self, chat_ids: &[Uuid]) -> Result<(), RevokeError> {
-        let sql = delete_svc::delete_chat_events_sql(chat_ids.len());
-        let mut query = sqlx::query(&sql);
-        for id in chat_ids {
-            query = query.bind(*id);
-        }
-        query
-            .execute(&mut **self.tx)
+        delete_svc::delete_chat_events(&TxConn::new(self.tx), chat_ids)
             .await
-            .map(|_| ())
             .map_err(store_err)
     }
 
     async fn delete_chat_approvals(&mut self, chat_ids: &[Uuid]) -> Result<(), RevokeError> {
-        let sql = delete_svc::delete_chat_approvals_sql(chat_ids.len());
-        let mut query = sqlx::query(&sql);
-        for id in chat_ids {
-            query = query.bind(*id);
-        }
-        query
-            .execute(&mut **self.tx)
+        delete_svc::delete_chat_approvals(&TxConn::new(self.tx), chat_ids)
             .await
-            .map(|_| ())
             .map_err(store_err)
     }
 
     async fn delete_chat_dedupes(&mut self, chat_ids: &[Uuid]) -> Result<(), RevokeError> {
-        let sql = delete_svc::delete_chat_dedupes_sql(chat_ids.len());
-        let mut query = sqlx::query(&sql);
-        for id in chat_ids {
-            query = query.bind(*id);
-        }
-        query
-            .execute(&mut **self.tx)
+        delete_svc::delete_chat_dedupes(&TxConn::new(self.tx), chat_ids)
             .await
-            .map(|_| ())
             .map_err(store_err)
     }
 
     async fn delete_runner_sessions(&mut self, runner_ids: &[Uuid]) -> Result<(), RevokeError> {
         pidash_services::domain::tokens::delete_runner_sessions_for_runners(
-            &mut **self.tx,
+            &pidash_db::orm_tx::TxConn::new(self.tx),
             runner_ids,
         )
         .await
@@ -798,148 +744,83 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
     }
 
     async fn delete_force_refresh(&mut self, runner_ids: &[Uuid]) -> Result<(), RevokeError> {
-        let sql = delete_svc::delete_force_refresh_sql(runner_ids.len());
-        let mut query = sqlx::query(&sql);
-        for id in runner_ids {
-            query = query.bind(*id);
-        }
-        query
-            .execute(&mut **self.tx)
+        delete_svc::delete_force_refresh(&TxConn::new(self.tx), runner_ids)
             .await
-            .map(|_| ())
             .map_err(store_err)
     }
 
     async fn delete_live_state(&mut self, runner_ids: &[Uuid]) -> Result<(), RevokeError> {
-        let sql = delete_svc::delete_live_state_sql(runner_ids.len());
-        let mut query = sqlx::query(&sql);
-        for id in runner_ids {
-            query = query.bind(*id);
-        }
-        query
-            .execute(&mut **self.tx)
+        delete_svc::delete_live_state(&TxConn::new(self.tx), runner_ids)
             .await
-            .map(|_| ())
             .map_err(store_err)
     }
 
     async fn null_run_runners(&mut self, runner_ids: &[Uuid]) -> Result<(), RevokeError> {
-        let sql = delete_svc::null_run_runners_sql(runner_ids.len());
-        let mut query = sqlx::query(&sql);
-        for id in runner_ids {
-            query = query.bind(*id);
-        }
-        query
-            .execute(&mut **self.tx)
+        delete_svc::null_run_runners(&TxConn::new(self.tx), runner_ids)
             .await
-            .map(|_| ())
             .map_err(store_err)
     }
 
     async fn null_run_pins(&mut self, runner_ids: &[Uuid]) -> Result<(), RevokeError> {
-        let sql = delete_svc::null_run_pins_sql(runner_ids.len());
-        let mut query = sqlx::query(&sql);
-        for id in runner_ids {
-            query = query.bind(*id);
-        }
-        query
-            .execute(&mut **self.tx)
+        delete_svc::null_run_pins(&TxConn::new(self.tx), runner_ids)
             .await
-            .map(|_| ())
             .map_err(store_err)
     }
 
     async fn null_event_messages(&mut self, message_ids: &[Uuid]) -> Result<(), RevokeError> {
-        let sql = delete_svc::null_event_messages_sql(message_ids.len());
-        let mut query = sqlx::query(&sql);
-        for id in message_ids {
-            query = query.bind(*id);
-        }
-        query
-            .execute(&mut **self.tx)
+        delete_svc::null_event_messages(&TxConn::new(self.tx), message_ids)
             .await
-            .map(|_| ())
             .map_err(store_err)
     }
 
     async fn delete_chat_messages(&mut self, message_ids: &[Uuid]) -> Result<(), RevokeError> {
-        let sql = delete_svc::delete_chat_messages_sql(message_ids.len());
-        let mut query = sqlx::query(&sql);
-        for id in message_ids {
-            query = query.bind(*id);
-        }
-        query
-            .execute(&mut **self.tx)
+        delete_svc::delete_chat_messages(&TxConn::new(self.tx), message_ids)
             .await
-            .map(|_| ())
             .map_err(store_err)
     }
 
     async fn delete_chat_sessions(&mut self, chat_ids: &[Uuid]) -> Result<(), RevokeError> {
-        let sql = delete_svc::delete_chat_sessions_sql(chat_ids.len());
-        let mut query = sqlx::query(&sql);
-        for id in chat_ids {
-            query = query.bind(*id);
-        }
-        query
-            .execute(&mut **self.tx)
+        delete_svc::delete_chat_sessions(&TxConn::new(self.tx), chat_ids)
             .await
-            .map(|_| ())
             .map_err(store_err)
     }
 
     async fn delete_runner_rows(&mut self, runner_ids: &[Uuid]) -> Result<(), RevokeError> {
-        let sql = delete_svc::delete_runner_rows_sql(runner_ids.len());
-        let mut query = sqlx::query(&sql);
-        for id in runner_ids {
-            query = query.bind(*id);
-        }
-        query
-            .execute(&mut **self.tx)
+        delete_svc::delete_runner_rows(&TxConn::new(self.tx), runner_ids)
             .await
-            .map(|_| ())
             .map_err(store_err)
     }
 
     async fn fetch_machine_for_delete(&mut self, machine_id: Uuid) -> Result<bool, RevokeError> {
-        sqlx::query(delete_svc::COLLECT_MACHINE_BY_ID_SQL)
-            .bind(machine_id)
-            .fetch_optional(&mut **self.tx)
+        delete_svc::machine_exists(&TxConn::new(self.tx), machine_id)
             .await
-            .map(|row| row.is_some())
             .map_err(store_err)
     }
 
     async fn delete_machine_sessions(&mut self, machine_id: Uuid) -> Result<(), RevokeError> {
-        sqlx::query(delete_svc::DELETE_MACHINE_SESSIONS_SQL)
-            .bind(machine_id)
-            .execute(&mut **self.tx)
+        delete_svc::delete_machine_sessions(&TxConn::new(self.tx), machine_id)
             .await
-            .map(|_| ())
             .map_err(store_err)
     }
 
     async fn null_runner_machines(&mut self, machine_id: Uuid) -> Result<(), RevokeError> {
-        sqlx::query(delete_svc::NULL_RUNNER_MACHINES_SQL)
-            .bind(machine_id)
-            .execute(&mut **self.tx)
+        delete_svc::null_runner_machines(&TxConn::new(self.tx), machine_id)
             .await
-            .map(|_| ())
             .map_err(store_err)
     }
 
     async fn null_token_machines(&mut self, machine_id: Uuid) -> Result<(), RevokeError> {
-        pidash_services::domain::tokens::clear_token_dev_machines(&mut **self.tx, machine_id)
-            .await
-            .map_err(store_err)
+        pidash_services::domain::tokens::clear_token_dev_machines(
+            &pidash_db::orm_tx::TxConn::new(self.tx),
+            machine_id,
+        )
+        .await
+        .map_err(store_err)
     }
 
     async fn delete_machine_row(&mut self, machine_id: Uuid) -> Result<(), RevokeError> {
-        sqlx::query(delete_svc::DELETE_MACHINE_ROW_SQL)
-            .bind(machine_id)
-            .execute(&mut **self.tx)
+        delete_svc::delete_machine_row(&TxConn::new(self.tx), machine_id)
             .await
-            .map(|_| ())
             .map_err(store_err)
     }
 }
@@ -998,7 +879,7 @@ impl PubsubStore for PoolPubsub<'_> {
         reason: &str,
     ) -> Result<(), OutboxError> {
         pidash_services::domain::tokens::revoke_runner_session(
-            self.pool,
+            &pidash_db::pool::sea_orm_connection(self.pool),
             session_id,
             Utc::now(),
             reason,
