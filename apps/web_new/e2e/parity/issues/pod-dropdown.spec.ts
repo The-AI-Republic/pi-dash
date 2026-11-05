@@ -6,10 +6,12 @@
 // rows that disable with a reason when unavailable; picking a pod pins
 // the executor and the pod on the server.
 // Rows: ISS-218 (pod / execution-target dropdown), ISS-117 (the create
-// modal starts on the project's default pod, NEWPIDASH-23).
+// modal starts on the project's default pod, NEWPIDASH-23; it names the
+// project-default agent while sending nothing, NEWPIDASH-45).
 import { test, expect } from "../fixtures";
 import {
   parityProjectIdentifier,
+  runsProjectDefaultExecutor,
   serverCreateIssueFull,
   serverCreatePod,
   serverCreateProjectWithFlags,
@@ -17,6 +19,7 @@ import {
   serverCleanupProject,
   serverIssue,
   serverIssues,
+  serverPatchProject,
   serverProjectPods,
   signInSession,
 } from "../helpers/api";
@@ -173,6 +176,67 @@ test(
         const detail = await serverIssue(seed.workspaceSlug, projectId, createdId ?? "", session);
         expect(detail.assigned_pod_id).toBe(auto?.id);
         expect(detail.agent_executor).toBe("local_runner");
+      });
+    } finally {
+      if (createdId !== null) await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, createdId, session);
+      await serverCleanupProject(seed.workspaceSlug, projectId, session);
+    }
+  }
+);
+
+test(
+  specTitle(["ISS-117", "ISS-218"], "create modal names the project-default agent and sends nothing"),
+  { tag: specTags(["ISS-117", "ISS-218"]) },
+  async ({ driver, seed }) => {
+    const tag = `NP45 create agent ${Date.now()}`;
+    const name = `${tag} issue`;
+    const session = await signInSession(seed.email, seed.password);
+    // A cloud default needs a configured cloud agent, which this stack
+    // has not got (the ISS-218 leg pins both agent rows disabled), so
+    // the scenario defaults to the managed agent instead; the trigger
+    // names either default the same way.
+    const projectId = await serverCreateProjectWithFlags(
+      seed.workspaceSlug,
+      `${tag} project`,
+      parityProjectIdentifier("NP45"),
+      {},
+      session
+    );
+    let createdId: string | null = null;
+    try {
+      await serverPatchProject(seed.workspaceSlug, projectId, session, { default_agent_executor: "managed_runner" });
+      expect(await runsProjectDefaultExecutor(seed.workspaceSlug, projectId, session)).toBe("managed_runner");
+      await driver.openEntry();
+      await driver.signInWithPasswordRetry(seed.email, seed.password);
+      await driver.openProjectIssuesSettled(seed.workspaceSlug, projectId);
+      await driver.dismissWelcomeDialog();
+
+      await test.step("the untouched form already names the default agent", async () => {
+        await driver.openCreateModal();
+        await expect.poll(() => driver.modalTextContains("Pi Dash Agent (desktop)"), { timeout: 15_000 }).toBe(true);
+      });
+
+      await test.step("a title-only create sends no target; the row inherits the default", async () => {
+        await driver.fillCreateTitle(name);
+        await driver.submitCreateModal();
+        await expect.poll(() => driver.createModalOpen(), { timeout: 30_000 }).toBe(false);
+        await expect
+          .poll(
+            async () => (await serverIssues(seed.workspaceSlug, projectId, session)).find((i) => i.name === name)?.id,
+            { timeout: 30_000 }
+          )
+          .toBeTruthy();
+        const row = (await serverIssues(seed.workspaceSlug, projectId, session)).find((i) => i.name === name);
+        createdId = row?.id ?? null;
+        const detail = await serverIssue(seed.workspaceSlug, projectId, createdId ?? "", session);
+        // The client sends no execution target (verified on the oracle by
+        // intercepting the POST: assigned_pod_id null, no agent_executor
+        // key). The server pins the default pod at write (Issue.save) while
+        // the NULL executor inherits the managed project default — the same
+        // row on both legs.
+        const pods = await serverProjectPods(projectId, session);
+        expect(detail.assigned_pod_id).toBe(pods.find((p) => p.isDefault)?.id);
+        expect(detail.agent_executor).toBeNull();
       });
     } finally {
       if (createdId !== null) await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, createdId, session);

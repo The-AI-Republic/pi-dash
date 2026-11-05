@@ -76,7 +76,8 @@ export function emptyCreateForm(projectId: string | null, descriptionHtml = ""):
  * "Runs on" field names it before the first run. A project that runs on
  * an agent by default (cloud or managed) starts on no pick at all: the
  * old form shows that agent and sends nothing, leaving the item on the
- * project default.
+ * project default, and the trigger names it the same way (NEWPIDASH-45)
+ * while the value stays null.
  */
 export function defaultExecutionSelection(
   pods: ReadonlyArray<Pick<Pod, "id" | "is_default">>,

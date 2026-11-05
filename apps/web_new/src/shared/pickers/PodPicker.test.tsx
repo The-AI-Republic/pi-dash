@@ -621,4 +621,14 @@ describe("PodPicker chip", () => {
     expect(chip).toHaveTextContent("ACME-Backend");
     expect(chip).toHaveTextContent("queued");
   });
+
+  it("names the project-default agent while nothing is picked (NEWPIDASH-45)", () => {
+    const { queryClient } = harness();
+    renderPicker(
+      { chip: true, label: "Runs on", placeholder: "Runs on", projectDefaultExecutor: "cloud_agent" },
+      queryClient
+    );
+    const chip = screen.getByRole("button", { name: "Runs on: Pi Dash Cloud Agent" });
+    expect(chip).toHaveTextContent("Pi Dash Cloud Agent");
+  });
 });
