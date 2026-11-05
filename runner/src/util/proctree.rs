@@ -878,7 +878,8 @@ struct Ownership<'a> {
 ///
 /// * `Some(true)`: a member carries our tag (only where environments are
 ///   readable); or the process with pid == pgid is our original leader (its
-///   start time matches the recorded one); or the group is leaderless and
+///   start time matches the recorded one, and no member was readable without
+///   our tag); or the group is leaderless and
 ///   every member started inside the owner's lifetime (at or after the
 ///   recorded leader start, at or before `alive_until_ms`) and, where
 ///   environments are readable, none was readable without our tag.
@@ -912,10 +913,13 @@ fn group_identity(pgid: i32, o: &Ownership<'_>) -> Option<bool> {
     if let Some(leader) = all.iter().find(|m| m.pid == pgid) {
         // A process holds the group's pid: it is either our leader or the
         // leader of a group that reused the pgid.
-        if o.leader_dead {
+        if o.leader_dead || leader.start_time_ms.abs_diff(leader_start) > START_TOLERANCE_MS {
             return Some(false);
         }
-        return Some(leader.start_time_ms.abs_diff(leader_start) <= START_TOLERANCE_MS);
+        // Matching start time, but a readable member without our tag: rapid
+        // pid reuse can land inside the tolerance, and readable negative tag
+        // evidence outweighs an approximate start-time match.
+        return if any_readable { None } else { Some(true) };
     }
     if live
         .iter()
@@ -980,6 +984,17 @@ async fn recover_one((path, mut rec): (PathBuf, ProcRecord), opts: RecoverOpts) 
     let alive_until_ms = rec
         .owner_alive_until_ms
         .unwrap_or(opts.last_alive_ms.unwrap_or(0));
+    // Pin it before any signal or wait: this pass can be cut short (startup
+    // bound, crash) while cleanup is in flight, and the record must not reach
+    // the next daemon without it.
+    if rec.pgid.is_some() && rec.owner_alive_until_ms.is_none() {
+        rec.owner_alive_until_ms = Some(alive_until_ms);
+        if let Some(dir) = path.parent()
+            && let Err(e) = write_record(dir, &rec)
+        {
+            tracing::warn!(record_id = %rec.record_id, "failed to stamp proc record: {e}");
+        }
+    }
     let outcome = match rec.pgid {
         // Crash between record and spawn (or before the pgid was filled
         // in): resolve by tag alone.
@@ -1028,14 +1043,6 @@ async fn recover_one((path, mut rec): (PathBuf, ProcRecord), opts: RecoverOpts) 
     match outcome {
         Recovered::Kept => {
             tracing::warn!(record_id = %rec.record_id, "could not resolve proc record; keeping it for the next start");
-            if rec.owner_alive_until_ms.is_none() {
-                rec.owner_alive_until_ms = Some(alive_until_ms);
-                if let Some(dir) = path.parent()
-                    && let Err(e) = write_record(dir, &rec)
-                {
-                    tracing::warn!(record_id = %rec.record_id, "failed to stamp proc record: {e}");
-                }
-            }
         }
         Recovered::Cleaned | Recovered::Resolved => {
             let _ = std::fs::remove_file(&path);
@@ -1302,6 +1309,63 @@ mod tests {
             kill_now(-pid);
             let _ = child.wait().await;
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_readable_untagged_leader_is_not_proven_ours_by_its_start_time() {
+        // Rapid pid reuse: a leader holding the recorded pgid whose start
+        // time matches ours within the tolerance, but whose readable
+        // environment lacks our tag. The tag evidence wins: keep, never
+        // signal.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx(dir.path(), "test-instance-readable");
+        let mut child = session_cmd("sleep 300 & exec sleep 300", None)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap() as i32;
+        let start = crate::util::procinfo::info(pid).unwrap().start_time_ms;
+        stale(&ctx, "readable", Some(pid), Some(start));
+        let report = recover(
+            list_records(&ctx.proc_dir, &ctx.instance_id),
+            opts(&ctx, Some(now_ms())),
+        )
+        .await;
+        assert_eq!(report.cleaned, 0, "{report:?}");
+        assert_eq!(report.kept, 1, "{report:?}");
+        assert!(alive(pid), "never signalled");
+        kill_now(-pid);
+        let _ = child.wait().await;
+    }
+
+    #[tokio::test]
+    async fn the_owner_lifetime_is_pinned_before_recovery_signals() {
+        // Recovery can be cut short (startup bound, or a crash) while it
+        // waits for a group to die. The record must already carry the
+        // owner's lifetime, or the next daemon's newer mark widens it.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_env(dir.path(), "test-instance-pin", false);
+        let mut child = session_cmd("trap '' TERM; sleep 300 & wait", None)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap() as i32;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let start = crate::util::procinfo::info(pid).unwrap().start_time_ms;
+        let path = stale(&ctx, "pin", Some(pid), Some(start));
+        let mark = now_ms();
+        let cut = tokio::time::timeout(
+            Duration::from_millis(500),
+            recover(
+                list_records(&ctx.proc_dir, &ctx.instance_id),
+                opts(&ctx, Some(mark)),
+            ),
+        )
+        .await;
+        assert!(cut.is_err(), "recovery was still waiting for the group");
+        let rec: ProcRecord = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(rec.owner_alive_until_ms, Some(mark));
+        kill_now(-pid);
+        let _ = child.wait().await;
     }
 
     #[tokio::test]
