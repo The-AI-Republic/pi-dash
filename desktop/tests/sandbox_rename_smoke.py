@@ -37,7 +37,6 @@ import importlib.util
 import os
 from pathlib import Path
 import platform
-import re
 import shutil
 import subprocess
 import sys
@@ -55,12 +54,6 @@ _SPEC = importlib.util.spec_from_file_location(
 bundle = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(bundle)
 
-# Last-resort default if prepare-agent.sh can't be parsed. Prefer the resolver
-# below so this guard always tests the version the bundle actually ships.
-FALLBACK_ENGINE_TAG = "rust-v0.153.4"
-
-PREPARE_AGENT = DESKTOP / "scripts/prepare-agent.sh"
-
 START = "PROBE_START"
 WROTE = "WROTE"
 
@@ -69,17 +62,13 @@ def resolve_engine_tag():
     """The engine tag the bundle actually ships, resolved as prepare-agent.sh does.
 
     Precedence matches the shell: `CODEX_BUNDLE_VERSION` if set, else the pinned
-    default parsed straight out of prepare-agent.sh so the two can't diverge.
+    tag in `runner/ENGINE_VERSION`, the one file the desktop scripts and the CLI
+    release pipeline all read, so this guard tests the version that ships.
     """
     env = os.environ.get("CODEX_BUNDLE_VERSION")
     if env:
         return env
-    try:
-        text = PREPARE_AGENT.read_text()
-    except OSError:
-        return FALLBACK_ENGINE_TAG
-    match = re.search(r"CODEX_BUNDLE_VERSION:-([^}\"']+)", text)
-    return match.group(1) if match else FALLBACK_ENGINE_TAG
+    return bundle.default_engine_tag()
 
 
 def host_target():

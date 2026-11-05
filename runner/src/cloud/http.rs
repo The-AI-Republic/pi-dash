@@ -3145,6 +3145,7 @@ mod reconnect_loop_tests {
 
     fn empty_state() -> StateHandle {
         StateHandle::new(crate::config::schema::Config {
+            engine: Default::default(),
             version: 2,
             daemon: Default::default(),
             runners: vec![],

@@ -222,6 +222,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
             cfg
         }
         None => Config {
+            engine: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: args.url.clone(),

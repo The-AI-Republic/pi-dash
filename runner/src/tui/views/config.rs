@@ -918,6 +918,7 @@ mod tests {
         };
         runner.agent.kind = kind;
         Config {
+            engine: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://pidash.example".into(),

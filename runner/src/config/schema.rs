@@ -18,6 +18,27 @@ pub struct Config {
     /// missing means "fall back to environment variables".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli: Option<CliSection>,
+    /// `[engine]`: the built-in agent engine. Empty (and not written) unless
+    /// a developer overrides the engine binary.
+    #[serde(default, skip_serializing_if = "EngineSection::is_default")]
+    pub engine: EngineSection,
+}
+
+/// Top-level `[engine]` table (`src/engine/locate.rs`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineSection {
+    /// Development override for the built-in engine executable, e.g. a local
+    /// Codex build. When set it must exist; the installed
+    /// `engine/<version>/` layouts next to `pidash` are then not searched.
+    /// A leading `~/` is expanded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<PathBuf>,
+}
+
+impl EngineSection {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 /// Top-level `[cli]` table. Holds the daemon credentials (one dev-machine
@@ -1093,6 +1114,7 @@ mod tests {
 
     fn config_with(runners: Vec<RunnerConfig>) -> Config {
         Config {
+            engine: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -1106,6 +1128,25 @@ mod tests {
             runners,
             cli: None,
         }
+    }
+
+    #[test]
+    fn engine_section_is_omitted_by_default_and_round_trips_an_override() {
+        let cfg = config_with(vec![]);
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(!text.contains("[engine]"), "{text}");
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.engine, EngineSection::default());
+
+        let mut cfg = config_with(vec![]);
+        cfg.engine.binary = Some(PathBuf::from("/opt/codex/bin/codex"));
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(text.contains("[engine]"), "{text}");
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(
+            back.engine.binary,
+            Some(PathBuf::from("/opt/codex/bin/codex"))
+        );
     }
 
     #[test]

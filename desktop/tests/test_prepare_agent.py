@@ -168,6 +168,58 @@ class PrepareAgentProfileTests(unittest.TestCase):
         self.assertNotIn("WARNING", result.stderr)
 
 
+@unittest.skipIf(sys.platform == "win32", "stubs are POSIX shell scripts")
+class PrepareAgentEngineVersionTests(unittest.TestCase):
+    """The pinned engine tag comes from runner/ENGINE_VERSION, shared with the
+    CLI release pipeline; CODEX_BUNDLE_VERSION still overrides it."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="prepare-agent-version-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.script = self.tmp / "desktop/scripts/prepare-agent.sh"
+        self.script.parent.mkdir(parents=True)
+        shutil.copy2(SCRIPT, self.script)
+        write(self.tmp / "Cargo.toml", "[workspace]\n")
+        write(self.tmp / "LICENSE.txt", "license\n")
+        write(self.tmp / "stubs/rustc", RUSTC_STUB, executable=True)
+        write(self.tmp / "stubs/cargo", CARGO_STUB, executable=True)
+        # No `gh` stub: staging at an unexpected tag would try to download
+        # and fail, so a passing run proves the tag matched the staged one.
+        self.bin = self.tmp / "desktop/src-tauri/bin"
+        write(self.bin / "pidash-agent-engine", ENGINE_STUB, executable=True)
+
+    def prepare(self, **env):
+        return subprocess.run(
+            ["bash", str(self.script)],
+            capture_output=True,
+            text=True,
+            env={"PATH": f"{self.tmp / 'stubs'}:/usr/bin:/bin:/usr/local/bin", **env},
+            check=False,
+        )
+
+    def test_tag_is_read_from_the_shared_version_file(self):
+        write(self.tmp / "runner/ENGINE_VERSION", "rust-v9.9.9\n")
+        write(self.bin / "engine-version.txt", "rust-v9.9.9\n")
+        result = self.prepare()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_env_override_wins_over_the_version_file(self):
+        write(self.tmp / "runner/ENGINE_VERSION", "rust-v9.9.9\n")
+        write(self.bin / "engine-version.txt", "rust-v1.2.3\n")
+        result = self.prepare(CODEX_BUNDLE_VERSION="rust-v1.2.3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_missing_version_file_fails_loudly(self):
+        write(self.bin / "engine-version.txt", "rust-v9.9.9\n")
+        result = self.prepare()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ENGINE_VERSION", result.stderr)
+
+    def test_repo_version_file_holds_one_upstream_tag(self):
+        tag = (SCRIPT.parents[2] / "runner/ENGINE_VERSION").read_text().strip()
+        self.assertRegex(tag, r"^rust-v\d+\.\d+\.\d+$")
+
+
 TARGET = "x86_64-unknown-linux-gnu"
 ASSET = "codex-x86_64-unknown-linux-musl.tar.gz"
 ENGINE = "#!/bin/sh\necho engine 0.0.0\n"
@@ -211,6 +263,7 @@ class PrepareAgentTempDirTests(unittest.TestCase):
             shutil.copy(SCRIPT, scripts / "prepare-agent.sh")
             (root / "oss/LICENSE.txt").write_text("license\n")
             write_executable(root / "oss/target/debug/pidash", "#!/bin/sh\n")
+            write(root / "oss/runner/ENGINE_VERSION", ENGINE_TAG + "\n")
 
             output = io.BytesIO()
             with tarfile.open(fileobj=output, mode="w:gz") as source:

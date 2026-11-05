@@ -4586,6 +4586,7 @@ mod tests {
                     .collect(),
             )),
             daemon_state: StateHandle::new(crate::config::schema::Config {
+                engine: Default::default(),
                 version: 2,
                 daemon: Default::default(),
                 runners: vec![],
@@ -4614,6 +4615,7 @@ mod tests {
         crate::config::file::write_config(
             &paths,
             &Config {
+                engine: Default::default(),
                 version: 2,
                 daemon: DaemonConfig::default(),
                 runners: vec![gone_cfg.clone(), keep_cfg.clone()],
@@ -5110,6 +5112,7 @@ mod tests {
                 daemon_paths: paths,
                 runner_config: config.clone(),
                 state: StateHandle::new(Config {
+                    engine: Default::default(),
                     version: 2,
                     daemon: Default::default(),
                     runners: vec![config.clone()],
@@ -5164,6 +5167,7 @@ mod tests {
         let mut chat = ChatWorker {
             runner_config: config.clone(),
             state: StateHandle::new(Config {
+                engine: Default::default(),
                 version: 2,
                 daemon: Default::default(),
                 runners: vec![config.clone()],
@@ -5443,6 +5447,7 @@ mod tests {
         // emission, but the emitter signature now takes a StateHandle so
         // the IPC's connected flag can be flipped on each WS handshake.
         let daemon_state = StateHandle::new(crate::config::schema::Config {
+            engine: Default::default(),
             version: 2,
             daemon: Default::default(),
             runners: vec![],

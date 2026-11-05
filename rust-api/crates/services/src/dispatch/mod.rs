@@ -28,6 +28,7 @@
 pub mod admission;
 pub mod execution;
 pub mod policy;
+pub mod tool_issues;
 pub mod tools;
 
 pub use admission::admission_bucket;
@@ -209,7 +210,6 @@ pub use tools::CREATE_TITLE_MAX_CHARS;
 pub use tools::CURRENT_ISSUE_COMMENTS_SQL;
 pub use tools::ERROR_CODE_MAX_CHARS;
 pub use tools::FIND_EXISTING_CALL_SQL;
-pub use tools::GET_PROJECT_ISSUE_SQL;
 pub use tools::GITHUB_BINDING_SQL;
 pub use tools::GITHUB_INSTALLATION_SQL;
 pub use tools::GITHUB_PATH_MAX_CHARS;
@@ -245,7 +245,6 @@ pub use tools::SCOPE_ROLES_WRITE;
 pub use tools::SCOPE_RUN_SQL;
 pub use tools::SCOPE_WORKSPACE_MEMBER_SQL;
 pub use tools::SEARCH_DEFAULT_LIMIT;
-pub use tools::SEARCH_ISSUES_SQL;
 pub use tools::SEARCH_MAX_LIMIT;
 pub use tools::SERVER_KEY_GITHUB;
 pub use tools::SOURCE_INTERNAL;

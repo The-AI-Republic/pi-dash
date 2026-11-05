@@ -660,6 +660,7 @@ mod tests {
 
     fn empty_state() -> StateHandle {
         StateHandle::new(Config {
+            engine: Default::default(),
             version: 2,
             daemon: Default::default(),
             runners: vec![],
@@ -833,6 +834,7 @@ mod tests {
         let mut daemon: crate::config::schema::DaemonConfig = Default::default();
         daemon.agent_watchdog.kill_after_hours = 72;
         let state = StateHandle::new(Config {
+            engine: Default::default(),
             version: 2,
             daemon,
             runners: vec![],

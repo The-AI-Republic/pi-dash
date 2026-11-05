@@ -9,6 +9,7 @@ pub mod config_cmd;
 pub mod connect;
 pub mod context;
 pub mod doctor;
+mod engine_cmd;
 mod install;
 pub mod issue;
 pub mod managed;
@@ -126,6 +127,10 @@ pub enum Command {
     /// also restart so the new code takes effect immediately.
     Update(update::Args),
 
+    /// The built-in agent engine shipped with this release (`engine install`
+    /// / `engine path`). Installed next to pidash, never on PATH.
+    Engine(engine_cmd::EngineArgs),
+
     /// Deregister with the cloud and delete local credentials.
     Remove(remove::Args),
 
@@ -205,6 +210,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Tui(args) => tui::run(args, &paths).await,
         Command::Doctor(args) => doctor::run(args, &paths).await,
         Command::Update(args) => update::run(args, &paths).await,
+        Command::Engine(args) => engine_cmd::run(args, &paths).await,
         Command::Remove(args) => remove::run(args, &paths).await,
         Command::Ai(args) => ai::run(args, &paths).await,
         Command::Issue(args) => run_crud(issue::run(args, &paths).await),
