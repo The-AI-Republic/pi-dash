@@ -1,35 +1,50 @@
 # Design: the built-in engine as a first-class runner
 
 - **Issue:** PIDESKAPP-121 (parent PIDESKAPP-120)
-- **Status:** proposed, awaiting product-owner approval
-- **Date:** 2026-10-13
-- **Code baseline:** pi-dash `main` at `3267ceb9`. Paths are relative to that tree; `api/` means `apps/api/pi_dash/`.
+- **Status:** proposed, awaiting product-owner approval. Revision 3; the product owner's decisions so far are recorded in section 15.
+- **Dates:** revision 1 on 2026-10-13; revision 2 and revision 3 on 2026-11-04
+- **Code baseline:** pi-dash `main` at `3267ceb9`. Paths are relative to that tree; `api/` means `apps/api/pi_dash/`. Facts added in revisions 2 and 3 were re-read at the tree of this branch on 2026-11-04.
 - **Revises:** `.ai_design/managed_runner/design.md` (see section 14 for the list of replaced rules)
 
-Every "today" statement below was read from the code at the baseline; nothing was run. Recommendations that need a product-owner decision are marked **[PO-n]** and collected in section 15.
+Every "today" statement below was read from the code at the baseline; nothing was run. Recommendations that need a product-owner decision are marked **[PO-n]** and collected in section 15; the ones already decided are marked there.
+
+**What changed across revisions.**
+
+- Revision 1 kept the desktop app's daemon as the app's child, separate from a hand-installed `pidash` CLI daemon, so a computer with both was two dev machines.
+- Revision 2 (product owner): the app and the CLI daemon are independent peers that cooperate, not parent and child, and a computer has one daemon. The engine still shipped with the app and ran only while the app was connected.
+- Revision 3 (product owner): **the built-in engine moves into the Pi Dash CLI.** Installing the CLI is enough to have an agent, with no Codex or Claude install. `pidash auth login` signs in both the daemon and the engine, with separate credentials of different lifetimes, stored in the OS keychain where available. The desktop app is a native client of the daemon over the local socket, not a host of anything. The engine harness is unchanged: the open-source OpenAI Codex, driven over `codex app-server`; nothing is written from scratch.
 
 ## 1. Summary
 
-| # | Question | Answer |
-| --- | --- | --- |
-| 1 | Machine identity | One computer with the desktop app is one dev machine (per workspace). Its daemon hosts both kinds of runner. A separately hand-installed `pidash` service stays its own machine. |
-| 2 | Runner identity | The engine is identified per machine. The stored unit stays one `Runner` row per machine and project, created only when the engine is turned on for that project. The per-user cap goes away. |
-| 3 | Executor model | The built-in engine becomes a runner like any other with a fixed agent. `managed_runner` stops being a selectable executor; "which runner" is expressed by pod or by a pinned runner. |
-| 4 | Dispatch and pods | A run can be pinned to one runner (new `Issue.assigned_runner`). An engine takes unpinned pod work only after its owner turns that on, and ranks after ordinary runners. |
-| 5 | Who may use it, who pays | Only the owner's work, billed to the owner's OpenHub wallet. A teammate's click never starts a run on it unless the owner opts in. BYOK stays unsupported. |
-| 6 | Availability | An offline engine is treated like any offline runner for pod work. Runs pinned to an offline engine queue visibly and expire after 12 hours. |
-| 7 | Default work dir | A per-machine, per-account setting holding the root folder. Existing task folders stay bound and are never moved or deleted. |
-| 8 | Visibility | Engines appear in runner lists, machine pages, pickers and pods, labelled by machine, with a reduced action set. |
-| 9 | Chat routing | Routed per runner. Only this computer's built-in contact uses the daemon socket; everything else goes through the server. |
-| 10 | Own agent on desktop | Added as an ordinary runner on the desktop's own daemon through the existing Add-runner flow. No second CLI install or sign-in. |
-| 11 | Migration | Rows and ids are kept. Engines take what they took before, with two stated exceptions: projects whose default is the built-in engine (their engines become pod members), and issues set to the built-in engine (they now name one person's engine). |
+| #   | Question                  | Answer                                                                                                                                                                                                                                                                                                                                                                                           |
+| --- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1   | Machine identity          | One computer is one dev machine, backed by one Pi Dash CLI daemon that runs as a user service. The app and the CLI are independent peers; the app is a native client of the daemon over the local socket. Whichever is installed first sets the daemon up.                                                                                                                                       |
+| —   | Where the engine lives    | In the Pi Dash CLI: shipped in the CLI release, run by the daemon as an agent like Codex or Claude Code. It works with no app installed.                                                                                                                                                                                                                                                         |
+| —   | Sign-in                   | `pidash auth login` signs in the daemon and the engine together, as two credentials: the daemon's (60 days) and the engine's (14 days). `pidash login --engine` renews the engine's alone. Credentials go to the OS keychain where one is available, else to a 0600 file. With the app: signing in to the app also signs in the CLI; a CLI signed in first needs one browser sign-in in the app. |
+| 2   | Runner identity           | One `Runner` row per machine and project, created only when the engine is turned on for that project. The per-user cap goes away.                                                                                                                                                                                                                                                                |
+| 3   | Executor model            | The built-in engine is a runner like any other with a fixed agent. `managed_runner` stops being a selectable executor; "which runner" is expressed by pod or by a pinned runner.                                                                                                                                                                                                                 |
+| 4   | Dispatch and pods         | A run can be pinned to one runner (new `Issue.assigned_runner`). An engine takes unpinned pod work only after its owner turns that on, and ranks after ordinary runners.                                                                                                                                                                                                                         |
+| 5   | Who may use it, who pays  | Only the owner's work, billed to the owner's OpenHub wallet through the engine credential. A teammate's click never starts a run on it unless the owner opts in. BYOK stays unsupported.                                                                                                                                                                                                         |
+| 6   | Availability              | An engine runner is online while the daemon is online, its engine credential is valid and it is not paused. The app plays no part. Runs pinned to an offline engine queue visibly and expire after 12 hours.                                                                                                                                                                                     |
+| 7   | Default work dir          | A daemon setting, `[engine] task_root`, edited from the CLI or the app. Existing task folders stay bound and are never moved or deleted.                                                                                                                                                                                                                                                         |
+| 8   | Visibility                | Engines appear in runner lists, machine pages, pickers and pods, labelled by machine, with a reduced action set.                                                                                                                                                                                                                                                                                 |
+| 9   | Chat routing              | Routed per runner. Local chat with this computer's engine goes from the app straight to the daemon over the local socket; everything else goes through the server.                                                                                                                                                                                                                               |
+| 10  | Own agent on the computer | An ordinary runner on the same daemon, added from the app (Add-runner) or the terminal (`pidash runner add`).                                                                                                                                                                                                                                                                                    |
+| 11  | Migration                 | Rows and ids are kept. The app's old per-workspace desktop machines are merged into the daemon's machine. Engines take what they took before, with two stated exceptions: projects whose default is the built-in engine (their engines become pod members), and issues set to the built-in engine (they now name one person's engine).                                                           |
 
 ## 2. Terms
 
-- **Desktop machine:** a `DevMachine` with `provisioning = desktop_bundled`, backed by the daemon the desktop app starts.
-- **Built-in engine:** the bundled Codex driven by that daemon. Shown to users as "Built-in engine · <machine name>".
-- **Engine runner:** a `Runner` row with `provisioning = desktop_bundled`; one per desktop machine and project.
-- **Own-agent runner:** a `Runner` row with `provisioning = manual` whose agent the user supplies.
+- **CLI:** the `pidash` program. `pidash <command>` is the command line; `pidash __run` is the daemon.
+- **Daemon:** the Pi Dash CLI daemon on a computer: one per OS user, installed in the standard location (`~/.local/bin`, Homebrew, or `%LOCALAPPDATA%\Programs\pidash`), configured under the standard XDG paths, and kept running by a user service (systemd, launchd, Windows). It holds the machine's credentials and hosts every runner on the computer.
+- **App:** the Pi Dash desktop app (Tauri). A native client of the daemon over its local control socket.
+- **Dev machine:** the `DevMachine` row backed by the daemon. One per computer and OS user.
+- **Built-in engine:** the open-source OpenAI Codex, renamed `pidash-agent-engine`, shipped in the CLI release and driven by the daemon over `codex app-server`. Shown to users as "Built-in engine · <machine name>".
+- **Engine runner:** a `Runner` row whose agent is the built-in engine (`provisioning = desktop_bundled` on the server, kept for compatibility; section 5). One per dev machine and project.
+- **Own-agent runner:** a `Runner` row with `provisioning = manual` whose agent the user supplies (Claude Code, their own Codex, and so on).
+- **Daemon credential:** the `MachineToken` the daemon holds per workspace. It authenticates the daemon, its runners and the CLI's commands to Pi Dash.
+- **Engine credential:** a new per-machine credential, issued with the daemon credential, whose only use is to obtain short-lived model tokens for the engine (section 4.3).
+- **Model token:** the short-lived OpenHub gateway token the engine presents on model calls. Held in the daemon's memory, never written to disk.
+- **Legacy desktop machine:** a `DevMachine` with `provisioning = desktop_bundled`, created by builds before this design for the daemon the app ran as its child (one per computer and workspace). Merged away on upgrade (section 13).
 
 ## 3. Constraints the design works within
 
@@ -37,47 +52,172 @@ These are facts of the current model that the design keeps, because changing the
 
 - A runner belongs to exactly one pod and a pod to exactly one project (`api/runner/models.py:52-176`, `:382-498`). The daemon enforces "one runner, one project" and an exclusive, non-nested working dir per runner (`runner/src/config/schema.rs:681-690`, `:733-754`).
 - A runner executes one run at a time (`runner/src/daemon/supervisor.rs:1385-1402`).
-- One dev machine is one daemon, one machine token and one live session (`machine_session_one_active_per_machine`, `api/runner/models.py:752-757`). The desktop starts one daemon per workspace, so today there is one desktop `DevMachine` per computer and workspace (`api/runner/views/desktop.py:108-119`).
+- One dev machine is one daemon and one live session (`machine_session_one_active_per_machine`, `api/runner/models.py:752-757`). A `DevMachine` is user-scoped, not workspace-scoped, and holds at most one active `MachineToken` per workspace (`api/runner/models.py:334-335`, `:814`), so the server already models one machine serving several workspaces.
 - Every runner is private. A runner only takes a run tied to its owner: created by the owner, already billed to the owner, on an issue the owner created or is assigned to, or from a scheduler binding the owner authored (`filter_runs_usable_by_runner`, `api/runner/services/permissions.py:83-123`). Lists and chat are owner-only.
-- The engine's model credential is the signed-in user's OpenHub token, written by the app to one file on the machine (`desktop/src-tauri/src/managed_runner.rs:398-405`). Whatever runs on the engine is billed to the person signed in to that desktop.
+- The daemon already drives several agents through one interface (`AgentKind`: Codex over `codex app-server`, Claude Code, Cursor Agent, OpenClaw, Grok; `runner/src/config/schema.rs:250`). The built-in engine is the Codex driver pointed at a bundled binary.
 
-## 4. Machine identity (point 1)
+These are facts of today that this design changes:
 
-**Decision: one computer with the desktop app is one dev machine hosting both kinds of runner.** The desktop's daemon is the pidash daemon for that computer. **[PO-1]**
+- The app runs its own daemon as a child process, one per workspace, under its app data with `PIDASH_CONFIG_DIR` and `PIDASH_DATA_DIR` overridden (`desktop/src-tauri/src/managed_runner.rs:97-104`, `:492-510`, `:668-672`), so it never meets a hand-installed daemon (`runner/src/util/paths.rs:36-46`). Today there is one desktop `DevMachine` per computer and workspace (`api/runner/views/desktop.py:108-125`), plus a separate `manual` one if the user also installed the CLI.
+- The engine binary ships in the app bundle (`desktop/scripts/bundle_agents.py`, `prepare-agent.sh`), and its Codex config and model token are written by the app (`managed_runner.rs:368-405`). The model token comes from `POST /api/v1/users/me/ai-assistant/agent-token/`, which accepts desktop sessions only (`managed_runner/design.md` §14.3).
+- A CLI install is bound to one workspace (`runner/src/config/schema.rs:41-48`), though each `[[runner]]` block already carries its own `workspace_slug` (`:116-120`).
+- CLI credentials are plaintext files with mode 0600: the CLI token in `config.toml` `[cli].token`, the per-runner refresh tokens under `data/runners/<id>/` (`runner/src/config/file.rs:177-237`). Nothing uses the OS keychain. A `MachineToken` never expires; it can only be revoked (`api/runner/models.py:811-850`).
+- Every `config.toml` change is applied by restarting the service and waiting for it to reconnect (`runner/src/service/reload.rs`), which stops every runner the daemon hosts.
 
-- The machine row is the existing `desktop_bundled` `DevMachine`. It stays one row per computer and workspace; the AI Dev Machines page is already workspace-scoped, so the user sees one row per computer.
-- Own-agent runners on a desktop machine are added to the same daemon (section 12), so they sit under the same machine row. No second record is created by the app.
-- A `pidash` service the user installed by hand in a terminal is a separate daemon with its own credential and lifecycle (it runs with the app closed). It remains its own `manual` machine and is not merged. The two rows are told apart by a "Desktop app" badge.
+## 4. The CLI, the engine and the app (point 1)
 
-This is preferred over "two records presented as one" because merging two daemons into one row needs a way to recognise the same computer from two installs, a relaxed one-session rule, and UI merge logic, all to hide a second sign-in the user no longer needs.
+**Decisions:** one computer is one dev machine backed by one CLI daemon **[PO-1, decided]**; the built-in engine is part of the CLI **[PO-15, decided]**; the app is a native client of the daemon, and sign-in follows option A in section 4.6 **[PO-16, decided]**.
 
-**Identity key.** Today the machine is found by `host_label = desktop-<uuid>` from `managed/device-id`, and that string is also the display label. Changes:
+### 4.1 The three parts and how they relate
 
-- Add `DevMachine.device_key` (indexed, not shown). `desktop-enroll` looks machines up by `(owner, device_key, workspace)`. Backfilled from `host_label`.
-- `host_label` becomes the OS hostname and `label` a user-editable name that defaults to it. Add `PATCH` on the machine for `label` (no rename exists today).
-- Every lookup that finds a machine by `host_label` must stop matching desktop machines, because the hostname is now shared with a hand-installed `pidash` service on the same computer and with the same computer's desktop machine in another workspace. Today `_get_or_create_dev_machine` matches on `(owner, host_label)` with no provisioning filter (`api/runner/views/enrollment.py:103-108`, `:124`), so a CLI enrolling without a machine id would attach to the desktop machine. That lookup excludes `desktop_bundled` rows, and the desktop sign-out `DELETE` (`api/runner/views/desktop.py:176`) selects by `device_key`.
+```
+Pi Dash cloud ⇄ CLI daemon ──spawns / drives──► built-in engine ──model calls──► OpenHub gateway
+                    ▲
+                    │ local control socket (native, not through the cloud)
+               desktop app            pidash commands, TUI
+```
 
-**App data wiped.** A wipe loses `device-id`, so the next sign-in would create a new machine and orphan the old one with its runners and pinned issues.
+- **The CLI daemon** is the computer's runner host. It is installed, started and updated as itself, runs whether or not the app is open, holds the machine's credentials, and hosts every runner, engine and own-agent alike.
+- **The built-in engine** is one of the agents the daemon can run. It ships in the CLI release, and the daemon starts it per run and drives it over `codex app-server`, exactly as it drives a user's own Codex. It has no identity on the server and never talks to the Pi Dash cloud; its only outside connection is model traffic to the OpenHub gateway, with a model token the daemon gives it.
+- **The desktop app** is a native client of the daemon, like the TUI or `pidash status` but richer. It talks to the daemon over the local socket for local chat, runs, approvals, runner set-up and engine settings. It owns no daemon, no runner and no engine.
+- **Independence.** The daemon and the engine work with no app installed (section 4.2). The app works as a cloud client with no daemon, and offers to set one up (section 4.7). The app never starts the daemon as its child (except the fallback in section 4.8), never stops it, and never deletes its config or credentials.
+- **Install order does not matter.** CLI first or app first, the result is one daemon, one machine row, and engine and own-agent runners side by side.
 
-- `desktop-enroll` also sends `machine_key`: a SHA-256 of the OS machine id (`/etc/machine-id`, `IOPlatformUUID`, `MachineGuid`) with a fixed salt. The raw id never leaves the computer.
-- When no machine matches `device_key` but one of the caller's own live desktop machines in the workspace has the same `machine_key`, the server adopts it: it re-keys that row and returns its id. Runner rows, pod membership and pins survive. Matching never crosses owners.
-- Adoption happens only when that machine has no live session. Two installs can share an OS id and both be in use: a development build beside a release build (separate app data, so separate `device-id`), or virtual machines cloned from one image. If the matching machine is online, a new machine is created instead, so the two installs do not take the row, and its single session, from each other.
-- Adoption restores the server side only; the wipe also removed the local runner definitions. At the next daemon start the reconcile step (section 5) re-enrols, on this computer, every live engine runner row of the adopted machine that has no local block. The existing reuse lookup returns the same row, so pins and pod membership work again without the user turning the engine on per project. Own-agent runner rows cannot be rebuilt this way (their agent and folder were local); they show as offline with "Set up again on this computer" or remove.
-- When the OS id is unavailable, a new machine is created. The old one shows as offline and the user removes it from AI Dev Machines. Removing a machine revokes its runners and clears their pins.
+### 4.2 The CLI on its own
 
-**How it appears in AI Dev Machines.** One row per computer: name, "Desktop app" badge, status, last seen. Expanding it lists the built-in engine (with the projects it is on) and the own-agent runners. Actions are in section 11.
+A user with no desktop app gets the whole feature from the terminal:
+
+1. Install the CLI with the existing installer or Homebrew. The engine comes with it (section 4.5).
+2. `pidash auth login`: the existing device-code sign-in in the browser. It now issues both the daemon credential and the engine credential (section 4.3). No second sign-in for the engine.
+3. `pidash install` (installs the user service), as today.
+4. `pidash runner add --agent engine --project <p>` turns the engine on for a project (section 5). `pidash runner add` with another agent adds an own-agent runner, as today.
+
+Runs, pods, pinning and billing then behave as in sections 6 to 9, whether or not the user ever installs the app.
+
+### 4.3 Credentials
+
+**Two credentials from one sign-in.** **[PO-17, decided: two credentials, 60 and 14 days, `--engine`]**
+
+|                | Daemon credential                                     | Engine credential                                                                                                      |
+| -------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| What it is     | The existing `MachineToken`, one per workspace        | New, one per machine (the wallet is per user, not per workspace)                                                       |
+| What it can do | Authenticate the daemon, its runners and CLI commands | Only exchange for a short-lived model token at the Pi Dash server                                                      |
+| Lifetime       | 60 days                                               | 14 days                                                                                                                |
+| Issued by      | `pidash auth login`                                   | `pidash auth login`, or `pidash login --engine` alone                                                                  |
+| Revoked by     | `pidash auth logout`, "Remove this computer"          | `pidash auth logout --engine`, `pidash auth logout`, "Remove this computer", "Sign out the engine" on the machine page |
+
+- **Why separate.** A leaked engine credential spends the wallet but cannot run tasks or read the workspace; a leaked daemon credential runs tasks but, alone, cannot spend. Each has its own expiry and can be revoked alone. The engine's shorter life bounds the wallet exposure.
+- **`pidash login --engine`** (also `pidash auth login --engine`; `pidash login` is the existing alias) runs the same device-code flow but asks only for an engine credential. It requires a signed-in daemon and binds the new credential to that daemon's machine. Use: renewing the engine without touching the daemon, or adding the engine to an install that signed in before this feature.
+- **`pidash auth status`** shows both credentials and their expiry dates.
+- **Absolute or sliding lifetimes.** **[PO-18]** Recommended: the daemon credential expires after 60 days _without use_, and each use renews it; the engine credential expires 14 days after it was issued, whatever its use. A fixed 60-day limit on the daemon credential would take every always-on CLI server offline every two months, a change from today, where it never expires. A fixed 14-day limit on the engine is the point of the shorter life. With the app signed in as the same user, the app renews the engine credential before it expires without asking (section 4.6), so only CLI-only users re-run `pidash login --engine`. Alternative: both fixed, as first stated.
+- **Expiry.** The daemon warns three days before the engine credential expires, in `pidash status`, the app and the machine page on the web. At expiry it pauses its engine runners with the reason `engine_sign_in_required` (section 8), so pods route elsewhere. A run in flight continues until its current model token expires.
+
+**Model tokens.**
+
+- New endpoint `POST /api/v1/runner/engine/model-token/`, authenticated by the engine credential only. It returns `{token, expires_at}`, rate-limited and audited like today's desktop endpoint (`managed_runner/design.md` §14.3), with the dev machine recorded.
+- The open-source server does not know about OpenHub, which lives in private-pi-dash. The endpoint calls a pluggable provider (setting `ENGINE_MODEL_TOKEN_PROVIDER`). The cloud's provider returns `get_gateway_token(user)`. With no provider configured, as on a self-hosted instance, the endpoint answers `501 engine_unavailable`, `pidash auth login` issues no engine credential, and the engine is shown as unavailable. BYOK for self-hosted instances is a later extension.
+- The daemon fetches a model token when an engine run or chat starts and refreshes it before expiry. It keeps it **in memory only**. The engine's command-backed auth helper (today `pidash __managed model-token --file`, `managed_runner.rs:753-790`) becomes `pidash __engine model-token`, which asks the daemon over the socket. Nothing short-lived is written to disk, which removes today's `runtime/model.token` file.
+
+**Storage in the OS keychain.** **[PO-19, decided: keychain where available]**
+
+- The daemon and engine credentials are stored in the OS credential store: macOS Keychain, Windows Credential Manager, the Secret Service on Linux (GNOME Keyring, KWallet), through the `keyring` crate.
+- A new setting `[auth] credentials_store = "auto" | "keyring" | "file"`, the same choice Codex offers (`cli_auth_credentials_store`). `auto`, the default, uses the keychain when it answers and falls back to a 0600 file otherwise, and `pidash doctor` reports which is in use. `keyring` refuses to fall back. `file` is today's behaviour.
+- The fallback matters on headless Linux: a server with no desktop session usually has no Secret Service, and a systemd user service started without a login session may find the keyring locked. Claude Code falls back the same way on Linux (`~/.claude/.credentials.json`).
+- Per-runner refresh tokens stay in their 0600 files in the first version. They rotate often, there can be 50 of them, and none can spend the wallet. They can move to the keychain later.
+- This is not a complete defence. Any process running as the same OS user can usually ask the keychain for an item the daemon can read. What it adds is that the secret is no longer in a file that backups, sync tools, a copied home directory or a `cat` can pick up.
+
+### 4.4 Discovery and compatibility
+
+- The app connects to the daemon's control socket at the default path. A new IPC request, `Hello`, returns the daemon's version and IPC protocol version, the signed-in account (user id and cloud URL), the workspaces it holds credentials for, the engine's state (available, signed out, expiring, unavailable) and the machine id.
+- The app ships a minimum daemon protocol version.
+  - **Compatible:** the app cooperates.
+  - **Daemon too old:** the app offers "Update Pi Dash on this computer". It installs the CLI release it carries over the installed one, atomically, then restarts the service with the reload helper. When the install is owned by a package manager (a Homebrew path), the app does not write it and tells the user to run `brew upgrade`. It never updates silently.
+  - **Daemon newer than the app understands:** the app asks the user to update the app.
+  - Until resolved, the app's engine features are unavailable. The daemon, its engine runners and its own-agent runners keep working.
+
+### 4.5 Shipping the engine with the CLI
+
+- The CLI release (cargo-dist, `dist-workspace.toml`) carries `pidash-agent-engine` beside `pidash` for each platform, built from the same pinned Codex release the app bundles today. The desktop build scripts (`bundle_agents.py`, `prepare-agent.sh`) move to the CLI release pipeline.
+- It is installed next to `pidash` but **never on `PATH`**: `<install>/../lib/pidash/` for the shell installer, `libexec` for Homebrew, a subfolder of `%LOCALAPPDATA%\Programs\pidash` on Windows. The daemon finds it relative to its own executable; `[engine] binary` overrides that for development.
+- The engine updates with the CLI. `pidash update` updates both.
+- The CLI download grows by the engine's size. **[PO-20]** Recommended: include the engine in every release archive, so one install is enough and the two are signed and tested together. Alternative: download it on first `pidash runner add --agent engine`.
+- The app still carries a copy of the CLI release, so it can set the daemon up offline (section 4.7). It no longer runs the engine itself.
+- Codex is Apache-2.0; redistributing it in the CLI release needs its licence and notice files in the archive, as the app bundle already needs.
+
+### 4.6 Signing in with the app (option A)
+
+| Situation                                                | What happens                                                                                                                                                                                                                                                                                      |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **App first**                                            | The user signs in to the app in the browser, as today. When the app sets up the daemon (section 4.7) it signs the CLI in with a device grant it approves with its own session, passing the code on stdin (`pidash_cli_login`, existing). The grant issues both credentials. One sign-in in total. |
+| **CLI first**                                            | The CLI is already signed in. The app asks for its own browser sign-in once, because the app's interface is the cloud web app and needs a web session. After that, `Hello` reports the same account and the app cooperates.                                                                       |
+| **Engine credential missing or expiring, app signed in** | The app approves an engine-only device grant with its session and hands it to the daemon (`pidash login --engine --device-code-stdin`). No prompt.                                                                                                                                                |
+| **App sign-out**                                         | Signs out the app only. The daemon, the engine and all runners stay signed in, because they are independent. The sign-out dialog offers "Also sign out Pi Dash on this computer", which runs `pidash auth logout`.                                                                                |
+| **CLI sign-out**                                         | The daemon and engine are signed out; the app stays signed in and shows the daemon as signed out, with "Sign in" (the app-first flow above).                                                                                                                                                      |
+
+The reverse direction (a CLI sign-in signing the app in, with no browser) needs the server to turn a machine credential into a web session through a one-time grant handed over the socket. It is left for a follow-up with its own security review (section 16).
+
+**Different accounts.** **[PO-13, decided]** When the daemon is signed in to a different Pi Dash account or cloud than the app, they do not cooperate in the first version. The app shows "Pi Dash on this computer is signed in as <account>", its engine features are unavailable, and everything served by the cloud works. It offers to sign the app in as that account, or "Sign Pi Dash on this computer in as me" when the daemon hosts no runners (otherwise it points to `pidash auth logout`). It never starts a second daemon.
+
+### 4.7 App first: setting up the daemon
+
+When the app finds no daemon, it offers "Set up Pi Dash on this computer" the first time the user turns the engine on for a project, adds a runner or opens local chat.
+
+- The consent screen says that Pi Dash runs as a background service, that it keeps the user's runners, the built-in engine included, available when the app is closed, how to pause it, and how to remove it (`pidash uninstall`).
+- Steps, all through the existing CLI rather than a second implementation:
+  1. install the CLI release the app carries (`pidash` and the engine) into the official installer's location (`install_pidash_cli`, `cli_install_dir`, `desktop/src-tauri/src/pidash_cli.rs:227-232`), and put `pidash` on `PATH` as today;
+  2. sign it in with a device grant the app approves (section 4.6);
+  3. `pidash install` (the user service) and `pidash start`.
+- The result is identical to a terminal install. This is the flow PIDESKAPP-114 found with no UI (`setUpCliForThisMachine`); it becomes the app's set-up path.
+- On macOS the service is a launchd agent, so the OS shows a "background item added" notice. The consent screen says so.
+
+### 4.8 When the user declines the service
+
+**[PO-12]** Recommended: the app runs the same daemon in the foreground while it is open: the same binary, the standard paths with no overrides, the same credentials. It stops when the app exits, and every runner on it, the engine included, is then online only while the app is open; the app says so. Accepting the service later only adds the service unit. Alternative: no daemon, and so no engine, without the service.
+
+### 4.9 Workspaces
+
+One daemon serves every workspace the user enables on the computer. The server side already fits: the `DevMachine` is user-scoped and has one `MachineToken` per workspace, and every runner block carries its `workspace_slug`.
+
+- The daemon holds one daemon credential per workspace and one engine credential for the machine, instead of the single workspace binding a CLI install has today (`runner/src/config/schema.rs:41-48`).
+- `pidash auth login --workspace <slug>` adds a workspace rather than replacing the binding. The app adds one the same way, with a device grant scoped to that workspace.
+- The one-session rule (`machine_session_one_active_per_machine`) must either become one session per machine and workspace, or one session that carries several workspaces. Decided in PIDESKAPP-122 (section 17).
+- `MAX_RUNNERS_PER_DAEMON` (50) is shared by engine and own-agent runners across all workspaces on the computer.
+
+### 4.10 Identity
+
+The daemon holds the machine's identity, exactly as a CLI install does today.
+
+- The machine is created by the daemon's sign-in and found by its machine id and `host_label` = OS hostname, as today (`api/runner/views/enrollment.py:80-124`).
+- `label` becomes user-editable, defaulting to the hostname. Add `PATCH` on the machine for `label` (no rename exists today).
+- The app's `managed/device-id` and the `desktop-enroll` endpoint are no longer used by new builds; `desktop-enroll` stays for older builds only (section 13).
+- **App data wiped:** nothing on the machine changes. The app only loses its own local chat history and settings.
+- **Daemon data wiped:** the same as for a CLI install today. The next sign-in reuses the machine row by `(owner, host_label)` (`enrollment.py:101-108`). The daemon re-creates the local blocks of the machine's live engine runner rows from the server, since an engine runner needs nothing local but its folder, so pins and pod membership survive. Own-agent runner rows cannot be rebuilt this way (their agent and folder were local); they show as offline with "Set up again on this computer" or remove.
+
+### 4.11 How it appears in AI Dev Machines
+
+One row per computer: name, status, last seen, and the engine's state (available, signed out, expiring on <date>, unavailable). Expanding it lists the built-in engine (with the projects it is on) and the own-agent runners. Actions are in section 11.
+
+### 4.12 Rejected alternatives
+
+- **The engine attached to the app** (revision 2). The app ships the engine and the daemon runs it only while the app is connected. It keeps "online only while the app is open", but the engine lives in one program and runs in another, needs a presence protocol and app-supplied paths, and does not exist for CLI-only users. Superseded by the product owner's choice.
+- **Two daemons, the app's as its child** (today, and revision 1). Two machine rows for one computer, a hostname collision between them, and own-agent runners on the app's daemon go offline with the app.
+- **Two daemons shown as one row.** Needs a hardware-derived key to recognise one computer from two installs, a relaxed one-session rule and UI merge logic.
+- **Writing a new engine.** Not needed: the harness is the open-source Codex the app already ships.
 
 ## 5. Runner identity (point 2)
 
-**Decision: the engine's identity is the machine; the stored unit is one engine runner per machine and project.** A true single row per machine would require a runner to serve several pods and projects, which breaks the constraints in section 3 for every runner type.
+**Decision: the stored unit is one engine runner per machine and project.** A true single row per machine would require a runner to serve several pods and projects, which breaks the constraints in section 3 for every runner type.
 
+- **A new agent kind.** `AgentKind::Engine` in the daemon's config: `agent.kind = "engine"`. The daemon resolves the bundled binary, the engine's `CODEX_HOME` (`<daemon data>/engine/<account>/codex-home`, never `~/.codex`) and the auth helper itself, so the block holds no app paths. It runs through the existing Codex driver. The engine's Codex config (gateway provider, policy, `managed_runner/design.md` §12.1) is written by the daemon; `render_engine_config` moves from `desktop/src-tauri/src/managed_runner.rs` to the runner. The model profile the engine uses (§12.2 there) is fetched by the daemon with its daemon credential.
 - **Uniqueness replaces the cap.** At most one live engine runner per `(dev_machine, project)`. The enrolment reuse lookup (`api/runner/views/enrollment.py:705-720`) is keyed on machine and project instead of machine and pod, and `_managed_cap_error` with `MANAGED_RUNNER_MAX_PER_USER_PROJECT` is deleted. A second computer on the same account enrols its own row. This resolves PIDESKAPP-96.
-- **Abuse guard.** A new `MANAGED_RUNNER_MAX_MACHINES_PER_USER` (default 10 live desktop machines per workspace) replaces the cap as the only count limit.
-- **Enrol on use, not on page open.** Today every project route opened enrols a runner (`desktop-overlay/apps/web/core/components/agent-runtime.tsx:65-141`). New rule: an engine runner is created when the user turns the engine on for a project, which happens on the first Run on this computer, on adding it to a pod, or from the engine's project list in desktop settings.
-- **Removal exists.** "Remove from project" revokes the row. The desktop reconciles at daemon start and on focus: local `[[runner]]` blocks whose server row is revoked are stripped with `pidash __managed remove`. The folder on disk is kept.
-- **Local limit.** `__managed enroll` checks `MAX_RUNNERS_PER_DAEMON` (50) before calling the server, so the limit can no longer leave a half-enrolled runner. Together with the two points above this resolves PIDESKAPP-118. The limit itself remains: one computer can have the engine on in 50 projects per workspace.
-- **Provisioning is per runner.** Today a runner inherits `provisioning` from its machine (`enrollment.py:701-704`). With own-agent runners on a desktop machine it is decided by the path: `__managed enroll` asks for an engine runner, accepted only on a `desktop_bundled` machine; every other create path yields `manual`.
-- **Naming.** The server assigns engine runner names: `builtin-<machine-slug>-<project-identifier>`, with a numeric suffix when the name is taken in the pod. The project is part of the name because a name must be unique in two scopes: per pod on the server (`runner_unique_name_per_pod`) and per daemon config on the computer (`ConfigError::DuplicateName`, `runner/src/config/schema.rs:717`), and one computer's engine runners for several projects share one config. Client-supplied names are ignored for engine runners. This removes the `desktop-desktop-<uuid>-<PROJECT>` names and the collision in PIDESKAPP-53. The UI shows "Built-in engine · <machine label>" from `provisioning` and the machine, so renaming the machine renames its engine everywhere. Engine runners are not renamed individually.
+- **No new machine limit.** Machines are created by the daemon's sign-in, the same path as any CLI install, so the existing limits on that path apply.
+- **Enrol on use, not on page open.** Today every project route opened in the app enrols a runner (`desktop-overlay/apps/web/core/components/agent-runtime.tsx:65-141`). New rule: an engine runner is created when the user turns the engine on for a project: `pidash runner add --agent engine`, the first Run on this computer in the app, adding it to a pod, or the engine's project list in the app's settings.
+- **How the app adds and removes them.** New IPC requests, `EngineRunnerAdd { workspace, project, working_dir }` and `EngineRunnerRemove { runner }`; the daemon enrols with the server using its daemon credential, writes the block under its config lock and validates it. The CLI does the same through `pidash runner add --agent engine` and `pidash runner remove`.
+- **No restart to add or remove a runner.** Today every config change restarts the service (section 3). On a shared daemon that would stop every other run whenever the engine is turned on for a project. The daemon must add and remove a runner block at runtime, starting or stopping only that runner. Machine control's remote `CreateRunner` (`runner/src/daemon/machine_control.rs:156-230`) is the starting point (section 17).
+- **Removal exists.** "Remove from project" revokes the row. The daemon reconciles at start and periodically: blocks whose server row is revoked are removed, and live engine runner rows of this machine with no local block are re-added. The folder on disk is kept.
+- **Local limit.** The daemon checks `MAX_RUNNERS_PER_DAEMON` (50) before calling the server, so the limit can no longer leave a half-enrolled runner. Together with the two points above this resolves PIDESKAPP-118.
+- **Provisioning is per runner.** Today a runner inherits `provisioning` from its machine (`enrollment.py:701-704`). Now one machine hosts both kinds, so it follows the agent: an `engine` runner is created as an engine runner, any other as `manual`. The server creates an engine runner only for a machine with a live engine credential. The stored value stays `desktop_bundled` for compatibility with older builds and history; it now means "built-in engine runner", and can be renamed later in a separate migration.
+- **Naming.** The server assigns engine runner names: `builtin-<machine-slug>-<project-identifier>`, with a numeric suffix when the name is taken in the pod. The project is part of the name because a name must be unique in two scopes: per pod on the server (`runner_unique_name_per_pod`) and per daemon config on the computer (`ConfigError::DuplicateName`, `runner/src/config/schema.rs:717`), and one computer's engine runners for several projects share one config. Client-supplied names are ignored for engine runners. This removes the `desktop-desktop-<uuid>-<PROJECT>` names and the collision in PIDESKAPP-53. The UI shows "Built-in engine · <machine label>", so renaming the machine renames its engine everywhere. Engine runners are not renamed individually.
 
 Two engine runners on one machine can run at the same time (two projects). That is today's behaviour and is kept. **[PO-7]**
 
@@ -119,88 +259,93 @@ The alternative is to keep `managed_runner` as a kind meaning "pinned to one eng
 
 ## 8. Who may use it, and who pays (point 5)
 
-- **Who pays:** always the engine's owner, through their OpenHub wallet. `AgentRun.owner` is already set from the runner's owner at assignment.
+- **Who pays:** always the engine's owner, through their OpenHub wallet. The model token is obtained with the owner's engine credential, and `AgentRun.owner` is already set from the runner's owner at assignment.
 - **Who can cause a run:** the owner. An engine runner takes a run only when one of these holds: **[PO-3]**
-
   - the owner created the run (clicked Run, from any client);
   - the run is automatic (tick or scheduler) and is on an issue the owner created or is assigned to, or comes from a scheduler binding the owner authored.
-- A teammate clicking Run on the owner's issue does not start a run on the owner's engine. This is stricter than the rule for ordinary runners, which would allow it.
-- **Owner controls:**
 
+- A teammate clicking Run on the owner's issue does not start a run on the owner's engine. This is stricter than the rule for ordinary runners, which would allow it.
+- **Unattended use is now normal.** The engine runs whenever the daemon runs, not only while the app is open, so these controls carry the whole weight of protecting the wallet.
+- **Owner controls:**
   - pod work is off until the owner turns it on, per project (the one exception is the migration of projects whose default is the built-in engine today, section 13);
-  - a per-machine "Pause agent runs" switch (`Runner.dispatch_paused`, set for all of the machine's engine runners), which the desktop also sets itself when the model profile is unavailable or the wallet is empty, so a pod stops routing to an engine that can only fail. The owner's switch and the app's automatic pause are recorded separately (a pause reason), so the app clearing its own pause never undoes the owner's;
+  - a per-machine "Pause agent runs" switch (`Runner.dispatch_paused`, set for all of the machine's engine runners), from the app, the web machine page or a new `pidash engine pause`. The daemon also pauses its engine runners itself when the model profile is unavailable, the wallet is empty or the engine credential has expired, so a pod stops routing to an engine that can only fail. The owner's switch and the daemon's automatic pause are recorded separately (a pause reason), so the daemon clearing its own pause never undoes the owner's;
   - an opt-in "Teammates can start runs on my issues", which applies the ordinary-runner rule;
-  - removing the engine from a project or removing the machine.
+  - removing the engine from a project, signing out the engine, or removing the machine.
+
+- **Spending limit.** **[PO-21]** Recommended: none beyond the wallet balance in the first version; add a per-machine daily limit as a follow-up if unattended spend becomes a support issue. Alternative: a daily limit per machine from the start, enforced by the model-token endpoint.
 - **Project defaults and scheduled work** cannot reach an engine whose owner has not made it a pod member, and then only for the owner's own work as defined above.
 - **BYOK:** unchanged. The engine supports the OpenHub lane only (`managed_runner/design.md` §12.2), because no stored key is returned to a client. A BYOK user's engine does not come online and is shown with the existing reason.
 - Sharing an engine with a team is not part of this design. No runner can be shared today.
 
 ## 9. Availability (point 6)
 
-- **Pod work:** an offline engine is an offline runner. Unpinned runs go to whichever eligible runner is online; they never wait for the engine in particular. A pod member that is usually offline costs nothing while offline.
+- **When an engine runner is online:** the daemon is online, the engine credential is valid, the model profile is available and the runner is not paused. The app is not involved: closing it changes nothing. This drops `managed_runner/design.md` §5's rule that the engine is "online exactly while the desktop app is open" **[PO-15, decided]**.
+- **Pod work:** an offline engine is an offline runner. Unpinned runs go to whichever eligible runner is online; they never wait for the engine in particular.
 - **Structural check:** `pod_has_runner_for_issue_principal` counts a `pod_member` engine runner as a registered runner for its owner. A pod whose only eligible runner is an offline engine therefore queues the run rather than bouncing the issue to Backlog, as for ordinary runners.
 - **Strictly pinned runs, engine offline:**
-
-  - *User-triggered:* accepted and queued, where today it is refused. The click may now come from the web or another computer, so the UI asks first: "<machine> is offline. Queue until it comes online?" **[PO-5]**
-  - *Automatic:* queued, as today.
+  - _User-triggered:_ accepted and queued, where today it is refused. The click may come from the web or another computer, so the UI asks first: "<machine> is offline. Queue until it comes online?" **[PO-5]**
+  - _Automatic:_ queued, as today.
   - Both carry `error_code = desktop_not_connected` and are shown as "Waiting for <machine name>". The web app has no such label today (`issue-detail/agent-status.tsx:196-201` does not read `error_code`); adding it is in scope.
   - The sweep in `managed_runner/tasks.py` fails them after `MANAGED_RUNNER_QUEUED_MAX_AGE_SECS` (12 h), now selected by "strict pin to an engine runner" rather than by kind. This replaces the "waiting for your desktop" queue of `managed_runner/design.md` §8.5 with the same mechanics and a wider entry.
-- **Paused engine:** treated as offline for matching, with its own label.
-- **App closed mid-run:** unchanged (`managed_runner/design.md` §9.5).
+
+- **Paused engine** (by the owner, or automatically for an expired engine credential, an empty wallet or a missing model profile): treated as offline for matching, with a label naming the reason.
+- **Daemon stopped mid-run** (service stop, update, computer shut down): the same as for any runner today. The daemon's graceful stop lets the current run finish for `MANAGED_RUNNER_GRACEFUL_STOP_SECS`, and the existing reaper handles anything left.
 
 ## 10. Default work dir (point 7)
 
-**Boundary with PIDESKAPP-42.** PIDESKAPP-42 owns the default root location and the folder layout below a root. This design owns the setting, its validation, how it reaches the runner and what a change does. A custom root uses the same layout below it as the default root.
+**Boundary with PIDESKAPP-42.** PIDESKAPP-42 owns the default root location and the folder layout below a root; with the engine in the CLI it decides them under the daemon's data directory instead of the app's. This design owns the setting, its validation, how it reaches the runner and what a change does. A custom root uses the same layout below it as the default root.
 
-- **Where it lives:** on the machine, per account: key `engine.task_root` in the host-written per-account settings file (`managed/accounts/<account-key>/settings.json`, `desktop/src-tauri/src/account_settings.rs`). It is not stored on the server and not per project, because it is a path on one computer.
-- **Default:** unset, meaning the default task root from PIDESKAPP-42. Until that lands this is today's `<app-data>/managed/workdirs`.
-- **Where it is edited:** a new "Built-in engine" section in desktop settings, with a folder picker. The desktop has no settings page and no folder-picker permission today; both are part of this work.
-- **Validation,** done by the Rust host and never by the webview:
-
+- **Where it lives:** in the daemon's config, `[engine] task_root`. It is not stored on the server and not per project, because it is a path on one computer.
+- **Default:** unset, meaning the default task root from PIDESKAPP-42. Until that lands, `<daemon data>/engine/workdirs`.
+- **Where it is edited:** a new `pidash config set engine-task-root <path>`, or a "Built-in engine" section in the app's settings with a folder picker, which sends it to the daemon over the socket. The app has no settings page and no folder-picker permission today; both are part of this work.
+- **Validation,** done by the daemon, never by the app's webview:
   - absolute, canonicalised, an existing or creatable directory, writable (probe file);
   - not a filesystem root or the home directory itself;
-  - not inside the app's resources or its private data (daemon config, chat data, engine home);
-  - not the same as, inside, or containing another runner's working dir in the same daemon;
+  - not inside the daemon's config or data directories (the engine home included) or the app's own data;
+  - not the same as, inside, or containing another runner's working dir in the daemon, own-agent runners included. With one daemon per computer this check covers every runner on it;
   - short enough for the deepest project path on Windows.
   - A network or removable drive is allowed with a warning. A failed check leaves the old value in place and reports which rule failed.
-- **Effect of a change:** **[PO-6]**
 
+- **Effect of a change:** **[PO-6]**
   - nothing is moved or deleted;
   - projects the engine is turned on for afterwards use the new root;
-  - projects already set up keep their current folder. Settings lists each project with its folder, "Open folder", and "Use the default location", which rebinds that project to the new root with a fresh folder and leaves the old one on disk. A "Switch all" action does the same for every project.
-- **How it reaches the runner:**
+  - projects already set up keep their current folder. The app's settings and `pidash runner list` show each project with its folder. "Use the default location" rebinds a project to the new root with a fresh folder and leaves the old one on disk; "Switch all" does it for every project.
 
-  - new projects: `pidash __managed enroll --working-dir`, as today;
-  - existing projects: a new `pidash __managed set-working-dir --project <p> --working-dir <abs>` that rewrites the block under the config lock and re-runs schema validation. The host applies it when no runner on that daemon is mid-run, because the restart stops every runner the daemon hosts, and then restarts the daemon;
-  - the runner reports the canonical path at session attach and the server stores it in `dev_metadata.working_dir` (`api/runner/services/session_service.py:62-93`), so the restart is what keeps the server's copy accurate. The server only displays it.
+- **How it reaches the runner:**
+  - new projects: the working dir given to `EngineRunnerAdd` or `pidash runner add --agent engine`, defaulting to the task root;
+  - existing projects: a new IPC request `EngineRunnerSetWorkingDir { runner, working_dir }` (CLI: `pidash runner set-working-dir`) that rewrites the block under the config lock, re-runs schema validation and restarts only that runner, and only while it is idle. A daemon restart is not acceptable here, because it would also stop other runs;
+  - the runner reports the canonical path at session attach and the server stores it in `dev_metadata.working_dir` (`api/runner/services/session_service.py:62-93`), so the runner's re-attach keeps the server's copy accurate. The server only displays it.
+
 - **Per-project folder chosen by the user** (pointing the engine at an existing local clone) uses the same command and is left as a follow-up.
 - The chat working directory is not covered by this setting. It belongs to PIDESKAPP-42.
 
 ## 11. Visibility and management (point 8)
 
-Server: the `include_bundled` filter (`api/runner/views/runners.py:326-329`) is removed. `provisioning`, `pod_dispatch`, `dispatch_paused` and the machine are added to the runner payload and to `IRunner`; `provisioning` to `IDevMachine`. Lists stay owner-only.
+Server: the `include_bundled` filter (`api/runner/views/runners.py:326-329`) is removed. `provisioning`, `pod_dispatch`, `dispatch_paused` (with its reason) and the machine are added to the runner payload and to `IRunner`; the engine's state and the engine credential's expiry to `IDevMachine`. Lists stay owner-only.
 
-| Surface | Change |
-| --- | --- |
-| AI Dev Machines | One row per computer with a "Desktop app" badge; expands to its engine and own-agent runners. |
-| Runners list and detail | Engine runners listed with a "Built-in" badge and machine name. Detail shows the reported work dir. |
-| Pod management | Pod shows its member runners. "Add runner to pod" lists the user's runners, engines included. No UI calls the existing move endpoint today. |
-| Issue execution picker | Cloud Agent, pods, and "Specific runner" (section 7). |
-| Project default executor | "Runner" or "Cloud Agent". The "Pi Dash Agent (desktop)" option is removed. |
-| Runs page | The label comes from the run's runner: "Built-in engine · <machine>" instead of "Local Runner". |
-| Desktop AI Agents nav | "This computer": the built-in engine (local chat). "Runners": every other runner the user owns, including other computers' engines, named by machine. |
+| Surface                  | Change                                                                                                                                                |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AI Dev Machines          | One row per computer with the engine's state; expands to its engine and own-agent runners (section 4.11).                                             |
+| Runners list and detail  | Engine runners listed with a "Built-in" badge and machine name. Detail shows the reported work dir.                                                   |
+| Pod management           | Pod shows its member runners. "Add runner to pod" lists the user's runners, engines included. No UI calls the existing move endpoint today.           |
+| Issue execution picker   | Cloud Agent, pods, and "Specific runner" (section 7).                                                                                                 |
+| Project default executor | "Runner" or "Cloud Agent". The "Pi Dash Agent (desktop)" option is removed.                                                                           |
+| Runs page                | The label comes from the run's runner: "Built-in engine · <machine>" instead of "Local Runner".                                                       |
+| Desktop AI Agents nav    | "This computer": the built-in engine (local chat). "Runners": every other runner the user owns, including other computers' engines, named by machine. |
+| CLI                      | `pidash runner list` shows engine runners; `pidash auth status` shows both credentials; `pidash engine pause` / `resume`.                             |
 
-Actions, given that the app owns the engine's install and lifecycle:
+Actions, given that the daemon owns its runners and credentials:
 
-| Action | Engine runner | Desktop machine |
-| --- | --- | --- |
-| Rename | No. Rename the machine. | Yes (new). |
-| Add to, remove from, move between pods | Yes, owner only. | n/a |
-| Pause and resume | Yes (per machine). | Yes. |
-| Remove | "Remove from project": revokes the row, keeps the folder. | "Remove this computer": revokes token and runners. The app on that computer returns to "set up" without a restart (PIDESKAPP-108). |
-| Rotate credential | n/a | Hidden. The app mints its own token at sign-in. |
-| Edit agent, model, work dir from the web | No. Work dir is set on the computer (section 10). | n/a |
-| Chat | Yes (section 12). | n/a |
+| Action                                   | Engine runner                                             | Dev machine                                                                                                                                                     |
+| ---------------------------------------- | --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Rename                                   | No. Rename the machine.                                   | Yes (new).                                                                                                                                                      |
+| Add to, remove from, move between pods   | Yes, owner only.                                          | n/a                                                                                                                                                             |
+| Pause and resume                         | Yes (per machine).                                        | Yes.                                                                                                                                                            |
+| Remove                                   | "Remove from project": revokes the row, keeps the folder. | "Remove this computer": revokes both credentials and every runner. The daemon and the app on that computer show "signed out" without a restart (PIDESKAPP-108). |
+| Sign out the engine                      | n/a                                                       | Yes (new): revokes the engine credential only.                                                                                                                  |
+| Rotate credential                        | n/a                                                       | As for any machine.                                                                                                                                             |
+| Edit agent, model, work dir from the web | No. Work dir is set on the computer (section 10).         | n/a                                                                                                                                                             |
+| Chat                                     | Yes (section 12).                                         | n/a                                                                                                                                                             |
 
 ## 12. Chat routing (point 9) and the user's own agent (point 10)
 
@@ -208,118 +353,154 @@ Actions, given that the app owns the engine's install and lifecycle:
 
 The transport is chosen per runner, not once for the app.
 
-| Chat target | Transport | Sessions stored | Working folder |
-| --- | --- | --- | --- |
-| This computer's built-in engine (the "This computer" contact) | Daemon socket | Local SQLite on this computer | Chat folder chosen by the host (PIDESKAPP-42) |
-| An own-agent runner on this computer | Server (HTTP + SSE) | Server | That runner's work dir |
-| Any runner on another computer, including its built-in engine | Server | Server | That runner's work dir, i.e. the project's task folder on that computer |
+| Chat target                                                   | Transport                   | Sessions stored         | Working folder                                                          |
+| ------------------------------------------------------------- | --------------------------- | ----------------------- | ----------------------------------------------------------------------- |
+| This computer's built-in engine (the "This computer" contact) | Local socket, app to daemon | Local, on this computer | Chat folder (PIDESKAPP-42)                                              |
+| An own-agent runner on this computer                          | Server (HTTP + SSE)         | Server                  | That runner's work dir                                                  |
+| Any runner on another computer, including its built-in engine | Server                      | Server                  | That runner's work dir, i.e. the project's task folder on that computer |
 
+- **Native local chat.** The app talks to this computer's engine the way the ChatGPT app talks to Codex: straight to the daemon over the local socket, with the cloud involved only for model calls. The IPC requests already exist (`ChatWarm`, `ChatSend`, `ChatCancel`, `ChatClose`, `ChatDecide`, `runner/src/ipc/server.rs:313-390`) and the app already uses them (`LocalChatTransport`).
 - **Implementation shape:** `registerLocalChatTransport` installs a routing transport that sends the built-in contact's sessions to `LocalChatTransport` and everything else to the cloud transport, in place of the global swap at `desktop-overlay/apps/web/core/services/local-chat-transport.ts:714-722`. Session-scoped calls resolve the owner transport from the session. Approvals follow the same split.
 - **No duplicates:** this computer's own engine runner rows are not listed under "Runners" on this computer; they are represented by the local contact. On the web and on other computers they are listed per project as "Built-in engine · <machine> · <project>".
 - **Chatting with another computer's engine** needs no new server work: server-routed chat already accepts an engine runner for its owner (`api/runner/views/chat.py:174-186` has no provisioning check); only the list hid it. It is billed to the same owner. The composer is disabled while that computer is offline, as for any runner.
-- **Local chat no longer borrows a project's runner.** Today a local chat turn runs on whichever project runner the daemon resolves, which fails once the daemon hosts two (PIDESKAPP-41), forces chat to enrol a project (PIDESKAPP-14), and blocks chat for the length of a run (PIDESKAPP-101). The daemon gets a machine-level engine profile (engine binary, engine home, token file) written at bootstrap. IPC chat with an absolute folder runs on that profile, with no project runner and no shared busy flag. The host guarantees the chat folder is outside every task folder (PIDESKAPP-25). **[PO-8]**
+- **Local chat no longer borrows a project's runner.** Today a local chat turn runs on whichever project runner the daemon resolves, which fails once the daemon hosts two (PIDESKAPP-41), forces chat to enrol a project (PIDESKAPP-14), and blocks chat for the length of a run (PIDESKAPP-101). The daemon gets a machine-level engine profile (engine binary, engine home, model token from its engine credential) of its own. IPC chat with an absolute folder runs on that profile, with no project runner and no shared busy flag. The app guarantees the chat folder is outside every task folder (PIDESKAPP-25). **[PO-8]**
 - Server-routed chat to a runner that is busy with a run still answers `runner_busy`, because that chat shares the run's folder. The UI should say so. The server comment claiming the two run concurrently (`api/runner/views/chat.py:247-251`) is wrong and should be corrected.
 
-### 12.2 The user's own agent on a desktop machine
+### 12.2 The user's own agent on the computer
 
-- **Set-up:** the existing Add-runner modal already creates a runner remotely on a machine that is online for control (`add-runner-modal.tsx`, `MachineMsg::CreateRunner`, `runner/src/daemon/machine_control.rs:156-230`). On desktop, "Add runner" preselects this computer and offers a folder picker for the work dir. The user picks project, pod, agent and folder. There is no CLI install and no second sign-in.
+Own-agent runners are ordinary runners on the same daemon. Nothing about them depends on the app.
+
+- **Set-up from the app:** the existing Add-runner modal already creates a runner remotely on a machine that is online for control (`add-runner-modal.tsx`, `MachineMsg::CreateRunner`, `runner/src/daemon/machine_control.rs:156-230`). In the app, "Add runner" preselects this computer and offers a folder picker for the work dir. The user picks project, pod, agent and folder. If no daemon exists yet, the set-up in section 4.7 runs first.
+- **Set-up from the terminal:** `pidash runner add`, as today. Both paths write the same daemon's config, so the app, the TUI and the web all see the same runners.
 - **What this requires:**
+  - the daemon must find the user's agent binary. A service started by launchd or systemd does not get the user's shell `PATH` (notably on macOS), so the binary is resolved at creation and stored as an absolute path, with a doctor check. This is already a problem for CLI services and the fix serves both;
+  - adding a runner must not restart the daemon (section 5).
 
-  - the desktop starts the workspace daemon at sign-in even when no engine runner exists (the daemon already supports a machine with no runners, `runner/src/cli/run.rs:44`);
-  - the daemon must find the user's agent binary. A daemon started from a GUI app does not get the user's shell `PATH` (notably on macOS), so the host resolves the binary at creation and stores an absolute path, with a doctor check;
-  - sign-out must keep runner definitions and remove only credentials. Today sign-out deletes `config.toml` (`managed_runner.rs:579-610`), which is harmless only because engine runners can be rebuilt. Where the config lives is PIDESKAPP-42's layout decision; this requirement is an input to it.
-- **Coexistence with the engine:** same daemon, separate runners, separate work dirs (enforced by config validation), separate agent credentials. Own-agent runners keep today's dispatch behaviour.
-- **Trade-off:** own-agent runners on the desktop daemon are online only while the app is open. A user who needs an always-on runner installs the `pidash` service in a terminal as today, and gets a separate machine row.
-- **PIDESKAPP-114:** the unreachable `setUpCliForThisMachine` flow installs a second CLI and signs it in as a second machine, which is the opposite of the decision in section 4. It is not given a UI. PIDESKAPP-114 is rescoped to the Add-runner flow above. Installing the bundled CLI onto `PATH` can remain as a convenience for terminal use, without the sign-in step.
-- **Coexistence with a hand-installed service:** the two daemons already use separate config, data and socket locations (`runner/src/util/paths.rs:32-46`) and can run together. Neither validates work dirs against the other, so the desktop's folder validation cannot catch a folder the other daemon uses; the settings text says so.
+- **Coexistence with the engine:** same daemon, separate runners, separate work dirs (enforced by config validation across every runner on the computer), separate agent credentials. Own-agent runners keep today's dispatch behaviour.
+- **PIDESKAPP-114:** its `setUpCliForThisMachine` flow becomes the daemon set-up in section 4.7. It no longer creates a second machine. PIDESKAPP-114 is rescoped to giving that flow its UI.
 
 ## 13. Migration (point 11)
 
 **Server** (one release, deployed before the desktop build):
 
-| Item | On upgrade |
-| --- | --- |
-| Desktop machines | Kept. `device_key` backfilled from `host_label`. Hostname and `machine_key` filled at the next sign-in from a new build. Duplicates left by earlier data wipes stay as offline rows for the user to remove. |
-| Engine runners | Kept with the same ids, pods and work dirs. Renamed to the new scheme. `pod_dispatch = pinned_only`, so they take exactly what they took before. |
-| Never-used engine runners | Revoked when they have no run and no issue pins them, evaluated after the issue row below has set `assigned_runner`. This clears the rows created by opening projects (PIDESKAPP-118). |
-| Projects with default `managed_runner` | Set to `local_runner`. Engine runners in those projects are set to `pod_member`, so each person's own work still reaches their own desktop. Two differences. A person who also has an own-agent runner in the default pod will see it preferred. And the engine becomes a pod member without its owner turning that on, so the owner's issues in that project that are explicitly set to "Runner" can now overflow to the engine and spend the wallet when their own-agent runner is busy or offline. The desktop shows a one-time notice naming the projects, with the switch to turn pod work off. **[PO-11]** |
-| Issues with `agent_executor = managed_runner` | Set to `local_runner` with `assigned_runner` = the pinned runner of the issue's latest engine run, else the issue creator's most recently seen engine runner in the project, else none (pod-level). Difference: the issue now names one person's engine, so a different teammate's Run is refused with the offer to re-pin (section 7, PO-10), where today it ran on that teammate's own desktop. |
-| Queued runs pinned to an engine | Untouched apart from `pin_strict = true`. The matcher keeps serving legacy `managed_runner` runs to the runner they are pinned to, and the 12 h expiry still applies. |
-| Finished runs | Untouched. |
-| Settings | `MANAGED_RUNNER_MAX_PER_USER_PROJECT` removed. `MANAGED_RUNNER_QUEUED_MAX_AGE_SECS` kept. `MANAGED_RUNNER_MAX_MACHINES_PER_USER` added. |
-| Older desktop builds | Keep working through the compatibility rules in section 6. |
+| Item                                          | On upgrade                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Legacy desktop machines                       | Kept until the app on that computer merges them (desktop steps below). New builds never create one; `desktop-enroll` stays for older builds only. Legacy machines that are never merged stay as offline rows for the user to remove. **[PO-9]**                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Merge endpoint                                | New `POST /api/v1/runner/dev-machines/<legacy-id>/merge-into/` with the target machine id, called by the app with the user's session. It requires both machines to belong to the caller, the source to be a legacy desktop machine with no live session, and the target to be a live machine. In one transaction it moves every live runner of the source to the target, keeping ids, pods, pins and queued runs, then revokes the source's tokens and the source.                                                                                                                                                                                                 |
+| Daemon credentials                            | `MachineToken` gains an expiry (section 4.3). Existing tokens get 60 days from their last use, so a token in use keeps working.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Engine credentials                            | New model. None exist at upgrade; each daemon gets one at its next sign-in, `pidash login --engine`, or from the app (section 4.6). Until then its engine is shown as signed out.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Engine runners                                | Kept with the same ids, pods and work dirs. Renamed to the new scheme. `pod_dispatch = pinned_only`, so they take exactly what they took before.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Never-used engine runners                     | Revoked when they have no run and no issue pins them, evaluated after the issue row below has set `assigned_runner`. This clears the rows created by opening projects (PIDESKAPP-118).                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Projects with default `managed_runner`        | Set to `local_runner`. Engine runners in those projects are set to `pod_member`, so each person's own work still reaches their own computer. Two differences. A person who also has an own-agent runner in the default pod will see it preferred. And the engine becomes a pod member without its owner turning that on, so the owner's issues in that project that are explicitly set to "Runner" can now overflow to the engine and spend the wallet when their own-agent runner is busy or offline, now also while the app is closed. The app and `pidash status` show a one-time notice naming the projects, with the switch to turn pod work off. **[PO-11]** |
+| Issues with `agent_executor = managed_runner` | Set to `local_runner` with `assigned_runner` = the pinned runner of the issue's latest engine run, else the issue creator's most recently seen engine runner in the project, else none (pod-level). Difference: the issue now names one person's engine, so a different teammate's Run is refused with the offer to re-pin (section 7, PO-10), where today it ran on that teammate's own desktop.                                                                                                                                                                                                                                                                  |
+| Queued runs pinned to an engine               | Untouched apart from `pin_strict = true`. The matcher keeps serving legacy `managed_runner` runs to the runner they are pinned to, and the 12 h expiry still applies.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Finished runs                                 | Untouched.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Model token endpoints                         | The new `engine/model-token/` is added. The desktop-session `ai-assistant/agent-token/` stays for older builds only.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Settings                                      | `MANAGED_RUNNER_MAX_PER_USER_PROJECT` removed. `MANAGED_RUNNER_QUEUED_MAX_AGE_SECS` kept. `ENGINE_MODEL_TOKEN_PROVIDER` added.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Older desktop builds                          | Keep working through the compatibility rules in section 6, with their own child daemon and a legacy desktop machine, as today.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
-**Desktop:**
+**CLI installs** (existing CLI users): `pidash update` brings the engine. The engine is signed out until the next `pidash auth login` or `pidash login --engine`. `pidash auth login` offers to move the existing plaintext credentials into the keychain (`credentials_store = auto`).
 
-- `device-id` is kept; the hostname and `machine_key` are sent from the first sign-in.
-- Local `[[runner]]` blocks are kept, names refreshed from the server, work dirs unchanged.
-- Enrol-on-open stops. Blocks for revoked rows are removed by the reconcile step.
-- The daemon's engine profile for chat is written at the next bootstrap. Local chat history is untouched.
-- Whether existing task folders move under the account root is PIDESKAPP-42's decision; this design only requires that a runner's bound folder keeps resolving.
+**Desktop:** on the first launch of a new build, the app moves from its private daemon trees to the shared daemon. The old build's child daemon is not running at that point, because it exited with the old app.
+
+1. Find or set up the shared daemon (sections 4.4 to 4.8). If the daemon is signed in to another account, or the user declines both the service and the foreground fallback, stop here: the legacy machines stay offline and the steps are retried when that is resolved. The app never starts a legacy child daemon again.
+2. For each legacy tree `<app-data>/managed/pidash/<workspace>/`: make sure the daemon has a credential for that workspace (section 4.9), then call the merge endpoint from the legacy machine into the daemon's machine.
+3. For each engine runner block in that tree, send `EngineRunnerAdd` with the block's project and working dir. The server's reuse lookup returns the merged row, so the runner keeps its id, pods, pins and folder.
+4. Move the engine's home for the signed-in account (`managed/accounts/<account-key>/codex-home`, the engine's own transcripts) into the daemon's engine home for that account, so earlier local chats can be resumed. Homes of other accounts stay where they are.
+5. Delete the legacy tree's `config.toml` and credentials and `runtime/model.token`. Task folders stay where they are.
+
+Also: names are refreshed from the server (section 5); enrol-on-open stops; `managed/device-id` is no longer read and can be deleted after a successful merge; the app's local chat history is untouched. Whether task folders move under the PIDESKAPP-42 layout is that design's decision; this design only requires that a runner's bound folder keeps resolving.
 
 ## 14. What this replaces in `.ai_design/managed_runner/design.md`
 
-| Section | Status |
-| --- | --- |
-| §2.5 "Third executor kind" | Replaced by section 6. |
-| §5 Conceptual model | Replaced: the engine is a runner with a fixed agent, not a separate executor. The three user-facing rules stay, with "online while the app is open" unchanged. |
-| §7.1 `AgentExecutorKind` | `managed_runner` kept as a legacy value only. |
-| §7.2 `Runner.provisioning` | Kept, but set per runner rather than inherited from the machine. |
-| §7.3 check constraint | Stays. |
-| §8.2, §8.3 resolution and availability | Replaced: availability is per runner (online, paused, model profile), not per viewer and project. The reason codes stay. |
-| §8.4 "always pinned", excluded from pod matching | Replaced by section 7. |
-| §8.5 scheduled work and the waiting queue | Replaced by section 9. Queue, label and 12 h expiry stay. |
-| §8.6 choosing the executor from the desktop | Replaced by the runner picker. The rule that the desktop never changes a project's default stays. |
-| §9.3 step 3 (runner per project opened, client naming, cap) | Replaced by section 5. Steps 1, 2, 4, 5 and 6 stay. |
-| §9.4 work directory location | Location replaced by section 10 and PIDESKAPP-42. The Git-optional contract stays. |
-| §15 policy table | Matching, scheduled work, quota and registration rows replaced. Metering, support and trust rows stay. |
-| §16 configuration | Cap removed, machine limit added; the rest stays. |
-| §20 "Reuse `local_runner` for the bundled runner" (rejected) | Reversed. Its two objections are met by opt-in pod membership and the usage rule. |
-| §12 (model settings, BYOK), §13 (isolation), §14 (security) | Stay unchanged. |
+| Section                                                                 | Status                                                                                                                                                                                                                                                                                                                                                                                   |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| §2.5 "Third executor kind"                                              | Replaced by section 6.                                                                                                                                                                                                                                                                                                                                                                   |
+| §5 Conceptual model                                                     | Replaced: the engine is an agent of the CLI daemon with a fixed binary, not a separate executor. Rule 1 ("the bundled Codex is an implementation detail of the app") becomes "of Pi Dash": still never on `PATH`, never the user's Codex. Rule 2 (executor choice visible at the point of action) stays. Rule 3 ("online exactly while the desktop app is open") is dropped (section 9). |
+| §6 Architecture (the app runs its own daemon)                           | Replaced by section 4.                                                                                                                                                                                                                                                                                                                                                                   |
+| §7.1 `AgentExecutorKind`                                                | `managed_runner` kept as a legacy value only.                                                                                                                                                                                                                                                                                                                                            |
+| §7.2 `Runner.provisioning`                                              | Kept, set per runner from its agent rather than inherited from the machine. `desktop_bundled` now means "built-in engine runner".                                                                                                                                                                                                                                                        |
+| §7.3 check constraint                                                   | Stays.                                                                                                                                                                                                                                                                                                                                                                                   |
+| §8.2, §8.3 resolution and availability                                  | Replaced: availability is per runner (online, paused, engine credential, model profile), not per viewer and project. The reason codes stay.                                                                                                                                                                                                                                              |
+| §8.4 "always pinned", excluded from pod matching                        | Replaced by section 7.                                                                                                                                                                                                                                                                                                                                                                   |
+| §8.5 scheduled work and the waiting queue                               | Replaced by section 9. Queue, label and 12 h expiry stay.                                                                                                                                                                                                                                                                                                                                |
+| §8.6 choosing the executor from the desktop                             | Replaced by the runner picker. The rule that the desktop never changes a project's default stays.                                                                                                                                                                                                                                                                                        |
+| §9.1 bundle layout                                                      | The engine moves from the app bundle to the CLI release (section 4.5). The app carries a copy of the CLI release for offline set-up.                                                                                                                                                                                                                                                     |
+| §9.2 per-user data directory                                            | Retired. Engine home and task folders move under the daemon's data directory; the app keeps only its own chat history and settings.                                                                                                                                                                                                                                                      |
+| §9.3 enrollment sequence                                                | Replaced by sections 4.2, 4.6, 4.7 and 5.                                                                                                                                                                                                                                                                                                                                                |
+| §9.4 work directory location                                            | Location replaced by section 10 and PIDESKAPP-42. The Git-optional contract stays.                                                                                                                                                                                                                                                                                                       |
+| §9.5 lifecycle                                                          | Upgrade: the engine updates with the CLI. Sign-out: app and CLI sign out separately (section 4.6). Mid-run stop: as for any runner (section 9). Uninstalling the app leaves the daemon and engine.                                                                                                                                                                                       |
+| §12.1 `CODEX_HOME/config.toml` written by the desktop                   | Written by the daemon instead (section 5); contents unchanged.                                                                                                                                                                                                                                                                                                                           |
+| §12.2 LLM settings, BYOK                                                | Stays; the daemon fetches the model profile.                                                                                                                                                                                                                                                                                                                                             |
+| §12.3 per-spawn environment                                             | Stays.                                                                                                                                                                                                                                                                                                                                                                                   |
+| §13 rules 1 and 2 (bundled binaries off `PATH`, separate `CODEX_HOME`)  | Stay.                                                                                                                                                                                                                                                                                                                                                                                    |
+| §13.3 "engine is inert outside the app"                                 | Replaced by "the engine is inert without a Pi Dash sign-in": it has no credential of its own, gets model tokens only through the daemon's engine credential, holds them in memory only, and stops when the credential expires or is revoked. "Dead when the app is closed" is dropped.                                                                                                   |
+| §14.2 credentials on the laptop                                         | Replaced by section 4.3: two credentials, keychain where available, model tokens never on disk.                                                                                                                                                                                                                                                                                          |
+| §14.3 token delivery endpoint                                           | Replaced by `engine/model-token/` with the engine credential; the old endpoint stays for older builds.                                                                                                                                                                                                                                                                                   |
+| §15 policy table                                                        | Matching, scheduled work, quota and registration rows replaced. Metering, support and trust rows stay.                                                                                                                                                                                                                                                                                   |
+| §16 configuration                                                       | Cap removed, `ENGINE_MODEL_TOKEN_PROVIDER` added; the rest stays.                                                                                                                                                                                                                                                                                                                        |
+| §20 "Reuse `local_runner` for the bundled runner" (rejected)            | Reversed. Its two objections are met by opt-in pod membership and the usage rule.                                                                                                                                                                                                                                                                                                        |
+| §14.1, §14.4, §14.5 (trust boundary, run visibility, server validation) | Stay.                                                                                                                                                                                                                                                                                                                                                                                    |
 
-## 15. Choices left for the product owner
+## 15. Choices for the product owner
 
-| # | Choice | Recommended | Alternative |
-| --- | --- | --- | --- |
-| PO-1 | One machine per computer, own agent on the desktop daemon | Yes. Own-agent runners there are online only while the app is open. | Keep a separate always-on CLI install per computer and merge the two rows in the UI by a hardware-derived key. |
-| PO-2 | Fold `managed_runner` into "Runner" | Yes. | Keep the kind for pinned-only runs. |
-| PO-3 | Whose work an engine takes | Only runs the owner starts, plus automation on the owner's issues; teammates' clicks need an opt-in. | Same rule as ordinary runners (teammates can start runs on the owner's issues by default). |
-| PO-4 | Ranking in a pod | Ordinary runners first, engine as overflow. | Equal ranking. |
-| PO-5 | Run pinned to an offline engine, started by a person | Queue after a confirmation, expire at 12 h. | Refuse, as today. |
-| PO-6 | Changing the work dir with projects already set up | Existing projects keep their folder; switch per project or all at once; nothing is moved. | Switch every project at once on change. |
-| PO-7 | Limit on simultaneous engine runs per computer | None beyond one per project. | A per-machine limit in settings. |
-| PO-8 | Local chat on its own engine profile | Yes; resolves PIDESKAPP-41, -14 and -101 for local chat. | Keep borrowing a project runner and pass its name; -101 stays. |
-| PO-9 | Old duplicate desktop machines | Leave for the user to remove. | Auto-remove desktop machines not seen for 90 days. |
-| PO-10 | Run on an issue pinned to someone else's runner | Refuse at creation and offer "Run on my engine instead". | Run it on the caller's own engine in that project for that run, leaving the pin as it is (today's per-person behaviour). |
-| PO-11 | Projects whose default is the built-in engine today | Make their engines pod members on upgrade, with a one-time notice. Explicit "Runner" issues there may overflow to the engine. | Leave them `pinned_only`; unpinned work in those projects waits for an ordinary runner until each owner turns pod work on. |
+| #     | Choice                                                      | Recommended                                                                                                                                       | Alternative                                                                                                                |
+| ----- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| PO-1  | How the app and the CLI daemon relate                       | **Decided 2026-11-04:** independent peers, one daemon per computer (section 4).                                                                   | Rejected: the app's own child daemon beside the CLI's, or two daemons shown as one row.                                    |
+| PO-2  | Fold `managed_runner` into "Runner"                         | Yes.                                                                                                                                              | Keep the kind for pinned-only runs.                                                                                        |
+| PO-3  | Whose work an engine takes                                  | Only runs the owner starts, plus automation on the owner's issues; teammates' clicks need an opt-in.                                              | Same rule as ordinary runners (teammates can start runs on the owner's issues by default).                                 |
+| PO-4  | Ranking in a pod                                            | Ordinary runners first, engine as overflow.                                                                                                       | Equal ranking.                                                                                                             |
+| PO-5  | Run pinned to an offline engine, started by a person        | Queue after a confirmation, expire at 12 h.                                                                                                       | Refuse, as today.                                                                                                          |
+| PO-6  | Changing the work dir with projects already set up          | Existing projects keep their folder; switch per project or all at once; nothing is moved.                                                         | Switch every project at once on change.                                                                                    |
+| PO-7  | Limit on simultaneous engine runs per computer              | None beyond one per project.                                                                                                                      | A per-machine limit in settings.                                                                                           |
+| PO-8  | Local chat on its own engine profile                        | Yes; resolves PIDESKAPP-41, -14 and -101 for local chat.                                                                                          | Keep borrowing a project runner and pass its name; -101 stays.                                                             |
+| PO-9  | Legacy desktop machines that are never merged               | Leave for the user to remove.                                                                                                                     | Auto-remove legacy desktop machines not seen for 90 days.                                                                  |
+| PO-10 | Run on an issue pinned to someone else's runner             | Refuse at creation and offer "Run on my engine instead".                                                                                          | Run it on the caller's own engine in that project for that run, leaving the pin as it is (today's per-person behaviour).   |
+| PO-11 | Projects whose default is the built-in engine today         | Make their engines pod members on upgrade, with a one-time notice. Explicit "Runner" issues there may overflow to the engine.                     | Leave them `pinned_only`; unpinned work in those projects waits for an ordinary runner until each owner turns pod work on. |
+| PO-12 | The user declines the background service                    | The app runs the same daemon in the foreground while it is open (section 4.8).                                                                    | No daemon, and so no engine, without the service.                                                                          |
+| PO-13 | The daemon is signed in to a different account than the app | **Decided 2026-11-04:** refuse to cooperate in the first version; offer to switch either side (section 4.6).                                      | One daemon holding credentials for several accounts.                                                                       |
+| PO-14 | Engine online only while the app is connected (revision 2)  | **Withdrawn 2026-11-04** with the engine's move into the CLI (PO-15).                                                                             | —                                                                                                                          |
+| PO-15 | Where the engine lives                                      | **Decided 2026-11-04:** in the CLI; the daemon runs it with or without the app (sections 4.1, 4.5).                                               | Attached to the app (revision 2).                                                                                          |
+| PO-16 | How the app and CLI share a sign-in                         | **Decided 2026-11-04:** option A: the app's sign-in signs the CLI in; a CLI signed in first needs one browser sign-in in the app (section 4.6).   | Option B, a CLI sign-in also signing the app in (follow-up); option C, the app's interface using the daemon's credential.  |
+| PO-17 | Credentials                                                 | **Decided 2026-11-04:** one sign-in, two credentials: daemon 60 days, engine 14 days; `pidash login --engine` for the engine alone (section 4.3). | One shared credential.                                                                                                     |
+| PO-18 | Absolute or sliding lifetimes                               | Daemon credential: 60 days without use. Engine credential: 14 days fixed, renewed silently by a signed-in app.                                    | Both fixed from issue.                                                                                                     |
+| PO-19 | Where credentials are stored                                | **Decided 2026-11-04:** the OS keychain where available, 0600 file otherwise (`credentials_store = auto`) (section 4.3).                          | File only, as today.                                                                                                       |
+| PO-20 | Engine in every CLI release archive                         | Yes; one install is enough.                                                                                                                       | Download it on first use.                                                                                                  |
+| PO-21 | Spending limit for unattended engine use                    | None beyond the wallet in the first version; per-machine daily limit as a follow-up.                                                              | A daily limit per machine from the start.                                                                                  |
 
 ## 16. Implementation epics
 
-| Epic | Verdict | Scope after this design |
-| --- | --- | --- |
-| PIDESKAPP-122 identity and enrolment | Confirmed, widened | Sections 4, 5 and the machine and runner rows of 13: `device_key`, `machine_key` adoption, hostname and rename, per-machine-project uniqueness, cap removal, server naming, per-runner provisioning, enrol on use, reconcile and remove, local limit pre-check. |
-| PIDESKAPP-123 dispatch | Confirmed, widened | Sections 6 to 9 and the rest of 13: `assigned_runner`, `pin_strict`, `pod_dispatch`, `dispatch_paused`, matcher and ranking, usage rule, tick and scheduler paths, expiry sweep, executor migration and compatibility for old builds. |
-| PIDESKAPP-124 default work dir | Confirmed | Section 10. Also delivers the first desktop settings page and the folder picker. Needs PIDESKAPP-42's default root and layout before its default can be final. |
-| PIDESKAPP-125 show and manage | Narrowed | Section 11 only: lists, machine page, pickers, pod UI, run labels, the waiting label. Chat and own-agent set-up move out. |
-| New: chat routing on desktop | Added | Section 12.1: routing transport, nav de-duplication, daemon engine profile for local chat. Absorbs PIDESKAPP-62 and PIDESKAPP-41. |
-| New: own agent on the desktop daemon | Added | Section 12.2: daemon at sign-in, Add-runner on this computer, agent binary resolution, runner definitions surviving sign-out. Absorbs PIDESKAPP-114. |
+| Epic                                                | Verdict            | Scope after this design                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| --------------------------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| New: engine in the CLI                              | Added              | Sections 4.2, 4.3, 4.5 and the engine parts of 5. CLI release with `pidash-agent-engine`; `AgentKind::Engine`; engine config, model profile and `CODEX_HOME` written by the daemon; engine credential model, issue on login, `pidash login --engine`, `logout --engine`, `auth status`; credential lifetimes; `engine/model-token/` with the pluggable provider (cloud provider in private-pi-dash); model tokens in memory and `pidash __engine model-token`; keychain storage with `credentials_store`; `pidash engine pause`.                    |
+| PIDESKAPP-122 shared daemon, identity and enrolment | Confirmed, widened | Sections 4.4, 4.7 to 4.10, the rest of 5, and the machine and runner rows of 13. Daemon: `Hello`, `EngineRunnerAdd`/`Remove`/`SetWorkingDir`, adding and removing a runner without a restart, one credential per workspace, reconcile. App: discovery and compatibility, set-up with consent (absorbs PIDESKAPP-114), foreground fallback, sign-in option A, account mismatch. Server: per-machine-project uniqueness, cap removal, server naming, per-runner provisioning, machine rename, merge endpoint. Migration from the app's private trees. |
+| PIDESKAPP-123 dispatch                              | Confirmed, widened | Sections 6 to 9 and the rest of 13: `assigned_runner`, `pin_strict`, `pod_dispatch`, `dispatch_paused` with reasons, matcher and ranking, usage rule, tick and scheduler paths, expiry sweep, executor migration and compatibility for old builds.                                                                                                                                                                                                                                                                                                  |
+| PIDESKAPP-124 default work dir                      | Confirmed          | Section 10. The setting is now the daemon's; the app's settings page and folder picker still come with it. Needs PIDESKAPP-42's default root and layout before its default can be final.                                                                                                                                                                                                                                                                                                                                                            |
+| PIDESKAPP-125 show and manage                       | Narrowed           | Section 11: lists, machine page, pickers, pod UI, run labels, the waiting and engine-state labels, CLI listings. Chat and own-agent set-up move out.                                                                                                                                                                                                                                                                                                                                                                                                |
+| New: chat routing on desktop                        | Added              | Section 12.1: routing transport, nav de-duplication, the daemon's engine profile for local chat. Absorbs PIDESKAPP-62 and PIDESKAPP-41.                                                                                                                                                                                                                                                                                                                                                                                                             |
+| New: own agent from the app                         | Added              | Section 12.2: Add-runner on this computer from the app, folder picker, agent binary resolution for services.                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Later: CLI sign-in signs in the app                 | Follow-up          | Option B of PO-16: a one-time web sign-in grant the daemon obtains and hands to the app over the socket. Needs its own security review.                                                                                                                                                                                                                                                                                                                                                                                                             |
 
-Order: 122 first. Then 123, 124, chat routing and own-agent in parallel. 125 last among them, because it shows fields 122 and 123 add. The two new epics are not filed yet; they are filed with the sub-issue split once this design is approved.
+Order: "engine in the CLI" and the daemon parts of 122 (multi-workspace credentials, runtime add and remove, `Hello`) first, in parallel, because everything else runs on them. Then the app parts of 122, 123, 124, chat routing and own-agent in parallel. 125 last among them, because it shows fields the others add. The new epics are filed with the sub-issue split once this design is approved.
 
 What remains of the three linked bugs once the feature is built:
 
 - **PIDESKAPP-62:** nothing separate. Its fix is the routing transport in the chat epic. Re-verify there and close.
 - **PIDESKAPP-96:** resolved by 122. Its request for a way to release a computer no longer in use is met by "Remove this computer". Close after the two-computer scenario passes.
-- **PIDESKAPP-118:** resolved by 122 (enrol on use, removal, pre-check, pruning of unused rows). What remains is the hard limit of 50 projects per computer and workspace, which now fails cleanly before anything is registered.
+- **PIDESKAPP-118:** resolved by 122 (enrol on use, removal, pre-check, pruning of unused rows). What remains is the hard limit of 50 runners per computer, shared by engine and own-agent runners across workspaces, which fails cleanly before anything is registered.
 
-Also affected: PIDESKAPP-53 (resolved by server naming), PIDESKAPP-108 (covered by machine removal in 125), PIDESKAPP-14 and PIDESKAPP-101 (resolved for local chat if PO-8 is accepted).
+Also affected: PIDESKAPP-53 (resolved by server naming), PIDESKAPP-108 (covered by machine removal in 125), PIDESKAPP-14 and PIDESKAPP-101 (resolved for local chat if PO-8 is accepted), PIDESKAPP-114 (rescoped to the set-up flow in 122).
 
 ## 17. To confirm during implementation
 
 These were read but not exercised, and should be checked first in the relevant epic:
 
-- that the desktop daemon's config qualifies for machine control, so remote runner creation works against it (`supports_machine_control`, `runner/src/cli/run.rs:44`);
-- whether a running runner picks up a changed working dir without a daemon restart (the design assumes a restart);
-- the OpenHub wallet and token code lives in private-pi-dash and was not read; the pause-on-empty-wallet signal in section 8 depends on what it exposes.
+- that machine control's `CreateRunner` (`runner/src/daemon/machine_control.rs:156-230`) adds a runner to a live daemon without restarting it, and what it takes to do the same for removal and a working-dir change (sections 5 and 10);
+- the one-session rule with several workspaces on one machine: whether a machine session can carry several workspace credentials, or the constraint becomes per machine and workspace (section 4.9);
+- that the CLI's single workspace binding (`runner/src/config/schema.rs:41-48`) is the only place that assumes one workspace per install;
+- keychain access from a background service on each OS: the login keychain from a launchd agent, and whether macOS asks again after `pidash` is updated (keychain access is tied to the binary's signature, so unsigned or re-signed builds may prompt); the Secret Service from a systemd user service, locked or absent on headless machines; Windows Credential Manager from what `runner/src/service/windows.rs` installs;
+- the OpenHub gateway token's lifetime, and whether a long run can outlive one token (`managed_runner/design.md` §24.4); the provider hook in private-pi-dash depends on what OpenHub exposes, which was not read;
+- the CLI release size with the engine, per platform, and what the Homebrew formula and the shell installer need for a non-`PATH` `lib/` directory;
+- service install on each OS from a GUI app: launchd agent approval on macOS, systemd user units where lingering is off.
 
 This document lives at `.ai_design/built_engine_as_runner/design.md`. Once it is approved, `managed_runner/design.md` should be marked with the pointers in section 14.
