@@ -1380,7 +1380,7 @@ async fn state_create(
     let default = input.default.expect("validated default");
     let now = utc_now_micros();
     let insert = pidash_services::domain::projects::states::create(
-        &pool,
+        &pidash_db::pool::sea_orm_connection(&pool),
         &pidash_services::domain::projects::states::NewState {
             project_id,
             workspace_id,
@@ -1397,7 +1397,6 @@ async fn state_create(
             created_by: actor.id,
             updated_by: None,
             now,
-            v1: false,
         },
     )
     .await;
@@ -1482,7 +1481,8 @@ async fn state_partial_update(
         updated_at: now,
         updated_by: actor.id,
     };
-    let update = project_states::update(&pool, pk, &patch).await;
+    let update =
+        project_states::update(&pidash_db::pool::sea_orm_connection(&pool), pk, &patch).await;
     if let Err(error) = update {
         if let sqlx::Error::Database(db_error) = &error {
             if db_error.code().as_deref() == Some("23505") {
@@ -1541,12 +1541,21 @@ async fn state_mark_default(
     // Plain `.update()`s: no `updated_at`/`updated_by` touch (queryset
     // updates bypass `save()`).
     use pidash_services::domain::projects::states as project_states;
-    project_states::clear_defaults(&pool, &slug, project_id)
-        .await
-        .map_err(db_denial)?;
-    project_states::mark_default(&pool, &slug, project_id, pk)
-        .await
-        .map_err(db_denial)?;
+    project_states::clear_defaults(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        &slug,
+        project_id,
+    )
+    .await
+    .map_err(db_denial)?;
+    project_states::mark_default(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        &slug,
+        project_id,
+        pk,
+    )
+    .await
+    .map_err(db_denial)?;
     Ok(no_content())
 }
 
@@ -1616,9 +1625,14 @@ async fn state_destroy(
     // stamps `updated_at`/`updated_by`) + the `soft_delete_related_objects`
     // publish.
     let now = utc_now_micros();
-    pidash_services::domain::projects::states::soft_delete_app(&pool, pk, now, actor.id)
-        .await
-        .map_err(db_denial)?;
+    pidash_services::domain::projects::states::soft_delete_app(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        pk,
+        now,
+        actor.id,
+    )
+    .await
+    .map_err(db_denial)?;
     enqueue_soft_delete(&pool, "state", &pk).await;
     Ok(no_content())
 }

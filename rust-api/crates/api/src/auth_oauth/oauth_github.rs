@@ -1498,7 +1498,7 @@ async fn process_invitations(
         let prefs = serde_json::json!({"pages": {"block_display": true},
                     "navigation": {"default_tab": "work_items", "hide_in_more_menu": []}});
         pidash_services::domain::projects::members::add(
-            pool,
+            &pidash_db::pool::sea_orm_connection(pool),
             &pidash_services::domain::projects::members::NewProjectMember {
                 workspace_id: *workspace_id,
                 project_id: Some(*project_id),

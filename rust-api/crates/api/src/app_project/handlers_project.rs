@@ -2742,7 +2742,7 @@ fn validate_str_choice(value: &Value, choices: &[&str]) -> Result<String, String
 /// DRF `ChoiceField` over `NETWORK_CHOICES` (`0`/`2`): same `str()`
 /// coercion — `0`, `2`, `"0"`, `"2"` pass; `True`/`2.0`/dicts fail with
 /// the `str()` rendering.
-fn validate_network(value: &Value) -> Result<i32, String> {
+fn validate_network(value: &Value) -> Result<i16, String> {
     if value.is_null() {
         return Err("This field may not be null.".to_owned());
     }
@@ -3714,7 +3714,7 @@ struct Validated {
     description: Option<String>,
     description_text: Option<Option<Value>>,
     description_html: Option<Option<Value>>,
-    network: Option<i32>,
+    network: Option<i16>,
     identifier: Option<String>,
     default_assignee: Option<Option<uuid::Uuid>>,
     project_lead: Option<Option<uuid::Uuid>>,
@@ -4761,7 +4761,6 @@ async fn insert_project(
             created_by: *actor_id,
             created_at: now,
             updated_at: now,
-            v1: false,
         },
     )
     .await
@@ -4836,7 +4835,7 @@ async fn insert_member(
     let sort_order = pidash_db::app_project::models::project_member::sort_order_on_create(min);
     use pidash_services::domain::projects::members as project_members;
     project_members::add_property(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &project_members::NewMemberProperty {
             workspace_id: *workspace_id,
             project_id: *project_id,
@@ -4857,7 +4856,7 @@ async fn insert_member(
     let view = pidash_db::app_project::models::project_member::default_props();
     let prefs = pidash_db::app_project::models::project_member::default_preferences();
     project_members::add(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &project_members::NewProjectMember {
             workspace_id: *workspace_id,
             project_id: Some(*project_id),
@@ -4893,7 +4892,7 @@ async fn insert_default_states(
     use pidash_services::domain::projects::states as project_states;
     for &(name, color, sequence, group, default) in DEFAULT_STATES.iter() {
         project_states::add_default(
-            pool,
+            &pidash_db::pool::sea_orm_connection(pool),
             &project_states::NewDefaultState {
                 project_id: *project_id,
                 workspace_id: *workspace_id,
@@ -4904,7 +4903,6 @@ async fn insert_default_states(
                 default,
                 created_by: *actor_id,
                 now,
-                v1: false,
             },
         )
         .await
@@ -4949,9 +4947,13 @@ async fn apply_update(
             .map_err(|_| Denial::ValidationFailed)?;
     }
     if new_default {
-        domain_projects::clear_other_defaults(&mut *tx, instance.workspace_id, instance.id)
-            .await
-            .map_err(db_denial)?;
+        domain_projects::clear_other_defaults(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            instance.workspace_id,
+            instance.id,
+        )
+        .await
+        .map_err(db_denial)?;
     }
     let identifier = match validated.identifier.as_deref() {
         Some(raw) => m::normalize_identifier(raw),
@@ -4993,7 +4995,7 @@ async fn apply_update(
             .description_html
             .as_ref()
             .map_or(instance.description_html.as_ref(), |v| v.as_ref()),
-        network: validated.network.unwrap_or(instance.network as i32),
+        network: validated.network.unwrap_or(instance.network),
         identifier: &identifier,
         default_assignee: validated
             .default_assignee
@@ -5076,7 +5078,7 @@ async fn apply_update(
         // it; `save()` overwrites only `updated_by` — `models/base.py`).
         created_by: validated.created_by.unwrap_or(instance.created_by_id),
     };
-    domain_projects::apply_update(&mut *tx, instance.id, &upd)
+    domain_projects::apply_update(&pidash_db::orm_tx::TxConn::new(&mut tx), instance.id, &upd)
         .await
         .map_err(db_denial)?;
     tx.commit().await.map_err(|_| Denial::ServerError)?;
@@ -6368,9 +6370,14 @@ async fn project_destroy(
     }
     let now = utc_now_micros();
     // `project.delete()`: stamps + its `soft_delete_related_objects` emit.
-    pidash_services::domain::projects::soft_delete(&pool, project_id, now, actor.id)
-        .await
-        .map_err(db_denial)?;
+    pidash_services::domain::projects::soft_delete(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        project_id,
+        now,
+        actor.id,
+    )
+    .await
+    .map_err(db_denial)?;
     enqueue_message(&pool, soft_delete_message(&project_id)).await;
     let origin = request_origin(&state)?;
     enqueue_message(
@@ -6448,9 +6455,14 @@ async fn archive_post(
         .map_err(orm_denial)?;
     row.ok_or(Denial::ObjectNotFound)?;
     let now = utc_now_micros();
-    pidash_services::domain::projects::archive(&pool, project_id, now, actor.id)
-        .await
-        .map_err(db_denial)?;
+    pidash_services::domain::projects::archive(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        project_id,
+        now,
+        actor.id,
+    )
+    .await
+    .map_err(db_denial)?;
     let db = sea_conn(&pool);
     let now_ts: sea_orm::prelude::DateTimeWithTimeZone = now.into();
     let workspace_ids = ws_entity::Entity::find()
@@ -6509,9 +6521,14 @@ async fn unarchive_delete(
         .map_err(orm_denial)?;
     row.ok_or(Denial::ObjectNotFound)?;
     let now = utc_now_micros();
-    pidash_services::domain::projects::unarchive(&pool, project_id, now, actor.id)
-        .await
-        .map_err(db_denial)?;
+    pidash_services::domain::projects::unarchive(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        project_id,
+        now,
+        actor.id,
+    )
+    .await
+    .map_err(db_denial)?;
     Ok(no_content())
 }
 
@@ -6719,7 +6736,7 @@ async fn user_views_post(
     }
     let now = utc_now_micros();
     pidash_services::domain::projects::members::reset_props(
-        &pool,
+        &pidash_db::pool::sea_orm_connection(&pool),
         member_id,
         &view_props,
         &default_props,

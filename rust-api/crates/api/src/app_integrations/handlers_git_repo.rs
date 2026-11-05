@@ -2039,9 +2039,14 @@ async fn bind_transaction(
         updates.push((ProjectTextField::BaseBranch, remote.default_branch.clone()));
     }
     for (field, value) in updates {
-        pidash_services::domain::projects::stamp_text_field(&mut *tx, field, &value, *project_id)
-            .await
-            .map_err(|_| RepoDenial::ServerError)?;
+        pidash_services::domain::projects::stamp_text_field(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            field,
+            &value,
+            *project_id,
+        )
+        .await
+        .map_err(|_| RepoDenial::ServerError)?;
     }
     tx.commit().await.map_err(|_| RepoDenial::ServerError)?;
     queries_git::fetch_binding_for_project(

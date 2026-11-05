@@ -1577,7 +1577,7 @@ impl SeedStore for PgSeedStore {
         let view_props = project_default_props();
         let preferences = default_preferences();
         add_seed(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &SeedProjectMember {
                 project_id,
                 workspace_id,
@@ -1639,7 +1639,7 @@ impl SeedStore for PgSeedStore {
         use pidash_services::domain::projects::states::{add_seed, SeedState};
         let actor = ctx_actor(ctx)?;
         add_seed(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &SeedState {
                 workspace_id,
                 project_id,

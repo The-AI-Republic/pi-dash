@@ -3140,9 +3140,10 @@ pub async fn me_deactivate(
             );
         }
     }
-    if let Err(denial) = project_members::deactivate_many(pool, &project_ids)
-        .await
-        .map_err(|_| Denial::ServerError)
+    if let Err(denial) =
+        project_members::deactivate_many(&pidash_db::pool::sea_orm_connection(pool), &project_ids)
+            .await
+            .map_err(|_| Denial::ServerError)
     {
         return denial.into_response();
     }

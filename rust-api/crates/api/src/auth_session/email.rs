@@ -905,7 +905,7 @@ async fn insert_project_arm_project_members(
         })
         .collect();
     pidash_services::domain::projects::members::bulk_add(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &bulk,
         &default_props,
         &preferences,
