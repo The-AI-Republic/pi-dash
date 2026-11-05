@@ -1275,6 +1275,29 @@ where
 
 const V1_COMMENT_SOFT_DELETE_SQL: &str = "UPDATE \"issue_comments\" SET \"deleted_at\" = $1, \"updated_at\" = $2, \"updated_by_id\" = $3 WHERE \"id\" = $4";
 
+/// `SoftDeleteModel.delete()` on the app comment destroy
+/// (`app/views/issue/comment.py:170-172`, `db/mixins.py:72-77`): one
+/// clock read stamps `deleted_at` and the full-save `updated_at`, CRUM
+/// stamps `updated_by`. Keyed by pk alone (the scoped `.get()` already
+/// found the live row), through SeaORM on any connection.
+pub async fn soft_delete_app_comment(
+    db: &impl ConnectionTrait,
+    id: Uuid,
+    actor: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sea_orm::DbErr> {
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    issue_comments::Entity::update_many()
+        .col_expr(issue_comments::Column::DeletedAt, Expr::value(now))
+        .col_expr(issue_comments::Column::UpdatedAt, Expr::value(now))
+        .col_expr(issue_comments::Column::UpdatedById, Expr::value(actor))
+        .filter(issue_comments::Column::Id.eq(id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
 /// Columns of the copy `INSERT`, in bind order.
 const DESCRIPTION_INSERT_COLUMNS: &str = "(id, created_at, updated_at, \
     description_json, description_html, description_stripped, project_id, \
