@@ -275,6 +275,12 @@ pub fn install_from_extracted(
     versions.sort();
 
     std::fs::create_dir_all(root)?;
+    // Serialize the check-remove-rename below across installers. Without it,
+    // one installer can see `dest` without its binary, another completes the
+    // install, and the first then removes that complete install (or, on
+    // Windows, leaves a directory with no binary). Staging and download stay
+    // outside the lock; only this short move step is serialized.
+    let _lock = lock_install_root(root)?;
     for (name, src) in versions {
         let dest = root.join(&name);
         if dest.join(binary_name).is_file() {
@@ -304,6 +310,27 @@ pub fn install_from_extracted(
         }
     }
     Ok(outcome)
+}
+
+/// Name of the lock file in the engine root. A file, and not a version name,
+/// so the locator and the old-version cleanup never treat it as an engine.
+pub const INSTALL_LOCK_FILE: &str = ".install.lock";
+
+/// Hold an exclusive lock on `root/.install.lock` until the returned file is
+/// dropped. Blocking: call from a blocking context.
+fn lock_install_root(root: &Path) -> Result<std::fs::File> {
+    use fs2::FileExt;
+    let path = root.join(INSTALL_LOCK_FILE);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("opening engine install lock {}", path.display()))?;
+    file.lock_exclusive()
+        .with_context(|| format!("locking engine install lock {}", path.display()))?;
+    Ok(file)
 }
 
 /// Rename a staged version directory to `dest`. `Ok(true)` when this call
@@ -633,6 +660,59 @@ mod tests {
     }
 
     #[test]
+    fn the_move_step_waits_for_another_installer_holding_the_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("engine");
+        fs::create_dir_all(root.join("0.153.4")).unwrap();
+        fs::write(root.join("0.153.4/LICENSE"), b"partial").unwrap();
+        let extracted = root.join(".staging-a/x");
+        stage_archive_tree(&extracted, "0.153.4", false);
+
+        // Another installer is mid-move: it holds the lock and is about to
+        // complete 0.153.4.
+        let held = lock_install_root(&root).unwrap();
+        let (r, e) = (root.clone(), extracted.clone());
+        let waiter = std::thread::spawn(move || install_from_extracted(&e, &r, false));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            fs::read(root.join("0.153.4/LICENSE")).unwrap(),
+            b"partial",
+            "the waiting installer must not touch the version dir while the lock is held"
+        );
+        fs::write(root.join("0.153.4/pidash-agent-engine"), b"winner").unwrap();
+        drop(held);
+
+        let outcome = waiter.join().unwrap().unwrap();
+        assert_eq!(outcome.already_present, vec!["0.153.4".to_string()]);
+        assert_eq!(
+            fs::read(root.join("0.153.4/pidash-agent-engine")).unwrap(),
+            b"winner"
+        );
+    }
+
+    #[test]
+    fn racing_installers_over_an_incomplete_dir_all_succeed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("engine");
+        fs::create_dir_all(root.join("0.153.4")).unwrap();
+        fs::write(root.join("0.153.4/LICENSE"), b"partial").unwrap();
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let extracted = root.join(format!(".staging-{i}/x"));
+                stage_archive_tree(&extracted, "0.153.4", false);
+                let root = root.clone();
+                std::thread::spawn(move || install_from_extracted(&extracted, &root, false))
+            })
+            .collect();
+        let mut installed = 0;
+        for h in handles {
+            installed += h.join().unwrap().unwrap().installed.len();
+        }
+        assert_eq!(installed, 1, "exactly one installer moves the version in");
+        assert!(root.join("0.153.4/pidash-agent-engine").is_file());
+    }
+
+    #[test]
     fn an_archive_without_an_engine_is_an_error() {
         let tmp = tempfile::tempdir().unwrap();
         let extracted = tmp.path().join("x/pidash-x86_64-unknown-linux-gnu");
@@ -770,12 +850,17 @@ mod tests {
             .unwrap();
         assert_eq!(outcome.installed, vec!["0.153.4".to_string()]);
         assert!(root.join("0.153.4/pidash-agent-engine").is_file());
-        // Staging is cleaned up; only the version directory remains.
-        let names: Vec<_> = fs::read_dir(&root)
+        // Staging is cleaned up; only the version directory (and the
+        // install lock file) remain.
+        let mut names: Vec<_> = fs::read_dir(&root)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
-        assert_eq!(names, vec!["0.153.4".to_string()]);
+        names.sort();
+        assert_eq!(
+            names,
+            vec![INSTALL_LOCK_FILE.to_string(), "0.153.4".to_string()]
+        );
     }
 
     #[cfg(unix)]
