@@ -1205,20 +1205,6 @@ async fn session(
     ))
 }
 
-/// Client IP (`ip_address.py:get_client_ip`): first `X-Forwarded-For`
-/// entry, else the peer address — which axum handlers do not see without
-/// `ConnectInfo`, so absent means empty (sign-out is untested; the shape
-/// of the stamp matters, not the value).
-fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|forwarded| forwarded.split(',').next())
-        .map(str::trim)
-        .unwrap_or("")
-        .to_owned()
-}
-
 /// Safe sign-out target (`host.py:base_host` with `is_admin=True` through
 /// `path_validator.py:get_safe_redirect_url` with an empty next path):
 /// `(ADMIN_BASE_URL or (WEB_URL or APP_BASE_URL)) + ADMIN_BASE_PATH`,
@@ -1253,13 +1239,25 @@ fn sign_out_redirect(
 async fn sign_out(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
+    req: Request,
 ) -> Result<Response, Denial> {
+    let (parts, body) = req.into_parts();
+    let headers = &parts.headers;
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return Ok(response),
+    };
+    // `ConnectInfo` peer for the `get_client_ip` fallback (NEWPIDASH-42):
+    // without it a direct sign-out stamped `last_logout_ip = ''` where
+    // Django stamps `REMOTE_ADDR`.
+    let peer = parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip().to_string());
     // `CsrfViewMiddleware` runs before the view body: a token-less POST
     // never reaches `admin.py:385`.
-    let pairs = form_pairs(content_type_of(&headers), &body);
-    if csrf_gate(&headers, &pairs).is_err() {
+    let pairs = form_pairs(content_type_of(headers), &body);
+    if csrf_gate(headers, &pairs).is_err() {
         return Ok(csrf_failure_response(render_csrf_failure(
             &failure_root_url(&state),
         )));
@@ -1281,8 +1279,9 @@ async fn sign_out(
             .await?
             .ok_or(Denial::ServerError)?;
         let now = Utc::now();
-        let ip = client_ip(&headers);
-        identity::stamp_logout(pool, actor, Some(ip.as_str()), now)
+        let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
+        let ip = forms::client_ip(forwarded, peer.as_deref());
+        identity::stamp_logout(pool, actor, ip.as_deref(), now)
             .await
             .map_err(|_| Denial::ServerError)?;
         // `logout()`: `Session.flush()` drops the presented row (this
@@ -2416,17 +2415,6 @@ mod tests {
         );
         // No base anywhere: Python raises `TypeError` out of the view (500).
         assert!(sign_out_redirect(None, Some(""), None, "/god-mode/").is_err());
-    }
-
-    #[test]
-    fn client_ip_prefers_first_forwarded_entry() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-forwarded-for",
-            "203.0.113.7, 70.41.3.18".parse().unwrap(),
-        );
-        assert_eq!(client_ip(&headers), "203.0.113.7");
-        assert_eq!(client_ip(&HeaderMap::new()), "");
     }
 
     #[test]
