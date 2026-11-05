@@ -2165,3 +2165,66 @@ async fn issue_patch_add_and_remove_share_one_label_lookup() {
     assert_eq!(label_gets, 1, "add + remove must share one label lookup");
     assert_eq!(recorded.len(), 3, "expected issue GET, labels GET, PATCH");
 }
+
+// ---- `pidash state list` target resolution ---------------------------------
+
+const PROJECTS_BODY: &str = r#"{"results":[
+    {"id":"00000000-0000-0000-0000-0000000000p1","identifier":"ENG","name":"Engineering"},
+    {"id":"00000000-0000-0000-0000-0000000000p2","identifier":"OPS","name":"Ops"}
+]}"#;
+
+fn state_list_fake_handler(req: &RecordedRequest) -> CannedResponse {
+    if req.path == "/api/v1/workspaces/acme/projects/" {
+        CannedResponse::ok(PROJECTS_BODY)
+    } else if req.path == "/api/v1/workspaces/acme/work-items/OPS-7/" {
+        CannedResponse::ok(r#"{"id":"i7","project":"00000000-0000-0000-0000-0000000000p2"}"#)
+    } else {
+        CannedResponse {
+            status: 404,
+            status_text: "Not Found",
+            body: r#"{"error":"Page not found."}"#.into(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn state_list_resolves_project_key() {
+    let fake = start_fake(Box::new(state_list_fake_handler)).await;
+    let id = pidash::cli::state::resolve_state_list_project(&client(&fake), "eng")
+        .await
+        .expect("project key resolves");
+    assert_eq!(id, "00000000-0000-0000-0000-0000000000p1");
+}
+
+#[tokio::test]
+async fn state_list_passes_project_uuid_through() {
+    let fake = start_fake(Box::new(state_list_fake_handler)).await;
+    let uuid = "0f0e0d0c-0b0a-0908-0706-050403020100";
+    let id = pidash::cli::state::resolve_state_list_project(&client(&fake), uuid)
+        .await
+        .expect("uuid accepted");
+    assert_eq!(id, uuid);
+    assert!(
+        fake.recorded.lock().unwrap().is_empty(),
+        "no lookup for a UUID"
+    );
+}
+
+#[tokio::test]
+async fn state_list_resolves_issue_identifier() {
+    let fake = start_fake(Box::new(state_list_fake_handler)).await;
+    let id = pidash::cli::state::resolve_state_list_project(&client(&fake), "OPS-7")
+        .await
+        .expect("issue identifier resolves");
+    assert_eq!(id, "00000000-0000-0000-0000-0000000000p2");
+}
+
+#[tokio::test]
+async fn state_list_unknown_project_key_is_a_clear_error() {
+    let fake = start_fake(Box::new(state_list_fake_handler)).await;
+    let err = pidash::cli::state::resolve_state_list_project(&client(&fake), "NOPE")
+        .await
+        .expect_err("unknown key");
+    assert_eq!(err.exit_code, EXIT_NOT_FOUND);
+    assert_eq!(err.message, "no project with identifier \"NOPE\"");
+}
