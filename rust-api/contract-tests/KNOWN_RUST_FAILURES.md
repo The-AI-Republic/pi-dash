@@ -25,5 +25,3 @@ Rules:
 - This list must be empty for PIDASHCONV-821 to be Done.
 
 ## Suites
-
-- `v1_openapi`: NEWPIDASH-34 — test_routes_golden.py: Rust OpenAPI document omits the v1 scheduler write routes (main 730ea8d28, 7d64d46ad)

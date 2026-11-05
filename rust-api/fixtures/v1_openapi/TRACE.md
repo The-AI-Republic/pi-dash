@@ -44,7 +44,7 @@ djangorestframework 3.15.2, Django 4.2.30.
   Notes: the `PUT` exclusion is case-insensitive (`method.upper()`); the
   `server` substring clause is over-broad by construction (`observer`
   contains `server`) but currently drops nothing beyond the prefix rule —
-  no served `/api/v1/` route contains `server` (assistant mcp-servers/*
+  no served `/api/v1/` route contains `server` (assistant mcp-servers/\*
   live under `/api/`; zero `server` paths in the golden route map).
 
 ## FX-OPENAPI-03 annotation-vocab inventory
@@ -64,20 +64,20 @@ djangorestframework 3.15.2, Django 4.2.30.
   re-exported in `__init__.py`; imported directly by
   `api/views/sticky.py`), `__init__.py:17-367` (159-name `__all__`
   surface; defined-but-not-exported is exactly the 16 `SAMPLE_*` dicts
-  + `SCHEMA_EXAMPLES` (module-internal sample data, `examples.py` only)
-  plus `sticky_docs` (imported directly by `api/views/sticky.py`) and
-  `postprocess_project_id_dual_form` (wired by dotted path in
-  `settings/openapi.py:44`).
-  Method: AST parse for exact definition line spans + runtime
-  introspection of the live objects (Django configured, no DB);
-  decorator defaults captured by running each factory with
-  `extend_schema` patched in-module; merge/get_sample/paginated helpers
-  executed over recorded vectors.
-  Reading notes recorded in-file: decorator tag names outside the 14
-  settings tags (`Workspaces`, `Stickies`, `Estimates`, `Estimate
-  Points`, `Pages`, `Work Item Relations`); `utils/openapi/README.md` is
-  stale (names `APITokenAuthenticationExtension` and
-  `postprocess_assign_tags`, neither exists).
+  - `SCHEMA_EXAMPLES` (module-internal sample data, `examples.py` only)
+    plus `sticky_docs` (imported directly by `api/views/sticky.py`) and
+    `postprocess_project_id_dual_form` (wired by dotted path in
+    `settings/openapi.py:44`).
+    Method: AST parse for exact definition line spans + runtime
+    introspection of the live objects (Django configured, no DB);
+    decorator defaults captured by running each factory with
+    `extend_schema` patched in-module; merge/get_sample/paginated helpers
+    executed over recorded vectors.
+    Reading notes recorded in-file: decorator tag names outside the 14
+    settings tags (`Workspaces`, `Stickies`, `Estimates`, `Estimate
+Points`, `Pages`, `Work Item Relations`); `utils/openapi/README.md` is
+    stale (names `APITokenAuthenticationExtension` and
+    `postprocess_assign_tags`, neither exists).
 
 ## FX-OPENAPI-04 live-doc essentials capture
 
@@ -85,10 +85,10 @@ djangorestframework 3.15.2, Django 4.2.30.
   `?format=json`) against Django with `ENABLE_DRF_SPECTACULAR=1` (routes
   `pi_dash/urls.py:31-44`); per-operation essentials (operationId, tags,
   summary, parameters, responses — verbatim) for every path × method in
-  the golden route map (125 paths, 193 operations); default content-type
+  the golden route map (128 paths, 200 operations); default content-type
   `application/vnd.oai.openapi; charset=utf-8` (YAML, no `+json`),
   `?format=json` content-type `application/vnd.oai.openapi+json`, parsed
-  doc-equality proof (`parsed_equal: true`, 125 paths each), route-map ==
+  doc-equality proof (`parsed_equal: true`, 128 paths each), route-map ==
   golden assertion, `ApiKeyAuthentication` securityScheme block verbatim
   (rendered from `utils/openapi/auth.py:15-34`
   `APIKeyAuthenticationExtension.get_security_definition`).
@@ -98,40 +98,41 @@ djangorestframework 3.15.2, Django 4.2.30.
 ## FX-OPENAPI-05 handler behaviour goldens
 
 - `FX-OPENAPI-05.handlers.json` + `FX-OPENAPI-05.swagger_ui.normalized.html`
-  + `FX-OPENAPI-05.redoc.normalized.html` — live HTTP fetches (routes
-  `pi_dash/urls.py:31-44`; throttle `settings/common.py:92-94`
-  `AnonRateThrottle` 30/minute over the default django-redis cache,
-  observed key `:1:throttle_anon_127.0.0.1`; APPEND_SLASH
-  `CommonMiddleware`; denial rewrite
-  `authentication/adapter/exception.py:17-34` reading context, code table
-  `authentication/adapter/error.py:71` `RATE_LIMIT_EXCEEDED = 5900`).
-  `?format=xml` → 404 + YAML body bytes (`detail: {string, code}`
-  ErrorDetail rendering); unsafe methods on all 3 endpoints → 405 + `Allow:
-  GET, HEAD, OPTIONS` + body bytes per endpoint kind (YAML renderer on
-  `/api/schema/`, `405 Method Not Allowed` TemplateHTMLRenderer exception
-  fallback on the UI pages); `GET /api/schema` → 301 + `Location:
-  /api/schema/` (relative) + empty body; swagger-ui (4653 bytes, 1 CSRF
-  hole, 64-char token) + redoc (736 bytes, no hole) page bytes normalized
-  with the contract-suite rule (`CSRFTOKEN"] = "[^"]*";` → `CSRFTOKEN"] =
-  "";`); burst → clean allow-30-then-deny (first 429 at attempt 31,
-  `Retry-After: 59`, per-renderer bodies: UI pages `429 Too Many
-  Requests` fallback text, YAML `error_code: 5900 / error_message:
-  RATE_LIMIT_EXCEEDED`, JSON 4-space `{"error_code": 5900,
-  "error_message": "RATE_LIMIT_EXCEEDED"}`), unsafe-while-throttled → 429
-  not 405 (throttle check runs before handler selection), window reset
-  re-allows (200 after 65s); flag off → all three routes absent (Django
-  URL-resolution 404, DEBUG technical page — length + sha + head recorded,
-  full bytes environment-specific).
-  Method: httpx fetches; private redis db 13 flushed before the denial
-  section and before the burst; flag-off from the same server restarted
-  with the flag unset.
+  - `FX-OPENAPI-05.redoc.normalized.html` — live HTTP fetches (routes
+    `pi_dash/urls.py:31-44`; throttle `settings/common.py:92-94`
+    `AnonRateThrottle` 30/minute over the default django-redis cache,
+    observed key `:1:throttle_anon_127.0.0.1`; APPEND_SLASH
+    `CommonMiddleware`; denial rewrite
+    `authentication/adapter/exception.py:17-34` reading context, code table
+    `authentication/adapter/error.py:71` `RATE_LIMIT_EXCEEDED = 5900`).
+    `?format=xml` → 404 + YAML body bytes (`detail: {string, code}`
+    ErrorDetail rendering); unsafe methods on all 3 endpoints → 405 + `Allow:
+GET, HEAD, OPTIONS` + body bytes per endpoint kind (YAML renderer on
+    `/api/schema/`, `405 Method Not Allowed` TemplateHTMLRenderer exception
+    fallback on the UI pages); `GET /api/schema` → 301 + `Location:
+/api/schema/` (relative) + empty body; swagger-ui (4653 bytes, 1 CSRF
+    hole, 64-char token) + redoc (736 bytes, no hole) page bytes normalized
+    with the contract-suite rule (`CSRFTOKEN"] = "[^"]*";` → `CSRFTOKEN"] =
+"";`); burst → clean allow-30-then-deny (first 429 at attempt 31,
+    `Retry-After: 59`, per-renderer bodies: UI pages `429 Too Many
+Requests` fallback text, YAML `error_code: 5900 / error_message:
+RATE_LIMIT_EXCEEDED`, JSON 4-space `{"error_code": 5900,
+"error_message": "RATE_LIMIT_EXCEEDED"}`), unsafe-while-throttled → 429
+    not 405 (throttle check runs before handler selection), window reset
+    re-allows (200 after 65s); flag off → all three routes absent (Django
+    URL-resolution 404, DEBUG technical page — length + sha + head recorded,
+    full bytes environment-specific).
+    Method: httpx fetches; private redis db 13 flushed before the denial
+    section and before the burst; flag-off from the same server restarted
+    with the flag unset.
 
 ## FX-OPENAPI-06 route table provenance
 
 - `FX-OPENAPI-06.routes_golden.json` — byte copy of
   `rust-api/contract-tests/v1_openapi/routes_golden.json` from PIDASHCONV-81
-  (`54254ec8`, PR #479; re-recorded PIDASHCONV-1090): 125 paths, sha256
-  `ded70c9f9ab4d979087043985e77eacac3f5589c72d2e5344a079d1eedde3229`.
+  (`54254ec8`, PR #479; re-recorded PIDASHCONV-1090 and NEWPIDASH-34):
+  128 paths, sha256
+  `cb329a9df2820fec062fbe961f61b2e56976ffee563ac35d932988707a51475f`.
   Regen rule (from `test_routes_golden.py`, never blanket-update):
   `REGEN_GOLDEN=1 pytest v1_openapi/test_routes_golden.py` + reviewed
   diff. The live capture in FX-OPENAPI-04 asserted route-map equality
@@ -141,14 +142,17 @@ djangorestframework 3.15.2, Django 4.2.30.
 
 - `FX-OPENAPI-07.components_schemas.json` — `components.schemas` of the
   live Django document (`GET /api/schema/?format=json` with
-  `ENABLE_DRF_SPECTACULAR=1`) at `apps/api == origin/main d656243d3`;
-  89 schemas, copied verbatim (key order preserved). Provenance: the
-  served JSON body is 1,397,521 bytes, sha256
-  `9760cb0b3c7c0885b37f020ebc848b7e69b87f1fb02bdd1db0c9578131b669f7` —
+  `ENABLE_DRF_SPECTACULAR=1`) at `apps/api == origin/main d656243d3`
+  (re-recorded by NEWPIDASH-34 at `origin/main 08be546d6`: +SchedulerBindingAPI,
+  +SchedulerAPI.is_builtin, SchedulerRunAPI.error_code description);
+  90 schemas, copied verbatim (key order preserved). Provenance: the
+  served JSON body is 1,417,414 bytes, sha256
+  `5c35ac9acb8964c678678d851be8b23f912ea6a5c9f853d8bc8685d02bb5e3dd` —
   identical to FX-OPENAPI-04's `json_rendering`, so the registry is from
   the same document the operation essentials were extracted from.
   Method: `curl` GET against a scratch Django server (scratch DB
-  `pidash_1208_dj`); the fixture is `{...metadata..., "schemas": {...}}`.
+  `pidash_1208_dj`, NEWPIDASH-34 re-record on `pidash_n34_dj`); the fixture
+  is `{...metadata..., "schemas": {...}}`.
   drf-spectacular's `SchemaGenerator.get_schema`
   (`0.28.0 generators.py:282-293`) writes `components=self.registry.build(...)`,
   so Django serves this registry and every operation `$ref` resolves; the

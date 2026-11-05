@@ -1,26 +1,26 @@
 {
   "_trace": "live GET /api/schema/ (+ ?format=json) against Django with ENABLE_DRF_SPECTACULAR=1 (routes pi_dash/urls.py:31-44); securityScheme rendered from utils/openapi/auth.py:15-34 (APIKeyAuthenticationExtension.get_security_definition)",
-  "_method": "httpx GETs to http://127.0.0.1:18890 (scratch DB pidash_1090_dj, ENABLE_DRF_SPECTACULAR=1); YAML parsed with yaml.safe_load, JSON with r.json(); equality asserted on the parsed docs",
+  "_method": "httpx GETs to http://127.0.0.1:18734 (scratch DB pidash_n34_dj, ENABLE_DRF_SPECTACULAR=1); YAML parsed with yaml.safe_load, JSON with r.json(); equality asserted on the parsed docs. Re-recorded by NEWPIDASH-34 (scheduler-writes drift, 730ea8d28/7d64d46ad).",
   "openapi_version": "3.0.3",
   "default_rendering": {
     "url": "/api/schema/",
     "status": 200,
     "content_type": "application/vnd.oai.openapi; charset=utf-8",
-    "body_bytes": 830731,
-    "body_sha256": "574b92976f8f6a7ad19fbee064ab14792781bb166d00ad5c9fa42c7347b7cabf",
+    "body_bytes": 841530,
+    "body_sha256": "c96aeb5a723cc0126d4448782516ed856d440b8cd11b7d13f648c19caacf8c6a",
     "note": "YAML by default; content-type has NO +json suffix"
   },
   "json_rendering": {
     "url": "/api/schema/?format=json",
     "status": 200,
     "content_type": "application/vnd.oai.openapi+json",
-    "body_bytes": 1397521,
-    "body_sha256": "9760cb0b3c7c0885b37f020ebc848b7e69b87f1fb02bdd1db0c9578131b669f7"
+    "body_bytes": 1417414,
+    "body_sha256": "5c35ac9acb8964c678678d851be8b23f912ea6a5c9f853d8bc8685d02bb5e3dd"
   },
   "doc_equality_proof": {
     "parsed_equal": true,
-    "yaml_paths": 125,
-    "json_paths": 125
+    "yaml_paths": 128,
+    "json_paths": 128
   },
   "route_map_matches_golden": true,
   "security_schemes": {
@@ -35,9 +35,7 @@
     "/api/v1/assets/user-assets/": {
       "post": {
         "operationId": "create_user_asset_upload",
-        "tags": [
-          "Assets"
-        ],
+        "tags": ["Assets"],
         "summary": "Generate presigned URL for user asset upload",
         "parameters": null,
         "responses": {
@@ -59,9 +57,7 @@
     "/api/v1/assets/user-assets/{asset_id}/": {
       "delete": {
         "operationId": "delete_user_asset",
-        "tags": [
-          "Assets"
-        ],
+        "tags": ["Assets"],
         "summary": "Delete user asset",
         "parameters": [
           {
@@ -99,9 +95,7 @@
       },
       "patch": {
         "operationId": "update_user_asset",
-        "tags": [
-          "Assets"
-        ],
+        "tags": ["Assets"],
         "summary": "Mark user asset as uploaded",
         "parameters": [
           {
@@ -141,9 +135,7 @@
     "/api/v1/auth/device/approve/": {
       "post": {
         "operationId": "auth_device_approve_create",
-        "tags": [
-          "auth"
-        ],
+        "tags": ["auth"],
         "summary": null,
         "parameters": null,
         "responses": {
@@ -156,9 +148,7 @@
     "/api/v1/auth/device/start/": {
       "post": {
         "operationId": "auth_device_start_create",
-        "tags": [
-          "auth"
-        ],
+        "tags": ["auth"],
         "summary": null,
         "parameters": null,
         "responses": {
@@ -171,9 +161,7 @@
     "/api/v1/auth/device/token/": {
       "post": {
         "operationId": "auth_device_token_create",
-        "tags": [
-          "auth"
-        ],
+        "tags": ["auth"],
         "summary": null,
         "parameters": null,
         "responses": {
@@ -186,9 +174,7 @@
     "/api/v1/auth/machine-token/": {
       "post": {
         "operationId": "auth_machine_token_create",
-        "tags": [
-          "auth"
-        ],
+        "tags": ["auth"],
         "summary": null,
         "parameters": null,
         "responses": {
@@ -201,9 +187,7 @@
     "/api/v1/auth/revoke/": {
       "post": {
         "operationId": "auth_revoke_create",
-        "tags": [
-          "auth"
-        ],
+        "tags": ["auth"],
         "summary": null,
         "parameters": null,
         "responses": {
@@ -216,9 +200,7 @@
     "/api/v1/auth/workspaces/": {
       "get": {
         "operationId": "auth_workspaces_retrieve",
-        "tags": [
-          "auth"
-        ],
+        "tags": ["auth"],
         "summary": null,
         "parameters": null,
         "responses": {
@@ -231,9 +213,7 @@
     "/api/v1/runner/chat/sessions/{session_id}/approvals/": {
       "post": {
         "operationId": "runner_chat_sessions_approvals_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -256,9 +236,7 @@
     "/api/v1/runner/chat/sessions/{session_id}/closed/": {
       "post": {
         "operationId": "runner_chat_sessions_closed_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -281,9 +259,7 @@
     "/api/v1/runner/chat/sessions/{session_id}/events/": {
       "post": {
         "operationId": "runner_chat_sessions_events_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -306,9 +282,7 @@
     "/api/v1/runner/chat/sessions/{session_id}/failed/": {
       "post": {
         "operationId": "runner_chat_sessions_failed_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -331,9 +305,7 @@
     "/api/v1/runner/chat/sessions/{session_id}/messages/{message_id}/complete/": {
       "post": {
         "operationId": "runner_chat_sessions_messages_complete_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -365,9 +337,7 @@
     "/api/v1/runner/chat/sessions/{session_id}/messages/{message_id}/started/": {
       "post": {
         "operationId": "runner_chat_sessions_messages_started_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -399,9 +369,7 @@
     "/api/v1/runner/chat/sessions/{session_id}/started/": {
       "post": {
         "operationId": "runner_chat_sessions_started_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -424,9 +392,7 @@
     "/api/v1/runner/dev-machines/desktop-enroll/": {
       "delete": {
         "operationId": "runner_dev_machines_desktop_enroll_destroy",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": null,
         "responses": {
@@ -437,9 +403,7 @@
       },
       "post": {
         "operationId": "runner_dev_machines_desktop_enroll_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": null,
         "responses": {
@@ -452,9 +416,7 @@
     "/api/v1/runner/dev-machines/{dev_machine_id}/commands/{request_id}/result/": {
       "post": {
         "operationId": "runner_dev_machines_commands_result_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -486,9 +448,7 @@
     "/api/v1/runner/dev-machines/{dev_machine_id}/sessions/": {
       "post": {
         "operationId": "runner_dev_machines_sessions_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -511,9 +471,7 @@
     "/api/v1/runner/dev-machines/{dev_machine_id}/sessions/{sid}/": {
       "delete": {
         "operationId": "runner_dev_machines_sessions_destroy",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -545,9 +503,7 @@
     "/api/v1/runner/health/": {
       "get": {
         "operationId": "runner_health_retrieve",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": null,
         "responses": {
@@ -560,9 +516,7 @@
     "/api/v1/runner/machine-tokens/": {
       "post": {
         "operationId": "runner_machine_tokens_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": null,
         "responses": {
@@ -575,9 +529,7 @@
     "/api/v1/runner/metrics/": {
       "get": {
         "operationId": "runner_metrics_retrieve",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": null,
         "responses": {
@@ -590,9 +542,7 @@
     "/api/v1/runner/projects/": {
       "get": {
         "operationId": "runner_projects_retrieve",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": null,
         "responses": {
@@ -605,9 +555,7 @@
     "/api/v1/runner/runners/": {
       "post": {
         "operationId": "runner_runners_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": null,
         "responses": {
@@ -620,9 +568,7 @@
     "/api/v1/runner/runners/enroll/": {
       "post": {
         "operationId": "runner_runners_enroll_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": null,
         "responses": {
@@ -635,9 +581,7 @@
     "/api/v1/runner/runners/{runner_id}/": {
       "delete": {
         "operationId": "runner_runners_destroy",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -660,9 +604,7 @@
     "/api/v1/runner/runners/{runner_id}/refresh/": {
       "post": {
         "operationId": "runner_runners_refresh_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -685,9 +627,7 @@
     "/api/v1/runner/runners/{runner_id}/sessions/": {
       "post": {
         "operationId": "runner_runners_sessions_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -710,9 +650,7 @@
     "/api/v1/runner/runners/{runner_id}/sessions/{sid}/": {
       "delete": {
         "operationId": "runner_runners_sessions_destroy",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -744,9 +682,7 @@
     "/api/v1/runner/runs/{run_id}/accept/": {
       "post": {
         "operationId": "runner_runs_accept_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -769,9 +705,7 @@
     "/api/v1/runner/runs/{run_id}/approvals/": {
       "post": {
         "operationId": "runner_runs_approvals_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -794,9 +728,7 @@
     "/api/v1/runner/runs/{run_id}/awaiting-reauth/": {
       "post": {
         "operationId": "runner_runs_awaiting_reauth_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -819,9 +751,7 @@
     "/api/v1/runner/runs/{run_id}/cancelled/": {
       "post": {
         "operationId": "runner_runs_cancelled_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -844,9 +774,7 @@
     "/api/v1/runner/runs/{run_id}/complete/": {
       "post": {
         "operationId": "runner_runs_complete_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -869,9 +797,7 @@
     "/api/v1/runner/runs/{run_id}/events/": {
       "post": {
         "operationId": "runner_runs_events_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -894,9 +820,7 @@
     "/api/v1/runner/runs/{run_id}/fail/": {
       "post": {
         "operationId": "runner_runs_fail_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -919,9 +843,7 @@
     "/api/v1/runner/runs/{run_id}/pause/": {
       "post": {
         "operationId": "runner_runs_pause_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -944,9 +866,7 @@
     "/api/v1/runner/runs/{run_id}/queued/": {
       "post": {
         "operationId": "runner_runs_queued_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -969,9 +889,7 @@
     "/api/v1/runner/runs/{run_id}/resumed/": {
       "post": {
         "operationId": "runner_runs_resumed_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -994,9 +912,7 @@
     "/api/v1/runner/runs/{run_id}/started/": {
       "post": {
         "operationId": "runner_runs_started_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -1019,9 +935,7 @@
     "/api/v1/runner/runs/{run_id}/stream/upgrade/": {
       "post": {
         "operationId": "runner_runs_stream_upgrade_create",
-        "tags": [
-          "runner"
-        ],
+        "tags": ["runner"],
         "summary": null,
         "parameters": [
           {
@@ -1044,9 +958,7 @@
     "/api/v1/runners/{runner_id}/": {
       "delete": {
         "operationId": "runners_destroy",
-        "tags": [
-          "runners"
-        ],
+        "tags": ["runners"],
         "summary": null,
         "parameters": [
           {
@@ -1069,9 +981,7 @@
     "/api/v1/users/me/": {
       "get": {
         "operationId": "get_current_user",
-        "tags": [
-          "Users"
-        ],
+        "tags": ["Users"],
         "summary": "Get current user",
         "parameters": null,
         "responses": {
@@ -1107,9 +1017,7 @@
     "/api/v1/workspaces/{slug}/agent-runs/{run_id}/yield/": {
       "post": {
         "operationId": "workspaces_agent_runs_yield_create",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": null,
         "parameters": [
           {
@@ -1140,9 +1048,7 @@
     "/api/v1/workspaces/{slug}/assets/": {
       "post": {
         "operationId": "create_generic_asset_upload",
-        "tags": [
-          "Assets"
-        ],
+        "tags": ["Assets"],
         "summary": "Generate presigned URL for generic asset upload",
         "parameters": [
           {
@@ -1187,9 +1093,7 @@
     "/api/v1/workspaces/{slug}/assets/{asset_id}/": {
       "get": {
         "operationId": "get_generic_asset",
-        "tags": [
-          "Assets"
-        ],
+        "tags": ["Assets"],
         "summary": "Get presigned URL for asset download",
         "parameters": [
           {
@@ -1238,9 +1142,7 @@
       },
       "patch": {
         "operationId": "update_generic_asset",
-        "tags": [
-          "Assets"
-        ],
+        "tags": ["Assets"],
         "summary": "Update generic asset after upload completion",
         "parameters": [
           {
@@ -1296,9 +1198,7 @@
     "/api/v1/workspaces/{slug}/invitations/": {
       "get": {
         "operationId": "workspaces_invitations_list",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": "List workspace invites",
         "parameters": [
           {
@@ -1336,9 +1236,7 @@
       },
       "post": {
         "operationId": "workspaces_invitations_create",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": "Create workspace invite",
         "parameters": [
           {
@@ -1375,9 +1273,7 @@
     "/api/v1/workspaces/{slug}/invitations/{pk}/": {
       "delete": {
         "operationId": "workspaces_invitations_destroy",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": "Delete workspace invite",
         "parameters": [
           {
@@ -1415,9 +1311,7 @@
       },
       "get": {
         "operationId": "workspaces_invitations_retrieve",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": "Get workspace invite",
         "parameters": [
           {
@@ -1462,9 +1356,7 @@
       },
       "patch": {
         "operationId": "workspaces_invitations_partial_update",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": "Update workspace invite",
         "parameters": [
           {
@@ -1511,9 +1403,7 @@
     "/api/v1/workspaces/{slug}/issues/search/": {
       "get": {
         "operationId": "search_work_items",
-        "tags": [
-          "Work Items"
-        ],
+        "tags": ["Work Items"],
         "summary": null,
         "parameters": [
           {
@@ -1660,9 +1550,7 @@
     "/api/v1/workspaces/{slug}/issues/{project_identifier}-{issue_identifier}/": {
       "get": {
         "operationId": "get_workspace_work_item",
-        "tags": [
-          "Work Items"
-        ],
+        "tags": ["Work Items"],
         "summary": "Retrieve work item by identifiers",
         "parameters": [
           {
@@ -1729,12 +1617,8 @@
                       "description": "Add OAuth 2.0 authentication flow",
                       "sequence_id": 1,
                       "priority": "high",
-                      "assignees": [
-                        "550e8400-e29b-41d4-a716-446655440001"
-                      ],
-                      "labels": [
-                        "550e8400-e29b-41d4-a716-446655440002"
-                      ],
+                      "assignees": ["550e8400-e29b-41d4-a716-446655440001"],
+                      "labels": ["550e8400-e29b-41d4-a716-446655440002"],
                       "created_at": "2024-01-15T10:30:00Z",
                       "updated_at": "2024-01-15T10:30:00Z"
                     }
@@ -1753,9 +1637,7 @@
     "/api/v1/workspaces/{slug}/members/": {
       "get": {
         "operationId": "get_workspace_members",
-        "tags": [
-          "Members"
-        ],
+        "tags": ["Members"],
         "summary": "List workspace members",
         "parameters": [
           {
@@ -1841,9 +1723,7 @@
     "/api/v1/workspaces/{slug}/projects/": {
       "get": {
         "operationId": "list_projects",
-        "tags": [
-          "Projects"
-        ],
+        "tags": ["Projects"],
         "summary": "List or retrieve projects",
         "parameters": [
           {
@@ -2015,9 +1895,7 @@
       },
       "post": {
         "operationId": "create_project",
-        "tags": [
-          "Projects"
-        ],
+        "tags": ["Projects"],
         "summary": "Create project",
         "parameters": [
           {
@@ -2080,9 +1958,7 @@
     "/api/v1/workspaces/{slug}/projects/{pk}/": {
       "delete": {
         "operationId": "delete_project",
-        "tags": [
-          "Projects"
-        ],
+        "tags": ["Projects"],
         "summary": "Delete project",
         "parameters": [
           {
@@ -2138,9 +2014,7 @@
       },
       "get": {
         "operationId": "retrieve_project",
-        "tags": [
-          "Projects"
-        ],
+        "tags": ["Projects"],
         "summary": "Retrieve project",
         "parameters": [
           {
@@ -2217,9 +2091,7 @@
       },
       "patch": {
         "operationId": "update_project",
-        "tags": [
-          "Projects"
-        ],
+        "tags": ["Projects"],
         "summary": "Update project",
         "parameters": [
           {
@@ -2301,9 +2173,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/archive/": {
       "delete": {
         "operationId": "unarchive_project",
-        "tags": [
-          "Projects"
-        ],
+        "tags": ["Projects"],
         "summary": "Unarchive project",
         "parameters": [
           {
@@ -2359,9 +2229,7 @@
       },
       "post": {
         "operationId": "archive_project",
-        "tags": [
-          "Projects"
-        ],
+        "tags": ["Projects"],
         "summary": "Archive project",
         "parameters": [
           {
@@ -2419,9 +2287,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/archived-cycles/": {
       "get": {
         "operationId": "list_archived_cycles",
-        "tags": [
-          "Cycles"
-        ],
+        "tags": ["Cycles"],
         "summary": "List archived cycles",
         "parameters": [
           {
@@ -2542,9 +2408,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/archived-cycles/{cycle_id}/unarchive/": {
       "delete": {
         "operationId": "unarchive_cycle",
-        "tags": [
-          "Cycles"
-        ],
+        "tags": ["Cycles"],
         "summary": "Unarchive cycle",
         "parameters": [
           {
@@ -2611,9 +2475,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/archived-modules/": {
       "get": {
         "operationId": "list_archived_modules",
-        "tags": [
-          "Modules"
-        ],
+        "tags": ["Modules"],
         "summary": "List archived modules",
         "parameters": [
           {
@@ -2804,9 +2666,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/archived-modules/{pk}/unarchive/": {
       "delete": {
         "operationId": "unarchive_module",
-        "tags": [
-          "Modules"
-        ],
+        "tags": ["Modules"],
         "summary": "Unarchive module",
         "parameters": [
           {
@@ -2881,9 +2741,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/cycles/": {
       "get": {
         "operationId": "list_cycles",
-        "tags": [
-          "Cycles"
-        ],
+        "tags": ["Cycles"],
         "summary": "List cycles",
         "parameters": [
           {
@@ -3109,9 +2967,7 @@
       },
       "post": {
         "operationId": "create_cycle",
-        "tags": [
-          "Cycles"
-        ],
+        "tags": ["Cycles"],
         "summary": "Create cycle",
         "parameters": [
           {
@@ -3196,9 +3052,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/archive/": {
       "post": {
         "operationId": "archive_cycle",
-        "tags": [
-          "Cycles"
-        ],
+        "tags": ["Cycles"],
         "summary": "Archive cycle",
         "parameters": [
           {
@@ -3268,9 +3122,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/": {
       "get": {
         "operationId": "list_cycle_work_items",
-        "tags": [
-          "Cycles"
-        ],
+        "tags": ["Cycles"],
         "summary": "List cycle work items",
         "parameters": [
           {
@@ -3400,9 +3252,7 @@
       },
       "post": {
         "operationId": "add_cycle_work_items",
-        "tags": [
-          "Cycles"
-        ],
+        "tags": ["Cycles"],
         "summary": "Add Work Items to Cycle",
         "parameters": [
           {
@@ -3491,9 +3341,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/{issue_id}/": {
       "delete": {
         "operationId": "delete_cycle_work_item",
-        "tags": [
-          "Cycles"
-        ],
+        "tags": ["Cycles"],
         "summary": "Delete cycle work item",
         "parameters": [
           {
@@ -3567,9 +3415,7 @@
       },
       "get": {
         "operationId": "retrieve_cycle_work_item",
-        "tags": [
-          "Cycles"
-        ],
+        "tags": ["Cycles"],
         "summary": "Retrieve cycle work item",
         "parameters": [
           {
@@ -3664,9 +3510,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/transfer-issues/": {
       "post": {
         "operationId": "transfer_cycle_work_items",
-        "tags": [
-          "Cycles"
-        ],
+        "tags": ["Cycles"],
         "summary": "Transfer cycle work items",
         "parameters": [
           {
@@ -3789,9 +3633,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/cycles/{pk}/": {
       "delete": {
         "operationId": "delete_cycle",
-        "tags": [
-          "Cycles"
-        ],
+        "tags": ["Cycles"],
         "summary": "Delete cycle",
         "parameters": [
           {
@@ -3856,9 +3698,7 @@
       },
       "get": {
         "operationId": "retrieve_cycle",
-        "tags": [
-          "Cycles"
-        ],
+        "tags": ["Cycles"],
         "summary": "Retrieve cycle",
         "parameters": [
           {
@@ -3950,9 +3790,7 @@
       },
       "patch": {
         "operationId": "update_cycle",
-        "tags": [
-          "Cycles"
-        ],
+        "tags": ["Cycles"],
         "summary": "Update cycle",
         "parameters": [
           {
@@ -4046,9 +3884,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/": {
       "get": {
         "operationId": "get_intake_work_items_list",
-        "tags": [
-          "Intake"
-        ],
+        "tags": ["Intake"],
         "summary": "List intake work items",
         "parameters": [
           {
@@ -4207,9 +4043,7 @@
       },
       "post": {
         "operationId": "create_intake_work_item",
-        "tags": [
-          "Intake"
-        ],
+        "tags": ["Intake"],
         "summary": "Create intake work item",
         "parameters": [
           {
@@ -4295,9 +4129,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/intake-issues/{issue_id}/": {
       "delete": {
         "operationId": "delete_intake_work_item",
-        "tags": [
-          "Intake"
-        ],
+        "tags": ["Intake"],
         "summary": "Delete intake work item",
         "parameters": [
           {
@@ -4370,9 +4202,7 @@
       },
       "get": {
         "operationId": "retrieve_intake_work_item",
-        "tags": [
-          "Intake"
-        ],
+        "tags": ["Intake"],
         "summary": "Retrieve intake work item",
         "parameters": [
           {
@@ -4470,9 +4300,7 @@
       },
       "patch": {
         "operationId": "update_intake_work_item",
-        "tags": [
-          "Intake"
-        ],
+        "tags": ["Intake"],
         "summary": "Update intake work item",
         "parameters": [
           {
@@ -4575,9 +4403,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/issues/": {
       "get": {
         "operationId": "list_work_items",
-        "tags": [
-          "Work Items"
-        ],
+        "tags": ["Work Items"],
         "summary": "List work items",
         "parameters": [
           {
@@ -4897,9 +4723,7 @@
       },
       "post": {
         "operationId": "create_work_item",
-        "tags": [
-          "Work Items"
-        ],
+        "tags": ["Work Items"],
         "summary": "Create work item",
         "parameters": [
           {
@@ -4962,12 +4786,8 @@
                       "description": "Add OAuth 2.0 authentication flow",
                       "sequence_id": 1,
                       "priority": "high",
-                      "assignees": [
-                        "550e8400-e29b-41d4-a716-446655440001"
-                      ],
-                      "labels": [
-                        "550e8400-e29b-41d4-a716-446655440002"
-                      ],
+                      "assignees": ["550e8400-e29b-41d4-a716-446655440001"],
+                      "labels": ["550e8400-e29b-41d4-a716-446655440002"],
                       "created_at": "2024-01-15T10:30:00Z",
                       "updated_at": "2024-01-15T10:30:00Z"
                     }
@@ -4989,9 +4809,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/activities/": {
       "get": {
         "operationId": "list_work_item_activities",
-        "tags": [
-          "Work Item Activity"
-        ],
+        "tags": ["Work Item Activity"],
         "summary": null,
         "parameters": [
           {
@@ -5202,9 +5020,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/activities/{pk}/": {
       "get": {
         "operationId": "retrieve_work_item_activity",
-        "tags": [
-          "Work Item Activity"
-        ],
+        "tags": ["Work Item Activity"],
         "summary": null,
         "parameters": [
           {
@@ -5432,9 +5248,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/comments/": {
       "get": {
         "operationId": "list_work_item_comments",
-        "tags": [
-          "Work Item Comments"
-        ],
+        "tags": ["Work Item Comments"],
         "summary": null,
         "parameters": [
           {
@@ -5640,9 +5454,7 @@
       },
       "post": {
         "operationId": "create_work_item_comment",
-        "tags": [
-          "Work Item Comments"
-        ],
+        "tags": ["Work Item Comments"],
         "summary": null,
         "parameters": [
           {
@@ -5762,9 +5574,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/comments/{pk}/": {
       "delete": {
         "operationId": "delete_work_item_comment",
-        "tags": [
-          "Work Item Comments"
-        ],
+        "tags": ["Work Item Comments"],
         "summary": null,
         "parameters": [
           {
@@ -5854,9 +5664,7 @@
       },
       "get": {
         "operationId": "retrieve_work_item_comment",
-        "tags": [
-          "Work Item Comments"
-        ],
+        "tags": ["Work Item Comments"],
         "summary": null,
         "parameters": [
           {
@@ -5988,9 +5796,7 @@
       },
       "patch": {
         "operationId": "update_work_item_comment",
-        "tags": [
-          "Work Item Comments"
-        ],
+        "tags": ["Work Item Comments"],
         "summary": null,
         "parameters": [
           {
@@ -6127,9 +5933,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/issue-attachments/": {
       "get": {
         "operationId": "list_work_item_attachments",
-        "tags": [
-          "Work Item Attachments"
-        ],
+        "tags": ["Work Item Attachments"],
         "summary": null,
         "parameters": [
           {
@@ -6229,9 +6033,7 @@
       },
       "post": {
         "operationId": "create_work_item_attachment",
-        "tags": [
-          "Work Item Attachments"
-        ],
+        "tags": ["Work Item Attachments"],
         "summary": null,
         "parameters": [
           {
@@ -6309,9 +6111,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/issue-attachments/{pk}/": {
       "delete": {
         "operationId": "delete_work_item_attachment",
-        "tags": [
-          "Work Item Attachments"
-        ],
+        "tags": ["Work Item Attachments"],
         "summary": null,
         "parameters": [
           {
@@ -6393,9 +6193,7 @@
       },
       "get": {
         "operationId": "retrieve_work_item_attachment",
-        "tags": [
-          "Work Item Attachments"
-        ],
+        "tags": ["Work Item Attachments"],
         "summary": null,
         "parameters": [
           {
@@ -6509,9 +6307,7 @@
       },
       "patch": {
         "operationId": "upload_work_item_attachment",
-        "tags": [
-          "Work Item Attachments"
-        ],
+        "tags": ["Work Item Attachments"],
         "summary": null,
         "parameters": [
           {
@@ -6598,9 +6394,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/links/": {
       "get": {
         "operationId": "list_work_item_links",
-        "tags": [
-          "Work Item Links"
-        ],
+        "tags": ["Work Item Links"],
         "summary": null,
         "parameters": [
           {
@@ -6809,9 +6603,7 @@
       },
       "post": {
         "operationId": "create_work_item_link",
-        "tags": [
-          "Work Item Links"
-        ],
+        "tags": ["Work Item Links"],
         "summary": null,
         "parameters": [
           {
@@ -6912,9 +6704,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/links/{pk}/": {
       "delete": {
         "operationId": "delete_work_item_link",
-        "tags": [
-          "Work Item Links"
-        ],
+        "tags": ["Work Item Links"],
         "summary": null,
         "parameters": [
           {
@@ -7004,9 +6794,7 @@
       },
       "get": {
         "operationId": "retrieve_work_item_link",
-        "tags": [
-          "Work Item Links"
-        ],
+        "tags": ["Work Item Links"],
         "summary": null,
         "parameters": [
           {
@@ -7199,9 +6987,7 @@
       },
       "patch": {
         "operationId": "update_issue_link",
-        "tags": [
-          "Work Item Links"
-        ],
+        "tags": ["Work Item Links"],
         "summary": null,
         "parameters": [
           {
@@ -7319,9 +7105,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/issues/{pk}/": {
       "delete": {
         "operationId": "delete_work_item",
-        "tags": [
-          "Work Items"
-        ],
+        "tags": ["Work Items"],
         "summary": "Delete work item",
         "parameters": [
           {
@@ -7386,9 +7170,7 @@
       },
       "get": {
         "operationId": "retrieve_work_item",
-        "tags": [
-          "Work Items"
-        ],
+        "tags": ["Work Items"],
         "summary": "Retrieve work item",
         "parameters": [
           {
@@ -7563,12 +7345,8 @@
                       "description": "Add OAuth 2.0 authentication flow",
                       "sequence_id": 1,
                       "priority": "high",
-                      "assignees": [
-                        "550e8400-e29b-41d4-a716-446655440001"
-                      ],
-                      "labels": [
-                        "550e8400-e29b-41d4-a716-446655440002"
-                      ],
+                      "assignees": ["550e8400-e29b-41d4-a716-446655440001"],
+                      "labels": ["550e8400-e29b-41d4-a716-446655440002"],
                       "created_at": "2024-01-15T10:30:00Z",
                       "updated_at": "2024-01-15T10:30:00Z"
                     }
@@ -7585,9 +7363,7 @@
       },
       "patch": {
         "operationId": "update_work_item",
-        "tags": [
-          "Work Items"
-        ],
+        "tags": ["Work Items"],
         "summary": "Partially update work item",
         "parameters": [
           {
@@ -7659,12 +7435,8 @@
                       "description": "Add OAuth 2.0 authentication flow",
                       "sequence_id": 1,
                       "priority": "high",
-                      "assignees": [
-                        "550e8400-e29b-41d4-a716-446655440001"
-                      ],
-                      "labels": [
-                        "550e8400-e29b-41d4-a716-446655440002"
-                      ],
+                      "assignees": ["550e8400-e29b-41d4-a716-446655440001"],
+                      "labels": ["550e8400-e29b-41d4-a716-446655440002"],
                       "created_at": "2024-01-15T10:30:00Z",
                       "updated_at": "2024-01-15T10:30:00Z"
                     }
@@ -7686,9 +7458,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/labels/": {
       "get": {
         "operationId": "list_labels",
-        "tags": [
-          "Labels"
-        ],
+        "tags": ["Labels"],
         "summary": null,
         "parameters": [
           {
@@ -7881,9 +7651,7 @@
       },
       "post": {
         "operationId": "create_label",
-        "tags": [
-          "Labels"
-        ],
+        "tags": ["Labels"],
         "summary": null,
         "parameters": [
           {
@@ -7966,9 +7734,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/labels/{pk}/": {
       "delete": {
         "operationId": "delete_label",
-        "tags": [
-          "Labels"
-        ],
+        "tags": ["Labels"],
         "summary": null,
         "parameters": [
           {
@@ -8041,9 +7807,7 @@
       },
       "get": {
         "operationId": "get_labels",
-        "tags": [
-          "Labels"
-        ],
+        "tags": ["Labels"],
         "summary": null,
         "parameters": [
           {
@@ -8135,9 +7899,7 @@
       },
       "patch": {
         "operationId": "update_label",
-        "tags": [
-          "Labels"
-        ],
+        "tags": ["Labels"],
         "summary": null,
         "parameters": [
           {
@@ -8237,9 +7999,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/members/": {
       "get": {
         "operationId": "get_project_members",
-        "tags": [
-          "Members"
-        ],
+        "tags": ["Members"],
         "summary": "List project members",
         "parameters": [
           {
@@ -8324,9 +8084,7 @@
       },
       "post": {
         "operationId": "create_project_member",
-        "tags": [
-          "Members"
-        ],
+        "tags": ["Members"],
         "summary": "Create project member",
         "parameters": [
           {
@@ -8382,9 +8140,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/members/{pk}/": {
       "delete": {
         "operationId": "delete_project_member",
-        "tags": [
-          "Members"
-        ],
+        "tags": ["Members"],
         "summary": "Delete project member",
         "parameters": [
           {
@@ -8440,9 +8196,7 @@
       },
       "get": {
         "operationId": "get_project_member",
-        "tags": [
-          "Members"
-        ],
+        "tags": ["Members"],
         "summary": "Get project member",
         "parameters": [
           {
@@ -8514,9 +8268,7 @@
       },
       "patch": {
         "operationId": "update_project_member",
-        "tags": [
-          "Members"
-        ],
+        "tags": ["Members"],
         "summary": "Update project member",
         "parameters": [
           {
@@ -8581,9 +8333,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/modules/": {
       "get": {
         "operationId": "list_modules",
-        "tags": [
-          "Modules"
-        ],
+        "tags": ["Modules"],
         "summary": "List modules",
         "parameters": [
           {
@@ -8775,9 +8525,7 @@
       },
       "post": {
         "operationId": "create_module",
-        "tags": [
-          "Modules"
-        ],
+        "tags": ["Modules"],
         "summary": "Create module",
         "parameters": [
           {
@@ -8868,9 +8616,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/modules/{module_id}/module-issues/": {
       "get": {
         "operationId": "list_module_work_items",
-        "tags": [
-          "Modules"
-        ],
+        "tags": ["Modules"],
         "summary": "List module work items",
         "parameters": [
           {
@@ -9076,9 +8822,7 @@
       },
       "post": {
         "operationId": "add_module_work_items",
-        "tags": [
-          "Modules"
-        ],
+        "tags": ["Modules"],
         "summary": "Add Work Items to Module",
         "parameters": [
           {
@@ -9175,9 +8919,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/modules/{module_id}/module-issues/{issue_id}/": {
       "delete": {
         "operationId": "delete_module_work_item",
-        "tags": [
-          "Modules"
-        ],
+        "tags": ["Modules"],
         "summary": "Delete module work item",
         "parameters": [
           {
@@ -9269,9 +9011,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/modules/{pk}/": {
       "delete": {
         "operationId": "delete_module",
-        "tags": [
-          "Modules"
-        ],
+        "tags": ["Modules"],
         "summary": "Delete module",
         "parameters": [
           {
@@ -9344,9 +9084,7 @@
       },
       "get": {
         "operationId": "retrieve_module",
-        "tags": [
-          "Modules"
-        ],
+        "tags": ["Modules"],
         "summary": "Retrieve module",
         "parameters": [
           {
@@ -9446,9 +9184,7 @@
       },
       "patch": {
         "operationId": "update_module",
-        "tags": [
-          "Modules"
-        ],
+        "tags": ["Modules"],
         "summary": "Update module",
         "parameters": [
           {
@@ -9576,9 +9312,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/modules/{pk}/archive/": {
       "post": {
         "operationId": "archive_module",
-        "tags": [
-          "Modules"
-        ],
+        "tags": ["Modules"],
         "summary": "Archive module",
         "parameters": [
           {
@@ -9656,9 +9390,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/pages/": {
       "get": {
         "operationId": "list_pages",
-        "tags": [
-          "Pages"
-        ],
+        "tags": ["Pages"],
         "summary": "List pages",
         "parameters": [
           {
@@ -9838,9 +9570,7 @@
       },
       "post": {
         "operationId": "create_page",
-        "tags": [
-          "Pages"
-        ],
+        "tags": ["Pages"],
         "summary": "Create page",
         "parameters": [
           {
@@ -9933,9 +9663,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/pages/{page_id}/": {
       "get": {
         "operationId": "retrieve_page",
-        "tags": [
-          "Pages"
-        ],
+        "tags": ["Pages"],
         "summary": "Retrieve page",
         "parameters": [
           {
@@ -10074,9 +9802,7 @@
       },
       "patch": {
         "operationId": "update_page",
-        "tags": [
-          "Pages"
-        ],
+        "tags": ["Pages"],
         "summary": "Update page",
         "parameters": [
           {
@@ -10186,9 +9912,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/pages/{page_id}/archive/": {
       "delete": {
         "operationId": "unarchive_page",
-        "tags": [
-          "Pages"
-        ],
+        "tags": ["Pages"],
         "summary": "Unarchive page",
         "parameters": [
           {
@@ -10271,9 +9995,7 @@
       },
       "post": {
         "operationId": "archive_page",
-        "tags": [
-          "Pages"
-        ],
+        "tags": ["Pages"],
         "summary": "Archive page",
         "parameters": [
           {
@@ -10358,9 +10080,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/project-members/": {
       "get": {
         "operationId": "get_project_members_2",
-        "tags": [
-          "Members"
-        ],
+        "tags": ["Members"],
         "summary": "List project members",
         "parameters": [
           {
@@ -10445,9 +10165,7 @@
       },
       "post": {
         "operationId": "create_project_member_2",
-        "tags": [
-          "Members"
-        ],
+        "tags": ["Members"],
         "summary": "Create project member",
         "parameters": [
           {
@@ -10503,9 +10221,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/project-members/{pk}/": {
       "delete": {
         "operationId": "delete_project_member_2",
-        "tags": [
-          "Members"
-        ],
+        "tags": ["Members"],
         "summary": "Delete project member",
         "parameters": [
           {
@@ -10561,9 +10277,7 @@
       },
       "get": {
         "operationId": "get_project_member_2",
-        "tags": [
-          "Members"
-        ],
+        "tags": ["Members"],
         "summary": "Get project member",
         "parameters": [
           {
@@ -10635,9 +10349,7 @@
       },
       "patch": {
         "operationId": "update_project_member_2",
-        "tags": [
-          "Members"
-        ],
+        "tags": ["Members"],
         "summary": "Update project member",
         "parameters": [
           {
@@ -10702,9 +10414,53 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/": {
       "get": {
         "operationId": "workspaces_projects_schedulers_retrieve",
-        "tags": [
-          "workspaces"
+        "tags": ["workspaces"],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+            "examples": {
+              "uuid": {
+                "value": "00000000-0000-0000-0000-000000000000",
+                "summary": "UUID form"
+              },
+              "slug": {
+                "value": "ENG",
+                "summary": "Workspace-scoped identifier"
+              }
+            }
+          },
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
         ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SchedulerAPI"
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "operationId": "workspaces_projects_schedulers_create",
+        "tags": ["workspaces"],
         "summary": null,
         "parameters": [
           {
@@ -10752,9 +10508,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/": {
       "get": {
         "operationId": "workspaces_projects_schedulers_retrieve_2",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": null,
         "parameters": [
           {
@@ -10808,12 +10562,172 @@
         }
       }
     },
+    "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/binding/": {
+      "delete": {
+        "operationId": "workspaces_projects_schedulers_binding_destroy",
+        "tags": ["workspaces"],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+            "examples": {
+              "uuid": {
+                "value": "00000000-0000-0000-0000-000000000000",
+                "summary": "UUID form"
+              },
+              "slug": {
+                "value": "ENG",
+                "summary": "Workspace-scoped identifier"
+              }
+            }
+          },
+          {
+            "in": "path",
+            "name": "scheduler_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true
+          },
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No response body"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "workspaces_projects_schedulers_binding_partial_update",
+        "tags": ["workspaces"],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+            "examples": {
+              "uuid": {
+                "value": "00000000-0000-0000-0000-000000000000",
+                "summary": "UUID form"
+              },
+              "slug": {
+                "value": "ENG",
+                "summary": "Workspace-scoped identifier"
+              }
+            }
+          },
+          {
+            "in": "path",
+            "name": "scheduler_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true
+          },
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SchedulerBindingAPI"
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/run-now/": {
+      "post": {
+        "operationId": "workspaces_projects_schedulers_run_now_create",
+        "tags": ["workspaces"],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+            "examples": {
+              "uuid": {
+                "value": "00000000-0000-0000-0000-000000000000",
+                "summary": "UUID form"
+              },
+              "slug": {
+                "value": "ENG",
+                "summary": "Workspace-scoped identifier"
+              }
+            }
+          },
+          {
+            "in": "path",
+            "name": "scheduler_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true
+          },
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SchedulerBindingAPI"
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/runs/": {
       "get": {
         "operationId": "workspaces_projects_schedulers_runs_retrieve",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": null,
         "parameters": [
           {
@@ -10870,9 +10784,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/states/": {
       "get": {
         "operationId": "list_states",
-        "tags": [
-          "States"
-        ],
+        "tags": ["States"],
         "summary": "List states",
         "parameters": [
           {
@@ -11033,9 +10945,7 @@
       },
       "post": {
         "operationId": "create_state",
-        "tags": [
-          "States"
-        ],
+        "tags": ["States"],
         "summary": "Create state",
         "parameters": [
           {
@@ -11120,9 +11030,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/states/{state_id}/": {
       "delete": {
         "operationId": "delete_state",
-        "tags": [
-          "States"
-        ],
+        "tags": ["States"],
         "summary": "Delete state",
         "parameters": [
           {
@@ -11198,9 +11106,7 @@
       },
       "get": {
         "operationId": "retrieve_state",
-        "tags": [
-          "States"
-        ],
+        "tags": ["States"],
         "summary": "Retrieve state",
         "parameters": [
           {
@@ -11294,9 +11200,7 @@
       },
       "patch": {
         "operationId": "update_state",
-        "tags": [
-          "States"
-        ],
+        "tags": ["States"],
         "summary": "Update state",
         "parameters": [
           {
@@ -11398,9 +11302,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/summary/": {
       "get": {
         "operationId": "workspaces_projects_summary_retrieve",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": null,
         "parameters": [
           {
@@ -11441,9 +11343,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/": {
       "get": {
         "operationId": "list_work_items_2",
-        "tags": [
-          "Work Items"
-        ],
+        "tags": ["Work Items"],
         "summary": "List work items",
         "parameters": [
           {
@@ -11763,9 +11663,7 @@
       },
       "post": {
         "operationId": "create_work_item_2",
-        "tags": [
-          "Work Items"
-        ],
+        "tags": ["Work Items"],
         "summary": "Create work item",
         "parameters": [
           {
@@ -11828,12 +11726,8 @@
                       "description": "Add OAuth 2.0 authentication flow",
                       "sequence_id": 1,
                       "priority": "high",
-                      "assignees": [
-                        "550e8400-e29b-41d4-a716-446655440001"
-                      ],
-                      "labels": [
-                        "550e8400-e29b-41d4-a716-446655440002"
-                      ],
+                      "assignees": ["550e8400-e29b-41d4-a716-446655440001"],
+                      "labels": ["550e8400-e29b-41d4-a716-446655440002"],
                       "created_at": "2024-01-15T10:30:00Z",
                       "updated_at": "2024-01-15T10:30:00Z"
                     }
@@ -11855,9 +11749,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/activities/": {
       "get": {
         "operationId": "list_work_item_activities_2",
-        "tags": [
-          "Work Item Activity"
-        ],
+        "tags": ["Work Item Activity"],
         "summary": null,
         "parameters": [
           {
@@ -12068,9 +11960,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/activities/{pk}/": {
       "get": {
         "operationId": "retrieve_work_item_activity_2",
-        "tags": [
-          "Work Item Activity"
-        ],
+        "tags": ["Work Item Activity"],
         "summary": null,
         "parameters": [
           {
@@ -12298,9 +12188,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/attachments/": {
       "get": {
         "operationId": "list_work_item_attachments_2",
-        "tags": [
-          "Work Item Attachments"
-        ],
+        "tags": ["Work Item Attachments"],
         "summary": null,
         "parameters": [
           {
@@ -12400,9 +12288,7 @@
       },
       "post": {
         "operationId": "create_work_item_attachment_2",
-        "tags": [
-          "Work Item Attachments"
-        ],
+        "tags": ["Work Item Attachments"],
         "summary": null,
         "parameters": [
           {
@@ -12480,9 +12366,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/attachments/{pk}/": {
       "delete": {
         "operationId": "delete_work_item_attachment_2",
-        "tags": [
-          "Work Item Attachments"
-        ],
+        "tags": ["Work Item Attachments"],
         "summary": null,
         "parameters": [
           {
@@ -12564,9 +12448,7 @@
       },
       "get": {
         "operationId": "retrieve_work_item_attachment_2",
-        "tags": [
-          "Work Item Attachments"
-        ],
+        "tags": ["Work Item Attachments"],
         "summary": null,
         "parameters": [
           {
@@ -12680,9 +12562,7 @@
       },
       "patch": {
         "operationId": "upload_work_item_attachment_2",
-        "tags": [
-          "Work Item Attachments"
-        ],
+        "tags": ["Work Item Attachments"],
         "summary": null,
         "parameters": [
           {
@@ -12769,9 +12649,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/code-reviews/": {
       "get": {
         "operationId": "workspaces_projects_work_items_code_reviews_retrieve",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": null,
         "parameters": [
           {
@@ -12826,9 +12704,7 @@
       },
       "post": {
         "operationId": "workspaces_projects_work_items_code_reviews_create",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": null,
         "parameters": [
           {
@@ -12885,9 +12761,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/code-reviews/{pk}/": {
       "delete": {
         "operationId": "workspaces_projects_work_items_code_reviews_destroy",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": null,
         "parameters": [
           {
@@ -12946,9 +12820,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/comments/": {
       "get": {
         "operationId": "list_work_item_comments_2",
-        "tags": [
-          "Work Item Comments"
-        ],
+        "tags": ["Work Item Comments"],
         "summary": null,
         "parameters": [
           {
@@ -13154,9 +13026,7 @@
       },
       "post": {
         "operationId": "create_work_item_comment_2",
-        "tags": [
-          "Work Item Comments"
-        ],
+        "tags": ["Work Item Comments"],
         "summary": null,
         "parameters": [
           {
@@ -13276,9 +13146,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/comments/{pk}/": {
       "delete": {
         "operationId": "delete_work_item_comment_2",
-        "tags": [
-          "Work Item Comments"
-        ],
+        "tags": ["Work Item Comments"],
         "summary": null,
         "parameters": [
           {
@@ -13368,9 +13236,7 @@
       },
       "get": {
         "operationId": "retrieve_work_item_comment_2",
-        "tags": [
-          "Work Item Comments"
-        ],
+        "tags": ["Work Item Comments"],
         "summary": null,
         "parameters": [
           {
@@ -13502,9 +13368,7 @@
       },
       "patch": {
         "operationId": "update_work_item_comment_2",
-        "tags": [
-          "Work Item Comments"
-        ],
+        "tags": ["Work Item Comments"],
         "summary": null,
         "parameters": [
           {
@@ -13641,9 +13505,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/github/pull-requests/": {
       "get": {
         "operationId": "workspaces_projects_work_items_github_pull_requests_retrieve",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": null,
         "parameters": [
           {
@@ -13698,9 +13560,7 @@
       },
       "post": {
         "operationId": "workspaces_projects_work_items_github_pull_requests_create",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": null,
         "parameters": [
           {
@@ -13757,9 +13617,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/github/pull-requests/{pk}/": {
       "delete": {
         "operationId": "workspaces_projects_work_items_github_pull_requests_destroy",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": null,
         "parameters": [
           {
@@ -13818,9 +13676,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/links/": {
       "get": {
         "operationId": "list_work_item_links_2",
-        "tags": [
-          "Work Item Links"
-        ],
+        "tags": ["Work Item Links"],
         "summary": null,
         "parameters": [
           {
@@ -14029,9 +13885,7 @@
       },
       "post": {
         "operationId": "create_work_item_link_2",
-        "tags": [
-          "Work Item Links"
-        ],
+        "tags": ["Work Item Links"],
         "summary": null,
         "parameters": [
           {
@@ -14132,9 +13986,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/links/{pk}/": {
       "delete": {
         "operationId": "delete_work_item_link_2",
-        "tags": [
-          "Work Item Links"
-        ],
+        "tags": ["Work Item Links"],
         "summary": null,
         "parameters": [
           {
@@ -14224,9 +14076,7 @@
       },
       "get": {
         "operationId": "retrieve_work_item_link_2",
-        "tags": [
-          "Work Item Links"
-        ],
+        "tags": ["Work Item Links"],
         "summary": null,
         "parameters": [
           {
@@ -14419,9 +14269,7 @@
       },
       "patch": {
         "operationId": "update_issue_link_2",
-        "tags": [
-          "Work Item Links"
-        ],
+        "tags": ["Work Item Links"],
         "summary": null,
         "parameters": [
           {
@@ -14539,9 +14387,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/": {
       "get": {
         "operationId": "list_work_item_relations",
-        "tags": [
-          "Work Item Relations"
-        ],
+        "tags": ["Work Item Relations"],
         "summary": "List work item relations",
         "parameters": [
           {
@@ -14717,21 +14563,12 @@
                 "examples": {
                   "WorkItemRelationsResponse": {
                     "value": {
-                      "blocking": [
-                        "550e8400-e29b-41d4-a716-446655440000",
-                        "550e8400-e29b-41d4-a716-446655440001"
-                      ],
-                      "blocked_by": [
-                        "550e8400-e29b-41d4-a716-446655440002"
-                      ],
+                      "blocking": ["550e8400-e29b-41d4-a716-446655440000", "550e8400-e29b-41d4-a716-446655440001"],
+                      "blocked_by": ["550e8400-e29b-41d4-a716-446655440002"],
                       "duplicate": [],
-                      "relates_to": [
-                        "550e8400-e29b-41d4-a716-446655440003"
-                      ],
+                      "relates_to": ["550e8400-e29b-41d4-a716-446655440003"],
                       "start_after": [],
-                      "start_before": [
-                        "550e8400-e29b-41d4-a716-446655440004"
-                      ],
+                      "start_before": ["550e8400-e29b-41d4-a716-446655440004"],
                       "finish_after": [],
                       "finish_before": []
                     },
@@ -14749,9 +14586,7 @@
       },
       "post": {
         "operationId": "create_work_item_relation",
-        "tags": [
-          "Work Item Relations"
-        ],
+        "tags": ["Work Item Relations"],
         "summary": "Create work item relation",
         "parameters": [
           {
@@ -14861,9 +14696,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/grouped/": {
       "get": {
         "operationId": "list_work_item_relations_grouped",
-        "tags": [
-          "Work Item Relations"
-        ],
+        "tags": ["Work Item Relations"],
         "summary": "List work item relations with details",
         "parameters": [
           {
@@ -14938,9 +14771,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/relate/": {
       "post": {
         "operationId": "relate_work_items",
-        "tags": [
-          "Work Item Relations"
-        ],
+        "tags": ["Work Item Relations"],
         "summary": "Relate work items (idempotent)",
         "parameters": [
           {
@@ -15018,9 +14849,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/unrelate/": {
       "post": {
         "operationId": "unrelate_work_items",
-        "tags": [
-          "Work Item Relations"
-        ],
+        "tags": ["Work Item Relations"],
         "summary": "Remove work item relations (idempotent)",
         "parameters": [
           {
@@ -15098,9 +14927,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/workpad/": {
       "get": {
         "operationId": "workspaces_projects_work_items_workpad_retrieve",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": null,
         "parameters": [
           {
@@ -15155,9 +14982,7 @@
       },
       "patch": {
         "operationId": "workspaces_projects_work_items_workpad_partial_update",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": null,
         "parameters": [
           {
@@ -15214,9 +15039,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/": {
       "delete": {
         "operationId": "delete_work_item_2",
-        "tags": [
-          "Work Items"
-        ],
+        "tags": ["Work Items"],
         "summary": "Delete work item",
         "parameters": [
           {
@@ -15281,9 +15104,7 @@
       },
       "get": {
         "operationId": "retrieve_work_item_2",
-        "tags": [
-          "Work Items"
-        ],
+        "tags": ["Work Items"],
         "summary": "Retrieve work item",
         "parameters": [
           {
@@ -15458,12 +15279,8 @@
                       "description": "Add OAuth 2.0 authentication flow",
                       "sequence_id": 1,
                       "priority": "high",
-                      "assignees": [
-                        "550e8400-e29b-41d4-a716-446655440001"
-                      ],
-                      "labels": [
-                        "550e8400-e29b-41d4-a716-446655440002"
-                      ],
+                      "assignees": ["550e8400-e29b-41d4-a716-446655440001"],
+                      "labels": ["550e8400-e29b-41d4-a716-446655440002"],
                       "created_at": "2024-01-15T10:30:00Z",
                       "updated_at": "2024-01-15T10:30:00Z"
                     }
@@ -15480,9 +15297,7 @@
       },
       "patch": {
         "operationId": "update_work_item_2",
-        "tags": [
-          "Work Items"
-        ],
+        "tags": ["Work Items"],
         "summary": "Partially update work item",
         "parameters": [
           {
@@ -15554,12 +15369,8 @@
                       "description": "Add OAuth 2.0 authentication flow",
                       "sequence_id": 1,
                       "priority": "high",
-                      "assignees": [
-                        "550e8400-e29b-41d4-a716-446655440001"
-                      ],
-                      "labels": [
-                        "550e8400-e29b-41d4-a716-446655440002"
-                      ],
+                      "assignees": ["550e8400-e29b-41d4-a716-446655440001"],
+                      "labels": ["550e8400-e29b-41d4-a716-446655440002"],
                       "created_at": "2024-01-15T10:30:00Z",
                       "updated_at": "2024-01-15T10:30:00Z"
                     }
@@ -15581,9 +15392,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/move/": {
       "post": {
         "operationId": "workspaces_projects_work_items_move_create",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": null,
         "parameters": [
           {
@@ -15640,9 +15449,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/re-tick/": {
       "post": {
         "operationId": "workspaces_projects_work_items_re_tick_create",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": null,
         "parameters": [
           {
@@ -15692,9 +15499,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/run-ai/": {
       "post": {
         "operationId": "run_ai_work_item",
-        "tags": [
-          "Work Items"
-        ],
+        "tags": ["Work Items"],
         "summary": "Run AI on a work item",
         "parameters": [
           {
@@ -15778,9 +15583,7 @@
     "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/wait/": {
       "post": {
         "operationId": "wait_work_item",
-        "tags": [
-          "Work Items"
-        ],
+        "tags": ["Work Items"],
         "summary": "Wait on a blocker",
         "parameters": [
           {
@@ -15858,11 +15661,103 @@
     "/api/v1/workspaces/{slug}/schedulers/": {
       "get": {
         "operationId": "workspaces_schedulers_retrieve",
-        "tags": [
-          "workspaces"
-        ],
+        "tags": ["workspaces"],
         "summary": null,
         "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SchedulerAPI"
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "operationId": "workspaces_schedulers_create",
+        "tags": ["workspaces"],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SchedulerAPI"
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{slug}/schedulers/{scheduler_id}/": {
+      "delete": {
+        "operationId": "workspaces_schedulers_destroy",
+        "tags": ["workspaces"],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scheduler_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true
+          },
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No response body"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "workspaces_schedulers_partial_update",
+        "tags": ["workspaces"],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "scheduler_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true
+          },
           {
             "in": "path",
             "name": "slug",
@@ -15889,9 +15784,7 @@
     "/api/v1/workspaces/{slug}/stickies/": {
       "get": {
         "operationId": "list_stickies",
-        "tags": [
-          "Stickies"
-        ],
+        "tags": ["Stickies"],
         "summary": "List stickies",
         "parameters": [
           {
@@ -15966,9 +15859,7 @@
       },
       "post": {
         "operationId": "create_sticky",
-        "tags": [
-          "Stickies"
-        ],
+        "tags": ["Stickies"],
         "summary": "Create a new sticky",
         "parameters": [
           {
@@ -16024,9 +15915,7 @@
     "/api/v1/workspaces/{slug}/stickies/{pk}/": {
       "delete": {
         "operationId": "delete_sticky",
-        "tags": [
-          "Stickies"
-        ],
+        "tags": ["Stickies"],
         "summary": "Delete a sticky",
         "parameters": [
           {
@@ -16073,9 +15962,7 @@
       },
       "get": {
         "operationId": "retrieve_sticky",
-        "tags": [
-          "Stickies"
-        ],
+        "tags": ["Stickies"],
         "summary": "Retrieve a sticky",
         "parameters": [
           {
@@ -16139,9 +16026,7 @@
       },
       "patch": {
         "operationId": "update_sticky",
-        "tags": [
-          "Stickies"
-        ],
+        "tags": ["Stickies"],
         "summary": "Update a sticky",
         "parameters": [
           {
@@ -16207,9 +16092,7 @@
     "/api/v1/workspaces/{slug}/work-items/search/": {
       "get": {
         "operationId": "search_work_items_2",
-        "tags": [
-          "Work Items"
-        ],
+        "tags": ["Work Items"],
         "summary": null,
         "parameters": [
           {
@@ -16356,9 +16239,7 @@
     "/api/v1/workspaces/{slug}/work-items/search/advanced/": {
       "get": {
         "operationId": "search_work_items_advanced",
-        "tags": [
-          "Work Items"
-        ],
+        "tags": ["Work Items"],
         "summary": null,
         "parameters": [
           {
@@ -16390,9 +16271,7 @@
     "/api/v1/workspaces/{slug}/work-items/{project_identifier}-{issue_identifier}/": {
       "get": {
         "operationId": "get_workspace_work_item_2",
-        "tags": [
-          "Work Items"
-        ],
+        "tags": ["Work Items"],
         "summary": "Retrieve work item by identifiers",
         "parameters": [
           {
@@ -16459,12 +16338,8 @@
                       "description": "Add OAuth 2.0 authentication flow",
                       "sequence_id": 1,
                       "priority": "high",
-                      "assignees": [
-                        "550e8400-e29b-41d4-a716-446655440001"
-                      ],
-                      "labels": [
-                        "550e8400-e29b-41d4-a716-446655440002"
-                      ],
+                      "assignees": ["550e8400-e29b-41d4-a716-446655440001"],
+                      "labels": ["550e8400-e29b-41d4-a716-446655440002"],
                       "created_at": "2024-01-15T10:30:00Z",
                       "updated_at": "2024-01-15T10:30:00Z"
                     }
