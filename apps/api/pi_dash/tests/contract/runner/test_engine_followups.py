@@ -19,6 +19,7 @@ from datetime import timedelta
 import pytest
 from django.apps import apps as django_apps
 from django.test import override_settings
+from django.urls import reverse
 from django.utils import timezone
 
 from pi_dash.db.models import APIToken, Project
@@ -207,3 +208,98 @@ def test_personal_api_token_logout_leaves_engines_alone(db, create_user, workspa
     assert token.is_active is False
     machine.refresh_from_db()
     assert machine.engine_sign_in_state == EngineSignInState.ACTIVE
+
+
+# --------------------------------------------------------------------------
+# GET/PATCH dev-machines/<id>/: the daemon's view of its machine (§5, §8)
+# --------------------------------------------------------------------------
+
+
+def _machine_url(machine):
+    return reverse("runner:daemon-dev-machine", kwargs={"dev_machine_id": machine.id})
+
+
+@override_settings(**ENABLED)
+def test_daemon_machine_get_lists_engine_fields_and_every_runner_row(
+    db, create_user, workspace, workspace_b, machine, mt, lane
+):
+    issue_engine_credential(user=create_user, dev_machine=machine)
+    DevMachine.objects.filter(pk=machine.pk).update(
+        engine_paused_by_owner=True, engine_auto_pause_reason=EngineAutoPauseReason.WALLET_EMPTY
+    )
+    engine = _engine(create_user, workspace, machine, "builtin-rich-mbp-test-workspace-def", age_days=3)
+    Runner.objects.filter(pk=engine.pk).update(dev_metadata={"working_dir": "/home/rich/work/def"})
+    gone = _engine(create_user, workspace_b, machine, "builtin-rich-mbp-second-ws-def", age_days=2)
+    Runner.objects.filter(pk=gone.pk).update(status="revoked", revoked_at=timezone.now(), revoked_reason="user_revoke")
+    pod = Pod.default_for_project(Project.objects.get(workspace=workspace, identifier="DEF"))
+    own = Runner.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        pod=pod,
+        dev_machine=machine,
+        name="my-claude",
+        capabilities=["agent:claude_code"],
+    )
+    Runner.objects.filter(pk=own.pk).update(created_at=timezone.now() - timedelta(days=1))
+    # Another machine's runner is not listed.
+    other = DevMachine.objects.create(owner=create_user, host_label="desk")
+    _engine(create_user, workspace, other, "builtin-desk-test-workspace-def")
+
+    # Any of the machine's workspace tokens works.
+    for token in (mt, _mint_mt(create_user, workspace_b, machine)):
+        resp = _client(bearer=token).get(_machine_url(machine))
+        assert resp.status_code == 200, resp.data
+        body = resp.data
+        assert body["id"] == str(machine.id)
+        assert body["engine_paused_by_owner"] is True
+        assert body["engine_auto_pause_reason"] == EngineAutoPauseReason.WALLET_EMPTY
+        assert body["engine_sign_in_state"] == EngineSignInState.ACTIVE
+        assert body["engine_credential_expires_at"] is not None
+        rows = body["runners"]
+        assert [r["id"] for r in rows] == [str(engine.id), str(gone.id), str(own.id)]
+        first, revoked, mine = rows
+        assert first == {
+            "id": str(engine.id),
+            "name": "builtin-rich-mbp-test-workspace-def",
+            "workspace_slug": "test-workspace",
+            "project_id": str(pod.project_id),
+            "project_identifier": "DEF",
+            "pod_id": str(pod.id),
+            "agent_kind": "engine",
+            "provisioning": RunnerProvisioning.DESKTOP_BUNDLED,
+            "status": engine.status,
+            "revoked_at": None,
+            "revoked_reason": "",
+            "working_dir": "/home/rich/work/def",
+        }
+        assert revoked["workspace_slug"] == "second-ws"
+        assert revoked["revoked_at"] is not None and revoked["status"] == "revoked"
+        assert revoked["working_dir"] == ""
+        assert mine["agent_kind"] == "claude_code"
+        assert mine["provisioning"] == RunnerProvisioning.MANUAL
+
+
+def test_daemon_machine_get_is_restricted_to_the_token_machine(db, create_user, workspace, machine, mt):
+    other = DevMachine.objects.create(owner=create_user, host_label="desk")
+    assert _client(bearer=mt).get(_machine_url(other)).status_code == 403
+    # A machine token not bound to a computer.
+    unbound = _mint_mt(create_user, workspace, other)
+    MachineToken.objects.filter(dev_machine=other).update(dev_machine=None)
+    assert _client(bearer=unbound).get(_machine_url(other)).status_code == 403
+    # No credential at all.
+    assert _client().get(_machine_url(machine)).status_code in (401, 403)
+    # A personal API token is not a daemon credential.
+    api_token = APIToken.objects.create(user=create_user, label="cli", workspace=workspace)
+    assert _client(api_key=api_token.token).get(_machine_url(machine)).status_code in (401, 403)
+
+
+def test_daemon_machine_patch_answers_the_same_body(db, create_user, workspace, machine, mt):
+    engine = _engine(create_user, workspace, machine, "builtin-rich-mbp-test-workspace-def")
+    resp = _client(bearer=mt).patch(_machine_url(machine), {"engine_paused_by_owner": True}, format="json")
+    assert resp.status_code == 200, resp.data
+    assert resp.data["engine_paused_by_owner"] is True
+    assert resp.data["engine_auto_pause_reason"] == ""
+    assert resp.data["engine_sign_in_state"] == EngineSignInState.NEVER
+    assert [r["id"] for r in resp.data["runners"]] == [str(engine.id)]
+    got = _client(bearer=mt).get(_machine_url(machine))
+    assert got.data == resp.data
