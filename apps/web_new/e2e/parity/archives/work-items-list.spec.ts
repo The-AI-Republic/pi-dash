@@ -23,6 +23,7 @@ import {
   serverIssue,
   serverPatchIssue,
   serverPatchProject,
+  serverPatchState,
   serverProjectStates,
   serverSessionUserId,
   serverUnarchiveIssue,
@@ -558,12 +559,16 @@ test(
       session
     );
     // Created in reverse workflow order so creation order cannot pass for workflow order.
+    // Archiving requires a completed/cancelled state (the API 400s otherwise),
+    // so all three start completed and two states move groups after archiving.
     const doneId = await serverCreateState(seed.workspaceSlug, projectId, `${tag} shipped`, "completed", session);
-    const startedId = await serverCreateState(seed.workspaceSlug, projectId, `${tag} doing`, "started", session);
-    const backlogId = await serverCreateState(seed.workspaceSlug, projectId, `${tag} someday`, "backlog", session);
+    const startedId = await serverCreateState(seed.workspaceSlug, projectId, `${tag} doing`, "completed", session);
+    const backlogId = await serverCreateState(seed.workspaceSlug, projectId, `${tag} someday`, "completed", session);
     const first = await archiveNamedIssue(seed, projectId, `${tag} alpha`, doneId, session);
     const second = await archiveNamedIssue(seed, projectId, `${tag} beta`, startedId, session);
     const third = await archiveNamedIssue(seed, projectId, `${tag} gamma`, backlogId, session);
+    await serverPatchState(seed.workspaceSlug, projectId, startedId, { group: "started" }, session);
+    await serverPatchState(seed.workspaceSlug, projectId, backlogId, { group: "backlog" }, session);
     try {
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await driver.archivesOpenIssuesList(seed.workspaceSlug, projectId);
