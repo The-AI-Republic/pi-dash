@@ -171,3 +171,41 @@ describe("discovery", () => {
     ).toBe("Pi Dash on this computer is signed in as x@example.com.");
   });
 });
+
+describe("engine pause (design §8)", () => {
+  const detail = (extra: Record<string, unknown>) =>
+    ({ state: "available", sign_in_state: "active", ...extra }) as Parameters<Daemon["pauseControl"]>[0];
+  const checked = "2026-11-04T10:00:00Z";
+
+  it("offers Pause or Resume, never both, and nothing while the state is unknown", () => {
+    expect(daemon.pauseControl(undefined)).toEqual({ action: "none" });
+    expect(daemon.pauseControl(detail({ paused_by_owner: true }))).toEqual({ action: "none" });
+    expect(daemon.pauseControl(detail({ paused_by_owner: false, pause_checked_at: checked }))).toEqual({
+      action: "pause",
+    });
+    expect(daemon.pauseControl(detail({ paused_by_owner: true, pause_checked_at: checked }))).toEqual({
+      action: "resume",
+    });
+  });
+
+  it("names an automatic pause, which the owner's switch does not lift", () => {
+    expect(
+      daemon.pauseControl(
+        detail({ paused_by_owner: false, auto_pause_reason: "wallet_empty", pause_checked_at: checked })
+      )
+    ).toEqual({ action: "pause", autoReason: "wallet_empty" });
+  });
+
+  it("sends EngineSetPaused to the daemon, then rediscovers", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "daemon_engine_set_paused") return { state: "available", sign_in_state: "active" };
+      if (command === "daemon_discover") return { kind: "compatible", hello: hello() };
+      return undefined;
+    });
+    await daemon.setEnginePaused(true);
+    expect(invoke.mock.calls.map(([c, a]) => [c, a])).toEqual([
+      ["daemon_engine_set_paused", { paused: true }],
+      ["daemon_discover", { appIdentity: { userId: "u-1", cloudUrl: "https://pidash.test" } }],
+    ]);
+  });
+});

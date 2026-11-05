@@ -426,6 +426,17 @@ pub async fn daemon_engine_status() -> Result<EngineStatusInfo, String> {
     }
 }
 
+/// The owner's "Pause the built-in engine" switch for this computer
+/// (design §8). The daemon asks the server and answers with the engine
+/// status, pause state included.
+#[tauri::command]
+pub async fn daemon_engine_set_paused(paused: bool) -> Result<EngineStatusInfo, String> {
+    match call(Request::EngineSetPaused { paused }, CALL_TIMEOUT).await? {
+        Response::EngineStatus(s) => Ok(s),
+        other => Err(unexpected(&other)),
+    }
+}
+
 #[tauri::command]
 pub async fn daemon_engine_settings_get() -> Result<EngineSettings, String> {
     match call(Request::EngineSettingsGet, CALL_TIMEOUT).await? {
@@ -623,6 +634,9 @@ mod tests {
                 model: None,
                 binary: None,
                 profile_fetched_at: None,
+                paused_by_owner: None,
+                auto_pause_reason: None,
+                pause_checked_at: None,
             }),
         }
     }

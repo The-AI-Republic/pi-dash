@@ -19,7 +19,9 @@
  *   pins and pods move, with the collision rule of §13), then has the daemon
  *   re-create the local blocks of the moved engine runners — an engine runner
  *   needs nothing local but its folder, which the daemon allocates (§10).
- *   Own-agent runners cannot be rebuilt (their agent and folder were local);
+ *   The daemon's engine reconcile would re-add them too, but only on its next
+ *   tick (every 10 minutes); the app does it at once, and treats a block the
+ *   reconcile added meanwhile as restored. Own-agent runners cannot be rebuilt (their agent and folder were local);
  *   they stay offline, for "Set up again on this computer" or removal.
  * - **Keep it** leaves the old machine offline for the user to remove (PO-9)
  *   and is remembered, so the app does not ask about it again.
@@ -143,6 +145,14 @@ async function movedEngines(moved: string[], deps: ReplaceDeps): Promise<MovedEn
   return engines;
 }
 
+/** Whether the daemon has an engine block for `workspace`/`project` (case-insensitive, as the daemon matches). */
+function servedIn(local: LocalRunner[], workspace: string, project: string): boolean {
+  return local.some(
+    (r) =>
+      r.agent === "engine" && r.workspace_slug === workspace && r.project_slug?.toLowerCase() === project.toLowerCase()
+  );
+}
+
 /**
  * "Replace it": merge `prompt.candidate` into this machine, then re-create the
  * moved engine runners' local blocks on the daemon. The merge is idempotent
@@ -169,10 +179,7 @@ export async function replaceMachine(prompt: ReplacePrompt, deps: ReplaceDeps = 
         const now = compatibleHello(deps.discovery());
         signedIn = new Set([...signedIn, ...(now?.workspaces.filter((w) => w.signed_in).map((w) => w.slug) ?? [])]);
       }
-      const served = local.some(
-        (r) => r.agent === "engine" && r.workspace_slug === workspace && r.project_slug === project
-      );
-      if (!served) {
+      if (!servedIn(local, workspace, project)) {
         // No working dir: the daemon allocates the folder (§10); the server's
         // reuse lookup returns the moved row, so the runner keeps its id.
         // eslint-disable-next-line no-await-in-loop -- one runner at a time
@@ -180,7 +187,11 @@ export async function replaceMachine(prompt: ReplacePrompt, deps: ReplaceDeps = 
       }
       restored.push(name);
     } catch (error) {
-      failed.push({ project: name, error: errorText(error) });
+      // The daemon's own reconcile may have re-added it meanwhile.
+      // eslint-disable-next-line no-await-in-loop -- only on a failure
+      const now = await deps.invoke<LocalRunner[]>("daemon_runners").catch(() => [] as LocalRunner[]);
+      if (servedIn(now, workspace, project)) restored.push(name);
+      else failed.push({ project: name, error: errorText(error) });
     }
   }
   return { merge, restored, failed, ownAgentRunners: Math.max(0, moved.length - engines.length) };

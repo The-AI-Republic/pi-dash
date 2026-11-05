@@ -238,6 +238,34 @@ describe("replace-machine prompt", () => {
     expect(outcome.restored).toEqual(["acme/API"]);
   });
 
+  it("counts a runner the daemon's own reconcile re-added meanwhile as restored", async () => {
+    const local: LocalRunner[] = [];
+    const world = fakeWorld({
+      candidates: [candidate("old-1")],
+      moved: ["r-web"],
+      serverRunners: { "ws-acme": [{ id: "r-web", is_engine: true, pod_detail: { project_identifier: "WEB" } }] },
+      local,
+    });
+    const invoke = world.deps.invoke;
+    world.deps.invoke = async <T>(command: string, args?: Record<string, unknown>) => {
+      if (command === "daemon_engine_runner_add") {
+        local.push({
+          name: "builtin-WEB",
+          runner_id: "r-web",
+          workspace_slug: "acme",
+          project_slug: "WEB",
+          working_dir: "/home/u/pidash/acme/WEB",
+          agent: "engine",
+        });
+        throw new Error("the built-in engine is already on for WEB in acme");
+      }
+      return invoke<T>(command, args);
+    };
+    const outcome = await replaceMachine((await findReplacePrompt("u-1", world.deps))!, world.deps);
+    expect(outcome.restored).toEqual(["acme/WEB"]);
+    expect(outcome.failed).toEqual([]);
+  });
+
   it("offerReplace shows the prompt only when there is a machine to ask about", async () => {
     const shown: unknown[] = [];
     registerReplacePrompt((p) => shown.push(p));

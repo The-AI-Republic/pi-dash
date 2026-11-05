@@ -489,6 +489,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             daemon::daemon_discover,
             daemon::daemon_status,
             daemon::daemon_engine_status,
+            daemon::daemon_engine_set_paused,
             daemon::daemon_engine_settings_get,
             daemon::daemon_engine_settings_set,
             daemon::daemon_engine_runner_add,
@@ -503,7 +504,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             setup::daemon_update_cli,
             setup::pidash_cli_engine_login,
             setup::pidash_cli_logout,
-            setup::pidash_engine_set_paused,
             // Moving older builds' private daemon trees to the shared daemon.
             migration::legacy_scan,
             migration::legacy_finish,

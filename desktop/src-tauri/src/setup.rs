@@ -292,20 +292,6 @@ pub fn logout_invocation(engine: bool) -> Vec<String> {
     args
 }
 
-/// `pidash engine pause` / `resume`: the per-machine switch (design §8).
-#[tauri::command]
-pub async fn pidash_engine_set_paused<R: Runtime>(
-    app: AppHandle<R>,
-    paused: bool,
-) -> Result<(), String> {
-    blocking(move || {
-        let cli = installed_cli()?;
-        let verb = if paused { "pause" } else { "resume" };
-        run_cli(&app, &cli, &["engine".into(), verb.into()], None, None)
-    })
-    .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
