@@ -528,9 +528,42 @@ impl TreeInner {
             let _ = std::fs::remove_file(record_path(dir, self.record_id));
         }
         REGISTRY.forget(self.record_id);
+        REGISTRY.release(self.record_id);
     }
 
-    async fn finish_group(&self) -> FinishOutcome {
+    /// True while this tree's group may still have members: it was armed and
+    /// is neither observed gone nor proven to be someone else's group now.
+    /// Never signals.
+    fn still_held(&self) -> bool {
+        let Some(pgid) = self.pgid() else {
+            return false;
+        };
+        if self.leader_reaped.load(Ordering::SeqCst) {
+            let leader_start = *self
+                .leader_start_ms
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let proof = Ownership {
+                tag: self.tag.as_deref(),
+                leader_start,
+                leader_dead: true,
+                alive_until_ms: now_ms(),
+                env_proof: self.env_proof,
+            };
+            if group_identity(pgid, &proof) == Some(false) {
+                // Our group is gone and its pgid belongs to someone else.
+                self.mark_gone();
+                return false;
+            }
+        }
+        if probe_group(pgid) == Probe::Gone {
+            self.mark_gone();
+            return false;
+        }
+        true
+    }
+
+    async fn finish_group(self: &Arc<Self>) -> FinishOutcome {
         let _serial = self.finish_lock.lock().await;
         let Some(pgid) = self.pgid() else {
             // Nothing owned (or already gone): nothing can be cleaned, so the
@@ -576,6 +609,15 @@ impl TreeInner {
                     record_id = %self.record_id,
                     "could not confirm agent process group gone ({why}); keeping record for recovery"
                 );
+                // A chat runtime's working dir is not handed to the next run
+                // while its tree may still be running (see `scope_unresolved`).
+                if self
+                    .scope
+                    .as_ref()
+                    .is_some_and(|s| s.kind == ScopeKind::Chat)
+                {
+                    REGISTRY.hold(self);
+                }
                 FinishOutcome::Unresolved(why)
             }
         }
@@ -602,12 +644,16 @@ pub struct Registry {
     gate: RwLock<()>,
     accepting: AtomicBool,
     live: Mutex<HashMap<Uuid, Weak<TreeInner>>>,
+    /// Chat trees whose finish could not confirm the group gone, kept until a
+    /// later check sees the group gone (see [`scope_unresolved`]).
+    held: Mutex<HashMap<Uuid, Arc<TreeInner>>>,
 }
 
 static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry {
     gate: RwLock::new(()),
     accepting: AtomicBool::new(true),
     live: Mutex::new(HashMap::new()),
+    held: Mutex::new(HashMap::new()),
 });
 
 impl Registry {
@@ -619,6 +665,18 @@ impl Registry {
 
     fn forget(&self, id: Uuid) {
         if let Ok(mut m) = self.live.lock() {
+            m.remove(&id);
+        }
+    }
+
+    fn hold(&self, inner: &Arc<TreeInner>) {
+        if let Ok(mut m) = self.held.lock() {
+            m.insert(inner.record_id, inner.clone());
+        }
+    }
+
+    fn release(&self, id: Uuid) {
+        if let Ok(mut m) = self.held.lock() {
             m.remove(&id);
         }
     }
@@ -688,6 +746,30 @@ pub async fn shutdown_all(bound: Duration) -> usize {
             n
         }
     }
+}
+
+/// True while a tree of `scope` whose finish could not confirm its group
+/// gone (EPERM, a member surviving SIGKILL, a group no longer provable ours)
+/// may still have members. Re-checks each such tree without signalling and
+/// forgets the ones now gone. The supervisor does not hand a chat runtime's
+/// working dir to the next run or chat runtime while this is true.
+pub fn scope_unresolved(kind: ScopeKind, id: &str) -> bool {
+    let held: Vec<Arc<TreeInner>> = match REGISTRY.held.lock() {
+        Ok(m) => m.values().cloned().collect(),
+        Err(_) => return false,
+    };
+    let mut unresolved = false;
+    for t in held {
+        // Re-check every held tree, so trees of other scopes are pruned too.
+        if t.still_held()
+            && t.scope
+                .as_ref()
+                .is_some_and(|s| s.kind == kind && s.id == id)
+        {
+            unresolved = true;
+        }
+    }
+    unresolved
 }
 
 /// Finish every live tree belonging to `scope` (safety net for a bridge that
@@ -1764,6 +1846,57 @@ mod tests {
         drop(tree);
         assert!(alive(orphan));
         kill_now(orphan);
+    }
+
+    /// A chat tree whose finish could not confirm the group gone keeps its
+    /// chat runtime's working dir held until a later check sees it gone.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_unresolved_chat_tree_stays_held_until_its_group_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx(dir.path(), "test-instance-held");
+        let pf = dir.path().join("pids");
+        let id = format!("chat-held-{}", Uuid::new_v4());
+        let chat = ProcScope {
+            kind: ScopeKind::Chat,
+            id: id.clone(),
+            runner_id: Some("r1".to_string()),
+        };
+        let tree = ProcessTree::prepare(Some(chat), Some(ctx.clone())).unwrap();
+        // Untagged and leaderless after the reap: unprovable, so never
+        // signalled and never confirmed gone.
+        let mut child = session_cmd(
+            &format!("sleep 300 & echo $! > {}; exit 0", pf.display()),
+            None,
+        )
+        .spawn()
+        .unwrap();
+        tree.attach(child.id());
+        child.wait().await.unwrap();
+        tree.leader_reaped();
+        let orphan = read_pids(&pf, 1).await[0];
+        assert!(!scope_unresolved(ScopeKind::Chat, &id));
+        let outcome = tree.finish_group().await;
+        assert!(
+            matches!(outcome, FinishOutcome::Unresolved(_)),
+            "{outcome:?}"
+        );
+        let record = tree.record_path().unwrap();
+        drop(tree);
+        assert!(
+            scope_unresolved(ScopeKind::Chat, &id),
+            "held after the drop"
+        );
+        assert!(!scope_unresolved(ScopeKind::Chat, "another-chat"));
+        assert!(!scope_unresolved(ScopeKind::Run, &id));
+        assert!(alive(orphan), "checking never signals");
+        kill_now(orphan);
+        assert!(wait_all_gone(&[orphan], Duration::from_secs(10)).await);
+        assert!(
+            !scope_unresolved(ScopeKind::Chat, &id),
+            "released once gone"
+        );
+        assert!(!record.exists(), "and its record is resolved");
     }
 
     #[tokio::test]
