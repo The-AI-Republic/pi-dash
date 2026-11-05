@@ -11,6 +11,9 @@
 //! - a live engine runner row of this machine with no local block (a merged
 //!   machine, a daemon whose config was restored from an old copy) is
 //!   re-added, with a folder allocated as in design §10;
+//!   A row the user removed on this computer only (`runner remove
+//!   --local-only`, or offline) is tombstoned and not re-added
+//!   ([`crate::engine::tombstones`]);
 //! - the machine's engine pause state is cached for `Hello` and
 //!   `pidash engine status`.
 //!
@@ -18,6 +21,7 @@
 //! daemon resolved at start, once no run is in flight and no process runs a
 //! binary from them.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -81,6 +85,11 @@ impl RunnerSpawnCtx {
         // Never race `EngineRunnerAdd` / machine control's create: a row
         // they just created has no block yet.
         let _engine_ops = self.engine_ops_lock.lock().await;
+        let tombstones = crate::engine::tombstones::load(&self.paths);
+        // Live engine rows seen across every workspace, and whether every
+        // workspace was read: tombstones are pruned only from a full view.
+        let mut live = BTreeSet::new();
+        let mut complete = true;
         for (workspace, token) in self.tokens.session_candidates() {
             let payload = match self.engine.refresh_machine(&token, machine_id).await {
                 Ok(p) => p,
@@ -89,14 +98,27 @@ impl RunnerSpawnCtx {
                         workspace = workspace.as_deref().unwrap_or("(default)"),
                         "engine reconcile skipped: reading the machine failed: {e}"
                     );
+                    complete = false;
                     continue;
                 }
             };
             let Some(rows) = payload.runners else {
+                complete = false;
                 continue;
             };
-            self.reconcile_rows(workspace.as_deref(), &rows, &mut report)
+            live.extend(
+                rows.iter()
+                    .filter(|r| r.is_engine() && !r.is_revoked())
+                    .map(|r| r.id),
+            );
+            self.reconcile_rows(workspace.as_deref(), &rows, &tombstones, &mut report)
                 .await;
+        }
+        if complete
+            && !tombstones.is_empty()
+            && let Err(e) = crate::engine::tombstones::retain_live(&self.paths, &live)
+        {
+            tracing::warn!("pruning engine runner tombstones failed: {e:#}");
         }
         report
     }
@@ -105,6 +127,7 @@ impl RunnerSpawnCtx {
         &self,
         workspace: Option<&str>,
         rows: &[MachineRunnerRow],
+        tombstones: &BTreeSet<Uuid>,
         report: &mut ReconcileReport,
     ) {
         let cfg = match crate::config::file::load_config(&self.paths) {
@@ -123,7 +146,9 @@ impl RunnerSpawnCtx {
                         Err(e) => report.failed.push(format!("{}: {e:#}", b.name)),
                     }
                 }
-                None if !row.is_revoked() => {
+                // Removed on this computer only (`runner remove
+                // --local-only`, or offline): the user doesn't want it here.
+                None if !row.is_revoked() && !tombstones.contains(&row.id) => {
                     let label = if row.name.is_empty() {
                         row.id.to_string()
                     } else {
@@ -232,8 +257,9 @@ impl RunnerSpawnCtx {
     /// Remove engine versions older than the one this daemon resolved at
     /// start (design §4.5). Returns `true` once there is nothing left to
     /// wait for: done, or nothing to clean (an override or no engine).
-    /// Returns `false` while a run or chat turn is in flight, so the next
-    /// tick tries again.
+    /// Returns `false` while a run or chat turn is in flight, or while an
+    /// old version is still in use or failed to go, so the next tick tries
+    /// again.
     pub(crate) fn cleanup_old_engine_versions(&self) -> bool {
         let Some(engine) = crate::engine::locate::resolved() else {
             return true;
@@ -248,11 +274,17 @@ impl RunnerSpawnCtx {
             crate::engine::cleanup::dir_in_use_by_a_process,
         ) {
             None => !busy,
-            Some(Ok(removed)) => {
-                for dir in removed {
+            Some(Ok(out)) => {
+                for dir in &out.removed {
                     tracing::info!(dir = %dir.display(), "removed an old engine version");
                 }
-                true
+                if !out.left.is_empty() {
+                    tracing::info!(
+                        dirs = ?out.left,
+                        "old engine versions kept for now (in use or not removable); retrying on the next tick"
+                    );
+                }
+                out.left.is_empty()
             }
             Some(Err(e)) => {
                 tracing::warn!("removing old engine versions failed: {e}");
@@ -441,6 +473,112 @@ mod tests {
         // A second pass changes nothing.
         let again = ctx.reconcile_engine_runners().await;
         assert_eq!(again, ReconcileReport::default());
+    }
+
+    #[tokio::test]
+    async fn a_runner_removed_locally_is_not_re_added_and_its_tombstone_is_pruned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        paths.ensure().unwrap();
+        let machine_id = Uuid::new_v4();
+        let block = engine_block("builtin-h-acme-web", "WEB", tmp.path().join("tasks/web"));
+        let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let row = serde_json::json!({"id": block.runner_id, "name": block.name,
+            "workspace_slug": "acme", "project_identifier": "WEB", "agent_kind": "engine"});
+        let path = crate::engine::api::dev_machine_path(machine_id);
+        let live_h = live.clone();
+        let handler: Handler = Arc::new(move |req| {
+            if req.path == path && req.method == "GET" {
+                let runners = if live_h.load(std::sync::atomic::Ordering::SeqCst) {
+                    vec![row.clone()]
+                } else {
+                    vec![]
+                };
+                (200, serde_json::json!({ "runners": runners }).to_string())
+            } else {
+                (404, String::new())
+            }
+        });
+        let server = test_server::start(handler).await;
+        seed(&paths, &server.url, vec![block.clone()]);
+
+        // `pidash runner remove --local-only`: the block goes, the server
+        // row stays live, a tombstone is written.
+        crate::cli::runner::remove(
+            crate::cli::runner::RemoveArgs {
+                name: block.name.clone(),
+                local_only: true,
+                yes: true,
+            },
+            &paths,
+        )
+        .await
+        .unwrap();
+        assert!(
+            crate::config::file::load_config(&paths)
+                .unwrap()
+                .runners
+                .is_empty()
+        );
+        assert!(crate::engine::tombstones::load(&paths).contains(&block.runner_id));
+
+        let ctx = ctx(&paths, &server.url, machine_id);
+        // The live row is not re-added while the tombstone stands.
+        assert_eq!(
+            ctx.reconcile_engine_runners().await,
+            ReconcileReport::default()
+        );
+        assert!(
+            crate::config::file::load_config(&paths)
+                .unwrap()
+                .runners
+                .is_empty()
+        );
+        assert!(crate::engine::tombstones::load(&paths).contains(&block.runner_id));
+
+        // Once the server no longer lists the row as live, the tombstone goes.
+        live.store(false, std::sync::atomic::Ordering::SeqCst);
+        ctx.reconcile_engine_runners().await;
+        assert!(crate::engine::tombstones::load(&paths).is_empty());
+    }
+
+    #[tokio::test]
+    async fn adding_a_runner_again_forgets_its_tombstone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        paths.ensure().unwrap();
+        seed(&paths, "http://127.0.0.1:9", vec![]);
+        let id = Uuid::new_v4();
+        crate::engine::tombstones::add(&paths, id).unwrap();
+        let resp = EnrollResponse {
+            runner_id: id,
+            runner_name: "builtin-h-acme-web".into(),
+            refresh_token: String::new(),
+            access_token: String::new(),
+            access_token_expires_at: String::new(),
+            refresh_token_generation: 0,
+            workspace_slug: "acme".into(),
+            pod_slug: String::new(),
+            project_identifier: "WEB".into(),
+            long_poll_interval_secs: 25,
+            protocol_version: crate::cloud::protocol::WIRE_VERSION,
+            machine_token: None,
+            machine_token_minted: false,
+        };
+        apply_enroll_response(
+            &paths,
+            &resp,
+            "http://127.0.0.1:9",
+            ApplyEnrollOptions {
+                working_dir: Some(tmp.path().join("tasks/web")),
+                agent_kind: AgentKind::Engine,
+                model: None,
+                reasoning_effort: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(crate::engine::tombstones::load(&paths).is_empty());
     }
 
     #[tokio::test]

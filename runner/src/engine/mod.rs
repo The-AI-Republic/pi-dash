@@ -45,6 +45,7 @@ pub mod manager;
 pub mod provision;
 #[cfg(test)]
 pub(crate) mod test_server;
+pub mod tombstones;
 pub mod workdir;
 
 /// Upstream release tag of the pinned engine, e.g. `rust-v0.153.4`.

@@ -479,6 +479,12 @@ impl RunnerSpawnCtx {
         // A login or logout may have issued or revoked the engine
         // credential: drop the model token and fetch the profile again.
         self.engine.credentials_changed();
+        // The server's automatic pause reason (e.g. engine_sign_in_required)
+        // may have cleared with this sign-in; re-read it in the background so
+        // Hello and `pidash engine status` don't show the old one until the
+        // next reconcile tick.
+        let ctx = self.clone();
+        tokio::spawn(async move { ctx.refresh_engine_pause().await });
         Ok(self.restart_stale_runners().await)
     }
 

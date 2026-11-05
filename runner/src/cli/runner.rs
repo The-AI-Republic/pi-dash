@@ -758,6 +758,13 @@ pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
     // only once its teardown is done, so re-adding the same id right after
     // is safe. The direct mutation below is the belt-and-suspenders "what
     // if the daemon isn't running on this host" path.
+    // The server row of a local-only or offline removal stays live; record
+    // it before the block goes so the engine reconcile loop doesn't re-add
+    // the runner (it would otherwise see a live engine row with no block).
+    if !matches!(mode, RemoveMode::Cascade) && cfg.runners[idx].agent.kind == AgentKind::Engine {
+        crate::engine::tombstones::add(paths, runner_id)
+            .context("recording the locally removed engine runner")?;
+    }
     let _ = try_ipc_remove_local(paths, &args.name).await;
 
     // Local cleanup: strip the [[runner]] block under the host-wide
