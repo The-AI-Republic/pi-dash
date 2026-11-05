@@ -98,6 +98,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Utc};
 use http_body_util::BodyExt as _;
+use pidash_db::orm_tx::TxConn;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -205,23 +206,11 @@ async fn workspace_role(
     workspace_id: Uuid,
     user_id: Uuid,
 ) -> Result<Option<i32>, Response> {
-    workspace_role_in(executor, workspace_id, user_id).await
-}
-
-async fn workspace_role_in(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
-    workspace_id: Uuid,
-    user_id: Uuid,
-) -> Result<Option<i32>, Response> {
-    let role: Option<i16> = sqlx::query_scalar(
-        r#"SELECT "role" FROM "workspace_members"
-           WHERE ("workspace_id" = $1 AND "member_id" = $2
-             AND "is_active" AND "deleted_at" IS NULL)
-           ORDER BY "created_at" DESC LIMIT 1"#,
+    let role = manage_reads::workspace_role(
+        &pidash_db::pool::sea_orm_connection(executor),
+        workspace_id,
+        user_id,
     )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(executor)
     .await
     .map_err(|_| server_error())?;
     Ok(role.map(i32::from))
@@ -468,6 +457,22 @@ struct PodOwned {
     updated_at: DateTime<Utc>,
 }
 
+impl From<pidash_db::entity::pod::Model> for PodOwned {
+    fn from(pod: pidash_db::entity::pod::Model) -> Self {
+        Self {
+            id: pod.id,
+            workspace_id: pod.workspace_id,
+            project_id: pod.project_id,
+            name: pod.name,
+            description: pod.description,
+            created_by: pod.created_by_id,
+            is_default: pod.is_default,
+            created_at: pod.created_at.with_timezone(&Utc),
+            updated_at: pod.updated_at.with_timezone(&Utc),
+        }
+    }
+}
+
 /// Decode a `pod` row at `base` (the P-series full-row reads and the pod
 /// block of the R-series joins — same column order everywhere).
 fn decode_pod(row: &sqlx::postgres::PgRow, base: usize) -> Result<PodOwned, Response> {
@@ -683,36 +688,31 @@ struct ProjectFacts {
     identifier: String,
 }
 
-/// Decode a `projects` row into the two facts (by name — the
-/// single-table row has no duplicate columns).
-fn decode_project_facts(row: &sqlx::postgres::PgRow) -> Result<ProjectFacts, Response> {
-    Ok(ProjectFacts {
-        workspace_id: row.try_get("workspace_id").map_err(|_| server_error())?,
-        identifier: row.try_get("identifier").map_err(|_| server_error())?,
-    })
+async fn project_facts(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: Uuid,
+    scoped: bool,
+) -> Result<Option<ProjectFacts>, Response> {
+    let facts = catalog_reads::project_facts(db, project_id, scoped)
+        .await
+        .map_err(|_| server_error())?;
+    Ok(facts.map(|(workspace_id, identifier)| ProjectFacts {
+        workspace_id,
+        identifier,
+    }))
 }
 
-/// [`catalog_reads::project_by_id_sql`] decoded to the two facts. Used by
-/// the *direct* `Project.objects.filter(pk=…)` reads
+/// The *direct* `Project.objects.filter(pk=…)` reads
 /// (`pods.py:56-58,99-101`), where `SoftDeletionManager` scopes the read
 /// and a tombstoned project reads as absent (404).
 async fn fetch_project_facts(
     pool: &PgPool,
     project_id: Uuid,
 ) -> Result<Option<ProjectFacts>, Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&catalog_reads::project_by_id_sql())
-        .bind(project_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| server_error())?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    decode_project_facts(&row).map(Some)
+    project_facts(&pidash_db::pool::sea_orm_connection(pool), project_id, true).await
 }
 
-/// [`catalog_reads::project_by_id_base_sql`] decoded to the two facts:
-/// the forward-FK `pod.project` read (`PodMiniSerializer`
+/// The forward-FK `pod.project` read (`PodMiniSerializer`
 /// `project_identifier`, the rename branch's `pod.project.identifier`, and
 /// the `Pod.save()` denorm check). Django resolves a forward FK through
 /// `Project._base_manager` (a plain `models.Manager`), so
@@ -722,35 +722,27 @@ async fn fetch_project_facts_base(
     pool: &PgPool,
     project_id: Uuid,
 ) -> Result<Option<ProjectFacts>, Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&catalog_reads::project_by_id_base_sql())
-        .bind(project_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| server_error())?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    decode_project_facts(&row).map(Some)
+    project_facts(
+        &pidash_db::pool::sea_orm_connection(pool),
+        project_id,
+        false,
+    )
+    .await
 }
 
-/// [`catalog_reads::project_by_id_base_sql`] inside a transaction: the
-/// `Pod.save()` denorm read (`QUIRK-denorm-read`). `save()` reads
-/// `self.project` — a forward-FK attribute — so Django resolves it
-/// through `Project._base_manager` and `SoftDeletionManager` does NOT
-/// scope it; a tombstoned project still returns its row (PIDASHCONV-1210).
-/// The value is only ever compared, never rendered — the mismatch arm is
-/// unreachable on these paths (neither `workspace_id` nor `project_id`
-/// changes), so only the read itself is ported.
+/// The `Pod.save()` denorm read inside a transaction (`QUIRK-denorm-read`):
+/// `save()` reads `self.project`, a forward-FK attribute, through
+/// `Project._base_manager`, so a tombstoned project still returns its row
+/// (PIDASHCONV-1210). The value is only ever compared, never rendered — the
+/// mismatch arm is unreachable on these paths (neither `workspace_id` nor
+/// `project_id` changes), so only the read itself is ported.
 async fn denorm_project_read(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     project_id: Uuid,
 ) -> Result<(), Response> {
-    sqlx::query(&catalog_reads::project_by_id_base_sql())
-        .bind(project_id)
-        .fetch_optional(&mut **tx)
+    project_facts(&TxConn::new(tx), project_id, false)
         .await
-        .map_err(|_| server_error())?;
-    Ok(())
+        .map(drop)
 }
 
 // ---------------------------------------------------------------------------
@@ -815,11 +807,11 @@ async fn render_pod(
     pod: &PodOwned,
     project_identifier: Option<String>,
 ) -> Result<String, Response> {
-    let runner_count: i64 = sqlx::query_scalar(&catalog_reads::pod_runner_count_sql())
-        .bind(pod.id)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| server_error())?;
+    let runner_count =
+        catalog_reads::pod_runner_count(&pidash_db::pool::sea_orm_connection(pool), pod.id)
+            .await
+            .map_err(|_| server_error())?;
+    let runner_count = i64::try_from(runner_count).map_err(|_| server_error())?;
     let identifier = match project_identifier {
         Some(identifier) => identifier,
         None => fetch_project_facts_base(pool, pod.project_id)
@@ -1546,63 +1538,63 @@ pub async fn pods_list(
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let rows: Vec<sqlx::postgres::PgRow> = if let Some(raw) = query_param(&params, "project") {
-        let project_id = match parse_uuid(&raw) {
-            Ok(project_id) => project_id,
-            Err(response) => return response,
-        };
-        let facts = match fetch_project_facts(&pool, project_id).await {
-            Ok(facts) => facts,
-            Err(response) => return response,
-        };
-        let Some(facts) = facts else {
-            return json_response(StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned());
-        };
-        let role = match workspace_role(&pool, facts.workspace_id, user_id).await {
-            Ok(role) => role,
-            Err(response) => return response,
-        };
-        if !membership::is_workspace_member(role) {
-            return forbidden();
-        }
-        match sqlx::query(&catalog_reads::pods_by_project_sql())
-            .bind(project_id)
-            .fetch_all(&pool)
+    let rows: Vec<pidash_db::entity::pod::Model> =
+        if let Some(raw) = query_param(&params, "project") {
+            let project_id = match parse_uuid(&raw) {
+                Ok(project_id) => project_id,
+                Err(response) => return response,
+            };
+            let facts = match fetch_project_facts(&pool, project_id).await {
+                Ok(facts) => facts,
+                Err(response) => return response,
+            };
+            let Some(facts) = facts else {
+                return json_response(StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned());
+            };
+            let role = match workspace_role(&pool, facts.workspace_id, user_id).await {
+                Ok(role) => role,
+                Err(response) => return response,
+            };
+            if !membership::is_workspace_member(role) {
+                return forbidden();
+            }
+            match catalog_reads::pods_by_project(
+                &pidash_db::pool::sea_orm_connection(&pool),
+                project_id,
+            )
             .await
-        {
-            Ok(rows) => rows,
-            Err(_) => return server_error(),
-        }
-    } else {
-        let Some(raw) = query_param(&params, "workspace") else {
-            return bad_request(PROJECT_OR_WORKSPACE_REQUIRED_BODY);
-        };
-        let workspace_id = match parse_uuid(&raw) {
-            Ok(workspace_id) => workspace_id,
-            Err(response) => return response,
-        };
-        let role = match workspace_role(&pool, workspace_id, user_id).await {
-            Ok(role) => role,
-            Err(response) => return response,
-        };
-        if !membership::is_workspace_member(role) {
-            return forbidden();
-        }
-        match sqlx::query(&catalog_reads::pods_by_workspace_sql())
-            .bind(workspace_id)
-            .fetch_all(&pool)
+            {
+                Ok(rows) => rows,
+                Err(_) => return server_error(),
+            }
+        } else {
+            let Some(raw) = query_param(&params, "workspace") else {
+                return bad_request(PROJECT_OR_WORKSPACE_REQUIRED_BODY);
+            };
+            let workspace_id = match parse_uuid(&raw) {
+                Ok(workspace_id) => workspace_id,
+                Err(response) => return response,
+            };
+            let role = match workspace_role(&pool, workspace_id, user_id).await {
+                Ok(role) => role,
+                Err(response) => return response,
+            };
+            if !membership::is_workspace_member(role) {
+                return forbidden();
+            }
+            match catalog_reads::pods_by_workspace(
+                &pidash_db::pool::sea_orm_connection(&pool),
+                workspace_id,
+            )
             .await
-        {
-            Ok(rows) => rows,
-            Err(_) => return server_error(),
-        }
-    };
+            {
+                Ok(rows) => rows,
+                Err(_) => return server_error(),
+            }
+        };
     let mut bodies = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let pod = match decode_pod(row, 0) {
-            Ok(pod) => pod,
-            Err(response) => return response,
-        };
+    for row in rows {
+        let pod = PodOwned::from(row);
         match render_pod(&pool, &pod, None).await {
             Ok(body) => bodies.push(body),
             Err(response) => return response,
@@ -1694,21 +1686,23 @@ pub async fn pods_create(
     let created_at = now_micros();
     let updated_at = now_micros();
     let pod_id = Uuid::new_v4();
-    if sqlx::query(&catalog_reads::pod_insert_sql())
-        .bind(pod_id)
-        .bind(facts.workspace_id)
-        .bind(project_id)
-        .bind(&final_name)
-        .bind(&description)
-        .bind(user_id)
-        .bind(false)
-        .bind(None::<DateTime<Utc>>)
-        .bind(created_at)
-        .bind(updated_at)
-        .execute(&pool)
-        .await
-        .is_err()
-    {
+    let inserted = catalog_reads::insert_pod(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        pidash_db::entity::pod::Model {
+            id: pod_id,
+            name: final_name.clone(),
+            description: description.clone(),
+            is_default: false,
+            deleted_at: None,
+            created_at: created_at.into(),
+            updated_at: updated_at.into(),
+            created_by_id: Some(user_id),
+            workspace_id: facts.workspace_id,
+            project_id,
+        },
+    )
+    .await;
+    if inserted.is_err() {
         return server_error();
     }
     let pod = PodOwned {
@@ -1742,15 +1736,13 @@ struct PodHit {
 /// `_get_pod` (`pods.py:139-145`): the P3 read, then the None-vs-False
 /// contract — missing (or tombstoned) → 404, non-member → 403.
 async fn get_pod(pool: &PgPool, user_id: Uuid, pod_id: Uuid) -> Result<PodHit, Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&catalog_reads::pod_by_id_sql())
-        .bind(pod_id)
-        .fetch_optional(pool)
+    let pod = catalog_reads::pod_by_id(&pidash_db::pool::sea_orm_connection(pool), pod_id, false)
         .await
         .map_err(|_| server_error())?;
-    let Some(row) = row else {
+    let Some(pod) = pod else {
         return Err(not_found());
     };
-    let pod = decode_pod(&row, 0)?;
+    let pod = PodOwned::from(pod);
     let role = workspace_role(pool, pod.workspace_id, user_id).await?;
     if !membership::is_workspace_member(role) {
         return Err(forbidden());
@@ -1886,13 +1878,13 @@ pub async fn pod_patch(
                     Ok(tx) => tx,
                     Err(_) => return server_error(),
                 };
-                if sqlx::query(&catalog_reads::pod_demote_siblings_sql())
-                    .bind(false)
-                    .bind(pod.project_id)
-                    .bind(pod.id)
-                    .execute(&mut *tx)
-                    .await
-                    .is_err()
+                if catalog_reads::demote_sibling_defaults(
+                    &TxConn::new(&mut tx),
+                    pod.project_id,
+                    pod.id,
+                )
+                .await
+                .is_err()
                 {
                     return server_error();
                 }
@@ -1920,19 +1912,17 @@ pub async fn pod_patch(
             project_identifier = Some(facts.identifier);
         }
         let now = now_micros();
-        let sql =
-            catalog_reads::pod_patch_update_sql(update_name, update_description, update_is_default);
-        let mut update = sqlx::query(&sql);
-        if update_name {
-            update = update.bind(&pod.name);
-        }
-        if update_description {
-            update = update.bind(&pod.description);
-        }
-        if update_is_default {
-            update = update.bind(pod.is_default);
-        }
-        if update.bind(now).bind(pod.id).execute(&pool).await.is_err() {
+        if catalog_reads::patch_pod(
+            &pidash_db::pool::sea_orm_connection(&pool),
+            pod.id,
+            update_name.then_some(pod.name.as_str()),
+            update_description.then_some(pod.description.as_str()),
+            update_is_default.then_some(pod.is_default),
+            now,
+        )
+        .await
+        .is_err()
+        {
             return server_error();
         }
         pod.updated_at = now;
@@ -1975,44 +1965,35 @@ pub async fn pod_delete(
         Ok(tx) => tx,
         Err(_) => return server_error(),
     };
-    let locked_row: Option<sqlx::postgres::PgRow> =
-        match sqlx::query(&catalog_reads::pod_locked_read_sql())
-            .bind(pod_id)
-            .fetch_optional(&mut *tx)
-            .await
-        {
-            Ok(locked_row) => locked_row,
+    let (locked, runners_hit, runs_hit) = {
+        let conn = TxConn::new(&mut tx);
+        let locked = match catalog_reads::pod_by_id(&conn, pod_id, true).await {
+            Ok(locked) => locked,
             Err(_) => return server_error(),
         };
-    let Some(locked_row) = locked_row else {
-        return not_found();
+        let Some(locked) = locked else {
+            return not_found();
+        };
+        let runners_hit = match catalog_reads::pod_has_live_runners(&conn, pod_id, "revoked").await
+        {
+            Ok(hit) => hit,
+            Err(_) => return server_error(),
+        };
+        // Guards in order (`pods.py:226-251`): runners, then active runs.
+        let runs_hit = if runners_hit {
+            false
+        } else {
+            match catalog_reads::pod_has_active_runs(&conn, pod_id).await {
+                Ok(hit) => hit,
+                Err(_) => return server_error(),
+            }
+        };
+        (locked, runners_hit, runs_hit)
     };
-    let locked = match decode_pod(&locked_row, 0) {
-        Ok(locked) => locked,
-        Err(response) => return response,
-    };
-    let runners_hit: Option<i32> = match sqlx::query(&catalog_reads::pod_runners_exist_sql())
-        .bind(pod_id)
-        .bind("revoked")
-        .fetch_optional(&mut *tx)
-        .await
-    {
-        Ok(hit) => hit.map(|_| 1i32),
-        Err(_) => return server_error(),
-    };
-    if runners_hit.is_some() {
+    if runners_hit {
         return conflict(POD_HAS_RUNNERS_BODY);
     }
-    let guard_sql = catalog_reads::pod_active_runs_exist_sql();
-    let mut guard = sqlx::query(&guard_sql).bind(pod_id);
-    for status in catalog_reads::NON_TERMINAL_STATUSES {
-        guard = guard.bind(*status);
-    }
-    let runs_hit: Option<i32> = match guard.fetch_optional(&mut *tx).await {
-        Ok(hit) => hit.map(|_| 1i32),
-        Err(_) => return server_error(),
-    };
-    if runs_hit.is_some() {
+    if runs_hit {
         return conflict(POD_HAS_ACTIVE_RUNS_BODY);
     }
     if locked.is_default {
@@ -2028,24 +2009,20 @@ pub async fn pod_delete(
     }
     let deleted_at = now_micros();
     let updated_at = now_micros();
-    if sqlx::query(&catalog_reads::pod_soft_delete_sql())
-        .bind(false)
-        .bind(deleted_at)
-        .bind(updated_at)
-        .bind(pod_id)
-        .execute(&mut *tx)
-        .await
-        .is_err()
     {
-        return server_error();
-    }
-    if sqlx::query(&catalog_reads::issue_assigned_pod_clear_sql())
-        .bind(pod_id)
-        .execute(&mut *tx)
-        .await
-        .is_err()
-    {
-        return server_error();
+        let conn = TxConn::new(&mut tx);
+        if catalog_reads::soft_delete_pod(&conn, pod_id, deleted_at, updated_at)
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
+        if pidash_services::domain::issues::clear_assigned_pod(&conn, pod_id)
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
     }
     if tx.commit().await.is_err() {
         return server_error();
