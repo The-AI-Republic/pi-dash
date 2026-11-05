@@ -36,11 +36,18 @@ const START_WAIT: Duration = Duration::from_secs(30);
 /// the set-up).
 const SHELL_PATH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The `PATH` a login shell of `shell` sets up: `$SHELL -lc 'printf %s "$PATH"'`.
-/// `None` when the shell cannot be run or prints nothing in time.
+/// Brackets around the `PATH` the login shell prints, so rc-file banners
+/// (with or without a trailing newline) are never taken for it.
+const PATH_BEGIN: &str = "__PIDASH_PATH_BEGIN__";
+const PATH_END: &str = "__PIDASH_PATH_END__";
+
+/// The `PATH` a login shell of `shell` sets up: `$SHELL -lc 'printf … "$PATH"'`,
+/// read between [`PATH_BEGIN`] and [`PATH_END`]. `None` when the shell cannot
+/// be run, takes no `-lc` (tcsh/csh, nushell), or prints nothing in time.
 pub fn login_shell_path_with(shell: &Path) -> Option<String> {
+    let script = format!("printf '{PATH_BEGIN}%s{PATH_END}' \"$PATH\"");
     let mut child = std::process::Command::new(shell)
-        .args(["-lc", "printf %s \"$PATH\""])
+        .args(["-lc", &script])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -61,10 +68,35 @@ pub fn login_shell_path_with(shell: &Path) -> Option<String> {
         }
     }
     let out = child.wait_with_output().ok()?;
-    // rc files may print banners; the PATH is the last line.
-    let text = String::from_utf8_lossy(&out.stdout);
-    let path = text.lines().last()?.trim().to_string();
+    parse_marked_path(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The `PATH` between the last [`PATH_BEGIN`] and the [`PATH_END`] after it.
+fn parse_marked_path(text: &str) -> Option<String> {
+    let start = text.rfind(PATH_BEGIN)? + PATH_BEGIN.len();
+    let len = text[start..].find(PATH_END)?;
+    let path = text[start..start + len].trim().to_string();
     (!path.is_empty()).then_some(path)
+}
+
+/// Shells to ask for the login `PATH`, in order: the user's `$SHELL`, then
+/// the platform's default login shell, so an unset `$SHELL` or one that
+/// takes no `-lc` (tcsh/csh, nushell) still gets the user's profile.
+#[cfg(unix)]
+fn login_shell_candidates(shell_env: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = shell_env.into_iter().collect();
+    let defaults: &[&str] = if cfg!(target_os = "macos") {
+        &["/bin/zsh", "/bin/bash"]
+    } else {
+        &["/bin/bash", "/bin/sh"]
+    };
+    for d in defaults {
+        let d = PathBuf::from(d);
+        if !out.contains(&d) {
+            out.push(d);
+        }
+    }
+    out
 }
 
 /// The `PATH` to install the service with: the login shell's, with the CLI's
@@ -85,17 +117,45 @@ pub fn service_path(login_shell: Option<String>, app_path: &str, cli_dir: Option
     path
 }
 
+/// The login-shell `PATH`, plus a warning for the set-up log when it came
+/// from a fallback shell or could not be read at all (the service then gets
+/// the app's own, shorter `PATH`, and own-agent runners may not find their
+/// agents).
 #[cfg(unix)]
-fn login_shell_path() -> Option<String> {
-    let shell = std::env::var_os("SHELL").map(PathBuf::from)?;
-    login_shell_path_with(&shell)
+fn login_shell_path() -> (Option<String>, Option<String>) {
+    let shell_env = std::env::var_os("SHELL")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    for (i, shell) in login_shell_candidates(shell_env.clone()).iter().enumerate() {
+        if let Some(path) = login_shell_path_with(shell) {
+            let warning = (i > 0 || shell_env.is_none()).then(|| {
+                format!(
+                    "Could not read PATH from your login shell ({}); used {} instead.",
+                    shell_env
+                        .as_deref()
+                        .map(|s| s.display().to_string())
+                        .unwrap_or_else(|| "$SHELL is not set".into()),
+                    shell.display()
+                )
+            });
+            return (Some(path), warning);
+        }
+    }
+    (
+        None,
+        Some(
+            "Could not read PATH from your login shell; the service uses the app's PATH. \
+             If a runner cannot find its agent, run `pidash install` from a terminal."
+                .into(),
+        ),
+    )
 }
 
 #[cfg(not(unix))]
-fn login_shell_path() -> Option<String> {
+fn login_shell_path() -> (Option<String>, Option<String>) {
     // Windows services inherit the user's environment from the registry; the
     // app's own PATH is already the user's.
-    None
+    (None, None)
 }
 
 /// The steps of the service set-up, as `pidash` argv lists (design §4.7
@@ -160,14 +220,15 @@ pub async fn daemon_install_service<R: Runtime>(app: AppHandle<R>) -> Result<(),
     let cli = blocking(installed_cli).await?;
     let app_path = std::env::var("PATH").unwrap_or_default();
     let cli_dir = cli.parent().map(Path::to_path_buf);
-    let path = blocking(move || {
-        Ok(service_path(
-            login_shell_path(),
-            &app_path,
-            cli_dir.as_deref(),
-        ))
+    let (path, warning) = blocking(move || {
+        let (login, warning) = login_shell_path();
+        Ok((service_path(login, &app_path, cli_dir.as_deref()), warning))
     })
     .await?;
+    if let Some(warning) = warning {
+        eprintln!("set-up: {warning}");
+        log(&app, format!("Warning: {warning}"));
+    }
     let run_app = app.clone();
     let run_cli_path = cli.clone();
     blocking(move || {
@@ -328,7 +389,7 @@ mod tests {
         let shell = script(
             tmp.path(),
             "fake-shell",
-            "[ \"$1\" = \"-lc\" ] || exit 3\necho 'Welcome banner'\nprintf %s /opt/homebrew/bin:/usr/bin",
+            "[ \"$1\" = \"-lc\" ] || exit 3\nprintf 'Welcome banner, no newline'\nPATH=/opt/homebrew/bin:/usr/bin\neval \"$2\"",
         );
         // ETXTBSY can hit a freshly written script while another test forks.
         let mut path = None;
@@ -343,6 +404,30 @@ mod tests {
         let silent = script(tmp.path(), "silent-shell", "exit 0");
         assert_eq!(login_shell_path_with(&silent), None);
         assert_eq!(login_shell_path_with(&tmp.path().join("missing")), None);
+    }
+
+    #[test]
+    fn the_path_is_read_between_the_markers() {
+        assert_eq!(
+            parse_marked_path("banner__PIDASH_PATH_BEGIN__/a:/b__PIDASH_PATH_END__trailer")
+                .as_deref(),
+            Some("/a:/b")
+        );
+        assert_eq!(parse_marked_path("just a banner\n/usr/bin"), None);
+        assert_eq!(
+            parse_marked_path("__PIDASH_PATH_BEGIN____PIDASH_PATH_END__"),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unset_shell_falls_back_to_the_platform_login_shell() {
+        let c = login_shell_candidates(None);
+        assert!(!c.is_empty());
+        let c = login_shell_candidates(Some(PathBuf::from("/bin/tcsh")));
+        assert_eq!(c[0], PathBuf::from("/bin/tcsh"));
+        assert!(c.len() >= 2);
     }
 
     #[cfg(unix)]

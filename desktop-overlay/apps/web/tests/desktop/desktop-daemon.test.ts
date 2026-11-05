@@ -158,6 +158,7 @@ describe("discovery", () => {
     const cli = { installed: false, path: null, version: null, updatable: false };
     expect(daemon.discoveryProblem({ kind: "no_daemon", cli })).toMatch(/not set up/);
     expect(daemon.discoveryProblem({ kind: "too_old", cli })).toMatch(/too old/);
+    expect(daemon.discoveryProblem({ kind: "not_answering", reason: "timed out" })).toMatch(/not answering/);
     expect(daemon.discoveryProblem({ kind: "app_too_old", daemon_version: "9.0.0", ipc_version: 9 })).toMatch(
       /Update the app/
     );

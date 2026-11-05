@@ -66,6 +66,8 @@ export type Discovery =
   | { kind: "no_daemon"; cli: CliInfo }
   | { kind: "too_old"; daemon_version?: string; ipc_version?: number; cli: CliInfo }
   | { kind: "app_too_old"; daemon_version: string; ipc_version: number }
+  /** The daemon did not answer in time, or its pipe stayed busy: asked again later. */
+  | { kind: "not_answering"; reason: string }
   | { kind: "signed_out"; hello: HelloInfo }
   | { kind: "account_mismatch"; daemon_account: string; daemon_cloud_url: string; hosts_runners: boolean }
   | { kind: "compatible"; hello: HelloInfo };
@@ -232,6 +234,8 @@ export function discoveryProblem(d: Discovery | null): string | null {
       return "Pi Dash on this computer is too old for this app. Update it to use the built-in engine.";
     case "app_too_old":
       return `Pi Dash on this computer (${d.daemon_version}) is newer than this app understands. Update the app.`;
+    case "not_answering":
+      return "Pi Dash on this computer is not answering right now. The app will try again.";
     case "signed_out":
       return "Pi Dash on this computer is signed out.";
     case "account_mismatch":

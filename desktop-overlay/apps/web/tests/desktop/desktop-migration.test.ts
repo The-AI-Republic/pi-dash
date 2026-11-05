@@ -132,6 +132,18 @@ describe("desktop migration", () => {
     ]);
   });
 
+  it("joins a run already in flight instead of starting a second one", async () => {
+    const computer = fakeComputer({ discovery: compatible([]) });
+    const [a, b] = await Promise.all([
+      migrateLegacyTrees("u-1", computer.deps),
+      migrateLegacyTrees("u-1", computer.deps),
+    ]);
+    expect(a).toEqual({ status: "done", migrated: ["acme"], failed: [] });
+    expect(b).toBe(a);
+    expect(computer.log.filter((line) => line.startsWith("sign_in"))).toHaveLength(1);
+    expect(computer.log.filter((line) => line.startsWith("daemon_engine_runner_add"))).toHaveLength(2);
+  });
+
   it("is idempotent: a second run finds nothing to do", async () => {
     const computer = fakeComputer({ discovery: compatible([{ slug: "acme", signed_in: true, runners: 0 }]) });
     await migrateLegacyTrees("u-1", computer.deps);
