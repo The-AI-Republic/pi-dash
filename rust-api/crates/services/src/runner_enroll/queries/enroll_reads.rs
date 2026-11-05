@@ -133,7 +133,8 @@
 
 use pidash_compat::py::py_strip;
 use pidash_db::entity::{
-    dev_machine, machine_token, pod, projects, runner, users, workspace_members, workspaces,
+    dev_machine, machine_token, pod, projects, runner, runner_force_refresh, users,
+    workspace_members, workspaces,
 };
 use pidash_db::runner_enroll::columns::{
     dev_machine as dm_cols, runner as r_cols, runner_force_refresh as ffr_cols,
@@ -982,6 +983,105 @@ pub async fn user_exists(db: &impl ConnectionTrait, user_id: Uuid) -> Result<boo
         .one(db)
         .await?;
     Ok(hit.is_some())
+}
+
+// ---------------------------------------------------------------------------
+// SeaORM refresh statements (E3-E5)
+// ---------------------------------------------------------------------------
+
+/// The E3 runner facts the refresh endpoint reads.
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+pub struct RefreshRunnerRow {
+    pub owner_id: Uuid,
+    pub workspace_id: Uuid,
+    pub dev_machine_id: Option<Uuid>,
+    pub refresh_token_hash: String,
+    pub refresh_token_generation: i32,
+    pub previous_refresh_token_hash: String,
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// E3 (`enrollment.py:403-404`): the runner by id, INNER JOINed to its
+/// workspace (`select_related`), `Meta.ordering`, first, `FOR UPDATE`.
+pub async fn refresh_locked_runner(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<Option<RefreshRunnerRow>, DbErr> {
+    runner::Entity::find()
+        .select_only()
+        .columns([
+            runner::Column::OwnerId,
+            runner::Column::WorkspaceId,
+            runner::Column::DevMachineId,
+            runner::Column::RefreshTokenHash,
+            runner::Column::RefreshTokenGeneration,
+            runner::Column::PreviousRefreshTokenHash,
+            runner::Column::RevokedAt,
+        ])
+        .join(JoinType::InnerJoin, runner_to_workspace())
+        .filter(runner::Column::Id.eq(runner_id))
+        .order_by_desc(runner::Column::LastHeartbeatAt)
+        .order_by_desc(runner::Column::CreatedAt)
+        .lock_exclusive()
+        .into_model::<RefreshRunnerRow>()
+        .one(db)
+        .await
+}
+
+/// E4 (`enrollment.py:415-425`): the linked dev machine is revoked.
+pub async fn dev_machine_is_revoked(
+    db: &impl ConnectionTrait,
+    dev_machine_id: Uuid,
+) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = dev_machine::Entity::find()
+        .select_only()
+        .column(dev_machine::Column::Id)
+        .filter(dev_machine::Column::Id.eq(dev_machine_id))
+        .filter(dev_machine::Column::RevokedAt.is_not_null())
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// E5 (`enrollment.py:448-460`): rotate to the new refresh token; the
+/// previous hash is the OLD current hash.
+pub async fn rotate_refresh_token(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+    new_hash: &str,
+    new_fingerprint: &str,
+    new_generation: i32,
+    previous_hash: &str,
+) -> Result<(), DbErr> {
+    runner::Entity::update_many()
+        .col_expr(runner::Column::RefreshTokenHash, Expr::value(new_hash))
+        .col_expr(
+            runner::Column::RefreshTokenFingerprint,
+            Expr::value(new_fingerprint),
+        )
+        .col_expr(
+            runner::Column::RefreshTokenGeneration,
+            Expr::value(new_generation),
+        )
+        .col_expr(
+            runner::Column::PreviousRefreshTokenHash,
+            Expr::value(previous_hash),
+        )
+        .filter(runner::Column::Id.eq(runner_id))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// `RunnerForceRefresh.objects.filter(runner=runner).delete()`
+/// (`enrollment.py:467`).
+pub async fn clear_force_refresh(db: &impl ConnectionTrait, runner_id: Uuid) -> Result<(), DbErr> {
+    runner_force_refresh::Entity::delete_many()
+        .filter(runner_force_refresh::Column::RunnerId.eq(runner_id))
+        .exec(db)
+        .await
+        .map(drop)
 }
 
 #[cfg(test)]
