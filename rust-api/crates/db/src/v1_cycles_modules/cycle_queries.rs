@@ -33,36 +33,32 @@
 //!
 //! # Builder contract
 //!
-//! Each `*_sql` function returns a complete `SELECT` statement with
-//! symbolic bind parameters, following the merged `v1_projects`
-//! precedent (`queries_stateest.rs`) and the sibling D-20 port
-//! (`module_queries.rs`, PIDASHCONV-308): `$1` is the workspace slug
-//! (`workspaces.slug`, text), `$2` the project id (uuid), `$3` the cycle
-//! id (uuid, Q2 detail / Q4 / Q5 / Q6), `$4` the acting-user id (uuid,
-//! member-scoped reads) or the issue id (uuid, Q5 lookup). Handlers bind
-//! them in that order; group literals (`'completed'`, …) and the
-//! `'ISSUE_ATTACHMENT'` / `'points'` / avatar-URL literals are embedded
-//! because they are fixed values, the same values Django sends as
-//! parameters at execution. The `cycle_view` now instant rides `$5` so
-//! `$4` stays the acting user on every builder.
+//! Each builder returns a complete sea-query [`SelectStatement`] with its
+//! values bound (`workspaces.slug`, the project id, the cycle id, the
+//! acting user, the `cycle_view` instant), so the handlers run it through
+//! SeaORM (`DbBackend::Postgres.build(&stmt)` → `query_all`) and decode
+//! the rows by name. No SQL text is written here: the aggregate
+//! annotations are `COUNT(CASE WHEN <filter> THEN <col> END)` /
+//! `SUM(CASE ...)` (sea-query 0.32 has no aggregate `FILTER` clause; the
+//! `CASE` form is the same count — `COUNT` and `SUM` skip the `NULL`
+//! the unmatched rows produce), the correlated subqueries are nested
+//! selects, and the `avatar_url` case is a `CaseStatement`. The group
+//! literals (`'completed'`, …) and the `'ISSUE_ATTACHMENT'` / `'points'`
+//! / avatar-URL literals bind as values — the same values Django sends as
+//! parameters at execution.
 //!
-//! Dynamic statements (Q1-Q5: kwargs order, archived variants,
-//! `cycle_view`) are sea-query builders; the Q6 transfer reads are fully
-//! static, so they are `pub const` full-statement strings with `$`
-//! placeholders (the merged `license/queries` precedent — there is no
-//! build-time database, same as the `license/queries` and
-//! `app_integrations/queries_git` precedents). The fixed aggregate
-//! fragments are shared `pub fn`/`pub const` pieces spliced into the
-//! builders with `Expr::cust`, and the Q6 consts are cross-pinned
-//! against those same pieces by the tests, so neither side can drift.
+//! The Q6 transfer reads, static text before (`pub const ... _SQL`), are
+//! builders now too, sharing the annotation pieces with Q1-Q5; the tests
+//! pin each statement's joins, scope, grouping and output names.
 //!
 //! Spelling notes (all semantics-preserving, each pinned as-rendered by
 //! the tests): sea-query renders `LEFT JOIN` where Django renders `LEFT
 //! OUTER JOIN`; the bare `"project_members"."is_active"` predicate
 //! renders as `= TRUE` (same convention as the sibling module port);
-//! `Count(U0."id")` (capital C, from `Func(..., function="Count")`)
-//! renders as `COUNT`; Django's incidental `users T9`/`T10` aliases
-//! render as the plain `"users"` table.
+//! Django's incidental `users T9`/`T10` aliases render as the plain
+//! `"users"` table; Django's positional `GROUP BY 1, 2, 3 ORDER BY 1` on
+//! the transfer distributions renders as the grouped expressions
+//! themselves.
 //!
 //! # Reads scope tables, not views
 //!
@@ -141,10 +137,15 @@
 //! (`assignees`, `labels` arrive via separate queries — no SQL fanout —
 //! and stay handler-owned).
 
-use sea_query::{Alias, Condition, Expr, IntoIden, JoinType, Order, Query, TableRef};
+use chrono::{DateTime, Utc};
+use sea_query::{
+    Alias, Asterisk, Condition, Expr, Func, IntoIden, JoinType, Order, Query, SelectStatement,
+    SimpleExpr, TableRef,
+};
+use uuid::Uuid;
 
 use super::cycle::{self, cycle_issue};
-use crate::v1_projects::models::{estimate_point, project, project_member, state};
+use crate::v1_projects::models::{estimate, estimate_point, project, project_member, state};
 
 /// `workspaces` table (no db-layer port owns it yet; literal matches the
 /// Django table name, same as `queries_stateest::WORKSPACE_TABLE`).
@@ -160,11 +161,13 @@ const ISSUE_LINK_TABLE: &str = "issue_links";
 /// `file_assets` table behind `attachment_count` (Q4 GET).
 const FILE_ASSET_TABLE: &str = "file_assets";
 /// `labels` table behind bare-M2M `order_by=labels` (Q4 GET,
-/// PIDASHCONV-522).
+/// PIDASHCONV-522) and the transfer label distributions.
 const LABEL_TABLE: &str = "labels";
-/// `issue_assignees` through table behind `order_by=assignees`.
+/// `issue_assignees` through table behind `order_by=assignees` and the
+/// transfer assignee distributions.
 const ISSUE_ASSIGNEE_TABLE: &str = "issue_assignees";
-/// `issue_labels` through table behind `order_by=labels`.
+/// `issue_labels` through table behind `order_by=labels` and the transfer
+/// label distributions.
 const ISSUE_LABEL_TABLE: &str = "issue_labels";
 /// `pod` table behind bare-FK `order_by=assigned_pod` (Q4 GET,
 /// PIDASHCONV-522; `runner.Pod`, `db_table = "pod"`, singular).
@@ -172,10 +175,29 @@ const POD_TABLE: &str = "pod";
 /// Alias of the parent self-join (`select_related("parent")`, Q4 GET);
 /// `order_by=parent__<col>` renders onto it (PIDASHCONV-522).
 pub const PARENT_ALIAS: &str = "T7";
-// NOTE: the transfer distributions join `issue_assignees`,
-// `issue_labels` and `labels` too, but those statements are static
-// `pub const` text (below), so the table names live inline there,
-// pinned by the distribution tests.
+
+/// The tenant scope every cycle read binds: `workspaces.slug` and the
+/// project id (`cycle.py:91-92` et al.).
+#[derive(Debug, Clone, Copy)]
+pub struct TenantScope<'a> {
+    pub slug: &'a str,
+    pub project_id: Uuid,
+}
+
+/// `"<table>"."<column>"`.
+fn col(table: &str, column: &str) -> Expr {
+    Expr::col((Alias::new(table), Alias::new(column)))
+}
+
+/// A scalar subquery as a select item.
+fn scalar(sub: SelectStatement) -> SimpleExpr {
+    SimpleExpr::SubQuery(None, Box::new(sub.into_sub_query_statement()))
+}
+
+/// `"<table>"` as a `FROM`/`JOIN` target.
+fn table(name: &str) -> Alias {
+    Alias::new(name)
+}
 
 // ---------------------------------------------------------------------------
 // Shared scope inputs
@@ -562,7 +584,7 @@ pub fn issue_join_traversal(head: &str) -> Option<TraversalOrder> {
 /// only reach the Q4 GET builder (kwargs chains always carry the
 /// default); rendered elsewhere they fail at the database exactly like
 /// Django's `FieldError` for the same name on those chains.
-fn apply_order(sel: &mut sea_query::SelectStatement, base: &str, order: &OrderBy) {
+fn apply_order(sel: &mut SelectStatement, base: &str, order: &OrderBy) {
     match order.target {
         OrderTarget::Base => {
             sel.order_by(
@@ -588,7 +610,7 @@ fn apply_order(sel: &mut sea_query::SelectStatement, base: &str, order: &OrderBy
         // Django's compiler yields `OrderBy(Random())` ascending — the
         // `-` flag never survives onto `?` (`-?` is a FieldError).
         OrderTarget::Random => {
-            sel.order_by_expr(Expr::cust("RANDOM()"), Order::Asc);
+            sel.order_by_expr(Func::random().into(), Order::Asc);
         }
         // Related `Meta.ordering` is `('-created_at',)`: the request `-`
         // inverts it, so plain M2M renders `DESC`.
@@ -674,79 +696,68 @@ pub enum CycleView {
     Incomplete,
 }
 
+impl CycleView {
+    /// Whether the predicate compares against the `timezone.now()` instant
+    /// (the `All` and `Draft` arms take none).
+    pub fn binds_now(self) -> bool {
+        !matches!(self, CycleView::All | CycleView::Draft)
+    }
+}
+
 /// The `cycle_view` predicate for the Q1 list `GET`
-/// (`cycle.py:202-259`). `now_bind` is the bind placeholder carrying the
-/// `timezone.now()` instant (the composed builder passes `"$5"`); the
-/// `Draft` arm takes no bind. Every comparison is on the `cycles` base
+/// (`cycle.py:202-259`). `now` is the `timezone.now()` instant; the
+/// `Draft` arm ignores it. Every comparison is on the `cycles` base
 /// table; `NULL` dates compare `NULL` (never match) except in the arms
 /// that test `IS NULL` explicitly — exactly like Django.
-pub fn cycle_view_condition(view: CycleView, now_bind: &str) -> Condition {
-    let cycles = || Alias::new(cycle::TABLE.to_owned());
-    let now = Expr::cust(now_bind);
+pub fn cycle_view_condition(view: CycleView, now: DateTime<Utc>) -> Condition {
+    let start = || col(cycle::TABLE, "start_date");
+    let end = || col(cycle::TABLE, "end_date");
     match view {
         CycleView::All => Condition::all(),
-        CycleView::Current => Condition::all()
-            .add(Expr::col((cycles(), Alias::new("start_date"))).lte(now.clone()))
-            .add(Expr::col((cycles(), Alias::new("end_date"))).gte(now)),
-        CycleView::Upcoming => {
-            Condition::all().add(Expr::col((cycles(), Alias::new("start_date"))).gt(now))
-        }
-        CycleView::Completed => {
-            Condition::all().add(Expr::col((cycles(), Alias::new("end_date"))).lt(now))
-        }
-        CycleView::Draft => Condition::all()
-            .add(Expr::col((cycles(), Alias::new("end_date"))).is_null())
-            .add(Expr::col((cycles(), Alias::new("start_date"))).is_null()),
-        CycleView::Incomplete => Condition::any()
-            .add(Expr::col((cycles(), Alias::new("end_date"))).gte(now))
-            .add(Expr::col((cycles(), Alias::new("end_date"))).is_null()),
+        CycleView::Current => Condition::all().add(start().lte(now)).add(end().gte(now)),
+        CycleView::Upcoming => Condition::all().add(start().gt(now)),
+        CycleView::Completed => Condition::all().add(end().lt(now)),
+        CycleView::Draft => Condition::all().add(end().is_null()).add(start().is_null()),
+        CycleView::Incomplete => Condition::any().add(end().gte(now)).add(end().is_null()),
     }
 }
 
 /// Project one table's `columns` as `"table"."col"` selects, in order.
-fn select_table_columns(sel: &mut sea_query::SelectStatement, table: &str, columns: &[&str]) {
-    for col in columns {
-        sel.column((Alias::new(table.to_owned()), Alias::new((*col).to_owned())));
+fn select_table_columns(sel: &mut SelectStatement, table_name: &str, columns: &[&str]) {
+    for column in columns {
+        sel.column((Alias::new(table_name), Alias::new(*column)));
     }
 }
 
 /// `INNER JOIN "projects" ON ("<table>"."project_id" = "projects"."id")`
 /// (every `select_related("project")`).
-fn join_project(sel: &mut sea_query::SelectStatement, table: &str) {
+fn join_project(sel: &mut SelectStatement, from: &str) {
     sel.join(
         JoinType::InnerJoin,
-        Alias::new(project::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(table.to_owned()), Alias::new("project_id")))
-                .equals((Alias::new(project::TABLE), Alias::new("id"))),
-        ),
+        table(project::TABLE),
+        col(from, "project_id").equals((Alias::new(project::TABLE), Alias::new("id"))),
     );
 }
 
 /// `INNER JOIN "workspaces" ON ("<table>"."workspace_id" = "workspaces"."id")`
 /// (every `select_related("workspace")` / `workspace__slug` traversal).
-fn join_workspace(sel: &mut sea_query::SelectStatement, table: &str) {
+fn join_workspace(sel: &mut SelectStatement, from: &str) {
     sel.join(
         JoinType::InnerJoin,
-        Alias::new(WORKSPACE_TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(table.to_owned()), Alias::new("workspace_id")))
-                .equals((Alias::new(WORKSPACE_TABLE), Alias::new("id"))),
-        ),
+        table(WORKSPACE_TABLE),
+        col(from, "workspace_id").equals((Alias::new(WORKSPACE_TABLE), Alias::new("id"))),
     );
 }
 
 /// `INNER JOIN "project_members" ON ("projects"."id" =
 /// "project_members"."project_id")` (every
 /// `project__project_projectmember` traversal, `cycle.py:93-96` et al.).
-fn join_member(sel: &mut sea_query::SelectStatement) {
+fn join_member(sel: &mut SelectStatement) {
     sel.join(
         JoinType::InnerJoin,
-        Alias::new(project_member::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(project::TABLE), Alias::new("id")))
-                .equals((Alias::new(project_member::TABLE), Alias::new("project_id"))),
-        ),
+        table(project_member::TABLE),
+        col(project::TABLE, "id")
+            .equals((Alias::new(project_member::TABLE), Alias::new("project_id"))),
     );
 }
 
@@ -754,14 +765,29 @@ fn join_member(sel: &mut sea_query::SelectStatement) {
 /// ordering-only to-one join (bare-FK related orderings and FK
 /// traversals, PIDASHCONV-522), appended after the parent `T7` join
 /// like Django.
-fn join_order_fk(sel: &mut sea_query::SelectStatement, table: &str, fk: &str) {
+fn join_order_fk(sel: &mut SelectStatement, target: &str, fk: &str) {
     sel.join(
         JoinType::LeftJoin,
-        Alias::new(table.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(ISSUE_TABLE), Alias::new(fk)))
-                .equals((Alias::new(table), Alias::new("id"))),
-        ),
+        table(target),
+        col(ISSUE_TABLE, fk).equals((Alias::new(target), Alias::new("id"))),
+    );
+}
+
+/// `LEFT JOIN "<to>" ON ("<from>"."<from_col>" = "<to>"."<to_col>")`.
+fn left_join(sel: &mut SelectStatement, from: &str, from_col: &str, to: &str, to_col: &str) {
+    sel.join(
+        JoinType::LeftJoin,
+        table(to),
+        col(from, from_col).equals((Alias::new(to), Alias::new(to_col))),
+    );
+}
+
+/// `INNER JOIN "<to>" ON ("<from>"."<from_col>" = "<to>"."<to_col>")`.
+fn inner_join(sel: &mut SelectStatement, from: &str, from_col: &str, to: &str, to_col: &str) {
+    sel.join(
+        JoinType::InnerJoin,
+        table(to),
+        col(from, from_col).equals((Alias::new(to), Alias::new(to_col))),
     );
 }
 
@@ -771,30 +797,21 @@ fn join_order_fk(sel: &mut sea_query::SelectStatement, table: &str, fk: &str) {
 /// comes from each model's manager and is applied per table at the call
 /// site — `projects` / `workspaces` carry NO deleted predicate (verified
 /// against live Django SQL: only the base table's manager scope renders).
-fn tenant_condition(table: &str) -> Condition {
+fn tenant_condition(base: &str, scope: &TenantScope<'_>) -> Condition {
     Condition::all()
-        .add(
-            Expr::col((Alias::new(WORKSPACE_TABLE.to_owned()), Alias::new("slug")))
-                .eq(Expr::cust("$1")),
-        )
-        .add(
-            Expr::col((Alias::new(table.to_owned()), Alias::new("project_id")))
-                .eq(Expr::cust("$2")),
-        )
+        .add(col(WORKSPACE_TABLE, "slug").eq(scope.slug))
+        .add(col(base, "project_id").eq(scope.project_id))
 }
 
 /// Member-visibility conjuncts (`cycle.py:93-96` et al.): the acting user
-/// (`$4`) is an active member of the project. Inlined at each call site
-/// (flat `AND` chain, like Django) rather than nested: Django renders the
+/// is an active member of the project. Inlined at each call site (flat
+/// `AND` chain, like Django) rather than nested: Django renders the
 /// `is_active=True` conjunct bare; sea-query renders `= TRUE` —
 /// identical semantics, pinned as-rendered.
-fn add_member_scope(scope: Condition) -> Condition {
+fn add_member_scope(scope: Condition, actor_id: Uuid) -> Condition {
     scope
-        .add(Expr::col((Alias::new(project_member::TABLE), Alias::new("is_active"))).eq(true))
-        .add(
-            Expr::col((Alias::new(project_member::TABLE), Alias::new("member_id")))
-                .eq(Expr::cust("$4")),
-        )
+        .add(col(project_member::TABLE, "is_active").eq(true))
+        .add(col(project_member::TABLE, "member_id").eq(actor_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -832,49 +849,71 @@ pub const COUNT_ALIASES: &[&str] = &[
     "backlog_issues",
 ];
 
+/// The `(group, alias)` pairs of the five grouped counts, in source order.
+const GROUPED_COUNTS: &[(&str, &str)] = &[
+    ("completed", "completed_issues"),
+    ("cancelled", "cancelled_issues"),
+    ("started", "started_issues"),
+    ("unstarted", "unstarted_issues"),
+    ("backlog", "backlog_issues"),
+];
+
 /// Explicit issue-liveness filter shared by all six counts
 /// (`cycle.py:103-107` and each group `Q`): the bridge is live, the
 /// issue is not archived and not a draft. There is deliberately NO
 /// triage / project-archived / issue soft-delete guard — relation
 /// traversals use the base manager (ported bug 5).
-const LIVE_ISSUE_FILTER: &str = r#""cycle_issues"."deleted_at" IS NULL AND "issues"."archived_at" IS NULL AND NOT "issues"."is_draft""#;
+fn live_issue_filter() -> Condition {
+    Condition::all()
+        .add(col(cycle_issue::TABLE, "deleted_at").is_null())
+        .add(col(ISSUE_TABLE, "archived_at").is_null())
+        .add(col(ISSUE_TABLE, "is_draft").not())
+}
 
-/// One `Count(...)` annotation as Django renders it
-/// (`cycle.py:100-164`, verified against live `str(query)` output) —
-/// with **no `DISTINCT`** (ported bug 1, the reverse of the module
-/// shape):
+/// `COUNT(CASE WHEN <filter> THEN <counted> END)`: Django's
+/// `Count(..., filter=Q(...))` (`COUNT(x) FILTER (WHERE ...)`) — the same
+/// row count, since `COUNT` skips the `NULL` the unmatched rows yield.
+fn count_where(filter: Condition, counted: Expr) -> SimpleExpr {
+    Func::count(Expr::case(filter, counted)).into()
+}
+
+/// `SUM(CASE WHEN <filter> THEN <summed> END)`: Django's
+/// `Sum(..., filter=Q(...))`; `NULL` when no row matches, like `FILTER`.
+fn sum_where(filter: Condition, summed: SimpleExpr) -> SimpleExpr {
+    Func::sum(Expr::case(filter, summed)).into()
+}
+
+/// One `Count(...)` annotation (`cycle.py:100-164`) — with **no
+/// `DISTINCT`** (ported bug 1, the reverse of the module shape):
 ///
-/// * total (`GroupFilter::All`): `COUNT("cycle_issues"."id")` — a real
-///   row count.
-/// * grouped: `COUNT("states"."group")` — a real row count (`COUNT`
-///   skips `NULL`, and every row passing the single-group `FILTER` is
-///   non-null). The `FILTER` carries the same liveness guard plus
-///   `"states"."group" = '<group>'`.
-pub fn count_issues_sql(filter: GroupFilter, alias: &str) -> String {
+/// * total (`GroupFilter::All`): counts `"cycle_issues"."id"` over the
+///   live filter — a real row count.
+/// * grouped: counts `"states"."group"` over the live filter plus
+///   `"states"."group" = '<group>'` — a real row count (`COUNT` skips
+///   `NULL`, and every row passing the single-group filter is non-null).
+pub fn count_issues_expr(filter: GroupFilter) -> SimpleExpr {
     match filter {
-        GroupFilter::All => format!(
-            r#"COUNT("cycle_issues"."id") FILTER (WHERE ({LIVE_ISSUE_FILTER})) AS "{alias}""#
-        ),
-        GroupFilter::Eq(group) => format!(
-            r#"COUNT("states"."group") FILTER (WHERE ({LIVE_ISSUE_FILTER} AND "states"."group" = '{group}')) AS "{alias}""#
+        GroupFilter::All => count_where(live_issue_filter(), col(cycle_issue::TABLE, "id")),
+        GroupFilter::Eq(group) => count_where(
+            live_issue_filter().add(col(state::TABLE, "group").eq(group)),
+            col(state::TABLE, "group"),
         ),
     }
 }
 
-/// All six count annotations in source order, for the Q1/Q2/Q3 select
+/// All six count annotations in source order, onto the Q1/Q2/Q3 select
 /// list (`total_issues` first, then the five groups).
-pub fn all_count_annotations_sql() -> Vec<String> {
-    let mut out = vec![count_issues_sql(GroupFilter::All, "total_issues")];
-    for (group, alias) in [
-        ("completed", "completed_issues"),
-        ("cancelled", "cancelled_issues"),
-        ("started", "started_issues"),
-        ("unstarted", "unstarted_issues"),
-        ("backlog", "backlog_issues"),
-    ] {
-        out.push(count_issues_sql(GroupFilter::Eq(group), alias));
+fn add_count_annotations(sel: &mut SelectStatement) {
+    sel.expr_as(
+        count_issues_expr(GroupFilter::All),
+        Alias::new("total_issues"),
+    );
+    for (group, alias) in GROUPED_COUNTS {
+        sel.expr_as(
+            count_issues_expr(GroupFilter::Eq(group)),
+            Alias::new(*alias),
+        );
     }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -890,60 +929,26 @@ pub fn all_count_annotations_sql() -> Vec<String> {
 /// non-nullable FK, so Django uses `INNER JOIN`). `with_estimates`
 /// adds the Q3 `estimate_points` left join
 /// (`issue_cycle__issue__estimate_point`, `:699`).
-fn join_cycle_reads(sel: &mut sea_query::SelectStatement, with_estimates: bool) {
-    let cycles = Alias::new(cycle::TABLE.to_owned());
+fn join_cycle_reads(sel: &mut SelectStatement, with_estimates: bool) {
     join_workspace(sel, cycle::TABLE);
     join_project(sel, cycle::TABLE);
     join_member(sel);
-    // LEFT OUTER JOIN "cycle_issues" ON ("cycles"."id" = "cycle_issues"."cycle_id")
-    sel.join(
-        JoinType::LeftJoin,
-        Alias::new(cycle_issue::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((cycles.clone(), Alias::new("id")))
-                .equals((Alias::new(cycle_issue::TABLE), Alias::new("cycle_id"))),
-        ),
-    );
-    // LEFT OUTER JOIN "issues" ON ("cycle_issues"."issue_id" = "issues"."id")
-    sel.join(
-        JoinType::LeftJoin,
-        Alias::new(ISSUE_TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(cycle_issue::TABLE), Alias::new("issue_id")))
-                .equals((Alias::new(ISSUE_TABLE), Alias::new("id"))),
-        ),
-    );
-    // LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
-    sel.join(
-        JoinType::LeftJoin,
-        Alias::new(state::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(ISSUE_TABLE), Alias::new("state_id")))
-                .equals((Alias::new(state::TABLE), Alias::new("id"))),
-        ),
-    );
+    left_join(sel, cycle::TABLE, "id", cycle_issue::TABLE, "cycle_id");
+    left_join(sel, cycle_issue::TABLE, "issue_id", ISSUE_TABLE, "id");
+    left_join(sel, ISSUE_TABLE, "state_id", state::TABLE, "id");
     if with_estimates {
-        // LEFT OUTER JOIN "estimate_points" ON ("issues"."estimate_point_id" = "estimate_points"."id")
-        sel.join(
-            JoinType::LeftJoin,
-            Alias::new(estimate_point::TABLE.to_owned()),
-            Condition::all().add(
-                Expr::col((Alias::new(ISSUE_TABLE), Alias::new("estimate_point_id")))
-                    .equals((Alias::new(estimate_point::TABLE), Alias::new("id"))),
-            ),
+        left_join(
+            sel,
+            ISSUE_TABLE,
+            "estimate_point_id",
+            estimate_point::TABLE,
+            "id",
         );
     }
-    // INNER JOIN "users" ON ("cycles"."owned_by_id" = "users"."id")
-    // (Django aliases this `T9`/`T10`; the alias is incidental join-order
-    // numbering with identical semantics, so the plain table renders).
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(USER_TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((cycles, Alias::new("owned_by_id")))
-                .equals((Alias::new(USER_TABLE), Alias::new("id"))),
-        ),
-    );
+    // Django aliases the owner join `T9`/`T10`; the alias is incidental
+    // join-order numbering with identical semantics, so the plain table
+    // renders.
+    inner_join(sel, cycle::TABLE, "owned_by_id", USER_TABLE, "id");
 }
 
 /// Shared Q1/Q2/Q3 `WHERE` head: the base-table manager scope
@@ -951,103 +956,117 @@ fn join_cycle_reads(sel: &mut sea_query::SelectStatement, with_estimates: bool) 
 /// member-visibility scope. The `projects` / `workspaces` /
 /// `project_members` joins carry no deleted predicate (verified against
 /// live Django SQL).
-fn cycle_list_where() -> Condition {
-    let scope = Condition::all()
-        .add(Expr::col((Alias::new(cycle::TABLE), Alias::new("deleted_at"))).is_null())
-        .add(tenant_condition(cycle::TABLE));
-    add_member_scope(scope)
+fn cycle_list_where(scope: &TenantScope<'_>, actor_id: Uuid) -> Condition {
+    let head = Condition::all()
+        .add(col(cycle::TABLE, "deleted_at").is_null())
+        .add(tenant_condition(cycle::TABLE, scope));
+    add_member_scope(head, actor_id)
+}
+
+/// The Q1/Q2/Q3 select head: `SELECT DISTINCT` base columns in
+/// [`cycle::COLUMNS`] order plus the six counts, `FROM "cycles"` with
+/// the shared joins.
+fn cycle_read_head(with_estimates: bool) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.distinct();
+    select_table_columns(&mut sel, cycle::TABLE, cycle::COLUMNS);
+    add_count_annotations(&mut sel);
+    if with_estimates {
+        add_estimate_sums(&mut sel);
+    }
+    sel.from(table(cycle::TABLE));
+    join_cycle_reads(&mut sel, with_estimates);
+    sel
 }
 
 /// Q1 cycle list (`CycleListCreateAPIEndpoint.get_queryset`,
-/// `cycle.py:89-167`, + `archived_at IS NULL` from the list `GET` at
-/// `:197`): `SELECT DISTINCT` base columns in [`cycle::COLUMNS`] order,
-/// the six count annotations, member-visibility scope, `GROUP BY
-/// "cycles"."id"`, kwargs order.
+/// `cycle.py:89-167`, + the list `GET` archived predicate at `:197`):
+/// `SELECT DISTINCT` base columns in [`cycle::COLUMNS`] order, the six
+/// count annotations, member-visibility scope, `GROUP BY "cycles"."id"`,
+/// kwargs order.
 ///
 /// Django groups by all four joined PKs; the tenant/member/owner joins
 /// are N:1 off `cycles.id`, so grouping by `cycles.id` alone yields
 /// identical groups (ported bug 12 — same documented narrowing as the
 /// sibling module port).
-///
-/// Binds: `$1` slug, `$2` project id, `$4` acting-user id.
-pub fn cycle_list_sql(order: &OrderBy, archived: ArchivedFilter) -> String {
-    cycle_list_sql_inner(order, archived, CycleView::All, "$5")
+pub fn cycle_list(
+    order: &OrderBy,
+    archived: ArchivedFilter,
+    scope: &TenantScope<'_>,
+    actor_id: Uuid,
+) -> SelectStatement {
+    cycle_list_inner(order, archived, CycleView::All, None, scope, actor_id)
 }
 
 /// Q1 list `GET` with a `cycle_view` date filter (`cycle.py:198-270`):
-/// the live Q1 list plus [`cycle_view_condition`]. `CycleView::All`
-/// renders no extra predicate (identical text to
-/// [`cycle_list_sql`] with [`ArchivedFilter::Live`]).
-///
-/// Binds: `$1` slug, `$2` project id, `$4` acting-user id, `$5` the
-/// `timezone.now()` instant (timestamptz; unused by the `All`/`Draft`
-/// arms).
-pub fn cycle_list_filtered_sql(order: &OrderBy, view: CycleView) -> String {
-    cycle_list_sql_inner(order, ArchivedFilter::Live, view, "$5")
+/// the live Q1 list plus [`cycle_view_condition`] against `now`, the
+/// `timezone.now()` instant. `CycleView::All` renders no extra predicate
+/// (identical to [`cycle_list`] with [`ArchivedFilter::Live`]).
+pub fn cycle_list_filtered(
+    order: &OrderBy,
+    view: CycleView,
+    now: DateTime<Utc>,
+    scope: &TenantScope<'_>,
+    actor_id: Uuid,
+) -> SelectStatement {
+    cycle_list_inner(
+        order,
+        ArchivedFilter::Live,
+        view,
+        Some(now),
+        scope,
+        actor_id,
+    )
 }
 
-fn cycle_list_sql_inner(
+fn cycle_list_inner(
     order: &OrderBy,
     archived: ArchivedFilter,
     view: CycleView,
-    now_bind: &str,
-) -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.distinct();
-    select_table_columns(&mut sel, cycle::TABLE, cycle::COLUMNS);
-    for annotation in all_count_annotations_sql() {
-        sel.expr(Expr::cust(annotation));
-    }
-    sel.from(Alias::new(cycle::TABLE.to_owned()));
-    join_cycle_reads(&mut sel, false);
-    let mut scope = cycle_list_where();
+    now: Option<DateTime<Utc>>,
+    scope: &TenantScope<'_>,
+    actor_id: Uuid,
+) -> SelectStatement {
+    let mut sel = cycle_read_head(false);
+    let mut where_ = cycle_list_where(scope, actor_id);
     match archived {
         ArchivedFilter::Live => {
-            scope = scope
-                .add(Expr::col((Alias::new(cycle::TABLE), Alias::new("archived_at"))).is_null());
+            where_ = where_.add(col(cycle::TABLE, "archived_at").is_null());
         }
         ArchivedFilter::Archived => {
-            scope = scope.add(
-                Expr::col((Alias::new(cycle::TABLE), Alias::new("archived_at"))).is_not_null(),
-            );
+            where_ = where_.add(col(cycle::TABLE, "archived_at").is_not_null());
         }
         ArchivedFilter::Any => {}
     }
     if view != CycleView::All {
-        scope = scope.add(cycle_view_condition(view, now_bind));
+        where_ = where_.add(cycle_view_condition(view, now.unwrap_or_else(Utc::now)));
     }
-    sel.cond_where(scope);
+    sel.cond_where(where_);
     sel.group_by_col((Alias::new(cycle::TABLE), Alias::new("id")));
     apply_order(&mut sel, cycle::TABLE, order);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// Q2 cycle detail (`CycleDetailAPIEndpoint.get_queryset`,
 /// `cycle.py:370-448`, + `.filter(archived_at__isnull=True).get(pk=pk)`
 /// from the detail `GET` at `:469`): identical to the live Q1 plus the
-/// pk predicate. The chain text is byte-identical to Q1's; only the GET
-/// wrapper differs.
-///
-/// Binds: `$1` slug, `$2` project id, `$3` cycle id, `$4` acting-user id.
-pub fn cycle_detail_sql(order: &OrderBy) -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.distinct();
-    select_table_columns(&mut sel, cycle::TABLE, cycle::COLUMNS);
-    for annotation in all_count_annotations_sql() {
-        sel.expr(Expr::cust(annotation));
-    }
-    sel.from(Alias::new(cycle::TABLE.to_owned()));
-    join_cycle_reads(&mut sel, false);
+/// pk predicate. The chain is identical to Q1's; only the GET wrapper
+/// differs.
+pub fn cycle_detail(
+    order: &OrderBy,
+    scope: &TenantScope<'_>,
+    cycle_id: Uuid,
+    actor_id: Uuid,
+) -> SelectStatement {
+    let mut sel = cycle_read_head(false);
     sel.cond_where(
-        cycle_list_where()
-            .add(Expr::col((Alias::new(cycle::TABLE), Alias::new("archived_at"))).is_null())
-            .add(Expr::col((Alias::new(cycle::TABLE), Alias::new("id"))).eq(Expr::cust("$3"))),
+        cycle_list_where(scope, actor_id)
+            .add(col(cycle::TABLE, "archived_at").is_null())
+            .add(col(cycle::TABLE, "id").eq(cycle_id)),
     );
     sel.group_by_col((Alias::new(cycle::TABLE), Alias::new("id")));
     apply_order(&mut sel, cycle::TABLE, order);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// The three Q3 estimate-sum aliases in source order (`cycle.py:699-721`).
@@ -1057,32 +1076,36 @@ pub const ESTIMATE_ALIASES: &[&str] = &[
     "started_estimates",
 ];
 
-/// One Q3 `Sum("issue_cycle__issue__estimate_point__key")` annotation as
-/// Django renders it (`cycle.py:699-721`, verified against live
-/// `str(query)` output). The total (`GroupFilter::All`) carries **no
-/// `FILTER`** (ported bug 7); the grouped sums carry the same liveness
+/// One Q3 `Sum("issue_cycle__issue__estimate_point__key")` annotation
+/// (`cycle.py:699-721`). The total (`GroupFilter::All`) carries **no
+/// filter** (ported bug 7); the grouped sums carry the same liveness
 /// guard plus the group equality. `key` is the `IntegerField`, so the
 /// sums are integer sums (unlike the transfer's `value`-cast doubles).
-pub fn estimate_sum_sql(filter: GroupFilter, alias: &str) -> String {
+pub fn estimate_sum_expr(filter: GroupFilter) -> SimpleExpr {
+    let key = col(estimate_point::TABLE, "key");
     match filter {
-        GroupFilter::All => format!(
-            r#"SUM("{ep}"."key") AS "{alias}""#,
-            ep = estimate_point::TABLE
-        ),
-        GroupFilter::Eq(group) => format!(
-            r#"SUM("{ep}"."key") FILTER (WHERE ({LIVE_ISSUE_FILTER} AND "states"."group" = '{group}')) AS "{alias}""#,
-            ep = estimate_point::TABLE,
+        GroupFilter::All => Func::sum(key).into(),
+        GroupFilter::Eq(group) => sum_where(
+            live_issue_filter().add(col(state::TABLE, "group").eq(group)),
+            key.into(),
         ),
     }
 }
 
-/// All three estimate sums in source order, for the Q3 select list.
-pub fn all_estimate_sums_sql() -> Vec<String> {
-    vec![
-        estimate_sum_sql(GroupFilter::All, "total_estimates"),
-        estimate_sum_sql(GroupFilter::Eq("completed"), "completed_estimates"),
-        estimate_sum_sql(GroupFilter::Eq("started"), "started_estimates"),
-    ]
+/// All three estimate sums in source order, onto the Q3 select list.
+fn add_estimate_sums(sel: &mut SelectStatement) {
+    sel.expr_as(
+        estimate_sum_expr(GroupFilter::All),
+        Alias::new("total_estimates"),
+    );
+    sel.expr_as(
+        estimate_sum_expr(GroupFilter::Eq("completed")),
+        Alias::new("completed_estimates"),
+    );
+    sel.expr_as(
+        estimate_sum_expr(GroupFilter::Eq("started")),
+        Alias::new("started_estimates"),
+    );
 }
 
 /// Q3 archived-cycle list (`CycleArchiveUnarchiveAPIEndpoint.get_queryset`,
@@ -1090,56 +1113,86 @@ pub fn all_estimate_sums_sql() -> Vec<String> {
 /// `archived_at__isnull=False` (`:630`) **plus** the three estimate sums
 /// (`:699-721`) and the `estimate_points` left join — the asymmetry vs
 /// the archived-module list, which has no estimates.
-///
-/// Binds: `$1` slug, `$2` project id, `$4` acting-user id.
-pub fn archived_cycle_list_sql(order: &OrderBy) -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.distinct();
-    select_table_columns(&mut sel, cycle::TABLE, cycle::COLUMNS);
-    for annotation in all_count_annotations_sql() {
-        sel.expr(Expr::cust(annotation));
-    }
-    for annotation in all_estimate_sums_sql() {
-        sel.expr(Expr::cust(annotation));
-    }
-    sel.from(Alias::new(cycle::TABLE.to_owned()));
-    join_cycle_reads(&mut sel, true);
+pub fn archived_cycle_list(
+    order: &OrderBy,
+    scope: &TenantScope<'_>,
+    actor_id: Uuid,
+) -> SelectStatement {
+    let mut sel = cycle_read_head(true);
     sel.cond_where(
-        cycle_list_where()
-            .add(Expr::col((Alias::new(cycle::TABLE), Alias::new("archived_at"))).is_not_null()),
+        cycle_list_where(scope, actor_id).add(col(cycle::TABLE, "archived_at").is_not_null()),
     );
     sel.group_by_col((Alias::new(cycle::TABLE), Alias::new("id")));
     apply_order(&mut sel, cycle::TABLE, order);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 // ---------------------------------------------------------------------------
 // Q4/Q5 issue querysets (CycleIssue-based)
 // ---------------------------------------------------------------------------
 
+/// The `IssueManager` guards (`db/models/issue.py:95-104`) spelled onto
+/// the given `issues` / `states` / `projects` identifiers: soft-delete,
+/// non-triage states (NULL-safe — the `states` join is a `LEFT OUTER
+/// JOIN`), live issues, live projects, non-drafts. Django's `NOT (x IS
+/// NOT NULL)` arms render as the equivalent `x IS NULL`.
+fn issue_manager_guards(issues: &str, states: &str, projects: &str) -> Condition {
+    Condition::all()
+        .add(col(issues, "deleted_at").is_null())
+        .add(
+            Condition::all()
+                .add(col(states, "group").eq("triage"))
+                .add(col(states, "group").is_not_null())
+                .not(),
+        )
+        .add(col(issues, "archived_at").is_null())
+        .add(col(projects, "archived_at").is_null())
+        .add(col(issues, "is_draft").not())
+}
+
+/// Outer `IssueManager` guards for the Q4 GET shape and the transfer
+/// distributions (`Issue.issue_objects` entry points — never relation
+/// traversals, ported bug 5), on the plain `issues` / `states` /
+/// `projects` tables.
+pub fn issue_manager_outer_guards() -> Condition {
+    issue_manager_guards(ISSUE_TABLE, state::TABLE, project::TABLE)
+}
+
 /// `sub_issues_count` correlated subquery (`cycle.py:817-822,864-869,
-/// 1029-1034`, verified against live `str(query)` output):
-/// `Issue.issue_objects.filter(parent=OuterRef(...))` — so the FULL
-/// `IssueManager` guards render inside (triage / archived issue /
-/// archived project / draft excluded, soft-delete excluded), with the
+/// 1029-1034`): `Issue.issue_objects.filter(parent=OuterRef(...))` — so
+/// the FULL `IssueManager` guards render inside (triage / archived issue
+/// / archived project / draft excluded, soft-delete excluded), with the
 /// `states` join nullable (`LEFT OUTER JOIN`, hence the NULL-safe triage
-/// guard). `Count` is NOT distinct (`Func(F("id"), function="Count")`
-/// renders `COUNT`, capital-C spelling normalized). The subquery
-/// restricts `parent_id` ONLY — no project or cycle scope (ported bug 6).
+/// guard). `Count` is NOT distinct. The subquery restricts `parent_id`
+/// ONLY — no project or cycle scope (ported bug 6).
 ///
 /// `outer` is the correlated parent column: `"cycle_issues"."issue_id"`
 /// for the Q4/Q5 querysets, `"issues"."id"` for the Q4 GET shape.
-pub fn sub_issues_count_sql(outer: &str) -> String {
-    format!(
-        r#"(SELECT COUNT(U0."id") AS "count" FROM "issues" U0 LEFT OUTER JOIN "states" U1 ON (U0."state_id" = U1."id") INNER JOIN "projects" U2 ON (U0."project_id" = U2."id") WHERE (U0."deleted_at" IS NULL AND NOT (U1."group" = 'triage' AND U1."group" IS NOT NULL) AND NOT (U0."archived_at" IS NOT NULL) AND NOT (U2."archived_at" IS NOT NULL) AND NOT (U0."is_draft") AND U0."parent_id" = ({outer}))) AS "sub_issues_count""#
-    )
+pub fn sub_issues_count_expr(outer: Expr) -> SimpleExpr {
+    let (u0, u1, u2) = ("U0", "U1", "U2");
+    let mut sub = Query::select();
+    sub.expr(Func::count(col(u0, "id")))
+        .from_as(table(ISSUE_TABLE), Alias::new(u0))
+        .join_as(
+            JoinType::LeftJoin,
+            table(state::TABLE),
+            Alias::new(u1),
+            col(u0, "state_id").equals((Alias::new(u1), Alias::new("id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            table(project::TABLE),
+            Alias::new(u2),
+            col(u0, "project_id").equals((Alias::new(u2), Alias::new("id"))),
+        )
+        .cond_where(issue_manager_guards(u0, u1, u2).add(col(u0, "parent_id").eq(outer)));
+    scalar(sub)
 }
 
 /// Q4/Q5 queryset (`CycleIssueListCreateAPIEndpoint.get_queryset`,
 /// `cycle.py:815-837`; Q5's `cycle.py:1027-1049` is chain-identical):
 /// `SELECT DISTINCT` bridge columns in [`cycle_issue::COLUMNS`] order +
-/// [`sub_issues_count_sql`] correlated to the bridge's issue.
+/// [`sub_issues_count_expr`] correlated to the bridge's issue.
 ///
 /// Joins (verified order): `issues` inner (`select_related("issue",
 /// "issue__state", "issue__project")` — the issue's own project arrives
@@ -1158,89 +1211,75 @@ pub fn sub_issues_count_sql(outer: &str) -> String {
 ///
 /// The Q5 detail `GET`/`DELETE` do NOT use this shape (ported bug 4);
 /// the Q4 list `POST` re-read (`:1008`) does.
-///
-/// Binds: `$1` slug, `$2` project id, `$3` cycle id, `$4` acting-user id.
-pub fn cycle_issue_queryset_sql(order: &OrderBy) -> String {
-    use sea_query::PostgresQueryBuilder;
-    let bridges = Alias::new(cycle_issue::TABLE.to_owned());
+pub fn cycle_issue_queryset(
+    order: &OrderBy,
+    scope: &TenantScope<'_>,
+    cycle_id: Uuid,
+    actor_id: Uuid,
+) -> SelectStatement {
     let mut sel = Query::select();
     sel.distinct();
     select_table_columns(&mut sel, cycle_issue::TABLE, cycle_issue::COLUMNS);
-    sel.expr(Expr::cust(sub_issues_count_sql(
-        r#""cycle_issues"."issue_id""#,
-    )));
-    sel.from(Alias::new(cycle_issue::TABLE.to_owned()));
-    // INNER JOIN "issues" ON ("cycle_issues"."issue_id" = "issues"."id")
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(ISSUE_TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((bridges.clone(), Alias::new("issue_id")))
-                .equals((Alias::new(ISSUE_TABLE), Alias::new("id"))),
-        ),
+    sel.expr_as(
+        sub_issues_count_expr(col(cycle_issue::TABLE, "issue_id")),
+        Alias::new("sub_issues_count"),
     );
+    sel.from(table(cycle_issue::TABLE));
+    inner_join(&mut sel, cycle_issue::TABLE, "issue_id", ISSUE_TABLE, "id");
     join_workspace(&mut sel, cycle_issue::TABLE);
     join_project(&mut sel, cycle_issue::TABLE);
     join_member(&mut sel);
-    // INNER JOIN "cycles" ON ("cycle_issues"."cycle_id" = "cycles"."id")
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(cycle::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((bridges.clone(), Alias::new("cycle_id")))
-                .equals((Alias::new(cycle::TABLE), Alias::new("id"))),
-        ),
-    );
+    inner_join(&mut sel, cycle_issue::TABLE, "cycle_id", cycle::TABLE, "id");
     // INNER JOIN "projects" AS "T8" ON ("issues"."project_id" = T8."id")
     // (select_related("issue__project")).
     sel.join(
         JoinType::InnerJoin,
-        TableRef::Table(Alias::new(project::TABLE.to_owned()).into_iden()).alias(Alias::new("T8")),
-        Condition::all().add(
-            Expr::col((Alias::new(ISSUE_TABLE), Alias::new("project_id")))
-                .equals((Alias::new("T8"), Alias::new("id"))),
-        ),
+        TableRef::Table(table(project::TABLE).into_iden()).alias(Alias::new("T8")),
+        col(ISSUE_TABLE, "project_id").equals((Alias::new("T8"), Alias::new("id"))),
     );
-    // LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
-    sel.join(
-        JoinType::LeftJoin,
-        Alias::new(state::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(ISSUE_TABLE), Alias::new("state_id")))
-                .equals((Alias::new(state::TABLE), Alias::new("id"))),
-        ),
-    );
-    let scope = Condition::all()
-        .add(Expr::col((bridges.clone(), Alias::new("deleted_at"))).is_null())
-        .add(
-            Expr::col((Alias::new(WORKSPACE_TABLE.to_owned()), Alias::new("slug")))
-                .eq(Expr::cust("$1")),
-        )
-        .add(Expr::col((bridges.clone(), Alias::new("project_id"))).eq(Expr::cust("$2")));
-    let scope = add_member_scope(scope);
-    let scope = scope.add(Expr::col((bridges, Alias::new("cycle_id"))).eq(Expr::cust("$3")));
-    sel.cond_where(scope);
+    left_join(&mut sel, ISSUE_TABLE, "state_id", state::TABLE, "id");
+    let where_ = Condition::all()
+        .add(col(cycle_issue::TABLE, "deleted_at").is_null())
+        .add(tenant_condition(cycle_issue::TABLE, scope));
+    let where_ =
+        add_member_scope(where_, actor_id).add(col(cycle_issue::TABLE, "cycle_id").eq(cycle_id));
+    sel.cond_where(where_);
     apply_order(&mut sel, cycle_issue::TABLE, order);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
-/// `link_count` scalar annotation (Q4 GET, `cycle.py:880-885`, verified
-/// against live `str(query)` output): `IssueLink.objects` uses the
-/// soft-delete default manager, so `deleted_at IS NULL` renders.
-pub fn link_count_sql() -> String {
-    format!(
-        r#"(SELECT COUNT(U0."id") AS "count" FROM "{ISSUE_LINK_TABLE}" U0 WHERE (U0."deleted_at" IS NULL AND U0."issue_id" = ("issues"."id"))) AS "link_count""#
-    )
+/// `link_count` scalar annotation (Q4 GET, `cycle.py:880-885`):
+/// `IssueLink.objects` uses the soft-delete default manager, so
+/// `deleted_at IS NULL` renders.
+pub fn link_count_expr() -> SimpleExpr {
+    let u0 = "U0";
+    let mut sub = Query::select();
+    sub.expr(Func::count(col(u0, "id")))
+        .from_as(table(ISSUE_LINK_TABLE), Alias::new(u0))
+        .cond_where(
+            Condition::all()
+                .add(col(u0, "deleted_at").is_null())
+                .add(col(u0, "issue_id").eq(col(ISSUE_TABLE, "id"))),
+        );
+    scalar(sub)
 }
 
 /// `attachment_count` scalar annotation (Q4 GET, `cycle.py:886-894`):
 /// same soft-delete manager scope plus the
 /// `entity_type = 'ISSUE_ATTACHMENT'` literal
 /// (`FileAsset.EntityTypeContext.ISSUE_ATTACHMENT`).
-pub fn attachment_count_sql() -> String {
-    format!(
-        r#"(SELECT COUNT(U0."id") AS "count" FROM "{FILE_ASSET_TABLE}" U0 WHERE (U0."deleted_at" IS NULL AND U0."entity_type" = 'ISSUE_ATTACHMENT' AND U0."issue_id" = ("issues"."id"))) AS "attachment_count""#
-    )
+pub fn attachment_count_expr() -> SimpleExpr {
+    let u0 = "U0";
+    let mut sub = Query::select();
+    sub.expr(Func::count(col(u0, "id")))
+        .from_as(table(FILE_ASSET_TABLE), Alias::new(u0))
+        .cond_where(
+            Condition::all()
+                .add(col(u0, "deleted_at").is_null())
+                .add(col(u0, "entity_type").eq("ISSUE_ATTACHMENT"))
+                .add(col(u0, "issue_id").eq(col(ISSUE_TABLE, "id"))),
+        );
+    scalar(sub)
 }
 
 /// `bridge_id` annotation (Q4 GET, `cycle.py:870`):
@@ -1248,18 +1287,9 @@ pub fn attachment_count_sql() -> String {
 /// via the `INNER JOIN "cycle_issues"`. One row per live bridge: an
 /// issue bridged twice (deleted-then-recreated rows excepted by the
 /// `deleted_at` guard) fans out into two rows — ported as observed.
-pub fn bridge_id_sql() -> String {
-    r#""cycle_issues"."id" AS "bridge_id""#.to_owned()
+pub fn bridge_id_expr() -> SimpleExpr {
+    col(cycle_issue::TABLE, "id").into()
 }
-
-/// Outer `IssueManager` guards for the Q4 GET shape
-/// (`db/models/issue.py:95-104`, verified against live `str(query)`
-/// output): soft-delete, non-triage states (NULL-safe — the `states`
-/// join is a `LEFT OUTER JOIN`), live issues, live projects, non-drafts.
-/// These apply ONLY to `Issue.issue_objects` entry points (the GET outer
-/// query, both `sub_issues_count` subqueries and the four transfer
-/// distributions), never to relation traversals (ported bug 5).
-pub const ISSUE_MANAGER_OUTER_GUARDS: &str = r#""issues"."deleted_at" IS NULL AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL) AND NOT ("issues"."archived_at" IS NOT NULL) AND NOT ("projects"."archived_at" IS NOT NULL) AND NOT ("issues"."is_draft")"#;
 
 /// Q4 issue list `GET` inline queryset (`cycle.py:862-895`): the shape
 /// the wire actually serves (the `post` re-read at `:1008` uses the Q4
@@ -1277,47 +1307,31 @@ pub const ISSUE_MANAGER_OUTER_GUARDS: &str = r#""issues"."deleted_at" IS NULL AN
 /// The `issues` projection is `"issues".*`: Django projects every issue
 /// column explicitly; same row content. (The issues-domain port owns the
 /// typed column list; this layer ports the scope, joins and annotations.)
-///
-/// Binds: `$1` slug, `$2` project id, `$3` cycle id.
-pub fn cycle_issue_list_get_sql(order: &OrderBy) -> String {
-    use sea_query::PostgresQueryBuilder;
+pub fn cycle_issue_list_get(
+    order: &OrderBy,
+    scope: &TenantScope<'_>,
+    cycle_id: Uuid,
+) -> SelectStatement {
     let mut sel = Query::select();
-    sel.expr(Expr::cust(r#""issues".*"#));
-    sel.expr(Expr::cust(sub_issues_count_sql(r#""issues"."id""#)));
-    sel.expr(Expr::cust(bridge_id_sql()));
-    sel.expr(Expr::cust(link_count_sql()));
-    sel.expr(Expr::cust(attachment_count_sql()));
-    sel.from(Alias::new(ISSUE_TABLE.to_owned()));
-    // LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
-    sel.join(
-        JoinType::LeftJoin,
-        Alias::new(state::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(ISSUE_TABLE), Alias::new("state_id")))
-                .equals((Alias::new(state::TABLE), Alias::new("id"))),
-        ),
+    sel.column((Alias::new(ISSUE_TABLE), Asterisk));
+    sel.expr_as(
+        sub_issues_count_expr(col(ISSUE_TABLE, "id")),
+        Alias::new("sub_issues_count"),
     );
+    sel.expr_as(bridge_id_expr(), Alias::new("bridge_id"));
+    sel.expr_as(link_count_expr(), Alias::new("link_count"));
+    sel.expr_as(attachment_count_expr(), Alias::new("attachment_count"));
+    sel.from(table(ISSUE_TABLE));
+    left_join(&mut sel, ISSUE_TABLE, "state_id", state::TABLE, "id");
     join_project(&mut sel, ISSUE_TABLE);
-    // INNER JOIN "cycle_issues" ON ("issues"."id" = "cycle_issues"."issue_id")
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(cycle_issue::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(ISSUE_TABLE), Alias::new("id")))
-                .equals((Alias::new(cycle_issue::TABLE), Alias::new("issue_id"))),
-        ),
-    );
+    inner_join(&mut sel, ISSUE_TABLE, "id", cycle_issue::TABLE, "issue_id");
     join_workspace(&mut sel, ISSUE_TABLE);
     // LEFT OUTER JOIN "issues" AS "T7" ON ("issues"."parent_id" = T7."id")
     // (select_related("parent")).
     sel.join(
         JoinType::LeftJoin,
-        TableRef::Table(Alias::new(ISSUE_TABLE.to_owned()).into_iden())
-            .alias(Alias::new(PARENT_ALIAS)),
-        Condition::all().add(
-            Expr::col((Alias::new(ISSUE_TABLE), Alias::new("parent_id")))
-                .equals((Alias::new(PARENT_ALIAS), Alias::new("id"))),
-        ),
+        TableRef::Table(table(ISSUE_TABLE).into_iden()).alias(Alias::new(PARENT_ALIAS)),
+        col(ISSUE_TABLE, "parent_id").equals((Alias::new(PARENT_ALIAS), Alias::new("id"))),
     );
     // Bare-M2M ordering joins (PIDASHCONV-522), after T7 like Django:
     // `LEFT JOIN "<through>"` + `LEFT JOIN "<target>"`, no DISTINCT —
@@ -1325,55 +1339,32 @@ pub fn cycle_issue_list_get_sql(order: &OrderBy) -> String {
     // M2M traversals (`assignees__<tail>`) share the same two joins.
     if let OrderTarget::M2M(which) | OrderTarget::M2MTraversal(which) = order.target {
         let (through, issue_fk, target_fk, target) = which.tables();
-        sel.join(
-            JoinType::LeftJoin,
-            Alias::new(through.to_owned()),
-            Condition::all().add(
-                Expr::col((Alias::new(ISSUE_TABLE), Alias::new("id")))
-                    .equals((Alias::new(through), Alias::new(issue_fk))),
-            ),
-        );
-        sel.join(
-            JoinType::LeftJoin,
-            Alias::new(target.to_owned()),
-            Condition::all().add(
-                Expr::col((Alias::new(through), Alias::new(target_fk)))
-                    .equals((Alias::new(target), Alias::new("id"))),
-            ),
-        );
+        left_join(&mut sel, ISSUE_TABLE, "id", through, issue_fk);
+        left_join(&mut sel, through, target_fk, target, "id");
     }
     // Bare-FK related-ordering joins (PIDASHCONV-522), after T7 like
     // Django: one `LEFT JOIN "<table>" ON ("issues"."<fk>" =
     // "<table>"."id")`. To-one, so rows never multiply (unlike M2M).
     if let OrderTarget::Related(which) = order.target {
-        if let Some((table, fk)) = which.join() {
-            join_order_fk(&mut sel, table, fk);
+        if let Some((target, fk)) = which.join() {
+            join_order_fk(&mut sel, target, fk);
         }
     }
     // FK-traversal ordering joins (PIDASHCONV-522): same to-one shape
     // as the bare-FK joins, for `created_by__<tail>` et al.
     if let OrderTarget::Traversal(which) = order.target {
-        let (table, fk) = which.join();
-        join_order_fk(&mut sel, table, fk);
+        let (target, fk) = which.join();
+        join_order_fk(&mut sel, target, fk);
     }
     sel.cond_where(
-        Condition::all()
-            .add(Expr::cust(ISSUE_MANAGER_OUTER_GUARDS))
-            .add(
-                Expr::col((Alias::new(cycle_issue::TABLE), Alias::new("cycle_id")))
-                    .eq(Expr::cust("$3")),
-            )
-            .add(Expr::col((Alias::new(cycle_issue::TABLE), Alias::new("deleted_at"))).is_null())
-            .add(
-                Expr::col((Alias::new(ISSUE_TABLE), Alias::new("project_id"))).eq(Expr::cust("$2")),
-            )
-            .add(
-                Expr::col((Alias::new(WORKSPACE_TABLE.to_owned()), Alias::new("slug")))
-                    .eq(Expr::cust("$1")),
-            ),
+        issue_manager_outer_guards()
+            .add(col(cycle_issue::TABLE, "cycle_id").eq(cycle_id))
+            .add(col(cycle_issue::TABLE, "deleted_at").is_null())
+            .add(col(ISSUE_TABLE, "project_id").eq(scope.project_id))
+            .add(col(WORKSPACE_TABLE, "slug").eq(scope.slug)),
     );
     apply_order(&mut sel, ISSUE_TABLE, order);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// Q5 detail `GET`/`DELETE` lookup (`CycleIssueDetailAPIEndpoint.get`,
@@ -1387,67 +1378,55 @@ pub fn cycle_issue_list_get_sql(order: &OrderBy) -> String {
 /// `DoesNotExist` → 404, 2+ → `MultipleObjectsReturned` → 500) and its
 /// `Meta.ordering` `ORDER BY` is order-irrelevant for a single-row
 /// fetch, so neither renders here; handlers own the exception mapping.
-///
-/// Binds: `$1` slug, `$2` project id, `$3` cycle id, `$4` issue id.
-pub fn cycle_issue_detail_lookup_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    let bridges = Alias::new(cycle_issue::TABLE.to_owned());
+pub fn cycle_issue_detail_lookup(
+    scope: &TenantScope<'_>,
+    cycle_id: Uuid,
+    issue_id: Uuid,
+) -> SelectStatement {
     let mut sel = Query::select();
     select_table_columns(&mut sel, cycle_issue::TABLE, cycle_issue::COLUMNS);
-    sel.from(Alias::new(cycle_issue::TABLE.to_owned()));
+    sel.from(table(cycle_issue::TABLE));
     join_workspace(&mut sel, cycle_issue::TABLE);
     sel.cond_where(
         Condition::all()
-            .add(Expr::col((bridges.clone(), Alias::new("deleted_at"))).is_null())
-            .add(Expr::col((bridges.clone(), Alias::new("cycle_id"))).eq(Expr::cust("$3")))
-            .add(Expr::col((bridges.clone(), Alias::new("issue_id"))).eq(Expr::cust("$4")))
-            .add(Expr::col((bridges.clone(), Alias::new("project_id"))).eq(Expr::cust("$2")))
-            .add(
-                Expr::col((Alias::new(WORKSPACE_TABLE.to_owned()), Alias::new("slug")))
-                    .eq(Expr::cust("$1")),
-            ),
+            .add(col(cycle_issue::TABLE, "deleted_at").is_null())
+            .add(col(cycle_issue::TABLE, "cycle_id").eq(cycle_id))
+            .add(col(cycle_issue::TABLE, "issue_id").eq(issue_id))
+            .add(col(cycle_issue::TABLE, "project_id").eq(scope.project_id))
+            .add(col(WORKSPACE_TABLE, "slug").eq(scope.slug)),
     );
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 // ---------------------------------------------------------------------------
-// Q6 transfer reads (static statements)
+// Q6 transfer reads
 // ---------------------------------------------------------------------------
 
 /// Explicit issue-liveness filter of the transfer old-cycle recounts
 /// (transfer file `:74-79` and each group `Q`): the Q1 filter plus the
 /// issue soft-delete guard (ported bug 8). Condition order follows
 /// Django, not the `Q()` kwarg order.
-const TRANSFER_LIVE_ISSUE_FILTER: &str = r#""cycle_issues"."deleted_at" IS NULL AND "issues"."archived_at" IS NULL AND "issues"."deleted_at" IS NULL AND NOT "issues"."is_draft""#;
-
-/// One old-cycle recount annotation as Django renders it (transfer file
-/// `:71-141`, verified against live `str(query)` output): the
-/// [`count_issues_sql`] shape with the extra issue soft-delete guard.
-/// No `DISTINCT`, like Q1.
-pub fn transfer_count_issues_sql(filter: GroupFilter, alias: &str) -> String {
-    match filter {
-        GroupFilter::All => format!(
-            r#"COUNT("cycle_issues"."id") FILTER (WHERE ({TRANSFER_LIVE_ISSUE_FILTER})) AS "{alias}""#
-        ),
-        GroupFilter::Eq(group) => format!(
-            r#"COUNT("states"."group") FILTER (WHERE ({TRANSFER_LIVE_ISSUE_FILTER} AND "states"."group" = '{group}')) AS "{alias}""#
-        ),
-    }
+fn transfer_live_issue_filter() -> Condition {
+    Condition::all()
+        .add(col(cycle_issue::TABLE, "deleted_at").is_null())
+        .add(col(ISSUE_TABLE, "archived_at").is_null())
+        .add(col(ISSUE_TABLE, "deleted_at").is_null())
+        .add(col(ISSUE_TABLE, "is_draft").not())
 }
 
-/// All six old-cycle recounts in source order (transfer file `:71-141`).
-pub fn all_transfer_counts_sql() -> Vec<String> {
-    let mut out = vec![transfer_count_issues_sql(GroupFilter::All, "total_issues")];
-    for (group, alias) in [
-        ("completed", "completed_issues"),
-        ("cancelled", "cancelled_issues"),
-        ("started", "started_issues"),
-        ("unstarted", "unstarted_issues"),
-        ("backlog", "backlog_issues"),
-    ] {
-        out.push(transfer_count_issues_sql(GroupFilter::Eq(group), alias));
+/// One old-cycle recount annotation (transfer file `:71-141`): the
+/// [`count_issues_expr`] shape with the extra issue soft-delete guard.
+/// No `DISTINCT`, like Q1.
+pub fn transfer_count_issues_expr(filter: GroupFilter) -> SimpleExpr {
+    match filter {
+        GroupFilter::All => {
+            count_where(transfer_live_issue_filter(), col(cycle_issue::TABLE, "id"))
+        }
+        GroupFilter::Eq(group) => count_where(
+            transfer_live_issue_filter().add(col(state::TABLE, "group").eq(group)),
+            col(state::TABLE, "group"),
+        ),
     }
-    out
 }
 
 /// The transfer's open-state gate (`utils/constants.py:86`):
@@ -1457,106 +1436,323 @@ pub fn all_transfer_counts_sql() -> Vec<String> {
 pub const OPEN_STATE_GROUPS: &[&str] = &["backlog", "unstarted", "started", "review", "test"];
 
 /// `avatar_url` select item shared by the assignee distributions
-/// (transfer file `:175-193,:296-312`, verified against live `str(query)`
-/// output): asset URL when `avatar_asset` is set, the raw `avatar`
-/// text when it is null, `NULL` otherwise (unreachable — the two `WHEN`
-/// arms partition null/non-null — ported as observed). Django renders
-/// the nested `Concat` as nested `CONCAT(...::text)` casts; the
-/// `Value` literals below are the executed parameter values.
-pub const AVATAR_URL_CASE: &str = r#"CASE WHEN "users"."avatar_asset_id" IS NOT NULL THEN CONCAT(('/api/assets/v2/static/')::text, (CONCAT(("users"."avatar_asset_id")::text, ('/')::text))::text) WHEN "users"."avatar_asset_id" IS NULL THEN "users"."avatar" ELSE NULL END AS "avatar_url""#;
+/// (transfer file `:175-193,:296-312`): the asset URL when
+/// `avatar_asset` is set, the raw `avatar` text when it is null, `NULL`
+/// otherwise (unreachable — the two `WHEN` arms partition
+/// null/non-null — ported as observed as the implicit `ELSE NULL`).
+/// Django renders the nested `Concat` as nested `CONCAT(...::text)`
+/// casts; the `Value` literals bind as text here.
+pub fn avatar_url_expr() -> SimpleExpr {
+    let asset = || col(USER_TABLE, "avatar_asset_id");
+    let text = |value: &str| Expr::val(value).cast_as(Alias::new("text"));
+    let url = Func::cust(Alias::new("CONCAT")).args([
+        text("/api/assets/v2/static/"),
+        asset().cast_as(Alias::new("text")),
+        text("/"),
+    ]);
+    Expr::case(asset().is_not_null(), url)
+        .case(asset().is_null(), col(USER_TABLE, "avatar"))
+        .into()
+}
+
+/// `"estimate_points"."value"` cast to double (transfer estimate math,
+/// `Cast("estimate_point__value", FloatField())`, ported bug 10): a
+/// non-numeric value fails at the database.
+fn estimate_value_double() -> SimpleExpr {
+    col(estimate_point::TABLE, "value").cast_as(Alias::new("double precision"))
+}
+
+/// The transfer distributions' completed / pending issue predicates
+/// (transfer file `:200-215,:320-334`).
+fn dist_alive() -> Condition {
+    Condition::all()
+        .add(col(ISSUE_TABLE, "archived_at").is_null())
+        .add(col(ISSUE_TABLE, "is_draft").not())
+}
+
+fn dist_completed() -> Condition {
+    Condition::all()
+        .add(col(ISSUE_TABLE, "archived_at").is_null())
+        .add(col(ISSUE_TABLE, "completed_at").is_not_null())
+        .add(col(ISSUE_TABLE, "is_draft").not())
+}
+
+fn dist_pending() -> Condition {
+    Condition::all()
+        .add(col(ISSUE_TABLE, "archived_at").is_null())
+        .add(col(ISSUE_TABLE, "completed_at").is_null())
+        .add(col(ISSUE_TABLE, "is_draft").not())
+}
 
 /// The three estimate-distribution sums in source order
 /// (`total_estimates`, `completed_estimates`, `pending_estimates`,
-/// transfer file `:195-215,:242-262`): `SUM` over the `value`
-/// CharField cast to double (ported bug 10), unfiltered total plus the
-/// completed/pending `FILTER`s. `NULL` when a group has no valued rows.
-pub const ESTIMATE_DIST_SUMS: &str = r#"SUM(("estimate_points"."value")::double precision) AS "total_estimates", SUM(("estimate_points"."value")::double precision) FILTER (WHERE ("issues"."archived_at" IS NULL AND "issues"."completed_at" IS NOT NULL AND NOT "issues"."is_draft")) AS "completed_estimates", SUM(("estimate_points"."value")::double precision) FILTER (WHERE ("issues"."archived_at" IS NULL AND "issues"."completed_at" IS NULL AND NOT "issues"."is_draft")) AS "pending_estimates""#;
+/// transfer file `:195-215,:242-262`): `SUM` over the `value` CharField
+/// cast to double (ported bug 10), unfiltered total plus the
+/// completed/pending filters. `NULL` when a group has no valued rows.
+fn add_estimate_dist_sums(sel: &mut SelectStatement) {
+    sel.expr_as(
+        SimpleExpr::from(Func::sum(estimate_value_double())),
+        Alias::new("total_estimates"),
+    );
+    sel.expr_as(
+        sum_where(dist_completed(), estimate_value_double()),
+        Alias::new("completed_estimates"),
+    );
+    sel.expr_as(
+        sum_where(dist_pending(), estimate_value_double()),
+        Alias::new("pending_estimates"),
+    );
+}
 
 /// The three issue-distribution counts in source order
 /// (`total_issues`, `completed_issues`, `pending_issues`, transfer file
 /// `:314-334,:362-382`): real row counts, unfiltered-alive total plus
-/// the completed/pending `FILTER`s.
-pub const ISSUE_DIST_COUNTS: &str = r#"COUNT("issues"."id") FILTER (WHERE ("issues"."archived_at" IS NULL AND NOT "issues"."is_draft")) AS "total_issues", COUNT("issues"."id") FILTER (WHERE ("issues"."archived_at" IS NULL AND "issues"."completed_at" IS NOT NULL AND NOT "issues"."is_draft")) AS "completed_issues", COUNT("issues"."id") FILTER (WHERE ("issues"."archived_at" IS NULL AND "issues"."completed_at" IS NULL AND NOT "issues"."is_draft")) AS "pending_issues""#;
+/// the completed/pending filters.
+fn add_issue_dist_counts(sel: &mut SelectStatement) {
+    sel.expr_as(
+        count_where(dist_alive(), col(ISSUE_TABLE, "id")),
+        Alias::new("total_issues"),
+    );
+    sel.expr_as(
+        count_where(dist_completed(), col(ISSUE_TABLE, "id")),
+        Alias::new("completed_issues"),
+    );
+    sel.expr_as(
+        count_where(dist_pending(), col(ISSUE_TABLE, "id")),
+        Alias::new("pending_issues"),
+    );
+}
 
 /// `WHERE` tail shared by the four transfer distributions (transfer file
-/// `:166-171` et al.): the [`ISSUE_MANAGER_OUTER_GUARDS`] head (the
+/// `:166-171` et al.): the [`issue_manager_outer_guards`] head (the
 /// entry point is `Issue.issue_objects`), then the cycle-bridge scope,
-/// then the tenant scope. Condition order follows Django. The static
-/// distribution statements embed this text verbatim (cross-pinned by
-/// the tests — Rust `const` cannot concatenate).
-pub const TRANSFER_DIST_WHERE: &str = r#""issues"."deleted_at" IS NULL AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL) AND NOT ("issues"."archived_at" IS NOT NULL) AND NOT ("projects"."archived_at" IS NOT NULL) AND NOT ("issues"."is_draft") AND "cycle_issues"."cycle_id" = ($3) AND "cycle_issues"."deleted_at" IS NULL AND "issues"."project_id" = ($2) AND "workspaces"."slug" = ($1)"#;
+/// then the tenant scope. Condition order follows Django.
+fn transfer_dist_where(scope: &TenantScope<'_>, cycle_id: Uuid) -> Condition {
+    issue_manager_outer_guards()
+        .add(col(cycle_issue::TABLE, "cycle_id").eq(cycle_id))
+        .add(col(cycle_issue::TABLE, "deleted_at").is_null())
+        .add(col(ISSUE_TABLE, "project_id").eq(scope.project_id))
+        .add(col(WORKSPACE_TABLE, "slug").eq(scope.slug))
+}
+
+/// Which dimension a transfer distribution groups by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Distribution {
+    /// `issue_assignees` → `users`: `display_name`, `assignee_id`,
+    /// `avatar_url` (transfer file `:165-217,:287-336`).
+    Assignee,
+    /// `issue_labels` → `labels`: `label_name`, `color`, `label_id`
+    /// (transfer file `:231-264,:351-384`).
+    Label,
+}
+
+/// What a transfer distribution measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Measure {
+    /// The three estimate sums (the `estimate_type` branch).
+    Estimates,
+    /// The three issue counts (always loaded).
+    Issues,
+}
 
 /// New-cycle guard lookup (transfer file `:59`) — and the identical
 /// `current_cycle` re-read (`:409`): `Cycle.objects.filter(
 /// workspace__slug, project_id, pk).first()`. The queryset keeps the
-/// model's default `-created_at` ordering (verified against live
-/// `str(query)` output — Django applies `Meta.ordering` to ungrouped
-/// selects); `.first()` adds `LIMIT 1`. No member join, no archived
-/// predicate — the guard reads any cycle in the tenant, live or
-/// archived.
-///
-/// Binds: `$1` slug, `$2` project id, `$3` the new (or current) cycle id.
-pub const TRANSFER_CYCLE_LOOKUP_SQL: &str = r#"SELECT "cycles"."id", "cycles"."created_at", "cycles"."updated_at", "cycles"."created_by_id", "cycles"."updated_by_id", "cycles"."deleted_at", "cycles"."project_id", "cycles"."workspace_id", "cycles"."name", "cycles"."description", "cycles"."start_date", "cycles"."end_date", "cycles"."owned_by_id", "cycles"."view_props", "cycles"."sort_order", "cycles"."external_source", "cycles"."external_id", "cycles"."progress_snapshot", "cycles"."archived_at", "cycles"."logo_props", "cycles"."timezone", "cycles"."version" FROM "cycles" INNER JOIN "workspaces" ON ("cycles"."workspace_id" = "workspaces"."id") WHERE ("cycles"."deleted_at" IS NULL AND "cycles"."id" = ($3) AND "cycles"."project_id" = ($2) AND "workspaces"."slug" = ($1)) ORDER BY "cycles"."created_at" DESC LIMIT 1"#;
+/// model's default `-created_at` ordering (Django applies
+/// `Meta.ordering` to ungrouped selects); `.first()` adds `LIMIT 1`. No
+/// member join, no archived predicate — the guard reads any cycle in
+/// the tenant, live or archived.
+pub fn transfer_cycle_lookup(scope: &TenantScope<'_>, cycle_id: Uuid) -> SelectStatement {
+    let mut sel = Query::select();
+    select_table_columns(&mut sel, cycle::TABLE, cycle::COLUMNS);
+    sel.from(table(cycle::TABLE));
+    join_workspace(&mut sel, cycle::TABLE);
+    sel.cond_where(
+        Condition::all()
+            .add(col(cycle::TABLE, "deleted_at").is_null())
+            .add(col(cycle::TABLE, "id").eq(cycle_id))
+            .add(tenant_condition(cycle::TABLE, scope)),
+    );
+    sel.order_by(
+        (Alias::new(cycle::TABLE), Alias::new("created_at")),
+        Order::Desc,
+    );
+    sel.limit(1);
+    sel
+}
 
 /// Old-cycle recounts (transfer file `:69-143`): the source cycle row
 /// plus the six counts with the extra issue soft-delete guard
-/// ([`transfer_count_issues_sql`]). No member join, no `projects` join
+/// ([`transfer_count_issues_expr`]). No member join, no `projects` join
 /// (the chain filters `project_id` directly on `cycles`), no archived
 /// predicate. `.first()` at `:143` adds `ORDER BY "cycles"."id" ASC
 /// LIMIT 1` (Django orders an unordered grouped queryset by pk).
-///
-/// Binds: `$1` slug, `$2` project id, `$3` the source cycle id.
-pub const TRANSFER_OLD_CYCLE_SQL: &str = r#"SELECT "cycles"."id", "cycles"."created_at", "cycles"."updated_at", "cycles"."created_by_id", "cycles"."updated_by_id", "cycles"."deleted_at", "cycles"."project_id", "cycles"."workspace_id", "cycles"."name", "cycles"."description", "cycles"."start_date", "cycles"."end_date", "cycles"."owned_by_id", "cycles"."view_props", "cycles"."sort_order", "cycles"."external_source", "cycles"."external_id", "cycles"."progress_snapshot", "cycles"."archived_at", "cycles"."logo_props", "cycles"."timezone", "cycles"."version", COUNT("cycle_issues"."id") FILTER (WHERE ("cycle_issues"."deleted_at" IS NULL AND "issues"."archived_at" IS NULL AND "issues"."deleted_at" IS NULL AND NOT "issues"."is_draft")) AS "total_issues", COUNT("states"."group") FILTER (WHERE ("cycle_issues"."deleted_at" IS NULL AND "issues"."archived_at" IS NULL AND "issues"."deleted_at" IS NULL AND NOT "issues"."is_draft" AND "states"."group" = 'completed')) AS "completed_issues", COUNT("states"."group") FILTER (WHERE ("cycle_issues"."deleted_at" IS NULL AND "issues"."archived_at" IS NULL AND "issues"."deleted_at" IS NULL AND NOT "issues"."is_draft" AND "states"."group" = 'cancelled')) AS "cancelled_issues", COUNT("states"."group") FILTER (WHERE ("cycle_issues"."deleted_at" IS NULL AND "issues"."archived_at" IS NULL AND "issues"."deleted_at" IS NULL AND NOT "issues"."is_draft" AND "states"."group" = 'started')) AS "started_issues", COUNT("states"."group") FILTER (WHERE ("cycle_issues"."deleted_at" IS NULL AND "issues"."archived_at" IS NULL AND "issues"."deleted_at" IS NULL AND NOT "issues"."is_draft" AND "states"."group" = 'unstarted')) AS "unstarted_issues", COUNT("states"."group") FILTER (WHERE ("cycle_issues"."deleted_at" IS NULL AND "issues"."archived_at" IS NULL AND "issues"."deleted_at" IS NULL AND NOT "issues"."is_draft" AND "states"."group" = 'backlog')) AS "backlog_issues" FROM "cycles" INNER JOIN "workspaces" ON ("cycles"."workspace_id" = "workspaces"."id") LEFT OUTER JOIN "cycle_issues" ON ("cycles"."id" = "cycle_issues"."cycle_id") LEFT OUTER JOIN "issues" ON ("cycle_issues"."issue_id" = "issues"."id") LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id") WHERE ("cycles"."deleted_at" IS NULL AND "cycles"."id" = ($3) AND "cycles"."project_id" = ($2) AND "workspaces"."slug" = ($1)) GROUP BY "cycles"."id" ORDER BY "cycles"."id" ASC LIMIT 1"#;
+pub fn transfer_old_cycle(scope: &TenantScope<'_>, cycle_id: Uuid) -> SelectStatement {
+    let mut sel = Query::select();
+    select_table_columns(&mut sel, cycle::TABLE, cycle::COLUMNS);
+    sel.expr_as(
+        transfer_count_issues_expr(GroupFilter::All),
+        Alias::new("total_issues"),
+    );
+    for (group, alias) in GROUPED_COUNTS {
+        sel.expr_as(
+            transfer_count_issues_expr(GroupFilter::Eq(group)),
+            Alias::new(*alias),
+        );
+    }
+    sel.from(table(cycle::TABLE));
+    join_workspace(&mut sel, cycle::TABLE);
+    left_join(&mut sel, cycle::TABLE, "id", cycle_issue::TABLE, "cycle_id");
+    left_join(&mut sel, cycle_issue::TABLE, "issue_id", ISSUE_TABLE, "id");
+    left_join(&mut sel, ISSUE_TABLE, "state_id", state::TABLE, "id");
+    sel.cond_where(
+        Condition::all()
+            .add(col(cycle::TABLE, "deleted_at").is_null())
+            .add(col(cycle::TABLE, "id").eq(cycle_id))
+            .add(tenant_condition(cycle::TABLE, scope)),
+    );
+    sel.group_by_col((Alias::new(cycle::TABLE), Alias::new("id")));
+    sel.order_by((Alias::new(cycle::TABLE), Alias::new("id")), Order::Asc);
+    sel.limit(1);
+    sel
+}
 
 /// `estimate_type` check (transfer file `:152-157`, and the identical
 /// re-check inside `burndown_plot`, `analytics_plot.py:127-132`):
 /// `Project.objects.filter(workspace__slug, pk, estimate__isnull=False,
-/// estimate__type="points").exists()` — rendered as Django's
-/// `.exists()` shape (`SELECT 1 AS "a" ... LIMIT 1`, verified against
-/// live output), which drops the model's default ordering.
-///
-/// Binds: `$1` slug, `$2` project id.
-pub const TRANSFER_ESTIMATE_TYPE_SQL: &str = r#"SELECT 1 AS "a" FROM "projects" INNER JOIN "estimates" ON ("projects"."estimate_id" = "estimates"."id") INNER JOIN "workspaces" ON ("projects"."workspace_id" = "workspaces"."id") WHERE ("projects"."deleted_at" IS NULL AND "projects"."estimate_id" IS NOT NULL AND "estimates"."type" = 'points' AND "projects"."id" = ($2) AND "workspaces"."slug" = ($1)) LIMIT 1"#;
+/// estimate__type="points").exists()` — Django's `.exists()` shape
+/// (one column, `LIMIT 1`, no ordering); the caller tests for a row.
+pub fn transfer_estimate_type(scope: &TenantScope<'_>) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.column((Alias::new(project::TABLE), Alias::new("id")));
+    sel.from(table(project::TABLE));
+    inner_join(
+        &mut sel,
+        project::TABLE,
+        "estimate_id",
+        estimate::TABLE,
+        "id",
+    );
+    join_workspace(&mut sel, project::TABLE);
+    sel.cond_where(
+        Condition::all()
+            .add(col(project::TABLE, "deleted_at").is_null())
+            .add(col(project::TABLE, "estimate_id").is_not_null())
+            .add(col(estimate::TABLE, "type").eq("points"))
+            .add(col(project::TABLE, "id").eq(scope.project_id))
+            .add(col(WORKSPACE_TABLE, "slug").eq(scope.slug)),
+    );
+    sel.limit(1);
+    sel
+}
 
-/// Assignee estimate distribution (transfer file `:165-217`): one row
-/// per (`display_name`, `assignee_id`, `avatar_url`) group with the
-/// three estimate sums ([`ESTIMATE_DIST_SUMS`]). `assignee_id` resolves
-/// to the through-table column (`issue_assignees.assignee_id`), while
-/// `display_name`/`avatar_url` read `users` (verified against live
-/// output). `GROUP BY 1, 2, 3 ORDER BY 1 ASC` is positional in Django's
-/// text and stays positional here; the ascending `display_name` order
-/// feeds the serialized list order, so it is load-bearing.
+/// One transfer distribution (transfer file `:165-399`): one row per
+/// group with the three measures. `assignee_id` / `label_id` resolve to
+/// the through-table column (`issue_assignees.assignee_id`,
+/// `issue_labels.label_id`), while `display_name` / `avatar_url` read
+/// `users` and `label_name` / `color` read `labels`. Django's
+/// positional `GROUP BY 1, 2, 3 ORDER BY 1 ASC` groups by the three
+/// dimension items (the assignee `avatar_url` case by its two `users`
+/// source columns, same groups) and orders by the first (`display_name`
+/// / `label_name`) ascending — the order feeds the serialized list, so
+/// it is load-bearing.
 ///
-/// Binds: `$1` slug, `$2` project id, `$3` the source cycle id.
-pub const TRANSFER_ASSIGNEE_ESTIMATE_SQL: &str = r#"SELECT "users"."display_name" AS "display_name", "issue_assignees"."assignee_id" AS "assignee_id", CASE WHEN "users"."avatar_asset_id" IS NOT NULL THEN CONCAT(('/api/assets/v2/static/')::text, (CONCAT(("users"."avatar_asset_id")::text, ('/')::text))::text) WHEN "users"."avatar_asset_id" IS NULL THEN "users"."avatar" ELSE NULL END AS "avatar_url", SUM(("estimate_points"."value")::double precision) AS "total_estimates", SUM(("estimate_points"."value")::double precision) FILTER (WHERE ("issues"."archived_at" IS NULL AND "issues"."completed_at" IS NOT NULL AND NOT "issues"."is_draft")) AS "completed_estimates", SUM(("estimate_points"."value")::double precision) FILTER (WHERE ("issues"."archived_at" IS NULL AND "issues"."completed_at" IS NULL AND NOT "issues"."is_draft")) AS "pending_estimates" FROM "issues" LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id") INNER JOIN "projects" ON ("issues"."project_id" = "projects"."id") INNER JOIN "cycle_issues" ON ("issues"."id" = "cycle_issues"."issue_id") INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id") LEFT OUTER JOIN "issue_assignees" ON ("issues"."id" = "issue_assignees"."issue_id") LEFT OUTER JOIN "users" ON ("issue_assignees"."assignee_id" = "users"."id") LEFT OUTER JOIN "estimate_points" ON ("issues"."estimate_point_id" = "estimate_points"."id") WHERE ("issues"."deleted_at" IS NULL AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL) AND NOT ("issues"."archived_at" IS NOT NULL) AND NOT ("projects"."archived_at" IS NOT NULL) AND NOT ("issues"."is_draft") AND "cycle_issues"."cycle_id" = ($3) AND "cycle_issues"."deleted_at" IS NULL AND "issues"."project_id" = ($2) AND "workspaces"."slug" = ($1)) GROUP BY 1, 2, 3 ORDER BY 1 ASC"#;
-
-/// Label estimate distribution (transfer file `:231-264`): one row per
-/// (`label_name`, `color`, `label_id`) group with the three estimate
-/// sums ([`ESTIMATE_DIST_SUMS`]). `label_id` resolves to the
-/// through-table column (`issue_labels.label_id`), while `label_name` /
-/// `color` read `labels`. Ascending `label_name` order feeds the
-/// serialized list order.
-///
-/// Binds: `$1` slug, `$2` project id, `$3` the source cycle id.
-pub const TRANSFER_LABEL_ESTIMATE_SQL: &str = r#"SELECT "labels"."name" AS "label_name", "labels"."color" AS "color", "issue_labels"."label_id" AS "label_id", SUM(("estimate_points"."value")::double precision) AS "total_estimates", SUM(("estimate_points"."value")::double precision) FILTER (WHERE ("issues"."archived_at" IS NULL AND "issues"."completed_at" IS NOT NULL AND NOT "issues"."is_draft")) AS "completed_estimates", SUM(("estimate_points"."value")::double precision) FILTER (WHERE ("issues"."archived_at" IS NULL AND "issues"."completed_at" IS NULL AND NOT "issues"."is_draft")) AS "pending_estimates" FROM "issues" LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id") INNER JOIN "projects" ON ("issues"."project_id" = "projects"."id") INNER JOIN "cycle_issues" ON ("issues"."id" = "cycle_issues"."issue_id") INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id") LEFT OUTER JOIN "issue_labels" ON ("issues"."id" = "issue_labels"."issue_id") LEFT OUTER JOIN "labels" ON ("issue_labels"."label_id" = "labels"."id") LEFT OUTER JOIN "estimate_points" ON ("issues"."estimate_point_id" = "estimate_points"."id") WHERE ("issues"."deleted_at" IS NULL AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL) AND NOT ("issues"."archived_at" IS NOT NULL) AND NOT ("projects"."archived_at" IS NOT NULL) AND NOT ("issues"."is_draft") AND "cycle_issues"."cycle_id" = ($3) AND "cycle_issues"."deleted_at" IS NULL AND "issues"."project_id" = ($2) AND "workspaces"."slug" = ($1)) GROUP BY 1, 2, 3 ORDER BY 1 ASC"#;
-
-/// Assignee issue distribution (transfer file `:287-336`): one row per
-/// (`display_name`, `assignee_id`, `avatar_url`) group with the three
-/// issue counts ([`ISSUE_DIST_COUNTS`]). Same grouping columns as the
-/// estimate twin, no `estimate_points` join. Ascending `display_name`
-/// order feeds the serialized list order.
-///
-/// Binds: `$1` slug, `$2` project id, `$3` the source cycle id.
-pub const TRANSFER_ASSIGNEE_ISSUE_SQL: &str = r#"SELECT "users"."display_name" AS "display_name", "issue_assignees"."assignee_id" AS "assignee_id", CASE WHEN "users"."avatar_asset_id" IS NOT NULL THEN CONCAT(('/api/assets/v2/static/')::text, (CONCAT(("users"."avatar_asset_id")::text, ('/')::text))::text) WHEN "users"."avatar_asset_id" IS NULL THEN "users"."avatar" ELSE NULL END AS "avatar_url", COUNT("issues"."id") FILTER (WHERE ("issues"."archived_at" IS NULL AND NOT "issues"."is_draft")) AS "total_issues", COUNT("issues"."id") FILTER (WHERE ("issues"."archived_at" IS NULL AND "issues"."completed_at" IS NOT NULL AND NOT "issues"."is_draft")) AS "completed_issues", COUNT("issues"."id") FILTER (WHERE ("issues"."archived_at" IS NULL AND "issues"."completed_at" IS NULL AND NOT "issues"."is_draft")) AS "pending_issues" FROM "issues" LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id") INNER JOIN "projects" ON ("issues"."project_id" = "projects"."id") INNER JOIN "cycle_issues" ON ("issues"."id" = "cycle_issues"."issue_id") INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id") LEFT OUTER JOIN "issue_assignees" ON ("issues"."id" = "issue_assignees"."issue_id") LEFT OUTER JOIN "users" ON ("issue_assignees"."assignee_id" = "users"."id") WHERE ("issues"."deleted_at" IS NULL AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL) AND NOT ("issues"."archived_at" IS NOT NULL) AND NOT ("projects"."archived_at" IS NOT NULL) AND NOT ("issues"."is_draft") AND "cycle_issues"."cycle_id" = ($3) AND "cycle_issues"."deleted_at" IS NULL AND "issues"."project_id" = ($2) AND "workspaces"."slug" = ($1)) GROUP BY 1, 2, 3 ORDER BY 1 ASC"#;
-
-/// Label issue distribution (transfer file `:351-384`, verified against
-/// live `str(query)` output): one row per (`label_name`, `color`,
-/// `label_id`) group with the three issue counts
-/// ([`ISSUE_DIST_COUNTS`]). Ascending `label_name` order feeds the
-/// serialized list order.
-///
-/// Binds: `$1` slug, `$2` project id, `$3` the source cycle id.
-pub const TRANSFER_LABEL_ISSUE_SQL: &str = r#"SELECT "labels"."name" AS "label_name", "labels"."color" AS "color", "issue_labels"."label_id" AS "label_id", COUNT("issues"."id") FILTER (WHERE ("issues"."archived_at" IS NULL AND NOT "issues"."is_draft")) AS "total_issues", COUNT("issues"."id") FILTER (WHERE ("issues"."archived_at" IS NULL AND "issues"."completed_at" IS NOT NULL AND NOT "issues"."is_draft")) AS "completed_issues", COUNT("issues"."id") FILTER (WHERE ("issues"."archived_at" IS NULL AND "issues"."completed_at" IS NULL AND NOT "issues"."is_draft")) AS "pending_issues" FROM "issues" LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id") INNER JOIN "projects" ON ("issues"."project_id" = "projects"."id") INNER JOIN "cycle_issues" ON ("issues"."id" = "cycle_issues"."issue_id") INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id") LEFT OUTER JOIN "issue_labels" ON ("issues"."id" = "issue_labels"."issue_id") LEFT OUTER JOIN "labels" ON ("issue_labels"."label_id" = "labels"."id") WHERE ("issues"."deleted_at" IS NULL AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL) AND NOT ("issues"."archived_at" IS NOT NULL) AND NOT ("projects"."archived_at" IS NOT NULL) AND NOT ("issues"."is_draft") AND "cycle_issues"."cycle_id" = ($3) AND "cycle_issues"."deleted_at" IS NULL AND "issues"."project_id" = ($2) AND "workspaces"."slug" = ($1)) GROUP BY 1, 2, 3 ORDER BY 1 ASC"#;
+/// Joins (verified order): `states` left outer, `projects` inner,
+/// `cycle_issues` inner, `workspaces` inner, the through table left
+/// outer, its target left outer, then `estimate_points` left outer for
+/// [`Measure::Estimates`].
+pub fn transfer_distribution(
+    scope: &TenantScope<'_>,
+    cycle_id: Uuid,
+    dimension: Distribution,
+    measure: Measure,
+) -> SelectStatement {
+    let mut sel = Query::select();
+    // The select items, and the columns the groups are made of. Django
+    // groups positionally (`GROUP BY 1, 2, 3`); a bound `CASE` cannot be
+    // matched by text (its literals are separate parameters), so the
+    // avatar group is its two source columns — `users` is N:1 off
+    // `assignee_id`, so the groups are identical.
+    let (items, group_cols): (Vec<(SimpleExpr, &str)>, Vec<Expr>) = match dimension {
+        Distribution::Assignee => (
+            vec![
+                (col(USER_TABLE, "display_name").into(), "display_name"),
+                (
+                    col(ISSUE_ASSIGNEE_TABLE, "assignee_id").into(),
+                    "assignee_id",
+                ),
+                (avatar_url_expr(), "avatar_url"),
+            ],
+            vec![
+                col(USER_TABLE, "display_name"),
+                col(ISSUE_ASSIGNEE_TABLE, "assignee_id"),
+                col(USER_TABLE, "avatar_asset_id"),
+                col(USER_TABLE, "avatar"),
+            ],
+        ),
+        Distribution::Label => (
+            vec![
+                (col(LABEL_TABLE, "name").into(), "label_name"),
+                (col(LABEL_TABLE, "color").into(), "color"),
+                (col(ISSUE_LABEL_TABLE, "label_id").into(), "label_id"),
+            ],
+            vec![
+                col(LABEL_TABLE, "name"),
+                col(LABEL_TABLE, "color"),
+                col(ISSUE_LABEL_TABLE, "label_id"),
+            ],
+        ),
+    };
+    for (expr, alias) in &items {
+        sel.expr_as(expr.clone(), Alias::new(*alias));
+    }
+    match measure {
+        Measure::Estimates => add_estimate_dist_sums(&mut sel),
+        Measure::Issues => add_issue_dist_counts(&mut sel),
+    }
+    sel.from(table(ISSUE_TABLE));
+    left_join(&mut sel, ISSUE_TABLE, "state_id", state::TABLE, "id");
+    join_project(&mut sel, ISSUE_TABLE);
+    inner_join(&mut sel, ISSUE_TABLE, "id", cycle_issue::TABLE, "issue_id");
+    join_workspace(&mut sel, ISSUE_TABLE);
+    match dimension {
+        Distribution::Assignee => {
+            left_join(
+                &mut sel,
+                ISSUE_TABLE,
+                "id",
+                ISSUE_ASSIGNEE_TABLE,
+                "issue_id",
+            );
+            left_join(
+                &mut sel,
+                ISSUE_ASSIGNEE_TABLE,
+                "assignee_id",
+                USER_TABLE,
+                "id",
+            );
+        }
+        Distribution::Label => {
+            left_join(&mut sel, ISSUE_TABLE, "id", ISSUE_LABEL_TABLE, "issue_id");
+            left_join(&mut sel, ISSUE_LABEL_TABLE, "label_id", LABEL_TABLE, "id");
+        }
+    }
+    if measure == Measure::Estimates {
+        left_join(
+            &mut sel,
+            ISSUE_TABLE,
+            "estimate_point_id",
+            estimate_point::TABLE,
+            "id",
+        );
+    }
+    sel.cond_where(transfer_dist_where(scope, cycle_id));
+    for column in group_cols {
+        sel.add_group_by([SimpleExpr::from(column)]);
+    }
+    sel.order_by_expr(items[0].0.clone(), Order::Asc);
+    sel
+}
 
 /// Move selection (transfer file `:436-443`): the `CycleIssue` rows
 /// whose issues transfer — live bridges in this cycle whose issue is
@@ -1567,19 +1763,77 @@ pub const TRANSFER_LABEL_ISSUE_SQL: &str = r#"SELECT "labels"."name" AS "label_n
 /// per-row `cycle_id` rewrite + `bulk_update` and the `issue_activity`
 /// payload assembly are handler/tasks-owned; this statement is the
 /// exact row set they consume.
-///
-/// Binds: `$1` slug, `$2` project id, `$3` the source cycle id.
-pub const TRANSFER_MOVE_SELECT_SQL: &str = r#"SELECT "cycle_issues"."id", "cycle_issues"."created_at", "cycle_issues"."updated_at", "cycle_issues"."created_by_id", "cycle_issues"."updated_by_id", "cycle_issues"."deleted_at", "cycle_issues"."project_id", "cycle_issues"."workspace_id", "cycle_issues"."issue_id", "cycle_issues"."cycle_id" FROM "cycle_issues" INNER JOIN "issues" ON ("cycle_issues"."issue_id" = "issues"."id") INNER JOIN "states" ON ("issues"."state_id" = "states"."id") INNER JOIN "workspaces" ON ("cycle_issues"."workspace_id" = "workspaces"."id") WHERE ("cycle_issues"."deleted_at" IS NULL AND "cycle_issues"."cycle_id" = ($3) AND "issues"."archived_at" IS NULL AND NOT "issues"."is_draft" AND "states"."group" IN ('backlog', 'unstarted', 'started', 'review', 'test') AND "cycle_issues"."project_id" = ($2) AND "workspaces"."slug" = ($1)) ORDER BY "cycle_issues"."created_at" DESC"#;
+pub fn transfer_move_select(scope: &TenantScope<'_>, cycle_id: Uuid) -> SelectStatement {
+    let mut sel = Query::select();
+    select_table_columns(&mut sel, cycle_issue::TABLE, cycle_issue::COLUMNS);
+    sel.from(table(cycle_issue::TABLE));
+    inner_join(&mut sel, cycle_issue::TABLE, "issue_id", ISSUE_TABLE, "id");
+    inner_join(&mut sel, ISSUE_TABLE, "state_id", state::TABLE, "id");
+    join_workspace(&mut sel, cycle_issue::TABLE);
+    sel.cond_where(
+        Condition::all()
+            .add(col(cycle_issue::TABLE, "deleted_at").is_null())
+            .add(col(cycle_issue::TABLE, "cycle_id").eq(cycle_id))
+            .add(col(ISSUE_TABLE, "archived_at").is_null())
+            .add(col(ISSUE_TABLE, "is_draft").not())
+            .add(col(state::TABLE, "group").is_in(OPEN_STATE_GROUPS.iter().copied()))
+            .add(col(cycle_issue::TABLE, "project_id").eq(scope.project_id))
+            .add(col(WORKSPACE_TABLE, "slug").eq(scope.slug)),
+    );
+    sel.order_by(
+        (Alias::new(cycle_issue::TABLE), Alias::new("created_at")),
+        Order::Desc,
+    );
+    sel
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_query::PostgresQueryBuilder;
+
+    const SLUG: &str = "acme";
+    fn project_id() -> Uuid {
+        Uuid::from_u128(0xA)
+    }
+    fn cycle_id() -> Uuid {
+        Uuid::from_u128(0xC)
+    }
+    fn actor_id() -> Uuid {
+        Uuid::from_u128(0xD)
+    }
+    fn issue_id() -> Uuid {
+        Uuid::from_u128(0xE)
+    }
+    fn scope() -> TenantScope<'static> {
+        TenantScope {
+            slug: SLUG,
+            project_id: project_id(),
+        }
+    }
+    fn render(sel: &SelectStatement) -> String {
+        sel.to_string(PostgresQueryBuilder)
+    }
+    fn lit(id: Uuid) -> String {
+        format!("'{id}'")
+    }
+
+    /// The literal `CASE` filter every Q1 count carries.
+    const LIVE_FILTER: &str = r#""cycle_issues"."deleted_at" IS NULL AND "issues"."archived_at" IS NULL AND (NOT "issues"."is_draft")"#;
 
     #[test]
     fn q1_list_live_scope_and_joins() {
         // FX-CYCMOD-04 Q1 (`cycle.py:89-167` + `:197`).
-        let sql = cycle_list_sql(&OrderBy::default_cycle(), ArchivedFilter::Live);
-        assert!(sql.contains("SELECT DISTINCT"), "{sql}");
+        let sql = render(&cycle_list(
+            &OrderBy::default_cycle(),
+            ArchivedFilter::Live,
+            &scope(),
+            actor_id(),
+        ));
+        assert!(
+            sql.starts_with(r#"SELECT DISTINCT "cycles"."id", "#),
+            "{sql}"
+        );
         assert!(sql.contains(r#"FROM "cycles""#), "{sql}");
         assert!(
             sql.contains(
@@ -1598,8 +1852,8 @@ mod tests {
             ),
             "{sql}"
         );
-        // NOTE: sea-query renders `LEFT JOIN`; Django renders the
-        // semantically identical `LEFT OUTER JOIN`.
+        // sea-query renders `LEFT JOIN`; Django renders the semantically
+        // identical `LEFT OUTER JOIN`.
         assert!(
             sql.contains(
                 r#"LEFT JOIN "cycle_issues" ON "cycles"."id" = "cycle_issues"."cycle_id""#
@@ -1619,16 +1873,27 @@ mod tests {
             sql.contains(r#"INNER JOIN "users" ON "cycles"."owned_by_id" = "users"."id""#),
             "{sql}"
         );
-        // Tenant scope + member scope + live filter + binds.
-        assert!(sql.contains(r#""cycles"."deleted_at" IS NULL"#), "{sql}");
-        assert!(sql.contains(r#""cycles"."project_id" = ($2)"#), "{sql}");
-        assert!(sql.contains(r#""workspaces"."slug" = ($1)"#), "{sql}");
+        // Tenant scope + member scope + live filter, values bound.
+        assert!(
+            sql.contains(r#"WHERE "cycles"."deleted_at" IS NULL AND"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!(
+                r#""workspaces"."slug" = '{SLUG}' AND "cycles"."project_id" = {}"#,
+                lit(project_id())
+            )),
+            "{sql}"
+        );
         assert!(
             sql.contains(r#""project_members"."is_active" = TRUE"#),
             "{sql}"
         );
         assert!(
-            sql.contains(r#""project_members"."member_id" = ($4)"#),
+            sql.contains(&format!(
+                r#""project_members"."member_id" = {}"#,
+                lit(actor_id())
+            )),
             "{sql}"
         );
         assert!(sql.contains(r#""cycles"."archived_at" IS NULL"#), "{sql}");
@@ -1640,7 +1905,7 @@ mod tests {
         assert!(!sql.contains("triage"), "{sql}");
         assert!(sql.contains(r#"GROUP BY "cycles"."id""#), "{sql}");
         assert!(
-            sql.contains(r#"ORDER BY "cycles"."created_at" DESC"#),
+            sql.ends_with(r#"ORDER BY "cycles"."created_at" DESC"#),
             "{sql}"
         );
     }
@@ -1648,39 +1913,54 @@ mod tests {
     #[test]
     fn q1_annotations_count_rows_with_no_distinct() {
         // FX-CYCMOD-04 Q1 (`cycle.py:100-164`): no DISTINCT anywhere
-        // (ported bug 1 — the reverse of the module shape).
-        let sql = cycle_list_sql(&OrderBy::default_cycle(), ArchivedFilter::Live);
+        // (ported bug 1 — the reverse of the module shape). Django's
+        // `FILTER (WHERE ...)` is the `COUNT(CASE WHEN ... THEN x END)`
+        // form here — the same row count.
+        let sql = render(&cycle_list(
+            &OrderBy::default_cycle(),
+            ArchivedFilter::Live,
+            &scope(),
+            actor_id(),
+        ));
         assert!(
-            sql.contains(
-                r#"COUNT("cycle_issues"."id") FILTER (WHERE ("cycle_issues"."deleted_at" IS NULL AND "issues"."archived_at" IS NULL AND NOT "issues"."is_draft")) AS "total_issues""#
-            ),
+            sql.contains(&format!(
+                r#"COUNT((CASE WHEN ({LIVE_FILTER}) THEN "cycle_issues"."id" END)) AS "total_issues""#
+            )),
             "{sql}"
         );
-        for (group, alias) in [
-            ("completed", "completed_issues"),
-            ("cancelled", "cancelled_issues"),
-            ("started", "started_issues"),
-            ("unstarted", "unstarted_issues"),
-            ("backlog", "backlog_issues"),
-        ] {
+        for (group, alias) in GROUPED_COUNTS {
             assert!(
                 sql.contains(&format!(
-                    r#"COUNT("states"."group") FILTER (WHERE ("cycle_issues"."deleted_at" IS NULL AND "issues"."archived_at" IS NULL AND NOT "issues"."is_draft" AND "states"."group" = '{group}')) AS "{alias}""#
+                    r#"COUNT((CASE WHEN ({LIVE_FILTER} AND "states"."group" = '{group}') THEN "states"."group" END)) AS "{alias}""#
                 )),
                 "{sql}"
             );
         }
         assert!(!sql.contains("COUNT(DISTINCT"), "{sql}");
+        assert!(!sql.contains("FILTER"), "{sql}");
         assert_eq!(
             COUNT_ALIASES.len(),
             6,
             "six annotations serve the fixture row keys"
         );
+        assert_eq!(COUNT_GROUPS.len(), 6);
+        for alias in COUNT_ALIASES {
+            assert_eq!(
+                sql.matches(&format!(r#" AS "{alias}""#)).count(),
+                1,
+                "{alias}"
+            );
+        }
     }
 
     #[test]
     fn q1_bare_queryset_carries_no_archived_predicate() {
-        let sql = cycle_list_sql(&OrderBy::default_cycle(), ArchivedFilter::Any);
+        let sql = render(&cycle_list(
+            &OrderBy::default_cycle(),
+            ArchivedFilter::Any,
+            &scope(),
+            actor_id(),
+        ));
         // The projected `"cycles"."archived_at"` column stays (it is a
         // real column); only the WHERE predicate is absent.
         assert!(!sql.contains(r#""cycles"."archived_at" IS"#), "{sql}");
@@ -1689,74 +1969,141 @@ mod tests {
     #[test]
     fn q1_order_passthrough() {
         // kwargs `.order_by(...)` passes through untouched.
-        let sql = cycle_list_sql(&OrderBy::new("name", false), ArchivedFilter::Live);
-        assert!(sql.contains(r#"ORDER BY "cycles"."name" ASC"#), "{sql}");
+        let sql = render(&cycle_list(
+            &OrderBy::new("name", false),
+            ArchivedFilter::Live,
+            &scope(),
+            actor_id(),
+        ));
+        assert!(sql.ends_with(r#"ORDER BY "cycles"."name" ASC"#), "{sql}");
     }
 
     #[test]
     fn q1_cycle_view_predicates() {
-        // `cycle.py:198-270`; now rides $5.
-        let all = cycle_list_filtered_sql(&OrderBy::default_cycle(), CycleView::All);
-        let live = cycle_list_sql(&OrderBy::default_cycle(), ArchivedFilter::Live);
-        assert_eq!(all, live, "All renders no extra predicate");
-        assert!(!all.contains("($5)"), "{all}");
-
-        let current = cycle_list_filtered_sql(&OrderBy::default_cycle(), CycleView::Current);
+        // `cycle.py:198-270`; the instant binds as a value.
+        let now = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("instant");
+        let now_lit = "'2023-11-14 22:13:20.000000 +00:00'";
+        let order = OrderBy::default_cycle();
+        let all = render(&cycle_list_filtered(
+            &order,
+            CycleView::All,
+            now,
+            &scope(),
+            actor_id(),
+        ));
+        let live = render(&cycle_list(
+            &order,
+            ArchivedFilter::Live,
+            &scope(),
+            actor_id(),
+        ));
+        assert_eq!(all, live, "All adds nothing");
+        assert!(!CycleView::All.binds_now());
+        assert!(!CycleView::Draft.binds_now());
+        assert!(CycleView::Current.binds_now());
+        let current = render(&cycle_list_filtered(
+            &order,
+            CycleView::Current,
+            now,
+            &scope(),
+            actor_id(),
+        ));
         assert!(
-            current.contains(r#""cycles"."start_date" <= ($5)"#),
+            current.contains(&format!(
+                r#"AND ("cycles"."start_date" <= {now_lit} AND "cycles"."end_date" >= {now_lit}) GROUP BY"#
+            )),
             "{current}"
         );
+        let upcoming = render(&cycle_list_filtered(
+            &order,
+            CycleView::Upcoming,
+            now,
+            &scope(),
+            actor_id(),
+        ));
         assert!(
-            current.contains(r#""cycles"."end_date" >= ($5)"#),
-            "{current}"
-        );
-        let upcoming = cycle_list_filtered_sql(&OrderBy::default_cycle(), CycleView::Upcoming);
-        assert!(
-            upcoming.contains(r#""cycles"."start_date" > ($5)"#),
+            upcoming.contains(&format!(
+                r#"AND "cycles"."start_date" > {now_lit} GROUP BY"#
+            )),
             "{upcoming}"
         );
-        let completed = cycle_list_filtered_sql(&OrderBy::default_cycle(), CycleView::Completed);
+        let completed = render(&cycle_list_filtered(
+            &order,
+            CycleView::Completed,
+            now,
+            &scope(),
+            actor_id(),
+        ));
         assert!(
-            completed.contains(r#""cycles"."end_date" < ($5)"#),
+            completed.contains(&format!(r#"AND "cycles"."end_date" < {now_lit} GROUP BY"#)),
             "{completed}"
         );
-        let draft = cycle_list_filtered_sql(&OrderBy::default_cycle(), CycleView::Draft);
-        assert!(draft.contains(r#""cycles"."end_date" IS NULL"#), "{draft}");
+        let draft = render(&cycle_list_filtered(
+            &order,
+            CycleView::Draft,
+            now,
+            &scope(),
+            actor_id(),
+        ));
         assert!(
-            draft.contains(r#""cycles"."start_date" IS NULL"#),
+            draft.contains(
+                r#"AND ("cycles"."end_date" IS NULL AND "cycles"."start_date" IS NULL) GROUP BY"#
+            ),
             "{draft}"
         );
-        assert!(!draft.contains("($5)"), "{draft}");
-        let incomplete = cycle_list_filtered_sql(&OrderBy::default_cycle(), CycleView::Incomplete);
+        assert!(!draft.contains(now_lit), "{draft}");
+        let incomplete = render(&cycle_list_filtered(
+            &order,
+            CycleView::Incomplete,
+            now,
+            &scope(),
+            actor_id(),
+        ));
         assert!(
-            incomplete.contains(r#""cycles"."end_date" >= ($5)"#),
+            incomplete.contains(&format!(
+                r#"AND ("cycles"."end_date" >= {now_lit} OR "cycles"."end_date" IS NULL) GROUP BY"#
+            )),
             "{incomplete}"
         );
-        assert!(
-            incomplete.contains(r#""cycles"."end_date" IS NULL"#),
-            "{incomplete}"
-        );
+        // Every filtered variant keeps the live predicate.
+        for sql in [&current, &upcoming, &completed, &draft, &incomplete] {
+            assert!(sql.contains(r#""cycles"."archived_at" IS NULL"#), "{sql}");
+        }
     }
 
     #[test]
     fn q2_detail_adds_live_plus_pk() {
-        // FX-CYCMOD-04 Q2 (`cycle.py:370-448` + `:469`).
-        let sql = cycle_detail_sql(&OrderBy::default_cycle());
-        assert!(sql.contains("SELECT DISTINCT"), "{sql}");
-        assert!(sql.contains(r#""cycles"."archived_at" IS NULL"#), "{sql}");
-        assert!(sql.contains(r#""cycles"."id" = ($3)"#), "{sql}");
+        let sql = render(&cycle_detail(
+            &OrderBy::default_cycle(),
+            &scope(),
+            cycle_id(),
+            actor_id(),
+        ));
+        let live = render(&cycle_list(
+            &OrderBy::default_cycle(),
+            ArchivedFilter::Live,
+            &scope(),
+            actor_id(),
+        ));
         assert!(
-            sql.contains(r#""project_members"."member_id" = ($4)"#),
+            sql.contains(&format!(
+                r#""cycles"."archived_at" IS NULL AND "cycles"."id" = {} GROUP BY"#,
+                lit(cycle_id())
+            )),
             "{sql}"
         );
-        assert!(sql.contains(r#"AS "total_issues""#), "{sql}");
+        // Same head as Q1: select list and joins are identical.
+        let head = |s: &str| s.split(" WHERE ").next().expect("head").to_owned();
+        assert_eq!(head(&sql), head(&live));
     }
 
     #[test]
     fn q3_archived_adds_estimates() {
-        // FX-CYCMOD-04 Q3 (`cycle.py:622-724`, estimates `:699-721`).
-        let sql = archived_cycle_list_sql(&OrderBy::default_cycle());
-        assert!(sql.contains("SELECT DISTINCT"), "{sql}");
+        let sql = render(&archived_cycle_list(
+            &OrderBy::default_cycle(),
+            &scope(),
+            actor_id(),
+        ));
         assert!(
             sql.contains(r#""cycles"."archived_at" IS NOT NULL"#),
             "{sql}"
@@ -1764,396 +2111,383 @@ mod tests {
         assert!(!sql.contains(r#""cycles"."archived_at" IS NULL"#), "{sql}");
         assert!(
             sql.contains(
-                r#"LEFT JOIN "estimate_points" ON "issues"."estimate_point_id" = "estimate_points"."id""#
+                r#"LEFT JOIN "estimate_points" ON "issues"."estimate_point_id" = "estimate_points"."id" INNER JOIN "users""#
             ),
             "{sql}"
         );
-        // Total has NO filter (ported bug 7); grouped sums do.
+        // Ported bug 7: the total has no filter.
         assert!(
             sql.contains(r#"SUM("estimate_points"."key") AS "total_estimates""#),
             "{sql}"
         );
-        for (group, alias) in [
-            ("completed", "completed_estimates"),
-            ("started", "started_estimates"),
-        ] {
-            assert!(
-                sql.contains(&format!(
-                    r#"SUM("estimate_points"."key") FILTER (WHERE ("cycle_issues"."deleted_at" IS NULL AND "issues"."archived_at" IS NULL AND NOT "issues"."is_draft" AND "states"."group" = '{group}')) AS "{alias}""#
-                )),
-                "{sql}"
+        assert!(
+            sql.contains(&format!(
+                r#"SUM((CASE WHEN ({LIVE_FILTER} AND "states"."group" = 'completed') THEN "estimate_points"."key" END)) AS "completed_estimates""#
+            )),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!(
+                r#"SUM((CASE WHEN ({LIVE_FILTER} AND "states"."group" = 'started') THEN "estimate_points"."key" END)) AS "started_estimates""#
+            )),
+            "{sql}"
+        );
+        assert_eq!(ESTIMATE_ALIASES.len(), 3);
+        for alias in COUNT_ALIASES.iter().chain(ESTIMATE_ALIASES) {
+            assert_eq!(
+                sql.matches(&format!(r#" AS "{alias}""#)).count(),
+                1,
+                "{alias}"
             );
         }
-        assert!(sql.contains(r#"AS "total_issues""#), "{sql}");
-        assert_eq!(ESTIMATE_ALIASES.len(), 3);
-        // Q1/Q2 carry no estimate join.
-        let q1 = cycle_list_sql(&OrderBy::default_cycle(), ArchivedFilter::Live);
-        assert!(!q1.contains("estimate_points"), "{q1}");
+        // Q1 has no estimate join.
+        let live = render(&cycle_list(
+            &OrderBy::default_cycle(),
+            ArchivedFilter::Live,
+            &scope(),
+            actor_id(),
+        ));
+        assert!(!live.contains("estimate_points"), "{live}");
     }
+
+    const SUB_ISSUES: &str = r#"(SELECT COUNT("U0"."id") FROM "issues" AS "U0" LEFT JOIN "states" AS "U1" ON "U0"."state_id" = "U1"."id" INNER JOIN "projects" AS "U2" ON "U0"."project_id" = "U2"."id" WHERE "U0"."deleted_at" IS NULL AND (NOT ("U1"."group" = 'triage' AND "U1"."group" IS NOT NULL)) AND "U0"."archived_at" IS NULL AND "U2"."archived_at" IS NULL AND (NOT "U0"."is_draft") AND "U0"."parent_id" = "#;
 
     #[test]
     fn q4_queryset_distinct_member_scope_and_subquery() {
-        // FX-CYCMOD-04 Q4 queryset (`cycle.py:815-837`; Q5's `:1027-1049`
-        // is chain-identical and shares this builder).
-        let sql = cycle_issue_queryset_sql(&OrderBy::default_cycle());
-        assert!(sql.contains("SELECT DISTINCT"), "{sql}");
-        assert!(sql.contains(r#"FROM "cycle_issues""#), "{sql}");
+        let sql = render(&cycle_issue_queryset(
+            &OrderBy::default_cycle(),
+            &scope(),
+            cycle_id(),
+            actor_id(),
+        ));
         assert!(
-            sql.contains(r#"INNER JOIN "issues" ON "cycle_issues"."issue_id" = "issues"."id""#),
+            sql.starts_with(r#"SELECT DISTINCT "cycle_issues"."id", "#),
             "{sql}"
         );
+        // The subquery is correlated to the bridge's issue; the full
+        // manager guards render inside (ported bugs 5/6).
         assert!(
-            sql.contains(r#"INNER JOIN "cycles" ON "cycle_issues"."cycle_id" = "cycles"."id""#),
+            sql.contains(&format!(
+                r#"{SUB_ISSUES}"cycle_issues"."issue_id") AS "sub_issues_count" FROM "cycle_issues""#
+            )),
             "{sql}"
         );
-        assert!(sql.contains(r#"INNER JOIN "project_members" ON "projects"."id" = "project_members"."project_id""#), "{sql}");
+        // Join order: issues, workspaces, projects, project_members,
+        // cycles, projects T8, states.
+        let joins = [
+            r#"INNER JOIN "issues" ON "cycle_issues"."issue_id" = "issues"."id""#,
+            r#"INNER JOIN "workspaces" ON "cycle_issues"."workspace_id" = "workspaces"."id""#,
+            r#"INNER JOIN "projects" ON "cycle_issues"."project_id" = "projects"."id""#,
+            r#"INNER JOIN "project_members" ON "projects"."id" = "project_members"."project_id""#,
+            r#"INNER JOIN "cycles" ON "cycle_issues"."cycle_id" = "cycles"."id""#,
+            r#"INNER JOIN "projects" AS "T8" ON "issues"."project_id" = "T8"."id""#,
+            r#"LEFT JOIN "states" ON "issues"."state_id" = "states"."id""#,
+        ];
+        let mut at = 0;
+        for join in joins {
+            let found = sql[at..]
+                .find(join)
+                .unwrap_or_else(|| panic!("{join}: {sql}"));
+            at += found + join.len();
+        }
+        // No manager guards on the outer join; no project/cycle archived
+        // predicates (ported bugs 3/5).
+        let where_ = sql.split(" WHERE ").nth(2).expect("outer where");
+        assert!(!where_.contains("triage"), "{where_}");
+        assert!(!where_.contains("archived_at"), "{where_}");
         assert!(
-            sql.contains(r#"INNER JOIN "projects" AS "T8" ON "issues"."project_id" = "T8"."id""#),
-            "{sql}"
-        );
-        assert!(
-            sql.contains(r#"LEFT JOIN "states" ON "issues"."state_id" = "states"."id""#),
-            "{sql}"
-        );
-        assert!(
-            sql.contains(r#""cycle_issues"."deleted_at" IS NULL"#),
-            "{sql}"
-        );
-        assert!(
-            sql.contains(r#""cycle_issues"."project_id" = ($2)"#),
-            "{sql}"
-        );
-        assert!(sql.contains(r#""cycle_issues"."cycle_id" = ($3)"#), "{sql}");
-        assert!(
-            sql.contains(r#""project_members"."is_active" = TRUE"#),
-            "{sql}"
-        );
-        assert!(
-            sql.contains(r#""project_members"."member_id" = ($4)"#),
-            "{sql}"
-        );
-        // Outer issues join carries no manager guards (ported bug 5): the
-        // outer WHERE has no triage / archived-issue / draft guard...
-        let outer_where = sql.rsplit("WHERE ").next().unwrap_or("");
-        assert!(!outer_where.contains("triage"), "{sql}");
-        assert!(!outer_where.contains(r#""issues"."archived_at""#), "{sql}");
-        assert!(!outer_where.contains("is_draft"), "{sql}");
-        // ...and no projects-archived guard either (ported bug 3 — the
-        // asymmetry vs the module querysets).
-        assert!(
-            !outer_where.contains(r#""projects"."archived_at""#),
-            "{sql}"
-        );
-        // ...but the correlated subquery does (IssueManager inside).
-        assert!(
-            sql.contains(r#"U0."parent_id" = ("cycle_issues"."issue_id")"#),
-            "{sql}"
-        );
-        assert!(
-            sql.contains(r#"NOT (U1."group" = 'triage' AND U1."group" IS NOT NULL)"#),
-            "{sql}"
-        );
-        // No cycle-archived predicate: archived cycles' issues list.
-        assert!(!outer_where.contains(r#""cycles"."archived_at""#), "{sql}");
-        assert!(
-            sql.contains(r#"ORDER BY "cycle_issues"."created_at" DESC"#),
-            "{sql}"
+            where_.starts_with(&format!(
+                r#""cycle_issues"."deleted_at" IS NULL AND ("workspaces"."slug" = '{SLUG}' AND "cycle_issues"."project_id" = {}) AND "project_members"."is_active" = TRUE AND "project_members"."member_id" = {} AND "cycle_issues"."cycle_id" = {} ORDER BY "cycle_issues"."created_at" DESC"#,
+                lit(project_id()),
+                lit(actor_id()),
+                lit(cycle_id())
+            )),
+            "{where_}"
         );
     }
 
     #[test]
     fn q4_get_issue_shape_annotations_and_guards() {
-        // FX-CYCMOD-04 Q4 GET (`cycle.py:862-895`).
-        let sql = cycle_issue_list_get_sql(&OrderBy::default_issue());
-        assert!(!sql.contains("SELECT DISTINCT"), "{sql}");
-        assert!(sql.contains(r#"FROM "issues""#), "{sql}");
-        assert!(sql.contains(ISSUE_MANAGER_OUTER_GUARDS), "{sql}");
+        let sql = render(&cycle_issue_list_get(
+            &OrderBy::default_issue(),
+            &scope(),
+            cycle_id(),
+        ));
+        assert!(sql.starts_with(r#"SELECT "issues".*, "#), "{sql}");
+        assert!(!sql.contains("DISTINCT"), "{sql}");
         assert!(
-            sql.contains(r#""cycle_issues"."deleted_at" IS NULL"#),
-            "{sql}"
-        );
-        assert!(sql.contains(r#""cycle_issues"."cycle_id" = ($3)"#), "{sql}");
-        assert!(sql.contains(r#""issues"."project_id" = ($2)"#), "{sql}");
-        assert!(sql.contains(r#""workspaces"."slug" = ($1)"#), "{sql}");
-        assert!(
-            sql.contains(r#""cycle_issues"."id" AS "bridge_id""#),
+            sql.contains(&format!(
+                r#"{SUB_ISSUES}"issues"."id") AS "sub_issues_count", "cycle_issues"."id" AS "bridge_id", (SELECT COUNT("U0"."id") FROM "issue_links" AS "U0" WHERE "U0"."deleted_at" IS NULL AND "U0"."issue_id" = "issues"."id") AS "link_count", (SELECT COUNT("U0"."id") FROM "file_assets" AS "U0" WHERE "U0"."deleted_at" IS NULL AND "U0"."entity_type" = 'ISSUE_ATTACHMENT' AND "U0"."issue_id" = "issues"."id") AS "attachment_count" FROM "issues""#
+            )),
             "{sql}"
         );
         assert!(
-            sql.contains(r#"FROM "issue_links" U0 WHERE (U0."deleted_at" IS NULL AND U0."issue_id" = ("issues"."id"))"#),
+            sql.contains(
+                r#"FROM "issues" LEFT JOIN "states" ON "issues"."state_id" = "states"."id" INNER JOIN "projects" ON "issues"."project_id" = "projects"."id" INNER JOIN "cycle_issues" ON "issues"."id" = "cycle_issues"."issue_id" INNER JOIN "workspaces" ON "issues"."workspace_id" = "workspaces"."id" LEFT JOIN "issues" AS "T7" ON "issues"."parent_id" = "T7"."id" WHERE"#
+            ),
             "{sql}"
         );
+        // The outer manager guards, then bridge scope, then tenant scope.
         assert!(
-            sql.contains(r#"U0."entity_type" = 'ISSUE_ATTACHMENT'"#),
-            "{sql}"
-        );
-        assert!(
-            sql.contains(r#"LEFT JOIN "issues" AS "T7" ON "issues"."parent_id" = "T7"."id""#),
+            sql.contains(&format!(
+                r#"WHERE "issues"."deleted_at" IS NULL AND (NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)) AND "issues"."archived_at" IS NULL AND "projects"."archived_at" IS NULL AND (NOT "issues"."is_draft") AND "cycle_issues"."cycle_id" = {} AND "cycle_issues"."deleted_at" IS NULL AND "issues"."project_id" = {} AND "workspaces"."slug" = '{SLUG}' ORDER BY "issues"."created_at" ASC"#,
+                lit(cycle_id()),
+                lit(project_id())
+            )),
             "{sql}"
         );
         assert!(!sql.contains("project_members"), "{sql}");
-        assert!(
-            sql.contains(r#"ORDER BY "issues"."created_at" ASC"#),
-            "{sql}"
-        );
+        for alias in [
+            "sub_issues_count",
+            "bridge_id",
+            "link_count",
+            "attachment_count",
+        ] {
+            assert_eq!(
+                sql.matches(&format!(r#" AS "{alias}""#)).count(),
+                1,
+                "{alias}"
+            );
+        }
     }
 
     #[test]
     fn q4_get_order_random_renders_random_asc() {
-        // PIDASHCONV-522: `?order_by=?` → Django `ORDER BY RANDOM() ASC`,
-        // no extra joins.
-        let sql = cycle_issue_list_get_sql(&OrderBy::random());
-        assert!(sql.contains("ORDER BY RANDOM() ASC"), "{sql}");
-        assert!(!sql.contains("issue_assignees"), "{sql}");
-        assert!(!sql.contains("issue_labels"), "{sql}");
+        let sql = render(&cycle_issue_list_get(
+            &OrderBy::random(),
+            &scope(),
+            cycle_id(),
+        ));
+        assert!(sql.ends_with("ORDER BY RANDOM() ASC"), "{sql}");
     }
 
     #[test]
     fn q4_get_order_traversal_renders_qualified() {
-        // PIDASHCONV-522: `state__group` reuses the select_related join.
-        let sql = cycle_issue_list_get_sql(&OrderBy::table("states", "group", false));
-        assert!(sql.contains(r#"ORDER BY "states"."group" ASC"#), "{sql}");
-        let sql = cycle_issue_list_get_sql(&OrderBy::table("states", "group", true));
-        assert!(sql.contains(r#"ORDER BY "states"."group" DESC"#), "{sql}");
-        // Parent traversals render onto the T7 self-join alias.
-        let sql = cycle_issue_list_get_sql(&OrderBy::table(PARENT_ALIAS, "created_at", false));
-        assert!(sql.contains(r#"ORDER BY "T7"."created_at" ASC"#), "{sql}");
-        // Reverse-FK traversals render onto the bridge table.
-        let sql = cycle_issue_list_get_sql(&OrderBy::table(cycle_issue::TABLE, "id", false));
-        assert!(sql.contains(r#"ORDER BY "cycle_issues"."id" ASC"#), "{sql}");
+        let sql = render(&cycle_issue_list_get(
+            &OrderBy::table(state::TABLE, "sequence", true),
+            &scope(),
+            cycle_id(),
+        ));
+        assert!(
+            sql.ends_with(r#"ORDER BY "states"."sequence" DESC"#),
+            "{sql}"
+        );
+        let sql = render(&cycle_issue_list_get(
+            &OrderBy::table(PARENT_ALIAS, "name", false),
+            &scope(),
+            cycle_id(),
+        ));
+        assert!(sql.ends_with(r#"ORDER BY "T7"."name" ASC"#), "{sql}");
     }
 
     #[test]
     fn q4_get_order_alias_renders_bare() {
-        // PIDASHCONV-522: early annotations order by bare alias (Django
-        // renders the positional `ORDER BY 35` — same semantics, without
-        // depending on the `issues.*` width).
-        let sql = cycle_issue_list_get_sql(&OrderBy::alias("sub_issues_count", false));
-        assert!(sql.contains(r#"ORDER BY "sub_issues_count" ASC"#), "{sql}");
-        assert!(!sql.contains(r#""issues"."sub_issues_count""#), "{sql}");
+        let sql = render(&cycle_issue_list_get(
+            &OrderBy::alias("sub_issues_count", true),
+            &scope(),
+            cycle_id(),
+        ));
+        assert!(
+            sql.ends_with(r#"ORDER BY "sub_issues_count" DESC"#),
+            "{sql}"
+        );
     }
 
     #[test]
     fn q4_get_order_m2m_joins_and_inverts_direction() {
-        // PIDASHCONV-522: `assignees` — through + target LEFT JOINs after
-        // T7, related Meta.ordering ('-created_at',) as-is → DESC ...
-        let sql = cycle_issue_list_get_sql(&OrderBy::m2m(M2MOrder::Assignees, false));
-        let t7 = sql.find(r#""T7""#).expect("T7 join");
-        let through = sql
-            .find(r#"LEFT JOIN "issue_assignees" ON "issues"."id" = "issue_assignees"."issue_id""#)
-            .expect("through join");
-        assert!(through > t7, "{sql}");
-        assert!(
-            sql.contains(r#"LEFT JOIN "users" ON "issue_assignees"."assignee_id" = "users"."id""#),
-            "{sql}"
-        );
-        assert!(
-            sql.contains(r#"ORDER BY "users"."created_at" DESC"#),
-            "{sql}"
-        );
-        // ... and the `-` prefix inverts it to ASC.
-        let sql = cycle_issue_list_get_sql(&OrderBy::m2m(M2MOrder::Assignees, true));
-        assert!(
-            sql.contains(r#"ORDER BY "users"."created_at" ASC"#),
-            "{sql}"
-        );
-        // `labels` mirrors via issue_labels/labels.
-        let sql = cycle_issue_list_get_sql(&OrderBy::m2m(M2MOrder::Labels, false));
+        let sql = render(&cycle_issue_list_get(
+            &OrderBy::m2m(M2MOrder::Assignees, false),
+            &scope(),
+            cycle_id(),
+        ));
         assert!(
             sql.contains(
-                r#"LEFT JOIN "issue_labels" ON "issues"."id" = "issue_labels"."issue_id""#
+                r#"LEFT JOIN "issues" AS "T7" ON "issues"."parent_id" = "T7"."id" LEFT JOIN "issue_assignees" ON "issues"."id" = "issue_assignees"."issue_id" LEFT JOIN "users" ON "issue_assignees"."assignee_id" = "users"."id" WHERE"#
+            ),
+            "{sql}"
+        );
+        // `User.Meta.ordering = ('-created_at',)`: plain renders DESC.
+        assert!(
+            sql.ends_with(r#"ORDER BY "users"."created_at" DESC"#),
+            "{sql}"
+        );
+        let sql = render(&cycle_issue_list_get(
+            &OrderBy::m2m(M2MOrder::Labels, true),
+            &scope(),
+            cycle_id(),
+        ));
+        assert!(
+            sql.contains(
+                r#"LEFT JOIN "issue_labels" ON "issues"."id" = "issue_labels"."issue_id" LEFT JOIN "labels" ON "issue_labels"."label_id" = "labels"."id" WHERE"#
             ),
             "{sql}"
         );
         assert!(
-            sql.contains(r#"LEFT JOIN "labels" ON "issue_labels"."label_id" = "labels"."id""#),
+            sql.ends_with(r#"ORDER BY "labels"."created_at" ASC"#),
             "{sql}"
         );
-        assert!(
-            sql.contains(r#"ORDER BY "labels"."created_at" DESC"#),
-            "{sql}"
-        );
+        // The default shape adds neither join.
+        let plain = render(&cycle_issue_list_get(
+            &OrderBy::default_issue(),
+            &scope(),
+            cycle_id(),
+        ));
+        assert!(!plain.contains("issue_assignees"), "{plain}");
+        assert!(!plain.contains("issue_labels"), "{plain}");
     }
 
     #[test]
     fn q4_get_order_related_terms_and_joins() {
-        // PIDASHCONV-522: bare FKs order by the related Meta.ordering,
-        // read off live Django 4.2 str(query) output for the Q4 GET.
-        // Already-joined tables add no join: `state` renders the
-        // ascending `sequence` term ...
-        let sql = cycle_issue_list_get_sql(&OrderBy::related(RelatedOrder::State, false));
-        assert!(sql.contains(r#"ORDER BY "states"."sequence" ASC"#), "{sql}");
-        let sql = cycle_issue_list_get_sql(&OrderBy::related(RelatedOrder::State, true));
-        assert!(
-            sql.contains(r#"ORDER BY "states"."sequence" DESC"#),
-            "{sql}"
-        );
-        // ... while `-created_at` orderings render DESC plain / ASC
-        // inverted, reusing the select_related / bridge joins.
-        for (which, term) in [
+        let cases: &[(RelatedOrder, bool, Option<&str>, &str)] = &[
+            (
+                RelatedOrder::State,
+                false,
+                None,
+                r#"ORDER BY "states"."sequence" ASC"#,
+            ),
+            (
+                RelatedOrder::State,
+                true,
+                None,
+                r#"ORDER BY "states"."sequence" DESC"#,
+            ),
             (
                 RelatedOrder::Project,
+                false,
+                None,
                 r#"ORDER BY "projects"."created_at" DESC"#,
             ),
             (
+                RelatedOrder::Project,
+                true,
+                None,
+                r#"ORDER BY "projects"."created_at" ASC"#,
+            ),
+            (
                 RelatedOrder::Workspace,
+                false,
+                None,
                 r#"ORDER BY "workspaces"."created_at" DESC"#,
             ),
-            (RelatedOrder::Parent, r#"ORDER BY "T7"."created_at" DESC"#),
             (
-                RelatedOrder::IssueCycle,
-                r#"ORDER BY "cycle_issues"."created_at" DESC"#,
+                RelatedOrder::Parent,
+                false,
+                None,
+                r#"ORDER BY "T7"."created_at" DESC"#,
             ),
-        ] {
-            let sql = cycle_issue_list_get_sql(&OrderBy::related(which, false));
-            assert!(sql.contains(term), "{sql}");
-            let inverted = term.replace("DESC", "ASC");
-            let sql = cycle_issue_list_get_sql(&OrderBy::related(which, true));
-            assert!(sql.contains(&inverted), "{sql}");
-        }
-        // New joins render after T7, like Django: `created_by` and
-        // `updated_by` each LEFT JOIN `users` on their own FK ...
-        for (which, join) in [
             (
                 RelatedOrder::CreatedBy,
-                r#"LEFT JOIN "users" ON "issues"."created_by_id" = "users"."id""#,
+                false,
+                Some(r#"LEFT JOIN "users" ON "issues"."created_by_id" = "users"."id" WHERE"#),
+                r#"ORDER BY "users"."created_at" DESC"#,
             ),
             (
                 RelatedOrder::UpdatedBy,
-                r#"LEFT JOIN "users" ON "issues"."updated_by_id" = "users"."id""#,
+                true,
+                Some(r#"LEFT JOIN "users" ON "issues"."updated_by_id" = "users"."id" WHERE"#),
+                r#"ORDER BY "users"."created_at" ASC"#,
             ),
-        ] {
-            let sql = cycle_issue_list_get_sql(&OrderBy::related(which, false));
-            let t7 = sql.find(r#""T7""#).expect("T7 join");
-            let extra = sql.find(join).expect("ordering join");
-            assert!(extra > t7, "{sql}");
-            assert!(
-                sql.contains(r#"ORDER BY "users"."created_at" DESC"#),
-                "{sql}"
-            );
-            let sql = cycle_issue_list_get_sql(&OrderBy::related(which, true));
-            assert!(
-                sql.contains(r#"ORDER BY "users"."created_at" ASC"#),
-                "{sql}"
-            );
+            (
+                RelatedOrder::EstimatePoint,
+                false,
+                Some(
+                    r#"LEFT JOIN "estimate_points" ON "issues"."estimate_point_id" = "estimate_points"."id" WHERE"#,
+                ),
+                r#"ORDER BY "estimate_points"."value" ASC"#,
+            ),
+            (
+                RelatedOrder::AssignedPod,
+                false,
+                Some(r#"LEFT JOIN "pod" ON "issues"."assigned_pod_id" = "pod"."id" WHERE"#),
+                r#"ORDER BY "pod"."is_default" DESC, "pod"."created_at" ASC"#,
+            ),
+            (
+                RelatedOrder::AssignedPod,
+                true,
+                Some(r#"LEFT JOIN "pod" ON "issues"."assigned_pod_id" = "pod"."id" WHERE"#),
+                r#"ORDER BY "pod"."is_default" ASC, "pod"."created_at" DESC"#,
+            ),
+            (
+                RelatedOrder::IssueCycle,
+                false,
+                None,
+                r#"ORDER BY "cycle_issues"."created_at" DESC"#,
+            ),
+        ];
+        for (which, descending, join, order) in cases {
+            let sql = render(&cycle_issue_list_get(
+                &OrderBy::related(*which, *descending),
+                &scope(),
+                cycle_id(),
+            ));
+            assert!(sql.ends_with(order), "{which:?}/{descending}: {sql}");
+            match join {
+                Some(join) => assert!(
+                    sql.contains(&format!(r#""T7"."id" {join}"#)),
+                    "{which:?}: {sql}"
+                ),
+                None => assert!(
+                    sql.contains(r#""T7"."id" WHERE"#),
+                    "{which:?} adds no join: {sql}"
+                ),
+            }
         }
-        // ... `estimate_point` joins `estimate_points` for the
-        // ascending `value` term ...
-        let sql = cycle_issue_list_get_sql(&OrderBy::related(RelatedOrder::EstimatePoint, false));
-        assert!(
-            sql.contains(
-                r#"LEFT JOIN "estimate_points" ON "issues"."estimate_point_id" = "estimate_points"."id""#
-            ),
-            "{sql}"
-        );
-        assert!(
-            sql.contains(r#"ORDER BY "estimate_points"."value" ASC"#),
-            "{sql}"
-        );
-        let sql = cycle_issue_list_get_sql(&OrderBy::related(RelatedOrder::EstimatePoint, true));
-        assert!(
-            sql.contains(r#"ORDER BY "estimate_points"."value" DESC"#),
-            "{sql}"
-        );
-        // ... and `assigned_pod` joins `pod` for TWO terms (the `-`
-        // inverts both).
-        let sql = cycle_issue_list_get_sql(&OrderBy::related(RelatedOrder::AssignedPod, false));
-        assert!(
-            sql.contains(r#"LEFT JOIN "pod" ON "issues"."assigned_pod_id" = "pod"."id""#),
-            "{sql}"
-        );
-        let first = sql
-            .find(r#"ORDER BY "pod"."is_default" DESC, "pod"."created_at" ASC"#)
-            .expect("two-term ordering");
-        assert!(first > 0, "{sql}");
-        let sql = cycle_issue_list_get_sql(&OrderBy::related(RelatedOrder::AssignedPod, true));
-        assert!(
-            sql.contains(r#"ORDER BY "pod"."is_default" ASC, "pod"."created_at" DESC"#),
-            "{sql}"
-        );
     }
 
     #[test]
     fn q4_get_order_fk_traversal_joins_then_orders_tail() {
-        // PIDASHCONV-522: `created_by__<tail>` et al. — the same to-one
-        // LEFT JOIN as the bare arm, then the tail onto the joined
-        // table, request direction as-is.
-        for (which, join, table, tail) in [
-            (
-                TraversalOrder::CreatedBy,
-                r#"LEFT JOIN "users" ON "issues"."created_by_id" = "users"."id""#,
-                "users",
-                "email",
-            ),
-            (
-                TraversalOrder::UpdatedBy,
-                r#"LEFT JOIN "users" ON "issues"."updated_by_id" = "users"."id""#,
-                "users",
-                "email",
-            ),
-            (
-                TraversalOrder::EstimatePoint,
-                r#"LEFT JOIN "estimate_points" ON "issues"."estimate_point_id" = "estimate_points"."id""#,
-                "estimate_points",
-                "value",
-            ),
-            (
-                TraversalOrder::AssignedPod,
-                r#"LEFT JOIN "pod" ON "issues"."assigned_pod_id" = "pod"."id""#,
-                "pod",
-                "name",
-            ),
-        ] {
-            let term = format!(r#"ORDER BY "{table}"."{tail}" ASC"#);
-            let sql = cycle_issue_list_get_sql(&OrderBy::traversal(which, tail, false));
-            let t7 = sql.find(r#""T7""#).expect("T7 join");
-            let extra = sql.find(join).expect("ordering join");
-            assert!(extra > t7, "{sql}");
-            assert!(sql.contains(&term), "{sql}");
-            let inverted = term.replace("ASC", "DESC");
-            let sql = cycle_issue_list_get_sql(&OrderBy::traversal(which, tail, true));
-            assert!(sql.contains(&inverted), "{sql}");
-        }
+        let sql = render(&cycle_issue_list_get(
+            &OrderBy::traversal(TraversalOrder::CreatedBy, "email", false),
+            &scope(),
+            cycle_id(),
+        ));
+        assert!(
+            sql.contains(r#"LEFT JOIN "users" ON "issues"."created_by_id" = "users"."id" WHERE"#),
+            "{sql}"
+        );
+        assert!(sql.ends_with(r#"ORDER BY "users"."email" ASC"#), "{sql}");
+        let sql = render(&cycle_issue_list_get(
+            &OrderBy::traversal(TraversalOrder::AssignedPod, "name", true),
+            &scope(),
+            cycle_id(),
+        ));
+        assert!(
+            sql.contains(r#"LEFT JOIN "pod" ON "issues"."assigned_pod_id" = "pod"."id" WHERE"#),
+            "{sql}"
+        );
+        assert!(sql.ends_with(r#"ORDER BY "pod"."name" DESC"#), "{sql}");
     }
 
     #[test]
     fn q4_get_order_m2m_traversal_joins_then_orders_tail() {
-        // PIDASHCONV-522: `assignees__<tail>` shares the bare arm's
-        // through + target joins, then orders the tail on the target.
-        let sql =
-            cycle_issue_list_get_sql(&OrderBy::m2m_traversal(M2MOrder::Assignees, "email", false));
+        let sql = render(&cycle_issue_list_get(
+            &OrderBy::m2m_traversal(M2MOrder::Labels, "name", false),
+            &scope(),
+            cycle_id(),
+        ));
         assert!(
             sql.contains(
-                r#"LEFT JOIN "issue_assignees" ON "issues"."id" = "issue_assignees"."issue_id""#
+                r#"LEFT JOIN "issue_labels" ON "issues"."id" = "issue_labels"."issue_id" LEFT JOIN "labels" ON "issue_labels"."label_id" = "labels"."id" WHERE"#
             ),
             "{sql}"
         );
-        assert!(
-            sql.contains(r#"LEFT JOIN "users" ON "issue_assignees"."assignee_id" = "users"."id""#),
-            "{sql}"
-        );
-        assert!(sql.contains(r#"ORDER BY "users"."email" ASC"#), "{sql}");
-        let sql = cycle_issue_list_get_sql(&OrderBy::m2m_traversal(M2MOrder::Labels, "name", true));
-        assert!(
-            sql.contains(r#"LEFT JOIN "labels" ON "issue_labels"."label_id" = "labels"."id""#),
-            "{sql}"
-        );
-        assert!(sql.contains(r#"ORDER BY "labels"."name" DESC"#), "{sql}");
+        assert!(sql.ends_with(r#"ORDER BY "labels"."name" ASC"#), "{sql}");
     }
 
     #[test]
     fn traversal_head_mapping() {
-        // PIDASHCONV-522: already-joined heads map to their table;
-        // join-needing FK heads map via `issue_join_traversal`; M2M
-        // heads map via `issue_m2m_order`; anything else maps nowhere
-        // (pass-through 500s).
-        assert_eq!(issue_traversal_table("state"), Some("states"));
-        assert_eq!(issue_traversal_table("project"), Some("projects"));
-        assert_eq!(issue_traversal_table("workspace"), Some("workspaces"));
+        assert_eq!(issue_traversal_table("state"), Some(state::TABLE));
+        assert_eq!(issue_traversal_table("project"), Some(project::TABLE));
+        assert_eq!(issue_traversal_table("workspace"), Some(WORKSPACE_TABLE));
         assert_eq!(issue_traversal_table("parent"), Some(PARENT_ALIAS));
-        assert_eq!(issue_traversal_table("issue_cycle"), Some("cycle_issues"));
-        assert_eq!(issue_traversal_table("created_by"), None);
-        assert_eq!(issue_traversal_table("assignees"), None);
+        assert_eq!(
+            issue_traversal_table("issue_cycle"),
+            Some(cycle_issue::TABLE)
+        );
+        assert_eq!(issue_traversal_table("nope"), None);
+        assert_eq!(issue_m2m_order("assignees"), Some(M2MOrder::Assignees));
+        assert_eq!(issue_m2m_order("labels"), Some(M2MOrder::Labels));
+        assert_eq!(issue_m2m_order("state"), None);
         assert_eq!(
             issue_join_traversal("created_by"),
             Some(TraversalOrder::CreatedBy)
@@ -2171,32 +2505,26 @@ mod tests {
             Some(TraversalOrder::AssignedPod)
         );
         assert_eq!(issue_join_traversal("state"), None);
-        assert_eq!(issue_join_traversal("assignees"), None);
-        assert_eq!(issue_m2m_order("assignees"), Some(M2MOrder::Assignees));
-        assert_eq!(issue_m2m_order("labels"), Some(M2MOrder::Labels));
-        assert_eq!(issue_m2m_order("created_by"), None);
-        assert_eq!(issue_m2m_order("state"), None);
     }
 
     #[test]
     fn q5_lookup_scope() {
-        // FX-CYCMOD-04 Q5 (`cycle.py:1069-1074` get, `:1092-1097` delete).
-        let sql = cycle_issue_detail_lookup_sql();
-        assert!(sql.contains(r#"FROM "cycle_issues""#), "{sql}");
+        let sql = render(&cycle_issue_detail_lookup(&scope(), cycle_id(), issue_id()));
         assert!(
-            sql.contains(r#""cycle_issues"."deleted_at" IS NULL"#),
+            sql.starts_with(r#"SELECT "cycle_issues"."id", "cycle_issues"."created_at""#),
             "{sql}"
         );
-        assert!(sql.contains(r#""workspaces"."slug" = ($1)"#), "{sql}");
         assert!(
-            sql.contains(r#""cycle_issues"."project_id" = ($2)"#),
+            sql.ends_with(&format!(
+                r#"FROM "cycle_issues" INNER JOIN "workspaces" ON "cycle_issues"."workspace_id" = "workspaces"."id" WHERE "cycle_issues"."deleted_at" IS NULL AND "cycle_issues"."cycle_id" = {} AND "cycle_issues"."issue_id" = {} AND "cycle_issues"."project_id" = {} AND "workspaces"."slug" = '{SLUG}'"#,
+                lit(cycle_id()),
+                lit(issue_id()),
+                lit(project_id())
+            )),
             "{sql}"
         );
-        assert!(sql.contains(r#""cycle_issues"."cycle_id" = ($3)"#), "{sql}");
-        assert!(sql.contains(r#""cycle_issues"."issue_id" = ($4)"#), "{sql}");
         assert!(!sql.contains("LIMIT"), "{sql}");
         assert!(!sql.contains("ORDER BY"), "{sql}");
-        assert!(!sql.contains("project_members"), "{sql}");
     }
 
     #[test]
@@ -2207,210 +2535,597 @@ mod tests {
 
     #[test]
     fn table_literals_match_ports() {
-        // Literals for tables no db-layer port owns stay in sync with the
-        // Django table names; the v1_projects ports are referenced so a
-        // rename fails the build here too.
-        assert_eq!(WORKSPACE_TABLE, "workspaces");
-        assert_eq!(ISSUE_TABLE, "issues");
-        assert_eq!(USER_TABLE, "users");
-        assert_eq!(ISSUE_LINK_TABLE, "issue_links");
-        assert_eq!(FILE_ASSET_TABLE, "file_assets");
-        assert_eq!(LABEL_TABLE, "labels");
-        assert_eq!(ISSUE_ASSIGNEE_TABLE, "issue_assignees");
-        assert_eq!(ISSUE_LABEL_TABLE, "issue_labels");
-        assert_eq!(POD_TABLE, "pod");
-        assert_eq!(PARENT_ALIAS, "T7");
+        assert_eq!(cycle::TABLE, "cycles");
+        assert_eq!(cycle_issue::TABLE, "cycle_issues");
         assert_eq!(project::TABLE, "projects");
         assert_eq!(project_member::TABLE, "project_members");
         assert_eq!(state::TABLE, "states");
+        assert_eq!(estimate::TABLE, "estimates");
         assert_eq!(estimate_point::TABLE, "estimate_points");
-        assert_eq!(cycle::TABLE, "cycles");
-        assert_eq!(cycle_issue::TABLE, "cycle_issues");
-    }
-
-    /// Every `COLUMNS` entry appears in the hand-written const, in order.
-    fn assert_columns_in_order(sql: &str, table: &str, columns: &[&str]) {
-        let mut cursor = 0;
-        for col in columns {
-            let needle = format!(r#""{table}"."{col}""#);
-            let at = sql[cursor..]
-                .find(&needle)
-                .unwrap_or_else(|| panic!("{needle} missing after offset {cursor} in:\n{sql}"));
-            cursor += at + needle.len();
-        }
+        assert_eq!(WORKSPACE_TABLE, "workspaces");
+        assert_eq!(ISSUE_TABLE, "issues");
+        assert_eq!(USER_TABLE, "users");
     }
 
     #[test]
     fn q6_cycle_lookup_is_first_shaped() {
-        // Transfer `:59` (+ `:409` re-read): Meta ordering + LIMIT 1, no
-        // member join, no archived predicate.
-        let sql = TRANSFER_CYCLE_LOOKUP_SQL;
-        assert_columns_in_order(sql, cycle::TABLE, cycle::COLUMNS);
+        let sql = render(&transfer_cycle_lookup(&scope(), cycle_id()));
         assert!(
-            sql.contains(
-                r#"INNER JOIN "workspaces" ON ("cycles"."workspace_id" = "workspaces"."id")"#
-            ),
+            sql.starts_with(r#"SELECT "cycles"."id", "cycles"."created_at""#),
             "{sql}"
         );
-        assert!(sql.contains(r#""cycles"."deleted_at" IS NULL"#), "{sql}");
-        assert!(sql.contains(r#""cycles"."id" = ($3)"#), "{sql}");
-        assert!(sql.contains(r#""cycles"."project_id" = ($2)"#), "{sql}");
-        assert!(sql.contains(r#""workspaces"."slug" = ($1)"#), "{sql}");
-        assert!(!sql.contains("project_members"), "{sql}");
+        assert!(
+            sql.ends_with(&format!(
+                r#"FROM "cycles" INNER JOIN "workspaces" ON "cycles"."workspace_id" = "workspaces"."id" WHERE "cycles"."deleted_at" IS NULL AND "cycles"."id" = {} AND ("workspaces"."slug" = '{SLUG}' AND "cycles"."project_id" = {}) ORDER BY "cycles"."created_at" DESC LIMIT 1"#,
+                lit(cycle_id()),
+                lit(project_id())
+            )),
+            "{sql}"
+        );
         assert!(!sql.contains("archived_at IS"), "{sql}");
-        assert!(
-            sql.ends_with(r#"ORDER BY "cycles"."created_at" DESC LIMIT 1"#),
-            "{sql}"
-        );
+        assert!(!sql.contains("project_members"), "{sql}");
     }
 
     #[test]
     fn q6_old_cycle_recounts_carry_issue_deleted_guard() {
-        // Transfer `:69-143`: six recounts cross-pinned against the
-        // fragment builders, pk-ordered `.first()`, no member/projects join.
-        let sql = TRANSFER_OLD_CYCLE_SQL;
-        assert_columns_in_order(sql, cycle::TABLE, cycle::COLUMNS);
-        for annotation in all_transfer_counts_sql() {
-            assert!(sql.contains(&annotation), "{sql}\nmissing: {annotation}");
-        }
-        // The extra guard vs Q1 (ported bug 8).
-        assert!(sql.contains(r#""issues"."deleted_at" IS NULL"#), "{sql}");
-        assert!(!sql.contains("project_members"), "{sql}");
-        assert!(!sql.contains(r#"JOIN "projects""#), "{sql}");
-        assert!(sql.contains(r#"GROUP BY "cycles"."id""#), "{sql}");
+        let sql = render(&transfer_old_cycle(&scope(), cycle_id()));
+        let filter = r#""cycle_issues"."deleted_at" IS NULL AND "issues"."archived_at" IS NULL AND "issues"."deleted_at" IS NULL AND (NOT "issues"."is_draft")"#;
         assert!(
-            sql.ends_with(r#"ORDER BY "cycles"."id" ASC LIMIT 1"#),
+            sql.contains(&format!(
+                r#"COUNT((CASE WHEN ({filter}) THEN "cycle_issues"."id" END)) AS "total_issues""#
+            )),
             "{sql}"
         );
+        for (group, alias) in GROUPED_COUNTS {
+            assert!(
+                sql.contains(&format!(
+                    r#"COUNT((CASE WHEN ({filter} AND "states"."group" = '{group}') THEN "states"."group" END)) AS "{alias}""#
+                )),
+                "{sql}"
+            );
+        }
+        assert!(
+            sql.contains(
+                r#"FROM "cycles" INNER JOIN "workspaces" ON "cycles"."workspace_id" = "workspaces"."id" LEFT JOIN "cycle_issues" ON "cycles"."id" = "cycle_issues"."cycle_id" LEFT JOIN "issues" ON "cycle_issues"."issue_id" = "issues"."id" LEFT JOIN "states" ON "issues"."state_id" = "states"."id" WHERE"#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.ends_with(r#"GROUP BY "cycles"."id" ORDER BY "cycles"."id" ASC LIMIT 1"#),
+            "{sql}"
+        );
+        assert!(!sql.contains("project_members"), "{sql}");
+        assert!(!sql.contains(r#"INNER JOIN "projects""#), "{sql}");
     }
 
     #[test]
     fn q6_estimate_type_is_exists_shaped() {
-        // Transfer `:152-157`: `SELECT 1 AS "a" ... LIMIT 1`.
-        let sql = TRANSFER_ESTIMATE_TYPE_SQL;
-        assert!(
-            sql.starts_with(r#"SELECT 1 AS "a" FROM "projects""#),
-            "{sql}"
+        let sql = render(&transfer_estimate_type(&scope()));
+        assert_eq!(
+            sql,
+            format!(
+                r#"SELECT "projects"."id" FROM "projects" INNER JOIN "estimates" ON "projects"."estimate_id" = "estimates"."id" INNER JOIN "workspaces" ON "projects"."workspace_id" = "workspaces"."id" WHERE "projects"."deleted_at" IS NULL AND "projects"."estimate_id" IS NOT NULL AND "estimates"."type" = 'points' AND "projects"."id" = {} AND "workspaces"."slug" = '{SLUG}' LIMIT 1"#,
+                lit(project_id())
+            )
         );
-        assert!(
-            sql.contains(
-                r#"INNER JOIN "estimates" ON ("projects"."estimate_id" = "estimates"."id")"#
-            ),
-            "{sql}"
-        );
-        assert!(sql.contains(r#""projects"."deleted_at" IS NULL"#), "{sql}");
-        assert!(
-            sql.contains(r#""projects"."estimate_id" IS NOT NULL"#),
-            "{sql}"
-        );
-        assert!(sql.contains(r#""estimates"."type" = 'points'"#), "{sql}");
-        assert!(sql.contains(r#""projects"."id" = ($2)"#), "{sql}");
-        assert!(sql.contains(r#""workspaces"."slug" = ($1)"#), "{sql}");
-        assert!(sql.ends_with("LIMIT 1"), "{sql}");
-        assert!(!sql.contains("ORDER BY"), "{sql}");
     }
 
     #[test]
     fn q6_distributions_share_fragments_and_where() {
-        // All four distributions embed the shared fragments verbatim.
-        for sql in [
-            TRANSFER_ASSIGNEE_ESTIMATE_SQL,
-            TRANSFER_LABEL_ESTIMATE_SQL,
-            TRANSFER_ASSIGNEE_ISSUE_SQL,
-            TRANSFER_LABEL_ISSUE_SQL,
-        ] {
-            assert!(sql.contains(TRANSFER_DIST_WHERE), "{sql}");
-            assert!(sql.contains(ISSUE_MANAGER_OUTER_GUARDS), "{sql}");
-            assert!(sql.ends_with("GROUP BY 1, 2, 3 ORDER BY 1 ASC"), "{sql}");
-        }
-        for sql in [TRANSFER_ASSIGNEE_ESTIMATE_SQL, TRANSFER_ASSIGNEE_ISSUE_SQL] {
-            assert!(sql.contains(AVATAR_URL_CASE), "{sql}");
-            assert!(
-                sql.contains(
-                    r#"LEFT OUTER JOIN "issue_assignees" ON ("issues"."id" = "issue_assignees"."issue_id")"#
-                ),
-                "{sql}"
-            );
-            assert!(
-                sql.contains(
-                    r#"LEFT OUTER JOIN "users" ON ("issue_assignees"."assignee_id" = "users"."id")"#
-                ),
-                "{sql}"
-            );
-            assert!(
-                sql.contains(r#""users"."display_name" AS "display_name""#),
-                "{sql}"
-            );
-            // assignee_id resolves to the through-table column.
-            assert!(
-                sql.contains(r#""issue_assignees"."assignee_id" AS "assignee_id""#),
-                "{sql}"
-            );
-            assert!(!sql.contains("issue_labels"), "{sql}");
-        }
-        for sql in [TRANSFER_LABEL_ESTIMATE_SQL, TRANSFER_LABEL_ISSUE_SQL] {
-            assert!(
-                sql.contains(
-                    r#"LEFT OUTER JOIN "issue_labels" ON ("issues"."id" = "issue_labels"."issue_id")"#
-                ),
-                "{sql}"
-            );
-            assert!(
-                sql.contains(
-                    r#"LEFT OUTER JOIN "labels" ON ("issue_labels"."label_id" = "labels"."id")"#
-                ),
-                "{sql}"
-            );
-            assert!(sql.contains(r#""labels"."name" AS "label_name""#), "{sql}");
-            // label_id resolves to the through-table column.
-            assert!(
-                sql.contains(r#""issue_labels"."label_id" AS "label_id""#),
-                "{sql}"
-            );
-            assert!(!sql.contains("issue_assignees"), "{sql}");
-            assert!(!sql.contains("avatar_url"), "{sql}");
-        }
-        for sql in [TRANSFER_ASSIGNEE_ESTIMATE_SQL, TRANSFER_LABEL_ESTIMATE_SQL] {
-            assert!(sql.contains(ESTIMATE_DIST_SUMS), "{sql}");
-            assert!(sql.contains(r#"JOIN "estimate_points""#), "{sql}");
-        }
-        for sql in [TRANSFER_ASSIGNEE_ISSUE_SQL, TRANSFER_LABEL_ISSUE_SQL] {
-            assert!(sql.contains(ISSUE_DIST_COUNTS), "{sql}");
-            assert!(!sql.contains("estimate_points"), "{sql}");
-        }
+        let where_ = format!(
+            r#"WHERE "issues"."deleted_at" IS NULL AND (NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)) AND "issues"."archived_at" IS NULL AND "projects"."archived_at" IS NULL AND (NOT "issues"."is_draft") AND "cycle_issues"."cycle_id" = {} AND "cycle_issues"."deleted_at" IS NULL AND "issues"."project_id" = {} AND "workspaces"."slug" = '{SLUG}' GROUP BY"#,
+            lit(cycle_id()),
+            lit(project_id())
+        );
+        let avatar = r#"(CASE WHEN ("users"."avatar_asset_id" IS NOT NULL) THEN CONCAT(CAST('/api/assets/v2/static/' AS text), CAST("users"."avatar_asset_id" AS text), CAST('/' AS text)) WHEN ("users"."avatar_asset_id" IS NULL) THEN "users"."avatar" END)"#;
+        let value = r#"CAST("estimate_points"."value" AS double precision)"#;
+        let estimate_sums = format!(
+            r#"SUM({value}) AS "total_estimates", SUM((CASE WHEN ("issues"."archived_at" IS NULL AND "issues"."completed_at" IS NOT NULL AND (NOT "issues"."is_draft")) THEN {value} END)) AS "completed_estimates", SUM((CASE WHEN ("issues"."archived_at" IS NULL AND "issues"."completed_at" IS NULL AND (NOT "issues"."is_draft")) THEN {value} END)) AS "pending_estimates""#
+        );
+        let issue_counts = r#"COUNT((CASE WHEN ("issues"."archived_at" IS NULL AND (NOT "issues"."is_draft")) THEN "issues"."id" END)) AS "total_issues", COUNT((CASE WHEN ("issues"."archived_at" IS NULL AND "issues"."completed_at" IS NOT NULL AND (NOT "issues"."is_draft")) THEN "issues"."id" END)) AS "completed_issues", COUNT((CASE WHEN ("issues"."archived_at" IS NULL AND "issues"."completed_at" IS NULL AND (NOT "issues"."is_draft")) THEN "issues"."id" END)) AS "pending_issues""#;
+        let base_joins = r#"FROM "issues" LEFT JOIN "states" ON "issues"."state_id" = "states"."id" INNER JOIN "projects" ON "issues"."project_id" = "projects"."id" INNER JOIN "cycle_issues" ON "issues"."id" = "cycle_issues"."issue_id" INNER JOIN "workspaces" ON "issues"."workspace_id" = "workspaces"."id""#;
+        let assignee_joins = r#"LEFT JOIN "issue_assignees" ON "issues"."id" = "issue_assignees"."issue_id" LEFT JOIN "users" ON "issue_assignees"."assignee_id" = "users"."id""#;
+        let label_joins = r#"LEFT JOIN "issue_labels" ON "issues"."id" = "issue_labels"."issue_id" LEFT JOIN "labels" ON "issue_labels"."label_id" = "labels"."id""#;
+        let estimate_join = r#"LEFT JOIN "estimate_points" ON "issues"."estimate_point_id" = "estimate_points"."id""#;
+
+        let sql = render(&transfer_distribution(
+            &scope(),
+            cycle_id(),
+            Distribution::Assignee,
+            Measure::Estimates,
+        ));
+        assert_eq!(
+            sql,
+            format!(
+                r#"SELECT "users"."display_name" AS "display_name", "issue_assignees"."assignee_id" AS "assignee_id", {avatar} AS "avatar_url", {estimate_sums} {base_joins} {assignee_joins} {estimate_join} {where_} "users"."display_name", "issue_assignees"."assignee_id", "users"."avatar_asset_id", "users"."avatar" ORDER BY "users"."display_name" ASC"#
+            )
+        );
+        let sql = render(&transfer_distribution(
+            &scope(),
+            cycle_id(),
+            Distribution::Label,
+            Measure::Estimates,
+        ));
+        assert_eq!(
+            sql,
+            format!(
+                r#"SELECT "labels"."name" AS "label_name", "labels"."color" AS "color", "issue_labels"."label_id" AS "label_id", {estimate_sums} {base_joins} {label_joins} {estimate_join} {where_} "labels"."name", "labels"."color", "issue_labels"."label_id" ORDER BY "labels"."name" ASC"#
+            )
+        );
+        let sql = render(&transfer_distribution(
+            &scope(),
+            cycle_id(),
+            Distribution::Assignee,
+            Measure::Issues,
+        ));
+        assert_eq!(
+            sql,
+            format!(
+                r#"SELECT "users"."display_name" AS "display_name", "issue_assignees"."assignee_id" AS "assignee_id", {avatar} AS "avatar_url", {issue_counts} {base_joins} {assignee_joins} {where_} "users"."display_name", "issue_assignees"."assignee_id", "users"."avatar_asset_id", "users"."avatar" ORDER BY "users"."display_name" ASC"#
+            )
+        );
+        let sql = render(&transfer_distribution(
+            &scope(),
+            cycle_id(),
+            Distribution::Label,
+            Measure::Issues,
+        ));
+        assert_eq!(
+            sql,
+            format!(
+                r#"SELECT "labels"."name" AS "label_name", "labels"."color" AS "color", "issue_labels"."label_id" AS "label_id", {issue_counts} {base_joins} {label_joins} {where_} "labels"."name", "labels"."color", "issue_labels"."label_id" ORDER BY "labels"."name" ASC"#
+            )
+        );
     }
 
     #[test]
     fn q6_move_select_scope_and_order() {
-        // Transfer `:436-443`: open states only, inner states join,
-        // load-bearing default ordering.
-        let sql = TRANSFER_MOVE_SELECT_SQL;
-        assert_columns_in_order(sql, cycle_issue::TABLE, cycle_issue::COLUMNS);
-        assert!(
-            sql.contains(r#"INNER JOIN "issues" ON ("cycle_issues"."issue_id" = "issues"."id")"#),
-            "{sql}"
-        );
-        assert!(
-            sql.contains(r#"INNER JOIN "states" ON ("issues"."state_id" = "states"."id")"#),
-            "{sql}"
-        );
+        let sql = render(&transfer_move_select(&scope(), cycle_id()));
+        assert!(sql.starts_with(r#"SELECT "cycle_issues"."id", "#), "{sql}");
+        // Ported bug 9: the states join is INNER.
         assert!(
             sql.contains(
-                r#""states"."group" IN ('backlog', 'unstarted', 'started', 'review', 'test')"#
+                r#"FROM "cycle_issues" INNER JOIN "issues" ON "cycle_issues"."issue_id" = "issues"."id" INNER JOIN "states" ON "issues"."state_id" = "states"."id" INNER JOIN "workspaces" ON "cycle_issues"."workspace_id" = "workspaces"."id" WHERE"#
             ),
             "{sql}"
         );
-        for group in OPEN_STATE_GROUPS {
-            assert!(sql.contains(&format!("'{group}'")), "{sql}");
-        }
-        assert_eq!(OPEN_STATE_GROUPS.len(), 5, "all but completed/cancelled");
-        assert!(!sql.contains("'completed'"), "{sql}");
-        assert!(!sql.contains("'cancelled'"), "{sql}");
-        assert!(sql.contains(r#""cycle_issues"."cycle_id" = ($3)"#), "{sql}");
         assert!(
-            sql.ends_with(r#"ORDER BY "cycle_issues"."created_at" DESC"#),
+            sql.ends_with(&format!(
+                r#"WHERE "cycle_issues"."deleted_at" IS NULL AND "cycle_issues"."cycle_id" = {} AND "issues"."archived_at" IS NULL AND (NOT "issues"."is_draft") AND "states"."group" IN ('backlog', 'unstarted', 'started', 'review', 'test') AND "cycle_issues"."project_id" = {} AND "workspaces"."slug" = '{SLUG}' ORDER BY "cycle_issues"."created_at" DESC"#,
+                lit(cycle_id()),
+                lit(project_id())
+            )),
             "{sql}"
         );
-        assert!(!sql.contains("LIMIT"), "{sql}");
+        assert_eq!(OPEN_STATE_GROUPS.len(), 5);
+    }
+
+    #[test]
+    fn no_sql_text_in_builders() {
+        // Every statement binds its values: rendering with the Postgres
+        // builder yields parameters, never inlined ids or slugs.
+        let (sql, values) = cycle_issue_list_get(&OrderBy::default_issue(), &scope(), cycle_id())
+            .build(PostgresQueryBuilder);
+        assert!(!sql.contains(SLUG), "{sql}");
+        assert!(!sql.contains(&cycle_id().to_string()), "{sql}");
+        // triage (subquery + outer), ISSUE_ATTACHMENT, cycle id, project
+        // id, slug.
+        assert_eq!(values.0.len(), 6, "{sql}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Live reads against the scratch database (temp tables, one transaction)
+    // -----------------------------------------------------------------------
+
+    /// `DATABASE_URL` pointing at a migrated database, else skip.
+    async fn pool() -> Option<sqlx::PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return None;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect");
+        let migrated: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.cycle_issues')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("probe");
+        if migrated.is_none() {
+            eprintln!("skipping live-db test: the database is not migrated");
+            return None;
+        }
+        Some(pool)
+    }
+
+    async fn exec(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, sql: &str) {
+        sqlx::query(sql)
+            .execute(&mut **tx)
+            .await
+            .unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+
+    fn get<T: sea_orm::TryGetable>(row: &sea_orm::QueryResult, column: &str) -> T {
+        row.try_get("", column)
+            .unwrap_or_else(|error| panic!("{column}: {error}"))
+    }
+
+    /// Every builder runs and counts over a seeded tenant: a live cycle
+    /// with a completed, a started, a draft and an archived bridged
+    /// issue, plus an archived cycle; the counts follow the ported
+    /// Django filters (drafts and archived issues never count, triage
+    /// counts, the transfer move skips completed and draft).
+    #[tokio::test]
+    async fn live_cycle_reads() {
+        use sea_orm::{ConnectionTrait, DbBackend};
+        let Some(pool) = pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        for table in [
+            "workspaces",
+            "projects",
+            "project_members",
+            "users",
+            "cycles",
+            "cycle_issues",
+            "issues",
+            "states",
+            "estimates",
+            "estimate_points",
+            "issue_assignees",
+            "issue_labels",
+            "labels",
+            "issue_links",
+            "file_assets",
+        ] {
+            exec(
+                &mut tx,
+                &format!("CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"),
+            )
+            .await;
+        }
+        // `GROUP BY "cycles"."id"` selects the other cycle columns through
+        // the primary key's functional dependence, which the copy must
+        // carry too.
+        exec(&mut tx, "ALTER TABLE cycles ADD PRIMARY KEY (id)").await;
+        let ws = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let other_project = Uuid::new_v4();
+        let actor = Uuid::new_v4();
+        let outsider = Uuid::new_v4();
+        let estimate = Uuid::new_v4();
+        let point = Uuid::new_v4();
+        let label = Uuid::new_v4();
+        let (done, started, backlog) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (live_cycle, archived_cycle) = (Uuid::new_v4(), Uuid::new_v4());
+        let (i_done, i_started, i_draft, i_archived, i_old) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let issue = |id: Uuid,
+                     state: Uuid,
+                     draft: bool,
+                     archived: bool,
+                     completed: bool,
+                     with_point: bool,
+                     age: i32| {
+            format!(
+                "INSERT INTO issues (id, name, workspace_id, project_id, state_id, sort_order, priority, complexity_score, sequence_id, \
+                 created_at, updated_at, is_draft, archived_at, completed_at, estimate_point_id, description_html, description_json, git_work_branch, workpad) \
+                 VALUES ('{id}', 'n', '{ws}', '{project}', '{state}', 1, 'none', 0, 1, now() - interval '{age} min', now(), {draft}, {}, {}, {}, '', '{{}}', '', '')",
+                if archived { "current_date" } else { "NULL" },
+                if completed { "now()" } else { "NULL" },
+                if with_point { format!("'{point_id}'", point_id = point) } else { "NULL".to_owned() },
+            )
+        };
+        let bridge = |cycle: Uuid, issue: Uuid, age: i32| {
+            format!(
+                "INSERT INTO cycle_issues (id, created_at, updated_at, project_id, workspace_id, cycle_id, issue_id) \
+                 VALUES ('{}', now() - interval '{age} min', now(), '{project}', '{ws}', '{cycle}', '{issue}')",
+                Uuid::new_v4()
+            )
+        };
+        let seeds = [
+            format!("INSERT INTO workspaces (id, slug, name, created_at, updated_at, owner_id, timezone, background_color) VALUES ('{ws}', 'acme', 'Acme', now(), now(), '{actor}', 'UTC', '')"),
+            format!("INSERT INTO projects (id, workspace_id, name, identifier, created_at, updated_at, estimate_id, cycle_view, timezone) VALUES ('{project}', '{ws}', 'P', 'P', now(), now(), '{estimate}', true, 'UTC'), ('{other_project}', '{ws}', 'Q', 'Q', now(), now(), NULL, true, 'UTC')"),
+            format!("INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, created_at, updated_at) VALUES ('{}', '{ws}', '{project}', '{actor}', 20, true, now(), now()), ('{}', '{ws}', '{project}', '{outsider}', 15, false, now(), now())", Uuid::new_v4(), Uuid::new_v4()),
+            format!("INSERT INTO users (id, display_name, avatar, email, first_name, last_name, created_at, updated_at, username, password, date_joined, user_timezone) VALUES ('{actor}', 'Ada', 'http://a/x.png', 'ada@example.invalid', 'Ada', 'L', now(), now(), 'ada', '', now(), 'UTC'), ('{outsider}', 'Bob', '', NULL, 'Bob', 'B', now(), now(), 'bob', '', now(), 'UTC')"),
+            format!("INSERT INTO estimates (id, project_id, workspace_id, name, type, created_at, updated_at) VALUES ('{estimate}', '{project}', '{ws}', 'E', 'points', now(), now())"),
+            format!("INSERT INTO estimate_points (id, estimate_id, project_id, workspace_id, key, value, description, created_at, updated_at) VALUES ('{point}', '{estimate}', '{project}', '{ws}', 3, '3', '', now(), now())"),
+            format!("INSERT INTO states (id, name, \"group\", created_at, updated_at, description, color, slug, project_id, workspace_id, sequence, \"default\", is_triage) VALUES \
+                     ('{done}', 'Done', 'completed', now(), now(), '', '', 'done', '{project}', '{ws}', 1, false, false), \
+                     ('{started}', 'Doing', 'started', now(), now(), '', '', 'doing', '{project}', '{ws}', 2, false, false), \
+                     ('{backlog}', 'Backlog', 'backlog', now(), now(), '', '', 'backlog', '{project}', '{ws}', 3, true, false)"),
+            format!("INSERT INTO labels (id, name, color, workspace_id, project_id, created_at, updated_at, description, sort_order) VALUES ('{label}', 'bug', '#f00', '{ws}', '{project}', now(), now(), '', 1)"),
+            format!("INSERT INTO cycles (id, created_at, updated_at, project_id, workspace_id, name, description, owned_by_id, view_props, sort_order, progress_snapshot, logo_props, timezone, version, start_date, end_date, archived_at) VALUES \
+                     ('{live_cycle}', now() - interval '2 min', now(), '{project}', '{ws}', 'Sprint 1', '', '{actor}', '{{}}', 65535, '{{}}', '{{}}', 'UTC', 1, now() - interval '1 day', now() + interval '1 day', NULL), \
+                     ('{archived_cycle}', now() - interval '1 min', now(), '{project}', '{ws}', 'Sprint 0', '', '{actor}', '{{}}', 55535, '{{}}', '{{}}', 'UTC', 1, now() - interval '20 day', now() - interval '10 day', now())"),
+            issue(i_done, done, false, false, true, true, 5),
+            issue(i_started, started, false, false, false, false, 4),
+            issue(i_draft, backlog, true, false, false, false, 3),
+            issue(i_archived, backlog, false, true, false, false, 2),
+            issue(i_old, done, false, false, true, true, 1),
+            bridge(live_cycle, i_done, 4),
+            bridge(live_cycle, i_started, 3),
+            bridge(live_cycle, i_draft, 2),
+            bridge(live_cycle, i_archived, 1),
+            bridge(archived_cycle, i_old, 1),
+            format!("INSERT INTO issue_assignees (id, issue_id, assignee_id, project_id, workspace_id, created_at, updated_at) VALUES ('{}', '{i_done}', '{actor}', '{project}', '{ws}', now(), now())", Uuid::new_v4()),
+            format!("INSERT INTO issue_labels (id, issue_id, label_id, project_id, workspace_id, created_at, updated_at) VALUES ('{}', '{i_done}', '{label}', '{project}', '{ws}', now(), now())", Uuid::new_v4()),
+            format!("INSERT INTO issue_links (id, issue_id, url, project_id, workspace_id, created_at, updated_at, metadata) VALUES ('{}', '{i_started}', 'http://x', '{project}', '{ws}', now(), now(), '{{}}')", Uuid::new_v4()),
+        ];
+        for sql in &seeds {
+            exec(&mut tx, sql).await;
+        }
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
+        let run = |sel: SelectStatement| {
+            let conn = &conn;
+            async move {
+                conn.query_all(DbBackend::Postgres.build(&sel))
+                    .await
+                    .unwrap_or_else(|error| panic!("{error}: {}", render(&sel)))
+            }
+        };
+        let scope = TenantScope {
+            slug: "acme",
+            project_id: project,
+        };
+        let now = Utc::now();
+
+        // Q1: the live cycle only, two counted issues (draft + archived skip).
+        let rows = run(cycle_list(
+            &OrderBy::default_cycle(),
+            ArchivedFilter::Live,
+            &scope,
+            actor,
+        ))
+        .await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(get::<Uuid>(&rows[0], "id"), live_cycle);
+        assert_eq!(get::<i64>(&rows[0], "total_issues"), 2);
+        assert_eq!(get::<i64>(&rows[0], "completed_issues"), 1);
+        assert_eq!(get::<i64>(&rows[0], "started_issues"), 1);
+        assert_eq!(get::<i64>(&rows[0], "backlog_issues"), 0);
+        assert_eq!(get::<String>(&rows[0], "name"), "Sprint 1");
+        // Member scope: an inactive member sees nothing.
+        let rows = run(cycle_list(
+            &OrderBy::default_cycle(),
+            ArchivedFilter::Live,
+            &scope,
+            outsider,
+        ))
+        .await;
+        assert!(rows.is_empty());
+        // Both cycles without the archived predicate, `-created_at` order.
+        let rows = run(cycle_list(
+            &OrderBy::default_cycle(),
+            ArchivedFilter::Any,
+            &scope,
+            actor,
+        ))
+        .await;
+        assert_eq!(
+            rows.iter()
+                .map(|row| get::<Uuid>(row, "id"))
+                .collect::<Vec<_>>(),
+            vec![archived_cycle, live_cycle]
+        );
+        // cycle_view: current matches, upcoming/completed/draft do not,
+        // incomplete matches.
+        for (view, expected) in [
+            (CycleView::Current, 1),
+            (CycleView::Upcoming, 0),
+            (CycleView::Completed, 0),
+            (CycleView::Draft, 0),
+            (CycleView::Incomplete, 1),
+        ] {
+            let rows = run(cycle_list_filtered(
+                &OrderBy::default_cycle(),
+                view,
+                now,
+                &scope,
+                actor,
+            ))
+            .await;
+            assert_eq!(rows.len(), expected, "{view:?}");
+        }
+        // Q2: live pk hits, archived pk misses.
+        let rows = run(cycle_detail(
+            &OrderBy::default_cycle(),
+            &scope,
+            live_cycle,
+            actor,
+        ))
+        .await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(get::<i64>(&rows[0], "total_issues"), 2);
+        let rows = run(cycle_detail(
+            &OrderBy::default_cycle(),
+            &scope,
+            archived_cycle,
+            actor,
+        ))
+        .await;
+        assert!(rows.is_empty());
+        // Q3: the archived cycle with its estimate sums (ported bug 7: the
+        // unfiltered total over every fanned row).
+        let rows = run(archived_cycle_list(
+            &OrderBy::default_cycle(),
+            &scope,
+            actor,
+        ))
+        .await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(get::<Uuid>(&rows[0], "id"), archived_cycle);
+        assert_eq!(get::<i64>(&rows[0], "total_issues"), 1);
+        assert_eq!(get::<i64>(&rows[0], "completed_issues"), 1);
+        assert_eq!(get::<Option<i64>>(&rows[0], "total_estimates"), Some(3));
+        assert_eq!(get::<Option<i64>>(&rows[0], "completed_estimates"), Some(3));
+        assert_eq!(get::<Option<i64>>(&rows[0], "started_estimates"), None);
+        // Q4 queryset: every live bridge (ported bug 5), newest first.
+        let rows = run(cycle_issue_queryset(
+            &OrderBy::default_cycle(),
+            &scope,
+            live_cycle,
+            actor,
+        ))
+        .await;
+        assert_eq!(
+            rows.iter()
+                .map(|row| get::<Uuid>(row, "issue_id"))
+                .collect::<Vec<_>>(),
+            vec![i_archived, i_draft, i_started, i_done]
+        );
+        assert!(rows
+            .iter()
+            .all(|row| get::<i64>(row, "sub_issues_count") == 0));
+        // Q4 GET: the manager guards drop the draft and archived issues;
+        // ascending created_at; the annotations decode by name.
+        let rows = run(cycle_issue_list_get(
+            &OrderBy::default_issue(),
+            &scope,
+            live_cycle,
+        ))
+        .await;
+        assert_eq!(
+            rows.iter()
+                .map(|row| get::<Uuid>(row, "id"))
+                .collect::<Vec<_>>(),
+            vec![i_done, i_started]
+        );
+        assert_eq!(get::<i64>(&rows[1], "link_count"), 1);
+        assert_eq!(get::<i64>(&rows[0], "link_count"), 0);
+        assert_eq!(get::<i64>(&rows[0], "attachment_count"), 0);
+        assert_eq!(get::<i64>(&rows[0], "sub_issues_count"), 0);
+        assert_eq!(get::<String>(&rows[0], "name"), "n");
+        assert_eq!(get::<i32>(&rows[0], "sequence_id"), 1);
+        assert!(get::<Option<Uuid>>(&rows[0], "bridge_id").is_some());
+        // M2M ordering multiplies nothing here (one assignee) and orders
+        // by the user's created_at.
+        let rows = run(cycle_issue_list_get(
+            &OrderBy::m2m(M2MOrder::Assignees, false),
+            &scope,
+            live_cycle,
+        ))
+        .await;
+        assert_eq!(rows.len(), 2);
+        let rows = run(cycle_issue_list_get(&OrderBy::random(), &scope, live_cycle)).await;
+        assert_eq!(rows.len(), 2);
+        // Q5 lookup: slug + project + cycle + issue.
+        let rows = run(cycle_issue_detail_lookup(&scope, live_cycle, i_done)).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(get::<Uuid>(&rows[0], "cycle_id"), live_cycle);
+        let rows = run(cycle_issue_detail_lookup(&scope, archived_cycle, i_done)).await;
+        assert!(rows.is_empty());
+        // Q6: the guard lookup finds archived cycles too.
+        let rows = run(transfer_cycle_lookup(&scope, archived_cycle)).await;
+        assert_eq!(rows.len(), 1);
+        assert!(get::<Option<DateTime<Utc>>>(&rows[0], "end_date").is_some());
+        let rows = run(transfer_cycle_lookup(
+            &TenantScope {
+                slug: "acme",
+                project_id: other_project,
+            },
+            archived_cycle,
+        ))
+        .await;
+        assert!(rows.is_empty());
+        let rows = run(transfer_old_cycle(&scope, live_cycle)).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(get::<i64>(&rows[0], "total_issues"), 2);
+        assert_eq!(get::<i64>(&rows[0], "completed_issues"), 1);
+        assert_eq!(get::<i64>(&rows[0], "started_issues"), 1);
+        assert_eq!(get::<i64>(&rows[0], "cancelled_issues"), 0);
+        assert_eq!(
+            get::<Option<DateTime<Utc>>>(&rows[0], "start_date").is_some(),
+            true
+        );
+        // The estimate gate: points estimate on P, none on Q.
+        assert_eq!(run(transfer_estimate_type(&scope)).await.len(), 1);
+        assert!(run(transfer_estimate_type(&TenantScope {
+            slug: "acme",
+            project_id: other_project
+        }))
+        .await
+        .is_empty());
+        // Distributions: the unassigned started issue groups under NULLs
+        // first? No — `ORDER BY display_name ASC` puts NULL last in
+        // Postgres, so Ada's row comes first.
+        let rows = run(transfer_distribution(
+            &scope,
+            live_cycle,
+            Distribution::Assignee,
+            Measure::Estimates,
+        ))
+        .await;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            get::<Option<String>>(&rows[0], "display_name"),
+            Some("Ada".to_owned())
+        );
+        assert_eq!(get::<Option<Uuid>>(&rows[0], "assignee_id"), Some(actor));
+        assert_eq!(
+            get::<Option<String>>(&rows[0], "avatar_url"),
+            Some("http://a/x.png".to_owned())
+        );
+        assert_eq!(get::<Option<f64>>(&rows[0], "total_estimates"), Some(3.0));
+        assert_eq!(
+            get::<Option<f64>>(&rows[0], "completed_estimates"),
+            Some(3.0)
+        );
+        assert_eq!(get::<Option<f64>>(&rows[0], "pending_estimates"), None);
+        assert_eq!(get::<Option<String>>(&rows[1], "display_name"), None);
+        assert_eq!(get::<Option<f64>>(&rows[1], "total_estimates"), None);
+        let rows = run(transfer_distribution(
+            &scope,
+            live_cycle,
+            Distribution::Assignee,
+            Measure::Issues,
+        ))
+        .await;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(get::<i64>(&rows[0], "total_issues"), 1);
+        assert_eq!(get::<i64>(&rows[0], "completed_issues"), 1);
+        assert_eq!(get::<i64>(&rows[0], "pending_issues"), 0);
+        assert_eq!(get::<i64>(&rows[1], "pending_issues"), 1);
+        let rows = run(transfer_distribution(
+            &scope,
+            live_cycle,
+            Distribution::Label,
+            Measure::Issues,
+        ))
+        .await;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            get::<Option<String>>(&rows[0], "label_name"),
+            Some("bug".to_owned())
+        );
+        assert_eq!(
+            get::<Option<String>>(&rows[0], "color"),
+            Some("#f00".to_owned())
+        );
+        assert_eq!(get::<Option<Uuid>>(&rows[0], "label_id"), Some(label));
+        assert_eq!(get::<i64>(&rows[0], "completed_issues"), 1);
+        let rows = run(transfer_distribution(
+            &scope,
+            live_cycle,
+            Distribution::Label,
+            Measure::Estimates,
+        ))
+        .await;
+        assert_eq!(get::<Option<f64>>(&rows[0], "total_estimates"), Some(3.0));
+        // The move: only the started issue (completed, draft and archived
+        // stay).
+        let rows = run(transfer_move_select(&scope, live_cycle)).await;
+        assert_eq!(
+            rows.iter()
+                .map(|row| get::<Uuid>(row, "issue_id"))
+                .collect::<Vec<_>>(),
+            vec![i_started]
+        );
+        drop(conn);
+        tx.rollback().await.expect("rollback");
     }
 }
