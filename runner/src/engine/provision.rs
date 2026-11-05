@@ -118,6 +118,10 @@ pub async fn add_engine_runner(
         .dev_machine_id
         .context("this computer has no dev-machine id yet; run `pidash auth login`")?;
     let cloud_url = cfg.daemon.cloud_url.clone();
+    // Read before the create, so a local failure below rolls back only a
+    // runner this call made (see `created_by_this_call`).
+    let before: std::collections::HashSet<uuid::Uuid> =
+        cfg.runners.iter().map(|r| r.runner_id).collect();
     let transport = SharedHttpTransport::new(cloud_url.clone())?;
     let host_label = crate::util::hostname::default_hostname();
     let resp = create_runner(
@@ -148,10 +152,17 @@ pub async fn add_engine_runner(
         } else {
             resp.workspace_slug.clone()
         };
+        // The server returned a runner this computer already has (a
+        // repeated or concurrent add): it is the answer, folder and all.
+        // Nothing is allocated or rewritten.
+        let cfg = file::load_config(paths)?;
+        if let Some(existing) = cfg.runners.iter().find(|r| r.runner_id == resp.runner_id) {
+            let dir = existing.workspace.working_dir.clone();
+            return anyhow::Ok((existing.clone(), ws, project_id, dir));
+        }
         let working_dir = match &req.working_dir {
             Some(dir) => dir.clone(),
             None => {
-                let cfg = file::load_config(paths)?;
                 let root = super::workdir::task_root(paths, &cfg);
                 super::workdir::allocate_working_dir(&root, &ws, &project_id, &cfg)?
             }
@@ -183,6 +194,13 @@ pub async fn add_engine_runner(
                 working_dir,
             };
             Ok((runner, info))
+        }
+        // The runner was already on this computer, or the server returned
+        // one it already had (with no block here after a local sign-out):
+        // it is a working runner, so leave its block and its server row
+        // alone. Only a runner this call made is rolled back.
+        Err(e) if !crate::cli::runner_ops::may_roll_back_create(&e, &resp, &before) => {
+            Err(e.context("setting up the engine runner locally"))
         }
         Err(e) => {
             let _ = file::mutate_config(paths, |cfg| {
@@ -273,18 +291,27 @@ mod tests {
         file::write_config(paths, &cfg).unwrap();
     }
 
+    /// Like the server: one engine runner per machine and project, so a
+    /// second create for the same project returns the same `runner_id`.
     fn enrol_handler() -> Handler {
-        Arc::new(|req| {
+        let ids: Arc<std::sync::Mutex<std::collections::HashMap<String, uuid::Uuid>>> =
+            Arc::default();
+        Arc::new(move |req| {
             if req.path == "/api/v1/runner/runners/" {
                 let body = req.json();
                 let n = body["project"].as_str().unwrap().to_string();
+                let mut ids = ids.lock().unwrap();
+                let created = !ids.contains_key(&n.to_lowercase());
+                let id = *ids
+                    .entry(n.to_lowercase())
+                    .or_insert_with(uuid::Uuid::new_v4);
                 let resp = serde_json::json!({
-                    "runner_id": uuid::Uuid::new_v4(),
+                    "runner_id": id,
                     "runner_name": format!("builtin-host-acme-{}", n.to_lowercase()),
                     "refresh_token": "", "access_token": "", "access_token_expires_at": "",
                     "refresh_token_generation": 0, "workspace_slug": "acme",
                     "project_identifier": n, "long_poll_interval_secs": 25,
-                    "protocol_version": 4
+                    "protocol_version": 4, "created": created
                 });
                 (201, resp.to_string())
             } else {
@@ -391,5 +418,260 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("not signed in"), "{err}");
         assert!(server.requests_to("/api/v1/runner/runners/").is_empty());
+    }
+
+    #[tokio::test]
+    async fn two_adds_for_one_project_at_once_leave_one_engine_runner() {
+        let server = test_server::start(enrol_handler()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        seed(&paths, &server.url);
+        let req = AddEngineRunner {
+            workspace: "acme".into(),
+            project: "WEB".into(),
+            working_dir: None,
+        };
+        let status = available();
+        let (a, b) = tokio::join!(
+            add_engine_runner(&paths, &req, &status),
+            add_engine_runner(&paths, &req, &status)
+        );
+        // Both passed the early check and enrolled. The server answers the
+        // second create with the same runner, so both adds succeed and
+        // name the one runner.
+        assert_eq!(server.requests_to("/api/v1/runner/runners/").len(), 2);
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_eq!(a.0.runner_id, b.0.runner_id);
+        let cfg = file::load_config(&paths).unwrap();
+        let engines: Vec<_> = cfg
+            .runners
+            .iter()
+            .filter(|r| r.agent.kind == AgentKind::Engine)
+            .collect();
+        assert_eq!(engines.len(), 1);
+        assert_eq!(engines[0].runner_id, a.0.runner_id);
+        // Nothing was rolled back: no delete reached the server.
+        let deletes: Vec<_> = server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == "DELETE")
+            .cloned()
+            .collect();
+        assert!(
+            deletes.is_empty(),
+            "the working runner was deleted: {deletes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_repeat_add_never_deletes_the_runner_that_is_there() {
+        // The server returns the existing runner, and the per-runner
+        // credentials can't be written. The block and the server row of
+        // the working runner must stay.
+        let id = uuid::Uuid::new_v4();
+        let server = test_server::start(Arc::new(move |req| {
+            if req.path == "/api/v1/runner/runners/" {
+                let resp = serde_json::json!({
+                    "runner_id": id,
+                    "runner_name": "builtin-host-acme-web",
+                    "refresh_token": "rt_x", "access_token": "", "access_token_expires_at": "",
+                    "refresh_token_generation": 1, "workspace_slug": "acme",
+                    "project_identifier": "WEB", "long_poll_interval_secs": 25,
+                    "protocol_version": 4
+                });
+                (201, resp.to_string())
+            } else {
+                (200, "{}".into())
+            }
+        }))
+        .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        seed(&paths, &server.url);
+        let req = AddEngineRunner {
+            workspace: "acme".into(),
+            project: "WEB".into(),
+            working_dir: None,
+        };
+        let (first, _) = add_engine_runner(&paths, &req, &available()).await.unwrap();
+        // Rename the project slug so the early per-project check misses it
+        // (as a block written by an older build would), and put a folder
+        // where the per-runner credentials go so the local half fails
+        // after the server call.
+        file::mutate_config(&paths, |cfg| {
+            cfg.runners[0].project_slug = Some("web-old".into());
+            Ok(())
+        })
+        .unwrap();
+        let resp_id = first.runner_id;
+        let creds = paths.for_runner(resp_id).credentials_path();
+        let _ = std::fs::remove_file(&creds);
+        std::fs::create_dir_all(&creds).unwrap();
+        // The repeat finds the runner in the config and returns it without
+        // rewriting anything, so the broken credentials path is not touched.
+        let (again, _) = add_engine_runner(&paths, &req, &available()).await.unwrap();
+        assert_eq!(again.runner_id, resp_id);
+        let cfg = file::load_config(&paths).unwrap();
+        assert!(
+            cfg.runners.iter().any(|r| r.runner_id == resp_id),
+            "the existing block was stripped"
+        );
+        let deletes = server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == "DELETE")
+            .count();
+        assert_eq!(deletes, 0, "the existing server row was deleted");
+    }
+
+    fn fixed_id_handler(id: uuid::Uuid, created: Option<bool>) -> Handler {
+        Arc::new(move |req| {
+            if req.path == "/api/v1/runner/runners/" {
+                let mut resp = serde_json::json!({
+                    "runner_id": id,
+                    "runner_name": "builtin-host-acme-web",
+                    "refresh_token": "", "access_token": "", "access_token_expires_at": "",
+                    "refresh_token_generation": 0, "workspace_slug": "acme",
+                    "project_identifier": "WEB", "long_poll_interval_secs": 25,
+                    "protocol_version": 4
+                });
+                if let Some(c) = created {
+                    resp["created"] = serde_json::json!(c);
+                }
+                (201, resp.to_string())
+            } else {
+                (200, "{}".into())
+            }
+        })
+    }
+
+    fn deletes(server: &test_server::MockServer) -> usize {
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == "DELETE")
+            .count()
+    }
+
+    /// A working dir that `create_dir_all` cannot make: under a file.
+    fn uncreatable_dir(root: &std::path::Path) -> PathBuf {
+        let file = root.join("a-file");
+        std::fs::write(&file, b"x").unwrap();
+        file.join("work")
+    }
+
+    #[tokio::test]
+    async fn an_existing_server_runner_is_never_deleted_on_an_early_local_failure() {
+        // The server answers with a runner it already had (after a local
+        // sign-out it has no block here), and the local half fails before
+        // the block is written: creating the folder fails.
+        let server = test_server::start(fixed_id_handler(uuid::Uuid::new_v4(), Some(false))).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        seed(&paths, &server.url);
+        let req = AddEngineRunner {
+            workspace: "acme".into(),
+            project: "WEB".into(),
+            working_dir: Some(uncreatable_dir(tmp.path())),
+        };
+        add_engine_runner(&paths, &req, &available())
+            .await
+            .expect_err("creating the folder must fail");
+        assert_eq!(deletes(&server), 0, "the existing server row was deleted");
+    }
+
+    #[tokio::test]
+    async fn a_runner_this_call_created_is_rolled_back_on_a_local_failure() {
+        for created in [Some(true), None] {
+            let id = uuid::Uuid::new_v4();
+            let server = test_server::start(fixed_id_handler(id, created)).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let paths = paths(tmp.path());
+            seed(&paths, &server.url);
+            let req = AddEngineRunner {
+                workspace: "acme".into(),
+                project: "WEB".into(),
+                working_dir: Some(uncreatable_dir(tmp.path())),
+            };
+            add_engine_runner(&paths, &req, &available())
+                .await
+                .expect_err("creating the folder must fail");
+            assert_eq!(deletes(&server), 1, "created = {created:?}: no rollback");
+            let cfg = file::load_config(&paths).unwrap();
+            assert!(!cfg.runners.iter().any(|r| r.runner_id == id));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_same_id_create_for_a_runner_in_the_config_is_never_rolled_back() {
+        // A server without the `created` field returns an id the config
+        // already holds, and a later local step would fail: the runner in
+        // the config is returned as it is, nothing is deleted.
+        let id = uuid::Uuid::new_v4();
+        let server = test_server::start(fixed_id_handler(id, None)).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        seed(&paths, &server.url);
+        let ok = AddEngineRunner {
+            workspace: "acme".into(),
+            project: "WEB".into(),
+            working_dir: None,
+        };
+        let (first, _) = add_engine_runner(&paths, &ok, &available()).await.unwrap();
+        // Hide it from the early per-project check, as a block from an older
+        // build with another project slug would be.
+        file::mutate_config(&paths, |cfg| {
+            cfg.runners[0].project_slug = Some("web-old".into());
+            Ok(())
+        })
+        .unwrap();
+        let failing = AddEngineRunner {
+            working_dir: Some(uncreatable_dir(tmp.path())),
+            ..ok
+        };
+        let (again, info) = add_engine_runner(&paths, &failing, &available())
+            .await
+            .unwrap();
+        assert_eq!(again.runner_id, first.runner_id);
+        assert_eq!(info.working_dir, first.workspace.working_dir);
+        assert_eq!(deletes(&server), 0);
+    }
+
+    #[tokio::test]
+    async fn a_repeated_add_reuses_the_folder_and_allocates_no_other() {
+        let server = test_server::start(enrol_handler()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        seed(&paths, &server.url);
+        let req = AddEngineRunner {
+            workspace: "acme".into(),
+            project: "WEB".into(),
+            working_dir: None,
+        };
+        let (first, _) = add_engine_runner(&paths, &req, &available()).await.unwrap();
+        file::mutate_config(&paths, |cfg| {
+            cfg.runners[0].project_slug = Some("web-old".into());
+            Ok(())
+        })
+        .unwrap();
+        let (again, info) = add_engine_runner(&paths, &req, &available()).await.unwrap();
+        assert_eq!(again.runner_id, first.runner_id);
+        assert_eq!(info.working_dir, first.workspace.working_dir);
+        let parent = first.workspace.working_dir.parent().unwrap();
+        let siblings: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            siblings.len(),
+            1,
+            "an extra folder was allocated: {siblings:?}"
+        );
     }
 }

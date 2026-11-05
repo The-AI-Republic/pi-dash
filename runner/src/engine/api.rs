@@ -60,12 +60,45 @@ pub struct IssuedEngineCredential {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+/// Describe a success body that did not parse without quoting it: these
+/// bodies carry the engine credential or a model token, and serde's message
+/// can quote a value too.
+pub(crate) fn unparsable(e: &serde_json::Error) -> String {
+    format!(
+        "unexpected response from the server ({:?} error at line {} column {})",
+        e.classify(),
+        e.line(),
+        e.column()
+    )
+}
+
+/// Read an `engine_sign_in_state` the server sent, mapping a value this
+/// runner does not know (a newer server) to `None` instead of failing the
+/// whole response.
+pub(crate) fn lenient_sign_in_state<'de, D>(d: D) -> Result<Option<EngineSignInState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(v.and_then(|v| serde_json::from_value(v).ok()))
+}
+
 /// Body of a redeemed engine-only grant.
 #[derive(Debug, Clone, Deserialize)]
 pub struct EngineGrantResponse {
     pub engine_credential: IssuedEngineCredential,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_sign_in_state")]
     pub engine_sign_in_state: Option<EngineSignInState>,
+}
+
+/// One poll of an engine-only grant (RFC 8628).
+#[derive(Debug)]
+pub enum GrantPoll {
+    Granted(EngineGrantResponse),
+    /// `authorization_pending`: not approved yet.
+    Pending,
+    /// `slow_down`: not approved yet, and poll 5 s less often.
+    SlowDown,
 }
 
 /// `GET /api/v1/runner/engine/profile/`.
@@ -80,7 +113,7 @@ pub struct EngineProfile {
     pub model: String,
     #[serde(default)]
     pub reason_code: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_sign_in_state")]
     pub engine_sign_in_state: Option<EngineSignInState>,
 }
 
@@ -183,8 +216,7 @@ impl EngineApi {
         if !status.is_success() {
             return Err(refused(status, &body));
         }
-        serde_json::from_str(&body)
-            .map_err(|e| EngineApiError::Other(format!("unexpected response ({e}): {body}")))
+        serde_json::from_str(&body).map_err(|e| EngineApiError::Other(unparsable(&e)))
     }
 
     async fn empty(resp: reqwest::Response) -> Result<(), EngineApiError> {
@@ -278,7 +310,7 @@ impl EngineApi {
         &self,
         device_code: &str,
         machine_token: &str,
-    ) -> Result<Option<EngineGrantResponse>, EngineApiError> {
+    ) -> Result<GrantPoll, EngineApiError> {
         let resp = self
             .http
             .post(self.url(DEVICE_TOKEN_PATH))
@@ -294,12 +326,13 @@ impl EngineApi {
             .map_err(|e| EngineApiError::Other(e.to_string()))?;
         if status.is_success() {
             return serde_json::from_str(&body)
-                .map(Some)
-                .map_err(|e| EngineApiError::Other(format!("unexpected response ({e}): {body}")));
+                .map(GrantPoll::Granted)
+                .map_err(|e| EngineApiError::Other(unparsable(&e)));
         }
         let err = refused(status, &body);
         match err.reason_code() {
-            Some("authorization_pending") | Some("slow_down") => Ok(None),
+            Some("authorization_pending") => Ok(GrantPoll::Pending),
+            Some("slow_down") => Ok(GrantPoll::SlowDown),
             _ => Err(err),
         }
     }
@@ -308,6 +341,27 @@ impl EngineApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unparsable_bodies_are_not_quoted_and_unknown_states_are_tolerated() {
+        let e = serde_json::from_str::<EngineGrantResponse>(
+            r#"{"engine_credential": {"token": 42, "secret": "ec_do_not_print"}}"#,
+        )
+        .unwrap_err();
+        let msg = unparsable(&e);
+        assert!(!msg.contains("ec_do_not_print"), "{msg}");
+        let e = serde_json::from_str::<EngineGrantResponse>(r#"{"engine_credential": "ec_x"}"#)
+            .unwrap_err();
+        assert!(!unparsable(&e).contains("ec_x"));
+
+        let p: EngineProfile =
+            serde_json::from_str(r#"{"available": true, "engine_sign_in_state": "something_new"}"#)
+                .unwrap();
+        assert_eq!(p.engine_sign_in_state, None);
+        let p: EngineProfile =
+            serde_json::from_str(r#"{"available": true, "engine_sign_in_state": null}"#).unwrap();
+        assert_eq!(p.engine_sign_in_state, None);
+    }
 
     #[test]
     fn refusals_carry_the_server_reason_code() {
