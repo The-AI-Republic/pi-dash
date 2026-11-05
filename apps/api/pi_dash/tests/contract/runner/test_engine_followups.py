@@ -173,18 +173,30 @@ def test_full_logout_signs_the_engine_out_and_blocks_silent_approval(
 
 
 @override_settings(**ENABLED)
-def test_full_logout_without_engine_marks_it_signed_out_and_is_idempotent(db, create_user, workspace, machine, lane):
+def test_full_logout_without_engine_leaves_it_never_and_is_idempotent(db, create_user, workspace, machine, lane):
     mt_raw = _mint_mt(create_user, workspace, machine)
     assert _logout(mt_raw).status_code == 200
     machine.refresh_from_db()
-    # Never signed in: still recorded as signed out, so silent renewal is refused.
-    assert machine.engine_sign_in_state == EngineSignInState.SIGNED_OUT
+    # Never turned on: it stays ``never`` (the app offers "Turn on", not
+    # "signed out"); a silent approval is refused for ``never`` all the same.
+    assert machine.engine_sign_in_state == EngineSignInState.NEVER
+    assert machine.engine_auto_pause_reason == ""
     assert not EngineCredential.objects.exists()
     # The revoked token is now rejected (DRF answers 403: no auth header
     # challenge); the CLI clears its local token either way.
     assert _logout(mt_raw).status_code in (401, 403)
     machine.refresh_from_db()
-    assert machine.engine_sign_in_state == EngineSignInState.SIGNED_OUT
+    assert machine.engine_sign_in_state == EngineSignInState.NEVER
+
+
+def test_rename_migration_does_not_import_the_live_naming_function():
+    """0038 carries a frozen copy of the naming rules, so a later change to
+    ``machine_identity`` cannot change what it does on an unmigrated database."""
+    import inspect
+
+    source = inspect.getsource(importlib.import_module("pi_dash.runner.migrations.0038_rename_engine_runners"))
+    assert "machine_identity import" not in source
+    assert "from pi_dash.runner.services" not in source
 
 
 @override_settings(**ENABLED)
