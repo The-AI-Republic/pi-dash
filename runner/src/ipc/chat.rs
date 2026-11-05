@@ -102,6 +102,9 @@ struct ChatSession {
 #[derive(Default)]
 struct SessionRuntime {
     bridge: Option<AgentBridge>,
+    /// Bridges whose leader exited between turns. Their process trees belong
+    /// to the session, so they are finished when it closes, not per turn.
+    retired: Vec<AgentBridge>,
     workspace: Option<PathBuf>,
     bridge_seq: u64,
     started_sent: bool,
@@ -455,9 +458,9 @@ pub(crate) async fn handle_close<S: ChatSink>(
         // acquire it to tear the bridge down.
         session.cancel.notify_waiters();
         let mut rt = session.rt.lock().await;
-        if let Some(bridge) = rt.bridge.take() {
-            bridge.finish(Duration::from_secs(5)).await.ok();
-        }
+        let mut ending: Vec<AgentBridge> = std::mem::take(&mut rt.retired);
+        ending.extend(rt.bridge.take());
+        AgentBridge::finish_all(ending, Duration::from_secs(5)).await;
         rt.started_sent = false;
     }
     inst.chat_sessions.remove(chat_session_id).await;
@@ -514,7 +517,9 @@ async fn ensure_bridge(
 
     if rt.bridge.as_ref().is_some_and(bridge_has_exited) {
         if let Some(bridge) = rt.bridge.take() {
-            bridge.finish(Duration::from_secs(1)).await.ok();
+            // A one-shot engine's leader exits after every turn; what it
+            // started lives until the session closes (runner cleanup §4.3).
+            rt.retired.push(bridge);
         }
         rt.started_sent = false;
     }

@@ -1354,6 +1354,7 @@ impl RunnerLoop {
             out: self.out.clone(),
             command_rx: rx,
             active_tx,
+            retired: Vec::new(),
         };
         // One process scope per chat runtime: its agent trees are finished
         // when the runtime ends (Release, idle timeout, Close, Shutdown), not
@@ -2135,6 +2136,10 @@ struct ChatWorker {
     out: RunnerOut,
     command_rx: mpsc::Receiver<ChatCommand>,
     active_tx: watch::Sender<bool>,
+    /// Bridges whose leader exited between turns. Their process trees live
+    /// until the chat runtime ends, when they are finished with the current
+    /// bridge.
+    retired: Vec<AgentBridge>,
 }
 
 impl ChatWorker {
@@ -2287,9 +2292,9 @@ impl ChatWorker {
                 }
             }
         }
-        if let Some(bridge) = bridge.take() {
-            bridge.finish(Duration::from_secs(5)).await.ok();
-        }
+        let mut ending: Vec<AgentBridge> = std::mem::take(&mut self.retired);
+        ending.extend(bridge.take());
+        AgentBridge::finish_all(ending, Duration::from_secs(5)).await;
         let _ = self.active_tx.send(false);
         self.state.set_chat_active(false).await;
     }
@@ -2371,7 +2376,11 @@ impl ChatWorker {
 
         if bridge.as_ref().is_some_and(bridge_has_exited) {
             if let Some(bridge) = bridge.take() {
-                bridge.finish(Duration::from_secs(1)).await.ok();
+                // The leader exited (a one-shot engine does so after every
+                // turn), but processes it started belong to the chat
+                // runtime, not the turn: keep the tree until the runtime
+                // ends (runner cleanup §4.3).
+                self.retired.push(bridge);
             }
             *started_sent = false;
         }
@@ -2491,7 +2500,11 @@ impl ChatWorker {
 
         if bridge_slot.as_ref().is_some_and(bridge_has_exited) {
             if let Some(bridge) = bridge_slot.take() {
-                bridge.finish(Duration::from_secs(1)).await.ok();
+                // The leader exited (a one-shot engine does so after every
+                // turn), but processes it started belong to the chat
+                // runtime, not the turn: keep the tree until the runtime
+                // ends (runner cleanup §4.3).
+                self.retired.push(bridge);
             }
             *started_sent = false;
         }
@@ -4569,20 +4582,38 @@ mod tests {
     /// and be gone once the runtime has ended.
     #[cfg(unix)]
     async fn chat_tree_lives_for_the_runtime(end: ChatEnd) {
+        chat_tree_lives_for_the_runtime_with(end, false).await;
+    }
+
+    /// A one-shot engine (cursor, muse, openclaw) exits after every turn; the
+    /// next turn spawns a new leader. What the first leader started still
+    /// belongs to the chat runtime and must survive the next turn.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_one_shot_engines_child_survives_the_next_turn_and_is_finished_on_release() {
+        chat_tree_lives_for_the_runtime_with(ChatEnd::Release, true).await;
+    }
+
+    #[cfg(unix)]
+    async fn chat_tree_lives_for_the_runtime_with(end: ChatEnd, one_shot: bool) {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let wd = tmp.path().join("wd");
         std::fs::create_dir_all(&wd).unwrap();
         let pidfile = tmp.path().join("child.pid");
+        let leaderfile = tmp.path().join("leader.pid");
         let fake = tmp.path().join("fake-claude");
         let init = r#"{"type":"system","subtype":"init","session_id":"sess_chat"}"#;
         let result = r#"{"type":"result","subtype":"success","session_id":"sess_chat","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}"#;
         std::fs::write(
             &fake,
             format!(
-                "#!/bin/sh\nsleep 300 </dev/null >/dev/null 2>&1 &\necho $! > '{pf}'\n\
-                 while IFS= read -r _; do printf '%s\\n' '{init}'; printf '%s\\n' '{result}'; done\n",
-                pf = pidfile.display()
+                "#!/bin/sh\necho $$ > '{lf}'\n[ -f '{pf}' ] || {{ sleep 300 </dev/null >/dev/null 2>&1 & echo $! > '{pf}'; }}\n\
+                 while IFS= read -r _; do printf '%s\\n' '{init}'; printf '%s\\n' '{result}'; {stop}done\n",
+                pf = pidfile.display(),
+                lf = leaderfile.display(),
+                // One-shot: the leader answers one turn and exits.
+                stop = if one_shot { "exit 0; " } else { "" },
             ),
         )
         .unwrap();
@@ -4606,6 +4637,7 @@ mod tests {
             out: RunnerOut::new(config.runner_id, tx),
             command_rx: cmd_rx,
             active_tx,
+            retired: Vec::new(),
         };
         let session = uuid::Uuid::new_v4();
         let worker = tokio::spawn(async move { chat.run(session).await });
@@ -4635,7 +4667,29 @@ mod tests {
         }
         cmd_tx.send(turn("one")).await.unwrap();
         turn_done(&mut rx).await;
-        let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        if one_shot {
+            // Let the first leader exit and be reaped, so turn two sees an
+            // exited bridge and spawns a new leader.
+            let leader: i32 = std::fs::read_to_string(&leaderfile)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while crate::agent::tracked::tests::alive(leader) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "one-shot leader exits"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
         cmd_tx.send(turn("two")).await.unwrap();
         turn_done(&mut rx).await;
         assert!(
@@ -4698,6 +4752,7 @@ mod tests {
             out: RunnerOut::new(config.runner_id, tx),
             command_rx: cmd_rx,
             active_tx,
+            retired: Vec::new(),
         };
         let chat_dir = chat
             .resolve_chat_workspace(uuid::Uuid::new_v4(), None)

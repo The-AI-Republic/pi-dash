@@ -896,8 +896,16 @@ fn tagged(pid: i32, tag: &str) -> Option<bool> {
 }
 
 /// Signal-and-poll a group we do not parent (recovery): SIGTERM, poll ≤ 3 s,
-/// SIGKILL, poll ≤ 2 s.
-async fn clean_foreign_group(pgid: i32) -> bool {
+/// SIGKILL, poll ≤ 2 s. `proof` was just confirmed for the group; it is
+/// checked again before the SIGKILL, because the group can empty after the
+/// SIGTERM and its pgid be reused while we poll.
+async fn clean_foreign_group(pgid: i32, proof: &Ownership<'_>) -> bool {
+    // The live members the proof was confirmed on (pid and start time).
+    let proven: Vec<(i32, u64)> = crate::util::procinfo::group_members(pgid)
+        .iter()
+        .filter(|m| !m.zombie)
+        .map(|m| (m.pid, m.start_time_ms))
+        .collect();
     match signal_group(pgid, Sig::Term) {
         Err(true) => return true,
         Err(false) => return false,
@@ -907,6 +915,12 @@ async fn clean_foreign_group(pgid: i32) -> bool {
         Probe::Gone => return true,
         Probe::Denied => return false,
         Probe::Alive => {}
+    }
+    match still_ours(pgid, proof, &proven) {
+        Some(true) => {}
+        // Ours emptied and the pgid now belongs to someone else.
+        Some(false) => return true,
+        None => return false,
     }
     match signal_group(pgid, Sig::Kill) {
         Err(true) => return true,
@@ -955,6 +969,31 @@ async fn clean_tagged_pids(tag: &str) -> bool {
         let _ = tag;
         true
     }
+}
+
+/// Re-check, before escalating, that `pgid` is still the group proven ours.
+/// It is if [`group_identity`] proves it again, or if every live member is
+/// one of the `proven` members (same pid, start time within tolerance): the leader may
+/// have exited on SIGTERM, leaving members the start-time window alone can
+/// no longer vouch for, but no newcomer has joined. A member outside that
+/// set means the group can no longer be proven ours.
+fn still_ours(pgid: i32, proof: &Ownership<'_>, proven: &[(i32, u64)]) -> Option<bool> {
+    match group_identity(pgid, proof) {
+        Some(true) => return Some(true),
+        Some(false) => return Some(false),
+        None => {}
+    }
+    let live: Vec<_> = crate::util::procinfo::group_members(pgid)
+        .into_iter()
+        .filter(|m| !m.zombie)
+        .collect();
+    (!live.is_empty()
+        && live.iter().all(|m| {
+            proven.iter().any(|&(pid, start)| {
+                pid == m.pid && start.abs_diff(m.start_time_ms) <= START_TOLERANCE_MS
+            })
+        }))
+    .then_some(true)
 }
 
 /// What a group must match to be ours. See [`group_identity`].
@@ -1125,7 +1164,7 @@ async fn recover_one((path, mut rec): (PathBuf, ProcRecord), opts: RecoverOpts) 
                 match group_identity(pgid, &proof) {
                     Some(true) => {
                         tracing::info!(pgid, record_id = %rec.record_id, "recovering leftover agent process group");
-                        if clean_foreign_group(pgid).await {
+                        if clean_foreign_group(pgid, &proof).await {
                             Recovered::Cleaned
                         } else {
                             Recovered::Kept
@@ -1289,6 +1328,40 @@ mod tests {
         let orphan = read_pids(&pf, 1).await[0];
         assert!(alive(orphan));
         (pgid, orphan)
+    }
+
+    #[tokio::test]
+    async fn recovery_escalates_only_while_the_proven_members_remain() {
+        // After SIGTERM, recovery re-checks the group before SIGKILL. A
+        // leaderless group the start-time window cannot vouch for (no mark)
+        // stays ours only while its live members are the ones proven before
+        // the SIGTERM; a newcomer (a reused pgid) is never escalated on.
+        let dir = tempfile::tempdir().unwrap();
+        let (pgid, orphan) = leaderless_group(dir.path(), None).await;
+        let start = crate::util::procinfo::info(orphan).unwrap().start_time_ms;
+        let proof = Ownership {
+            tag: None,
+            leader_start: Some(start),
+            leader_dead: false,
+            alive_until_ms: 0,
+            env_proof: false,
+        };
+        assert_eq!(group_identity(pgid, &proof), None);
+        assert_eq!(still_ours(pgid, &proof, &[(orphan, start)]), Some(true));
+        assert_eq!(still_ours(pgid, &proof, &[]), None, "a newcomer");
+        assert_eq!(
+            still_ours(pgid, &proof, &[(orphan + 1, start)]),
+            None,
+            "a different pid"
+        );
+        // Provable as someone else's: a member older than our leader.
+        let later = Ownership {
+            leader_start: Some(start + 10 * START_TOLERANCE_MS),
+            ..proof
+        };
+        assert_eq!(still_ours(pgid, &later, &[(orphan, start)]), Some(false));
+        kill_now(orphan);
+        wait_all_gone(&[orphan], Duration::from_secs(10)).await;
     }
 
     fn kill_now(pid: i32) {

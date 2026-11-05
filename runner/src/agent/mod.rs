@@ -597,6 +597,12 @@ impl AgentBridge {
         }
     }
 
+    /// Finish several bridges in parallel (a chat runtime's retired bridges
+    /// plus its current one, when the runtime ends).
+    pub async fn finish_all(bridges: Vec<AgentBridge>, grace: Duration) {
+        futures_util::future::join_all(bridges.into_iter().map(|b| b.finish(grace))).await;
+    }
+
     /// Bridge-owned observability handle: the agent subprocess's PID and a
     /// watch receiver that yields `Some(ExitSnapshot)` once the wait task
     /// observes termination. Supervisor uses this to drive
