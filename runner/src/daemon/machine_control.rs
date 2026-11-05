@@ -337,6 +337,7 @@ impl MachineControl {
 
         // 1. Cloud registration — same X-Api-Key surface as
         //    `pidash runner add`.
+        let before = crate::cli::runner_ops::runner_ids_before_create(&self.spawn_ctx.paths);
         let resp = create_runner(
             &self.transport,
             CreateRunnerRequest {
@@ -363,6 +364,16 @@ impl MachineControl {
         //    it up on hot-add — no restart required.
         let cloud_url = self.spawn_ctx.cloud_url();
         let persisted = async {
+            // The server returned a runner this computer already has: it is
+            // the answer as it is, so no folder is allocated for it.
+            let cfg = crate::config::file::load_config(&self.spawn_ctx.paths)?;
+            if let Some(existing) = cfg.runners.iter().find(|r| r.runner_id == resp.runner_id) {
+                return Ok(crate::cli::runner_ops::AppliedRunner {
+                    runner: existing.clone(),
+                    is_first_runner: false,
+                    already_present: true,
+                });
+            }
             let working_dir = create_working_dir(&self.spawn_ctx.paths, &cmd, &resp, agent_kind)?;
             let options = ApplyEnrollOptions {
                 working_dir,
@@ -375,9 +386,11 @@ impl MachineControl {
         };
         let applied = match persisted.await.context("persisting [[runner]] block") {
             Ok(applied) => applied,
-            // The runner was already on this computer: never roll back the
-            // one that is working.
-            Err(persist_err) if !crate::cli::runner_ops::may_roll_back(&persist_err) => {
+            // The runner was already on this computer, or the server
+            // returned one it already had: never roll back a working one.
+            Err(persist_err)
+                if !crate::cli::runner_ops::may_roll_back_create(&persist_err, &resp, &before) =>
+            {
                 return Err(persist_err);
             }
             Err(persist_err) => {
@@ -1040,6 +1053,7 @@ mod tests {
             protocol_version: 4,
             machine_token: None,
             machine_token_minted: false,
+            created: None,
         };
         apply_enroll_response(
             &paths,

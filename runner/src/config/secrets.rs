@@ -108,6 +108,15 @@ pub trait SecretBackend: Send + Sync {
     fn set(&self, item: &str, value: &str) -> Result<(), SecretError>;
     /// Deleting a missing item is not an error.
     fn delete(&self, item: &str) -> Result<(), SecretError>;
+    /// Every value stored under `item`, duplicates included: what [`get`]
+    /// cannot return for an `Ambiguous` item can still be read one by one,
+    /// so a sign-out can revoke those tokens before it forgets them.
+    /// Values that cannot be read at all are left out.
+    ///
+    /// [`get`]: SecretBackend::get
+    fn get_all(&self, item: &str) -> Vec<String> {
+        self.get(item).ok().flatten().into_iter().collect()
+    }
     /// Whether the store answers at all.
     fn probe(&self) -> Result<(), SecretError> {
         self.get(PROBE_ITEM).map(|_| ())
@@ -181,6 +190,21 @@ impl SecretBackend for OsKeyring {
                 other => other.map_err(keyring_error),
             }
         })
+    }
+
+    fn get_all(&self, item: &str) -> Vec<String> {
+        let user = self.user(item);
+        bounded(move || {
+            let entry = keyring::Entry::new(KEYRING_SERVICE, &user).map_err(keyring_error)?;
+            Ok(match entry.get_password() {
+                Ok(v) => vec![v],
+                Err(keyring::Error::Ambiguous(dups)) => {
+                    dups.iter().filter_map(|d| d.get_password().ok()).collect()
+                }
+                Err(_) => Vec::new(),
+            })
+        })
+        .unwrap_or_default()
     }
 
     fn delete(&self, item: &str) -> Result<(), SecretError> {
@@ -330,6 +354,18 @@ impl SecretBackend for MemoryKeyring {
             .get(item)
             .cloned())
     }
+    fn get_all(&self, item: &str) -> Vec<String> {
+        if self.check().is_err() {
+            return Vec::new();
+        }
+        self.items
+            .lock()
+            .expect("memory keyring poisoned")
+            .get(item)
+            .cloned()
+            .into_iter()
+            .collect()
+    }
     fn set(&self, item: &str, value: &str) -> Result<(), SecretError> {
         self.check()?;
         self.broken
@@ -391,48 +427,127 @@ pub fn backend_for(paths: &Paths) -> Arc<dyn SecretBackend> {
     })
 }
 
-fn forgetting() -> &'static Mutex<HashMap<PathBuf, usize>> {
-    static F: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+/// Which keychain items the command holding a [`ForgetUnreadable`] owns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForgetScope {
+    /// Every item: a full `pidash auth logout`.
+    All,
+    /// Only these items. Broken items outside the list are kept as they
+    /// are (still listed, never deleted), so signing in or out of one
+    /// workspace or the engine never drops another credential's item.
+    Items(Vec<String>),
+}
+
+impl ForgetScope {
+    /// The items of workspace `slug`: its own item, and the default item
+    /// when `slug` is the default workspace.
+    pub fn workspace(slug: &str, is_default: bool) -> Vec<String> {
+        let mut items = vec![format!("{ITEM_WORKSPACE_PREFIX}{slug}")];
+        if is_default {
+            items.push(ITEM_DEFAULT_MACHINE_TOKEN.to_string());
+        }
+        items
+    }
+
+    fn covers(&self, item: &str) -> bool {
+        match self {
+            ForgetScope::All => true,
+            ForgetScope::Items(items) => items.iter().any(|i| i == item),
+        }
+    }
+}
+
+type ForgetRegistry = Mutex<HashMap<PathBuf, Vec<(u64, ForgetScope)>>>;
+
+fn forgetting() -> &'static ForgetRegistry {
+    static F: OnceLock<ForgetRegistry> = OnceLock::new();
     F.get_or_init(Default::default)
 }
 
 /// While held, config writes of the install at `paths` may forget keychain
-/// items the keychain can never return ([`SecretError::permanent`]): they
-/// are dropped from the file and deleted from the keychain (which also
-/// removes duplicates). Held by `pidash auth login` and `pidash auth
-/// logout`, the way out for such an item; every other write keeps refusing.
-/// Items that are only unreadable for now (a locked keychain) are never
-/// forgotten.
+/// items the keychain can never return ([`SecretError::permanent`]) that
+/// fall in `scope`: they are dropped from the file and deleted from the
+/// keychain (which also removes duplicates). Broken items outside `scope`
+/// are kept as they are, so the write goes ahead without touching them.
+/// Held by `pidash auth login` and `pidash auth logout`, the way out for
+/// such an item; every other write keeps refusing. Items that are only
+/// unreadable for now (a locked keychain) are never forgotten.
 #[must_use]
-pub struct ForgetUnreadable(PathBuf);
+pub struct ForgetUnreadable(PathBuf, u64);
 
-pub fn forget_unreadable(paths: &Paths) -> ForgetUnreadable {
+pub fn forget_unreadable(paths: &Paths, scope: ForgetScope) -> ForgetUnreadable {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let key = paths.config_dir.clone();
-    *forgetting()
+    forgetting()
         .lock()
         .expect("forget registry poisoned")
         .entry(key.clone())
-        .or_default() += 1;
-    ForgetUnreadable(key)
+        .or_default()
+        .push((id, scope));
+    ForgetUnreadable(key, id)
+}
+
+impl ForgetUnreadable {
+    /// Widen this guard to `items` too (a command that learns which
+    /// workspace it signs out only after it read the config).
+    pub fn add(&self, items: Vec<String>) {
+        let mut f = forgetting().lock().expect("forget registry poisoned");
+        if let Some((_, scope)) = f
+            .get_mut(&self.0)
+            .and_then(|v| v.iter_mut().find(|(id, _)| *id == self.1))
+            && let ForgetScope::Items(mine) = scope
+        {
+            mine.extend(items);
+        }
+    }
 }
 
 impl Drop for ForgetUnreadable {
     fn drop(&mut self) {
         let mut f = forgetting().lock().expect("forget registry poisoned");
-        if let Some(n) = f.get_mut(&self.0) {
-            *n -= 1;
-            if *n == 0 {
+        if let Some(v) = f.get_mut(&self.0) {
+            v.retain(|(id, _)| *id != self.1);
+            if v.is_empty() {
                 f.remove(&self.0);
             }
         }
     }
 }
 
-fn may_forget(paths: &Paths) -> bool {
+/// The scopes held for the install at `paths`; `None` when no sign-in or
+/// sign-out is running.
+fn forget_scopes(paths: &Paths) -> Option<Vec<ForgetScope>> {
     forgetting()
         .lock()
         .expect("forget registry poisoned")
-        .contains_key(&paths.config_dir)
+        .get(&paths.config_dir)
+        .map(|v| v.iter().map(|(_, s)| s.clone()).collect())
+}
+
+/// Every value the keychain still holds for the broken items of `cfg` that
+/// `scope` covers, read one duplicate at a time. A sign-out revokes these
+/// tokens on the server before it forgets the items, so an item that could
+/// not be read never leaves a live token behind.
+pub fn recover_broken_values(paths: &Paths, cfg: &Config, scope: &ForgetScope) -> Vec<String> {
+    if cfg.auth.broken_keyring_items.is_empty() {
+        return Vec::new();
+    }
+    let backend = backend_for(paths);
+    let mut out: Vec<String> = Vec::new();
+    for item in cfg
+        .auth
+        .broken_keyring_items
+        .iter()
+        .filter(|i| scope.covers(i))
+    {
+        for v in backend.get_all(item) {
+            if !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    }
+    out
 }
 
 /// Every secret in `cfg`, as `(item, value)`.
@@ -612,7 +727,8 @@ pub fn plan_write(
             cfg.auth.unread_keyring_items.join(", ")
         );
     }
-    if now_in_keyring && !cfg.auth.broken_keyring_items.is_empty() && !may_forget(paths) {
+    let scopes = forget_scopes(paths);
+    if now_in_keyring && !cfg.auth.broken_keyring_items.is_empty() && scopes.is_none() {
         // The keychain answers but can never return these items (duplicate
         // items, a value that is not text). Waiting does not help; signing
         // in or out again replaces or forgets them.
@@ -625,9 +741,37 @@ pub fn plan_write(
             cfg.auth.broken_keyring_items.join(", ")
         );
     }
-    if now_in_keyring && !cfg.auth.broken_keyring_items.is_empty() {
+    // Under a sign-in or sign-out: a broken item is forgotten when the
+    // command owns it (its scope) or this write stores a new value for it
+    // (the set replaces the duplicates). Any other broken item belongs to
+    // another credential and is kept exactly as it is.
+    let secret_items: Vec<&str> = secrets.iter().map(|(i, _)| i.as_str()).collect();
+    let kept_broken: Vec<String> = if now_in_keyring {
+        cfg.auth
+            .broken_keyring_items
+            .iter()
+            .filter(|i| !secret_items.contains(&i.as_str()))
+            .filter(|i| {
+                !scopes
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|s| s.covers(i))
+            })
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let forgotten: Vec<&String> = cfg
+        .auth
+        .broken_keyring_items
+        .iter()
+        .filter(|i| now_in_keyring && !kept_broken.contains(i))
+        .collect();
+    if !forgotten.is_empty() {
         tracing::warn!(
-            items = %cfg.auth.broken_keyring_items.join(", "),
+            items = %forgotten.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
             "forgetting keychain items that cannot be read back"
         );
     }
@@ -645,6 +789,16 @@ pub fn plan_write(
         }
         CredentialsStoreMode::Auto => (now_in_keyring || migrate) && keyring_ok.is_ok(),
     };
+    if !to_keyring && !kept_broken.is_empty() {
+        // Moving the secrets to the file would have to drop these items,
+        // which belong to credentials this command does not own.
+        anyhow::bail!(
+            "the {} holds Pi Dash credential(s) it cannot return ({}); sign them out \
+             (`pidash auth logout`) before moving the credentials to config.toml",
+            backend.name(),
+            kept_broken.join(", ")
+        );
+    }
 
     let mut out = cfg.clone();
     if to_keyring {
@@ -655,7 +809,11 @@ pub fn plan_write(
                 .map_err(|e| anyhow::anyhow!("storing {item} in the {}: {e}", backend.name()))?;
             items.push(item.clone());
         }
+        // Broken items of other credentials stay listed, so the next load
+        // still reports them and nothing deletes them.
+        items.extend(kept_broken.iter().cloned());
         items.sort();
+        items.dedup();
         let delete_after = on_disk
             .keyring_items
             .iter()
@@ -1103,7 +1261,7 @@ mod tests {
         let other = format!("{ITEM_WORKSPACE_PREFIX}beta");
         keyring.fail_get_of(&other, true);
         {
-            let _forget = forget_unreadable(&p);
+            let _forget = forget_unreadable(&p, ForgetScope::All);
             let err = mutate_config(&p, |_| Ok(())).unwrap_err();
             assert!(
                 format!("{err:#}").contains("did not return every"),
@@ -1115,7 +1273,7 @@ mod tests {
         // Under sign-in/out the broken item is dropped and deleted; the
         // others stay in the keychain.
         {
-            let _forget = forget_unreadable(&p);
+            let _forget = forget_unreadable(&p, ForgetScope::All);
             mutate_config(&p, |_| Ok(())).unwrap();
         }
         let after = load_config(&p).unwrap();
@@ -1130,6 +1288,69 @@ mod tests {
         assert!(!keyring.items().contains_key(ITEM_ENGINE_CREDENTIAL));
         assert_eq!(tokens(&after).0.as_deref(), Some("mt_acme"));
         // And ordinary writes work again.
+        mutate_config(&p, |_| Ok(())).unwrap();
+    }
+
+    #[test]
+    fn a_scoped_sign_out_never_forgets_another_credentials_broken_item() {
+        let keyring = MemoryKeyring::new();
+        let (_tmp, p) = setup(CredentialsStoreMode::Auto, keyring.clone());
+        migrate_credentials_store(&p).unwrap();
+        let beta = format!("{ITEM_WORKSPACE_PREFIX}beta");
+        keyring.break_item(&beta);
+        // `pidash auth logout --engine`: forgets the engine credential only.
+        {
+            let _forget =
+                forget_unreadable(&p, ForgetScope::Items(vec![ITEM_ENGINE_CREDENTIAL.into()]));
+            mutate_config(&p, |cfg| {
+                cfg.cli.as_mut().unwrap().engine_credential = None;
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert!(!keyring.items().contains_key(ITEM_ENGINE_CREDENTIAL));
+        // beta's item is still listed and still in the keychain.
+        assert!(keyring.items().contains_key(&beta));
+        let after = load_config(&p).unwrap();
+        assert_eq!(after.auth.broken_keyring_items, vec![beta.clone()]);
+        assert_eq!(tokens(&after).0.as_deref(), Some("mt_acme"));
+        // So ordinary writes are still refused until beta is dealt with.
+        assert!(mutate_config(&p, |_| Ok(())).is_err());
+
+        // Moving to the file would drop beta's item: refused.
+        {
+            let _forget = forget_unreadable(&p, ForgetScope::Items(Vec::new()));
+            let err = mutate_config(&p, |cfg| {
+                cfg.auth.credentials_store = CredentialsStoreMode::File;
+                Ok(())
+            })
+            .unwrap_err();
+            assert!(format!("{err:#}").contains(&beta), "{err:#}");
+        }
+
+        // A sign-out of beta reads its token for the revoke, then forgets it.
+        let cfg = load_config(&p).unwrap();
+        let scope = ForgetScope::Items(ForgetScope::workspace("beta", false));
+        assert_eq!(recover_broken_values(&p, &cfg, &scope), vec!["mt_beta"]);
+        assert!(
+            recover_broken_values(
+                &p,
+                &cfg,
+                &ForgetScope::Items(vec![ITEM_ENGINE_CREDENTIAL.into()])
+            )
+            .is_empty()
+        );
+        {
+            let _forget = forget_unreadable(&p, scope);
+            mutate_config(&p, |cfg| {
+                cfg.cli.as_mut().unwrap().remove_workspace_token("beta");
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert!(!keyring.items().contains_key(&beta));
+        let after = load_config(&p).unwrap();
+        assert!(after.auth.broken_keyring_items.is_empty());
         mutate_config(&p, |_| Ok(())).unwrap();
     }
 

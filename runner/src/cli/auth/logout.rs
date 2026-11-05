@@ -77,8 +77,21 @@ pub(crate) async fn sign_out_engine(paths: &Paths, local_only: bool) -> Result<b
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     // Signing out forgets keychain items the keychain can never return, so
-    // a damaged keychain can't keep this computer signed in.
-    let _forget = crate::config::secrets::forget_unreadable(paths);
+    // a damaged keychain can't keep this computer signed in. Only the items
+    // of what is signed out: a workspace or engine sign-out never forgets
+    // another credential's item.
+    use crate::config::secrets::{ForgetScope, ITEM_ENGINE_CREDENTIAL, forget_unreadable};
+    let engine_item = || vec![ITEM_ENGINE_CREDENTIAL.to_string()];
+    let forget = forget_unreadable(
+        paths,
+        if args.engine {
+            ForgetScope::Items(engine_item())
+        } else if args.workspace.is_some() {
+            ForgetScope::Items(Vec::new())
+        } else {
+            ForgetScope::All
+        },
+    );
     if args.engine {
         let held = sign_out_engine(paths, args.local_only).await?;
         crate::service::reload::notify_credentials_changed(paths).await;
@@ -102,7 +115,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let tokens: Vec<String> = match workspace {
+    let mut tokens: Vec<String> = match workspace {
         Some(slug) => cli
             .token_for_workspace(Some(slug))
             .filter(|_| cli.workspace_slugs().iter().any(|s| s == slug))
@@ -110,7 +123,33 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
             .unwrap_or_default(),
         None => cli.workspace_tokens().into_iter().map(|(_, t)| t).collect(),
     };
-    if tokens.is_empty() {
+    // The keychain items being signed out that it cannot return (duplicate
+    // items): their tokens are still read one duplicate at a time and
+    // revoked with the rest, so forgetting the items leaves no live token.
+    let scope = match workspace {
+        Some(slug) => ForgetScope::Items(ForgetScope::workspace(
+            slug,
+            cli.workspace_slug.as_deref() == Some(slug),
+        )),
+        None => ForgetScope::All,
+    };
+    let broken_in_scope = cfg.as_ref().is_some_and(|c| {
+        c.auth.broken_keyring_items.iter().any(|i| match &scope {
+            ForgetScope::All => true,
+            ForgetScope::Items(items) => items.contains(i),
+        })
+    });
+    if let ForgetScope::Items(items) = &scope {
+        forget.add(items.clone());
+    }
+    if let Some(c) = cfg.as_ref() {
+        for t in crate::config::secrets::recover_broken_values(paths, c, &scope) {
+            if t.starts_with("mt_") && !tokens.contains(&t) {
+                tokens.push(t);
+            }
+        }
+    }
+    if tokens.is_empty() && !broken_in_scope {
         match workspace {
             Some(slug) => println!("Workspace {slug:?} is not signed in — nothing to revoke."),
             None => {
@@ -139,6 +178,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     if workspace.is_none() || last_workspace {
         // `pidash auth logout` signs the engine out too (design §4.3). Its
         // credential is revoked first, while a machine token still works.
+        forget.add(engine_item());
         sign_out_engine(paths, args.local_only).await?;
     }
 
@@ -411,5 +451,107 @@ mod tests {
         assert!(keyring.items().is_empty(), "{:?}", keyring.items());
         // Writes work again.
         file::mutate_config(&p, |_| Ok(())).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_broken_machine_token_item_is_revoked_before_it_is_forgotten() {
+        use crate::config::schema::CredentialsStoreMode;
+        use crate::config::secrets::{self, ITEM_WORKSPACE_PREFIX, MemoryKeyring};
+        use crate::engine::test_server;
+        for workspace in [Some("beta"), None] {
+            let server = test_server::start(std::sync::Arc::new(|_| (200, "{}".into()))).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let p = paths(tmp.path());
+            let keyring = MemoryKeyring::new();
+            secrets::use_backend_for(&p.config_dir, keyring.clone());
+            let mut cfg = two_workspaces_and_engine(&server.url);
+            cfg.cli
+                .as_mut()
+                .unwrap()
+                .workspaces
+                .push(crate::config::schema::WorkspaceCredential {
+                    slug: "beta".into(),
+                    token: "mt_beta".into(),
+                });
+            cfg.auth.credentials_store = CredentialsStoreMode::Auto;
+            file::write_config(&p, &cfg).unwrap();
+            file::migrate_credentials_store(&p).unwrap();
+            let beta = format!("{ITEM_WORKSPACE_PREFIX}beta");
+            keyring.break_item(&beta);
+
+            run(
+                Args {
+                    local_only: false,
+                    workspace: workspace.map(str::to_string),
+                    engine: false,
+                },
+                &p,
+            )
+            .await
+            .unwrap();
+
+            let revoked: Vec<_> = server
+                .requests_to("/api/v1/auth/revoke/")
+                .iter()
+                .filter_map(|r| r.headers.get("x-api-key").cloned())
+                .collect();
+            assert!(
+                revoked.iter().any(|t| t == "mt_beta"),
+                "{workspace:?}: beta's token was not revoked: {revoked:?}"
+            );
+            assert!(!keyring.items().contains_key(&beta), "{workspace:?}");
+            let after = file::load_config(&p).unwrap();
+            assert!(after.auth.broken_keyring_items.is_empty(), "{workspace:?}");
+            if workspace.is_some() {
+                // acme and the engine are untouched.
+                let cli = after.cli.unwrap();
+                assert_eq!(cli.token.as_deref(), Some("mt_acme"));
+                assert_eq!(cli.engine_credential.unwrap().token, "ec_live");
+                assert!(!revoked.iter().any(|t| t == "mt_acme"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_engine_sign_out_keeps_a_workspaces_broken_item() {
+        use crate::config::schema::CredentialsStoreMode;
+        use crate::config::secrets::{self, ITEM_WORKSPACE_PREFIX, MemoryKeyring};
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(tmp.path());
+        let keyring = MemoryKeyring::new();
+        secrets::use_backend_for(&p.config_dir, keyring.clone());
+        let mut cfg = two_workspaces_and_engine("https://cloud.invalid");
+        cfg.cli
+            .as_mut()
+            .unwrap()
+            .workspaces
+            .push(crate::config::schema::WorkspaceCredential {
+                slug: "beta".into(),
+                token: "mt_beta".into(),
+            });
+        cfg.auth.credentials_store = CredentialsStoreMode::Auto;
+        file::write_config(&p, &cfg).unwrap();
+        file::migrate_credentials_store(&p).unwrap();
+        let beta = format!("{ITEM_WORKSPACE_PREFIX}beta");
+        keyring.break_item(&beta);
+
+        run(
+            Args {
+                local_only: true,
+                workspace: None,
+                engine: true,
+            },
+            &p,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            keyring.items().get(&beta).map(String::as_str),
+            Some("mt_beta")
+        );
+        let after = file::load_config(&p).unwrap();
+        assert_eq!(after.auth.broken_keyring_items, vec![beta]);
+        assert!(after.cli.unwrap().engine_credential.is_none());
     }
 }

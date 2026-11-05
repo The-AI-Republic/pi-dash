@@ -250,6 +250,7 @@ impl RunnerSpawnCtx {
             protocol_version: crate::cloud::protocol::WIRE_VERSION,
             machine_token: None,
             machine_token_minted: false,
+            created: None,
         };
         let applied = apply_enroll_response(
             &self.paths,
@@ -709,6 +710,7 @@ mod tests {
             protocol_version: crate::cloud::protocol::WIRE_VERSION,
             machine_token: None,
             machine_token_minted: false,
+            created: None,
         };
         apply_enroll_response(
             &paths,
