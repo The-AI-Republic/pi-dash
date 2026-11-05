@@ -17,7 +17,8 @@ from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 
-from pi_dash.db.models import Issue, Project, State, User
+from pi_dash.core.agent_execution import AgentExecutorKind
+from pi_dash.db.models import Project, User
 from pi_dash.runner.models import (
     AgentRun,
     AgentRunStatus,
@@ -151,26 +152,26 @@ def merge_setup(db, create_user, workspace, machine):
         name="builtin-rich-mbp-test-workspace-def",
         provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
     )
-    state = State.objects.create(name="Todo", group="unstarted", project=project)
-    issue = Issue.objects.create(workspace=workspace, project=project, state=state, name="Task")
-    Issue.all_objects.filter(pk=issue.pk).update(assigned_runner=loser, assigned_pod=pod_a)
-    own_issue = Issue.objects.create(workspace=workspace, project=project, state=state, name="Own")
-    Issue.all_objects.filter(pk=own_issue.pk).update(assigned_runner=own, assigned_pod=pod_a)
-
     def run(**kw):
         return AgentRun.objects.create(
             workspace=workspace,
             owner=create_user,
             created_by=create_user,
-            pod=pod_a,
+            pod=kw.pop("pod", pod_a),
             prompt="p",
             status=AgentRunStatus.QUEUED,
             **kw,
         )
 
-    strict = run(work_item=issue, pinned_runner=loser, pin_strict=True)
-    loose = run(pinned_runner=loser, pin_strict=False)
-    own_strict = run(work_item=own_issue, pinned_runner=own, pin_strict=True)
+    # A legacy managed run pinned to the source engine, in a pod the survivor
+    # is not in: only that engine could serve it, so it is cancelled.
+    legacy = run(pinned_runner=loser, executor_kind=AgentExecutorKind.MANAGED_RUNNER)
+    # A locality pin to the source engine: released to its own pod.
+    loose = run(pinned_runner=loser)
+    # A locality pin to the source engine in the survivor's pod: re-pinned.
+    same_pod = run(pinned_runner=loser, pod=pod_b)
+    # A locality pin to the own-agent runner, which moves with its runs.
+    own_pinned = run(pinned_runner=own)
     issue_engine_credential(user=create_user, dev_machine=source)
     return {
         "source": source,
@@ -180,11 +181,10 @@ def merge_setup(db, create_user, workspace, machine):
         "survivor": survivor,
         "pod_a": pod_a,
         "pod_b": pod_b,
-        "issue": issue,
-        "own_issue": own_issue,
-        "strict": strict,
+        "legacy": legacy,
         "loose": loose,
-        "own_strict": own_strict,
+        "same_pod": same_pod,
+        "own_pinned": own_pinned,
         "mt_source": mt_source,
     }
 
@@ -210,13 +210,12 @@ def test_merge_moves_runners_and_resolves_collision_across_pods(db, web, merge_s
     # The target's engine survives; the source's is revoked after its work moved.
     s["loser"].refresh_from_db()
     assert s["loser"].revoked_at is not None and s["loser"].revoked_reason == "dev_machine_merged"
-    s["issue"].refresh_from_db()
-    assert s["issue"].assigned_runner_id == s["survivor"].id
-    assert s["issue"].assigned_pod_id == s["pod_b"].id
-    s["strict"].refresh_from_db()
-    assert s["strict"].status == AgentRunStatus.QUEUED
-    assert s["strict"].pinned_runner_id == s["survivor"].id and s["strict"].pod_id == s["pod_b"].id
-    assert s["strict"].pin_strict is True
+    # No run's ``pod`` is rewritten (design §13, revision 4.0).
+    s["legacy"].refresh_from_db()
+    assert s["legacy"].status == AgentRunStatus.CANCELLED
+    assert s["legacy"].error_code == "runner_revoked" and s["legacy"].pod_id == s["pod_a"].id
+    s["same_pod"].refresh_from_db()
+    assert s["same_pod"].pinned_runner_id == s["survivor"].id and s["same_pod"].pod_id == s["pod_b"].id
     s["loose"].refresh_from_db()
     assert s["loose"].pinned_runner_id is None and s["loose"].pod_id == s["pod_a"].id
 
@@ -224,10 +223,8 @@ def test_merge_moves_runners_and_resolves_collision_across_pods(db, web, merge_s
     s["own"].refresh_from_db()
     assert s["own"].dev_machine_id == s["target"].id and s["own"].revoked_at is None
     assert s["own"].pod_id == s["pod_a"].id
-    s["own_strict"].refresh_from_db()
-    assert s["own_strict"].pinned_runner_id == s["own"].id and s["own_strict"].status == AgentRunStatus.QUEUED
-    s["own_issue"].refresh_from_db()
-    assert s["own_issue"].assigned_runner_id == s["own"].id
+    s["own_pinned"].refresh_from_db()
+    assert s["own_pinned"].pinned_runner_id == s["own"].id and s["own_pinned"].status == AgentRunStatus.QUEUED
 
     # Source revoked, its credentials too.
     s["source"].refresh_from_db()

@@ -155,7 +155,7 @@ def update_machine_controls(machine_id, user, values: dict) -> DevMachine:
 
     ``label`` renames the machine, and with it every engine runner's display
     name ("Built-in engine · <label>"); an empty label falls back to the
-    hostname. Engine pause changes release or drain the engines' non-strict
+    hostname. Engine pause changes release or drain the engines' locality
     pins in the same transaction.
     """
     from pi_dash.runner.services.dispatch_rules import on_engine_pause_changed
@@ -243,21 +243,37 @@ class MergeError(Exception):
 
 
 def _hand_over_to_survivor(loser: Runner, survivor: Runner) -> set:
-    """Collision: move ``loser``'s issues and queued strict runs to
-    ``survivor`` (runner **and** pod: the matcher scans only a runner's
-    current pod, and the two can sit in different pods of the project), and
-    release its queued non-strict pins to their own pod. Returns the pods to
-    drain."""
-    from pi_dash.db.models.issue import Issue
+    """Collision (design §13, revision 4.0): hand ``loser``'s queued runs to
+    ``survivor`` before ``loser`` is revoked. No run's ``pod`` is rewritten.
 
-    Issue.all_objects.filter(assigned_runner=loser).update(assigned_runner=survivor, assigned_pod=survivor.pod_id)
-    strict = AgentRun.objects.filter(pinned_runner=loser, status=AgentRunStatus.QUEUED, pin_strict=True)
-    strict_pods = set(strict.values_list("pod_id", flat=True))
-    strict.update(pinned_runner=survivor, pod_id=survivor.pod_id)
-    loose = AgentRun.objects.filter(pinned_runner=loser, status=AgentRunStatus.QUEUED, pin_strict=False)
+    - Queued runs pinned to ``loser`` in the survivor's pod are re-pinned to
+      the survivor.
+    - In another pod, a locality pin is released to its own pod, and a
+      legacy ``managed_runner`` run is cancelled with ``runner_revoked``: the
+      matcher serves such a run only to the engine it is pinned to.
+
+    Runs ``loser`` still holds (assigned, running) are cancelled by
+    ``Runner.revoke`` right after, as for any revoke. Returns the pods to
+    drain.
+    """
+    from pi_dash.core.agent_execution import AgentExecutorKind
+    from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+
+    queued = AgentRun.objects.select_for_update().filter(pinned_runner=loser, status=AgentRunStatus.QUEUED)
+    queued.filter(pod_id=survivor.pod_id).update(pinned_runner=survivor)
+    elsewhere = queued.exclude(pod_id=survivor.pod_id)
+    loose = elsewhere.filter(executor_kind=AgentExecutorKind.LOCAL_RUNNER)
     loose_pods = set(loose.values_list("pod_id", flat=True))
     loose.update(pinned_runner=None)
-    return {survivor.pod_id} | strict_pods | loose_pods
+    for run_id in list(elsewhere.filter(executor_kind=AgentExecutorKind.MANAGED_RUNNER).values_list("pk", flat=True)):
+        finalize_agent_run(
+            run_id,
+            AgentRunStatus.CANCELLED,
+            expected_status=AgentRunStatus.QUEUED,
+            updates={"error": "runner revoked", "error_code": "runner_revoked"},
+        )
+    loose_pods.discard(None)
+    return {survivor.pod_id} | loose_pods
 
 
 def merge_dev_machine(*, user, source_id, target_id) -> dict:
@@ -267,9 +283,11 @@ def merge_dev_machine(*, user, source_id, target_id) -> dict:
     the target must be live (not revoked or merged away). Every live runner
     of the source moves to the target with its id, pod, pins and queued runs.
     When both have a live engine runner for one project, the target's
-    survives and the source's work is handed to it before the source's
-    runner is revoked. The source's tokens and engine credential are
-    revoked, and the source is marked revoked with ``merged_into``.
+    survives and the source's queued work is handed over (re-pinned in the
+    survivor's pod, released or cancelled elsewhere) before the source's
+    runner is revoked; no run's ``pod`` is rewritten. The source's tokens
+    and engine credential are revoked, and the source is marked revoked
+    with ``merged_into``.
 
     Idempotent: a retry for a source already merged into the same target
     returns the stored result; into another target it is refused.
