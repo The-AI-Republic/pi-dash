@@ -63,7 +63,7 @@ Rules: a pgid is signalled only while this owner has observed it alive and not y
 
 **Cleanup before completion is published.** Today `pump_events` publishes `RunCompleted`/`RunFailed` (`supervisor.rs:3975,4014`) before the caller's shutdown (`:3428`). Reorder so the run's tree is finished first and completion is published after, on every path: normal finish, the `pump_events` error path, spawn/startup failure, cancel, watchdog timeout, runner removal. claude_code, codex and grok change their `None` branch to call `finish(2 s)`.
 
-**Daemon shutdown:** stop accepting new spawns, snapshot live trees, `finish` them in parallel, then journal/publish `RunFailed{DaemonRestart}`; all inside launchd's 20 s `ExitTimeOut` (finish ≤ 10 s, publish ≤ 5 s).
+**Daemon shutdown:** stop accepting new spawns (each spawn holds an admission from writing its record until its leader is recorded; shutdown waits for admitted spawns before it stops accepting, so none is missed by the snapshot or finished before it is armed), snapshot live trees, `finish` them in parallel, then journal/publish `RunFailed{DaemonRestart}`; all inside launchd's 20 s `ExitTimeOut` (finish ≤ 10 s, publish ≤ 5 s).
 
 **Crash recovery (replaces launchd's group kill, which `setsid` gives up):** at daemon start, after taking the exclusive instance lock (below), for each record whose `instance_id` is ours:
 

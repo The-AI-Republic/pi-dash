@@ -27,7 +27,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::agent::ExitSnapshot;
-use crate::util::proctree::{FinishOutcome, PROC_TAG_ENV, ProcessTree, TreeView};
+use crate::util::proctree::{self, FinishOutcome, PROC_TAG_ENV, ProcessTree, TreeView};
 
 /// Grace a dropped (unfinished) bridge gives its agent.
 pub const DROP_GRACE: Duration = Duration::from_secs(2);
@@ -44,6 +44,9 @@ enum Ctl {
 /// Prepare the tree (provisional record), tag the command, spawn, and record
 /// the leader. `kill_on_drop` is forced on.
 pub fn spawn(cmd: &mut Command) -> Result<(Child, ProcessTree)> {
+    // Held until the tree is attached, so daemon shutdown cannot snapshot
+    // (or finish) the tree between prepare and attach.
+    let admit = proctree::admit().context("admitting agent spawn")?;
     let tree = ProcessTree::prepare_current().context("preparing agent process record")?;
     if let Some(tag) = tree.tag() {
         cmd.env(PROC_TAG_ENV, tag);
@@ -51,6 +54,7 @@ pub fn spawn(cmd: &mut Command) -> Result<(Child, ProcessTree)> {
     cmd.kill_on_drop(true);
     let child = cmd.spawn()?;
     tree.attach(child.id());
+    drop(admit);
     Ok((child, tree))
 }
 

@@ -571,11 +571,15 @@ impl TreeInner {
 
 /// Live trees, so daemon shutdown can finish them all.
 pub struct Registry {
+    /// Held shared by each [`SpawnAdmission`] and exclusively by
+    /// [`shutdown_all`] while it stops accepting.
+    gate: RwLock<()>,
     accepting: AtomicBool,
     live: Mutex<HashMap<Uuid, Weak<TreeInner>>>,
 }
 
 static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry {
+    gate: RwLock::new(()),
     accepting: AtomicBool::new(true),
     live: Mutex::new(HashMap::new()),
 });
@@ -610,11 +614,39 @@ pub fn shutting_down() -> bool {
     !REGISTRY.accepting.load(Ordering::SeqCst)
 }
 
+/// Admission for one spawn: hold it from [`ProcessTree::prepare`] through
+/// [`ProcessTree::attach`].
+/// [`shutdown_all`] waits for every admission to be dropped before it stops
+/// accepting and takes its snapshot, so an admitted spawn is either attached
+/// and in the snapshot, or never prepared at all.
+pub struct SpawnAdmission {
+    _gate: std::sync::RwLockReadGuard<'static, ()>,
+}
+
+/// Admit one spawn, or fail once daemon shutdown has begun.
+pub fn admit() -> std::io::Result<SpawnAdmission> {
+    let guard = REGISTRY.gate.read().unwrap_or_else(|e| e.into_inner());
+    if shutting_down() {
+        return Err(std::io::Error::other(
+            "daemon is shutting down; not spawning new agents",
+        ));
+    }
+    Ok(SpawnAdmission { _gate: guard })
+}
+
 /// Daemon shutdown: stop accepting spawns, snapshot every live tree and
 /// finish them in parallel, bounded by `bound`. Returns how many trees were
 /// still unresolved.
 pub async fn shutdown_all(bound: Duration) -> usize {
-    REGISTRY.accepting.store(false, Ordering::SeqCst);
+    // Wait (briefly: admissions span one synchronous prepare/spawn/attach)
+    // for admitted spawns to attach, then refuse new ones.
+    let stop = tokio::task::spawn_blocking(|| {
+        let _gate = REGISTRY.gate.write().unwrap_or_else(|e| e.into_inner());
+        REGISTRY.accepting.store(false, Ordering::SeqCst);
+    });
+    if stop.await.is_err() {
+        REGISTRY.accepting.store(false, Ordering::SeqCst);
+    }
     let trees = REGISTRY.snapshot(|_| true);
     let n = trees.len();
     let finishes = trees
