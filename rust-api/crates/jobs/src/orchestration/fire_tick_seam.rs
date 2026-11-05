@@ -290,7 +290,7 @@ where
         now: DateTime<Utc>,
     ) -> Result<(), DispatchError> {
         apply_clock_write(
-            &mut **self.dispatch_tx().inner(),
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
             &ClockWrite::Update,
             ticker,
             now,
@@ -305,7 +305,7 @@ where
         // the pre-consolidation bind); pass the row stamp so the call
         // reads honestly.
         apply_clock_write(
-            &mut **self.dispatch_tx().inner(),
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
             &ClockWrite::Insert,
             ticker,
             ticker.created_at,

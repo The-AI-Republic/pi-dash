@@ -214,17 +214,12 @@ crates/services/src/assistant/config.rs 1
 crates/services/src/assistant/mcp.rs 1
 crates/services/src/dispatch/execution.rs 7
 crates/services/src/domain/assistant.rs 21
-crates/services/src/domain/clock.rs 2
 crates/services/src/domain/comments.rs 24
 crates/services/src/domain/identity.rs 43
 crates/services/src/domain/issues.rs 35
 crates/services/src/domain/issues_move.rs 3
 crates/services/src/domain/issues_move_creation.rs 4
 crates/services/src/domain/projects.rs 66
-crates/services/src/domain/relations.rs 4
-crates/services/src/domain/tokens.rs 36
-crates/services/src/domain/transition.rs 1
-crates/services/src/domain/txn.rs 2
 crates/services/src/domain/workspaces.rs 27
 crates/services/src/integrations/github_client.rs 9
 crates/services/src/operations/comments.rs 3

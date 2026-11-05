@@ -264,8 +264,11 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
     // `api_tokens.last_used` is stamped on every validated call
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
-        let _ =
-            pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, raw).await;
+        let _ = pidash_services::domain::tokens::touch_api_token_last_used_by_token(
+            &pidash_db::pool::sea_orm_connection(pool),
+            raw,
+        )
+        .await;
     }
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
@@ -362,13 +365,15 @@ async fn resolve_machine_token(
     .map_err(|error| db_error(error, "machine-token-member"))?
     .unwrap_or(false);
     if !member {
-        let _ =
-            pidash_services::domain::tokens::revoke_machine_token_by_hash(pool, &presented_hash)
-                .await;
+        let _ = pidash_services::domain::tokens::revoke_machine_token_by_hash(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &presented_hash,
+        )
+        .await;
         return Err(Denial::InvalidToken);
     }
     let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &presented_hash,
     )
     .await;

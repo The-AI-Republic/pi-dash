@@ -1238,7 +1238,9 @@ impl ToolStore for PgToolStore {
             related_issue_id: *related_id,
             relation_type: stored_type,
         };
-        let outcome = relation_domain::relate_row(&self.pool, &row).await;
+        let outcome =
+            relation_domain::relate_row(&pidash_db::pool::sea_orm_connection(&self.pool), &row)
+                .await;
         match outcome {
             Ok(_) => Ok(true),
             Err(error)
@@ -1264,8 +1266,14 @@ impl ToolStore for PgToolStore {
         // plus the related-objects sweep enqueue. Best-effort by repo
         // precedent (unlike `.delay()`, which propagates a broker
         // failure): a queue failure must not fail the op.
-        relation_domain::soft_delete_relation_row(&self.pool, *row_id, *actor_id, *now, *now)
-            .await?;
+        relation_domain::soft_delete_relation_row(
+            &pidash_db::pool::sea_orm_connection(&self.pool),
+            *row_id,
+            *actor_id,
+            *now,
+            *now,
+        )
+        .await?;
         let mut kwargs = serde_json::Map::with_capacity(1);
         kwargs.insert("using".to_owned(), Value::Null);
         enqueue_best_effort(

@@ -1103,7 +1103,12 @@ async fn relation_create(
                 relation_type: stored_type,
             });
         }
-        if let Err(error) = relation_domain::relate_rows_or_nothing(&pool, &rows).await {
+        if let Err(error) = relation_domain::relate_rows_or_nothing(
+            &pidash_db::pool::sea_orm_connection(&pool),
+            &rows,
+        )
+        .await
+        {
             return integrity_denial(error).into_response();
         }
     }
@@ -1476,9 +1481,15 @@ async fn remove_relation(
     let current_instance = python_dumps(&Value::Object(shape));
     // `.delete()` first (soft row + fan-out), then the activity row.
     let now = chrono::Utc::now();
-    if relation_domain::soft_delete_relation_row(&pool, edge.id, user_id, now, now)
-        .await
-        .is_err()
+    if relation_domain::soft_delete_relation_row(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        edge.id,
+        user_id,
+        now,
+        now,
+    )
+    .await
+    .is_err()
     {
         return Denial::ServerError.into_response();
     }

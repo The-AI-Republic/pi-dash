@@ -1664,9 +1664,14 @@ where
     ) -> Result<(), CreationError> {
         // `updated_at` is now-at-write: Python's `save()` stamps
         // `auto_now` at write time (the pre-consolidation bind).
-        apply_clock_write(self.pool, &write, row, Utc::now())
-            .await
-            .map_err(Self::db)
+        apply_clock_write(
+            &pidash_db::pool::sea_orm_connection(self.pool),
+            &write,
+            row,
+            Utc::now(),
+        )
+        .await
+        .map_err(Self::db)
     }
 
     fn set_rollback(&mut self) {
@@ -2498,7 +2503,8 @@ async fn relate_insert_tx(
         related_issue_id: row.related_issue_id,
         relation_type: row.relation_type.as_str(),
     };
-    let inserted = relation_domain::relate_row(&mut **tx.inner(), &value).await;
+    let inserted =
+        relation_domain::relate_row(&pidash_db::orm_tx::TxConn::new(tx.inner()), &value).await;
     match inserted {
         Ok(_) => {
             sqlx::query("RELEASE SAVEPOINT relate_target")
@@ -2559,7 +2565,7 @@ async fn op_unrelate_issues(
         for row in matching {
             let now = Utc::now();
             relation_domain::soft_delete_relation_row(
-                &mut **tx.inner(),
+                &pidash_db::orm_tx::TxConn::new(tx.inner()),
                 row.id,
                 scope.creator_id,
                 now,

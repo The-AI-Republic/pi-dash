@@ -851,7 +851,7 @@ async fn insert_machine_token(
     minted: &enroll_tokens::MintedToken,
 ) -> Result<(), sqlx::Error> {
     pidash_services::domain::tokens::insert_machine_token(
-        conn,
+        &pidash_db::orm_tx::TxConn::new(conn),
         &pidash_services::domain::tokens::NewMachineToken {
             id: Uuid::new_v4(),
             user_id,
@@ -937,7 +937,7 @@ pub async fn rotate_machine_token(
     let with_machine = dev_machine_id.is_some();
     if with_machine {
         pidash_services::domain::tokens::revoke_tokens_for_machine_in_workspace(
-            &mut **tx,
+            &pidash_db::orm_tx::TxConn::new(tx),
             dev_machine_id.expect("checked is_some"),
             workspace_id,
             Utc::now(),
@@ -946,7 +946,7 @@ pub async fn rotate_machine_token(
         .map_err(|_| RotateOutcome::Server)?;
     } else {
         pidash_services::domain::tokens::revoke_tokens_legacy_host(
-            &mut **tx,
+            &pidash_db::orm_tx::TxConn::new(tx),
             host_label,
             user_id,
             workspace_id,
@@ -1573,9 +1573,14 @@ async fn create_attempt(tx: &mut Transaction<'_, Postgres>, params: &CreateAttem
             Err(RotateOutcome::Collision) => return Attempt::Collision,
             Err(RotateOutcome::Server) => return Attempt::Server,
         }
-        if deactivate_api_token(&mut **tx, Some(params.auth_token), true, Utc::now())
-            .await
-            .is_err()
+        if deactivate_api_token(
+            &pidash_db::orm_tx::TxConn::new(tx),
+            Some(params.auth_token),
+            true,
+            Utc::now(),
+        )
+        .await
+        .is_err()
         {
             return Attempt::Server;
         }
