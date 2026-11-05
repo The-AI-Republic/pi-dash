@@ -329,6 +329,10 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     .await
     {
         Ok(applied) => applied,
+        // The runner was already on this computer: leave it as it is.
+        Err(persist_err) if !runner_ops::may_roll_back(&persist_err) => {
+            return Err(persist_err.context("persisting new runner to config.toml"));
+        }
         Err(persist_err) => {
             // Best-effort local cleanup before unwinding the cloud row.
             // `apply_enroll_response` may have written either nothing
