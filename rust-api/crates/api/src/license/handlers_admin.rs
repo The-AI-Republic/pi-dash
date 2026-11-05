@@ -35,10 +35,10 @@
 //!   session issuance, 302s).
 //!
 //! The three plain-view POSTs sit behind `CsrfViewMiddleware` (unlike the
-//! DRF units, which use the CSRF-exempt session auth): a missing cookie
-//! or token answers the 200 `csrf_failure` page, never the view. The gate
-//! mirrors `auth_session/email.rs` and renders the shared
-//! [`crate::auth_session::render::render_csrf_failure`] page.
+//! DRF units, which use the CSRF-exempt session auth): a foreign Origin
+//! or a missing cookie or token answers the 200 `csrf_failure` page,
+//! never the view. The gate mirrors `auth_session/email.rs` and renders
+//! the shared [`crate::auth_session::render::render_csrf_failure`] page.
 //!
 //! Layering: this module owns the HTTP shell (routes, session auth, the
 //! `InstanceAdminPermission` gate, SQL text, row fetching). Output shapes
@@ -93,6 +93,7 @@ use super::form_body::{
 };
 use super::handlers_auth_forms as forms;
 use super::{file_asset_url, AssetUrl};
+use crate::auth_session::csrf_origin_gate;
 use crate::auth_session::multipart::parse_fields;
 use crate::auth_session::render::render_csrf_failure;
 use crate::edge;
@@ -1255,7 +1256,13 @@ async fn sign_out(
         .get::<ConnectInfo<SocketAddr>>()
         .map(|info| info.0.ip().to_string());
     // `CsrfViewMiddleware` runs before the view body: a token-less POST
-    // never reaches `admin.py:385`.
+    // never reaches `admin.py:385`. Origin/Referer first, before the
+    // cookie and token checks (`process_view`, NEWPIDASH-12).
+    if csrf_origin_gate(state.settings(), headers).is_err() {
+        return Ok(csrf_failure_response(render_csrf_failure(
+            &failure_root_url(&state),
+        )));
+    }
     let pairs = form_pairs(content_type_of(headers), &body);
     if csrf_gate(headers, &pairs).is_err() {
         return Ok(csrf_failure_response(render_csrf_failure(
@@ -1924,6 +1931,13 @@ async fn sign_up(State(state): State<AppState>, req: Request) -> Result<Response
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
         .map(|info| info.0.ip().to_string());
+    // Origin/Referer before the cookie and token checks
+    // (`CsrfViewMiddleware.process_view`, NEWPIDASH-12).
+    if csrf_origin_gate(state.settings(), headers).is_err() {
+        return Ok(csrf_failure_response(render_csrf_failure(
+            &failure_root_url(&state),
+        )));
+    }
     let pairs = form_pairs(content_type_of(headers), &body);
     if csrf_gate(headers, &pairs).is_err() {
         return Ok(csrf_failure_response(render_csrf_failure(
@@ -2048,6 +2062,13 @@ async fn sign_in(State(state): State<AppState>, req: Request) -> Result<Response
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
         .map(|info| info.0.ip().to_string());
+    // Origin/Referer before the cookie and token checks
+    // (`CsrfViewMiddleware.process_view`, NEWPIDASH-12).
+    if csrf_origin_gate(state.settings(), headers).is_err() {
+        return Ok(csrf_failure_response(render_csrf_failure(
+            &failure_root_url(&state),
+        )));
+    }
     let pairs = form_pairs(content_type_of(headers), &body);
     if csrf_gate(headers, &pairs).is_err() {
         return Ok(csrf_failure_response(render_csrf_failure(
