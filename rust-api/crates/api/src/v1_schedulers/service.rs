@@ -124,17 +124,12 @@ async fn outcome_of(result: Result<Response, Denial>) -> Result<Outcome, Denial>
     }
 }
 
-/// The workspace id for a slug: `None` when unknown. The same lookup the
-/// v1 [`super::preamble`] runs, so the unknown-slug 403 trap behaves
-/// identically here.
+/// The workspace id for a slug: `None` when unknown. The same lookup
+/// the v1 [`super::preamble`] runs (one implementation, in
+/// [`super::workspace_id_by_slug`]), so the unknown-slug 403 trap
+/// behaves identically here.
 async fn workspace_id(pool: &PgPool, slug: &str) -> Result<Option<Uuid>, Denial> {
-    let id: Option<Uuid> = sqlx::query_scalar(r#"SELECT "id" FROM "workspaces" WHERE "slug" = $1"#)
-        .bind(slug)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?
-        .flatten();
-    Ok(id)
+    super::workspace_id_by_slug(pool, slug).await
 }
 
 /// The write gates in [`writes`] order (facts, class, zone, decorator,
