@@ -417,12 +417,7 @@ pub mod orm {
                     .eq(true)
                     .not(),
             )
-            .and_where(
-                group()
-                    .eq("triage")
-                    .and(group().is_not_null())
-                    .not(),
-            )
+            .and_where(group().eq("triage").and(group().is_not_null()).not())
             .and_where(Expr::col((projects::Entity, projects::Column::ArchivedAt)).is_null())
             .to_owned()
     }
@@ -500,8 +495,11 @@ pub mod orm {
             .from(project_members::Entity)
             .inner_join(
                 workspaces::Entity,
-                Expr::col((project_members::Entity, project_members::Column::WorkspaceId))
-                    .equals((workspaces::Entity, workspaces::Column::Id)),
+                Expr::col((
+                    project_members::Entity,
+                    project_members::Column::WorkspaceId,
+                ))
+                .equals((workspaces::Entity, workspaces::Column::Id)),
             )
             .and_where(
                 Expr::col((project_members::Entity, project_members::Column::DeletedAt)).is_null(),
@@ -515,9 +513,7 @@ pub mod orm {
                 Expr::col((project_members::Entity, project_members::Column::MemberId))
                     .eq(member_id),
             )
-            .and_where(
-                Expr::col((project_members::Entity, project_members::Column::Role)).gte(15),
-            )
+            .and_where(Expr::col((project_members::Entity, project_members::Column::Role)).gte(15))
             .and_where(
                 Expr::col((project_members::Entity, project_members::Column::IsActive)).into(),
             )
@@ -611,10 +607,12 @@ pub mod orm {
             .from(agent_run::Entity)
             .and_where(Expr::col((agent_run::Entity, agent_run::Column::WorkItemId)).eq(issue_id))
             .and_where(
-                Expr::col((agent_run::Entity, agent_run::Column::Status))
-                    .is_in(HANDOFF_STATUSES),
+                Expr::col((agent_run::Entity, agent_run::Column::Status)).is_in(HANDOFF_STATUSES),
             )
-            .order_by((agent_run::Entity, agent_run::Column::CreatedAt), Order::Desc)
+            .order_by(
+                (agent_run::Entity, agent_run::Column::CreatedAt),
+                Order::Desc,
+            )
             .lock(LockType::Update)
             .to_owned()
     }
@@ -630,10 +628,16 @@ pub mod orm {
     /// description ids, `-created_at`.
     pub fn description_ids_select(issue_id: Uuid) -> SelectStatement {
         comments_of(issue_id)
-            .column((issue_comments::Entity, issue_comments::Column::DescriptionId))
+            .column((
+                issue_comments::Entity,
+                issue_comments::Column::DescriptionId,
+            ))
             .and_where(
-                Expr::col((issue_comments::Entity, issue_comments::Column::DescriptionId))
-                    .is_not_null(),
+                Expr::col((
+                    issue_comments::Entity,
+                    issue_comments::Column::DescriptionId,
+                ))
+                .is_not_null(),
             )
             .to_owned()
     }
@@ -3303,11 +3307,18 @@ mod tests {
             select.to_string(sea_orm::sea_query::PostgresQueryBuilder)
         };
         let source = render(orm::source_issue_select("acme", Uuid::nil(), Uuid::nil()));
-        let locked = render(orm::source_issue_lock_select("acme", Uuid::nil(), Uuid::nil()));
+        let locked = render(orm::source_issue_lock_select(
+            "acme",
+            Uuid::nil(),
+            Uuid::nil(),
+        ));
         let handoff = render(orm::handoff_runs_lock_select(Uuid::nil()));
         // Lock forms.
         assert!(SOURCE_ISSUE_LOCK_SQL.contains("FOR UPDATE OF \"issues\""));
-        assert!(locked.ends_with("LIMIT 1 FOR UPDATE OF \"issues\""), "{locked}");
+        assert!(
+            locked.ends_with("LIMIT 1 FOR UPDATE OF \"issues\""),
+            "{locked}"
+        );
         assert!(!source.contains("FOR UPDATE"), "{source}");
         assert!(
             handoff.ends_with("ORDER BY \"agent_run\".\"created_at\" DESC FOR UPDATE"),
@@ -3316,7 +3327,10 @@ mod tests {
         assert!(!handoff.contains("SKIP LOCKED"));
         // The handoff status set matches the module const.
         for status in PROJECT_MOVE_HANDOFF_STATUSES {
-            assert!(handoff.contains(&format!("'{}'", status.value())), "{status:?}");
+            assert!(
+                handoff.contains(&format!("'{}'", status.value())),
+                "{status:?}"
+            );
         }
         assert_eq!(PROJECT_MOVE_HANDOFF_STATUSES.len(), 8);
         assert_eq!(orm::HANDOFF_STATUSES.len(), 8);
@@ -3334,10 +3348,15 @@ mod tests {
         assert!(!by_identifier.contains("LOWER("));
         for sql in [&by_pk, &by_identifier] {
             assert!(sql.contains("\"projects\".\"deleted_at\" IS NULL"), "{sql}");
-            assert!(sql.ends_with("ORDER BY \"projects\".\"created_at\" DESC LIMIT 1"), "{sql}");
+            assert!(
+                sql.ends_with("ORDER BY \"projects\".\"created_at\" DESC LIMIT 1"),
+                "{sql}"
+            );
         }
-        assert!(render(orm::member_exists_select("acme", Uuid::nil(), Uuid::nil()))
-            .contains("\"project_members\".\"role\" >= 15"));
+        assert!(
+            render(orm::member_exists_select("acme", Uuid::nil(), Uuid::nil()))
+                .contains("\"project_members\".\"role\" >= 15")
+        );
         // All 12 repoints set the same pair.
         assert_eq!(REPOINT_ORDER.len(), 12);
         for target in REPOINT_ORDER {
@@ -3384,7 +3403,11 @@ mod tests {
         };
         for sql in [
             render(orm::source_issue_select("acme", Uuid::nil(), Uuid::nil())),
-            render(orm::source_issue_lock_select("acme", Uuid::nil(), Uuid::nil())),
+            render(orm::source_issue_lock_select(
+                "acme",
+                Uuid::nil(),
+                Uuid::nil(),
+            )),
             render(orm::moved_issue_refetch_select(Uuid::nil())),
             SOURCE_ISSUE_LOCK_SQL.to_owned(),
         ] {

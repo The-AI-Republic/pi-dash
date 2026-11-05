@@ -530,8 +530,8 @@ pub(crate) fn repoint_update(
     use pidash_db::entity::{
         comment_reactions as cr, descriptions as d, file_assets as fa, issue_activities as ia,
         issue_comments as ic, issue_description_versions as idv, issue_links as il,
-        issue_mentions as im, issue_reactions as ir, issue_subscribers as is,
-        issue_versions as iv, issue_votes as ivo,
+        issue_mentions as im, issue_reactions as ir, issue_subscribers as is, issue_versions as iv,
+        issue_votes as ivo,
     };
     let p = target_project_id;
     let w = target_workspace_id;
@@ -705,8 +705,12 @@ impl<'t> SeaMoveStore<'t> {
 
     async fn state_id(&self, stmt: SelectStatement) -> Result<Option<StateRow>, StoreError> {
         let row = query_one(&self.conn, &stmt).await?;
-        row.map(|row| Ok(StateRow { id: get(&row, "id")? }))
-            .transpose()
+        row.map(|row| {
+            Ok(StateRow {
+                id: get(&row, "id")?,
+            })
+        })
+        .transpose()
     }
 }
 
@@ -973,7 +977,13 @@ impl MoveStore for SeaMoveStore<'_> {
         use pidash_db::entity::issue_labels as l;
         execute(
             &self.conn,
-            &soft_wipe(l::Entity, l::Column::DeletedAt, l::Column::IssueId, issue_id, now),
+            &soft_wipe(
+                l::Entity,
+                l::Column::DeletedAt,
+                l::Column::IssueId,
+                issue_id,
+                now,
+            ),
         )
         .await
     }
@@ -986,7 +996,13 @@ impl MoveStore for SeaMoveStore<'_> {
         use pidash_db::entity::cycle_issues as c;
         execute(
             &self.conn,
-            &soft_wipe(c::Entity, c::Column::DeletedAt, c::Column::IssueId, issue_id, now),
+            &soft_wipe(
+                c::Entity,
+                c::Column::DeletedAt,
+                c::Column::IssueId,
+                issue_id,
+                now,
+            ),
         )
         .await
     }
@@ -999,7 +1015,13 @@ impl MoveStore for SeaMoveStore<'_> {
         use pidash_db::entity::module_issues as m;
         execute(
             &self.conn,
-            &soft_wipe(m::Entity, m::Column::DeletedAt, m::Column::IssueId, issue_id, now),
+            &soft_wipe(
+                m::Entity,
+                m::Column::DeletedAt,
+                m::Column::IssueId,
+                issue_id,
+                now,
+            ),
         )
         .await
     }
@@ -1271,6 +1293,130 @@ mod tests {
 
     fn uid(n: u128) -> Uuid {
         Uuid::from_u128(n)
+    }
+
+    /// The move write builders, rendered without a database: the
+    /// `update_fields` order, the stamp arm, the soft wipes, the prune
+    /// subquery and the twelve repoints' pair + scope.
+    #[test]
+    fn write_statement_shapes() {
+        use sea_orm::sea_query::PostgresQueryBuilder;
+        let now: DateTime<Utc> = "2026-06-01T12:00:00+00:00".parse().expect("T0");
+        let fields = crate::app_issues::issue_move::MovedIssueFields {
+            project_id: uid(0x20),
+            workspace_id: uid(0x10),
+            sequence_id: 9,
+            state_id: uid(0x30),
+            assigned_pod_id: None,
+            updated_by_id: None,
+        };
+        let plain = issue_move_update(uid(1), &fields, 9, &now).to_string(PostgresQueryBuilder);
+        let set = &plain[plain.find("SET ").unwrap()..plain.find(" WHERE").unwrap()];
+        assert_eq!(
+            set,
+            "SET \"project_id\" = '00000000-0000-0000-0000-000000000020', \"workspace_id\" = '00000000-0000-0000-0000-000000000010', \"sequence_id\" = 9, \"state_id\" = '00000000-0000-0000-0000-000000000030', \"assigned_pod_id\" = NULL, \"parent_id\" = NULL, \"estimate_point_id\" = NULL, \"type_id\" = NULL, \"updated_at\" = '2026-06-01 12:00:00.000000 +00:00'"
+        );
+        assert!(
+            plain.ends_with("WHERE \"issues\".\"id\" = '00000000-0000-0000-0000-000000000001'"),
+            "{plain}"
+        );
+        let stamped = issue_move_update(
+            uid(1),
+            &crate::app_issues::issue_move::MovedIssueFields {
+                updated_by_id: Some(uid(0x40)),
+                ..fields
+            },
+            9,
+            &now,
+        )
+        .to_string(PostgresQueryBuilder);
+        assert!(stamped.contains("\"updated_at\" = '2026-06-01 12:00:00.000000 +00:00', \"updated_by_id\" = '00000000-0000-0000-0000-000000000040' WHERE"), "{stamped}");
+
+        let detach = sequence_detach(uid(1), uid(0x20)).to_string(PostgresQueryBuilder);
+        assert!(detach.contains("SET \"issue_id\" = NULL WHERE \"issue_sequences\".\"deleted_at\" IS NULL AND \"issue_sequences\".\"issue_id\" = "), "{detach}");
+        assert!(
+            detach.contains("AND (NOT \"issue_sequences\".\"project_id\" = "),
+            "{detach}"
+        );
+        let create = sequence_create(uid(2), uid(1), 9, uid(0x20), uid(0x10), &now, uid(0x40))
+            .to_string(PostgresQueryBuilder);
+        assert!(create.starts_with("INSERT INTO \"issue_sequences\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"sequence\", \"deleted\")"), "{create}");
+        assert!(create.ends_with("9, FALSE)"), "{create}");
+
+        let prune = assignee_prune(uid(1), uid(0x20), &now).to_string(PostgresQueryBuilder);
+        assert!(
+            prune.contains(
+                "\"project_members\".\"role\" >= 15 AND \"project_members\".\"is_active\""
+            ),
+            "{prune}"
+        );
+        assert!(prune.contains("(NOT \"issue_assignees\".\"assignee_id\" IN (SELECT \"project_members\".\"member_id\""), "{prune}");
+        assert!(
+            prune.contains(
+                "\"project_members\".\"member_id\" IN (SELECT \"issue_assignees\".\"assignee_id\""
+            ),
+            "{prune}"
+        );
+        let repoint =
+            assignee_repoint(uid(1), uid(0x20), uid(0x10)).to_string(PostgresQueryBuilder);
+        assert!(repoint.contains("SET \"project_id\" = '00000000-0000-0000-0000-000000000020', \"workspace_id\" = '00000000-0000-0000-0000-000000000010' WHERE \"issue_assignees\".\"deleted_at\" IS NULL"), "{repoint}");
+        let relations = relation_delete(uid(1), &now).to_string(PostgresQueryBuilder);
+        assert!(relations.contains("\"issue_relations\".\"deleted_at\" IS NULL AND (\"issue_relations\".\"issue_id\" = "), "{relations}");
+        assert!(
+            relations.contains("OR \"issue_relations\".\"related_issue_id\" = "),
+            "{relations}"
+        );
+        let children = children_detach(uid(1), uid(0x20)).to_string(PostgresQueryBuilder);
+        assert!(children.contains("SET \"parent_id\" = NULL WHERE \"issues\".\"deleted_at\" IS NULL AND \"issues\".\"parent_id\" = "), "{children}");
+        assert!(
+            children.contains("AND (NOT \"issues\".\"project_id\" = "),
+            "{children}"
+        );
+        let inert = inert_run_update(uid(1), &now).to_string(PostgresQueryBuilder);
+        assert!(
+            inert.contains("SET \"status\" = 'cancelled', \"ended_at\" = "),
+            "{inert}"
+        );
+        let barrier = handoff_parent_update(uid(1), &serde_json::json!({"k": 1}))
+            .to_string(PostgresQueryBuilder);
+        assert!(
+            barrier.contains("SET \"status\" = 'cancel_requested', \"run_config\" = E'{"),
+            "{barrier}"
+        );
+
+        // Every repoint sets the same pair over live rows; the id-list
+        // arms render an empty list as a never-true predicate.
+        let comments = [uid(0x70)];
+        for target in crate::app_issues::issue_move::REPOINT_ORDER {
+            let sql = repoint_update(*target, uid(1), &comments, &[], uid(0x20), uid(0x10))
+                .to_string(PostgresQueryBuilder);
+            assert!(sql.contains("SET \"project_id\" = '00000000-0000-0000-0000-000000000020', \"workspace_id\" = '00000000-0000-0000-0000-000000000010' WHERE"), "{target:?}: {sql}");
+            assert!(sql.contains("\"deleted_at\" IS NULL"), "{target:?}: {sql}");
+            assert!(!sql.contains("updated_at"), "{target:?}: {sql}");
+        }
+        let activity = repoint_update(
+            RepointTarget::IssueActivity,
+            uid(1),
+            &comments,
+            &[],
+            uid(0x20),
+            uid(0x10),
+        )
+        .to_string(PostgresQueryBuilder);
+        assert!(activity.contains("(\"issue_activities\".\"issue_id\" = '00000000-0000-0000-0000-000000000001' OR \"issue_activities\".\"issue_comment_id\" IN ('00000000-0000-0000-0000-000000000070'))"), "{activity}");
+        let empty = repoint_update(
+            RepointTarget::Description,
+            uid(1),
+            &comments,
+            &[],
+            uid(0x20),
+            uid(0x10),
+        )
+        .to_string(PostgresQueryBuilder);
+        assert!(
+            empty.ends_with("WHERE \"descriptions\".\"deleted_at\" IS NULL AND 1 = 2"),
+            "{empty}"
+        );
     }
 
     fn lazy_pool() -> sqlx::PgPool {

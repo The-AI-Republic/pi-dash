@@ -571,14 +571,14 @@ pub mod orm {
     use chrono::{DateTime, Utc};
     use pidash_db::entity::{
         agent_run as run, agent_run_event as event, git_code_review_links as reviews,
-        git_repositories as repos, git_repository_bindings as bindings, issue_agent_ticker as ticker,
-        issue_assignees, issue_comments as comments, issue_labels, issue_relations as relations,
-        issues, labels, pod, projects, prompt_section_override as overrides, runner, states,
-        users, workspaces,
+        git_repositories as repos, git_repository_bindings as bindings,
+        issue_agent_ticker as ticker, issue_assignees, issue_comments as comments, issue_labels,
+        issue_relations as relations, issues, labels, pod, projects,
+        prompt_section_override as overrides, runner, states, users, workspaces,
     };
     use sea_orm::sea_query::extension::postgres::{PgBinOper, PgFunc};
     use sea_orm::sea_query::{
-        Alias, Condition, Expr, Func, InsertStatement, LockType, Order, Query,
+        Alias, Condition, Expr, Func, InsertStatement, JoinType, LockType, Order, Query,
         SelectStatement, SimpleExpr, UpdateStatement,
     };
     use serde_json::Value;
@@ -685,7 +685,11 @@ pub mod orm {
     /// [`super::STATE_SELECT_SQL`]: `id`, `name`, `group`.
     pub fn state_select(state_id: Uuid) -> SelectStatement {
         Query::select()
-            .columns([states::Column::Id, states::Column::Name, states::Column::Group])
+            .columns([
+                states::Column::Id,
+                states::Column::Name,
+                states::Column::Group,
+            ])
             .from(states::Entity)
             .and_where(Expr::col(states::Column::Id).eq(state_id))
             .to_owned()
@@ -754,7 +758,11 @@ pub mod orm {
     /// keys from the stored object (a non-object counts as `{}`), then
     /// add its non-null values (`jsonb_strip_nulls`, applied here to the
     /// flat patch).
-    pub fn finalize_update(run_id: Uuid, ended_at: DateTime<Utc>, patch: &Value) -> UpdateStatement {
+    pub fn finalize_update(
+        run_id: Uuid,
+        ended_at: DateTime<Utc>,
+        patch: &Value,
+    ) -> UpdateStatement {
         let stored = Expr::case(
             Expr::expr(Func::cust(alias("jsonb_typeof")).arg(run_col(run::Column::ErrorDetails)))
                 .eq("object"),
@@ -771,13 +779,17 @@ pub mod orm {
                 }
             }
         }
-        let merged = Expr::expr(merged).binary(PgBinOper::Concatenate, Expr::val(Value::Object(kept)));
+        let merged =
+            Expr::expr(merged).binary(PgBinOper::Concatenate, Expr::val(Value::Object(kept)));
         Query::update()
             .table(run::Entity)
             .value(run::Column::Status, "failed")
             .value(run::Column::EndedAt, ended_at)
             .value(run::Column::TerminalHooksAppliedAt, None::<DateTime<Utc>>)
-            .value(run::Column::TerminalCapacityReleasedAt, None::<DateTime<Utc>>)
+            .value(
+                run::Column::TerminalCapacityReleasedAt,
+                None::<DateTime<Utc>>,
+            )
             .value(run::Column::ErrorDetails, merged)
             .and_where(run_col(run::Column::Id).eq(run_id))
             .to_owned()
@@ -1025,8 +1037,10 @@ pub mod orm {
         Query::select()
             .column((alias("l"), labels::Column::Name))
             .from_as(issue_labels::Entity, alias("il"))
-            .inner_join(
-                (labels::Entity, alias("l")),
+            .join_as(
+                JoinType::InnerJoin,
+                labels::Entity,
+                alias("l"),
                 at("l", labels::Column::Id).equals((alias("il"), issue_labels::Column::LabelId)),
             )
             .and_where(at("il", issue_labels::Column::IssueId).eq(issue_id))
@@ -1044,9 +1058,12 @@ pub mod orm {
                 (alias("u"), users::Column::Email),
             ])
             .from_as(issue_assignees::Entity, alias("ia"))
-            .inner_join(
-                (users::Entity, alias("u")),
-                at("u", users::Column::Id).equals((alias("ia"), issue_assignees::Column::AssigneeId)),
+            .join_as(
+                JoinType::InnerJoin,
+                users::Entity,
+                alias("u"),
+                at("u", users::Column::Id)
+                    .equals((alias("ia"), issue_assignees::Column::AssigneeId)),
             )
             .and_where(at("ia", issue_assignees::Column::IssueId).eq(issue_id))
             .order_by((alias("u"), users::Column::CreatedAt), Order::Desc)
@@ -1057,7 +1074,11 @@ pub mod orm {
     /// `sequence`.
     pub fn bundle_project_states_select(project_id: Uuid) -> SelectStatement {
         Query::select()
-            .columns([states::Column::Name, states::Column::Group, states::Column::Description])
+            .columns([
+                states::Column::Name,
+                states::Column::Group,
+                states::Column::Description,
+            ])
             .from(states::Entity)
             .and_where(Expr::col(states::Column::ProjectId).eq(project_id))
             .and_where(Expr::col(states::Column::DeletedAt).is_null())
@@ -1078,12 +1099,16 @@ pub mod orm {
             .column((alias("p"), projects::Column::Identifier))
             .expr_as(at("s", states::Column::Name), alias("state_name"))
             .from_as(issues::Entity, alias("i"))
-            .inner_join(
-                (projects::Entity, alias("p")),
+            .join_as(
+                JoinType::InnerJoin,
+                projects::Entity,
+                alias("p"),
                 at("p", projects::Column::Id).equals((alias("i"), issues::Column::ProjectId)),
             )
-            .left_join(
-                (states::Entity, alias("s")),
+            .join_as(
+                JoinType::LeftJoin,
+                states::Entity,
+                alias("s"),
                 at("s", states::Column::Id).equals((alias("i"), issues::Column::StateId)),
             )
             .to_owned()
@@ -1149,8 +1174,10 @@ pub mod orm {
                 (alias("u"), users::Column::IsBot),
             ])
             .from_as(comments::Entity, alias("c"))
-            .left_join(
-                (users::Entity, alias("u")),
+            .join_as(
+                JoinType::LeftJoin,
+                users::Entity,
+                alias("u"),
                 at("u", users::Column::Id).equals((alias("c"), comments::Column::ActorId)),
             )
             .and_where(at("c", comments::Column::IssueId).eq(issue_id))
@@ -1194,8 +1221,10 @@ pub mod orm {
                 (alias("r"), repos::Column::FullName),
             ])
             .from_as(bindings::Entity, alias("b"))
-            .inner_join(
-                (repos::Entity, alias("r")),
+            .join_as(
+                JoinType::InnerJoin,
+                repos::Entity,
+                alias("r"),
                 at("r", repos::Column::Id).equals((alias("b"), bindings::Column::RepositoryId)),
             )
             .and_where(at("b", bindings::Column::ProjectId).eq(project_id))
@@ -1209,7 +1238,11 @@ pub mod orm {
     /// [`super::BUNDLE_ANCESTOR_HOP_SQL`]: one plain FK hop.
     pub fn bundle_ancestor_hop_select(issue_id: Uuid) -> SelectStatement {
         Query::select()
-            .columns([issues::Column::Name, issues::Column::ProjectId, issues::Column::ParentId])
+            .columns([
+                issues::Column::Name,
+                issues::Column::ProjectId,
+                issues::Column::ParentId,
+            ])
             .from(issues::Entity)
             .and_where(Expr::col(issues::Column::Id).eq(issue_id))
             .to_owned()
@@ -1239,9 +1272,7 @@ pub mod orm {
         let count = Query::select()
             .expr(Expr::col((alias("c"), comments::Column::Id)).count())
             .from_as(comments::Entity, alias("c"))
-            .and_where(
-                at("c", comments::Column::IssueId).equals((alias("i"), issues::Column::Id)),
-            )
+            .and_where(at("c", comments::Column::IssueId).equals((alias("i"), issues::Column::Id)))
             .and_where(at("c", comments::Column::DeletedAt).is_null())
             .to_owned();
         Query::select()
@@ -1250,7 +1281,10 @@ pub mod orm {
                 (alias("i"), issues::Column::StateId),
                 (alias("i"), issues::Column::GitWorkBranch),
             ])
-            .expr_as(SimpleExpr::SubQuery(None, Box::new(count.into_sub_query_statement())), alias("comments_count"))
+            .expr_as(
+                SimpleExpr::SubQuery(None, Box::new(count.into_sub_query_statement())),
+                alias("comments_count"),
+            )
             .from_as(issues::Entity, alias("i"))
             .and_where(at("i", issues::Column::Id).eq(parent_id))
             .to_owned()
@@ -2975,6 +3009,208 @@ mod tests {
             Value::Array(items) => Value::Array(items.iter().map(jsonb_normalize).collect()),
             scalar => scalar.clone(),
         }
+    }
+
+    /// The [`orm`] builders, rendered without a database: aliased
+    /// joins (`AS`), INNER vs LEFT, the scopes, orderings, lock forms
+    /// and the output names the seam decodes by.
+    #[test]
+    fn orm_statement_shapes() {
+        use sea_orm::sea_query::PostgresQueryBuilder;
+        let render =
+            |select: sea_orm::sea_query::SelectStatement| select.to_string(PostgresQueryBuilder);
+        let id = uid(0x01);
+
+        let labels = render(orm::bundle_labels_select(id));
+        assert!(labels.contains("FROM \"issue_labels\" AS \"il\" INNER JOIN \"labels\" AS \"l\" ON \"l\".\"id\" = \"il\".\"label_id\""), "{labels}");
+        assert!(labels.contains("\"l\".\"deleted_at\" IS NULL"), "{labels}");
+        assert!(
+            labels.ends_with("ORDER BY \"l\".\"created_at\" DESC"),
+            "{labels}"
+        );
+        assert!(
+            !labels.contains("\"il\".\"deleted_at\""),
+            "link rows unfiltered: {labels}"
+        );
+
+        let assignees = render(orm::bundle_assignees_select(id));
+        assert!(
+            assignees
+                .contains("INNER JOIN \"users\" AS \"u\" ON \"u\".\"id\" = \"ia\".\"assignee_id\""),
+            "{assignees}"
+        );
+        assert!(
+            assignees.ends_with("ORDER BY \"u\".\"created_at\" DESC"),
+            "{assignees}"
+        );
+
+        let children = render(orm::bundle_children_select(id));
+        assert!(children.contains("FROM \"issues\" AS \"i\" INNER JOIN \"projects\" AS \"p\" ON \"p\".\"id\" = \"i\".\"project_id\" LEFT JOIN \"states\" AS \"s\" ON \"s\".\"id\" = \"i\".\"state_id\""), "{children}");
+        assert!(
+            children.contains("\"s\".\"name\" AS \"state_name\""),
+            "{children}"
+        );
+        for guard in [
+            "\"i\".\"deleted_at\" IS NULL",
+            "\"s\".\"group\" <> 'triage'",
+            "\"i\".\"archived_at\" IS NULL",
+            "\"p\".\"archived_at\" IS NULL",
+            "NOT \"i\".\"is_draft\"",
+        ] {
+            assert!(children.contains(guard), "{guard}: {children}");
+        }
+        assert!(
+            children.ends_with("ORDER BY \"i\".\"created_at\" ASC"),
+            "{children}"
+        );
+
+        let targets = render(orm::bundle_relation_targets_select(&[id, uid(0x02)]));
+        assert!(
+            targets.contains("\"s\".\"group\" AS \"state_group\""),
+            "{targets}"
+        );
+        assert!(targets.contains("\"i\".\"id\" IN ("), "{targets}");
+        assert!(
+            !targets.contains("archived_at"),
+            "targets keep archived rows: {targets}"
+        );
+
+        let comments = render(orm::bundle_comments_select(id));
+        assert!(comments.contains("FROM \"issue_comments\" AS \"c\" LEFT JOIN \"users\" AS \"u\" ON \"u\".\"id\" = \"c\".\"actor_id\""), "{comments}");
+        assert!(
+            comments.contains("NOT 'fold' = ANY(\"c\".\"labels\")"),
+            "{comments}"
+        );
+        assert!(
+            comments.ends_with("ORDER BY \"c\".\"created_at\" ASC"),
+            "{comments}"
+        );
+
+        let remote = render(orm::bundle_remote_select(id));
+        assert!(remote.contains("FROM \"git_repository_bindings\" AS \"b\" INNER JOIN \"git_repositories\" AS \"r\" ON \"r\".\"id\" = \"b\".\"repository_id\""), "{remote}");
+        assert!(
+            remote.ends_with("ORDER BY \"b\".\"created_at\" ASC LIMIT 1"),
+            "{remote}"
+        );
+
+        let parent = render(orm::bundle_parent_cols_select(id));
+        assert!(parent.contains("(SELECT COUNT(\"c\".\"id\") FROM \"issue_comments\" AS \"c\" WHERE \"c\".\"issue_id\" = \"i\".\"id\" AND \"c\".\"deleted_at\" IS NULL) AS \"comments_count\""), "{parent}");
+
+        let overrides = render(orm::bundle_overrides_select(id, None));
+        assert!(
+            overrides.contains("\"is_active\" AND \"workspace_id\" = "),
+            "{overrides}"
+        );
+        assert!(
+            overrides.contains("(\"user_id\" IS NULL OR \"user_id\" = NULL)"),
+            "{overrides}"
+        );
+
+        // Run reads: the view projection, newest first, the active set,
+        // and `FOR UPDATE OF "agent_run"` on the lock forms only.
+        let latest = render(orm::latest_prior_run_select(id));
+        assert!(
+            latest.ends_with("ORDER BY \"created_at\" DESC LIMIT 1"),
+            "{latest}"
+        );
+        assert!(!latest.contains("FOR UPDATE"), "{latest}");
+        let active = render(orm::active_run_select(id));
+        for status in ACTIVE_STATUSES {
+            assert!(
+                active.contains(&format!("'{}'", status.value())),
+                "{status:?}: {active}"
+            );
+        }
+        let lock = render(orm::run_lock_select(id));
+        assert!(lock.ends_with("FOR UPDATE OF \"agent_run\""), "{lock}");
+        let finalize = render(orm::finalize_lock_select(id));
+        assert!(finalize.contains("\"agent_run\".\"status\" NOT IN ('completed', 'failed', 'cancelled', 'blocked', 'refused')"), "{finalize}");
+        assert!(
+            finalize.ends_with("FOR UPDATE OF \"agent_run\""),
+            "{finalize}"
+        );
+        let issue_lock = render(orm::issue_lock_select(id));
+        assert!(
+            issue_lock.ends_with("FOR UPDATE OF \"issues\""),
+            "{issue_lock}"
+        );
+        assert!(
+            !issue_lock.contains("deleted_at"),
+            "all_objects: {issue_lock}"
+        );
+        let default_pod = render(orm::default_pod_select(id));
+        assert!(
+            default_pod
+                .contains("\"is_default\" AND \"deleted_at\" IS NULL ORDER BY \"id\" ASC LIMIT 1"),
+            "{default_pod}"
+        );
+        for (column, name) in RUN_VIEW_COLUMNS.iter().zip(orm::RUN_VIEW.iter()) {
+            assert_eq!(
+                *column,
+                sea_orm::Iden::to_string(name),
+                "RUN_VIEW column order matches RUN_VIEW_COLUMNS"
+            );
+        }
+
+        // Writes: the finalize merge keeps the stored object (reset when
+        // not one), drops the patch's keys, adds its non-null values.
+        let merge = orm::finalize_update(id, now(), &finalize_error_details_patch("c", ""))
+            .to_string(PostgresQueryBuilder);
+        assert!(merge.contains("\"status\" = 'failed'"), "{merge}");
+        assert!(
+            merge.contains(
+                "\"terminal_hooks_applied_at\" = NULL, \"terminal_capacity_released_at\" = NULL"
+            ),
+            "{merge}"
+        );
+        assert!(merge.contains("(CASE WHEN (jsonb_typeof(\"agent_run\".\"error_details\") = 'object') THEN \"agent_run\".\"error_details\" ELSE '{}' END) - 'code' - 'message') || E'{"), "{merge}");
+        let insert = orm::run_insert(&NewAgentRun {
+            id,
+            workspace_id: uid(0x10),
+            created_by_id: uid(0x40),
+            pod_id: uid(0x50),
+            pinned_runner_id: None,
+            work_item_id: uid(0x02),
+            parent_run_id: None,
+            executor_kind: AgentExecutorKind::CloudAgent,
+            error_details: json!({}),
+            tool_plan: json!({}),
+            trigger: "direct".to_owned(),
+            phase_kind: String::new(),
+            run_config: json!({}),
+            now: now(),
+        })
+        .to_string(PostgresQueryBuilder);
+        assert!(insert.starts_with("INSERT INTO \"agent_run\" (\"id\", \"workspace_id\", \"owner_id\", \"created_by_id\""), "{insert}");
+        assert!(
+            insert.contains("'queued', 'cloud_agent', 0, NULL, ''"),
+            "{insert}"
+        );
+        assert!(
+            insert.ends_with(&format!(
+                "RETURNING {}",
+                RUN_VIEW_COLUMNS
+                    .iter()
+                    .map(|column| format!("\"{column}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            "{insert}"
+        );
+        let seq = render(orm::terminal_event_seq_select(id));
+        assert!(
+            seq.contains("COALESCE(MAX(\"seq\"), 0) + 1 AS \"seq\""),
+            "{seq}"
+        );
+        let exists = render(orm::terminal_event_exists_select(id));
+        assert!(
+            exists.contains("EXISTS(SELECT 1 FROM \"agent_run_event\" WHERE"),
+            "{exists}"
+        );
+        assert!(
+            exists.contains("\"kind\" = 'terminal') AS \"exists\""),
+            "{exists}"
+        );
     }
 
     fn issue_view() -> IssueView {

@@ -4153,7 +4153,7 @@ async fn join_request_approve(
             // The reactivate `.save()` stamps `updated_by` with the
             // approver (`db/models/base.py:42`).
             members::update_role(
-                &pidash_db::orm_tx::TxConn::new(&mut *tx),
+                &pidash_db::orm_tx::TxConn::new(&mut tx),
                 &members::RoleUpdate {
                     id: member_id,
                     role: request_role,
@@ -4168,7 +4168,7 @@ async fn join_request_approve(
             // (`db/models/base.py:37-39`), so the column stays unset —
             // while the JSON props ride the model defaults (`:207-213`).
             members::add(
-                &pidash_db::orm_tx::TxConn::new(&mut *tx),
+                &pidash_db::orm_tx::TxConn::new(&mut tx),
                 &members::NewMember {
                     workspace_id,
                     user_id: Some(requester_id),
