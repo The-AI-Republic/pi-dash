@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
 
@@ -209,15 +210,12 @@ async fn run_agent_checks(
                     blocker: true,
                 }),
             }
-            checks.push(Check {
-                name: tag("claude-auth"),
-                ok: true,
-                detail: format!(
-                    "assumed ok (run `{} /login` if runs fail with auth errors)",
-                    claude_binary
-                ),
-                blocker: false,
-            });
+            let probe = gather_claude_auth_probe(claude_binary).await;
+            checks.push(
+                classify_claude_auth(&probe)
+                    .with_fix(claude_binary)
+                    .into_check(tag("claude-auth")),
+            );
         }
         crate::config::schema::AgentKind::CursorAgent => {
             match check_version(cursor_binary).await {
@@ -235,18 +233,21 @@ async fn run_agent_checks(
                 }),
             }
             // cursor-agent auth is interactive (`cursor-agent login`) or via the
-            // CURSOR_API_KEY env var; there's no cheap non-interactive probe, so
-            // surface a hint rather than block.
-            checks.push(Check {
-                name: tag("cursor-auth"),
-                ok: true,
-                detail: format!(
-                    "assumed ok (run `{} login` or set CURSOR_API_KEY if runs fail \
-                     with auth errors)",
-                    cursor_binary
-                ),
-                blocker: false,
-            });
+            // CURSOR_API_KEY env var. The env var is a cheap local check; an
+            // interactive login has no probe we trust, so without the key we
+            // keep the neutral hint rather than warn.
+            checks.push(
+                env_key_auth(
+                    "CURSOR_API_KEY",
+                    std::env::var("CURSOR_API_KEY").ok(),
+                    format!(
+                        "assumed ok (run `{} login` or set CURSOR_API_KEY if runs fail \
+                         with auth errors)",
+                        cursor_binary
+                    ),
+                )
+                .into_check(tag("cursor-auth")),
+            );
         }
         crate::config::schema::AgentKind::OpenClaw => {
             match check_version(openclaw_binary).await {
@@ -304,17 +305,19 @@ async fn run_agent_checks(
                 }),
             }
             // grok auth is via the `XAI_API_KEY` env var or an interactive
-            // `grok` login; there's no cheap non-interactive probe, so surface
-            // a hint rather than block.
-            checks.push(Check {
-                name: tag("grok-auth"),
-                ok: true,
-                detail: format!(
-                    "assumed ok (set XAI_API_KEY or run `{grok_binary}` login if runs \
-                     fail with auth errors)"
-                ),
-                blocker: false,
-            });
+            // `grok` login. Report the env var when set; an interactive login
+            // has no cheap probe, so otherwise keep the neutral hint.
+            checks.push(
+                env_key_auth(
+                    "XAI_API_KEY",
+                    std::env::var("XAI_API_KEY").ok(),
+                    format!(
+                        "assumed ok (set XAI_API_KEY or run `{grok_binary}` login if runs \
+                         fail with auth errors)"
+                    ),
+                )
+                .into_check(tag("grok-auth")),
+            );
         }
         crate::config::schema::AgentKind::MuseCode => {
             match check_version(muse_binary).await {
@@ -331,14 +334,17 @@ async fn run_agent_checks(
                     blocker: true,
                 }),
             }
-            // Muse Code auth is via the `META_API_KEY` env var; there's no cheap
-            // non-interactive probe, so surface a hint rather than block.
-            checks.push(Check {
-                name: tag("muse-auth"),
-                ok: true,
-                detail: "assumed ok (set META_API_KEY if runs fail with auth errors)".to_string(),
-                blocker: false,
-            });
+            // Muse Code auth is via the `META_API_KEY` env var. Report it when
+            // set. When unset here it may still come from the login shell the
+            // daemon spawns the agent through, so stay neutral rather than warn.
+            checks.push(
+                env_key_auth(
+                    "META_API_KEY",
+                    std::env::var("META_API_KEY").ok(),
+                    "assumed ok (set META_API_KEY if runs fail with auth errors)".to_string(),
+                )
+                .into_check(tag("muse-auth")),
+            );
         }
     }
 }
@@ -381,6 +387,246 @@ async fn check_codex_auth(binary: &str) -> Result<String> {
         "unable to confirm Codex auth; run `{} login` before starting the runner",
         binary
     )
+}
+
+/// Outcome of a cheap, local agent-auth check. Never derived from a model
+/// call: doctor must not spend tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AuthStatus {
+    /// Credentials were found. Reported as a pass.
+    LoggedIn(String),
+    /// We looked and found nothing. A warning (`ok: false`) but never a
+    /// blocker: the operator gets the fix, doctor still exits 0.
+    NotLoggedIn(String),
+    /// We could not tell (e.g. macOS Keychain, an unrecognised credentials
+    /// file, a third-party provider). Neutral: reported as a pass with a hint.
+    Unknown(String),
+}
+
+impl AuthStatus {
+    /// Append the Claude-specific fix to non-passing outcomes.
+    fn with_fix(self, claude_binary: &str) -> Self {
+        match self {
+            AuthStatus::LoggedIn(d) => AuthStatus::LoggedIn(d),
+            AuthStatus::NotLoggedIn(d) => AuthStatus::NotLoggedIn(format!(
+                "not logged in: {d}; run `{claude_binary} /login` (or set ANTHROPIC_API_KEY)"
+            )),
+            AuthStatus::Unknown(d) => AuthStatus::Unknown(format!(
+                "could not verify: {d}; run `{claude_binary} /login` if runs fail with auth errors"
+            )),
+        }
+    }
+
+    fn into_check(self, name: String) -> Check {
+        let (ok, detail) = match self {
+            AuthStatus::LoggedIn(d) => (true, d),
+            AuthStatus::NotLoggedIn(d) => (false, d),
+            AuthStatus::Unknown(d) => (true, d),
+        };
+        Check {
+            name,
+            ok,
+            detail,
+            blocker: false,
+        }
+    }
+}
+
+/// Env-var-only auth check for agents whose sole cheap local signal is an API
+/// key variable (Cursor, Grok, Muse). A set key is reported; an unset key keeps
+/// `fallback` as a neutral hint because those agents may also be logged in
+/// interactively or get the key from the login shell.
+fn env_key_auth(var: &str, value: Option<String>, fallback: String) -> AuthStatus {
+    match value {
+        Some(v) if !v.trim().is_empty() => AuthStatus::LoggedIn(format!("{var} is set")),
+        _ => AuthStatus::Unknown(fallback),
+    }
+}
+
+/// Env vars Claude Code accepts as credentials, in the order it documents them.
+const CLAUDE_AUTH_ENV_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+];
+
+/// Env vars that route Claude Code to a cloud provider whose credentials we
+/// cannot cheaply verify.
+const CLAUDE_THIRD_PARTY_ENV_VARS: &[&str] = &[
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+];
+
+/// What `claude auth status` reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaudeStatus {
+    logged_in: bool,
+    auth_method: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CredentialsFile {
+    /// Holds a `claudeAiOauth` entry.
+    Found(PathBuf),
+    /// Exists but is not in a format we recognise.
+    Unrecognized(PathBuf),
+    Missing,
+}
+
+/// Everything the Claude auth decision depends on, gathered up front so the
+/// decision itself ([`classify_claude_auth`]) is pure and unit-testable.
+#[derive(Debug, Clone)]
+struct ClaudeAuthProbe {
+    /// `None` when the CLI has no `auth status` subcommand or its output
+    /// could not be parsed.
+    status: Option<ClaudeStatus>,
+    /// First credential env var that is set and non-empty.
+    env_var: Option<&'static str>,
+    /// First third-party-provider switch that is set.
+    third_party_provider: Option<&'static str>,
+    credentials: CredentialsFile,
+    is_macos: bool,
+}
+
+fn classify_claude_auth(p: &ClaudeAuthProbe) -> AuthStatus {
+    // Claude Code's own status command reads every credential source it
+    // supports (env, credentials file, macOS Keychain, apiKeyHelper), so its
+    // answer wins when we have one.
+    if let Some(status) = &p.status {
+        if status.logged_in {
+            let method = status.auth_method.as_deref().unwrap_or("unknown method");
+            return AuthStatus::LoggedIn(format!("logged in ({method})"));
+        }
+        if let Some(var) = p.third_party_provider {
+            return AuthStatus::Unknown(format!(
+                "{var} is set; cloud-provider credentials are not checked"
+            ));
+        }
+        return AuthStatus::NotLoggedIn("`claude auth status` reports no login".to_string());
+    }
+    if let Some(var) = p.env_var {
+        return AuthStatus::LoggedIn(format!("{var} is set"));
+    }
+    if let Some(var) = p.third_party_provider {
+        return AuthStatus::Unknown(format!(
+            "{var} is set; cloud-provider credentials are not checked"
+        ));
+    }
+    match &p.credentials {
+        CredentialsFile::Found(path) => {
+            AuthStatus::LoggedIn(format!("credentials found ({})", path.display()))
+        }
+        CredentialsFile::Unrecognized(path) => AuthStatus::Unknown(format!(
+            "unrecognised credentials file ({})",
+            path.display()
+        )),
+        // On macOS Claude Code keeps its login in the Keychain, so a missing
+        // file says nothing.
+        CredentialsFile::Missing if p.is_macos => AuthStatus::Unknown(
+            "credentials are kept in the macOS Keychain, which doctor does not read".to_string(),
+        ),
+        CredentialsFile::Missing => {
+            AuthStatus::NotLoggedIn("no auth env var and no credentials file".to_string())
+        }
+    }
+}
+
+/// Parse `claude auth status` JSON. Tolerates login-shell noise around the
+/// object. Returns `None` for anything without a boolean `loggedIn`.
+fn parse_claude_status(stdout: &str) -> Option<ClaudeStatus> {
+    let start = stdout.find('{')?;
+    let end = stdout.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&stdout[start..=end]).ok()?;
+    Some(ClaudeStatus {
+        logged_in: v.get("loggedIn")?.as_bool()?,
+        auth_method: v
+            .get("authMethod")
+            .and_then(|m| m.as_str())
+            .map(str::to_string),
+    })
+}
+
+/// True when `claude auth status --help` printed that subcommand's own usage.
+/// An older CLI without it prints the top-level help instead; running
+/// `claude auth status` there would treat the words as a prompt.
+fn supports_auth_status(help_output: &str) -> bool {
+    help_output.contains("claude auth status")
+}
+
+fn claude_credentials_path(
+    config_dir: Option<std::ffi::OsString>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    match config_dir {
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir).join(".credentials.json")),
+        _ => home.map(|h| h.join(".claude").join(".credentials.json")),
+    }
+}
+
+fn read_credentials_file(path: &Path) -> CredentialsFile {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return if path.exists() {
+            CredentialsFile::Unrecognized(path.to_path_buf())
+        } else {
+            CredentialsFile::Missing
+        };
+    };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) if v.get("claudeAiOauth").is_some_and(|o| o.is_object()) => {
+            CredentialsFile::Found(path.to_path_buf())
+        }
+        _ => CredentialsFile::Unrecognized(path.to_path_buf()),
+    }
+}
+
+/// Run a short, non-model `claude` subcommand through the daemon's spawn
+/// helper with a timeout and no stdin. Returns `(stdout, stderr)`, or `None`
+/// if it could not be spawned or did not finish in time.
+async fn run_claude_quietly(binary: &str, args: &[&str]) -> Option<(String, String)> {
+    let mut cmd = login_shell_command(binary, args, None);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let out = tokio::time::timeout(std::time::Duration::from_secs(15), cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    Some((
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    ))
+}
+
+async fn claude_auth_status(binary: &str) -> Option<ClaudeStatus> {
+    let (help_out, help_err) = run_claude_quietly(binary, &["auth", "status", "--help"]).await?;
+    if !supports_auth_status(&format!("{help_out}\n{help_err}")) {
+        return None;
+    }
+    // `auth status` exits 1 when logged out, so read the JSON, not the code.
+    let (out, _) = run_claude_quietly(binary, &["auth", "status"]).await?;
+    parse_claude_status(&out)
+}
+
+async fn gather_claude_auth_probe(binary: &str) -> ClaudeAuthProbe {
+    let set = |var: &&str| std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
+    let credentials = claude_credentials_path(
+        std::env::var_os("CLAUDE_CONFIG_DIR"),
+        directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()),
+    )
+    .map(|p| read_credentials_file(&p))
+    .unwrap_or(CredentialsFile::Missing);
+    ClaudeAuthProbe {
+        status: claude_auth_status(binary).await,
+        env_var: CLAUDE_AUTH_ENV_VARS.iter().copied().find(|v| set(v)),
+        third_party_provider: CLAUDE_THIRD_PARTY_ENV_VARS.iter().copied().find(|v| set(v)),
+        credentials,
+        is_macos: cfg!(target_os = "macos"),
+    }
 }
 
 async fn check_git() -> Result<String> {
@@ -652,5 +898,199 @@ mod tests {
         assert!(grok_checks.iter().any(|c| c.name == "grok-auth"));
         assert!(muse_checks.iter().any(|c| c.name == "muse"));
         assert!(muse_checks.iter().any(|c| c.name == "muse-auth"));
+    }
+
+    // ---- Claude Code auth classification (PIDASH-7) ----
+
+    fn probe() -> ClaudeAuthProbe {
+        ClaudeAuthProbe {
+            status: None,
+            env_var: None,
+            third_party_provider: None,
+            credentials: CredentialsFile::Missing,
+            is_macos: false,
+        }
+    }
+
+    #[test]
+    fn claude_auth_env_key_set_is_logged_in() {
+        let p = ClaudeAuthProbe {
+            env_var: Some("ANTHROPIC_API_KEY"),
+            ..probe()
+        };
+        match classify_claude_auth(&p) {
+            AuthStatus::LoggedIn(d) => assert!(d.contains("ANTHROPIC_API_KEY"), "{d}"),
+            other => panic!("expected LoggedIn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claude_auth_credentials_file_found_is_logged_in() {
+        let p = ClaudeAuthProbe {
+            credentials: CredentialsFile::Found(PathBuf::from("/h/.claude/.credentials.json")),
+            ..probe()
+        };
+        match classify_claude_auth(&p) {
+            AuthStatus::LoggedIn(d) => assert!(d.contains(".credentials.json"), "{d}"),
+            other => panic!("expected LoggedIn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claude_auth_nothing_found_on_linux_is_not_logged_in() {
+        assert!(matches!(
+            classify_claude_auth(&probe()),
+            AuthStatus::NotLoggedIn(_)
+        ));
+    }
+
+    #[test]
+    fn claude_auth_macos_without_file_could_not_verify() {
+        let p = ClaudeAuthProbe {
+            is_macos: true,
+            ..probe()
+        };
+        match classify_claude_auth(&p) {
+            AuthStatus::Unknown(d) => assert!(d.contains("Keychain"), "{d}"),
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claude_auth_unrecognized_credentials_file_could_not_verify() {
+        let p = ClaudeAuthProbe {
+            credentials: CredentialsFile::Unrecognized(PathBuf::from("/h/.credentials.json")),
+            ..probe()
+        };
+        assert!(matches!(classify_claude_auth(&p), AuthStatus::Unknown(_)));
+    }
+
+    #[test]
+    fn claude_auth_status_command_is_authoritative() {
+        let yes = ClaudeAuthProbe {
+            status: Some(ClaudeStatus {
+                logged_in: true,
+                auth_method: Some("claude.ai".into()),
+            }),
+            ..probe()
+        };
+        match classify_claude_auth(&yes) {
+            AuthStatus::LoggedIn(d) => assert!(d.contains("claude.ai"), "{d}"),
+            other => panic!("expected LoggedIn, got {other:?}"),
+        }
+        // Even on macOS, Claude's own "not logged in" answer wins — it reads
+        // the Keychain itself.
+        let no = ClaudeAuthProbe {
+            status: Some(ClaudeStatus {
+                logged_in: false,
+                auth_method: Some("none".into()),
+            }),
+            credentials: CredentialsFile::Found(PathBuf::from("/stale")),
+            is_macos: true,
+            ..probe()
+        };
+        assert!(matches!(
+            classify_claude_auth(&no),
+            AuthStatus::NotLoggedIn(_)
+        ));
+    }
+
+    #[test]
+    fn claude_auth_third_party_provider_could_not_verify() {
+        let p = ClaudeAuthProbe {
+            third_party_provider: Some("CLAUDE_CODE_USE_BEDROCK"),
+            status: Some(ClaudeStatus {
+                logged_in: false,
+                auth_method: None,
+            }),
+            ..probe()
+        };
+        assert!(matches!(classify_claude_auth(&p), AuthStatus::Unknown(_)));
+    }
+
+    #[test]
+    fn claude_auth_status_to_check_mapping() {
+        let ok = AuthStatus::LoggedIn("x".into()).into_check("claude-auth".into());
+        assert!(ok.ok && !ok.blocker);
+        let warn =
+            AuthStatus::NotLoggedIn("run `claude /login`".into()).into_check("claude-auth".into());
+        assert!(
+            !warn.ok && !warn.blocker,
+            "not logged in must warn, not block"
+        );
+        let unknown = AuthStatus::Unknown("could not verify".into()).into_check("a".into());
+        assert!(unknown.ok && !unknown.blocker, "unknown must stay neutral");
+    }
+
+    #[test]
+    fn parse_claude_status_reads_logged_in_json() {
+        let out = "bash: no job control in this shell\n{\n  \"loggedIn\": true,\n  \"authMethod\": \"claude.ai\"\n}\n";
+        assert_eq!(
+            parse_claude_status(out),
+            Some(ClaudeStatus {
+                logged_in: true,
+                auth_method: Some("claude.ai".into()),
+            })
+        );
+        let out = r#"{"loggedIn": false, "authMethod": "none"}"#;
+        assert_eq!(parse_claude_status(out).map(|s| s.logged_in), Some(false));
+        assert_eq!(parse_claude_status("Usage: claude [options]"), None);
+        assert_eq!(parse_claude_status(r#"{"foo": 1}"#), None);
+    }
+
+    #[test]
+    fn auth_status_subcommand_detection() {
+        assert!(supports_auth_status(
+            "Usage: claude auth status [options]\n\nShow authentication status"
+        ));
+        // An old CLI without the subcommand prints its top-level help for
+        // `--help`; we must not then run `claude auth status`, which it would
+        // treat as a prompt.
+        assert!(!supports_auth_status(
+            "Usage: claude [options] [command] [prompt]\n\nClaude Code"
+        ));
+    }
+
+    #[test]
+    fn read_credentials_file_outcomes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".credentials.json");
+        assert_eq!(read_credentials_file(&path), CredentialsFile::Missing);
+        std::fs::write(&path, r#"{"claudeAiOauth":{"accessToken":"t"}}"#).unwrap();
+        assert_eq!(
+            read_credentials_file(&path),
+            CredentialsFile::Found(path.clone())
+        );
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(
+            read_credentials_file(&path),
+            CredentialsFile::Unrecognized(path.clone())
+        );
+    }
+
+    #[test]
+    fn claude_credentials_path_honours_config_dir() {
+        assert_eq!(
+            claude_credentials_path(Some("/cfg".into()), Some(PathBuf::from("/home/u"))),
+            Some(PathBuf::from("/cfg/.credentials.json"))
+        );
+        assert_eq!(
+            claude_credentials_path(None, Some(PathBuf::from("/home/u"))),
+            Some(PathBuf::from("/home/u/.claude/.credentials.json"))
+        );
+        assert_eq!(
+            claude_credentials_path(Some("".into()), Some(PathBuf::from("/home/u"))),
+            Some(PathBuf::from("/home/u/.claude/.credentials.json"))
+        );
+    }
+
+    #[test]
+    fn env_key_auth_reports_set_key_or_keeps_hint() {
+        let set = env_key_auth("XAI_API_KEY", Some("k".into()), "hint".into());
+        assert!(matches!(set, AuthStatus::LoggedIn(ref d) if d.contains("XAI_API_KEY")));
+        let unset = env_key_auth("XAI_API_KEY", None, "hint".into());
+        assert!(matches!(unset, AuthStatus::Unknown(ref d) if d == "hint"));
+        let empty = env_key_auth("XAI_API_KEY", Some("  ".into()), "hint".into());
+        assert!(matches!(empty, AuthStatus::Unknown(_)));
     }
 }
