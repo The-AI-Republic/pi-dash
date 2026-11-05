@@ -478,6 +478,32 @@ pub fn clear_workspace_token(paths: &Paths, slug: &str) -> Result<bool> {
 pub struct AppliedRunner {
     pub runner: RunnerConfig,
     pub is_first_runner: bool,
+    /// The config already held a block with this `runner_id` before this
+    /// call. The server answers a repeated create (same machine and
+    /// project for the engine) with the runner it already has, so this is
+    /// a successful no-op: the existing block is kept as it was.
+    pub already_present: bool,
+}
+
+/// Attached (as context) to an [`apply_enroll_response`] error when a
+/// block with the response's `runner_id` was already in the config. The
+/// runner existed before this call, so a caller must not roll it back:
+/// stripping the block or deleting the server row would remove a runner
+/// that was working. See [`may_roll_back`].
+#[derive(Debug)]
+pub struct KeptExistingRunner;
+
+impl std::fmt::Display for KeptExistingRunner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this runner was already on this computer; it was left in place")
+    }
+}
+
+/// Whether a caller may roll back (strip the `[[runner]]` block, delete
+/// the server row) after `err` from [`apply_enroll_response`]. False when
+/// the runner existed before the call.
+pub fn may_roll_back(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<KeptExistingRunner>().is_none()
 }
 
 #[derive(Debug, Clone)]
@@ -619,6 +645,7 @@ pub async fn apply_enroll_response(
     let new_runner_for_closure = new_runner.clone();
     let runner_id = new_runner.runner_id;
     let mut is_first_runner = false;
+    let mut already_present = false;
     let cfg_after = file::mutate_config_or_init(paths, init_cfg, |cfg| {
         if !cfg.daemon.cloud_url.is_empty() && cfg.daemon.cloud_url != cloud_url {
             anyhow::bail!(
@@ -629,6 +656,17 @@ pub async fn apply_enroll_response(
         }
         if cfg.daemon.cloud_url.is_empty() {
             cfg.daemon.cloud_url = cloud_url.to_string();
+        }
+        // A repeated create for a runner this host already has (the server
+        // returns the existing runner_id, e.g. two engine adds for one
+        // project): keep the block that is there and succeed.
+        if cfg
+            .runners
+            .iter()
+            .any(|r| r.runner_id == new_runner_for_closure.runner_id)
+        {
+            already_present = true;
+            return Ok(());
         }
         // One engine runner per machine and project (design §5). The
         // caller checked before enrolling, but outside this lock: two adds
@@ -657,15 +695,41 @@ pub async fn apply_enroll_response(
         is_first_runner = cfg.runners.is_empty();
         cfg.runners.push(new_runner_for_closure);
         Ok(())
-    })
-    .context("persisting [[runner]] block under config lock")?;
+    });
+    let cfg_after = match cfg_after {
+        Ok(cfg) => cfg,
+        Err(e) if already_present => {
+            return Err(e
+                .context(KeptExistingRunner)
+                .context("persisting [[runner]] block under config lock"));
+        }
+        Err(e) => return Err(e.context("persisting [[runner]] block under config lock")),
+    };
     let new_runner = cfg_after
         .runners
         .iter()
         .find(|runner| runner.runner_id == runner_id)
         .cloned()
         .unwrap_or(new_runner);
+    let applied = AppliedRunner {
+        runner: new_runner,
+        is_first_runner,
+        already_present,
+    };
+    match write_enroll_credentials(paths, resp, cloud_url).await {
+        Ok(()) => Ok(applied),
+        Err(e) if already_present => Err(e.context(KeptExistingRunner)),
+        Err(e) => Err(e),
+    }
+}
 
+/// The credential half of [`apply_enroll_response`], after the block is in
+/// the config.
+async fn write_enroll_credentials(
+    paths: &Paths,
+    resp: &EnrollResponse,
+    cloud_url: &str,
+) -> Result<()> {
     // Credentials write happens AFTER config so a config-write failure
     // (cloud-URL mismatch, validation error, IO) doesn't leave an orphan
     // per-runner credentials file pointing at a runner the supervisor
@@ -695,10 +759,7 @@ pub async fn apply_enroll_response(
                 "cloud did not return per-runner credentials and no dev-machine token is configured"
             );
         }
-        return Ok(AppliedRunner {
-            runner: new_runner,
-            is_first_runner,
-        });
+        return Ok(());
     }
     write_runner_credentials(
         runner_paths.credentials_path(),
@@ -711,11 +772,7 @@ pub async fn apply_enroll_response(
     )
     .await
     .context("writing per-runner credentials failed")?;
-
-    Ok(AppliedRunner {
-        runner: new_runner,
-        is_first_runner,
-    })
+    Ok(())
 }
 
 #[cfg(test)]
@@ -978,6 +1035,77 @@ mod tests {
         );
         // The persisted config validates (exclusive dir, no collision).
         file::load_config(&paths).unwrap().validate().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_repeated_create_for_the_same_runner_keeps_the_block() {
+        // The server answers a second create for the same machine and
+        // project with the runner it already has.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let resp = sample_response("engine");
+        apply_enroll_response(
+            &paths,
+            &resp,
+            "https://example.com",
+            enroll_options(tmp.path().join("wd1"), AgentKind::Engine),
+        )
+        .await
+        .unwrap();
+        let again = apply_enroll_response(
+            &paths,
+            &resp,
+            "https://example.com",
+            enroll_options(tmp.path().join("wd2"), AgentKind::Engine),
+        )
+        .await
+        .unwrap();
+        assert!(again.already_present);
+        assert_eq!(again.runner.workspace.working_dir, tmp.path().join("wd1"));
+        let cfg = file::load_config(&paths).unwrap();
+        assert_eq!(cfg.runners.len(), 1);
+        assert_eq!(cfg.runners[0].workspace.working_dir, tmp.path().join("wd1"));
+    }
+
+    #[tokio::test]
+    async fn a_failure_after_a_repeated_create_forbids_rollback() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let resp = sample_response("engine");
+        apply_enroll_response(
+            &paths,
+            &resp,
+            "https://example.com",
+            enroll_options(tmp.path().join("wd1"), AgentKind::Engine),
+        )
+        .await
+        .unwrap();
+        // A folder where the credentials file goes: the write fails.
+        let creds = paths.for_runner(resp.runner_id).credentials_path();
+        std::fs::remove_file(&creds).unwrap();
+        std::fs::create_dir_all(&creds).unwrap();
+        let err = apply_enroll_response(
+            &paths,
+            &resp,
+            "https://example.com",
+            enroll_options(tmp.path().join("wd1"), AgentKind::Engine),
+        )
+        .await
+        .unwrap_err();
+        assert!(!may_roll_back(&err), "{err:#}");
+        // A brand-new runner that fails the same way may be rolled back.
+        let fresh = sample_response("fresh");
+        let creds = paths.for_runner(fresh.runner_id).credentials_path();
+        std::fs::create_dir_all(&creds).unwrap();
+        let err = apply_enroll_response(
+            &paths,
+            &fresh,
+            "https://example.com",
+            enroll_options(tmp.path().join("wd3"), AgentKind::Codex),
+        )
+        .await
+        .unwrap_err();
+        assert!(may_roll_back(&err), "{err:#}");
     }
 
     #[tokio::test]

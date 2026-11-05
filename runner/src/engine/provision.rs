@@ -184,6 +184,11 @@ pub async fn add_engine_runner(
             };
             Ok((runner, info))
         }
+        // The runner was already on this computer: it is the working one,
+        // so leave its block and its server row alone.
+        Err(e) if !crate::cli::runner_ops::may_roll_back(&e) => {
+            Err(e.context("setting up the engine runner locally"))
+        }
         Err(e) => {
             let _ = file::mutate_config(paths, |cfg| {
                 cfg.runners.retain(|r| r.runner_id != resp.runner_id);
@@ -273,13 +278,22 @@ mod tests {
         file::write_config(paths, &cfg).unwrap();
     }
 
+    /// Like the server: one engine runner per machine and project, so a
+    /// second create for the same project returns the same `runner_id`.
     fn enrol_handler() -> Handler {
-        Arc::new(|req| {
+        let ids: Arc<std::sync::Mutex<std::collections::HashMap<String, uuid::Uuid>>> =
+            Arc::default();
+        Arc::new(move |req| {
             if req.path == "/api/v1/runner/runners/" {
                 let body = req.json();
                 let n = body["project"].as_str().unwrap().to_string();
+                let id = *ids
+                    .lock()
+                    .unwrap()
+                    .entry(n.to_lowercase())
+                    .or_insert_with(uuid::Uuid::new_v4);
                 let resp = serde_json::json!({
-                    "runner_id": uuid::Uuid::new_v4(),
+                    "runner_id": id,
                     "runner_name": format!("builtin-host-acme-{}", n.to_lowercase()),
                     "refresh_token": "", "access_token": "", "access_token_expires_at": "",
                     "refresh_token_generation": 0, "workspace_slug": "acme",
@@ -409,23 +423,95 @@ mod tests {
             add_engine_runner(&paths, &req, &status),
             add_engine_runner(&paths, &req, &status)
         );
-        // Both passed the early check and enrolled; the write under the
-        // config lock refuses the second.
+        // Both passed the early check and enrolled. The server answers the
+        // second create with the same runner, so both adds succeed and
+        // name the one runner.
         assert_eq!(server.requests_to("/api/v1/runner/runners/").len(), 2);
-        let errs: Vec<String> = [a.err(), b.err()]
-            .into_iter()
-            .flatten()
-            .map(|e| format!("{e:#}"))
-            .collect();
-        assert_eq!(errs.len(), 1, "exactly one add is refused: {errs:?}");
-        assert!(errs[0].contains("already on"), "{}", errs[0]);
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_eq!(a.0.runner_id, b.0.runner_id);
         let cfg = file::load_config(&paths).unwrap();
-        assert_eq!(
-            cfg.runners
-                .iter()
-                .filter(|r| r.agent.kind == AgentKind::Engine)
-                .count(),
-            1
+        let engines: Vec<_> = cfg
+            .runners
+            .iter()
+            .filter(|r| r.agent.kind == AgentKind::Engine)
+            .collect();
+        assert_eq!(engines.len(), 1);
+        assert_eq!(engines[0].runner_id, a.0.runner_id);
+        // Nothing was rolled back: no delete reached the server.
+        let deletes: Vec<_> = server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == "DELETE")
+            .cloned()
+            .collect();
+        assert!(
+            deletes.is_empty(),
+            "the working runner was deleted: {deletes:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_repeat_add_never_deletes_the_runner_that_is_there() {
+        // The server returns the existing runner, and the local half then
+        // fails (the per-runner credentials can't be written).
+        // The block and the server row of the working runner must stay.
+        let id = uuid::Uuid::new_v4();
+        let server = test_server::start(Arc::new(move |req| {
+            if req.path == "/api/v1/runner/runners/" {
+                let resp = serde_json::json!({
+                    "runner_id": id,
+                    "runner_name": "builtin-host-acme-web",
+                    "refresh_token": "rt_x", "access_token": "", "access_token_expires_at": "",
+                    "refresh_token_generation": 1, "workspace_slug": "acme",
+                    "project_identifier": "WEB", "long_poll_interval_secs": 25,
+                    "protocol_version": 4
+                });
+                (201, resp.to_string())
+            } else {
+                (200, "{}".into())
+            }
+        }))
+        .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        seed(&paths, &server.url);
+        let req = AddEngineRunner {
+            workspace: "acme".into(),
+            project: "WEB".into(),
+            working_dir: None,
+        };
+        let (first, _) = add_engine_runner(&paths, &req, &available()).await.unwrap();
+        // Rename the project slug so the early per-project check misses it
+        // (as a block written by an older build would), and put a folder
+        // where the per-runner credentials go so the local half fails
+        // after the server call.
+        file::mutate_config(&paths, |cfg| {
+            cfg.runners[0].project_slug = Some("web-old".into());
+            Ok(())
+        })
+        .unwrap();
+        let resp_id = first.runner_id;
+        let creds = paths.for_runner(resp_id).credentials_path();
+        let _ = std::fs::remove_file(&creds);
+        std::fs::create_dir_all(&creds).unwrap();
+        let err = add_engine_runner(&paths, &req, &available())
+            .await
+            .expect_err("the credentials write must fail");
+        assert!(!crate::cli::runner_ops::may_roll_back(&err), "{err:#}");
+        let cfg = file::load_config(&paths).unwrap();
+        assert!(
+            cfg.runners.iter().any(|r| r.runner_id == resp_id),
+            "the existing block was stripped"
+        );
+        let deletes = server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == "DELETE")
+            .count();
+        assert_eq!(deletes, 0, "the existing server row was deleted");
     }
 }

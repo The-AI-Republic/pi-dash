@@ -274,6 +274,26 @@ impl MachineControl {
             anyhow::bail!("create_runner command missing project");
         }
         let agent_kind = parse_agent_kind(&cmd.agent)?;
+        // One engine runner per machine and project (design §5): when this
+        // computer already runs the engine for the project, the command is
+        // already satisfied. Answer with that runner instead of creating
+        // (and possibly rolling back) another.
+        if agent_kind == AgentKind::Engine
+            && !cmd.workspace_slug.is_empty()
+            && let Some(existing) =
+                existing_engine_runner(&self.spawn_ctx.paths, &cmd.workspace_slug, &cmd.project)?
+        {
+            tracing::info!(
+                runner_id = %existing.runner_id,
+                project = %cmd.project,
+                "create_runner: the engine is already on for this project; reusing it"
+            );
+            self.spawn_ctx
+                .add_runner(existing.clone())
+                .await
+                .context("bringing up the existing engine runner")?;
+            return Ok((existing.runner_id, existing.name));
+        }
         let host_label = hostname().unwrap_or_else(|| "unknown-host".to_string());
 
         // The command names its workspace; answer it with that workspace's
@@ -318,6 +338,11 @@ impl MachineControl {
             .context("persisting [[runner]] block")
         {
             Ok(applied) => applied,
+            // The runner was already on this computer: never roll back the
+            // one that is working.
+            Err(persist_err) if !crate::cli::runner_ops::may_roll_back(&persist_err) => {
+                return Err(persist_err);
+            }
             Err(persist_err) => {
                 // Roll the cloud-side row back so a failed local write
                 // doesn't leave an orphan runner (mirrors `pidash
@@ -347,6 +372,25 @@ impl MachineControl {
 
         Ok((resp.runner_id, resp.runner_name))
     }
+}
+
+/// The engine runner this computer already has for `workspace`/`project`.
+fn existing_engine_runner(
+    paths: &crate::util::paths::Paths,
+    workspace: &str,
+    project: &str,
+) -> Result<Option<crate::config::schema::RunnerConfig>> {
+    if !paths.config_path().exists() {
+        return Ok(None);
+    }
+    let cfg = crate::config::file::load_config(paths)?;
+    Ok(cfg.runners.into_iter().find(|r| {
+        r.agent.kind == AgentKind::Engine
+            && r.workspace_slug.as_deref() == Some(workspace)
+            && r.project_slug
+                .as_deref()
+                .is_some_and(|p| p.eq_ignore_ascii_case(project))
+    }))
 }
 
 /// Kebab-case wire value → AgentKind, via the same clap ValueEnum
@@ -721,5 +765,63 @@ mod tests {
         assert_eq!(command_token(&tokens, &session, "acme").unwrap(), "mt_acme");
         assert_eq!(command_token(&tokens, &session, "").unwrap(), "mt_acme");
         assert!(command_token(&tokens, &session, "gamma").is_err());
+    }
+
+    #[tokio::test]
+    async fn an_engine_already_on_for_the_project_is_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = crate::util::paths::Paths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            runtime_dir: tmp.path().join("runtime"),
+            machine_context_dir: tmp.path().join("config"),
+        };
+        assert!(
+            existing_engine_runner(&paths, "acme", "WEB")
+                .unwrap()
+                .is_none()
+        );
+        let resp = crate::cloud::http::EnrollResponse {
+            runner_id: Uuid::new_v4(),
+            runner_name: "builtin-acme-web".into(),
+            refresh_token: "rt".into(),
+            access_token: String::new(),
+            access_token_expires_at: String::new(),
+            refresh_token_generation: 1,
+            workspace_slug: "acme".into(),
+            pod_slug: String::new(),
+            project_identifier: "WEB".into(),
+            long_poll_interval_secs: 25,
+            protocol_version: 4,
+            machine_token: None,
+            machine_token_minted: false,
+        };
+        apply_enroll_response(
+            &paths,
+            &resp,
+            "https://example.com",
+            ApplyEnrollOptions {
+                working_dir: Some(tmp.path().join("wd")),
+                agent_kind: AgentKind::Engine,
+                model: None,
+                reasoning_effort: None,
+            },
+        )
+        .await
+        .unwrap();
+        let found = existing_engine_runner(&paths, "acme", "web")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.runner_id, resp.runner_id);
+        assert!(
+            existing_engine_runner(&paths, "beta", "WEB")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            existing_engine_runner(&paths, "acme", "API")
+                .unwrap()
+                .is_none()
+        );
     }
 }
