@@ -630,12 +630,31 @@ pub async fn apply_enroll_response(
         .as_deref()
         .filter(|t| !t.trim().is_empty())
     {
-        write_cli_token(paths, cloud_url, machine_token, false)
-            .context("writing shared dev-machine token to [cli].token")?;
+        // The token belongs to the runner's workspace (design §4.9): store
+        // it in that workspace's slot, never over another workspace's
+        // default `[cli].token`.
+        if resp.workspace_slug.trim().is_empty() {
+            write_cli_token(paths, cloud_url, machine_token, false)
+                .context("writing shared dev-machine token to [cli].token")?;
+        } else {
+            store_workspace_token(
+                paths,
+                cloud_url,
+                &resp.workspace_slug,
+                machine_token,
+                false,
+                false,
+            )
+            .context("writing the workspace's dev-machine token")?;
+        }
     }
     if resp.refresh_token.trim().is_empty() {
-        let has_machine_token = load_cli_token(paths)?
-            .as_deref()
+        let workspace =
+            (!resp.workspace_slug.trim().is_empty()).then_some(resp.workspace_slug.as_str());
+        let has_machine_token = file::load_config(paths)?
+            .cli
+            .as_ref()
+            .and_then(|cli| cli.token_for_workspace(workspace))
             .map(|token| token.starts_with("mt_"))
             .unwrap_or(false);
         if !has_machine_token {
@@ -872,6 +891,35 @@ mod tests {
         assert!(!applied.is_first_runner);
         let cfg = file::load_config(&paths).unwrap();
         assert_eq!(cfg.runners.len(), 2);
+    }
+
+    /// PIDESKAPP-122 review: enrolling a runner of a second workspace
+    /// stores the returned machine token in that workspace's slot and
+    /// leaves the default workspace's token alone.
+    #[tokio::test]
+    async fn enrolment_token_goes_to_the_runners_workspace_slot() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        write_cli_token(&paths, "https://example.com", "legacy-user-token", false).unwrap();
+        write_cli_workspace(&paths, "acme").unwrap();
+
+        let mut resp = sample_response("b1");
+        resp.workspace_slug = "beta".into();
+        resp.refresh_token = String::new();
+        resp.machine_token = Some("mt_beta".into());
+        apply_enroll_response(
+            &paths,
+            &resp,
+            "https://example.com",
+            enroll_options(tmp.path().join("wb"), AgentKind::Codex),
+        )
+        .await
+        .unwrap();
+
+        let cli = file::load_config(&paths).unwrap().cli.expect("cli section");
+        assert_eq!(cli.token.as_deref(), Some("legacy-user-token"));
+        assert_eq!(cli.workspace_slug.as_deref(), Some("acme"));
+        assert_eq!(cli.token_for_workspace(Some("beta")), Some("mt_beta"));
     }
 
     #[test]

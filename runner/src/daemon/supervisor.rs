@@ -167,6 +167,7 @@ impl Supervisor {
             instances: ipc_instances.clone(),
             tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             activation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            pending_idle_restarts: Default::default(),
         };
 
         let ipc = IpcServer {
@@ -371,7 +372,12 @@ pub(crate) struct RunnerSpawnCtx {
     tasks: Arc<std::sync::Mutex<HashMap<uuid::Uuid, SpawnedInstanceTasks>>>,
     /// Serialises every add / stop / restart of a runner.
     activation_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Runners waiting to be restarted with new credentials once idle.
+    pending_idle_restarts: Arc<std::sync::Mutex<std::collections::HashSet<uuid::Uuid>>>,
 }
+
+/// How often a busy runner whose credentials changed is checked for idle.
+const IDLE_RESTART_POLL: Duration = Duration::from_secs(2);
 
 /// How long a stopped runner's HTTP loops get to exit before they are
 /// aborted.
@@ -433,9 +439,12 @@ impl RunnerSpawnCtx {
     }
 
     /// Restart every runner whose workspace now has a different live token
-    /// than the one it runs with (a workspace signed in or re-signed in).
-    /// A busy runner is skipped and keeps its old credential until its
-    /// next restart.
+    /// than the one it runs with: a workspace signed in or re-signed in
+    /// (new token), or signed out (no token, so the runner comes back up
+    /// offline and stops taking work). A busy runner is not interrupted:
+    /// it is restarted as soon as it is idle (see
+    /// [`Self::schedule_restart_when_idle`]), because a login rotates the
+    /// workspace token and the old one stops working on the server.
     async fn restart_stale_runners(&self) -> usize {
         if self.transport.is_none() {
             return 0;
@@ -446,13 +455,17 @@ impl RunnerSpawnCtx {
             .into_iter()
             .filter(|inst| {
                 let desired = self.tokens.token_for(inst.config.workspace_slug.as_deref());
-                desired.is_some() && desired != inst.machine_token
+                desired != inst.machine_token
             })
             .collect();
         let mut restarted = 0;
         for inst in stale {
             if let Err(e) = ensure_idle(&inst) {
-                tracing::info!(runner = %inst.name, "not restarting for new credentials: {e:#}");
+                tracing::info!(
+                    runner = %inst.name,
+                    "credentials changed; restarting once the runner is idle: {e:#}"
+                );
+                self.schedule_restart_when_idle(inst.runner_id);
                 continue;
             }
             let cfg = inst.config.clone();
@@ -465,6 +478,52 @@ impl RunnerSpawnCtx {
             }
         }
         restarted
+    }
+
+    /// Restart runner `runner_id` with the current credentials once it has
+    /// no run and no local chat turn in flight. One waiter per runner; it
+    /// ends when the runner is gone or no longer needs the restart.
+    ///
+    /// A plain `fn` that spawns a boxed future, so the spawned task can call
+    /// back into [`Self::restart_stale_runners`] without a recursive future
+    /// type.
+    fn schedule_restart_when_idle(&self, runner_id: uuid::Uuid) {
+        {
+            let mut pending = self
+                .pending_idle_restarts
+                .lock()
+                .expect("idle-restart set poisoned");
+            if !pending.insert(runner_id) {
+                return;
+            }
+        }
+        let ctx = self.clone();
+        let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            Box::pin(async move {
+                loop {
+                    tokio::time::sleep(IDLE_RESTART_POLL).await;
+                    let Some(inst) = ctx.instance_by_id(runner_id) else {
+                        break;
+                    };
+                    let desired = ctx.tokens.token_for(inst.config.workspace_slug.as_deref());
+                    if desired == inst.machine_token {
+                        break;
+                    }
+                    if ensure_idle(&inst).is_ok() {
+                        ctx.pending_idle_restarts
+                            .lock()
+                            .expect("idle-restart set poisoned")
+                            .remove(&runner_id);
+                        ctx.restart_stale_runners().await;
+                        return;
+                    }
+                }
+                ctx.pending_idle_restarts
+                    .lock()
+                    .expect("idle-restart set poisoned")
+                    .remove(&runner_id);
+            });
+        tokio::spawn(fut);
     }
 
     /// Change one runner's settings in-process (design §5, "a new
@@ -4595,6 +4654,7 @@ mod tests {
                 insts.iter().map(|i| (i.runner_id, (*i).clone())).collect(),
             )),
             activation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            pending_idle_restarts: Default::default(),
         }
     }
 
@@ -4942,6 +5002,82 @@ mod tests {
         tokens.mark_revoked("mt_acme");
         assert!(ctx.is_workspace_signed_out(&a));
         assert!(!ctx.is_workspace_signed_out(&b));
+    }
+
+    /// PIDESKAPP-122 review: a login while a runner is mid-run rotates the
+    /// workspace token; the runner is restarted with the new one as soon as
+    /// it is idle instead of keeping the revoked token for good. A
+    /// sign-out (no token left) takes the runner offline the same way.
+    #[tokio::test]
+    async fn busy_runner_picks_up_new_credentials_once_idle_and_sign_out_takes_it_offline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        paths.ensure().unwrap();
+        let transport = SharedHttpTransport::new("http://127.0.0.1:1".into()).unwrap();
+        let tokens = two_workspace_tokens();
+        let a = build_runner_instance(
+            runner_in("a", "acme", tmp.path().join("wa")),
+            Some(&transport),
+            &tokens,
+            &paths,
+            &DaemonConfig::default(),
+        )
+        .await
+        .unwrap();
+        let runner_id = a.runner_id;
+        let ctx = RunnerSpawnCtx::for_tests(Some(transport), tokens.clone(), &paths, &[&a]);
+
+        a.state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id: uuid::Uuid::new_v4(),
+                thread_id: None,
+                status: "running".into(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        let mut relogin = crate::config::schema::CliSection {
+            token: Some("mt_acme_2".into()),
+            workspace_slug: Some("acme".into()),
+            ..Default::default()
+        };
+        relogin.set_workspace_token("beta", "mt_beta", false);
+        tokens.reload(Some(&relogin));
+        assert_eq!(
+            ctx.restart_stale_runners().await,
+            0,
+            "busy: not interrupted"
+        );
+        assert_eq!(
+            ctx.instance_by_id(runner_id)
+                .unwrap()
+                .machine_token
+                .as_deref(),
+            Some("mt_acme")
+        );
+
+        a.state.set_current_run(None).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let now = ctx.instance_by_id(runner_id).and_then(|i| i.machine_token);
+            if now.as_deref() == Some("mt_acme_2") {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "runner was not restarted once idle"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Local-only sign-out of acme: the runner comes back up offline.
+        let mut signed_out = crate::config::schema::CliSection::default();
+        signed_out.set_workspace_token("beta", "mt_beta", false);
+        tokens.reload(Some(&signed_out));
+        assert_eq!(ctx.restart_stale_runners().await, 1);
+        let after = ctx.instance_by_id(runner_id).unwrap();
+        assert!(after.machine_token.is_none());
+        assert!(after.workspace_signed_out && after.client.is_none());
     }
 
     #[tokio::test]
