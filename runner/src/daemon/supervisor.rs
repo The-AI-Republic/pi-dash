@@ -81,11 +81,11 @@ impl Supervisor {
             approvals: _supervisor_approvals,
         } = self;
         // Process ownership (runner cleanup §4.1): take the exclusive
-        // instance lock, list this instance's stale proc records *before* any
-        // runner can spawn, and recover them in the background. Held until
+        // instance lock and recover this instance's stale proc records
+        // *before* any runner can spawn (bounded; a resumed chat reuses its
+        // tag, so recovery must not run alongside new agents). Held until
         // the daemon exits.
-        let (_proc_ownership, recovery_handle) =
-            crate::daemon::proc_cleanup::startup(&paths.data_dir);
+        let _proc_ownership = crate::daemon::proc_cleanup::startup(&paths.data_dir).await;
 
         // Daemon-level state has no single runner_id any more — runners
         // come and go under one connection. Per-instance state still
@@ -280,9 +280,6 @@ impl Supervisor {
         if let Some(h) = replay_retry_handle {
             h.abort();
             let _ = h.await;
-        }
-        if let Some(h) = recovery_handle {
-            h.abort();
         }
 
         // Finish every agent process tree before anything is published:

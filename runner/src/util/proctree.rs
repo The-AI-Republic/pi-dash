@@ -216,6 +216,17 @@ enum Sig {
     Kill,
 }
 
+/// What signalling an owned group did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Signalled {
+    Sent,
+    /// The group is gone (ESRCH), or its pgid provably belongs to someone
+    /// else now: either way ours is gone.
+    Gone,
+    /// Not sent: EPERM, or the group could not be proven ours.
+    Refused(&'static str),
+}
+
 /// Signal a whole group. `Err(true)` on ESRCH (gone), `Err(false)` otherwise.
 fn signal_group(pgid: i32, sig: Sig) -> Result<(), bool> {
     #[cfg(unix)]
@@ -284,6 +295,11 @@ struct TreeInner {
     record_dir: Option<PathBuf>,
     record: Mutex<Option<ProcRecord>>,
     phase: Mutex<Phase>,
+    /// Start time of the leader, for the identity check after it is reaped.
+    leader_start_ms: Mutex<Option<u64>>,
+    /// Set once the leader has been reaped. From then on an empty group's
+    /// pgid can be reused, so every signal first re-proves the group is ours.
+    leader_reaped: AtomicBool,
     finish_lock: tokio::sync::Mutex<()>,
 }
 
@@ -297,11 +313,43 @@ impl TreeInner {
 
     /// Signal while holding the phase lock, so a concurrent drop or finish
     /// can never signal a group another path has already observed gone.
-    fn signal(&self, sig: Sig) -> Result<(), bool> {
-        let phase = self.phase.lock().unwrap_or_else(|e| e.into_inner());
-        match *phase {
-            Phase::Armed(pgid) => signal_group(pgid, sig),
-            _ => Err(true),
+    ///
+    /// Once the leader has been reaped, an emptied group's pgid may have been
+    /// reused, so the group is first re-proven ours with the same check crash
+    /// recovery uses ([`group_identity`]): a member carries our tag, or,
+    /// without a readable tag, every member started at or after our leader.
+    fn signal(&self, sig: Sig) -> Signalled {
+        let mut phase = self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        let Phase::Armed(pgid) = *phase else {
+            return Signalled::Gone;
+        };
+        if self.leader_reaped.load(Ordering::SeqCst) {
+            let leader_start = *self
+                .leader_start_ms
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match group_identity(pgid, self.tag.as_deref(), leader_start) {
+                Some(true) => {}
+                Some(false) => {
+                    *phase = Phase::Gone;
+                    return Signalled::Gone;
+                }
+                None => {
+                    if probe_group(pgid) == Probe::Gone {
+                        *phase = Phase::Gone;
+                        return Signalled::Gone;
+                    }
+                    return Signalled::Refused("group can no longer be proven ours");
+                }
+            }
+        }
+        match signal_group(pgid, sig) {
+            Ok(()) => Signalled::Sent,
+            Err(true) => {
+                *phase = Phase::Gone;
+                Signalled::Gone
+            }
+            Err(false) => Signalled::Refused("EPERM"),
         }
     }
 
@@ -325,17 +373,17 @@ impl TreeInner {
             Probe::Gone => None,
             Probe::Denied => Some("EPERM probing group".to_string()),
             Probe::Alive => match self.signal(Sig::Term) {
-                Err(true) => None,
-                Err(false) => Some("EPERM sending SIGTERM".to_string()),
-                Ok(()) => match wait_group(pgid, TERM_WAIT).await {
+                Signalled::Gone => None,
+                Signalled::Refused(why) => Some(format!("SIGTERM not sent: {why}")),
+                Signalled::Sent => match wait_group(pgid, TERM_WAIT).await {
                     Probe::Gone => None,
                     Probe::Denied => Some("EPERM after SIGTERM".to_string()),
                     Probe::Alive => {
                         tracing::debug!(pgid, "group survived SIGTERM; sending SIGKILL");
                         match self.signal(Sig::Kill) {
-                            Err(true) => None,
-                            Err(false) => Some("EPERM sending SIGKILL".to_string()),
-                            Ok(()) => match wait_group(pgid, KILL_WAIT).await {
+                            Signalled::Gone => None,
+                            Signalled::Refused(why) => Some(format!("SIGKILL not sent: {why}")),
+                            Signalled::Sent => match wait_group(pgid, KILL_WAIT).await {
                                 Probe::Gone => None,
                                 Probe::Denied => Some("EPERM after SIGKILL".to_string()),
                                 Probe::Alive => Some(
@@ -474,7 +522,12 @@ impl TreeView {
             return true;
         };
         match inner.pgid() {
-            Some(pgid) => probe_group(pgid) == Probe::Gone,
+            Some(pgid) if probe_group(pgid) == Probe::Gone => {
+                // Observed gone: never signal this pgid again.
+                inner.mark_gone();
+                true
+            }
+            Some(_) => false,
             None => true,
         }
     }
@@ -527,6 +580,8 @@ impl ProcessTree {
             record_dir,
             record: Mutex::new(record),
             phase: Mutex::new(Phase::Provisional),
+            leader_start_ms: Mutex::new(None),
+            leader_reaped: AtomicBool::new(false),
             finish_lock: tokio::sync::Mutex::new(()),
         });
         REGISTRY.remember(&inner);
@@ -586,6 +641,11 @@ impl ProcessTree {
             return;
         };
         let start = crate::util::procinfo::info(pgid).map(|p| p.start_time_ms);
+        *self
+            .inner
+            .leader_start_ms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = start;
         let mut rec = self.inner.record.lock().unwrap_or_else(|e| e.into_inner());
         if let (Some(rec), Some(dir)) = (rec.as_mut(), &self.inner.record_dir) {
             rec.pgid = Some(pgid);
@@ -593,6 +653,19 @@ impl ProcessTree {
             if let Err(e) = write_record(dir, rec) {
                 tracing::warn!("failed to update proc record {}: {e}", rec.record_id);
             }
+        }
+    }
+
+    /// The leader has been reaped (its exit status collected). Its pid, and
+    /// with it the pgid, can now be reused once the group empties: disarm at
+    /// once if the group is already gone, and re-prove ownership before any
+    /// later signal (see `TreeInner::signal`).
+    pub fn leader_reaped(&self) {
+        self.inner.leader_reaped.store(true, Ordering::SeqCst);
+        if let Some(pgid) = self.inner.pgid()
+            && probe_group(pgid) == Probe::Gone
+        {
+            self.inner.mark_gone();
         }
     }
 
@@ -704,8 +777,14 @@ async fn clean_tagged_pids(tag: &str) -> bool {
     }
 }
 
-/// Decision for one record whose group still has live members.
-fn group_is_ours(pgid: i32, rec: &ProcRecord) -> Option<bool> {
+/// Is the live group `pgid` still the one whose leader started at
+/// `leader_start` and whose members carry `tag`? `Some(true)`: a member
+/// carries the tag, or no member's environment could be checked and every
+/// member started at or after the leader. `Some(false)`: a member is older
+/// than the leader, so the pgid was reused. `None`: cannot prove either way
+/// (or no live member is left). Used by crash recovery and, once the leader
+/// is reaped, before every signal of a live tree.
+fn group_identity(pgid: i32, tag: Option<&str>, leader_start: Option<u64>) -> Option<bool> {
     let members: Vec<_> = crate::util::procinfo::group_members(pgid)
         .into_iter()
         .filter(|m| !m.zombie)
@@ -714,14 +793,16 @@ fn group_is_ours(pgid: i32, rec: &ProcRecord) -> Option<bool> {
         return None;
     }
     let mut any_readable = false;
-    for m in &members {
-        match tagged(m.pid, &rec.tag) {
-            Some(true) => return Some(true),
-            Some(false) => any_readable = true,
-            None => {}
+    if let Some(tag) = tag {
+        for m in &members {
+            match tagged(m.pid, tag) {
+                Some(true) => return Some(true),
+                Some(false) => any_readable = true,
+                None => {}
+            }
         }
     }
-    let leader_start = rec.leader_start_time_ms?;
+    let leader_start = leader_start?;
     let all_after = members.iter().all(|m| m.start_time_ms >= leader_start);
     if !any_readable && all_after {
         return Some(true);
@@ -740,43 +821,67 @@ fn group_is_ours(pgid: i32, rec: &ProcRecord) -> Option<bool> {
 /// [`list_records`]; call it before any new spawn so live records are not in
 /// the list). Deletes a record only once its group is confirmed gone.
 pub async fn recover(records: Vec<(PathBuf, ProcRecord)>) -> RecoveryReport {
+    // Records are independent, so resolve them in parallel: the whole pass
+    // takes about one record's worst case (SIGTERM 3 s + SIGKILL 2 s), which
+    // keeps daemon start short while it waits for recovery.
+    let results = futures_util::future::join_all(records.into_iter().map(recover_one)).await;
     let mut report = RecoveryReport::default();
-    for (path, rec) in records {
-        let resolved = match rec.pgid {
-            // Crash between record and spawn (or before the pgid was filled
-            // in): resolve by tag alone.
-            None => clean_tagged_pids(&rec.tag).await,
-            Some(pgid) => match probe_group(pgid) {
-                Probe::Gone => true,
-                Probe::Denied => false,
-                Probe::Alive => match group_is_ours(pgid, &rec) {
-                    Some(true) => {
-                        tracing::info!(pgid, record_id = %rec.record_id, "recovering leftover agent process group");
-                        let ok = clean_foreign_group(pgid).await;
-                        if ok {
-                            report.cleaned += 1;
-                            let _ = std::fs::remove_file(&path);
-                            continue;
-                        }
-                        false
-                    }
-                    Some(false) => {
-                        tracing::info!(pgid, record_id = %rec.record_id, "proc record's pgid now belongs to another group; ignoring it");
-                        true
-                    }
-                    None => false,
-                },
-            },
-        };
-        if resolved {
-            report.resolved += 1;
-            let _ = std::fs::remove_file(&path);
-        } else {
-            report.kept += 1;
-            tracing::warn!(record_id = %rec.record_id, "could not resolve proc record; keeping it for the next start");
+    for r in results {
+        match r {
+            Recovered::Cleaned => report.cleaned += 1,
+            Recovered::Resolved => report.resolved += 1,
+            Recovered::Kept => report.kept += 1,
         }
     }
     report
+}
+
+enum Recovered {
+    Cleaned,
+    Resolved,
+    Kept,
+}
+
+async fn recover_one((path, rec): (PathBuf, ProcRecord)) -> Recovered {
+    let outcome = match rec.pgid {
+        // Crash between record and spawn (or before the pgid was filled
+        // in): resolve by tag alone.
+        None => {
+            if clean_tagged_pids(&rec.tag).await {
+                Recovered::Resolved
+            } else {
+                Recovered::Kept
+            }
+        }
+        Some(pgid) => match probe_group(pgid) {
+            Probe::Gone => Recovered::Resolved,
+            Probe::Denied => Recovered::Kept,
+            Probe::Alive => match group_identity(pgid, Some(&rec.tag), rec.leader_start_time_ms) {
+                Some(true) => {
+                    tracing::info!(pgid, record_id = %rec.record_id, "recovering leftover agent process group");
+                    if clean_foreign_group(pgid).await {
+                        Recovered::Cleaned
+                    } else {
+                        Recovered::Kept
+                    }
+                }
+                Some(false) => {
+                    tracing::info!(pgid, record_id = %rec.record_id, "proc record's pgid now belongs to another group; ignoring it");
+                    Recovered::Resolved
+                }
+                None => Recovered::Kept,
+            },
+        },
+    };
+    match outcome {
+        Recovered::Kept => {
+            tracing::warn!(record_id = %rec.record_id, "could not resolve proc record; keeping it for the next start");
+        }
+        Recovered::Cleaned | Recovered::Resolved => {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    outcome
 }
 
 #[cfg(all(test, unix))]
@@ -995,6 +1100,69 @@ mod tests {
         assert!(alive(pid));
         let _ = child.start_kill();
         let _ = child.wait().await;
+    }
+
+    #[tokio::test]
+    async fn a_group_kept_after_its_leader_was_reaped_is_revalidated_before_any_signal() {
+        // After the leader is reaped an empty group's pgid can be reused. Model
+        // that: the tree is armed on a live group that is untagged (the
+        // reuser), and the leader has been reported reaped.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx(dir.path(), "test-instance-revalidate");
+        let tree = ProcessTree::prepare(Some(scope("run-reval")), Some(ctx.clone())).unwrap();
+        let mut impostor = session_cmd("exec sleep 300", None).spawn().unwrap();
+        let pid = impostor.id().unwrap() as i32;
+        tree.attach(impostor.id());
+        tree.leader_reaped();
+        assert_eq!(tree.pgid(), Some(pid), "a live group stays armed");
+        let outcome = tree.finish_group().await;
+        assert!(
+            matches!(outcome, FinishOutcome::Unresolved(_)),
+            "{outcome:?}"
+        );
+        assert!(
+            alive(pid),
+            "an unprovable group is never signalled by finish"
+        );
+        drop(tree);
+        assert!(alive(pid), "nor by the drop backstop");
+        let _ = impostor.start_kill();
+        let _ = impostor.wait().await;
+    }
+
+    #[tokio::test]
+    async fn a_group_observed_gone_when_the_leader_is_reaped_is_disarmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx(dir.path(), "test-instance-disarm");
+        let tree = ProcessTree::prepare(Some(scope("run-disarm")), Some(ctx.clone())).unwrap();
+        let mut child = session_cmd("exit 0", tree.tag()).spawn().unwrap();
+        tree.attach(child.id());
+        assert!(tree.pgid().is_some());
+        let path = tree.record_path().unwrap();
+        child.wait().await.unwrap();
+        tree.leader_reaped();
+        assert_eq!(tree.pgid(), None, "an empty group is never signalled again");
+        assert!(!path.exists(), "and its record is resolved");
+    }
+
+    #[tokio::test]
+    async fn a_tagged_group_kept_after_its_leader_was_reaped_is_still_cleaned() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx(dir.path(), "test-instance-tagged");
+        let pf = dir.path().join("pids");
+        let tree = ProcessTree::prepare(Some(scope("run-tagged")), Some(ctx.clone())).unwrap();
+        let mut child = session_cmd(
+            &format!("sleep 300 & echo $! > {}; exit 0", pf.display()),
+            tree.tag(),
+        )
+        .spawn()
+        .unwrap();
+        tree.attach(child.id());
+        child.wait().await.unwrap();
+        tree.leader_reaped();
+        let orphan = read_pids(&pf, 1).await[0];
+        assert_eq!(tree.finish_group().await, FinishOutcome::Gone);
+        assert!(wait_all_gone(&[orphan], Duration::from_secs(1)).await);
     }
 
     #[tokio::test]

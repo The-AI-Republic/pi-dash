@@ -148,8 +148,12 @@ async fn wait_task(
     exit_tx: watch::Sender<Option<ExitSnapshot>>,
 ) {
     let mut exited = false;
+    // Publish the exit and tell the tree its leader is reaped: from here an
+    // emptied group's pgid may be reused, so the tree re-proves ownership
+    // before any later signal.
     let publish = |res: std::io::Result<std::process::ExitStatus>| {
         let _ = exit_tx.send(Some(exit_snapshot_from(res.ok())));
+        tree.leader_reaped();
     };
     let (grace, done) = loop {
         tokio::select! {
