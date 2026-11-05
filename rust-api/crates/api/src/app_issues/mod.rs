@@ -42,6 +42,7 @@
 //! - the manager's triage exclusion keeps NULL-state rows (Django
 //!   negates null-safely: `NOT (group = 'triage' AND group IS NOT NULL)`).
 
+mod access;
 pub mod expand;
 pub mod handlers_archive;
 pub mod handlers_bulk;
@@ -536,16 +537,10 @@ async fn resolve_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    access::project_id_by_identifier(&pidash_db::pool::sea_orm_connection(pool), slug, &upper)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ProjectNotFound)
 }
 
 /// `allow_permission([ADMIN, MEMBER, GUEST])` at `PROJECT` level: an
@@ -559,50 +554,21 @@ async fn allow_project(
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<(), Denial> {
-    let role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    match role {
-        Some((20,)) | Some((15,)) | Some((5,)) => Ok(()),
-        _ => {
-            let member: Option<(i32,)> = sqlx::query_as(
-                r#"SELECT 1 FROM project_members pm
-                   JOIN workspaces w ON w.id = pm.workspace_id
-                   WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-                   AND pm.is_active AND pm.deleted_at IS NULL"#,
-            )
-            .bind(user_id)
-            .bind(project_id)
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            let admin: Option<(i32,)> = sqlx::query_as(
-                r#"SELECT 1 FROM workspace_members wm
-                   JOIN workspaces w ON w.id = wm.workspace_id
-                   WHERE wm.member_id = $1 AND w.slug = $2 AND wm.role = 20
-                   AND wm.is_active AND wm.deleted_at IS NULL"#,
-            )
-            .bind(user_id)
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            if member.is_some() && admin.is_some() {
-                Ok(())
-            } else {
-                Err(Denial::Forbidden)
-            }
-        }
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let role = access::project_role(&db, slug, *project_id, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    if matches!(role, Some(20 | 15 | 5)) {
+        return Ok(());
+    }
+    // The fallback's "any active project membership" is the role row.
+    let admin = access::is_workspace_admin(&db, slug, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    if role.is_some() && admin {
+        Ok(())
+    } else {
+        Err(Denial::Forbidden)
     }
 }
 
@@ -615,28 +581,21 @@ async fn tenant_context(
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<TenantContext, Denial> {
-    let row: Option<(uuid::Uuid, bool)> = sqlx::query_as(
-        r#"SELECT p.workspace_id, p.guest_view_all_features FROM projects p
-           JOIN workspaces w ON w.id = p.workspace_id
-           WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let (workspace_id, guest_view_all) = row.ok_or(Denial::NotFound)?;
-    let member: Option<(String, i16)> = sqlx::query_as(
-        r#"SELECT u.user_timezone, pm.role FROM users u
-           LEFT JOIN project_members pm ON pm.member_id = u.id
-             AND pm.project_id = $2 AND pm.is_active AND pm.deleted_at IS NULL
-           WHERE u.id = $1"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let (timezone_name, role) = member.ok_or(Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let (workspace_id, guest_view_all) = access::project_tenant(&db, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::NotFound)?;
+    let timezone_name = access::user_timezone(&db, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
+    // The actor is a project member past the gates; a missing membership
+    // (a NULL role off the old LEFT JOIN) stays the 500 it was.
+    let role = access::project_role_any_slug(&db, *project_id, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
     let timezone: Tz = timezone_name.parse().map_err(|_| Denial::ServerError)?;
     let guest_scoped = role == 5 && !guest_view_all;
     Ok(TenantContext {
@@ -929,12 +888,10 @@ pub async fn filters_timezone(
     {
         return Ok(chrono_tz::UTC);
     }
-    let row: Option<(String,)> = sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
+    let name = access::user_timezone(&pidash_db::pool::sea_orm_connection(pool), *user_id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    let (name,) = row.ok_or(Denial::ServerError)?;
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
     name.parse().map_err(|_| Denial::ServerError)
 }
 
@@ -1863,14 +1820,6 @@ fn quote_json(rendered: String) -> String {
 // ---- group values ---------------------------------------------------------------
 // Port of `issue_group_values`: the known group buckets per field.
 
-/// `state_id` group values (`utils/grouper.py::issue_group_values`,
-/// `State.objects.filter(is_triage=False, ...)`): the explicit
-/// `is_triage = FALSE` plus `StateManager`'s `NOT (group = 'triage')`
-/// (`db/models/state.py:79-83`). `$1` = slug, `$2` = project.
-const STATE_GROUP_VALUES_SQL: &str = r#"SELECT s.id FROM states s JOIN workspaces w ON w.id = s.workspace_id
-                   WHERE s.is_triage = FALSE AND NOT (s."group" = 'triage')
-                   AND w.slug = $1 AND s.project_id = $2 AND s.deleted_at IS NULL"#;
-
 /// `SELECT` for the `target_date`/`start_date`/`created_by` group-values
 /// branches (`utils/grouper.py::issue_group_values`):
 /// `SELECT DISTINCT {column}, issue.created_at ... ORDER BY issue.created_at DESC`.
@@ -1898,92 +1847,74 @@ pub async fn group_values(
     project_id: &uuid::Uuid,
     filtered: &FilteredSet,
 ) -> Result<Vec<String>, Denial> {
-    // Binds for a fresh statement: slug + project first (same order).
-    let scalar_text = |rows: Vec<(Option<String>,)>| {
-        rows.into_iter()
-            .filter_map(|row| row.0)
-            .collect::<Vec<String>>()
-    };
     match field {
         "state_id" => {
-            let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(STATE_GROUP_VALUES_SQL)
-                .bind(slug)
-                .bind(project_id)
-                .fetch_all(pool)
-                .await
-                .map_err(|_| Denial::ServerError)?;
-            Ok(rows.into_iter().map(|row| row.0.to_string()).collect())
-        }
-        "labels__id" => {
-            let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-                r#"SELECT l.id FROM labels l JOIN workspaces w ON w.id = l.workspace_id
-                   WHERE w.slug = $1 AND l.project_id = $2 AND l.deleted_at IS NULL"#,
+            let rows = access::non_triage_state_ids(
+                &pidash_db::pool::sea_orm_connection(pool),
+                slug,
+                *project_id,
             )
-            .bind(slug)
-            .bind(project_id)
-            .fetch_all(pool)
             .await
             .map_err(|_| Denial::ServerError)?;
-            let mut out: Vec<String> = rows.into_iter().map(|row| row.0.to_string()).collect();
+            Ok(rows.into_iter().map(|id| id.to_string()).collect())
+        }
+        "labels__id" => {
+            let rows = access::label_ids(
+                &pidash_db::pool::sea_orm_connection(pool),
+                slug,
+                *project_id,
+            )
+            .await
+            .map_err(|_| Denial::ServerError)?;
+            let mut out: Vec<String> = rows.into_iter().map(|id| id.to_string()).collect();
             out.push("None".to_owned());
             Ok(out)
         }
         "assignees__id" => {
-            let rows: Vec<(Option<uuid::Uuid>,)> = sqlx::query_as(
-                r#"SELECT pm.member_id FROM project_members pm
-                   JOIN workspaces w ON w.id = pm.workspace_id
-                   WHERE w.slug = $1 AND pm.project_id = $2 AND pm.is_active
-                   AND pm.deleted_at IS NULL"#,
+            let rows = access::member_ids(
+                &pidash_db::pool::sea_orm_connection(pool),
+                slug,
+                *project_id,
             )
-            .bind(slug)
-            .bind(project_id)
-            .fetch_all(pool)
             .await
             .map_err(|_| Denial::ServerError)?;
-            Ok(scalar_text(
-                rows.into_iter()
-                    .map(|row| (row.0.map(|id| id.to_string()),))
-                    .collect(),
-            ))
+            Ok(rows
+                .into_iter()
+                .flatten()
+                .map(|id| id.to_string())
+                .collect())
         }
         "issue_module__module_id" => {
-            let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-                r#"SELECT m.id FROM modules m JOIN workspaces w ON w.id = m.workspace_id
-                   WHERE w.slug = $1 AND m.project_id = $2 AND m.deleted_at IS NULL"#,
+            let rows = access::module_ids(
+                &pidash_db::pool::sea_orm_connection(pool),
+                slug,
+                *project_id,
             )
-            .bind(slug)
-            .bind(project_id)
-            .fetch_all(pool)
             .await
             .map_err(|_| Denial::ServerError)?;
-            let mut out: Vec<String> = rows.into_iter().map(|row| row.0.to_string()).collect();
+            let mut out: Vec<String> = rows.into_iter().map(|id| id.to_string()).collect();
             out.push("None".to_owned());
             Ok(out)
         }
         "cycle_id" => {
-            let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-                r#"SELECT c.id FROM cycles c JOIN workspaces w ON w.id = c.workspace_id
-                   WHERE w.slug = $1 AND c.project_id = $2 AND c.deleted_at IS NULL"#,
+            let rows = access::cycle_ids(
+                &pidash_db::pool::sea_orm_connection(pool),
+                slug,
+                *project_id,
             )
-            .bind(slug)
-            .bind(project_id)
-            .fetch_all(pool)
             .await
             .map_err(|_| Denial::ServerError)?;
-            let mut out: Vec<String> = rows.into_iter().map(|row| row.0.to_string()).collect();
+            let mut out: Vec<String> = rows.into_iter().map(|id| id.to_string()).collect();
             out.push("None".to_owned());
             Ok(out)
         }
         "project_id" => {
-            let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-                r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-                   WHERE w.slug = $1 AND p.deleted_at IS NULL"#,
-            )
-            .bind(slug)
-            .fetch_all(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            Ok(rows.into_iter().map(|row| row.0.to_string()).collect())
+            let rows =
+                access::workspace_project_ids(&pidash_db::pool::sea_orm_connection(pool), slug)
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
+            let out: Vec<String> = rows.into_iter().map(|id| id.to_string()).collect();
+            Ok(out)
         }
         "priority" => Ok(PRIORITY_VALUES
             .iter()
@@ -2731,12 +2662,10 @@ async fn serializer_is_epic(pool: &sqlx::PgPool, raw: Option<&Value>) -> Result<
     let id = text
         .parse::<uuid::Uuid>()
         .map_err(|_| Denial::ServerError)?;
-    let row: Option<(bool,)> = sqlx::query_as("SELECT is_epic FROM issue_types WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
+    access::issue_type_is_epic(&pidash_db::pool::sea_orm_connection(pool), id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    row.map(|flag| flag.0).ok_or(Denial::ServerError)
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)
 }
 
 /// The flat `fields=`/`expand=` branch: `IssueSerializer(queryset, ...)`
@@ -3393,15 +3322,6 @@ mod tests {
         assert!(sql.contains("issue.created_at AS ordering_created_at"));
         assert!(sql.contains("ORDER BY issue.created_at DESC"));
         assert!(!sql.contains("IS NOT NULL"));
-    }
-
-    #[test]
-    fn state_group_values_exclude_triage_group() {
-        // `State.objects.filter(is_triage=False, ...)`: the explicit flag
-        // plus `StateManager`'s `NOT (group = 'triage')`.
-        assert!(STATE_GROUP_VALUES_SQL.contains("s.is_triage = FALSE"));
-        assert!(STATE_GROUP_VALUES_SQL.contains("NOT (s.\"group\" = 'triage')"));
-        assert!(STATE_GROUP_VALUES_SQL.contains("s.deleted_at IS NULL"));
     }
 
     #[test]
