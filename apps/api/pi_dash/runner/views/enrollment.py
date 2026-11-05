@@ -704,6 +704,7 @@ class RunnerCreateEndpoint(APIView):
                         # existing row with its id, pods and pins.
                         runner = live_engine_runner_for(dev_machine, project, lock=True)
                         if runner is not None:
+                            created = False
                             if not legacy_machine and not runner.name.startswith(ENGINE_NAME_PREFIX + "-"):
                                 runner.name = engine_runner_name(
                                     dev_machine, workspace, project, runner.pod, exclude_runner_id=runner.pk
@@ -727,6 +728,7 @@ class RunnerCreateEndpoint(APIView):
                         provisioning=provisioning,
                         enrolled_at=timezone.now(),
                     )
+                    created = True
                     if auth_machine_token is None and host_label:
                         machine_minted = _rotate_machine_token(
                             user=runner.owner,
@@ -777,6 +779,12 @@ class RunnerCreateEndpoint(APIView):
             "machine_token_minted": machine_minted is not None,
             "provisioning": runner.provisioning,
             "pod_dispatch": runner.pod_dispatch,
+            # False when this call returned a runner the server already had
+            # (one engine runner per machine and project). A client rolls
+            # back after a local failure only a runner that was created,
+            # so it never deletes one that is working or that a re-add
+            # after a local sign-out found again.
+            "created": created,
         }
         if machine_minted is not None:
             body["machine_token"] = machine_minted.raw
