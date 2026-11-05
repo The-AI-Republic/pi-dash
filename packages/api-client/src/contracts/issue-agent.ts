@@ -31,9 +31,12 @@ export type RunErrorDiagnostic = z.infer<typeof RunErrorDiagnostic>;
 /**
  * Why a queued pinned run has not dispatched yet (hybrid assignment,
  * design §14.3). Computed, never stored; null without a pin. `reason`
- * stays an open string (runner_offline, runner_busy,
+ * stays an open string (runner_offline, runner_busy, runner_paused,
  * runner_not_permitted, dispatching); `releasable` tells the client
- * whether the requester may release this run to the pod.
+ * whether the requester may release this run to the pod. `pause_reason`
+ * accompanies `runner_paused` (built-in engine design §8): empty for the
+ * owner's pause, else the automatic reason code. Optional for servers
+ * that predate it.
  */
 export const DispatchWait = z.object({
   reason: z.string(),
@@ -44,6 +47,7 @@ export const DispatchWait = z.object({
   runner_last_seen_at: nullableDateTime(),
   runs_ahead: z.number(),
   releasable: z.boolean(),
+  pause_reason: z.optional(z.string()),
 });
 export type DispatchWait = z.infer<typeof DispatchWait>;
 

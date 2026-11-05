@@ -58,6 +58,7 @@ import {
   RunnersOverview,
   runnerHeartbeat,
   runnerPlatform,
+  runnerRowActions,
   runnerVersion,
 } from "./RunnersOverview.js";
 
@@ -82,7 +83,10 @@ function state(runners: Runner[]): PodFilterState {
 
 function renderTable(
   runners: Runner[],
-  handlers: { onDelete?: (id: string) => Promise<void>; onRevoke?: (id: string) => Promise<void> } = {}
+  handlers: {
+    onDelete?: (id: string, options?: { purgeLocal?: boolean }) => Promise<void>;
+    onRevoke?: (id: string) => Promise<void>;
+  } = {}
 ) {
   const onDelete = handlers.onDelete ?? vi.fn(async () => undefined);
   const onRevoke = handlers.onRevoke ?? vi.fn(async () => undefined);
@@ -261,6 +265,43 @@ describe("RunnersOverview row actions", () => {
     await waitFor(() => expect(onDelete).toHaveBeenCalledWith("r-1"));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("offers a built-in engine only Remove from project, then Delete once removed (design §11)", () => {
+    const engine = { status: "online", enrolled_at: "2024-01-01T00:00:00Z", provisioning: "desktop_bundled" } as const;
+    expect(runnerRowActions({ ...engine, revoked_at: null })).toEqual({ revoke: false, remove: true, delete: false });
+    expect(runnerRowActions({ ...engine, revoked_at: "2024-02-01T00:00:00Z" })).toEqual({
+      revoke: false,
+      remove: false,
+      delete: true,
+    });
+    expect(runnerRowActions({ ...engine, provisioning: "manual", revoked_at: null })).toEqual({
+      revoke: true,
+      remove: false,
+      delete: true,
+    });
+  });
+
+  it("removes a built-in engine from the project by revoking it, never deleting its folder", async () => {
+    const { onRevoke, onDelete } = renderTable([runner({ provisioning: "desktop_bundled", revoked_at: null })]);
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Remove from project" }));
+    const dialog = screen.getByRole("dialog", { name: "Remove from project?" });
+    expect(dialog).toHaveTextContent("folder on the computer is kept");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Remove from project" }));
+    await waitFor(() => expect(onRevoke).toHaveBeenCalledWith("r-1"));
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("deletes a removed engine's row with the local purge off", async () => {
+    const onDelete = vi.fn(async (_id: string, _options?: { purgeLocal?: boolean }) => undefined);
+    renderTable([runner({ provisioning: "desktop_bundled", revoked_at: "2024-02-01T00:00:00Z", status: "revoked" })], {
+      onDelete,
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(onDelete).toHaveBeenCalledWith("r-1", { purgeLocal: false }));
   });
 
   it("revokes through the confirmation", async () => {

@@ -115,16 +115,26 @@ describe("DevMachinesTable", () => {
     expect(screen.getByText("Never")).toBeInTheDocument();
   });
 
-  it("shows the engine state only when the server reports engine fields", () => {
+  it("shows the engine state only for machines with a live engine runner", () => {
+    const fields = { engine_paused_by_owner: false, engine_auto_pause_reason: "", control_online: true };
     setup({
       machines: [
-        machine("plain"),
-        machine("paused", { engine_paused_by_owner: true, engine_auto_pause_reason: "" }),
-        machine("wallet", { engine_paused_by_owner: false, engine_auto_pause_reason: "wallet_empty" }),
+        machine("plain", fields),
+        machine("paused", { ...fields, engine_paused_by_owner: true }),
+        machine("wallet", { ...fields, engine_auto_pause_reason: "wallet_empty" }),
+        machine("away", { ...fields, control_online: false }),
+        machine("removed", fields),
+      ],
+      runners: [
+        runner("e-paused", "paused", "desktop_bundled", "P"),
+        runner("e-wallet", "wallet", "desktop_bundled", "P"),
+        runner("e-away", "away", "desktop_bundled", "P"),
+        { ...runner("e-removed", "removed", "desktop_bundled", "P"), revoked_at: "2026-01-01T00:00:00Z" },
+        runner("a-plain", "plain", "manual", "P"),
       ],
     });
     const states = screen.getAllByTestId("dev-machine-engine-state").map((node) => node.textContent);
-    expect(states).toEqual(["Engine paused by you", "Engine paused: wallet is empty"]);
+    expect(states).toEqual(["Engine paused by you", "Engine paused: wallet is empty", "Engine unavailable"]);
   });
 
   it("expands a row into its engine and own-agent runners", () => {
@@ -132,6 +142,7 @@ describe("DevMachinesTable", () => {
       runner("e1", "one", "desktop_bundled", "PROJ"),
       runner("a1", "one", "manual", "WEB", "claude-box"),
       runner("x1", "other", "manual", "WEB", "elsewhere"),
+      { ...runner("r1", "one", "manual", "WEB", "gone-agent"), revoked_at: "2026-01-01T00:00:00Z" },
     ];
     setup({ runners });
     expect(screen.queryByTestId("dev-machine-details")).not.toBeInTheDocument();
@@ -140,6 +151,7 @@ describe("DevMachinesTable", () => {
     expect(within(details).getByRole("region", { name: "Built-in engine" })).toHaveTextContent("PROJ");
     expect(within(details).getByRole("region", { name: "Own-agent runners" })).toHaveTextContent("claude-box · WEB");
     expect(details).not.toHaveTextContent("elsewhere");
+    expect(details).not.toHaveTextContent("gone-agent");
     // An older server reports no engine controls, so only rename is offered.
     expect(within(details).getByRole("button", { name: "Rename" })).toBeInTheDocument();
     expect(within(details).queryByRole("button", { name: "Pause the built-in engine" })).not.toBeInTheDocument();
@@ -157,7 +169,7 @@ describe("DevMachinesTable", () => {
       engine_team_runs: false,
       engine_sign_in_state: "expiring",
     };
-    setup({ machines: [machine("one", engine)], onSetting, runners: [] });
+    setup({ machines: [machine("one", engine)], onSetting, runners: [runner("e1", "one", "desktop_bundled", "P")] });
     fireEvent.click(screen.getByRole("button", { name: MACHINE_DETAILS_SHOW }));
     fireEvent.click(screen.getByRole("button", { name: "Resume the built-in engine" }));
     expect(onSetting).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "pause", paused: false }));
@@ -167,6 +179,10 @@ describe("DevMachinesTable", () => {
     expect(onSetting).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "sign-out-engine" }));
     fireEvent.click(screen.getByRole("button", { name: "Rename" }));
     expect(onSetting).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "rename" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove the built-in engine from P" }));
+    expect(onSetting).toHaveBeenLastCalledWith(
+      expect.objectContaining({ kind: "remove-engine", runner: expect.objectContaining({ id: "e1" }) })
+    );
   });
 
   it("offers Replaced by for an offline twin of a live machine and names a merge", () => {

@@ -5,7 +5,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import * as React from "react";
-import type { Workspace } from "@pidash/api-client";
+import type { Runner, Workspace } from "@pidash/api-client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const useDevMachines = vi.fn();
@@ -54,6 +54,21 @@ const workspace: Workspace = {
   total_members: 1,
   role: 15,
 };
+
+/** A minimal live engine runner on `machineId`, for the expanded row. */
+function engineRunner(machineId: string): Runner {
+  return {
+    id: `engine-${machineId}`,
+    name: `builtin-${machineId}`,
+    provisioning: "desktop_bundled",
+    status: "online",
+    dev_machine: machineId,
+    dev_machine_detail: null,
+    revoked_at: null,
+    pod: "pod",
+    pod_detail: { id: "pod", name: "P-pod", is_default: true, project: "p", project_identifier: "P" },
+  } as unknown as Runner;
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -137,6 +152,7 @@ describe("DevMachinesContainer", () => {
       isPending: false,
       isError: false,
     });
+    useDevMachineRunners.mockReturnValue({ data: [engineRunner("old-id")], isPending: false, isError: false });
     mount([workspace]);
     expect(useDevMachineRunners).toHaveBeenCalledWith("acme", "ws-id");
     fireEvent.click(screen.getAllByRole("button", { name: "Show runners and settings" })[0] as HTMLElement);

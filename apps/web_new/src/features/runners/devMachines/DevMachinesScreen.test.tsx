@@ -2,7 +2,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { ApiError, type DevMachine } from "@pidash/api-client";
+import { ApiError, type DevMachine, type Runner } from "@pidash/api-client";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -39,6 +39,21 @@ function machine(id: string, overrides: Partial<DevMachine> = {}): DevMachine {
     updated_at: "2026-01-01T00:00:00Z",
     ...overrides,
   };
+}
+
+/** A minimal live engine runner on `machineId`, for the expanded row. */
+function engineRunner(machineId: string): Runner {
+  return {
+    id: `engine-${machineId}`,
+    name: `builtin-${machineId}`,
+    provisioning: "desktop_bundled",
+    status: "online",
+    dev_machine: machineId,
+    dev_machine_detail: null,
+    revoked_at: null,
+    pod: "pod",
+    pod_detail: { id: "pod", name: "P-pod", is_default: true, project: "p", project_identifier: "P" },
+  } as unknown as Runner;
 }
 
 function setup(overrides: Partial<React.ComponentProps<typeof DevMachinesScreen>> = {}) {
@@ -152,13 +167,25 @@ describe("DevMachinesScreen", () => {
     const onUpdate = vi.fn(async () => {
       throw new ApiError({ status: 403, code: "403", message: "forbidden" });
     });
-    setup({ onUpdate, machines: [machine("one", { engine_paused_by_owner: false })] });
+    setup({ onUpdate, machines: [machine("one", { engine_paused_by_owner: false })], runners: [engineRunner("one")] });
     fireEvent.click(screen.getByRole("button", { name: "Show runners and settings" }));
     fireEvent.click(screen.getByRole("button", { name: "Pause the built-in engine" }));
     await waitFor(() => expect(onUpdate).toHaveBeenCalledWith("one", { engine_paused_by_owner: true }));
     await waitFor(() =>
       expect(notifyError).toHaveBeenCalledWith(MACHINE_ACTION_FAILED_TITLE, MACHINE_SETTING_FAILED_BODY.forbidden)
     );
+  });
+
+  it("removes one engine from its project through a confirmation", async () => {
+    const onRemoveEngine = vi.fn(async (_id: string) => undefined);
+    setup({ onRemoveEngine, machines: [machine("one")], runners: [engineRunner("one")] });
+    fireEvent.click(screen.getByRole("button", { name: "Show runners and settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove the built-in engine from P" }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent("folder on the computer is kept");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove from project" }));
+    await waitFor(() => expect(onRemoveEngine).toHaveBeenCalledWith("engine-one"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
   it("maps settings failures to their sentences", () => {

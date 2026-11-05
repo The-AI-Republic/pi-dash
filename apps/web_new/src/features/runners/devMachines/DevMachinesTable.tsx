@@ -15,6 +15,7 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import * as React from "react";
 
 import { BUILT_IN_ENGINE } from "../../../shared/lib/runnerIdentity.js";
+import { REMOVE_ENGINE_LABEL } from "../components/RunnerConfirmDialog.js";
 import { RunnerStatusBadge, runnerStatusOf } from "../components/RunnerStatusBadge.js";
 import {
   DEV_MACHINE_STATUS_LABELS,
@@ -71,7 +72,13 @@ export type MachineSettingRequest =
   | { kind: "pause"; machine: DevMachine; paused: boolean }
   | { kind: "team-runs"; machine: DevMachine; enabled: boolean }
   | { kind: "sign-out-engine"; machine: DevMachine }
-  | { kind: "replace"; machine: DevMachine; target: DevMachine };
+  | { kind: "replace"; machine: DevMachine; target: DevMachine }
+  | { kind: "remove-engine"; machine: DevMachine; runner: Runner };
+
+/** Accessible name of one engine's "Remove from project" button on the machine row. */
+export function removeEngineLabel(projectIdentifier: string): string {
+  return `Remove the built-in engine from ${projectIdentifier}`;
+}
 
 export interface DevMachinesTableProps {
   machines: DevMachine[] | undefined;
@@ -104,11 +111,34 @@ function runnerProject(runner: Runner): string {
   return runner.pod_detail.project_identifier;
 }
 
-function RunnerLine({ runner, label }: { runner: Runner; label: string }): React.ReactElement {
+function RunnerLine({
+  runner,
+  label,
+  onRemove,
+  disabled,
+}: {
+  runner: Runner;
+  label: string;
+  onRemove?: (() => void) | undefined;
+  disabled?: boolean | undefined;
+}): React.ReactElement {
   return (
     <li className="flex items-center justify-between gap-(--space-3)">
       <span className="min-w-0 truncate text-(--text)">{label}</span>
-      <RunnerStatusBadge status={runnerStatusOf(runner)} />
+      <span className="inline-flex items-center gap-(--space-2)">
+        <RunnerStatusBadge status={runnerStatusOf(runner)} />
+        {onRemove === undefined ? null : (
+          <Button
+            size="small"
+            variant="secondary"
+            aria-label={removeEngineLabel(runnerProject(runner))}
+            disabled={disabled}
+            onClick={onRemove}
+          >
+            {REMOVE_ENGINE_LABEL}
+          </Button>
+        )}
+      </span>
     </li>
   );
 }
@@ -119,12 +149,17 @@ function RunnerGroup({
   loaded,
   rows,
   label,
+  onRemove,
+  disabled,
 }: {
   heading: string;
   empty: string;
   loaded: boolean;
   rows: Runner[];
   label: (runner: Runner) => string;
+  /** Per-row remove action; absent rows show none. */
+  onRemove?: ((runner: Runner) => void) | undefined;
+  disabled?: boolean | undefined;
 }): React.ReactElement {
   let body: React.ReactNode;
   if (!loaded) body = <p className="text-meta text-(--text-muted)">{MACHINE_RUNNERS_LOADING}</p>;
@@ -133,7 +168,13 @@ function RunnerGroup({
     body = (
       <ul className="flex flex-col gap-(--space-1)">
         {rows.map((runner) => (
-          <RunnerLine key={runner.id} runner={runner} label={label(runner)} />
+          <RunnerLine
+            key={runner.id}
+            runner={runner}
+            label={label(runner)}
+            onRemove={onRemove === undefined ? undefined : () => onRemove(runner)}
+            disabled={disabled}
+          />
         ))}
       </ul>
     );
@@ -162,7 +203,7 @@ function MachineDetails({
   busy,
   onSetting,
 }: MachineDetailsProps): React.ReactElement {
-  const settings = machineSettings(machine);
+  const settings = machineSettings(machine, { hasEngine: (runners?.engines.length ?? 0) > 0 });
   const replacement = replacementCandidate(machine, machines);
   const disabled = busy || onSetting === undefined;
   const request = (next: MachineSettingRequest): void => onSetting?.(next);
@@ -175,6 +216,12 @@ function MachineDetails({
           loaded={runnersLoaded}
           rows={runners?.engines ?? []}
           label={runnerProject}
+          onRemove={
+            onSetting === undefined || machine.revoked_at !== null
+              ? undefined
+              : (runner) => request({ kind: "remove-engine", machine, runner })
+          }
+          disabled={disabled}
         />
         <RunnerGroup
           heading={MACHINE_OWN_AGENTS_HEADING}
@@ -313,7 +360,11 @@ export function DevMachinesTable({
         <tbody>
           {rows.map((machine) => {
             const status = devMachineStatus(machine);
-            const engine = engineState(machine, formatDate);
+            const engine = engineState(
+              machine,
+              { hasEngine: (grouped.get(machine.id)?.engines.length ?? 0) > 0 },
+              formatDate
+            );
             const merged = mergedIntoText(machine, rows);
             const open = expanded.has(machine.id);
             const detailsId = `dev-machine-details-${machine.id}`;

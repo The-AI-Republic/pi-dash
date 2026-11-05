@@ -9,6 +9,7 @@ import {
   machineWaitBannerText,
   machineWaitLabel,
   machineWaitName,
+  machineWaitPause,
   selectMachineWait,
   selectWaitingBadge,
   selectWaitingRun,
@@ -101,6 +102,17 @@ describe("waitingReasonText", () => {
     expect(waitingReasonText({ ...WAIT, reason: "dispatching" }, now)).toBe("dispatching");
   });
 
+  it("reads a paused runner as paused, with the reason, not offline", () => {
+    expect(waitingReasonText({ ...WAIT, reason: "runner_paused", pause_reason: "wallet_empty" }, now)).toBe(
+      "paused: wallet is empty"
+    );
+    expect(waitingReasonText({ ...WAIT, reason: "runner_paused", pause_reason: "" }, now)).toBe(
+      "paused: paused by its owner"
+    );
+    expect(waitingReasonText({ ...WAIT, reason: "runner_paused" }, now)).toBe("paused: paused by its owner");
+    expect(waitingBadgeLabel({ ...WAIT, reason: "runner_paused" })).toBe("Paused");
+  });
+
   it("surfaces unknown reasons as-is", () => {
     expect(waitingReasonText({ ...WAIT, reason: "tomorrow_problem" }, now)).toBe("tomorrow_problem");
   });
@@ -185,5 +197,33 @@ describe("machine waits (built-in engine design §9)", () => {
     expect(machineWaitLabel("Work laptop")).toBe("Waiting for Work laptop");
     expect(machineWaitBannerText("Work laptop")).toContain("Waiting for Work laptop — Work laptop is offline.");
     expect(machineWaitBannerText(UNKNOWN_MACHINE_NAME)).toContain("its computer is offline");
+  });
+
+  it("tells a paused engine apart from an offline computer", () => {
+    const wait = { run: runSummary(), runnerId: RUNNER_ID };
+    expect(machineWaitPause(wait, [engine])).toBeNull();
+    expect(machineWaitPause(wait, [{ ...engine, paused_at: "2026-11-05T00:00:00Z" }])).toBe("paused by its owner");
+    const machine = engine.dev_machine_detail;
+    expect(
+      machineWaitPause(wait, [
+        { ...engine, dev_machine_detail: { ...machine, engine_auto_pause_reason: "wallet_empty" } },
+      ])
+    ).toBe("wallet is empty");
+    expect(
+      machineWaitPause(wait, [{ ...engine, dev_machine_detail: { ...machine, engine_paused_by_owner: true } }])
+    ).toBe("paused by its owner");
+    expect(
+      machineWaitPause(wait, [
+        {
+          ...engine,
+          provisioning: "manual",
+          dev_machine_detail: { ...machine, engine_paused_by_owner: true },
+        },
+      ])
+    ).toBeNull();
+    expect(machineWaitPause(wait, undefined)).toBeNull();
+    expect(machineWaitBannerText("Work laptop", "wallet is empty")).toBe(
+      "Waiting for Work laptop: wallet is empty. The run starts when it is resumed."
+    );
   });
 });

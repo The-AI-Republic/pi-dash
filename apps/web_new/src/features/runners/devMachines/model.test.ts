@@ -105,52 +105,86 @@ describe("machineActions", () => {
 
 describe("engineState", () => {
   const fmt = () => "Nov 7";
-  it("shows nothing when the server reports no engine field or the machine is revoked", () => {
-    expect(engineState(machine())).toBeNull();
-    expect(engineState(machine({ engine_paused_by_owner: true, revoked_at: "2026-01-01T00:00:00Z" }))).toBeNull();
+  const engine = { hasEngine: true };
+  const online = { control_online: true };
+  it("shows nothing for a machine with no engine runner or a revoked machine", () => {
+    expect(engineState(machine({ ...online, engine_paused_by_owner: false }), { hasEngine: false })).toBeNull();
+    expect(
+      engineState(machine({ engine_paused_by_owner: true, revoked_at: "2026-01-01T00:00:00Z" }), engine)
+    ).toBeNull();
   });
 
   it("ranks the owner's pause, then the automatic pause, then the sign-in state", () => {
-    const paused = { engine_paused_by_owner: true, engine_auto_pause_reason: "wallet_empty" };
-    expect(engineState(machine(paused))?.label).toBe("Engine paused by you");
-    expect(engineState(machine({ ...paused, engine_paused_by_owner: false }))?.label).toBe(
+    const paused = { ...online, engine_paused_by_owner: true, engine_auto_pause_reason: "wallet_empty" };
+    expect(engineState(machine(paused), engine)?.label).toBe("Engine paused by you");
+    expect(engineState(machine({ ...paused, engine_paused_by_owner: false }), engine)?.label).toBe(
       "Engine paused: wallet is empty"
     );
-    expect(engineState(machine({ engine_auto_pause_reason: "brand_new" }))?.label).toBe("Engine paused: brand_new");
-    expect(engineState(machine({ engine_paused_by_owner: false }))).toEqual({
+    expect(engineState(machine({ ...online, engine_auto_pause_reason: "brand_new" }), engine)?.label).toBe(
+      "Engine paused: brand_new"
+    );
+    expect(engineState(machine({ ...online, engine_paused_by_owner: false }), engine)).toEqual({
       label: "Engine available",
       tone: "success",
     });
   });
 
+  it("reads an offline machine's engine as unavailable", () => {
+    expect(engineState(machine({ engine_paused_by_owner: false, engine_sign_in_state: "active" }), engine)).toEqual({
+      label: "Engine unavailable",
+      tone: "neutral",
+    });
+    expect(engineState(machine({ online_runner_count: 1 }), engine)?.label).toBe("Engine available");
+    expect(engineState(machine({ engine_sign_in_state: "signed_out" }), engine)?.label).toBe("Engine signed out");
+  });
+
   it("reads the sign-in state with its expiry", () => {
-    const at = { engine_credential_expires_at: "2026-11-07T00:00:00Z" };
-    expect(engineState(machine({ ...at, engine_sign_in_state: "expiring" }), fmt)?.label).toBe(
+    const at = { ...online, engine_credential_expires_at: "2026-11-07T00:00:00Z" };
+    expect(engineState(machine({ ...at, engine_sign_in_state: "expiring" }), engine, fmt)?.label).toBe(
       "Engine expiring on Nov 7"
     );
-    expect(engineState(machine({ engine_sign_in_state: "expiring" }))?.label).toBe("Engine sign-in expiring");
-    expect(engineState(machine({ engine_sign_in_state: "signed_out" }))?.label).toBe("Engine signed out");
-    expect(engineState(machine({ engine_sign_in_state: "expired" }))?.label).toBe("Engine sign-in expired");
-    expect(engineState(machine({ engine_sign_in_state: "never" }))?.label).toBe("Engine not signed in");
-    expect(engineState(machine({ engine_sign_in_state: "active" }))?.label).toBe("Engine available");
+    const read = (state: string) => engineState(machine({ ...online, engine_sign_in_state: state }), engine)?.label;
+    expect(read("expiring")).toBe("Engine sign-in expiring");
+    expect(read("signed_out")).toBe("Engine signed out");
+    expect(read("expired")).toBe("Engine sign-in expired");
+    expect(read("never")).toBe("Engine not signed in");
+    expect(read("active")).toBe("Engine available");
   });
 });
 
 describe("machineSettings", () => {
+  const engine = { hasEngine: true };
   it("offers each engine control only when its field is reported", () => {
-    expect(machineSettings(machine())).toEqual({ rename: true, pause: false, teamRuns: false, signOutEngine: false });
+    expect(machineSettings(machine(), engine)).toEqual({
+      rename: true,
+      pause: false,
+      teamRuns: false,
+      signOutEngine: false,
+    });
     expect(
       machineSettings(
-        machine({ engine_paused_by_owner: false, engine_team_runs: true, engine_sign_in_state: "active" })
+        machine({ engine_paused_by_owner: false, engine_team_runs: true, engine_sign_in_state: "active" }),
+        engine
       )
     ).toEqual({ rename: true, pause: true, teamRuns: true, signOutEngine: true });
-    expect(machineSettings(machine({ engine_sign_in_state: "signed_out" })).signOutEngine).toBe(false);
-    expect(machineSettings(machine({ revoked_at: "2026-01-01T00:00:00Z", engine_paused_by_owner: false }))).toEqual({
+    expect(machineSettings(machine({ engine_sign_in_state: "signed_out" }), engine).signOutEngine).toBe(false);
+    expect(
+      machineSettings(machine({ revoked_at: "2026-01-01T00:00:00Z", engine_paused_by_owner: false }), engine)
+    ).toEqual({
       rename: false,
       pause: false,
       teamRuns: false,
       signOutEngine: false,
     });
+  });
+
+  it("hides pause and team runs on a machine with no engine runner", () => {
+    expect(
+      machineSettings(
+        machine({ engine_paused_by_owner: false, engine_team_runs: false, engine_sign_in_state: "active" }),
+        { hasEngine: false }
+      )
+    ).toEqual({ rename: true, pause: false, teamRuns: false, signOutEngine: true });
   });
 });
 
@@ -182,11 +216,12 @@ describe("mergedIntoText", () => {
 });
 
 describe("runnersByMachine", () => {
-  it("groups runners by machine, engines apart from own agents", () => {
+  it("groups live runners by machine, engines apart from own agents", () => {
     const rows = [
-      { id: "e", dev_machine: "m1", provisioning: "desktop_bundled" },
-      { id: "a", dev_machine: "m1", provisioning: "manual" },
-      { id: "z", dev_machine: null, provisioning: "manual" },
+      { id: "e", dev_machine: "m1", provisioning: "desktop_bundled", revoked_at: null },
+      { id: "a", dev_machine: "m1", provisioning: "manual", revoked_at: null },
+      { id: "gone", dev_machine: "m1", provisioning: "desktop_bundled", revoked_at: "2026-01-01T00:00:00Z" },
+      { id: "z", dev_machine: null, provisioning: "manual", revoked_at: null },
     ] as unknown as Runner[];
     const grouped = runnersByMachine(rows);
     expect(grouped.get("m1")?.engines.map((row) => row.id)).toEqual(["e"]);

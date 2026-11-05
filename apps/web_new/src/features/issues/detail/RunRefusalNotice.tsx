@@ -23,6 +23,8 @@ import { useUpdateExecutionTarget } from "../api/executionTarget.js";
 import {
   ASSIGNED_RUNNER_NOT_OWNER,
   NO_OWN_RUNNER_TEXT,
+  OWN_RUNNER_UNAVAILABLE_TEXT,
+  ownRunnersUnavailable,
   PICK_ANOTHER_TARGET_LABEL,
   RUN_ON_MY_ENGINE_LABEL,
   selectOwnRunner,
@@ -57,6 +59,7 @@ export function RunRefusalNotice({
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const own = notOwner ? selectOwnRunner(runners.data, me.data?.id) : null;
   const ownMissing = notOwner && runners.data !== undefined && me.data !== undefined && own === null;
+  const ownUnavailable = ownMissing && ownRunnersUnavailable(runners.data, me.data?.id);
 
   async function runOnMine(): Promise<void> {
     if (own === null) return;
@@ -94,7 +97,9 @@ export function RunRefusalNotice({
       </p>
       {notOwner ? (
         ownMissing ? (
-          <p className="text-caption text-(--text-muted)">{NO_OWN_RUNNER_TEXT}</p>
+          <p className="text-caption text-(--text-muted)">
+            {ownUnavailable ? OWN_RUNNER_UNAVAILABLE_TEXT : NO_OWN_RUNNER_TEXT}
+          </p>
         ) : (
           <div>
             <Button

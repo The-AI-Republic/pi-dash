@@ -10,7 +10,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { setSessionClient } from "../../../core/session/queries.js";
 import { RunRefusalNotice } from "./RunRefusalNotice.js";
-import { NO_OWN_RUNNER_TEXT, RUN_ON_MY_ENGINE_LABEL, type RunRefusal } from "./runRefusal.js";
+import {
+  NO_OWN_RUNNER_TEXT,
+  OWN_RUNNER_UNAVAILABLE_TEXT,
+  RUN_ON_MY_ENGINE_LABEL,
+  type RunRefusal,
+} from "./runRefusal.js";
 
 const SLUG = "acme";
 const WORKSPACE_ID = "023e4567-e89b-12d3-a456-426614174009";
@@ -147,6 +152,17 @@ describe("RunRefusalNotice", () => {
     renderNotice(queryClient, NOT_OWNER);
     expect(await screen.findByText(NO_OWN_RUNNER_TEXT)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: RUN_ON_MY_ENGINE_LABEL })).not.toBeInTheDocument();
+  });
+
+  it("does not re-pin to my engine while it is offline", async () => {
+    const { calls, queryClient } = harness([
+      runnerRow(THEIR_ENGINE, OTHER),
+      { ...runnerRow(MY_ENGINE, ME), status: "offline" },
+    ]);
+    renderNotice(queryClient, NOT_OWNER);
+    expect(await screen.findByText(OWN_RUNNER_UNAVAILABLE_TEXT)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: RUN_ON_MY_ENGINE_LABEL })).not.toBeInTheDocument();
+    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
   });
 
   it("offers another runner or the pod when the assigned runner is offline", async () => {

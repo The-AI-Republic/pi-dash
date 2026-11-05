@@ -10,7 +10,7 @@
 import type { DevMachine, Runner } from "@pidash/api-client";
 import type { BadgeTone } from "@pidash/kit";
 
-import { isEngineRunner } from "../../../shared/lib/runnerIdentity.js";
+import { ENGINE_AUTO_PAUSE_TEXT, isEngineRunner } from "../../../shared/lib/runnerIdentity.js";
 
 export const DEV_MACHINE_STATUSES = ["active", "offline", "registered", "revoked"] as const;
 export type DevMachineStatus = (typeof DEV_MACHINE_STATUSES)[number];
@@ -111,14 +111,7 @@ export const MACHINE_ACTION_COPY: Record<MachineAction, MachineActionCopy> = {
 
 // --- Built-in engine state (built-in engine design §4.3, §4.11, §8) ---
 
-/** Plain wording for the server's automatic engine pause reasons. */
-export const ENGINE_AUTO_PAUSE_TEXT: Readonly<Record<string, string>> = {
-  engine_sign_in_required: "sign-in required",
-  gateway_session_revoked: "model gateway access was revoked",
-  wallet_empty: "wallet is empty",
-  profile_unavailable: "no model profile available",
-  engine_disabled: "turned off on this server",
-};
+export { ENGINE_AUTO_PAUSE_TEXT };
 
 /** The engine state a machine row shows, or null when there is none to show. */
 export interface EngineStateView {
@@ -126,34 +119,35 @@ export interface EngineStateView {
   tone: BadgeTone;
 }
 
-/** True when the server reports any engine field for this machine. */
-export function machineReportsEngine(
-  machine: Pick<DevMachine, "engine_paused_by_owner" | "engine_auto_pause_reason" | "engine_sign_in_state">
-): boolean {
-  return (
-    machine.engine_paused_by_owner !== undefined ||
-    machine.engine_auto_pause_reason !== undefined ||
-    machine.engine_sign_in_state !== undefined
-  );
+/** What a machine row knows about the machine's engine runners. */
+export interface MachineEngineContext {
+  /** True when the machine has at least one live (not revoked) engine runner. */
+  hasEngine: boolean;
 }
 
 /**
- * The engine's state for one machine. The owner's pause wins, then the
- * server's automatic pause, then the sign-in state; a server that reports
- * no engine field at all yields null so the row shows nothing invented.
+ * The engine's state for one machine (design §4.11: available, signed
+ * out, expiring on <date>, unavailable). A machine with no live engine
+ * runner shows nothing. The owner's pause wins, then the server's
+ * automatic pause, then a signed-out or expired sign-in; a machine whose
+ * daemon is not connected reads "unavailable"; then expiring, then
+ * available.
  */
 export function engineState(
   machine: Pick<
     DevMachine,
     | "revoked_at"
+    | "control_online"
+    | "online_runner_count"
     | "engine_paused_by_owner"
     | "engine_auto_pause_reason"
     | "engine_sign_in_state"
     | "engine_credential_expires_at"
   >,
+  context: MachineEngineContext,
   formatDate: (iso: string) => string = (iso) => new Date(iso).toLocaleDateString()
 ): EngineStateView | null {
-  if (machine.revoked_at !== null || !machineReportsEngine(machine)) return null;
+  if (machine.revoked_at !== null || !context.hasEngine) return null;
   if (machine.engine_paused_by_owner === true) return { label: "Engine paused by you", tone: "warning" };
   const reason = machine.engine_auto_pause_reason ?? "";
   if (reason !== "") {
@@ -168,16 +162,20 @@ export function engineState(
       return { label: "Engine sign-in revoked", tone: "neutral" };
     case "expired":
       return { label: "Engine sign-in expired", tone: "warning" };
-    case "expiring": {
-      const at = machine.engine_credential_expires_at ?? null;
-      return {
-        label: at === null ? "Engine sign-in expiring" : `Engine expiring on ${formatDate(at)}`,
-        tone: "warning",
-      };
-    }
     default:
-      return { label: "Engine available", tone: "success" };
+      break;
   }
+  if (!(machine.control_online || machine.online_runner_count > 0)) {
+    return { label: "Engine unavailable", tone: "neutral" };
+  }
+  if (machine.engine_sign_in_state === "expiring") {
+    const at = machine.engine_credential_expires_at ?? null;
+    return {
+      label: at === null ? "Engine sign-in expiring" : `Engine expiring on ${formatDate(at)}`,
+      tone: "warning",
+    };
+  }
+  return { label: "Engine available", tone: "success" };
 }
 
 /** Sign-in states with a live or renewable credential to revoke. */
@@ -192,19 +190,23 @@ export interface MachineSettings {
 }
 
 /**
- * Settings available for one machine. A revoked machine offers none; each
- * engine control needs its field on the payload, so an older server
- * simply hides it. Sign-out needs the sign-in state the newer server
- * reports, and a credential to revoke.
+ * Settings available for one machine. A revoked machine offers none.
+ * Pause and the team-runs opt-in govern the machine's engine, so they
+ * need a live engine runner on it and their field on the payload (an
+ * older server simply hides them). Sign-out revokes the machine's engine
+ * credential, which exists without any engine runner, so it needs only
+ * a signed-in state to revoke.
  */
 export function machineSettings(
-  machine: Pick<DevMachine, "revoked_at" | "engine_paused_by_owner" | "engine_team_runs" | "engine_sign_in_state">
+  machine: Pick<DevMachine, "revoked_at" | "engine_paused_by_owner" | "engine_team_runs" | "engine_sign_in_state">,
+  context: MachineEngineContext
 ): MachineSettings {
   const live = machine.revoked_at === null;
+  const engine = live && context.hasEngine;
   return {
     rename: live,
-    pause: live && machine.engine_paused_by_owner !== undefined,
-    teamRuns: live && machine.engine_team_runs !== undefined,
+    pause: engine && machine.engine_paused_by_owner !== undefined,
+    teamRuns: engine && machine.engine_team_runs !== undefined,
     signOutEngine:
       live && machine.engine_sign_in_state !== undefined && SIGNED_IN_STATES.has(machine.engine_sign_in_state),
   };
@@ -253,11 +255,15 @@ export interface MachineRunners {
   ownAgents: Runner[];
 }
 
-/** Group a runner list under its machine, engines apart from own agents. */
+/**
+ * Group a runner list under its machine, engines apart from own agents.
+ * Revoked runners are left out: the list endpoint returns them, but a
+ * removed engine is no longer on its project.
+ */
 export function runnersByMachine(runners: readonly Runner[]): Map<string, MachineRunners> {
   const out = new Map<string, MachineRunners>();
   for (const runner of runners) {
-    if (runner.dev_machine === null) continue;
+    if (runner.dev_machine === null || runner.revoked_at !== null) continue;
     let entry = out.get(runner.dev_machine);
     if (entry === undefined) {
       entry = { engines: [], ownAgents: [] };

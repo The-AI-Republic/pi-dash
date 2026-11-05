@@ -9,6 +9,8 @@
 import { Button, Dialog, Input } from "@pidash/kit";
 import * as React from "react";
 
+import { REMOVE_ENGINE_BODY, REMOVE_ENGINE_LABEL, REMOVE_ENGINE_TITLE } from "../components/RunnerConfirmDialog.js";
+
 export const RENAME_MACHINE_TITLE = "Rename computer";
 export const RENAME_MACHINE_DESCRIPTION =
   "The name shows everywhere this computer appears, including its built-in engine (“Built-in engine · <name>”).";
@@ -82,6 +84,13 @@ export interface MachineConfirmCopy {
   body: string;
   confirm: string;
 }
+
+/** "Remove from project" for one engine runner (design §11). */
+export const REMOVE_ENGINE_COPY: MachineConfirmCopy = {
+  title: REMOVE_ENGINE_TITLE,
+  body: REMOVE_ENGINE_BODY,
+  confirm: REMOVE_ENGINE_LABEL,
+};
 
 export const SIGN_OUT_ENGINE_COPY: MachineConfirmCopy = {
   title: "Sign out the built-in engine?",

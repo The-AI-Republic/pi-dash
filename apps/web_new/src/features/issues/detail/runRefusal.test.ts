@@ -5,7 +5,7 @@ import { ApiError } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
 
 import { agentReasonMessage } from "../../../shared/lib/agentReasons.js";
-import { parseRunRefusal, selectOwnRunner } from "./runRefusal.js";
+import { ownRunnersUnavailable, parseRunRefusal, selectOwnRunner } from "./runRefusal.js";
 
 function conflict(body: unknown, code = "conflict") {
   return new ApiError({ status: 409, code, message: "refused", body });
@@ -71,5 +71,46 @@ describe("selectOwnRunner", () => {
     expect(selectOwnRunner(runners, "u-9")).toBeNull();
     expect(selectOwnRunner(runners, undefined)).toBeNull();
     expect(selectOwnRunner(undefined, "u-1")).toBeNull();
+  });
+});
+
+describe("selectOwnRunner availability", () => {
+  const engine = {
+    pod: "p",
+    revoked_at: null,
+    owner: "u-1",
+    provisioning: "desktop_bundled" as const,
+    status: "online" as const,
+    paused_at: null,
+    last_heartbeat_at: "2026-11-05T08:00:00Z",
+  };
+
+  it("skips offline, paused and unassignable runners", () => {
+    const runners = [
+      { ...engine, id: "offline", status: "offline" as const, last_heartbeat_at: "2026-11-05T09:00:00Z" },
+      { ...engine, id: "paused", paused_at: "2026-11-05T07:00:00Z" },
+      { ...engine, id: "unassignable", assignable: false },
+      { ...engine, id: "own-agent", provisioning: "manual" as const },
+    ];
+    expect(selectOwnRunner(runners, "u-1")?.id).toBe("own-agent");
+    expect(ownRunnersUnavailable(runners, "u-1")).toBe(false);
+  });
+
+  it("prefers the most recently seen of the caller's ready engines", () => {
+    const runners = [
+      { ...engine, id: "older", last_heartbeat_at: "2026-11-05T06:00:00Z" },
+      { ...engine, id: "newer", status: "busy" as const, last_heartbeat_at: "2026-11-05T08:30:00Z" },
+    ];
+    expect(selectOwnRunner(runners, "u-1")?.id).toBe("newer");
+  });
+
+  it("returns null and reports unavailable when every runner of the caller's is away", () => {
+    const runners = [
+      { ...engine, id: "offline", status: "offline" as const },
+      { ...engine, id: "paused", paused_at: "2026-11-05T07:00:00Z" },
+    ];
+    expect(selectOwnRunner(runners, "u-1")).toBeNull();
+    expect(ownRunnersUnavailable(runners, "u-1")).toBe(true);
+    expect(ownRunnersUnavailable([], "u-1")).toBe(false);
   });
 });

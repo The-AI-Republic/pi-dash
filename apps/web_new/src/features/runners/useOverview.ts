@@ -13,7 +13,7 @@ import { useRunners, useRunnersPods } from "./api/queries.js";
 import { useRunnerPodFilter, type PodFilterState } from "./podFilter.js";
 
 export interface RunnersOverviewData extends PodFilterState {
-  onDelete: (runnerId: string) => Promise<void>;
+  onDelete: (runnerId: string, options?: { purgeLocal?: boolean }) => Promise<void>;
   onRevoke: (runnerId: string) => Promise<void>;
   /** Pods of the current scope with the read's progress (RUN-012). */
   pods: Pod[] | undefined;
@@ -43,7 +43,10 @@ export function useRunnersOverview(workspaceSlug: string): RunnersOverviewData {
   return {
     ...filter,
     // The mutations reject on failure; the screen catches and toasts.
-    onDelete: (runnerId) => remove.mutateAsync(runnerId).then(() => undefined),
+    onDelete: (runnerId, options) =>
+      remove
+        .mutateAsync(options?.purgeLocal === undefined ? runnerId : { runnerId, purgeLocal: options.purgeLocal })
+        .then(() => undefined),
     onRevoke: (runnerId) => revoke.mutateAsync(runnerId).then(() => undefined),
     pods: pods.data,
     podsLoading: area.allowed && pods.isPending,

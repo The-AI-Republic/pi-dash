@@ -69,3 +69,47 @@ export function engineLabel(machineName: string | null): string {
 export function runnerDisplayName(runner: RunnerIdentity): string {
   return isEngineRunner(runner) ? engineLabel(runnerMachineName(runner)) : runner.name;
 }
+
+/** Plain wording for the server's automatic engine pause reasons (design §8). */
+export const ENGINE_AUTO_PAUSE_TEXT: Readonly<Record<string, string>> = {
+  engine_sign_in_required: "sign-in required",
+  gateway_session_revoked: "model gateway access was revoked",
+  wallet_empty: "wallet is empty",
+  profile_unavailable: "no model profile available",
+  engine_disabled: "turned off on this server",
+};
+
+/** Plain wording for one pause reason; unknown codes surface as-is. */
+export function pauseReasonText(reason: string | null | undefined): string {
+  if (reason === null || reason === undefined || reason === "") return "paused by its owner";
+  return ENGINE_AUTO_PAUSE_TEXT[reason] ?? reason;
+}
+
+/** The runner fields that say whether it is paused. */
+export interface RunnerPauseFields {
+  provisioning?: string | undefined;
+  paused_at?: string | null | undefined;
+  dev_machine_detail?:
+    | {
+        engine_paused_by_owner?: boolean | undefined;
+        engine_auto_pause_reason?: string | undefined;
+      }
+    | null
+    | undefined;
+}
+
+/**
+ * Why a runner is paused, as a clause ("paused by its owner", "wallet is
+ * empty"), or null when it is not. The runner's own pause and, for an
+ * engine, its machine's owner pause read as the owner's; then the
+ * machine's automatic reason.
+ */
+export function runnerPauseText(runner: RunnerPauseFields): string | null {
+  if ((runner.paused_at ?? null) !== null) return pauseReasonText("");
+  if (!isEngineRunner(runner)) return null;
+  const machine = runner.dev_machine_detail ?? null;
+  if (machine === null) return null;
+  if (machine.engine_paused_by_owner === true) return pauseReasonText("");
+  const reason = machine.engine_auto_pause_reason ?? "";
+  return reason === "" ? null : pauseReasonText(reason);
+}

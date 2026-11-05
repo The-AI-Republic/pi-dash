@@ -8,7 +8,14 @@
 import type { AgentRunSummary, DispatchWait, Issue, Runner } from "@pidash/api-client";
 
 import { machineOfflineMessage } from "../../../../shared/lib/agentReasons.js";
-import { runnerDisplayName, runnerMachineName, type RunnerIdentity } from "../../../../shared/lib/runnerIdentity.js";
+import {
+  pauseReasonText,
+  runnerDisplayName,
+  runnerMachineName,
+  runnerPauseText,
+  type RunnerIdentity,
+  type RunnerPauseFields,
+} from "../../../../shared/lib/runnerIdentity.js";
 import { formatRunnerSeenAgo } from "../../../../shared/pickers/index.js";
 
 /** A queued run pinned to a runner, with its computed wait. */
@@ -33,7 +40,8 @@ export function selectWaitingRun(issue: Pick<Issue, "agent_status">): WaitingRun
 }
 
 /** Wait fields the reason sentence reads. */
-export type WaitingReasonInput = Pick<DispatchWait, "reason" | "runner_last_seen_at" | "runs_ahead">;
+export type WaitingReasonInput = Pick<DispatchWait, "reason" | "runner_last_seen_at" | "runs_ahead"> &
+  Partial<Pick<DispatchWait, "pause_reason">>;
 
 /**
  * Why the run waits, in one clause: offline names the last heartbeat,
@@ -50,6 +58,8 @@ export function waitingReasonText(wait: WaitingReasonInput, nowMs: number = Date
     case "runner_busy":
       if (wait.runs_ahead <= 0) return "busy";
       return `busy, ${wait.runs_ahead} ${wait.runs_ahead === 1 ? "run" : "runs"} ahead`;
+    case "runner_paused":
+      return `paused: ${pauseReasonText(wait.pause_reason)}`;
     case "runner_not_permitted":
       return "the runner can't take this issue";
     case "dispatching":
@@ -71,6 +81,8 @@ export function waitingBadgeLabel(wait: WaitingReasonInput): string {
       return "Offline";
     case "runner_busy":
       return wait.runs_ahead > 0 ? `${wait.runs_ahead} ahead` : "Busy";
+    case "runner_paused":
+      return "Paused";
     case "runner_not_permitted":
       return "Not permitted";
     case "dispatching":
@@ -111,8 +123,24 @@ export function selectMachineWait(issue: Pick<Issue, "agent_status" | "assigned_
   return { run, runnerId };
 }
 
-/** The runner fields the machine name is derived from. */
-type MachineRunner = Pick<Runner, "id"> & RunnerIdentity;
+/** The runner fields the machine name and pause are derived from. */
+type MachineRunner = Pick<Runner, "id"> & RunnerIdentity & RunnerPauseFields;
+
+function waitedRunner(wait: MachineWait, runners: ReadonlyArray<MachineRunner> | undefined): MachineRunner | undefined {
+  return wait.runnerId === null ? undefined : runners?.find((row) => row.id === wait.runnerId);
+}
+
+/**
+ * Why the waited-for runner is paused, or null when it is not (or is not
+ * in the loaded list). The server reports a paused runner's run with the
+ * same code as an offline computer, so the runner's own pause fields
+ * tell the two apart (built-in engine design §8: "Waiting for <machine>:
+ * the wallet is empty", not "<machine> is offline").
+ */
+export function machineWaitPause(wait: MachineWait, runners: ReadonlyArray<MachineRunner> | undefined): string | null {
+  const runner = waitedRunner(wait, runners);
+  return runner === undefined ? null : runnerPauseText(runner);
+}
 
 /**
  * The computer a machine wait is for: the pinned runner's machine,
@@ -120,7 +148,7 @@ type MachineRunner = Pick<Runner, "id"> & RunnerIdentity;
  * runner list is missing it.
  */
 export function machineWaitName(wait: MachineWait, runners: ReadonlyArray<MachineRunner> | undefined): string {
-  const runner = wait.runnerId === null ? undefined : runners?.find((row) => row.id === wait.runnerId);
+  const runner = waitedRunner(wait, runners);
   if (runner === undefined) return UNKNOWN_MACHINE_NAME;
   return runnerMachineName(runner) ?? runnerDisplayName(runner);
 }
@@ -130,15 +158,27 @@ export function machineWaitLabel(machineName: string): string {
   return `Waiting for ${machineName}`;
 }
 
-/** The banner sentence: what the run waits for, and why. */
-export function machineWaitBannerText(machineName: string): string {
+/**
+ * The banner sentence: what the run waits for, and why. `pause` is the
+ * clause from `machineWaitPause` when the runner is paused rather than
+ * offline.
+ */
+export function machineWaitBannerText(machineName: string, pause: string | null = null): string {
+  if (pause !== null) {
+    return `${machineWaitLabel(machineName)}: ${pause}. The run starts when it is resumed.`;
+  }
   return machineName === UNKNOWN_MACHINE_NAME
     ? `${machineWaitLabel(machineName)} — its computer is offline. The run starts when it reconnects.`
     : `${machineWaitLabel(machineName)} — ${machineOfflineMessage(machineName)}. The run starts when it reconnects.`;
 }
 
-/** Compact marker the trigger shows while the computer is away. */
-export const MACHINE_WAIT_BADGE = "Offline";
+/**
+ * Compact marker the trigger shows while the run waits for its runner's
+ * computer. The issue alone cannot tell an offline computer from a
+ * paused engine (both carry the same code), so the badge says only that
+ * the run waits; the banner names which.
+ */
+export const MACHINE_WAIT_BADGE = "Waiting";
 
 /** The trigger badge for an issue, or undefined while nothing waits. */
 export function selectWaitingBadge(issue: Pick<Issue, "agent_status" | "assigned_runner_id">): string | undefined {

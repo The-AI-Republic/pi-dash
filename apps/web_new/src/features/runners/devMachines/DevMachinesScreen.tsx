@@ -18,6 +18,7 @@ import {
   DevMachineConfirmDialog,
   DevMachineRenameDialog,
   SIGN_OUT_ENGINE_COPY,
+  REMOVE_ENGINE_COPY,
   replaceMachineCopy,
 } from "./DevMachineSettingsDialogs.js";
 import { DevMachinesTable, type MachineSettingRequest } from "./DevMachinesTable.js";
@@ -38,6 +39,7 @@ export const MACHINE_SETTING_FAILED_BODY = {
   teamRuns: "Could not change who can start runs on this computer's engine.",
   signOutEngine: "Could not sign out the built-in engine.",
   merge: "Could not merge the computers.",
+  removeEngine: "Could not remove the built-in engine from the project.",
   forbidden: "Only the computer's owner can change this.",
 } as const;
 
@@ -64,6 +66,11 @@ export interface DevMachinesScreenProps {
   onUpdate?: ((machineId: string, patch: DevMachinePatch) => Promise<unknown>) | undefined;
   onSignOutEngine?: ((machineId: string) => Promise<unknown>) | undefined;
   onMerge?: ((sourceId: string, targetId: string) => Promise<unknown>) | undefined;
+  /**
+   * "Remove from project" for one engine runner (design §11): revokes the
+   * row and keeps the engine's folder on the computer.
+   */
+  onRemoveEngine?: ((runnerId: string) => Promise<unknown>) | undefined;
 }
 
 type Pending = { action: MachineAction; machine: DevMachine };
@@ -71,7 +78,8 @@ type Pending = { action: MachineAction; machine: DevMachine };
 type Editing =
   | { kind: "rename"; machine: DevMachine }
   | { kind: "sign-out-engine"; machine: DevMachine }
-  | { kind: "replace"; machine: DevMachine; target: DevMachine };
+  | { kind: "replace"; machine: DevMachine; target: DevMachine }
+  | { kind: "remove-engine"; machine: DevMachine; runner: Runner };
 
 /** The toast body for a failed settings write. */
 export function settingFailureBody(error: unknown, fallback: string, rename = false): string {
@@ -98,6 +106,7 @@ export function DevMachinesScreen({
   onUpdate,
   onSignOutEngine,
   onMerge,
+  onRemoveEngine,
 }: DevMachinesScreenProps): React.ReactElement {
   useDocumentHead({ title: devMachinesDocumentTitle(workspaceName), robots: "noindex, nofollow" });
   const [pending, setPending] = React.useState<Pending | null>(null);
@@ -180,7 +189,8 @@ export function DevMachinesScreen({
     }
   }
 
-  const settingsAvailable = onUpdate !== undefined || onSignOutEngine !== undefined || onMerge !== undefined;
+  const settingsAvailable =
+    onUpdate !== undefined || onSignOutEngine !== undefined || onMerge !== undefined || onRemoveEngine !== undefined;
 
   let editDialog: React.ReactNode = null;
   if (editing?.kind === "rename" && onUpdate !== undefined) {
@@ -212,6 +222,22 @@ export function DevMachinesScreen({
           void runEdit(
             () => onSignOutEngine(target.id),
             (error) => settingFailureBody(error, MACHINE_SETTING_FAILED_BODY.signOutEngine)
+          )
+        }
+      />
+    );
+  } else if (editing?.kind === "remove-engine" && onRemoveEngine !== undefined) {
+    const { machine: host, runner } = editing;
+    editDialog = (
+      <DevMachineConfirmDialog
+        copy={REMOVE_ENGINE_COPY}
+        machineName={`${devMachineName(host)} · ${runner.pod_detail.project_identifier}`}
+        pending={working}
+        onCancel={() => setEditing(null)}
+        onConfirm={() =>
+          void runEdit(
+            () => onRemoveEngine(runner.id),
+            (error) => settingFailureBody(error, MACHINE_SETTING_FAILED_BODY.removeEngine)
           )
         }
       />

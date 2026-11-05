@@ -12,10 +12,21 @@ import { getAppClient } from "../../../core/api/client.js";
 import { runnersKeys } from "./keys.js";
 
 /** Delete one runner through its confirmation. */
+/** One runner delete, with whether the daemon also removes its local folder. */
+export interface DeleteRunnerInput {
+  runnerId: string;
+  purgeLocal: boolean;
+}
+
 export function useDeleteRunner(workspaceSlug: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (runnerId: string) => deleteRunner(getAppClient(), runnerId),
+    // A bare id deletes with the server's default local teardown; a built-in
+    // engine passes `purgeLocal: false` so its folder survives (design §11).
+    mutationFn: (input: string | DeleteRunnerInput) =>
+      typeof input === "string"
+        ? deleteRunner(getAppClient(), input)
+        : deleteRunner(getAppClient(), input.runnerId, { purgeLocal: input.purgeLocal }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: runnersKeys.all(workspaceSlug) }),
   });
 }

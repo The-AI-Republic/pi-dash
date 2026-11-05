@@ -22,6 +22,7 @@ import {
   useSignOutDevMachineEngine,
   useUpdateDevMachine,
 } from "../api/devMachines.js";
+import { useRevokeRunner } from "../api/mutations.js";
 import { DevMachinesScreen } from "./DevMachinesScreen.js";
 
 export function DevMachinesContainer({ workspaceSlug }: { workspaceSlug: string }): React.ReactElement | null {
@@ -35,6 +36,8 @@ export function DevMachinesContainer({ workspaceSlug }: { workspaceSlug: string 
   const update = useUpdateDevMachine(workspaceSlug, workspaceId);
   const signOutEngine = useSignOutDevMachineEngine(workspaceSlug, workspaceId);
   const merge = useMergeDevMachine(workspaceSlug);
+  // Revoking invalidates every runners read, the expanded rows' included.
+  const removeEngine = useRevokeRunner(workspaceSlug);
   if (workspace === undefined) return null;
   const area = buildRunnersAreaValue({ workspaceSlug }, workspace.id, "allowed");
   return (
@@ -57,6 +60,7 @@ export function DevMachinesContainer({ workspaceSlug }: { workspaceSlug: string 
       onUpdate={(machineId, patch) => update.mutateAsync({ machineId, patch })}
       onSignOutEngine={(id) => signOutEngine.mutateAsync(id)}
       onMerge={(sourceId, targetId) => merge.mutateAsync({ sourceId, targetId })}
+      onRemoveEngine={(runnerId) => removeEngine.mutateAsync(runnerId)}
     />
   );
 }

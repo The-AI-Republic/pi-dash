@@ -28,6 +28,7 @@ import {
   machineWaitBannerText,
   machineWaitLabel,
   machineWaitName,
+  machineWaitPause,
   selectMachineWait,
   selectWaitingRun,
   waitingBannerText,
@@ -80,8 +81,11 @@ export function WaitingBanner({
   }
 
   const machineName = machineWait === null ? null : machineWaitName(machineWait, runners.data);
+  const machinePause = machineWait === null ? null : machineWaitPause(machineWait, runners.data);
   const sentence =
-    waiting !== null ? waitingBannerText(waiting.runnerName, waiting.wait) : machineWaitBannerText(machineName ?? "");
+    waiting !== null
+      ? waitingBannerText(waiting.runnerName, waiting.wait)
+      : machineWaitBannerText(machineName ?? "", machinePause);
   const activeRunId = waiting?.run.id ?? machineWait?.run.id ?? "";
 
   return (
