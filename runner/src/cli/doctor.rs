@@ -500,6 +500,10 @@ struct ClaudeAuthProbe {
     credentials: CredentialsFile,
     /// `apiKeyHelper` in user or managed Claude settings.
     api_key_helper: ConfigKey,
+    /// An auth or third-party-provider variable in the `env` block of user
+    /// or managed Claude settings, which Claude Code applies to every
+    /// session.
+    settings_env_var: ConfigKey,
     /// `primaryApiKey` in Claude's global config (`~/.claude.json`), where
     /// a Console API-key login is stored.
     stored_api_key: ConfigKey,
@@ -539,6 +543,9 @@ fn classify_claude_auth(p: &ClaudeAuthProbe) -> AuthStatus {
     if let ConfigKey::Found(path) = &p.stored_api_key {
         return AuthStatus::LoggedIn(format!("API key stored in {}", path.display()));
     }
+    if let ConfigKey::Found(path) = &p.settings_env_var {
+        return AuthStatus::LoggedIn(format!("auth env var set in {}", path.display()));
+    }
     // From here on nothing positive was found. Only report "not logged in"
     // when every source we know of was actually ruled out.
     if let CredentialsFile::Unrecognized(path) = &p.credentials {
@@ -547,7 +554,7 @@ fn classify_claude_auth(p: &ClaudeAuthProbe) -> AuthStatus {
             path.display()
         ));
     }
-    for key in [&p.api_key_helper, &p.stored_api_key] {
+    for key in [&p.api_key_helper, &p.settings_env_var, &p.stored_api_key] {
         if let ConfigKey::Unreadable(path) = key {
             return AuthStatus::Unknown(format!("could not read {}", path.display()));
         }
@@ -638,6 +645,30 @@ fn claude_managed_settings_paths() -> Vec<PathBuf> {
 /// Whether the JSON file at `path` sets `key` to a non-empty string. The
 /// value itself is never returned.
 fn read_config_key(path: &Path, key: &str) -> ConfigKey {
+    read_config_with(path, |v| non_empty_str(v.get(key)))
+}
+
+/// Whether the settings file at `path` sets a Claude auth or third-party
+/// provider variable in its `env` block. Values are never returned.
+fn read_settings_env_auth(path: &Path) -> ConfigKey {
+    read_config_with(path, |v| {
+        let Some(env) = v.get("env").and_then(|e| e.as_object()) else {
+            return false;
+        };
+        CLAUDE_AUTH_ENV_VARS
+            .iter()
+            .chain(CLAUDE_THIRD_PARTY_ENV_VARS)
+            .any(|var| non_empty_str(env.get(*var)))
+    })
+}
+
+fn non_empty_str(v: Option<&serde_json::Value>) -> bool {
+    v.and_then(|x| x.as_str())
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
+/// Read the JSON object at `path` and test it with `has`.
+fn read_config_with(path: &Path, has: impl Fn(&serde_json::Value) -> bool) -> ConfigKey {
     let Ok(text) = std::fs::read_to_string(path) else {
         return if path.exists() {
             ConfigKey::Unreadable(path.to_path_buf())
@@ -646,10 +677,13 @@ fn read_config_key(path: &Path, key: &str) -> ConfigKey {
         };
     };
     match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) if v.is_object() => match v.get(key).and_then(|x| x.as_str()) {
-            Some(s) if !s.trim().is_empty() => ConfigKey::Found(path.to_path_buf()),
-            _ => ConfigKey::Absent,
-        },
+        Ok(v) if v.is_object() => {
+            if has(&v) {
+                ConfigKey::Found(path.to_path_buf())
+            } else {
+                ConfigKey::Absent
+            }
+        }
         _ => ConfigKey::Unreadable(path.to_path_buf()),
     }
 }
@@ -657,7 +691,13 @@ fn read_config_key(path: &Path, key: &str) -> ConfigKey {
 /// First file that sets `key`; otherwise the first unreadable one; else
 /// [`ConfigKey::Absent`].
 fn scan_config_key(paths: &[PathBuf], key: &str) -> ConfigKey {
-    let results: Vec<ConfigKey> = paths.iter().map(|p| read_config_key(p, key)).collect();
+    scan_configs(paths, |p| read_config_key(p, key))
+}
+
+/// First `Found` from `read` over `paths`; otherwise the first unreadable
+/// one; else [`ConfigKey::Absent`].
+fn scan_configs(paths: &[PathBuf], read: impl Fn(&Path) -> ConfigKey) -> ConfigKey {
+    let results: Vec<ConfigKey> = paths.iter().map(|p| read(p)).collect();
     results
         .iter()
         .find(|r| matches!(r, ConfigKey::Found(_)))
@@ -828,6 +868,7 @@ fn build_claude_probe(
         third_party_provider: find(CLAUDE_THIRD_PARTY_ENV_VARS),
         credentials,
         api_key_helper: scan_config_key(&settings, "apiKeyHelper"),
+        settings_env_var: scan_configs(&settings, read_settings_env_auth),
         stored_api_key: scan_config_key(&Vec::from_iter(global), "primaryApiKey"),
         is_macos,
     }
@@ -1124,6 +1165,7 @@ mod tests {
             third_party_provider: None,
             credentials: CredentialsFile::Missing,
             api_key_helper: ConfigKey::Absent,
+            settings_env_var: ConfigKey::Absent,
             stored_api_key: ConfigKey::Absent,
             is_macos: false,
         }
@@ -1481,6 +1523,39 @@ mod tests {
             ..AgentEnvSnapshot::default()
         };
         let p = build_claude_probe(None, &env, &[], false);
+        assert!(matches!(
+            classify_claude_auth(&p),
+            AuthStatus::NotLoggedIn(_)
+        ));
+    }
+
+    #[test]
+    fn build_claude_probe_finds_auth_var_in_settings_env() {
+        // Old CLI, nothing in the process env, but the key lives in the
+        // settings `env` block that Claude Code applies to every session.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".claude")).unwrap();
+        let settings = home.path().join(".claude").join("settings.json");
+        let env = AgentEnvSnapshot {
+            home: Some(home.path().display().to_string()),
+            ..AgentEnvSnapshot::default()
+        };
+        for body in [
+            r#"{"env":{"ANTHROPIC_API_KEY":"sk-x"}}"#,
+            r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1"}}"#,
+        ] {
+            std::fs::write(&settings, body).unwrap();
+            let p = build_claude_probe(None, &env, &[], false);
+            assert_eq!(p.settings_env_var, ConfigKey::Found(settings.clone()));
+            match classify_claude_auth(&p) {
+                AuthStatus::LoggedIn(d) => assert!(!d.contains("sk-x"), "{d}"),
+                other => panic!("expected LoggedIn, got {other:?}"),
+            }
+        }
+        // An unrelated or empty env entry does not count.
+        std::fs::write(&settings, r#"{"env":{"ANTHROPIC_API_KEY":"","FOO":"1"}}"#).unwrap();
+        let p = build_claude_probe(None, &env, &[], false);
+        assert_eq!(p.settings_env_var, ConfigKey::Absent);
         assert!(matches!(
             classify_claude_auth(&p),
             AuthStatus::NotLoggedIn(_)
