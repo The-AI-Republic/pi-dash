@@ -214,7 +214,7 @@ services:
   # Comment this if you using any external s3 compatible storage
   pi-dash-minio:
     # MinIO stopped publishing minio/minio (Docker Hub) and quay.io now
-    # refuses anonymous pulls (PIDASH-2). pgsty/minio is the maintained
+    # refuses anonymous pulls. pgsty/minio is the maintained
     # community build of the same server: same CLI, root user and /data
     # layout, so existing upload volumes keep working. Pinned by tag and
     # multi-arch digest; re-pin deliberately, never float on latest.

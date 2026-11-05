@@ -220,7 +220,7 @@ function matcherBlock(route, indent) {
  * True when the generated block must route /assets/*: some, but not all,
  * paths are migrated. Both apps build their hashed bundles into /assets/,
  * so without this route a web_new page shell would load the old app's
- * catch-all for its bundles and render blank (PIDASH-2). With nothing
+ * catch-all for its bundles and render blank. With nothing
  * migrated the old app owns /assets/*; with the catch-all web_new does.
  */
 function needsAssetRoute(entries) {
@@ -229,7 +229,7 @@ function needsAssetRoute(entries) {
 
 /**
  * Proxy path matchers for web_new's public files, derived from its Vite
- * public dir so a new file cannot regress (PIDASH-2). Vite copies the dir to
+ * public dir so a new file cannot regress. Vite copies the dir to
  * the site root, so a top-level file is served at `/<name>` and a top-level
  * directory at `/<name>/*`. Dotfiles are skipped; `assets` is already routed.
  */

@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Self-host smoke checks (PIDASH-2). A fresh community install pulls every
+// Self-host smoke checks. A fresh community install pulls every
 // compose image, reads variables.env into the services, and relies on the
 // web_new nginx answering 404 for a missing bundle so the proxy can fall
 // back to the old app. None of that is exercised by the app test suites, so
@@ -182,7 +182,7 @@ describe("web_new nginx", () => {
     assert.match(block[1], /try_files\s+\$uri\s+=404;/);
   });
 
-  it("serves .webmanifest as application/manifest+json (PIDASH-2)", () => {
+  it("serves .webmanifest as application/manifest+json", () => {
     // nginx's stock mime.types has no webmanifest entry, so web_new's
     // manifests would go out as application/octet-stream.
     const conf = readFileSync(join(root, "apps", "web_new", "nginx", "nginx.conf"), "utf8");
@@ -192,7 +192,7 @@ describe("web_new nginx", () => {
     assert.match(http[1], /types\s*\{[^}]*application\/manifest\+json\s+webmanifest;[^}]*\}/);
   });
 
-  it("answers 404 for a missing file under every public directory (PIDASH-2)", () => {
+  it("answers 404 for a missing file under every public directory", () => {
     // The proxy sends web_new's public directories (illustrations/, logos/,
     // ...) here first, with the same 404 retry of the old app as /assets/.
     const conf = readFileSync(join(root, "apps", "web_new", "nginx", "nginx.conf"), "utf8");

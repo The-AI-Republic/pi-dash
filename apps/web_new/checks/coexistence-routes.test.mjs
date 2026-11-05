@@ -132,7 +132,7 @@ describe("buildCeLines", () => {
     ]);
   });
 
-  it("sends /assets/* to web_new first and retries the old app on a 404 (PIDASH-2)", () => {
+  it("sends /assets/* to web_new first and retries the old app on a 404", () => {
     // Both apps build their bundles into /assets/, and a web_new page shell
     // is useless without its own. The old app's bundles fall through.
     assert.deepEqual(buildCeAssetLines(), [
@@ -148,7 +148,7 @@ describe("buildCeLines", () => {
     assert.deepEqual(buildCeLines(["/{ws}"]).slice(-buildCeAssetLines().length), buildCeAssetLines());
   });
 
-  it("routes web_new's public files with its bundles, behind the same 404 fallback (PIDASH-2)", () => {
+  it("routes web_new's public files with its bundles, behind the same 404 fallback", () => {
     const lines = buildCeLines(["/{ws}"], [], ["/icon.svg", "/illustrations/*"]);
     assert.ok(lines.includes("\t@web_new_static path /assets/* /icon.svg /illustrations/*"), lines.join("\n"));
     assert.deepEqual(lines.slice(-8), buildCeAssetLines(["/icon.svg", "/illustrations/*"]));
@@ -188,7 +188,7 @@ describe("buildAioLines", () => {
     ]);
   });
 
-  it("serves /assets/* from web_new only when the file exists there (PIDASH-2)", () => {
+  it("serves /assets/* from web_new only when the file exists there", () => {
     // A bundle web_new does not have falls through to the old app's
     // static root below, instead of a 404 or web_new's index.html.
     assert.deepEqual(buildAioAssetLines(), [
@@ -208,13 +208,13 @@ describe("buildAioLines", () => {
     ]);
   });
 
-  it("serves web_new's public files the same way (PIDASH-2)", () => {
+  it("serves web_new's public files the same way", () => {
     const lines = buildAioLines(["/{ws}"], [], ["/icon.svg", "/logos/*"]);
     assert.ok(lines.includes("        path /assets/* /icon.svg /logos/*"), lines.join("\n"));
     assert.deepEqual(lines.slice(-13), buildAioAssetLines(["/icon.svg", "/logos/*"]));
   });
 
-  it("labels web manifests application/manifest+json (PIDASH-2)", () => {
+  it("labels web manifests application/manifest+json", () => {
     // Caddy's file_server has no .webmanifest type and the AIO image ships
     // no mime table, so without this the manifest goes out untyped.
     const lines = buildAioAssetLines(["/manifest.webmanifest"]);
@@ -548,7 +548,7 @@ describe("the repo's generated Caddyfiles", () => {
   const proxyDir = join(here, "..", "..", "proxy");
   const publicDir = join(here, "..", "public");
 
-  it("route web_new's /assets/* bundles before the old app's catch-all (PIDASH-2)", () => {
+  it("route web_new's /assets/* bundles before the old app's catch-all", () => {
     for (const [name, assetLines, anchor] of [
       ["Caddyfile.ce", buildCeAssetLines(publicPathsOf(publicDir)), CE_ANCHOR],
       ["Caddyfile.aio.ce", buildAioAssetLines(publicPathsOf(publicDir)), AIO_ANCHOR],
@@ -562,7 +562,7 @@ describe("the repo's generated Caddyfiles", () => {
       );
     }
   });
-  it("route every entry of apps/web_new/public/ to web_new (PIDASH-2)", () => {
+  it("route every entry of apps/web_new/public/ to web_new", () => {
     // Listed independently of the generator: icon.svg, the manifests and
     // illustrations/ must not reach the old app's SPA fallback.
     const wanted = readdirSync(publicDir, { withFileTypes: true })

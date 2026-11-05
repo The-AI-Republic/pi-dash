@@ -1,7 +1,7 @@
 # Copyright (c) Pi Dash contributors
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
-# Self-host smoke checks (PIDASH-2): compose images that can no longer be
+# Self-host smoke checks: compose images that can no longer be
 # pulled, variables.env values that break interpolation, and the web_new
 # nginx 404 the community proxy's /assets/* fallback depends on. Plain
 # node:test over the shipped files, so no install step.
