@@ -170,7 +170,9 @@ impl Drop for LocalTurnGuard {
 /// assign lane's mirror check of `chat_active` (supervisor.rs) closes the
 /// other direction. This is best-effort advisory exclusion, consistent with
 /// the cloud loop's own `current_chat`/`current_run` checks.
-pub(crate) fn try_begin_local_turn(inst: &RunnerInstance) -> std::result::Result<LocalTurnGuard, String> {
+pub(crate) fn try_begin_local_turn(
+    inst: &RunnerInstance,
+) -> std::result::Result<LocalTurnGuard, String> {
     if inst.state.rx_in_flight.borrow().is_some() {
         return Err("a managed issue run is using this runner's working copy".to_string());
     }
@@ -423,7 +425,10 @@ pub(crate) async fn handle_send<S: ChatSink>(
 
 /// `ChatCancel`: interrupt the in-flight turn (if any). Best-effort — trips
 /// the session's cancel signal, which the active turn observes.
-pub(crate) async fn handle_cancel(inst: &RunnerInstance, chat_session_id: Uuid) -> Result<Response> {
+pub(crate) async fn handle_cancel(
+    inst: &RunnerInstance,
+    chat_session_id: Uuid,
+) -> Result<Response> {
     if let Some(session) = inst.chat_sessions.get(chat_session_id).await {
         session.cancel.notify_waiters();
     }

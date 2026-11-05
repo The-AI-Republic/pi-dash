@@ -383,9 +383,7 @@ mod tests {
             Some("/home/user/.local/bin:/usr/local/bin:/usr/bin"),
         );
         assert!(
-            body.contains(
-                "Environment=\"PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin\""
-            ),
+            body.contains("Environment=\"PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin\""),
             "unit body must include captured PATH; got:\n{body}"
         );
     }

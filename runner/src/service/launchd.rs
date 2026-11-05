@@ -50,7 +50,13 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
     };
     // See `service::capture_install_time_path` for why we bake $PATH in.
     let path_env = super::capture_install_time_path().map(|p| xml_escape(&p));
-    let body = render_plist(&exe_str, &config, data.as_deref(), &logs, path_env.as_deref());
+    let body = render_plist(
+        &exe_str,
+        &config,
+        data.as_deref(),
+        &logs,
+        path_env.as_deref(),
+    );
     tokio::fs::write(&plist_path, body).await?;
     println!("installed launchd agent at {}", plist_path.display());
     Ok(())
@@ -749,7 +755,9 @@ mod tests {
         assert!(is_not_loaded_error("Service not loaded"));
         // Real failures we MUST surface, not silently absorb:
         assert!(!is_not_loaded_error("Operation not permitted"));
-        assert!(!is_not_loaded_error("Bootstrap failed: 5: Input/output error"));
+        assert!(!is_not_loaded_error(
+            "Bootstrap failed: 5: Input/output error"
+        ));
         assert!(!is_not_loaded_error(""));
     }
 
@@ -779,7 +787,9 @@ mod tests {
         assert!(!is_already_loaded_error(
             "Load failed: 2: No such file or directory"
         ));
-        assert!(!is_already_loaded_error("Path had bad ownership/permissions"));
+        assert!(!is_already_loaded_error(
+            "Path had bad ownership/permissions"
+        ));
         assert!(!is_already_loaded_error(""));
     }
 

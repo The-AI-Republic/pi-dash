@@ -294,7 +294,6 @@ pub struct RunPayload {
     pub model: Option<String>,
 }
 
-
 /// Build the Pi Dash-controlled environment for this runner's agent.
 ///
 /// Empty for a user-enrolled runner, so its agent inherits the operator's

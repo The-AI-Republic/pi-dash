@@ -1889,7 +1889,10 @@ impl HttpLoop {
                     if let Some(state) = &self.state {
                         state.set_connected(false).await;
                     }
-                    match self.wait_after_failure(&TransportError::RunnerGone, 0).await {
+                    match self
+                        .wait_after_failure(&TransportError::RunnerGone, 0)
+                        .await
+                    {
                         Ok(()) => {}
                         Err(err) if is_bootstrap_shutdown(&err) => break,
                         Err(err) => return Err(err),
@@ -2700,9 +2703,18 @@ mod tests {
             (StatusCode::BAD_GATEWAY, "{\"detail\":\"runner_gone\"}"),
             (StatusCode::UNAUTHORIZED, "<html>runner_gone</html>"),
             (StatusCode::UNAUTHORIZED, "runner_gone"),
-            (StatusCode::UNAUTHORIZED, "{\"detail\":\"runner_gone_soon\"}"),
-            (StatusCode::UNAUTHORIZED, "{\"detail\":\"runner_not_found\"}"),
-            (StatusCode::UNAUTHORIZED, "{\"detail\":\"machine_token_invalid\"}"),
+            (
+                StatusCode::UNAUTHORIZED,
+                "{\"detail\":\"runner_gone_soon\"}",
+            ),
+            (
+                StatusCode::UNAUTHORIZED,
+                "{\"detail\":\"runner_not_found\"}",
+            ),
+            (
+                StatusCode::UNAUTHORIZED,
+                "{\"detail\":\"machine_token_invalid\"}",
+            ),
             (StatusCode::UNAUTHORIZED, ""),
         ];
         for (status, body) in not_gone {
@@ -2727,9 +2739,7 @@ mod tests {
     fn runner_gone_is_neither_fatal_nor_recoverable_until_confirmed() {
         assert!(!TransportError::RunnerGone.is_fatal_for_runner());
         assert!(!TransportError::RunnerGone.is_recoverable());
-        assert!(
-            TransportError::RunnerDeletedInCloud { confirmations: 10 }.is_fatal_for_runner()
-        );
+        assert!(TransportError::RunnerDeletedInCloud { confirmations: 10 }.is_fatal_for_runner());
         let code = TransportErrorCode::from(&TransportError::RunnerGone);
         assert!(matches!(code.into_err(), TransportError::RunnerGone));
     }
@@ -3214,18 +3224,24 @@ mod reconnect_loop_tests {
     }
 
     fn fast_policy() -> ReconnectPolicy {
-        ReconnectPolicy::new(Backoff::new(Duration::from_millis(1), Duration::from_millis(2)))
-            .with_gone_timing(GoneTiming {
-                confirmations: 10,
-                min_span: Duration::from_millis(100),
-                retry_interval: Duration::from_millis(2),
-            })
+        ReconnectPolicy::new(Backoff::new(
+            Duration::from_millis(1),
+            Duration::from_millis(2),
+        ))
+        .with_gone_timing(GoneTiming {
+            confirmations: 10,
+            min_span: Duration::from_millis(100),
+            retry_interval: Duration::from_millis(2),
+        })
     }
 
     async fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while !cond() {
-            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
@@ -3259,8 +3275,12 @@ mod reconnect_loop_tests {
             format!("http://{}", l.local_addr().unwrap())
         };
         let (timeout_url, _) = stub_server(Arc::new(|_, _| None)).await;
-        let (unavailable_url, _) =
-            stub_server(fixed(503, "application/json", "{\"detail\":\"unavailable\"}")).await;
+        let (unavailable_url, _) = stub_server(fixed(
+            503,
+            "application/json",
+            "{\"detail\":\"unavailable\"}",
+        ))
+        .await;
         let (proxy_url, _) = stub_server(fixed(
             502,
             "text/html",
@@ -3304,9 +3324,15 @@ mod reconnect_loop_tests {
         let task = tokio::spawn(h.http_loop.run());
         wait_until("first attempt", || hits.load(Ordering::SeqCst) == 1).await;
         let snap = h.state.runner_snapshot().await;
-        assert_eq!(snap.disconnect_reason.as_deref(), Some("server unreachable: HTTP 503"));
+        assert_eq!(
+            snap.disconnect_reason.as_deref(),
+            Some("server unreachable: HTTP 503")
+        );
         let wait = snap.next_retry_at.expect("next retry recorded") - Utc::now();
-        assert!(wait.num_seconds() >= 20 && wait.num_seconds() <= 36, "{wait}");
+        assert!(
+            wait.num_seconds() >= 20 && wait.num_seconds() <= 36,
+            "{wait}"
+        );
 
         h.remove_tx.send(true).unwrap();
         let err = tokio::time::timeout(Duration::from_secs(1), task)
@@ -3363,7 +3389,11 @@ mod reconnect_loop_tests {
             if n == 0 {
                 Some((201, "application/json", session.clone()))
             } else {
-                Some((401, "application/json", "{\"detail\":\"runner_gone\"}".into()))
+                Some((
+                    401,
+                    "application/json",
+                    "{\"detail\":\"runner_gone\"}".into(),
+                ))
             }
         }))
         .await;
@@ -3389,7 +3419,11 @@ mod reconnect_loop_tests {
         .to_string();
         let (url, hits) = stub_server(Arc::new(move |n, _| match n {
             0 => Some((201, "application/json", session.clone())),
-            1 => Some((503, "text/html", "<html>503 Service Unavailable</html>".into())),
+            1 => Some((
+                503,
+                "text/html",
+                "<html>503 Service Unavailable</html>".into(),
+            )),
             _ => Some((200, "application/json", "{\"messages\":[]}".into())),
         }))
         .await;
@@ -3406,8 +3440,14 @@ mod reconnect_loop_tests {
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         };
-        assert!(!snap.connected, "a failed poll must mark the runner disconnected");
-        assert_eq!(snap.disconnect_reason.as_deref(), Some("server unreachable: HTTP 503"));
+        assert!(
+            !snap.connected,
+            "a failed poll must mark the runner disconnected"
+        );
+        assert_eq!(
+            snap.disconnect_reason.as_deref(),
+            Some("server unreachable: HTTP 503")
+        );
         assert!(snap.next_retry_at.is_some(), "next retry recorded");
         assert_eq!(snap.cloud_deleted_confirmations, 0);
 
@@ -3434,7 +3474,11 @@ mod reconnect_loop_tests {
             if n == 9 {
                 Some((503, "text/html", "<html>down</html>".into()))
             } else {
-                Some((401, "application/json", "{\"detail\":\"runner_gone\"}".into()))
+                Some((
+                    401,
+                    "application/json",
+                    "{\"detail\":\"runner_gone\"}".into(),
+                ))
             }
         }))
         .await;

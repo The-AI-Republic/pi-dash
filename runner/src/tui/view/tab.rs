@@ -14,8 +14,8 @@ use super::super::app::AppData;
 use super::super::event_sender::AppEventSender;
 use super::super::input::keymap::{Context, KeymapRegistry};
 use super::super::tui_runtime::FrameRequester;
-use super::focus::{CardId, FocusNode, FocusPath};
 use super::KeyHandled;
+use super::focus::{CardId, FocusNode, FocusPath};
 use crate::util::paths::Paths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -81,8 +81,8 @@ impl TabKind {
         let s = raw.trim().to_ascii_lowercase();
         match s.as_str() {
             "general" | "1" => Some(TabKind::General),
-            "runners" | "runner" | "runner-status" | "runner_status" | "status"
-            | "config" | "2" => Some(TabKind::RunnerStatus),
+            "runners" | "runner" | "runner-status" | "runner_status" | "status" | "config"
+            | "2" => Some(TabKind::RunnerStatus),
             "runs" | "3" => Some(TabKind::Runs),
             "approvals" | "4" => Some(TabKind::Approvals),
             _ => None,
@@ -139,11 +139,7 @@ pub trait Tab {
     /// leaves. Examples: cycle an enum field in place, open a buffer,
     /// trigger a Submit. Returning `KeyHandled::NotConsumed` lets the
     /// App fall through to its default (no-op).
-    fn activate_item(
-        &mut self,
-        _item_id: CardId,
-        _ctx: &mut TabCtx<'_>,
-    ) -> KeyHandled {
+    fn activate_item(&mut self, _item_id: CardId, _ctx: &mut TabCtx<'_>) -> KeyHandled {
         KeyHandled::NotConsumed
     }
 
@@ -177,12 +173,7 @@ pub trait Tab {
     }
 
     /// Cursor position the terminal should park at this frame.
-    fn cursor_pos(
-        &self,
-        _area: Rect,
-        _data: &AppData,
-        _focus: &FocusPath,
-    ) -> Option<(u16, u16)> {
+    fn cursor_pos(&self, _area: Rect, _data: &AppData, _focus: &FocusPath) -> Option<(u16, u16)> {
         None
     }
 

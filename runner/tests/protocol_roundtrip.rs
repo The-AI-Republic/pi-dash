@@ -6,8 +6,8 @@ use pidash::approval::{
     router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource},
 };
 use pidash::cloud::protocol::{
-    ApprovalDecision, ApprovalKind, ApprovalMode, ClientMsg, Envelope, RunEventRecord, RunnerStatus,
-    ServerMsg, WIRE_VERSION,
+    ApprovalDecision, ApprovalKind, ApprovalMode, ClientMsg, Envelope, RunEventRecord,
+    RunnerStatus, ServerMsg, WIRE_VERSION,
 };
 use pidash::config::schema::ApprovalPolicySection;
 use std::path::Path;

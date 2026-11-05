@@ -7,17 +7,17 @@ use uuid::Uuid;
 // Re-export the shared types under their legacy `codex::bridge::` path so
 // existing integration tests and any downstream callers that imported them
 // from here keep compiling. The canonical definitions live in `agent::`.
-pub use crate::agent::{BridgeEvent, RunPayload};
 use crate::agent::ENGINE_STARTUP_TIMEOUT;
+pub use crate::agent::{BridgeEvent, RunPayload};
 use crate::approval::EngineThreadSettings;
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, FailureReason};
 use crate::codex::app_server::AppServer;
-use crate::util::shell::AgentEnv;
 use crate::codex::jsonrpc::{self, Incoming};
 use crate::codex::schema::{
     ApprovalResponseParams, ClientInfo, InitializeParams, NotificationKind, ThreadStartParams,
     TurnInputItem, TurnInterruptParams, TurnStartParams,
 };
+use crate::util::shell::AgentEnv;
 
 /// How long a new turn waits for an interrupted one to report its end.
 const INTERRUPT_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);

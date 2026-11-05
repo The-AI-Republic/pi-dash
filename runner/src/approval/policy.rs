@@ -373,7 +373,11 @@ mod tests {
                 ApprovalKind::CommandExecution,
                 &serde_json::json!({ "command": "sudo rm -rf /var" }),
             );
-            assert_eq!(d, Decision::AutoDecline, "mode {mode:?} must refuse denylist");
+            assert_eq!(
+                d,
+                Decision::AutoDecline,
+                "mode {mode:?} must refuse denylist"
+            );
         }
     }
 }
