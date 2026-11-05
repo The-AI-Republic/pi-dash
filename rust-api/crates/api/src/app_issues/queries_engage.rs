@@ -5,7 +5,7 @@
 //! Ports the annotated read querysets behind the issue history, comment,
 //! version, meta and identifier endpoints to SQL text, extending pilot-2's
 //! api-crate query pattern (`super::queries_core` fragments, [`Binder`] `$n`
-//! binds, `super::render::V2Page` page math). Each builder returns a fragment
+//! binds). Each builder returns a fragment
 //! or a complete statement the handler executes; handlers own auth gates,
 //! filter stacks, ordering variants, pagination envelopes and response shaping.
 //!
@@ -38,8 +38,9 @@
 //!   guest-view gate are `super::queries_core` fragments, referenced, not
 //!   copied. Pin tests assert the shared texts still match.
 //! - Page math is pilot-2's `super::render::v2_page` (the
-//!   `global_paginator.paginate` port): handlers compute the [`V2Page`],
-//!   version builders render its `LIMIT`/`OFFSET` only.
+//!   `global_paginator.paginate` port). The version reads themselves are
+//!   SeaORM selects in `handlers_versions_move` (batch 2c); only their
+//!   [`VERSION_PAGE_KEYS`] render order stays here.
 //! - The identifier reaction/link prefetches are
 //!   `queries_core::{reaction_prefetch_sql, link_prefetch_sql}` verbatim
 //!   (same `Prefetch` chains as retrieve); the guest-view gate is
@@ -95,7 +96,7 @@
 //! the permission gates (`resolve_gate`, `@allow_permission`, the
 //! `strict_str_to_int` / `is_lite_request` pure helpers), the comment
 //! `filterset_fields` splice (`issue__id`, `workspace__id`), the
-//! `paginate` envelopes (keys + `user_timezone_converter`, via [`V2Page`]),
+//! `paginate` envelopes (keys + `user_timezone_converter`, via `render::V2Page`),
 //! the lite/full serializer shapes (the 15-key lite dict, `LITE_KEYS`),
 //! the `recent_visited_task` / `issue_activity` enqueues, and the
 //! identifier full `assignees` / `labels` / `issue_module__module` M2M
@@ -108,7 +109,6 @@ use super::queries_core::{
     ASSIGNEE_IDS_ACTIVE_SELECT, CYCLE_ID_SELECT, ISSUE_COLUMNS, LABEL_IDS_SELECT,
     MODULE_IDS_SELECT, PREFETCH_ISSUE_COLUMNS, PROJECT_COLUMNS, STATE_COLUMNS, USER_COLUMNS,
 };
-use super::render::V2Page;
 use super::Binder;
 
 // ---------------------------------------------------------------------------
@@ -141,32 +141,6 @@ pub const COMMENT_REACTION_COLUMNS: &str = "comment_reactions.created_at, \
     comment_reactions.updated_by_id, comment_reactions.deleted_at, comment_reactions.id, \
     comment_reactions.project_id, comment_reactions.workspace_id, comment_reactions.actor_id, \
     comment_reactions.comment_id, comment_reactions.reaction";
-
-/// All 33 concrete `issue_versions` columns (detail base-table order). The
-/// snapshot references (`parent`, `state`, `estimate_point`, `type`, `cycle`)
-/// are plain UUID columns without the `_id` suffix.
-pub const VERSION_COLUMNS: &str = "issue_versions.created_at, issue_versions.updated_at, \
-    issue_versions.created_by_id, issue_versions.updated_by_id, issue_versions.deleted_at, \
-    issue_versions.id, issue_versions.project_id, issue_versions.workspace_id, \
-    issue_versions.parent, issue_versions.state, issue_versions.estimate_point, \
-    issue_versions.name, issue_versions.priority, issue_versions.start_date, \
-    issue_versions.target_date, issue_versions.assignees, issue_versions.sequence_id, \
-    issue_versions.labels, issue_versions.sort_order, issue_versions.completed_at, \
-    issue_versions.archived_at, issue_versions.is_draft, issue_versions.external_source, \
-    issue_versions.external_id, issue_versions.type, issue_versions.cycle, \
-    issue_versions.modules, issue_versions.properties, issue_versions.meta, \
-    issue_versions.last_saved_at, issue_versions.issue_id, issue_versions.activity_id, \
-    issue_versions.owned_by_id";
-
-/// All 15 concrete `issue_description_versions` columns (detail base order).
-pub const DESCRIPTION_VERSION_COLUMNS: &str = "issue_description_versions.created_at, \
-    issue_description_versions.updated_at, issue_description_versions.created_by_id, \
-    issue_description_versions.updated_by_id, issue_description_versions.deleted_at, \
-    issue_description_versions.id, issue_description_versions.project_id, \
-    issue_description_versions.workspace_id, issue_description_versions.issue_id, \
-    issue_description_versions.description_binary, issue_description_versions.description_html, \
-    issue_description_versions.description_stripped, issue_description_versions.description_json, \
-    issue_description_versions.last_saved_at, issue_description_versions.owned_by_id";
 
 /// All 14 concrete `workspaces` columns (`select_related("workspace")` order).
 pub const WORKSPACE_COLUMNS: &str = "workspaces.created_at, workspaces.updated_at, \
@@ -470,190 +444,6 @@ pub const VERSION_PAGE_KEYS: &[&str] = &[
     "updated_by",
 ];
 
-/// Version page select list for one version table: the
-/// [`VERSION_PAGE_KEYS`] columns with FK attnames, in call order. Shared
-/// by both version lists (same `required_fields`, both endpoints).
-pub fn version_page_selects(table: &str) -> String {
-    format!(
-        "{table}.id, {table}.workspace_id, {table}.project_id, {table}.issue_id, \
-        {table}.last_saved_at, {table}.owned_by_id, {table}.created_at, {table}.updated_at, \
-        {table}.created_by_id, {table}.updated_by_id"
-    )
-}
-
-/// Version scope predicates for one version table. Binds, in order: issue
-/// id, project id, workspace slug.
-fn version_scope_where(
-    binder: &mut Binder,
-    table: &str,
-    slug: &str,
-    project_id: uuid::Uuid,
-    issue_id: uuid::Uuid,
-) -> String {
-    let issue = binder.bind_uuid(issue_id);
-    let project = binder.bind_uuid(project_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    format!(
-        "{table}.deleted_at IS NULL AND {table}.issue_id = {issue} \
-        AND {table}.project_id = {project} AND workspaces.slug = {slug_holder}"
-    )
-}
-
-/// `LIMIT`/`OFFSET` tail for a [`V2Page`]: Django omits `OFFSET` when the
-/// slice starts at zero (`[0:1000]` renders bare `LIMIT 1000`) and always
-/// renders the length (`[20:30]` renders `LIMIT 10 OFFSET 20`). The
-/// bounds are computed page math, never user input, so they inline.
-fn page_limit_offset(page: &V2Page) -> String {
-    let length = page.end - page.start;
-    if page.start == 0 {
-        format!("LIMIT {length}")
-    } else {
-        format!("LIMIT {length} OFFSET {}", page.start)
-    }
-}
-
-/// Version-detail statement (`version.py:38-44`): full version row, model
-/// ordering. The pk lookup is unique, so `LIMIT 1` matches Django's
-/// `.get()` (which reads up to `LIMIT 21` to detect multiples —
-/// unobservable on a unique pk). Binds, in order: issue id, version id,
-/// project id, workspace slug.
-pub fn version_detail_sql(
-    binder: &mut Binder,
-    slug: &str,
-    project_id: uuid::Uuid,
-    issue_id: uuid::Uuid,
-    version_id: uuid::Uuid,
-) -> String {
-    let issue = binder.bind_uuid(issue_id);
-    let version = binder.bind_uuid(version_id);
-    let project = binder.bind_uuid(project_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    format!(
-        "SELECT {VERSION_COLUMNS} FROM issue_versions \
-        INNER JOIN workspaces ON issue_versions.workspace_id = workspaces.id \
-        WHERE issue_versions.deleted_at IS NULL AND issue_versions.issue_id = {issue} \
-        AND issue_versions.id = {version} AND issue_versions.project_id = {project} \
-        AND workspaces.slug = {slug_holder} \
-        ORDER BY issue_versions.created_at DESC LIMIT 1"
-    )
-}
-
-/// Version-list count (`paginate`'s `base_queryset.count()`): same
-/// joins/`WHERE` as the list, no `ORDER BY` (aggregates clear ordering;
-/// rendering replicated from `Query.get_count`). Binds: issue id, project
-/// id, workspace slug.
-pub fn version_count_sql(
-    binder: &mut Binder,
-    slug: &str,
-    project_id: uuid::Uuid,
-    issue_id: uuid::Uuid,
-) -> String {
-    let scope = version_scope_where(binder, "issue_versions", slug, project_id, issue_id);
-    format!(
-        "SELECT COUNT(*) AS \"__count\" FROM issue_versions \
-        INNER JOIN workspaces ON issue_versions.workspace_id = workspaces.id \
-        WHERE {scope}"
-    )
-}
-
-/// Version-list page (`version.py:61-74`): the 10 `required_fields` over
-/// the model's `-created_at` ordering (no explicit `order_by`), sliced
-/// per [`V2Page`]. The handler computes the page with
-/// `render::v2_page(cursor, total)` and renders the envelope; the
-/// `user_timezone_converter` pass over `created_at`/`updated_at` is
-/// render-shape, handler-owned. Binds: issue id, project id, slug.
-pub fn version_list_sql(
-    binder: &mut Binder,
-    slug: &str,
-    project_id: uuid::Uuid,
-    issue_id: uuid::Uuid,
-    page: &V2Page,
-) -> String {
-    let selects = version_page_selects("issue_versions");
-    let scope = version_scope_where(binder, "issue_versions", slug, project_id, issue_id);
-    let tail = page_limit_offset(page);
-    format!(
-        "SELECT {selects} FROM issue_versions \
-        INNER JOIN workspaces ON issue_versions.workspace_id = workspaces.id \
-        WHERE {scope} ORDER BY issue_versions.created_at DESC {tail}"
-    )
-}
-
-/// Description-version-detail statement (`version.py:107-116`): full row.
-/// `IssueDescriptionVersion` declares no `Meta.ordering` (unlike its
-/// siblings), so there is no `ORDER BY` — ported as-is. Same binds as
-/// [`version_detail_sql`].
-pub fn description_detail_sql(
-    binder: &mut Binder,
-    slug: &str,
-    project_id: uuid::Uuid,
-    issue_id: uuid::Uuid,
-    version_id: uuid::Uuid,
-) -> String {
-    let issue = binder.bind_uuid(issue_id);
-    let version = binder.bind_uuid(version_id);
-    let project = binder.bind_uuid(project_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    format!(
-        "SELECT {DESCRIPTION_VERSION_COLUMNS} FROM issue_description_versions \
-        INNER JOIN workspaces ON issue_description_versions.workspace_id = workspaces.id \
-        WHERE issue_description_versions.deleted_at IS NULL \
-        AND issue_description_versions.issue_id = {issue} \
-        AND issue_description_versions.id = {version} \
-        AND issue_description_versions.project_id = {project} \
-        AND workspaces.slug = {slug_holder} LIMIT 1"
-    )
-}
-
-/// Description-version-list count: same shape as [`version_count_sql`].
-/// Same binds.
-pub fn description_count_sql(
-    binder: &mut Binder,
-    slug: &str,
-    project_id: uuid::Uuid,
-    issue_id: uuid::Uuid,
-) -> String {
-    let scope = version_scope_where(
-        binder,
-        "issue_description_versions",
-        slug,
-        project_id,
-        issue_id,
-    );
-    format!(
-        "SELECT COUNT(*) AS \"__count\" FROM issue_description_versions \
-        INNER JOIN workspaces ON issue_description_versions.workspace_id = workspaces.id \
-        WHERE {scope}"
-    )
-}
-
-/// Description-version-list page (`version.py:133-144`): same 10 columns
-/// as [`version_list_sql`], over the endpoint's explicit
-/// `.order_by("-created_at")` (the model has no default ordering, so the
-/// call is load-bearing). Same binds as [`version_list_sql`].
-pub fn description_list_sql(
-    binder: &mut Binder,
-    slug: &str,
-    project_id: uuid::Uuid,
-    issue_id: uuid::Uuid,
-    page: &V2Page,
-) -> String {
-    let selects = version_page_selects("issue_description_versions");
-    let scope = version_scope_where(
-        binder,
-        "issue_description_versions",
-        slug,
-        project_id,
-        issue_id,
-    );
-    let tail = page_limit_offset(page);
-    format!(
-        "SELECT {selects} FROM issue_description_versions \
-        INNER JOIN workspaces ON issue_description_versions.workspace_id = workspaces.id \
-        WHERE {scope} ORDER BY issue_description_versions.created_at DESC {tail}"
-    )
-}
-
 // ---------------------------------------------------------------------------
 // Meta (base.py:1199-1211)
 // ---------------------------------------------------------------------------
@@ -862,7 +652,6 @@ pub fn identifier_full_sql(
 
 #[cfg(test)]
 mod tests {
-    use super::super::render::v2_page;
     use super::*;
 
     const SLUG: &str = "ws-slug";
@@ -1053,86 +842,6 @@ mod tests {
         assert_eq!(binder.values().len(), 4);
     }
 
-    // -- versions ------------------------------------------------------------
-
-    #[test]
-    fn version_page_keys_and_selects_render_in_call_order() {
-        assert_eq!(
-            VERSION_PAGE_KEYS,
-            &[
-                "id",
-                "workspace",
-                "project",
-                "issue",
-                "last_saved_at",
-                "owned_by",
-                "created_at",
-                "updated_at",
-                "created_by",
-                "updated_by",
-            ]
-        );
-        // FK keys select attnames; both tables share the shape.
-        for table in ["issue_versions", "issue_description_versions"] {
-            let selects = flat(&version_page_selects(table));
-            assert_eq!(
-                selects,
-                format!(
-                    "{table}.id, {table}.workspace_id, {table}.project_id, {table}.issue_id, \
-                    {table}.last_saved_at, {table}.owned_by_id, {table}.created_at, \
-                    {table}.updated_at, {table}.created_by_id, {table}.updated_by_id"
-                )
-            );
-        }
-    }
-
-    #[test]
-    fn version_detail_count_and_list_shapes() {
-        let mut binder = Binder::new();
-        let detail = version_detail_sql(&mut binder, SLUG, PROJECT, ISSUE, ISSUE);
-        assert!(detail.contains("issue_versions.activity_id"));
-        assert!(detail.contains("issue_versions.owned_by_id"));
-        assert!(detail.ends_with("ORDER BY issue_versions.created_at DESC LIMIT 1"));
-        assert_eq!(binder.values().len(), 4);
-
-        let mut binder = Binder::new();
-        let count = version_count_sql(&mut binder, SLUG, PROJECT, ISSUE);
-        assert!(count.starts_with("SELECT COUNT(*) AS \"__count\""));
-        assert!(!count.contains("ORDER BY"));
-        assert_eq!(binder.values().len(), 3);
-
-        // First page: bare LIMIT, no OFFSET. Later page: LIMIT + OFFSET.
-        let mut binder = Binder::new();
-        let first = v2_page(None, 2500).expect("page");
-        let sql = version_list_sql(&mut binder, SLUG, PROJECT, ISSUE, &first);
-        assert!(sql.ends_with("ORDER BY issue_versions.created_at DESC LIMIT 1000"));
-        let mut binder = Binder::new();
-        let later = v2_page(Some("10:2:0"), 100).expect("page");
-        let sql = version_list_sql(&mut binder, SLUG, PROJECT, ISSUE, &later);
-        assert!(sql.ends_with("ORDER BY issue_versions.created_at DESC LIMIT 10 OFFSET 20"));
-        assert_eq!(binder.values().len(), 3);
-    }
-
-    #[test]
-    fn description_version_ordering_differs_from_issue_version() {
-        // No Meta.ordering: the detail has no ORDER BY at all...
-        let mut binder = Binder::new();
-        let detail = description_detail_sql(&mut binder, SLUG, PROJECT, ISSUE, ISSUE);
-        assert!(!detail.contains("ORDER BY"));
-        assert!(detail.ends_with("LIMIT 1"));
-
-        // ...while the list orders explicitly (load-bearing call).
-        let mut binder = Binder::new();
-        let page = v2_page(None, 5).expect("page");
-        let sql = description_list_sql(&mut binder, SLUG, PROJECT, ISSUE, &page);
-        assert!(sql.ends_with("ORDER BY issue_description_versions.created_at DESC LIMIT 5"));
-
-        let mut binder = Binder::new();
-        let count = description_count_sql(&mut binder, SLUG, PROJECT, ISSUE);
-        assert!(count.starts_with("SELECT COUNT(*) AS \"__count\""));
-        assert!(!count.contains("ORDER BY"));
-    }
-
     // -- meta ----------------------------------------------------------------
 
     #[test]
@@ -1267,36 +976,6 @@ mod tests {
         dump!("comment_reaction_list", |binder: &mut Binder| {
             comment_reaction_list_sql(binder, SLUG, PROJECT, COMMENT, USER)
         });
-        dump!("version_detail", |binder: &mut Binder| {
-            version_detail_sql(binder, SLUG, PROJECT, ISSUE, ISSUE)
-        });
-        dump!("version_count", |binder: &mut Binder| {
-            version_count_sql(binder, SLUG, PROJECT, ISSUE)
-        });
-        dump!("version_list_page", |binder: &mut Binder| {
-            version_list_sql(
-                binder,
-                SLUG,
-                PROJECT,
-                ISSUE,
-                &v2_page(None, 2500).expect("page"),
-            )
-        });
-        dump!("description_detail", |binder: &mut Binder| {
-            description_detail_sql(binder, SLUG, PROJECT, ISSUE, ISSUE)
-        });
-        dump!("description_count", |binder: &mut Binder| {
-            description_count_sql(binder, SLUG, PROJECT, ISSUE)
-        });
-        dump!("description_list_page", |binder: &mut Binder| {
-            description_list_sql(
-                binder,
-                SLUG,
-                PROJECT,
-                ISSUE,
-                &v2_page(Some("10:2:0"), 100).expect("page"),
-            )
-        });
         dump!("meta", |binder: &mut Binder| {
             meta_sql(binder, SLUG, PROJECT, ISSUE)
         });
@@ -1319,8 +998,6 @@ mod tests {
             ("cols_activity", ACTIVITY_COLUMNS),
             ("cols_comment", COMMENT_COLUMNS),
             ("cols_comment_reaction", COMMENT_REACTION_COLUMNS),
-            ("cols_version", VERSION_COLUMNS),
-            ("cols_description_version", DESCRIPTION_VERSION_COLUMNS),
             ("cols_workspace", WORKSPACE_COLUMNS),
             ("cols_ticker", TICKER_COLUMNS),
             ("cols_parent_issue", PARENT_ISSUE_COLUMNS),
