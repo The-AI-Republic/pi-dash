@@ -351,10 +351,20 @@ async fn bulk_update_in_chunks(
     for chunk in ids.chunks(BULK_BATCH_SIZE) {
         let outcome = match write {
             BulkIssueWrite::Archive(archived_at) => {
-                domain_issues::bulk_set_archived_at(pool, chunk, *archived_at).await
+                domain_issues::bulk_set_archived_at(
+                    &pidash_db::pool::sea_orm_connection(pool),
+                    chunk,
+                    *archived_at,
+                )
+                .await
             }
             BulkIssueWrite::Close(state_id) => {
-                domain_issues::bulk_set_state(pool, chunk, *state_id).await
+                domain_issues::bulk_set_state(
+                    &pidash_db::pool::sea_orm_connection(pool),
+                    chunk,
+                    *state_id,
+                )
+                .await
             }
         };
         outcome.map_err(|error| AutomationError::Log(format!("{phase}: bulk update: {error}")))?;

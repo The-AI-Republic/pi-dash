@@ -624,15 +624,19 @@ async fn workspace_member_role(
 /// rows (revoked is denied earlier), so the `is not None` early return never
 /// fires here.
 async fn revoke_machine_token(pool: &PgPool, token_id: Uuid) -> Result<(), sqlx::Error> {
-    pidash_services::domain::tokens::revoke_machine_token_by_id(pool, token_id, chrono::Utc::now())
-        .await
+    pidash_services::domain::tokens::revoke_machine_token_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        token_id,
+        chrono::Utc::now(),
+    )
+    .await
 }
 
 /// `MachineToken.objects.filter(pk=...).update(last_used_at=...)`: no
 /// `updated_at` touch (`QuerySet.update` writes only the named column).
 async fn bump_machine_token_last_used(pool: &PgPool, token_id: Uuid) -> Result<(), sqlx::Error> {
     pidash_services::domain::tokens::touch_machine_token_last_used_by_id(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         token_id,
         chrono::Utc::now(),
     )
@@ -1045,9 +1049,13 @@ async fn authenticate_api_key_token(
     {
         return Ok(ApiKeyOutcome::Invalid);
     }
-    pidash_services::domain::tokens::touch_api_token_last_used_by_id(pool, id, chrono::Utc::now())
-        .await
-        .map_err(|_| server_error())?;
+    pidash_services::domain::tokens::touch_api_token_last_used_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        id,
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(|_| server_error())?;
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
     crate::middleware::publish_logger_user_id(&user_id.to_string());

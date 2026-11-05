@@ -1500,15 +1500,19 @@ async fn comment_create_inner(
         edited_at,
     };
     let mut tx = pool.begin().await.map_err(|_| HandlerError::ServerError)?;
-    comment_domain::insert_comment_row(&mut *tx, &rows)
+    comment_domain::insert_comment_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows)
         .await
         .map_err(integrity_error)?;
-    comment_domain::insert_description_row(&mut *tx, &rows)
+    comment_domain::insert_description_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows)
         .await
         .map_err(integrity_error)?;
-    comment_domain::link_comment_description(&mut *tx, rows.id, rows.description_id)
-        .await
-        .map_err(integrity_error)?;
+    comment_domain::link_comment_description(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        rows.id,
+        rows.description_id,
+    )
+    .await
+    .map_err(integrity_error)?;
     // The `issue_id` FK is `DEFERRABLE INITIALLY DEFERRED`, so a comment
     // on a missing issue only fails here at commit — map it the same way
     // as the inserts (`handle_exception`, `views/base.py:74-78`).
@@ -1776,7 +1780,7 @@ async fn apply_comment_update(
     let new_html = html.clone().unwrap_or(old_html.clone());
     let html_value = html.clone().or(old.comment_html.clone());
     comment_domain::save_space_comment_update(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &comment_domain::SpaceCommentUpdate {
             id: *comment_id,
             updated_at: *now,
@@ -1841,13 +1845,16 @@ async fn apply_comment_update(
             html: &new_html,
             stripped: desc_stripped.as_deref(),
         };
-        comment_domain::insert_description_values(pool, &desc)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
+        comment_domain::insert_description_values(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &desc,
+        )
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
         let description_id = desc.id;
         let relinked_at = chrono::Utc::now();
         comment_domain::relink_space_comment_description(
-            pool,
+            &pidash_db::pool::sea_orm_connection(pool),
             *comment_id,
             description_id,
             *actor_id,
@@ -1863,23 +1870,40 @@ async fn apply_comment_update(
         let description_id = uuid::Uuid::parse_str(old.description_id.as_deref().unwrap_or(""))
             .map_err(|_| HandlerError::ServerError)?;
         if html_changed {
-            comment_domain::sync_description_html(pool, description_id, &new_html)
-                .await
-                .map_err(|_| HandlerError::ServerError)?;
-        }
-        if stripped_changed {
-            comment_domain::sync_description_stripped(pool, description_id, &stripped_value)
-                .await
-                .map_err(|_| HandlerError::ServerError)?;
-        }
-        if json_changed {
-            comment_domain::sync_description_json(pool, description_id, &comment_json)
-                .await
-                .map_err(|_| HandlerError::ServerError)?;
-        }
-        comment_domain::touch_synced_description(pool, description_id, Some(*actor_id), *now)
+            comment_domain::sync_description_html(
+                &pidash_db::pool::sea_orm_connection(pool),
+                description_id,
+                &new_html,
+            )
             .await
             .map_err(|_| HandlerError::ServerError)?;
+        }
+        if stripped_changed {
+            comment_domain::sync_description_stripped(
+                &pidash_db::pool::sea_orm_connection(pool),
+                description_id,
+                &stripped_value,
+            )
+            .await
+            .map_err(|_| HandlerError::ServerError)?;
+        }
+        if json_changed {
+            comment_domain::sync_description_json(
+                &pidash_db::pool::sea_orm_connection(pool),
+                description_id,
+                &comment_json,
+            )
+            .await
+            .map_err(|_| HandlerError::ServerError)?;
+        }
+        comment_domain::touch_synced_description(
+            &pidash_db::pool::sea_orm_connection(pool),
+            description_id,
+            Some(*actor_id),
+            *now,
+        )
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     }
     Ok(())
 }
@@ -1945,9 +1969,14 @@ async fn comment_destroy_inner(
     enqueue_message(pool, publish.message()).await;
     // `comment.delete()` (`db/mixins.py:72-77`): `deleted_at` plus a full
     // `save()` (`updated_at`, CRUM `updated_by`).
-    comment_domain::soft_delete_space_comment(pool, comment_id, actor.id, now)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+    comment_domain::soft_delete_space_comment(
+        &pidash_db::pool::sea_orm_connection(pool),
+        comment_id,
+        actor.id,
+        now,
+    )
+    .await
+    .map_err(|_| HandlerError::ServerError)?;
     enqueue_soft_delete(pool, "issuecomment", &comment_id).await;
     Ok(())
 }

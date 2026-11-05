@@ -862,6 +862,32 @@ pub mod github_pull_request_link {
         pub draft: bool,
         pub pr_updated_at: Option<chrono::DateTime<chrono::Utc>>,
     }
+
+    impl From<crate::entity::github_pull_request_links::Model> for GithubPullRequestLink {
+        fn from(row: crate::entity::github_pull_request_links::Model) -> Self {
+            let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+            Self {
+                id: row.id,
+                created_at: at(row.created_at),
+                updated_at: at(row.updated_at),
+                created_by_id: row.created_by_id,
+                updated_by_id: row.updated_by_id,
+                deleted_at: row.deleted_at.map(at),
+                project_id: row.project_id,
+                workspace_id: row.workspace_id,
+                issue_id: row.issue_id,
+                repo_owner: row.repo_owner,
+                repo_name: row.repo_name,
+                pr_number: row.pr_number,
+                url: row.url,
+                title: row.title,
+                state: row.state,
+                merged: row.merged,
+                draft: row.draft,
+                pr_updated_at: row.pr_updated_at.map(at),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

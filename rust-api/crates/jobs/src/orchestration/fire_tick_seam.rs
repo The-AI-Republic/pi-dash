@@ -290,7 +290,7 @@ where
         now: DateTime<Utc>,
     ) -> Result<(), DispatchError> {
         apply_clock_write(
-            &mut **self.dispatch_tx().inner(),
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
             &ClockWrite::Update,
             ticker,
             now,
@@ -305,7 +305,7 @@ where
         // the pre-consolidation bind); pass the row stamp so the call
         // reads honestly.
         apply_clock_write(
-            &mut **self.dispatch_tx().inner(),
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
             &ClockWrite::Insert,
             ticker,
             ticker.created_at,
@@ -424,7 +424,7 @@ where
         now: DateTime<Utc>,
     ) -> Result<(), DispatchError> {
         domain_issues::update_issue_state_no_audit(
-            &mut **self.dispatch_tx().inner(),
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
             issue_id,
             state_id,
             now,
@@ -522,14 +522,20 @@ where
             labels: &empty_list,
             edited_at: None,
         };
-        comment_domain::insert_comment_row(&mut **self.dispatch_tx().inner(), &rows)
-            .await
-            .map_err(db)?;
-        comment_domain::insert_description_row(&mut **self.dispatch_tx().inner(), &rows)
-            .await
-            .map_err(db)?;
+        comment_domain::insert_comment_row(
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
+            &rows,
+        )
+        .await
+        .map_err(db)?;
+        comment_domain::insert_description_row(
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
+            &rows,
+        )
+        .await
+        .map_err(db)?;
         comment_domain::link_comment_description(
-            &mut **self.dispatch_tx().inner(),
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
             rows.id,
             rows.description_id,
         )

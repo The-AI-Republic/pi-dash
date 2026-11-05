@@ -11,10 +11,12 @@
 //! Fixture ids: FX-ISS-17 (`rust-api/fixtures/app_issues/handlers/`) pins
 //! every behavior below; FX-ISS-21 (`guards/`) pins the enqueue payloads.
 //!
-//! Layering: the read SQL is `super::queries_engage` builders executed
-//! through `super::fetch_json_rows` (single-table leaves) or positional
-//! decoding (multi-table joined selects — the builder columns are
-//! unaliased, so `row_to_json` maps would collide); activity / subscriber
+//! Layering: the gates, single-table leaves, scoped lookups and every
+//! write run on SeaORM (entities in `pidash_db::entity`, decoded by name;
+//! comment writes through `pidash_services::domain::comments`). The
+//! history / comment-list / comment-reaction-list joins are still the
+//! `super::queries_engage` builders decoded positionally (the builder
+//! columns are unaliased); activity / subscriber
 //! / reaction-lite shapes plus the sync predicates are
 //! `pidash_services::app_issues::serializers_engage`; the member roster
 //! renders through D-25's `app_project::ser_shared`
@@ -71,20 +73,30 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono_tz::Tz;
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QueryOrder, QuerySelect, RelationTrait,
+};
 use serde_json::{Map, Value};
-use sqlx::Row;
 
+use super::queries_engage::{ISSUE_PREFIX, PROJECT_PREFIX, USER_PREFIX, WORKSPACE_PREFIX};
 use crate::edge;
 use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
-use pidash_compat::datetime::{render_date, render_datetime_in, render_rfc3339_in};
-use pidash_compat::db::is_integrity_error;
+use pidash_compat::datetime::{render_date, render_datetime_in};
 use pidash_compat::py::{py_float_repr_probed, py_str_value, python_dumps};
 use pidash_compat::response::{empty_response, json_response};
 use pidash_compat::validate::uuid_from_json_int;
 use pidash_db::app_pages::strip::ml_strip_tags;
 use pidash_db::entity::comment_hooks::description_stripped_for;
+use pidash_db::entity::{
+    comment_reactions, descriptions, file_assets, intake_issues, issue_activities, issue_assignees,
+    issue_comments, issue_reactions, issue_subscribers, issue_worklogs, issues, project_members,
+    projects, users, workspaces,
+};
+use pidash_db::orm_tx::is_integrity_violation;
 use pidash_services::domain::comments as comment_domain;
 use pidash_services::v1_projects::tasks::model_activity_kwargs;
 
@@ -364,6 +376,24 @@ fn integrity_denial(error: sqlx::Error) -> Denial {
     Denial::ServerError
 }
 
+/// [`integrity_denial`] for a SeaORM write failure.
+fn integrity_denial_orm(error: DbErr) -> Denial {
+    if is_integrity_violation(&error) {
+        return Denial::BadError("The payload is not valid".to_owned());
+    }
+    Denial::ServerError
+}
+
+/// A SeaORM connection over the request pool (no I/O).
+fn orm(pool: &sqlx::PgPool) -> DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
+/// Any read failure is the generic 500.
+fn db_denial(_: DbErr) -> Denial {
+    Denial::ServerError
+}
+
 // ---------------------------------------------------------------------------
 // Request plumbing: auth + project rewrite + permission gates
 // ---------------------------------------------------------------------------
@@ -385,11 +415,14 @@ async fn actor_user_id(
     let id = raw
         .parse::<uuid::Uuid>()
         .map_err(|_| Denial::Unauthorized)?;
-    let exists: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM users WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
+    let exists: Option<uuid::Uuid> = users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Id.eq(id))
+        .into_tuple()
+        .one(&orm(pool))
         .await
-        .map_err(|_| Denial::ServerError)?;
+        .map_err(db_denial)?;
     if exists.is_none() {
         return Err(Denial::Unauthorized);
     }
@@ -422,16 +455,10 @@ async fn resolve_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    super::access::project_id_by_identifier(&orm(pool), slug, &upper)
+        .await
+        .map_err(db_denial)?
+        .ok_or(Denial::ProjectNotFound)
 }
 
 /// Parse a `<uuid:>` path segment the way Django's `UUIDConverter` does:
@@ -471,32 +498,16 @@ async fn fetch_membership(
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<Membership, Denial> {
-    let project_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let workspace_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = orm(pool);
+    let project_role = super::access::project_role(&db, slug, *project_id, *user_id)
+        .await
+        .map_err(db_denial)?;
+    let workspace_role = super::access::workspace_role(&db, slug, *user_id)
+        .await
+        .map_err(db_denial)?;
     Ok(Membership {
-        project_role: project_role.map(|row| row.0),
-        workspace_role: workspace_role.map(|row| row.0),
+        project_role,
+        workspace_role,
     })
 }
 
@@ -526,29 +537,62 @@ async fn check_admin_creator(
     slug: &str,
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
-    table: &str,
+    model: CreatorModel,
     pk: &uuid::Uuid,
 ) -> Result<(), Denial> {
     let membership = fetch_membership(pool, slug, project_id, user_id).await?;
     if membership.workspace_role.is_none() {
         return Err(Denial::Forbidden);
     }
-    // The creator check reads the default manager (soft-deleted rows do
-    // not count) over `table`, whose name is a static per-call-site
-    // literal, never request input.
-    let sql = format!(
-        "SELECT 1 FROM {table} WHERE id = $1 AND created_by_id = $2 AND deleted_at IS NULL"
-    );
-    let created: Option<(i32,)> = sqlx::query_as(&sql)
-        .bind(pk)
-        .bind(user_id)
-        .fetch_optional(pool)
+    let created = created_by_probe(&orm(pool), model, *pk, *user_id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    if created.is_some() {
+        .map_err(db_denial)?;
+    if created {
         return Ok(());
     }
     check_allow(&membership, &[20])
+}
+
+/// The `model` behind an `allow_permission(creator=True, model=...)`.
+#[derive(Debug, Clone, Copy)]
+enum CreatorModel {
+    IssueComment,
+    IssueWorklog,
+}
+
+/// The creator bypass `model.objects.filter(id=pk, created_by=user)`
+/// over the default manager (soft-deleted rows do not count).
+async fn created_by_probe(
+    db: &impl sea_orm::ConnectionTrait,
+    model: CreatorModel,
+    pk: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> Result<bool, DbErr> {
+    let hit: Option<uuid::Uuid> = match model {
+        CreatorModel::IssueComment => {
+            issue_comments::Entity::find()
+                .select_only()
+                .column(issue_comments::Column::Id)
+                .filter(issue_comments::Column::Id.eq(pk))
+                .filter(issue_comments::Column::CreatedById.eq(user_id))
+                .filter(issue_comments::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(db)
+                .await?
+        }
+        CreatorModel::IssueWorklog => {
+            issue_worklogs::Entity::find()
+                .select_only()
+                .column(issue_worklogs::Column::Id)
+                .filter(issue_worklogs::Column::Id.eq(pk))
+                .filter(issue_worklogs::Column::CreatedById.eq(user_id))
+                .filter(issue_worklogs::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(db)
+                .await?
+        }
+    };
+    Ok(hit.is_some())
 }
 
 /// `ProjectEntityPermission` (`project.py:85-116`): safe methods need any
@@ -583,203 +627,14 @@ struct Tenant {
 }
 
 async fn tenant_context(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<Tenant, Denial> {
-    let timezone_name: Option<(String,)> =
-        sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    let timezone_name = super::access::user_timezone(&orm(pool), *user_id)
+        .await
+        .map_err(db_denial)?;
     let timezone: Tz = timezone_name
-        .map(|row| row.0)
         .ok_or(Denial::ServerError)?
         .parse()
         .map_err(|_| Denial::ServerError)?;
     Ok(Tenant { timezone })
-}
-
-// ---------------------------------------------------------------------------
-// Fetch helpers
-// ---------------------------------------------------------------------------
-
-/// One bound `$N` parameter for the single-table `row_to_json` fetches.
-#[derive(Debug, Clone, Copy)]
-enum SqlParam<'a> {
-    Text(&'a str),
-    Uuid(uuid::Uuid),
-}
-
-/// Fetch zero or one row of `inner` as a JSON object. Single-table
-/// selects only — the joined builder statements decode positionally
-/// (their columns are unaliased, so `row_to_json` maps would collide).
-async fn fetch_optional_object(
-    pool: &sqlx::PgPool,
-    inner: &str,
-    params: &[SqlParam<'_>],
-) -> Result<Option<Value>, Denial> {
-    let sql = format!("SELECT row_to_json(__r)::text AS __row FROM ({inner}) AS __r");
-    let mut query = sqlx::query(&sql);
-    for param in params {
-        query = match param {
-            SqlParam::Text(text) => query.bind(*text),
-            SqlParam::Uuid(id) => query.bind(*id),
-        };
-    }
-    let row: Option<sqlx::postgres::PgRow> = query
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    match row {
-        None => Ok(None),
-        Some(row) => {
-            let text: String = row.try_get("__row").map_err(|_| Denial::ServerError)?;
-            match serde_json::from_str(&text).map_err(|_| Denial::ServerError)? {
-                Value::Object(_) => Ok(Some(
-                    serde_json::from_str(&text).map_err(|_| Denial::ServerError)?,
-                )),
-                _ => Err(Denial::ServerError),
-            }
-        }
-    }
-}
-
-/// Fetch every row of `inner` as JSON objects (single-table only, as
-/// above).
-async fn fetch_all_objects(
-    pool: &sqlx::PgPool,
-    inner: &str,
-    params: &[SqlParam<'_>],
-) -> Result<Vec<Value>, Denial> {
-    let sql = format!("SELECT row_to_json(__r)::text AS __row FROM ({inner}) AS __r");
-    let mut query = sqlx::query(&sql);
-    for param in params {
-        query = match param {
-            SqlParam::Text(text) => query.bind(*text),
-            SqlParam::Uuid(id) => query.bind(*id),
-        };
-    }
-    let rows: Vec<sqlx::postgres::PgRow> = query
-        .fetch_all(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let text: String = row.try_get("__row").map_err(|_| Denial::ServerError)?;
-        match serde_json::from_str(&text).map_err(|_| Denial::ServerError)? {
-            Value::Object(map) => out.push(Value::Object(map)),
-            _ => return Err(Denial::ServerError),
-        }
-    }
-    Ok(out)
-}
-
-/// Fetch every row of a [`super::Binder`]-built statement as raw rows
-/// for positional decoding.
-async fn fetch_positional_rows(
-    pool: &sqlx::PgPool,
-    sql: &str,
-    values: Vec<sea_query::Value>,
-) -> Result<Vec<sqlx::postgres::PgRow>, Denial> {
-    let query = super::bind_all(sql, values).map_err(|_| Denial::ServerError)?;
-    query.fetch_all(pool).await.map_err(|_| Denial::ServerError)
-}
-
-fn obj(value: &Value) -> Result<&Map<String, Value>, Denial> {
-    value.as_object().ok_or(Denial::ServerError)
-}
-
-fn req_str(map: &Map<String, Value>, key: &str) -> Result<String, Denial> {
-    match map.get(key) {
-        Some(Value::String(s)) => Ok(s.clone()),
-        _ => Err(Denial::ServerError),
-    }
-}
-
-fn opt_str(map: &Map<String, Value>, key: &str) -> Result<Option<String>, Denial> {
-    match map.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(s)) => Ok(Some(s.clone())),
-        _ => Err(Denial::ServerError),
-    }
-}
-
-fn req_bool(map: &Map<String, Value>, key: &str) -> Result<bool, Denial> {
-    match map.get(key) {
-        Some(Value::Bool(b)) => Ok(*b),
-        _ => Err(Denial::ServerError),
-    }
-}
-
-// ---- positional cell readers (index into the builder select lists) ----
-
-fn cell_string(row: &sqlx::postgres::PgRow, idx: usize) -> Result<String, Denial> {
-    row.try_get::<String, _>(idx)
-        .map_err(|_| Denial::ServerError)
-}
-
-fn cell_opt_string(row: &sqlx::postgres::PgRow, idx: usize) -> Result<Option<String>, Denial> {
-    row.try_get::<Option<String>, _>(idx)
-        .map_err(|_| Denial::ServerError)
-}
-
-fn cell_uuid(row: &sqlx::postgres::PgRow, idx: usize) -> Result<uuid::Uuid, Denial> {
-    row.try_get::<uuid::Uuid, _>(idx)
-        .map_err(|_| Denial::ServerError)
-}
-
-fn cell_opt_uuid(row: &sqlx::postgres::PgRow, idx: usize) -> Result<Option<uuid::Uuid>, Denial> {
-    row.try_get::<Option<uuid::Uuid>, _>(idx)
-        .map_err(|_| Denial::ServerError)
-}
-
-fn cell_bool(row: &sqlx::postgres::PgRow, idx: usize) -> Result<bool, Denial> {
-    row.try_get::<bool, _>(idx).map_err(|_| Denial::ServerError)
-}
-
-fn cell_i32(row: &sqlx::postgres::PgRow, idx: usize) -> Result<i32, Denial> {
-    row.try_get::<i32, _>(idx).map_err(|_| Denial::ServerError)
-}
-
-fn cell_f64(row: &sqlx::postgres::PgRow, idx: usize) -> Result<f64, Denial> {
-    row.try_get::<f64, _>(idx).map_err(|_| Denial::ServerError)
-}
-
-fn cell_opt_f64(row: &sqlx::postgres::PgRow, idx: usize) -> Result<Option<f64>, Denial> {
-    row.try_get::<Option<f64>, _>(idx)
-        .map_err(|_| Denial::ServerError)
-}
-
-fn cell_json(row: &sqlx::postgres::PgRow, idx: usize) -> Result<Value, Denial> {
-    row.try_get::<Value, _>(idx)
-        .map_err(|_| Denial::ServerError)
-}
-
-fn cell_str_array(row: &sqlx::postgres::PgRow, idx: usize) -> Result<Vec<String>, Denial> {
-    row.try_get::<Vec<String>, _>(idx)
-        .map_err(|_| Denial::ServerError)
-}
-
-fn cell_datetime(
-    row: &sqlx::postgres::PgRow,
-    idx: usize,
-) -> Result<chrono::DateTime<chrono::Utc>, Denial> {
-    row.try_get::<chrono::DateTime<chrono::Utc>, _>(idx)
-        .map_err(|_| Denial::ServerError)
-}
-
-fn cell_opt_datetime(
-    row: &sqlx::postgres::PgRow,
-    idx: usize,
-) -> Result<Option<chrono::DateTime<chrono::Utc>>, Denial> {
-    row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(idx)
-        .map_err(|_| Denial::ServerError)
-}
-
-fn cell_opt_date(
-    row: &sqlx::postgres::PgRow,
-    idx: usize,
-) -> Result<Option<chrono::NaiveDate>, Denial> {
-    row.try_get::<Option<chrono::NaiveDate>, _>(idx)
-        .map_err(|_| Denial::ServerError)
 }
 
 // ---------------------------------------------------------------------------
@@ -797,9 +652,9 @@ fn render_dt_opt(dt: Option<chrono::DateTime<chrono::Utc>>, tz: &Tz) -> Option<S
     dt.map(|dt| render_dt(&dt, tz))
 }
 
-fn render_dt_str_opt(raw: Option<String>, tz: &Tz) -> Result<Option<String>, Denial> {
-    raw.map(|text| render_rfc3339_in(&text, tz).map_err(|_| Denial::ServerError))
-        .transpose()
+/// A SeaORM `timestamptz` as the UTC instant the renderers take.
+fn utc(dt: sea_orm::prelude::DateTimeWithTimeZone) -> chrono::DateTime<chrono::Utc> {
+    dt.with_timezone(&chrono::Utc)
 }
 
 // ---------------------------------------------------------------------------
@@ -1260,14 +1115,6 @@ fn app_origin(state: &AppState) -> String {
 // Asset URLs + nested lite shapes
 // ---------------------------------------------------------------------------
 
-/// `SELECT` for the logo/cover/avatar asset row behind `*_url`
-/// properties.
-fn logo_asset_sql() -> String {
-    // The asset FK traversal is `_base_manager` (a soft-deleted asset
-    // still renders its URL), so the read is unguarded.
-    "SELECT \"a\".\"id\", \"a\".\"entity_type\", \"a\".\"workspace_id\", \"a\".\"project_id\", \"a\".\"issue_id\", \"w\".\"slug\" AS \"workspace_slug\" FROM \"file_assets\" AS \"a\" LEFT OUTER JOIN \"workspaces\" AS \"w\" ON (\"a\".\"workspace_id\" = \"w\".\"id\") WHERE (\"a\".\"id\" = $1)".to_owned()
-}
-
 /// Port of `FileAsset.asset_url` (`db/models/asset.py:80-99`):
 /// static-asset branches render `/api/assets/v2/static/<id>/`;
 /// attachment/description branches interpolate ids; anything else
@@ -1324,22 +1171,54 @@ async fn logo_or_cover_url(
     let Some(asset_id) = asset_id else {
         return Ok(raw.filter(|text| !text.is_empty()));
     };
-    let row = fetch_optional_object(pool, &logo_asset_sql(), &[SqlParam::Uuid(asset_id)])
-        .await?
+    let row = fetch_asset_url_row(&orm(pool), asset_id)
+        .await
+        .map_err(db_denial)?
         .ok_or(Denial::ServerError)?;
-    let o = obj(&row)?;
-    let entity_type = opt_str(o, "entity_type")?;
-    let workspace_slug = opt_str(o, "workspace_slug")?;
-    let project_id = opt_str(o, "project_id")?;
-    let issue_id = opt_str(o, "issue_id")?;
-    let id = req_str(o, "id")?;
     asset_url(
-        &id,
-        entity_type.as_deref(),
-        workspace_slug.as_deref(),
-        project_id.as_deref(),
-        issue_id.as_deref(),
+        &row.id.to_string(),
+        row.entity_type.as_deref(),
+        row.workspace_slug.as_deref(),
+        row.project_id.map(|id| id.to_string()).as_deref(),
+        row.issue_id.map(|id| id.to_string()).as_deref(),
     )
+}
+
+/// The asset columns behind `FileAsset.asset_url`, plus the workspace
+/// slug through a LEFT JOIN (a null workspace leaves it null).
+#[derive(Debug, FromQueryResult)]
+pub(super) struct AssetUrlRow {
+    pub(super) id: uuid::Uuid,
+    pub(super) entity_type: Option<String>,
+    pub(super) project_id: Option<uuid::Uuid>,
+    pub(super) issue_id: Option<uuid::Uuid>,
+    pub(super) workspace_slug: Option<String>,
+}
+
+fn asset_url_select(asset_id: uuid::Uuid) -> sea_orm::Select<file_assets::Entity> {
+    // The asset FK traversal is `_base_manager` (a soft-deleted asset
+    // still renders its URL), so the read is unguarded.
+    file_assets::Entity::find()
+        .select_only()
+        .columns([
+            file_assets::Column::Id,
+            file_assets::Column::EntityType,
+            file_assets::Column::ProjectId,
+            file_assets::Column::IssueId,
+        ])
+        .column_as(workspaces::Column::Slug, "workspace_slug")
+        .join(JoinType::LeftJoin, file_assets::Relation::Workspaces.def())
+        .filter(file_assets::Column::Id.eq(asset_id))
+}
+
+pub(super) async fn fetch_asset_url_row(
+    db: &impl sea_orm::ConnectionTrait,
+    asset_id: uuid::Uuid,
+) -> Result<Option<AssetUrlRow>, DbErr> {
+    asset_url_select(asset_id)
+        .into_model::<AssetUrlRow>()
+        .one(db)
+        .await
 }
 
 /// Owned app `UserLiteSerializer` row (`user.py:141-153`).
@@ -1375,28 +1254,50 @@ pub(crate) async fn fetch_user_lite(
     pool: &sqlx::PgPool,
     user_id: &uuid::Uuid,
 ) -> Result<UserLiteOwned, Denial> {
-    let row = fetch_optional_object(
-        pool,
-        "SELECT \"users\".\"id\", \"users\".\"first_name\", \"users\".\"last_name\", \"users\".\"avatar\", \"users\".\"avatar_asset_id\", \"users\".\"is_bot\", \"users\".\"display_name\" FROM \"users\" WHERE (\"users\".\"id\" = $1)",
-        &[SqlParam::Uuid(*user_id)],
-    )
-    .await?
-    .ok_or(Denial::ServerError)?;
-    let o = obj(&row)?;
-    let asset_id = opt_str(o, "avatar_asset_id")?
-        .map(|raw| raw.parse::<uuid::Uuid>())
-        .transpose()
-        .map_err(|_| Denial::ServerError)?;
-    let avatar_url = logo_or_cover_url(pool, opt_str(o, "avatar")?, asset_id).await?;
+    let row = users::Entity::find()
+        .select_only()
+        .columns([
+            users::Column::Id,
+            users::Column::FirstName,
+            users::Column::LastName,
+            users::Column::Avatar,
+            users::Column::AvatarAssetId,
+            users::Column::IsBot,
+            users::Column::DisplayName,
+        ])
+        .filter(users::Column::Id.eq(*user_id))
+        .into_model::<UserLiteDb>()
+        .one(&orm(pool))
+        .await
+        .map_err(db_denial)?
+        .ok_or(Denial::ServerError)?;
+    user_lite_owned(pool, row).await
+}
+
+/// [`UserLiteOwned`] over fetched columns (the avatar URL resolved).
+async fn user_lite_owned(pool: &sqlx::PgPool, row: UserLiteDb) -> Result<UserLiteOwned, Denial> {
+    let avatar_url = logo_or_cover_url(pool, Some(row.avatar.clone()), row.avatar_asset_id).await?;
     Ok(UserLiteOwned {
-        id: req_str(o, "id")?,
-        first_name: req_str(o, "first_name")?,
-        last_name: req_str(o, "last_name")?,
-        avatar: req_str(o, "avatar")?,
+        id: row.id.to_string(),
+        first_name: row.first_name,
+        last_name: row.last_name,
+        avatar: row.avatar,
         avatar_url,
-        is_bot: req_bool(o, "is_bot")?,
-        display_name: req_str(o, "display_name")?,
+        is_bot: row.is_bot,
+        display_name: row.display_name,
     })
+}
+
+/// The `users` columns behind [`UserLiteOwned`].
+#[derive(Debug, FromQueryResult)]
+struct UserLiteDb {
+    id: uuid::Uuid,
+    first_name: String,
+    last_name: String,
+    avatar: String,
+    avatar_asset_id: Option<uuid::Uuid>,
+    is_bot: bool,
+    display_name: String,
 }
 
 /// Owned app `ProjectLiteSerializer` row (`project.py:120-133`).
@@ -1436,29 +1337,57 @@ pub(crate) async fn fetch_project_lite(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
 ) -> Result<ProjectLiteOwned, Denial> {
-    let row = fetch_optional_object(
-        pool,
-        "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"logo_props\", \"projects\".\"description\", \"projects\".\"is_default\" FROM \"projects\" WHERE (\"projects\".\"id\" = $1)",
-        &[SqlParam::Uuid(*project_id)],
-    )
-    .await?
-    .ok_or(Denial::ServerError)?;
-    let o = obj(&row)?;
-    let asset_id = opt_str(o, "cover_image_asset_id")?
-        .map(|raw| raw.parse::<uuid::Uuid>())
-        .transpose()
-        .map_err(|_| Denial::ServerError)?;
-    let cover_image_url = logo_or_cover_url(pool, opt_str(o, "cover_image")?, asset_id).await?;
+    let row = projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::Identifier,
+            projects::Column::Name,
+            projects::Column::CoverImage,
+            projects::Column::CoverImageAssetId,
+            projects::Column::LogoProps,
+            projects::Column::Description,
+            projects::Column::IsDefault,
+        ])
+        .filter(projects::Column::Id.eq(*project_id))
+        .into_model::<ProjectLiteDb>()
+        .one(&orm(pool))
+        .await
+        .map_err(db_denial)?
+        .ok_or(Denial::ServerError)?;
+    project_lite_owned(pool, row).await
+}
+
+/// [`ProjectLiteOwned`] over fetched columns (the cover URL resolved).
+async fn project_lite_owned(
+    pool: &sqlx::PgPool,
+    row: ProjectLiteDb,
+) -> Result<ProjectLiteOwned, Denial> {
+    let cover_image_url =
+        logo_or_cover_url(pool, row.cover_image.clone(), row.cover_image_asset_id).await?;
     Ok(ProjectLiteOwned {
-        id: req_str(o, "id")?,
-        identifier: req_str(o, "identifier")?,
-        name: req_str(o, "name")?,
-        cover_image: opt_str(o, "cover_image")?,
+        id: row.id.to_string(),
+        identifier: row.identifier,
+        name: row.name,
+        cover_image: row.cover_image,
         cover_image_url,
-        logo_props: o.get("logo_props").cloned().ok_or(Denial::ServerError)?,
-        description: req_str(o, "description")?,
-        is_default: req_bool(o, "is_default")?,
+        logo_props: row.logo_props,
+        description: row.description,
+        is_default: row.is_default,
     })
+}
+
+/// The `projects` columns behind [`ProjectLiteOwned`].
+#[derive(Debug, FromQueryResult)]
+struct ProjectLiteDb {
+    id: uuid::Uuid,
+    identifier: String,
+    name: String,
+    cover_image: Option<String>,
+    cover_image_asset_id: Option<uuid::Uuid>,
+    logo_props: Value,
+    description: String,
+    is_default: bool,
 }
 
 /// Owned app `WorkspaceLiteSerializer` row (`workspace.py:79-83`).
@@ -1490,25 +1419,46 @@ pub(crate) async fn fetch_workspace_lite(
     pool: &sqlx::PgPool,
     workspace_id: &uuid::Uuid,
 ) -> Result<WorkspaceLiteOwned, Denial> {
-    let row = fetch_optional_object(
-        pool,
-        "SELECT \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"slug\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\" FROM \"workspaces\" WHERE (\"workspaces\".\"id\" = $1)",
-        &[SqlParam::Uuid(*workspace_id)],
-    )
-    .await?
-    .ok_or(Denial::ServerError)?;
-    let o = obj(&row)?;
-    let asset_id = opt_str(o, "logo_asset_id")?
-        .map(|raw| raw.parse::<uuid::Uuid>())
-        .transpose()
-        .map_err(|_| Denial::ServerError)?;
-    let logo_url = logo_or_cover_url(pool, opt_str(o, "logo")?, asset_id).await?;
+    let row = workspaces::Entity::find()
+        .select_only()
+        .columns([
+            workspaces::Column::Id,
+            workspaces::Column::Name,
+            workspaces::Column::Slug,
+            workspaces::Column::Logo,
+            workspaces::Column::LogoAssetId,
+        ])
+        .filter(workspaces::Column::Id.eq(*workspace_id))
+        .into_model::<WorkspaceLiteDb>()
+        .one(&orm(pool))
+        .await
+        .map_err(db_denial)?
+        .ok_or(Denial::ServerError)?;
+    workspace_lite_owned(pool, row).await
+}
+
+/// [`WorkspaceLiteOwned`] over fetched columns (the logo URL resolved).
+async fn workspace_lite_owned(
+    pool: &sqlx::PgPool,
+    row: WorkspaceLiteDb,
+) -> Result<WorkspaceLiteOwned, Denial> {
+    let logo_url = logo_or_cover_url(pool, row.logo, row.logo_asset_id).await?;
     Ok(WorkspaceLiteOwned {
-        name: req_str(o, "name")?,
-        slug: req_str(o, "slug")?,
-        id: req_str(o, "id")?,
+        name: row.name,
+        slug: row.slug,
+        id: row.id.to_string(),
         logo_url,
     })
+}
+
+/// The `workspaces` columns behind [`WorkspaceLiteOwned`].
+#[derive(Debug, FromQueryResult)]
+struct WorkspaceLiteDb {
+    id: uuid::Uuid,
+    name: String,
+    slug: String,
+    logo: Option<String>,
+    logo_asset_id: Option<uuid::Uuid>,
 }
 
 /// Owned app `IssueFlatSerializer` row (`issue.py:105-123`).
@@ -1554,245 +1504,191 @@ async fn fetch_issue_flat(
 ) -> Result<IssueFlatOwned, Denial> {
     // Forward-FK traversal (`_base_manager`): soft-deleted issues
     // render, so the read is unguarded.
-    let row = fetch_optional_object(
-        pool,
-        "SELECT \"issues\".\"id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"is_draft\" FROM \"issues\" WHERE (\"issues\".\"id\" = $1)",
-        &[SqlParam::Uuid(*issue_id)],
-    )
-    .await?
-    .ok_or(Denial::ServerError)?;
-    let o = obj(&row)?;
-    let complexity_score = match o.get("complexity_score") {
-        Some(Value::Number(n)) => n.as_i64().ok_or(Denial::ServerError)? as i32,
-        _ => return Err(Denial::ServerError),
-    };
-    let sequence_id = match o.get("sequence_id") {
-        Some(Value::Number(n)) => n.as_i64().ok_or(Denial::ServerError)? as i32,
-        _ => return Err(Denial::ServerError),
-    };
-    let sort_order = match o.get("sort_order") {
-        Some(Value::Number(n)) => n.as_f64().ok_or(Denial::ServerError)?,
-        _ => return Err(Denial::ServerError),
-    };
-    Ok(IssueFlatOwned {
-        id: req_str(o, "id")?,
-        name: req_str(o, "name")?,
-        description_json: o
-            .get("description_json")
-            .cloned()
-            .ok_or(Denial::ServerError)?,
-        description_html: opt_str(o, "description_html")?,
-        priority: req_str(o, "priority")?,
-        complexity_score,
-        start_date: opt_str(o, "start_date")?,
-        target_date: opt_str(o, "target_date")?,
-        sequence_id,
-        sort_order,
-        is_draft: req_bool(o, "is_draft")?,
-    })
+    let row = issues::Entity::find()
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::Name,
+            issues::Column::DescriptionJson,
+            issues::Column::DescriptionHtml,
+            issues::Column::Priority,
+            issues::Column::ComplexityScore,
+            issues::Column::StartDate,
+            issues::Column::TargetDate,
+            issues::Column::SequenceId,
+            issues::Column::SortOrder,
+            issues::Column::IsDraft,
+        ])
+        .filter(issues::Column::Id.eq(*issue_id))
+        .into_model::<IssueFlatDb>()
+        .one(&orm(pool))
+        .await
+        .map_err(db_denial)?
+        .ok_or(Denial::ServerError)?;
+    Ok(issue_flat_owned(row))
 }
 
-// ---------------------------------------------------------------------------
-// Positional decoding of the joined builder statements
-// ---------------------------------------------------------------------------
-
-/// Column counts of the builder select lists (the join widths the
-/// positional offsets below assume).
-const PROJECT_COLS: usize = 46;
-const WORKSPACE_COLS: usize = 14;
-const ISSUE_COLS: usize = 34;
-
-/// History statements select base + project + workspace + issue + user.
-/// Base widths: activities 20, comments 24.
-const HISTORY_PROJECT_AT: usize = 20;
-const HISTORY_COMMENTS_PROJECT_AT: usize = 24;
-
-/// `comment_list_sql` selects base 24 + `is_member` + project +
-/// workspace + issue (no actor join).
-const LIST_MEMBER_AT: usize = 24;
-const LIST_PROJECT_AT: usize = 25;
-
-/// `history_reactions_prefetch_sql` selects reactions 11 + user 40.
-const PREFETCH_USER_AT: usize = 11;
-
-/// Within-table offsets into `PROJECT_COLUMNS` (46).
-const P_ID: usize = 5;
-const P_NAME: usize = 6;
-const P_DESCRIPTION: usize = 7;
-const P_IDENTIFIER: usize = 12;
-const P_IS_DEFAULT: usize = 24;
-const P_COVER_IMAGE: usize = 27;
-const P_COVER_IMAGE_ASSET_ID: usize = 28;
-const P_LOGO_PROPS: usize = 32;
-
-/// Within-table offsets into `WORKSPACE_COLUMNS` (14).
-const W_ID: usize = 5;
-const W_NAME: usize = 6;
-const W_LOGO: usize = 7;
-const W_LOGO_ASSET_ID: usize = 8;
-const W_SLUG: usize = 10;
-
-/// Within-table offsets into `PREFETCH_ISSUE_COLUMNS` (34).
-const I_ID: usize = 5;
-const I_NAME: usize = 12;
-const I_DESCRIPTION_JSON: usize = 13;
-const I_DESCRIPTION_HTML: usize = 14;
-const I_PRIORITY: usize = 17;
-const I_COMPLEXITY_SCORE: usize = 18;
-const I_START_DATE: usize = 19;
-const I_TARGET_DATE: usize = 20;
-const I_SEQUENCE_ID: usize = 21;
-const I_SORT_ORDER: usize = 22;
-const I_IS_DRAFT: usize = 25;
-
-/// Within-table offsets into `USER_COLUMNS` (40).
-const U_ID: usize = 2;
-const U_DISPLAY_NAME: usize = 6;
-const U_FIRST_NAME: usize = 7;
-const U_LAST_NAME: usize = 8;
-const U_AVATAR: usize = 9;
-const U_AVATAR_ASSET_ID: usize = 10;
-const U_IS_BOT: usize = 35;
-
-/// Within-table offsets into `COMMENT_COLUMNS` (24).
-const C_CREATED_AT: usize = 0;
-const C_UPDATED_AT: usize = 1;
-const C_CREATED_BY_ID: usize = 2;
-const C_UPDATED_BY_ID: usize = 3;
-const C_DELETED_AT: usize = 4;
-const C_ID: usize = 5;
-const C_PROJECT_ID: usize = 6;
-const C_WORKSPACE_ID: usize = 7;
-const C_STRIPPED: usize = 8;
-const C_JSON: usize = 9;
-const C_HTML: usize = 10;
-const C_DESCRIPTION_ID: usize = 11;
-const C_ATTACHMENTS: usize = 12;
-const C_LABELS: usize = 13;
-const C_ISSUE_ID: usize = 14;
-const C_ACTOR_ID: usize = 15;
-const C_ACCESS: usize = 16;
-const C_EXTERNAL_SOURCE: usize = 17;
-const C_EXTERNAL_ID: usize = 18;
-const C_SPEAKER_TYPE: usize = 19;
-const C_SPEAKER_LABEL: usize = 20;
-const C_SPEAKER_RUN_ID: usize = 21;
-const C_EDITED_AT: usize = 22;
-const C_PARENT_ID: usize = 23;
-
-/// Within-table offsets into `ACTIVITY_COLUMNS` (20).
-const A_CREATED_AT: usize = 0;
-const A_UPDATED_AT: usize = 1;
-const A_CREATED_BY_ID: usize = 2;
-const A_UPDATED_BY_ID: usize = 3;
-const A_DELETED_AT: usize = 4;
-const A_ID: usize = 5;
-const A_PROJECT_ID: usize = 6;
-const A_WORKSPACE_ID: usize = 7;
-const A_ISSUE_ID: usize = 8;
-const A_VERB: usize = 9;
-const A_FIELD: usize = 10;
-const A_OLD_VALUE: usize = 11;
-const A_NEW_VALUE: usize = 12;
-const A_COMMENT: usize = 13;
-const A_ATTACHMENTS: usize = 14;
-const A_ISSUE_COMMENT_ID: usize = 15;
-const A_ACTOR_ID: usize = 16;
-const A_OLD_IDENTIFIER: usize = 17;
-const A_NEW_IDENTIFIER: usize = 18;
-const A_EPOCH: usize = 19;
-
-/// Within-table offsets into `COMMENT_REACTION_COLUMNS` (11).
-const R_CREATED_AT: usize = 0;
-const R_UPDATED_AT: usize = 1;
-const R_CREATED_BY_ID: usize = 2;
-const R_UPDATED_BY_ID: usize = 3;
-const R_DELETED_AT: usize = 4;
-const R_ID: usize = 5;
-const R_PROJECT_ID: usize = 6;
-const R_WORKSPACE_ID: usize = 7;
-const R_ACTOR_ID: usize = 8;
-const R_COMMENT_ID: usize = 9;
-const R_REACTION: usize = 10;
-
-/// Decode the project-lite nest from a joined row at `base`.
-async fn decode_project_lite(
-    pool: &sqlx::PgPool,
-    row: &sqlx::postgres::PgRow,
-    base: usize,
-) -> Result<ProjectLiteOwned, Denial> {
-    let asset_id = cell_opt_uuid(row, base + P_COVER_IMAGE_ASSET_ID)?;
-    let cover_image = cell_opt_string(row, base + P_COVER_IMAGE)?;
-    let cover_image_url = logo_or_cover_url(pool, cover_image.clone(), asset_id).await?;
-    Ok(ProjectLiteOwned {
-        id: cell_uuid(row, base + P_ID)?.to_string(),
-        identifier: cell_string(row, base + P_IDENTIFIER)?,
-        name: cell_string(row, base + P_NAME)?,
-        cover_image,
-        cover_image_url,
-        logo_props: cell_json(row, base + P_LOGO_PROPS)?,
-        description: cell_string(row, base + P_DESCRIPTION)?,
-        is_default: cell_bool(row, base + P_IS_DEFAULT)?,
-    })
-}
-
-/// Decode the workspace-lite nest from a joined row at `base`.
-async fn decode_workspace_lite(
-    pool: &sqlx::PgPool,
-    row: &sqlx::postgres::PgRow,
-    base: usize,
-) -> Result<WorkspaceLiteOwned, Denial> {
-    let asset_id = cell_opt_uuid(row, base + W_LOGO_ASSET_ID)?;
-    let logo = cell_opt_string(row, base + W_LOGO)?;
-    let logo_url = logo_or_cover_url(pool, logo, asset_id).await?;
-    Ok(WorkspaceLiteOwned {
-        name: cell_string(row, base + W_NAME)?,
-        slug: cell_string(row, base + W_SLUG)?,
-        id: cell_uuid(row, base + W_ID)?.to_string(),
-        logo_url,
-    })
-}
-
-/// Decode the issue-flat nest from a joined row at `base`.
-fn decode_issue_flat(row: &sqlx::postgres::PgRow, base: usize) -> Result<IssueFlatOwned, Denial> {
-    Ok(IssueFlatOwned {
-        id: cell_uuid(row, base + I_ID)?.to_string(),
-        name: cell_string(row, base + I_NAME)?,
-        description_json: cell_json(row, base + I_DESCRIPTION_JSON)?,
-        description_html: cell_opt_string(row, base + I_DESCRIPTION_HTML)?,
-        priority: cell_string(row, base + I_PRIORITY)?,
-        complexity_score: cell_i32(row, base + I_COMPLEXITY_SCORE)?,
-        start_date: cell_opt_date(row, base + I_START_DATE)?.map(|d| render_date(&d)),
-        target_date: cell_opt_date(row, base + I_TARGET_DATE)?.map(|d| render_date(&d)),
-        sequence_id: cell_i32(row, base + I_SEQUENCE_ID)?,
-        sort_order: cell_f64(row, base + I_SORT_ORDER)?,
-        is_draft: cell_bool(row, base + I_IS_DRAFT)?,
-    })
-}
-
-/// Decode the actor-lite nest from a joined row at `base`. `None` when
-/// the LEFT JOIN missed (null actor), like the null source rendering
-/// `actor_detail` as `null`.
-async fn decode_user_lite(
-    pool: &sqlx::PgPool,
-    row: &sqlx::postgres::PgRow,
-    base: usize,
-) -> Result<Option<UserLiteOwned>, Denial> {
-    if cell_opt_uuid(row, base + U_ID)?.is_none() {
-        return Ok(None);
+/// [`IssueFlatOwned`] over fetched columns.
+fn issue_flat_owned(row: IssueFlatDb) -> IssueFlatOwned {
+    IssueFlatOwned {
+        id: row.id.to_string(),
+        name: row.name,
+        description_json: row.description_json,
+        description_html: Some(row.description_html),
+        priority: row.priority,
+        complexity_score: row.complexity_score,
+        start_date: row.start_date.map(|d| render_date(&d)),
+        target_date: row.target_date.map(|d| render_date(&d)),
+        sequence_id: row.sequence_id,
+        sort_order: row.sort_order,
+        is_draft: row.is_draft,
     }
-    let asset_id = cell_opt_uuid(row, base + U_AVATAR_ASSET_ID)?;
-    let avatar = cell_string(row, base + U_AVATAR)?;
-    let avatar_url = logo_or_cover_url(pool, Some(avatar.clone()), asset_id).await?;
-    Ok(Some(UserLiteOwned {
-        id: cell_uuid(row, base + U_ID)?.to_string(),
-        first_name: cell_string(row, base + U_FIRST_NAME)?,
-        last_name: cell_string(row, base + U_LAST_NAME)?,
-        avatar,
-        avatar_url,
-        is_bot: cell_bool(row, base + U_IS_BOT)?,
-        display_name: cell_string(row, base + U_DISPLAY_NAME)?,
-    }))
+}
+
+/// The `issues` columns behind [`IssueFlatOwned`].
+#[derive(Debug, FromQueryResult)]
+struct IssueFlatDb {
+    id: uuid::Uuid,
+    name: String,
+    description_json: Value,
+    description_html: String,
+    priority: String,
+    complexity_score: i32,
+    start_date: Option<chrono::NaiveDate>,
+    target_date: Option<chrono::NaiveDate>,
+    sequence_id: i32,
+    sort_order: f64,
+    is_draft: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Joined builder rows, decoded by name (batch 2h)
+// ---------------------------------------------------------------------------
+//
+// The `queries_engage` history / comment selects return the base table's
+// columns unprefixed plus each joined nest under its own prefix
+// (`queries_engage::{PROJECT_PREFIX, WORKSPACE_PREFIX, ISSUE_PREFIX,
+// USER_PREFIX}`); the row types below decode every value by name.
+
+/// The project / workspace / issue nests of one joined row.
+struct NestDb {
+    project: ProjectLiteDb,
+    workspace: WorkspaceLiteDb,
+    issue: IssueFlatDb,
+}
+
+impl NestDb {
+    fn decode(res: &sea_orm::QueryResult) -> Result<Self, DbErr> {
+        Ok(Self {
+            project: ProjectLiteDb::from_query_result(res, PROJECT_PREFIX)?,
+            workspace: WorkspaceLiteDb::from_query_result(res, WORKSPACE_PREFIX)?,
+            issue: IssueFlatDb::from_query_result(res, ISSUE_PREFIX)?,
+        })
+    }
+
+    /// Resolve the nests' asset URLs into the owned lite shapes.
+    async fn into_owned(
+        self,
+        pool: &sqlx::PgPool,
+    ) -> Result<(ProjectLiteOwned, WorkspaceLiteOwned, IssueFlatOwned), Denial> {
+        let project = project_lite_owned(pool, self.project).await?;
+        let workspace = workspace_lite_owned(pool, self.workspace).await?;
+        Ok((project, workspace, issue_flat_owned(self.issue)))
+    }
+}
+
+/// The LEFT-joined actor nest: `None` when the join missed (null actor),
+/// like the null source rendering `actor_detail` as `null`.
+fn decode_actor(res: &sea_orm::QueryResult) -> Result<Option<UserLiteDb>, DbErr> {
+    match res.try_get::<Option<uuid::Uuid>>(USER_PREFIX, "id")? {
+        None => Ok(None),
+        Some(_) => UserLiteDb::from_query_result(res, USER_PREFIX).map(Some),
+    }
+}
+
+async fn actor_owned(
+    pool: &sqlx::PgPool,
+    actor: Option<UserLiteDb>,
+) -> Result<Option<UserLiteOwned>, Denial> {
+    match actor {
+        None => Ok(None),
+        Some(row) => user_lite_owned(pool, row).await.map(Some),
+    }
+}
+
+/// One `history_activities_select` row.
+struct HistoryActivityRow {
+    activity: issue_activities::Model,
+    nests: NestDb,
+    actor: Option<UserLiteDb>,
+}
+
+impl FromQueryResult for HistoryActivityRow {
+    fn from_query_result(res: &sea_orm::QueryResult, pre: &str) -> Result<Self, DbErr> {
+        Ok(Self {
+            activity: issue_activities::Model::from_query_result(res, pre)?,
+            nests: NestDb::decode(res)?,
+            actor: decode_actor(res)?,
+        })
+    }
+}
+
+/// One `history_comments_select` row.
+struct HistoryCommentRow {
+    comment: issue_comments::Model,
+    nests: NestDb,
+    actor: Option<UserLiteDb>,
+}
+
+impl FromQueryResult for HistoryCommentRow {
+    fn from_query_result(res: &sea_orm::QueryResult, pre: &str) -> Result<Self, DbErr> {
+        Ok(Self {
+            comment: issue_comments::Model::from_query_result(res, pre)?,
+            nests: NestDb::decode(res)?,
+            actor: decode_actor(res)?,
+        })
+    }
+}
+
+/// One `comment_list_select` row (no actor join).
+struct ListCommentRow {
+    comment: issue_comments::Model,
+    is_member: bool,
+    nests: NestDb,
+}
+
+impl FromQueryResult for ListCommentRow {
+    fn from_query_result(res: &sea_orm::QueryResult, pre: &str) -> Result<Self, DbErr> {
+        Ok(Self {
+            comment: issue_comments::Model::from_query_result(res, pre)?,
+            is_member: res.try_get(pre, "is_member")?,
+            nests: NestDb::decode(res)?,
+        })
+    }
+}
+
+/// One `history_reactions_prefetch_select` row: the reaction plus its
+/// actor's `display_name`.
+struct PrefetchedReactionRow {
+    reaction: comment_reactions::Model,
+    display_name: String,
+}
+
+impl FromQueryResult for PrefetchedReactionRow {
+    fn from_query_result(res: &sea_orm::QueryResult, pre: &str) -> Result<Self, DbErr> {
+        Ok(Self {
+            reaction: comment_reactions::Model::from_query_result(res, pre)?,
+            display_name: res.try_get(USER_PREFIX, "display_name")?,
+        })
+    }
+}
+
+/// One `history_intake_prefetch_select` row.
+#[derive(FromQueryResult)]
+struct IntakeSourceDb {
+    source: Option<String>,
+    source_email: Option<String>,
+    extra: Value,
 }
 
 // ---------------------------------------------------------------------------
@@ -1807,25 +1703,21 @@ async fn comment_is_synced(
     comment_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
     use pidash_services::app_issues::serializers_engage::{
-        GITHUB_COMMENT_SYNC_PROBE_SQL, GIT_COMMENT_SYNC_PROBE_SQL,
+        git_comment_synced, github_comment_synced,
     };
     if external_source.unwrap_or("").is_empty() {
         return Ok(false);
     }
-    let git: Option<(i32,)> = sqlx::query_as(GIT_COMMENT_SYNC_PROBE_SQL)
-        .bind(comment_id)
-        .fetch_optional(pool)
+    let db = orm(pool);
+    if git_comment_synced(&db, *comment_id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    if git.is_some() {
+        .map_err(db_denial)?
+    {
         return Ok(true);
     }
-    let github: Option<(i32,)> = sqlx::query_as(GITHUB_COMMENT_SYNC_PROBE_SQL)
-        .bind(comment_id)
-        .fetch_optional(pool)
+    github_comment_synced(&db, *comment_id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(github.is_some())
+        .map_err(db_denial)
 }
 
 /// The destroy guard (`comment.py:158-160`): a raw OR over both sync
@@ -1836,22 +1728,18 @@ async fn comment_has_sync_row(
     comment_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
     use pidash_services::app_issues::serializers_engage::{
-        GITHUB_COMMENT_SYNC_PROBE_SQL, GIT_COMMENT_SYNC_PROBE_SQL,
+        git_comment_synced, github_comment_synced,
     };
-    let git: Option<(i32,)> = sqlx::query_as(GIT_COMMENT_SYNC_PROBE_SQL)
-        .bind(comment_id)
-        .fetch_optional(pool)
+    let db = orm(pool);
+    if git_comment_synced(&db, *comment_id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    if git.is_some() {
+        .map_err(db_denial)?
+    {
         return Ok(true);
     }
-    let github: Option<(i32,)> = sqlx::query_as(GITHUB_COMMENT_SYNC_PROBE_SQL)
-        .bind(comment_id)
-        .fetch_optional(pool)
+    github_comment_synced(&db, *comment_id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(github.is_some())
+        .map_err(db_denial)
 }
 
 // ---------------------------------------------------------------------------
@@ -2491,17 +2379,11 @@ async fn check_fk(
         );
         return Ok(Presence::Missing);
     };
-    let sql = if table == "users" {
-        format!("SELECT 1 FROM {table} WHERE id = $1")
-    } else {
-        format!("SELECT 1 FROM {table} WHERE id = $1 AND deleted_at IS NULL")
-    };
-    let exists: Option<(i32,)> = sqlx::query_as(&sql)
-        .bind(id)
-        .fetch_optional(pool)
+    let exists = fk_target_exists(&orm(pool), table, id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    if exists.is_none() {
+        .map_err(db_denial)?
+        .ok_or(Denial::ServerError)?;
+    if !exists {
         push_error(
             errors,
             field,
@@ -2510,6 +2392,50 @@ async fn check_fk(
         return Ok(Presence::Missing);
     }
     Ok(Presence::Value(id))
+}
+
+/// The `PrimaryKeyRelatedField` queryset lookup behind [`check_fk`]:
+/// `users` has no soft delete; the other targets read their default
+/// manager (soft-deleted rows do not count). `None` for a table no
+/// engage serializer points at.
+async fn fk_target_exists(
+    db: &impl sea_orm::ConnectionTrait,
+    table: &str,
+    id: uuid::Uuid,
+) -> Result<Option<bool>, DbErr> {
+    let hit: Option<uuid::Uuid> = match table {
+        "users" => {
+            users::Entity::find()
+                .select_only()
+                .column(users::Column::Id)
+                .filter(users::Column::Id.eq(id))
+                .into_tuple()
+                .one(db)
+                .await?
+        }
+        "descriptions" => {
+            descriptions::Entity::find()
+                .select_only()
+                .column(descriptions::Column::Id)
+                .filter(descriptions::Column::Id.eq(id))
+                .filter(descriptions::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(db)
+                .await?
+        }
+        "issue_comments" => {
+            issue_comments::Entity::find()
+                .select_only()
+                .column(issue_comments::Column::Id)
+                .filter(issue_comments::Column::Id.eq(id))
+                .filter(issue_comments::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(db)
+                .await?
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(hit.is_some()))
 }
 
 /// Django `URLValidator` (`django/core/validators.py:69-160`), line for
@@ -3042,107 +2968,34 @@ struct CommentBaseOwned {
     parent_id: Option<uuid::Uuid>,
 }
 
-impl CommentBaseOwned {
-    /// Decode the base columns of a joined builder row (`COMMENT_COLUMNS`
-    /// at offset 0).
-    fn from_positional(row: &sqlx::postgres::PgRow) -> Result<Self, Denial> {
-        Ok(Self {
-            id: cell_uuid(row, C_ID)?,
-            created_at: cell_datetime(row, C_CREATED_AT)?,
-            updated_at: cell_datetime(row, C_UPDATED_AT)?,
-            created_by: cell_opt_uuid(row, C_CREATED_BY_ID)?,
-            updated_by: cell_opt_uuid(row, C_UPDATED_BY_ID)?,
-            deleted_at: cell_opt_datetime(row, C_DELETED_AT)?,
-            project_id: cell_uuid(row, C_PROJECT_ID)?,
-            workspace_id: cell_uuid(row, C_WORKSPACE_ID)?,
-            stripped: cell_string(row, C_STRIPPED)?,
-            json: cell_json(row, C_JSON)?,
-            html: cell_string(row, C_HTML)?,
-            description_id: cell_opt_uuid(row, C_DESCRIPTION_ID)?,
-            attachments: cell_str_array(row, C_ATTACHMENTS)?,
-            labels: cell_str_array(row, C_LABELS)?,
-            issue_id: cell_uuid(row, C_ISSUE_ID)?,
-            actor_id: cell_opt_uuid(row, C_ACTOR_ID)?,
-            access: cell_string(row, C_ACCESS)?,
-            external_source: cell_opt_string(row, C_EXTERNAL_SOURCE)?,
-            external_id: cell_opt_string(row, C_EXTERNAL_ID)?,
-            speaker_type: cell_string(row, C_SPEAKER_TYPE)?,
-            speaker_label: cell_string(row, C_SPEAKER_LABEL)?,
-            speaker_run_id: cell_opt_uuid(row, C_SPEAKER_RUN_ID)?,
-            edited_at: cell_opt_datetime(row, C_EDITED_AT)?,
-            parent_id: cell_opt_uuid(row, C_PARENT_ID)?,
-        })
-    }
-
-    /// Decode a single-table `row_to_json` map (column names as keys).
-    fn from_map(map: &Map<String, Value>) -> Result<Self, Denial> {
-        let uuid = |key: &str| -> Result<uuid::Uuid, Denial> {
-            req_str(map, key)?
-                .parse::<uuid::Uuid>()
-                .map_err(|_| Denial::ServerError)
-        };
-        let opt_uuid = |key: &str| -> Result<Option<uuid::Uuid>, Denial> {
-            opt_str(map, key)?
-                .map(|raw| raw.parse::<uuid::Uuid>())
-                .transpose()
-                .map_err(|_| Denial::ServerError)
-        };
-        let dt = |key: &str| -> Result<chrono::DateTime<chrono::Utc>, Denial> {
-            let raw = req_str(map, key)?;
-            chrono::DateTime::parse_from_rfc3339(&raw)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|_| Denial::ServerError)
-        };
-        let opt_dt = |key: &str| -> Result<Option<chrono::DateTime<chrono::Utc>>, Denial> {
-            opt_str(map, key)?
-                .map(|raw| {
-                    chrono::DateTime::parse_from_rfc3339(&raw)
-                        .map(|dt| dt.with_timezone(&chrono::Utc))
-                })
-                .transpose()
-                .map_err(|_| Denial::ServerError)
-        };
-        let str_array = |key: &str| -> Result<Vec<String>, Denial> {
-            match map.get(key) {
-                Some(Value::Array(items)) => items
-                    .iter()
-                    .map(|item| match item {
-                        Value::String(s) => Ok(s.clone()),
-                        _ => Err(Denial::ServerError),
-                    })
-                    .collect(),
-                _ => Err(Denial::ServerError),
-            }
-        };
-        Ok(Self {
-            id: uuid("id")?,
-            created_at: dt("created_at")?,
-            updated_at: dt("updated_at")?,
-            created_by: opt_uuid("created_by_id")?.or(opt_uuid("created_by")?),
-            updated_by: opt_uuid("updated_by_id")?.or(opt_uuid("updated_by")?),
-            deleted_at: opt_dt("deleted_at")?,
-            project_id: uuid("project_id")?,
-            workspace_id: uuid("workspace_id")?,
-            stripped: req_str(map, "comment_stripped")?,
-            json: map
-                .get("comment_json")
-                .cloned()
-                .ok_or(Denial::ServerError)?,
-            html: req_str(map, "comment_html")?,
-            description_id: opt_uuid("description_id")?,
-            attachments: str_array("attachments")?,
-            labels: str_array("labels")?,
-            issue_id: uuid("issue_id")?,
-            actor_id: opt_uuid("actor_id")?,
-            access: req_str(map, "access")?,
-            external_source: opt_str(map, "external_source")?,
-            external_id: opt_str(map, "external_id")?,
-            speaker_type: req_str(map, "speaker_type")?,
-            speaker_label: req_str(map, "speaker_label")?,
-            speaker_run_id: opt_uuid("speaker_agent_run_id")?,
-            edited_at: opt_dt("edited_at")?,
-            parent_id: opt_uuid("parent_id")?,
-        })
+impl From<issue_comments::Model> for CommentBaseOwned {
+    fn from(row: issue_comments::Model) -> Self {
+        Self {
+            id: row.id,
+            created_at: utc(row.created_at),
+            updated_at: utc(row.updated_at),
+            created_by: row.created_by_id,
+            updated_by: row.updated_by_id,
+            deleted_at: row.deleted_at.map(utc),
+            project_id: row.project_id,
+            workspace_id: row.workspace_id,
+            stripped: row.comment_stripped,
+            json: row.comment_json,
+            html: row.comment_html,
+            description_id: row.description_id,
+            attachments: row.attachments,
+            labels: row.labels,
+            issue_id: row.issue_id,
+            actor_id: row.actor_id,
+            access: row.access,
+            external_source: row.external_source,
+            external_id: row.external_id,
+            speaker_type: row.speaker_type,
+            speaker_label: row.speaker_label,
+            speaker_run_id: row.speaker_agent_run_id,
+            edited_at: row.edited_at.map(utc),
+            parent_id: row.parent_id,
+        }
     }
 }
 
@@ -3419,41 +3272,15 @@ struct CommentView {
 /// The `users` read is unguarded (no `deleted_at` column); a dangling
 /// FK is a 500 like Python's `DoesNotExist` into the fallback.
 async fn fetch_display_name(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<String, Denial> {
-    let row: Option<(String,)> = sqlx::query_as("SELECT display_name FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
+    users::Entity::find()
+        .select_only()
+        .column(users::Column::DisplayName)
+        .filter(users::Column::Id.eq(*user_id))
+        .into_tuple::<String>()
+        .one(&orm(pool))
         .await
-        .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ServerError)
-}
-
-/// Render one reaction map (single-table `row_to_json`, column names as
-/// keys) with its `display_name` leaf.
-async fn render_comment_reaction_map(
-    pool: &sqlx::PgPool,
-    map: &Map<String, Value>,
-    tz: &Tz,
-) -> Result<CommentReactionView, Denial> {
-    let actor_id = req_str(map, "actor_id")?
-        .parse::<uuid::Uuid>()
-        .map_err(|_| Denial::ServerError)?;
-    let display_name = fetch_display_name(pool, &actor_id).await?;
-    Ok(CommentReactionView {
-        id: req_str(map, "id")?,
-        actor: req_str(map, "actor_id")?,
-        comment: req_str(map, "comment_id")?,
-        reaction: req_str(map, "reaction")?,
-        display_name,
-        deleted_at: render_dt_str_opt(opt_str(map, "deleted_at")?, tz)?,
-        workspace: req_str(map, "workspace_id")?,
-        project: req_str(map, "project_id")?,
-        created_at: render_rfc3339_in(&req_str(map, "created_at")?, tz)
-            .map_err(|_| Denial::ServerError)?,
-        updated_at: render_rfc3339_in(&req_str(map, "updated_at")?, tz)
-            .map_err(|_| Denial::ServerError)?,
-        created_by: opt_str(map, "created_by_id")?.or(opt_str(map, "created_by")?),
-        updated_by: opt_str(map, "updated_by_id")?.or(opt_str(map, "updated_by")?),
-    })
+        .map_err(db_denial)?
+        .ok_or(Denial::ServerError)
 }
 
 /// The live reaction rows for one comment, newest first (model
@@ -3464,17 +3291,27 @@ async fn render_comment_reactions_for(
     comment_id: &uuid::Uuid,
     tz: &Tz,
 ) -> Result<Vec<CommentReactionView>, Denial> {
-    let rows = fetch_all_objects(
-        pool,
-        "SELECT * FROM comment_reactions WHERE deleted_at IS NULL AND comment_id = $1 ORDER BY created_at DESC",
-        &[SqlParam::Uuid(*comment_id)],
-    )
-    .await?;
+    let rows = comment_reactions_for(&orm(pool), *comment_id)
+        .await
+        .map_err(db_denial)?;
     let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        out.push(render_comment_reaction_map(pool, obj(row)?, tz).await?);
+    for row in rows {
+        let base = CommentReactionBaseOwned::from(row);
+        out.push(comment_reaction_view(pool, &base, tz).await?);
     }
     Ok(out)
+}
+
+async fn comment_reactions_for(
+    db: &impl sea_orm::ConnectionTrait,
+    comment_id: uuid::Uuid,
+) -> Result<Vec<comment_reactions::Model>, DbErr> {
+    comment_reactions::Entity::find()
+        .filter(comment_reactions::Column::DeletedAt.is_null())
+        .filter(comment_reactions::Column::CommentId.eq(comment_id))
+        .order_by_desc(comment_reactions::Column::CreatedAt)
+        .all(db)
+        .await
 }
 
 /// Assemble a [`CommentView`] from a decoded base, resolved nests, the
@@ -3545,24 +3382,13 @@ fn nest_values(
 /// prefetch map.
 async fn render_history_comment(
     pool: &sqlx::PgPool,
-    row: &sqlx::postgres::PgRow,
+    row: HistoryCommentRow,
     tz: &Tz,
     reactions: Vec<CommentReactionView>,
 ) -> Result<Value, Denial> {
-    let base = CommentBaseOwned::from_positional(row)?;
-    let project = decode_project_lite(pool, row, HISTORY_COMMENTS_PROJECT_AT).await?;
-    let workspace =
-        decode_workspace_lite(pool, row, HISTORY_COMMENTS_PROJECT_AT + PROJECT_COLS).await?;
-    let issue = decode_issue_flat(
-        row,
-        HISTORY_COMMENTS_PROJECT_AT + PROJECT_COLS + WORKSPACE_COLS,
-    )?;
-    let actor = decode_user_lite(
-        pool,
-        row,
-        HISTORY_COMMENTS_PROJECT_AT + PROJECT_COLS + WORKSPACE_COLS + ISSUE_COLS,
-    )
-    .await?;
+    let base = CommentBaseOwned::from(row.comment);
+    let (project, workspace, issue) = row.nests.into_owned(pool).await?;
+    let actor = actor_owned(pool, row.actor).await?;
     let is_synced = comment_is_synced(pool, base.external_source.as_deref(), &base.id).await?;
     let (actor_detail, issue_detail, project_detail, workspace_detail) =
         nest_values(&actor, &issue, &project, &workspace)?;
@@ -3585,14 +3411,12 @@ async fn render_history_comment(
 /// list statement), `is_member` comes from the annotation.
 async fn render_list_comment(
     pool: &sqlx::PgPool,
-    row: &sqlx::postgres::PgRow,
+    row: ListCommentRow,
     tz: &Tz,
 ) -> Result<Value, Denial> {
-    let base = CommentBaseOwned::from_positional(row)?;
-    let is_member = cell_bool(row, LIST_MEMBER_AT)?;
-    let project = decode_project_lite(pool, row, LIST_PROJECT_AT).await?;
-    let workspace = decode_workspace_lite(pool, row, LIST_PROJECT_AT + PROJECT_COLS).await?;
-    let issue = decode_issue_flat(row, LIST_PROJECT_AT + PROJECT_COLS + WORKSPACE_COLS)?;
+    let base = CommentBaseOwned::from(row.comment);
+    let is_member = row.is_member;
+    let (project, workspace, issue) = row.nests.into_owned(pool).await?;
     let actor = match base.actor_id {
         None => None,
         Some(id) => Some(fetch_user_lite(pool, &id).await?),
@@ -3696,24 +3520,18 @@ struct ActivityRender {
 /// (first element) or stays `None` — exactly the `:529` guard chain.
 async fn render_history_activity(
     pool: &sqlx::PgPool,
-    row: &sqlx::postgres::PgRow,
+    row: HistoryActivityRow,
     tz: &Tz,
     intake: Option<IntakeOwned>,
 ) -> Result<Value, Denial> {
     use pidash_services::app_issues::serializers_engage::{
         issue_activity_to_representation, ActivitySourceData, IssueActivityRow,
     };
-    let project = decode_project_lite(pool, row, HISTORY_PROJECT_AT).await?;
-    let workspace = decode_workspace_lite(pool, row, HISTORY_PROJECT_AT + PROJECT_COLS).await?;
-    let issue = decode_issue_flat(row, HISTORY_PROJECT_AT + PROJECT_COLS + WORKSPACE_COLS)?;
-    let actor = decode_user_lite(
-        pool,
-        row,
-        HISTORY_PROJECT_AT + PROJECT_COLS + WORKSPACE_COLS + ISSUE_COLS,
-    )
-    .await?;
+    let (project, workspace, issue) = row.nests.into_owned(pool).await?;
+    let actor = actor_owned(pool, row.actor).await?;
+    let a = row.activity;
     let render = ActivityRender {
-        id: cell_uuid(row, A_ID)?.to_string(),
+        id: a.id.to_string(),
         actor,
         // The history statement pins `issue_id` to the requested issue,
         // so the joined issue is always the activity's own.
@@ -3721,25 +3539,25 @@ async fn render_history_activity(
         project,
         workspace,
         source: intake,
-        created_at: render_dt(&cell_datetime(row, A_CREATED_AT)?, tz),
-        updated_at: render_dt(&cell_datetime(row, A_UPDATED_AT)?, tz),
-        deleted_at: render_dt_opt(cell_opt_datetime(row, A_DELETED_AT)?, tz),
-        verb: cell_string(row, A_VERB)?,
-        field: cell_opt_string(row, A_FIELD)?,
-        old_value: cell_opt_string(row, A_OLD_VALUE)?,
-        new_value: cell_opt_string(row, A_NEW_VALUE)?,
-        comment: cell_string(row, A_COMMENT)?,
-        attachments: cell_str_array(row, A_ATTACHMENTS)?,
-        old_identifier: cell_opt_uuid(row, A_OLD_IDENTIFIER)?.map(|id| id.to_string()),
-        new_identifier: cell_opt_uuid(row, A_NEW_IDENTIFIER)?.map(|id| id.to_string()),
-        epoch: cell_opt_f64(row, A_EPOCH)?,
-        created_by: cell_opt_uuid(row, A_CREATED_BY_ID)?.map(|id| id.to_string()),
-        updated_by: cell_opt_uuid(row, A_UPDATED_BY_ID)?.map(|id| id.to_string()),
-        project_id: cell_uuid(row, A_PROJECT_ID)?.to_string(),
-        workspace_id: cell_uuid(row, A_WORKSPACE_ID)?.to_string(),
-        issue_id: cell_opt_uuid(row, A_ISSUE_ID)?.map(|id| id.to_string()),
-        issue_comment_id: cell_opt_uuid(row, A_ISSUE_COMMENT_ID)?.map(|id| id.to_string()),
-        actor_id: cell_opt_uuid(row, A_ACTOR_ID)?.map(|id| id.to_string()),
+        created_at: render_dt(&utc(a.created_at), tz),
+        updated_at: render_dt(&utc(a.updated_at), tz),
+        deleted_at: render_dt_opt(a.deleted_at.map(utc), tz),
+        verb: a.verb,
+        field: a.field,
+        old_value: a.old_value,
+        new_value: a.new_value,
+        comment: a.comment,
+        attachments: a.attachments,
+        old_identifier: a.old_identifier.map(|id| id.to_string()),
+        new_identifier: a.new_identifier.map(|id| id.to_string()),
+        epoch: a.epoch,
+        created_by: a.created_by_id.map(|id| id.to_string()),
+        updated_by: a.updated_by_id.map(|id| id.to_string()),
+        project_id: a.project_id.to_string(),
+        workspace_id: a.workspace_id.to_string(),
+        issue_id: a.issue_id.map(|id| id.to_string()),
+        issue_comment_id: a.issue_comment_id.map(|id| id.to_string()),
+        actor_id: a.actor_id.map(|id| id.to_string()),
     };
     use pidash_services::app_issues::serializers_engage::app_issue_flat_to_representation;
     use pidash_services::app_issues::serializers_engage::AppIssueFlatRow;
@@ -3847,47 +3665,21 @@ struct IssueReactionBaseOwned {
     actor_id: uuid::Uuid,
 }
 
-impl IssueReactionBaseOwned {
-    fn from_map(map: &Map<String, Value>) -> Result<Self, Denial> {
-        let uuid = |key: &str| -> Result<uuid::Uuid, Denial> {
-            req_str(map, key)?
-                .parse::<uuid::Uuid>()
-                .map_err(|_| Denial::ServerError)
-        };
-        let opt_uuid = |key: &str| -> Result<Option<uuid::Uuid>, Denial> {
-            opt_str(map, key)?
-                .map(|raw| raw.parse::<uuid::Uuid>())
-                .transpose()
-                .map_err(|_| Denial::ServerError)
-        };
-        let dt = |key: &str| -> Result<chrono::DateTime<chrono::Utc>, Denial> {
-            let raw = req_str(map, key)?;
-            chrono::DateTime::parse_from_rfc3339(&raw)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|_| Denial::ServerError)
-        };
-        let opt_dt = |key: &str| -> Result<Option<chrono::DateTime<chrono::Utc>>, Denial> {
-            opt_str(map, key)?
-                .map(|raw| {
-                    chrono::DateTime::parse_from_rfc3339(&raw)
-                        .map(|dt| dt.with_timezone(&chrono::Utc))
-                })
-                .transpose()
-                .map_err(|_| Denial::ServerError)
-        };
-        Ok(Self {
-            id: uuid("id")?,
-            created_at: dt("created_at")?,
-            updated_at: dt("updated_at")?,
-            deleted_at: opt_dt("deleted_at")?,
-            reaction: req_str(map, "reaction")?,
-            created_by: opt_uuid("created_by_id")?.or(opt_uuid("created_by")?),
-            updated_by: opt_uuid("updated_by_id")?.or(opt_uuid("updated_by")?),
-            project_id: uuid("project_id")?,
-            workspace_id: uuid("workspace_id")?,
-            issue_id: uuid("issue_id")?,
-            actor_id: uuid("actor_id")?,
-        })
+impl From<issue_reactions::Model> for IssueReactionBaseOwned {
+    fn from(row: issue_reactions::Model) -> Self {
+        Self {
+            id: row.id,
+            created_at: utc(row.created_at),
+            updated_at: utc(row.updated_at),
+            deleted_at: row.deleted_at.map(utc),
+            reaction: row.reaction,
+            created_by: row.created_by_id,
+            updated_by: row.updated_by_id,
+            project_id: row.project_id,
+            workspace_id: row.workspace_id,
+            issue_id: row.issue_id,
+            actor_id: row.actor_id,
+        }
     }
 }
 
@@ -4083,91 +3875,22 @@ async fn history_inner(
     created_after: Option<&str>,
     activity_type: Option<&str>,
 ) -> Result<String, Denial> {
-    use super::queries_engage::{
-        history_activities_sql, history_comments_sql, history_intake_prefetch_sql,
-        history_reactions_prefetch_sql,
-    };
-    use super::Binder;
-    use std::collections::HashMap;
     match activity_type {
         Some("issue-property") => {
-            let mut binder = Binder::new();
-            // NOTE: the builder's `created_after` binds TEXT, which
-            // Postgres cannot compare to timestamptz (`operator does
-            // not exist`); the predicate splices here with a cast.
-            // Same rows Django's timestamptz bind returns.
-            let mut sql = history_activities_sql(&mut binder, slug, *issue_id, *user_id, None);
-            if let Some(ts) = created_after {
-                let holder = binder.bind_string(ts.to_owned());
-                sql = splice_and(
-                    &sql,
-                    &format!("issue_activities.created_at > {holder}::timestamptz"),
-                );
-            }
-            let rows = fetch_positional_rows(pool, &sql, binder.values()).await?;
-            // The `issue__issue_intake` prefetch: one issue, so the first
-            // (newest) intake row serves every activity — or none.
-            let mut intake: Option<IntakeOwned> = None;
-            if !rows.is_empty() {
-                let mut binder = Binder::new();
-                let sql = history_intake_prefetch_sql(&mut binder, &[*issue_id]);
-                let intake_rows = fetch_positional_rows(pool, &sql, binder.values()).await?;
-                if let Some(row) = intake_rows.first() {
-                    intake = Some(IntakeOwned {
-                        source: cell_opt_string(row, 1)?,
-                        source_email: cell_opt_string(row, 2)?,
-                        extra: cell_json(row, 3)?,
-                    });
-                }
-            }
+            let (rows, intake) =
+                history_activity_rows(pool, slug, issue_id, user_id, created_after).await?;
             let mut out = Vec::with_capacity(rows.len());
-            for row in &rows {
-                // The prefetch list is shared, so clone the small triple
-                // per row (same `source_data` object Django attaches).
-                let intake = intake.as_ref().map(|owned| IntakeOwned {
-                    source: owned.source.clone(),
-                    source_email: owned.source_email.clone(),
-                    extra: owned.extra.clone(),
-                });
-                out.push(render_history_activity(pool, row, tz, intake).await?);
+            for row in rows {
+                out.push(render_history_activity(pool, row, tz, clone_intake(&intake)).await?);
             }
             serde_json::to_string(&out).map_err(|_| Denial::ServerError)
         }
         Some("issue-comment") => {
-            let mut binder = Binder::new();
-            // NOTE: as above — the builder's TEXT bind cannot compare
-            // to timestamptz; splice with a cast instead.
-            let mut sql = history_comments_sql(&mut binder, slug, *issue_id, *user_id, None);
-            if let Some(ts) = created_after {
-                let holder = binder.bind_string(ts.to_owned());
-                sql = splice_and(
-                    &sql,
-                    &format!("issue_comments.created_at > {holder}::timestamptz"),
-                );
-            }
-            let rows = fetch_positional_rows(pool, &sql, binder.values()).await?;
-            // The `comment_reactions` prefetch: one IN query, grouped by
-            // parent in row order.
-            let mut grouped: HashMap<uuid::Uuid, Vec<CommentReactionView>> = HashMap::new();
-            if !rows.is_empty() {
-                let mut ids = Vec::with_capacity(rows.len());
-                for row in &rows {
-                    ids.push(cell_uuid(row, C_ID)?);
-                }
-                let mut binder = Binder::new();
-                let sql = history_reactions_prefetch_sql(&mut binder, &ids);
-                let prefetched = fetch_positional_rows(pool, &sql, binder.values()).await?;
-                for row in &prefetched {
-                    let view = render_prefetched_reaction(row, tz)?;
-                    grouped
-                        .entry(cell_uuid(row, R_COMMENT_ID)?)
-                        .or_default()
-                        .push(view);
-                }
-            }
+            let (rows, mut grouped) =
+                history_comment_rows(pool, slug, issue_id, user_id, created_after, tz).await?;
             let mut out = Vec::with_capacity(rows.len());
-            for row in &rows {
-                let reactions = grouped.remove(&cell_uuid(row, C_ID)?).unwrap_or_default();
+            for row in rows {
+                let reactions = grouped.remove(&row.comment.id).unwrap_or_default();
                 out.push(render_history_comment(pool, row, tz, reactions).await?);
             }
             serde_json::to_string(&out).map_err(|_| Denial::ServerError)
@@ -4179,72 +3902,22 @@ async fn history_inner(
             // ties keep chain order, activities first. The intake
             // prefetch rides every branch now, so the merged read
             // carries it too.
-            let mut binder = Binder::new();
-            let mut sql = history_activities_sql(&mut binder, slug, *issue_id, *user_id, None);
-            if let Some(ts) = created_after {
-                let holder = binder.bind_string(ts.to_owned());
-                sql = splice_and(
-                    &sql,
-                    &format!("issue_activities.created_at > {holder}::timestamptz"),
-                );
-            }
-            let activities = fetch_positional_rows(pool, &sql, binder.values()).await?;
-            let mut intake: Option<IntakeOwned> = None;
-            if !activities.is_empty() {
-                let mut binder = Binder::new();
-                let sql = history_intake_prefetch_sql(&mut binder, &[*issue_id]);
-                let intake_rows = fetch_positional_rows(pool, &sql, binder.values()).await?;
-                if let Some(row) = intake_rows.first() {
-                    intake = Some(IntakeOwned {
-                        source: cell_opt_string(row, 1)?,
-                        source_email: cell_opt_string(row, 2)?,
-                        extra: cell_json(row, 3)?,
-                    });
-                }
-            }
-            let mut binder = Binder::new();
-            let mut sql = history_comments_sql(&mut binder, slug, *issue_id, *user_id, None);
-            if let Some(ts) = created_after {
-                let holder = binder.bind_string(ts.to_owned());
-                sql = splice_and(
-                    &sql,
-                    &format!("issue_comments.created_at > {holder}::timestamptz"),
-                );
-            }
-            let comments = fetch_positional_rows(pool, &sql, binder.values()).await?;
-            let mut grouped: HashMap<uuid::Uuid, Vec<CommentReactionView>> = HashMap::new();
-            if !comments.is_empty() {
-                let mut ids = Vec::with_capacity(comments.len());
-                for row in &comments {
-                    ids.push(cell_uuid(row, C_ID)?);
-                }
-                let mut binder = Binder::new();
-                let sql = history_reactions_prefetch_sql(&mut binder, &ids);
-                let prefetched = fetch_positional_rows(pool, &sql, binder.values()).await?;
-                for row in &prefetched {
-                    let view = render_prefetched_reaction(row, tz)?;
-                    grouped
-                        .entry(cell_uuid(row, R_COMMENT_ID)?)
-                        .or_default()
-                        .push(view);
-                }
-            }
+            let (activities, intake) =
+                history_activity_rows(pool, slug, issue_id, user_id, created_after).await?;
+            let (comments, mut grouped) =
+                history_comment_rows(pool, slug, issue_id, user_id, created_after, tz).await?;
             // Chain order is activities first, then comments, and
             // `sort_by` is stable — equal `created_at` strings keep
             // that order, exactly `sorted(chain(...), key=...)`.
             let mut merged: Vec<(String, Value)> =
                 Vec::with_capacity(activities.len() + comments.len());
-            for row in &activities {
-                let intake = intake.as_ref().map(|owned| IntakeOwned {
-                    source: owned.source.clone(),
-                    source_email: owned.source_email.clone(),
-                    extra: owned.extra.clone(),
-                });
-                let rendered = render_history_activity(pool, row, tz, intake).await?;
+            for row in activities {
+                let rendered =
+                    render_history_activity(pool, row, tz, clone_intake(&intake)).await?;
                 merged.push((rendered_created_at(&rendered)?.to_owned(), rendered));
             }
-            for row in &comments {
-                let reactions = grouped.remove(&cell_uuid(row, C_ID)?).unwrap_or_default();
+            for row in comments {
+                let reactions = grouped.remove(&row.comment.id).unwrap_or_default();
                 let rendered = render_history_comment(pool, row, tz, reactions).await?;
                 merged.push((rendered_created_at(&rendered)?.to_owned(), rendered));
             }
@@ -4255,44 +3928,117 @@ async fn history_inner(
     }
 }
 
+/// The prefetch list is shared, so clone the small triple per row (same
+/// `source_data` object Django attaches).
+fn clone_intake(intake: &Option<IntakeOwned>) -> Option<IntakeOwned> {
+    intake.as_ref().map(|owned| IntakeOwned {
+        source: owned.source.clone(),
+        source_email: owned.source_email.clone(),
+        extra: owned.extra.clone(),
+    })
+}
+
+/// The history activities plus the `issue__issue_intake` prefetch: one
+/// issue, so the first (newest) intake row serves every activity — or
+/// none. The prefetch runs only when there are activities.
+async fn history_activity_rows(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    issue_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+    created_after: Option<&str>,
+) -> Result<(Vec<HistoryActivityRow>, Option<IntakeOwned>), Denial> {
+    use super::queries_engage::{history_activities_select, history_intake_prefetch_select};
+    let db = orm(pool);
+    let rows = history_activities_select(slug, *issue_id, *user_id, created_after)
+        .into_model::<HistoryActivityRow>()
+        .all(&db)
+        .await
+        .map_err(db_denial)?;
+    let mut intake = None;
+    if !rows.is_empty() {
+        let prefetched = history_intake_prefetch_select(&[*issue_id])
+            .into_model::<IntakeSourceDb>()
+            .all(&db)
+            .await
+            .map_err(db_denial)?;
+        intake = prefetched.into_iter().next().map(|row| IntakeOwned {
+            source: row.source,
+            source_email: row.source_email,
+            extra: row.extra,
+        });
+    }
+    Ok((rows, intake))
+}
+
+/// The history comments plus the `comment_reactions` prefetch: one IN
+/// query, grouped by parent in row order. The prefetch runs only when
+/// there are comments.
+async fn history_comment_rows(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    issue_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+    created_after: Option<&str>,
+    tz: &Tz,
+) -> Result<
+    (
+        Vec<HistoryCommentRow>,
+        std::collections::HashMap<uuid::Uuid, Vec<CommentReactionView>>,
+    ),
+    Denial,
+> {
+    use super::queries_engage::{history_comments_select, history_reactions_prefetch_select};
+    let db = orm(pool);
+    let rows = history_comments_select(slug, *issue_id, *user_id, created_after)
+        .into_model::<HistoryCommentRow>()
+        .all(&db)
+        .await
+        .map_err(db_denial)?;
+    let mut grouped: std::collections::HashMap<uuid::Uuid, Vec<CommentReactionView>> =
+        std::collections::HashMap::new();
+    if !rows.is_empty() {
+        let ids: Vec<uuid::Uuid> = rows.iter().map(|row| row.comment.id).collect();
+        let prefetched = history_reactions_prefetch_select(&ids)
+            .into_model::<PrefetchedReactionRow>()
+            .all(&db)
+            .await
+            .map_err(db_denial)?;
+        for row in prefetched {
+            let comment_id = row.reaction.comment_id;
+            grouped
+                .entry(comment_id)
+                .or_default()
+                .push(render_prefetched_reaction(row, tz));
+        }
+    }
+    Ok((rows, grouped))
+}
+
 /// Render one prefetched reaction: the actor nest comes from the joined
 /// user columns (`select_related("actor")`); only `display_name` is
 /// read, like the serializer's `source` traversal.
-fn render_prefetched_reaction(
-    row: &sqlx::postgres::PgRow,
-    tz: &Tz,
-) -> Result<CommentReactionView, Denial> {
-    // The join is INNER (non-null FK), so the user columns are present;
-    // `display_name` is read from them, not re-queried.
-    let display_name = cell_string(row, PREFETCH_USER_AT + U_DISPLAY_NAME)?;
-    Ok(CommentReactionView {
-        id: cell_uuid(row, R_ID)?.to_string(),
-        actor: cell_uuid(row, R_ACTOR_ID)?.to_string(),
-        comment: cell_uuid(row, R_COMMENT_ID)?.to_string(),
-        reaction: cell_string(row, R_REACTION)?,
-        display_name,
-        deleted_at: render_dt_opt(cell_opt_datetime(row, R_DELETED_AT)?, tz),
-        workspace: cell_uuid(row, R_WORKSPACE_ID)?.to_string(),
-        project: cell_uuid(row, R_PROJECT_ID)?.to_string(),
-        created_at: render_dt(&cell_datetime(row, R_CREATED_AT)?, tz),
-        updated_at: render_dt(&cell_datetime(row, R_UPDATED_AT)?, tz),
-        created_by: cell_opt_uuid(row, R_CREATED_BY_ID)?.map(|id| id.to_string()),
-        updated_by: cell_opt_uuid(row, R_UPDATED_BY_ID)?.map(|id| id.to_string()),
-    })
+fn render_prefetched_reaction(row: PrefetchedReactionRow, tz: &Tz) -> CommentReactionView {
+    let r = row.reaction;
+    CommentReactionView {
+        id: r.id.to_string(),
+        actor: r.actor_id.to_string(),
+        comment: r.comment_id.to_string(),
+        reaction: r.reaction,
+        display_name: row.display_name,
+        deleted_at: render_dt_opt(r.deleted_at.map(utc), tz),
+        workspace: r.workspace_id.to_string(),
+        project: r.project_id.to_string(),
+        created_at: render_dt(&utc(r.created_at), tz),
+        updated_at: render_dt(&utc(r.updated_at), tz),
+        created_by: r.created_by_id.map(|id| id.to_string()),
+        updated_by: r.updated_by_id.map(|id| id.to_string()),
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Comments: writes
 // ---------------------------------------------------------------------------
-
-/// Splice an AND predicate into a builder statement's WHERE (before the
-/// trailing ORDER BY): the `filter_queryset` / `get_object` shape.
-fn splice_and(sql: &str, predicate: &str) -> String {
-    match sql.rfind("ORDER BY") {
-        Some(idx) => format!("{} AND {} {}", &sql[..idx], predicate, &sql[idx..]),
-        None => format!("{sql} WHERE {predicate}"),
-    }
-}
 
 /// The `IssueComment.save()` update path (`issue.py:598-647`): recompute
 /// `comment_stripped`, sync the `Description` triple for the changed
@@ -4354,7 +4100,7 @@ async fn save_comment_update(
             html: &html,
             stripped: desc_stripped.as_deref(),
         };
-        comment_domain::insert_description_values(&mut **tx, &desc)
+        comment_domain::insert_description_values(&pidash_db::orm_tx::TxConn::new(tx), &desc)
             .await
             .map_err(integrity_denial)?;
         Some(desc.id)
@@ -4367,23 +4113,40 @@ async fn save_comment_update(
         if let Some(desc_id) = description_id {
             if html_changed || json_changed || stripped_changed {
                 if html_changed {
-                    comment_domain::sync_description_html(&mut **tx, desc_id, &html)
-                        .await
-                        .map_err(|_| Denial::ServerError)?;
-                }
-                if stripped_changed {
-                    comment_domain::sync_description_stripped(&mut **tx, desc_id, &stripped)
-                        .await
-                        .map_err(|_| Denial::ServerError)?;
-                }
-                if json_changed {
-                    comment_domain::sync_description_json(&mut **tx, desc_id, &json)
-                        .await
-                        .map_err(|_| Denial::ServerError)?;
-                }
-                comment_domain::touch_synced_description(&mut **tx, desc_id, Some(*user_id), *now)
+                    comment_domain::sync_description_html(
+                        &pidash_db::orm_tx::TxConn::new(tx),
+                        desc_id,
+                        &html,
+                    )
                     .await
                     .map_err(|_| Denial::ServerError)?;
+                }
+                if stripped_changed {
+                    comment_domain::sync_description_stripped(
+                        &pidash_db::orm_tx::TxConn::new(tx),
+                        desc_id,
+                        &stripped,
+                    )
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
+                }
+                if json_changed {
+                    comment_domain::sync_description_json(
+                        &pidash_db::orm_tx::TxConn::new(tx),
+                        desc_id,
+                        &json,
+                    )
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
+                }
+                comment_domain::touch_synced_description(
+                    &pidash_db::orm_tx::TxConn::new(tx),
+                    desc_id,
+                    Some(*user_id),
+                    *now,
+                )
+                .await
+                .map_err(|_| Denial::ServerError)?;
             }
         }
         description_id
@@ -4415,7 +4178,7 @@ async fn save_comment_update(
         parent_id: parent.unwrap_or(stored.parent_id),
     };
     comment_domain::save_app_comment_update(
-        &mut **tx,
+        &pidash_db::orm_tx::TxConn::new(tx),
         &comment_domain::AppCommentUpdate {
             id: base.id,
             updated_at: base.updated_at,
@@ -4491,12 +4254,12 @@ async fn read_context(
 /// 400 — not the generic invalid-detail body.
 fn filterset_predicates(
     query: &super::QueryMap,
-) -> Result<Vec<(&'static str, uuid::Uuid)>, Denial> {
+) -> Result<Vec<(issue_comments::Column, uuid::Uuid)>, Denial> {
     let mut filters = Vec::new();
     let mut errors = Map::new();
     for (param, column) in [
-        ("issue__id", "issue_comments.issue_id"),
-        ("workspace__id", "issue_comments.workspace_id"),
+        ("issue__id", issue_comments::Column::IssueId),
+        ("workspace__id", issue_comments::Column::WorkspaceId),
     ] {
         if let Some(raw) = super::query_last(query, param) {
             // Django's `forms.UUIDField` takes every spelling
@@ -4512,6 +4275,32 @@ fn filterset_predicates(
     } else {
         Err(Denial::BadJson(Value::Object(errors)))
     }
+}
+
+/// The comment-list queryset (`comment_list_select`) narrowed by the
+/// filterset predicates and, for `get_object`, the pk.
+async fn comment_list_rows(
+    ctx: &ReadContext,
+    filters: Vec<(issue_comments::Column, uuid::Uuid)>,
+    pk: Option<uuid::Uuid>,
+) -> Result<Vec<ListCommentRow>, Denial> {
+    let mut select = super::queries_engage::comment_list_select(
+        &ctx.slug,
+        ctx.project_id,
+        ctx.issue_id,
+        ctx.user_id,
+    );
+    for (column, id) in filters {
+        select = select.filter(column.eq(id));
+    }
+    if let Some(pk) = pk {
+        select = select.filter(issue_comments::Column::Id.eq(pk));
+    }
+    select
+        .into_model::<ListCommentRow>()
+        .all(&orm(&ctx.pool))
+        .await
+        .map_err(db_denial)
 }
 
 /// `IssueCommentViewSet.list` (`comment.py:43-69`): DRF's default over
@@ -4536,24 +4325,12 @@ async fn comment_list(
         Err(error) => return error.into_response(),
     };
     // The path issue always scopes; the filterset only narrows further.
-    let mut binder = super::Binder::new();
-    let mut sql = super::queries_engage::comment_list_sql(
-        &mut binder,
-        &ctx.slug,
-        ctx.project_id,
-        ctx.issue_id,
-        ctx.user_id,
-    );
-    for (column, id) in filters {
-        let holder = binder.bind_uuid(id);
-        sql = splice_and(&sql, &format!("{column} = {holder}"));
-    }
-    let rows = match fetch_positional_rows(&ctx.pool, &sql, binder.values()).await {
+    let rows = match comment_list_rows(&ctx, filters, None).await {
         Ok(rows) => rows,
         Err(error) => return error.into_response(),
     };
     let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
+    for row in rows {
         match render_list_comment(&ctx.pool, row, &ctx.timezone).await {
             Ok(value) => out.push(value),
             Err(error) => return error.into_response(),
@@ -4587,25 +4364,11 @@ async fn comment_retrieve(
         Ok(filters) => filters,
         Err(error) => return error.into_response(),
     };
-    let mut binder = super::Binder::new();
-    let mut sql = super::queries_engage::comment_list_sql(
-        &mut binder,
-        &ctx.slug,
-        ctx.project_id,
-        ctx.issue_id,
-        ctx.user_id,
-    );
-    for (column, id) in filters {
-        let holder = binder.bind_uuid(id);
-        sql = splice_and(&sql, &format!("{column} = {holder}"));
-    }
-    let holder = binder.bind_uuid(pk);
-    sql = splice_and(&sql, &format!("issue_comments.id = {holder}"));
-    let rows = match fetch_positional_rows(&ctx.pool, &sql, binder.values()).await {
+    let rows = match comment_list_rows(&ctx, filters, Some(pk)).await {
         Ok(rows) => rows,
         Err(error) => return error.into_response(),
     };
-    let Some(row) = rows.first() else {
+    let Some(row) = rows.into_iter().next() else {
         return Denial::NotFoundDetail.into_response();
     };
     match render_list_comment(&ctx.pool, row, &ctx.timezone).await {
@@ -4649,30 +4412,27 @@ async fn comment_create(
     }
     // `Project.objects.get` / `Issue.objects.get`: default managers
     // (soft-deleted rows 404), unscoped by tenant (the gate scoped).
-    let project: Option<(uuid::Uuid, bool)> = match sqlx::query_as(
-        "SELECT workspace_id, guest_view_all_features FROM projects WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(project_id)
-    .fetch_optional(&pool)
-    .await
-    {
+    let db = orm(&pool);
+    let project = match super::access::project_tenant(&db, project_id).await {
         Ok(row) => row,
         Err(_) => return Denial::ServerError.into_response(),
     };
     let Some((workspace_id, guest_view_all)) = project else {
         return Denial::NotFound.into_response();
     };
-    let issue: Option<(Option<uuid::Uuid>,)> = match sqlx::query_as(
-        "SELECT created_by_id FROM issues WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(issue_id)
-    .fetch_optional(&pool)
-    .await
+    let issue: Option<Option<uuid::Uuid>> = match issues::Entity::find()
+        .select_only()
+        .column(issues::Column::CreatedById)
+        .filter(issues::Column::Id.eq(issue_id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
     {
         Ok(row) => row,
         Err(_) => return Denial::ServerError.into_response(),
     };
-    let Some((issue_created_by,)) = issue else {
+    let Some(issue_created_by) = issue else {
         return Denial::NotFound.into_response();
     };
     // The guest-view rule refuses with 400, not 403.
@@ -4774,7 +4534,9 @@ async fn comment_create(
         labels: &base.labels,
         edited_at: base.edited_at,
     };
-    if let Err(error) = comment_domain::insert_comment_row(&mut *tx, &rows).await {
+    if let Err(error) =
+        comment_domain::insert_comment_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows).await
+    {
         return integrity_denial(error).into_response();
     }
     let desc = comment_domain::DescriptionValues {
@@ -4789,16 +4551,23 @@ async fn comment_create(
         html: &base.html,
         stripped: rows.desc_stripped,
     };
-    if let Err(error) = comment_domain::insert_description_values(&mut *tx, &desc).await {
+    if let Err(error) =
+        comment_domain::insert_description_values(&pidash_db::orm_tx::TxConn::new(&mut tx), &desc)
+            .await
+    {
         return integrity_denial(error).into_response();
     }
     // `update_fields=["description_id"]` writes that column only: the
     // `auto_now` stamp is skipped (in memory AND in the row — Django's
     // well-known `update_fields` gotcha), while `BaseModel.save` still
     // assigns `updated_by` on the in-memory instance.
-    if comment_domain::link_comment_description(&mut *tx, base.id, rows.description_id)
-        .await
-        .is_err()
+    if comment_domain::link_comment_description(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        base.id,
+        rows.description_id,
+    )
+    .await
+    .is_err()
     {
         return Denial::ServerError.into_response();
     }
@@ -4871,42 +4640,75 @@ async fn fetch_scoped_comment(
     issue_id: &uuid::Uuid,
     pk: &uuid::Uuid,
 ) -> Result<Option<CommentBaseOwned>, Denial> {
-    let row = fetch_optional_object(
-        pool,
-        "SELECT issue_comments.* FROM issue_comments INNER JOIN workspaces ON (issue_comments.workspace_id = workspaces.id) WHERE (issue_comments.deleted_at IS NULL AND workspaces.slug = $1 AND issue_comments.project_id = $2 AND issue_comments.issue_id = $3 AND issue_comments.id = $4) LIMIT 1",
-        &[
-            SqlParam::Text(slug),
-            SqlParam::Uuid(*project_id),
-            SqlParam::Uuid(*issue_id),
-            SqlParam::Uuid(*pk),
-        ],
-    )
-    .await?;
-    row.map(|value| CommentBaseOwned::from_map(obj(&value)?))
-        .transpose()
+    let row = issue_comments::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            issue_comments::Relation::Workspaces.def(),
+        )
+        .filter(issue_comments::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issue_comments::Column::ProjectId.eq(*project_id))
+        .filter(issue_comments::Column::IssueId.eq(*issue_id))
+        .filter(issue_comments::Column::Id.eq(*pk))
+        .one(&orm(pool))
+        .await
+        .map_err(db_denial)?;
+    Ok(row.map(CommentBaseOwned::from))
+}
+
+/// The soft-deletable rows the engage destroys stamp.
+#[derive(Debug, Clone, Copy)]
+enum SoftDeleteTarget {
+    IssueComment,
+    CommentReaction,
+    IssueReaction,
+    IssueSubscriber,
+    IssueWorklog,
 }
 
 /// `SoftDeleteModel.delete(soft=True)` (`db/mixins.py:57-78`): stamp
 /// `deleted_at` (+ `updated_at`/`updated_by` through the full `save()`),
-/// row stays. `table` is a static per-call-site literal.
+/// row stays. Comments write through `domain::comments`.
 async fn soft_delete_row(
     pool: &sqlx::PgPool,
-    table: &str,
+    target: SoftDeleteTarget,
     pk: &uuid::Uuid,
     user_id: &uuid::Uuid,
     now: &chrono::DateTime<chrono::Utc>,
 ) -> Result<(), Denial> {
-    let sql = format!(
-        "UPDATE {table} SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3"
-    );
-    sqlx::query(&sql)
-        .bind(now)
-        .bind(user_id)
-        .bind(pk)
-        .execute(pool)
+    soft_delete_stamp(&orm(pool), target, *pk, *user_id, *now)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(())
+        .map_err(db_denial)
+}
+
+async fn soft_delete_stamp(
+    db: &impl sea_orm::ConnectionTrait,
+    target: SoftDeleteTarget,
+    pk: uuid::Uuid,
+    user_id: uuid::Uuid,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), DbErr> {
+    macro_rules! stamp {
+        ($table:ident) => {
+            $table::Entity::update_many()
+                .col_expr($table::Column::DeletedAt, Expr::value(now))
+                .col_expr($table::Column::UpdatedAt, Expr::value(now))
+                .col_expr($table::Column::UpdatedById, Expr::value(user_id))
+                .filter($table::Column::Id.eq(pk))
+                .exec(db)
+                .await
+                .map(|_| ())
+        };
+    }
+    match target {
+        SoftDeleteTarget::IssueComment => {
+            comment_domain::soft_delete_app_comment(db, pk, user_id, now).await
+        }
+        SoftDeleteTarget::CommentReaction => stamp!(comment_reactions),
+        SoftDeleteTarget::IssueReaction => stamp!(issue_reactions),
+        SoftDeleteTarget::IssueSubscriber => stamp!(issue_subscribers),
+        SoftDeleteTarget::IssueWorklog => stamp!(issue_worklogs),
+    }
 }
 
 /// DRF's default `update` (`comment.py:184-195` maps PUT with no view
@@ -4933,35 +4735,15 @@ async fn comment_update(
         Ok(filters) => filters,
         Err(error) => return error.into_response(),
     };
-    let mut binder = super::Binder::new();
-    let mut sql = super::queries_engage::comment_list_sql(
-        &mut binder,
-        &ctx.slug,
-        ctx.project_id,
-        ctx.issue_id,
-        ctx.user_id,
-    );
-    for (column, id) in filters {
-        let holder = binder.bind_uuid(id);
-        sql = splice_and(&sql, &format!("{column} = {holder}"));
-    }
-    let holder = binder.bind_uuid(pk);
-    sql = splice_and(&sql, &format!("issue_comments.id = {holder}"));
-    let rows = match fetch_positional_rows(&ctx.pool, &sql, binder.values()).await {
+    let rows = match comment_list_rows(&ctx, filters, Some(pk)).await {
         Ok(rows) => rows,
         Err(error) => return error.into_response(),
     };
-    let Some(row) = rows.first() else {
+    let Some(row) = rows.into_iter().next() else {
         return Denial::NotFoundDetail.into_response();
     };
-    let stored = match CommentBaseOwned::from_positional(row) {
-        Ok(base) => base,
-        Err(error) => return error.into_response(),
-    };
-    let is_member = match cell_bool(row, LIST_MEMBER_AT) {
-        Ok(flag) => flag,
-        Err(error) => return error.into_response(),
-    };
+    let is_member = row.is_member;
+    let stored = CommentBaseOwned::from(row.comment);
     let request_body = match read_body(req).await {
         Ok(request_body) => request_body,
         Err(error) => return error.into_response(),
@@ -5061,8 +4843,15 @@ async fn comment_partial_update(
         Ok(id) => id,
         Err(error) => return error.into_response(),
     };
-    if let Err(error) =
-        check_admin_creator(&pool, &slug, &project_id, &user_id, "issue_comments", &pk).await
+    if let Err(error) = check_admin_creator(
+        &pool,
+        &slug,
+        &project_id,
+        &user_id,
+        CreatorModel::IssueComment,
+        &pk,
+    )
+    .await
     {
         return error.into_response();
     }
@@ -5243,8 +5032,15 @@ async fn comment_destroy(
         Ok(id) => id,
         Err(error) => return error.into_response(),
     };
-    if let Err(error) =
-        check_admin_creator(&pool, &slug, &project_id, &user_id, "issue_comments", &pk).await
+    if let Err(error) = check_admin_creator(
+        &pool,
+        &slug,
+        &project_id,
+        &user_id,
+        CreatorModel::IssueComment,
+        &pk,
+    )
+    .await
     {
         return error.into_response();
     }
@@ -5275,7 +5071,15 @@ async fn comment_destroy(
         Err(error) => return error.into_response(),
     };
     let now = chrono::Utc::now();
-    if let Err(error) = soft_delete_row(&pool, "issue_comments", &stored.id, &user_id, &now).await {
+    if let Err(error) = soft_delete_row(
+        &pool,
+        SoftDeleteTarget::IssueComment,
+        &stored.id,
+        &user_id,
+        &now,
+    )
+    .await
+    {
         return error.into_response();
     }
     let mut requested = Map::new();
@@ -5342,13 +5146,15 @@ async fn fetch_project_workspace_unguarded(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
 ) -> Result<uuid::Uuid, Denial> {
-    let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT workspace_id FROM projects WHERE id = $1")
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::NotFound)
+    projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .filter(projects::Column::Id.eq(*project_id))
+        .into_tuple::<uuid::Uuid>()
+        .one(&orm(pool))
+        .await
+        .map_err(db_denial)?
+        .ok_or(Denial::NotFound)
 }
 
 /// A decoded `comment_reactions` row (single-table maps).
@@ -5367,14 +5173,42 @@ struct CommentReactionBaseOwned {
     reaction: String,
 }
 
+impl From<comment_reactions::Model> for CommentReactionBaseOwned {
+    fn from(row: comment_reactions::Model) -> Self {
+        Self {
+            id: row.id,
+            created_at: utc(row.created_at),
+            updated_at: utc(row.updated_at),
+            deleted_at: row.deleted_at.map(utc),
+            created_by: row.created_by_id,
+            updated_by: row.updated_by_id,
+            project_id: row.project_id,
+            workspace_id: row.workspace_id,
+            comment_id: row.comment_id,
+            actor_id: row.actor_id,
+            reaction: row.reaction,
+        }
+    }
+}
+
 /// Render one comment reaction with its `display_name` leaf.
 async fn render_comment_reaction(
     pool: &sqlx::PgPool,
     base: &CommentReactionBaseOwned,
     tz: &Tz,
 ) -> Result<Value, Denial> {
+    let view = comment_reaction_view(pool, base, tz).await?;
+    serde_json::to_value(&view).map_err(|_| Denial::ServerError)
+}
+
+/// [`render_comment_reaction`] before the JSON step.
+async fn comment_reaction_view(
+    pool: &sqlx::PgPool,
+    base: &CommentReactionBaseOwned,
+    tz: &Tz,
+) -> Result<CommentReactionView, Denial> {
     let display_name = fetch_display_name(pool, &base.actor_id).await?;
-    let view = CommentReactionView {
+    Ok(CommentReactionView {
         id: base.id.to_string(),
         actor: base.actor_id.to_string(),
         comment: base.comment_id.to_string(),
@@ -5387,8 +5221,7 @@ async fn render_comment_reaction(
         updated_at: render_dt(&base.updated_at, tz),
         created_by: base.created_by.map(|id| id.to_string()),
         updated_by: base.updated_by.map(|id| id.to_string()),
-    };
-    serde_json::to_value(&view).map_err(|_| Denial::ServerError)
+    })
 }
 
 /// `CommentReactionViewSet.list` (`comment.py:186-200`): DRF's default,
@@ -5419,24 +5252,18 @@ async fn comment_reaction_list(
         Ok(tenant) => tenant,
         Err(error) => return error.into_response(),
     };
-    let mut binder = super::Binder::new();
-    let sql = super::queries_engage::comment_reaction_list_sql(
-        &mut binder,
-        &slug,
-        project_id,
-        comment_id,
-        user_id,
-    );
-    let rows = match fetch_positional_rows(&pool, &sql, binder.values()).await {
+    let rows = match super::queries_engage::comment_reaction_list_select(
+        &slug, project_id, comment_id, user_id,
+    )
+    .all(&orm(&pool))
+    .await
+    {
         Ok(rows) => rows,
-        Err(error) => return error.into_response(),
+        Err(error) => return db_denial(error).into_response(),
     };
     let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let base = match comment_reaction_from_positional(row) {
-            Ok(base) => base,
-            Err(error) => return error.into_response(),
-        };
+    for row in rows {
+        let base = CommentReactionBaseOwned::from(row);
         match render_comment_reaction(&pool, &base, &tenant.timezone).await {
             Ok(value) => out.push(value),
             Err(error) => return error.into_response(),
@@ -5448,23 +5275,30 @@ async fn comment_reaction_list(
     }
 }
 
-/// Decode a `COMMENT_REACTION_COLUMNS` positional row at offset 0.
-fn comment_reaction_from_positional(
-    row: &sqlx::postgres::PgRow,
-) -> Result<CommentReactionBaseOwned, Denial> {
-    Ok(CommentReactionBaseOwned {
-        id: cell_uuid(row, R_ID)?,
-        created_at: cell_datetime(row, R_CREATED_AT)?,
-        updated_at: cell_datetime(row, R_UPDATED_AT)?,
-        deleted_at: cell_opt_datetime(row, R_DELETED_AT)?,
-        created_by: cell_opt_uuid(row, R_CREATED_BY_ID)?,
-        updated_by: cell_opt_uuid(row, R_UPDATED_BY_ID)?,
-        project_id: cell_uuid(row, R_PROJECT_ID)?,
-        workspace_id: cell_uuid(row, R_WORKSPACE_ID)?,
-        comment_id: cell_uuid(row, R_COMMENT_ID)?,
-        actor_id: cell_uuid(row, R_ACTOR_ID)?,
-        reaction: cell_string(row, R_REACTION)?,
-    })
+/// The comment reaction `INSERT` (`BaseModel.save`: no `updated_by`, no
+/// `deleted_at`).
+async fn insert_comment_reaction(
+    db: &impl sea_orm::ConnectionTrait,
+    base: &CommentReactionBaseOwned,
+) -> Result<(), DbErr> {
+    use sea_orm::Set;
+    let row = comment_reactions::ActiveModel {
+        id: Set(base.id),
+        created_at: Set(base.created_at.into()),
+        updated_at: Set(base.updated_at.into()),
+        created_by_id: Set(base.created_by),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        project_id: Set(base.project_id),
+        workspace_id: Set(base.workspace_id),
+        actor_id: Set(base.actor_id),
+        comment_id: Set(base.comment_id),
+        reaction: Set(base.reaction.clone()),
+    };
+    comment_reactions::Entity::insert(row)
+        .exec_without_returning(db)
+        .await
+        .map(|_| ())
 }
 
 /// `CommentReactionViewSet.create` (`comment.py:202-212`): the only
@@ -5540,27 +5374,11 @@ async fn comment_reaction_create(
         actor_id: user_id,
         reaction,
     };
-    if let Err(error) = sqlx::query(
-        r#"INSERT INTO comment_reactions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            project_id, workspace_id, actor_id, comment_id, reaction)
-           VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, $9)"#,
-    )
-    .bind(base.id)
-    .bind(base.created_at)
-    .bind(base.updated_at)
-    .bind(base.created_by)
-    .bind(base.project_id)
-    .bind(base.workspace_id)
-    .bind(base.actor_id)
-    .bind(base.comment_id)
-    .bind(&base.reaction)
-    .execute(&pool)
-    .await
-    {
-        if is_integrity_error(&error) {
-            return Denial::BadError("Reaction already exists for the user".to_owned()).into_response();
+    if let Err(error) = insert_comment_reaction(&orm(&pool), &base).await {
+        if is_integrity_violation(&error) {
+            return Denial::BadError("Reaction already exists for the user".to_owned())
+                .into_response();
         }
-        let _ = error;
         return Denial::ServerError.into_response();
     }
     let epoch = chrono::Utc::now().timestamp();
@@ -5631,36 +5449,39 @@ async fn comment_reaction_destroy(
     }
     // The body is never read here; drop `req` without parsing.
     let _ = req;
-    let row = match fetch_optional_object(
-        &pool,
-        "SELECT comment_reactions.* FROM comment_reactions INNER JOIN workspaces ON (comment_reactions.workspace_id = workspaces.id) WHERE (comment_reactions.deleted_at IS NULL AND workspaces.slug = $1 AND comment_reactions.project_id = $2 AND comment_reactions.comment_id = $3 AND comment_reactions.reaction = $4 AND comment_reactions.actor_id = $5) LIMIT 1",
-        &[
-            SqlParam::Text(&slug),
-            SqlParam::Uuid(project_id),
-            SqlParam::Uuid(comment_id),
-            SqlParam::Text(&reaction_code),
-            SqlParam::Uuid(user_id),
-        ],
-    )
-    .await
+    let row: Option<uuid::Uuid> = match comment_reactions::Entity::find()
+        .select_only()
+        .column(comment_reactions::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            comment_reactions::Relation::Workspaces.def(),
+        )
+        .filter(comment_reactions::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(&slug))
+        .filter(comment_reactions::Column::ProjectId.eq(project_id))
+        .filter(comment_reactions::Column::CommentId.eq(comment_id))
+        .filter(comment_reactions::Column::Reaction.eq(&reaction_code))
+        .filter(comment_reactions::Column::ActorId.eq(user_id))
+        .into_tuple()
+        .one(&orm(&pool))
+        .await
     {
         Ok(row) => row,
-        Err(error) => return error.into_response(),
-    };
-    let Some(row) = row else {
-        return Denial::NotFound.into_response();
-    };
-    let stored_id = match obj(&row).and_then(|map| req_str(map, "id")) {
-        Ok(id) => id,
-        Err(error) => return error.into_response(),
-    };
-    let stored_uuid = match stored_id.parse::<uuid::Uuid>() {
-        Ok(id) => id,
         Err(_) => return Denial::ServerError.into_response(),
     };
+    let Some(stored_uuid) = row else {
+        return Denial::NotFound.into_response();
+    };
+    let stored_id = stored_uuid.to_string();
     let now = chrono::Utc::now();
-    if let Err(error) =
-        soft_delete_row(&pool, "comment_reactions", &stored_uuid, &user_id, &now).await
+    if let Err(error) = soft_delete_row(
+        &pool,
+        SoftDeleteTarget::CommentReaction,
+        &stored_uuid,
+        &user_id,
+        &now,
+    )
+    .await
     {
         return error.into_response();
     }
@@ -5726,27 +5547,16 @@ async fn issue_reaction_list(
         Ok(tenant) => tenant,
         Err(error) => return error.into_response(),
     };
-    let rows = match fetch_all_objects(
-        &pool,
-        "SELECT DISTINCT issue_reactions.* FROM issue_reactions INNER JOIN workspaces ON (issue_reactions.workspace_id = workspaces.id) INNER JOIN projects ON (issue_reactions.project_id = projects.id) INNER JOIN project_members ON (issue_reactions.project_id = project_members.project_id) WHERE (issue_reactions.deleted_at IS NULL AND workspaces.slug = $1 AND issue_reactions.project_id = $2 AND issue_reactions.issue_id = $3 AND projects.archived_at IS NULL AND project_members.member_id = $4 AND project_members.is_active) ORDER BY issue_reactions.created_at DESC",
-        &[
-            SqlParam::Text(&slug),
-            SqlParam::Uuid(project_id),
-            SqlParam::Uuid(issue_id),
-            SqlParam::Uuid(user_id),
-        ],
-    )
-    .await
+    let rows = match issue_reaction_list_select(&slug, project_id, issue_id, user_id)
+        .all(&orm(&pool))
+        .await
     {
         Ok(rows) => rows,
-        Err(error) => return error.into_response(),
+        Err(_) => return Denial::ServerError.into_response(),
     };
     let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let base = match obj(row).and_then(IssueReactionBaseOwned::from_map) {
-            Ok(base) => base,
-            Err(error) => return error.into_response(),
-        };
+    for row in rows {
+        let base = IssueReactionBaseOwned::from(row);
         match render_issue_reaction(&pool, &base, &tenant.timezone).await {
             Ok(value) => out.push(value),
             Err(error) => return error.into_response(),
@@ -5756,6 +5566,42 @@ async fn issue_reaction_list(
         Ok(body) => json_response(StatusCode::OK, body),
         Err(_) => Denial::ServerError.into_response(),
     }
+}
+
+/// The `IssueReactionViewSet.get_queryset` scope (`reaction.py:26-40`):
+/// tenant + issue filters, the actor's active project membership (the
+/// member join reads no tombstone filter, as coded), unarchived project,
+/// `DISTINCT`, newest first.
+fn issue_reaction_list_select(
+    slug: &str,
+    project_id: uuid::Uuid,
+    issue_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> sea_orm::Select<issue_reactions::Entity> {
+    let members: sea_orm::RelationDef =
+        issue_reactions::Entity::belongs_to(project_members::Entity)
+            .from(issue_reactions::Column::ProjectId)
+            .to(project_members::Column::ProjectId)
+            .into();
+    issue_reactions::Entity::find()
+        .distinct()
+        .join(
+            JoinType::InnerJoin,
+            issue_reactions::Relation::Workspaces.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            issue_reactions::Relation::Projects.def(),
+        )
+        .join(JoinType::InnerJoin, members)
+        .filter(issue_reactions::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issue_reactions::Column::ProjectId.eq(project_id))
+        .filter(issue_reactions::Column::IssueId.eq(issue_id))
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .order_by_desc(issue_reactions::Column::CreatedAt)
 }
 
 /// `IssueReactionViewSet.create` (`reaction.py:42-62`): `reaction` is
@@ -5858,24 +5704,27 @@ async fn issue_reaction_create(
         issue_id,
         actor_id: user_id,
     };
-    if let Err(error) = sqlx::query(
-        r#"INSERT INTO issue_reactions (id, created_at, updated_at, deleted_at, reaction,
-            created_by_id, updated_by_id, project_id, workspace_id, issue_id, actor_id)
-           VALUES ($1, $2, $3, NULL, $4, $5, NULL, $6, $7, $8, $9)"#,
-    )
-    .bind(base.id)
-    .bind(base.created_at)
-    .bind(base.updated_at)
-    .bind(&base.reaction)
-    .bind(base.created_by)
-    .bind(base.project_id)
-    .bind(base.workspace_id)
-    .bind(base.issue_id)
-    .bind(base.actor_id)
-    .execute(&pool)
-    .await
+    let row = {
+        use sea_orm::Set;
+        issue_reactions::ActiveModel {
+            id: Set(base.id),
+            created_at: Set(base.created_at.into()),
+            updated_at: Set(base.updated_at.into()),
+            deleted_at: Set(None),
+            reaction: Set(base.reaction.clone()),
+            created_by_id: Set(base.created_by),
+            updated_by_id: Set(None),
+            project_id: Set(base.project_id),
+            workspace_id: Set(base.workspace_id),
+            issue_id: Set(base.issue_id),
+            actor_id: Set(base.actor_id),
+        }
+    };
+    if let Err(error) = issue_reactions::Entity::insert(row)
+        .exec_without_returning(&orm(&pool))
+        .await
     {
-        return integrity_denial(error).into_response();
+        return integrity_denial_orm(error).into_response();
     }
     let epoch = chrono::Utc::now().timestamp();
     let mut activity = Map::new();
@@ -5944,36 +5793,39 @@ async fn issue_reaction_destroy(
         return error.into_response();
     }
     let _ = req;
-    let row = match fetch_optional_object(
-        &pool,
-        "SELECT issue_reactions.* FROM issue_reactions INNER JOIN workspaces ON (issue_reactions.workspace_id = workspaces.id) WHERE (issue_reactions.deleted_at IS NULL AND workspaces.slug = $1 AND issue_reactions.project_id = $2 AND issue_reactions.issue_id = $3 AND issue_reactions.reaction = $4 AND issue_reactions.actor_id = $5) LIMIT 1",
-        &[
-            SqlParam::Text(&slug),
-            SqlParam::Uuid(project_id),
-            SqlParam::Uuid(issue_id),
-            SqlParam::Text(&reaction_code),
-            SqlParam::Uuid(user_id),
-        ],
-    )
-    .await
+    let row: Option<uuid::Uuid> = match issue_reactions::Entity::find()
+        .select_only()
+        .column(issue_reactions::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            issue_reactions::Relation::Workspaces.def(),
+        )
+        .filter(issue_reactions::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(&slug))
+        .filter(issue_reactions::Column::ProjectId.eq(project_id))
+        .filter(issue_reactions::Column::IssueId.eq(issue_id))
+        .filter(issue_reactions::Column::Reaction.eq(&reaction_code))
+        .filter(issue_reactions::Column::ActorId.eq(user_id))
+        .into_tuple()
+        .one(&orm(&pool))
+        .await
     {
         Ok(row) => row,
-        Err(error) => return error.into_response(),
-    };
-    let Some(row) = row else {
-        return Denial::NotFound.into_response();
-    };
-    let stored_id = match obj(&row).and_then(|map| req_str(map, "id")) {
-        Ok(id) => id,
-        Err(error) => return error.into_response(),
-    };
-    let stored_uuid = match stored_id.parse::<uuid::Uuid>() {
-        Ok(id) => id,
         Err(_) => return Denial::ServerError.into_response(),
     };
+    let Some(stored_uuid) = row else {
+        return Denial::NotFound.into_response();
+    };
+    let stored_id = stored_uuid.to_string();
     let now = chrono::Utc::now();
-    if let Err(error) =
-        soft_delete_row(&pool, "issue_reactions", &stored_uuid, &user_id, &now).await
+    if let Err(error) = soft_delete_row(
+        &pool,
+        SoftDeleteTarget::IssueReaction,
+        &stored_uuid,
+        &user_id,
+        &now,
+    )
+    .await
     {
         return error.into_response();
     }
@@ -6063,59 +5915,43 @@ async fn subscriber_list(
     if let Err(error) = check_entity(&membership, true) {
         return error.into_response();
     }
-    let rows = match sqlx::query(
-        "SELECT pm.id, u.id, u.first_name, u.last_name, u.avatar, u.avatar_asset_id, u.is_bot, u.display_name FROM project_members AS pm INNER JOIN workspaces AS w ON (pm.workspace_id = w.id) LEFT OUTER JOIN users AS u ON (pm.member_id = u.id) WHERE (pm.deleted_at IS NULL AND w.slug = $1 AND pm.project_id = $2 AND pm.is_active) ORDER BY pm.created_at DESC",
-    )
-    .bind(&slug)
-    .bind(project_id)
-    .fetch_all(&pool)
-    .await
+    let rows = match subscriber_roster_select(&slug, project_id)
+        .into_model::<RosterRow>()
+        .all(&orm(&pool))
+        .await
     {
         Ok(rows) => rows,
         Err(_) => return Denial::ServerError.into_response(),
     };
     let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let id: uuid::Uuid = match row.try_get(0) {
-            Ok(id) => id,
-            Err(_) => return Denial::ServerError.into_response(),
-        };
-        let member_id: Option<uuid::Uuid> = match row.try_get(1) {
-            Ok(id) => id,
-            Err(_) => return Denial::ServerError.into_response(),
-        };
-        let member = match member_id {
+    for row in rows {
+        let id = row.id;
+        let member = match row.member_id {
             None => None,
             Some(member_id) => {
-                let avatar: String = match row.try_get(4) {
-                    Ok(avatar) => avatar,
-                    Err(_) => return Denial::ServerError.into_response(),
-                };
-                let asset_id: Option<uuid::Uuid> = match row.try_get(5) {
-                    Ok(id) => id,
-                    Err(_) => return Denial::ServerError.into_response(),
+                // The LEFT JOIN hit a user row: its NOT NULL columns are set.
+                let (
+                    Some(first_name),
+                    Some(last_name),
+                    Some(avatar),
+                    Some(is_bot),
+                    Some(display_name),
+                ) = (
+                    row.first_name,
+                    row.last_name,
+                    row.avatar,
+                    row.is_bot,
+                    row.display_name,
+                )
+                else {
+                    return Denial::ServerError.into_response();
                 };
                 let avatar_url =
-                    match logo_or_cover_url(&pool, Some(avatar.clone()), asset_id).await {
+                    match logo_or_cover_url(&pool, Some(avatar.clone()), row.avatar_asset_id).await
+                    {
                         Ok(url) => url,
                         Err(error) => return error.into_response(),
                     };
-                let first_name: String = match row.try_get(2) {
-                    Ok(name) => name,
-                    Err(_) => return Denial::ServerError.into_response(),
-                };
-                let last_name: String = match row.try_get(3) {
-                    Ok(name) => name,
-                    Err(_) => return Denial::ServerError.into_response(),
-                };
-                let is_bot: bool = match row.try_get(6) {
-                    Ok(flag) => flag,
-                    Err(_) => return Denial::ServerError.into_response(),
-                };
-                let display_name: String = match row.try_get(7) {
-                    Ok(name) => name,
-                    Err(_) => return Denial::ServerError.into_response(),
-                };
                 Some(UserLiteOwned {
                     id: member_id.to_string(),
                     first_name,
@@ -6156,6 +5992,77 @@ async fn subscriber_list(
         Ok(body) => json_response(StatusCode::OK, body),
         Err(_) => Denial::ServerError.into_response(),
     }
+}
+
+/// One roster row: the membership id plus the member's lite columns,
+/// all null when the LEFT JOIN misses.
+#[derive(Debug, FromQueryResult)]
+struct RosterRow {
+    id: uuid::Uuid,
+    member_id: Option<uuid::Uuid>,
+    first_name: Option<String>,
+    last_name: Option<String>,
+    avatar: Option<String>,
+    avatar_asset_id: Option<uuid::Uuid>,
+    is_bot: Option<bool>,
+    display_name: Option<String>,
+}
+
+/// The `subscriber.py:52-57` roster: live, active project members in the
+/// slug's workspace (INNER JOIN workspaces, LEFT JOIN users), newest
+/// first.
+fn subscriber_roster_select(
+    slug: &str,
+    project_id: uuid::Uuid,
+) -> sea_orm::Select<project_members::Entity> {
+    let member: sea_orm::RelationDef = project_members::Entity::belongs_to(users::Entity)
+        .from(project_members::Column::MemberId)
+        .to(users::Column::Id)
+        .into();
+    project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Id)
+        .column_as(users::Column::Id, "member_id")
+        .column_as(users::Column::FirstName, "first_name")
+        .column_as(users::Column::LastName, "last_name")
+        .column_as(users::Column::Avatar, "avatar")
+        .column_as(users::Column::AvatarAssetId, "avatar_asset_id")
+        .column_as(users::Column::IsBot, "is_bot")
+        .column_as(users::Column::DisplayName, "display_name")
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .join(JoinType::LeftJoin, member)
+        .filter(project_members::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .order_by_desc(project_members::Column::CreatedAt)
+}
+
+/// The `issue_subscribers` `INSERT` (`BaseModel.save`: no `updated_by`).
+async fn insert_subscriber(
+    db: &impl sea_orm::ConnectionTrait,
+    base: &SubscriberOwned,
+) -> Result<(), DbErr> {
+    use sea_orm::Set;
+    let row = issue_subscribers::ActiveModel {
+        id: Set(base.id),
+        created_at: Set(base.created_at.into()),
+        updated_at: Set(base.updated_at.into()),
+        deleted_at: Set(base.deleted_at.map(Into::into)),
+        created_by_id: Set(base.created_by),
+        updated_by_id: Set(None),
+        project_id: Set(base.project_id),
+        workspace_id: Set(base.workspace_id),
+        issue_id: Set(base.issue_id),
+        subscriber_id: Set(base.subscriber_id),
+    };
+    issue_subscribers::Entity::insert(row)
+        .exec_without_returning(db)
+        .await
+        .map(|_| ())
 }
 
 /// `IssueSubscriberViewSet.create`: DRF's default
@@ -6270,24 +6177,8 @@ async fn subscriber_create(
         issue_id,
         subscriber_id,
     };
-    if let Err(error) = sqlx::query(
-        r#"INSERT INTO issue_subscribers (id, created_at, updated_at, deleted_at, created_by_id, updated_by_id,
-            project_id, workspace_id, issue_id, subscriber_id)
-           VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9)"#,
-    )
-    .bind(base.id)
-    .bind(base.created_at)
-    .bind(base.updated_at)
-    .bind(base.deleted_at)
-    .bind(base.created_by)
-    .bind(base.project_id)
-    .bind(base.workspace_id)
-    .bind(base.issue_id)
-    .bind(base.subscriber_id)
-    .execute(&pool)
-    .await
-    {
-        return integrity_denial(error).into_response();
+    if let Err(error) = insert_subscriber(&orm(&pool), &base).await {
+        return integrity_denial_orm(error).into_response();
     }
     match render_subscriber(&base, &tenant.timezone) {
         Ok(value) => match serde_json::to_string(&value) {
@@ -6307,17 +6198,22 @@ async fn fetch_subscription(
     issue_id: &uuid::Uuid,
     subscriber_id: &uuid::Uuid,
 ) -> Result<Option<uuid::Uuid>, Denial> {
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT issue_subscribers.id FROM issue_subscribers INNER JOIN workspaces ON (issue_subscribers.workspace_id = workspaces.id) WHERE (issue_subscribers.deleted_at IS NULL AND workspaces.slug = $1 AND issue_subscribers.project_id = $2 AND issue_subscribers.issue_id = $3 AND issue_subscribers.subscriber_id = $4) LIMIT 1",
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(issue_id)
-    .bind(subscriber_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|row| row.0))
+    issue_subscribers::Entity::find()
+        .select_only()
+        .column(issue_subscribers::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            issue_subscribers::Relation::Workspaces.def(),
+        )
+        .filter(issue_subscribers::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issue_subscribers::Column::ProjectId.eq(*project_id))
+        .filter(issue_subscribers::Column::IssueId.eq(*issue_id))
+        .filter(issue_subscribers::Column::SubscriberId.eq(*subscriber_id))
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(db_denial)
 }
 
 /// `IssueSubscriberViewSet.destroy` (`subscriber.py:59-67`): the kwarg
@@ -6358,7 +6254,15 @@ async fn subscriber_destroy(
         Err(error) => return error.into_response(),
     };
     let now = chrono::Utc::now();
-    if let Err(error) = soft_delete_row(&pool, "issue_subscribers", &pk, &user_id, &now).await {
+    if let Err(error) = soft_delete_row(
+        &pool,
+        SoftDeleteTarget::IssueSubscriber,
+        &pk,
+        &user_id,
+        &now,
+    )
+    .await
+    {
         return error.into_response();
     }
     enqueue_soft_delete(&pool, "issuesubscriber", &pk).await;
@@ -6427,23 +6331,8 @@ async fn subscribe(
         issue_id,
         subscriber_id: user_id,
     };
-    if let Err(error) = sqlx::query(
-        r#"INSERT INTO issue_subscribers (id, created_at, updated_at, deleted_at, created_by_id, updated_by_id,
-            project_id, workspace_id, issue_id, subscriber_id)
-           VALUES ($1, $2, $3, NULL, $4, NULL, $5, $6, $7, $8)"#,
-    )
-    .bind(base.id)
-    .bind(base.created_at)
-    .bind(base.updated_at)
-    .bind(base.created_by)
-    .bind(base.project_id)
-    .bind(base.workspace_id)
-    .bind(base.issue_id)
-    .bind(base.subscriber_id)
-    .execute(&pool)
-    .await
-    {
-        return integrity_denial(error).into_response();
+    if let Err(error) = insert_subscriber(&orm(&pool), &base).await {
+        return integrity_denial_orm(error).into_response();
     }
     match render_subscriber(&base, &tenant.timezone) {
         Ok(value) => match serde_json::to_string(&value) {
@@ -6491,7 +6380,15 @@ async fn unsubscribe(
         Err(error) => return error.into_response(),
     };
     let now = chrono::Utc::now();
-    if let Err(error) = soft_delete_row(&pool, "issue_subscribers", &pk, &user_id, &now).await {
+    if let Err(error) = soft_delete_row(
+        &pool,
+        SoftDeleteTarget::IssueSubscriber,
+        &pk,
+        &user_id,
+        &now,
+    )
+    .await
+    {
         return error.into_response();
     }
     enqueue_soft_delete(&pool, "issuesubscriber", &pk).await;
@@ -6561,58 +6458,23 @@ struct WorklogBaseOwned {
     actor_id: Option<uuid::Uuid>,
 }
 
-impl WorklogBaseOwned {
-    fn from_map(map: &Map<String, Value>) -> Result<Self, Denial> {
-        let uuid = |key: &str| -> Result<uuid::Uuid, Denial> {
-            req_str(map, key)?
-                .parse::<uuid::Uuid>()
-                .map_err(|_| Denial::ServerError)
-        };
-        let opt_uuid = |key: &str| -> Result<Option<uuid::Uuid>, Denial> {
-            opt_str(map, key)?
-                .map(|raw| raw.parse::<uuid::Uuid>())
-                .transpose()
-                .map_err(|_| Denial::ServerError)
-        };
-        let dt = |key: &str| -> Result<chrono::DateTime<chrono::Utc>, Denial> {
-            let raw = req_str(map, key)?;
-            chrono::DateTime::parse_from_rfc3339(&raw)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|_| Denial::ServerError)
-        };
-        let opt_dt = |key: &str| -> Result<Option<chrono::DateTime<chrono::Utc>>, Denial> {
-            opt_str(map, key)?
-                .map(|raw| {
-                    chrono::DateTime::parse_from_rfc3339(&raw)
-                        .map(|dt| dt.with_timezone(&chrono::Utc))
-                })
-                .transpose()
-                .map_err(|_| Denial::ServerError)
-        };
-        let minutes = match map.get("minutes") {
-            Some(Value::Number(number)) => number
-                .as_i64()
-                .and_then(|n| i32::try_from(n).ok())
-                .ok_or(Denial::ServerError)?,
-            _ => return Err(Denial::ServerError),
-        };
-        let logged_on = chrono::NaiveDate::parse_from_str(&req_str(map, "logged_on")?, "%Y-%m-%d")
-            .map_err(|_| Denial::ServerError)?;
-        Ok(Self {
-            id: uuid("id")?,
-            created_at: dt("created_at")?,
-            updated_at: dt("updated_at")?,
-            deleted_at: opt_dt("deleted_at")?,
-            minutes,
-            logged_on,
-            note: req_str(map, "note")?,
-            created_by: opt_uuid("created_by_id")?.or(opt_uuid("created_by")?),
-            updated_by: opt_uuid("updated_by_id")?.or(opt_uuid("updated_by")?),
-            project_id: uuid("project_id")?,
-            workspace_id: uuid("workspace_id")?,
-            issue_id: uuid("issue_id")?,
-            actor_id: opt_uuid("actor_id")?.or(opt_uuid("actor")?),
-        })
+impl From<issue_worklogs::Model> for WorklogBaseOwned {
+    fn from(row: issue_worklogs::Model) -> Self {
+        Self {
+            id: row.id,
+            created_at: utc(row.created_at),
+            updated_at: utc(row.updated_at),
+            deleted_at: row.deleted_at.map(utc),
+            minutes: row.minutes,
+            logged_on: row.logged_on,
+            note: row.note,
+            created_by: row.created_by_id,
+            updated_by: row.updated_by_id,
+            project_id: row.project_id,
+            workspace_id: row.workspace_id,
+            issue_id: row.issue_id,
+            actor_id: row.actor_id,
+        }
     }
 }
 
@@ -6994,11 +6856,41 @@ fn validate_worklog_input(body: &Map<String, Value>, partial: bool) -> Result<Wo
 
 /// The `IssueWorklogViewSet.get_queryset` scope (`worklog.py:45-63`):
 /// tenant + issue filters, live project membership, unarchived
-/// project, newest first. Single-table select (the serializer reads no
-/// joined nest but the lazily-loaded actor), so the joined scope still
-/// decodes through the row maps. The member join excludes soft-deleted
-/// rows (the reverse-FK traversal uses the default manager).
-const WORKLOG_LIST_SQL: &str = "SELECT DISTINCT issue_worklogs.* FROM issue_worklogs INNER JOIN workspaces ON issue_worklogs.workspace_id = workspaces.id INNER JOIN projects ON issue_worklogs.project_id = projects.id INNER JOIN project_members ON projects.id = project_members.project_id WHERE issue_worklogs.deleted_at IS NULL AND workspaces.slug = $1 AND issue_worklogs.project_id = $2 AND issue_worklogs.issue_id = $3 AND project_members.member_id = $4 AND project_members.is_active AND project_members.deleted_at IS NULL AND projects.archived_at IS NULL ORDER BY issue_worklogs.created_at DESC";
+/// project, `DISTINCT`, newest first. Only `issue_worklogs` columns are
+/// selected (the serializer reads no joined nest but the lazily-loaded
+/// actor). The member join excludes soft-deleted rows (the reverse-FK
+/// traversal uses the default manager).
+fn worklog_list_select(
+    slug: &str,
+    project_id: uuid::Uuid,
+    issue_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> sea_orm::Select<issue_worklogs::Entity> {
+    let members: sea_orm::RelationDef = projects::Entity::belongs_to(project_members::Entity)
+        .from(projects::Column::Id)
+        .to(project_members::Column::ProjectId)
+        .into();
+    issue_worklogs::Entity::find()
+        .distinct()
+        .join(
+            JoinType::InnerJoin,
+            issue_worklogs::Relation::Workspaces.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            issue_worklogs::Relation::Projects.def(),
+        )
+        .join(JoinType::InnerJoin, members)
+        .filter(issue_worklogs::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issue_worklogs::Column::ProjectId.eq(project_id))
+        .filter(issue_worklogs::Column::IssueId.eq(issue_id))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .filter(projects::Column::ArchivedAt.is_null())
+        .order_by_desc(issue_worklogs::Column::CreatedAt)
+}
 
 /// `IssueWorklogViewSet.list` (`worklog.py:45-63` over DRF's default):
 /// class `IsAuthenticated` only — outsiders list `[]`, every active
@@ -7017,31 +6909,16 @@ async fn worklog_list(
         Ok(ctx) => ctx,
         Err(error) => return error.into_response(),
     };
-    let rows = match fetch_all_objects(
-        &ctx.pool,
-        WORKLOG_LIST_SQL,
-        &[
-            SqlParam::Text(&ctx.slug),
-            SqlParam::Uuid(ctx.project_id),
-            SqlParam::Uuid(ctx.issue_id),
-            SqlParam::Uuid(ctx.user_id),
-        ],
-    )
-    .await
+    let rows = match worklog_list_select(&ctx.slug, ctx.project_id, ctx.issue_id, ctx.user_id)
+        .all(&orm(&ctx.pool))
+        .await
     {
         Ok(rows) => rows,
-        Err(error) => return error.into_response(),
+        Err(_) => return Denial::ServerError.into_response(),
     };
     let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let base = match row
-            .as_object()
-            .ok_or(Denial::ServerError)
-            .and_then(WorklogBaseOwned::from_map)
-        {
-            Ok(base) => base,
-            Err(error) => return error.into_response(),
-        };
+    for row in rows {
+        let base = WorklogBaseOwned::from(row);
         match render_worklog(&ctx.pool, &base, &ctx.timezone).await {
             Ok(value) => out.push(value),
             Err(error) => return error.into_response(),
@@ -7069,38 +6946,18 @@ async fn worklog_retrieve(
         Ok(ctx) => ctx,
         Err(error) => return error.into_response(),
     };
-    let sql = WORKLOG_LIST_SQL.replacen(
-        "ORDER BY issue_worklogs.created_at DESC",
-        "AND issue_worklogs.id = $5 ORDER BY issue_worklogs.created_at DESC",
-        1,
-    );
-    let rows = match fetch_all_objects(
-        &ctx.pool,
-        &sql,
-        &[
-            SqlParam::Text(&ctx.slug),
-            SqlParam::Uuid(ctx.project_id),
-            SqlParam::Uuid(ctx.issue_id),
-            SqlParam::Uuid(ctx.user_id),
-            SqlParam::Uuid(pk),
-        ],
-    )
-    .await
+    let rows = match worklog_list_select(&ctx.slug, ctx.project_id, ctx.issue_id, ctx.user_id)
+        .filter(issue_worklogs::Column::Id.eq(pk))
+        .all(&orm(&ctx.pool))
+        .await
     {
         Ok(rows) => rows,
-        Err(error) => return error.into_response(),
+        Err(_) => return Denial::ServerError.into_response(),
     };
-    let Some(row) = rows.first() else {
+    let Some(row) = rows.into_iter().next() else {
         return Denial::NotFoundWorklog.into_response();
     };
-    let base = match row
-        .as_object()
-        .ok_or(Denial::ServerError)
-        .and_then(WorklogBaseOwned::from_map)
-    {
-        Ok(base) => base,
-        Err(error) => return error.into_response(),
-    };
+    let base = WorklogBaseOwned::from(row);
     match render_worklog(&ctx.pool, &base, &ctx.timezone).await {
         Ok(value) => match serde_json::to_string(&value) {
             Ok(body) => json_response(StatusCode::OK, body),
@@ -7125,14 +6982,16 @@ async fn worklog_can_log(
     if membership.project_role == Some(20) || membership.workspace_role == Some(20) {
         return Ok(true);
     }
-    let assigned: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM issue_assignees WHERE issue_id = $1 AND assignee_id = $2 AND deleted_at IS NULL",
-    )
-    .bind(issue_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let assigned: Option<uuid::Uuid> = issue_assignees::Entity::find()
+        .select_only()
+        .column(issue_assignees::Column::Id)
+        .filter(issue_assignees::Column::IssueId.eq(*issue_id))
+        .filter(issue_assignees::Column::AssigneeId.eq(*user_id))
+        .filter(issue_assignees::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(db_denial)?;
     Ok(assigned.is_some())
 }
 
@@ -7146,19 +7005,20 @@ async fn fetch_scoped_worklog(
     issue_id: &uuid::Uuid,
     pk: &uuid::Uuid,
 ) -> Result<Option<WorklogBaseOwned>, Denial> {
-    let row = fetch_optional_object(
-        pool,
-        "SELECT issue_worklogs.* FROM issue_worklogs INNER JOIN workspaces ON (issue_worklogs.workspace_id = workspaces.id) WHERE (issue_worklogs.deleted_at IS NULL AND workspaces.slug = $1 AND issue_worklogs.project_id = $2 AND issue_worklogs.issue_id = $3 AND issue_worklogs.id = $4) LIMIT 1",
-        &[
-            SqlParam::Text(slug),
-            SqlParam::Uuid(*project_id),
-            SqlParam::Uuid(*issue_id),
-            SqlParam::Uuid(*pk),
-        ],
-    )
-    .await?;
-    row.map(|value| WorklogBaseOwned::from_map(obj(&value)?))
-        .transpose()
+    let row = issue_worklogs::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            issue_worklogs::Relation::Workspaces.def(),
+        )
+        .filter(issue_worklogs::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issue_worklogs::Column::ProjectId.eq(*project_id))
+        .filter(issue_worklogs::Column::IssueId.eq(*issue_id))
+        .filter(issue_worklogs::Column::Id.eq(*pk))
+        .one(&orm(pool))
+        .await
+        .map_err(db_denial)?;
+    Ok(row.map(WorklogBaseOwned::from))
 }
 
 /// `IssueWorklogViewSet.create` (`worklog.py:95-128`): ADMIN + MEMBER
@@ -7197,13 +7057,16 @@ async fn worklog_create(
     }
     // `Issue.objects.get(pk=issue_id, project_id=project_id)`: default
     // manager (soft-deleted rows miss), unscoped by workspace slug.
-    let issue: Option<(uuid::Uuid,)> = match sqlx::query_as(
-        "SELECT id FROM issues WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL",
-    )
-    .bind(issue_id)
-    .bind(project_id)
-    .fetch_optional(&pool)
-    .await
+    let db = orm(&pool);
+    let issue: Option<uuid::Uuid> = match issues::Entity::find()
+        .select_only()
+        .column(issues::Column::Id)
+        .filter(issues::Column::Id.eq(issue_id))
+        .filter(issues::Column::ProjectId.eq(project_id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
     {
         Ok(row) => row,
         Err(_) => return Denial::ServerError.into_response(),
@@ -7212,14 +7075,21 @@ async fn worklog_create(
         return Denial::NotFound.into_response();
     }
     // The intake refusal precedes `_can_log` (`worklog.py:98-112`).
-    let intake: Option<(i32,)> = match sqlx::query_as(
-        "SELECT 1 FROM intake_issues INNER JOIN workspaces ON intake_issues.workspace_id = workspaces.id WHERE intake_issues.issue_id = $1 AND intake_issues.status IN (-2, 0) AND workspaces.slug = $2 AND intake_issues.project_id = $3 AND intake_issues.deleted_at IS NULL",
-    )
-    .bind(issue_id)
-    .bind(&slug)
-    .bind(project_id)
-    .fetch_optional(&pool)
-    .await
+    let intake: Option<uuid::Uuid> = match intake_issues::Entity::find()
+        .select_only()
+        .column(intake_issues::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            intake_issues::Relation::Workspaces.def(),
+        )
+        .filter(intake_issues::Column::IssueId.eq(issue_id))
+        .filter(intake_issues::Column::Status.is_in([-2, 0]))
+        .filter(workspaces::Column::Slug.eq(&slug))
+        .filter(intake_issues::Column::ProjectId.eq(project_id))
+        .filter(intake_issues::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
     {
         Ok(row) => row,
         Err(_) => return Denial::ServerError.into_response(),
@@ -7280,27 +7150,29 @@ async fn worklog_create(
         issue_id,
         actor_id: Some(user_id),
     };
-    if let Err(error) = sqlx::query(
-        r#"INSERT INTO issue_worklogs (id, created_at, updated_at, deleted_at, minutes,
-            logged_on, note, created_by_id, updated_by_id, project_id, workspace_id,
-            issue_id, actor_id)
-           VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, NULL, $8, $9, $10, $11)"#,
-    )
-    .bind(base.id)
-    .bind(base.created_at)
-    .bind(base.updated_at)
-    .bind(base.minutes)
-    .bind(base.logged_on)
-    .bind(&base.note)
-    .bind(base.created_by)
-    .bind(base.project_id)
-    .bind(base.workspace_id)
-    .bind(base.issue_id)
-    .bind(base.actor_id)
-    .execute(&pool)
-    .await
+    let row = {
+        use sea_orm::Set;
+        issue_worklogs::ActiveModel {
+            id: Set(base.id),
+            created_at: Set(base.created_at.into()),
+            updated_at: Set(base.updated_at.into()),
+            deleted_at: Set(None),
+            minutes: Set(base.minutes),
+            logged_on: Set(base.logged_on),
+            note: Set(base.note.clone()),
+            created_by_id: Set(base.created_by),
+            updated_by_id: Set(None),
+            project_id: Set(base.project_id),
+            workspace_id: Set(base.workspace_id),
+            issue_id: Set(base.issue_id),
+            actor_id: Set(base.actor_id),
+        }
+    };
+    if let Err(error) = issue_worklogs::Entity::insert(row)
+        .exec_without_returning(&db)
+        .await
     {
-        return integrity_denial(error).into_response();
+        return integrity_denial_orm(error).into_response();
     }
     let rendered = match render_worklog(&pool, &base, &tenant.timezone).await {
         Ok(value) => value,
@@ -7362,8 +7234,15 @@ async fn worklog_partial_update(
         Ok(id) => id,
         Err(error) => return error.into_response(),
     };
-    if let Err(error) =
-        check_admin_creator(&pool, &slug, &project_id, &user_id, "issue_worklogs", &pk).await
+    if let Err(error) = check_admin_creator(
+        &pool,
+        &slug,
+        &project_id,
+        &user_id,
+        CreatorModel::IssueWorklog,
+        &pk,
+    )
+    .await
     {
         return error.into_response();
     }
@@ -7409,19 +7288,26 @@ async fn worklog_partial_update(
         updated_by: Some(user_id),
         ..stored
     };
-    if let Err(error) = sqlx::query(
-        "UPDATE issue_worklogs SET minutes = $1, logged_on = $2, note = $3, updated_at = $4, updated_by_id = $5 WHERE id = $6",
-    )
-    .bind(base.minutes)
-    .bind(base.logged_on)
-    .bind(&base.note)
-    .bind(base.updated_at)
-    .bind(base.updated_by)
-    .bind(base.id)
-    .execute(&pool)
-    .await
+    if let Err(error) = issue_worklogs::Entity::update_many()
+        .col_expr(issue_worklogs::Column::Minutes, Expr::value(base.minutes))
+        .col_expr(
+            issue_worklogs::Column::LoggedOn,
+            Expr::value(base.logged_on),
+        )
+        .col_expr(issue_worklogs::Column::Note, Expr::value(base.note.clone()))
+        .col_expr(
+            issue_worklogs::Column::UpdatedAt,
+            Expr::value(base.updated_at),
+        )
+        .col_expr(
+            issue_worklogs::Column::UpdatedById,
+            Expr::value(base.updated_by),
+        )
+        .filter(issue_worklogs::Column::Id.eq(base.id))
+        .exec(&orm(&pool))
+        .await
     {
-        return integrity_denial(error).into_response();
+        return integrity_denial_orm(error).into_response();
     }
     let epoch = chrono::Utc::now().timestamp();
     let origin = app_origin(&state);
@@ -7484,8 +7370,15 @@ async fn worklog_destroy(
         Ok(id) => id,
         Err(error) => return error.into_response(),
     };
-    if let Err(error) =
-        check_admin_creator(&pool, &slug, &project_id, &user_id, "issue_worklogs", &pk).await
+    if let Err(error) = check_admin_creator(
+        &pool,
+        &slug,
+        &project_id,
+        &user_id,
+        CreatorModel::IssueWorklog,
+        &pk,
+    )
+    .await
     {
         return error.into_response();
     }
@@ -7506,7 +7399,15 @@ async fn worklog_destroy(
         Err(error) => return error.into_response(),
     };
     let now = chrono::Utc::now();
-    if let Err(error) = soft_delete_row(&pool, "issue_worklogs", &stored.id, &user_id, &now).await {
+    if let Err(error) = soft_delete_row(
+        &pool,
+        SoftDeleteTarget::IssueWorklog,
+        &stored.id,
+        &user_id,
+        &now,
+    )
+    .await
+    {
         return error.into_response();
     }
     let mut requested = Map::new();
@@ -7567,69 +7468,6 @@ mod tests {
         assert_eq!(app_origin(&state), "https://app.example.invalid");
         let state = origin_state(Some(""), Some(""));
         assert_eq!(app_origin(&state), "http://localhost");
-    }
-
-    /// The positional offsets transcribe the builder select lists; pin
-    /// the column counts so drift fails loudly.
-    #[test]
-    fn builder_column_counts_match_offsets() {
-        fn count(list: &str) -> usize {
-            list.split(',').count()
-        }
-        assert_eq!(count(super::super::queries_engage::ACTIVITY_COLUMNS), 20);
-        assert_eq!(count(super::super::queries_engage::COMMENT_COLUMNS), 24);
-        assert_eq!(
-            count(super::super::queries_engage::COMMENT_REACTION_COLUMNS),
-            11
-        );
-        assert_eq!(
-            count(super::super::queries_core::PROJECT_COLUMNS),
-            PROJECT_COLS
-        );
-        assert_eq!(
-            count(super::super::queries_engage::WORKSPACE_COLUMNS),
-            WORKSPACE_COLS
-        );
-        assert_eq!(
-            count(super::super::queries_core::PREFETCH_ISSUE_COLUMNS),
-            ISSUE_COLS
-        );
-        assert_eq!(count(super::super::queries_core::USER_COLUMNS), 40);
-        // Spot-check the within-table offsets this module decodes.
-        let project: Vec<&str> = super::super::queries_core::PROJECT_COLUMNS
-            .split(',')
-            .collect();
-        assert!(project[P_ID].trim_end().ends_with("projects.id"));
-        assert!(project[P_IDENTIFIER]
-            .trim_end()
-            .ends_with("projects.identifier"));
-        assert!(project[P_LOGO_PROPS]
-            .trim_end()
-            .ends_with("projects.logo_props"));
-        let user: Vec<&str> = super::super::queries_core::USER_COLUMNS
-            .split(',')
-            .collect();
-        assert!(user[U_DISPLAY_NAME]
-            .trim_end()
-            .ends_with("users.display_name"));
-        assert!(user[U_AVATAR_ASSET_ID]
-            .trim_end()
-            .ends_with("users.avatar_asset_id"));
-        let comment: Vec<&str> = super::super::queries_engage::COMMENT_COLUMNS
-            .split(',')
-            .collect();
-        assert!(comment[C_HTML]
-            .trim_end()
-            .ends_with("issue_comments.comment_html"));
-        assert!(comment[C_PARENT_ID]
-            .trim_end()
-            .ends_with("issue_comments.parent_id"));
-        let reaction: Vec<&str> = super::super::queries_engage::COMMENT_REACTION_COLUMNS
-            .split(',')
-            .collect();
-        assert!(reaction[R_REACTION]
-            .trim_end()
-            .ends_with("comment_reactions.reaction"));
     }
 
     #[test]
@@ -8278,7 +8116,7 @@ mod tests {
         );
         let filters = filterset_predicates(&query).unwrap();
         assert_eq!(filters.len(), 1);
-        assert_eq!(filters[0].0, "issue_comments.issue_id");
+        assert!(matches!(filters[0].0, issue_comments::Column::IssueId));
         // Garbage answers the per-field django-filter body, in
         // `filterset_fields` order — not the invalid-detail 400.
         let mut query: super::super::QueryMap = HashMap::new();
@@ -8301,15 +8139,6 @@ mod tests {
             }
             other => panic!("expected field errors, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn splice_and_keeps_django_shape() {
-        let sql = "SELECT a FROM t WHERE x = $1 ORDER BY t.created_at DESC";
-        assert_eq!(
-            splice_and(sql, "t.id = $2"),
-            "SELECT a FROM t WHERE x = $1  AND t.id = $2 ORDER BY t.created_at DESC"
-        );
     }
 
     #[test]
@@ -8853,5 +8682,694 @@ mod pidashconv_736_tests {
         // TAB and U+0085 padding already matched Django; pin the behavior.
         assert_eq!(normalize_resolve_identifier("\teng\t"), "ENG");
         assert_eq!(normalize_resolve_identifier("\u{85}eng\u{85}"), "ENG");
+    }
+}
+
+#[cfg(test)]
+mod orm_tests {
+    //! The engage reads and writes on SeaORM: statement-shape pins (no
+    //! database) and one live run against constraint-free temp tables.
+    use super::*;
+    use sea_orm::{DbBackend, QueryTrait};
+
+    fn sql_of<E: EntityTrait>(select: sea_orm::Select<E>) -> String {
+        select.build(DbBackend::Postgres).to_string()
+    }
+
+    #[test]
+    fn roster_select_keeps_joins_scope_and_unique_names() {
+        let sql = sql_of(subscriber_roster_select("acme", uuid::Uuid::nil()));
+        assert!(
+            sql.contains(
+                r#"INNER JOIN "workspaces" ON "project_members"."workspace_id" = "workspaces"."id""#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"LEFT JOIN "users" ON "project_members"."member_id" = "users"."id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#""project_members"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#""project_members"."is_active" = TRUE"#),
+            "{sql}"
+        );
+        assert!(
+            sql.ends_with(r#"ORDER BY "project_members"."created_at" DESC"#),
+            "{sql}"
+        );
+        for alias in [
+            r#""users"."id" AS "member_id""#,
+            r#""users"."first_name" AS "first_name""#,
+            r#""users"."display_name" AS "display_name""#,
+        ] {
+            assert!(sql.contains(alias), "{alias} in {sql}");
+        }
+    }
+
+    #[test]
+    fn reaction_and_worklog_lists_are_distinct_and_member_scoped() {
+        let id = uuid::Uuid::nil();
+        let reactions = sql_of(issue_reaction_list_select("acme", id, id, id));
+        assert!(reactions.starts_with("SELECT DISTINCT "), "{reactions}");
+        assert!(
+            reactions.contains(r#"INNER JOIN "project_members" ON "issue_reactions"."project_id" = "project_members"."project_id""#),
+            "{reactions}"
+        );
+        assert!(
+            reactions.contains(r#""projects"."archived_at" IS NULL"#),
+            "{reactions}"
+        );
+        // As coded: the reaction scope reads no member tombstone filter.
+        assert!(
+            !reactions.contains(r#""project_members"."deleted_at""#),
+            "{reactions}"
+        );
+        let worklogs = sql_of(worklog_list_select("acme", id, id, id));
+        assert!(worklogs.starts_with("SELECT DISTINCT "), "{worklogs}");
+        assert!(
+            worklogs.contains(r#"INNER JOIN "project_members" ON "projects"."id" = "project_members"."project_id""#),
+            "{worklogs}"
+        );
+        assert!(
+            worklogs.contains(r#""project_members"."deleted_at" IS NULL"#),
+            "{worklogs}"
+        );
+        assert!(
+            worklogs.ends_with(r#"ORDER BY "issue_worklogs"."created_at" DESC"#),
+            "{worklogs}"
+        );
+    }
+
+    #[test]
+    fn asset_url_select_left_joins_the_workspace_slug() {
+        let sql = sql_of(asset_url_select(uuid::Uuid::nil()));
+        assert!(
+            sql.contains(
+                r#"LEFT JOIN "workspaces" ON "file_assets"."workspace_id" = "workspaces"."id""#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#""workspaces"."slug" AS "workspace_slug""#),
+            "{sql}"
+        );
+        assert!(
+            !sql.contains("deleted_at"),
+            "unguarded _base_manager read: {sql}"
+        );
+    }
+
+    async fn exec(pool: &sqlx::PgPool, sql: &str) {
+        sqlx::query(sql).execute(pool).await.expect(sql);
+    }
+
+    /// Every new read and write on a one-connection pool over temp
+    /// copies of the tables (no constraints, so each NOT NULL column the
+    /// entity models decode is seeded by hand).
+    #[tokio::test]
+    async fn live_engage_queries() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "users",
+            "file_assets",
+            "workspaces",
+            "projects",
+            "issues",
+            "project_members",
+            "workspace_members",
+            "issue_comments",
+            "descriptions",
+            "comment_reactions",
+            "issue_reactions",
+            "issue_subscribers",
+            "issue_worklogs",
+            "issue_assignees",
+            "intake_issues",
+            "git_comment_syncs",
+            "github_comment_syncs",
+            "issue_activities",
+        ] {
+            exec(
+                &pool,
+                &format!("CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"),
+            )
+            .await;
+        }
+        let id = uuid::Uuid::new_v4;
+        let (ws, project, archived, issue) = (id(), id(), id(), id());
+        let (member, other, ghost) = (id(), id(), id());
+        let (avatar_asset, attach_asset) = (id(), id());
+        let (comment, gone_comment, desc, gone_desc) = (id(), id(), id(), id());
+        let (old_reaction, new_reaction, dead_reaction) = (id(), id(), id());
+        let (issue_reaction, archived_reaction) = (id(), id());
+        let (worklog, dead_worklog, subscription) = (id(), id(), id());
+        let (pm_old, pm_new, pm_ghost, pm_inactive, pm_dup) = (id(), id(), id(), id(), id());
+        let (act_early, act_late, act_comment) = (id(), id(), id());
+        for sql in [
+            format!(
+                "INSERT INTO issue_activities (id, created_at, updated_at, verb, field, old_value, new_value, comment, attachments, issue_id, project_id, workspace_id, actor_id, epoch, deleted_at) VALUES \
+                 ('{act_early}', '2026-01-01T00:00:00Z', now(), 'updated', 'state', 'a', 'b', 'moved', '{{}}', '{issue}', '{project}', '{ws}', '{member}', 1.5, NULL), \
+                 ('{act_late}', '2026-02-01T00:00:00Z', now(), 'created', NULL, NULL, NULL, '', '{{x}}', '{issue}', '{project}', '{ws}', NULL, NULL, NULL), \
+                 ('{act_comment}', '2026-01-10T00:00:00Z', now(), 'created', 'comment', NULL, NULL, '', '{{}}', '{issue}', '{project}', '{ws}', NULL, NULL, NULL), \
+                 (gen_random_uuid(), '2026-01-11T00:00:00Z', now(), 'deleted', 'state', NULL, NULL, '', '{{}}', '{issue}', '{project}', '{ws}', NULL, NULL, now())"
+            ),
+            format!(
+                "INSERT INTO users (id, first_name, last_name, avatar, avatar_asset_id, is_bot, display_name, user_timezone) VALUES \
+                 ('{member}', 'Ada', 'L', 'raw.png', '{avatar_asset}', false, 'ada', 'Asia/Tokyo'), \
+                 ('{other}', 'Bob', 'K', '', NULL, true, 'bob', 'UTC')"
+            ),
+            format!(
+                "INSERT INTO file_assets (id, entity_type, workspace_id, project_id, issue_id, deleted_at) VALUES \
+                 ('{avatar_asset}', 'USER_AVATAR', NULL, NULL, NULL, now()), \
+                 ('{attach_asset}', 'ISSUE_ATTACHMENT', '{ws}', '{project}', '{issue}', NULL)"
+            ),
+            format!(
+                "INSERT INTO workspaces (id, name, slug, logo, logo_asset_id) VALUES ('{ws}', 'Acme', 'acme', 'https://x/logo', NULL)"
+            ),
+            format!(
+                "INSERT INTO projects (id, identifier, name, cover_image, cover_image_asset_id, logo_props, description, is_default, workspace_id, guest_view_all_features, archived_at, deleted_at) VALUES \
+                 ('{project}', 'ENG', 'Eng', NULL, '{attach_asset}', '{{\"a\":1}}', 'd', true, '{ws}', false, NULL, now()), \
+                 ('{archived}', 'OLD', 'Old', '', NULL, '{{}}', '', false, '{ws}', false, now(), NULL)"
+            ),
+            format!(
+                "INSERT INTO issues (id, name, description_json, description_html, priority, complexity_score, start_date, target_date, sequence_id, sort_order, is_draft, project_id, created_by_id, deleted_at) VALUES \
+                 ('{issue}', 'Fix', '{{\"t\":[]}}', '<p>x</p>', 'high', 3, '2026-01-02', NULL, 7, 65535.5, false, '{project}', '{member}', now())"
+            ),
+            format!(
+                "INSERT INTO project_members (id, project_id, workspace_id, member_id, role, is_active, deleted_at, created_at) VALUES \
+                 ('{pm_old}', '{project}', '{ws}', '{member}', 20, true, NULL, now() - interval '2 hours'), \
+                 ('{pm_new}', '{project}', '{ws}', '{other}', 15, true, NULL, now() - interval '1 hour'), \
+                 ('{pm_ghost}', '{project}', '{ws}', '{ghost}', 5, true, NULL, now()), \
+                 ('{pm_inactive}', '{project}', '{ws}', '{other}', 15, false, NULL, now()), \
+                 ('{pm_dup}', '{project}', '{ws}', '{member}', 20, true, now(), now()), \
+                 (gen_random_uuid(), '{archived}', '{ws}', '{member}', 20, true, NULL, now())"
+            ),
+            format!(
+                "INSERT INTO workspace_members (id, workspace_id, member_id, role, is_active, deleted_at) VALUES \
+                 (gen_random_uuid(), '{ws}', '{member}', 20, true, NULL)"
+            ),
+            format!(
+                "INSERT INTO issue_comments (id, created_at, updated_at, comment_stripped, attachments, created_by_id, issue_id, project_id, updated_by_id, workspace_id, actor_id, comment_html, comment_json, access, external_id, external_source, deleted_at, edited_at, description_id, parent_id, speaker_type, speaker_label, speaker_agent_run_id, labels) VALUES \
+                 ('{comment}', now(), now(), 'hi', '{{a.png}}', '{member}', '{issue}', '{project}', NULL, '{ws}', '{member}', '<p>hi</p>', '{{\"k\":1}}', 'INTERNAL', NULL, 'github', NULL, NULL, '{desc}', NULL, 'human', '', NULL, '{{}}'), \
+                 ('{gone_comment}', now(), now(), '', '{{}}', '{member}', '{issue}', '{project}', NULL, '{ws}', NULL, '', '{{}}', 'INTERNAL', NULL, NULL, now(), NULL, NULL, NULL, 'human', '', NULL, '{{}}')"
+            ),
+            format!(
+                "INSERT INTO descriptions (id, deleted_at) VALUES ('{desc}', NULL), ('{gone_desc}', now())"
+            ),
+            format!(
+                "INSERT INTO comment_reactions (id, created_at, updated_at, reaction, actor_id, comment_id, created_by_id, project_id, updated_by_id, workspace_id, deleted_at) VALUES \
+                 ('{old_reaction}', now() - interval '1 hour', now(), '+1', '{member}', '{comment}', '{member}', '{project}', NULL, '{ws}', NULL), \
+                 ('{new_reaction}', now(), now(), 'heart', '{other}', '{comment}', NULL, '{project}', NULL, '{ws}', NULL), \
+                 ('{dead_reaction}', now(), now(), 'x', '{member}', '{comment}', NULL, '{project}', NULL, '{ws}', now())"
+            ),
+            format!(
+                "INSERT INTO issue_reactions (id, created_at, updated_at, reaction, actor_id, created_by_id, issue_id, project_id, updated_by_id, workspace_id, deleted_at) VALUES \
+                 ('{issue_reaction}', now(), now(), '+1', '{member}', '{member}', '{issue}', '{project}', NULL, '{ws}', NULL), \
+                 ('{archived_reaction}', now(), now(), '+1', '{member}', NULL, '{issue}', '{archived}', NULL, '{ws}', NULL)"
+            ),
+            format!(
+                "INSERT INTO issue_worklogs (id, created_at, updated_at, deleted_at, minutes, logged_on, note, actor_id, created_by_id, issue_id, project_id, updated_by_id, workspace_id) VALUES \
+                 ('{worklog}', now(), now(), NULL, 30, '2026-01-03', 'n', '{member}', '{member}', '{issue}', '{project}', NULL, '{ws}'), \
+                 ('{dead_worklog}', now(), now(), now(), 5, '2026-01-03', '', NULL, NULL, '{issue}', '{project}', NULL, '{ws}')"
+            ),
+            format!(
+                "INSERT INTO issue_subscribers (id, deleted_at, issue_id, project_id, subscriber_id, workspace_id) VALUES \
+                 ('{subscription}', NULL, '{issue}', '{project}', '{member}', '{ws}')"
+            ),
+            format!(
+                "INSERT INTO issue_assignees (id, issue_id, assignee_id, deleted_at) VALUES \
+                 (gen_random_uuid(), '{issue}', '{other}', now())"
+            ),
+            format!(
+                "INSERT INTO intake_issues (id, issue_id, status, project_id, workspace_id, deleted_at, created_at, extra) VALUES \
+                 (gen_random_uuid(), '{issue}', 1, '{project}', '{ws}', NULL, now(), '{{\"k\":2}}')"
+            ),
+            format!(
+                "INSERT INTO github_comment_syncs (id, comment_id, deleted_at) VALUES (gen_random_uuid(), '{comment}', NULL)"
+            ),
+            format!(
+                "INSERT INTO git_comment_syncs (id, comment_id, deleted_at) VALUES (gen_random_uuid(), '{comment}', now())"
+            ),
+        ] {
+            exec(&pool, &sql).await;
+        }
+        let db = orm(&pool);
+        let tz: Tz = "UTC".parse().unwrap();
+
+        // Plumbing reads.
+        assert_eq!(
+            super::super::access::user_timezone(&db, member)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("Asia/Tokyo")
+        );
+        let membership = fetch_membership(&pool, "acme", &project, &member)
+            .await
+            .unwrap();
+        assert_eq!(
+            (membership.project_role, membership.workspace_role),
+            (Some(20), Some(20))
+        );
+        assert!(
+            created_by_probe(&db, CreatorModel::IssueComment, comment, member)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !created_by_probe(&db, CreatorModel::IssueComment, gone_comment, member)
+                .await
+                .unwrap()
+        );
+        assert!(
+            created_by_probe(&db, CreatorModel::IssueWorklog, worklog, member)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !created_by_probe(&db, CreatorModel::IssueWorklog, worklog, other)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            fk_target_exists(&db, "users", other).await.unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            fk_target_exists(&db, "users", ghost).await.unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            fk_target_exists(&db, "descriptions", desc).await.unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            fk_target_exists(&db, "descriptions", gone_desc)
+                .await
+                .unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            fk_target_exists(&db, "issue_comments", gone_comment)
+                .await
+                .unwrap(),
+            Some(false)
+        );
+        assert_eq!(fk_target_exists(&db, "states", desc).await.unwrap(), None);
+        // `_base_manager`: the soft-deleted project still answers.
+        assert_eq!(
+            fetch_project_workspace_unguarded(&pool, &project)
+                .await
+                .unwrap(),
+            ws
+        );
+        assert_eq!(fetch_display_name(&pool, &other).await.unwrap(), "bob");
+
+        // Lite nests: a soft-deleted avatar asset still renders its URL; the
+        // attachment URL interpolates the LEFT-JOINed workspace slug.
+        let user = fetch_user_lite(&pool, &member).await.unwrap();
+        assert_eq!(
+            user.avatar_url,
+            Some(format!("/api/assets/v2/static/{avatar_asset}/"))
+        );
+        assert_eq!((user.avatar.as_str(), user.is_bot), ("raw.png", false));
+        let project_lite = fetch_project_lite(&pool, &project).await.unwrap();
+        assert_eq!(
+            project_lite.cover_image_url,
+            Some(format!(
+                "/api/assets/v2/workspaces/acme/projects/{project}/issues/{issue}/attachments/{attach_asset}/"
+            ))
+        );
+        assert_eq!(project_lite.logo_props, serde_json::json!({"a": 1}));
+        let workspace = fetch_workspace_lite(&pool, &ws).await.unwrap();
+        assert_eq!(workspace.logo_url.as_deref(), Some("https://x/logo"));
+        let flat = fetch_issue_flat(&pool, &issue).await.unwrap();
+        assert_eq!(flat.start_date.as_deref(), Some("2026-01-02"));
+        assert_eq!(flat.target_date, None);
+        assert_eq!((flat.sequence_id, flat.sort_order), (7, 65535.5));
+        assert_eq!(flat.description_html.as_deref(), Some("<p>x</p>"));
+
+        // Comments: the scoped get, sync probes (the git row is tombstoned).
+        let stored = fetch_scoped_comment(&pool, "acme", &project, &issue, &comment)
+            .await
+            .unwrap()
+            .expect("live comment");
+        assert_eq!(stored.attachments, vec!["a.png".to_owned()]);
+        assert_eq!(stored.description_id, Some(desc));
+        assert!(
+            fetch_scoped_comment(&pool, "other", &project, &issue, &comment)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            fetch_scoped_comment(&pool, "acme", &project, &issue, &gone_comment)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(comment_is_synced(&pool, Some("github"), &comment)
+            .await
+            .unwrap());
+        assert!(!comment_is_synced(&pool, Some(""), &comment).await.unwrap());
+        assert!(!comment_has_sync_row(&pool, &gone_comment).await.unwrap());
+
+        // Comment reactions: live rows newest first, then an insert.
+        let reactions = render_comment_reactions_for(&pool, &comment, &tz)
+            .await
+            .unwrap();
+        assert_eq!(
+            reactions.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+            vec![new_reaction.to_string(), old_reaction.to_string()]
+        );
+        let now = chrono::Utc::now();
+        let fresh = CommentReactionBaseOwned {
+            id: id(),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            created_by: Some(other),
+            updated_by: None,
+            project_id: project,
+            workspace_id: ws,
+            comment_id: comment,
+            actor_id: other,
+            reaction: "eyes".to_owned(),
+        };
+        insert_comment_reaction(&db, &fresh).await.unwrap();
+        let stored_reaction = comment_reactions::Entity::find_by_id(fresh.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("inserted");
+        assert_eq!(
+            (
+                stored_reaction.reaction.as_str(),
+                stored_reaction.updated_by_id
+            ),
+            ("eyes", None)
+        );
+
+        // Issue reactions: one row despite two memberships; the archived
+        // project's reaction drops out.
+        let listed = issue_reaction_list_select("acme", project, issue, member)
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            listed.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![issue_reaction]
+        );
+        assert!(issue_reaction_list_select("acme", archived, issue, member)
+            .all(&db)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Worklogs: the tombstoned membership does not count, DISTINCT holds.
+        let logs = worklog_list_select("acme", project, issue, member)
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(logs.iter().map(|w| w.id).collect::<Vec<_>>(), vec![worklog]);
+        assert_eq!(WorklogBaseOwned::from(logs[0].clone()).minutes, 30);
+        assert!(
+            fetch_scoped_worklog(&pool, "acme", &project, &issue, &dead_worklog)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!worklog_can_log(
+            &pool,
+            &Membership {
+                project_role: Some(15),
+                workspace_role: Some(15)
+            },
+            &issue,
+            &other
+        )
+        .await
+        .unwrap());
+
+        // Subscribers: the active roster newest first, a ghost member as a
+        // LEFT JOIN miss; the subscription lookup.
+        let roster = subscriber_roster_select("acme", project)
+            .into_model::<RosterRow>()
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            roster.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![pm_ghost, pm_new, pm_old]
+        );
+        assert_eq!(roster[0].member_id, None);
+        assert_eq!(roster[1].display_name.as_deref(), Some("bob"));
+        assert_eq!(
+            fetch_subscription(&pool, "acme", &project, &issue, &member)
+                .await
+                .unwrap(),
+            Some(subscription)
+        );
+        let sub = SubscriberOwned {
+            id: id(),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            created_by: Some(other),
+            updated_by: None,
+            project_id: project,
+            workspace_id: ws,
+            issue_id: issue,
+            subscriber_id: other,
+        };
+        insert_subscriber(&db, &sub).await.unwrap();
+        assert_eq!(
+            fetch_subscription(&pool, "acme", &project, &issue, &other)
+                .await
+                .unwrap(),
+            Some(sub.id)
+        );
+
+        // Batch 2h: the history / comment-list selects, decoded by name.
+        // The soft-deleted `pm_dup` membership still joins (bug 4), so the
+        // DISTINCT-less history paths return every row twice.
+        use super::super::queries_engage as qe;
+        let activities = qe::history_activities_select("acme", issue, member, None)
+            .into_model::<HistoryActivityRow>()
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            activities.iter().map(|r| r.activity.id).collect::<Vec<_>>(),
+            vec![act_early, act_early, act_late, act_late]
+        );
+        let early = &activities[0];
+        assert_eq!(early.activity.epoch, Some(1.5));
+        assert_eq!(
+            early.actor.as_ref().map(|a| a.display_name.as_str()),
+            Some("ada")
+        );
+        assert_eq!(early.nests.project.identifier, "ENG");
+        assert_eq!(early.nests.workspace.slug, "acme");
+        assert_eq!(early.nests.issue.sequence_id, 7);
+        assert!(activities[2].actor.is_none());
+        assert_eq!(activities[2].activity.attachments, vec!["x".to_owned()]);
+        let later =
+            qe::history_activities_select("acme", issue, member, Some("2026-01-15T00:00:00+00:00"))
+                .into_model::<HistoryActivityRow>()
+                .all(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            later.iter().map(|r| r.activity.id).collect::<Vec<_>>(),
+            vec![act_late, act_late]
+        );
+        assert!(
+            qe::history_activities_select("other-ws", issue, member, None)
+                .into_model::<HistoryActivityRow>()
+                .all(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let history_comments = qe::history_comments_select("acme", issue, member, None)
+            .into_model::<HistoryCommentRow>()
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            history_comments
+                .iter()
+                .map(|r| r.comment.id)
+                .collect::<Vec<_>>(),
+            vec![comment, comment]
+        );
+        assert_eq!(
+            history_comments[0]
+                .actor
+                .as_ref()
+                .map(|a| a.first_name.as_str()),
+            Some("Ada")
+        );
+        let prefetched = qe::history_reactions_prefetch_select(&[comment])
+            .into_model::<PrefetchedReactionRow>()
+            .all(&db)
+            .await
+            .unwrap();
+        // Live reactions newest first (the earlier write steps added one).
+        let live_reactions: Vec<uuid::Uuid> = comment_reactions::Entity::find()
+            .filter(comment_reactions::Column::CommentId.eq(comment))
+            .filter(comment_reactions::Column::DeletedAt.is_null())
+            .order_by_desc(comment_reactions::Column::CreatedAt)
+            .all(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            prefetched.iter().map(|r| r.reaction.id).collect::<Vec<_>>(),
+            live_reactions
+        );
+        assert!(!live_reactions.contains(&dead_reaction));
+        let names: std::collections::HashMap<_, _> = prefetched
+            .iter()
+            .map(|r| (r.reaction.id, r.display_name.as_str()))
+            .collect();
+        assert_eq!(names[&new_reaction], "bob");
+        assert_eq!(names[&old_reaction], "ada");
+        let intake = qe::history_intake_prefetch_select(&[issue])
+            .into_model::<IntakeSourceDb>()
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(intake.len(), 1);
+        assert_eq!(intake[0].source, None);
+        // The rendered branches: property, comment, merged.
+        let render = |kind: Option<&'static str>| {
+            let pool = pool.clone();
+            async move {
+                let body = history_inner(&pool, "acme", &issue, &member, &tz, None, kind)
+                    .await
+                    .unwrap();
+                serde_json::from_str::<Vec<Value>>(&body).unwrap()
+            }
+        };
+        let property = render(Some("issue-property")).await;
+        assert_eq!(property.len(), 4);
+        assert_eq!(property[0]["id"], serde_json::json!(act_early.to_string()));
+        assert_eq!(property[0]["actor_detail"]["display_name"], "ada");
+        assert_eq!(property[0]["project_detail"]["identifier"], "ENG");
+        assert_eq!(property[2]["actor_detail"], Value::Null);
+        let comments_view = render(Some("issue-comment")).await;
+        assert_eq!(comments_view.len(), 2);
+        assert_eq!(
+            comments_view[0]["comment_reactions"]
+                .as_array()
+                .map(Vec::len),
+            Some(live_reactions.len())
+        );
+        assert_eq!(comments_view[0]["workspace_detail"]["slug"], "acme");
+        assert_eq!(render(None).await.len(), 6);
+        // Comment list: DISTINCT folds the duplicate membership.
+        let listed = qe::comment_list_select("acme", project, issue, member)
+            .into_model::<ListCommentRow>()
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            listed.iter().map(|r| r.comment.id).collect::<Vec<_>>(),
+            vec![comment]
+        );
+        assert!(listed[0].is_member);
+        assert_eq!(listed[0].nests.issue.priority, "high");
+        let narrowed = qe::comment_list_select("acme", project, issue, member)
+            .filter(issue_comments::Column::WorkspaceId.eq(project))
+            .all(&db)
+            .await
+            .unwrap();
+        assert!(narrowed.is_empty());
+        let rendered = render_list_comment(&pool, listed.into_iter().next().unwrap(), &tz)
+            .await
+            .unwrap();
+        assert_eq!(rendered["is_member"], Value::Bool(true));
+        assert_eq!(rendered["issue_detail"]["sequence_id"], 7);
+        let reactions = qe::comment_reaction_list_select("acme", project, comment, member)
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            reactions.iter().map(|r| r.id).collect::<Vec<_>>(),
+            live_reactions
+        );
+        assert_eq!(
+            qe::comment_reaction_list_select("acme", project, comment, ghost)
+                .all(&db)
+                .await
+                .unwrap()
+                .len(),
+            live_reactions.len()
+        );
+        assert!(
+            qe::comment_reaction_list_select("other-ws", project, comment, member)
+                .all(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // Soft deletes stamp deleted_at / updated_at / updated_by.
+        for (target, pk) in [
+            (SoftDeleteTarget::IssueComment, comment),
+            (SoftDeleteTarget::CommentReaction, old_reaction),
+            (SoftDeleteTarget::IssueReaction, issue_reaction),
+            (SoftDeleteTarget::IssueSubscriber, subscription),
+            (SoftDeleteTarget::IssueWorklog, worklog),
+        ] {
+            soft_delete_row(&pool, target, &pk, &other, &now)
+                .await
+                .unwrap();
+        }
+        let comment_row = issue_comments::Entity::find_by_id(comment)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(comment_row.updated_by_id, Some(other));
+        assert_eq!(
+            comment_row.deleted_at.map(utc),
+            Some(now).map(|n| {
+                // Postgres keeps microseconds.
+                chrono::DateTime::from_timestamp_micros(n.timestamp_micros()).unwrap()
+            })
+        );
+        assert!(fetch_subscription(&pool, "acme", &project, &issue, &member)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(worklog_list_select("acme", project, issue, member)
+            .all(&db)
+            .await
+            .unwrap()
+            .is_empty());
+        let stamped = issue_reactions::Entity::find_by_id(issue_reaction)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stamped.updated_by_id, Some(other));
+        assert!(stamped.deleted_at.is_some());
     }
 }

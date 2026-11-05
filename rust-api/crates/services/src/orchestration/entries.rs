@@ -236,6 +236,31 @@ pub const CLOCK_POLICY_SQL: &str = "SELECT agent_ticking_enabled, agent_default_
     agent_default_interval_seconds, agent_review_default_interval_seconds, \
     agent_test_default_interval_seconds FROM projects WHERE id = $1";
 
+/// SeaORM form of [`CLOCK_POLICY_SQL`]: the project's
+/// `(agent_ticking_enabled, agent_default_max_ticks,
+/// agent_default_interval_seconds, agent_review_default_interval_seconds,
+/// agent_test_default_interval_seconds)`, no soft-delete guard.
+pub async fn clock_policy(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: uuid::Uuid,
+) -> Result<Option<(bool, i32, i32, i32, i32)>, sea_orm::DbErr> {
+    use pidash_db::entity::projects;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::AgentTickingEnabled,
+            projects::Column::AgentDefaultMaxTicks,
+            projects::Column::AgentDefaultIntervalSeconds,
+            projects::Column::AgentReviewDefaultIntervalSeconds,
+            projects::Column::AgentTestDefaultIntervalSeconds,
+        ])
+        .filter(projects::Column::Id.eq(project_id))
+        .into_tuple()
+        .one(db)
+        .await
+}
+
 /// The scheduler full-row INSERT (`AgentRun.objects.create`,
 /// `service.py:953-965`): the same 36 non-generated columns in model
 /// order as L6's `RUN_INSERT_SQL`, with the scheduler VALUES shape —
