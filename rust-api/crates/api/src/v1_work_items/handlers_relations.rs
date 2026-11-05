@@ -113,7 +113,18 @@ use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use sea_orm::sea_query::extension::postgres::PgFunc;
+use sea_orm::sea_query::{
+    Alias, Condition, Expr, Func, JoinType, Order, Query as SeaQuery, SelectStatement, SimpleExpr,
+    Value as SqlValue,
+};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, DbErr, EntityTrait, FromQueryResult, QueryFilter,
+    QuerySelect, RelationTrait,
+};
+
 use pidash_auth::scope::TenantScope;
+use pidash_db::entity::{issue_relations, issue_types, issues, projects, states, workspaces};
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::relations as relation_domain;
 use pidash_services::domain::transition::IssueTransitionHook;
@@ -588,20 +599,27 @@ fn app_origin(urls: &pidash_db::config::UrlSettings) -> Result<String, Denial> {
 // Lookups
 // ---------------------------------------------------------------------------
 
-fn row_uuid(row: &sqlx::postgres::PgRow, column: &str) -> Result<Uuid, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
-}
-
-fn row_uuid_opt(row: &sqlx::postgres::PgRow, column: &str) -> Result<Option<Uuid>, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
-}
-
 fn row_string(row: &sqlx::postgres::PgRow, column: &str) -> Result<String, Denial> {
     row.try_get(column).map_err(|_| Denial::ServerError)
 }
 
 fn row_datetime(row: &sqlx::postgres::PgRow, column: &str) -> Result<DateTime<Utc>, Denial> {
     row.try_get(column).map_err(|_| Denial::ServerError)
+}
+
+/// Run a built statement into typed rows, decoded by name.
+async fn query_built<T: FromQueryResult>(
+    db: &impl ConnectionTrait,
+    stmt: &SelectStatement,
+) -> Result<Vec<T>, DbErr> {
+    let rows = db.query_all(DbBackend::Postgres.build(stmt)).await?;
+    rows.iter()
+        .map(|row| T::from_query_result(row, ""))
+        .collect()
+}
+
+fn rel(column: issue_relations::Column) -> Expr {
+    Expr::col((issue_relations::Entity, column))
 }
 
 /// The ten grouped-read arms (`views/issue.py:2984-2995`), in source order.
@@ -618,52 +636,130 @@ struct RelationAggregate {
     finish_before: Vec<Uuid>,
 }
 
+/// The aggregate row: `NULL` (no rows at all) reads as the empty arm.
+#[derive(Debug, FromQueryResult)]
+struct RelationAggregateRow {
+    blocking_ids: Option<Vec<Uuid>>,
+    blocked_by_ids: Option<Vec<Uuid>>,
+    duplicate_ids: Option<Vec<Uuid>>,
+    duplicate_ids_related: Option<Vec<Uuid>>,
+    relates_to_ids: Option<Vec<Uuid>>,
+    relates_to_ids_related: Option<Vec<Uuid>>,
+    start_after_ids: Option<Vec<Uuid>>,
+    start_before_ids: Option<Vec<Uuid>>,
+    finish_after_ids: Option<Vec<Uuid>>,
+    finish_before_ids: Option<Vec<Uuid>>,
+}
+
+/// One `_agg_ids` arm: the distinct `collected` ids of the live pair rows
+/// whose `anchor` side is this issue and whose type is `relation_type`
+/// (Django: `ArrayAgg(..., distinct=True, filter=Q(...))`). sea-query has
+/// no aggregate `FILTER`, so the filter is a `CASE` inside the `DISTINCT`
+/// aggregate and the single `NULL` it leaves for non-matching rows is
+/// `array_remove`d: the same ids in the same (sorted) order.
+fn aggregate_arm(
+    anchor: issue_relations::Column,
+    collected: issue_relations::Column,
+    relation_type: &str,
+    issue_id: Uuid,
+) -> SimpleExpr {
+    let matched = rel(anchor)
+        .eq(issue_id)
+        .and(rel(issue_relations::Column::RelationType).eq(relation_type));
+    Func::cust(Alias::new("array_remove"))
+        .arg(PgFunc::array_agg_distinct(Expr::case(
+            matched,
+            rel(collected),
+        )))
+        .arg(SimpleExpr::Value(SqlValue::Uuid(None)))
+        .into()
+}
+
+/// The grouped aggregate statement (`:2971-2995`): one `SELECT` with the
+/// ten arms over the pair scope (live rows mentioning the issue on either
+/// side, in this workspace — NO `project_id` predicate, REL-2).
+fn relation_aggregate_select(slug: &str, issue_id: Uuid) -> SelectStatement {
+    use issue_relations::Column::{IssueId, RelatedIssueId};
+    let arms = [
+        ("blocking_ids", RelatedIssueId, IssueId, "blocked_by"),
+        ("blocked_by_ids", IssueId, RelatedIssueId, "blocked_by"),
+        ("duplicate_ids", IssueId, RelatedIssueId, "duplicate"),
+        (
+            "duplicate_ids_related",
+            RelatedIssueId,
+            IssueId,
+            "duplicate",
+        ),
+        ("relates_to_ids", IssueId, RelatedIssueId, "relates_to"),
+        (
+            "relates_to_ids_related",
+            RelatedIssueId,
+            IssueId,
+            "relates_to",
+        ),
+        ("start_after_ids", RelatedIssueId, IssueId, "start_before"),
+        ("start_before_ids", IssueId, RelatedIssueId, "start_before"),
+        ("finish_after_ids", RelatedIssueId, IssueId, "finish_before"),
+        (
+            "finish_before_ids",
+            IssueId,
+            RelatedIssueId,
+            "finish_before",
+        ),
+    ];
+    let mut stmt = SeaQuery::select();
+    for (alias, anchor, collected, relation_type) in arms {
+        stmt.expr_as(
+            aggregate_arm(anchor, collected, relation_type, issue_id),
+            Alias::new(alias),
+        );
+    }
+    stmt.from(issue_relations::Entity)
+        .join(
+            JoinType::InnerJoin,
+            workspaces::Entity,
+            rel(issue_relations::Column::WorkspaceId)
+                .equals((workspaces::Entity, workspaces::Column::Id)),
+        )
+        .cond_where(
+            Condition::all()
+                .add(rel(issue_relations::Column::DeletedAt).is_null())
+                .add(
+                    rel(IssueId)
+                        .eq(issue_id)
+                        .or(rel(RelatedIssueId).eq(issue_id)),
+                )
+                .add(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug)),
+        );
+    stmt
+}
+
 /// The grouped aggregate (`:2971-2995`, fixture `relation_grouped_aggregation`):
-/// one `SELECT` with the ten `_agg_ids` arms over the pair scope (live
-/// rows mentioning the issue on either side, in this workspace — NO
-/// `project_id` predicate, REL-2). Array order is Postgres's, preserved
-/// as-is like Python (only the two unions reorder — first-seen).
+/// one statement, see [`relation_aggregate_select`]. Array order is
+/// Postgres's, preserved as-is like Python (only the two unions reorder —
+/// first-seen).
 async fn fetch_relation_aggregate(
     pool: &PgPool,
     slug: &str,
     issue_id: &Uuid,
 ) -> Result<RelationAggregate, Denial> {
-    let row = sqlx::query(
-        r#"SELECT
-             COALESCE(ARRAY_AGG(DISTINCT "issue_relations"."issue_id") FILTER (WHERE "issue_relations"."related_issue_id" = $1 AND "issue_relations"."relation_type" = 'blocked_by'), '{}'::uuid[]) AS "blocking_ids",
-             COALESCE(ARRAY_AGG(DISTINCT "issue_relations"."related_issue_id") FILTER (WHERE "issue_relations"."issue_id" = $1 AND "issue_relations"."relation_type" = 'blocked_by'), '{}'::uuid[]) AS "blocked_by_ids",
-             COALESCE(ARRAY_AGG(DISTINCT "issue_relations"."related_issue_id") FILTER (WHERE "issue_relations"."issue_id" = $1 AND "issue_relations"."relation_type" = 'duplicate'), '{}'::uuid[]) AS "duplicate_ids",
-             COALESCE(ARRAY_AGG(DISTINCT "issue_relations"."issue_id") FILTER (WHERE "issue_relations"."related_issue_id" = $1 AND "issue_relations"."relation_type" = 'duplicate'), '{}'::uuid[]) AS "duplicate_ids_related",
-             COALESCE(ARRAY_AGG(DISTINCT "issue_relations"."related_issue_id") FILTER (WHERE "issue_relations"."issue_id" = $1 AND "issue_relations"."relation_type" = 'relates_to'), '{}'::uuid[]) AS "relates_to_ids",
-             COALESCE(ARRAY_AGG(DISTINCT "issue_relations"."issue_id") FILTER (WHERE "issue_relations"."related_issue_id" = $1 AND "issue_relations"."relation_type" = 'relates_to'), '{}'::uuid[]) AS "relates_to_ids_related",
-             COALESCE(ARRAY_AGG(DISTINCT "issue_relations"."issue_id") FILTER (WHERE "issue_relations"."related_issue_id" = $1 AND "issue_relations"."relation_type" = 'start_before'), '{}'::uuid[]) AS "start_after_ids",
-             COALESCE(ARRAY_AGG(DISTINCT "issue_relations"."related_issue_id") FILTER (WHERE "issue_relations"."issue_id" = $1 AND "issue_relations"."relation_type" = 'start_before'), '{}'::uuid[]) AS "start_before_ids",
-             COALESCE(ARRAY_AGG(DISTINCT "issue_relations"."issue_id") FILTER (WHERE "issue_relations"."related_issue_id" = $1 AND "issue_relations"."relation_type" = 'finish_before'), '{}'::uuid[]) AS "finish_after_ids",
-             COALESCE(ARRAY_AGG(DISTINCT "issue_relations"."related_issue_id") FILTER (WHERE "issue_relations"."issue_id" = $1 AND "issue_relations"."relation_type" = 'finish_before'), '{}'::uuid[]) AS "finish_before_ids"
-           FROM "issue_relations" INNER JOIN "workspaces" ON ("issue_relations"."workspace_id" = "workspaces"."id")
-           WHERE ("issue_relations"."deleted_at" IS NULL
-             AND ("issue_relations"."issue_id" = $1 OR "issue_relations"."related_issue_id" = $1)
-             AND "workspaces"."slug" = $2)"#,
-    )
-    .bind(issue_id)
-    .bind(slug)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| db_error(error, "relation-aggregate"))?;
-    let arm = |column: &str| -> Result<Vec<Uuid>, Denial> {
-        row.try_get(column).map_err(|_| Denial::ServerError)
-    };
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<RelationAggregateRow> =
+        query_built(&db, &relation_aggregate_select(slug, *issue_id))
+            .await
+            .map_err(|error| db_error(error, "relation-aggregate"))?;
+    let row = rows.into_iter().next().ok_or(Denial::ServerError)?;
     Ok(RelationAggregate {
-        blocking: arm("blocking_ids")?,
-        blocked_by: arm("blocked_by_ids")?,
-        duplicate: arm("duplicate_ids")?,
-        duplicate_related: arm("duplicate_ids_related")?,
-        relates_to: arm("relates_to_ids")?,
-        relates_to_related: arm("relates_to_ids_related")?,
-        start_after: arm("start_after_ids")?,
-        start_before: arm("start_before_ids")?,
-        finish_after: arm("finish_after_ids")?,
-        finish_before: arm("finish_before_ids")?,
+        blocking: row.blocking_ids.unwrap_or_default(),
+        blocked_by: row.blocked_by_ids.unwrap_or_default(),
+        duplicate: row.duplicate_ids.unwrap_or_default(),
+        duplicate_related: row.duplicate_ids_related.unwrap_or_default(),
+        relates_to: row.relates_to_ids.unwrap_or_default(),
+        relates_to_related: row.relates_to_ids_related.unwrap_or_default(),
+        start_after: row.start_after_ids.unwrap_or_default(),
+        start_before: row.start_before_ids.unwrap_or_default(),
+        finish_after: row.finish_after_ids.unwrap_or_default(),
+        finish_before: row.finish_before_ids.unwrap_or_default(),
     })
 }
 
@@ -677,18 +773,17 @@ async fn fetch_project_workspace(
     slug: &str,
     project_id: &Uuid,
 ) -> Result<Uuid, Denial> {
-    let workspace_id: Option<Uuid> = sqlx::query_scalar(
-        r#"SELECT "projects"."workspace_id" FROM "projects"
-           INNER JOIN "workspaces" ON ("projects"."workspace_id" = "workspaces"."id")
-           WHERE "projects"."id" = $1 AND "projects"."deleted_at" IS NULL
-             AND "workspaces"."slug" = $2"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "relation-post-project"))?
-    .flatten();
+    let workspace_id: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .into_tuple()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "relation-post-project"))?;
     workspace_id.ok_or_else(|| Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()))
 }
 
@@ -936,6 +1031,131 @@ async fn relation_post_inner(
     Ok(json_created(body))
 }
 
+/// One refetched relation row with its traversal facts, decoded by name
+/// (`t_*`: the traversed issue, `s_id`: its state, `ty_*`: its type — all
+/// `LEFT` joined, so NULL when the traversal was hard-deleted).
+#[derive(Debug, FromQueryResult)]
+struct RefetchRow {
+    relation_type: String,
+    created_by_id: Option<Uuid>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    updated_by_id: Option<Uuid>,
+    t_id: Option<Uuid>,
+    t_project: Option<Uuid>,
+    t_seq: Option<i32>,
+    t_name: Option<String>,
+    t_priority: Option<String>,
+    s_id: Option<Uuid>,
+    ty_id: Option<Uuid>,
+    ty_epic: Option<bool>,
+}
+
+/// The refetch statement (`:3111-3130`): the pair rows of `stored` type
+/// between the issue and `issues` (the traversed side flips with
+/// `reverse`), `LEFT` joined to the traversed issue, its state and type,
+/// workspace-scoped, in `Meta.ordering` (`-created_at`).
+fn refetch_select(
+    slug: &str,
+    issue_id: Uuid,
+    issues: &[Uuid],
+    stored: &str,
+    reverse: bool,
+) -> SelectStatement {
+    use issue_relations::Column::{IssueId, RelatedIssueId};
+    let (t, s, ty) = (Alias::new("t"), Alias::new("s"), Alias::new("ty"));
+    // The traversed side: forward renders `related_issue`, reverse `issue`.
+    let (side, anchor, listed) = if reverse {
+        (IssueId, RelatedIssueId, IssueId)
+    } else {
+        (RelatedIssueId, IssueId, RelatedIssueId)
+    };
+    let traversed = |column: issues::Column| Expr::col((t.clone(), column));
+    let mut stmt = SeaQuery::select();
+    stmt.expr_as(
+        rel(issue_relations::Column::RelationType),
+        Alias::new("relation_type"),
+    )
+    .expr_as(
+        rel(issue_relations::Column::CreatedById),
+        Alias::new("created_by_id"),
+    )
+    .expr_as(
+        rel(issue_relations::Column::CreatedAt),
+        Alias::new("created_at"),
+    )
+    .expr_as(
+        rel(issue_relations::Column::UpdatedAt),
+        Alias::new("updated_at"),
+    )
+    .expr_as(
+        rel(issue_relations::Column::UpdatedById),
+        Alias::new("updated_by_id"),
+    )
+    .expr_as(traversed(issues::Column::Id), Alias::new("t_id"))
+    .expr_as(
+        traversed(issues::Column::ProjectId),
+        Alias::new("t_project"),
+    )
+    .expr_as(traversed(issues::Column::SequenceId), Alias::new("t_seq"))
+    .expr_as(traversed(issues::Column::Name), Alias::new("t_name"))
+    .expr_as(
+        traversed(issues::Column::Priority),
+        Alias::new("t_priority"),
+    )
+    .expr_as(
+        Expr::col((s.clone(), states::Column::Id)),
+        Alias::new("s_id"),
+    )
+    .expr_as(
+        Expr::col((ty.clone(), issue_types::Column::Id)),
+        Alias::new("ty_id"),
+    )
+    .expr_as(
+        Expr::col((ty.clone(), issue_types::Column::IsEpic)),
+        Alias::new("ty_epic"),
+    )
+    .from(issue_relations::Entity)
+    .join_as(
+        JoinType::LeftJoin,
+        issues::Entity,
+        t.clone(),
+        traversed(issues::Column::Id).equals((issue_relations::Entity, side)),
+    )
+    .join_as(
+        JoinType::LeftJoin,
+        states::Entity,
+        s.clone(),
+        Expr::col((s.clone(), states::Column::Id)).equals((t.clone(), issues::Column::StateId)),
+    )
+    .join_as(
+        JoinType::LeftJoin,
+        issue_types::Entity,
+        ty.clone(),
+        Expr::col((ty.clone(), issue_types::Column::Id))
+            .equals((t.clone(), issues::Column::TypeId)),
+    )
+    .join(
+        JoinType::InnerJoin,
+        workspaces::Entity,
+        rel(issue_relations::Column::WorkspaceId)
+            .equals((workspaces::Entity, workspaces::Column::Id)),
+    )
+    .cond_where(
+        Condition::all()
+            .add(rel(issue_relations::Column::DeletedAt).is_null())
+            .add(rel(anchor).eq(issue_id))
+            .add(rel(listed).is_in(issues.iter().copied()))
+            .add(rel(issue_relations::Column::RelationType).eq(stored))
+            .add(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug)),
+    )
+    .order_by(
+        (issue_relations::Entity, issue_relations::Column::CreatedAt),
+        Order::Desc,
+    );
+    stmt
+}
+
 /// The post-create refetch (`:3111-3130`) with its traversal facts, in
 /// `Meta.ordering`, rendered per the forward/reverse split (`:3132`).
 async fn fetch_refetch_rows(
@@ -947,47 +1167,11 @@ async fn fetch_refetch_rows(
     reverse: bool,
     tz: &Tz,
 ) -> Result<Value, Denial> {
-    // The traversed side: forward renders `related_issue`, reverse `issue`.
-    let side = if reverse {
-        "issue_id"
-    } else {
-        "related_issue_id"
-    };
-    let (pair_left, pair_right) = if reverse {
-        (
-            r#""issue_relations"."issue_id" = ANY($3)"#,
-            r#""issue_relations"."related_issue_id" = $2"#,
-        )
-    } else {
-        (
-            r#""issue_relations"."issue_id" = $2"#,
-            r#""issue_relations"."related_issue_id" = ANY($3)"#,
-        )
-    };
-    let rows = sqlx::query(&format!(
-        r#"SELECT "issue_relations"."relation_type",
-                  "issue_relations"."created_by_id", "issue_relations"."created_at",
-                  "issue_relations"."updated_at", "issue_relations"."updated_by_id",
-                  "t"."id" AS "t_id", "t"."project_id" AS "t_project",
-                  "t"."sequence_id" AS "t_seq", "t"."name" AS "t_name",
-                  "t"."priority" AS "t_priority", "s"."id" AS "s_id",
-                  "ty"."id" AS "ty_id", "ty"."is_epic" AS "ty_epic"
-           FROM "issue_relations"
-           LEFT OUTER JOIN "issues" AS "t" ON ("t"."id" = "issue_relations"."{side}")
-           LEFT OUTER JOIN "states" AS "s" ON ("s"."id" = "t"."state_id")
-           LEFT OUTER JOIN "issue_types" AS "ty" ON ("ty"."id" = "t"."type_id")
-           INNER JOIN "workspaces" ON ("issue_relations"."workspace_id" = "workspaces"."id")
-           WHERE ("issue_relations"."deleted_at" IS NULL
-             AND {pair_left} AND {pair_right}
-             AND "issue_relations"."relation_type" = $4
-             AND "workspaces"."slug" = $1)
-           ORDER BY "issue_relations"."created_at" DESC"#
-    ))
-    .bind(slug)
-    .bind(issue_id)
-    .bind(issues)
-    .bind(stored)
-    .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<RefetchRow> = query_built(
+        &db,
+        &refetch_select(slug, *issue_id, issues, stored, reverse),
+    )
     .await
     .map_err(|error| db_error(error, "relation-refetch"))?;
     let mut rendered = Vec::with_capacity(rows.len());
@@ -997,47 +1181,34 @@ async fn fetch_refetch_rows(
     Ok(Value::Array(rendered))
 }
 
-fn render_refetch_row(
-    row: &sqlx::postgres::PgRow,
-    reverse: bool,
-    tz: &Tz,
-) -> Result<Value, Denial> {
-    let relation_type = row_string(row, "relation_type")?;
-    let created_by: Option<Uuid> = row_uuid_opt(row, "created_by_id")?;
-    let created_at: DateTime<Utc> = row_datetime(row, "created_at")?;
-    let updated_at: DateTime<Utc> = row_datetime(row, "updated_at")?;
-    let updated_by: Option<Uuid> = row_uuid_opt(row, "updated_by_id")?;
-    let created_by = created_by.map(|id| id.to_string());
-    let updated_by = updated_by.map(|id| id.to_string());
-    let created_at = crate::serializer::render_datetime_in(&created_at, tz);
-    let updated_at = crate::serializer::render_datetime_in(&updated_at, tz);
-    let traversed: Option<Uuid> = row_uuid_opt(row, "t_id")?;
-    if traversed.is_none() {
+fn render_refetch_row(row: &RefetchRow, reverse: bool, tz: &Tz) -> Result<Value, Denial> {
+    let relation_type = row.relation_type.as_str();
+    let created_by = row.created_by_id.map(|id| id.to_string());
+    let updated_by = row.updated_by_id.map(|id| id.to_string());
+    let created_at = crate::serializer::render_datetime_in(&row.created_at, tz);
+    let updated_at = crate::serializer::render_datetime_in(&row.updated_at, tz);
+    let Some(traversed) = row.t_id else {
         // A concurrently hard-deleted traversal (the FK forbids it
         // otherwise): DRF `SkipField`s every traversed key and renders
         // the relation columns in field order.
         return Ok(Value::Object(missing_traversal_body(
-            &relation_type,
+            relation_type,
             created_by.as_deref(),
             &created_at,
             &updated_at,
             updated_by.as_deref(),
             reverse,
         )));
-    }
-    let project_id = row_uuid(row, "t_project")?;
-    let sequence_id: i32 = row.try_get("t_seq").map_err(|_| Denial::ServerError)?;
-    let name = row_string(row, "t_name")?;
-    let priority = row_string(row, "t_priority")?;
-    let state_id: Option<Uuid> = row_uuid_opt(row, "s_id")?;
-    let project_id = project_id.to_string();
-    let state_id = state_id.map(|id| id.to_string());
-    let traversed = traversed.expect("checked some").to_string();
+    };
+    let project_id = row.t_project.ok_or(Denial::ServerError)?.to_string();
+    let sequence_id = row.t_seq.ok_or(Denial::ServerError)?;
+    let name = row.t_name.as_deref().ok_or(Denial::ServerError)?;
+    let priority = row.t_priority.as_deref().ok_or(Denial::ServerError)?;
+    let state_id = row.s_id.map(|id| id.to_string());
+    let traversed = traversed.to_string();
     if reverse {
-        let type_id: Option<Uuid> = row_uuid_opt(row, "ty_id")?;
-        let is_epic: Option<bool> = row.try_get("ty_epic").map_err(|_| Denial::ServerError)?;
-        let type_id = type_id.map(|id| id.to_string());
-        let issue_type = match (&type_id, is_epic) {
+        let type_id = row.ty_id.map(|id| id.to_string());
+        let issue_type = match (&type_id, row.ty_epic) {
             (Some(id), Some(is_epic)) => Some(RelatedIssueType { id, is_epic }),
             _ => None,
         };
@@ -1045,11 +1216,11 @@ fn render_refetch_row(
             id: &traversed,
             project_id: &project_id,
             sequence_id: i64::from(sequence_id),
-            relation_type: &relation_type,
-            name: &name,
+            relation_type,
+            name,
             issue_type,
             state_id: state_id.as_deref(),
-            priority: &priority,
+            priority,
             created_by: created_by.as_deref(),
             created_at: &created_at,
             updated_by: updated_by.as_deref(),
@@ -1068,10 +1239,10 @@ fn render_refetch_row(
             id: &traversed,
             project_id: &project_id,
             sequence_id: i64::from(sequence_id),
-            relation_type: &relation_type,
-            name: &name,
+            relation_type,
+            name,
             state_id: state_id.as_deref(),
-            priority: &priority,
+            priority,
             created_by: created_by.as_deref(),
             created_at: &created_at,
             updated_at: &updated_at,
@@ -1811,5 +1982,237 @@ mod tests {
                 "updated_at"
             ]
         );
+    }
+
+    #[test]
+    fn relation_aggregate_statement_pins_arms_and_scope() {
+        use sea_orm::sea_query::PostgresQueryBuilder;
+        let issue = Uuid::nil();
+        let sql = relation_aggregate_select("acme", issue).to_string(PostgresQueryBuilder);
+        // Ten arms, each a DISTINCT aggregate over a CASE with the NULLs removed.
+        assert_eq!(
+            sql.matches("array_remove(ARRAY_AGG(DISTINCT (CASE WHEN (")
+                .count(),
+            10,
+            "{sql}"
+        );
+        assert!(sql.starts_with(r#"SELECT array_remove(ARRAY_AGG(DISTINCT (CASE WHEN ("issue_relations"."related_issue_id" = '00000000-0000-0000-0000-000000000000' AND "issue_relations"."relation_type" = 'blocked_by') THEN "issue_relations"."issue_id" END)), NULL) AS "blocking_ids", array_remove(ARRAY_AGG(DISTINCT (CASE WHEN ("issue_relations"."issue_id" = '00000000-0000-0000-0000-000000000000' AND "issue_relations"."relation_type" = 'blocked_by') THEN "issue_relations"."related_issue_id" END)), NULL) AS "blocked_by_ids""#), "{sql}");
+        for alias in [
+            "duplicate_ids",
+            "duplicate_ids_related",
+            "relates_to_ids",
+            "relates_to_ids_related",
+            "start_after_ids",
+            "start_before_ids",
+            "finish_after_ids",
+            "finish_before_ids",
+        ] {
+            assert!(sql.contains(&format!("AS \"{alias}\"")), "{sql}");
+        }
+        assert!(sql.ends_with(r#"FROM "issue_relations" INNER JOIN "workspaces" ON "issue_relations"."workspace_id" = "workspaces"."id" WHERE "issue_relations"."deleted_at" IS NULL AND ("issue_relations"."issue_id" = '00000000-0000-0000-0000-000000000000' OR "issue_relations"."related_issue_id" = '00000000-0000-0000-0000-000000000000') AND "workspaces"."slug" = 'acme'"#), "{sql}");
+    }
+
+    #[test]
+    fn refetch_statement_flips_the_traversed_side() {
+        use sea_orm::sea_query::PostgresQueryBuilder;
+        let issue = Uuid::nil();
+        let other = Uuid::from_u128(1);
+        let forward = refetch_select("acme", issue, &[other], "blocked_by", false)
+            .to_string(PostgresQueryBuilder);
+        assert!(forward.contains(r#"LEFT JOIN "issues" AS "t" ON "t"."id" = "issue_relations"."related_issue_id" LEFT JOIN "states" AS "s" ON "s"."id" = "t"."state_id" LEFT JOIN "issue_types" AS "ty" ON "ty"."id" = "t"."type_id" INNER JOIN "workspaces" ON"#), "{forward}");
+        assert!(forward.contains(r#"WHERE "issue_relations"."deleted_at" IS NULL AND "issue_relations"."issue_id" = '00000000-0000-0000-0000-000000000000' AND "issue_relations"."related_issue_id" IN ('00000000-0000-0000-0000-000000000001') AND "issue_relations"."relation_type" = 'blocked_by' AND "workspaces"."slug" = 'acme' ORDER BY "issue_relations"."created_at" DESC"#), "{forward}");
+        assert!(forward.contains(r#""t"."id" AS "t_id", "t"."project_id" AS "t_project", "t"."sequence_id" AS "t_seq", "t"."name" AS "t_name", "t"."priority" AS "t_priority", "s"."id" AS "s_id", "ty"."id" AS "ty_id", "ty"."is_epic" AS "ty_epic""#), "{forward}");
+        let reverse =
+            refetch_select("acme", issue, &[], "blocked_by", true).to_string(PostgresQueryBuilder);
+        assert!(
+            reverse.contains(
+                r#"LEFT JOIN "issues" AS "t" ON "t"."id" = "issue_relations"."issue_id""#
+            ),
+            "{reverse}"
+        );
+        // An empty list matches nothing (`= ANY('{}')` parity).
+        assert!(reverse.contains(r#"AND "issue_relations"."related_issue_id" = '00000000-0000-0000-0000-000000000000' AND 1 = 2 AND"#), "{reverse}");
+    }
+
+    /// The aggregate, the refetch and the project read against temp copies
+    /// on one connection; the aggregate is cross-checked against Django's
+    /// `FILTER` spelling on the same rows.
+    #[tokio::test]
+    async fn live_relation_reads() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "issue_relations",
+            "workspaces",
+            "projects",
+            "issues",
+            "states",
+            "issue_types",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (ws, other_ws, project, dead_project) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let me = Uuid::new_v4();
+        let mut others: Vec<Uuid> = (0..4).map(|_| Uuid::new_v4()).collect();
+        others.sort();
+        let (o1, o2, o3, o4) = (others[0], others[1], others[2], others[3]);
+        let (state, epic_type, user) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme'), ('{other_ws}', 'other')"),
+            format!(
+                "INSERT INTO projects (id, workspace_id, deleted_at) VALUES ('{project}', '{ws}', NULL), ('{dead_project}', '{ws}', now())"
+            ),
+            format!("INSERT INTO states (id) VALUES ('{state}')"),
+            format!("INSERT INTO issue_types (id, is_epic) VALUES ('{epic_type}', true)"),
+            format!(
+                "INSERT INTO issues (id, project_id, sequence_id, name, priority, state_id, type_id) VALUES \
+                 ('{o1}', '{project}', 11, 'one', 'high', '{state}', '{epic_type}'), \
+                 ('{o2}', '{project}', 12, 'two', 'none', NULL, NULL), \
+                 ('{o3}', '{project}', 13, 'three', 'low', NULL, NULL)"
+            ),
+            // Pair rows: blocked_by both ways (one duplicated, one dead),
+            // a duplicate, a relates_to in the other workspace, dates.
+            format!(
+                "INSERT INTO issue_relations (id, issue_id, related_issue_id, relation_type, workspace_id, project_id, created_at, updated_at, created_by_id, updated_by_id, deleted_at) VALUES \
+                 (gen_random_uuid(), '{me}', '{o2}', 'blocked_by', '{ws}', '{project}', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', '{user}', NULL, NULL), \
+                 (gen_random_uuid(), '{me}', '{o1}', 'blocked_by', '{ws}', '{project}', '2025-01-02T00:00:00Z', '2025-01-02T00:00:00Z', NULL, '{user}', NULL), \
+                 (gen_random_uuid(), '{me}', '{o1}', 'blocked_by', '{ws}', '{project}', '2025-01-03T00:00:00Z', '2025-01-03T00:00:00Z', NULL, NULL, NULL), \
+                 (gen_random_uuid(), '{o3}', '{me}', 'blocked_by', '{ws}', '{project}', '2025-01-04T00:00:00Z', '2025-01-04T00:00:00Z', NULL, NULL, NULL), \
+                 (gen_random_uuid(), '{o4}', '{me}', 'blocked_by', '{ws}', '{project}', '2025-01-05T00:00:00Z', '2025-01-05T00:00:00Z', NULL, NULL, now()), \
+                 (gen_random_uuid(), '{me}', '{o4}', 'duplicate', '{ws}', '{project}', '2025-01-06T00:00:00Z', '2025-01-06T00:00:00Z', NULL, NULL, NULL), \
+                 (gen_random_uuid(), '{o3}', '{me}', 'relates_to', '{other_ws}', '{project}', '2025-01-07T00:00:00Z', '2025-01-07T00:00:00Z', NULL, NULL, NULL), \
+                 (gen_random_uuid(), '{me}', '{o2}', 'start_before', '{ws}', '{project}', '2025-01-08T00:00:00Z', '2025-01-08T00:00:00Z', NULL, NULL, NULL), \
+                 (gen_random_uuid(), '{o1}', '{me}', 'finish_before', '{ws}', '{project}', '2025-01-09T00:00:00Z', '2025-01-09T00:00:00Z', NULL, NULL, NULL)"
+            ),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+
+        let agg = fetch_relation_aggregate(&pool, "acme", &me)
+            .await
+            .expect("aggregate");
+        assert_eq!(agg.blocked_by, vec![o1, o2], "distinct, sorted");
+        assert_eq!(agg.blocking, vec![o3], "the soft-deleted pair is out");
+        assert_eq!(agg.duplicate, vec![o4]);
+        assert!(agg.duplicate_related.is_empty());
+        assert!(agg.relates_to.is_empty());
+        assert!(agg.relates_to_related.is_empty(), "other workspace");
+        assert_eq!(agg.start_before, vec![o2]);
+        assert!(agg.start_after.is_empty());
+        assert_eq!(agg.finish_after, vec![o1]);
+        assert!(agg.finish_before.is_empty());
+        // Cross-check against the Django `FILTER` spelling.
+        let (blocked_by, blocking): (Vec<Uuid>, Vec<Uuid>) = sqlx::query_as(
+            r#"SELECT COALESCE(ARRAY_AGG(DISTINCT "related_issue_id") FILTER (WHERE "issue_id" = $1 AND "relation_type" = 'blocked_by'), '{}'::uuid[]),
+                      COALESCE(ARRAY_AGG(DISTINCT "issue_id") FILTER (WHERE "related_issue_id" = $1 AND "relation_type" = 'blocked_by'), '{}'::uuid[])
+               FROM issue_relations WHERE deleted_at IS NULL AND ("issue_id" = $1 OR "related_issue_id" = $1)"#,
+        )
+        .bind(me)
+        .fetch_one(&pool)
+        .await
+        .expect("filter spelling");
+        assert_eq!(
+            (agg.blocked_by.clone(), agg.blocking.clone()),
+            (blocked_by, blocking)
+        );
+        // No rows at all: every arm empty, never an error.
+        let none = fetch_relation_aggregate(&pool, "acme", &Uuid::new_v4())
+            .await
+            .expect("empty");
+        assert!(none.blocked_by.is_empty() && none.finish_before.is_empty());
+        let none = fetch_relation_aggregate(&pool, "nope", &me)
+            .await
+            .expect("empty");
+        assert!(none.blocked_by.is_empty());
+
+        // Refetch, forward: newest first, the duplicated pair renders twice,
+        // traversal facts by name (o1 carries a state and an epic type).
+        let tz = chrono_tz::UTC;
+        let rows = fetch_refetch_rows(&pool, "acme", &me, &[o1, o2], "blocked_by", false, &tz)
+            .await
+            .expect("refetch");
+        let rows = rows.as_array().expect("array");
+        assert_eq!(rows.len(), 3);
+        let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().expect("id")).collect();
+        assert_eq!(ids, vec![o1.to_string(), o1.to_string(), o2.to_string()]);
+        assert_eq!(rows[0]["sequence_id"], Value::from(11));
+        assert_eq!(rows[0]["name"], Value::from("one"));
+        assert_eq!(rows[0]["state_id"], Value::from(state.to_string()));
+        assert_eq!(rows[0]["project_id"], Value::from(project.to_string()));
+        assert_eq!(rows[0]["created_at"], Value::from("2025-01-03T00:00:00Z"));
+        assert_eq!(rows[1]["updated_by"], Value::from(user.to_string()));
+        assert_eq!(
+            rows[2]["created_by"],
+            Value::from(user.to_string()),
+            "{rows:?}"
+        );
+        assert_eq!(rows[2]["state_id"], Value::Null);
+        // Reverse: the traversed side is `issue_id`, the type renders.
+        let rows = fetch_refetch_rows(&pool, "acme", &me, &[o3, o4], "blocked_by", true, &tz)
+            .await
+            .expect("refetch");
+        let rows = rows.as_array().expect("array");
+        assert_eq!(rows.len(), 1, "the soft-deleted pair is out");
+        assert_eq!(rows[0]["id"], Value::from(o3.to_string()));
+        assert_eq!(rows[0]["sequence_id"], Value::from(13));
+        assert_eq!(rows[0]["relation_type"], Value::from("blocked_by"));
+        assert!(
+            rows[0].get("type_id").is_none() && rows[0].get("is_epic").is_none(),
+            "no type: both keys are skipped: {rows:?}"
+        );
+        // `o1 -> me finish_before`: the epic type renders on the reverse side.
+        let rows = fetch_refetch_rows(&pool, "acme", &me, &[o1], "finish_before", true, &tz)
+            .await
+            .expect("refetch");
+        let rows = rows.as_array().expect("array");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["is_epic"], Value::Bool(true), "{rows:?}");
+        assert_eq!(rows[0]["type_id"], Value::from(epic_type.to_string()));
+        assert_eq!(rows[0]["state_id"], Value::from(state.to_string()));
+        // A hard-missing traversal renders the relation columns only.
+        let rows = fetch_refetch_rows(&pool, "acme", &me, &[o3], "blocked_by", false, &tz)
+            .await
+            .expect("refetch");
+        assert!(
+            rows.as_array().expect("array").is_empty(),
+            "o3 is on the other side"
+        );
+        let rows = fetch_refetch_rows(&pool, "acme", &me, &[o4], "duplicate", false, &tz)
+            .await
+            .expect("refetch");
+        let rows = rows.as_array().expect("array");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].get("name").is_none(), "{rows:?}");
+        assert_eq!(rows[0]["relation_type"], Value::from("duplicate"));
+
+        // The project's workspace: live rows under this slug only.
+        assert_eq!(
+            fetch_project_workspace(&pool, "acme", &project).await,
+            Ok(ws)
+        );
+        assert_eq!(
+            fetch_project_workspace(&pool, "acme", &dead_project).await,
+            Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()))
+        );
+        assert!(fetch_project_workspace(&pool, "other", &project)
+            .await
+            .is_err());
     }
 }
