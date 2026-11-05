@@ -81,6 +81,19 @@
 //! Queryset-adjacent constants handlers need (`.values()` key orders, the
 //! `IN`-list bucket table, default orders) ARE in scope and marked.
 
+use pidash_db::entity::{
+    issue_assignees, issue_labels, issue_links, issue_relations, issues, project_members, projects,
+    states, users, workspaces,
+};
+use sea_orm::prelude::DateTimeWithTimeZone;
+use sea_orm::sea_query::extension::postgres::PgFunc;
+use sea_orm::sea_query::{Alias, Condition, Expr, Query, SelectStatement, SimpleExpr};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait,
+};
+use uuid::Uuid;
+
 use super::Binder;
 
 // ---------------------------------------------------------------------------
@@ -588,38 +601,6 @@ pub const RELATION_BUCKETS: &[RelationBucket] = &[
     },
 ];
 
-/// One relation id-list statement (`relation.py:52-100`): `SELECT DISTINCT`
-/// the id column plus the ordering column, over the `(issue OR related)`
-/// scope with the workspace slug, side and type filters. The base
-/// queryset's `select_related` joins never reach SQL (unreferenced by a
-/// `values_list`). Binds, in order: issue id (OR left), issue id (OR right),
-/// workspace slug, issue id (side), relation type.
-pub fn relation_ids_sql(
-    binder: &mut Binder,
-    slug: &str,
-    issue_id: uuid::Uuid,
-    ids: RelationIds,
-) -> String {
-    let left = binder.bind_uuid(issue_id);
-    let right = binder.bind_uuid(issue_id);
-    let slug_holder = binder.bind_string(slug.to_owned());
-    let side = binder.bind_uuid(issue_id);
-    let relation_type = binder.bind_string(ids.relation_type.to_owned());
-    format!(
-        "SELECT DISTINCT issue_relations.{column}, issue_relations.created_at \
-        FROM issue_relations \
-        INNER JOIN workspaces ON issue_relations.workspace_id = workspaces.id \
-        WHERE issue_relations.deleted_at IS NULL \
-        AND (issue_relations.issue_id = {left} OR issue_relations.related_issue_id = {right}) \
-        AND workspaces.slug = {slug_holder} \
-        AND issue_relations.{side_col} = {side} \
-        AND issue_relations.relation_type = {relation_type} \
-        ORDER BY issue_relations.created_at DESC",
-        column = ids.column,
-        side_col = ids.side,
-    )
-}
-
 /// The 14 bucket `.values()` keys in RENDER order (`relation.py:157-172`):
 /// concrete columns in call order, the two direct-`ArrayAgg` annotations in
 /// `annotate()` order, then the `relation_type` literal. `.values()` dicts —
@@ -641,136 +622,218 @@ pub const RELATION_ROW_FIELDS: &[&str] = &[
     "relation_type",
 ];
 
-/// Bucket select list for one `relation_type` literal (target queryset
-/// `relation.py:102-154`, keys `:157-172`). The label/assignee arrays aggregate
-/// DIRECTLY over `LEFT JOIN`ed link rows with `FILTER` (not the subquery
-/// form), which is why the bucket statement needs `GROUP BY issue.id`. The
-/// target queryset's `cycle_id`/count annotations are dead here —
-/// `.values(*fields)` never selects them — and are not emitted. Binds the
-/// label literal.
-pub fn relation_bucket_selects(binder: &mut Binder, label: &str) -> String {
-    let literal = binder.bind_string(label.to_owned());
-    format!(
-        "DISTINCT issue.id, issue.name, issue.state_id, issue.sort_order, issue.priority, \
-        issue.sequence_id, issue.project_id, issue.created_at, issue.updated_at, \
-        issue.created_by_id, issue.updated_by_id, \
-        COALESCE(ARRAY_AGG(DISTINCT issue_labels.label_id) \
-        FILTER (WHERE (NOT (issue_labels.label_id IS NULL) AND issue_labels.deleted_at IS NULL)), \
-        '{{}}'::uuid[]) AS label_ids, \
-        COALESCE(ARRAY_AGG(DISTINCT issue_assignees.assignee_id) \
-        FILTER (WHERE (NOT (issue_assignees.assignee_id IS NULL) AND project_members.is_active \
-        AND issue_assignees.deleted_at IS NULL)), '{{}}'::uuid[]) AS assignee_ids, \
-        {literal} AS relation_type"
-    )
-}
-
-/// Bucket `FROM`: manager-scope joins plus the array-aggregation `LEFT JOIN`s
-/// (`labels__id` / `assignees__id` traversal joins the link tables; the
-/// active-member predicate left-joins `users` + `project_members`). None of
-/// the joined tables carries a soft-delete guard — only the `FILTER` clauses
-/// and the outer `WHERE` do.
-pub const RELATION_BUCKET_FROM: &str = "FROM issues AS issue \
-    LEFT JOIN states AS state ON state.id = issue.state_id \
-    JOIN projects AS project ON project.id = issue.project_id \
-    JOIN workspaces ON workspaces.id = issue.workspace_id \
-    LEFT OUTER JOIN issue_labels ON issue.id = issue_labels.issue_id \
-    LEFT OUTER JOIN issue_assignees ON issue.id = issue_assignees.issue_id \
-    LEFT OUTER JOIN users ON issue_assignees.assignee_id = users.id \
-    LEFT OUTER JOIN project_members ON users.id = project_members.member_id";
-
-/// Bucket scope preamble: the `issue_objects` manager plus the workspace slug
-/// (`relation.py:102-103`). Binds the slug.
-pub fn relation_bucket_preamble(binder: &mut Binder, slug: &str) -> String {
-    let slug_holder = binder.bind_string(slug.to_owned());
-    format!(
-        "issue.deleted_at IS NULL \
-        AND NOT (state.\"group\" = 'triage' AND state.\"group\" IS NOT NULL) \
-        AND issue.archived_at IS NULL AND project.archived_at IS NULL AND issue.is_draft = FALSE \
-        AND workspaces.slug = {slug_holder}"
-    )
-}
-
-/// Full single-list bucket statement: preamble plus `id IN (<id-list>)`,
-/// grouped by the issue pk. No `ORDER BY` (bug 4). The id-list subquery drops
-/// its outer `ORDER BY` (and with it the ordering column) — subqueries never
-/// carry ordering.
-pub fn relation_bucket_sql(
-    binder: &mut Binder,
-    slug: &str,
-    issue_id: uuid::Uuid,
-    bucket: RelationBucket,
-) -> String {
-    debug_assert_eq!(
-        bucket.ids.len(),
-        1,
-        "OR-ed buckets use relation_bucket_union_sql"
-    );
-    relation_bucket_union_sql(binder, slug, issue_id, bucket)
-}
-
-/// Full bucket statement for one or two id-lists. Django's `|` renders the
-/// two-branch form as `(preamble AND id IN A) OR (preamble AND id IN B)`;
-/// the preamble is conjunctive, so the factored `preamble AND (IN A OR IN B)`
-/// ported here matches row for row with half the text.
-pub fn relation_bucket_union_sql(
-    binder: &mut Binder,
-    slug: &str,
-    issue_id: uuid::Uuid,
-    bucket: RelationBucket,
-) -> String {
-    let selects = relation_bucket_selects(binder, bucket.label);
-    let preamble = relation_bucket_preamble(binder, slug);
-    let mut branches = Vec::with_capacity(bucket.ids.len());
-    for ids in bucket.ids {
-        let left = binder.bind_uuid(issue_id);
-        let right = binder.bind_uuid(issue_id);
-        let slug_holder = binder.bind_string(slug.to_owned());
-        let side = binder.bind_uuid(issue_id);
-        let relation_type = binder.bind_string(ids.relation_type.to_owned());
-        branches.push(format!(
-            "issue.id IN (SELECT DISTINCT r.{column} FROM issue_relations r \
-            INNER JOIN workspaces rw ON rw.id = r.workspace_id \
-            WHERE r.deleted_at IS NULL AND (r.issue_id = {left} OR r.related_issue_id = {right}) \
-            AND rw.slug = {slug_holder} AND r.{side_col} = {side} \
-            AND r.relation_type = {relation_type})",
-            column = ids.column,
-            side_col = ids.side,
-        ));
+/// `issue_relations` column behind a [`RelationIds`] side or returned
+/// column (`issue_id` / `related_issue_id`).
+fn relation_column(name: &str) -> issue_relations::Column {
+    match name {
+        "issue_id" => issue_relations::Column::IssueId,
+        "related_issue_id" => issue_relations::Column::RelatedIssueId,
+        other => unreachable!("relation bucket column {other}"),
     }
-    let membership = branches.join(" OR ");
-    format!("SELECT {selects} {RELATION_BUCKET_FROM} WHERE {preamble} AND ({membership}) GROUP BY issue.id")
+}
+
+/// One relation id-list (`relation.py:52-100`) as an `IN` subquery:
+/// `SELECT DISTINCT <column>` over the `(issue OR related)` scope with the
+/// workspace slug (an aliased `workspaces` join), side and type filters.
+/// Subqueries carry no ordering, so the list's `-created_at` drops.
+fn relation_ids_subquery(slug: &str, issue_id: Uuid, ids: RelationIds) -> SelectStatement {
+    let rw = Alias::new("rw");
+    Query::select()
+        .distinct()
+        .column((issue_relations::Entity, relation_column(ids.column)))
+        .from(issue_relations::Entity)
+        .join_as(
+            JoinType::InnerJoin,
+            workspaces::Entity,
+            rw.clone(),
+            Expr::col((rw.clone(), workspaces::Column::Id)).equals((
+                issue_relations::Entity,
+                issue_relations::Column::WorkspaceId,
+            )),
+        )
+        .and_where(
+            Expr::col((issue_relations::Entity, issue_relations::Column::DeletedAt)).is_null(),
+        )
+        .cond_where(
+            Condition::any()
+                .add(
+                    Expr::col((issue_relations::Entity, issue_relations::Column::IssueId))
+                        .eq(issue_id),
+                )
+                .add(
+                    Expr::col((
+                        issue_relations::Entity,
+                        issue_relations::Column::RelatedIssueId,
+                    ))
+                    .eq(issue_id),
+                ),
+        )
+        .and_where(Expr::col((rw, workspaces::Column::Slug)).eq(slug))
+        .and_where(Expr::col((issue_relations::Entity, relation_column(ids.side))).eq(issue_id))
+        .and_where(
+            Expr::col((
+                issue_relations::Entity,
+                issue_relations::Column::RelationType,
+            ))
+            .eq(ids.relation_type),
+        )
+        .to_owned()
+}
+
+/// `(SELECT ARRAY_AGG(DISTINCT <column>) FROM <query>)`, correlated on the
+/// outer `issues.id`.
+fn distinct_array(mut query: SelectStatement, column: SimpleExpr) -> SimpleExpr {
+    query.expr(PgFunc::array_agg_distinct(column));
+    SimpleExpr::SubQuery(None, Box::new(query.into_sub_query_statement()))
+}
+
+/// One relation bucket row (`relation.py:157-172`): the eleven concrete
+/// columns plus the two id-list annotations. The `relation_type` literal
+/// is the bucket label, rendered by the caller. An empty aggregate is SQL
+/// `NULL` (`None`), Django's `[]` default.
+#[derive(Debug, FromQueryResult)]
+pub struct RelationBucketRow {
+    pub id: Uuid,
+    pub name: String,
+    pub state_id: Option<Uuid>,
+    pub sort_order: f64,
+    pub priority: String,
+    pub sequence_id: i32,
+    pub project_id: Uuid,
+    pub created_at: DateTimeWithTimeZone,
+    pub updated_at: DateTimeWithTimeZone,
+    pub created_by_id: Option<Uuid>,
+    pub updated_by_id: Option<Uuid>,
+    pub label_ids: Option<Vec<Uuid>>,
+    pub assignee_ids: Option<Vec<Uuid>>,
+}
+
+/// One bucket statement (target queryset `relation.py:102-154`): the
+/// `issue_objects` manager plus the workspace slug, `id IN` one or two
+/// id-lists (Django's `|` of two conjunctive scopes, factored). The
+/// label/assignee `ArrayAgg(distinct, filter=...)` annotations are
+/// correlated subqueries with the same filters (live label links; live
+/// assignee links whose user has an active project membership in any
+/// project, as the unguarded `users` / `project_members` joins decide),
+/// so the outer row needs no `GROUP BY`. No `ORDER BY` (bug 4). The
+/// target queryset's `cycle_id` / count annotations never reach
+/// `.values(*fields)` and are not emitted.
+pub fn relation_bucket_select(
+    slug: &str,
+    issue_id: Uuid,
+    bucket: RelationBucket,
+) -> sea_orm::Select<issues::Entity> {
+    let outer_id = || Expr::col((issues::Entity, issues::Column::Id));
+    let label_ids = distinct_array(
+        Query::select()
+            .from(issue_labels::Entity)
+            .and_where(
+                Expr::col((issue_labels::Entity, issue_labels::Column::IssueId)).eq(outer_id()),
+            )
+            .and_where(
+                Expr::col((issue_labels::Entity, issue_labels::Column::LabelId)).is_not_null(),
+            )
+            .and_where(Expr::col((issue_labels::Entity, issue_labels::Column::DeletedAt)).is_null())
+            .to_owned(),
+        Expr::col((issue_labels::Entity, issue_labels::Column::LabelId)).into(),
+    );
+    let assignee_ids = distinct_array(
+        Query::select()
+            .from(issue_assignees::Entity)
+            .inner_join(
+                users::Entity,
+                Expr::col((users::Entity, users::Column::Id))
+                    .equals((issue_assignees::Entity, issue_assignees::Column::AssigneeId)),
+            )
+            .inner_join(
+                project_members::Entity,
+                Expr::col((project_members::Entity, project_members::Column::MemberId))
+                    .equals((users::Entity, users::Column::Id)),
+            )
+            .and_where(
+                Expr::col((issue_assignees::Entity, issue_assignees::Column::IssueId))
+                    .eq(outer_id()),
+            )
+            .and_where(
+                Expr::col((issue_assignees::Entity, issue_assignees::Column::AssigneeId))
+                    .is_not_null(),
+            )
+            .and_where(
+                Expr::col((project_members::Entity, project_members::Column::IsActive)).eq(true),
+            )
+            .and_where(
+                Expr::col((issue_assignees::Entity, issue_assignees::Column::DeletedAt)).is_null(),
+            )
+            .to_owned(),
+        Expr::col((issue_assignees::Entity, issue_assignees::Column::AssigneeId)).into(),
+    );
+    let membership = bucket.ids.iter().fold(Condition::any(), |any, ids| {
+        any.add(outer_id().in_subquery(relation_ids_subquery(slug, issue_id, *ids)))
+    });
+    issues::Entity::find()
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::Name,
+            issues::Column::StateId,
+            issues::Column::SortOrder,
+            issues::Column::Priority,
+            issues::Column::SequenceId,
+            issues::Column::ProjectId,
+            issues::Column::CreatedAt,
+            issues::Column::UpdatedAt,
+            issues::Column::CreatedById,
+            issues::Column::UpdatedById,
+        ])
+        .expr_as(label_ids, "label_ids")
+        .expr_as(assignee_ids, "assignee_ids")
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(
+            Condition::all()
+                .add(states::Column::Group.eq("triage"))
+                .add(states::Column::Group.is_not_null())
+                .not(),
+        )
+        .filter(issues::Column::ArchivedAt.is_null())
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(issues::Column::IsDraft.eq(false))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(membership)
 }
 
 // ---------------------------------------------------------------------------
 // Links (link.py:32-46)
 // ---------------------------------------------------------------------------
 
-/// Full link-list statement: all link columns, `DISTINCT` (the member join
-/// can fan out), newest first. The member join is unguarded (bug 7). Binds,
-/// in order: workspace slug, project id, issue id, user id.
-pub fn link_list_sql(
-    binder: &mut Binder,
+/// The link-list queryset (`link.py:26-35`): all link columns,
+/// `DISTINCT` (the member join can fan out), newest first. The member
+/// join is unguarded (bug 7): any active membership row of the actor in
+/// the project, soft-deleted or not.
+pub fn link_list_select(
     slug: &str,
-    project_id: uuid::Uuid,
-    issue_id: uuid::Uuid,
-    user_id: uuid::Uuid,
-) -> String {
-    let slug_holder = binder.bind_string(slug.to_owned());
-    let project = binder.bind_uuid(project_id);
-    let issue = binder.bind_uuid(issue_id);
-    let user = binder.bind_uuid(user_id);
-    format!(
-        "SELECT DISTINCT {ISSUE_LINK_COLUMNS} \
-        FROM issue_links \
-        INNER JOIN workspaces ON issue_links.workspace_id = workspaces.id \
-        INNER JOIN projects ON issue_links.project_id = projects.id \
-        INNER JOIN project_members ON projects.id = project_members.project_id \
-        WHERE issue_links.deleted_at IS NULL AND workspaces.slug = {slug_holder} \
-        AND issue_links.project_id = {project} AND issue_links.issue_id = {issue} \
-        AND projects.archived_at IS NULL AND project_members.is_active \
-        AND project_members.member_id = {user} \
-        ORDER BY issue_links.created_at DESC"
-    )
+    project_id: Uuid,
+    issue_id: Uuid,
+    user_id: Uuid,
+) -> sea_orm::Select<issue_links::Entity> {
+    issue_links::Entity::find()
+        .distinct()
+        .join(JoinType::InnerJoin, issue_links::Relation::Workspaces.def())
+        .join(JoinType::InnerJoin, issue_links::Relation::Projects.def())
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Projects.def().rev(),
+        )
+        .filter(issue_links::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issue_links::Column::ProjectId.eq(project_id))
+        .filter(issue_links::Column::IssueId.eq(issue_id))
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .order_by_desc(issue_links::Column::CreatedAt)
 }
 
 // ---------------------------------------------------------------------------
@@ -1107,82 +1170,51 @@ mod tests {
     }
 
     #[test]
-    fn relation_ids_carry_ordering_column_and_scope() {
-        let ids = RelationIds {
-            column: "issue_id",
-            relation_type: "blocked_by",
-            side: "related_issue_id",
-        };
-        let mut binder = Binder::new();
-        let sql = relation_ids_sql(&mut binder, SLUG, ISSUE, ids);
+    fn relation_bucket_select_pins_scope_membership_and_aggregates() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = relation_bucket_select(SLUG, ISSUE, RELATION_BUCKETS[2]) // duplicate
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#"LEFT JOIN "states""#));
+        assert!(sql.contains(r#"INNER JOIN "projects""#));
         assert!(
-            sql.contains("SELECT DISTINCT issue_relations.issue_id, issue_relations.created_at")
+            sql.contains(r#"NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)"#)
         );
+        assert!(sql.contains(r#""issues"."is_draft" = FALSE"#));
+        assert!(sql.contains(r#"ARRAY_AGG(DISTINCT "issue_labels"."label_id")"#));
+        assert!(sql.contains(r#"ARRAY_AGG(DISTINCT "issue_assignees"."assignee_id")"#));
+        assert!(sql.contains(r#""project_members"."is_active" = TRUE"#));
         assert!(sql
-            .contains("(issue_relations.issue_id = $1 OR issue_relations.related_issue_id = $2)"));
-        assert!(sql.contains("workspaces.slug = $3"));
-        assert!(sql.contains("issue_relations.related_issue_id = $4"));
-        assert!(sql.contains("issue_relations.relation_type = $5"));
-        assert!(sql.ends_with("ORDER BY issue_relations.created_at DESC"));
-        // Only the slug join survives a values_list; the base select_related
-        // joins (project, issue) never render.
-        assert!(!sql.contains("JOIN projects"));
-        assert!(!sql.contains("JOIN issues"));
-        assert_eq!(binder.values().len(), 5);
-    }
-
-    #[test]
-    fn relation_bucket_aggregates_over_joins_without_order() {
-        let bucket = RELATION_BUCKETS[0]; // blocking
-        let mut binder = Binder::new();
-        let sql = relation_bucket_sql(&mut binder, SLUG, ISSUE, bucket);
-        // Direct FILTER aggregates over LEFT joins + GROUP BY, no ORDER BY.
-        assert!(sql.contains("FILTER (WHERE (NOT (issue_labels.label_id IS NULL)"));
-        assert!(sql.contains("LEFT OUTER JOIN issue_assignees"));
-        assert!(sql.contains("LEFT OUTER JOIN project_members"));
-        assert!(sql.ends_with("GROUP BY issue.id"));
+            .contains(r#""issues"."id" IN (SELECT DISTINCT "issue_relations"."related_issue_id""#));
+        assert!(
+            sql.contains(r#" OR "issues"."id" IN (SELECT DISTINCT "issue_relations"."issue_id""#)
+        );
+        assert_eq!(sql.matches(r#""rw"."slug" = 'ws-slug'"#).count(), 2);
+        assert_eq!(sql.matches(r#""workspaces"."slug" = 'ws-slug'"#).count(), 1);
         assert!(!sql.contains("ORDER BY"));
-        assert!(sql.contains("issue.id IN (SELECT DISTINCT r.issue_id"));
-        // Dead target annotations are not emitted.
-        assert!(!sql.contains("AS cycle_id"));
-        assert!(!sql.contains("AS link_count"));
-        // created_by/updated_by select the raw id columns (dict keys renamed
-        // in Python, aliased by handlers from RELATION_ROW_FIELDS).
-        assert!(sql.contains("issue.created_by_id, issue.updated_by_id"));
-    }
-
-    #[test]
-    fn relation_or_buckets_factor_the_preamble() {
-        let bucket = RELATION_BUCKETS[2]; // duplicate
-        let mut binder = Binder::new();
-        let sql = relation_bucket_union_sql(&mut binder, SLUG, ISSUE, bucket);
-        assert!(sql.contains("r.related_issue_id"));
-        assert!(sql.contains(" OR issue.id IN (SELECT DISTINCT r.issue_id"));
-        assert!(sql.contains("$1 AS relation_type"));
-        // Single preamble, two membership branches (preamble binds
-        // workspaces.slug; branches bind rw.slug).
-        assert_eq!(sql.matches(".slug").count(), 3); // preamble + 2 branches
-        assert!(sql.ends_with("GROUP BY issue.id"));
+        assert!(!sql.contains("GROUP BY"));
+        assert!(sql.contains(r#"AS "label_ids""#));
+        assert!(sql.contains(r#"AS "assignee_ids""#));
     }
 
     // -- links ---------------------------------------------------------------
 
     #[test]
     fn link_list_joins_member_without_deleted_guard() {
-        let mut binder = Binder::new();
-        let sql = link_list_sql(&mut binder, SLUG, PROJECT, ISSUE, USER);
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = link_list_select(SLUG, PROJECT, ISSUE, USER)
+            .build(DbBackend::Postgres)
+            .to_string();
         assert!(sql.starts_with("SELECT DISTINCT"));
-        assert!(sql.contains("INNER JOIN projects ON issue_links.project_id = projects.id"));
-        assert!(
-            sql.contains("INNER JOIN project_members ON projects.id = project_members.project_id")
-        );
-        assert!(sql.contains("projects.archived_at IS NULL"));
-        assert!(sql.contains("project_members.is_active"));
-        assert!(sql.contains("project_members.member_id = $4"));
-        // Bug 7: no project_members.deleted_at guard.
-        assert!(!sql.contains("project_members.deleted_at"));
-        assert!(sql.ends_with("ORDER BY issue_links.created_at DESC"));
-        assert_eq!(binder.values().len(), 4);
+        assert!(sql
+            .contains(r#"INNER JOIN "projects" ON "issue_links"."project_id" = "projects"."id""#));
+        assert!(sql.contains(
+            r#"INNER JOIN "project_members" ON "projects"."id" = "project_members"."project_id""#
+        ));
+        assert!(sql.contains(r#""projects"."archived_at" IS NULL"#));
+        assert!(sql.contains(r#""project_members"."is_active" = TRUE"#));
+        assert!(!sql.contains(r#""project_members"."deleted_at""#));
+        assert!(sql.ends_with(r#"ORDER BY "issue_links"."created_at" DESC"#));
     }
 
     // -- archive -------------------------------------------------------------
@@ -1256,24 +1288,6 @@ mod tests {
         });
         dump!("subissues_values", |binder: &mut Binder| {
             sub_issues_sql(binder, SLUG, ISSUE)
-        });
-        dump!("relation_ids_blocking", |binder: &mut Binder| {
-            relation_ids_sql(binder, SLUG, ISSUE, RELATION_BUCKETS[0].ids[0])
-        });
-        dump!("relation_ids_blocked_by", |binder: &mut Binder| {
-            relation_ids_sql(binder, SLUG, ISSUE, RELATION_BUCKETS[1].ids[0])
-        });
-        dump!("relation_ids_duplicate", |binder: &mut Binder| {
-            relation_ids_sql(binder, SLUG, ISSUE, RELATION_BUCKETS[2].ids[0])
-        });
-        dump!("relation_bucket_blocking", |binder: &mut Binder| {
-            relation_bucket_sql(binder, SLUG, ISSUE, RELATION_BUCKETS[0])
-        });
-        dump!("relation_bucket_duplicate_union", |binder: &mut Binder| {
-            relation_bucket_union_sql(binder, SLUG, ISSUE, RELATION_BUCKETS[2])
-        });
-        dump!("link_list", |binder: &mut Binder| {
-            link_list_sql(binder, SLUG, PROJECT, ISSUE, USER)
         });
         dump!("archive_base", |binder: &mut Binder| {
             archive_list_sql(binder, SLUG, PROJECT, true)

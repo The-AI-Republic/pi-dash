@@ -1275,12 +1275,12 @@ async fn logo_or_cover_url(
 /// The asset columns behind `FileAsset.asset_url`, plus the workspace
 /// slug through a LEFT JOIN (a null workspace leaves it null).
 #[derive(Debug, FromQueryResult)]
-struct AssetUrlRow {
-    id: uuid::Uuid,
-    entity_type: Option<String>,
-    project_id: Option<uuid::Uuid>,
-    issue_id: Option<uuid::Uuid>,
-    workspace_slug: Option<String>,
+pub(super) struct AssetUrlRow {
+    pub(super) id: uuid::Uuid,
+    pub(super) entity_type: Option<String>,
+    pub(super) project_id: Option<uuid::Uuid>,
+    pub(super) issue_id: Option<uuid::Uuid>,
+    pub(super) workspace_slug: Option<String>,
 }
 
 fn asset_url_select(asset_id: uuid::Uuid) -> sea_orm::Select<file_assets::Entity> {
@@ -1299,7 +1299,7 @@ fn asset_url_select(asset_id: uuid::Uuid) -> sea_orm::Select<file_assets::Entity
         .filter(file_assets::Column::Id.eq(asset_id))
 }
 
-async fn fetch_asset_url_row(
+pub(super) async fn fetch_asset_url_row(
     db: &impl sea_orm::ConnectionTrait,
     asset_id: uuid::Uuid,
 ) -> Result<Option<AssetUrlRow>, DbErr> {
