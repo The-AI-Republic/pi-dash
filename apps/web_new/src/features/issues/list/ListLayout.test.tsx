@@ -367,6 +367,7 @@ function pageState(overrides: Record<string, unknown> = {}) {
 function refs() {
   return {
     labels: {},
+    orders: {} as Record<string, readonly string[]>,
     stateRows: [
       {
         id: STATE,
@@ -570,6 +571,16 @@ describe("ListLayout", () => {
     expect(screen.getByRole("button", { name: "Load more" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Load more" }));
     expect(mocks.pages.mock.results.at(-1)?.value.loadMoreSection).toHaveBeenCalledWith(sections[0]);
+  });
+
+  it("hands the grouping dimension's section order to the pages, and none when ungrouped (NEWPIDASH-39)", () => {
+    mocks.refs.mockReturnValue({ ...refs(), orders: { state: ["backlog", "todo"] } });
+    mocks.pages.mockReturnValue(pageState({ sections: [], grouped: true }));
+    renderLayout({ prefs: prefs({ groupBy: "state" }) });
+    expect(mocks.pages.mock.calls.at(-1)?.[8]).toEqual(["backlog", "todo"]);
+    cleanup();
+    renderLayout({ prefs: prefs({ groupBy: null }) });
+    expect(mocks.pages.mock.calls.at(-1)?.[8]).toEqual([]);
   });
 
   it("hides rows and quick-add for a collapsed section", () => {

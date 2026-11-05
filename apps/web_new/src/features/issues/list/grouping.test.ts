@@ -19,6 +19,7 @@ import {
   sectionNextCursor,
   sectionPrefill,
   serverGroupBy,
+  stateWorkflowOrder,
 } from "./grouping.js";
 
 function row(id: string, sequence = 1): IssueListItem {
@@ -122,6 +123,27 @@ describe("group titles and ordering", () => {
     expect(orderGroupKeys(["None", "b", "a", "None"])).toEqual(["b", "a", "None", "None"]);
   });
 
+  it("puts known keys in the explicit order, unknown keys after them and None last (NEWPIDASH-39)", () => {
+    expect(
+      orderGroupKeys(["todo", "None", "stray", "backlog", "done"], ["backlog", "todo", "missing", "done"])
+    ).toEqual(["backlog", "todo", "done", "stray", "None"]);
+  });
+
+  it("orders states by workflow group, then by sequence inside a group (NEWPIDASH-39)", () => {
+    expect(
+      stateWorkflowOrder([
+        { id: "todo", group: "unstarted", sequence: 25000 },
+        { id: "done", group: "completed", sequence: 1 },
+        { id: "doing-late", group: "started", sequence: 90000 },
+        { id: "backlog", group: "backlog", sequence: 50000 },
+        { id: "doing-early", group: "started", sequence: 10 },
+        { id: "cancelled", group: "cancelled", sequence: 0 },
+        { id: "review", group: "review", sequence: 70000 },
+        { id: "test", group: "test", sequence: 80000 },
+      ])
+    ).toEqual(["backlog", "todo", "doing-early", "doing-late", "review", "test", "done", "cancelled"]);
+  });
+
   it("disables creation only for creator grouping", () => {
     expect(creationDisabledForGroup("created_by")).toBe(true);
     expect(creationDisabledForGroup("state")).toBe(false);
@@ -170,6 +192,27 @@ describe("grouped sections", () => {
     expect(sections.map((section) => section.key)).toEqual(["todo"]);
   });
 
+  it("orders state sections by the explicit workflow order, not the envelope's (NEWPIDASH-39)", () => {
+    const sections = groupedSections(
+      {
+        results: {
+          todo: { results: [row("t")], total_results: 1 },
+          backlog: { results: [row("b")], total_results: 1 },
+          done: { results: [], total_results: 0 },
+          started: { results: [row("s")], total_results: 1 },
+        },
+      },
+      new Map([
+        ["backlog", "Backlog"],
+        ["todo", "Todo"],
+        ["started", "In Progress"],
+        ["done", "Done"],
+      ]),
+      { showEmptyGroups: true, dimension: "state", order: ["backlog", "todo", "started", "done"] }
+    );
+    expect(sections.map((section) => section.title)).toEqual(["Backlog", "Todo", "In Progress", "Done"]);
+  });
+
   it("folds m2m join keys back into arrays and defaults absent arrays", () => {
     const grouped: GroupedIssueRow = {
       ...row("one"),
@@ -205,6 +248,15 @@ describe("grouped sections", () => {
     expect(merged.map((section) => section.key)).toEqual(["a", "b", "None"]);
     expect(merged[0]?.rows.map((entry) => entry.id)).toEqual(["1", "2", "3"]);
     expect(merged[0]?.total).toBe(5);
+  });
+
+  it("merges a later page into the explicit order (NEWPIDASH-39)", () => {
+    const current = [{ key: "todo", title: "Todo", rows: [row("1")], total: 1, value: "todo" }];
+    const incoming = [{ key: "backlog", title: "Backlog", rows: [row("2")], total: 1, value: "backlog" }];
+    expect(mergeGroupedPage(current, incoming, ["backlog", "todo"]).map((section) => section.key)).toEqual([
+      "backlog",
+      "todo",
+    ]);
   });
 
   it("reports paging state and its next cursor", () => {
