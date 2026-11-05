@@ -27,7 +27,6 @@ crates/api/src/app_integrations/handlers_github_proj.rs 34
 crates/api/src/app_integrations/handlers_github_ws.rs 17
 crates/api/src/app_integrations/mod.rs 1
 crates/api/src/app_issues/handlers_archive.rs 3
-crates/api/src/app_issues/handlers_core.rs 41
 crates/api/src/app_issues/handlers_relations.rs 53
 crates/api/src/app_issues/mod.rs 2
 crates/api/src/app_modules/handlers_archive.rs 5
