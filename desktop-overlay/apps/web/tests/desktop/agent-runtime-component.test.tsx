@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   resume: vi.fn(),
   migrate: vi.fn(),
   register: vi.fn(),
+  offerReplace: vi.fn(),
+  machineId: "machine-1" as string | undefined,
 }));
 
 vi.mock("mobx-react", () => ({ observer: (component: unknown) => component }));
@@ -24,7 +26,13 @@ vi.mock("@/services/agent-runtime", () => ({
   resumeAgentRuntime: mocks.resume,
   isDesktop: () => true,
 }));
+vi.mock("@/components/desktop-replace-machine-dialog", () => ({ DesktopReplaceMachineDialog: () => null }));
+vi.mock("@/components/desktop-migration-notices", () => ({ DesktopMigrationNotices: () => null }));
 vi.mock("@/services/desktop-migration", () => ({ migrateLegacyTrees: mocks.migrate }));
+vi.mock("@/services/desktop-replace", () => ({ offerReplace: mocks.offerReplace }));
+vi.mock("@/services/desktop-daemon", () => ({
+  compatibleHello: () => (mocks.machineId ? { machine_id: mocks.machineId } : null),
+}));
 vi.mock("@/services/local-chat-transport", () => ({ registerLocalChatTransport: mocks.register }));
 
 import { AgentRuntime } from "../../core/components/agent-runtime";
@@ -34,6 +42,8 @@ beforeEach(() => {
   vi.resetAllMocks();
   mocks.refresh.mockResolvedValue(undefined);
   mocks.migrate.mockResolvedValue({ status: "nothing_to_do" });
+  mocks.offerReplace.mockResolvedValue(false);
+  mocks.machineId = "machine-1";
 });
 
 afterEach(() => {
@@ -81,5 +91,27 @@ describe("desktop runtime component", () => {
       });
     }
     expect(mocks.migrate).toHaveBeenCalledTimes(2);
+  });
+
+  it("offers the replace prompt after the migration, once per machine", async () => {
+    mocks.migrate.mockResolvedValueOnce({ status: "blocked", reason: "no_daemon" });
+    render(<AgentRuntime />);
+    await flush();
+    // Not while the migration is blocked.
+    expect(mocks.offerReplace).not.toHaveBeenCalled();
+    for (let i = 0; i < 3; i++) {
+      // eslint-disable-next-line no-await-in-loop -- one check per minute
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+    }
+    expect(mocks.offerReplace).toHaveBeenCalledTimes(1);
+    expect(mocks.offerReplace).toHaveBeenCalledWith("user");
+    // A fresh sign-in is a new machine: asked again.
+    mocks.machineId = "machine-2";
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(mocks.offerReplace).toHaveBeenCalledTimes(2);
   });
 });

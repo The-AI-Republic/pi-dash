@@ -25,6 +25,7 @@ vi.mock("@pi-dash/services", () => ({
 
 import { mergePath, migrateLegacyTrees, type LegacyTree, type MigrationDeps } from "@/services/desktop-migration";
 import type { Discovery, LocalRunner } from "@/services/desktop-daemon";
+import type { Notices } from "@/services/desktop-notices";
 
 const LEGACY_MACHINE = "legacy-machine-1";
 const DAEMON_MACHINE = "daemon-machine-1";
@@ -45,7 +46,14 @@ function compatible(workspaces: { slug: string; signed_in: boolean; runners: num
 }
 
 /** A fake computer: the legacy trees on disk and the daemon's runner blocks. */
-function fakeComputer(options: { discovery: Discovery | null; workspaces?: string[] }) {
+function fakeComputer(options: {
+  discovery: Discovery | null;
+  workspaces?: string[];
+  /** Runner blocks the daemon already has. */
+  runners?: LocalRunner[];
+  /** Server `pod_dispatch` per runner id; `pinned_only` when absent. */
+  podDispatch?: Record<string, string>;
+}) {
   let trees: LegacyTree[] = [
     {
       workspace: "acme",
@@ -68,11 +76,16 @@ function fakeComputer(options: { discovery: Discovery | null; workspaces?: strin
       ],
     },
   ];
-  const runners: LocalRunner[] = [];
+  const runners: LocalRunner[] = [...(options.runners ?? [])];
   let discovery = options.discovery;
   const signedIn = new Set(options.workspaces ?? []);
   const log: string[] = [];
+  const recorded: Notices[] = [];
   const deps: MigrationDeps = {
+    get: async <T>(path: string) => {
+      const id = /\/api\/runners\/([^/]+)\//.exec(path)?.[1] ?? "";
+      return { id, is_engine: true, pod_dispatch: options.podDispatch?.[id] ?? "pinned_only" } as T;
+    },
     discovery: () => discovery,
     signInWorkspace: async (slug) => {
       log.push(`sign_in ${slug}`);
@@ -86,22 +99,28 @@ function fakeComputer(options: { discovery: Discovery | null; workspaces?: strin
     invoke: async <T>(command: string, args?: Record<string, unknown>) => {
       if (command === "legacy_scan") return trees as T;
       if (command === "daemon_runners") return runners as T;
+      if (command === "desktop_notices_record") {
+        recorded.push(args?.notices as Notices);
+        return { notices: args?.notices, dismissed: [] } as T;
+      }
       log.push(`${command} ${JSON.stringify(args ?? {})}`);
       if (command === "daemon_engine_runner_add") {
-        runners.push({
+        const added: LocalRunner = {
           name: `builtin-${String(args?.project)}`,
           runner_id: `id-${String(args?.project)}`,
           workspace_slug: String(args?.workspace),
           project_slug: String(args?.project),
           working_dir: String(args?.workingDir),
           agent: "engine",
-        });
+        };
+        runners.push(added);
+        return { runner: added.name, runner_id: added.runner_id } as T;
       }
       if (command === "legacy_finish") trees = trees.filter((t) => t.dir !== args?.dir);
       return undefined as T;
     },
   };
-  return { deps, log, setDiscovery: (d: Discovery | null) => (discovery = d) };
+  return { deps, log, recorded, setDiscovery: (d: Discovery | null) => (discovery = d) };
 }
 
 describe("desktop migration", () => {
@@ -125,7 +144,7 @@ describe("desktop migration", () => {
     expect(outcome).toEqual({ status: "done", migrated: ["acme"], failed: [] });
     expect(computer.log).toEqual([
       "sign_in acme",
-      `POST ${mergePath(LEGACY_MACHINE)} {"target_dev_machine_id":"${DAEMON_MACHINE}"}`,
+      `POST ${mergePath(LEGACY_MACHINE)} {"target":"${DAEMON_MACHINE}"}`,
       'daemon_engine_runner_add {"workspace":"acme","project":"WEB","workingDir":"/app/managed/workdirs/acme/WEB"}',
       'daemon_engine_runner_add {"workspace":"acme","project":"API","workingDir":"/app/managed/workdirs/acme/API"}',
       'legacy_finish {"dir":"/app/managed/pidash/acme","account":"u-1","daemonAccount":"u-1"}',
@@ -161,5 +180,91 @@ describe("desktop migration", () => {
     const computer = fakeComputer({ discovery: compatible([{ slug: "acme", signed_in: true, runners: 0 }]) });
     await migrateLegacyTrees("u-1", computer.deps);
     expect(computer.log.some((line) => line.startsWith("sign_in"))).toBe(false);
+  });
+
+  it("records no notice when nothing collided and no engine became a pod member", async () => {
+    const computer = fakeComputer({ discovery: compatible([{ slug: "acme", signed_in: true, runners: 0 }]) });
+    await migrateLegacyTrees("u-1", computer.deps);
+    expect(computer.recorded).toEqual([]);
+  });
+
+  it("names the legacy folder left unused when the daemon already ran the engine for that project", async () => {
+    const computer = fakeComputer({
+      discovery: compatible([{ slug: "acme", signed_in: true, runners: 1 }]),
+      runners: [
+        {
+          name: "builtin-WEB",
+          runner_id: "daemon-web",
+          workspace_slug: "acme",
+          project_slug: "WEB",
+          working_dir: "/home/u/pidash/acme/WEB",
+          agent: "engine",
+        },
+      ],
+    });
+    await migrateLegacyTrees("u-1", computer.deps);
+    // WEB is not added again; API is.
+    const adds = computer.log.filter((line) => line.startsWith("daemon_engine_runner_add"));
+    expect(adds).toEqual([
+      'daemon_engine_runner_add {"workspace":"acme","project":"API","workingDir":"/app/managed/workdirs/acme/API"}',
+    ]);
+    expect(computer.recorded).toEqual([
+      {
+        legacy_folders: [{ workspace: "acme", project: "WEB", path: "/app/managed/workdirs/acme/WEB" }],
+        pod_member_projects: [],
+      },
+    ]);
+  });
+
+  it("names the projects whose engine the server made a pod member (PO-11), before finishing", async () => {
+    const computer = fakeComputer({
+      discovery: compatible([{ slug: "acme", signed_in: true, runners: 0 }]),
+      podDispatch: { "id-API": "pod_member" },
+    });
+    const invoke = computer.deps.invoke;
+    const order: string[] = [];
+    computer.deps.invoke = async <T>(command: string, args?: Record<string, unknown>) => {
+      if (command === "desktop_notices_record" || command === "legacy_finish") order.push(command);
+      return invoke<T>(command, args);
+    };
+    await migrateLegacyTrees("u-1", computer.deps);
+    expect(computer.recorded).toEqual([
+      { legacy_folders: [], pod_member_projects: [{ runner_id: "id-API", workspace: "acme", project: "API" }] },
+    ]);
+    expect(order).toEqual(["desktop_notices_record", "legacy_finish"]);
+  });
+
+  it("still names a pod-member project when a migration resumes after its runners were re-added", async () => {
+    const computer = fakeComputer({
+      discovery: compatible([{ slug: "acme", signed_in: true, runners: 0 }]),
+      podDispatch: { "id-WEB": "pod_member" },
+    });
+    let failFinish = true;
+    const invoke = computer.deps.invoke;
+    computer.deps.invoke = async <T>(command: string, args?: Record<string, unknown>) => {
+      if (command === "legacy_finish" && failFinish) throw new Error("disk busy");
+      return invoke<T>(command, args);
+    };
+    await migrateLegacyTrees("u-1", computer.deps);
+    failFinish = false;
+    await migrateLegacyTrees("u-1", computer.deps);
+    // Recorded on both runs; the host drops the duplicate (account_settings.rs).
+    expect(computer.recorded).toHaveLength(2);
+    expect(computer.recorded[1].pod_member_projects).toEqual([
+      { runner_id: "id-WEB", workspace: "acme", project: "WEB" },
+    ]);
+    expect(computer.recorded[1].legacy_folders).toEqual([]);
+  });
+
+  it("does not fail the tree when the pod lookup fails", async () => {
+    const computer = fakeComputer({ discovery: compatible([{ slug: "acme", signed_in: true, runners: 0 }]) });
+    computer.deps.get = async () => {
+      throw new Error("offline");
+    };
+    await expect(migrateLegacyTrees("u-1", computer.deps)).resolves.toEqual({
+      status: "done",
+      migrated: ["acme"],
+      failed: [],
+    });
   });
 });

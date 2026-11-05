@@ -8,9 +8,13 @@ import { useEffect } from "react";
 import { observer } from "mobx-react";
 import { useUser } from "@/hooks/store/user";
 import { DesktopDaemonSetupDialog } from "@/components/desktop-daemon-setup-dialog";
+import { DesktopMigrationNotices } from "@/components/desktop-migration-notices";
+import { DesktopReplaceMachineDialog } from "@/components/desktop-replace-machine-dialog";
 import { DesktopSignOutDialog } from "@/components/desktop-sign-out-dialog";
 import { isDesktop, refreshAgentRuntime, resumeAgentRuntime } from "@/services/agent-runtime";
+import { compatibleHello } from "@/services/desktop-daemon";
 import { migrateLegacyTrees } from "@/services/desktop-migration";
+import { offerReplace } from "@/services/desktop-replace";
 import { registerLocalChatTransport } from "@/services/local-chat-transport";
 
 /**
@@ -23,6 +27,10 @@ import { registerLocalChatTransport } from "@/services/local-chat-transport";
  * its sign-in is `expiring` or `expired`), and move older builds' private
  * daemon trees to it. The migration is retried on each launch until the
  * daemon is there and signed in as this account.
+ *
+ * Once the migration is out of the way, it asks — once per launch and machine
+ * — whether the daemon's machine replaces an offline one with the same
+ * hostname (design §4.10), and it shows the migration's one-time notices.
  */
 export const AgentRuntime = observer(function AgentRuntime() {
   const { data: user } = useUser();
@@ -34,18 +42,27 @@ export const AgentRuntime = observer(function AgentRuntime() {
     registerLocalChatTransport();
     let active = true;
     let migrated = false;
+    const askedFor = new Set<string>();
     const refresh = async () => {
       await refreshAgentRuntime();
-      if (!active || migrated) return;
-      const outcome = await migrateLegacyTrees(user.id);
-      // Blocked (no daemon yet, another account): nothing happened, so try
-      // again on the next refresh — set-up may finish meanwhile. A tree that
-      // failed half-way waits for the next launch rather than retrying every
-      // minute.
-      if (outcome.status !== "blocked") migrated = true;
-      if (outcome.status === "done" && outcome.failed.length) {
-        console.warn("Moving to Pi Dash on this computer did not finish for", outcome.failed);
+      if (!active) return;
+      if (!migrated) {
+        const outcome = await migrateLegacyTrees(user.id);
+        // Blocked (no daemon yet, another account): nothing happened, so try
+        // again on the next refresh — set-up may finish meanwhile. A tree that
+        // failed half-way waits for the next launch rather than retrying every
+        // minute.
+        if (outcome.status !== "blocked") migrated = true;
+        if (outcome.status === "done" && outcome.failed.length) {
+          console.warn("Moving to Pi Dash on this computer did not finish for", outcome.failed);
+        }
       }
+      // "Is this <label>? Replace it": once per launch for each machine the
+      // daemon is signed in as (a fresh sign-in is a new machine id).
+      const machineId = compatibleHello()?.machine_id;
+      if (!active || !migrated || !machineId || askedFor.has(machineId)) return;
+      askedFor.add(machineId);
+      await offerReplace(user.id);
     };
     const tick = () => void refresh().catch(() => {});
     tick();
@@ -64,6 +81,8 @@ export const AgentRuntime = observer(function AgentRuntime() {
       {/* Mounted on every page: sign-out and set-up can start from any of them. */}
       <DesktopSignOutDialog />
       <DesktopDaemonSetupDialog />
+      <DesktopReplaceMachineDialog />
+      {user?.id && <DesktopMigrationNotices account={user.id} />}
     </>
   );
 });

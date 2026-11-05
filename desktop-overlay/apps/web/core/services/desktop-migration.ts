@@ -21,6 +21,11 @@
  * 4–5. `legacy_finish`: move the account's engine home into the daemon's and
  *    delete the tree's config, credentials and model token. Task folders stay.
  *
+ * Before step 5 it records the tree's one-time notices (`desktop-notices`):
+ * each legacy folder left unused because the daemon already ran the engine for
+ * that project (the merge's collision rule), and each project whose re-added
+ * engine runner the server made a pod member on upgrade (PO-11).
+ *
  * Step 1 is the caller's: nothing runs unless the daemon is the app's
  * (`compatible`). Blocked — no daemon, another account, the service declined —
  * the trees stay and every later launch tries again. A finished tree is gone
@@ -34,12 +39,15 @@ import {
   currentDiscovery,
   daemonAccountKey,
   invoke,
+  sessionGet,
   sessionPost,
   signInWorkspace,
   type Discovery,
+  type EngineRunnerInfo,
   type HelloInfo,
   type LocalRunner,
 } from "@/services/desktop-daemon";
+import { emptyNotices, hasNotices, recordNotices, runnerPath, type ServerRunner } from "@/services/desktop-notices";
 
 export interface LegacyEngineRunner {
   name: string;
@@ -58,6 +66,24 @@ export interface LegacyTree {
 
 export const mergePath = (source: string) => `/api/v1/runner/dev-machines/${source}/merge-into/`;
 
+/** `POST merge-into/`'s answer (`machine_identity.merge_dev_machine`). */
+export interface MergeResult {
+  source_dev_machine_id: string;
+  target_dev_machine_id: string;
+  merged_at?: string;
+  moved_runner_ids: string[];
+  collisions: { revoked_runner_id: string; survivor_runner_id: string }[];
+}
+
+/** Merge machine `source` into `target` (design §13; also the §4.10 replace). */
+export function mergeMachine(
+  post: <T>(path: string, body: unknown) => Promise<T>,
+  source: string,
+  target: string
+): Promise<MergeResult> {
+  return post<MergeResult>(mergePath(source), { target });
+}
+
 export type MigrationOutcome =
   | { status: "nothing_to_do" }
   | { status: "blocked"; reason: Discovery["kind"] | "unknown" }
@@ -67,6 +93,7 @@ export type MigrationOutcome =
 export interface MigrationDeps {
   invoke: <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
   post: <T>(path: string, body: unknown) => Promise<T>;
+  get: <T>(path: string) => Promise<T>;
   signInWorkspace: (workspaceSlug: string) => Promise<void>;
   discovery: () => Discovery | null;
 }
@@ -74,6 +101,7 @@ export interface MigrationDeps {
 const defaultDeps: MigrationDeps = {
   invoke,
   post: sessionPost,
+  get: (path) => sessionGet(path),
   signInWorkspace,
   discovery: currentDiscovery,
 };
@@ -94,22 +122,48 @@ async function migrateTree(tree: LegacyTree, account: string, hello: HelloInfo, 
   // Step 2b: merge the legacy machine into the daemon's.
   const target = current.machine_id;
   if (tree.dev_machine_id && target && tree.dev_machine_id !== target) {
-    await deps.post(mergePath(tree.dev_machine_id), { target_dev_machine_id: target });
+    await mergeMachine(deps.post, tree.dev_machine_id, target);
   }
   // Step 3: the engine runners, unless the daemon already runs the engine for
   // that project (a resumed migration, or a CLI that turned it on first).
   const runners = await deps.invoke<LocalRunner[]>("daemon_runners");
-  const served = (project: string) =>
-    runners.some((r) => r.agent === "engine" && r.workspace_slug === tree.workspace && r.project_slug === project);
+  const servedBy = (project: string) =>
+    runners.find((r) => r.agent === "engine" && r.workspace_slug === tree.workspace && r.project_slug === project);
+  const notices = emptyNotices();
+  // The tree's runners now on the daemon: re-added here, or by an earlier
+  // run of a migration that stopped before step 5 (same folder).
+  const added: { runnerId: string; project: string }[] = [];
   for (const block of tree.engine_runners) {
-    if (served(block.project)) continue;
+    const served = servedBy(block.project);
+    if (served) {
+      if (served.working_dir === block.working_dir) {
+        added.push({ runnerId: served.runner_id, project: block.project });
+      } else {
+        // The daemon's own runner survived the merge; the legacy folder is unused.
+        notices.legacy_folders.push({ workspace: tree.workspace, project: block.project, path: block.working_dir });
+      }
+      continue;
+    }
     // eslint-disable-next-line no-await-in-loop -- one runner at a time, in config order
-    await deps.invoke("daemon_engine_runner_add", {
+    const info = await deps.invoke<EngineRunnerInfo | undefined>("daemon_engine_runner_add", {
       workspace: tree.workspace,
       project: block.project,
       workingDir: block.working_dir,
     });
+    const runnerId = info?.runner_id ?? block.runner_id;
+    if (runnerId) added.push({ runnerId, project: block.project });
   }
+  // PO-11: engines that became pod members on upgrade. Engines start
+  // `pinned_only`, so a re-added one that takes pod work was switched by the
+  // server's migration. A lookup that fails only loses its notice.
+  for (const { runnerId, project } of added) {
+    // eslint-disable-next-line no-await-in-loop -- a handful of runners per tree
+    const row = await deps.get<ServerRunner>(runnerPath(runnerId)).catch(() => null);
+    if (row?.pod_dispatch === "pod_member") {
+      notices.pod_member_projects.push({ runner_id: runnerId, workspace: tree.workspace, project });
+    }
+  }
+  if (hasNotices(notices)) await recordNotices(account, notices, deps.invoke);
   // Steps 4 and 5.
   await deps.invoke("legacy_finish", { dir: tree.dir, account, daemonAccount: daemonAccountKey(current) ?? null });
 }

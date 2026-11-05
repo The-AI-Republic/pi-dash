@@ -527,6 +527,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // sign-out wipes.
             account_settings::chat_approval_modes_save,
             account_settings::chat_approval_modes_load,
+            // One-time notices (migration, PO-11) and declined "Replace it"
+            // prompts, kept with the per-account settings.
+            account_settings::desktop_notices_load,
+            account_settings::desktop_notices_record,
+            account_settings::desktop_notices_dismiss,
         ])
         // Fallback for the navigation policy below: if a server-host page
         // does get through (e.g. a redirect the policy hook didn't see),
