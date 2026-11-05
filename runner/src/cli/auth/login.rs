@@ -135,8 +135,16 @@ struct TokenError {
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
-    // Signing in replaces keychain items the keychain can never return.
-    let _forget = crate::config::secrets::forget_unreadable(paths);
+    // Signing in replaces keychain items the keychain can never return:
+    // the ones this sign-in stores a new value for. Other credentials'
+    // broken items are kept as they are.
+    use crate::config::secrets::{ForgetScope, ITEM_ENGINE_CREDENTIAL, forget_unreadable};
+    let scope = if args.engine {
+        vec![ITEM_ENGINE_CREDENTIAL.to_string()]
+    } else {
+        Vec::new()
+    };
+    let _forget = forget_unreadable(paths, ForgetScope::Items(scope));
     if args.engine {
         return engine_login(&args, paths).await;
     }
@@ -148,7 +156,10 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
 }
 
 pub async fn run_auth_only(args: Args, paths: &Paths) -> Result<()> {
-    let _forget = crate::config::secrets::forget_unreadable(paths);
+    let _forget = crate::config::secrets::forget_unreadable(
+        paths,
+        crate::config::secrets::ForgetScope::Items(Vec::new()),
+    );
     login_and_bind_workspace(&args, paths).await.map(|_| ())
 }
 
@@ -244,6 +255,15 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         &host_label,
     )
     .await?;
+    // This workspace's own item is replaced (or, when it becomes the
+    // default, superseded) by this write, so a broken copy of it may go.
+    let _forget_own = crate::config::secrets::forget_unreadable(
+        paths,
+        crate::config::secrets::ForgetScope::Items(crate::config::secrets::ForgetScope::workspace(
+            &machine_token.workspace_slug,
+            false,
+        )),
+    );
     let cfg = runner_ops::store_workspace_token(
         paths,
         &cloud_url,

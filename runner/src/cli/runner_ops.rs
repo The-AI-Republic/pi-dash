@@ -506,6 +506,37 @@ pub fn may_roll_back(err: &anyhow::Error) -> bool {
     err.downcast_ref::<KeptExistingRunner>().is_none()
 }
 
+/// The runner ids in the config right now, read before a create so a later
+/// rollback can tell a runner this call made from one that was already
+/// here. An unreadable config gives an empty set.
+pub fn runner_ids_before_create(paths: &Paths) -> std::collections::HashSet<Uuid> {
+    file::load_config(paths)
+        .map(|cfg| cfg.runners.iter().map(|r| r.runner_id).collect())
+        .unwrap_or_default()
+}
+
+/// Whether this call made the runner in `resp`, so a local failure may
+/// strip its block and delete its server row. False when the server says
+/// it returned a runner it already had (`created: false`) or the config
+/// held the id before the create: rolling back would remove a runner that
+/// is working here, or one that lives on after a local sign-out.
+pub fn created_by_this_call(
+    resp: &EnrollResponse,
+    before: &std::collections::HashSet<Uuid>,
+) -> bool {
+    resp.created.unwrap_or(true) && !before.contains(&resp.runner_id)
+}
+
+/// [`may_roll_back`] and [`created_by_this_call`] together: the one check
+/// every create path makes before it rolls back after a local failure.
+pub fn may_roll_back_create(
+    err: &anyhow::Error,
+    resp: &EnrollResponse,
+    before: &std::collections::HashSet<Uuid>,
+) -> bool {
+    may_roll_back(err) && created_by_this_call(resp, before)
+}
+
 #[derive(Debug, Clone)]
 pub struct ApplyEnrollOptions<'a> {
     pub working_dir: Option<PathBuf>,
@@ -917,6 +948,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_a_runner_this_call_created_may_be_rolled_back() {
+        let mut resp = sample_response("r");
+        let empty = std::collections::HashSet::new();
+        // A server without the field never returns an existing runner.
+        assert!(created_by_this_call(&resp, &empty));
+        resp.created = Some(true);
+        assert!(created_by_this_call(&resp, &empty));
+        // The server returned one it already had.
+        resp.created = Some(false);
+        assert!(!created_by_this_call(&resp, &empty));
+        // The config held the id before the create.
+        resp.created = Some(true);
+        let before: std::collections::HashSet<_> = [resp.runner_id].into_iter().collect();
+        assert!(!created_by_this_call(&resp, &before));
+        let err = anyhow::anyhow!("creating the folder failed");
+        assert!(!may_roll_back_create(&err, &resp, &before));
+        assert!(may_roll_back_create(&err, &resp, &empty));
+    }
+
     fn sample_response(runner_name: &str) -> EnrollResponse {
         EnrollResponse {
             runner_id: Uuid::new_v4(),
@@ -932,6 +983,7 @@ mod tests {
             protocol_version: 4,
             machine_token: None,
             machine_token_minted: false,
+            created: None,
         }
     }
 

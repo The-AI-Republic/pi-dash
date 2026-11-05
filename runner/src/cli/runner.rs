@@ -293,6 +293,7 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         .workspace
         .clone()
         .or(runner_ops::load_cli_workspace(paths)?);
+    let before = runner_ops::runner_ids_before_create(paths);
     let resp = create_runner(
         &transport,
         CreateRunnerRequest {
@@ -329,8 +330,9 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     .await
     {
         Ok(applied) => applied,
-        // The runner was already on this computer: leave it as it is.
-        Err(persist_err) if !runner_ops::may_roll_back(&persist_err) => {
+        // The runner was already on this computer, or the server returned
+        // one it already had: leave it as it is.
+        Err(persist_err) if !runner_ops::may_roll_back_create(&persist_err, &resp, &before) => {
             return Err(persist_err.context("persisting new runner to config.toml"));
         }
         Err(persist_err) => {

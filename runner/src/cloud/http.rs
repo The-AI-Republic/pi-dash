@@ -2518,6 +2518,12 @@ pub struct EnrollResponse {
     pub machine_token: Option<String>,
     #[serde(default)]
     pub machine_token_minted: bool,
+    /// Whether the server created this runner in this call. `Some(false)`
+    /// when it answered with a runner it already had (a repeated engine
+    /// add for the same machine and project). Servers that predate the
+    /// field leave it out; they never return an existing runner.
+    #[serde(default)]
+    pub created: Option<bool>,
 }
 
 #[cfg(test)]

@@ -303,6 +303,7 @@ impl MachineControl {
 
         // 1. Cloud registration — same X-Api-Key surface as
         //    `pidash runner add`.
+        let before = crate::cli::runner_ops::runner_ids_before_create(&self.spawn_ctx.paths);
         let resp = create_runner(
             &self.transport,
             CreateRunnerRequest {
@@ -338,9 +339,11 @@ impl MachineControl {
             .context("persisting [[runner]] block")
         {
             Ok(applied) => applied,
-            // The runner was already on this computer: never roll back the
-            // one that is working.
-            Err(persist_err) if !crate::cli::runner_ops::may_roll_back(&persist_err) => {
+            // The runner was already on this computer, or the server
+            // returned one it already had: never roll back a working one.
+            Err(persist_err)
+                if !crate::cli::runner_ops::may_roll_back_create(&persist_err, &resp, &before) =>
+            {
                 return Err(persist_err);
             }
             Err(persist_err) => {
@@ -795,6 +798,7 @@ mod tests {
             protocol_version: 4,
             machine_token: None,
             machine_token_minted: false,
+            created: None,
         };
         apply_enroll_response(
             &paths,
