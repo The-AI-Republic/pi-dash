@@ -105,7 +105,7 @@ use axum::Router;
 use chrono::{DateTime, Utc};
 use http_body_util::BodyExt as _;
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_auth::permissions::membership;
@@ -121,7 +121,7 @@ use pidash_db::runner_sessions::RunnerSession;
 use pidash_jobs::runner_enroll::{
     fire_revoke_bundle, revoke, RevokeBundle, RevokeCtx, RevokeScope,
 };
-use pidash_services::runner_enroll::queries::{enroll_reads, manage_reads};
+use pidash_services::runner_enroll::queries::manage_reads;
 use pidash_services::runner_enroll::revoke::{self};
 use pidash_services::runner_enroll::serializers::shapes;
 use pidash_services::runner_runs::finalization as finalize_kernel;
@@ -240,15 +240,11 @@ async fn workspace_role(
     workspace_id: Uuid,
     user_id: Uuid,
 ) -> Result<Option<i32>, Response> {
-    let role: Option<i16> = sqlx::query_scalar(
-        r#"SELECT "role" FROM "workspace_members"
-           WHERE ("workspace_id" = $1 AND "member_id" = $2
-             AND "is_active" AND "deleted_at" IS NULL)
-           ORDER BY "created_at" DESC LIMIT 1"#,
+    let role = manage_reads::workspace_role(
+        &pidash_db::pool::sea_orm_connection(executor),
+        workspace_id,
+        user_id,
     )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(executor)
     .await
     .map_err(|_| server_error())?;
     Ok(role.map(i32::from))
@@ -428,25 +424,7 @@ fn body_opt_raw(value: Option<&JVal>) -> Result<Option<String>, Response> {
 // Gates (rows + scope checks over the merged builders)
 // ---------------------------------------------------------------------------
 
-/// The runner facts the delete gate needs (`r_cols::COLUMNS`
-/// positions: id 0, owner 1, workspace 2, visibility 8, revoked 27).
-struct RunnerGate {
-    id: Uuid,
-    owner_id: Uuid,
-    workspace_id: Uuid,
-    visibility: i16,
-    revoked_at: Option<DateTime<Utc>>,
-}
-
-fn decode_runner_gate(row: &sqlx::postgres::PgRow) -> Result<RunnerGate, Response> {
-    Ok(RunnerGate {
-        id: row.try_get(0).map_err(|_| server_error())?,
-        owner_id: row.try_get(1).map_err(|_| server_error())?,
-        workspace_id: row.try_get(2).map_err(|_| server_error())?,
-        visibility: row.try_get(8).map_err(|_| server_error())?,
-        revoked_at: row.try_get(27).map_err(|_| server_error())?,
-    })
-}
+use manage_reads::RunnerGateRow as RunnerGate;
 
 /// The R2 read plus the view gate (`runners.py:442-445`): missing
 /// row (or present-but-unviewable) → 404 `not found`. Unlike the
@@ -460,15 +438,12 @@ async fn get_runner(
     user_id: Uuid,
     runner_id: Uuid,
 ) -> Result<(RunnerGate, Option<i32>), Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&manage_reads::runner_detail_sql())
-        .bind(runner_id)
-        .fetch_optional(pool)
+    let runner = manage_reads::runner_gate(&pidash_db::pool::sea_orm_connection(pool), runner_id)
         .await
         .map_err(|_| server_error())?;
-    let Some(row) = row else {
+    let Some(runner) = runner else {
         return Err(not_found());
     };
-    let runner = decode_runner_gate(&row)?;
     let role = workspace_role(pool, runner.workspace_id, user_id).await?;
     let can_view = runner_perm::can_view_runner(&runner_perm::RunnerFacts {
         workspace: WorkspaceId::from(runner.workspace_id.to_string()),
@@ -500,23 +475,7 @@ fn can_manage_gate(runner: &RunnerGate, user_id: Uuid, role: Option<i32>) -> boo
     )
 }
 
-/// The machine facts the scope gates need (`dm_cols::COLUMNS`
-/// positions: id 0, owner 1, visibility 4, revoked 7).
-struct MachineGate {
-    id: Uuid,
-    owner_id: Uuid,
-    visibility: i16,
-    revoked_at: Option<DateTime<Utc>>,
-}
-
-fn decode_machine_gate(row: &sqlx::postgres::PgRow) -> Result<MachineGate, Response> {
-    Ok(MachineGate {
-        id: row.try_get(0).map_err(|_| server_error())?,
-        owner_id: row.try_get(1).map_err(|_| server_error())?,
-        visibility: row.try_get(4).map_err(|_| server_error())?,
-        revoked_at: row.try_get(7).map_err(|_| server_error())?,
-    })
-}
+use manage_reads::MachineGateRow as MachineGate;
 
 /// The unlocked machine read plus the M4 scope probes
 /// (`machine_commands.py:63-73` minus the revoked arm): miss or
@@ -529,15 +488,13 @@ async fn scope_machine(
     workspace_id: Uuid,
     machine_id: Uuid,
 ) -> Result<MachineGate, Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&manage_reads::scoped_machine_read_sql())
-        .bind(machine_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let machine = manage_reads::machine_gate(&db, machine_id)
         .await
         .map_err(|_| server_error())?;
-    let Some(row) = row else {
+    let Some(machine) = machine else {
         return Err(not_found());
     };
-    let machine = decode_machine_gate(&row)?;
     // `can_view_dev_machine` reduces to the same private-and-owned
     // kernel as the runner check (the kernel covers both).
     let can_view = runner_perm::can_view_runner(&runner_perm::RunnerFacts {
@@ -549,25 +506,15 @@ async fn scope_machine(
     if !can_view {
         return Err(not_found());
     }
-    let runner_hit: Option<i32> =
-        sqlx::query_scalar(&manage_reads::machine_scope_runner_probe_sql())
-            .bind(1i32)
-            .bind(machine_id)
-            .bind(user_id)
-            .bind(0i16)
-            .bind(workspace_id)
-            .fetch_optional(pool)
+    let runner_hit =
+        manage_reads::machine_scope_runner_exists(&db, machine_id, user_id, workspace_id)
             .await
             .map_err(|_| server_error())?;
-    let token_hit: Option<i32> = sqlx::query_scalar(&manage_reads::machine_scope_token_probe_sql())
-        .bind(1i32)
-        .bind(machine_id)
-        .bind(user_id)
-        .bind(workspace_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| server_error())?;
-    if runner_hit.is_none() && token_hit.is_none() {
+    let token_hit =
+        manage_reads::machine_scope_token_exists(&db, machine_id, user_id, workspace_id)
+            .await
+            .map_err(|_| server_error())?;
+    if !runner_hit && !token_hit {
         return Err(not_found());
     }
     Ok(machine)
@@ -615,70 +562,31 @@ async fn web_workspace(
 // Handler-owned SQL (reads no provider owns, spelled from verified twins)
 // ---------------------------------------------------------------------------
 
-/// Workspace by id (`machine_commands.py:105`):
-/// `Workspace.objects.filter(pk=ws).first()` — the E6a
-/// [`enroll_reads::workspace_by_slug_sql`] shape (default-manager
-/// scope + `-created_at` + `LIMIT 1`) with the `slug` conjunct swapped
-/// for the pk. `$1` = workspace id. Miss → 404 `workspace_not_found`.
-pub fn workspace_by_id_sql() -> String {
-    format!(
-        "SELECT {} FROM \"workspaces\" \
-         WHERE (\"workspaces\".\"deleted_at\" IS NULL AND \"workspaces\".\"id\" = $1) \
-         ORDER BY \"workspaces\".\"created_at\" DESC LIMIT 1",
-        enroll_reads::WORKSPACES_SELECT_COLUMNS
-            .iter()
-            .map(|col| format!("\"workspaces\".\"{col}\""))
-            .collect::<Vec<_>>()
-            .join(", "),
-    )
-}
-
-/// Project-exists probe (`machine_commands.py:108`):
-/// `Project.objects.filter(workspace_id=ws,
-/// identifier=id).exists()` — the M4 exists shape (`SELECT $1 AS "a"
-/// … LIMIT 1`, `$1` = const 1) over the E6c
-/// [`enroll_reads::project_by_workspace_identifier_sql`] WHERE
-/// (scope + Q-sorted conjuncts). `$2` = identifier, `$3` = workspace.
-/// False → 404 `project_not_found`.
-pub const PROJECT_EXISTS_SQL: &str = "SELECT $1 AS \"a\" FROM \"projects\" \
-     WHERE (\"projects\".\"deleted_at\" IS NULL \
-     AND \"projects\".\"identifier\" = $2 AND \"projects\".\"workspace_id\" = $3) LIMIT 1";
-
-/// The workspace slug for the create message: the by-id read above,
-/// `slug` at its [`enroll_reads::WORKSPACES_SELECT_COLUMNS`] position.
+/// The workspace slug for the create message (`machine_commands.py:105`,
+/// `Workspace.objects.filter(pk=ws).first()`). Miss → 404
+/// `workspace_not_found`.
 async fn fetch_workspace_slug(pool: &PgPool, workspace_id: Uuid) -> Result<String, Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&workspace_by_id_sql())
-        .bind(workspace_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| server_error())?;
-    let Some(row) = row else {
-        return Err(json_response(
-            StatusCode::NOT_FOUND,
-            WORKSPACE_NOT_FOUND_BODY.to_owned(),
-        ));
-    };
-    let position = enroll_reads::WORKSPACES_SELECT_COLUMNS
-        .iter()
-        .position(|column| *column == "slug")
-        .expect("slug in select columns");
-    row.try_get(position).map_err(|_| server_error())
+    let slug =
+        manage_reads::workspace_slug(&pidash_db::pool::sea_orm_connection(pool), workspace_id)
+            .await
+            .map_err(|_| server_error())?;
+    slug.ok_or_else(|| json_response(StatusCode::NOT_FOUND, WORKSPACE_NOT_FOUND_BODY.to_owned()))
 }
 
-/// The project-exists probe above.
+/// The project-exists probe (`machine_commands.py:108`). False → 404
+/// `project_not_found`.
 async fn project_exists(
     pool: &PgPool,
     workspace_id: Uuid,
     identifier: &str,
 ) -> Result<bool, Response> {
-    let hit: Option<i32> = sqlx::query_scalar(PROJECT_EXISTS_SQL)
-        .bind(1i32)
-        .bind(identifier)
-        .bind(workspace_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| server_error())?;
-    Ok(hit.is_some())
+    manage_reads::project_identifier_exists(
+        &pidash_db::pool::sea_orm_connection(pool),
+        workspace_id,
+        identifier,
+    )
+    .await
+    .map_err(|_| server_error())
 }
 
 // ---------------------------------------------------------------------------
@@ -1906,51 +1814,6 @@ mod tests {
             purge_flag_body(),
             r#"{"error":"purge_local must be one of: true, false, 1, 0, yes, no"}"#
         );
-    }
-
-    // -- D13-F5 handler-owned SQL -----------------------------------------------
-
-    #[test]
-    fn workspace_by_id_sql_matches_e6a_shape() {
-        let sql = workspace_by_id_sql();
-        assert_eq!(
-            sql,
-            format!(
-                "SELECT {} FROM \"workspaces\" \
-                 WHERE (\"workspaces\".\"deleted_at\" IS NULL AND \"workspaces\".\"id\" = $1) \
-                 ORDER BY \"workspaces\".\"created_at\" DESC LIMIT 1",
-                enroll_reads::WORKSPACES_SELECT_COLUMNS
-                    .iter()
-                    .map(|col| format!("\"workspaces\".\"{col}\""))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            )
-        );
-        // `slug` decodes positionally from this select list.
-        assert_eq!(
-            enroll_reads::WORKSPACES_SELECT_COLUMNS
-                .iter()
-                .position(|column| *column == "slug"),
-            Some(10)
-        );
-        // Same scope + ordering as the verified E6a twin.
-        assert!(enroll_reads::workspace_by_slug_sql().contains("\"deleted_at\" IS NULL"));
-        assert!(sql.contains("\"deleted_at\" IS NULL"));
-    }
-
-    #[test]
-    fn project_exists_sql_matches_e6c_where() {
-        assert_eq!(
-            PROJECT_EXISTS_SQL,
-            "SELECT $1 AS \"a\" FROM \"projects\" \
-             WHERE (\"projects\".\"deleted_at\" IS NULL \
-             AND \"projects\".\"identifier\" = $2 AND \"projects\".\"workspace_id\" = $3) LIMIT 1"
-        );
-        // The E6c twin binds identifier-first; the exists shape prepends
-        // the M4 `$1` const without reordering the conjuncts.
-        let twin = enroll_reads::project_by_workspace_identifier_sql();
-        assert!(twin
-            .contains("\"projects\".\"identifier\" = $1 AND \"projects\".\"workspace_id\" = $2"));
     }
 
     // -- D13-F8 wire pins (called, never inlined) ---------------------------------
