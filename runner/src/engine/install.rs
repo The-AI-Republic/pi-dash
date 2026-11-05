@@ -191,19 +191,46 @@ async fn install_release_from(
 
     let url = release_archive_url(base, cli_version, target);
 
-    std::fs::create_dir_all(root)
-        .with_context(|| format!("creating engine directory {}", root.display()))?;
-    let staging = Staging::create(root)?;
+    // The filesystem work runs off the async runtime: the daemon calls this
+    // from a tokio worker, and removing a ~95 MB staging tree or moving the
+    // engine into place can block for a while on a slow disk.
+    let staging = {
+        let root = root.to_path_buf();
+        blocking(move || {
+            std::fs::create_dir_all(&root)
+                .with_context(|| format!("creating engine directory {}", root.display()))?;
+            Staging::create(&root)
+        })
+        .await?
+    };
 
-    let archive = staging.path().join(archive_name(target));
-    download_verified(&url, &archive).await?;
+    let result = async {
+        let archive = staging.path().join(archive_name(target));
+        download_verified(&url, &archive).await?;
 
-    let extracted = staging.path().join("x");
-    std::fs::create_dir_all(&extracted)?;
-    extract(&archive, &extracted).await?;
+        let extracted = staging.path().join("x");
+        tokio::fs::create_dir_all(&extracted).await?;
+        extract(&archive, &extracted).await?;
 
-    install_from_extracted(&extracted, root, windows)
-        .with_context(|| format!("installing the engine from {url}"))
+        let root = root.to_path_buf();
+        blocking(move || install_from_extracted(&extracted, &root, windows))
+            .await
+            .with_context(|| format!("installing the engine from {url}"))
+    }
+    .await;
+    // Dropping the staging directory removes it; do that off the runtime too.
+    let _ = tokio::task::spawn_blocking(move || drop(staging)).await;
+    result
+}
+
+async fn blocking<T, F>(f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .context("engine install task panicked")?
 }
 
 /// Move every `engine/<version>/` found in an extracted release archive into
@@ -268,11 +295,31 @@ pub fn install_from_extracted(
                 std::fs::Permissions::from_mode(0o755),
             )?;
         }
-        std::fs::rename(&src, &dest)
-            .with_context(|| format!("moving engine {name} into {}", dest.display()))?;
-        outcome.installed.push(name);
+        if move_into_place(&src, &dest, binary_name)
+            .with_context(|| format!("moving engine {name} into {}", dest.display()))?
+        {
+            outcome.installed.push(name);
+        } else {
+            outcome.already_present.push(name);
+        }
     }
     Ok(outcome)
+}
+
+/// Rename a staged version directory to `dest`. `Ok(true)` when this call
+/// installed it, `Ok(false)` when a concurrent installer got there first.
+///
+/// Nothing serializes `pidash engine install`, `pidash update` and the
+/// daemon's own install, and each stages in its own directory. When two race,
+/// the second rename fails (ENOTEMPTY / EEXIST, or access denied on Windows)
+/// because the first already put the same version in place. A complete
+/// install at `dest` is exactly what the caller wanted, so that is success.
+fn move_into_place(src: &Path, dest: &Path, binary_name: &str) -> std::io::Result<bool> {
+    match std::fs::rename(src, dest) {
+        Ok(()) => Ok(true),
+        Err(_) if dest.join(binary_name).is_file() => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 fn find_engine_dir(extracted: &Path) -> Result<PathBuf> {
@@ -532,6 +579,43 @@ mod tests {
             fs::read(current.join("pidash-agent-engine")).unwrap(),
             b"running engine"
         );
+    }
+
+    #[test]
+    fn losing_a_rename_race_to_a_complete_install_is_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let binary = crate::engine::binary_name(false);
+        let src = stage_archive_tree(&tmp.path().join("x"), "0.153.4", false);
+        // Another installer's rename landed after our pre-check.
+        let dest = tmp.path().join("root").join("0.153.4");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join(binary), b"winner").unwrap();
+
+        assert!(!move_into_place(&src, &dest, binary).unwrap());
+        assert_eq!(fs::read(dest.join(binary)).unwrap(), b"winner");
+    }
+
+    #[test]
+    fn a_failed_rename_onto_an_incomplete_dir_is_still_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let binary = crate::engine::binary_name(false);
+        let src = stage_archive_tree(&tmp.path().join("x"), "0.153.4", false);
+        let dest = tmp.path().join("root").join("0.153.4");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("partial"), b"x").unwrap();
+
+        assert!(move_into_place(&src, &dest, binary).is_err());
+    }
+
+    #[test]
+    fn a_rename_into_an_empty_slot_installs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let binary = crate::engine::binary_name(false);
+        let src = stage_archive_tree(&tmp.path().join("x"), "0.153.4", false);
+        let root = tmp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        assert!(move_into_place(&src, &root.join("0.153.4"), binary).unwrap());
+        assert!(root.join("0.153.4").join(binary).is_file());
     }
 
     #[test]
