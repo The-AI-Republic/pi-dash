@@ -9,7 +9,7 @@ use crate::agent::{AgentBridge, AgentCursor, BridgeEvent, RunPayload, within_sta
 use crate::approval::policy::Policy;
 use crate::approval::router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource};
 use crate::cloud::http::{
-    AckEntry, AttachBody, CredentialsHandle, HttpLoop, InboundEnvelope, MachineClient, PollStatus,
+    AckEntry, AttachBody, CredentialsHandle, HttpLoop, InboundEnvelope, PollStatus,
     RunnerCloudClient, RunnerCredentials, SharedHttpTransport, TransportError,
 };
 use crate::cloud::protocol::{
@@ -25,9 +25,13 @@ use crate::daemon::run_event_mirror::RunEventMirror;
 use crate::daemon::runner_instance::RunnerInstance;
 use crate::daemon::runner_out::RunnerOut;
 use crate::daemon::state::{AgentHealthReport, StateHandle};
+use crate::daemon::workspace_tokens::WorkspaceTokens;
 use crate::history::index::{RunSummary, RunsIndex};
 use crate::history::jsonl::{HistoryEntry, HistoryWriter};
-use crate::ipc::protocol::{CurrentRunSummary, version_lt};
+use crate::ipc::protocol::{
+    CurrentRunSummary, EngineState, HelloAccount, HelloInfo, HelloWorkspace, IPC_VERSION,
+    RunnerChanges, version_lt,
+};
 use crate::ipc::server::IpcServer;
 use crate::util::paths::{Paths, RunnerPaths};
 
@@ -90,19 +94,17 @@ impl Supervisor {
             Some(SharedHttpTransport::new(config.daemon.cloud_url.clone())?)
         };
 
-        let shared_machine_token = config
-            .cli
-            .as_ref()
-            .and_then(|cli| cli.token.as_deref())
-            .filter(|token| token.starts_with("mt_"))
-            .map(str::to_string);
+        // One dev-machine token per workspace (design §4.9): each runner
+        // authenticates with its block's workspace token, the machine
+        // session with any live one.
+        let tokens = WorkspaceTokens::from_cli(config.cli.as_ref());
 
         let mut instances: Vec<RunnerInstance> = Vec::new();
         for runner_cfg in &config.runners {
             let inst = build_runner_instance(
                 runner_cfg.clone(),
                 transport.as_ref(),
-                shared_machine_token.as_deref(),
+                &tokens,
                 &paths,
                 &config.daemon,
             )
@@ -156,13 +158,14 @@ impl Supervisor {
         // cloud-driven `create_runner` hot-add path.
         let spawn_ctx = RunnerSpawnCtx {
             transport: transport.clone(),
-            shared_machine_token: shared_machine_token.clone(),
+            tokens: tokens.clone(),
             paths: paths.clone(),
             daemon: config.daemon.clone(),
             mailboxes: mailboxes.clone(),
             hello_runners: hello_runners.clone(),
             daemon_state: state.clone(),
             instances: ipc_instances.clone(),
+            tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             activation_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
@@ -200,31 +203,26 @@ impl Supervisor {
         }
 
         // One RunnerLoop per instance. Each consumes from its mailbox.
-        let mut loop_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-        let mut http_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-        let mut refresh_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        // Handles are kept in the spawn context so one runner can be
+        // stopped on its own (reconfigure, credential change) and every
+        // runner is aborted on shutdown.
         for inst in &instances {
             let tasks = spawn_instance_tasks(inst, &spawn_ctx).await;
-            loop_handles.extend(tasks.runner_loop);
-            http_handles.extend(tasks.http_loop);
-            refresh_handles.extend(tasks.refresh);
+            spawn_ctx.register_tasks(inst.runner_id, tasks);
         }
 
         // Machine-level control session: lets the cloud push
         // machine-scoped commands (``create_runner``) down to this
-        // machine even when it hosts zero runners. Requires the shared
-        // machine token and a persisted dev_machine_id — both written
-        // by `pidash auth login` / modern enrollments; legacy installs
-        // without them simply don't get the channel.
-        let machine_handle = match (
-            transport.clone(),
-            shared_machine_token.clone(),
-            config.daemon.dev_machine_id,
-        ) {
-            (Some(shared), Some(token), Some(dev_machine_id)) => {
-                let client = MachineClient::new(shared, dev_machine_id, token);
+        // machine even when it hosts zero runners. One session per
+        // machine, opened with any live workspace token and re-opened
+        // with another when that one is revoked (design §4.9). Needs a
+        // persisted dev_machine_id, written by `pidash auth login`;
+        // legacy installs without one simply don't get the channel.
+        let machine_handle = match (transport.clone(), config.daemon.dev_machine_id) {
+            (Some(shared), Some(dev_machine_id)) => {
                 let control = crate::daemon::machine_control::MachineControl::new(
-                    client,
+                    shared,
+                    dev_machine_id,
                     spawn_ctx.clone(),
                     state.clone(),
                 );
@@ -233,7 +231,7 @@ impl Supervisor {
             _ => {
                 if !opts.offline {
                     tracing::info!(
-                        "machine control session disabled (missing dev_machine_id or mt_ token in config)"
+                        "machine control session disabled (no dev_machine_id in config)"
                     );
                 }
                 None
@@ -292,15 +290,7 @@ impl Supervisor {
             tracing::warn!("drain of in-flight runs timed out at 5s");
         }
 
-        for h in loop_handles {
-            h.abort();
-        }
-        for h in http_handles {
-            h.abort();
-        }
-        for h in refresh_handles {
-            h.abort();
-        }
+        spawn_ctx.abort_all_tasks();
         if let Some(h) = machine_handle {
             h.abort();
         }
@@ -315,19 +305,42 @@ impl Supervisor {
 /// Construct (but don't start) a `RunnerInstance` from its config
 /// block. Shared by the startup loop and the machine control session's
 /// hot-add path.
+///
+/// The runner authenticates with the token of its block's
+/// `workspace_slug` (design §4.9). When that workspace has no token on
+/// this machine and the runner has no legacy per-runner credentials, the
+/// instance is built signed out: it runs no cloud loops and reports
+/// `workspace_signed_out`, and the other runners are unaffected.
 async fn build_runner_instance(
     runner_cfg: RunnerConfig,
     transport: Option<&SharedHttpTransport>,
-    shared_machine_token: Option<&str>,
+    tokens: &WorkspaceTokens,
     paths: &Paths,
     daemon: &DaemonConfig,
 ) -> Result<RunnerInstance> {
     let inst = if let Some(shared) = transport {
         let runner_paths = paths.for_runner(runner_cfg.runner_id);
-        let creds =
-            load_runner_credentials(&runner_paths, &runner_cfg.name, shared_machine_token).await?;
-        let client = RunnerCloudClient::new(runner_cfg.runner_id, creds, shared.clone());
-        RunnerInstance::new_http(runner_cfg, paths, client, daemon.clone())
+        let token = tokens.token_for(runner_cfg.workspace_slug.as_deref());
+        match load_runner_credentials(&runner_paths, &runner_cfg.name, token.as_deref()).await {
+            Ok(creds) => {
+                let client = RunnerCloudClient::new(runner_cfg.runner_id, creds, shared.clone());
+                let mut inst = RunnerInstance::new_http(runner_cfg, paths, client, daemon.clone());
+                inst.machine_token = token;
+                inst
+            }
+            Err(e) if token.is_none() => {
+                tracing::warn!(
+                    runner = %runner_cfg.name,
+                    workspace = runner_cfg.workspace_slug.as_deref().unwrap_or("(default)"),
+                    "workspace signed out on this machine; runner stays offline until \
+                     `pidash auth login --workspace <slug>` ({e:#})"
+                );
+                let mut inst = RunnerInstance::new_offline(runner_cfg, paths, daemon.clone());
+                inst.workspace_signed_out = true;
+                inst
+            }
+            Err(e) => return Err(e),
+        }
     } else {
         RunnerInstance::new_offline(runner_cfg, paths, daemon.clone())
     };
@@ -343,34 +356,352 @@ async fn build_runner_instance(
 #[derive(Clone)]
 pub(crate) struct RunnerSpawnCtx {
     transport: Option<SharedHttpTransport>,
-    shared_machine_token: Option<String>,
+    /// Workspace → dev-machine token (design §4.9). Replaces the single
+    /// `shared_machine_token`; shared with the machine control session.
+    pub(crate) tokens: WorkspaceTokens,
     pub(crate) paths: Paths,
     daemon: DaemonConfig,
     mailboxes: Arc<RwLock<HashMap<uuid::Uuid, mpsc::Sender<InboundEnvelope>>>>,
     hello_runners: Arc<RwLock<HelloRunnerMap>>,
     daemon_state: StateHandle,
     instances: Arc<std::sync::RwLock<HashMap<uuid::Uuid, RunnerInstance>>>,
+    /// Task handles of every running runner, so one runner can be stopped
+    /// (reconfigure, credential change) while the others keep running,
+    /// and every runner is aborted on daemon shutdown.
+    tasks: Arc<std::sync::Mutex<HashMap<uuid::Uuid, SpawnedInstanceTasks>>>,
+    /// Serialises every add / stop / restart of a runner.
     activation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
+/// How long a stopped runner's HTTP loops get to exit before they are
+/// aborted.
+const RUNNER_STOP_GRACE: Duration = Duration::from_secs(5);
+/// How long `RunnerRemoveLocal` waits for the runner's teardown (block
+/// stripped, loop exited) before it answers.
+pub(crate) const RUNNER_REMOVE_WAIT: Duration = Duration::from_secs(10);
+
 impl RunnerSpawnCtx {
+    /// Bring the runner named `name` up from its block on disk, with no
+    /// daemon restart (`pidash runner add`, the TUI, `pidash __managed`).
+    ///
+    /// The workspace tokens are re-read first, so a runner of a workspace
+    /// signed in after the daemon started gets its token. A runner that is
+    /// already running is restarted in-process when its block changed, and
+    /// left alone otherwise.
     pub(crate) async fn activate_configured(&self, name: &str) -> Result<()> {
         let cfg = crate::config::file::load_config(&self.paths)?;
         cfg.validate()
             .map_err(|e| anyhow::anyhow!("invalid config: {e}"))?;
         if cfg.daemon.cloud_url != self.daemon.cloud_url
             || cfg.daemon.dev_machine_id != self.daemon.dev_machine_id
-            || cfg.cli.as_ref().and_then(|cli| cli.token.as_deref())
-                != self.shared_machine_token.as_deref()
         {
             anyhow::bail!("daemon identity changed; restart before activating a runner");
         }
+        self.tokens.reload(cfg.cli.as_ref());
         let runner = cfg
             .runners
-            .into_iter()
+            .iter()
             .find(|r| r.name == name)
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("no configured runner named {name:?}"))?;
-        self.add_runner(runner).await
+        {
+            let _activation = self.activation_lock.lock().await;
+            match self.instance_by_id(runner.runner_id) {
+                None => self.add_runner_locked(runner).await?,
+                Some(running) if same_block(&running.config, &runner) => {}
+                Some(running) => {
+                    ensure_idle(&running)?;
+                    self.stop_runner_locked(running.runner_id).await;
+                    self.add_runner_locked(runner).await?;
+                }
+            }
+        }
+        self.restart_stale_runners().await;
+        Ok(())
+    }
+
+    /// Re-read the workspace tokens from `config.toml` (`pidash auth
+    /// login` / `logout`) and restart, in-process, the idle runners whose
+    /// workspace token changed. Returns how many runners were restarted.
+    pub(crate) async fn reload_credentials(&self) -> Result<usize> {
+        let cfg = crate::config::file::load_config(&self.paths)?;
+        if cfg.daemon.cloud_url != self.daemon.cloud_url {
+            anyhow::bail!("daemon cloud changed; restart the daemon to apply it");
+        }
+        self.tokens.reload(cfg.cli.as_ref());
+        Ok(self.restart_stale_runners().await)
+    }
+
+    /// Restart every runner whose workspace now has a different live token
+    /// than the one it runs with (a workspace signed in or re-signed in).
+    /// A busy runner is skipped and keeps its old credential until its
+    /// next restart.
+    async fn restart_stale_runners(&self) -> usize {
+        if self.transport.is_none() {
+            return 0;
+        }
+        let _activation = self.activation_lock.lock().await;
+        let stale: Vec<RunnerInstance> = self
+            .all_instances()
+            .into_iter()
+            .filter(|inst| {
+                let desired = self.tokens.token_for(inst.config.workspace_slug.as_deref());
+                desired.is_some() && desired != inst.machine_token
+            })
+            .collect();
+        let mut restarted = 0;
+        for inst in stale {
+            if let Err(e) = ensure_idle(&inst) {
+                tracing::info!(runner = %inst.name, "not restarting for new credentials: {e:#}");
+                continue;
+            }
+            let cfg = inst.config.clone();
+            self.stop_runner_locked(inst.runner_id).await;
+            match self.add_runner_locked(cfg).await {
+                Ok(()) => restarted += 1,
+                Err(e) => {
+                    tracing::error!(runner = %inst.name, "restart with new credentials failed: {e:#}")
+                }
+            }
+        }
+        restarted
+    }
+
+    /// Change one runner's settings in-process (design §5, "a new
+    /// per-runner reconfigure"): stop that runner, rewrite its block under
+    /// the config lock, validate, start it again. Every other runner keeps
+    /// running. Refused while the runner has a run or a local chat turn in
+    /// flight. On a failed write the runner is started again unchanged.
+    pub(crate) async fn reconfigure_runner(
+        &self,
+        name: &str,
+        changes: RunnerChanges,
+    ) -> Result<RunnerConfig> {
+        if changes.is_empty() {
+            anyhow::bail!("nothing to change");
+        }
+        if let Some(dir) = &changes.working_dir
+            && !dir.is_absolute()
+        {
+            anyhow::bail!(
+                "working dir must be an absolute path, got {}",
+                dir.display()
+            );
+        }
+        let _activation = self.activation_lock.lock().await;
+        let inst = self
+            .all_instances()
+            .into_iter()
+            .find(|i| i.name == name)
+            .ok_or_else(|| anyhow::anyhow!("no running runner named {name:?}"))?;
+        ensure_idle(&inst)?;
+        let runner_id = inst.runner_id;
+
+        // Validate against the current file before stopping anything, so
+        // a rejected change never takes the runner down.
+        let mut preview = crate::config::file::load_config(&self.paths)?;
+        apply_runner_changes(&mut preview, runner_id, &changes)?;
+        preview
+            .validate()
+            .map_err(|e| anyhow::anyhow!("invalid change: {e}"))?;
+
+        self.stop_runner_locked(runner_id).await;
+        if let Some(dir) = &changes.working_dir
+            && let Err(e) = std::fs::create_dir_all(dir)
+        {
+            self.add_runner_locked(inst.config.clone()).await?;
+            anyhow::bail!("creating working dir {}: {e}", dir.display());
+        }
+        let paths = self.paths.clone();
+        let write_changes = changes.clone();
+        let written = tokio::task::spawn_blocking(move || {
+            crate::config::file::mutate_config(&paths, |cfg| {
+                apply_runner_changes(cfg, runner_id, &write_changes)
+            })
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("config write task failed: {e}"))
+        .and_then(|r| r);
+        let cfg = match written {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                self.add_runner_locked(inst.config.clone()).await?;
+                return Err(e.context("rewriting the runner's block"));
+            }
+        };
+        let block = cfg
+            .runners
+            .into_iter()
+            .find(|r| r.runner_id == runner_id)
+            .ok_or_else(|| anyhow::anyhow!("runner {name:?} vanished from config.toml"))?;
+        self.add_runner_locked(block.clone()).await?;
+        tracing::info!(runner = %name, "reconfigured runner in running daemon");
+        Ok(block)
+    }
+
+    /// Wait until the runner `runner_id` is fully torn down: gone from the
+    /// registry and its runner loop exited (which is after its block was
+    /// stripped from `config.toml`). Lets `RunnerRemoveLocal` answer only
+    /// once a re-add of the same id is safe.
+    pub(crate) async fn wait_runner_removed(
+        &self,
+        runner_id: uuid::Uuid,
+        within: Duration,
+    ) -> bool {
+        let deadline = Instant::now() + within;
+        loop {
+            let registered = self.instance_by_id(runner_id).is_some();
+            let loop_running = self
+                .tasks
+                .lock()
+                .expect("runner task map poisoned")
+                .get(&runner_id)
+                .and_then(|t| t.runner_loop.as_ref())
+                .is_some_and(|h| !h.is_finished());
+            if !registered && !loop_running {
+                self.tasks
+                    .lock()
+                    .expect("runner task map poisoned")
+                    .remove(&runner_id);
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// Whether `inst` is signed out: built with no credential, or its
+    /// workspace no longer has a live token (signed out, or the cloud
+    /// revoked it).
+    pub(crate) fn is_workspace_signed_out(&self, inst: &RunnerInstance) -> bool {
+        inst.workspace_signed_out
+            || (inst.machine_token.is_some()
+                && self
+                    .tokens
+                    .token_for(inst.config.workspace_slug.as_deref())
+                    .is_none())
+    }
+
+    /// The `Hello` answer (design §4.4).
+    pub(crate) fn hello(&self) -> HelloInfo {
+        let instances = self.all_instances();
+        let mut slugs: std::collections::BTreeSet<String> =
+            self.tokens.known_workspaces().into_iter().collect();
+        for inst in &instances {
+            if let Some(slug) = inst.config.workspace_slug.as_deref() {
+                slugs.insert(slug.to_string());
+            }
+        }
+        let workspaces = slugs
+            .into_iter()
+            .map(|slug| HelloWorkspace {
+                signed_in: self.tokens.token_for(Some(&slug)).is_some(),
+                runners: instances
+                    .iter()
+                    .filter(|i| i.config.workspace_slug.as_deref() == Some(slug.as_str()))
+                    .count(),
+                slug,
+            })
+            .collect();
+        let account = if self.tokens.session_candidates().is_empty() {
+            None
+        } else {
+            let (user_id, email) = self.tokens.account();
+            Some(HelloAccount {
+                user_id,
+                email,
+                cloud_url: self.daemon.cloud_url.clone(),
+            })
+        };
+        HelloInfo {
+            daemon_version: crate::RUNNER_VERSION.to_string(),
+            ipc_version: IPC_VERSION,
+            cloud_url: self.daemon.cloud_url.clone(),
+            account,
+            workspaces,
+            machine_id: self.daemon.dev_machine_id,
+            // The built-in engine lands in a later release (PIDESKAPP-121
+            // §4.5); until then this daemon has none.
+            engine: EngineState::Unavailable,
+        }
+    }
+
+    fn all_instances(&self) -> Vec<RunnerInstance> {
+        self.instances
+            .read()
+            .expect("runner registry poisoned")
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    fn instance_by_id(&self, runner_id: uuid::Uuid) -> Option<RunnerInstance> {
+        self.instances
+            .read()
+            .expect("runner registry poisoned")
+            .get(&runner_id)
+            .cloned()
+    }
+
+    fn register_tasks(&self, runner_id: uuid::Uuid, tasks: SpawnedInstanceTasks) {
+        if let Some(old) = self
+            .tasks
+            .lock()
+            .expect("runner task map poisoned")
+            .insert(runner_id, tasks)
+        {
+            old.abort();
+        }
+    }
+
+    /// Abort every runner's tasks (daemon shutdown).
+    fn abort_all_tasks(&self) {
+        for (_, tasks) in self.tasks.lock().expect("runner task map poisoned").drain() {
+            tasks.abort();
+        }
+    }
+
+    /// Stop one runner without touching its block or data dir: take it out
+    /// of every registry, let its HTTP loops exit (no further cloud
+    /// requests), then stop its runner loop. Caller holds
+    /// `activation_lock` and has checked the runner is idle.
+    async fn stop_runner_locked(&self, runner_id: uuid::Uuid) {
+        let inst = self
+            .instances
+            .write()
+            .expect("runner registry poisoned")
+            .remove(&runner_id);
+        self.mailboxes.write().await.remove(&runner_id);
+        self.hello_runners.write().await.remove(&runner_id);
+        if let Some(inst) = &inst {
+            let _ = inst.remove_tx.send(true);
+        }
+        let tasks = self
+            .tasks
+            .lock()
+            .expect("runner task map poisoned")
+            .remove(&runner_id);
+        if let Some(tasks) = tasks {
+            for handle in [tasks.http_loop, tasks.refresh].into_iter().flatten() {
+                let abort = handle.abort_handle();
+                if tokio::time::timeout(RUNNER_STOP_GRACE, handle)
+                    .await
+                    .is_err()
+                {
+                    abort.abort();
+                }
+            }
+            if let Some(handle) = tasks.runner_loop {
+                handle.abort();
+                let _ = handle.await;
+            }
+        }
+        if let Some(inst) = inst {
+            inst.state.set_connected(false).await;
+            tracing::info!(runner_id = %runner_id, name = %inst.name, "stopped runner");
+        }
     }
 
     pub(crate) fn cloud_url(&self) -> String {
@@ -410,6 +741,11 @@ impl RunnerSpawnCtx {
     /// process, and the graceful drain and IPC registry include hot-added runners.
     pub(crate) async fn add_runner(&self, runner_cfg: RunnerConfig) -> Result<()> {
         let _activation = self.activation_lock.lock().await;
+        self.add_runner_locked(runner_cfg).await
+    }
+
+    /// [`Self::add_runner`] for a caller that holds `activation_lock`.
+    async fn add_runner_locked(&self, runner_cfg: RunnerConfig) -> Result<()> {
         if self
             .instances
             .read()
@@ -421,7 +757,7 @@ impl RunnerSpawnCtx {
         let inst = build_runner_instance(
             runner_cfg,
             self.transport.as_ref(),
-            self.shared_machine_token.as_deref(),
+            &self.tokens,
             &self.paths,
             &self.daemon,
         )
@@ -441,7 +777,8 @@ impl RunnerSpawnCtx {
                 ),
             );
         }
-        let _tasks = spawn_instance_tasks(&inst, self).await;
+        let tasks = spawn_instance_tasks(&inst, self).await;
+        self.register_tasks(inst.runner_id, tasks);
         self.instances
             .write()
             .expect("runner registry poisoned")
@@ -451,6 +788,49 @@ impl RunnerSpawnCtx {
     }
 }
 
+/// Whether a running runner's block equals the one on disk.
+fn same_block(running: &RunnerConfig, on_disk: &RunnerConfig) -> bool {
+    match (serde_json::to_value(running), serde_json::to_value(on_disk)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Refuse to stop a runner that is doing work: a run in flight or a local
+/// chat turn holding its working copy.
+fn ensure_idle(inst: &RunnerInstance) -> Result<()> {
+    if let Some(run_id) = *inst.state.rx_in_flight.borrow() {
+        anyhow::bail!(
+            "runner {:?} is mid-run (run {run_id}); try again when it is idle",
+            inst.name
+        );
+    }
+    if inst.chat_active.load(std::sync::atomic::Ordering::SeqCst) {
+        anyhow::bail!(
+            "runner {:?} has a local chat turn in flight; try again when it is idle",
+            inst.name
+        );
+    }
+    Ok(())
+}
+
+/// Apply `changes` to runner `runner_id`'s block in `cfg`.
+fn apply_runner_changes(
+    cfg: &mut Config,
+    runner_id: uuid::Uuid,
+    changes: &RunnerChanges,
+) -> Result<()> {
+    let block = cfg
+        .runners
+        .iter_mut()
+        .find(|r| r.runner_id == runner_id)
+        .ok_or_else(|| anyhow::anyhow!("runner {runner_id} is not in config.toml"))?;
+    if let Some(dir) = &changes.working_dir {
+        block.workspace.working_dir = dir.clone();
+    }
+    Ok(())
+}
+
 /// Handles of the tasks that drive one runner. `None` entries mean the
 /// corresponding task was not spawned (offline mode has no HTTP/refresh
 /// loop; a taken mailbox refuses a duplicate RunnerLoop).
@@ -458,6 +838,17 @@ struct SpawnedInstanceTasks {
     runner_loop: Option<tokio::task::JoinHandle<()>>,
     http_loop: Option<tokio::task::JoinHandle<()>>,
     refresh: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl SpawnedInstanceTasks {
+    fn abort(&self) {
+        for handle in [&self.runner_loop, &self.http_loop, &self.refresh]
+            .into_iter()
+            .flatten()
+        {
+            handle.abort();
+        }
+    }
 }
 
 /// The binary this runner's configured agent kind will actually launch.
@@ -573,9 +964,28 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
         let purge_mailbox = inst.mailbox_tx.clone();
         let runner_name = inst.name.clone();
         let runner_id = inst.runner_id;
+        let tokens = ctx.tokens.clone();
+        let machine_token = inst.machine_token.clone();
         let http_handle = tokio::spawn(async move {
             if let Err(e) = http_loop.run().await {
                 local_state.set_connected(false).await;
+                if matches!(
+                    e,
+                    TransportError::MachineTokenRevoked | TransportError::MembershipRevoked
+                ) && let Some(token) = machine_token.as_deref()
+                {
+                    // Only this workspace is signed out: its other runners
+                    // and the machine session stop offering the token, and
+                    // `pidash status` reports `workspace_signed_out`.
+                    let workspace = tokens.mark_revoked(token);
+                    tracing::error!(
+                        runner = %runner_name,
+                        workspace = workspace.as_deref().unwrap_or("(default)"),
+                        "workspace token revoked; this workspace's runners are signed out \
+                         until `pidash auth login --workspace <slug>`"
+                    );
+                    return;
+                }
                 if let TransportError::RunnerDeletedInCloud { confirmations } = e {
                     purge_cloud_deleted_runner(
                         &purge_mailbox,
@@ -1262,8 +1672,12 @@ struct ChatWarm {
 enum ChatCommand {
     Warm(ChatWarm),
     Message(ChatTurn),
-    Cancel { reason: Option<String> },
-    Close { reason: Option<String> },
+    Cancel {
+        reason: Option<String>,
+    },
+    Close {
+        reason: Option<String>,
+    },
     /// Tear down this runtime to make room for another session (or to free the
     /// runner's working dir for an assign) WITHOUT closing the
     /// cloud session: it stays open and a later warm/message revives it via
@@ -1894,10 +2308,7 @@ impl RunnerLoop {
                     // never deleted — not even when it was configured
                     // inside the data dir.
                     let runner_dir = self.runner_paths.base_dir().to_path_buf();
-                    remove_runner_data_dir(
-                        &runner_dir,
-                        &self.runner_config.workspace.working_dir,
-                    );
+                    remove_runner_data_dir(&runner_dir, &self.runner_config.workspace.working_dir);
                     // Strip the matching `[[runner]]` block from
                     // config.toml under the host-wide config lock so a
                     // concurrent `pidash runner add` can't lose its
@@ -3848,7 +4259,11 @@ impl AssignWorker {
                 reason,
             } => {
                 run_events.flush_before_lifecycle(&self.out).await;
-                let policy = Policy::new(&self.runner_config.approval_policy, workspace_root, crate::cloud::protocol::ApprovalMode::Ask);
+                let policy = Policy::new(
+                    &self.runner_config.approval_policy,
+                    workspace_root,
+                    crate::cloud::protocol::ApprovalMode::Ask,
+                );
                 let decision = policy.evaluate(kind, &payload);
                 if let Some(auto) = decision.into_cloud() {
                     bridge.send_approval(&approval_id, auto).await.ok();
@@ -4103,11 +4518,52 @@ mod tests {
     }
 
     fn spawn_ctx_for(paths: &Paths, insts: &[&RunnerInstance]) -> RunnerSpawnCtx {
+        RunnerSpawnCtx::for_tests(None, WorkspaceTokens::default(), paths, insts)
+    }
+
+    impl RunnerSpawnCtx {
+        /// A spawn context over `insts` (already built, not registered
+        /// with tasks), for unit tests of this module and of machine
+        /// control.
+        pub(crate) fn for_tests(
+            transport: Option<SharedHttpTransport>,
+            tokens: WorkspaceTokens,
+            paths: &Paths,
+            insts: &[&RunnerInstance],
+        ) -> RunnerSpawnCtx {
+            RunnerSpawnCtx::for_tests_with_daemon(
+                transport,
+                tokens,
+                paths,
+                DaemonConfig::default(),
+                insts,
+            )
+        }
+
+        pub(crate) fn for_tests_with_daemon(
+            transport: Option<SharedHttpTransport>,
+            tokens: WorkspaceTokens,
+            paths: &Paths,
+            daemon: DaemonConfig,
+            insts: &[&RunnerInstance],
+        ) -> RunnerSpawnCtx {
+            spawn_ctx_inner(transport, tokens, paths, daemon, insts)
+        }
+    }
+
+    fn spawn_ctx_inner(
+        transport: Option<SharedHttpTransport>,
+        tokens: WorkspaceTokens,
+        paths: &Paths,
+        daemon: DaemonConfig,
+        insts: &[&RunnerInstance],
+    ) -> RunnerSpawnCtx {
         RunnerSpawnCtx {
-            transport: None,
-            shared_machine_token: None,
+            transport,
+            tokens,
             paths: paths.clone(),
-            daemon: DaemonConfig::default(),
+            daemon,
+            tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mailboxes: Arc::new(RwLock::new(
                 insts
                     .iter()
@@ -4186,7 +4642,11 @@ mod tests {
         assert!(*remove_rx.borrow_and_update(), "teardown latch set");
         let cfg = crate::config::file::load_config(&paths).unwrap();
         let names: Vec<_> = cfg.runners.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, vec!["keep"], "only the deleted runner's block is stripped");
+        assert_eq!(
+            names,
+            vec!["keep"],
+            "only the deleted runner's block is stripped"
+        );
         assert!(!data_dir.exists(), "data dir deleted");
         assert_eq!(
             std::fs::read_to_string(wd_gone.join("user-file.txt")).unwrap(),
@@ -4198,6 +4658,369 @@ mod tests {
             "no longer listed by `pidash status`"
         );
         assert!(!ctx.mailboxes.read().await.contains_key(&inst.runner_id));
+    }
+
+    // ---- PIDESKAPP-122: runner changes without a restart ---------------
+
+    fn write_runners(paths: &Paths, runners: Vec<RunnerConfig>) {
+        crate::config::file::write_config(
+            paths,
+            &Config {
+                version: 2,
+                daemon: DaemonConfig::default(),
+                runners,
+                cli: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// Build `cfgs` as offline instances, register them in a fresh spawn
+    /// context and start their tasks, like the supervisor's startup loop.
+    async fn running_ctx(paths: &Paths, cfgs: &[RunnerConfig]) -> RunnerSpawnCtx {
+        let insts: Vec<RunnerInstance> = cfgs
+            .iter()
+            .map(|c| {
+                let inst = RunnerInstance::new_offline(c.clone(), paths, DaemonConfig::default());
+                inst.paths.ensure().unwrap();
+                inst
+            })
+            .collect();
+        let ctx = spawn_ctx_for(paths, &insts.iter().collect::<Vec<_>>());
+        for inst in &insts {
+            let tasks = spawn_instance_tasks(inst, &ctx).await;
+            ctx.register_tasks(inst.runner_id, tasks);
+        }
+        ctx
+    }
+
+    fn registered_names(ctx: &RunnerSpawnCtx) -> Vec<String> {
+        let mut names: Vec<String> = ctx.all_instances().into_iter().map(|i| i.name).collect();
+        names.sort();
+        names
+    }
+
+    fn loop_running(ctx: &RunnerSpawnCtx, runner_id: uuid::Uuid) -> bool {
+        ctx.tasks
+            .lock()
+            .unwrap()
+            .get(&runner_id)
+            .and_then(|t| t.runner_loop.as_ref())
+            .is_some_and(|h| !h.is_finished())
+    }
+
+    /// Design §5 "Removal exists": a local removal leaves nothing in the
+    /// registry (so `pidash status` no longer lists the runner), and adding
+    /// the same id back afterwards brings it up again instead of being a
+    /// silent no-op.
+    #[tokio::test]
+    async fn local_removal_cleans_the_registry_and_the_same_id_can_be_re_added() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        paths.ensure().unwrap();
+        let gone = runner_config("gone", "WEB", tmp.path().join("wd-gone"));
+        let keep = runner_config("keep", "API", tmp.path().join("wd-keep"));
+        write_runners(&paths, vec![gone.clone(), keep.clone()]);
+        let ctx = running_ctx(&paths, &[gone.clone(), keep.clone()]).await;
+
+        // What IPC `RunnerRemoveLocal` does: synthesize RemoveRunner, then
+        // wait for the teardown.
+        let inst = ctx.instance_by_id(gone.runner_id).unwrap();
+        inst.mailbox_tx
+            .send(InboundEnvelope {
+                stream_id: None,
+                env: crate::cloud::protocol::Envelope::for_runner(
+                    gone.runner_id,
+                    ServerMsg::RemoveRunner {
+                        runner_id: gone.runner_id,
+                        reason: Some("test".into()),
+                    },
+                ),
+            })
+            .await
+            .unwrap();
+        assert!(
+            ctx.wait_runner_removed(gone.runner_id, Duration::from_secs(5))
+                .await
+        );
+        assert_eq!(registered_names(&ctx), vec!["keep"]);
+        assert!(!ctx.mailboxes.read().await.contains_key(&gone.runner_id));
+        assert!(!ctx.hello_runners.read().await.contains_key(&gone.runner_id));
+        let on_disk = crate::config::file::load_config(&paths).unwrap();
+        assert_eq!(on_disk.runners.len(), 1, "block stripped before the answer");
+
+        // Re-add the same id: block written again, then RunnerActivateLocal.
+        write_runners(&paths, vec![gone.clone(), keep.clone()]);
+        ctx.activate_configured("gone").await.unwrap();
+        assert_eq!(registered_names(&ctx), vec!["gone", "keep"]);
+        assert!(loop_running(&ctx, gone.runner_id), "re-added runner runs");
+        assert!(loop_running(&ctx, keep.runner_id), "other runner untouched");
+    }
+
+    #[tokio::test]
+    async fn activating_an_unchanged_running_runner_is_a_no_op() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        paths.ensure().unwrap();
+        let main = runner_config("main", "WEB", tmp.path().join("wd-main"));
+        write_runners(&paths, vec![main.clone()]);
+        let ctx = running_ctx(&paths, std::slice::from_ref(&main)).await;
+        let before = ctx.instance_by_id(main.runner_id).unwrap();
+        ctx.activate_configured("main").await.unwrap();
+        let after = ctx.instance_by_id(main.runner_id).unwrap();
+        assert!(
+            Arc::ptr_eq(&before.chat_active, &after.chat_active),
+            "same instance: not restarted"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconfigure_moves_one_runner_to_a_new_working_dir_in_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        paths.ensure().unwrap();
+        let main = runner_config("main", "WEB", tmp.path().join("wd-main"));
+        let other = runner_config("other", "API", tmp.path().join("wd-other"));
+        write_runners(&paths, vec![main.clone(), other.clone()]);
+        let ctx = running_ctx(&paths, &[main.clone(), other.clone()]).await;
+        let other_before = ctx.instance_by_id(other.runner_id).unwrap();
+
+        let new_dir = tmp.path().join("moved").join("main");
+        let block = ctx
+            .reconfigure_runner(
+                "main",
+                RunnerChanges {
+                    working_dir: Some(new_dir.clone()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(block.workspace.working_dir, new_dir);
+        assert!(new_dir.is_dir(), "missing working dir is created");
+        let on_disk = crate::config::file::load_config(&paths).unwrap();
+        let main_on_disk = on_disk.runners.iter().find(|r| r.name == "main").unwrap();
+        assert_eq!(main_on_disk.workspace.working_dir, new_dir);
+        let running = ctx.instance_by_id(main.runner_id).unwrap();
+        assert_eq!(running.config.workspace.working_dir, new_dir);
+        assert!(loop_running(&ctx, main.runner_id), "restarted runner runs");
+
+        let other_after = ctx.instance_by_id(other.runner_id).unwrap();
+        assert!(
+            Arc::ptr_eq(&other_before.chat_active, &other_after.chat_active),
+            "the other runner was not restarted"
+        );
+        assert!(loop_running(&ctx, other.runner_id));
+    }
+
+    #[tokio::test]
+    async fn reconfigure_is_refused_mid_run_and_for_a_colliding_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        paths.ensure().unwrap();
+        let main = runner_config("main", "WEB", tmp.path().join("wd-main"));
+        let other = runner_config("other", "API", tmp.path().join("wd-other"));
+        write_runners(&paths, vec![main.clone(), other.clone()]);
+        let ctx = running_ctx(&paths, &[main.clone(), other.clone()]).await;
+
+        // Nested inside another runner's dir: rejected before anything stops.
+        let before = ctx.instance_by_id(main.runner_id).unwrap();
+        let err = ctx
+            .reconfigure_runner(
+                "main",
+                RunnerChanges {
+                    working_dir: Some(tmp.path().join("wd-other").join("nested")),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("invalid change"), "{err:#}");
+        let after = ctx.instance_by_id(main.runner_id).unwrap();
+        assert!(Arc::ptr_eq(&before.chat_active, &after.chat_active));
+        assert!(loop_running(&ctx, main.runner_id));
+
+        // Mid-run: refused, nothing written.
+        let run_id = uuid::Uuid::new_v4();
+        before
+            .state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "running".into(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        let err = ctx
+            .reconfigure_runner(
+                "main",
+                RunnerChanges {
+                    working_dir: Some(tmp.path().join("elsewhere")),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("mid-run"), "{err:#}");
+        let on_disk = crate::config::file::load_config(&paths).unwrap();
+        assert_eq!(
+            on_disk.runners[0].workspace.working_dir,
+            main.workspace.working_dir
+        );
+        assert!(loop_running(&ctx, main.runner_id));
+    }
+
+    // ---- PIDESKAPP-122: one daemon, several workspaces -----------------
+
+    fn runner_in(name: &str, workspace: &str, working_dir: PathBuf) -> RunnerConfig {
+        let mut cfg = runner_config(name, name, working_dir);
+        cfg.workspace_slug = Some(workspace.into());
+        cfg
+    }
+
+    fn two_workspace_tokens() -> WorkspaceTokens {
+        WorkspaceTokens::from_cli(Some(&crate::config::schema::CliSection {
+            token: Some("mt_acme".into()),
+            workspace_slug: Some("acme".into()),
+            workspaces: vec![crate::config::schema::WorkspaceCredential {
+                slug: "beta".into(),
+                token: "mt_beta".into(),
+            }],
+            ..Default::default()
+        }))
+    }
+
+    #[tokio::test]
+    async fn each_runner_authenticates_with_its_workspace_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        paths.ensure().unwrap();
+        let transport = SharedHttpTransport::new("http://127.0.0.1:1".into()).unwrap();
+        let tokens = two_workspace_tokens();
+        let daemon = DaemonConfig::default();
+
+        let a = build_runner_instance(
+            runner_in("a", "acme", tmp.path().join("wa")),
+            Some(&transport),
+            &tokens,
+            &paths,
+            &daemon,
+        )
+        .await
+        .unwrap();
+        let b = build_runner_instance(
+            runner_in("b", "beta", tmp.path().join("wb")),
+            Some(&transport),
+            &tokens,
+            &paths,
+            &daemon,
+        )
+        .await
+        .unwrap();
+        let c = build_runner_instance(
+            runner_in("c", "gamma", tmp.path().join("wc")),
+            Some(&transport),
+            &tokens,
+            &paths,
+            &daemon,
+        )
+        .await
+        .expect("a workspace with no token does not fail the daemon");
+
+        assert_eq!(a.machine_token.as_deref(), Some("mt_acme"));
+        assert_eq!(b.machine_token.as_deref(), Some("mt_beta"));
+        assert!(c.machine_token.is_none());
+        assert!(c.workspace_signed_out && c.client.is_none());
+
+        let ctx = RunnerSpawnCtx::for_tests(Some(transport), tokens.clone(), &paths, &[&a, &b, &c]);
+        assert!(!ctx.is_workspace_signed_out(&a));
+        assert!(!ctx.is_workspace_signed_out(&b));
+        assert!(
+            ctx.is_workspace_signed_out(&c),
+            "only gamma's runner signed out"
+        );
+
+        // The cloud revokes acme's token: only acme's runner is signed out.
+        tokens.mark_revoked("mt_acme");
+        assert!(ctx.is_workspace_signed_out(&a));
+        assert!(!ctx.is_workspace_signed_out(&b));
+    }
+
+    #[tokio::test]
+    async fn hello_reports_version_account_workspaces_machine_and_engine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let mut cli = crate::config::schema::CliSection {
+            token: Some("mt_acme".into()),
+            workspace_slug: Some("acme".into()),
+            account_email: Some("dev@example.com".into()),
+            account_user_id: Some("u-1".into()),
+            ..Default::default()
+        };
+        cli.set_workspace_token("beta", "mt_beta", false);
+        let tokens = WorkspaceTokens::from_cli(Some(&cli));
+        tokens.mark_revoked("mt_beta");
+        let a = RunnerInstance::new_offline(
+            runner_in("a", "acme", tmp.path().join("wa")),
+            &paths,
+            DaemonConfig::default(),
+        );
+        let g = RunnerInstance::new_offline(
+            runner_in("g", "gamma", tmp.path().join("wg")),
+            &paths,
+            DaemonConfig::default(),
+        );
+        let machine_id = uuid::Uuid::new_v4();
+        let ctx = RunnerSpawnCtx::for_tests_with_daemon(
+            None,
+            tokens,
+            &paths,
+            DaemonConfig {
+                cloud_url: "https://cloud.example".into(),
+                dev_machine_id: Some(machine_id),
+                ..DaemonConfig::default()
+            },
+            &[&a, &g],
+        );
+
+        let hello = ctx.hello();
+        assert_eq!(hello.daemon_version, crate::RUNNER_VERSION);
+        assert_eq!(hello.ipc_version, IPC_VERSION);
+        assert_eq!(hello.machine_id, Some(machine_id));
+        assert_eq!(hello.engine, EngineState::Unavailable);
+        assert_eq!(
+            hello.account,
+            Some(HelloAccount {
+                user_id: Some("u-1".into()),
+                email: Some("dev@example.com".into()),
+                cloud_url: "https://cloud.example".into(),
+            })
+        );
+        assert_eq!(
+            hello.workspaces,
+            vec![
+                HelloWorkspace {
+                    slug: "acme".into(),
+                    signed_in: true,
+                    runners: 1
+                },
+                HelloWorkspace {
+                    slug: "beta".into(),
+                    signed_in: false,
+                    runners: 0
+                },
+                HelloWorkspace {
+                    slug: "gamma".into(),
+                    signed_in: false,
+                    runners: 1
+                },
+            ]
+        );
+
+        let wire = serde_json::to_value(crate::ipc::protocol::Response::Hello(hello)).unwrap();
+        assert_eq!(wire["result"], "hello");
+        assert_eq!(wire["data"]["engine"], "unavailable");
+        assert_eq!(wire["data"]["ipc_version"], IPC_VERSION);
+        assert_eq!(wire["data"]["account"]["email"], "dev@example.com");
+        assert_eq!(wire["data"]["workspaces"][0]["slug"], "acme");
     }
 
     #[test]
@@ -4272,7 +5095,11 @@ mod tests {
             let mut config = runner_config("general-tasks", "TEST", wd.clone());
             config.project_slug = None; // no cloud context lookup in this test
             config.agent.kind = kind;
-            let missing_binary = tmp.path().join("missing-agent").to_string_lossy().into_owned();
+            let missing_binary = tmp
+                .path()
+                .join("missing-agent")
+                .to_string_lossy()
+                .into_owned();
             config.codex.binary = missing_binary.clone();
             config.claude_code.binary = missing_binary;
             let runner_paths = paths.for_runner(config.runner_id);

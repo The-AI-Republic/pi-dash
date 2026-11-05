@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 use crate::cloud::http::{EnrollResponse, RunnerCredentials, write_runner_credentials};
 use crate::config::file;
 use crate::config::schema::{
-    AgentKind, AgentSection, ApprovalPolicySection, ClaudeCodeSection, CliSection, CodexSection,
-    Config, CursorAgentSection, DaemonConfig, GrokSection, MuseCodeSection, OpenClawSection,
-    RunnerConfig, WorkspaceSection,
+    AgentKind, AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, Config,
+    CursorAgentSection, DaemonConfig, GrokSection, MuseCodeSection, OpenClawSection, RunnerConfig,
+    WorkspaceSection,
 };
 use crate::util::paths::Paths;
 use std::io::IsTerminal;
@@ -231,15 +231,115 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str, force: bool)
     if cfg.daemon.cloud_url.is_empty() {
         cfg.daemon.cloud_url = cloud_url.to_string();
     }
-    let preserved_workspace = cfg.cli.as_ref().and_then(|c| c.workspace_slug.clone());
-    let preserved_default_project = cfg.cli.as_ref().and_then(|c| c.default_project.clone());
-    cfg.cli = Some(CliSection {
-        token: Some(token.to_string()),
-        workspace_slug: preserved_workspace,
-        default_project: preserved_default_project,
-    });
+    let mut cli = cfg.cli.take().unwrap_or_default();
+    cli.token = Some(token.to_string());
+    cfg.cli = Some(cli);
     file::write_config(paths, &cfg)?;
     Ok(())
+}
+
+/// Store the dev-machine token `token` for workspace `slug`, under the
+/// config lock (see [`CliSection::set_workspace_token`] for how `as_default`
+/// decides between refreshing the default workspace and adding one).
+/// Bootstraps `config.toml` with `[daemon].cloud_url` on a fresh host and
+/// applies the same cloud-mismatch guard as [`write_cli_token`].
+pub fn store_workspace_token(
+    paths: &Paths,
+    cloud_url: &str,
+    slug: &str,
+    token: &str,
+    as_default: bool,
+    force: bool,
+) -> Result<Config> {
+    file::mutate_config_or_init(
+        paths,
+        || Some(bootstrap_config(cloud_url)),
+        |cfg| {
+            apply_cloud_binding(cfg, cloud_url, force)?;
+            let mut cli = cfg.cli.take().unwrap_or_default();
+            cli.set_workspace_token(slug, token, as_default);
+            cfg.cli = Some(cli);
+            Ok(())
+        },
+    )
+}
+
+/// Make sure `config.toml` exists and is bound to `cloud_url`, before a
+/// login asks the user to approve anything. A different cloud is refused
+/// unless `force`, which rebinds and drops the old cloud's tokens.
+pub fn bind_cloud(paths: &Paths, cloud_url: &str, force: bool) -> Result<()> {
+    file::mutate_config_or_init(
+        paths,
+        || Some(bootstrap_config(cloud_url)),
+        |cfg| apply_cloud_binding(cfg, cloud_url, force),
+    )?;
+    Ok(())
+}
+
+fn bootstrap_config(cloud_url: &str) -> Config {
+    Config {
+        version: 2,
+        daemon: DaemonConfig {
+            cloud_url: cloud_url.to_string(),
+            ..DaemonConfig::default()
+        },
+        runners: vec![],
+        cli: None,
+    }
+}
+
+fn apply_cloud_binding(cfg: &mut Config, cloud_url: &str, force: bool) -> Result<()> {
+    if !cfg.daemon.cloud_url.is_empty() && cfg.daemon.cloud_url != cloud_url {
+        if !force {
+            anyhow::bail!(
+                "this host is already enrolled with cloud {} — refusing to sign in to a different cloud {} (pass --force to re-enroll against the new cloud)",
+                cfg.daemon.cloud_url,
+                cloud_url
+            );
+        }
+        cfg.daemon.cloud_url = cloud_url.to_string();
+        // Tokens of the old cloud are useless against the new one.
+        if let Some(cli) = cfg.cli.as_mut() {
+            cli.clear_all_tokens();
+        }
+    }
+    if cfg.daemon.cloud_url.is_empty() {
+        cfg.daemon.cloud_url = cloud_url.to_string();
+    }
+    Ok(())
+}
+
+/// Record the signed-in account (`pidash auth login`), for `Hello`.
+pub fn store_account(paths: &Paths, email: Option<&str>, user_id: Option<&str>) -> Result<()> {
+    if email.is_none() && user_id.is_none() {
+        return Ok(());
+    }
+    file::mutate_config(paths, |cfg| {
+        let mut cli = cfg.cli.take().unwrap_or_default();
+        if let Some(email) = email {
+            cli.account_email = Some(email.to_string());
+        }
+        if let Some(user_id) = user_id {
+            cli.account_user_id = Some(user_id.to_string());
+        }
+        cfg.cli = Some(cli);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// The token for workspace `slug` (`None` = the default workspace), as
+/// [`CliSection::token_for_workspace`] picks it.
+pub fn load_workspace_token(paths: &Paths, slug: Option<&str>) -> Result<Option<String>> {
+    if !paths.config_path().exists() {
+        return Ok(None);
+    }
+    let cfg = file::load_config(paths)?;
+    Ok(cfg
+        .cli
+        .as_ref()
+        .and_then(|c| c.token_for_workspace(slug))
+        .map(str::to_string))
 }
 
 /// Return the stable cloud identity for this dev machine, minting and
@@ -312,19 +412,37 @@ pub fn write_cli_default_project(paths: &Paths, project: &str) -> Result<()> {
     Ok(())
 }
 
-/// Clear `[cli].token` from `config.toml`. Used by `pidash auth logout`.
+/// Clear every workspace token (`[cli].token` and `[[cli.workspaces]]`) from
+/// `config.toml`. Used by `pidash auth logout`.
 /// Leaves `[[runner]]` blocks untouched so the daemon keeps running
 /// under its own identity. No-op if no config exists.
 pub fn clear_cli_token(paths: &Paths) -> Result<()> {
     if !paths.config_path().exists() {
         return Ok(());
     }
-    let mut cfg = file::load_config(paths)?;
-    if let Some(ref mut cli) = cfg.cli {
-        cli.token = None;
-    }
-    file::write_config(paths, &cfg)?;
+    file::mutate_config(paths, |cfg| {
+        if let Some(ref mut cli) = cfg.cli {
+            cli.clear_all_tokens();
+        }
+        Ok(())
+    })?;
     Ok(())
+}
+
+/// Forget one workspace's token (`pidash auth logout --workspace <slug>`).
+/// Returns whether the workspace had a token.
+pub fn clear_workspace_token(paths: &Paths, slug: &str) -> Result<bool> {
+    if !paths.config_path().exists() {
+        return Ok(false);
+    }
+    let mut removed = false;
+    file::mutate_config(paths, |cfg| {
+        if let Some(ref mut cli) = cfg.cli {
+            removed = cli.remove_workspace_token(slug);
+        }
+        Ok(())
+    })?;
+    Ok(removed)
 }
 
 /// Result of applying a mint locally: the new `RunnerConfig` block and
@@ -802,7 +920,10 @@ mod tests {
         .await
         .unwrap();
         let wd = &applied.runner.workspace.working_dir;
-        assert!(wd.starts_with(paths.data_dir.join("workspaces")), "wd: {wd:?}");
+        assert!(
+            wd.starts_with(paths.data_dir.join("workspaces")),
+            "wd: {wd:?}"
+        );
         // The persisted config validates (exclusive dir, no collision).
         file::load_config(&paths).unwrap().validate().unwrap();
     }
@@ -1006,5 +1127,48 @@ mod tests {
         let after = file::load_config(&paths).unwrap();
         assert!(after.cli.as_ref().and_then(|c| c.token.as_ref()).is_none());
         assert_eq!(after.runners.len(), 1, "runner block must be preserved");
+    }
+
+    #[test]
+    fn store_workspace_token_adds_a_workspace_next_to_the_default() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        bind_cloud(&paths, "https://example.com", false).unwrap();
+        store_workspace_token(&paths, "https://example.com", "acme", "mt_a", true, false).unwrap();
+        // `pidash auth login --workspace beta`
+        store_workspace_token(&paths, "https://example.com", "beta", "mt_b", false, false).unwrap();
+        assert_eq!(load_cli_token(&paths).unwrap().as_deref(), Some("mt_a"));
+        assert_eq!(load_cli_workspace(&paths).unwrap().as_deref(), Some("acme"));
+        assert_eq!(
+            load_workspace_token(&paths, Some("beta"))
+                .unwrap()
+                .as_deref(),
+            Some("mt_b")
+        );
+        assert_eq!(
+            load_workspace_token(&paths, Some("acme"))
+                .unwrap()
+                .as_deref(),
+            Some("mt_a")
+        );
+
+        // Signing out one workspace leaves the other.
+        assert!(clear_workspace_token(&paths, "beta").unwrap());
+        assert_eq!(load_workspace_token(&paths, Some("beta")).unwrap(), None);
+        assert_eq!(load_cli_token(&paths).unwrap().as_deref(), Some("mt_a"));
+
+        // A different cloud is refused before anything is approved.
+        assert!(bind_cloud(&paths, "https://other.example.com", false).is_err());
+    }
+
+    #[test]
+    fn store_account_records_the_signed_in_user() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        bind_cloud(&paths, "https://example.com", false).unwrap();
+        store_account(&paths, Some("dev@example.com"), Some("u-1")).unwrap();
+        let cli = file::load_config(&paths).unwrap().cli.unwrap();
+        assert_eq!(cli.account_email.as_deref(), Some("dev@example.com"));
+        assert_eq!(cli.account_user_id.as_deref(), Some("u-1"));
     }
 }

@@ -139,10 +139,54 @@ Useful follow-ups:
 
 ```bash
 pidash auth status               # who am I logged in as; runner list
-pidash auth logout               # revoke the CLI token server-side
-pidash runner add --project X    # add another runner
+pidash auth logout               # revoke every workspace token server-side
+pidash runner add --project X    # add another runner (no daemon restart)
 pidash runner list / remove      # manage runners
+pidash runner set-working-dir <runner> <path>   # move one runner, no restart
 ```
+
+### Several workspaces on one computer
+
+One daemon serves every workspace you sign in to on the computer. Each
+workspace has its own dev-machine token; each runner authenticates with the
+token of its block's `workspace_slug`, and the machine's control session is
+opened with any signed-in workspace's token.
+
+```bash
+pidash auth login                    # signs in (or refreshes) the default workspace
+pidash auth login --workspace beta   # adds workspace `beta`; the others stay signed in
+pidash runner add --workspace beta --project API
+pidash auth logout --workspace beta  # signs out only `beta`
+```
+
+The tokens live in `config.toml` (mode 0600):
+
+```toml
+[cli]
+token = "mt_…"            # the default workspace's token
+workspace_slug = "acme"   # the default workspace
+
+[[cli.workspaces]]        # one table per further workspace
+slug = "beta"
+token = "mt_…"
+```
+
+A config written by an older `pidash` (just `[cli] token` + `workspace_slug`)
+loads unchanged and is one workspace. When a workspace's token is revoked or
+signed out, only that workspace's runners stop, and `pidash status` shows them
+as `workspace_signed_out`; the other workspaces keep running. `pidash auth
+login --workspace <slug>` signs it back in without a daemon restart.
+
+### Runner changes without a restart
+
+`pidash runner add` (and the TUI's add-runner form) writes the new
+`[[runner]]` block and asks the running daemon to start that runner
+in-process; the service is only (re)started when no daemon is running.
+`pidash runner remove` tears the runner down in the daemon and waits until it
+is gone, so it disappears from `pidash status` at once and the same id can be
+added again. `pidash runner set-working-dir <runner> <path>` stops just that
+runner, rewrites its block under the config lock, validates it and starts it
+again; it is refused while the runner is mid-run. No other runner is touched.
 
 ### Agent CLI auto-install
 

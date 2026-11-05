@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::dto::{
-    ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRecord, ObservabilitySnapshot, RunSummary,
-    RunnerStatus,
+    ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRecord, ObservabilitySnapshot,
+    RunSummary, RunnerStatus,
 };
 
 /// IPC wire version. Bumped on incompatible shape changes between
@@ -41,13 +41,43 @@ use crate::dto::{
 /// types but not the handler yet answers with a `501` error — either
 /// way a version mismatch surfaces cleanly rather than as a confusing
 /// serde failure.
-pub const IPC_VERSION: u32 = 4;
+///
+/// v5 (PIDESKAPP-122, the daemon foundation of
+/// `.ai_design/built_engine_as_runner/design.md` §4.4, §4.9 and §5) added
+/// `Hello` (the discovery handshake that reports this version), the
+/// per-runner `RunnerReconfigure`, `CredentialsReload`, and the
+/// `workspace_signed_out` flag on `RunnerStatusSnapshot`. A client that
+/// gets no `Hello` answer is talking to a daemon older than v5.
+pub const IPC_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
-    /// Activate an already-persisted runner without restarting other runners.
+    /// Discovery handshake (v5): the daemon answers with
+    /// [`Response::Hello`] — its version, [`IPC_VERSION`], the signed-in
+    /// account, the workspaces it holds credentials for, the machine id
+    /// and the built-in engine's state. A daemon older than v5 answers an
+    /// error, which a client treats as "too old".
+    Hello,
+    /// Activate an already-persisted runner without restarting other
+    /// runners. Since v5 a runner that is already running is restarted
+    /// in-process when its block on disk changed, and the daemon re-reads
+    /// the workspace tokens first, so a runner of a workspace signed in
+    /// after the daemon started comes up without a restart.
     RunnerActivateLocal { runner: String },
+    /// Change one runner's settings without restarting the daemon (v5):
+    /// the daemon stops that runner, rewrites its `[[runner]]` block under
+    /// the config lock, validates the result and starts it again. Every
+    /// other runner keeps running. Refused while the runner has a run or a
+    /// local chat turn in flight.
+    RunnerReconfigure {
+        runner: String,
+        changes: RunnerChanges,
+    },
+    /// Re-read the workspace tokens from `config.toml` (v5), after
+    /// `pidash auth login` / `logout`. Runners whose workspace's token
+    /// changed are restarted in-process; nothing else is touched.
+    CredentialsReload,
     /// One-shot current-state snapshot.
     StatusGet,
     /// Subscribe to status deltas (stream until the connection closes).
@@ -229,6 +259,8 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", content = "data", rename_all = "snake_case")]
 pub enum Response {
+    /// Answer to [`Request::Hello`].
+    Hello(HelloInfo),
     Status(StatusSnapshot),
     Config(serde_json::Value),
     Runs(Vec<RunSummary>),
@@ -300,6 +332,84 @@ pub enum Response {
         chat_session_id: Uuid,
         closed_at: DateTime<Utc>,
     },
+}
+
+/// Settings [`Request::RunnerReconfigure`] changes. Every field is
+/// optional; `None` leaves the setting as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunnerChanges {
+    /// New exclusive working directory. Must be absolute; the daemon
+    /// creates it when missing and refuses one that collides with, or
+    /// nests inside, another runner's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<std::path::PathBuf>,
+}
+
+impl RunnerChanges {
+    pub fn is_empty(&self) -> bool {
+        self.working_dir.is_none()
+    }
+}
+
+/// Answer to [`Request::Hello`] (design §4.4).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HelloInfo {
+    /// The daemon's own version (`CARGO_PKG_VERSION` of `pidash`).
+    pub daemon_version: String,
+    /// The daemon's [`IPC_VERSION`]. A client compares it with the
+    /// minimum it needs.
+    pub ipc_version: u32,
+    /// Cloud the daemon is bound to (`[daemon].cloud_url`).
+    pub cloud_url: String,
+    /// The signed-in account; `None` when no workspace is signed in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<HelloAccount>,
+    /// Workspaces the daemon holds a credential for, plus workspaces that
+    /// have runners but whose credential is missing or revoked
+    /// (`signed_in = false`). Sorted by slug.
+    #[serde(default)]
+    pub workspaces: Vec<HelloWorkspace>,
+    /// The dev machine id (`[daemon].dev_machine_id`); `None` until the
+    /// first sign-in mints it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<Uuid>,
+    /// State of the built-in engine.
+    pub engine: EngineState,
+}
+
+/// The account `pidash auth login` signed in. Fields the login could not
+/// learn are `None`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HelloAccount {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    pub cloud_url: String,
+}
+
+/// One workspace in [`HelloInfo::workspaces`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HelloWorkspace {
+    pub slug: String,
+    /// Whether the daemon holds a live credential for it. `false` means
+    /// its runners are `workspace_signed_out`.
+    pub signed_in: bool,
+    /// How many runners of this workspace the daemon hosts.
+    #[serde(default)]
+    pub runners: usize,
+}
+
+/// The built-in engine's state as `Hello` reports it (design §4.4).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineState {
+    Available,
+    SignedOut,
+    Expiring,
+    /// The daemon has no engine (this build: the engine lands in a later
+    /// release), or the instance cannot serve it.
+    Unavailable,
 }
 
 /// Connection-level state shared across every runner the daemon hosts.
@@ -397,6 +507,13 @@ pub struct RunnerStatusSnapshot {
     /// runner locally (it was deleted in the cloud). 0 when not confirming.
     #[serde(default)]
     pub cloud_deleted_confirmations: u32,
+    /// The daemon holds no live credential for this runner's workspace
+    /// (never signed in, signed out, or its token was revoked), so the
+    /// runner cannot reach the cloud until `pidash auth login --workspace
+    /// <slug>`. Other workspaces' runners are unaffected. `false` from an
+    /// older daemon.
+    #[serde(default)]
+    pub workspace_signed_out: bool,
     /// Per-active-run telemetry. `None` when the daemon isn't running
     /// with `agent_observability_v1` enabled, or when the runner has
     /// never seen a run.
@@ -538,6 +655,12 @@ impl RunnerStatusSnapshot {
         let project = self.project_slug.as_deref().unwrap_or("(no project)");
         if self.connected {
             return format!("  {} — {:?} project={}", self.name, self.status, project);
+        }
+        if self.workspace_signed_out {
+            return format!(
+                "  {} — workspace_signed_out project={} (sign the workspace in with `pidash auth login --workspace <slug>`)",
+                self.name, project
+            );
         }
         if self.cloud_deleted_confirmations > 0 {
             // The cloud keeps answering `runner_gone`; the daemon removes
@@ -689,6 +812,7 @@ mod tests {
                 next_retry_at: None,
                 disconnect_reason: None,
                 cloud_deleted_confirmations: 0,
+                workspace_signed_out: false,
                 observability: None,
             }],
         };
@@ -740,6 +864,7 @@ mod tests {
             next_retry_at: None,
             disconnect_reason: None,
             cloud_deleted_confirmations: 0,
+            workspace_signed_out: false,
             observability: None,
         }
     }
@@ -791,7 +916,10 @@ mod tests {
     #[test]
     fn reconnect_request_wire_shape() {
         let all = serde_json::to_value(Request::Reconnect { runner: None }).unwrap();
-        assert_eq!(all, serde_json::json!({"method": "reconnect", "params": {}}));
+        assert_eq!(
+            all,
+            serde_json::json!({"method": "reconnect", "params": {}})
+        );
         let one = serde_json::to_value(Request::Reconnect {
             runner: Some("r1".into()),
         })
@@ -829,6 +957,7 @@ mod tests {
                 next_retry_at: None,
                 disconnect_reason: None,
                 cloud_deleted_confirmations: 0,
+                workspace_signed_out: false,
                 observability: Some(ObservabilitySnapshot {
                     last_event_at: Some(Utc::now()),
                     last_event_kind: Some("raw".into()),
@@ -915,6 +1044,7 @@ mod tests {
                     next_retry_at: None,
                     disconnect_reason: None,
                     cloud_deleted_confirmations: 0,
+                    workspace_signed_out: false,
                     observability: None,
                 },
                 RunnerStatusSnapshot {
@@ -932,6 +1062,7 @@ mod tests {
                     next_retry_at: None,
                     disconnect_reason: None,
                     cloud_deleted_confirmations: 0,
+                    workspace_signed_out: false,
                     observability: None,
                 },
             ],
@@ -944,11 +1075,11 @@ mod tests {
     // ---- Local chat (IPC v4, PDASHOSS01-159) ------------------------
 
     #[test]
-    fn ipc_version_is_four_for_local_chat() {
+    fn ipc_version_covers_local_chat() {
         // The local-chat message types are the first real wire change
-        // since the shared-crate extraction. Guard the bump so a stray
-        // edit that reverts it is caught here.
-        assert_eq!(IPC_VERSION, 4);
+        // since the shared-crate extraction (v4). Guard the bump so a stray
+        // edit that reverts it is caught here; v5 (Hello) builds on it.
+        const { assert!(IPC_VERSION >= 4) };
     }
 
     #[test]
@@ -1010,7 +1141,14 @@ mod tests {
         let s = serde_json::to_string(&req).unwrap();
         // `skip_serializing_if = Option::is_none` keeps absent selectors
         // off the wire (and keeps older daemons from tripping on them).
-        for field in ["runner", "cwd", "model", "mode", "local_thread_id", "local_session_id"] {
+        for field in [
+            "runner",
+            "cwd",
+            "model",
+            "mode",
+            "local_thread_id",
+            "local_session_id",
+        ] {
             assert!(!s.contains(field), "unexpected {field} in {s}");
         }
         // Required fields are still present.
@@ -1128,5 +1266,98 @@ mod tests {
             }
             other => panic!("expected ChatEvent, got {other:?}"),
         }
+    }
+
+    // ---- v5: Hello, RunnerReconfigure, CredentialsReload ---------------
+
+    #[test]
+    fn v5_requests_have_the_documented_wire_shape() {
+        assert_eq!(
+            serde_json::to_value(Request::Hello).unwrap(),
+            serde_json::json!({"method": "hello"})
+        );
+        assert_eq!(
+            serde_json::to_value(Request::CredentialsReload).unwrap(),
+            serde_json::json!({"method": "credentials_reload"})
+        );
+        let reconfigure = Request::RunnerReconfigure {
+            runner: "main".into(),
+            changes: RunnerChanges {
+                working_dir: Some("/work/main".into()),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&reconfigure).unwrap(),
+            serde_json::json!({
+                "method": "runner_reconfigure",
+                "params": {"runner": "main", "changes": {"working_dir": "/work/main"}}
+            })
+        );
+        let back: Request = serde_json::from_value(serde_json::json!({
+            "method": "runner_reconfigure",
+            "params": {"runner": "main", "changes": {}}
+        }))
+        .unwrap();
+        assert!(matches!(
+            back,
+            Request::RunnerReconfigure { changes, .. } if changes.is_empty()
+        ));
+    }
+
+    #[test]
+    fn hello_response_shape_round_trips() {
+        let hello = HelloInfo {
+            daemon_version: "0.1.29".into(),
+            ipc_version: IPC_VERSION,
+            cloud_url: "https://cloud.example".into(),
+            account: Some(HelloAccount {
+                user_id: None,
+                email: Some("dev@example.com".into()),
+                cloud_url: "https://cloud.example".into(),
+            }),
+            workspaces: vec![HelloWorkspace {
+                slug: "acme".into(),
+                signed_in: true,
+                runners: 2,
+            }],
+            machine_id: Some(Uuid::nil()),
+            engine: EngineState::Unavailable,
+        };
+        let wire = serde_json::to_value(Response::Hello(hello.clone())).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "result": "hello",
+                "data": {
+                    "daemon_version": "0.1.29",
+                    "ipc_version": IPC_VERSION,
+                    "cloud_url": "https://cloud.example",
+                    "account": {"email": "dev@example.com", "cloud_url": "https://cloud.example"},
+                    "workspaces": [{"slug": "acme", "signed_in": true, "runners": 2}],
+                    "machine_id": "00000000-0000-0000-0000-000000000000",
+                    "engine": "unavailable",
+                }
+            })
+        );
+        let Response::Hello(back) = serde_json::from_value(wire).unwrap() else {
+            panic!("hello expected")
+        };
+        assert_eq!(back, hello);
+        assert_eq!(IPC_VERSION, 5);
+    }
+
+    #[test]
+    fn workspace_signed_out_defaults_off_and_shows_in_status() {
+        let mut snap: RunnerStatusSnapshot = serde_json::from_value(serde_json::json!({
+            "runner_id": Uuid::nil(), "name": "main", "status": "idle",
+            "current_run": null, "approvals_pending": 0, "last_heartbeat": null,
+        }))
+        .unwrap();
+        assert!(!snap.workspace_signed_out, "older daemons omit the field");
+        snap.workspace_signed_out = true;
+        assert!(
+            snap.compact_line(Utc::now())
+                .contains("workspace_signed_out")
+        );
     }
 }

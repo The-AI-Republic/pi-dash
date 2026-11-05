@@ -431,8 +431,8 @@ mod resolve_tests {
     use super::*;
     use crate::config::file::write_config;
     use crate::config::schema::{
-        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CursorAgentSection, CliSection, CodexSection, Config,
-        DaemonConfig, RunnerConfig, WorkspaceSection,
+        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CliSection, CodexSection, Config,
+        CursorAgentSection, DaemonConfig, RunnerConfig, WorkspaceSection,
     };
     use crate::util::paths::Paths;
     use tempfile::tempdir;
@@ -479,7 +479,7 @@ mod resolve_tests {
             cli: Some(CliSection {
                 token: Some(token.into()),
                 workspace_slug: None,
-                default_project: None,
+                ..Default::default()
             }),
         }
     }

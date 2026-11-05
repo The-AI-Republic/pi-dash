@@ -4,8 +4,8 @@
 //! The CLI mints the runner UUID locally (via ``util::runner_id::mint``,
 //! shared with the TUI), POSTs to the cloud, and then writes the new
 //! ``[[runner]]`` block to ``config.toml``. Local config remains the
-//! canonical runner list — the daemon picks up the change on its next
-//! reload.
+//! canonical runner list; the running daemon is then asked to activate the
+//! new block in-process (no restart, PIDESKAPP-122).
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
@@ -37,6 +37,84 @@ pub enum RunnerCommand {
     Remove(RemoveArgs),
     /// Use a developer-supplied local agent package; installs and starts nothing.
     UsePackage(UsePackageArgs),
+    /// Change a runner's working directory without restarting the daemon.
+    /// Only that runner is stopped and started again; refused while it is
+    /// mid-run.
+    SetWorkingDir(SetWorkingDirArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct SetWorkingDirArgs {
+    /// Name of the runner (see `pidash runner list`).
+    pub runner: String,
+    /// New working directory: one exclusive directory per runner, created
+    /// when missing. Must not be, contain or sit inside another runner's.
+    pub path: PathBuf,
+}
+
+/// `pidash runner set-working-dir <runner> <path>`: through the running
+/// daemon's per-runner reconfigure when one answers, else by rewriting the
+/// block directly (no daemon, so nothing to restart).
+pub async fn set_working_dir(args: SetWorkingDirArgs, paths: &Paths) -> Result<()> {
+    use crate::ipc::client::Client;
+    use crate::ipc::protocol::{Request, Response, RunnerChanges};
+
+    let path = if args.path.is_absolute() {
+        args.path.clone()
+    } else {
+        std::env::current_dir()
+            .context("reading the current directory")?
+            .join(&args.path)
+    };
+    let cfg = file::load_config(paths)?;
+    if !cfg.runners.iter().any(|r| r.name == args.runner) {
+        anyhow::bail!("no runner named {:?} in config.toml", args.runner);
+    }
+
+    if let Ok(mut client) = Client::connect(paths.ipc_socket_path()).await {
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            client.call(Request::RunnerReconfigure {
+                runner: args.runner.clone(),
+                changes: RunnerChanges {
+                    working_dir: Some(path.clone()),
+                },
+            }),
+        )
+        .await
+        .context("timed out waiting for the daemon to reconfigure the runner")??;
+        return match response {
+            Response::Ack => {
+                println!(
+                    "Runner {} now works in {} (restarted in the running daemon; other runners untouched).",
+                    args.runner,
+                    path.display()
+                );
+                Ok(())
+            }
+            Response::Error(e) => anyhow::bail!("daemon refused: {}", e.message),
+            other => anyhow::bail!("unexpected daemon response: {other:?}"),
+        };
+    }
+
+    // No daemon: nothing is running, so rewrite the block directly.
+    std::fs::create_dir_all(&path)
+        .with_context(|| format!("creating working dir {}", path.display()))?;
+    file::mutate_config(paths, |cfg| {
+        let runner = cfg
+            .runners
+            .iter_mut()
+            .find(|r| r.name == args.runner)
+            .with_context(|| format!("no configured runner named {:?}", args.runner))?;
+        runner.workspace.working_dir = path.clone();
+        Ok(())
+    })?;
+    println!(
+        "Runner {} now works in {} (the daemon is not running; used from its next start).",
+        args.runner,
+        path.display()
+    );
+    Ok(())
 }
 
 #[derive(Debug, ClapArgs)]
@@ -58,7 +136,10 @@ fn use_package(args: UsePackageArgs, paths: &Paths) -> Result<()> {
             .with_context(|| format!("no configured runner named {:?}", args.name))?;
         package.apply_to_runner(runner)
     })?;
-    println!("Agent package configured for {:?}. No package was installed or started. Restart the owning daemon when idle to apply the change.", args.name);
+    println!(
+        "Agent package configured for {:?}. No package was installed or started. Restart the owning daemon when idle to apply the change.",
+        args.name
+    );
     Ok(())
 }
 
@@ -140,6 +221,7 @@ pub async fn run(args: RunnerArgs, paths: &Paths) -> Result<()> {
         RunnerCommand::List => list(paths),
         RunnerCommand::Remove(a) => remove(a, paths).await,
         RunnerCommand::UsePackage(a) => use_package(a, paths),
+        RunnerCommand::SetWorkingDir(a) => set_working_dir(a, paths).await,
     }
 }
 
@@ -292,26 +374,42 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             );
         }
     } else {
-        println!("Workspace context will be written when this runner resolves its working directory on the first run.");
-    }
-    if applied.is_first_runner {
         println!(
-            "First runner on this host — installing service so the daemon starts automatically."
+            "Workspace context will be written when this runner resolves its working directory on the first run."
         );
-        let svc = crate::service::detect();
-        svc.write_unit(paths).await?;
-        svc.enable_and_start().await?;
-    } else {
-        // Restart so the new [[runner]] block is loaded.
-        let outcome = crate::service::reload::restart_and_verify(paths).await;
-        if !outcome.ok {
+    }
+    // Bring the runner up inside the running daemon: no restart, so no
+    // other runner's run is interrupted (design §5). Only with no daemon
+    // running is the service (installed and) started, which loads the
+    // new block with the others.
+    use crate::service::reload::{ActivateOutcome, activate_runner_in_daemon, restart_and_verify};
+    match activate_runner_in_daemon(paths, &applied.runner.name).await {
+        ActivateOutcome::Activated => {
+            println!("Runner is live in the running daemon (no restart).");
+        }
+        ActivateOutcome::DaemonNotRunning if applied.is_first_runner => {
             println!(
-                "(Service restart did not complete cleanly: {})",
-                outcome.summary
+                "First runner on this host — installing service so the daemon starts automatically."
             );
-            if let Some(detail) = outcome.detail {
-                println!("{detail}");
+            let svc = crate::service::detect();
+            svc.write_unit(paths).await?;
+            svc.enable_and_start().await?;
+        }
+        ActivateOutcome::DaemonNotRunning => {
+            let outcome = restart_and_verify(paths).await;
+            if !outcome.ok {
+                println!(
+                    "(Service start did not complete cleanly: {})",
+                    outcome.summary
+                );
+                if let Some(detail) = outcome.detail {
+                    println!("{detail}");
+                }
             }
+        }
+        ActivateOutcome::Failed(why) => {
+            println!("(The running daemon did not activate the runner: {why})");
+            println!("The runner block was written; `pidash restart` loads it.");
         }
     }
 
@@ -337,13 +435,18 @@ async fn ensure_cli_token(
     cloud_url: Option<&str>,
     workspace: Option<&str>,
 ) -> Result<String> {
-    if let Some(token) =
-        runner_ops::load_cli_token(paths).context("reading [cli].token from config.toml")?
-    {
+    // The cloud binds a runner to its token's workspace, so a runner of
+    // workspace W is created with W's token (design §4.9).
+    if let Some(token) = workspace_token(paths, workspace)? {
         return Ok(token);
     }
 
-    println!("No Pi Dash auth token found; starting `pidash auth login` first.");
+    match workspace {
+        Some(slug) => println!(
+            "Workspace {slug:?} is not signed in on this computer; starting `pidash auth login --workspace {slug}` first."
+        ),
+        None => println!("No Pi Dash auth token found; starting `pidash auth login` first."),
+    }
     crate::cli::auth::login::run_auth_only(
         crate::cli::auth::login::Args {
             url: cloud_url.map(|u| u.trim_end_matches('/').to_string()),
@@ -357,11 +460,23 @@ async fn ensure_cli_token(
     .await
     .context("auth login before runner add failed")?;
 
-    runner_ops::load_cli_token(paths)
-        .context("reading [cli].token from config.toml after auth login")?
-        .ok_or_else(|| {
-            anyhow::anyhow!("auth login completed but no CLI token was written to config.toml")
-        })
+    workspace_token(paths, workspace)?.ok_or_else(|| {
+        anyhow::anyhow!("auth login completed but no CLI token was written to config.toml")
+    })
+}
+
+/// The token to act on `workspace` with (`None` = the default workspace).
+/// A legacy user-scoped API token (not `mt_`) is not bound to one
+/// workspace, so it still serves any workspace, as before.
+fn workspace_token(paths: &Paths, workspace: Option<&str>) -> Result<Option<String>> {
+    if let Some(token) = runner_ops::load_workspace_token(paths, workspace)
+        .context("reading workspace tokens from config.toml")?
+    {
+        return Ok(Some(token));
+    }
+    Ok(runner_ops::load_cli_token(paths)
+        .context("reading [cli].token from config.toml")?
+        .filter(|t| !t.starts_with("mt_")))
 }
 
 fn hostname_or_unknown() -> String {
@@ -454,8 +569,9 @@ pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
         if args.local_only {
             (RemoveMode::LocalOnly, None, FallbackReason::Unused)
         } else {
-            let cli_token = runner_ops::load_cli_token(paths)
-                .context("reading [cli].token from config.toml")?;
+            // The runner's own workspace token: the cloud binds a runner
+            // to its token's workspace (design §4.9).
+            let cli_token = workspace_token(paths, cfg.runners[idx].workspace_slug.as_deref())?;
             match cli_token {
                 None => (
                     RemoveMode::OfflineFallback,
@@ -521,18 +637,17 @@ pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
         anyhow::bail!("cloud delete-runner failed");
     }
 
-    // For OfflineFallback / LocalOnly modes, ask the local daemon to
-    // tear down the runner via IPC before we touch config.toml or the
-    // data dir. Without this the daemon keeps polling the cloud against
-    // its in-memory copy of the config and re-creates the data dir
-    // until the operator manually restarts the service. For Cascade
-    // mode, the cloud already enqueued a remove_runner frame and the
-    // daemon will react to that; the direct mutation below is the
-    // belt-and-suspenders "what if the daemon isn't running on this
-    // host" path.
-    if !matches!(mode, RemoveMode::Cascade) {
-        let _ = try_ipc_remove_local(paths, &args.name).await;
-    }
+    // Ask the local daemon to tear down the runner via IPC before we
+    // touch config.toml or the data dir, in every mode. Without this the
+    // daemon keeps polling the cloud against its in-memory copy of the
+    // config and re-creates the data dir until the operator restarts the
+    // service. In Cascade mode the cloud also enqueued a remove_runner
+    // frame, but tearing down now means `pidash status` stops listing the
+    // runner at once instead of after the next poll; the daemon answers
+    // only once its teardown is done, so re-adding the same id right after
+    // is safe. The direct mutation below is the belt-and-suspenders "what
+    // if the daemon isn't running on this host" path.
+    let _ = try_ipc_remove_local(paths, &args.name).await;
 
     // Local cleanup: strip the [[runner]] block under the host-wide
     // config lock, then drop the per-runner data dir. The daemon's

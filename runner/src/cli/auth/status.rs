@@ -24,9 +24,7 @@ struct UserMe {
 
 pub async fn run(_args: Args, paths: &Paths) -> Result<()> {
     let token = runner_ops::load_cli_token(paths)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "not logged in — run `pidash auth login` to authenticate this host"
-        )
+        anyhow::anyhow!("not logged in — run `pidash auth login` to authenticate this host")
     })?;
 
     let cfg = file::load_config(paths).ok();
@@ -79,6 +77,18 @@ pub async fn run(_args: Args, paths: &Paths) -> Result<()> {
     }
 
     if let Some(c) = &cfg {
+        let workspaces = c
+            .cli
+            .as_ref()
+            .map(|cli| cli.workspace_slugs())
+            .unwrap_or_default();
+        if !workspaces.is_empty() {
+            println!(
+                "  ✓ Workspaces signed in: {} (default: {})",
+                workspaces.join(", "),
+                workspaces[0]
+            );
+        }
         let runner_count = c.runners.len();
         if runner_count == 0 {
             println!("  - No runners registered on this host.");

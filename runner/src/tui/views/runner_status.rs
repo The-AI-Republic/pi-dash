@@ -732,6 +732,7 @@ mod tests {
             next_retry_at: None,
             disconnect_reason: None,
             cloud_deleted_confirmations: 0,
+            workspace_signed_out: false,
             observability: None,
         }
     }

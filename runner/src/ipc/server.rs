@@ -146,8 +146,17 @@ impl IpcServer {
 
     async fn dispatch(&self, req: Request, buf: &mut BufStream<IpcStream>) -> Result<Response> {
         match req {
+            Request::Hello => Ok(Response::Hello(self.spawn_ctx.hello())),
             Request::RunnerActivateLocal { runner } => {
                 self.spawn_ctx.activate_configured(&runner).await?;
+                Ok(Response::Ack)
+            }
+            Request::RunnerReconfigure { runner, changes } => {
+                self.spawn_ctx.reconfigure_runner(&runner, changes).await?;
+                Ok(Response::Ack)
+            }
+            Request::CredentialsReload => {
+                self.spawn_ctx.reload_credentials().await?;
                 Ok(Response::Ack)
             }
             Request::StatusGet => Ok(Response::Status(self.status_snapshot().await)),
@@ -307,6 +316,20 @@ impl IpcServer {
                              (loop may have already exited)"
                         )
                     })?;
+                // Answer only once the teardown finished: the runner is out
+                // of the registry (so `pidash status` no longer lists it)
+                // and its block is stripped, so re-adding the same id right
+                // after cannot race the strip.
+                if !self
+                    .spawn_ctx
+                    .wait_runner_removed(
+                        inst.runner_id,
+                        crate::daemon::supervisor::RUNNER_REMOVE_WAIT,
+                    )
+                    .await
+                {
+                    anyhow::bail!("runner {runner:?} did not finish its teardown in time");
+                }
                 Ok(Response::Ack)
             }
             // Local chat (PDASHOSS01-159, IPC v4). The desktop host drives
@@ -442,7 +465,9 @@ impl IpcServer {
         let instances = self.all_instances();
         let mut runners = Vec::with_capacity(instances.len());
         for inst in instances {
-            runners.push(inst.state.runner_snapshot().await);
+            let mut snap = inst.state.runner_snapshot().await;
+            snap.workspace_signed_out = self.spawn_ctx.is_workspace_signed_out(&inst);
+            runners.push(snap);
         }
         // Stable order so successive snapshots don't churn rendering.
         runners.sort_by(|a, b| a.name.cmp(&b.name));
