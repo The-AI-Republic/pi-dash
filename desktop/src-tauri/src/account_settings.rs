@@ -22,7 +22,7 @@ use std::path::PathBuf;
 
 use tauri::{AppHandle, Runtime};
 
-use crate::managed_runner::ManagedPaths;
+use crate::app_paths::AppPaths;
 
 /// The modes the engine understands (`runner/src/approval/mode.rs`).
 const APPROVAL_MODES: [&str; 3] = ["ask", "workspace", "full_access"];
@@ -47,7 +47,7 @@ pub async fn chat_approval_modes_save<R: Runtime>(
     account: String,
     modes: BTreeMap<String, String>,
 ) -> Result<(), String> {
-    save_approval_modes(&ManagedPaths::resolve(&app)?, &account, modes)
+    save_approval_modes(&AppPaths::resolve(&app)?, &account, modes)
 }
 
 /// The approval modes remembered for `account`; empty when there are none.
@@ -56,11 +56,11 @@ pub async fn chat_approval_modes_load<R: Runtime>(
     app: AppHandle<R>,
     account: String,
 ) -> Result<BTreeMap<String, String>, String> {
-    load_approval_modes(&ManagedPaths::resolve(&app)?, &account)
+    load_approval_modes(&AppPaths::resolve(&app)?, &account)
 }
 
 fn save_approval_modes(
-    paths: &ManagedPaths,
+    paths: &AppPaths,
     account: &str,
     modes: BTreeMap<String, String>,
 ) -> Result<(), String> {
@@ -80,7 +80,7 @@ fn save_approval_modes(
     let path = settings_path(paths, account)?;
     let bytes =
         serde_json::to_vec_pretty(&settings).map_err(|e| format!("account settings: {e}"))?;
-    crate::managed_runner::atomic_write(&path, &bytes)?;
+    crate::app_paths::atomic_write(&path, &bytes)?;
     if let Some(dir) = path.parent() {
         crate::chat_history::restrict_dir(dir);
     }
@@ -88,7 +88,7 @@ fn save_approval_modes(
 }
 
 fn load_approval_modes(
-    paths: &ManagedPaths,
+    paths: &AppPaths,
     account: &str,
 ) -> Result<BTreeMap<String, String>, String> {
     let mut modes = read(paths, account)?.chat_approval_modes;
@@ -98,7 +98,7 @@ fn load_approval_modes(
 }
 
 /// `managed/accounts/<account-key>/settings.json`.
-fn settings_path(paths: &ManagedPaths, account: &str) -> Result<PathBuf, String> {
+fn settings_path(paths: &AppPaths, account: &str) -> Result<PathBuf, String> {
     Ok(paths
         .root
         .join("accounts")
@@ -108,7 +108,7 @@ fn settings_path(paths: &ManagedPaths, account: &str) -> Result<PathBuf, String>
 
 /// Missing or unreadable settings are the same as none: a damaged file must not
 /// stop sign-out, and the next save rewrites it.
-fn read(paths: &ManagedPaths, account: &str) -> Result<AccountSettings, String> {
+fn read(paths: &AppPaths, account: &str) -> Result<AccountSettings, String> {
     let path = settings_path(paths, account)?;
     Ok(std::fs::read(&path)
         .ok()
@@ -129,8 +129,8 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    fn paths(root: &Path) -> ManagedPaths {
-        ManagedPaths::for_test_root(root.join("managed"))
+    fn paths(root: &Path) -> AppPaths {
+        AppPaths::at(root.join("managed"))
     }
 
     fn modes(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {

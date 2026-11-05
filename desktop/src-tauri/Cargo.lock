@@ -778,6 +778,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "directories"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16f5094c54661b38d03bd7e50df373292118db60b585c08a411c6d840017fe7d"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
 name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2703,6 +2712,7 @@ name = "pi-dash-desktop"
 version = "0.3.3"
 dependencies = [
  "chrono",
+ "directories",
  "libc",
  "pidash-ipc",
  "reqwest",
@@ -2719,6 +2729,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tempfile",
  "tokio",
+ "toml 0.9.12+spec-1.1.0",
  "url",
  "uuid",
 ]

@@ -1,10 +1,44 @@
 # Pi Dash Desktop
 
 The Pi Dash desktop app: a Tauri v2 wrapper that bundles the Pi Dash web UI
-as static assets and runs it in a native window, together with a bundled
-`pidash` runner and agent engine so work can run on the user's own machine
-("Pi Dash Agent"). Builds to `.AppImage` / `.deb` on Linux, `.dmg` / `.app`
-on macOS, `.msi` / `.exe` on Windows.
+as static assets and runs it in a native window. Work on the user's own
+machine runs on that computer's Pi Dash daemon — the `pidash` CLI, run as a
+user service, with the built-in engine it ships — and the app is a client of
+that daemon over its local socket. It carries a copy of the CLI so it can set
+the daemon up when there is none. Builds to `.AppImage` / `.deb` on Linux,
+`.dmg` / `.app` on macOS, `.msi` / `.exe` on Windows.
+
+### The app and the computer's daemon
+
+(`.ai_design/built_engine_as_runner/design.md` §4, §10, §12, §13.)
+
+- **Discovery.** The app connects to the daemon's standard control socket
+  (the path an override-less `pidash` resolves) and sends `Hello`
+  (`src-tauri/src/daemon.rs`). No answer means a daemon too old for the app,
+  which offers "Update Pi Dash on this computer" (never silently, and not for
+  an install it cannot write); a newer protocol asks the user to update the
+  app; a daemon signed in to another account or cloud is refused, with offers
+  to switch either side. The app never starts a second daemon, and never
+  starts, stops or re-roots the one there is.
+- **Set-up.** With no daemon, the app asks before setting one up (the
+  service is required; declining sets nothing up): it installs the CLI it
+  carries into the official location (the network installer on Windows),
+  signs it in with a device grant it approves with its own session, runs
+  `pidash install` with the user's login-shell `PATH` and `pidash start`, and
+  `pidash engine install` when the engine is missing (`src-tauri/src/setup.rs`).
+- **Sign-in.** The app renews the engine credential silently only when the
+  daemon reports it `expiring` or `expired`; `never` gets "Turn on the
+  built-in engine", `signed_out` only an explicit "Sign in the built-in
+  engine". Signing out of the app signs out only the app, unless the user
+  ticks "Also sign out Pi Dash on this computer" (`pidash auth logout`).
+- **Chat.** "This computer" chats go to the daemon over the socket; every
+  other runner's chat goes through the server.
+- **Migration.** Builds before this ran a private daemon per workspace under
+  the app's data. On launch the app merges each such legacy machine into the
+  daemon's, re-adds its engine runners with their folders, moves the
+  account's engine home, and deletes the old config and credentials, keeping
+  task folders (`src-tauri/src/migration.rs`). Retried on each launch until it
+  can run.
 
 AI Republic publishes the official, signed and auto-updating build from this
 source (with its cloud edition's overrides and release configuration, kept
@@ -15,7 +49,7 @@ is here.
 
 ```
 desktop/
-  src-tauri/          the Rust app (window, deep links, updater, managed runner)
+  src-tauri/          the Rust app (window, deep links, updater, daemon client)
   scripts/            dev-prep.sh (bundle the SPA), prepare-agent.sh (stage the
                       runner + engine locally), bundle_agents.py (release staging),
                       merge-web-tree.sh, test-overlay.sh
@@ -201,8 +235,9 @@ distributor that publishes signed updates supplies it with
 `createUpdaterArtifacts` then requires `TAURI_SIGNING_PRIVATE_KEY` /
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` at build time (`cargo tauri signer
 generate` creates a keypair). A distributor should also set its own
-`identifier`: it determines the app-data directory (where the managed runner
-keeps its state) and the OS install identity.
+`identifier`: it determines the app-data directory (where the app keeps its
+local chat history and settings, and where older builds kept their private
+daemon trees, which the migration reads) and the OS install identity.
 
 ## Tests
 
