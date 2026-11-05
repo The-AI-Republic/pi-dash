@@ -424,7 +424,7 @@ where
         now: DateTime<Utc>,
     ) -> Result<(), DispatchError> {
         domain_issues::update_issue_state_no_audit(
-            &mut **self.dispatch_tx().inner(),
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
             issue_id,
             state_id,
             now,

@@ -1262,9 +1262,12 @@ async fn apply_bulk_dates(pool: &sqlx::PgPool, writes: &[BulkWrite<'_>]) -> Resu
             target_date: write.target_date,
         });
     }
-    pidash_services::domain::issues::bulk_update_issue_dates(pool, &parsed_writes)
-        .await
-        .map_err(|_| Denial::ServerError)
+    pidash_services::domain::issues::bulk_update_issue_dates(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &parsed_writes,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)
 }
 
 /// Python truthiness for the `if start_date:` / `if target_date:` guards.
@@ -2459,9 +2462,13 @@ async fn link_sub_issues(
     parent_id: &uuid::Uuid,
     found: &[uuid::Uuid],
 ) -> Result<(), Denial> {
-    pidash_services::domain::issues::link_sub_issue_parents(pool, *parent_id, found)
-        .await
-        .map_err(|_| Denial::ServerError)
+    pidash_services::domain::issues::link_sub_issue_parents(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *parent_id,
+        found,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)
 }
 
 /// The sub-issue POST rows (`:241-244`): the `IssueSerializer` columns

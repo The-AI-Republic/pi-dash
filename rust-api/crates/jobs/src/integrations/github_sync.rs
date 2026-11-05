@@ -970,7 +970,7 @@ async fn create_issue(
     let stripped = strip_html_text(description_html);
     let issue_id = Uuid::new_v4();
     domain_issues::insert_mirror_issue(
-        &mut **tx,
+        &pidash_db::orm_tx::TxConn::new(tx),
         &domain_issues::MirrorIssueInsert {
             issue_id,
             now: *now,
@@ -992,7 +992,7 @@ async fn create_issue(
     .await
     .map_err(db_error)?;
     domain_issues::insert_issue_sequence(
-        &mut **tx,
+        &pidash_db::orm_tx::TxConn::new(tx),
         &domain_issues::MirrorIssueSequence {
             project_id: scan.project_id,
             workspace_id: *workspace_id,
@@ -1174,7 +1174,7 @@ pub async fn upsert_issue(
             // `save()` recomputes the stripped form (`issue.py:345-350`).
             let stripped = strip_html_text(&description_html);
             domain_issues::update_github_mirror_issue(
-                pool,
+                &pidash_db::pool::sea_orm_connection(pool),
                 &domain_issues::GithubMirrorIssueUpdate {
                     issue_id,
                     name,
