@@ -53,26 +53,26 @@ use super::{query_last, Denial, FilterLayers, Gate, QueryMap, INVALID_DETAIL_BOD
 
 // ---- names -------------------------------------------------------------------
 
-fn a(name: &'static str) -> Alias {
+pub(crate) fn a(name: &'static str) -> Alias {
     Alias::new(name)
 }
 
 /// `alias.column`.
-fn col<C: IntoIden + 'static>(alias: &'static str, column: C) -> Expr {
+pub(crate) fn col<C: IntoIden + 'static>(alias: &'static str, column: C) -> Expr {
     Expr::col((a(alias), column))
 }
 
 /// `issue.column`.
-fn issue<C: IntoIden + 'static>(column: C) -> Expr {
+pub(crate) fn issue<C: IntoIden + 'static>(column: C) -> Expr {
     col("issue", column)
 }
 
 /// A scalar subquery expression.
-fn sub(stmt: SelectStatement) -> SimpleExpr {
+pub(crate) fn sub(stmt: SelectStatement) -> SimpleExpr {
     SimpleExpr::SubQuery(None, Box::new(SubQueryStatement::SelectStatement(stmt)))
 }
 
-fn text<T: Into<String>>(value: T) -> SimpleExpr {
+pub(crate) fn text<T: Into<String>>(value: T) -> SimpleExpr {
     Expr::val(value.into()).into()
 }
 
@@ -91,7 +91,10 @@ fn count_star(null_when_empty: bool) -> SimpleExpr {
     }
 }
 
-fn select_one_from<T: IntoIden + 'static>(table: T, alias: &'static str) -> SelectStatement {
+pub(crate) fn select_one_from<T: IntoIden + 'static>(
+    table: T,
+    alias: &'static str,
+) -> SelectStatement {
     let mut stmt = Query::select();
     stmt.expr(Expr::val(1)).from_as(table, a(alias));
     stmt
@@ -341,7 +344,7 @@ fn finish_set(
 
 /// `state."group" IS NULL OR NOT (state."group" = 'triage')`: the
 /// manager's triage exclusion, keeping NULL-state rows.
-fn not_triage(state_alias: &'static str) -> SimpleExpr {
+pub(crate) fn not_triage(state_alias: &'static str) -> SimpleExpr {
     let group = || col(state_alias, states::Column::Group);
     group().is_null().or(group().eq("triage").not())
 }
@@ -743,7 +746,7 @@ pub fn cycle_id_subquery() -> SimpleExpr {
     sub(stmt)
 }
 
-fn link_count(null_when_empty: bool) -> SimpleExpr {
+pub(crate) fn link_count(null_when_empty: bool) -> SimpleExpr {
     let mut stmt = Query::select();
     stmt.expr(count_star(null_when_empty))
         .from_as(issue_links::Entity, a("il"))
@@ -752,7 +755,7 @@ fn link_count(null_when_empty: bool) -> SimpleExpr {
     sub(stmt)
 }
 
-fn attachment_count(null_when_empty: bool) -> SimpleExpr {
+pub(crate) fn attachment_count(null_when_empty: bool) -> SimpleExpr {
     let mut stmt = Query::select();
     stmt.expr(count_star(null_when_empty))
         .from_as(file_assets::Entity, a("fa"))
@@ -767,7 +770,7 @@ fn attachment_count(null_when_empty: bool) -> SimpleExpr {
 /// order-key form joins states unguarded and negates
 /// `group = 'triage' AND group IS NOT NULL` (pinned live: a soft-deleted
 /// triage state still excludes its children there).
-fn sub_issues_count(null_when_empty: bool, annotation: bool) -> SimpleExpr {
+pub(crate) fn sub_issues_count(null_when_empty: bool, annotation: bool) -> SimpleExpr {
     let mut stmt = Query::select();
     let state_on = col("cs", states::Column::Id).equals((a("c"), issues::Column::StateId));
     stmt.expr(count_star(null_when_empty))
@@ -809,7 +812,7 @@ fn sub_issues_count(null_when_empty: bool, annotation: bool) -> SimpleExpr {
 }
 
 /// `COALESCE(ARRAY_AGG(DISTINCT x), '{}'::uuid[])`.
-fn id_array(x: Expr) -> SimpleExpr {
+pub(crate) fn id_array(x: Expr) -> SimpleExpr {
     Func::coalesce([
         PgFunc::array_agg_distinct(x).into(),
         Expr::val("{}").cast_as(a("uuid[]")),
@@ -817,7 +820,7 @@ fn id_array(x: Expr) -> SimpleExpr {
     .into()
 }
 
-fn label_ids() -> SimpleExpr {
+pub(crate) fn label_ids() -> SimpleExpr {
     let mut stmt = Query::select();
     stmt.expr(id_array(col("il", issue_labels::Column::LabelId)))
         .from_as(issue_labels::Entity, a("il"))
@@ -967,7 +970,7 @@ pub fn serializer_columns(stmt: &mut SelectStatement) {
 // ---- ordering ------------------------------------------------------------------
 
 /// The priority `CASE` (`priority_order`): no `ELSE`.
-fn priority_case() -> SimpleExpr {
+pub(crate) fn priority_case() -> SimpleExpr {
     let mut case = CaseStatement::new();
     for (index, priority) in pidash_services::app_issues::ordering::PRIORITY_ORDER
         .iter()
@@ -982,7 +985,7 @@ fn priority_case() -> SimpleExpr {
 }
 
 /// The state-group `CASE` (`state_order`), `ELSE` after the last group.
-fn state_case() -> SimpleExpr {
+pub(crate) fn state_case() -> SimpleExpr {
     let order = pidash_services::app_issues::ordering::STATE_ORDER;
     let mut case = CaseStatement::new();
     for (index, group) in order.iter().enumerate() {
@@ -996,7 +999,7 @@ fn state_case() -> SimpleExpr {
 
 /// The `Min(...)` annotation for the assignee/label/module branch, as a
 /// scalar subquery (NULL when empty).
-fn min_order_subquery(relation: &str) -> Result<SimpleExpr, Denial> {
+pub(crate) fn min_order_subquery(relation: &str) -> Result<SimpleExpr, Denial> {
     let mut stmt = Query::select();
     match relation {
         "labels__name" => {
@@ -1552,7 +1555,7 @@ pub async fn fetch_rows(
 }
 
 /// Run a built statement into typed rows, decoded by name.
-async fn query_built<T: FromQueryResult>(
+pub(crate) async fn query_built<T: FromQueryResult>(
     db: &sea_orm::DatabaseConnection,
     stmt: &SelectStatement,
 ) -> Result<Vec<T>, Denial> {

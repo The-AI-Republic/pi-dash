@@ -58,6 +58,8 @@ pub mod list_engine;
 mod list_oracle;
 pub mod queries_core;
 pub mod queries_engage;
+#[cfg(test)]
+mod reads_oracle;
 pub mod render;
 
 use std::collections::HashMap;

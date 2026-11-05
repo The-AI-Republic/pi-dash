@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use pidash_services::app_issues::OrderSpec;
 use sqlx::Row;
 
-use super::queries_core::{archive_scope_where, ARCHIVE_JOINS};
+use super::reads_oracle::{archive_scope_where, ARCHIVE_JOINS};
 use super::{
     bind_all, complex_filter, legacy_sql, query_last, render_condition, with_order_joins, Binder,
     Denial, FilterLayers, FilteredSet, Gate, OrderKey, QueryMap, INVALID_DETAIL_BODY_MSG,
@@ -969,7 +969,7 @@ mod pins {
 /// Old engine vs new engine on one seeded dataset: every list statement,
 /// byte-identical `row_to_json` output (rows), equal counts and totals.
 #[cfg(test)]
-mod live {
+pub(crate) mod live {
     use super::super::list_engine as engine;
     use super::super::{fetch_count, fetch_json_rows, OneOrMany};
     use super::*;
@@ -1002,35 +1002,35 @@ mod live {
         "github_issue_syncs",
     ];
 
-    fn uid(n: u128) -> uuid::Uuid {
+    pub(crate) fn uid(n: u128) -> uuid::Uuid {
         uuid::Uuid::from_u128(0x5eed_0000_0000_0000_0000_0000_0000_0000 + n)
     }
 
     // Fixed ids.
-    const WS: u128 = 1;
-    const PROJECT: u128 = 2;
-    const OTHER_PROJECT: u128 = 3;
-    const S_BACKLOG: u128 = 10;
-    const S_STARTED: u128 = 11;
-    const S_DONE: u128 = 12;
-    const S_TRIAGE: u128 = 13;
-    const S_GONE: u128 = 14;
-    const U_ANN: u128 = 20;
-    const U_BOB: u128 = 21;
-    const U_CID: u128 = 22;
-    const L_ALPHA: u128 = 30;
-    const L_BETA: u128 = 31;
-    const L_GONE: u128 = 32;
-    const M_A: u128 = 40;
-    const M_ARCH: u128 = 41;
-    const M_GONE: u128 = 42;
-    const C_ONE: u128 = 50;
-    const C_TWO: u128 = 51;
-    const C_GONE: u128 = 52;
-    const E_ONE: u128 = 60;
-    const E_THREE: u128 = 61;
-    const T_EPIC: u128 = 70;
-    const T_TASK: u128 = 71;
+    pub(crate) const WS: u128 = 1;
+    pub(crate) const PROJECT: u128 = 2;
+    pub(crate) const OTHER_PROJECT: u128 = 3;
+    pub(crate) const S_BACKLOG: u128 = 10;
+    pub(crate) const S_STARTED: u128 = 11;
+    pub(crate) const S_DONE: u128 = 12;
+    pub(crate) const S_TRIAGE: u128 = 13;
+    pub(crate) const S_GONE: u128 = 14;
+    pub(crate) const U_ANN: u128 = 20;
+    pub(crate) const U_BOB: u128 = 21;
+    pub(crate) const U_CID: u128 = 22;
+    pub(crate) const L_ALPHA: u128 = 30;
+    pub(crate) const L_BETA: u128 = 31;
+    pub(crate) const L_GONE: u128 = 32;
+    pub(crate) const M_A: u128 = 40;
+    pub(crate) const M_ARCH: u128 = 41;
+    pub(crate) const M_GONE: u128 = 42;
+    pub(crate) const C_ONE: u128 = 50;
+    pub(crate) const C_TWO: u128 = 51;
+    pub(crate) const C_GONE: u128 = 52;
+    pub(crate) const E_ONE: u128 = 60;
+    pub(crate) const E_THREE: u128 = 61;
+    pub(crate) const T_EPIC: u128 = 70;
+    pub(crate) const T_TASK: u128 = 71;
 
     fn q(id: u128) -> String {
         format!("'{}'", uid(id))
@@ -1188,7 +1188,7 @@ mod live {
         ]
     }
 
-    async fn seed(pool: &sqlx::PgPool) {
+    pub(crate) async fn seed(pool: &sqlx::PgPool) {
         for table in TABLES {
             sqlx::query(&format!(
                 "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
@@ -1381,7 +1381,7 @@ mod live {
         }
     }
 
-    fn gate(user: u128, guest_scoped: bool) -> Gate {
+    pub(crate) fn gate(user: u128, guest_scoped: bool) -> Gate {
         Gate {
             user_id: uid(user),
             timezone: "Asia/Kolkata".parse().expect("tz"),
