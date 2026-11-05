@@ -12,8 +12,10 @@
 //! Django proxy branches) and call the same cores these entries call, so
 //! the two surfaces cannot drift. The caller authenticates (the MCP
 //! principal is already authed) and resolves nothing: entries take the
-//! raw workspace slug and project ref and run the v1 rewrite and gates
-//! themselves, in Django's order.
+//! raw workspace slug, project ref and scheduler ref and run the v1
+//! rewrite and gates themselves, in Django's order. Scheduler slugs
+//! resolve after the gates, so a probe answers the route's 403 instead
+//! of leaking existence; a slug miss answers the core's unknown-id 404.
 
 use std::collections::HashMap;
 
@@ -247,11 +249,13 @@ pub async fn list_project_schedulers(
 
 /// `GET .../projects/<project>/schedulers/<id>/`: one full definition
 /// with its binding here. 404 unless installed on this project.
+/// `scheduler_ref` is the UUID-or-slug, resolved after the gate; a slug
+/// miss answers the detail 404.
 pub async fn get_scheduler(
     ctx: &ServiceCtx,
     settings: &pidash_db::config::Settings,
     project_raw: &str,
-    scheduler_id: &Uuid,
+    scheduler_ref: &str,
 ) -> Result<Outcome, Denial> {
     let wid = workspace_id(&ctx.pool, &ctx.workspace_slug).await?;
     let project_id = rewrite_project_id(&ctx.pool, &ctx.workspace_slug, project_raw).await?;
@@ -266,12 +270,16 @@ pub async fn get_scheduler(
     .await?;
     ensure_feature_enabled(settings)?;
     let timezone = activate_timezone(ctx.actor_timezone.as_deref())?;
+    let workspace_id = wid.ok_or(Denial::Forbidden)?;
+    let scheduler_id = writes::resolve_scheduler_ref(&ctx.pool, &workspace_id, scheduler_ref)
+        .await?
+        .ok_or(Denial::SchedulerNotFound)?;
     outcome_of(
         handlers::project_scheduler_detail_core(
             &ctx.pool,
             &ctx.workspace_slug,
             &project_id,
-            scheduler_id,
+            &scheduler_id,
             &timezone,
         )
         .await,
@@ -280,12 +288,14 @@ pub async fn get_scheduler(
 }
 
 /// `GET .../projects/<project>/schedulers/<id>/runs/`: recent runs fired
-/// by this install, newest first, paginated.
+/// by this install, newest first, paginated. `scheduler_ref` is the
+/// UUID-or-slug, resolved after the gate; a slug miss answers the runs
+/// guard 404.
 pub async fn list_runs(
     ctx: &ServiceCtx,
     settings: &pidash_db::config::Settings,
     project_raw: &str,
-    scheduler_id: &Uuid,
+    scheduler_ref: &str,
     params: &ListParams,
 ) -> Result<Outcome, Denial> {
     let wid = workspace_id(&ctx.pool, &ctx.workspace_slug).await?;
@@ -301,6 +311,10 @@ pub async fn list_runs(
     .await?;
     ensure_feature_enabled(settings)?;
     let timezone = activate_timezone(ctx.actor_timezone.as_deref())?;
+    let workspace_id = wid.ok_or(Denial::Forbidden)?;
+    let scheduler_id = writes::resolve_scheduler_ref(&ctx.pool, &workspace_id, scheduler_ref)
+        .await?
+        .ok_or(Denial::BindingNotFound)?;
     let query = params.query_map();
     outcome_of(
         handlers::project_scheduler_runs_core(
@@ -308,7 +322,7 @@ pub async fn list_runs(
             &ctx.user_id,
             &ctx.workspace_slug,
             &project_id,
-            scheduler_id,
+            &scheduler_id,
             &timezone,
             &query,
         )
@@ -322,13 +336,15 @@ pub async fn list_runs(
 // ---------------------------------------------------------------------------
 
 /// `PATCH .../projects/<project>/schedulers/<id>/binding/`: edit the
-/// install. `if_match` is the joined `If-Match` header value, if sent;
-/// the body's `expected_updated_at` still applies without one.
+/// install. `scheduler_ref` is the UUID-or-slug, resolved after the
+/// gates; a slug miss answers the binding-lock 404. `if_match` is the
+/// joined `If-Match` header value, if sent; the body's
+/// `expected_updated_at` still applies without one.
 pub async fn patch_binding(
     ctx: &ServiceCtx,
     settings: &pidash_db::config::Settings,
     project_raw: &str,
-    scheduler_id: &Uuid,
+    scheduler_ref: &str,
     data: &Value,
     if_match: Option<String>,
 ) -> Result<Outcome, Denial> {
@@ -336,8 +352,12 @@ pub async fn patch_binding(
     let project_id = rewrite_project_id(&ctx.pool, &ctx.workspace_slug, project_raw).await?;
     let context =
         authorize_write(ctx, settings, Some(project_id), wid, writes::Scope::Project).await?;
+    let workspace_id = context.workspace_id.as_ref().ok_or(Denial::Forbidden)?;
+    let scheduler_id = writes::resolve_scheduler_ref(&ctx.pool, workspace_id, scheduler_ref)
+        .await?
+        .ok_or(Denial::BindingNotFound)?;
     outcome_of(
-        writes::binding_patch_inner(&context, &ctx.workspace_slug, scheduler_id, data, if_match)
+        writes::binding_patch_inner(&context, &ctx.workspace_slug, &scheduler_id, data, if_match)
             .await,
     )
     .await
@@ -345,18 +365,24 @@ pub async fn patch_binding(
 
 /// `POST .../projects/<project>/schedulers/<id>/run-now/`: make the
 /// install due so the scanner fires it on its next tick.
+/// `scheduler_ref` is the UUID-or-slug, resolved after the gates; a slug
+/// miss answers the binding-lock 404.
 pub async fn run_now(
     ctx: &ServiceCtx,
     settings: &pidash_db::config::Settings,
     project_raw: &str,
-    scheduler_id: &Uuid,
+    scheduler_ref: &str,
     if_match: Option<String>,
 ) -> Result<Outcome, Denial> {
     let wid = workspace_id(&ctx.pool, &ctx.workspace_slug).await?;
     let project_id = rewrite_project_id(&ctx.pool, &ctx.workspace_slug, project_raw).await?;
     let context =
         authorize_write(ctx, settings, Some(project_id), wid, writes::Scope::Project).await?;
-    outcome_of(writes::run_now_core(&context, &ctx.workspace_slug, scheduler_id, if_match).await)
+    let workspace_id = context.workspace_id.as_ref().ok_or(Denial::Forbidden)?;
+    let scheduler_id = writes::resolve_scheduler_ref(&ctx.pool, workspace_id, scheduler_ref)
+        .await?
+        .ok_or(Denial::BindingNotFound)?;
+    outcome_of(writes::run_now_core(&context, &ctx.workspace_slug, &scheduler_id, if_match).await)
         .await
 }
 
@@ -376,19 +402,26 @@ pub async fn install_binding(
 }
 
 /// `DELETE .../projects/<project>/schedulers/<id>/binding/`: uninstall.
+/// `scheduler_ref` is the UUID-or-slug, resolved after the gates; a slug
+/// miss answers the binding-lock 404.
 pub async fn uninstall_binding(
     ctx: &ServiceCtx,
     settings: &pidash_db::config::Settings,
     project_raw: &str,
-    scheduler_id: &Uuid,
+    scheduler_ref: &str,
     if_match: Option<String>,
 ) -> Result<Outcome, Denial> {
     let wid = workspace_id(&ctx.pool, &ctx.workspace_slug).await?;
     let project_id = rewrite_project_id(&ctx.pool, &ctx.workspace_slug, project_raw).await?;
     let context =
         authorize_write(ctx, settings, Some(project_id), wid, writes::Scope::Project).await?;
+    let workspace_id = context.workspace_id.as_ref().ok_or(Denial::Forbidden)?;
+    let scheduler_id = writes::resolve_scheduler_ref(&ctx.pool, workspace_id, scheduler_ref)
+        .await?
+        .ok_or(Denial::BindingNotFound)?;
     outcome_of(
-        writes::binding_uninstall_core(&context, &ctx.workspace_slug, scheduler_id, if_match).await,
+        writes::binding_uninstall_core(&context, &ctx.workspace_slug, &scheduler_id, if_match)
+            .await,
     )
     .await
 }
@@ -410,34 +443,53 @@ pub async fn create_definition(
 
 /// `PATCH /api/v1/workspaces/<slug>/schedulers/<id>/`: edit a
 /// user-created definition. Built-ins answer 409 `builtin_scheduler`.
+/// `scheduler_ref` is the UUID-or-slug, resolved after the gates; a slug
+/// miss answers the definition 404.
 pub async fn patch_definition(
     ctx: &ServiceCtx,
     settings: &pidash_db::config::Settings,
-    scheduler_id: &Uuid,
+    scheduler_ref: &str,
     data: &Value,
     if_match: Option<String>,
 ) -> Result<Outcome, Denial> {
     let wid = workspace_id(&ctx.pool, &ctx.workspace_slug).await?;
     let context = authorize_write(ctx, settings, None, wid, writes::Scope::Workspace).await?;
+    let workspace_id = context.workspace_id.as_ref().ok_or(Denial::Forbidden)?;
+    let scheduler_id = writes::resolve_scheduler_ref(&ctx.pool, workspace_id, scheduler_ref)
+        .await?
+        .ok_or(Denial::SchedulerNotFound)?;
     outcome_of(
-        writes::definition_patch_inner(&context, &ctx.workspace_slug, scheduler_id, data, if_match)
-            .await,
+        writes::definition_patch_inner(
+            &context,
+            &ctx.workspace_slug,
+            &scheduler_id,
+            data,
+            if_match,
+        )
+        .await,
     )
     .await
 }
 
 /// `DELETE /api/v1/workspaces/<slug>/schedulers/<id>/`: soft-delete a
-/// user-created definition and every install of it.
+/// user-created definition and every install of it. `scheduler_ref` is
+/// the UUID-or-slug, resolved after the gates; a slug miss answers the
+/// definition 404.
 pub async fn delete_definition(
     ctx: &ServiceCtx,
     settings: &pidash_db::config::Settings,
-    scheduler_id: &Uuid,
+    scheduler_ref: &str,
     if_match: Option<String>,
 ) -> Result<Outcome, Denial> {
     let wid = workspace_id(&ctx.pool, &ctx.workspace_slug).await?;
     let context = authorize_write(ctx, settings, None, wid, writes::Scope::Workspace).await?;
+    let workspace_id = context.workspace_id.as_ref().ok_or(Denial::Forbidden)?;
+    let scheduler_id = writes::resolve_scheduler_ref(&ctx.pool, workspace_id, scheduler_ref)
+        .await?
+        .ok_or(Denial::SchedulerNotFound)?;
     outcome_of(
-        writes::definition_delete_core(&context, &ctx.workspace_slug, scheduler_id, if_match).await,
+        writes::definition_delete_core(&context, &ctx.workspace_slug, &scheduler_id, if_match)
+            .await,
     )
     .await
 }

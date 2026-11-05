@@ -1285,6 +1285,30 @@ async fn scheduler_by_ref(
         .map_err(|error| db_error(error, "v1-install-scheduler"))
 }
 
+/// The id a UUID-or-slug scheduler ref names, for the non-HTTP entries
+/// (NEWPIDASH-37 review: the service resolves post-gate, so a slug probe
+/// answers the route's 403 instead of leaking existence).
+///
+/// A ref that parses as a UUID (`uuid.UUID(ref)`, the install path's
+/// rule) passes straight through with NO existence check: the cores
+/// answer their own 404s for unknown ids. Anything else goes through
+/// [`scheduler_by_ref`], whose slug leg is the install path's exact
+/// lookup (live rows, `ORDER BY created_at DESC LIMIT 1`); `None` is a
+/// slug miss, which each service entry maps to its core's unknown-id
+/// denial.
+pub(crate) async fn resolve_scheduler_ref(
+    pool: &PgPool,
+    workspace_id: &Uuid,
+    reference: &str,
+) -> Result<Option<Uuid>, Denial> {
+    if let Some(id) = app_bind::uuid_from_hex_forms(reference) {
+        return Ok(Some(id));
+    }
+    // Not UUID-parseable, so `scheduler_by_ref` takes its slug leg.
+    let row = scheduler_by_ref(pool, workspace_id, reference).await?;
+    Ok(row.map(|(id, _enabled)| id))
+}
+
 /// The install body past auth, the gates, the flag and body parsing.
 /// Shared by the v1 handler above and the [`super::service`] entry (same
 /// statements, so the two surfaces cannot drift).
