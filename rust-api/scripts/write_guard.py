@@ -3,7 +3,8 @@
 
 Design D7 (.ai_design/rust_orm/design.md): the tables in section 4 are written
 only from pidash_services::domain (plus test fixtures). This script lists every
-raw-SQL INSERT/UPDATE/DELETE and every sea-query write builder against a
+raw-SQL INSERT/UPDATE/DELETE, every sea-query write builder and every SeaORM
+entity write (`issues::Entity::update_many()`, `issues::ActiveModel { .. }`) against a
 covered table outside the allowed module, and compares the set with the
 committed allowlist. A hit not on the list fails; an allowlist entry with no
 hit fails too, so the list must shrink in the same PR that removes a site.
@@ -57,6 +58,10 @@ COVERED_TABLES = frozenset({
 })
 
 ALLOWED_DIR = "crates/services/src/domain/"
+# The entities' own save hooks (`ActiveModelBehavior`, the Rust side of
+# Django `Model.save()` side effects such as default notification
+# preferences) are model code, the layer Django keeps them in.
+ENTITY_HOOKS_DIR = "crates/db/src/entity/"
 # Path segments whose whole subtree is exempt (unit/integration/contract
 # tests and fixtures; contract-tests/ and fixtures/ live outside crates/ but
 # are listed so the rule survives a wider scan root).
@@ -71,6 +76,14 @@ RE_DELETE = re.compile(
     re.IGNORECASE)
 RE_QUERY_CTOR = re.compile(r"Query::(insert|update|delete)\s*\(\s*\)")
 RE_QUERY_ANY_CTOR = re.compile(r"Query::\w+\s*\(\s*\)")
+# SeaORM entity writes: the entity module is named after its table
+# (`pidash_db::entity::issues`), so `issues::Entity::update_many()` and
+# `issues::ActiveModel { .. }` (an ActiveModel exists only to be written)
+# attribute statically. Covers writes run anywhere, including on an sqlx
+# transaction through `pidash_db::orm_tx`.
+RE_ENTITY_WRITE = re.compile(
+    r"\b([a-z_][a-z0-9_]*)::(?:Entity::(insert|insert_many|update|update_many"
+    r"|delete|delete_many|delete_by_id)\s*\(|(ActiveModel)\s*\{)")
 RE_TABLE_CALL = re.compile(r"\.(into_table|table|from_table)\s*\(")
 RE_CFG_TEST = re.compile(r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]")
 RE_ATTR = re.compile(r"#\[(?:[^\[\]]|\[[^\]]*\])*\]")
@@ -434,6 +447,25 @@ def scan_seaquery(code, rel, consts):
         yield kind, table, code[m.start():close], "sea-query"
 
 
+def scan_entity(code):
+    """Yield (kind, table, text) for SeaORM entity writes on covered tables."""
+    for m in RE_ENTITY_WRITE.finditer(code):
+        table = m.group(1)
+        if table not in COVERED_TABLES:
+            continue
+        if m.group(3) is not None and re.search(
+                r"\bfor\s+(?:[\w]+::)*$", code[max(0, m.start() - 120):m.start()]):
+            continue  # `impl ActiveModelBehavior for x::ActiveModel {`
+        op = m.group(2)
+        kind = "SAVE" if op is None else op.split("_")[0].upper()
+        if m.group(3) is None:
+            text = code[m.start():balanced_call_end(code, m.end() - 1)]
+        else:
+            end = code.find("}", m.end())
+            text = code[m.start():end + 1 if end != -1 else m.end()]
+        yield kind, table, text
+
+
 def iter_rs_files(root):
     crates = root / "crates"
     if not crates.is_dir():
@@ -441,7 +473,7 @@ def iter_rs_files(root):
         sys.exit(2)
     for path in sorted(crates.rglob("*.rs")):
         rel = path.relative_to(root).as_posix()
-        if rel.startswith(ALLOWED_DIR):
+        if rel.startswith((ALLOWED_DIR, ENTITY_HOOKS_DIR)):
             continue
         if any(seg in ("/" + rel + "/") for seg in SKIP_SEGMENTS):
             continue
@@ -476,6 +508,9 @@ def collect_hits(root):
             shown = table if table is not None else "?"
             hits.append("%s | %s %s | %s | %s"
                         % (rel, kind, shown, fingerprint(stmt), origin))
+        for kind, table, stmt in scan_entity(masked):
+            hits.append("%s | %s %s | %s | entity"
+                        % (rel, kind, table, fingerprint(stmt)))
         for kind, table, stmt, origin in scan_seaquery(masked, rel, consts):
             hits.append("%s | %s %s | %s | %s"
                         % (rel, kind, table, fingerprint(stmt), origin))

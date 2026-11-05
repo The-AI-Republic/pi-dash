@@ -130,22 +130,26 @@ Writes to the design §4 tables go through `pidash_services::domain`
 and sqlx cannot join a SeaORM one (`.ai_design/rust_orm/design.md`). Never
 split one transaction across the two. Code that already holds an
 `sqlx::Transaction` (row locks, shared kernels taking `&mut tx`) keeps it
-and runs SeaORM-built statements on it through `pidash_db::orm_tx`:
+and runs SeaORM on it through `pidash_db::orm_tx::TxConn`, a SeaORM
+`ConnectionTrait` over the transaction's connection:
 
 ```rust
-let runner: Option<runner::Model> =
-    orm_tx::fetch_optional(&mut *tx, &runner::Entity::find_by_id(id).lock_exclusive().into_query()).await?;
-orm_tx::execute(&mut *tx, &runner::Entity::update_many()
+let conn = orm_tx::TxConn::new(&mut tx);
+let runner = runner::Entity::find_by_id(id).lock_exclusive().one(&conn).await?;
+runner::Entity::update_many()
     .col_expr(runner::Column::RevokedAt, Expr::value(now))
     .filter(runner::Column::Id.eq(id))
-    .into_query()).await?;
+    .exec(&conn)
+    .await?;
+comment.insert(&conn).await?; // ActiveModelBehavior hooks and RETURNING run
 ```
 
-Rows decode by name through `FromQueryResult` (entity `Model`s or
-`#[derive(FromQueryResult)]` structs); `orm_tx` holds the only `raw-sql:`
-reasons this needs, so call sites count as migrated. Move a whole
-transaction onto a SeaORM `DatabaseTransaction` instead only when every
-statement in it, and every kernel it is passed to, moves too.
+The full SeaORM API works unchanged, so a later move to a SeaORM
+`DatabaseTransaction` changes only where `conn` comes from. Drop `conn` to
+use `tx` directly again. Writes to the design §4 tables still belong in
+`pidash_services::domain`: the write guard flags `<table>::Entity::insert /
+update / delete…(` and `<table>::ActiveModel { .. }` outside it, on any
+connection.
 
 ## 4. Output parity
 

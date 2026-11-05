@@ -1,234 +1,254 @@
-//! Run SeaORM-built statements on an sqlx executor, including an open
-//! `sqlx::Transaction`.
+//! SeaORM on an open sqlx transaction.
 //!
 //! A SeaORM transaction cannot adopt an `sqlx::Transaction`, and sqlx cannot
 //! join a SeaORM one (`.ai_design/rust_orm/design.md`). Much of rust-api runs
 //! its reads and writes inside sqlx transactions, often with row locks, and
 //! passes them to shared kernels. Rewriting every transaction boundary would
-//! block the raw-SQL migration (`rust-api/docs/orm-migration.md`), so this
-//! bridge lets that code build its statements with SeaORM entities and the
-//! query builder, then run them on the transaction it already holds:
+//! block the raw-SQL migration (`rust-api/docs/orm-migration.md`), so
+//! [`TxConn`] wraps the connection that transaction holds as a SeaORM
+//! [`ConnectionTrait`]: the whole SeaORM API runs on it unchanged.
 //!
 //! ```ignore
-//! let runner: Option<runner::Model> = orm_tx::fetch_optional(
-//!     &mut *tx,
-//!     &runner::Entity::find_by_id(id).lock_exclusive().into_query(),
-//! )
-//! .await?;
-//! orm_tx::execute(
-//!     &mut *tx,
-//!     &runner::Entity::update_many()
-//!         .col_expr(runner::Column::RevokedAt, Expr::value(now))
-//!         .filter(runner::Column::Id.eq(id))
-//!         .into_query(),
-//! )
-//! .await?;
+//! let conn = orm_tx::TxConn::new(&mut tx);
+//! let runner = runner::Entity::find_by_id(id).lock_exclusive().one(&conn).await?;
+//! runner::Entity::update_many()
+//!     .col_expr(runner::Column::RevokedAt, Expr::value(now))
+//!     .filter(runner::Column::Id.eq(id))
+//!     .exec(&conn)
+//!     .await?;
+//! comment.insert(&conn).await?; // ActiveModelBehavior hooks run, RETURNING too
 //! ```
 //!
-//! Statements are bound through `sea-query-binder`, the binder SeaORM's own
-//! sqlx driver uses, and rows decode through SeaORM's `FromQueryResult`
-//! (entity `Model`s, partial models and `#[derive(FromQueryResult)]`
-//! structs), so names and types come from the entities, never from
-//! positions. The executor is any sqlx Postgres executor: `&mut *tx`,
-//! `&mut *conn` or `&PgPool`.
+//! Statements bind through `sea-query-binder`, exactly as SeaORM's own
+//! Postgres driver binds them, and errors are the `DbErr`s that driver
+//! returns. `TxConn` borrows the connection; drop it (end its scope) to use
+//! the transaction directly again. It deliberately does not implement
+//! `TransactionTrait`: the transaction belongs to its sqlx owner, which
+//! commits or rolls it back.
 
-use sea_orm::{DbErr, FromQueryResult, QueryResult};
-use sea_query::PostgresQueryBuilder;
-use sea_query_binder::SqlxBinder;
-use sqlx::postgres::{PgQueryResult, Postgres};
+use sea_orm::{ConnectionTrait, DbBackend, DbErr, ExecResult, QueryResult, RuntimeErr, Statement};
+use sea_query::Values;
+use sea_query_binder::SqlxValues;
+use sqlx::PgConnection;
+use tokio::sync::Mutex;
 
-/// Build `statement` for Postgres with its bound values.
-fn build(statement: &impl SqlxBinder) -> (String, sea_query_binder::SqlxValues) {
-    statement.build_sqlx(PostgresQueryBuilder)
+/// A SeaORM connection over a borrowed sqlx Postgres connection, usually the
+/// one an `sqlx::Transaction` holds (`TxConn::new(&mut tx)`).
+pub struct TxConn<'c> {
+    conn: Mutex<&'c mut PgConnection>,
 }
 
-fn decode<M: FromQueryResult>(row: sqlx::postgres::PgRow) -> Result<M, sqlx::Error> {
-    M::from_query_result(&QueryResult::from(row), "").map_err(db_err_to_sqlx)
-}
-
-/// A SeaORM decode error as the sqlx error callers already handle.
-pub fn db_err_to_sqlx(error: DbErr) -> sqlx::Error {
-    match error {
-        DbErr::Query(sea_orm::RuntimeErr::SqlxError(inner))
-        | DbErr::Exec(sea_orm::RuntimeErr::SqlxError(inner))
-        | DbErr::Conn(sea_orm::RuntimeErr::SqlxError(inner)) => inner,
-        other => sqlx::Error::Decode(Box::new(other)),
+impl<'c> TxConn<'c> {
+    pub fn new(conn: &'c mut PgConnection) -> Self {
+        Self {
+            conn: Mutex::new(conn),
+        }
     }
 }
 
-/// Every row of a SeaORM-built query, decoded into `M`.
-pub async fn fetch_all<'e, M, X>(
-    executor: X,
-    statement: &impl SqlxBinder,
-) -> Result<Vec<M>, sqlx::Error>
-where
-    M: FromQueryResult,
-    X: sqlx::Executor<'e, Database = Postgres>,
-{
-    let (sql, values) = build(statement);
-    // raw-sql: the SeaORM <-> sqlx-transaction bridge; the statement is SeaORM-built.
-    let rows = sqlx::query_with(&sql, values).fetch_all(executor).await?;
-    rows.into_iter().map(decode).collect()
+impl std::fmt::Debug for TxConn<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TxConn")
+    }
 }
 
-/// At most one row of a SeaORM-built query, decoded into `M`. The statement
-/// is run as built: add `.limit(1)` to it when only the first row matters.
-pub async fn fetch_optional<'e, M, X>(
-    executor: X,
-    statement: &impl SqlxBinder,
-) -> Result<Option<M>, sqlx::Error>
-where
-    M: FromQueryResult,
-    X: sqlx::Executor<'e, Database = Postgres>,
-{
-    let (sql, values) = build(statement);
-    // raw-sql: the SeaORM <-> sqlx-transaction bridge; the statement is SeaORM-built.
-    let row = sqlx::query_with(&sql, values)
-        .fetch_optional(executor)
-        .await?;
-    row.map(decode).transpose()
+fn query(stmt: &Statement) -> sqlx::query::Query<'_, sqlx::Postgres, SqlxValues> {
+    let values = stmt.values.clone().unwrap_or(Values(Vec::new()));
+    // raw-sql: the SeaORM <-> sqlx-transaction bridge; every statement is SeaORM-built.
+    sqlx::query_with(&stmt.sql, SqlxValues(values))
 }
 
-/// Exactly one row of a SeaORM-built query, decoded into `M`
-/// (`sqlx::Error::RowNotFound` when there is none).
-pub async fn fetch_one<'e, M, X>(executor: X, statement: &impl SqlxBinder) -> Result<M, sqlx::Error>
-where
-    M: FromQueryResult,
-    X: sqlx::Executor<'e, Database = Postgres>,
-{
-    let (sql, values) = build(statement);
-    // raw-sql: the SeaORM <-> sqlx-transaction bridge; the statement is SeaORM-built.
-    let row = sqlx::query_with(&sql, values).fetch_one(executor).await?;
-    decode(row)
+fn exec_err(error: sqlx::Error) -> DbErr {
+    DbErr::Exec(RuntimeErr::SqlxError(error))
 }
 
-/// Run a SeaORM-built INSERT / UPDATE / DELETE (or any statement whose rows
-/// are not read) and return the affected-row count.
-pub async fn execute<'e, X>(
-    executor: X,
-    statement: &impl SqlxBinder,
-) -> Result<PgQueryResult, sqlx::Error>
-where
-    X: sqlx::Executor<'e, Database = Postgres>,
-{
-    let (sql, values) = build(statement);
-    // raw-sql: the SeaORM <-> sqlx-transaction bridge; the statement is SeaORM-built.
-    sqlx::query_with(&sql, values).execute(executor).await
+fn query_err(error: sqlx::Error) -> DbErr {
+    DbErr::Query(RuntimeErr::SqlxError(error))
+}
+
+#[async_trait::async_trait]
+impl ConnectionTrait for TxConn<'_> {
+    fn get_database_backend(&self) -> DbBackend {
+        DbBackend::Postgres
+    }
+
+    async fn execute(&self, stmt: Statement) -> Result<ExecResult, DbErr> {
+        let mut conn = self.conn.lock().await;
+        query(&stmt)
+            .execute(&mut **conn)
+            .await
+            .map(ExecResult::from)
+            .map_err(exec_err)
+    }
+
+    async fn execute_unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
+        let mut conn = self.conn.lock().await;
+        // raw-sql: `ConnectionTrait::execute_unprepared` (SeaORM's own escape hatch); a bare `&str` runs unprepared, like `raw_sql`.
+        sqlx::Executor::execute(&mut **conn, sql)
+            .await
+            .map(ExecResult::from)
+            .map_err(exec_err)
+    }
+
+    async fn query_one(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
+        let mut conn = self.conn.lock().await;
+        query(&stmt)
+            .fetch_optional(&mut **conn)
+            .await
+            .map(|row| row.map(QueryResult::from))
+            .map_err(query_err)
+    }
+
+    async fn query_all(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
+        let mut conn = self.conn.lock().await;
+        query(&stmt)
+            .fetch_all(&mut **conn)
+            .await
+            .map(|rows| rows.into_iter().map(QueryResult::from).collect())
+            .map_err(query_err)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entity::{agent_run, runner};
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, QueryTrait};
+    use crate::entity::{issue_comments, runner};
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set};
     use uuid::Uuid;
 
-    #[test]
-    fn builds_a_select_with_bound_values() {
-        let id = Uuid::new_v4();
-        let query = runner::Entity::find_by_id(id).lock_exclusive().into_query();
-        let (sql, _values) = build(&query);
-        assert!(sql.starts_with(r#"SELECT "runner"."id""#), "{sql}");
-        assert!(sql.contains(r#"WHERE "runner"."id" = $1"#), "{sql}");
-        assert!(sql.ends_with("FOR UPDATE"), "{sql}");
-    }
-
-    #[test]
-    fn builds_an_update_with_bound_values() {
-        let query = agent_run::Entity::update_many()
-            .col_expr(
-                agent_run::Column::Status,
-                sea_query::Expr::value("cancelled"),
-            )
-            .filter(agent_run::Column::Id.eq(Uuid::nil()))
-            .into_query();
-        let (sql, _values) = build(&query);
-        assert_eq!(
-            sql,
-            r#"UPDATE "agent_run" SET "status" = $1 WHERE "agent_run"."id" = $2"#
-        );
-    }
-
-    /// Reads and writes through the bridge inside one sqlx transaction see
-    /// each other, and decode into entity models by name.
-    #[tokio::test]
-    async fn live_round_trip_inside_an_sqlx_transaction() {
-        let url = match std::env::var("DATABASE_URL") {
-            Ok(url) => url,
-            Err(_) => {
-                eprintln!("skipping live-db test: DATABASE_URL is not set");
-                return;
-            }
+    /// `DATABASE_URL` pointing at a migrated database, else skip.
+    async fn pool() -> Option<sqlx::PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return None;
         };
         let pool = sqlx::PgPool::connect(&url).await.expect("connect");
+        let migrated: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.issue_comments')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("probe");
+        if migrated.is_none() {
+            eprintln!("skipping live-db test: the database is not migrated");
+            return None;
+        }
+        Some(pool)
+    }
+
+    /// An entity insert (hooks included), a locked read, a bulk update and a
+    /// partial read all run on one sqlx transaction, and each sees the
+    /// previous statement's uncommitted write.
+    #[tokio::test]
+    async fn live_seaorm_on_an_sqlx_transaction() {
+        let Some(pool) = pool().await else {
+            return;
+        };
         let mut tx = pool.begin().await.expect("begin");
-        let workspace = Uuid::new_v4();
-        let owner = Uuid::new_v4();
-        // A session-local table shaped like the columns under test, so the
-        // test needs no seeded rows: `pidash_db` has no seed helpers.
+        // Session-local copies without foreign keys, so the test needs no
+        // seeded parents; they shadow the real tables for this transaction.
         sqlx::query(
-            "CREATE TEMP TABLE runner (LIKE public.runner INCLUDING DEFAULTS) ON COMMIT DROP",
+            "CREATE TEMP TABLE issue_comments (LIKE public.issue_comments INCLUDING DEFAULTS) \
+             ON COMMIT DROP",
         )
         .execute(&mut *tx)
         .await
         .expect("temp table");
-        let id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO runner (id, created_at, updated_at, owner_id, workspace_id, pod_id, name, \
-             host_label, provisioning, visibility, refresh_token_hash, refresh_token_fingerprint, \
-             refresh_token_generation, previous_refresh_token_hash, \
-             access_token_signing_key_version, enrollment_token_hash, \
-             enrollment_token_fingerprint, capabilities, status, os, arch, runner_version, \
-             dev_metadata, protocol_version, revoked_reason) VALUES ($1, now(), now(), $2, $3, $4, \
-             'bridge', '', 'desktop_bundled', 0, '', '', 0, '', 1, '', '', '[]', 'online', '', '', \
-             '', '{}', 1, '')",
-        )
-        .bind(id)
-        .bind(owner)
-        .bind(workspace)
-        .bind(Uuid::new_v4())
-        .execute(&mut *tx)
-        .await
-        .expect("seed");
-        let done = execute(
-            &mut *tx,
-            &runner::Entity::update_many()
-                .col_expr(runner::Column::Status, sea_query::Expr::value("revoked"))
-                .filter(runner::Column::Id.eq(id))
-                .into_query(),
-        )
-        .await
-        .expect("update");
-        assert_eq!(done.rows_affected(), 1);
-        let found: Option<runner::Model> =
-            fetch_optional(&mut *tx, &runner::Entity::find_by_id(id).into_query())
+        let issue_id = Uuid::new_v4();
+        {
+            let conn = TxConn::new(&mut tx);
+            let comment = issue_comments::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                created_at: Set(chrono::Utc::now().into()),
+                updated_at: Set(chrono::Utc::now().into()),
+                comment_html: Set("<p>Hello <b>bridge</b></p>".to_owned()),
+                comment_json: Set(serde_json::json!({})),
+                comment_stripped: Set(String::new()),
+                access: Set("INTERNAL".to_owned()),
+                issue_id: Set(issue_id),
+                project_id: Set(Uuid::new_v4()),
+                workspace_id: Set(Uuid::new_v4()),
+                attachments: Set(Vec::new()),
+                labels: Set(Vec::new()),
+                speaker_type: Set("human".to_owned()),
+                speaker_label: Set(String::new()),
+                ..Default::default()
+            };
+            let inserted = comment.insert(&conn).await.expect("insert");
+            // `before_save` (comment_hooks) recomputed the stripped text.
+            assert_eq!(inserted.comment_stripped, "Hello bridge");
+
+            let locked = issue_comments::Entity::find_by_id(inserted.id)
+                .lock_exclusive()
+                .one(&conn)
                 .await
-                .expect("read");
-        let found = found.expect("row");
-        assert_eq!(
-            (found.id, found.status.as_str(), found.name.as_str()),
-            (id, "revoked", "bridge")
-        );
-        #[derive(Debug, PartialEq, sea_orm::FromQueryResult)]
-        struct NameRow {
-            name: String,
-        }
-        let names: Vec<NameRow> = fetch_all(
-            &mut *tx,
-            &runner::Entity::find()
+                .expect("locked read")
+                .expect("row");
+            assert_eq!(locked.id, inserted.id);
+
+            let done = issue_comments::Entity::update_many()
+                .col_expr(
+                    issue_comments::Column::Access,
+                    sea_query::Expr::value("EXTERNAL"),
+                )
+                .filter(issue_comments::Column::IssueId.eq(issue_id))
+                .exec(&conn)
+                .await
+                .expect("update");
+            assert_eq!(done.rows_affected, 1);
+
+            #[derive(Debug, PartialEq, sea_orm::FromQueryResult)]
+            struct AccessRow {
+                access: String,
+            }
+            let rows = issue_comments::Entity::find()
                 .select_only()
-                .column(runner::Column::Name)
-                .filter(runner::Column::WorkspaceId.eq(workspace))
-                .into_query(),
-        )
-        .await
-        .expect("names");
-        assert_eq!(
-            names,
-            vec![NameRow {
-                name: "bridge".to_owned()
-            }]
-        );
+                .column(issue_comments::Column::Access)
+                .filter(issue_comments::Column::IssueId.eq(issue_id))
+                .into_model::<AccessRow>()
+                .all(&conn)
+                .await
+                .expect("partial read");
+            assert_eq!(
+                rows,
+                vec![AccessRow {
+                    access: "EXTERNAL".to_owned()
+                }]
+            );
+            assert!(runner::Entity::find_by_id(Uuid::new_v4())
+                .one(&conn)
+                .await
+                .expect("miss")
+                .is_none());
+        }
+        // The borrow ended: the transaction is usable directly again.
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issue_comments")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("count");
+        assert_eq!(n, 1);
         tx.rollback().await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn live_errors_are_the_drivers_db_errs() {
+        let Some(pool) = pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        let conn = TxConn::new(&mut tx);
+        let error = conn
+            .query_one(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT * FROM no_such_table",
+            ))
+            .await
+            .expect_err("missing table");
+        assert!(
+            matches!(
+                error,
+                DbErr::Query(RuntimeErr::SqlxError(sqlx::Error::Database(_)))
+            ),
+            "{error:?}"
+        );
     }
 }
