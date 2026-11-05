@@ -776,6 +776,7 @@ def test_engine_runner_is_unique_per_machine_and_project(db, create_user, worksp
     _sign_in(create_user, machine)
     first = _create_runner(mt, project="DEF", agent_kind="engine", name="ignored-name")
     assert first.status_code == 201, first.data
+    assert first.data["created"] is True
     assert first.data["provisioning"] == RunnerProvisioning.DESKTOP_BUNDLED
     assert first.data["pod_dispatch"] == "pinned_only"
     assert first.data["runner_name"] == "builtin-rich-mbp-test-workspace-def"
@@ -786,6 +787,8 @@ def test_engine_runner_is_unique_per_machine_and_project(db, create_user, worksp
     again = _create_runner(mt, project="DEF", agent_kind="engine", pod=other_pod.name)
     assert again.status_code == 201
     assert again.data["runner_id"] == first.data["runner_id"]
+    # The client must not roll this one back after a local failure.
+    assert again.data["created"] is False
     assert Runner.objects.filter(provisioning=RunnerProvisioning.DESKTOP_BUNDLED).count() == 1
 
     # No per-user cap: a second computer on the same account enrols its own.
@@ -858,6 +861,7 @@ def test_legacy_desktop_enrolment_still_works_without_engine_credential(db, crea
     assert resp.data["runner_name"] == "desktop-desktop-abc-DEF"
     again = _create_runner(raw, project="DEF", name="desktop-desktop-abc-DEF")
     assert again.data["runner_id"] == resp.data["runner_id"]
+    assert again.data["created"] is False
     assert not EngineCredential.objects.exists()
 
 
