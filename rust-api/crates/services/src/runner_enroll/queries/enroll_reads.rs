@@ -132,11 +132,18 @@
 //! `[:N]` slicing (Porting guide semantic traps).
 
 use pidash_compat::py::py_strip;
-use pidash_db::app_project::models::project as project_cols;
-use pidash_db::runner_enroll::columns::{
-    dev_machine as dm_cols, machine_token as mt_cols, pod as pod_cols, runner as r_cols,
-    runner_force_refresh as ffr_cols,
+use pidash_db::entity::{
+    dev_machine, machine_token, pod, projects, runner, users, workspace_members, workspaces,
 };
+use pidash_db::runner_enroll::columns::{
+    dev_machine as dm_cols, runner as r_cols, runner_force_refresh as ffr_cols,
+};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, JoinType, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, RelationDef, RelationTrait, Select, Set,
+};
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Cross-domain SELECT lists (Django `_meta` field order)
@@ -200,46 +207,9 @@ fn qualified(table: &str, columns: &[&str]) -> String {
         .join(", ")
 }
 
-/// `$1, $2, …, $n` placeholder list for an `n`-column `INSERT`.
-fn placeholders(n: usize) -> String {
-    (1..=n)
-        .map(|i| format!("${i}"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 // ---------------------------------------------------------------------------
 // E1. Enroll tx: locked runner by one-time enrollment hash
 // ---------------------------------------------------------------------------
-
-/// E1 — enroll locked read (`enrollment.py:284-290`).
-///
-/// `Runner.objects.select_for_update().select_related("workspace",
-/// "pod__project").get(enrollment_token_hash=token_hash)` inside
-/// `transaction.atomic()`. Full `runner` + `workspaces` + `pod` +
-/// `projects` rows (`INNER JOIN`: both FKs are non-nullable).
-/// `.get()` clears ordering and (per QUIRK-get-no-limit) the `LIMIT 21`
-/// multiplicity probe is omitted — handlers map row counts.
-///
-/// `$1` = enrollment token hash (`tokens.hash_token(presented)`).
-///
-/// Guards (handlers map these; bodies are handlers-owned): miss → 401
-/// `invalid_or_expired_enrollment_token` (rolls back); `revoked_at` set
-/// → 409 `runner_revoked`; `enrolled_at` set → 409
-/// `enrollment_token_already_used` (`:291-305`).
-pub fn enroll_locked_read_sql() -> String {
-    format!(
-        "SELECT {}, {}, {}, {} FROM \"runner\" \
-         INNER JOIN \"workspaces\" ON (\"runner\".\"workspace_id\" = \"workspaces\".\"id\") \
-         INNER JOIN \"pod\" ON (\"runner\".\"pod_id\" = \"pod\".\"id\") \
-         INNER JOIN \"projects\" ON (\"pod\".\"project_id\" = \"projects\".\"id\") \
-         WHERE \"runner\".\"enrollment_token_hash\" = $1 FOR UPDATE",
-        qualified(r_cols::TABLE, r_cols::COLUMNS),
-        qualified("workspaces", WORKSPACES_SELECT_COLUMNS),
-        qualified(pod_cols::TABLE, pod_cols::COLUMNS),
-        qualified(project_cols::TABLE, project_cols::COLUMNS),
-    )
-}
 
 // ---------------------------------------------------------------------------
 // E2. Enroll tx: mark enrolled + rotate to refresh generation 1
@@ -260,53 +230,6 @@ pub const ENROLL_UPDATE_FIELDS: &[&str] = &[
     "refresh_token_generation",
     "previous_refresh_token_hash",
 ];
-
-/// E2 — mark enrolled (`enrollment.py:325-348`), still inside the enroll tx.
-///
-/// `runner.save(update_fields=...)`: `updated_at` is NOT in the list, so
-/// `auto_now` does NOT bump it (fixture `enroll_E2_after`). `SET` order
-/// is model-field order: `dev_machine_id`, then `name` 2nd ONLY when
-/// `with_name` (the body supplied a non-blank name, `:345-347`), then
-/// `host_label`, the four refresh columns, the two enrollment columns,
-/// `enrolled_at`.
-///
-/// Without name — `$1` dev_machine_id (or NULL), `$2` host_label
-/// (`request or stored`), `$3` new refresh hash, `$4` new refresh
-/// fingerprint, `$5` generation (`1`), `$6` previous hash (`''`), `$7`
-/// enrollment hash (`''`), `$8` enrollment fingerprint (`''`), `$9`
-/// enrolled_at (`now()`), `$10` runner id. With name, `$2` is the name
-/// and every later bind shifts by one (`$11` id).
-pub fn enroll_mark_enrolled_sql(with_name: bool) -> String {
-    if !with_name {
-        let body = [
-            "\"dev_machine_id\" = $1",
-            "\"host_label\" = $2",
-            "\"refresh_token_hash\" = $3",
-            "\"refresh_token_fingerprint\" = $4",
-            "\"refresh_token_generation\" = $5",
-            "\"previous_refresh_token_hash\" = $6",
-            "\"enrollment_token_hash\" = $7",
-            "\"enrollment_token_fingerprint\" = $8",
-            "\"enrolled_at\" = $9",
-        ]
-        .join(", ");
-        return format!("UPDATE \"runner\" SET {body} WHERE \"runner\".\"id\" = $10");
-    }
-    let body = [
-        "\"dev_machine_id\" = $1",
-        "\"name\" = $2",
-        "\"host_label\" = $3",
-        "\"refresh_token_hash\" = $4",
-        "\"refresh_token_fingerprint\" = $5",
-        "\"refresh_token_generation\" = $6",
-        "\"previous_refresh_token_hash\" = $7",
-        "\"enrollment_token_hash\" = $8",
-        "\"enrollment_token_fingerprint\" = $9",
-        "\"enrolled_at\" = $10",
-    ]
-    .join(", ");
-    format!("UPDATE \"runner\" SET {body} WHERE \"runner\".\"id\" = $11")
-}
 
 // ---------------------------------------------------------------------------
 // E3. Refresh row-lock: locked runner + workspace
@@ -426,196 +349,13 @@ pub fn workspace_by_slug_sql() -> String {
     )
 }
 
-/// E6b — inferred workspace (`enrollment.py:639-643`).
-///
-/// `WorkspaceMember.objects.filter(member=user,
-/// is_active=True).select_related("workspace").order_by("created_at")[:2]`:
-/// the caller's active memberships, oldest first, probing 2 rows. The
-/// base table carries the manager scope; the joined `workspaces` row
-/// carries none. `is_active=True` renders bare (QUIRK-bare-boolean).
-///
-/// `$1` = caller (member) id.
-///
-/// 0 rows → 400 `no_workspace_membership`; 2 rows → 400
-/// `workspace_slug_required`; 1 row → its workspace.
-pub fn memberships_for_inference_sql() -> String {
-    format!(
-        "SELECT {}, {} FROM \"workspace_members\" \
-         INNER JOIN \"workspaces\" ON (\"workspace_members\".\"workspace_id\" = \"workspaces\".\"id\") \
-         WHERE (\"workspace_members\".\"deleted_at\" IS NULL \
-         AND \"workspace_members\".\"is_active\" \
-         AND \"workspace_members\".\"member_id\" = $1) \
-         ORDER BY \"workspace_members\".\"created_at\" ASC LIMIT 2",
-        qualified("workspace_members", WORKSPACE_MEMBERS_SELECT_COLUMNS),
-        qualified("workspaces", WORKSPACES_SELECT_COLUMNS),
-    )
-}
-
-/// E6c — project (`enrollment.py:664-669`).
-///
-/// `Project.objects.filter(workspace_id=ws, identifier=id).first()`:
-/// scope + `-created_at` + `LIMIT 1`. `Q`-sorted: `identifier` binds
-/// first although the source passes `workspace_id` first.
-///
-/// `$1` = project identifier, `$2` = workspace id.
-///
-/// Miss → 404 `project_not_found`.
-pub fn project_by_workspace_identifier_sql() -> String {
-    format!(
-        "SELECT {} FROM \"projects\" \
-         WHERE (\"projects\".\"deleted_at\" IS NULL \
-         AND \"projects\".\"identifier\" = $1 AND \"projects\".\"workspace_id\" = $2) \
-         ORDER BY \"projects\".\"created_at\" DESC LIMIT 1",
-        qualified(project_cols::TABLE, project_cols::COLUMNS),
-    )
-}
-
-/// E6d — pod by explicit name (`enrollment.py:672-673`).
-///
-/// `Pod.objects.filter(project=project, name=name,
-/// deleted_at__isnull=True).first()`: `PodManager` scope + the explicit
-/// `deleted_at` conjunct (kept twice — QUIRK-duplicate-deleted-at) +
-/// `Meta.ordering` (`-is_default, created_at`) + `LIMIT 1`.
-///
-/// `$1` = pod name, `$2` = project id.
-///
-/// Miss does NOT 404: the code falls through to
-/// [`pod::DEFAULT_FOR_PROJECT_ID_SQL`](pidash_db::runner_enroll::columns::pod::DEFAULT_FOR_PROJECT_ID_SQL)
-/// (QUIRK-pod-fallthrough); only a missing default → 409
-/// `project_has_no_default_pod` (`:676-680`).
-pub fn pod_by_name_sql() -> String {
-    format!(
-        "SELECT {} FROM \"pod\" \
-         WHERE (\"pod\".\"deleted_at\" IS NULL AND \"pod\".\"deleted_at\" IS NULL \
-         AND \"pod\".\"name\" = $1 AND \"pod\".\"project_id\" = $2) \
-         ORDER BY \"pod\".\"is_default\" DESC, \"pod\".\"created_at\" ASC LIMIT 1",
-        qualified(pod_cols::TABLE, pod_cols::COLUMNS),
-    )
-}
-
 // ---------------------------------------------------------------------------
 // E7. Create tx body: desktop reuse probe + cap count + insert
 // ---------------------------------------------------------------------------
 
-/// E7 — desktop-bundled reuse probe (`enrollment.py:709-720`).
-///
-/// `Runner.objects.select_for_update().filter(owner, workspace_id,
-/// dev_machine, pod, provisioning=DESKTOP_BUNDLED,
-/// revoked_at__isnull=True).first()`, inside the per-attempt tx.
-/// `Q`-sorted `WHERE`, `Meta.ordering`, `LIMIT 1`.
-///
-/// `$1` dev_machine_id, `$2` owner_id, `$3` pod_id, `$4` provisioning
-/// (`'desktop_bundled'`), `$5` workspace_id.
-///
-/// Hit → reuse the row (break the retry loop; nothing minted). Miss →
-/// the cap count, then the insert.
-pub fn desktop_reuse_probe_sql() -> String {
-    format!(
-        "SELECT {} FROM \"runner\" \
-         WHERE (\"runner\".\"dev_machine_id\" = $1 AND \"runner\".\"owner_id\" = $2 \
-         AND \"runner\".\"pod_id\" = $3 AND \"runner\".\"provisioning\" = $4 \
-         AND \"runner\".\"revoked_at\" IS NULL AND \"runner\".\"workspace_id\" = $5) \
-         ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC \
-         LIMIT 1 FOR UPDATE",
-        qualified(r_cols::TABLE, r_cols::COLUMNS),
-    )
-}
-
-/// E7 — managed cap count (`_managed_cap_error`, `enrollment.py:237-246`).
-///
-/// `Runner.objects.filter(owner, pod, workspace_id,
-/// provisioning=DESKTOP_BUNDLED).exclude(status=REVOKED).count()`:
-/// `.exclude()` renders `NOT (…)` appended after the sorted filters;
-/// `.count()` renders `COUNT(*) AS "__count"` with ordering cleared.
-///
-/// `$1` owner_id, `$2` pod_id, `$3` provisioning (`'desktop_bundled'`),
-/// `$4` workspace_id, `$5` status (`'revoked'`).
-///
-/// Count ≥ `MANAGED_RUNNER_MAX_PER_USER_PROJECT` (default 1) → 409
-/// `managed_runner_limit` (rolls the attempt tx back).
-pub fn managed_cap_count_sql() -> String {
-    "SELECT COUNT(*) AS \"__count\" FROM \"runner\" \
-     WHERE (\"runner\".\"owner_id\" = $1 AND \"runner\".\"pod_id\" = $2 \
-     AND \"runner\".\"provisioning\" = $3 AND \"runner\".\"workspace_id\" = $4 \
-     AND NOT (\"runner\".\"status\" = $5))"
-        .to_string()
-}
-
-/// E7 — runner insert (`enrollment.py:726-735`), inside the attempt tx.
-///
-/// `Runner.objects.create(owner, workspace_id, dev_machine, pod, name,
-/// host_label, provisioning, enrolled_at=now())`. `Runner.save()`'s
-/// single-project auto-resolve is a no-op here (`pod` is always set —
-/// `:676-680` 409s otherwise), so this is a plain 31-column `INSERT`
-/// with every column bound (`$1..$31` in [`r_cols::COLUMNS`] order):
-/// `$1` id (fresh uuid4), `$2` owner, `$3` workspace, `$4` dev machine
-/// (or NULL — legacy path), `$5` pod, `$6` name (explicit or
-/// `_next_auto_runner_name`), `$7` host label, `$8` provisioning
-/// (inherited from the machine, NEVER from the body, `:701-704`), `$9`
-/// visibility (`0`), `$10-12` refresh hash/fingerprint (`''`) +
-/// generation (`0`), `$13` previous hash (`''`), `$14` signing key
-/// version (`1`), `$15-16` enrollment hash/fingerprint (`''` — enrolled
-/// at creation, no legacy token), `$17` enrolled_at (`now()`), `$18`
-/// capabilities (`[]`), `$19` status (`'offline'`), `$20-22`
-/// os/arch/version (`''`), `$23` dev_metadata (`{}`), `$24` protocol
-/// version (`1`), `$25` heartbeat (NULL), `$26-27`
-/// created/updated (`now()`), `$28-29` revoked_at (NULL)/reason (`''`),
-/// `$30-31` paused_at/paused_by (NULL).
-///
-/// `IntegrityError` on `runner_unique_name_per_pod` → explicit name:
-/// 409 `runner_name_taken`; auto name: retry (max 5) else 409
-/// `could_not_allocate_runner_name` (`:750-758`).
-pub fn runner_insert_sql() -> String {
-    let cols = r_cols::COLUMNS
-        .iter()
-        .map(|col| format!("\"{col}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "INSERT INTO \"{}\" ({cols}) VALUES ({})",
-        r_cols::TABLE,
-        placeholders(r_cols::COLUMNS.len()),
-    )
-}
-
 // ---------------------------------------------------------------------------
 // B1/B2/B3. Token bootstrap + rotate
 // ---------------------------------------------------------------------------
-
-/// B1 — bootstrap locked-exists probe (`_maybe_mint_machine_token`,
-/// `enrollment.py:143-155`), inside the enrollment/creation tx.
-///
-/// `MachineToken.objects.select_for_update().filter(**filters).first()`
-/// with `Q`-sorted `WHERE`, `-created_at` ordering, `LIMIT 1`.
-///
-/// With a dev machine — `$1` dev_machine_id, `$2` user_id, `$3`
-/// workspace_id (plus the unbound `revoked_at IS NULL`). Legacy
-/// (host-label token) — `$1` host_label, `$2` user_id, `$3`
-/// workspace_id (plus `revoked_at IS NULL AND dev_machine_id IS NULL`).
-///
-/// Hit → return `None` (no mint; the response omits `machine_token`).
-pub fn bootstrap_probe_sql(with_dev_machine: bool) -> String {
-    let select = qualified(mt_cols::TABLE, mt_cols::COLUMNS);
-    let order = "ORDER BY \"machine_token\".\"created_at\" DESC LIMIT 1 FOR UPDATE";
-    if with_dev_machine {
-        format!(
-            "SELECT {select} FROM \"machine_token\" \
-             WHERE (\"machine_token\".\"dev_machine_id\" = $1 \
-             AND \"machine_token\".\"revoked_at\" IS NULL \
-             AND \"machine_token\".\"user_id\" = $2 \
-             AND \"machine_token\".\"workspace_id\" = $3) {order}"
-        )
-    } else {
-        format!(
-            "SELECT {select} FROM \"machine_token\" \
-             WHERE (\"machine_token\".\"dev_machine_id\" IS NULL \
-             AND \"machine_token\".\"host_label\" = $1 \
-             AND \"machine_token\".\"revoked_at\" IS NULL \
-             AND \"machine_token\".\"user_id\" = $2 \
-             AND \"machine_token\".\"workspace_id\" = $3) {order}"
-        )
-    }
-}
 
 // NOTE: the B2 bootstrap insert and the B3 rotate revoke builders lived
 // here; the statements moved to `crate::domain::tokens`
@@ -649,97 +389,10 @@ pub fn dev_machine_by_id_sql() -> String {
     )
 }
 
-/// D2 — dev-machine insert (`enrollment.py:86-99,111-118`), in a savepoint.
-///
-/// `DevMachine.objects.create(id?, owner, host_label, label,
-/// last_seen_at=now())`: plain 10-column `INSERT`, `$1..$10` in
-/// [`dm_cols::COLUMNS`] order — `$1` id (client id, or a fresh server
-/// uuid4 on the D3 path), `$2` owner, `$3` host label (normalized —
-/// possibly `""` on the with-id path), `$4` label (host `[:128]`),
-/// `$5` visibility (`0`), `$6` provisioning (`'manual'`), `$7`
-/// last_seen_at (`now()`), `$8` revoked_at (NULL), `$9-10`
-/// created/updated (`now()`).
-///
-/// With-id path: `IntegrityError` (id race) → re-lock D1;
-/// miss/foreign owner → ownership error; else touch + return (`:95-99`).
-/// D3 path: `IntegrityError` (legacy owner/host constraint race) →
-/// legacy reselect (same SQL as [`dev_machine_by_owner_host_sql`]);
-/// return whatever won, even `None` (`:119-127`).
-pub fn dev_machine_insert_sql() -> String {
-    let cols = dm_cols::COLUMNS
-        .iter()
-        .map(|col| format!("\"{col}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "INSERT INTO \"{}\" ({cols}) VALUES ({})",
-        dm_cols::TABLE,
-        placeholders(dm_cols::COLUMNS.len()),
-    )
-}
-
-/// D3 — dev-machine by (owner, host_label), locked, oldest first
-/// (`enrollment.py:101-127`).
-///
-/// `DevMachine.objects.select_for_update().filter(owner, host_label,
-/// revoked_at__isnull=True).order_by("created_at").first()`. Also the
-/// legacy-race reselect (`:122-127`), which is textually identical.
-///
-/// `$1` host_label (normalized — the empty-label + no-id case returns
-/// `None` BEFORE any SQL, `:101-102`, leaving `runner.dev_machine`
-/// NULL), `$2` owner_id.
-///
-/// Hit → touch (D4) + return. Miss → D2 insert with a server uuid.
-pub fn dev_machine_by_owner_host_sql() -> String {
-    format!(
-        "SELECT {} FROM \"dev_machine\" \
-         WHERE (\"dev_machine\".\"host_label\" = $1 \
-         AND \"dev_machine\".\"owner_id\" = $2 \
-         AND \"dev_machine\".\"revoked_at\" IS NULL) \
-         ORDER BY \"dev_machine\".\"created_at\" ASC LIMIT 1 FOR UPDATE",
-        qualified(dm_cols::TABLE, dm_cols::COLUMNS),
-    )
-}
-
 /// D4 — the always-written touch fields (`_touch_dev_machine`,
 /// `enrollment.py:60`). [`touch_dev_machine_sql`] emits these plus the
 /// conditional `host_label`/`label` in Django model-field order.
 pub const TOUCH_BASE_FIELDS: &[&str] = &["last_seen_at", "updated_at"];
-
-/// D4 — `_touch_dev_machine` write (`enrollment.py:57-69`).
-///
-/// `machine.save(update_fields=[…])`: always `last_seen_at=now` +
-/// `updated_at=now`, plus `host_label` when [`touch_selection`] says the
-/// non-empty request label differs from stored, plus `label` when the
-/// non-empty request label meets an empty stored label. `SET` order is
-/// model-field order: `host_label`, `label`, `last_seen_at`,
-/// `updated_at` — so the `$N` numbering depends on the flags:
-///
-/// * neither: `$1` last_seen_at, `$2` updated_at, `$3` id.
-/// * host only: `$1` host_label, `$2` last_seen_at, `$3` updated_at, `$4` id.
-/// * label only: `$1` label, `$2` last_seen_at, `$3` updated_at, `$4` id.
-/// * both: `$1` host_label, `$2` label, `$3` last_seen_at, `$4`
-///   updated_at, `$5` id.
-pub fn touch_dev_machine_sql(update_host_label: bool, update_label: bool) -> String {
-    let mut set: Vec<String> = Vec::new();
-    let mut next: u32 = 1;
-    if update_host_label {
-        set.push(format!("\"host_label\" = ${next}"));
-        next += 1;
-    }
-    if update_label {
-        set.push(format!("\"label\" = ${next}"));
-        next += 1;
-    }
-    set.push(format!("\"last_seen_at\" = ${next}"));
-    next += 1;
-    set.push(format!("\"updated_at\" = ${next}"));
-    next += 1;
-    format!(
-        "UPDATE \"dev_machine\" SET {} WHERE \"dev_machine\".\"id\" = ${next}",
-        set.join(", "),
-    )
-}
 
 // ---------------------------------------------------------------------------
 // Bind helpers (pure; the SQL above names the slots, these compute values)
@@ -825,9 +478,517 @@ pub fn touch_selection(
     }
 }
 
+// ---------------------------------------------------------------------------
+// SeaORM reads and writes (the enroll / create endpoints)
+// ---------------------------------------------------------------------------
+
+// The entities omit runner's relations (see entity/mod.rs); the joins
+// the enroll reads need are spelled here.
+fn runner_to_workspace() -> RelationDef {
+    runner::Entity::belongs_to(workspaces::Entity)
+        .from(runner::Column::WorkspaceId)
+        .to(workspaces::Column::Id)
+        .into()
+}
+
+fn runner_to_pod() -> RelationDef {
+    runner::Entity::belongs_to(pod::Entity)
+        .from(runner::Column::PodId)
+        .to(pod::Column::Id)
+        .into()
+}
+
+/// The [`enroll_locked_read_sql`] row the enroll endpoint reads.
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+pub struct EnrollRunnerRow {
+    pub runner_id: Uuid,
+    pub owner_id: Uuid,
+    pub workspace_id: Uuid,
+    pub pod_id: Uuid,
+    pub name: String,
+    pub host_label: String,
+    pub enrolled_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub workspace_slug: String,
+    pub pod_name: String,
+    pub project_identifier: String,
+}
+
+/// E1 (`enrollment.py:284-290`): runners by one-time enrollment hash,
+/// INNER JOINed to workspace, pod and project, row-locked. Every match is
+/// returned so the caller can 500 on two (`MultipleObjectsReturned`).
+pub fn enroll_locked_query(token_hash: &str) -> Select<runner::Entity> {
+    runner::Entity::find()
+        .select_only()
+        .column_as(runner::Column::Id, "runner_id")
+        .columns([
+            runner::Column::OwnerId,
+            runner::Column::WorkspaceId,
+            runner::Column::PodId,
+            runner::Column::Name,
+            runner::Column::HostLabel,
+            runner::Column::EnrolledAt,
+            runner::Column::RevokedAt,
+        ])
+        .column_as(workspaces::Column::Slug, "workspace_slug")
+        .column_as(pod::Column::Name, "pod_name")
+        .column_as(projects::Column::Identifier, "project_identifier")
+        .join(JoinType::InnerJoin, runner_to_workspace())
+        .join(JoinType::InnerJoin, runner_to_pod())
+        .join(JoinType::InnerJoin, pod::Relation::Projects.def())
+        .filter(runner::Column::EnrollmentTokenHash.eq(token_hash))
+        .lock_exclusive()
+}
+
+pub async fn enroll_locked_runners(
+    db: &impl ConnectionTrait,
+    token_hash: &str,
+) -> Result<Vec<EnrollRunnerRow>, DbErr> {
+    enroll_locked_query(token_hash)
+        .into_model::<EnrollRunnerRow>()
+        .all(db)
+        .await
+}
+
+/// E2 (`enrollment.py:325-348`, [`ENROLL_UPDATE_FIELDS`]): mark enrolled
+/// and rotate to refresh generation 1; `name` only when the body set one.
+/// `updated_at` is not in the field list.
+#[allow(clippy::too_many_arguments)]
+pub async fn mark_runner_enrolled(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+    dev_machine_id: Option<Uuid>,
+    name: Option<&str>,
+    host_label: &str,
+    refresh_hash: &str,
+    refresh_fingerprint: &str,
+    enrolled_at: chrono::DateTime<chrono::Utc>,
+) -> Result<(), DbErr> {
+    let mut update = runner::Entity::update_many()
+        .col_expr(runner::Column::DevMachineId, Expr::value(dev_machine_id));
+    if let Some(name) = name {
+        update = update.col_expr(runner::Column::Name, Expr::value(name));
+    }
+    update
+        .col_expr(runner::Column::HostLabel, Expr::value(host_label))
+        .col_expr(runner::Column::RefreshTokenHash, Expr::value(refresh_hash))
+        .col_expr(
+            runner::Column::RefreshTokenFingerprint,
+            Expr::value(refresh_fingerprint),
+        )
+        .col_expr(runner::Column::RefreshTokenGeneration, Expr::value(1i32))
+        .col_expr(runner::Column::PreviousRefreshTokenHash, Expr::value(""))
+        .col_expr(runner::Column::EnrollmentTokenHash, Expr::value(""))
+        .col_expr(runner::Column::EnrollmentTokenFingerprint, Expr::value(""))
+        .col_expr(runner::Column::EnrolledAt, Expr::value(enrolled_at))
+        .filter(runner::Column::Id.eq(runner_id))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// A locked dev-machine row: the touch inputs plus provisioning.
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+pub struct LockedDevMachineRow {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub host_label: String,
+    pub label: String,
+    pub provisioning: String,
+}
+
+fn locked_dev_machine() -> Select<dev_machine::Entity> {
+    dev_machine::Entity::find()
+        .select_only()
+        .columns([
+            dev_machine::Column::Id,
+            dev_machine::Column::OwnerId,
+            dev_machine::Column::HostLabel,
+            dev_machine::Column::Label,
+            dev_machine::Column::Provisioning,
+        ])
+        .lock_exclusive()
+}
+
+/// D1 ([`dev_machine_by_id_sql`]): by id, `Meta.ordering`, `LIMIT 1`,
+/// `FOR UPDATE`.
+pub async fn lock_dev_machine_by_id(
+    db: &impl ConnectionTrait,
+    id: Uuid,
+) -> Result<Option<LockedDevMachineRow>, DbErr> {
+    locked_dev_machine()
+        .filter(dev_machine::Column::Id.eq(id))
+        .order_by_desc(dev_machine::Column::LastSeenAt)
+        .order_by_desc(dev_machine::Column::CreatedAt)
+        .into_model::<LockedDevMachineRow>()
+        .one(db)
+        .await
+}
+
+/// D3 ([`dev_machine_by_owner_host_sql`]): the owner's oldest unrevoked
+/// machine with this host label, `FOR UPDATE`.
+pub async fn lock_dev_machine_by_owner_host(
+    db: &impl ConnectionTrait,
+    host_label: &str,
+    owner_id: Uuid,
+) -> Result<Option<LockedDevMachineRow>, DbErr> {
+    locked_dev_machine()
+        .filter(dev_machine::Column::HostLabel.eq(host_label))
+        .filter(dev_machine::Column::OwnerId.eq(owner_id))
+        .filter(dev_machine::Column::RevokedAt.is_null())
+        .order_by_asc(dev_machine::Column::CreatedAt)
+        .into_model::<LockedDevMachineRow>()
+        .one(db)
+        .await
+}
+
+/// `_touch_dev_machine` (`enrollment.py:57-69`, [`touch_selection`]):
+/// `host_label` / `label` only when selected, then the two timestamps.
+pub async fn touch_dev_machine(
+    db: &impl ConnectionTrait,
+    id: Uuid,
+    host_label: Option<&str>,
+    label: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), DbErr> {
+    let mut update = dev_machine::Entity::update_many();
+    if let Some(host_label) = host_label {
+        update = update.col_expr(dev_machine::Column::HostLabel, Expr::value(host_label));
+    }
+    if let Some(label) = label {
+        update = update.col_expr(dev_machine::Column::Label, Expr::value(label));
+    }
+    update
+        .col_expr(dev_machine::Column::LastSeenAt, Expr::value(now))
+        .col_expr(dev_machine::Column::UpdatedAt, Expr::value(now))
+        .filter(dev_machine::Column::Id.eq(id))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// `_maybe_mint_machine_token`'s locked probe ([`bootstrap_probe_sql`]):
+/// an unrevoked token for this user + workspace on the machine (or, with
+/// no machine, on the host label with no machine), newest first,
+/// `FOR UPDATE`.
+pub async fn bootstrap_token_exists(
+    db: &impl ConnectionTrait,
+    dev_machine_id: Option<Uuid>,
+    host_label: &str,
+    user_id: Uuid,
+    workspace_id: Uuid,
+) -> Result<bool, DbErr> {
+    let query = machine_token::Entity::find()
+        .select_only()
+        .column(machine_token::Column::Id);
+    let query = match dev_machine_id {
+        Some(machine) => query.filter(machine_token::Column::DevMachineId.eq(machine)),
+        None => query
+            .filter(machine_token::Column::DevMachineId.is_null())
+            .filter(machine_token::Column::HostLabel.eq(host_label)),
+    };
+    let hit: Option<Uuid> = query
+        .filter(machine_token::Column::RevokedAt.is_null())
+        .filter(machine_token::Column::UserId.eq(user_id))
+        .filter(machine_token::Column::WorkspaceId.eq(workspace_id))
+        .order_by_desc(machine_token::Column::CreatedAt)
+        .lock_exclusive()
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// E6a ([`workspace_by_slug_sql`]): a live workspace by slug,
+/// `-created_at`, first.
+pub async fn workspace_by_slug(
+    db: &impl ConnectionTrait,
+    slug: &str,
+) -> Result<Option<(Uuid, String)>, DbErr> {
+    workspaces::Entity::find()
+        .select_only()
+        .columns([workspaces::Column::Id, workspaces::Column::Slug])
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .order_by_desc(workspaces::Column::CreatedAt)
+        .into_tuple()
+        .one(db)
+        .await
+}
+
+/// A live workspace's slug by id (the stale-ticket check).
+pub async fn live_workspace_slug(
+    db: &impl ConnectionTrait,
+    workspace_id: Uuid,
+) -> Result<Option<String>, DbErr> {
+    workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Slug)
+        .filter(workspaces::Column::Id.eq(workspace_id))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
+        .await
+}
+
+/// E6b ([`memberships_for_inference_sql`]): the caller's active, live
+/// memberships' workspaces `(id, slug)`, oldest membership first, at
+/// most two (the caller only needs "exactly one").
+pub async fn memberships_for_inference(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+) -> Result<Vec<(Uuid, String)>, DbErr> {
+    workspace_members::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .column(workspaces::Column::Slug)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .order_by_asc(workspace_members::Column::CreatedAt)
+        .limit(2)
+        .into_tuple()
+        .all(db)
+        .await
+}
+
+/// `is_workspace_member` (`core/permissions.py:28-34`): an active, live
+/// membership exists.
+pub async fn is_active_member(
+    db: &impl ConnectionTrait,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// E6c ([`project_by_workspace_identifier_sql`]): a live project
+/// `(id, identifier)`, `-created_at`, first.
+pub async fn project_by_workspace_identifier(
+    db: &impl ConnectionTrait,
+    workspace_id: Uuid,
+    identifier: &str,
+) -> Result<Option<(Uuid, String)>, DbErr> {
+    projects::Entity::find()
+        .select_only()
+        .columns([projects::Column::Id, projects::Column::Identifier])
+        .filter(projects::Column::DeletedAt.is_null())
+        .filter(projects::Column::Identifier.eq(identifier))
+        .filter(projects::Column::WorkspaceId.eq(workspace_id))
+        .order_by_desc(projects::Column::CreatedAt)
+        .into_tuple()
+        .one(db)
+        .await
+}
+
+/// A pod hit `(id, name, project_id)`.
+pub type PodHitRow = (Uuid, String, Uuid);
+
+fn live_pods(project_id: Uuid) -> Select<pod::Entity> {
+    pod::Entity::find()
+        .select_only()
+        .columns([pod::Column::Id, pod::Column::Name, pod::Column::ProjectId])
+        .filter(pod::Column::DeletedAt.is_null())
+        .filter(pod::Column::ProjectId.eq(project_id))
+        .order_by_desc(pod::Column::IsDefault)
+        .order_by_asc(pod::Column::CreatedAt)
+}
+
+/// E6d-explicit ([`pod_by_name_sql`]): a live pod of the project by name.
+pub async fn pod_by_name(
+    db: &impl ConnectionTrait,
+    project_id: Uuid,
+    name: &str,
+) -> Result<Option<PodHitRow>, DbErr> {
+    live_pods(project_id)
+        .filter(pod::Column::Name.eq(name))
+        .into_tuple()
+        .one(db)
+        .await
+}
+
+/// E6d-default (`Pod.default_for_project_id`, `models.py:173-176`).
+pub async fn default_pod_for_project(
+    db: &impl ConnectionTrait,
+    project_id: Uuid,
+) -> Result<Option<PodHitRow>, DbErr> {
+    live_pods(project_id)
+        .filter(pod::Column::IsDefault.eq(true))
+        .into_tuple()
+        .one(db)
+        .await
+}
+
+/// `_next_auto_runner_name` (`enrollment.py:790-796`): every runner in
+/// the pod, revoked included.
+pub async fn count_pod_runners(db: &impl ConnectionTrait, pod_id: Uuid) -> Result<u64, DbErr> {
+    runner::Entity::find()
+        .filter(runner::Column::PodId.eq(pod_id))
+        .count(db)
+        .await
+}
+
+/// A reused desktop runner `(id, name, refresh_token_generation)`.
+pub type ReuseHitRow = (Uuid, String, i32);
+
+/// E7 reuse probe ([`desktop_reuse_probe_sql`]): the live bundled runner
+/// for this machine / owner / pod / workspace, `Meta.ordering`, locked.
+pub async fn desktop_reuse_probe(
+    db: &impl ConnectionTrait,
+    dev_machine_id: Uuid,
+    owner_id: Uuid,
+    pod_id: Uuid,
+    provisioning: &str,
+    workspace_id: Uuid,
+) -> Result<Option<ReuseHitRow>, DbErr> {
+    runner::Entity::find()
+        .select_only()
+        .columns([
+            runner::Column::Id,
+            runner::Column::Name,
+            runner::Column::RefreshTokenGeneration,
+        ])
+        .filter(runner::Column::DevMachineId.eq(dev_machine_id))
+        .filter(runner::Column::OwnerId.eq(owner_id))
+        .filter(runner::Column::PodId.eq(pod_id))
+        .filter(runner::Column::Provisioning.eq(provisioning))
+        .filter(runner::Column::RevokedAt.is_null())
+        .filter(runner::Column::WorkspaceId.eq(workspace_id))
+        .order_by_desc(runner::Column::LastHeartbeatAt)
+        .order_by_desc(runner::Column::CreatedAt)
+        .lock_exclusive()
+        .into_tuple()
+        .one(db)
+        .await
+}
+
+/// E7 cap count (`_managed_cap_error`, `enrollment.py:237-246`): the
+/// owner's non-revoked runners of this provisioning in the pod.
+pub async fn managed_cap_count(
+    db: &impl ConnectionTrait,
+    owner_id: Uuid,
+    pod_id: Uuid,
+    provisioning: &str,
+    workspace_id: Uuid,
+    revoked: &str,
+) -> Result<u64, DbErr> {
+    runner::Entity::find()
+        .filter(runner::Column::OwnerId.eq(owner_id))
+        .filter(runner::Column::PodId.eq(pod_id))
+        .filter(runner::Column::Provisioning.eq(provisioning))
+        .filter(runner::Column::WorkspaceId.eq(workspace_id))
+        .filter(runner::Column::Status.ne(revoked))
+        .count(db)
+        .await
+}
+
+/// The E7 runner insert's caller-chosen values; every other column takes
+/// the `Runner` field default, as the old 31-column `INSERT` bound them.
+pub struct NewRunner<'a> {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub workspace_id: Uuid,
+    pub dev_machine_id: Option<Uuid>,
+    pub pod_id: Uuid,
+    pub name: &'a str,
+    pub host_label: &'a str,
+    pub provisioning: &'a str,
+    pub status: &'a str,
+    pub now: chrono::DateTime<chrono::Utc>,
+}
+
+/// E7 (`enrollment.py:726-735`): `Runner.objects.create(...)` with the
+/// model defaults (visibility 0, generation 0, key version 1, empty
+/// hashes, `[]` capabilities, `{}` metadata, protocol 1) and
+/// `enrolled_at = created_at = updated_at = now`.
+pub async fn insert_runner(db: &impl ConnectionTrait, new: &NewRunner<'_>) -> Result<(), DbErr> {
+    runner::Entity::insert(runner::ActiveModel {
+        id: Set(new.id),
+        owner_id: Set(new.owner_id),
+        workspace_id: Set(new.workspace_id),
+        dev_machine_id: Set(new.dev_machine_id),
+        pod_id: Set(new.pod_id),
+        name: Set(new.name.to_owned()),
+        host_label: Set(new.host_label.to_owned()),
+        provisioning: Set(new.provisioning.to_owned()),
+        visibility: Set(0),
+        refresh_token_hash: Set(String::new()),
+        refresh_token_fingerprint: Set(String::new()),
+        refresh_token_generation: Set(0),
+        previous_refresh_token_hash: Set(String::new()),
+        access_token_signing_key_version: Set(1),
+        enrollment_token_hash: Set(String::new()),
+        enrollment_token_fingerprint: Set(String::new()),
+        enrolled_at: Set(Some(new.now.into())),
+        capabilities: Set(serde_json::json!([])),
+        status: Set(new.status.to_owned()),
+        os: Set(String::new()),
+        arch: Set(String::new()),
+        runner_version: Set(String::new()),
+        dev_metadata: Set(serde_json::json!({})),
+        protocol_version: Set(1),
+        last_heartbeat_at: Set(None),
+        created_at: Set(new.now.into()),
+        updated_at: Set(new.now.into()),
+        revoked_at: Set(None),
+        revoked_reason: Set(String::new()),
+        paused_at: Set(None),
+        paused_by_id: Set(None),
+    })
+    .exec_without_returning(db)
+    .await
+    .map(drop)
+}
+
+/// The session-auth user row `(id, password, is_active)`.
+pub async fn session_user(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+) -> Result<Option<(Uuid, String, bool)>, DbErr> {
+    users::Entity::find()
+        .select_only()
+        .columns([
+            users::Column::Id,
+            users::Column::Password,
+            users::Column::IsActive,
+        ])
+        .filter(users::Column::Id.eq(user_id))
+        .into_tuple()
+        .one(db)
+        .await
+}
+
+/// The user row exists (the stale-ticket check).
+pub async fn user_exists(db: &impl ConnectionTrait, user_id: Uuid) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Id.eq(user_id))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pidash_db::app_project::models::project as project_cols;
+    use pidash_db::runner_enroll::columns::{machine_token as mt_cols, pod as pod_cols};
 
     const FIXTURE_ENROLL: &str =
         include_str!("../../../../../fixtures/runner_enroll/queries/enroll_refresh.sql");
@@ -993,101 +1154,7 @@ mod tests {
 
     // -- E1 --
 
-    #[test]
-    fn e1_locks_runner_with_workspace_pod_project_joins() {
-        let sql = enroll_locked_read_sql();
-        let list = assert_suffix(
-            &sql,
-            "FROM \"runner\" INNER JOIN \"workspaces\" ON (\"runner\".\"workspace_id\" = \"workspaces\".\"id\") \
-             INNER JOIN \"pod\" ON (\"runner\".\"pod_id\" = \"pod\".\"id\") \
-             INNER JOIN \"projects\" ON (\"pod\".\"project_id\" = \"projects\".\"id\") \
-             WHERE \"runner\".\"enrollment_token_hash\" = $1 FOR UPDATE",
-        );
-        // Full rows in Django select order: runner, workspaces, pod, projects.
-        let expected = format!(
-            "{}, {}, {}, {}",
-            expected_list("runner", RUNNER_COLS),
-            expected_list("workspaces", WORKSPACES_SELECT_COLUMNS),
-            expected_list("pod", POD_COLS),
-            expected_list("projects", project_cols::COLUMNS),
-        );
-        assert_eq!(list, expected);
-        // .get(): no ordering, no LIMIT (handlers map row counts).
-        assert!(!sql.contains("ORDER BY"), "{sql}");
-        assert!(!sql.contains("LIMIT"), "{sql}");
-        for fragment in [
-            fixture_fragment("INNER JOIN \"workspaces\""),
-            fixture_fragment("INNER JOIN \"pod\""),
-            fixture_fragment("INNER JOIN \"projects\""),
-            fixture_fragment("\"enrollment_token_hash\" = $1"),
-            fixture_fragment("FOR UPDATE"),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
-    }
-
     // -- E2 --
-
-    #[test]
-    fn e2_emits_model_order_set_without_updated_at() {
-        assert_eq!(
-            ENROLL_UPDATE_FIELDS,
-            &[
-                "dev_machine",
-                "host_label",
-                "enrolled_at",
-                "enrollment_token_hash",
-                "enrollment_token_fingerprint",
-                "refresh_token_hash",
-                "refresh_token_fingerprint",
-                "refresh_token_generation",
-                "previous_refresh_token_hash",
-            ]
-        );
-        assert_eq!(
-            enroll_mark_enrolled_sql(false),
-            "UPDATE \"runner\" SET \"dev_machine_id\" = $1, \"host_label\" = $2, \
-             \"refresh_token_hash\" = $3, \"refresh_token_fingerprint\" = $4, \
-             \"refresh_token_generation\" = $5, \"previous_refresh_token_hash\" = $6, \
-             \"enrollment_token_hash\" = $7, \"enrollment_token_fingerprint\" = $8, \
-             \"enrolled_at\" = $9 WHERE \"runner\".\"id\" = $10",
-        );
-        // updated_at NOT bumped (fixture enroll_E2_after).
-        assert!(!enroll_mark_enrolled_sql(false).contains("updated_at"));
-        assert!(!enroll_mark_enrolled_sql(true).contains("updated_at"));
-        for fragment in [
-            fixture_fragment("\"dev_machine_id\" = $1"),
-            fixture_fragment("\"host_label\" = $2"),
-            fixture_fragment("\"refresh_token_hash\" = "),
-            fixture_fragment("\"enrolled_at\" = "),
-        ] {
-            assert_builder_contains(&enroll_mark_enrolled_sql(false), &fragment);
-        }
-    }
-
-    #[test]
-    fn e2_name_slot_is_second_when_body_named() {
-        assert_eq!(
-            enroll_mark_enrolled_sql(true),
-            "UPDATE \"runner\" SET \"dev_machine_id\" = $1, \"name\" = $2, \"host_label\" = $3, \
-             \"refresh_token_hash\" = $4, \"refresh_token_fingerprint\" = $5, \
-             \"refresh_token_generation\" = $6, \"previous_refresh_token_hash\" = $7, \
-             \"enrollment_token_hash\" = $8, \"enrollment_token_fingerprint\" = $9, \
-             \"enrolled_at\" = $10 WHERE \"runner\".\"id\" = $11",
-        );
-        // The SET covers exactly the update_fields (+ name), whatever the order.
-        for col in ENROLL_UPDATE_FIELDS.iter().copied().chain(["name"]) {
-            let attr = if col == "dev_machine" {
-                "dev_machine_id"
-            } else {
-                col
-            };
-            assert!(
-                enroll_mark_enrolled_sql(true).contains(&format!("\"{attr}\" = ")),
-                "{col}"
-            );
-        }
-    }
 
     // -- E3/E4/E5 --
 
@@ -1189,179 +1256,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn e6b_probes_two_membership_rows_oldest_first() {
-        let sql = memberships_for_inference_sql();
-        let list = assert_suffix(
-            &sql,
-            "FROM \"workspace_members\" INNER JOIN \"workspaces\" ON \
-             (\"workspace_members\".\"workspace_id\" = \"workspaces\".\"id\") \
-             WHERE (\"workspace_members\".\"deleted_at\" IS NULL \
-             AND \"workspace_members\".\"is_active\" AND \"workspace_members\".\"member_id\" = $1) \
-             ORDER BY \"workspace_members\".\"created_at\" ASC LIMIT 2",
-        );
-        assert_eq!(
-            list,
-            format!(
-                "{}, {}",
-                expected_list("workspace_members", WORKSPACE_MEMBERS_SELECT_COLUMNS),
-                expected_list("workspaces", WORKSPACES_SELECT_COLUMNS),
-            )
-        );
-        for fragment in [
-            fixture_fragment("FROM \"workspace_members\""),
-            fixture_fragment("\"member_id\" = $1"),
-            fixture_fragment("is_active"),
-            fixture_fragment("LIMIT 2"),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
-    }
-
-    #[test]
-    fn e6c_binds_identifier_before_workspace() {
-        let sql = project_by_workspace_identifier_sql();
-        let list = assert_suffix(
-            &sql,
-            "FROM \"projects\" WHERE (\"projects\".\"deleted_at\" IS NULL \
-             AND \"projects\".\"identifier\" = $1 AND \"projects\".\"workspace_id\" = $2) \
-             ORDER BY \"projects\".\"created_at\" DESC LIMIT 1",
-        );
-        assert_eq!(list, expected_list("projects", project_cols::COLUMNS));
-        for fragment in [
-            fixture_fragment("FROM \"projects\""),
-            fixture_fragment("\"identifier\" = "),
-            fixture_fragment("\"workspace_id\" = "),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
-    }
-
-    #[test]
-    fn e6d_explicit_keeps_duplicate_deleted_at() {
-        let sql = pod_by_name_sql();
-        let list = assert_suffix(
-            &sql,
-            "FROM \"pod\" WHERE (\"pod\".\"deleted_at\" IS NULL AND \"pod\".\"deleted_at\" IS NULL \
-             AND \"pod\".\"name\" = $1 AND \"pod\".\"project_id\" = $2) \
-             ORDER BY \"pod\".\"is_default\" DESC, \"pod\".\"created_at\" ASC LIMIT 1",
-        );
-        assert_eq!(list, expected_list("pod", POD_COLS));
-        for fragment in [
-            fixture_fragment("\"deleted_at\" IS NULL"),
-            fixture_fragment("\"name\" = "),
-            fixture_fragment("\"project_id\" = "),
-            fixture_fragment("is_default"),
-            fixture_fragment("LIMIT 1"),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
-        // Second leg is the merged default-pod read (db-owned, PIDASHCONV-581).
-        let default = pidash_db::runner_enroll::columns::pod::DEFAULT_FOR_PROJECT_ID_SQL;
-        assert!(default.contains("\"pod\".\"project_id\" = $1"), "{default}");
-        assert!(default.contains("\"pod\".\"is_default\""), "{default}");
-        assert!(default.contains("LIMIT 1"), "{default}");
-    }
-
     // -- E7 --
 
-    #[test]
-    fn e7_reuse_probe_locks_sorted_filters() {
-        let sql = desktop_reuse_probe_sql();
-        let list = assert_suffix(
-            &sql,
-            "FROM \"runner\" WHERE (\"runner\".\"dev_machine_id\" = $1 AND \"runner\".\"owner_id\" = $2 \
-             AND \"runner\".\"pod_id\" = $3 AND \"runner\".\"provisioning\" = $4 \
-             AND \"runner\".\"revoked_at\" IS NULL AND \"runner\".\"workspace_id\" = $5) \
-             ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1 FOR UPDATE",
-        );
-        assert_eq!(list, expected_list("runner", RUNNER_COLS));
-        for fragment in [
-            fixture_fragment("\"owner_id\" = "),
-            fixture_fragment("\"provisioning\" = "),
-            fixture_fragment("\"revoked_at\" IS NULL"),
-            fixture_fragment("FOR UPDATE"),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
-    }
-
-    #[test]
-    fn e7_cap_count_excludes_revoked() {
-        assert_eq!(
-            managed_cap_count_sql(),
-            "SELECT COUNT(*) AS \"__count\" FROM \"runner\" \
-             WHERE (\"runner\".\"owner_id\" = $1 AND \"runner\".\"pod_id\" = $2 \
-             AND \"runner\".\"provisioning\" = $3 AND \"runner\".\"workspace_id\" = $4 \
-             AND NOT (\"runner\".\"status\" = $5))",
-        );
-        for fragment in [
-            fixture_fragment("COUNT(*)"),
-            fixture_fragment("\"owner_id\" = "),
-            fixture_fragment("status"),
-        ] {
-            assert_builder_contains(&managed_cap_count_sql(), &fragment);
-        }
-    }
-
-    #[test]
-    fn e7_insert_binds_all_thirty_one_columns() {
-        let sql = runner_insert_sql();
-        let cols = RUNNER_COLS
-            .iter()
-            .map(|c| format!("\"{c}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
-        assert_eq!(
-            sql,
-            format!(
-                "INSERT INTO \"runner\" ({cols}) VALUES ({})",
-                (1..=31)
-                    .map(|i| format!("${i}"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            )
-        );
-        for fragment in [
-            fixture_fragment("INSERT INTO \"runner\""),
-            fixture_fragment("\"enrolled_at\""),
-            fixture_fragment("VALUES"),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
-    }
-
     // -- B1/B2/B3 --
-
-    #[test]
-    fn b1_probe_sorts_filters_with_limit_for_update() {
-        let machine = bootstrap_probe_sql(true);
-        let list = assert_suffix(
-            &machine,
-            "FROM \"machine_token\" WHERE (\"machine_token\".\"dev_machine_id\" = $1 \
-             AND \"machine_token\".\"revoked_at\" IS NULL AND \"machine_token\".\"user_id\" = $2 \
-             AND \"machine_token\".\"workspace_id\" = $3) \
-             ORDER BY \"machine_token\".\"created_at\" DESC LIMIT 1 FOR UPDATE",
-        );
-        assert_eq!(list, expected_list("machine_token", TOKEN_COLS));
-        let legacy = bootstrap_probe_sql(false);
-        let legacy_list = assert_suffix(
-            &legacy,
-            "FROM \"machine_token\" WHERE (\"machine_token\".\"dev_machine_id\" IS NULL \
-             AND \"machine_token\".\"host_label\" = $1 AND \"machine_token\".\"revoked_at\" IS NULL \
-             AND \"machine_token\".\"user_id\" = $2 AND \"machine_token\".\"workspace_id\" = $3) \
-             ORDER BY \"machine_token\".\"created_at\" DESC LIMIT 1 FOR UPDATE",
-        );
-        assert_eq!(legacy_list, expected_list("machine_token", TOKEN_COLS));
-        for fragment in [
-            fixture_fragment("\"user_id\" = "),
-            fixture_fragment("\"dev_machine_id\" = "),
-            fixture_fragment("\"host_label\" = "),
-            fixture_fragment("LIMIT 1"),
-        ] {
-            assert_builder_contains(&format!("{machine} {legacy}"), &fragment);
-        }
-    }
 
     // (The B2/B3 SQL pins moved with the statements to
     // `crate::domain::tokens`; the no-`LIMIT` contract rides the same
@@ -1384,82 +1281,6 @@ mod tests {
             fixture_fragment("\"id\" = $1"),
         ] {
             assert_builder_contains(&sql, &fragment);
-        }
-    }
-
-    #[test]
-    fn d2_insert_binds_all_ten_columns() {
-        let sql = dev_machine_insert_sql();
-        let cols = MACHINE_COLS
-            .iter()
-            .map(|c| format!("\"{c}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
-        assert_eq!(
-            sql,
-            format!(
-                "INSERT INTO \"dev_machine\" ({cols}) VALUES ({})",
-                (1..=10)
-                    .map(|i| format!("${i}"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            )
-        );
-        for fragment in [
-            fixture_fragment("INSERT INTO \"dev_machine\""),
-            fixture_fragment("\"owner_id\""),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
-    }
-
-    #[test]
-    fn d3_selects_by_owner_host_oldest_first() {
-        let sql = dev_machine_by_owner_host_sql();
-        let list = assert_suffix(
-            &sql,
-            "FROM \"dev_machine\" WHERE (\"dev_machine\".\"host_label\" = $1 \
-             AND \"dev_machine\".\"owner_id\" = $2 AND \"dev_machine\".\"revoked_at\" IS NULL) \
-             ORDER BY \"dev_machine\".\"created_at\" ASC LIMIT 1 FOR UPDATE",
-        );
-        assert_eq!(list, expected_list("dev_machine", MACHINE_COLS));
-        for fragment in [
-            fixture_fragment("\"host_label\" = "),
-            fixture_fragment("\"owner_id\" = "),
-            fixture_fragment("\"created_at\" ASC"),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
-    }
-
-    #[test]
-    fn d4_variants_number_binds_in_model_order() {
-        assert_eq!(TOUCH_BASE_FIELDS, &["last_seen_at", "updated_at"]);
-        assert_eq!(
-            touch_dev_machine_sql(false, false),
-            "UPDATE \"dev_machine\" SET \"last_seen_at\" = $1, \"updated_at\" = $2 \
-             WHERE \"dev_machine\".\"id\" = $3",
-        );
-        assert_eq!(
-            touch_dev_machine_sql(true, false),
-            "UPDATE \"dev_machine\" SET \"host_label\" = $1, \"last_seen_at\" = $2, \
-             \"updated_at\" = $3 WHERE \"dev_machine\".\"id\" = $4",
-        );
-        assert_eq!(
-            touch_dev_machine_sql(false, true),
-            "UPDATE \"dev_machine\" SET \"label\" = $1, \"last_seen_at\" = $2, \
-             \"updated_at\" = $3 WHERE \"dev_machine\".\"id\" = $4",
-        );
-        assert_eq!(
-            touch_dev_machine_sql(true, true),
-            "UPDATE \"dev_machine\" SET \"host_label\" = $1, \"label\" = $2, \
-             \"last_seen_at\" = $3, \"updated_at\" = $4 WHERE \"dev_machine\".\"id\" = $5",
-        );
-        for fragment in [
-            fixture_fragment("\"last_seen_at\" = "),
-            fixture_fragment("\"updated_at\" = "),
-        ] {
-            assert_builder_contains(&touch_dev_machine_sql(true, true), &fragment);
         }
     }
 
@@ -1582,32 +1403,231 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fixture_rows_shape_is_as_documented() {
-        let rows: serde_json::Value = serde_json::from_str(FIXTURE_ROWS).unwrap();
-        assert_eq!(rows["fixture_id"], "D13-F5");
-        // E2_after pins updated_at UNCHANGED — builders must not name it.
-        assert!(rows["enroll_E2_after"]["updated_at"]
-            .as_str()
-            .unwrap()
-            .contains("UNCHANGED"));
-        assert!(!enroll_mark_enrolled_sql(true).contains("updated_at"));
-        // E1_hit guards read revoked_at/enrolled_at off the locked row.
-        assert!(rows["enroll_E1_hit"]["runner"].get("revoked_at").is_some());
-        assert!(rows["enroll_E1_hit"]["runner"].get("enrolled_at").is_some());
-        assert!(RUNNER_COLS.contains(&"revoked_at"));
-        assert!(RUNNER_COLS.contains(&"enrolled_at"));
-        // B3_after pins set-wide revoke (no LIMIT) + the new-row shape.
-        assert!(rows["rotate_B3_after"]["old_rows"]
-            .as_str()
-            .unwrap()
-            .contains("regardless of count"));
-        assert_eq!(rows["rotate_B3_after"]["new_row"]["is_service"], true);
+    /// The SeaORM enroll statements against constraint-free temp copies of
+    /// their tables on one sqlx transaction (`TxConn`).
+    #[tokio::test]
+    async fn live_enroll_statements() {
+        let Some(pool) = crate::read::test_support::pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        for table in [
+            "runner",
+            "pod",
+            "projects",
+            "workspaces",
+            "dev_machine",
+            "machine_token",
+            "workspace_members",
+            "users",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        let (user, ws, project, pod_id, machine) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug, created_at) VALUES ('{ws}', 'ws-e', now())"),
+            format!("INSERT INTO projects (id, identifier, workspace_id, created_at) VALUES ('{project}', 'ENR', '{ws}', now())"),
+            format!(
+                "INSERT INTO pod (id, name, project_id, is_default, created_at) VALUES \
+                 ('{pod_id}', 'main', '{project}', true, now()), \
+                 (gen_random_uuid(), 'gone', '{project}', false, now())"
+            ),
+            "UPDATE pod SET deleted_at = now() WHERE name = 'gone'".to_owned(),
+            format!(
+                "INSERT INTO workspace_members (id, workspace_id, member_id, is_active, created_at) \
+                 VALUES (gen_random_uuid(), '{ws}', '{user}', true, now())"
+            ),
+            format!("INSERT INTO users (id, password, is_active) VALUES ('{user}', 'pw', true)"),
+            format!(
+                "INSERT INTO dev_machine (id, owner_id, host_label, label, provisioning, visibility, \
+                 created_at, updated_at) VALUES ('{machine}', '{user}', 'box', 'box', 'manual', 0, \
+                 now(), now())"
+            ),
+        ] {
+            sqlx::query(&sql).execute(&mut *tx).await.expect("seed");
+        }
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let now = chrono::Utc::now();
+        let runner_id = Uuid::new_v4();
+        insert_runner(
+            &conn,
+            &NewRunner {
+                id: runner_id,
+                owner_id: user,
+                workspace_id: ws,
+                dev_machine_id: Some(machine),
+                pod_id,
+                name: "r1",
+                host_label: "box",
+                provisioning: "desktop_bundled",
+                status: "offline",
+                now,
+            },
+        )
+        .await
+        .expect("insert runner");
+        runner::Entity::update_many()
+            .col_expr(
+                runner::Column::EnrollmentTokenHash,
+                Expr::value("enroll-hash"),
+            )
+            .filter(runner::Column::Id.eq(runner_id))
+            .exec(&conn)
+            .await
+            .expect("set hash");
+
+        let rows = enroll_locked_runners(&conn, "enroll-hash")
+            .await
+            .expect("E1");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
         assert_eq!(
-            machine_token_label("macbook-pro"),
-            rows["rotate_B3_after"]["new_row"]["label"]
-                .as_str()
-                .unwrap(),
+            (
+                row.runner_id,
+                row.workspace_slug.as_str(),
+                row.pod_name.as_str(),
+                row.project_identifier.as_str()
+            ),
+            (runner_id, "ws-e", "main", "ENR")
+        );
+        mark_runner_enrolled(
+            &conn,
+            runner_id,
+            Some(machine),
+            Some("renamed"),
+            "box",
+            "rh",
+            "rf",
+            now,
+        )
+        .await
+        .expect("E2");
+        let marked = runner::Entity::find_by_id(runner_id)
+            .one(&conn)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(
+            (
+                marked.name.as_str(),
+                marked.refresh_token_generation,
+                marked.enrollment_token_hash.as_str()
+            ),
+            ("renamed", 1, "")
+        );
+        assert!(enroll_locked_runners(&conn, "enroll-hash")
+            .await
+            .expect("E1")
+            .is_empty());
+
+        let locked = lock_dev_machine_by_id(&conn, machine)
+            .await
+            .expect("D1")
+            .expect("row");
+        assert_eq!(
+            (locked.owner_id, locked.provisioning.as_str()),
+            (user, "manual")
+        );
+        assert_eq!(
+            lock_dev_machine_by_owner_host(&conn, "box", user)
+                .await
+                .expect("D3")
+                .map(|m| m.id),
+            Some(machine)
+        );
+        touch_dev_machine(&conn, machine, None, Some("new-label"), now)
+            .await
+            .expect("touch");
+        let touched = dev_machine::Entity::find_by_id(machine)
+            .one(&conn)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(
+            (touched.host_label.as_str(), touched.label.as_str()),
+            ("box", "new-label")
+        );
+
+        assert!(
+            !bootstrap_token_exists(&conn, Some(machine), "box", user, ws)
+                .await
+                .expect("probe")
+        );
+        assert_eq!(
+            workspace_by_slug(&conn, "ws-e").await.expect("E6a"),
+            Some((ws, "ws-e".to_owned()))
+        );
+        assert_eq!(
+            memberships_for_inference(&conn, user).await.expect("E6b"),
+            vec![(ws, "ws-e".to_owned())]
+        );
+        assert!(is_active_member(&conn, ws, user).await.expect("member"));
+        assert_eq!(
+            project_by_workspace_identifier(&conn, ws, "ENR")
+                .await
+                .expect("E6c"),
+            Some((project, "ENR".to_owned()))
+        );
+        assert_eq!(
+            pod_by_name(&conn, project, "main")
+                .await
+                .expect("E6d")
+                .map(|p| p.0),
+            Some(pod_id)
+        );
+        assert_eq!(
+            pod_by_name(&conn, project, "gone").await.expect("E6d"),
+            None
+        );
+        assert_eq!(
+            default_pod_for_project(&conn, project)
+                .await
+                .expect("default")
+                .map(|p| p.0),
+            Some(pod_id)
+        );
+        assert_eq!(count_pod_runners(&conn, pod_id).await.expect("count"), 1);
+        assert_eq!(
+            desktop_reuse_probe(&conn, machine, user, pod_id, "desktop_bundled", ws)
+                .await
+                .expect("reuse")
+                .map(|hit| (hit.0, hit.2)),
+            Some((runner_id, 1))
+        );
+        assert_eq!(
+            managed_cap_count(&conn, user, pod_id, "desktop_bundled", ws, "revoked")
+                .await
+                .expect("cap"),
+            1
+        );
+        assert_eq!(
+            managed_cap_count(&conn, user, pod_id, "desktop_bundled", ws, "offline")
+                .await
+                .expect("cap"),
+            0
+        );
+        assert_eq!(
+            session_user(&conn, user).await.expect("user"),
+            Some((user, "pw".to_owned(), true))
+        );
+        assert!(user_exists(&conn, user).await.expect("user"));
+        assert_eq!(
+            live_workspace_slug(&conn, ws)
+                .await
+                .expect("slug")
+                .as_deref(),
+            Some("ws-e")
         );
     }
 }

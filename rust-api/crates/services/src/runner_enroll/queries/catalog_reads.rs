@@ -190,9 +190,7 @@ use pidash_db::app_project::models::project as project_cols;
 use pidash_db::entity::{
     dev_machine, machine_token, pod, projects, runner, workspace_members, workspaces,
 };
-use pidash_db::runner_enroll::columns::{
-    dev_machine as dm_cols, pod as pod_cols, runner as r_cols,
-};
+use pidash_db::runner_enroll::columns::{pod as pod_cols, runner as r_cols};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, JoinType, QueryFilter,
@@ -813,7 +811,7 @@ pub fn bundled_machine_lookup_query(
 /// `DevMachine.objects.create(owner, host_label, label, provisioning,
 /// last_seen_at)` for the desktop enroll (`desktop.py:121-127`):
 /// visibility `0`, no revocation, every timestamp `now`.
-pub async fn insert_bundled_dev_machine(
+pub async fn insert_dev_machine(
     db: &impl ConnectionTrait,
     id: Uuid,
     owner_id: Uuid,
@@ -938,32 +936,6 @@ pub async fn is_active_workspace_member(
     Ok(hit.is_some())
 }
 
-/// K1 — bundled-machine insert (`desktop.py:121-127`), inside the tx.
-///
-/// `DevMachine.objects.create(owner, host_label, label,
-/// provisioning, last_seen_at)`: plain 10-column `INSERT`, `$1..$10`
-/// in [`dm_cols::COLUMNS`] order — `$1` id (fresh uuid4), `$2` owner,
-/// `$3` host_label (stripped `[:255]`), `$4` label (`host_label[:128]`,
-/// [`dev_machine_label`]), `$5` visibility (`0`), `$6` provisioning
-/// (`'desktop_bundled'`), `$7` last_seen_at (`now()`), `$8` revoked_at
-/// (`NULL`), `$9-10` created/updated (`now()`).
-///
-/// Twin of queries-A `dev_machine_insert_sql` (identical text — the
-/// K1 call site binds desktop values into the same shape); owned here
-/// so this module has no compile edge on queries-A.
-pub fn dev_machine_insert_sql() -> String {
-    let cols = dm_cols::COLUMNS
-        .iter()
-        .map(|col| format!("\"{col}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "INSERT INTO \"{}\" ({cols}) VALUES ({})",
-        dm_cols::TABLE,
-        placeholders(dm_cols::COLUMNS.len()),
-    )
-}
-
 // ---------------------------------------------------------------------------
 // K2. Desktop enroll: token rotate + mint
 // ---------------------------------------------------------------------------
@@ -1040,6 +1012,7 @@ pub fn desktop_token_label(host_label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pidash_db::runner_enroll::columns::dev_machine as dm_cols;
     use pidash_db::runner_enroll::columns::{enums, machine_token as mt_cols};
 
     const FIXTURE_SQL: &str =
@@ -1687,17 +1660,6 @@ mod tests {
     }
 
     #[test]
-    fn dev_machine_insert_binds_all_columns_in_order() {
-        let sql = dev_machine_insert_sql();
-        assert_eq!(
-            sql,
-            "INSERT INTO \"dev_machine\" (\"id\", \"owner_id\", \"host_label\", \"label\", \
-             \"visibility\", \"provisioning\", \"last_seen_at\", \"revoked_at\", \
-             \"created_at\", \"updated_at\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"
-        );
-    }
-
-    #[test]
     fn bundled_ids_keep_ordering_with_host_last() {
         let plain = built(bundled_machine_ids_query(
             Uuid::nil(),
@@ -1740,7 +1702,7 @@ mod tests {
         let then = chrono::Utc::now() - chrono::Duration::hours(1);
         {
             let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
-            insert_bundled_dev_machine(
+            insert_dev_machine(
                 &conn,
                 machine,
                 world.user_id,

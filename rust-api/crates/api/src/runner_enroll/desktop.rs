@@ -497,7 +497,7 @@ async fn post_desktop_enroll(
             None => {
                 // Insert (`:121-127`).
                 let id = Uuid::new_v4();
-                if catalog_reads::insert_bundled_dev_machine(
+                if catalog_reads::insert_dev_machine(
                     &conn,
                     id,
                     user_id,
