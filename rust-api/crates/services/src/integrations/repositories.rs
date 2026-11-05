@@ -533,6 +533,657 @@ pub fn list_account_repositories(
     })
 }
 
+/// SeaORM twins of the repository and binding statements above, for
+/// store implementations on a SeaORM connection. Same filters, ordering,
+/// column sets and write shapes.
+pub mod orm {
+    use chrono::{DateTime, Utc};
+    use pidash_db::entity::{
+        git_provider_accounts, git_repositories, git_repository_bindings, github_repository_syncs,
+        projects, workspaces,
+    };
+    use pidash_db::integrations::git_models::{
+        git_repository::GitRepository, git_repository_binding::GitRepositoryBinding,
+    };
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{
+        ColumnTrait, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+        QueryOrder, QueryResult, QuerySelect, RelationTrait, Set,
+    };
+    use serde_json::Value;
+    use uuid::Uuid;
+
+    use super::super::accounts::orm::{select_prefixed, workspace_id_of_slug};
+    use super::{BindingView, NewRepository, ProjectRef, RepositoryDefaults};
+
+    fn live_repositories(
+        provider: &str,
+        host_url: &str,
+    ) -> sea_orm::Select<git_repositories::Entity> {
+        git_repositories::Entity::find()
+            .filter(git_repositories::Column::Provider.eq(provider))
+            .filter(git_repositories::Column::HostUrl.eq(host_url))
+            .filter(git_repositories::Column::DeletedAt.is_null())
+    }
+
+    /// `REPOSITORY_FIND_BY_EXTERNAL_SQL`.
+    pub async fn find_repository_by_external(
+        db: &impl ConnectionTrait,
+        provider: &str,
+        host_url: &str,
+        external_id: &str,
+    ) -> Result<Option<GitRepository>, DbErr> {
+        let row = live_repositories(provider, host_url)
+            .filter(git_repositories::Column::ExternalId.eq(external_id))
+            .order_by_asc(git_repositories::Column::Id)
+            .limit(1)
+            .one(db)
+            .await?;
+        Ok(row.map(GitRepository::from))
+    }
+
+    /// `REPOSITORY_FIND_BY_FULL_NAME_SQL`.
+    pub async fn find_repository_by_full_name(
+        db: &impl ConnectionTrait,
+        provider: &str,
+        host_url: &str,
+        full_name: &str,
+    ) -> Result<Option<GitRepository>, DbErr> {
+        let row = live_repositories(provider, host_url)
+            .filter(git_repositories::Column::FullName.eq(full_name))
+            .order_by_asc(git_repositories::Column::Id)
+            .limit(1)
+            .one(db)
+            .await?;
+        Ok(row.map(GitRepository::from))
+    }
+
+    /// A repository by id, any manager scope (the post-save reread).
+    pub async fn repository_by_id(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<GitRepository>, DbErr> {
+        let row = git_repositories::Entity::find_by_id(id).one(db).await?;
+        Ok(row.map(GitRepository::from))
+    }
+
+    /// `REPOSITORY_UPDATE_SQL`: the defaults plus `updated_at`.
+    pub async fn update_repository(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+        defaults: &RepositoryDefaults,
+        now: DateTime<Utc>,
+    ) -> Result<(), DbErr> {
+        git_repositories::Entity::update_many()
+            .col_expr(
+                git_repositories::Column::ExternalId,
+                Expr::value(defaults.external_id.clone()),
+            )
+            .col_expr(
+                git_repositories::Column::Namespace,
+                Expr::value(defaults.namespace.clone()),
+            )
+            .col_expr(
+                git_repositories::Column::Name,
+                Expr::value(defaults.name.clone()),
+            )
+            .col_expr(
+                git_repositories::Column::FullName,
+                Expr::value(defaults.full_name.clone()),
+            )
+            .col_expr(
+                git_repositories::Column::WebUrl,
+                Expr::value(defaults.web_url.clone()),
+            )
+            .col_expr(
+                git_repositories::Column::CloneUrlHttp,
+                Expr::value(defaults.clone_url_http.clone()),
+            )
+            .col_expr(
+                git_repositories::Column::CloneUrlSsh,
+                Expr::value(defaults.clone_url_ssh.clone()),
+            )
+            .col_expr(
+                git_repositories::Column::DefaultBranch,
+                Expr::value(defaults.default_branch.clone()),
+            )
+            .col_expr(
+                git_repositories::Column::IsPrivate,
+                Expr::value(defaults.is_private),
+            )
+            .col_expr(
+                git_repositories::Column::Metadata,
+                Expr::value(defaults.metadata.clone()),
+            )
+            .col_expr(git_repositories::Column::UpdatedAt, Expr::value(now))
+            .filter(git_repositories::Column::Id.eq(id))
+            .exec(db)
+            .await?;
+        Ok(())
+    }
+
+    /// `REPOSITORY_INSERT_SQL`: audit and `deleted_at` keep their defaults.
+    pub async fn insert_repository(
+        db: &impl ConnectionTrait,
+        row: &NewRepository,
+    ) -> Result<(), DbErr> {
+        git_repositories::Entity::insert(git_repositories::ActiveModel {
+            id: Set(row.id),
+            created_at: Set(row.created_at.into()),
+            updated_at: Set(row.updated_at.into()),
+            provider: Set(row.provider.clone()),
+            host_url: Set(row.host_url.clone()),
+            external_id: Set(row.defaults.external_id.clone()),
+            namespace: Set(row.defaults.namespace.clone()),
+            name: Set(row.defaults.name.clone()),
+            full_name: Set(row.defaults.full_name.clone()),
+            web_url: Set(row.defaults.web_url.clone()),
+            clone_url_http: Set(row.defaults.clone_url_http.clone()),
+            clone_url_ssh: Set(row.defaults.clone_url_ssh.clone()),
+            default_branch: Set(row.defaults.default_branch.clone()),
+            is_private: Set(row.defaults.is_private),
+            metadata: Set(row.defaults.metadata.clone()),
+            ..Default::default()
+        })
+        .exec_without_returning(db)
+        .await?;
+        Ok(())
+    }
+
+    /// `WORKSPACE_ID_SQL`: a live workspace by slug.
+    pub async fn workspace_id(
+        db: &impl ConnectionTrait,
+        slug: &str,
+    ) -> Result<Option<Uuid>, DbErr> {
+        workspaces::Entity::find()
+            .select_only()
+            .column(workspaces::Column::Id)
+            .filter(workspaces::Column::Slug.eq(slug))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .order_by_asc(workspaces::Column::Id)
+            .limit(1)
+            .into_tuple()
+            .one(db)
+            .await
+    }
+
+    /// `PROJECT_GET_SQL`: a live project in the workspace.
+    pub async fn project(
+        db: &impl ConnectionTrait,
+        workspace_id: Uuid,
+        project_id: Uuid,
+    ) -> Result<Option<ProjectRef>, DbErr> {
+        let row: Option<(Uuid, Uuid, String, String)> = projects::Entity::find()
+            .select_only()
+            .columns([
+                projects::Column::Id,
+                projects::Column::WorkspaceId,
+                projects::Column::RepoUrl,
+                projects::Column::BaseBranch,
+            ])
+            .filter(projects::Column::Id.eq(project_id))
+            .filter(projects::Column::WorkspaceId.eq(workspace_id))
+            .filter(projects::Column::DeletedAt.is_null())
+            .order_by_asc(projects::Column::Id)
+            .limit(1)
+            .into_tuple()
+            .one(db)
+            .await?;
+        Ok(
+            row.map(|(id, workspace_id, repo_url, base_branch)| ProjectRef {
+                id,
+                workspace_id,
+                repo_url,
+                base_branch,
+            }),
+        )
+    }
+
+    /// `BINDING_DELETE_SQL`: hard-delete the project's bindings.
+    pub async fn delete_project_bindings(
+        db: &impl ConnectionTrait,
+        project_id: Uuid,
+    ) -> Result<u64, DbErr> {
+        let done = git_repository_bindings::Entity::delete_many()
+            .filter(git_repository_bindings::Column::ProjectId.eq(project_id))
+            .exec(db)
+            .await?;
+        Ok(done.rows_affected)
+    }
+
+    /// `BINDING_DELETE_ONE_SQL`: hard-delete one binding.
+    pub async fn delete_binding(db: &impl ConnectionTrait, binding_id: Uuid) -> Result<u64, DbErr> {
+        let done = git_repository_bindings::Entity::delete_many()
+            .filter(git_repository_bindings::Column::Id.eq(binding_id))
+            .exec(db)
+            .await?;
+        Ok(done.rows_affected)
+    }
+
+    /// `GITHUB_SYNC_DELETE_SQL`: hard-delete the project's GitHub syncs.
+    pub async fn delete_project_github_syncs(
+        db: &impl ConnectionTrait,
+        project_id: Uuid,
+    ) -> Result<u64, DbErr> {
+        let done = github_repository_syncs::Entity::delete_many()
+            .filter(github_repository_syncs::Column::ProjectId.eq(project_id))
+            .exec(db)
+            .await?;
+        Ok(done.rows_affected)
+    }
+
+    /// `GITHUB_SYNC_SET_ENABLED_SQL`: the project's GitHub syncs in the
+    /// slug's workspace.
+    pub async fn set_project_github_syncs_enabled(
+        db: &impl ConnectionTrait,
+        project_id: Uuid,
+        workspace_slug: &str,
+        enabled: bool,
+    ) -> Result<u64, DbErr> {
+        let done = github_repository_syncs::Entity::update_many()
+            .col_expr(
+                github_repository_syncs::Column::IsSyncEnabled,
+                Expr::value(enabled),
+            )
+            .filter(github_repository_syncs::Column::ProjectId.eq(project_id))
+            .filter(
+                Expr::col((
+                    github_repository_syncs::Entity,
+                    github_repository_syncs::Column::WorkspaceId,
+                ))
+                .eq(workspace_id_of_slug(workspace_slug)),
+            )
+            .exec(db)
+            .await?;
+        Ok(done.rows_affected)
+    }
+
+    /// The `BINDING_INSERT_SQL` row: `last_synced_at`, `last_sync_error`
+    /// and `deleted_at` keep their defaults.
+    pub struct NewBinding<'a> {
+        pub id: Uuid,
+        pub now: DateTime<Utc>,
+        pub created_by_id: Option<Uuid>,
+        pub updated_by_id: Option<Uuid>,
+        pub project_id: Uuid,
+        pub workspace_id: Uuid,
+        pub repository_id: Uuid,
+        pub provider_account_id: Uuid,
+        pub actor_id: Option<Uuid>,
+        pub is_sync_enabled: bool,
+        pub clone_auth_mode: &'a str,
+        pub metadata: Value,
+    }
+
+    /// `BINDING_INSERT_SQL`. A `None` actor binds SQL `NULL`, so the
+    /// `NOT NULL` column raises the integrity error the SQL form raised.
+    pub async fn insert_binding(
+        db: &impl ConnectionTrait,
+        row: NewBinding<'_>,
+    ) -> Result<(), DbErr> {
+        let mut insert = sea_orm::sea_query::Query::insert();
+        insert
+            .into_table(git_repository_bindings::Entity)
+            .columns([
+                git_repository_bindings::Column::Id,
+                git_repository_bindings::Column::CreatedAt,
+                git_repository_bindings::Column::UpdatedAt,
+                git_repository_bindings::Column::CreatedById,
+                git_repository_bindings::Column::UpdatedById,
+                git_repository_bindings::Column::ProjectId,
+                git_repository_bindings::Column::WorkspaceId,
+                git_repository_bindings::Column::RepositoryId,
+                git_repository_bindings::Column::ProviderAccountId,
+                git_repository_bindings::Column::ActorId,
+                git_repository_bindings::Column::IsSyncEnabled,
+                git_repository_bindings::Column::CloneAuthMode,
+                git_repository_bindings::Column::Metadata,
+            ])
+            .values_panic([
+                row.id.into(),
+                row.now.into(),
+                row.now.into(),
+                row.created_by_id.into(),
+                row.updated_by_id.into(),
+                row.project_id.into(),
+                row.workspace_id.into(),
+                row.repository_id.into(),
+                row.provider_account_id.into(),
+                row.actor_id.into(),
+                row.is_sync_enabled.into(),
+                row.clone_auth_mode.into(),
+                row.metadata.into(),
+            ]);
+        db.execute(db.get_database_backend().build(&insert)).await?;
+        Ok(())
+    }
+
+    /// A binding by id, any manager scope (the post-save reread).
+    pub async fn binding_by_id(
+        db: &impl ConnectionTrait,
+        binding_id: Uuid,
+    ) -> Result<Option<GitRepositoryBinding>, DbErr> {
+        let row = git_repository_bindings::Entity::find_by_id(binding_id)
+            .one(db)
+            .await?;
+        Ok(row.map(GitRepositoryBinding::from))
+    }
+
+    /// `BINDING_SET_SYNC_SQL`.
+    pub async fn set_binding_sync(
+        db: &impl ConnectionTrait,
+        binding_id: Uuid,
+        enabled: bool,
+        now: DateTime<Utc>,
+    ) -> Result<(), DbErr> {
+        git_repository_bindings::Entity::update_many()
+            .col_expr(
+                git_repository_bindings::Column::IsSyncEnabled,
+                Expr::value(enabled),
+            )
+            .col_expr(git_repository_bindings::Column::UpdatedAt, Expr::value(now))
+            .filter(git_repository_bindings::Column::Id.eq(binding_id))
+            .exec(db)
+            .await?;
+        Ok(())
+    }
+
+    /// One binding row with its repository and account, decoded by the
+    /// `b_` / `r_` / `a_` prefixes.
+    struct BindingTriple(BindingView);
+
+    impl FromQueryResult for BindingTriple {
+        fn from_query_result(row: &QueryResult, _pre: &str) -> Result<Self, DbErr> {
+            Ok(Self(BindingView {
+                binding: git_repository_bindings::Model::from_query_result(row, "b_")?.into(),
+                repository: git_repositories::Model::from_query_result(row, "r_")?.into(),
+                account: git_provider_accounts::Model::from_query_result(row, "a_")?.into(),
+            }))
+        }
+    }
+
+    fn binding_select(
+        project_id: Uuid,
+        workspace_slug: &str,
+    ) -> sea_orm::Select<git_repository_bindings::Entity> {
+        let select = git_repository_bindings::Entity::find().select_only();
+        let select = select_prefixed::<git_repository_bindings::Entity, _>(select, "b_");
+        let select = select_prefixed::<git_repositories::Entity, _>(select, "r_");
+        let select = select_prefixed::<git_provider_accounts::Entity, _>(select, "a_");
+        select
+            .join(
+                JoinType::InnerJoin,
+                git_repository_bindings::Relation::GitRepositories.def(),
+            )
+            .join(
+                JoinType::InnerJoin,
+                git_repository_bindings::Relation::GitProviderAccounts.def(),
+            )
+            .join(
+                JoinType::InnerJoin,
+                git_repository_bindings::Relation::Workspaces.def(),
+            )
+            .filter(git_repository_bindings::Column::ProjectId.eq(project_id))
+            .filter(workspaces::Column::Slug.eq(workspace_slug))
+            .filter(git_repository_bindings::Column::DeletedAt.is_null())
+            .order_by_asc(git_repository_bindings::Column::Id)
+            .limit(1)
+    }
+
+    /// `BINDING_GET_SQL`: the project's live binding in the slug's
+    /// workspace, with its repository and account (inner joins, no
+    /// soft-delete guard on the joined rows).
+    pub async fn binding_view(
+        db: &impl ConnectionTrait,
+        project_id: Uuid,
+        workspace_slug: &str,
+    ) -> Result<Option<BindingView>, DbErr> {
+        let row = binding_select(project_id, workspace_slug)
+            .into_model::<BindingTriple>()
+            .one(db)
+            .await?;
+        Ok(row.map(|BindingTriple(view)| view))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use sea_orm::{DbBackend, QueryTrait};
+
+        #[test]
+        fn binding_view_names_every_column_once() {
+            let sql = binding_select(Uuid::nil(), "acme")
+                .build(DbBackend::Postgres)
+                .to_string();
+            assert!(sql.contains(r#""git_repository_bindings"."id" AS "b_id""#));
+            assert!(sql.contains(r#""git_repositories"."id" AS "r_id""#));
+            assert!(sql.contains(r#""git_provider_accounts"."id" AS "a_id""#));
+            assert!(sql.contains(r#"INNER JOIN "workspaces""#));
+            assert!(sql.contains(r#""git_repository_bindings"."deleted_at" IS NULL"#));
+            assert!(sql.ends_with(r#"ORDER BY "git_repository_bindings"."id" ASC LIMIT 1"#));
+            let select = sql.split(" FROM ").next().expect("select list");
+            let mut names: Vec<&str> = select
+                .split(" AS ")
+                .skip(1)
+                .map(|tail| tail.split(',').next().unwrap_or(""))
+                .collect();
+            let total = names.len();
+            names.sort();
+            names.dedup();
+            assert_eq!(names.len(), total, "duplicate output names");
+        }
+
+        /// The repository, binding and sync statements against
+        /// constraint-free temp tables on a one-connection pool.
+        #[tokio::test]
+        async fn live_repository_and_binding_statements() {
+            let Ok(url) = std::env::var("DATABASE_URL") else {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                return;
+            };
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&url)
+                .await
+                .expect("connect");
+            for table in [
+                "workspaces",
+                "projects",
+                "git_repositories",
+                "git_provider_accounts",
+                "git_repository_bindings",
+                "github_repository_syncs",
+            ] {
+                sqlx::query(&format!(
+                    "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+                ))
+                .execute(&pool)
+                .await
+                .expect("temp table");
+            }
+            let db = pidash_db::pool::sea_orm_connection(&pool);
+            let (ws, project, account) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+            for sql in [
+                format!("INSERT INTO workspaces (id, slug, deleted_at) VALUES ('{ws}', 'acme', NULL)"),
+                format!(
+                    "INSERT INTO projects (id, workspace_id, repo_url, base_branch, deleted_at) \
+                     VALUES ('{project}', '{ws}', 'https://x/r', 'main', NULL)"
+                ),
+                format!(
+                    "INSERT INTO git_provider_accounts (id, created_at, updated_at, provider, \
+                     host_url, auth_type, external_account_id, external_account_login, \
+                     display_name, capabilities, credential_config, status, last_check_error, \
+                     metadata, workspace_id) VALUES ('{account}', now(), now(), 'gitlab', \
+                     'https://gitlab.com', 'pat', '1', 'me', 'Me', '{{}}', '{{}}', 'connected', '', \
+                     '{{}}', '{ws}')"
+                ),
+                format!(
+                    "INSERT INTO github_repository_syncs (id, project_id, workspace_id, is_sync_enabled) \
+                     VALUES (gen_random_uuid(), '{project}', '{ws}', true)"
+                ),
+            ] {
+                sqlx::query(&sql).execute(&pool).await.expect("seed");
+            }
+            let now = Utc::now();
+            let defaults = RepositoryDefaults {
+                external_id: "42".to_owned(),
+                namespace: "Group".to_owned(),
+                name: "Repo".to_owned(),
+                full_name: "Group/Repo".to_owned(),
+                web_url: "https://gitlab.com/Group/Repo".to_owned(),
+                clone_url_http: "https://gitlab.com/Group/Repo.git".to_owned(),
+                clone_url_ssh: "git@gitlab.com:Group/Repo.git".to_owned(),
+                default_branch: "main".to_owned(),
+                is_private: true,
+                metadata: serde_json::json!({"a": 1}),
+            };
+            let repo_id = Uuid::new_v4();
+            insert_repository(
+                &db,
+                &NewRepository {
+                    id: repo_id,
+                    created_at: now,
+                    updated_at: now,
+                    provider: "gitlab".to_owned(),
+                    host_url: "https://gitlab.com".to_owned(),
+                    defaults: defaults.clone(),
+                },
+            )
+            .await
+            .expect("insert repository");
+            let found = find_repository_by_external(&db, "gitlab", "https://gitlab.com", "42")
+                .await
+                .expect("by external")
+                .expect("found");
+            assert_eq!((found.id, found.is_private), (repo_id, true));
+            assert!(find_repository_by_full_name(
+                &db,
+                "gitlab",
+                "https://gitlab.com",
+                "Group/Repo"
+            )
+            .await
+            .expect("by name")
+            .is_some());
+            let later = now + chrono::Duration::seconds(5);
+            let renamed = RepositoryDefaults {
+                full_name: "Group/Renamed".to_owned(),
+                ..defaults
+            };
+            update_repository(&db, repo_id, &renamed, later)
+                .await
+                .expect("update");
+            let reread = repository_by_id(&db, repo_id)
+                .await
+                .expect("reread")
+                .expect("row");
+            assert_eq!(reread.full_name, "Group/Renamed");
+            assert_eq!(reread.updated_at.timestamp(), later.timestamp());
+            assert_eq!(workspace_id(&db, "acme").await.expect("ws"), Some(ws));
+            let project_ref = super::project(&db, ws, project)
+                .await
+                .expect("project")
+                .expect("found");
+            assert_eq!(project_ref.base_branch, "main");
+            assert!(super::project(&db, Uuid::new_v4(), project)
+                .await
+                .expect("miss")
+                .is_none());
+
+            // Bind: insert, read back the triple, toggle sync, delete.
+            let binding_id = Uuid::new_v4();
+            insert_binding(
+                &db,
+                NewBinding {
+                    id: binding_id,
+                    now,
+                    created_by_id: Some(account),
+                    updated_by_id: Some(account),
+                    project_id: project,
+                    workspace_id: ws,
+                    repository_id: repo_id,
+                    provider_account_id: account,
+                    actor_id: Some(account),
+                    is_sync_enabled: false,
+                    clone_auth_mode: "token",
+                    metadata: serde_json::json!({"raw_url": "https://x/r"}),
+                },
+            )
+            .await
+            .expect("insert binding");
+            // The temp copy has no column defaults; fill what the model decodes.
+            sqlx::query("UPDATE git_repository_bindings SET last_sync_error = ''")
+                .execute(&pool)
+                .await
+                .expect("fill");
+            let view = binding_view(&db, project, "acme")
+                .await
+                .expect("view")
+                .expect("found");
+            assert_eq!(view.binding.id, binding_id);
+            assert_eq!(view.repository.id, repo_id);
+            assert_eq!(view.account.id, account);
+            assert_eq!(view.binding.metadata["raw_url"], "https://x/r");
+            assert!(binding_view(&db, project, "other")
+                .await
+                .expect("slug")
+                .is_none());
+            set_binding_sync(&db, binding_id, true, later)
+                .await
+                .expect("sync");
+            let toggled = binding_by_id(&db, binding_id)
+                .await
+                .expect("reread")
+                .expect("row");
+            assert!(toggled.is_sync_enabled);
+            assert_eq!(
+                set_project_github_syncs_enabled(&db, project, "acme", false)
+                    .await
+                    .expect("syncs"),
+                1
+            );
+            assert_eq!(
+                set_project_github_syncs_enabled(&db, project, "other", false)
+                    .await
+                    .expect("other"),
+                0
+            );
+            assert_eq!(delete_binding(&db, binding_id).await.expect("delete"), 1);
+            assert_eq!(
+                delete_project_bindings(&db, project).await.expect("none"),
+                0
+            );
+            assert_eq!(
+                delete_project_github_syncs(&db, project)
+                    .await
+                    .expect("syncs delete"),
+                1
+            );
+            // A missing actor binds NULL (the NOT NULL integrity error on
+            // the real table); the temp copy accepts it.
+            insert_binding(
+                &db,
+                NewBinding {
+                    id: Uuid::new_v4(),
+                    now,
+                    created_by_id: None,
+                    updated_by_id: None,
+                    project_id: project,
+                    workspace_id: ws,
+                    repository_id: repo_id,
+                    provider_account_id: account,
+                    actor_id: None,
+                    is_sync_enabled: false,
+                    clone_auth_mode: "token",
+                    metadata: serde_json::json!({}),
+                },
+            )
+            .await
+            .expect("null actor");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::accounts::fakes::*;
