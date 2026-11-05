@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use uuid::Uuid;
 
+pub use pidash_ipc::protocol::EngineSignInState;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub version: u32,
@@ -22,6 +24,10 @@ pub struct Config {
     /// a developer overrides the engine binary.
     #[serde(default, skip_serializing_if = "EngineSection::is_default")]
     pub engine: EngineSection,
+    /// `[auth]`: where the daemon and engine credentials are stored
+    /// (`config::secrets`). Not written while it holds only defaults.
+    #[serde(default, skip_serializing_if = "AuthSection::is_default")]
+    pub auth: AuthSection,
 }
 
 /// Top-level `[engine]` table (`src/engine/locate.rs`).
@@ -33,6 +39,81 @@ pub struct EngineSection {
     /// A leading `~/` is expanded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary: Option<PathBuf>,
+    /// Parent of the per-project folders new engine runners work in
+    /// (design §10). Unset means the default,
+    /// `<daemon data>/engine/workdirs`. Changing it moves nothing: runners
+    /// already set up keep their folder. Validated by
+    /// `engine::workdir::validate_task_root`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_root: Option<PathBuf>,
+}
+
+/// `[auth] credentials_store`: where the daemon credentials (the `mt_`
+/// tokens) and the engine credential live (design §4.3). Per-runner
+/// refresh tokens always stay in their 0600 files.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialsStoreMode {
+    /// The OS keychain when it answers, else `config.toml` (0600).
+    /// Plaintext tokens move into the keychain at the next sign-in.
+    #[default]
+    Auto,
+    /// The OS keychain only; refuse to fall back to a file.
+    Keyring,
+    /// `config.toml` (0600), as builds before the keychain did.
+    File,
+}
+
+impl CredentialsStoreMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Keyring => "keyring",
+            Self::File => "file",
+        }
+    }
+}
+
+/// Top-level `[auth]` table.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthSection {
+    #[serde(default)]
+    pub credentials_store: CredentialsStoreMode,
+    /// Written by the daemon, not the user: `"keyring"` when the tokens
+    /// of `[cli]` are held in the OS keychain (the file then carries their
+    /// workspaces and expiry dates but no secret).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets_in: Option<String>,
+    /// Written by the daemon: the keychain items it holds, so items of a
+    /// signed-out workspace can be deleted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keyring_items: Vec<String>,
+}
+
+impl AuthSection {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// Whether the `[cli]` secrets are in the keychain rather than this file.
+    pub fn secrets_in_keyring(&self) -> bool {
+        self.secrets_in.as_deref() == Some(SECRETS_IN_KEYRING)
+    }
+}
+
+/// Value of `[auth] secrets_in` when the secrets are in the keychain.
+pub const SECRETS_IN_KEYRING: &str = "keyring";
+
+/// The engine credential (`ec_…`, design §4.3): one per machine, 14 days
+/// from issue. Its only use is `POST /api/v1/runner/engine/model-token/`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineCredential {
+    /// The raw `ec_` value. Empty in the file when the secret is in the
+    /// keychain.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 impl EngineSection {
@@ -100,12 +181,23 @@ pub struct CliSection {
     /// Daemon credentials of every workspace other than the default one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspaces: Vec<WorkspaceCredential>,
+
+    /// The machine's engine credential (design §4.3), issued by `pidash
+    /// auth login` or `pidash login --engine`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_credential: Option<EngineCredential>,
+
+    /// Local mirror of the server's engine sign-in state for this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_sign_in_state: Option<EngineSignInState>,
 }
 
 /// One `[[cli.workspaces]]` entry: a workspace and its dev-machine token.
+/// `token` is empty in the file when the secret is in the keychain.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceCredential {
     pub slug: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub token: String,
 }
 
@@ -496,6 +588,11 @@ pub enum AgentKind {
     /// (`muse exec --json --prompt-file <PATH>`), whose JSONL event stream the
     /// runner drives one turn per subprocess.
     MuseCode,
+    /// The built-in engine (`pidash-agent-engine`, the open-source Codex
+    /// shipped with the CLI; design §5). Driven by the Codex driver; the
+    /// daemon supplies the binary, a private `CODEX_HOME` and the model
+    /// token itself, so the block holds no paths.
+    Engine,
 }
 
 impl AgentKind {
@@ -509,6 +606,7 @@ impl AgentKind {
             AgentKind::OpenClaw => "OpenClaw",
             AgentKind::Grok => "Grok",
             AgentKind::MuseCode => "Muse Code",
+            AgentKind::Engine => "Built-in engine",
         }
     }
 
@@ -529,6 +627,7 @@ impl AgentKind {
             AgentKind::Grok => "grok",
             // Muse Code ships as the `muse` CLI; the runner drives `muse exec`.
             AgentKind::MuseCode => "muse",
+            AgentKind::Engine => crate::engine::ENGINE_BINARY_NAME,
         }
     }
 
@@ -543,6 +642,7 @@ impl AgentKind {
             AgentKind::OpenClaw => "https://github.com/openclaw/acpx",
             AgentKind::Grok => "https://x.ai/cli",
             AgentKind::MuseCode => "https://developer.meta.com/ai/products/muse-code/",
+            AgentKind::Engine => "https://github.com/The-AI-Republic/pi-dash",
         }
     }
 
@@ -587,6 +687,9 @@ impl AgentKind {
             // open-install-page fallback for these agents rather than guess a
             // command. Add a row here once a vendor script is confirmed.
             AgentKind::OpenClaw | AgentKind::Grok | AgentKind::MuseCode => None,
+            // Ships with pidash (`pidash engine install`), never fetched
+            // from a vendor.
+            AgentKind::Engine => None,
         }
     }
 
@@ -603,6 +706,7 @@ impl AgentKind {
             AgentKind::OpenClaw => None,
             AgentKind::Grok => Some("set XAI_API_KEY  (or run `grok` and log in)"),
             AgentKind::MuseCode => Some("set META_API_KEY"),
+            AgentKind::Engine => Some("pidash login --engine"),
         }
     }
 }
@@ -1115,6 +1219,7 @@ mod tests {
     fn config_with(runners: Vec<RunnerConfig>) -> Config {
         Config {
             engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),

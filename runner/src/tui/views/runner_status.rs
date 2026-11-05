@@ -702,6 +702,7 @@ mod tests {
     fn config(runners: Vec<RunnerConfig>) -> Config {
         Config {
             engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://pidash.example".into(),

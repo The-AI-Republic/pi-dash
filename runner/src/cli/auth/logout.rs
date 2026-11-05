@@ -22,9 +22,72 @@ pub struct Args {
     /// stay signed in. Without it, every workspace is signed out.
     #[arg(long)]
     pub workspace: Option<String>,
+
+    /// Sign out only the built-in engine: revoke this computer's engine
+    /// credential. The daemon and its runners stay signed in; engine
+    /// runners pause until `pidash login --engine`. The desktop app does not
+    /// renew an engine signed out this way.
+    #[arg(long, conflicts_with = "workspace")]
+    pub engine: bool,
+}
+
+/// Revoke this machine's engine credential (unless `local_only`) and
+/// forget it, recording `signed_out`. Returns whether one was held.
+pub(crate) async fn sign_out_engine(paths: &Paths, local_only: bool) -> Result<bool> {
+    let Some(cfg) = file::load_config_opt(paths)? else {
+        return Ok(false);
+    };
+    let cli = cfg.cli.clone().unwrap_or_default();
+    let held = cli
+        .engine_credential
+        .as_ref()
+        .is_some_and(|c| !c.token.is_empty());
+    if !local_only {
+        let machine_token = cli
+            .workspace_tokens()
+            .into_iter()
+            .map(|(_, t)| t)
+            .find(|t| t.starts_with("mt_"));
+        match machine_token {
+            Some(mt) if !cfg.daemon.cloud_url.is_empty() => {
+                let api = crate::engine::api::EngineApi::new(&cfg.daemon.cloud_url)?;
+                if let Err(e) = api.revoke_credential(&mt).await {
+                    // Still forget it locally, so the user is not stuck.
+                    tracing::warn!("revoking the engine credential failed: {e}");
+                    eprintln!("warning: the server did not confirm the engine sign-out: {e}");
+                }
+            }
+            _ => {
+                if held {
+                    eprintln!(
+                        "warning: no daemon credential to revoke the engine credential with; forgetting it locally"
+                    );
+                }
+            }
+        }
+    }
+    runner_ops::store_engine_credential(
+        paths,
+        None,
+        crate::config::schema::EngineSignInState::SignedOut,
+    )
+    .context("forgetting the engine credential")?;
+    Ok(held)
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
+    if args.engine {
+        let held = sign_out_engine(paths, args.local_only).await?;
+        crate::service::reload::notify_credentials_changed(paths).await;
+        if held {
+            println!(
+                "Signed out the built-in engine. Run `pidash login --engine` to sign it in again."
+            );
+        } else {
+            println!("The built-in engine was not signed in; recorded it as signed out.");
+        }
+        return Ok(());
+    }
     let cfg = if paths.config_path().exists() {
         Some(file::load_config(paths)?)
     } else {
@@ -50,6 +113,12 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
             None => println!("Not logged in — nothing to revoke."),
         }
         return Ok(());
+    }
+
+    if workspace.is_none() {
+        // `pidash auth logout` signs the engine out too (design §4.3). Its
+        // credential is revoked first, while a machine token still works.
+        sign_out_engine(paths, args.local_only).await?;
     }
 
     if !args.local_only {
@@ -94,7 +163,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         }
         None => {
             runner_ops::clear_cli_token(paths).context("clearing tokens from config.toml")?;
-            println!("Logged out.");
+            println!("Logged out (the built-in engine too).");
         }
     }
     crate::service::reload::notify_credentials_changed(paths).await;

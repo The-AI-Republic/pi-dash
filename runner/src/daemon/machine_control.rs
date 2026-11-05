@@ -163,7 +163,14 @@ impl MachineControl {
                         client.close_session(&session_id).await;
                         return;
                     }
-                    r = client.poll(&session_id, std::mem::take(&mut acks), DEFAULT_LONG_POLL_SECS) => r,
+                    r = client.poll_with(
+                        &session_id,
+                        crate::cloud::protocol::MachinePollBody {
+                            ack: std::mem::take(&mut acks),
+                            engine_state: Some((&self.spawn_ctx.engine.status()).into()),
+                        },
+                        DEFAULT_LONG_POLL_SECS,
+                    ) => r,
                 };
                 match polled {
                     Ok(resp) => {
@@ -287,6 +294,8 @@ impl MachineControl {
                 host_label: &host_label,
                 name: (!cmd.name.is_empty()).then_some(cmd.name.as_str()),
                 pod: (!cmd.pod.is_empty()).then_some(cmd.pod.as_str()),
+                agent_kind: (agent_kind == AgentKind::Engine)
+                    .then_some(crate::engine::api::ENGINE_AGENT_KIND),
             },
         )
         .await
@@ -585,6 +594,8 @@ mod tests {
         let transport = SharedHttpTransport::new(url).unwrap();
         let ctx = RunnerSpawnCtx::for_tests(Some(transport.clone()), tokens.clone(), &paths, &[]);
         let daemon_state = StateHandle::new(crate::config::schema::Config {
+            engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: Default::default(),
             runners: vec![],
@@ -643,6 +654,8 @@ mod tests {
         let transport = SharedHttpTransport::new(url).unwrap();
         let ctx = RunnerSpawnCtx::for_tests(Some(transport.clone()), tokens.clone(), &paths, &[]);
         let daemon_state = StateHandle::new(crate::config::schema::Config {
+            engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: Default::default(),
             runners: vec![],

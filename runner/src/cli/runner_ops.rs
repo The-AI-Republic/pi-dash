@@ -76,6 +76,8 @@ fn model_applies_to_agent(kind: AgentKind, model: &str) -> bool {
         AgentKind::CursorAgent | AgentKind::OpenClaw | AgentKind::Grok | AgentKind::MuseCode => {
             !m.is_empty()
         }
+        // The engine's model comes from the server's profile (design §4.3).
+        AgentKind::Engine => false,
     }
 }
 
@@ -164,6 +166,7 @@ pub fn agent_sections_for(
         AgentKind::OpenClaw => openclaw.model_default = model,
         AgentKind::Grok => grok.model_default = model,
         AgentKind::MuseCode => muse_code.model_default = model,
+        AgentKind::Engine => {}
     }
     (codex, claude_code, cursor_agent, openclaw, grok, muse_code)
 }
@@ -202,6 +205,7 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str, force: bool)
     } else {
         Config {
             engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: cloud_url.to_string(),
@@ -279,6 +283,8 @@ pub fn bind_cloud(paths: &Paths, cloud_url: &str, force: bool) -> Result<()> {
 
 fn bootstrap_config(cloud_url: &str) -> Config {
     Config {
+        engine: Default::default(),
+        auth: Default::default(),
         version: 2,
         daemon: DaemonConfig {
             cloud_url: cloud_url.to_string(),
@@ -430,6 +436,25 @@ pub fn clear_cli_token(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+/// Store (or with `None`, forget) the machine's engine credential and record
+/// the engine sign-in state, under the config lock. The secret lands where
+/// `[auth] credentials_store` says.
+pub fn store_engine_credential(
+    paths: &Paths,
+    credential: Option<&crate::engine::api::IssuedEngineCredential>,
+    state: crate::config::schema::EngineSignInState,
+) -> Result<Config> {
+    file::mutate_config(paths, |cfg| {
+        let cli = cfg.cli.get_or_insert_with(Default::default);
+        cli.engine_credential = credential.map(|c| crate::config::schema::EngineCredential {
+            token: c.token.clone(),
+            expires_at: c.expires_at,
+        });
+        cli.engine_sign_in_state = Some(state);
+        Ok(())
+    })
+}
+
 /// Forget one workspace's token (`pidash auth logout --workspace <slug>`).
 /// Returns whether the workspace had a token.
 pub fn clear_workspace_token(paths: &Paths, slug: &str) -> Result<bool> {
@@ -569,6 +594,7 @@ pub async fn apply_enroll_response(
     let init_cfg = move || {
         Some(Config {
             engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: bootstrap_cloud_url.clone(),

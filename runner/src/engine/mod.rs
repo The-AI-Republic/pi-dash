@@ -18,13 +18,34 @@
 //!   install` and for `pidash update` before it replaces `pidash`.
 //! - [`cleanup`] removes engine versions older than the running one.
 //!
+//! Running it (PIDESKAPP-121, design §4.3 and §5):
+//!
+//! - [`api`] is the server contract (profile, model token, credential
+//!   revoke, pause) in one place.
+//! - [`manager`] holds the machine's engine state in the daemon: the
+//!   engine credential, the profile (fetched at start, on credential issue
+//!   and every 15 minutes) and the in-memory model token.
+//! - [`codex_config`] writes the engine's private `CODEX_HOME`.
+//! - [`agent`] turns an `agent.kind = "engine"` block into a Codex launch.
+//! - [`provision`] turns the engine on for a project (`EngineRunnerAdd`,
+//!   `pidash runner add --agent engine`).
+//! - [`workdir`] owns `[engine] task_root`: validation and folder allocation.
+//!
 //! The pinned engine release is `runner/ENGINE_VERSION`, the single source of
 //! truth shared with the CLI release pipeline (`runner/scripts/stage_engine.py`)
 //! and the desktop build scripts.
 
+pub mod agent;
+pub mod api;
 pub mod cleanup;
+pub mod codex_config;
 pub mod install;
 pub mod locate;
+pub mod manager;
+pub mod provision;
+#[cfg(test)]
+pub(crate) mod test_server;
+pub mod workdir;
 
 /// Upstream release tag of the pinned engine, e.g. `rust-v0.153.4`.
 const ENGINE_TAG_FILE: &str = include_str!("../../ENGINE_VERSION");

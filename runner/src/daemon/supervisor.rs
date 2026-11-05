@@ -29,8 +29,8 @@ use crate::daemon::workspace_tokens::WorkspaceTokens;
 use crate::history::index::{RunSummary, RunsIndex};
 use crate::history::jsonl::{HistoryEntry, HistoryWriter};
 use crate::ipc::protocol::{
-    CurrentRunSummary, EngineState, HelloAccount, HelloInfo, HelloWorkspace, IPC_VERSION,
-    RunnerChanges, version_lt,
+    CurrentRunSummary, HelloAccount, HelloInfo, HelloWorkspace, IPC_VERSION, RunnerChanges,
+    version_lt,
 };
 use crate::ipc::server::IpcServer;
 use crate::util::paths::{Paths, RunnerPaths};
@@ -156,7 +156,21 @@ impl Supervisor {
         // Shared context for bringing a runner's tasks up — used by the
         // startup loop below and by the machine control session's
         // cloud-driven `create_runner` hot-add path.
+        // The machine's built-in engine (design §4.3): credential, profile,
+        // in-memory model token and machine-level state.
+        let engine = crate::engine::manager::EngineManager::new(
+            transport.as_ref().map(|t| t.cloud_url()),
+            paths.clone(),
+            tokens.clone(),
+            crate::engine::locate::resolved().map(|e| e.binary.clone()),
+        );
+        let engine_handle = transport.as_ref().map(|_| {
+            let engine = engine.clone();
+            let shutdown = state.shutdown_notified();
+            tokio::spawn(async move { engine.run(shutdown).await })
+        });
         let spawn_ctx = RunnerSpawnCtx {
+            engine: engine.clone(),
             transport: transport.clone(),
             tokens: tokens.clone(),
             paths: paths.clone(),
@@ -297,6 +311,9 @@ impl Supervisor {
         if let Some(h) = triggers_handle {
             h.abort();
         }
+        if let Some(h) = engine_handle {
+            h.abort();
+        }
         ipc_handle.abort();
         Ok(())
     }
@@ -355,6 +372,8 @@ async fn build_runner_instance(
 /// All fields are cheap clones of the supervisor's shared state.
 #[derive(Clone)]
 pub(crate) struct RunnerSpawnCtx {
+    /// The machine's built-in engine (PIDESKAPP-121).
+    pub(crate) engine: Arc<crate::engine::manager::EngineManager>,
     transport: Option<SharedHttpTransport>,
     /// Workspace → dev-machine token (design §4.9). Replaces the single
     /// `shared_machine_token`; shared with the machine control session.
@@ -429,6 +448,9 @@ impl RunnerSpawnCtx {
             anyhow::bail!("daemon cloud changed; restart the daemon to apply it");
         }
         self.tokens.reload(cfg.cli.as_ref());
+        // A login or logout may have issued or revoked the engine
+        // credential: drop the model token and fetch the profile again.
+        self.engine.credentials_changed();
         Ok(self.restart_stale_runners().await)
     }
 
@@ -586,6 +608,7 @@ impl RunnerSpawnCtx {
 
     /// The `Hello` answer (design §4.4).
     pub(crate) fn hello(&self) -> HelloInfo {
+        let engine = self.engine.status();
         let instances = self.all_instances();
         let mut slugs: std::collections::BTreeSet<String> =
             self.tokens.known_workspaces().into_iter().collect();
@@ -622,9 +645,8 @@ impl RunnerSpawnCtx {
             account,
             workspaces,
             machine_id: self.daemon.dev_machine_id,
-            // The built-in engine lands in a later release (PIDESKAPP-121
-            // §4.5); until then this daemon has none.
-            engine: EngineState::Unavailable,
+            engine: engine.state,
+            engine_detail: Some(engine),
         }
     }
 
@@ -860,6 +882,7 @@ fn agent_binary_for(config: &crate::config::schema::RunnerConfig) -> &str {
         crate::config::schema::AgentKind::OpenClaw => &config.openclaw.binary,
         crate::config::schema::AgentKind::Grok => &config.grok.binary,
         crate::config::schema::AgentKind::MuseCode => &config.muse_code.binary,
+        crate::config::schema::AgentKind::Engine => crate::engine::agent::binary_display(),
     }
 }
 
@@ -3560,7 +3583,8 @@ impl AssignWorker {
     /// so the two aren't conflated in telemetry.
     fn crash_reason(&self) -> FailureReason {
         match self.runner_config.agent.kind {
-            AgentKind::Codex => FailureReason::CodexCrash,
+            // The built-in engine is Codex, driven by the same driver.
+            AgentKind::Codex | AgentKind::Engine => FailureReason::CodexCrash,
             AgentKind::ClaudeCode
             | AgentKind::CursorAgent
             | AgentKind::OpenClaw
@@ -4559,6 +4583,12 @@ mod tests {
         insts: &[&RunnerInstance],
     ) -> RunnerSpawnCtx {
         RunnerSpawnCtx {
+            engine: crate::engine::manager::EngineManager::new(
+                transport.as_ref().map(|t| t.cloud_url()),
+                paths.clone(),
+                tokens.clone(),
+                None,
+            ),
             transport,
             tokens,
             paths: paths.clone(),
@@ -4587,6 +4617,7 @@ mod tests {
             )),
             daemon_state: StateHandle::new(crate::config::schema::Config {
                 engine: Default::default(),
+                auth: Default::default(),
                 version: 2,
                 daemon: Default::default(),
                 runners: vec![],
@@ -4616,6 +4647,7 @@ mod tests {
             &paths,
             &Config {
                 engine: Default::default(),
+                auth: Default::default(),
                 version: 2,
                 daemon: DaemonConfig::default(),
                 runners: vec![gone_cfg.clone(), keep_cfg.clone()],
@@ -4668,6 +4700,8 @@ mod tests {
         crate::config::file::write_config(
             paths,
             &Config {
+                engine: Default::default(),
+                auth: Default::default(),
                 version: 2,
                 daemon: DaemonConfig::default(),
                 runners,
@@ -4987,7 +5021,7 @@ mod tests {
         assert_eq!(hello.daemon_version, crate::RUNNER_VERSION);
         assert_eq!(hello.ipc_version, IPC_VERSION);
         assert_eq!(hello.machine_id, Some(machine_id));
-        assert_eq!(hello.engine, EngineState::Unavailable);
+        assert_eq!(hello.engine, crate::ipc::protocol::EngineState::Unavailable);
         assert_eq!(
             hello.account,
             Some(HelloAccount {
@@ -5113,6 +5147,7 @@ mod tests {
                 runner_config: config.clone(),
                 state: StateHandle::new(Config {
                     engine: Default::default(),
+                    auth: Default::default(),
                     version: 2,
                     daemon: Default::default(),
                     runners: vec![config.clone()],
@@ -5168,6 +5203,7 @@ mod tests {
             runner_config: config.clone(),
             state: StateHandle::new(Config {
                 engine: Default::default(),
+                auth: Default::default(),
                 version: 2,
                 daemon: Default::default(),
                 runners: vec![config.clone()],
@@ -5448,6 +5484,7 @@ mod tests {
         // the IPC's connected flag can be flipped on each WS handshake.
         let daemon_state = StateHandle::new(crate::config::schema::Config {
             engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: Default::default(),
             runners: vec![],

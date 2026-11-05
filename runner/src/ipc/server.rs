@@ -289,49 +289,56 @@ impl IpcServer {
                 Ok(Response::Ack)
             }
             Request::RunnerRemoveLocal { runner } => {
-                // Synthesize a `ServerMsg::RemoveRunner` envelope into
-                // the target instance's inbound mailbox. The supervisor
-                // already has the full teardown handler for that
-                // variant (cancel run + strip config.toml + delete
-                // data dir + exit RunnerLoop), so we don't duplicate
-                // any of that logic here — we just enter the same
-                // code path the cloud's wire frame would.
-                let inst = self.resolve_runner(Some(&runner))?;
-                let envelope = crate::cloud::protocol::Envelope::for_runner(
-                    inst.runner_id,
-                    crate::cloud::protocol::ServerMsg::RemoveRunner {
-                        runner_id: inst.runner_id,
-                        reason: Some("local removal via pidash CLI".to_string()),
-                    },
-                );
-                inst.mailbox_tx
-                    .send(crate::cloud::http::InboundEnvelope {
-                        stream_id: None,
-                        env: envelope,
-                    })
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "delivering synthesized RemoveRunner to {runner:?} mailbox \
-                             (loop may have already exited)"
-                        )
-                    })?;
-                // Answer only once the teardown finished: the runner is out
-                // of the registry (so `pidash status` no longer lists it)
-                // and its block is stripped, so re-adding the same id right
-                // after cannot race the strip.
-                if !self
-                    .spawn_ctx
-                    .wait_runner_removed(
-                        inst.runner_id,
-                        crate::daemon::supervisor::RUNNER_REMOVE_WAIT,
-                    )
-                    .await
-                {
-                    anyhow::bail!("runner {runner:?} did not finish its teardown in time");
-                }
+                self.remove_local(&runner).await?;
                 Ok(Response::Ack)
             }
+            // ---- Built-in engine (IPC v6, PIDESKAPP-121) ----------------
+            Request::EngineModelToken => match self.spawn_ctx.engine.model_token().await {
+                Ok(t) => Ok(Response::EngineModelToken {
+                    token: t.token,
+                    expires_at: t.expires_at,
+                }),
+                // The message starts with the reason code, so the helper
+                // (and the engine's log) say why.
+                Err(e) => Ok(Response::Error(RpcError {
+                    code: 403,
+                    message: e.to_string(),
+                })),
+            },
+            Request::EngineStatus => Ok(Response::EngineStatus(self.spawn_ctx.engine.status())),
+            Request::EngineRunnerAdd {
+                workspace,
+                project,
+                working_dir,
+            } => {
+                let info = self
+                    .spawn_ctx
+                    .engine_runner_add(workspace, project, working_dir)
+                    .await?;
+                Ok(Response::EngineRunnerAdded(info))
+            }
+            Request::EngineRunnerRemove { runner } => {
+                // Revoke in the cloud first (the server unpins and fails
+                // strict runs, design §7), then tear down locally. The
+                // folder on disk is kept.
+                let (runner_id, token) = self.spawn_ctx.engine_runner_for_removal(&runner)?;
+                crate::cloud::runners::delete_runner(
+                    &self.spawn_ctx.cloud_url(),
+                    &token,
+                    &runner_id,
+                    false,
+                )
+                .await
+                .with_context(|| format!("removing {runner:?} in the cloud"))?;
+                self.remove_local(&runner).await?;
+                Ok(Response::Ack)
+            }
+            Request::EngineSettingsGet => {
+                Ok(Response::EngineSettings(self.spawn_ctx.engine_settings()?))
+            }
+            Request::EngineSettingsSet { task_root } => Ok(Response::EngineSettings(
+                self.spawn_ctx.set_engine_settings(task_root).await?,
+            )),
             // Local chat (PDASHOSS01-159, IPC v4). The desktop host drives
             // the built-in engine directly over this socket — never through
             // the Pi Dash chat relay. Streamed `Response::Chat*` frames are
@@ -425,6 +432,53 @@ impl IpcServer {
     /// (the common single-runner install), return it. When `name` is
     /// `None` and there are multiple, refuse with a hint listing the
     /// configured names — the caller must disambiguate.
+    /// Local-only removal of `runner` (no cloud call): the same teardown
+    /// the cloud's `remove_runner` frame triggers. Returns once it finished.
+    async fn remove_local(&self, runner: &str) -> Result<()> {
+        // Synthesize a `ServerMsg::RemoveRunner` envelope into
+        // the target instance's inbound mailbox. The supervisor
+        // already has the full teardown handler for that
+        // variant (cancel run + strip config.toml + delete
+        // data dir + exit RunnerLoop), so we don't duplicate
+        // any of that logic here — we just enter the same
+        // code path the cloud's wire frame would.
+        let inst = self.resolve_runner(Some(runner))?;
+        let envelope = crate::cloud::protocol::Envelope::for_runner(
+            inst.runner_id,
+            crate::cloud::protocol::ServerMsg::RemoveRunner {
+                runner_id: inst.runner_id,
+                reason: Some("local removal via pidash CLI".to_string()),
+            },
+        );
+        inst.mailbox_tx
+            .send(crate::cloud::http::InboundEnvelope {
+                stream_id: None,
+                env: envelope,
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "delivering synthesized RemoveRunner to {runner:?} mailbox \
+                             (loop may have already exited)"
+                )
+            })?;
+        // Answer only once the teardown finished: the runner is out
+        // of the registry (so `pidash status` no longer lists it)
+        // and its block is stripped, so re-adding the same id right
+        // after cannot race the strip.
+        if !self
+            .spawn_ctx
+            .wait_runner_removed(
+                inst.runner_id,
+                crate::daemon::supervisor::RUNNER_REMOVE_WAIT,
+            )
+            .await
+        {
+            anyhow::bail!("runner {runner:?} did not finish its teardown in time");
+        }
+        Ok(())
+    }
+
     fn resolve_runner(&self, name: Option<&str>) -> Result<RunnerInstance> {
         let instances = self.all_instances();
         let mut names: Vec<_> = instances.iter().map(|i| i.name.clone()).collect();
@@ -498,5 +552,120 @@ fn deep_merge(base: &mut serde_json::Value, patch: serde_json::Value) {
             }
         }
         (b, p) => *b = p,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::config::schema::{CliSection, Config, EngineCredential};
+    use crate::daemon::supervisor::RunnerSpawnCtx;
+    use crate::daemon::workspace_tokens::WorkspaceTokens;
+    use crate::engine::test_server::{self, Handler};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    async fn daemon_with(
+        cli: CliSection,
+        url: &str,
+    ) -> (tempfile::TempDir, crate::util::paths::Paths) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = crate::util::paths::Paths {
+            config_dir: tmp.path().join("c"),
+            data_dir: tmp.path().join("d"),
+            runtime_dir: tmp.path().join("r"),
+            machine_context_dir: tmp.path().join("c"),
+        };
+        let tokens = WorkspaceTokens::from_cli(Some(&cli));
+        let transport = crate::cloud::http::SharedHttpTransport::new(url.to_string()).unwrap();
+        let spawn_ctx = RunnerSpawnCtx::for_tests(Some(transport), tokens, &paths, &[]);
+        let server = IpcServer {
+            path: paths.ipc_socket_path(),
+            primary_state: crate::daemon::state::StateHandle::new(Config {
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![],
+                cli: None,
+                engine: Default::default(),
+                auth: Default::default(),
+            }),
+            paths: paths.clone(),
+            instances: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            spawn_ctx,
+        };
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        for _ in 0..200 {
+            if paths.ipc_socket_path().exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        (tmp, paths)
+    }
+
+    fn cli(engine: bool) -> CliSection {
+        CliSection {
+            token: Some("mt_acme".into()),
+            workspace_slug: Some("acme".into()),
+            engine_credential: engine.then(|| EngineCredential {
+                token: "ec_live".into(),
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::days(10)),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_auth_helper_gets_the_in_memory_model_token_over_ipc() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let handler: Handler = Arc::new(move |req| {
+            assert_eq!(req.bearer(), Some("ec_live"));
+            c.fetch_add(1, Ordering::SeqCst);
+            let body = serde_json::json!({
+                "token": "gw_token",
+                "expires_at": (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
+            });
+            (200, body.to_string())
+        });
+        let server = test_server::start(handler).await;
+        let (_tmp, paths) = daemon_with(cli(true), &server.url).await;
+
+        // What `pidash __engine model-token` prints.
+        let token = crate::cli::engine_cmd::fetch_model_token(&paths)
+            .await
+            .unwrap();
+        assert_eq!(token, "gw_token");
+        let again = crate::cli::engine_cmd::fetch_model_token(&paths)
+            .await
+            .unwrap();
+        assert_eq!(again, "gw_token");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "served from daemon memory");
+
+        let mut client = crate::ipc::client::Client::connect(paths.ipc_socket_path())
+            .await
+            .unwrap();
+        match client.call(Request::EngineStatus).await.unwrap() {
+            Response::EngineStatus(st) => {
+                assert_eq!(
+                    st.sign_in_state,
+                    crate::ipc::protocol::EngineSignInState::Active
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_auth_helper_reports_why_there_is_no_token() {
+        let handler: Handler = Arc::new(|_| (500, String::new()));
+        let server = test_server::start(handler).await;
+        let (_tmp, paths) = daemon_with(cli(false), &server.url).await;
+        let err = crate::cli::engine_cmd::fetch_model_token(&paths)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("engine_sign_in_required"), "{err}");
+        assert!(server.requests.lock().unwrap().is_empty());
     }
 }

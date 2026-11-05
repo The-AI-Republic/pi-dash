@@ -251,6 +251,8 @@ pub fn set_runner_agent_binary(runner: &mut RunnerConfig, agent: AgentKind, path
         AgentKind::OpenClaw => runner.openclaw.binary = p,
         AgentKind::Grok => runner.grok.binary = p,
         AgentKind::MuseCode => runner.muse_code.binary = p,
+        // The daemon resolves the engine itself (`engine::locate`).
+        AgentKind::Engine => {}
     }
 }
 

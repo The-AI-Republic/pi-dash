@@ -449,6 +449,7 @@ mod resolve_tests {
     fn make_config(token: &str) -> Config {
         Config {
             engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://cloud.example/".into(),

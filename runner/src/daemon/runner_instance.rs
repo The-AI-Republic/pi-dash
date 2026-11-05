@@ -126,6 +126,7 @@ impl RunnerInstance {
         // operator settings instead of schema defaults.
         let state = StateHandle::new(crate::config::schema::Config {
             engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon,
             runners: vec![config.clone()],

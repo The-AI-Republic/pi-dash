@@ -89,6 +89,7 @@ pub async fn run(_args: Args, paths: &Paths) -> Result<()> {
                 workspaces[0]
             );
         }
+        print_credentials(paths, c).await;
         let runner_count = c.runners.len();
         if runner_count == 0 {
             println!("  - No runners registered on this host.");
@@ -102,4 +103,72 @@ pub async fn run(_args: Args, paths: &Paths) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Both credentials, their expiry and the engine sign-in state (design
+/// §4.3 "`pidash auth status` shows both credentials and their expiry").
+async fn print_credentials(paths: &Paths, cfg: &crate::config::schema::Config) {
+    let cli = cfg.cli.clone().unwrap_or_default();
+    let workspaces = cli
+        .workspace_slugs()
+        .len()
+        .max(usize::from(cli.token.is_some()));
+    println!(
+        "  ✓ Daemon credential: {workspaces} workspace token(s); each expires 60 days after its last use"
+    );
+    let now = chrono::Utc::now();
+    let state = cli.engine_sign_in_state.unwrap_or_default();
+    match cli
+        .engine_credential
+        .as_ref()
+        .filter(|c| !c.token.is_empty())
+    {
+        Some(c) => match c.expires_at {
+            Some(e) if e <= now => println!(
+                "  ✗ Engine credential: expired on {} — run `pidash login --engine`",
+                e.format("%Y-%m-%d")
+            ),
+            Some(e) => {
+                let days = (e - now).num_days();
+                let mark = if days < crate::engine::manager::EXPIRING_WITHIN_DAYS {
+                    "!"
+                } else {
+                    "✓"
+                };
+                println!(
+                    "  {mark} Engine credential: expires {} (in {days} day(s))",
+                    e.format("%Y-%m-%d %H:%M UTC")
+                );
+            }
+            None => println!("  ✓ Engine credential: held (expiry unknown)"),
+        },
+        None => println!("  - Engine credential: none — run `pidash login --engine`"),
+    }
+    println!("    Engine sign-in state: {}", state.as_str());
+    // What the running daemon makes of it, when one answers.
+    if let Ok(mut client) = crate::ipc::client::Client::connect(paths.ipc_socket_path()).await
+        && let Ok(Ok(crate::ipc::protocol::Response::EngineStatus(st))) = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.call(crate::ipc::protocol::Request::EngineStatus),
+        )
+        .await
+    {
+        println!(
+            "    Engine on this computer: {}{}",
+            serde_json::to_value(st.state)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default(),
+            st.reason_code
+                .map(|r| format!(" ({r})"))
+                .unwrap_or_default()
+        );
+    }
+    println!(
+        "    Stored in: {}",
+        match crate::config::secrets::location(cfg) {
+            "keychain" => "the OS keychain".to_string(),
+            _ => format!("{} (0600)", paths.config_path().display()),
+        }
+    );
 }

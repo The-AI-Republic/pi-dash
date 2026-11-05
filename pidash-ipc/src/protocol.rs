@@ -48,7 +48,13 @@ use crate::dto::{
 /// per-runner `RunnerReconfigure`, `CredentialsReload`, and the
 /// `workspace_signed_out` flag on `RunnerStatusSnapshot`. A client that
 /// gets no `Hello` answer is talking to a daemon older than v5.
-pub const IPC_VERSION: u32 = 5;
+///
+/// v6 (PIDESKAPP-121, the built-in engine in the CLI, design §4.3 and §5)
+/// added `EngineModelToken` (the engine's auth helper asks the daemon for
+/// the current model token), `EngineStatus`, `EngineRunnerAdd` /
+/// `EngineRunnerRemove`, `EngineSettingsGet` / `EngineSettingsSet`, and the
+/// `engine_detail` field on `HelloInfo`. `Hello.engine` keeps its v5 shape.
+pub const IPC_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
@@ -78,6 +84,41 @@ pub enum Request {
     /// `pidash auth login` / `logout`. Runners whose workspace's token
     /// changed are restarted in-process; nothing else is touched.
     CredentialsReload,
+
+    // ---- Built-in engine (v6, PIDESKAPP-121) ------------------------
+    /// The engine's command-backed auth helper (`pidash __engine
+    /// model-token`) asks for the current model token. The daemon holds it
+    /// in memory only and refreshes it when under 60 s remain. Answered
+    /// with [`Response::EngineModelToken`], or an error carrying the
+    /// server's `reason_code` (e.g. `engine_sign_in_required`).
+    EngineModelToken,
+    /// Machine-level engine state: [`Response::EngineStatus`].
+    EngineStatus,
+    /// Turn the built-in engine on for a project (design §5): the daemon
+    /// checks the local runner cap and the engine's availability, enrols
+    /// an engine runner with the workspace's daemon credential, allocates
+    /// its folder under `[engine] task_root` (or uses `working_dir`),
+    /// writes the block under the config lock and starts it in-process.
+    /// Answered with [`Response::EngineRunnerAdded`].
+    EngineRunnerAdd {
+        workspace: String,
+        project: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_dir: Option<std::path::PathBuf>,
+    },
+    /// Turn the engine off for one project: revoke the runner in the cloud
+    /// and remove it locally (its folder is kept on disk).
+    EngineRunnerRemove { runner: String },
+    /// The daemon's engine settings: [`Response::EngineSettings`].
+    EngineSettingsGet,
+    /// Change the engine settings. `task_root = None` returns to the
+    /// default root. The daemon validates the root (design §10) and keeps
+    /// the old value when a rule fails. Answered with
+    /// [`Response::EngineSettings`].
+    EngineSettingsSet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_root: Option<std::path::PathBuf>,
+    },
     /// One-shot current-state snapshot.
     StatusGet,
     /// Subscribe to status deltas (stream until the connection closes).
@@ -261,6 +302,17 @@ pub enum Request {
 pub enum Response {
     /// Answer to [`Request::Hello`].
     Hello(HelloInfo),
+    /// Answer to [`Request::EngineModelToken`].
+    EngineModelToken {
+        token: String,
+        expires_at: DateTime<Utc>,
+    },
+    /// Answer to [`Request::EngineStatus`].
+    EngineStatus(EngineStatusInfo),
+    /// Answer to [`Request::EngineRunnerAdd`].
+    EngineRunnerAdded(EngineRunnerInfo),
+    /// Answer to [`Request::EngineSettingsGet`] / [`Request::EngineSettingsSet`].
+    EngineSettings(EngineSettings),
     Status(StatusSnapshot),
     Config(serde_json::Value),
     Runs(Vec<RunSummary>),
@@ -375,6 +427,9 @@ pub struct HelloInfo {
     pub machine_id: Option<Uuid>,
     /// State of the built-in engine.
     pub engine: EngineState,
+    /// Why, and until when (v6). `None` from a v5 daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_detail: Option<EngineStatusInfo>,
 }
 
 /// The account `pidash auth login` signed in. Fields the login could not
@@ -407,9 +462,97 @@ pub enum EngineState {
     Available,
     SignedOut,
     Expiring,
-    /// The daemon has no engine (this build: the engine lands in a later
-    /// release), or the instance cannot serve it.
+    /// The daemon has no engine binary, or the instance cannot serve it
+    /// (see [`EngineStatusInfo::reason_code`]).
     Unavailable,
+}
+
+/// The machine's engine sign-in state (design §4.3), kept by the server
+/// per machine (`DevMachine.engine_sign_in_state`) and mirrored by the
+/// daemon.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineSignInState {
+    /// The machine never had an engine credential.
+    #[default]
+    Never,
+    /// A live credential.
+    Active,
+    /// A live credential that expires within three days.
+    Expiring,
+    /// The credential reached its 14 days.
+    Expired,
+    /// The user signed the engine out; only an explicit engine sign-in
+    /// clears it (the app must not renew silently).
+    SignedOut,
+    /// An admin or "Remove this computer" revoked it.
+    Revoked,
+}
+
+impl EngineSignInState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::Active => "active",
+            Self::Expiring => "expiring",
+            Self::Expired => "expired",
+            Self::SignedOut => "signed_out",
+            Self::Revoked => "revoked",
+        }
+    }
+
+    /// States in which the app may renew the credential silently.
+    pub fn allows_silent_renewal(self) -> bool {
+        matches!(self, Self::Expiring | Self::Expired)
+    }
+}
+
+/// Machine-level engine state with its reason (design §4.3, §8):
+/// `Hello.engine_detail`, `EngineStatus`, `pidash status`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EngineStatusInfo {
+    pub state: EngineState,
+    /// Why the engine is not available: one of the server's reason codes
+    /// (`engine_sign_in_required`, `gateway_session_revoked`,
+    /// `wallet_empty`, `profile_unavailable`, `engine_disabled`) or a
+    /// local one (`engine_not_installed`, `profile_pending`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    pub sign_in_state: EngineSignInState,
+    /// Expiry of the engine credential, when one is held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_expires_at: Option<DateTime<Utc>>,
+    /// Model the profile names, when it was fetched and is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Engine executable the daemon resolved at start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+    /// When the profile was last fetched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_fetched_at: Option<DateTime<Utc>>,
+}
+
+/// Answer to [`Request::EngineRunnerAdd`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EngineRunnerInfo {
+    pub runner: String,
+    pub runner_id: Uuid,
+    pub workspace: String,
+    pub project: String,
+    pub working_dir: std::path::PathBuf,
+}
+
+/// The daemon's engine settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EngineSettings {
+    /// Root new engine runners' folders are allocated under.
+    pub task_root: std::path::PathBuf,
+    /// Whether `task_root` is the default (`[engine] task_root` unset).
+    pub task_root_is_default: bool,
+    /// Warnings from the last validation (a network or removable drive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Connection-level state shared across every runner the daemon hosts.
@@ -1322,6 +1465,7 @@ mod tests {
             }],
             machine_id: Some(Uuid::nil()),
             engine: EngineState::Unavailable,
+            engine_detail: None,
         };
         let wire = serde_json::to_value(Response::Hello(hello.clone())).unwrap();
         assert_eq!(
@@ -1343,7 +1487,7 @@ mod tests {
             panic!("hello expected")
         };
         assert_eq!(back, hello);
-        assert_eq!(IPC_VERSION, 5);
+        const { assert!(IPC_VERSION >= 5) };
     }
 
     #[test]
@@ -1359,5 +1503,78 @@ mod tests {
             snap.compact_line(Utc::now())
                 .contains("workspace_signed_out")
         );
+    }
+
+    // ---- v6: the built-in engine -----------------------------------
+
+    #[test]
+    fn v6_engine_requests_have_the_documented_wire_shape() {
+        assert_eq!(IPC_VERSION, 6);
+        assert_eq!(
+            serde_json::to_value(Request::EngineModelToken).unwrap(),
+            serde_json::json!({"method": "engine_model_token"})
+        );
+        assert_eq!(
+            serde_json::to_value(Request::EngineRunnerAdd {
+                workspace: "acme".into(),
+                project: "WEB".into(),
+                working_dir: None,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "method": "engine_runner_add",
+                "params": {"workspace": "acme", "project": "WEB"}
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(Request::EngineRunnerRemove { runner: "r".into() }).unwrap(),
+            serde_json::json!({"method": "engine_runner_remove", "params": {"runner": "r"}})
+        );
+        assert_eq!(
+            serde_json::to_value(Request::EngineSettingsSet { task_root: None }).unwrap(),
+            serde_json::json!({"method": "engine_settings_set", "params": {}})
+        );
+        let token = Response::EngineModelToken {
+            token: "gw".into(),
+            expires_at: DateTime::parse_from_rfc3339("2026-11-04T10:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        assert_eq!(
+            serde_json::to_value(&token).unwrap(),
+            serde_json::json!({
+                "result": "engine_model_token",
+                "data": {"token": "gw", "expires_at": "2026-11-04T10:00:00Z"}
+            })
+        );
+    }
+
+    #[test]
+    fn hello_from_a_v5_daemon_has_no_engine_detail() {
+        let back: HelloInfo = serde_json::from_value(serde_json::json!({
+            "daemon_version": "0.1.29", "ipc_version": 5, "cloud_url": "https://c",
+            "workspaces": [], "engine": "unavailable"
+        }))
+        .unwrap();
+        assert!(back.engine_detail.is_none());
+        let status = EngineStatusInfo {
+            state: EngineState::SignedOut,
+            reason_code: Some("engine_sign_in_required".into()),
+            sign_in_state: EngineSignInState::SignedOut,
+            credential_expires_at: None,
+            model: None,
+            binary: None,
+            profile_fetched_at: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            serde_json::json!({
+                "state": "signed_out",
+                "reason_code": "engine_sign_in_required",
+                "sign_in_state": "signed_out"
+            })
+        );
+        assert!(EngineSignInState::Expired.allows_silent_renewal());
+        assert!(!EngineSignInState::SignedOut.allows_silent_renewal());
     }
 }

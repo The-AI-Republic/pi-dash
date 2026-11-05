@@ -292,6 +292,57 @@ For development, point the daemon at another build in `config.toml`:
 binary = "~/src/codex/codex-rs/target/debug/codex"
 ```
 
+### Using the engine
+
+```bash
+pidash auth login                      # signs in the daemon and the engine
+pidash runner add --agent engine --project WEB [--working-dir <dir>]
+pidash engine status                   # available / signed out / expiring / unavailable (reason)
+pidash engine pause                    # this computer's engine takes no new work …
+pidash engine resume                   # … until resumed
+pidash login --engine                  # renew the engine's 14-day credential alone
+pidash auth logout --engine            # sign the engine out; the daemon stays signed in
+pidash auth status                     # both credentials, expiry, engine sign-in state
+pidash config set engine-task-root ~/pidash-tasks   # or `default`
+```
+
+- **Two credentials.** `pidash auth login` stores the daemon credential
+  (one `mt_` token per workspace) and, when the server can serve the engine,
+  the engine credential (`ec_`, 14 days from issue, one per computer). The
+  engine credential can only fetch short-lived model tokens; the daemon holds
+  those **in memory only**, refreshes them when under 60 s remain, and hands
+  them to the engine through its auth helper `pidash __engine model-token`
+  (over the local socket). Nothing short-lived is written to disk.
+- **An engine runner** is `[runner.agent] kind = "engine"` with no paths: the
+  daemon supplies the engine binary, a private `CODEX_HOME` at
+  `<data dir>/engine/<account>/codex-home` (never `~/.codex`) and the Codex
+  config it writes there from the server's model profile (fetched at start,
+  on every sign-in and every 15 minutes). The server names engine runners.
+- **Folders.** Each project gets `<task root>/<workspace>/<project>/`, with a
+  numeric suffix when that folder is taken or not empty. The task root
+  defaults to `<data dir>/engine/workdirs`; changing it moves nothing.
+- **`pidash status`** and the IPC `Hello` / `EngineStatus` report the
+  machine-level engine state; the daemon also reports it to the server in the
+  machine session's heartbeat (`engine_state`).
+
+### Where credentials are stored
+
+```toml
+[auth]
+credentials_store = "auto"   # "auto" (default) | "keyring" | "file"
+```
+
+- `auto`: the OS keychain (macOS Keychain, Windows Credential Manager, the
+  Secret Service on Linux) when it answers, else `config.toml` (0600).
+  Plaintext tokens move into the keychain at the next `pidash auth login`.
+- `keyring`: the keychain only; a write fails rather than falling back.
+- `file`: `config.toml` (0600), as before.
+
+This covers the daemon and engine credentials, not the per-runner refresh
+tokens. `pidash doctor` reports which store is in use. `PIDASH_KEYRING=off`
+makes the keychain count as unavailable (containers, CI). On a headless Linux
+server with no Secret Service, `auto` keeps the 0600 file.
+
 ## Auto-update
 
 `pidash` keeps itself current. When the cloud announces a newer `latest_runner_version` in the welcome frame, the running daemon swaps the on-disk `pidash` binary in place. The currently-running process is **never disturbed** — it keeps its loaded copy until the next natural restart (`pidash restart`, host reboot, or a service-manager respawn after a crash). This gives you the Claude-Code-style "always current" experience without ever killing in-flight work.
