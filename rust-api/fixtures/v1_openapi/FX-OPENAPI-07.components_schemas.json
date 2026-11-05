@@ -586,7 +586,9 @@
           "readOnly": true
         }
       },
-      "required": ["name"]
+      "required": [
+        "name"
+      ]
     },
     "CycleCreateRequest": {
       "type": "object",
@@ -1069,7 +1071,9 @@
           "x-spec-enum-id": "e7668cf5fe0b8280"
         }
       },
-      "required": ["name"]
+      "required": [
+        "name"
+      ]
     },
     "CycleIssue": {
       "type": "object",
@@ -1131,7 +1135,10 @@
           "readOnly": true
         }
       },
-      "required": ["deleted_at", "issue"]
+      "required": [
+        "deleted_at",
+        "issue"
+      ]
     },
     "CycleIssueRequestRequest": {
       "type": "object",
@@ -1146,7 +1153,9 @@
           "description": "List of issue IDs to add to the cycle"
         }
       },
-      "required": ["issues"]
+      "required": [
+        "issues"
+      ]
     },
     "CycleLite": {
       "type": "object",
@@ -1683,7 +1692,12 @@
           "format": "uuid"
         }
       },
-      "required": ["name", "owned_by", "project", "workspace"]
+      "required": [
+        "name",
+        "owned_by",
+        "project",
+        "workspace"
+      ]
     },
     "GenericAssetUploadRequest": {
       "type": "object",
@@ -1719,7 +1733,10 @@
           "description": "External source system (for integration tracking)"
         }
       },
-      "required": ["name", "size"]
+      "required": [
+        "name",
+        "size"
+      ]
     },
     "GitCodeReviewLink": {
       "type": "object",
@@ -1775,7 +1792,11 @@
           "readOnly": true
         },
         "state": {
-          "enum": ["open", "closed", "merged"],
+          "enum": [
+            "open",
+            "closed",
+            "merged"
+          ],
           "type": "string",
           "description": "* `open` - Open\n* `closed` - Closed\n* `merged` - Merged",
           "x-spec-enum-id": "accd57f0178a6a6c",
@@ -1853,7 +1874,10 @@
           "readOnly": true
         },
         "state": {
-          "enum": ["open", "closed"],
+          "enum": [
+            "open",
+            "closed"
+          ],
           "type": "string",
           "description": "* `open` - Open\n* `closed` - Closed",
           "x-spec-enum-id": "ca546e63ad969a47",
@@ -1931,7 +1955,13 @@
           "nullable": true
         },
         "status": {
-          "enum": [-2, -1, 0, 1, 2],
+          "enum": [
+            -2,
+            -1,
+            0,
+            1,
+            2
+          ],
           "type": "integer",
           "description": "* `-2` - Pending\n* `-1` - Rejected\n* `0` - Snoozed\n* `1` - Accepted\n* `2` - Duplicate",
           "x-spec-enum-id": "255d1d18a49d93c5",
@@ -2001,7 +2031,9 @@
           "nullable": true
         }
       },
-      "required": ["intake"]
+      "required": [
+        "intake"
+      ]
     },
     "IntakeIssueCreateRequest": {
       "type": "object",
@@ -2016,7 +2048,9 @@
           "description": "Issue data for the intake issue"
         }
       },
-      "required": ["issue"]
+      "required": [
+        "issue"
+      ]
     },
     "Issue": {
       "type": "object",
@@ -2073,7 +2107,13 @@
           "nullable": true
         },
         "priority": {
-          "enum": ["urgent", "high", "medium", "low", "none"],
+          "enum": [
+            "urgent",
+            "high",
+            "medium",
+            "low",
+            "none"
+          ],
           "type": "string",
           "description": "* `urgent` - Urgent\n* `high` - High\n* `medium` - Medium\n* `low` - Low\n* `none` - None",
           "x-spec-enum-id": "c1fd7437c30830ac",
@@ -2139,7 +2179,13 @@
           "maxLength": 32
         },
         "agent_executor": {
-          "enum": ["local_runner", "cloud_agent", "managed_runner", "", null],
+          "enum": [
+            "local_runner",
+            "cloud_agent",
+            "managed_runner",
+            "",
+            null
+          ],
           "type": "string",
           "description": "* `local_runner` - Local Runner\n* `cloud_agent` - Pi Dash Cloud Agent\n* `managed_runner` - Pi Dash Agent",
           "x-spec-enum-id": "8f45fd83eb28a6b7",
@@ -2193,7 +2239,9 @@
           "nullable": true
         }
       },
-      "required": ["name"]
+      "required": [
+        "name"
+      ]
     },
     "IssueActivity": {
       "type": "object",
@@ -2290,7 +2338,10 @@
           "nullable": true
         }
       },
-      "required": ["project", "workspace"]
+      "required": [
+        "project",
+        "workspace"
+      ]
     },
     "IssueAdvancedSearchProject": {
       "type": "object",
@@ -2305,7 +2356,11 @@
           "type": "string"
         }
       },
-      "required": ["id", "identifier", "name"]
+      "required": [
+        "id",
+        "identifier",
+        "name"
+      ]
     },
     "IssueAdvancedSearchResponse": {
       "type": "object",
@@ -2323,7 +2378,11 @@
           }
         }
       },
-      "required": ["count", "query", "results"]
+      "required": [
+        "count",
+        "query",
+        "results"
+      ]
     },
     "IssueAdvancedSearchResult": {
       "type": "object",
@@ -2415,7 +2474,10 @@
           "nullable": true
         }
       },
-      "required": ["group", "name"]
+      "required": [
+        "group",
+        "name"
+      ]
     },
     "IssueAttachment": {
       "type": "object",
@@ -2534,7 +2596,9 @@
           "nullable": true
         }
       },
-      "required": ["asset"]
+      "required": [
+        "asset"
+      ]
     },
     "IssueAttachmentUploadRequest": {
       "type": "object",
@@ -2565,7 +2629,10 @@
           "description": "External source system (for integration tracking)"
         }
       },
-      "required": ["name", "size"]
+      "required": [
+        "name",
+        "size"
+      ]
     },
     "IssueComment": {
       "type": "object",
@@ -2621,7 +2688,10 @@
           "maxItems": 8
         },
         "access": {
-          "enum": ["INTERNAL", "EXTERNAL"],
+          "enum": [
+            "INTERNAL",
+            "EXTERNAL"
+          ],
           "type": "string",
           "description": "* `INTERNAL` - INTERNAL\n* `EXTERNAL` - EXTERNAL",
           "x-spec-enum-id": "bd43942b53ce5eef"
@@ -2637,7 +2707,12 @@
           "maxLength": 255
         },
         "speaker_type": {
-          "enum": ["human", "agent", "system", "integration"],
+          "enum": [
+            "human",
+            "agent",
+            "system",
+            "integration"
+          ],
           "type": "string",
           "description": "* `human` - Human\n* `agent` - Agent\n* `system` - System\n* `integration` - Integration",
           "x-spec-enum-id": "37e3b0ec0f03ba8f"
@@ -2710,7 +2785,10 @@
           "type": "string"
         },
         "access": {
-          "enum": ["INTERNAL", "EXTERNAL"],
+          "enum": [
+            "INTERNAL",
+            "EXTERNAL"
+          ],
           "type": "string",
           "description": "* `INTERNAL` - INTERNAL\n* `EXTERNAL` - EXTERNAL",
           "x-spec-enum-id": "bd43942b53ce5eef"
@@ -2735,7 +2813,12 @@
           "maxItems": 8
         },
         "speaker_type": {
-          "enum": ["human", "agent", "system", "integration"],
+          "enum": [
+            "human",
+            "agent",
+            "system",
+            "integration"
+          ],
           "type": "string",
           "description": "* `human` - Human\n* `agent` - Agent\n* `system` - System\n* `integration` - Integration",
           "x-spec-enum-id": "37e3b0ec0f03ba8f"
@@ -2837,7 +2920,13 @@
           "nullable": true
         },
         "priority": {
-          "enum": ["urgent", "high", "medium", "low", "none"],
+          "enum": [
+            "urgent",
+            "high",
+            "medium",
+            "low",
+            "none"
+          ],
           "type": "string",
           "description": "* `urgent` - Urgent\n* `high` - High\n* `medium` - Medium\n* `low` - Low\n* `none` - None",
           "x-spec-enum-id": "c1fd7437c30830ac",
@@ -2903,7 +2992,13 @@
           "maxLength": 32
         },
         "agent_executor": {
-          "enum": ["local_runner", "cloud_agent", "managed_runner", "", null],
+          "enum": [
+            "local_runner",
+            "cloud_agent",
+            "managed_runner",
+            "",
+            null
+          ],
           "type": "string",
           "description": "* `local_runner` - Local Runner\n* `cloud_agent` - Pi Dash Cloud Agent\n* `managed_runner` - Pi Dash Agent",
           "x-spec-enum-id": "8f45fd83eb28a6b7",
@@ -2953,7 +3048,9 @@
           "nullable": true
         }
       },
-      "required": ["name"]
+      "required": [
+        "name"
+      ]
     },
     "IssueForIntakeRequest": {
       "type": "object",
@@ -2973,14 +3070,22 @@
           "type": "string"
         },
         "priority": {
-          "enum": ["urgent", "high", "medium", "low", "none"],
+          "enum": [
+            "urgent",
+            "high",
+            "medium",
+            "low",
+            "none"
+          ],
           "type": "string",
           "description": "* `urgent` - Urgent\n* `high` - High\n* `medium` - Medium\n* `low` - Low\n* `none` - None",
           "x-spec-enum-id": "c1fd7437c30830ac",
           "title": "Issue Priority"
         }
       },
-      "required": ["name"]
+      "required": [
+        "name"
+      ]
     },
     "IssueLink": {
       "type": "object",
@@ -3045,7 +3150,9 @@
           "readOnly": true
         }
       },
-      "required": ["url"]
+      "required": [
+        "url"
+      ]
     },
     "IssueLinkCreateRequest": {
       "type": "object",
@@ -3061,7 +3168,9 @@
           "minLength": 1
         }
       },
-      "required": ["url"]
+      "required": [
+        "url"
+      ]
     },
     "IssueRelation": {
       "type": "object",
@@ -3153,7 +3262,10 @@
           "minItems": 1
         }
       },
-      "required": ["issues", "relation_type"]
+      "required": [
+        "issues",
+        "relation_type"
+      ]
     },
     "IssueRelationResponse": {
       "type": "object",
@@ -3286,7 +3398,13 @@
           "type": "string"
         },
         "priority": {
-          "enum": ["urgent", "high", "medium", "low", "none"],
+          "enum": [
+            "urgent",
+            "high",
+            "medium",
+            "low",
+            "none"
+          ],
           "type": "string",
           "description": "* `urgent` - Urgent\n* `high` - High\n* `medium` - Medium\n* `low` - Low\n* `none` - None",
           "x-spec-enum-id": "c1fd7437c30830ac",
@@ -3352,7 +3470,13 @@
           "maxLength": 32
         },
         "agent_executor": {
-          "enum": ["local_runner", "cloud_agent", "managed_runner", "", null],
+          "enum": [
+            "local_runner",
+            "cloud_agent",
+            "managed_runner",
+            "",
+            null
+          ],
           "type": "string",
           "description": "* `local_runner` - Local Runner\n* `cloud_agent` - Pi Dash Cloud Agent\n* `managed_runner` - Pi Dash Agent",
           "x-spec-enum-id": "8f45fd83eb28a6b7",
@@ -3389,7 +3513,9 @@
           "nullable": true
         }
       },
-      "required": ["name"]
+      "required": [
+        "name"
+      ]
     },
     "IssueSearch": {
       "type": "object",
@@ -3420,7 +3546,14 @@
           "description": "Workspace slug"
         }
       },
-      "required": ["id", "name", "project__identifier", "project_id", "sequence_id", "workspace__slug"]
+      "required": [
+        "id",
+        "name",
+        "project__identifier",
+        "project_id",
+        "sequence_id",
+        "workspace__slug"
+      ]
     },
     "IssueWorkpad": {
       "type": "object",
@@ -3518,7 +3651,9 @@
           "nullable": true
         }
       },
-      "required": ["name"]
+      "required": [
+        "name"
+      ]
     },
     "LabelCreateUpdateRequest": {
       "type": "object",
@@ -3556,7 +3691,9 @@
           "format": "double"
         }
       },
-      "required": ["name"]
+      "required": [
+        "name"
+      ]
     },
     "Module": {
       "type": "object",
@@ -3636,7 +3773,14 @@
           "nullable": true
         },
         "status": {
-          "enum": ["backlog", "planned", "in-progress", "paused", "completed", "cancelled"],
+          "enum": [
+            "backlog",
+            "planned",
+            "in-progress",
+            "paused",
+            "completed",
+            "cancelled"
+          ],
           "type": "string",
           "description": "* `backlog` - Backlog\n* `planned` - Planned\n* `in-progress` - In Progress\n* `paused` - Paused\n* `completed` - Completed\n* `cancelled` - Cancelled",
           "x-spec-enum-id": "a3d702ffba30a19d"
@@ -3691,7 +3835,9 @@
           "nullable": true
         }
       },
-      "required": ["name"]
+      "required": [
+        "name"
+      ]
     },
     "ModuleCreateRequest": {
       "type": "object",
@@ -3718,7 +3864,14 @@
           "nullable": true
         },
         "status": {
-          "enum": ["backlog", "planned", "in-progress", "paused", "completed", "cancelled"],
+          "enum": [
+            "backlog",
+            "planned",
+            "in-progress",
+            "paused",
+            "completed",
+            "cancelled"
+          ],
           "type": "string",
           "description": "* `backlog` - Backlog\n* `planned` - Planned\n* `in-progress` - In Progress\n* `paused` - Paused\n* `completed` - Completed\n* `cancelled` - Cancelled",
           "x-spec-enum-id": "a3d702ffba30a19d"
@@ -3747,7 +3900,9 @@
           "maxLength": 255
         }
       },
-      "required": ["name"]
+      "required": [
+        "name"
+      ]
     },
     "ModuleIssue": {
       "type": "object",
@@ -3811,7 +3966,10 @@
           "format": "uuid"
         }
       },
-      "required": ["deleted_at", "issue"]
+      "required": [
+        "deleted_at",
+        "issue"
+      ]
     },
     "ModuleIssueRequestRequest": {
       "type": "object",
@@ -3826,7 +3984,9 @@
           "description": "List of issue IDs to add to the module"
         }
       },
-      "required": ["issues"]
+      "required": [
+        "issues"
+      ]
     },
     "ModuleLite": {
       "type": "object",
@@ -3881,7 +4041,14 @@
           "nullable": true
         },
         "status": {
-          "enum": ["backlog", "planned", "in-progress", "paused", "completed", "cancelled"],
+          "enum": [
+            "backlog",
+            "planned",
+            "in-progress",
+            "paused",
+            "completed",
+            "cancelled"
+          ],
           "type": "string",
           "description": "* `backlog` - Backlog\n* `planned` - Planned\n* `in-progress` - In Progress\n* `paused` - Paused\n* `completed` - Completed\n* `cancelled` - Cancelled",
           "x-spec-enum-id": "a3d702ffba30a19d"
@@ -3940,7 +4107,12 @@
           "readOnly": true
         }
       },
-      "required": ["deleted_at", "name", "project", "workspace"]
+      "required": [
+        "deleted_at",
+        "name",
+        "project",
+        "workspace"
+      ]
     },
     "PageCreateRequest": {
       "type": "object",
@@ -3962,13 +4134,18 @@
           "nullable": true
         },
         "access": {
-          "enum": [1, 0],
+          "enum": [
+            1,
+            0
+          ],
           "type": "integer",
           "description": "* `1` - Private\n* `0` - Public",
           "x-spec-enum-id": "715ca7d3f37ed4e6"
         }
       },
-      "required": ["name"]
+      "required": [
+        "name"
+      ]
     },
     "PageDetail": {
       "type": "object",
@@ -3995,7 +4172,10 @@
           "readOnly": true
         },
         "access": {
-          "enum": [0, 1],
+          "enum": [
+            0,
+            1
+          ],
           "type": "integer",
           "description": "* `0` - Public\n* `1` - Private",
           "x-spec-enum-id": "1f931f5195e4368f",
@@ -4062,7 +4242,10 @@
           "readOnly": true
         },
         "access": {
-          "enum": [0, 1],
+          "enum": [
+            0,
+            1
+          ],
           "type": "integer",
           "description": "* `0` - Public\n* `1` - Private",
           "x-spec-enum-id": "1f931f5195e4368f",
@@ -5635,7 +5818,13 @@
       "description": "Serializer for updating intake work items and their associated issues.\n\nHandles intake work item modifications including status changes, triage decisions,\nand embedded issue updates for issue queue processing workflows.",
       "properties": {
         "status": {
-          "enum": [-2, -1, 0, 1, 2],
+          "enum": [
+            -2,
+            -1,
+            0,
+            1,
+            2
+          ],
           "type": "integer",
           "description": "* `-2` - Pending\n* `-1` - Rejected\n* `0` - Snoozed\n* `1` - Accepted\n* `2` - Duplicate",
           "x-spec-enum-id": "255d1d18a49d93c5",
@@ -5680,7 +5869,10 @@
           "type": "string"
         },
         "access": {
-          "enum": ["INTERNAL", "EXTERNAL"],
+          "enum": [
+            "INTERNAL",
+            "EXTERNAL"
+          ],
           "type": "string",
           "description": "* `INTERNAL` - INTERNAL\n* `EXTERNAL` - EXTERNAL",
           "x-spec-enum-id": "bd43942b53ce5eef"
@@ -5705,7 +5897,12 @@
           "maxItems": 8
         },
         "speaker_type": {
-          "enum": ["human", "agent", "system", "integration"],
+          "enum": [
+            "human",
+            "agent",
+            "system",
+            "integration"
+          ],
           "type": "string",
           "description": "* `human` - Human\n* `agent` - Agent\n* `system` - System\n* `integration` - Integration",
           "x-spec-enum-id": "37e3b0ec0f03ba8f"
@@ -5787,7 +5984,13 @@
           "type": "string"
         },
         "priority": {
-          "enum": ["urgent", "high", "medium", "low", "none"],
+          "enum": [
+            "urgent",
+            "high",
+            "medium",
+            "low",
+            "none"
+          ],
           "type": "string",
           "description": "* `urgent` - Urgent\n* `high` - High\n* `medium` - Medium\n* `low` - Low\n* `none` - None",
           "x-spec-enum-id": "c1fd7437c30830ac",
@@ -5853,7 +6056,13 @@
           "maxLength": 32
         },
         "agent_executor": {
-          "enum": ["local_runner", "cloud_agent", "managed_runner", "", null],
+          "enum": [
+            "local_runner",
+            "cloud_agent",
+            "managed_runner",
+            "",
+            null
+          ],
           "type": "string",
           "description": "* `local_runner` - Local Runner\n* `cloud_agent` - Pi Dash Cloud Agent\n* `managed_runner` - Pi Dash Agent",
           "x-spec-enum-id": "8f45fd83eb28a6b7",
@@ -5962,7 +6171,14 @@
           "nullable": true
         },
         "status": {
-          "enum": ["backlog", "planned", "in-progress", "paused", "completed", "cancelled"],
+          "enum": [
+            "backlog",
+            "planned",
+            "in-progress",
+            "paused",
+            "completed",
+            "cancelled"
+          ],
           "type": "string",
           "description": "* `backlog` - Backlog\n* `planned` - Planned\n* `in-progress` - In Progress\n* `paused` - Paused\n* `completed` - Completed\n* `cancelled` - Cancelled",
           "x-spec-enum-id": "a3d702ffba30a19d"
@@ -6012,7 +6228,10 @@
           "nullable": true
         },
         "access": {
-          "enum": [1, 0],
+          "enum": [
+            1,
+            0
+          ],
           "type": "integer",
           "description": "* `1` - Private\n* `0` - Public",
           "x-spec-enum-id": "715ca7d3f37ed4e6"
@@ -6028,7 +6247,11 @@
           "format": "uuid"
         },
         "role": {
-          "enum": [20, 15, 5],
+          "enum": [
+            20,
+            15,
+            5
+          ],
           "type": "integer",
           "description": "* `20` - Admin\n* `15` - Member\n* `5` - Guest",
           "x-spec-enum-id": "d128cd0829af3517",
@@ -6579,7 +6802,11 @@
           "maxLength": 128
         },
         "default_agent_executor": {
-          "enum": ["local_runner", "cloud_agent", "managed_runner"],
+          "enum": [
+            "local_runner",
+            "cloud_agent",
+            "managed_runner"
+          ],
           "type": "string",
           "description": "* `local_runner` - Local Runner\n* `cloud_agent` - Pi Dash Cloud Agent\n* `managed_runner` - Pi Dash Agent",
           "x-spec-enum-id": "8f45fd83eb28a6b7"
@@ -6621,7 +6848,16 @@
           "format": "double"
         },
         "group": {
-          "enum": ["backlog", "unstarted", "started", "review", "test", "completed", "cancelled", "triage"],
+          "enum": [
+            "backlog",
+            "unstarted",
+            "started",
+            "review",
+            "test",
+            "completed",
+            "cancelled",
+            "triage"
+          ],
           "type": "string",
           "description": "* `backlog` - Backlog\n* `unstarted` - Unstarted\n* `started` - Started\n* `review` - Review\n* `test` - Test\n* `completed` - Completed\n* `cancelled` - Cancelled\n* `triage` - Triage",
           "x-spec-enum-id": "f65a90e70618f185"
@@ -6703,7 +6939,11 @@
           "maxLength": 255
         },
         "role": {
-          "enum": [20, 15, 5],
+          "enum": [
+            20,
+            15,
+            5
+          ],
           "type": "integer",
           "description": "* `20` - Admin\n* `15` - Member\n* `5` - Guest",
           "x-spec-enum-id": "d128cd0829af3517",
@@ -6789,7 +7029,10 @@
           "title": "Project Description HTML"
         },
         "network": {
-          "enum": [0, 2],
+          "enum": [
+            0,
+            2
+          ],
           "type": "integer",
           "description": "* `0` - Secret\n* `2` - Public",
           "x-spec-enum-id": "ff6cd64f49ca3db3",
@@ -7342,7 +7585,11 @@
           "type": "boolean"
         },
         "default_agent_executor": {
-          "enum": ["local_runner", "cloud_agent", "managed_runner"],
+          "enum": [
+            "local_runner",
+            "cloud_agent",
+            "managed_runner"
+          ],
           "type": "string",
           "description": "* `local_runner` - Local Runner\n* `cloud_agent` - Pi Dash Cloud Agent\n* `managed_runner` - Pi Dash Agent",
           "x-spec-enum-id": "8f45fd83eb28a6b7"
@@ -7391,7 +7638,10 @@
           "nullable": true
         }
       },
-      "required": ["identifier", "name"]
+      "required": [
+        "identifier",
+        "name"
+      ]
     },
     "ProjectCreateRequest": {
       "type": "object",
@@ -7935,13 +8185,20 @@
           "maxLength": 128
         },
         "default_agent_executor": {
-          "enum": ["local_runner", "cloud_agent", "managed_runner"],
+          "enum": [
+            "local_runner",
+            "cloud_agent",
+            "managed_runner"
+          ],
           "type": "string",
           "description": "* `local_runner` - Local Runner\n* `cloud_agent` - Pi Dash Cloud Agent\n* `managed_runner` - Pi Dash Agent",
           "x-spec-enum-id": "8f45fd83eb28a6b7"
         }
       },
-      "required": ["identifier", "name"]
+      "required": [
+        "identifier",
+        "name"
+      ]
     },
     "ProjectMember": {
       "type": "object",
@@ -7957,7 +8214,11 @@
           "format": "uuid"
         },
         "role": {
-          "enum": [20, 15, 5],
+          "enum": [
+            20,
+            15,
+            5
+          ],
           "type": "integer",
           "description": "* `20` - Admin\n* `15` - Member\n* `5` - Guest",
           "x-spec-enum-id": "d128cd0829af3517",
@@ -7965,7 +8226,9 @@
           "maximum": 32767
         }
       },
-      "required": ["member"]
+      "required": [
+        "member"
+      ]
     },
     "ProjectMemberRequest": {
       "type": "object",
@@ -7976,7 +8239,11 @@
           "format": "uuid"
         },
         "role": {
-          "enum": [20, 15, 5],
+          "enum": [
+            20,
+            15,
+            5
+          ],
           "type": "integer",
           "description": "* `20` - Admin\n* `15` - Member\n* `5` - Guest",
           "x-spec-enum-id": "d128cd0829af3517",
@@ -7984,7 +8251,9 @@
           "maximum": 32767
         }
       },
-      "required": ["member"]
+      "required": [
+        "member"
+      ]
     },
     "SchedulerAPI": {
       "type": "object",
@@ -8021,7 +8290,10 @@
           "readOnly": true
         },
         "source": {
-          "enum": ["builtin", "manifest"],
+          "enum": [
+            "builtin",
+            "manifest"
+          ],
           "type": "string",
           "description": "* `builtin` - Builtin\n* `manifest` - Manifest",
           "x-spec-enum-id": "4a797422aacb8b54",
@@ -8113,7 +8385,11 @@
           "readOnly": true
         },
         "outcome_mode": {
-          "enum": ["create_issue", "apply_fix", "fix_and_review"],
+          "enum": [
+            "create_issue",
+            "apply_fix",
+            "fix_and_review"
+          ],
           "type": "string",
           "description": "* `create_issue` - Create issues\n* `apply_fix` - Apply fix (open PR)\n* `fix_and_review` - Fix & open for review",
           "x-spec-enum-id": "65419881e3ce912a",
@@ -8217,7 +8493,14 @@
           "readOnly": true
         },
         "trigger": {
-          "enum": ["state_transition", "run_ai", "comment_and_run", "tick", "scheduler", "direct"],
+          "enum": [
+            "state_transition",
+            "run_ai",
+            "comment_and_run",
+            "tick",
+            "scheduler",
+            "direct"
+          ],
           "type": "string",
           "description": "* `state_transition` - State transition\n* `run_ai` - Run AI button\n* `comment_and_run` - Comment & Run\n* `tick` - Automatic tick\n* `scheduler` - Scheduler beat\n* `direct` - Direct",
           "x-spec-enum-id": "72ba8f1eb279d630",
@@ -8305,7 +8588,16 @@
           "format": "double"
         },
         "group": {
-          "enum": ["backlog", "unstarted", "started", "review", "test", "completed", "cancelled", "triage"],
+          "enum": [
+            "backlog",
+            "unstarted",
+            "started",
+            "review",
+            "test",
+            "completed",
+            "cancelled",
+            "triage"
+          ],
           "type": "string",
           "description": "* `backlog` - Backlog\n* `unstarted` - Unstarted\n* `started` - Started\n* `review` - Review\n* `test` - Test\n* `completed` - Completed\n* `cancelled` - Cancelled\n* `triage` - Triage",
           "x-spec-enum-id": "f65a90e70618f185"
@@ -8350,7 +8642,10 @@
           "readOnly": true
         }
       },
-      "required": ["color", "name"]
+      "required": [
+        "color",
+        "name"
+      ]
     },
     "StateLite": {
       "type": "object",
@@ -8372,7 +8667,16 @@
           "title": "State Color"
         },
         "group": {
-          "enum": ["backlog", "unstarted", "started", "review", "test", "completed", "cancelled", "triage"],
+          "enum": [
+            "backlog",
+            "unstarted",
+            "started",
+            "review",
+            "test",
+            "completed",
+            "cancelled",
+            "triage"
+          ],
           "type": "string",
           "description": "* `backlog` - Backlog\n* `unstarted` - Unstarted\n* `started` - Started\n* `review` - Review\n* `test` - Test\n* `completed` - Completed\n* `cancelled` - Cancelled\n* `triage` - Triage",
           "x-spec-enum-id": "f65a90e70618f185",
@@ -8405,7 +8709,16 @@
           "format": "double"
         },
         "group": {
-          "enum": ["backlog", "unstarted", "started", "review", "test", "completed", "cancelled", "triage"],
+          "enum": [
+            "backlog",
+            "unstarted",
+            "started",
+            "review",
+            "test",
+            "completed",
+            "cancelled",
+            "triage"
+          ],
           "type": "string",
           "description": "* `backlog` - Backlog\n* `unstarted` - Unstarted\n* `started` - Started\n* `review` - Review\n* `test` - Test\n* `completed` - Completed\n* `cancelled` - Cancelled\n* `triage` - Triage",
           "x-spec-enum-id": "f65a90e70618f185"
@@ -8427,7 +8740,10 @@
           "maxLength": 255
         }
       },
-      "required": ["color", "name"]
+      "required": [
+        "color",
+        "name"
+      ]
     },
     "Sticky": {
       "type": "object",
@@ -8549,7 +8865,9 @@
           "description": "ID of the target cycle to transfer issues to"
         }
       },
-      "required": ["new_cycle_id"]
+      "required": [
+        "new_cycle_id"
+      ]
     },
     "UserAssetUploadRequest": {
       "type": "object",
@@ -8561,7 +8879,13 @@
           "description": "Original filename of the asset"
         },
         "type": {
-          "enum": ["image/jpeg", "image/png", "image/webp", "image/jpg", "image/gif"],
+          "enum": [
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+            "image/jpg",
+            "image/gif"
+          ],
           "type": "string",
           "x-spec-enum-id": "c79f3b4ad843519e",
           "default": "image/jpeg",
@@ -8572,13 +8896,20 @@
           "description": "File size in bytes"
         },
         "entity_type": {
-          "enum": ["USER_AVATAR", "USER_COVER"],
+          "enum": [
+            "USER_AVATAR",
+            "USER_COVER"
+          ],
           "type": "string",
           "x-spec-enum-id": "ddb7b8ca3e92601a",
           "description": "Type of user asset\n\n* `USER_AVATAR` - User Avatar\n* `USER_COVER` - User Cover"
         }
       },
-      "required": ["entity_type", "name", "size"]
+      "required": [
+        "entity_type",
+        "name",
+        "size"
+      ]
     },
     "UserLite": {
       "type": "object",
@@ -8631,7 +8962,11 @@
           "maxLength": 255
         },
         "role": {
-          "enum": [20, 15, 5],
+          "enum": [
+            20,
+            15,
+            5
+          ],
           "type": "integer",
           "description": "* `20` - Admin\n* `15` - Member\n* `5` - Guest",
           "x-spec-enum-id": "d128cd0829af3517",
@@ -8660,7 +8995,9 @@
           "readOnly": true
         }
       },
-      "required": ["email"]
+      "required": [
+        "email"
+      ]
     },
     "WorkspaceInviteRequest": {
       "type": "object",
@@ -8672,7 +9009,11 @@
           "maxLength": 255
         },
         "role": {
-          "enum": [20, 15, 5],
+          "enum": [
+            20,
+            15,
+            5
+          ],
           "type": "integer",
           "description": "* `20` - Admin\n* `15` - Member\n* `5` - Guest",
           "x-spec-enum-id": "d128cd0829af3517",
@@ -8680,7 +9021,9 @@
           "maximum": 32767
         }
       },
-      "required": ["email"]
+      "required": [
+        "email"
+      ]
     }
   }
 }
