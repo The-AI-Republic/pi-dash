@@ -157,7 +157,7 @@ const RunnersListPage = observer(function RunnersListPage() {
   async function togglePause(r: IRunner) {
     setTogglingPauseId(r.id);
     try {
-      if (r.paused_at) {
+      if (r.status === "paused") {
         await service.resumeRunner(r.id);
       } else {
         const paused = await service.pauseRunner(r.id);
@@ -178,7 +178,7 @@ const RunnersListPage = observer(function RunnersListPage() {
       setToast({
         type: TOAST_TYPE.ERROR,
         title: t("Error!"),
-        message: err?.error ?? (r.paused_at ? t("Failed to resume runner") : t("Failed to pause runner")),
+        message: err?.error ?? (r.status === "paused" ? t("Failed to resume runner") : t("Failed to pause runner")),
       });
     } finally {
       setTogglingPauseId(null);
@@ -350,24 +350,16 @@ const RunnersListPage = observer(function RunnersListPage() {
                   <td className="font-mono px-3 py-2 text-11">{r.name}</td>
                   <td className="px-3 py-2">{r.pod_detail ? r.pod_detail.name : "—"}</td>
                   <td className="px-3 py-2">
-                    <div className="flex items-center gap-1.5">
-                      {r.paused_at && (
-                        <Tooltip
-                          tooltipContent={t(
-                            "Paused: this runner stays connected but takes no new work. Any in-flight run finishes."
-                          )}
-                        >
-                          <span>
-                            <Badge variant="outline-warning" size="sm">
-                              {t("Paused")}
-                            </Badge>
-                          </span>
-                        </Tooltip>
-                      )}
-                      <Badge variant={STATUS_BADGE_VARIANT[r.status]} size="sm">
-                        {t(RUNNER_STATUS_I18N_LABELS[r.status])}
-                      </Badge>
-                    </div>
+                    <Tooltip
+                      tooltipContent={t("Paused: this runner takes no new work. Any in-flight run finishes.")}
+                      disabled={r.status !== "paused"}
+                    >
+                      <span>
+                        <Badge variant={STATUS_BADGE_VARIANT[r.status]} size="sm">
+                          {t(RUNNER_STATUS_I18N_LABELS[r.status])}
+                        </Badge>
+                      </span>
+                    </Tooltip>
                   </td>
                   <td className="px-3 py-2">{r.os ? `${r.os} / ${r.arch}` : "—"}</td>
                   <td className="px-3 py-2">{r.runner_version || "—"}</td>
@@ -388,7 +380,7 @@ const RunnersListPage = observer(function RunnersListPage() {
                           onClick={() => togglePause(r)}
                           disabled={togglingPauseId === r.id}
                         >
-                          {r.paused_at ? t("Resume") : t("Pause")}
+                          {r.status === "paused" ? t("Resume") : t("Pause")}
                         </Button>
                       )}
                       {isRevocable(r) && (

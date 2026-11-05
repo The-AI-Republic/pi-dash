@@ -550,9 +550,7 @@ def _pinned_runner_for(parent: AgentRun, target_pod: Optional[Pod] = None) -> Op
     runner = parent.runner
     if runner is None:
         return None
-    if runner.status in (RunnerStatus.REVOKED, RunnerStatus.OFFLINE):
-        return None
-    if runner.paused_at is not None:
+    if runner.status in (RunnerStatus.REVOKED, RunnerStatus.OFFLINE, RunnerStatus.PAUSED):
         return None
     if runner.last_heartbeat_at is None or runner.last_heartbeat_at < timezone.now() - HEARTBEAT_GRACE:
         return None

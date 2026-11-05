@@ -12,6 +12,7 @@ export const STATUS_BADGE_VARIANT: Record<TRunnerStatus, TBadgeVariant> = {
   busy: "accent-primary",
   offline: "accent-neutral",
   revoked: "accent-warning",
+  paused: "outline-warning",
 };
 
 /** Status -> i18n source string. Kept as a static map (rather than `t(status)`)
@@ -21,4 +22,5 @@ export const RUNNER_STATUS_I18N_LABELS: Record<TRunnerStatus, string> = {
   busy: "busy",
   offline: "offline",
   revoked: "revoked",
+  paused: "paused",
 };

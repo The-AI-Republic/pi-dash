@@ -127,7 +127,7 @@ def _pinned_runner_gone_q(cutoff) -> Q:
     return (
         Q(pinned_runner__last_heartbeat_at__lt=cutoff)
         | Q(pinned_runner__last_heartbeat_at__isnull=True)
-        | Q(pinned_runner__paused_at__isnull=False)
+        | Q(pinned_runner__status=RunnerStatus.PAUSED)
     )
 
 
@@ -208,7 +208,7 @@ def release_pins_for_paused_runner(runner_id) -> int:
     """Send every QUEUED local run pinned to a just-paused runner back to its
     pod queue, so the paused runner's pending work moves to another runner
     instead of waiting for a resume."""
-    paused_q = Q(pinned_runner__paused_at__isnull=False)
+    paused_q = Q(pinned_runner__status=RunnerStatus.PAUSED)
     candidates = _releasable_pins().filter(pinned_runner_id=runner_id).values_list("id", flat=True)
     released = _release_pins(candidates, paused_q)
     if released:

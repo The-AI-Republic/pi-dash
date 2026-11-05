@@ -79,9 +79,11 @@ def managed_runner_availability(project, user) -> tuple[bool, str]:
     if not enrolled_managed_runners(project, user).exists():
         return False, ManagedRunnerReason.NO_RUNNER_FOR_PROJECT
     if online_managed_runner(project, user) is None:
-        # Connected but paused is a different fix ("resume it") from not
-        # connected ("open the desktop app").
-        if enrolled_managed_runners(project, user).filter(paused_at__isnull=False).exists():
+        from pi_dash.runner.models import RunnerStatus
+
+        # Paused is a different fix ("resume it") from not connected ("open
+        # the desktop app").
+        if enrolled_managed_runners(project, user).filter(status=RunnerStatus.PAUSED).exists():
             return False, ManagedRunnerReason.RUNNER_PAUSED
         return False, ManagedRunnerReason.NOT_CONNECTED
     return True, ""
