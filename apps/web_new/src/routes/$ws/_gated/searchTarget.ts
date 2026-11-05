@@ -4,18 +4,35 @@
 // Palette server-hit navigation (shell spec, SHELL-084). Maps a grouped
 // search hit to the route the app navigates to. Issues and intake items go
 // deep through the browse route, projects to their tracking tab, workspaces
-// home. Cycle, module, view and page hits land on their project's tracking
-// tab (pages carry project_ids, the rest project_id) until their areas land
-// their own routes; the owning area deepens its case then. Hits with
-// unreadable rows fall back to the workspace home rather than navigating
-// nowhere.
+// home. Cycle, module, view and page hits land on their entity pages, with
+// pages preferring the open project when it is in their project list.
+// Views without a project land on the workspace view; page hits without a
+// project and hits with unreadable rows fall back to the workspace home
+// rather than navigating nowhere.
 
 import type { SearchResultHit } from "../../../shared/commands/index.js";
 
 export type SearchTarget =
   | { to: "/$ws"; params: { ws: string } }
   | { to: "/$ws/projects/$projectId/issues"; params: { ws: string; projectId: string } }
-  | { to: "/$ws/browse/$issueKey"; params: { ws: string; issueKey: string } };
+  | { to: "/$ws/browse/$issueKey"; params: { ws: string; issueKey: string } }
+  | {
+      to: "/$ws/projects/$projectId/cycles/$cycleId";
+      params: { ws: string; projectId: string; cycleId: string };
+    }
+  | {
+      to: "/$ws/projects/$projectId/modules/$moduleId";
+      params: { ws: string; projectId: string; moduleId: string };
+    }
+  | {
+      to: "/$ws/projects/$projectId/views/$viewId";
+      params: { ws: string; projectId: string; viewId: string };
+    }
+  | { to: "/$ws/workspace-views/$viewId"; params: { ws: string; viewId: string } }
+  | {
+      to: "/$ws/projects/$projectId/pages/$pageId";
+      params: { ws: string; projectId: string; pageId: string };
+    };
 
 function text(row: Record<string, unknown>, field: string): string | null {
   const value = row[field];
@@ -31,6 +48,14 @@ function firstProjectId(row: Record<string, unknown>): string | null {
   return first ?? null;
 }
 
+function pageProjectId(row: Record<string, unknown>, currentProjectId: string | null): string | null {
+  const list = row["project_ids"];
+  if (!Array.isArray(list)) return null;
+  if (currentProjectId !== null && list.includes(currentProjectId)) return currentProjectId;
+  const first = list.find((entry): entry is string => typeof entry === "string" && entry.length > 0);
+  return first ?? null;
+}
+
 function projectFallback(row: Record<string, unknown>, workspaceSlug: string, home: SearchTarget): SearchTarget {
   const projectId = firstProjectId(row);
   if (projectId !== null) {
@@ -39,7 +64,11 @@ function projectFallback(row: Record<string, unknown>, workspaceSlug: string, ho
   return home;
 }
 
-export function resolveSearchTarget(hit: SearchResultHit, workspaceSlug: string): SearchTarget {
+export function resolveSearchTarget(
+  hit: SearchResultHit,
+  workspaceSlug: string,
+  currentProjectId?: string | null
+): SearchTarget {
   const home: SearchTarget = { to: "/$ws", params: { ws: workspaceSlug } };
   const row = (hit.raw ?? {}) as Record<string, unknown>;
   switch (hit.entity) {
@@ -65,10 +94,50 @@ export function resolveSearchTarget(hit: SearchResultHit, workspaceSlug: string)
     case "workspace": {
       return { to: "/$ws", params: { ws: text(row, "slug") ?? workspaceSlug } };
     }
-    case "cycle":
-    case "module":
-    case "issue_view":
-    case "page":
-      return projectFallback(row, workspaceSlug, home);
+    case "cycle": {
+      const id = text(row, "id");
+      const projectId = text(row, "project_id");
+      if (id !== null && projectId !== null) {
+        return {
+          to: "/$ws/projects/$projectId/cycles/$cycleId",
+          params: { ws: workspaceSlug, projectId, cycleId: id },
+        };
+      }
+      return home;
+    }
+    case "module": {
+      const id = text(row, "id");
+      const projectId = text(row, "project_id");
+      if (id !== null && projectId !== null) {
+        return {
+          to: "/$ws/projects/$projectId/modules/$moduleId",
+          params: { ws: workspaceSlug, projectId, moduleId: id },
+        };
+      }
+      return home;
+    }
+    case "issue_view": {
+      const id = text(row, "id");
+      if (id === null) return home;
+      const projectId = text(row, "project_id");
+      if (projectId !== null) {
+        return {
+          to: "/$ws/projects/$projectId/views/$viewId",
+          params: { ws: workspaceSlug, projectId, viewId: id },
+        };
+      }
+      return { to: "/$ws/workspace-views/$viewId", params: { ws: workspaceSlug, viewId: id } };
+    }
+    case "page": {
+      const id = text(row, "id");
+      const projectId = pageProjectId(row, currentProjectId ?? null);
+      if (id !== null && projectId !== null) {
+        return {
+          to: "/$ws/projects/$projectId/pages/$pageId",
+          params: { ws: workspaceSlug, projectId, pageId: id },
+        };
+      }
+      return home;
+    }
   }
 }
