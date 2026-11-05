@@ -150,12 +150,9 @@ pub async fn add_engine_runner(
         };
         let working_dir = match &req.working_dir {
             Some(dir) => dir.clone(),
-            None => {
-                let cfg = file::load_config(paths)?;
-                let root = super::workdir::task_root(paths, &cfg);
-                super::workdir::allocate_working_dir(&root, &ws, &project_id, &cfg)?
-            }
+            None => super::workdir::allocate_engine_folder(paths, &ws, &project_id)?,
         };
+
         std::fs::create_dir_all(&working_dir)
             .with_context(|| format!("creating {}", working_dir.display()))?;
         let applied = apply_enroll_response(
@@ -210,6 +207,11 @@ pub async fn status_without_daemon(paths: &Paths) -> Result<EngineStatusInfo> {
     let cfg = file::load_config(paths)?;
     let tokens = crate::daemon::workspace_tokens::WorkspaceTokens::from_cli(cfg.cli.as_ref());
     let binary = super::locate::resolve(&cfg.engine).ok().map(|e| e.binary);
+    let session_token = tokens
+        .session_candidates()
+        .into_iter()
+        .next()
+        .map(|(_, t)| t);
     let manager = super::manager::EngineManager::new(
         Some(&cfg.daemon.cloud_url),
         paths.clone(),
@@ -217,6 +219,12 @@ pub async fn status_without_daemon(paths: &Paths) -> Result<EngineStatusInfo> {
         binary,
     );
     manager.refresh_profile().await;
+    // The pause state is the server's; read it now (best-effort).
+    if let (Some(token), Some(machine_id)) = (session_token, cfg.daemon.dev_machine_id)
+        && let Err(e) = manager.refresh_machine(&token, machine_id).await
+    {
+        tracing::debug!("reading the engine pause state failed: {e}");
+    }
     Ok(manager.status())
 }
 
@@ -246,6 +254,9 @@ mod tests {
             model: None,
             binary: None,
             profile_fetched_at: None,
+            paused_by_owner: None,
+            auto_pause_reason: None,
+            pause_checked_at: None,
         }
     }
 

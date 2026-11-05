@@ -54,6 +54,12 @@ use crate::dto::{
 /// the current model token), `EngineStatus`, `EngineRunnerAdd` /
 /// `EngineRunnerRemove`, `EngineSettingsGet` / `EngineSettingsSet`, and the
 /// `engine_detail` field on `HelloInfo`. `Hello.engine` keeps its v5 shape.
+/// Still within v6 (no release shipped v6 without them, and every addition
+/// is optional on the wire): `EngineSetPaused`, the pause fields of
+/// `EngineStatusInfo` (`paused_by_owner`, `auto_pause_reason`,
+/// `pause_checked_at`), and local chat on the daemon's own engine profile —
+/// a `Chat*` request with no `runner` selector and an absolute `cwd` runs on
+/// the machine-level built-in engine, not on a project runner.
 pub const IPC_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +100,11 @@ pub enum Request {
     EngineModelToken,
     /// Machine-level engine state: [`Response::EngineStatus`].
     EngineStatus,
+    /// Set the owner's "Pause the built-in engine" switch for this machine
+    /// (`pidash engine pause` / `resume`, the app). The daemon asks the
+    /// server, caches the machine's pause state from the answer and replies
+    /// with [`Response::EngineStatus`].
+    EngineSetPaused { paused: bool },
     /// Turn the built-in engine on for a project (design §5): the daemon
     /// checks the local runner cap and the engine's availability, enrols
     /// an engine runner with the workspace's daemon credential, allocates
@@ -212,9 +223,12 @@ pub enum Request {
     // host, with events streamed back over this same IPC connection
     // rather than relayed through the Pi Dash cloud. Each mirrors the
     // cloud `ServerMsg::Chat*` frame it is named after so the daemon
-    // handler can reuse the existing chat runtime. Like every other
-    // per-runner request they carry an optional `runner` selector
-    // (required only when the daemon hosts more than one runner).
+    // handler can reuse the existing chat runtime. They carry an optional
+    // `runner` selector. Without one, a request with an absolute `cwd`
+    // runs on the daemon's own engine profile (design §12.1: the machine's
+    // built-in engine, no project runner, not blocked by runs; a `cwd`
+    // inside any runner's working dir is refused), and cancel / close /
+    // decide follow the session to whichever host holds it.
     /// Warm a local chat session's engine without submitting a turn.
     /// Streams `ChatEvent` frames (`kind: "chat_warmed"` /
     /// `"chat_warm_failed"`) then a terminal `Ack`. Mirrors `ChatWarm`.
@@ -531,6 +545,31 @@ pub struct EngineStatusInfo {
     /// When the profile was last fetched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_fetched_at: Option<DateTime<Utc>>,
+    /// Whether the owner paused the built-in engine on this machine
+    /// (`DevMachine.engine_paused_by_owner`, design §8). `None` until the
+    /// daemon has read the machine's pause state from the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_by_owner: Option<bool>,
+    /// The server's automatic pause reason
+    /// (`DevMachine.engine_auto_pause_reason`: `engine_sign_in_required`,
+    /// `gateway_session_revoked`, `wallet_empty`, `profile_unavailable`,
+    /// `engine_disabled`). `None` when not paused automatically, or not
+    /// known yet (see `pause_checked_at`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_pause_reason: Option<String>,
+    /// When the daemon last read the pause state from the server; `None`
+    /// means `paused_by_owner` and `auto_pause_reason` are unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_checked_at: Option<DateTime<Utc>>,
+}
+
+impl EngineStatusInfo {
+    /// Whether the engine is paused, by the owner or automatically. `None`
+    /// while the pause state is unknown.
+    pub fn paused(&self) -> Option<bool> {
+        self.pause_checked_at?;
+        Some(self.paused_by_owner == Some(true) || self.auto_pause_reason.is_some())
+    }
 }
 
 /// Answer to [`Request::EngineRunnerAdd`].
@@ -1565,7 +1604,11 @@ mod tests {
             model: None,
             binary: None,
             profile_fetched_at: None,
+            paused_by_owner: None,
+            auto_pause_reason: None,
+            pause_checked_at: None,
         };
+        assert_eq!(status.paused(), None, "unknown until read from the server");
         assert_eq!(
             serde_json::to_value(&status).unwrap(),
             serde_json::json!({
@@ -1576,5 +1619,26 @@ mod tests {
         );
         assert!(EngineSignInState::Expired.allows_silent_renewal());
         assert!(!EngineSignInState::SignedOut.allows_silent_renewal());
+    }
+
+    #[test]
+    fn engine_pause_state_round_trips() {
+        let back: EngineStatusInfo = serde_json::from_value(serde_json::json!({
+            "state": "available", "sign_in_state": "active",
+            "paused_by_owner": true, "pause_checked_at": "2026-11-04T10:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(back.paused_by_owner, Some(true));
+        assert_eq!(back.paused(), Some(true));
+        let auto: EngineStatusInfo = serde_json::from_value(serde_json::json!({
+            "state": "available", "sign_in_state": "active", "paused_by_owner": false,
+            "auto_pause_reason": "wallet_empty", "pause_checked_at": "2026-11-04T10:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(auto.paused(), Some(true));
+        let req: Request =
+            serde_json::from_value(serde_json::json!({"method": "engine_set_paused", "params": {"paused": true}}))
+                .unwrap();
+        assert!(matches!(req, Request::EngineSetPaused { paused: true }));
     }
 }

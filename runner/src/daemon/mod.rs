@@ -1,6 +1,7 @@
 mod activity_watchdog;
 pub mod drain_journal;
 pub mod engine_ops;
+pub(crate) mod engine_reconcile;
 pub mod machine_control;
 pub mod observability;
 pub mod reconnect_triggers;
