@@ -299,7 +299,11 @@ async fn post_message(
     .await
     .map_err(|_| server_error())?;
     let created = pidash_services::domain::assistant::create_user_message(
-        &mut *tx, thread_id, turn_id, next_seq, &content,
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        thread_id,
+        turn_id,
+        next_seq,
+        &content,
     )
     .await
     .map_err(|_| server_error())?;

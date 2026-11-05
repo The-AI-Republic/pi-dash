@@ -4100,7 +4100,7 @@ async fn save_comment_update(
             html: &html,
             stripped: desc_stripped.as_deref(),
         };
-        comment_domain::insert_description_values(&mut **tx, &desc)
+        comment_domain::insert_description_values(&pidash_db::orm_tx::TxConn::new(tx), &desc)
             .await
             .map_err(integrity_denial)?;
         Some(desc.id)
@@ -4113,23 +4113,40 @@ async fn save_comment_update(
         if let Some(desc_id) = description_id {
             if html_changed || json_changed || stripped_changed {
                 if html_changed {
-                    comment_domain::sync_description_html(&mut **tx, desc_id, &html)
-                        .await
-                        .map_err(|_| Denial::ServerError)?;
-                }
-                if stripped_changed {
-                    comment_domain::sync_description_stripped(&mut **tx, desc_id, &stripped)
-                        .await
-                        .map_err(|_| Denial::ServerError)?;
-                }
-                if json_changed {
-                    comment_domain::sync_description_json(&mut **tx, desc_id, &json)
-                        .await
-                        .map_err(|_| Denial::ServerError)?;
-                }
-                comment_domain::touch_synced_description(&mut **tx, desc_id, Some(*user_id), *now)
+                    comment_domain::sync_description_html(
+                        &pidash_db::orm_tx::TxConn::new(tx),
+                        desc_id,
+                        &html,
+                    )
                     .await
                     .map_err(|_| Denial::ServerError)?;
+                }
+                if stripped_changed {
+                    comment_domain::sync_description_stripped(
+                        &pidash_db::orm_tx::TxConn::new(tx),
+                        desc_id,
+                        &stripped,
+                    )
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
+                }
+                if json_changed {
+                    comment_domain::sync_description_json(
+                        &pidash_db::orm_tx::TxConn::new(tx),
+                        desc_id,
+                        &json,
+                    )
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
+                }
+                comment_domain::touch_synced_description(
+                    &pidash_db::orm_tx::TxConn::new(tx),
+                    desc_id,
+                    Some(*user_id),
+                    *now,
+                )
+                .await
+                .map_err(|_| Denial::ServerError)?;
             }
         }
         description_id
@@ -4161,7 +4178,7 @@ async fn save_comment_update(
         parent_id: parent.unwrap_or(stored.parent_id),
     };
     comment_domain::save_app_comment_update(
-        &mut **tx,
+        &pidash_db::orm_tx::TxConn::new(tx),
         &comment_domain::AppCommentUpdate {
             id: base.id,
             updated_at: base.updated_at,
@@ -4517,7 +4534,9 @@ async fn comment_create(
         labels: &base.labels,
         edited_at: base.edited_at,
     };
-    if let Err(error) = comment_domain::insert_comment_row(&mut *tx, &rows).await {
+    if let Err(error) =
+        comment_domain::insert_comment_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows).await
+    {
         return integrity_denial(error).into_response();
     }
     let desc = comment_domain::DescriptionValues {
@@ -4532,16 +4551,23 @@ async fn comment_create(
         html: &base.html,
         stripped: rows.desc_stripped,
     };
-    if let Err(error) = comment_domain::insert_description_values(&mut *tx, &desc).await {
+    if let Err(error) =
+        comment_domain::insert_description_values(&pidash_db::orm_tx::TxConn::new(&mut tx), &desc)
+            .await
+    {
         return integrity_denial(error).into_response();
     }
     // `update_fields=["description_id"]` writes that column only: the
     // `auto_now` stamp is skipped (in memory AND in the row — Django's
     // well-known `update_fields` gotcha), while `BaseModel.save` still
     // assigns `updated_by` on the in-memory instance.
-    if comment_domain::link_comment_description(&mut *tx, base.id, rows.description_id)
-        .await
-        .is_err()
+    if comment_domain::link_comment_description(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        base.id,
+        rows.description_id,
+    )
+    .await
+    .is_err()
     {
         return Denial::ServerError.into_response();
     }

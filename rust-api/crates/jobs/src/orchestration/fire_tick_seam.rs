@@ -522,14 +522,20 @@ where
             labels: &empty_list,
             edited_at: None,
         };
-        comment_domain::insert_comment_row(&mut **self.dispatch_tx().inner(), &rows)
-            .await
-            .map_err(db)?;
-        comment_domain::insert_description_row(&mut **self.dispatch_tx().inner(), &rows)
-            .await
-            .map_err(db)?;
+        comment_domain::insert_comment_row(
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
+            &rows,
+        )
+        .await
+        .map_err(db)?;
+        comment_domain::insert_description_row(
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
+            &rows,
+        )
+        .await
+        .map_err(db)?;
         comment_domain::link_comment_description(
-            &mut **self.dispatch_tx().inner(),
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
             rows.id,
             rows.description_id,
         )

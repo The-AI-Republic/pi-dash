@@ -4091,9 +4091,15 @@ async fn comment_delete_inner(
     // `updated_at` re-stamps on the `save()`.
     let deleted_at = now_utc();
     let updated_at = now_utc();
-    comment_domain::soft_delete_v1_comment(&pre.pool, *pk, pre.actor.id, deleted_at, updated_at)
-        .await
-        .map_err(|error| db_error(error, "comment-delete"))?;
+    comment_domain::soft_delete_v1_comment(
+        &pidash_db::pool::sea_orm_connection(&pre.pool),
+        *pk,
+        pre.actor.id,
+        deleted_at,
+        updated_at,
+    )
+    .await
+    .map_err(|error| db_error(error, "comment-delete"))?;
     // `delete()` emits the sweep before the view enqueues the activity
     // (`:2111-2120`): write, sweep, activity.
     let (sweep_args, sweep_kwargs) = soft_delete_sweep("issuecomment", &pk.to_string());

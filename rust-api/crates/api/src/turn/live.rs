@@ -683,7 +683,7 @@ pub async fn append_event(
     .map_err(db_error)?;
     let seq = max.unwrap_or(0) + 1;
     pidash_services::domain::assistant::append_event(
-        &mut *tx,
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         &pidash_services::domain::assistant::NewEvent {
             thread_id,
             turn_id,
@@ -794,7 +794,7 @@ pub async fn create_message(
     .map_err(db_error)?;
     let seq = max.unwrap_or(0) + 1;
     pidash_services::domain::assistant::create_message_row(
-        &mut *tx,
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         &pidash_services::domain::assistant::NewMessage {
             id: message_id,
             thread_id,
@@ -1737,7 +1737,11 @@ impl TurnSeam for LiveTurnSeam {
     ) -> Result<(), SeamError> {
         let now = Utc::now();
         pidash_services::domain::assistant::finalize_message(
-            &self.pool, message_id, text, status, now,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
+            message_id,
+            text,
+            status,
+            now,
         )
         .await
         .map_err(db_error)?;
@@ -1825,9 +1829,13 @@ impl TurnSeam for LiveTurnSeam {
         let mut flagged = payload.as_object().cloned().unwrap_or_default();
         flagged.insert("truncated".to_owned(), Value::Bool(true));
         let merged = Value::Object(flagged);
-        pidash_services::domain::assistant::save_message_payload(&self.pool, message_id, &merged)
-            .await
-            .map_err(db_error)?;
+        pidash_services::domain::assistant::save_message_payload(
+            &pidash_db::pool::sea_orm_connection(&self.pool),
+            message_id,
+            &merged,
+        )
+        .await
+        .map_err(db_error)?;
         self.emit_message_completed(
             ctx,
             message_id,
@@ -1858,7 +1866,7 @@ impl TurnSeam for LiveTurnSeam {
             .await
             .map_err(db_error)?;
         let won = pidash_services::domain::assistant::complete_turn(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             ctx.turn_id,
             &model_messages,
             &usage,
@@ -1896,9 +1904,12 @@ impl TurnSeam for LiveTurnSeam {
             Utc::now(),
         )
         .await?;
-        pidash_services::domain::assistant::prune_turn_deltas(&self.pool, ctx.turn_id)
-            .await
-            .map_err(db_error)?;
+        pidash_services::domain::assistant::prune_turn_deltas(
+            &pidash_db::pool::sea_orm_connection(&self.pool),
+            ctx.turn_id,
+        )
+        .await
+        .map_err(db_error)?;
         Ok(())
     }
 
@@ -1927,7 +1938,7 @@ impl TurnSeam for LiveTurnSeam {
             .await
             .map_err(db_error)?;
         let won = pidash_services::domain::assistant::fail_turn(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             ctx.turn_id,
             row_code,
             row_detail,
@@ -1941,7 +1952,7 @@ impl TurnSeam for LiveTurnSeam {
             return Ok(());
         }
         pidash_services::domain::assistant::finalize_open_messages(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             ctx.turn_id,
             rt::MSG_FAILED,
         )
@@ -1985,9 +1996,12 @@ impl TurnSeam for LiveTurnSeam {
             now,
         )
         .await?;
-        pidash_services::domain::assistant::prune_turn_deltas(&self.pool, ctx.turn_id)
-            .await
-            .map_err(db_error)?;
+        pidash_services::domain::assistant::prune_turn_deltas(
+            &pidash_db::pool::sea_orm_connection(&self.pool),
+            ctx.turn_id,
+        )
+        .await
+        .map_err(db_error)?;
         Ok(())
     }
 
@@ -2012,7 +2026,7 @@ impl TurnSeam for LiveTurnSeam {
             return Ok(());
         }
         pidash_services::domain::assistant::finalize_open_messages(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             ctx.turn_id,
             rt::MSG_CANCELLED,
         )
@@ -2035,9 +2049,12 @@ impl TurnSeam for LiveTurnSeam {
             Utc::now(),
         )
         .await?;
-        pidash_services::domain::assistant::prune_turn_deltas(&self.pool, ctx.turn_id)
-            .await
-            .map_err(db_error)?;
+        pidash_services::domain::assistant::prune_turn_deltas(
+            &pidash_db::pool::sea_orm_connection(&self.pool),
+            ctx.turn_id,
+        )
+        .await
+        .map_err(db_error)?;
         Ok(())
     }
 

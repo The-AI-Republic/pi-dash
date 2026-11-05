@@ -992,10 +992,15 @@ async fn op_add_current_issue_comment(
         labels: &empty_list,
         edited_at: None,
     };
-    comment_domain::insert_comment_row(&mut **tx.inner(), &rows).await?;
-    comment_domain::insert_description_row(&mut **tx.inner(), &rows).await?;
-    comment_domain::link_comment_description(&mut **tx.inner(), rows.id, rows.description_id)
+    comment_domain::insert_comment_row(&pidash_db::orm_tx::TxConn::new(tx.inner()), &rows).await?;
+    comment_domain::insert_description_row(&pidash_db::orm_tx::TxConn::new(tx.inner()), &rows)
         .await?;
+    comment_domain::link_comment_description(
+        &pidash_db::orm_tx::TxConn::new(tx.inner()),
+        rows.id,
+        rows.description_id,
+    )
+    .await?;
     let comment_id = rows.id;
     let created = plan::comment_created(&comment_id.to_string());
     serde_json::to_value(created)

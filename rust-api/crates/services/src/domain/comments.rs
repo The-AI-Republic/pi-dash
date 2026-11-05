@@ -18,14 +18,18 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use sea_orm::{ActiveModelTrait, ActiveValue, ConnectionTrait, DbBackend, Statement};
+use sea_orm::sea_query::{Expr, InsertStatement};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait,
+    QueryFilter, QueryTrait, UpdateMany,
+};
 use serde_json::{Map, Value};
-use sqlx::Row;
 use uuid::Uuid;
 
 use pidash_db::entity::descriptions;
 use pidash_db::entity::issue_comments;
 use pidash_db::ops::repair::NewDescription;
+use pidash_db::orm_tx::{into_sqlx, TxConn};
 
 use super::activity::{TaskEnqueueHook, ISSUE_ACTIVITY_TASK, MODEL_ACTIVITY_TASK};
 use super::ctx::WriteCtx;
@@ -423,7 +427,7 @@ pub async fn update(
             }
             Some(id) => {
                 // `Description.objects.filter(pk).update(...)`
-                // (`issue.py:640-642`): raw statements, not an entity
+                // (`issue.py:640-642`): bare `update_many` statements, not an entity
                 // `.update()` — that would fire
                 // `descriptions::before_save` and recompute
                 // `description_stripped` (Django flavor), where Django
@@ -432,46 +436,39 @@ pub async fn update(
                 // unchanged field keeps the description row's own value,
                 // even when the link just moved to another row.
                 if html_changed {
-                    db.execute(Statement::from_sql_and_values(
-                        DbBackend::Postgres,
-                        SYNC_DESCRIPTION_HTML_SQL,
-                        [sea_orm::Value::from(id), sea_orm::Value::from(html.clone())],
-                    ))
+                    description_column_update(
+                        id,
+                        descriptions::Column::DescriptionHtml,
+                        html.clone(),
+                    )
+                    .exec(&db)
                     .await
                     .map_err(DomainError::Db)?;
                 }
                 if stripped_changed {
-                    db.execute(Statement::from_sql_and_values(
-                        DbBackend::Postgres,
-                        SYNC_DESCRIPTION_STRIPPED_SQL,
-                        [
-                            sea_orm::Value::from(id),
-                            sea_orm::Value::from(stripped_now.clone()),
-                        ],
-                    ))
+                    description_column_update(
+                        id,
+                        descriptions::Column::DescriptionStripped,
+                        stripped_now.clone(),
+                    )
+                    .exec(&db)
                     .await
                     .map_err(DomainError::Db)?;
                 }
                 if json_changed {
-                    db.execute(Statement::from_sql_and_values(
-                        DbBackend::Postgres,
-                        SYNC_DESCRIPTION_JSON_SQL,
-                        [sea_orm::Value::from(id), sea_orm::Value::from(json.clone())],
-                    ))
+                    description_column_update(
+                        id,
+                        descriptions::Column::DescriptionJson,
+                        json.clone(),
+                    )
+                    .exec(&db)
                     .await
                     .map_err(DomainError::Db)?;
                 }
-                db.execute(Statement::from_sql_and_values(
-                    DbBackend::Postgres,
-                    SYNC_DESCRIPTION_TOUCH_SQL,
-                    [
-                        sea_orm::Value::from(id),
-                        sea_orm::Value::from(actor),
-                        sea_orm::Value::from(input.updated_at),
-                    ],
-                ))
-                .await
-                .map_err(DomainError::Db)?;
+                description_touch_update(id, Some(actor), input.updated_at)
+                    .exec(&db)
+                    .await
+                    .map_err(DomainError::Db)?;
             }
         }
     }
@@ -585,55 +582,77 @@ pub struct CommentRows<'a> {
     pub edited_at: Option<DateTime<Utc>>,
 }
 
-const COMMENT_ROW_INSERT_SQL: &str = "INSERT INTO issue_comments (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, issue_id, actor_id, comment_html, comment_stripped, comment_json, description_id, attachments, labels, access, external_source, external_id, speaker_type, speaker_label, speaker_agent_run_id, edited_at, parent_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)";
+/// Run one bare-column `UPDATE` (no hooks) for the `sqlx::Error` twins.
+async fn exec_update<E: EntityTrait>(
+    db: &impl ConnectionTrait,
+    update: UpdateMany<E>,
+) -> Result<u64, sqlx::Error> {
+    update
+        .exec(db)
+        .await
+        .map(|done| done.rows_affected)
+        .map_err(into_sqlx)
+}
 
-const DESCRIPTION_ROW_INSERT_SQL: &str = "INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, description_json, description_html, description_binary, description_stripped) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, NULL, $10)";
-
-const COMMENT_LINK_UPDATE_SQL: &str = "UPDATE issue_comments SET description_id = $2 WHERE id = $1";
+/// The full bare comment row (`Entity::insert`, so the `before_save`
+/// hook does NOT run: the caller's stripped value lands verbatim).
+/// `description_id`/`deleted_at` differ per shape: the plain create
+/// binds NULL plus the caller's `deleted_at`, the linked sync create
+/// binds the description id plus NULL.
+fn comment_row(
+    v: &CommentRows<'_>,
+    description_id: Option<Uuid>,
+    deleted_at: Option<DateTime<Utc>>,
+) -> issue_comments::ActiveModel {
+    issue_comments::ActiveModel {
+        id: ActiveValue::Set(v.id),
+        created_at: ActiveValue::Set(v.created_at.into()),
+        updated_at: ActiveValue::Set(v.updated_at.into()),
+        created_by_id: ActiveValue::Set(v.created_by),
+        updated_by_id: ActiveValue::Set(v.updated_by),
+        deleted_at: ActiveValue::Set(deleted_at.map(Into::into)),
+        workspace_id: ActiveValue::Set(v.workspace_id),
+        project_id: ActiveValue::Set(v.project_id),
+        issue_id: ActiveValue::Set(v.issue_id),
+        actor_id: ActiveValue::Set(v.actor_id),
+        comment_html: ActiveValue::Set(v.html.to_owned()),
+        comment_stripped: ActiveValue::Set(v.stripped.to_owned()),
+        comment_json: ActiveValue::Set(v.json.clone()),
+        description_id: ActiveValue::Set(description_id),
+        attachments: ActiveValue::Set(v.attachments.to_vec()),
+        labels: ActiveValue::Set(v.labels.to_vec()),
+        access: ActiveValue::Set(v.access.to_owned()),
+        external_source: ActiveValue::Set(v.external_source.map(str::to_owned)),
+        external_id: ActiveValue::Set(v.external_id.map(str::to_owned)),
+        speaker_type: ActiveValue::Set(v.speaker_type.to_owned()),
+        speaker_label: ActiveValue::Set(v.speaker_label.to_owned()),
+        speaker_agent_run_id: ActiveValue::Set(v.speaker_agent_run_id),
+        edited_at: ActiveValue::Set(v.edited_at.map(Into::into)),
+        parent_id: ActiveValue::Set(v.parent_id),
+    }
+}
 
 /// The comment `INSERT` (`issue.py:606-613`, stripped recomputed):
 /// statement 1 of 3. Callers run
 /// [`insert_comment_row`]→[`insert_description_row`]→[`link_comment_description`]
 /// in Django order on their own transaction.
-pub async fn insert_comment_row<'e, E>(ex: E, v: &CommentRows<'_>) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(COMMENT_ROW_INSERT_SQL)
-        .bind(v.id)
-        .bind(v.created_at)
-        .bind(v.updated_at)
-        .bind(v.created_by)
-        .bind(v.updated_by)
-        .bind(v.deleted_at)
-        .bind(v.workspace_id)
-        .bind(v.project_id)
-        .bind(v.issue_id)
-        .bind(v.actor_id)
-        .bind(v.html)
-        .bind(v.stripped)
-        .bind(v.json)
-        .bind(v.attachments)
-        .bind(v.labels)
-        .bind(v.access)
-        .bind(v.external_source)
-        .bind(v.external_id)
-        .bind(v.speaker_type)
-        .bind(v.speaker_label)
-        .bind(v.speaker_agent_run_id)
-        .bind(v.edited_at)
-        .bind(v.parent_id)
-        .execute(ex)
-        .await?;
+pub async fn insert_comment_row(
+    db: &impl ConnectionTrait,
+    v: &CommentRows<'_>,
+) -> Result<(), sqlx::Error> {
+    issue_comments::Entity::insert(comment_row(v, None, v.deleted_at))
+        .exec_without_returning(db)
+        .await
+        .map_err(into_sqlx)?;
     Ok(())
 }
 
 /// `Description.objects.create` (`issue.py:620-627`, stripped via
 /// `Description.save`, `description.py:23-29`): statement 2 of 3.
-pub async fn insert_description_row<'e, E>(ex: E, v: &CommentRows<'_>) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+pub async fn insert_description_row(
+    db: &impl ConnectionTrait,
+    v: &CommentRows<'_>,
+) -> Result<(), sqlx::Error> {
     let values = DescriptionValues {
         id: v.description_id,
         created_at: v.desc_created_at,
@@ -646,7 +665,7 @@ where
         html: v.html,
         stripped: v.desc_stripped,
     };
-    insert_description_values(ex, &values).await
+    insert_description_values(db, &values).await
 }
 
 /// The description row's ten columns, for writers that mint the side
@@ -665,89 +684,78 @@ pub struct DescriptionValues<'a> {
     pub stripped: Option<&'a str>,
 }
 
+/// The bare description row (`Entity::insert`: no `before_save`, the
+/// caller's stripped value lands verbatim); `deleted_at` and
+/// `description_binary` are NULL.
+fn description_row(v: &DescriptionValues<'_>) -> descriptions::ActiveModel {
+    descriptions::ActiveModel {
+        id: ActiveValue::Set(v.id),
+        created_at: ActiveValue::Set(v.created_at.into()),
+        updated_at: ActiveValue::Set(v.updated_at.into()),
+        created_by_id: ActiveValue::Set(v.created_by),
+        updated_by_id: ActiveValue::Set(v.updated_by),
+        deleted_at: ActiveValue::Set(None),
+        workspace_id: ActiveValue::Set(v.workspace_id),
+        project_id: ActiveValue::Set(Some(v.project_id)),
+        description_json: ActiveValue::Set(v.json.clone()),
+        description_html: ActiveValue::Set(v.html.to_owned()),
+        description_binary: ActiveValue::Set(None),
+        description_stripped: ActiveValue::Set(v.stripped.map(str::to_owned)),
+    }
+}
+
 /// See [`DescriptionValues`]: the shared description `INSERT` all
 /// three create shapes ride ([`insert_description_row`] delegates).
-pub async fn insert_description_values<'e, E>(
-    ex: E,
+pub async fn insert_description_values(
+    db: &impl ConnectionTrait,
     v: &DescriptionValues<'_>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(DESCRIPTION_ROW_INSERT_SQL)
-        .bind(v.id)
-        .bind(v.created_at)
-        .bind(v.updated_at)
-        .bind(v.created_by)
-        .bind(v.updated_by)
-        .bind(v.workspace_id)
-        .bind(v.project_id)
-        .bind(v.json)
-        .bind(v.html)
-        .bind(v.stripped)
-        .execute(ex)
-        .await?;
+) -> Result<(), sqlx::Error> {
+    descriptions::Entity::insert(description_row(v))
+        .exec_without_returning(db)
+        .await
+        .map_err(into_sqlx)?;
     Ok(())
+}
+
+/// `save(update_fields=["description_id"])`: the single-column link,
+/// no stamp bump.
+fn comment_link_update(
+    comment_id: Uuid,
+    description_id: Uuid,
+) -> UpdateMany<issue_comments::Entity> {
+    issue_comments::Entity::update_many()
+        .col_expr(
+            issue_comments::Column::DescriptionId,
+            Expr::value(description_id),
+        )
+        .filter(issue_comments::Column::Id.eq(comment_id))
 }
 
 /// `save(update_fields=["description_id"])` (`issue.py:628`): statement
 /// 3 of 3 — the single-column link, no stamp bump.
-pub async fn link_comment_description<'e, E>(
-    ex: E,
+pub async fn link_comment_description(
+    db: &impl ConnectionTrait,
     comment_id: Uuid,
     description_id: Uuid,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(COMMENT_LINK_UPDATE_SQL)
-        .bind(comment_id)
-        .bind(description_id)
-        .execute(ex)
-        .await?;
+) -> Result<(), sqlx::Error> {
+    exec_update(db, comment_link_update(comment_id, description_id)).await?;
     Ok(())
 }
 
 /// The sync-mirror comment `INSERT` (git/github `_upsert_comment`
 /// create arm): unlike [`insert_comment_row`], the description row is
-/// written FIRST and its id binds inline (`$13`), so no link step
-/// follows. Audit binds the scan actor twice (restamp); `updated_by`
-/// is NOT NULL here.
-const SYNC_COMMENT_LINKED_INSERT_SQL: &str = "INSERT INTO issue_comments (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, issue_id, actor_id, comment_html, comment_stripped, comment_json, description_id, attachments, labels, access, external_source, external_id, speaker_type, speaker_label, speaker_agent_run_id, edited_at, parent_id) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)";
-
+/// written FIRST and its id binds inline, so no link step follows.
+/// Audit binds the scan actor twice (restamp); `deleted_at` is NULL.
 /// Statement 2 of the sync create pair (after
-/// [`insert_description_row`]), taking the shared [`CommentRows`]
-/// (description id binds inline; `updated_by` binds the scan actor).
-pub async fn insert_comment_row_linked<'e, E>(ex: E, v: &CommentRows<'_>) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(SYNC_COMMENT_LINKED_INSERT_SQL)
-        .bind(v.id)
-        .bind(v.created_at)
-        .bind(v.updated_at)
-        .bind(v.created_by)
-        .bind(v.updated_by)
-        .bind(v.workspace_id)
-        .bind(v.project_id)
-        .bind(v.issue_id)
-        .bind(v.actor_id)
-        .bind(v.html)
-        .bind(v.stripped)
-        .bind(v.json)
-        .bind(v.description_id)
-        .bind(v.attachments)
-        .bind(v.labels)
-        .bind(v.access)
-        .bind(v.external_source)
-        .bind(v.external_id)
-        .bind(v.speaker_type)
-        .bind(v.speaker_label)
-        .bind(v.speaker_agent_run_id)
-        .bind(v.edited_at)
-        .bind(v.parent_id)
-        .execute(ex)
-        .await?;
+/// [`insert_description_row`]), taking the shared [`CommentRows`].
+pub async fn insert_comment_row_linked(
+    db: &impl ConnectionTrait,
+    v: &CommentRows<'_>,
+) -> Result<(), sqlx::Error> {
+    issue_comments::Entity::insert(comment_row(v, Some(v.description_id), None))
+        .exec_without_returning(db)
+        .await
+        .map_err(into_sqlx)?;
     Ok(())
 }
 
@@ -758,11 +766,9 @@ where
 /// `actor_id` IS in `defaults` (`git_sync_task.py:165`,
 /// `github_sync_task.py:217`) — the restamp matches Django
 /// (PIDASHCONV-1581 item 3 was filed on a misread and disproven:
-/// no divergence). The git text binds created/updated via
-/// `$8`/`$9`, the github text via a shared `$8`; both bind the
-/// scan actor twice, so one shared `$8` preserves both. The
-/// description subset refresh and its `changed` gate stay
-/// driver-side.
+/// no divergence). Both sync writers bind the scan actor to
+/// `actor_id`, `created_by_id` and `updated_by_id`. The description
+/// subset refresh and its `changed` gate stay driver-side.
 pub struct SyncCommentUpdate<'a> {
     pub id: Uuid,
     pub updated_at: DateTime<Utc>,
@@ -777,92 +783,98 @@ pub struct SyncCommentUpdate<'a> {
     pub actor: Uuid,
 }
 
-const SYNC_COMMENT_UPDATE_SQL: &str = "UPDATE issue_comments SET comment_html = $2, comment_stripped = $3, comment_json = $4, workspace_id = $5, project_id = $6, actor_id = $7, created_by_id = $8, updated_by_id = $8, updated_at = $9 WHERE id = $1";
+fn sync_comment_update(v: &SyncCommentUpdate<'_>) -> UpdateMany<issue_comments::Entity> {
+    use issue_comments::Column as C;
+    issue_comments::Entity::update_many()
+        .col_expr(C::CommentHtml, Expr::value(v.html))
+        .col_expr(C::CommentStripped, Expr::value(v.stripped))
+        .col_expr(C::CommentJson, Expr::value(v.json.clone()))
+        .col_expr(C::WorkspaceId, Expr::value(v.workspace_id))
+        .col_expr(C::ProjectId, Expr::value(v.project_id))
+        .col_expr(C::ActorId, Expr::value(v.actor))
+        .col_expr(C::CreatedById, Expr::value(v.actor))
+        .col_expr(C::UpdatedById, Expr::value(v.actor))
+        .col_expr(C::UpdatedAt, Expr::value(v.updated_at))
+        .filter(C::Id.eq(v.id))
+}
 
 /// See [`SyncCommentUpdate`]: the comment `UPDATE` only.
-pub async fn update_sync_comment<'e, E>(ex: E, v: &SyncCommentUpdate<'_>) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(SYNC_COMMENT_UPDATE_SQL)
-        .bind(v.id)
-        .bind(v.html)
-        .bind(v.stripped)
-        .bind(v.json)
-        .bind(v.workspace_id)
-        .bind(v.project_id)
-        .bind(v.actor)
-        .bind(v.actor)
-        .bind(v.updated_at)
-        .execute(ex)
-        .await?;
+pub async fn update_sync_comment(
+    db: &impl ConnectionTrait,
+    v: &SyncCommentUpdate<'_>,
+) -> Result<(), sqlx::Error> {
+    exec_update(db, sync_comment_update(v)).await?;
     Ok(())
 }
 
-const SYNC_DESCRIPTION_TOUCH_SQL: &str =
-    "UPDATE descriptions SET updated_by_id = $2, updated_at = $3 WHERE id = $1";
+/// One changed-subset description column: a queryset `update()`, so no
+/// `Description.save()` re-strip.
+fn description_column_update(
+    description_id: Uuid,
+    column: descriptions::Column,
+    value: impl Into<sea_orm::Value>,
+) -> UpdateMany<descriptions::Entity> {
+    descriptions::Entity::update_many()
+        .col_expr(column, Expr::value(value))
+        .filter(descriptions::Column::Id.eq(description_id))
+}
 
-const SYNC_DESCRIPTION_HTML_SQL: &str =
-    "UPDATE descriptions SET description_html = $2 WHERE id = $1";
-
-const SYNC_DESCRIPTION_STRIPPED_SQL: &str =
-    "UPDATE descriptions SET description_stripped = $2 WHERE id = $1";
-
-const SYNC_DESCRIPTION_JSON_SQL: &str =
-    "UPDATE descriptions SET description_json = $2 WHERE id = $1";
+/// The audit pair of the description sync (`updated_by_id`,
+/// `updated_at`).
+fn description_touch_update(
+    description_id: Uuid,
+    updated_by: Option<Uuid>,
+    updated_at: DateTime<Utc>,
+) -> UpdateMany<descriptions::Entity> {
+    descriptions::Entity::update_many()
+        .col_expr(descriptions::Column::UpdatedById, Expr::value(updated_by))
+        .col_expr(descriptions::Column::UpdatedAt, Expr::value(updated_at))
+        .filter(descriptions::Column::Id.eq(description_id))
+}
 
 /// The changed-subset description sync (`issue.py:630-639`), one
 /// single-column `UPDATE` per changed field (statement count is
 /// unobservable; rows match Django's one multi-column `UPDATE`). The
-/// caller invokes one fn per changed field, each with a fresh executor
-/// borrow, plus [`touch_synced_description`] for the audit pair.
-pub async fn sync_description_html<'e, E>(
-    ex: E,
+/// caller invokes one fn per changed field plus
+/// [`touch_synced_description`] for the audit pair.
+pub async fn sync_description_html(
+    db: &impl ConnectionTrait,
     description_id: Uuid,
     html: &str,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(SYNC_DESCRIPTION_HTML_SQL)
-        .bind(description_id)
-        .bind(html)
-        .execute(ex)
-        .await?;
+) -> Result<(), sqlx::Error> {
+    let update =
+        description_column_update(description_id, descriptions::Column::DescriptionHtml, html);
+    exec_update(db, update).await?;
     Ok(())
 }
 
 /// See [`sync_description_html`].
-pub async fn sync_description_stripped<'e, E>(
-    ex: E,
+pub async fn sync_description_stripped(
+    db: &impl ConnectionTrait,
     description_id: Uuid,
     stripped: &str,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(SYNC_DESCRIPTION_STRIPPED_SQL)
-        .bind(description_id)
-        .bind(stripped)
-        .execute(ex)
-        .await?;
+) -> Result<(), sqlx::Error> {
+    let update = description_column_update(
+        description_id,
+        descriptions::Column::DescriptionStripped,
+        stripped,
+    );
+    exec_update(db, update).await?;
     Ok(())
 }
 
 /// See [`sync_description_html`].
-pub async fn sync_description_json<'e, E>(
-    ex: E,
+pub async fn sync_description_json(
+    db: &impl ConnectionTrait,
     description_id: Uuid,
     json: &Value,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(SYNC_DESCRIPTION_JSON_SQL)
-        .bind(description_id)
-        .bind(json)
-        .execute(ex)
-        .await?;
+) -> Result<(), sqlx::Error> {
+    let update = description_column_update(
+        description_id,
+        descriptions::Column::DescriptionJson,
+        json.clone(),
+    );
+    exec_update(db, update).await?;
     Ok(())
 }
 
@@ -871,21 +883,17 @@ where
 /// Request writers pass the actor; the sync writers pass `None`
 /// (`BaseModel.save` blanks `updated_by` with no crum user, and the
 /// sync reads `self.updated_by_id` after that — `issue.py:644-646`).
-pub async fn touch_synced_description<'e, E>(
-    ex: E,
+pub async fn touch_synced_description(
+    db: &impl ConnectionTrait,
     description_id: Uuid,
     updated_by: Option<Uuid>,
     updated_at: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(SYNC_DESCRIPTION_TOUCH_SQL)
-        .bind(description_id)
-        .bind(updated_by)
-        .bind(updated_at)
-        .execute(ex)
-        .await?;
+) -> Result<(), sqlx::Error> {
+    exec_update(
+        db,
+        description_touch_update(description_id, updated_by, updated_at),
+    )
+    .await?;
     Ok(())
 }
 
@@ -893,21 +901,17 @@ where
 /// `save(update_fields=["created_at", "created_by"])` — the bare
 /// two-column restamp, no `updated_at` bump, no description sync (the
 /// tracked triple is unchanged).
-pub async fn restamp_comment_created<'e, E>(
-    ex: E,
+pub async fn restamp_comment_created(
+    db: &impl ConnectionTrait,
     id: Uuid,
     created_at: DateTime<Utc>,
     created_by: Option<Uuid>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query("UPDATE issue_comments SET created_at = $2, created_by_id = $3 WHERE id = $1")
-        .bind(id)
-        .bind(created_at)
-        .bind(created_by)
-        .execute(ex)
-        .await?;
+) -> Result<(), sqlx::Error> {
+    let update = issue_comments::Entity::update_many()
+        .col_expr(issue_comments::Column::CreatedAt, Expr::value(created_at))
+        .col_expr(issue_comments::Column::CreatedById, Expr::value(created_by))
+        .filter(issue_comments::Column::Id.eq(id));
+    exec_update(db, update).await?;
     Ok(())
 }
 
@@ -917,34 +921,39 @@ where
 /// (the mint arm links a fresh description; the sync arm re-binds the
 /// linked id). No scope / `actor_id` / `created_by_id` restamp and no
 /// `comment_json` write — unlike [`update_sync_comment`] (git-sync-shaped)
-/// and [`update`] (full-column save). Bind order is the overlay's verbatim
-/// (`tools_relations_comments.rs`, `execute_update_comment`).
-const MCP_COMMENT_UPDATE_SQL: &str = "UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, comment_stripped = $3, comment_html = $4, description_id = $5 WHERE id = $6";
-
-/// See [`MCP_COMMENT_UPDATE_SQL`]: the row `UPDATE` only. The description
-/// mint/sync stays driver-side (the overlay already runs it through
-/// [`insert_description_values`] / the `sync_description_*` fns).
-pub async fn update_comment_row<'e, E>(
-    ex: E,
+/// and [`update`] (full-column save).
+fn mcp_comment_update(
     id: Uuid,
     updated_at: DateTime<Utc>,
     updated_by: Uuid,
     stripped: &str,
     html: &str,
     description_id: Option<Uuid>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(MCP_COMMENT_UPDATE_SQL)
-        .bind(updated_at)
-        .bind(updated_by)
-        .bind(stripped)
-        .bind(html)
-        .bind(description_id)
-        .bind(id)
-        .execute(ex)
-        .await?;
+) -> UpdateMany<issue_comments::Entity> {
+    use issue_comments::Column as C;
+    issue_comments::Entity::update_many()
+        .col_expr(C::UpdatedAt, Expr::value(updated_at))
+        .col_expr(C::UpdatedById, Expr::value(updated_by))
+        .col_expr(C::CommentStripped, Expr::value(stripped))
+        .col_expr(C::CommentHtml, Expr::value(html))
+        .col_expr(C::DescriptionId, Expr::value(description_id))
+        .filter(C::Id.eq(id))
+}
+
+/// See [`mcp_comment_update`]: the row `UPDATE` only. The description
+/// mint/sync stays driver-side (the overlay already runs it through
+/// [`insert_description_values`] / the `sync_description_*` fns).
+pub async fn update_comment_row(
+    db: &impl ConnectionTrait,
+    id: Uuid,
+    updated_at: DateTime<Utc>,
+    updated_by: Uuid,
+    stripped: &str,
+    html: &str,
+    description_id: Option<Uuid>,
+) -> Result<(), sqlx::Error> {
+    let update = mcp_comment_update(id, updated_at, updated_by, stripped, html, description_id);
+    exec_update(db, update).await?;
     Ok(())
 }
 
@@ -952,7 +961,7 @@ where
 /// writes the instance back with only provided attributes changed — the
 /// driver merges first, so this is a plain full-row write). No
 /// `deleted_at` guard: the app destroy path re-saves through here. Runs
-/// on any executor so the driver keeps the write inside its transaction.
+/// on any connection so the driver keeps the write inside its transaction.
 pub struct AppCommentUpdate<'a> {
     pub id: Uuid,
     pub updated_at: DateTime<Utc>,
@@ -975,38 +984,39 @@ pub struct AppCommentUpdate<'a> {
     pub parent_id: Option<Uuid>,
 }
 
-const APP_COMMENT_UPDATE_SQL: &str = "UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, deleted_at = $3, comment_stripped = $4, comment_json = $5, comment_html = $6, description_id = $7, attachments = $8, labels = $9, actor_id = $10, access = $11, external_source = $12, external_id = $13, speaker_type = $14, speaker_label = $15, speaker_agent_run_id = $16, edited_at = $17, parent_id = $18 WHERE id = $19";
+fn app_comment_update(v: &AppCommentUpdate<'_>) -> UpdateMany<issue_comments::Entity> {
+    use issue_comments::Column as C;
+    issue_comments::Entity::update_many()
+        .col_expr(C::UpdatedAt, Expr::value(v.updated_at))
+        .col_expr(C::UpdatedById, Expr::value(v.updated_by))
+        .col_expr(C::DeletedAt, Expr::value(v.deleted_at))
+        .col_expr(C::CommentStripped, Expr::value(v.stripped))
+        .col_expr(C::CommentJson, Expr::value(v.json.clone()))
+        .col_expr(C::CommentHtml, Expr::value(v.html))
+        .col_expr(C::DescriptionId, Expr::value(v.description_id))
+        .col_expr(C::Attachments, Expr::value(v.attachments.to_vec()))
+        .col_expr(C::Labels, Expr::value(v.labels.to_vec()))
+        .col_expr(C::ActorId, Expr::value(v.actor_id))
+        .col_expr(C::Access, Expr::value(v.access))
+        .col_expr(
+            C::ExternalSource,
+            Expr::value(v.external_source.map(str::to_owned)),
+        )
+        .col_expr(C::ExternalId, Expr::value(v.external_id.map(str::to_owned)))
+        .col_expr(C::SpeakerType, Expr::value(v.speaker_type))
+        .col_expr(C::SpeakerLabel, Expr::value(v.speaker_label))
+        .col_expr(C::SpeakerAgentRunId, Expr::value(v.speaker_agent_run_id))
+        .col_expr(C::EditedAt, Expr::value(v.edited_at))
+        .col_expr(C::ParentId, Expr::value(v.parent_id))
+        .filter(C::Id.eq(v.id))
+}
 
 /// See [`AppCommentUpdate`]: the comment `UPDATE` only.
-pub async fn save_app_comment_update<'e, E>(
-    ex: E,
+pub async fn save_app_comment_update(
+    db: &impl ConnectionTrait,
     v: &AppCommentUpdate<'_>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(APP_COMMENT_UPDATE_SQL)
-        .bind(v.updated_at)
-        .bind(v.updated_by)
-        .bind(v.deleted_at)
-        .bind(v.stripped)
-        .bind(v.json)
-        .bind(v.html)
-        .bind(v.description_id)
-        .bind(v.attachments)
-        .bind(v.labels)
-        .bind(v.actor_id)
-        .bind(v.access)
-        .bind(v.external_source)
-        .bind(v.external_id)
-        .bind(v.speaker_type)
-        .bind(v.speaker_label)
-        .bind(v.speaker_agent_run_id)
-        .bind(v.edited_at)
-        .bind(v.parent_id)
-        .bind(v.id)
-        .execute(ex)
-        .await?;
+) -> Result<(), sqlx::Error> {
+    exec_update(db, app_comment_update(v)).await?;
     Ok(())
 }
 
@@ -1035,95 +1045,97 @@ pub struct SpaceCommentUpdate<'a> {
     pub description_id: Option<Uuid>,
 }
 
-const SPACE_COMMENT_UPDATE_SQL: &str = "UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, comment_stripped = $3, comment_json = $4, comment_html = $5, attachments = $6, labels = $7, access = $8, external_source = $9, external_id = $10, speaker_type = $11, speaker_label = $12, speaker_agent_run_id = $13, edited_at = $14, parent_id = $15, description_id = $16 WHERE id = $17 AND deleted_at IS NULL";
+fn space_comment_update(v: &SpaceCommentUpdate<'_>) -> UpdateMany<issue_comments::Entity> {
+    use issue_comments::Column as C;
+    let owned = |value: Option<&str>| value.map(str::to_owned);
+    issue_comments::Entity::update_many()
+        .col_expr(C::UpdatedAt, Expr::value(v.updated_at))
+        .col_expr(C::UpdatedById, Expr::value(v.updated_by))
+        .col_expr(C::CommentStripped, Expr::value(v.stripped))
+        .col_expr(C::CommentJson, Expr::value(v.json.clone()))
+        .col_expr(C::CommentHtml, Expr::value(owned(v.html)))
+        .col_expr(C::Attachments, Expr::value(v.attachments.to_vec()))
+        .col_expr(C::Labels, Expr::value(v.labels.to_vec()))
+        .col_expr(C::Access, Expr::value(owned(v.access)))
+        .col_expr(C::ExternalSource, Expr::value(owned(v.external_source)))
+        .col_expr(C::ExternalId, Expr::value(owned(v.external_id)))
+        .col_expr(C::SpeakerType, Expr::value(owned(v.speaker_type)))
+        .col_expr(C::SpeakerLabel, Expr::value(owned(v.speaker_label)))
+        .col_expr(C::SpeakerAgentRunId, Expr::value(v.speaker_agent_run_id))
+        .col_expr(C::EditedAt, Expr::value(v.edited_at))
+        .col_expr(C::ParentId, Expr::value(v.parent_id))
+        .col_expr(C::DescriptionId, Expr::value(v.description_id))
+        .filter(C::Id.eq(v.id))
+        .filter(C::DeletedAt.is_null())
+}
 
 /// See [`SpaceCommentUpdate`]: the comment `UPDATE` only.
-pub async fn save_space_comment_update<'e, E>(
-    ex: E,
+pub async fn save_space_comment_update(
+    db: &impl ConnectionTrait,
     v: &SpaceCommentUpdate<'_>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(SPACE_COMMENT_UPDATE_SQL)
-        .bind(v.updated_at)
-        .bind(v.updated_by)
-        .bind(v.stripped)
-        .bind(v.json)
-        .bind(v.html)
-        .bind(v.attachments)
-        .bind(v.labels)
-        .bind(v.access)
-        .bind(v.external_source)
-        .bind(v.external_id)
-        .bind(v.speaker_type)
-        .bind(v.speaker_label)
-        .bind(v.speaker_agent_run_id)
-        .bind(v.edited_at)
-        .bind(v.parent_id)
-        .bind(v.description_id)
-        .bind(v.id)
-        .execute(ex)
-        .await?;
+) -> Result<(), sqlx::Error> {
+    exec_update(db, space_comment_update(v)).await?;
     Ok(())
 }
 
 /// The space missing-link relink (`db/models/issue.py:618-621`): the
 /// second save stamps `updated_by`/`updated_at` again (a fresh clock
 /// read — the driver's `relinked_at`, not the save stamp).
-pub async fn relink_space_comment_description<'e, E>(
-    ex: E,
+pub async fn relink_space_comment_description(
+    db: &impl ConnectionTrait,
     id: Uuid,
     description_id: Uuid,
     updated_by: Uuid,
     updated_at: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(SPACE_COMMENT_RELINK_SQL)
-        .bind(description_id)
-        .bind(updated_by)
-        .bind(updated_at)
-        .bind(id)
-        .execute(ex)
-        .await?;
+) -> Result<(), sqlx::Error> {
+    use issue_comments::Column as C;
+    let update = issue_comments::Entity::update_many()
+        .col_expr(C::DescriptionId, Expr::value(description_id))
+        .col_expr(C::UpdatedById, Expr::value(updated_by))
+        .col_expr(C::UpdatedAt, Expr::value(updated_at))
+        .filter(C::Id.eq(id))
+        .filter(C::DeletedAt.is_null());
+    exec_update(db, update).await?;
     Ok(())
 }
 
-const SPACE_COMMENT_RELINK_SQL: &str = "UPDATE issue_comments SET description_id = $1, updated_by_id = $2, updated_at = $3 WHERE id = $4 AND deleted_at IS NULL";
+/// The soft-delete audit stamp (`db/mixins.py:72-77`): `deleted_at`,
+/// the full-save `updated_at`, and CRUM `updated_by`.
+fn comment_soft_delete_update(
+    id: Uuid,
+    actor: Uuid,
+    deleted_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+) -> UpdateMany<issue_comments::Entity> {
+    use issue_comments::Column as C;
+    issue_comments::Entity::update_many()
+        .col_expr(C::DeletedAt, Expr::value(deleted_at))
+        .col_expr(C::UpdatedAt, Expr::value(updated_at))
+        .col_expr(C::UpdatedById, Expr::value(actor))
+        .filter(C::Id.eq(id))
+}
 
 /// `comment.delete()` on space (`db/mixins.py:72-77`): `deleted_at` plus
 /// a full `save()` (`updated_at`, CRUM `updated_by`). One clock read,
 /// bound twice — the one-now shape stays with the driver, so this takes
-/// a single `now`.
-pub async fn soft_delete_space_comment<'e, E>(
-    ex: E,
+/// a single `now`. Guarded by `deleted_at IS NULL`.
+pub async fn soft_delete_space_comment(
+    db: &impl ConnectionTrait,
     id: Uuid,
     actor: Uuid,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(SPACE_COMMENT_SOFT_DELETE_SQL)
-        .bind(now)
-        .bind(now)
-        .bind(actor)
-        .bind(id)
-        .execute(ex)
-        .await?;
+) -> Result<(), sqlx::Error> {
+    let update = comment_soft_delete_update(id, actor, now, now)
+        .filter(issue_comments::Column::DeletedAt.is_null());
+    exec_update(db, update).await?;
     Ok(())
 }
-
-const SPACE_COMMENT_SOFT_DELETE_SQL: &str = "UPDATE issue_comments SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL";
 
 /// The v1 comment PATCH save (`IssueComment.save`,
 /// `db/models/issue.py:598-647`): the merged triple plus the audit pair.
 /// The stripped value is the `:606` recompute (even when `comment_html`
 /// is untouched); the `Description` INSERT-or-sync and the link write
-/// stay driver-side inside the same atomic block. Quoted columns, like
-/// the v1 driver.
+/// stay driver-side inside the same atomic block.
 pub struct V1CommentUpdate<'a> {
     pub id: Uuid,
     pub json: &'a Value,
@@ -1140,32 +1152,33 @@ pub struct V1CommentUpdate<'a> {
     pub updated_by: Uuid,
 }
 
-const V1_COMMENT_UPDATE_SQL: &str = "UPDATE \"issue_comments\" SET \"comment_json\" = $1, \"comment_html\" = $2, \"comment_stripped\" = $3, \"access\" = $4, \"external_source\" = $5, \"external_id\" = $6, \"labels\" = $7, \"speaker_type\" = $8, \"speaker_label\" = $9, \"speaker_agent_run_id\" = $10, \"updated_at\" = $11, \"updated_by_id\" = $12 WHERE \"id\" = $13";
+fn v1_comment_update(v: &V1CommentUpdate<'_>) -> UpdateMany<issue_comments::Entity> {
+    use issue_comments::Column as C;
+    issue_comments::Entity::update_many()
+        .col_expr(C::CommentJson, Expr::value(v.json.clone()))
+        .col_expr(C::CommentHtml, Expr::value(v.html))
+        .col_expr(C::CommentStripped, Expr::value(v.stripped))
+        .col_expr(C::Access, Expr::value(v.access))
+        .col_expr(
+            C::ExternalSource,
+            Expr::value(v.external_source.map(str::to_owned)),
+        )
+        .col_expr(C::ExternalId, Expr::value(v.external_id.map(str::to_owned)))
+        .col_expr(C::Labels, Expr::value(v.labels.to_vec()))
+        .col_expr(C::SpeakerType, Expr::value(v.speaker_type))
+        .col_expr(C::SpeakerLabel, Expr::value(v.speaker_label))
+        .col_expr(C::SpeakerAgentRunId, Expr::value(v.speaker_agent_run_id))
+        .col_expr(C::UpdatedAt, Expr::value(v.updated_at))
+        .col_expr(C::UpdatedById, Expr::value(v.updated_by))
+        .filter(C::Id.eq(v.id))
+}
 
 /// See [`V1CommentUpdate`]: the comment `UPDATE` only.
-pub async fn save_v1_comment_update<'e, E>(
-    ex: E,
+pub async fn save_v1_comment_update(
+    db: &impl ConnectionTrait,
     v: &V1CommentUpdate<'_>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(V1_COMMENT_UPDATE_SQL)
-        .bind(v.json)
-        .bind(v.html)
-        .bind(v.stripped)
-        .bind(v.access)
-        .bind(v.external_source)
-        .bind(v.external_id)
-        .bind(v.labels)
-        .bind(v.speaker_type)
-        .bind(v.speaker_label)
-        .bind(v.speaker_agent_run_id)
-        .bind(v.updated_at)
-        .bind(v.updated_by)
-        .bind(v.id)
-        .execute(ex)
-        .await?;
+) -> Result<(), sqlx::Error> {
+    exec_update(db, v1_comment_update(v)).await?;
     Ok(())
 }
 
@@ -1185,67 +1198,43 @@ pub struct V1DescriptionSync<'a> {
     pub updated_at: DateTime<Utc>,
 }
 
-/// See [`V1DescriptionSync`]: the changed-subset description `UPDATE`.
-pub async fn sync_v1_description_subset<'e, E>(
-    ex: E,
-    v: &V1DescriptionSync<'_>,
-) -> Result<u64, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let Some(sql) =
-        v1_description_sync_sql(v.html.is_some(), v.stripped.is_some(), v.json.is_some())
-    else {
-        return Ok(0);
-    };
-    let mut query = sqlx::query(&sql);
-    if let Some(html) = v.html {
-        query = query.bind(html);
-    }
-    if let Some(stripped) = v.stripped {
-        query = query.bind(stripped);
-    }
-    if let Some(json) = v.json {
-        query = query.bind(json);
-    }
-    query
-        .bind(v.updated_by)
-        .bind(v.updated_at)
-        .bind(v.id)
-        .execute(ex)
-        .await
-        .map(|done| done.rows_affected())
-}
-
 /// The changed-subset statement for [`sync_v1_description_subset`]:
-/// each `true` arm joins the SET list in fixed html/stripped/json
-/// order, then the audit pair and the id. `None` when no arm runs.
-fn v1_description_sync_sql(html: bool, stripped: bool, json: bool) -> Option<String> {
-    let mut sets: Vec<&str> = Vec::new();
-    if html {
-        sets.push("description_html");
-    }
-    if stripped {
-        sets.push("description_stripped");
-    }
-    if json {
-        sets.push("description_json");
-    }
-    if sets.is_empty() {
+/// each `Some` arm joins the SET list in fixed html/stripped/json
+/// order, then the audit pair. `None` when no arm runs.
+fn v1_description_sync_update(
+    v: &V1DescriptionSync<'_>,
+) -> Option<UpdateMany<descriptions::Entity>> {
+    use descriptions::Column as C;
+    if v.html.is_none() && v.stripped.is_none() && v.json.is_none() {
         return None;
     }
-    let set_sql = sets
-        .iter()
-        .enumerate()
-        .map(|(idx, col)| format!("\"{col}\" = ${}", idx + 1))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!(
-        "UPDATE \"descriptions\" SET {set_sql}, \"updated_by_id\" = ${}, \"updated_at\" = ${} WHERE \"id\" = ${}",
-        sets.len() + 1,
-        sets.len() + 2,
-        sets.len() + 3,
-    ))
+    let mut update = descriptions::Entity::update_many();
+    if let Some(html) = v.html {
+        update = update.col_expr(C::DescriptionHtml, Expr::value(html));
+    }
+    if let Some(stripped) = v.stripped {
+        update = update.col_expr(C::DescriptionStripped, Expr::value(stripped));
+    }
+    if let Some(json) = v.json {
+        update = update.col_expr(C::DescriptionJson, Expr::value(json.clone()));
+    }
+    Some(
+        update
+            .col_expr(C::UpdatedById, Expr::value(v.updated_by))
+            .col_expr(C::UpdatedAt, Expr::value(v.updated_at))
+            .filter(C::Id.eq(v.id)),
+    )
+}
+
+/// See [`V1DescriptionSync`]: the changed-subset description `UPDATE`.
+pub async fn sync_v1_description_subset(
+    db: &impl ConnectionTrait,
+    v: &V1DescriptionSync<'_>,
+) -> Result<u64, sqlx::Error> {
+    match v1_description_sync_update(v) {
+        Some(update) => exec_update(db, update).await,
+        None => Ok(0),
+    }
 }
 
 /// `SoftDeleteModel.delete()` on v1 (`views/issue.py:2103-2121`):
@@ -1253,27 +1242,20 @@ fn v1_description_sync_sql(html: bool, stripped: bool, json: bool) -> Option<Str
 /// Two `now()` calls like `delete()`: `deleted_at` stamps first,
 /// `updated_at` re-stamps on the `save()` — the two-now shape stays
 /// with the driver, so this takes both stamps.
-pub async fn soft_delete_v1_comment<'e, E>(
-    ex: E,
+pub async fn soft_delete_v1_comment(
+    db: &impl ConnectionTrait,
     id: Uuid,
     actor: Uuid,
     deleted_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(V1_COMMENT_SOFT_DELETE_SQL)
-        .bind(deleted_at)
-        .bind(updated_at)
-        .bind(actor)
-        .bind(id)
-        .execute(ex)
-        .await?;
+) -> Result<(), sqlx::Error> {
+    exec_update(
+        db,
+        comment_soft_delete_update(id, actor, deleted_at, updated_at),
+    )
+    .await?;
     Ok(())
 }
-
-const V1_COMMENT_SOFT_DELETE_SQL: &str = "UPDATE \"issue_comments\" SET \"deleted_at\" = $1, \"updated_at\" = $2, \"updated_by_id\" = $3 WHERE \"id\" = $4";
 
 /// `SoftDeleteModel.delete()` on the app comment destroy
 /// (`app/views/issue/comment.py:170-172`, `db/mixins.py:72-77`): one
@@ -1286,60 +1268,40 @@ pub async fn soft_delete_app_comment(
     actor: Uuid,
     now: DateTime<Utc>,
 ) -> Result<(), sea_orm::DbErr> {
-    use sea_orm::sea_query::Expr;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-    issue_comments::Entity::update_many()
-        .col_expr(issue_comments::Column::DeletedAt, Expr::value(now))
-        .col_expr(issue_comments::Column::UpdatedAt, Expr::value(now))
-        .col_expr(issue_comments::Column::UpdatedById, Expr::value(actor))
-        .filter(issue_comments::Column::Id.eq(id))
+    comment_soft_delete_update(id, actor, now, now)
         .exec(db)
         .await?;
     Ok(())
 }
 
-/// Columns of the copy `INSERT`, in bind order.
-const DESCRIPTION_INSERT_COLUMNS: &str = "(id, created_at, updated_at, \
-    description_json, description_html, description_stripped, project_id, \
-    created_by_id, updated_by_id, workspace_id)";
-
-/// The copy link step: `bulk_update` writes `description_id` only, no
-/// `updated_at` bump (verified against live Django). Moved verbatim
-/// from `pidash_db::ops::repair` (PIDASHCONV-1630).
-pub(crate) const LINK_COMMENT_SQL: &str =
-    "UPDATE issue_comments SET description_id = $1 WHERE id = $2";
-
 /// Multi-row `INSERT INTO descriptions ... RETURNING id` for `bulk_create`
 /// (`copy_issue_comment_to_description.py:44`): one statement per batch,
-/// Postgres `$N` placeholders, zip-aligned `RETURNING id` like Django's.
-/// Moved verbatim from `pidash_db::ops::repair` (PIDASHCONV-1630).
-pub(crate) fn descriptions_insert_sql(row_count: usize) -> String {
-    let mut sql = format!("INSERT INTO descriptions {DESCRIPTION_INSERT_COLUMNS} VALUES ");
-    for row in 0..row_count {
-        if row > 0 {
-            sql.push_str(", ");
-        }
-        let base = row * 10;
-        sql.push('(');
-        for col in 0..10 {
-            if col > 0 {
-                sql.push_str(", ");
-            }
-            sql.push_str(&format!("${}", base + col + 1));
-        }
-        sql.push(')');
-    }
-    sql.push_str(" RETURNING id");
-    sql
+/// zip-aligned `RETURNING id` like Django's. A bare `insert_many` (no
+/// `Description.save()` hook: the mapped stripped value lands verbatim).
+fn copy_descriptions_insert(descriptions: &[NewDescription]) -> InsertStatement {
+    let rows = descriptions.iter().map(|desc| descriptions::ActiveModel {
+        id: ActiveValue::Set(desc.id),
+        created_at: ActiveValue::Set(desc.created_at.into()),
+        updated_at: ActiveValue::Set(desc.updated_at.into()),
+        description_json: ActiveValue::Set(desc.description_json.clone()),
+        description_html: ActiveValue::Set(desc.description_html.clone()),
+        description_stripped: ActiveValue::Set(desc.description_stripped.clone()),
+        project_id: ActiveValue::Set(desc.project_id),
+        created_by_id: ActiveValue::Set(desc.created_by_id),
+        updated_by_id: ActiveValue::Set(desc.updated_by_id),
+        workspace_id: ActiveValue::Set(desc.workspace_id),
+        ..Default::default()
+    });
+    let mut stmt = descriptions::Entity::insert_many(rows).into_query();
+    stmt.returning_col(descriptions::Column::Id);
+    stmt
 }
 
 /// One copy batch write (`copy_issue_comment_to_description.py:28-51`):
-/// `bulk_create` then the `description_id` backfill in a single
-/// transaction. Returns the inserted ids, zip-aligned with `descriptions`.
-/// Moved verbatim from `pidash_db::ops::repair` (PIDASHCONV-1630); the
-/// only change is the error type (`sqlx::Error`, the domain twin
-/// convention — `RepairError` was a transparent wrapper, so the ops
-/// binary renders identical text).
+/// `bulk_create` then the `description_id` backfill (`bulk_update`
+/// writes `description_id` only, no `updated_at` bump) in a single
+/// transaction. Returns the inserted ids, zip-aligned with
+/// `descriptions`.
 pub async fn apply_copy_batch(
     pool: &sqlx::PgPool,
     descriptions: &[NewDescription],
@@ -1349,33 +1311,21 @@ pub async fn apply_copy_batch(
         return Ok(Vec::new());
     }
     let mut tx = pool.begin().await?;
-    let insert_sql = descriptions_insert_sql(descriptions.len());
-    let mut query = sqlx::query(&insert_sql);
-    for desc in descriptions {
-        query = query
-            .bind(desc.id)
-            .bind(desc.created_at)
-            .bind(desc.updated_at)
-            .bind(sqlx::types::Json(&desc.description_json))
-            .bind(&desc.description_html)
-            .bind(&desc.description_stripped)
-            .bind(desc.project_id)
-            .bind(desc.created_by_id)
-            .bind(desc.updated_by_id)
-            .bind(desc.workspace_id);
-    }
-    let inserted = query.fetch_all(&mut *tx).await?;
-    let mut ids = Vec::with_capacity(inserted.len());
-    for row in &inserted {
-        ids.push(row.try_get::<Uuid, _>("id")?);
-    }
-    for (comment_id, description_id) in links {
-        sqlx::query(LINK_COMMENT_SQL)
-            .bind(description_id)
-            .bind(comment_id)
-            .execute(&mut *tx)
-            .await?;
-    }
+    let ids = {
+        let db = TxConn::new(&mut tx);
+        let inserted = db
+            .query_all(DbBackend::Postgres.build(&copy_descriptions_insert(descriptions)))
+            .await
+            .map_err(into_sqlx)?;
+        let mut ids = Vec::with_capacity(inserted.len());
+        for row in &inserted {
+            ids.push(row.try_get::<Uuid>("", "id").map_err(into_sqlx)?);
+        }
+        for (comment_id, description_id) in links {
+            exec_update(&db, comment_link_update(*comment_id, *description_id)).await?;
+        }
+        ids
+    };
     tx.commit().await?;
     Ok(ids)
 }
@@ -1394,88 +1344,166 @@ mod tests {
         Uuid::from_u128(n)
     }
 
-    #[test]
-    fn sync_sql_shapes() {
-        // Moved with the retired sync consts (`git_sync` /
-        // `github_sync`): the linked create INSERT (description id
-        // inline) and the actor-restamping comment UPDATE (the github
-        // `$8`-shared text; git bound the same actor twice via
-        // `$8`/`$9`). The `created_by_id = $8` pin is the github
-        // parse-suite pin, carried over verbatim. The restamp matches
-        // Django (`actor_id` is in the sync `defaults`); only the
-        // retired full-triple refresh diverged (PIDASHCONV-1581 item
-        // 2), and the subset twins below replaced it.
-        assert!(SYNC_COMMENT_LINKED_INSERT_SQL.contains("description_id"));
-        assert!(SYNC_COMMENT_LINKED_INSERT_SQL.contains("$13"));
-        assert!(SYNC_COMMENT_UPDATE_SQL.contains("actor_id = $7"));
-        assert!(SYNC_COMMENT_UPDATE_SQL.contains("created_by_id = $8"));
-        assert!(SYNC_COMMENT_UPDATE_SQL.contains("updated_by_id = $8"));
-        assert!(SYNC_COMMENT_UPDATE_SQL.contains("updated_at = $9"));
-        assert!(SYNC_DESCRIPTION_TOUCH_SQL.contains("updated_by_id = $2"));
-        assert!(SYNC_DESCRIPTION_TOUCH_SQL.contains("updated_at = $3"));
-        // The plain create triple: link binds description id second.
-        assert!(COMMENT_ROW_INSERT_SQL.contains("description_id, attachments"));
-        assert!(COMMENT_LINK_UPDATE_SQL.contains("description_id = $2"));
+    fn pin_time() -> DateTime<Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-11-05T10:00:00Z")
+            .expect("pin time")
+            .with_timezone(&Utc)
+    }
+
+    fn render<E: EntityTrait>(update: UpdateMany<E>) -> String {
+        update.build(DbBackend::Postgres).to_string()
     }
 
     #[test]
-    fn mcp_comment_update_sql_is_byte_identical() {
-        // The overlay MCP `update_comment` row UPDATE, verbatim
-        // (`tools_relations_comments.rs`, `execute_update_comment`): the
-        // overlay source splits the literal with a continuation
-        // backslash, which collapses to single spaces at runtime, so the
-        // executed string is this one line. Full equality (not
-        // `contains`): SET order and `$n` positions are the Tier-1
-        // contract the overlay adopts.
-        assert_eq!(
-            MCP_COMMENT_UPDATE_SQL,
-            "UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, comment_stripped = $3, comment_html = $4, description_id = $5 WHERE id = $6"
-        );
+    fn comment_statement_shapes() {
+        let json = serde_json::json!({"a": 1});
+        let tags = vec!["t".to_owned()];
+        let sync = SyncCommentUpdate {
+            id: uid(1),
+            updated_at: pin_time(),
+            html: "<p>h</p>",
+            stripped: "h",
+            json: &json,
+            workspace_id: uid(2),
+            project_id: uid(3),
+            actor: uid(4),
+        };
+        let app = AppCommentUpdate {
+            id: uid(1),
+            updated_at: pin_time(),
+            updated_by: Some(uid(4)),
+            deleted_at: None,
+            stripped: "h",
+            json: &json,
+            html: "<p>h</p>",
+            description_id: Some(uid(5)),
+            attachments: &tags,
+            labels: &tags,
+            actor_id: Some(uid(4)),
+            access: "INTERNAL",
+            external_source: None,
+            external_id: Some("9"),
+            speaker_type: "human",
+            speaker_label: "",
+            speaker_agent_run_id: None,
+            edited_at: None,
+            parent_id: None,
+        };
+        let space = SpaceCommentUpdate {
+            id: uid(1),
+            updated_at: pin_time(),
+            updated_by: uid(4),
+            stripped: "h",
+            json: &json,
+            html: Some("<p>h</p>"),
+            attachments: &tags,
+            labels: &tags,
+            access: None,
+            external_source: None,
+            external_id: None,
+            speaker_type: Some("human"),
+            speaker_label: None,
+            speaker_agent_run_id: None,
+            edited_at: None,
+            parent_id: None,
+            description_id: None,
+        };
+        let v1 = V1CommentUpdate {
+            id: uid(1),
+            json: &json,
+            html: "<p>h</p>",
+            stripped: "h",
+            access: "INTERNAL",
+            external_source: None,
+            external_id: None,
+            labels: &tags,
+            speaker_type: "human",
+            speaker_label: "",
+            speaker_agent_run_id: None,
+            updated_at: pin_time(),
+            updated_by: uid(4),
+        };
+        let all = V1DescriptionSync {
+            id: uid(5),
+            html: Some("<p>h</p>"),
+            stripped: Some("h"),
+            json: Some(&json),
+            updated_by: uid(4),
+            updated_at: pin_time(),
+        };
+        let only_stripped = V1DescriptionSync {
+            html: None,
+            json: None,
+            ..all
+        };
+        let copy = NewDescription {
+            id: uid(5),
+            created_at: pin_time(),
+            updated_at: pin_time(),
+            description_json: json.clone(),
+            description_html: "<p>h</p>".to_owned(),
+            description_stripped: Some("h".to_owned()),
+            project_id: Some(uid(3)),
+            created_by_id: None,
+            updated_by_id: None,
+            workspace_id: uid(2),
+        };
+        let got = [
+            render(comment_link_update(uid(1), uid(5))),
+            render(sync_comment_update(&sync)),
+            render(description_column_update(
+                uid(5),
+                descriptions::Column::DescriptionHtml,
+                "<p>h</p>",
+            )),
+            render(description_touch_update(uid(5), None, pin_time())),
+            render(mcp_comment_update(
+                uid(1),
+                pin_time(),
+                uid(4),
+                "h",
+                "<p>h</p>",
+                Some(uid(5)),
+            )),
+            render(app_comment_update(&app)),
+            render(space_comment_update(&space)),
+            render(v1_comment_update(&v1)),
+            render(comment_soft_delete_update(
+                uid(1),
+                uid(4),
+                pin_time(),
+                pin_time(),
+            )),
+            render(v1_description_sync_update(&all).expect("all arms")),
+            render(v1_description_sync_update(&only_stripped).expect("one arm")),
+            DbBackend::Postgres
+                .build(&copy_descriptions_insert(&[copy.clone(), copy]))
+                .to_string(),
+        ];
+        let want = [
+            r#"UPDATE "issue_comments" SET "description_id" = '00000000-0000-0000-0000-000000000005' WHERE "issue_comments"."id" = '00000000-0000-0000-0000-000000000001'"#,
+            r#"UPDATE "issue_comments" SET "comment_html" = '<p>h</p>', "comment_stripped" = 'h', "comment_json" = E'{\"a\":1}', "workspace_id" = '00000000-0000-0000-0000-000000000002', "project_id" = '00000000-0000-0000-0000-000000000003', "actor_id" = '00000000-0000-0000-0000-000000000004', "created_by_id" = '00000000-0000-0000-0000-000000000004', "updated_by_id" = '00000000-0000-0000-0000-000000000004', "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "issue_comments"."id" = '00000000-0000-0000-0000-000000000001'"#,
+            r#"UPDATE "descriptions" SET "description_html" = '<p>h</p>' WHERE "descriptions"."id" = '00000000-0000-0000-0000-000000000005'"#,
+            r#"UPDATE "descriptions" SET "updated_by_id" = NULL, "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "descriptions"."id" = '00000000-0000-0000-0000-000000000005'"#,
+            r#"UPDATE "issue_comments" SET "updated_at" = '2026-11-05 10:00:00.000000 +00:00', "updated_by_id" = '00000000-0000-0000-0000-000000000004', "comment_stripped" = 'h', "comment_html" = '<p>h</p>', "description_id" = '00000000-0000-0000-0000-000000000005' WHERE "issue_comments"."id" = '00000000-0000-0000-0000-000000000001'"#,
+            r#"UPDATE "issue_comments" SET "updated_at" = '2026-11-05 10:00:00.000000 +00:00', "updated_by_id" = '00000000-0000-0000-0000-000000000004', "deleted_at" = NULL, "comment_stripped" = 'h', "comment_json" = E'{\"a\":1}', "comment_html" = '<p>h</p>', "description_id" = '00000000-0000-0000-0000-000000000005', "attachments" = ARRAY ['t'], "labels" = ARRAY ['t'], "actor_id" = '00000000-0000-0000-0000-000000000004', "access" = 'INTERNAL', "external_source" = NULL, "external_id" = '9', "speaker_type" = 'human', "speaker_label" = '', "speaker_agent_run_id" = NULL, "edited_at" = NULL, "parent_id" = NULL WHERE "issue_comments"."id" = '00000000-0000-0000-0000-000000000001'"#,
+            r#"UPDATE "issue_comments" SET "updated_at" = '2026-11-05 10:00:00.000000 +00:00', "updated_by_id" = '00000000-0000-0000-0000-000000000004', "comment_stripped" = 'h', "comment_json" = E'{\"a\":1}', "comment_html" = '<p>h</p>', "attachments" = ARRAY ['t'], "labels" = ARRAY ['t'], "access" = NULL, "external_source" = NULL, "external_id" = NULL, "speaker_type" = 'human', "speaker_label" = NULL, "speaker_agent_run_id" = NULL, "edited_at" = NULL, "parent_id" = NULL, "description_id" = NULL WHERE "issue_comments"."id" = '00000000-0000-0000-0000-000000000001' AND "issue_comments"."deleted_at" IS NULL"#,
+            r#"UPDATE "issue_comments" SET "comment_json" = E'{\"a\":1}', "comment_html" = '<p>h</p>', "comment_stripped" = 'h', "access" = 'INTERNAL', "external_source" = NULL, "external_id" = NULL, "labels" = ARRAY ['t'], "speaker_type" = 'human', "speaker_label" = '', "speaker_agent_run_id" = NULL, "updated_at" = '2026-11-05 10:00:00.000000 +00:00', "updated_by_id" = '00000000-0000-0000-0000-000000000004' WHERE "issue_comments"."id" = '00000000-0000-0000-0000-000000000001'"#,
+            r#"UPDATE "issue_comments" SET "deleted_at" = '2026-11-05 10:00:00.000000 +00:00', "updated_at" = '2026-11-05 10:00:00.000000 +00:00', "updated_by_id" = '00000000-0000-0000-0000-000000000004' WHERE "issue_comments"."id" = '00000000-0000-0000-0000-000000000001'"#,
+            r#"UPDATE "descriptions" SET "description_html" = '<p>h</p>', "description_stripped" = 'h', "description_json" = E'{\"a\":1}', "updated_by_id" = '00000000-0000-0000-0000-000000000004', "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "descriptions"."id" = '00000000-0000-0000-0000-000000000005'"#,
+            r#"UPDATE "descriptions" SET "description_stripped" = 'h', "updated_by_id" = '00000000-0000-0000-0000-000000000004', "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "descriptions"."id" = '00000000-0000-0000-0000-000000000005'"#,
+            r#"INSERT INTO "descriptions" ("created_at", "updated_at", "id", "description_json", "description_html", "description_stripped", "created_by_id", "project_id", "updated_by_id", "workspace_id") VALUES ('2026-11-05 10:00:00.000000 +00:00', '2026-11-05 10:00:00.000000 +00:00', '00000000-0000-0000-0000-000000000005', E'{\"a\":1}', '<p>h</p>', 'h', NULL, '00000000-0000-0000-0000-000000000003', NULL, '00000000-0000-0000-0000-000000000002'), ('2026-11-05 10:00:00.000000 +00:00', '2026-11-05 10:00:00.000000 +00:00', '00000000-0000-0000-0000-000000000005', E'{\"a\":1}', '<p>h</p>', 'h', NULL, '00000000-0000-0000-0000-000000000003', NULL, '00000000-0000-0000-0000-000000000002') RETURNING "id""#,
+        ];
+        assert_eq!(got.len(), want.len());
+        for (got, want) in got.iter().zip(want) {
+            assert_eq!(got, want);
+        }
+        assert!(v1_description_sync_update(&V1DescriptionSync {
+            stripped: None,
+            ..only_stripped
+        })
+        .is_none());
     }
-
-    #[test]
-    fn app_space_v1_update_sql_shapes() {
-        // Moved verbatim from the retired app/space/v1 comment
-        // drivers. Full-text pins: the statements moved byte-for-byte.
-        // The three full-row saves differ per view (design D6 — Django
-        // has the same differences), so they stay separate twins.
-        assert_eq!(
-            APP_COMMENT_UPDATE_SQL,
-            "UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, deleted_at = $3, comment_stripped = $4, comment_json = $5, comment_html = $6, description_id = $7, attachments = $8, labels = $9, actor_id = $10, access = $11, external_source = $12, external_id = $13, speaker_type = $14, speaker_label = $15, speaker_agent_run_id = $16, edited_at = $17, parent_id = $18 WHERE id = $19"
-        );
-        assert_eq!(
-            SPACE_COMMENT_UPDATE_SQL,
-            "UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, comment_stripped = $3, comment_json = $4, comment_html = $5, attachments = $6, labels = $7, access = $8, external_source = $9, external_id = $10, speaker_type = $11, speaker_label = $12, speaker_agent_run_id = $13, edited_at = $14, parent_id = $15, description_id = $16 WHERE id = $17 AND deleted_at IS NULL"
-        );
-        assert_eq!(
-            SPACE_COMMENT_RELINK_SQL,
-            "UPDATE issue_comments SET description_id = $1, updated_by_id = $2, updated_at = $3 WHERE id = $4 AND deleted_at IS NULL"
-        );
-        assert_eq!(
-            SPACE_COMMENT_SOFT_DELETE_SQL,
-            "UPDATE issue_comments SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL"
-        );
-        assert_eq!(
-            V1_COMMENT_UPDATE_SQL,
-            "UPDATE \"issue_comments\" SET \"comment_json\" = $1, \"comment_html\" = $2, \"comment_stripped\" = $3, \"access\" = $4, \"external_source\" = $5, \"external_id\" = $6, \"labels\" = $7, \"speaker_type\" = $8, \"speaker_label\" = $9, \"speaker_agent_run_id\" = $10, \"updated_at\" = $11, \"updated_by_id\" = $12 WHERE \"id\" = $13"
-        );
-        assert_eq!(
-            V1_COMMENT_SOFT_DELETE_SQL,
-            "UPDATE \"issue_comments\" SET \"deleted_at\" = $1, \"updated_at\" = $2, \"updated_by_id\" = $3 WHERE \"id\" = $4"
-        );
-        // The description subset: fixed html/stripped/json order, then
-        // the audit pair and the id; empty is no statement.
-        assert_eq!(
-            v1_description_sync_sql(true, true, true).as_deref(),
-            Some("UPDATE \"descriptions\" SET \"description_html\" = $1, \"description_stripped\" = $2, \"description_json\" = $3, \"updated_by_id\" = $4, \"updated_at\" = $5 WHERE \"id\" = $6")
-        );
-        assert_eq!(
-            v1_description_sync_sql(false, true, false).as_deref(),
-            Some("UPDATE \"descriptions\" SET \"description_stripped\" = $1, \"updated_by_id\" = $2, \"updated_at\" = $3 WHERE \"id\" = $4")
-        );
-        assert_eq!(v1_description_sync_sql(false, false, false), None);
-    }
-
     fn activity_spec() -> CommentActivitySpec {
         CommentActivitySpec {
             event: "comment.activity.created".to_owned(),
@@ -2167,13 +2195,19 @@ mod tests {
             edited_at: None,
         };
         let mut tx = pool.begin().await.expect("begin");
-        insert_comment_row(&mut *tx, &values).await.expect("insert");
-        insert_description_row(&mut *tx, &values)
+        insert_comment_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &values)
+            .await
+            .expect("insert");
+        insert_description_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &values)
             .await
             .expect("desc");
-        link_comment_description(&mut *tx, values.id, values.description_id)
-            .await
-            .expect("link");
+        link_comment_description(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            values.id,
+            values.description_id,
+        )
+        .await
+        .expect("link");
         tx.commit().await.expect("commit");
         let row: (String, Option<Uuid>) = sqlx::query_as(
             "SELECT comment_stripped, updated_by_id FROM issue_comments WHERE id = $1",
@@ -2227,7 +2261,7 @@ mod tests {
         let stamp = chrono::DateTime::parse_from_rfc3339("2020-01-02T03:04:05Z")
             .expect("stamp")
             .with_timezone(&Utc);
-        restamp_comment_created(&pool, id, stamp, None)
+        restamp_comment_created(&pidash_db::pool::sea_orm_connection(&pool), id, stamp, None)
             .await
             .expect("restamp");
         let after: (chrono::DateTime<Utc>, Option<Uuid>, chrono::DateTime<Utc>) = sqlx::query_as(
@@ -2288,13 +2322,19 @@ mod tests {
             edited_at: None,
         };
         let mut tx = pool.begin().await.expect("begin");
-        insert_comment_row(&mut *tx, &values).await.expect("insert");
-        insert_description_row(&mut *tx, &values)
+        insert_comment_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &values)
+            .await
+            .expect("insert");
+        insert_description_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &values)
             .await
             .expect("desc");
-        link_comment_description(&mut *tx, values.id, values.description_id)
-            .await
-            .expect("link");
+        link_comment_description(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            values.id,
+            values.description_id,
+        )
+        .await
+        .expect("link");
         tx.commit().await.expect("commit");
         // The overlay's mint arm runs before this UPDATE (fresh
         // description, updater as `created_by`, `updated_by` NULL);
@@ -2315,11 +2355,11 @@ mod tests {
             html: "<p>v2</p>",
             stripped: Some("v2"),
         };
-        insert_description_values(&pool, &minted_values)
+        insert_description_values(&pidash_db::pool::sea_orm_connection(&pool), &minted_values)
             .await
             .expect("mint");
         update_comment_row(
-            &pool,
+            &pidash_db::pool::sea_orm_connection(&pool),
             values.id,
             stamp,
             updater.actor,
@@ -2427,10 +2467,10 @@ mod tests {
             edited_at: None,
         };
         let mut tx = pool.begin().await.expect("begin");
-        insert_description_row(&mut *tx, &values)
+        insert_description_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &values)
             .await
             .expect("desc");
-        insert_comment_row_linked(&mut *tx, &values)
+        insert_comment_row_linked(&pidash_db::orm_tx::TxConn::new(&mut tx), &values)
             .await
             .expect("insert");
         tx.commit().await.expect("commit");
@@ -2466,19 +2506,32 @@ mod tests {
             actor: seed.actor,
         };
         let mut tx = pool.begin().await.expect("begin");
-        update_sync_comment(&mut *tx, &update)
+        update_sync_comment(&pidash_db::orm_tx::TxConn::new(&mut tx), &update)
             .await
             .expect("update");
         let synced_at = Utc::now();
-        sync_description_html(&mut *tx, values.description_id, "<p>v2</p>")
-            .await
-            .expect("sync html");
-        sync_description_stripped(&mut *tx, values.description_id, "v2")
-            .await
-            .expect("sync stripped");
-        touch_synced_description(&mut *tx, values.description_id, None, synced_at)
-            .await
-            .expect("touch");
+        sync_description_html(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            values.description_id,
+            "<p>v2</p>",
+        )
+        .await
+        .expect("sync html");
+        sync_description_stripped(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            values.description_id,
+            "v2",
+        )
+        .await
+        .expect("sync stripped");
+        touch_synced_description(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            values.description_id,
+            None,
+            synced_at,
+        )
+        .await
+        .expect("touch");
         tx.commit().await.expect("commit");
         let row: (Option<Uuid>, Option<Uuid>, Option<Uuid>, String) = sqlx::query_as(
             "SELECT actor_id, created_by_id, updated_by_id, comment_stripped \
@@ -2506,27 +2559,312 @@ mod tests {
         assert_eq!(desc.3, None);
     }
 
-    #[test]
-    fn repair_insert_builder_numbers_placeholders() {
-        // Moved with the builder from `pidash_db::ops::repair`
-        // (PIDASHCONV-1630); assertions verbatim.
-        let one = descriptions_insert_sql(1);
-        assert!(one.starts_with("INSERT INTO descriptions ("), "{one}");
-        assert!(
-            one.contains("$1, $2, $3, $4, $5, $6, $7, $8, $9, $10"),
-            "{one}"
-        );
-        assert!(one.ends_with(" RETURNING id"), "{one}");
-        let two = descriptions_insert_sql(2);
-        assert!(two.contains("($11, $12, $13"), "{two}");
-        assert!(two.contains("$20) RETURNING id"), "{two}");
-    }
+    /// The temp-table half: session-local copies of `issue_comments` and
+    /// `descriptions` (no constraints) on a one-connection pool, so the
+    /// view-specific twins and the repair copy batch run with no seeded
+    /// parents. Each write is checked by reading the row back.
+    #[tokio::test]
+    async fn live_twins_on_temp_tables() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        for table in ["issue_comments", "descriptions"] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let db = pidash_db::sea_orm_connection(&pool);
+        let json = serde_json::json!({"k": 1});
+        let tags = vec!["a".to_owned(), "b".to_owned()];
+        let created = pin_time();
+        let rows = CommentRows {
+            id: uid(1),
+            description_id: uid(2),
+            created_at: created,
+            updated_at: created,
+            desc_created_at: created,
+            desc_updated_at: created,
+            workspace_id: uid(3),
+            project_id: uid(4),
+            issue_id: uid(5),
+            actor_id: Some(uid(6)),
+            created_by: Some(uid(6)),
+            updated_by: None,
+            deleted_at: None,
+            html: "<p>v1</p>",
+            json: &json,
+            stripped: "v1",
+            desc_stripped: None,
+            access: "INTERNAL",
+            speaker_type: "human",
+            speaker_label: "",
+            speaker_agent_run_id: None,
+            external_id: None,
+            external_source: None,
+            parent_id: None,
+            attachments: &tags,
+            labels: &tags,
+            edited_at: None,
+        };
+        insert_comment_row(&db, &rows)
+            .await
+            .expect("insert comment");
+        insert_description_row(&db, &rows)
+            .await
+            .expect("insert desc");
+        link_comment_description(&db, rows.id, rows.description_id)
+            .await
+            .expect("link");
+        let comment = |id: Uuid| {
+            let db = &db;
+            async move {
+                issue_comments::Entity::find_by_id(id)
+                    .one(db)
+                    .await
+                    .expect("read comment")
+                    .expect("comment row")
+            }
+        };
+        let description = |id: Uuid| {
+            let db = &db;
+            async move {
+                descriptions::Entity::find_by_id(id)
+                    .one(db)
+                    .await
+                    .expect("read description")
+                    .expect("description row")
+            }
+        };
+        let row = comment(rows.id).await;
+        assert_eq!(row.description_id, Some(uid(2)));
+        assert_eq!(row.comment_stripped, "v1");
+        assert_eq!(row.labels, tags);
+        assert_eq!(row.deleted_at, None);
+        assert_eq!(description(uid(2)).await.description_stripped, None);
 
-    #[test]
-    fn repair_link_comment_pins_single_column() {
-        // Moved with the const from `pidash_db::ops::repair`
-        // (PIDASHCONV-1630); assertions verbatim.
-        assert!(LINK_COMMENT_SQL.contains("SET description_id = $1"));
-        assert!(!LINK_COMMENT_SQL.contains("updated_at"));
+        // App full-row save: every writable column lands.
+        let t1 = created + chrono::Duration::seconds(1);
+        save_app_comment_update(
+            &db,
+            &AppCommentUpdate {
+                id: rows.id,
+                updated_at: t1,
+                updated_by: Some(uid(7)),
+                deleted_at: None,
+                stripped: "v2",
+                json: &serde_json::json!({"k": 2}),
+                html: "<p>v2</p>",
+                description_id: Some(uid(2)),
+                attachments: &[],
+                labels: &tags[..1],
+                actor_id: None,
+                access: "EXTERNAL",
+                external_source: Some("GitHub"),
+                external_id: Some("42"),
+                speaker_type: "agent",
+                speaker_label: "Bot",
+                speaker_agent_run_id: Some(uid(8)),
+                edited_at: Some(t1),
+                parent_id: Some(uid(9)),
+            },
+        )
+        .await
+        .expect("app save");
+        let row = comment(rows.id).await;
+        assert_eq!(row.comment_html, "<p>v2</p>");
+        assert_eq!(row.comment_json, serde_json::json!({"k": 2}));
+        assert_eq!(row.updated_by_id, Some(uid(7)));
+        assert_eq!(row.attachments, Vec::<String>::new());
+        assert_eq!(row.labels, vec!["a".to_owned()]);
+        assert_eq!(row.actor_id, None);
+        assert_eq!(row.access, "EXTERNAL");
+        assert_eq!(row.external_source.as_deref(), Some("GitHub"));
+        assert_eq!(row.speaker_agent_run_id, Some(uid(8)));
+        assert_eq!(row.edited_at, Some(t1.into()));
+        assert_eq!(row.parent_id, Some(uid(9)));
+        assert_eq!(row.created_by_id, Some(uid(6)));
+
+        // v1 save + changed-subset sync (stripped only) + JSON sync.
+        let t2 = t1 + chrono::Duration::seconds(1);
+        save_v1_comment_update(
+            &db,
+            &V1CommentUpdate {
+                id: rows.id,
+                json: &json,
+                html: "<p>v3</p>",
+                stripped: "v3",
+                access: "INTERNAL",
+                external_source: None,
+                external_id: None,
+                labels: &tags,
+                speaker_type: "human",
+                speaker_label: "",
+                speaker_agent_run_id: None,
+                updated_at: t2,
+                updated_by: uid(6),
+            },
+        )
+        .await
+        .expect("v1 save");
+        let row = comment(rows.id).await;
+        assert_eq!(row.comment_html, "<p>v3</p>");
+        assert_eq!(row.external_source, None);
+        assert_eq!(row.speaker_agent_run_id, None);
+        assert_eq!(row.parent_id, Some(uid(9)), "v1 leaves it");
+        let synced = sync_v1_description_subset(
+            &db,
+            &V1DescriptionSync {
+                id: uid(2),
+                html: None,
+                stripped: Some("v3"),
+                json: None,
+                updated_by: uid(6),
+                updated_at: t2,
+            },
+        )
+        .await
+        .expect("v1 subset");
+        assert_eq!(synced, 1);
+        let none = sync_v1_description_subset(
+            &db,
+            &V1DescriptionSync {
+                id: uid(2),
+                html: None,
+                stripped: None,
+                json: None,
+                updated_by: uid(6),
+                updated_at: t2,
+            },
+        )
+        .await
+        .expect("v1 empty subset");
+        assert_eq!(none, 0);
+        sync_description_json(&db, uid(2), &serde_json::json!({"k": 3}))
+            .await
+            .expect("json sync");
+        let desc = description(uid(2)).await;
+        assert_eq!(desc.description_stripped.as_deref(), Some("v3"));
+        assert_eq!(desc.description_html, "<p>v1</p>", "html untouched");
+        assert_eq!(desc.description_json, serde_json::json!({"k": 3}));
+        assert_eq!(desc.updated_by_id, Some(uid(6)));
+        assert_eq!(desc.updated_at, t2.fixed_offset());
+
+        // Space save (deleted_at guard), relink, soft delete; then the
+        // guard makes a second space save a no-op.
+        let t3 = t2 + chrono::Duration::seconds(1);
+        let space = SpaceCommentUpdate {
+            id: rows.id,
+            updated_at: t3,
+            updated_by: uid(7),
+            stripped: "v4",
+            json: &json,
+            html: Some("<p>v4</p>"),
+            attachments: &tags,
+            labels: &tags,
+            access: Some("INTERNAL"),
+            external_source: None,
+            external_id: None,
+            speaker_type: Some("human"),
+            speaker_label: Some(""),
+            speaker_agent_run_id: None,
+            edited_at: None,
+            parent_id: None,
+            description_id: Some(uid(2)),
+        };
+        save_space_comment_update(&db, &space)
+            .await
+            .expect("space save");
+        assert_eq!(comment(rows.id).await.comment_html, "<p>v4</p>");
+        relink_space_comment_description(&db, rows.id, uid(10), uid(6), t3)
+            .await
+            .expect("relink");
+        let row = comment(rows.id).await;
+        assert_eq!(row.description_id, Some(uid(10)));
+        assert_eq!(row.updated_by_id, Some(uid(6)));
+        let t4 = t3 + chrono::Duration::seconds(1);
+        soft_delete_space_comment(&db, rows.id, uid(7), t4)
+            .await
+            .expect("space delete");
+        let row = comment(rows.id).await;
+        assert_eq!(row.deleted_at, Some(t4.into()));
+        assert_eq!(row.updated_at, t4.fixed_offset());
+        save_space_comment_update(
+            &db,
+            &SpaceCommentUpdate {
+                html: Some("<p>late</p>"),
+                ..space
+            },
+        )
+        .await
+        .expect("guarded space save");
+        assert_eq!(comment(rows.id).await.comment_html, "<p>v4</p>");
+
+        // v1 two-now soft delete re-stamps the deleted row by pk.
+        let t5 = t4 + chrono::Duration::seconds(1);
+        let t6 = t5 + chrono::Duration::seconds(1);
+        soft_delete_v1_comment(&db, rows.id, uid(6), t5, t6)
+            .await
+            .expect("v1 delete");
+        let row = comment(rows.id).await;
+        assert_eq!(row.deleted_at, Some(t5.into()));
+        assert_eq!(row.updated_at, t6.fixed_offset());
+        assert_eq!(row.updated_by_id, Some(uid(6)));
+
+        // The repair copy batch: multi-row insert RETURNING ids in input
+        // order, then the bare description_id links.
+        let second = CommentRows {
+            id: uid(11),
+            ..rows
+        };
+        insert_comment_row(&db, &second)
+            .await
+            .expect("second comment");
+        let new_desc = |id: u128, project: Option<Uuid>| NewDescription {
+            id: uid(id),
+            created_at: created,
+            updated_at: created,
+            description_json: serde_json::json!({}),
+            description_html: format!("<p>{id}</p>"),
+            description_stripped: Some(id.to_string()),
+            project_id: project,
+            created_by_id: None,
+            updated_by_id: None,
+            workspace_id: uid(3),
+        };
+        let batch = [new_desc(21, Some(uid(4))), new_desc(20, None)];
+        let ids = apply_copy_batch(&pool, &batch, &[(uid(1), uid(21)), (uid(11), uid(20))])
+            .await
+            .expect("copy batch");
+        assert_eq!(ids, vec![uid(21), uid(20)]);
+        assert_eq!(comment(uid(1)).await.description_id, Some(uid(21)));
+        let linked = comment(uid(11)).await;
+        assert_eq!(linked.description_id, Some(uid(20)));
+        assert_eq!(
+            linked.updated_at,
+            created.fixed_offset(),
+            "link bumps nothing"
+        );
+        let copied = description(uid(20)).await;
+        assert_eq!(copied.project_id, None);
+        assert_eq!(copied.description_stripped.as_deref(), Some("20"));
+        assert!(apply_copy_batch(&pool, &[], &[])
+            .await
+            .expect("empty batch")
+            .is_empty());
+        for table in ["issue_comments", "descriptions"] {
+            sqlx::query(&format!("DROP TABLE pg_temp.{table}"))
+                .execute(&pool)
+                .await
+                .expect("drop temp table");
+        }
     }
 }
