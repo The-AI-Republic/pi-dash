@@ -123,6 +123,11 @@ class DevMachineSerializer(serializers.ModelSerializer):
             "runner_count",
             "online_runner_count",
             "control_online",
+            # Built-in engine controls (built_engine_as_runner §8, §11).
+            # Machines are private, so only the owner ever sees these.
+            "engine_paused_by_owner",
+            "engine_auto_pause_reason",
+            "engine_team_runs",
             "last_seen_at",
             "last_heartbeat_at",
             "revoked_at",
@@ -151,7 +156,14 @@ class DevMachineMiniSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DevMachine
-        fields = ["id", "host_label", "label"]
+        fields = [
+            "id",
+            "host_label",
+            "label",
+            "engine_paused_by_owner",
+            "engine_auto_pause_reason",
+            "engine_team_runs",
+        ]
         read_only_fields = fields
 
 
@@ -175,6 +187,9 @@ class RunnerSerializer(serializers.ModelSerializer):
             # and support tooling can answer "is this the bundled desktop
             # runner or one the user installed?" without a second query.
             "provisioning",
+            # Whether the runner takes unpinned pod work (built_engine_as_runner
+            # §7). Changed through the owner-only PATCH.
+            "pod_dispatch",
             "os",
             "arch",
             "runner_version",
@@ -203,6 +218,7 @@ class RunnerSerializer(serializers.ModelSerializer):
             # Never client-settable: a runner must not be able to claim it is
             # Pi Dash-managed and thereby become eligible for pinned work.
             "provisioning",
+            "pod_dispatch",
             "os",
             "arch",
             "runner_version",
@@ -308,6 +324,8 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "thread_id",
             "agent_metadata",
             "runner",
+            "pinned_runner",
+            "pin_strict",
             "work_item",
             "scheduler_binding",
             "scheduler_binding_detail",

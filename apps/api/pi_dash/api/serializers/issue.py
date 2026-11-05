@@ -152,7 +152,9 @@ class IssueSerializer(BaseSerializer):
 
     class Meta:
         model = Issue
-        read_only_fields = ["id", "workspace", "project", "updated_by", "updated_at"]
+        # ``assigned_runner`` is read-only here: assigning an issue to a runner
+        # is an owner action taken in the app (built_engine_as_runner §7).
+        read_only_fields = ["id", "workspace", "project", "updated_by", "updated_at", "assigned_runner"]
         # ``workpad`` is the agent's per-issue scratchpad. It can grow to several
         # KB of markdown, so exclude it here and expose it through the dedicated
         # workpad endpoint to keep ``GET /work-items/<id>/`` payloads small.
@@ -186,6 +188,21 @@ class IssueSerializer(BaseSerializer):
             and data.get("start_date", None) > data.get("target_date", None)
         ):
             raise serializers.ValidationError("Start date cannot exceed target date")
+
+        # Runner is the only executor (built_engine_as_runner §6): translate
+        # ``managed_runner`` / ``cloud_agent`` from older clients, and make an
+        # explicit pod choice clear the issue's assigned runner (§7).
+        from pi_dash.runner.services.issue_assignment import normalize_issue_dispatch_target
+
+        normalize_issue_dispatch_target(
+            data,
+            instance=self.instance,
+            project=None,
+            user=None,
+            pod_error_key="assigned_pod",
+            runner_error_key="assigned_runner",
+            allow_runner_write=False,
+        )
 
         # ``assigned_pod`` is the pod this issue's agent runs dispatch to. It is
         # optional — omitting it lets ``Issue.save`` resolve the project's default

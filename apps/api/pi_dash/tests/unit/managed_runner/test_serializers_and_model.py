@@ -112,11 +112,13 @@ def test_issue_serializer_accepts_a_managed_pin_when_available(
 
 
 @override_settings(**MANAGED_SETTINGS)
-def test_issue_serializer_refuses_a_managed_pin_with_an_actionable_reason(
+def test_issue_serializer_translates_a_managed_pin_to_the_callers_engine(
     project, create_user, byok_lane, bundled_runner, issue_for_project, rf
 ):
-    """The error text is what the user reads; it must name the fix, not the
-    internal reason code."""
+    """An older desktop build still writes ``managed_runner``. It is stored as
+    ``local_runner`` assigned to the caller's own engine runner, the old
+    behaviour (built_engine_as_runner §6); availability is the engine's own
+    business now, not a reason to refuse the write."""
     from pi_dash.app.serializers.issue import IssueCreateSerializer as IssueSerializer
 
     request = rf.post("/")
@@ -127,9 +129,10 @@ def test_issue_serializer_refuses_a_managed_pin_with_an_actionable_reason(
         partial=True,
         context={"request": request, "project_id": str(project.id)},
     )
-    assert not serializer.is_valid()
-    detail = str(serializer.errors["agent_executor"])
-    assert "OpenHub" in detail
+    assert serializer.is_valid(), serializer.errors
+    assert serializer.validated_data["agent_executor"] == AgentExecutorKind.LOCAL_RUNNER
+    assert serializer.validated_data["assigned_runner"] == bundled_runner
+    assert serializer.validated_data["assigned_pod"] == bundled_runner.pod
 
 
 @override_settings(**MANAGED_SETTINGS)
@@ -153,14 +156,14 @@ def test_issue_serializer_allows_a_pin_before_the_desktop_enrolls_the_project(
 
 
 @override_settings(MANAGED_RUNNER_ENABLED=False)
-def test_project_serializer_refuses_a_managed_default_when_disabled(project, create_user, rf):
+def test_project_serializer_translates_a_managed_default(project, create_user, rf):
     from pi_dash.api.serializers.project import ProjectSerializer
 
     serializer = ProjectSerializer(
         project, data={"default_agent_executor": AgentExecutorKind.MANAGED_RUNNER}, partial=True
     )
-    assert not serializer.is_valid()
-    assert "default_agent_executor" in serializer.errors
+    assert serializer.is_valid(), serializer.errors
+    assert serializer.validated_data["default_agent_executor"] == AgentExecutorKind.LOCAL_RUNNER
 
 
 @override_settings(**MANAGED_SETTINGS)
@@ -173,6 +176,7 @@ def test_project_serializer_accepts_a_managed_default_when_enabled(project):
         project, data={"default_agent_executor": AgentExecutorKind.MANAGED_RUNNER}, partial=True
     )
     assert serializer.is_valid(), serializer.errors
+    assert serializer.validated_data["default_agent_executor"] == AgentExecutorKind.LOCAL_RUNNER
 
 
 # --------------------------------------------------------------------------

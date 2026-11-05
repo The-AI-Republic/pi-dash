@@ -45,7 +45,7 @@ from pi_dash.db.models import (
     ProjectMember,
     EstimatePoint,
 )
-from pi_dash.runner.models import Pod
+from pi_dash.runner.models import Pod, Runner
 from pi_dash.runner.diagnostics import classify_run_error
 from pi_dash.utils.content_validator import (
     validate_html_content,
@@ -87,12 +87,15 @@ def _comment_is_actively_synced(comment) -> bool:
     )
 
 
-#: User-facing copy for a refused ``managed_runner`` pin, keyed by the reason
-#: code ``managed_runner_availability`` returned. The picker shows the same
-#: strings, so a user never sees two different explanations for one situation.
+#: User-facing copy for the built-in engine's reason codes, keyed by the code
+#: ``managed_runner_availability`` (or a waiting run's ``error_code``)
+#: carries. The picker shows the same strings, so a user never sees two
+#: different explanations for one situation. ``{machine}`` is the machine's
+#: display name: the daemon runs without the app, so "open the desktop app"
+#: is no longer the fix (built_engine_as_runner §9).
 _MANAGED_UNAVAILABLE_DETAIL = {
     "managed_runner_disabled": "Pi Dash Agent is not enabled on this instance",
-    "desktop_not_connected": "Open the Pi Dash desktop app to run on this computer",
+    "desktop_not_connected": "{machine} is offline",
     "llm_config_missing": "Configure an AI provider in Pi Dash AI settings first",
     "gateway_scopes_missing": "Sign in to Pi Dash again to refresh your AI access",
     "byok_not_supported_on_desktop": (
@@ -100,6 +103,12 @@ _MANAGED_UNAVAILABLE_DETAIL = {
         "Pi Dash AI and the Cloud Agent keep using your own key."
     ),
 }
+
+
+def managed_unavailable_detail(reason: str, *, machine: str = "") -> str:
+    """The sentence for ``reason``; ``machine`` fills ``{machine}``."""
+    template = _MANAGED_UNAVAILABLE_DETAIL.get(reason, reason)
+    return template.format(machine=machine or "This computer")
 
 
 class IssueFlatSerializer(BaseSerializer):
@@ -153,6 +162,13 @@ class IssueCreateSerializer(BaseSerializer):
     assigned_pod_id = serializers.PrimaryKeyRelatedField(
         source="assigned_pod", queryset=Pod.all_objects.all(), required=False, allow_null=True
     )
+    # One specific runner this issue's runs go to (built_engine_as_runner §7).
+    # Owner-only; setting it moves ``assigned_pod`` to the runner's pod, and
+    # choosing a different pod clears it. Rules in
+    # ``runner.services.issue_assignment``.
+    assigned_runner_id = serializers.PrimaryKeyRelatedField(
+        source="assigned_runner", queryset=Runner.objects.all(), required=False, allow_null=True
+    )
     label_ids = serializers.ListField(
         child=serializers.PrimaryKeyRelatedField(queryset=Label.objects.all()),
         write_only=True,
@@ -172,7 +188,7 @@ class IssueCreateSerializer(BaseSerializer):
         # workpad endpoint and would bloat every web-tier issue payload if
         # included here. ``assigned_pod`` is excluded too because it's surfaced
         # explicitly as ``assigned_pod_id`` above (the *_id FK convention).
-        exclude = ["workpad", "assigned_pod"]
+        exclude = ["workpad", "assigned_pod", "assigned_runner"]
         read_only_fields = [
             "workspace",
             "project",
@@ -235,6 +251,25 @@ class IssueCreateSerializer(BaseSerializer):
         ):
             raise serializers.ValidationError("Start date cannot exceed target date")
 
+        # Executor, assigned runner and pod are one execution target
+        # (built_engine_as_runner §6, §7): Runner is the only executor, an
+        # assigned runner fixes the pod, choosing a pod clears the runner.
+        # Older clients' ``managed_runner`` / ``cloud_agent`` are translated,
+        # and a change of executor under a live run is refused.
+        from pi_dash.runner.services.issue_assignment import (
+            issue_has_non_queued_active_run,
+            normalize_issue_dispatch_target,
+            project_for_issue_write,
+        )
+
+        request = self.context.get("request")
+        self._assignment_changed = normalize_issue_dispatch_target(
+            attrs,
+            instance=self.instance,
+            project=project_for_issue_write(self, attrs),
+            user=getattr(request, "user", None),
+        )
+
         # assigned_pod must belong to the issue's *project* and be active.
         # See .ai_design/n_runners_in_same_machine/new_pod_project_relationship/
         # design.md §8.2. Pods are project-scoped now; allowing any pod in
@@ -261,64 +296,20 @@ class IssueCreateSerializer(BaseSerializer):
             # null would re-route the next run to the project default). Initial
             # assignment (no prior pod) is allowed; re-sending the current pod
             # (the web form re-PATCHes the full editable set on blur) is a no-op.
+            # A runner assignment change is allowed while the only active run
+            # is queued: ``update`` re-pins that run in the same transaction.
             if self.instance is not None and self.instance.assigned_pod_id is not None:
                 new_pod_id = pod.id if pod is not None else None
-                if str(new_pod_id) != str(self.instance.assigned_pod_id) and self.instance.has_active_run:
-                    raise serializers.ValidationError(
-                        {"assigned_pod_id": "cannot reassign pod while the issue has an active run"}
+                if str(new_pod_id) != str(self.instance.assigned_pod_id):
+                    blocked = (
+                        issue_has_non_queued_active_run(self.instance)
+                        if self._assignment_changed
+                        else self.instance.has_active_run
                     )
-
-        # ``agent_executor`` is the per-issue execution-target override; NULL
-        # inherits the project default. Cloud Agent and pods are mutually
-        # exclusive targets, so the UI presents them as one "Runs on" choice
-        # and this is the matching server-side guard.
-        if "agent_executor" in attrs:
-            executor = attrs["agent_executor"]  # None clears the override
-            if executor is not None:
-                from pi_dash.core.agent_execution import AgentExecutorKind, cloud_agent_is_configured
-
-                if executor not in AgentExecutorKind.values:
-                    raise serializers.ValidationError({"agent_executor": "unknown agent executor"})
-                # Refuse a target that could never dispatch, rather than
-                # accepting it and failing invisibly at run creation.
-                if executor == AgentExecutorKind.CLOUD_AGENT and not cloud_agent_is_configured():
-                    raise serializers.ValidationError(
-                        {"agent_executor": "Pi Dash Cloud Agent is not available on this instance"}
-                    )
-                if executor == AgentExecutorKind.MANAGED_RUNNER:
-                    # Pinning to the desktop is viewer-specific: the check is
-                    # "can the person making this request run it on their own
-                    # machine", which is exactly what the picker showed them.
-                    from pi_dash.managed_runner.errors import ManagedRunnerReason
-                    from pi_dash.managed_runner.policy import managed_runner_availability
-
-                    project = self.instance.project if self.instance is not None else attrs.get("project")
-                    if project is None:
-                        from pi_dash.db.models import Project
-
-                        project = Project.objects.filter(pk=self.context.get("project_id")).first()
-                    if project is None:
-                        raise serializers.ValidationError({"agent_executor": "A project is required for desktop runs"})
-                    viewer = getattr(self.context.get("request"), "user", None)
-                    available, reason = managed_runner_availability(project, viewer)
-                    # A desktop that has not enrolled this project yet fixes
-                    # itself the moment the app opens it, so accept the pin
-                    # rather than blocking on a race the client will resolve.
-                    if not available and reason != ManagedRunnerReason.NO_RUNNER_FOR_PROJECT:
+                    if blocked:
                         raise serializers.ValidationError(
-                            {"agent_executor": _MANAGED_UNAVAILABLE_DETAIL.get(reason, reason)}
+                            {"assigned_pod_id": "cannot reassign pod while the issue has an active run"}
                         )
-            # Same mid-flight rule as the pod: ``AgentRun.executor_kind`` is
-            # snapshotted at creation, so switching targets under a live run
-            # would silently apply only to the next dispatch.
-            if (
-                self.instance is not None
-                and str(executor) != str(self.instance.agent_executor)
-                and self.instance.has_active_run
-            ):
-                raise serializers.ValidationError(
-                    {"agent_executor": "cannot change the execution target while the issue has an active run"}
-                )
 
         # Validate description content for security
         if "description_html" in attrs and attrs["description_html"]:
@@ -515,7 +506,19 @@ class IssueCreateSerializer(BaseSerializer):
 
         # Time updation occues even when other related models are updated
         instance.updated_at = timezone.now()
-        return super().update(instance, validated_data)
+        if not getattr(self, "_assignment_changed", False):
+            return super().update(instance, validated_data)
+        # The issue's runner changed: re-point its queued runs in the same
+        # transaction, so none is left pinned to the old runner or pod
+        # (built_engine_as_runner §7).
+        from django.db import transaction
+
+        from pi_dash.runner.services.dispatch_rules import repin_queued_runs_for_issue
+
+        with transaction.atomic():
+            instance = super().update(instance, validated_data)
+            repin_queued_runs_for_issue(instance)
+        return instance
 
 
 class IssueActivitySerializer(BaseSerializer):
@@ -1046,6 +1049,9 @@ class IssueSerializer(DynamicBaseSerializer):
     # round-trip the issue's current pod. Reassignment while a run is active is
     # rejected server-side in IssueCreateSerializer.validate.
     assigned_pod_id = serializers.PrimaryKeyRelatedField(source="assigned_pod", read_only=True)
+    # The specific runner this issue runs on, when it names one
+    # (built_engine_as_runner §7). FK id only, like ``assigned_pod_id``.
+    assigned_runner_id = serializers.PrimaryKeyRelatedField(source="assigned_runner", read_only=True)
     module_ids = serializers.ListField(child=serializers.UUIDField(), required=False)
 
     # Many to many
@@ -1086,6 +1092,7 @@ class IssueSerializer(DynamicBaseSerializer):
             "type_id",
             "is_epic",
             "assigned_pod_id",
+            "assigned_runner_id",
             "agent_executor",
             "module_ids",
             "label_ids",

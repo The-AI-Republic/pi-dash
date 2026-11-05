@@ -8,6 +8,9 @@ The rule these tests pin: a closed laptop is *transient* and the work waits
 visibly; anything that waiting cannot fix is *structural* and bounces loudly.
 Getting this backwards either un-schedules people's issues every evening, or
 queues runs forever against a machine that is never coming back.
+
+Since PIDESKAPP-123 the waiting run is one strictly pinned to an issue's
+``assigned_runner`` (``.ai_design/built_engine_as_runner/design.md`` §7-§9).
 """
 
 from __future__ import annotations
@@ -28,9 +31,16 @@ from .conftest import MANAGED_SETTINGS
 pytestmark = pytest.mark.unit
 
 
-def _managed_issue(issue, project):
-    issue.agent_executor = AgentExecutorKind.MANAGED_RUNNER
-    issue.save(update_fields=["agent_executor"])
+def _assigned_issue(issue, runner):
+    """Assign ``issue`` to ``runner``, created by the runner's owner.
+
+    A queryset update, because ``BaseModel.save`` blanks ``created_by``
+    outside a request and the usage rule reads it.
+    """
+    type(issue).objects.filter(pk=issue.pk).update(
+        assigned_runner=runner, assigned_pod=runner.pod, created_by=runner.owner
+    )
+    issue.refresh_from_db()
     return issue
 
 
@@ -50,60 +60,45 @@ def _preflight(issue, user, project, triggered_by="tick"):
 # --------------------------------------------------------------------------
 
 
-@override_settings(**MANAGED_SETTINGS)
-def test_preflight_allows_a_closed_laptop(
-    project, create_user, openhub_lane, bundled_runner, issue_for_project
-):
+def test_preflight_allows_a_closed_laptop(project, create_user, bundled_runner, issue_for_project):
     """Offline must pass the preflight so the run is created and waits.
 
     If this bounced, every issue whose owner shut their laptop would be moved
     back to Backlog and the ticker disarmed — losing the schedule, not just
     the run.
     """
-    issue = _managed_issue(issue_for_project, project)
+    issue = _assigned_issue(issue_for_project, bundled_runner)
     bundled_runner.status = RunnerStatus.OFFLINE
     bundled_runner.save(update_fields=["status"])
     original_state = issue.state_id
-    assert _preflight(issue, create_user, project) is True
+    assert _preflight(issue, None, project) is True
     issue.refresh_from_db()
     assert issue.state_id == original_state
 
 
-@override_settings(**MANAGED_SETTINGS)
-def test_preflight_bounces_when_nothing_is_enrolled(
-    project, create_user, openhub_lane, issue_for_project
+def test_preflight_bounces_a_pod_level_issue_with_only_a_pinned_only_engine(
+    project, create_user, bundled_runner, issue_for_project
 ):
-    issue = _managed_issue(issue_for_project, project)
-    assert _preflight(issue, create_user, project) is False
+    assert _preflight(issue_for_project, create_user, project) is False
 
 
-@override_settings(**MANAGED_SETTINGS)
-def test_preflight_bounces_a_byok_creator(project, create_user, byok_lane, bundled_runner, issue_for_project):
-    """Waiting cannot give the user a supported provider, so this is loud."""
-    issue = _managed_issue(issue_for_project, project)
-    assert _preflight(issue, create_user, project) is False
-
-
-@override_settings(MANAGED_RUNNER_ENABLED=False)
-def test_preflight_bounces_when_the_instance_disables_the_feature(
-    project, create_user, openhub_lane, bundled_runner, issue_for_project
+def test_preflight_bounces_a_tick_on_someone_elses_engine(
+    project, create_user, create_user2, issue_for_project
 ):
-    issue = _managed_issue(issue_for_project, project)
-    assert _preflight(issue, create_user, project) is False
+    """The engine's owner is neither the issue's creator nor an assignee: the
+    usage rule would never admit the tick, so bounce instead of queueing."""
+    from .conftest import make_runner
+    from pi_dash.runner.models import RunnerProvisioning
 
-
-@override_settings(**MANAGED_SETTINGS)
-def test_preflight_bounces_without_a_creator(project, openhub_lane, bundled_runner, issue_for_project):
-    issue = _managed_issue(issue_for_project, project)
+    engine = make_runner(owner=create_user2, project=project, provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
+    issue = _assigned_issue(issue_for_project, engine)
+    type(issue).objects.filter(pk=issue.pk).update(created_by=create_user)
+    issue.refresh_from_db()
     assert _preflight(issue, None, project) is False
 
 
-@override_settings(**MANAGED_SETTINGS)
-def test_local_issues_are_unaffected_by_the_managed_branch(
-    project, create_user, manual_runner, issue_for_project
-):
-    """Regression guard: the new branch must not change local-runner
-    preflight, which has its own eligibility rules."""
+def test_local_issues_are_unaffected(project, create_user, manual_runner, issue_for_project):
+    """Regression guard: own-agent runners keep their eligibility rules."""
     assert _preflight(issue_for_project, create_user, project) is True
 
 
@@ -112,37 +107,26 @@ def test_local_issues_are_unaffected_by_the_managed_branch(
 # --------------------------------------------------------------------------
 
 
-@override_settings(**MANAGED_SETTINGS)
-def test_creator_resolution_never_picks_a_user_without_a_desktop(
-    project, create_user, openhub_lane, issue_for_project, monkeypatch
+def test_tick_on_an_assigned_issue_runs_as_the_runner_owner(
+    project, create_user, bundled_runner, issue_for_project
 ):
-    """A candidate with a provider but no enrolled desktop could never serve a
-    managed run — choosing them would mint a run that waits forever."""
+    """§7: for ticks and schedulers the run's principal is the runner's owner
+    when the usage rule allows it."""
     from pi_dash.orchestration import scheduling
 
-    monkeypatch.setattr("pi_dash.core.agent_execution.user_has_llm_config", lambda u: True)
-    issue = _managed_issue(issue_for_project, project)
-    resolved = scheduling._resolve_creator_for_trigger(
-        issue, triggered_by=scheduling.TRIGGER_RUN_AI, actor=create_user
-    )
-    assert resolved is None
-
-
-@override_settings(**MANAGED_SETTINGS)
-def test_creator_resolution_picks_the_desktop_owner(
-    project, create_user, openhub_lane, bundled_runner, issue_for_project, monkeypatch
-):
-    """The mirror of the test above: with a desktop enrolled, the same
-    candidate is accepted — so the new gate narrows the set rather than
-    emptying it."""
-    from pi_dash.orchestration import scheduling
-
-    monkeypatch.setattr("pi_dash.core.agent_execution.user_has_llm_config", lambda u: True)
-    issue = _managed_issue(issue_for_project, project)
-    resolved = scheduling._resolve_creator_for_trigger(
-        issue, triggered_by=scheduling.TRIGGER_RUN_AI, actor=create_user
-    )
+    issue = _assigned_issue(issue_for_project, bundled_runner)
+    resolved = scheduling._resolve_creator_for_trigger(issue, triggered_by=scheduling.TRIGGER_TICK)
     assert resolved == create_user
+
+
+def test_explicit_actor_still_wins(project, create_user, create_user2, bundled_runner, issue_for_project):
+    from pi_dash.orchestration import scheduling
+
+    issue = _assigned_issue(issue_for_project, bundled_runner)
+    resolved = scheduling._resolve_creator_for_trigger(
+        issue, triggered_by=scheduling.TRIGGER_RUN_AI, actor=create_user2
+    )
+    assert resolved == create_user2
 
 
 # --------------------------------------------------------------------------
@@ -157,6 +141,7 @@ def _waiting_run(project, user, runner, *, age=timedelta(0)):
         pod=project.pods.get(is_default=True),
         executor_kind=AgentExecutorKind.MANAGED_RUNNER,
         pinned_runner=runner,
+        pin_strict=True,
         status=AgentRunStatus.QUEUED,
         error_details={"code": ManagedRunnerReason.NOT_CONNECTED},
         prompt="",
@@ -199,8 +184,10 @@ def test_sweep_fails_a_wait_that_outlived_the_bound(project, create_user, bundle
     run.refresh_from_db()
     assert run.status == AgentRunStatus.FAILED
     assert run.error_code == ManagedRunnerReason.NOT_CONNECTED
-    # The message must tell the user what to do, not just what happened.
-    assert "desktop" in run.error.lower()
+    # The message names the machine (the daemon runs without the app, so
+    # "open the desktop app" is no longer the fix) and what to do next.
+    assert run.error.startswith("rich-laptop is offline")
+    assert "run the issue again" in run.error
 
 
 @override_settings(**MANAGED_SETTINGS, MANAGED_RUNNER_QUEUED_MAX_AGE_SECS=3600)

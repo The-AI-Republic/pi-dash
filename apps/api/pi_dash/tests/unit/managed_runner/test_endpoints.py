@@ -76,12 +76,16 @@ def test_project_responses_compute_managed_availability_for_the_viewer(
     if operation == "create":
         assert option["reason_code"] == "no_managed_runner_for_project"
     else:
-        assert option == {"kind": "managed_runner", "available": True, "reason_code": ""}
+        assert option == {"kind": "managed_runner", "available": True, "reason_code": "", "deprecated": True}
+    # Runner is the only selectable executor (built_engine_as_runner §6); the
+    # old entries stay for older builds, flagged so new builds hide them.
+    kinds = {item["kind"]: item["deprecated"] for item in data["agent_executor_options"]}
+    assert kinds == {"cloud_agent": True, "local_runner": False, "managed_runner": True}
 
 
 @pytest.mark.parametrize("operation", ["create", "update"])
 @override_settings(**MANAGED_SETTINGS)
-def test_issue_endpoints_persist_the_viewers_desktop_selection(
+def test_issue_endpoints_translate_the_viewers_desktop_selection(
     web_client, workspace, project, issue_for_project, bundled_runner, openhub_lane, monkeypatch, operation
 ):
     from pi_dash.app.views.issue import base
@@ -105,10 +109,16 @@ def test_issue_endpoints_persist_the_viewers_desktop_selection(
         )
     assert response.status_code in (200, 201, 204), response.content
     issue_id = response.json()["id"] if operation == "create" else issue_for_project.id
-    assert Issue.objects.get(pk=issue_id).agent_executor == "managed_runner"
+    # An older desktop build's ``managed_runner`` becomes ``local_runner``
+    # pinned to the caller's own engine runner (built_engine_as_runner §6).
+    issue = Issue.objects.get(pk=issue_id)
+    assert issue.agent_executor == "local_runner"
+    assert issue.assigned_runner_id == bundled_runner.id
+    assert issue.assigned_pod_id == bundled_runner.pod_id
     detail = web_client.get(f"{path}{issue_id}/")
     assert detail.status_code == 200
-    assert detail.json()["agent_executor"] == "managed_runner"
+    assert detail.json()["agent_executor"] == "local_runner"
+    assert detail.json()["assigned_runner_id"] == str(bundled_runner.id)
     project.refresh_from_db()
     assert project.default_agent_executor == "local_runner"
 

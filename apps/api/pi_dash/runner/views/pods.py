@@ -263,5 +263,6 @@ class PodDetailEndpoint(APIView):
             # Sweep pointing issues.
             from pi_dash.db.models.issue import Issue
 
-            Issue.objects.filter(assigned_pod=locked).update(assigned_pod=None)
+            # ``assigned_runner`` goes too: the invariant ties it to its pod.
+            Issue.objects.filter(assigned_pod=locked).update(assigned_pod=None, assigned_runner=None)
         return Response(status=status.HTTP_204_NO_CONTENT)

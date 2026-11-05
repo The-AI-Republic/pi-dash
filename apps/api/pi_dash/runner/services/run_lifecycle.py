@@ -252,8 +252,9 @@ def apply_run_resume_unavailable(
 ) -> None:
     """Re-queue a run whose pinned session disappeared.
 
-    Drops the runner / pin / assigned_at and clears the parent's
-    ``thread_id`` so the next dispatch builds a fresh-session Assign.
+    Drops the runner / assigned_at (and the pin, unless it is strict) and
+    clears the parent's ``thread_id`` so the next dispatch builds a
+    fresh-session Assign.
     See legacy ``RunnerConsumer._handle_resume_unavailable``.
 
     Must be called inside ``transaction.atomic()`` because the fallback
@@ -271,7 +272,12 @@ def apply_run_resume_unavailable(
         return
     run.status = AgentRunStatus.QUEUED
     run.runner = None
-    run.pinned_runner = None
+    # A strict pin (an issue's ``assigned_runner``) is the run's target, not
+    # a preference: keep it so the run waits for the same runner and a
+    # cancellation race can never send it to another machine
+    # (``built_engine_as_runner`` design §7).
+    if not run.pin_strict:
+        run.pinned_runner = None
     run.assigned_at = None
     if run.parent_run is not None and run.parent_run.thread_id:
         run.parent_run.thread_id = ""

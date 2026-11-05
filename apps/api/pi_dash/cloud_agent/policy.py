@@ -5,7 +5,6 @@ from django.conf import settings
 from pi_dash.core.agent_execution import (
     AgentExecutorKind,
     cloud_agent_is_configured,
-    managed_runner_is_enabled,
 )
 
 READ_TOOLS = (
@@ -60,15 +59,13 @@ def resolve_executor_kind(*, project, requested=None) -> str:
         raise ValueError("unknown agent executor")
     if value == AgentExecutorKind.CLOUD_AGENT and not cloud_agent_is_configured():
         raise CloudAgentUnavailable("Pi Dash Cloud Agent is not currently available")
-    if value == AgentExecutorKind.MANAGED_RUNNER and not managed_runner_is_enabled():
-        # Instance-level only. Whether *this* viewer's desktop can take the run
-        # is a per-viewer question answered in ``execution_fields``.
-        from pi_dash.managed_runner.errors import ManagedRunnerReason, ManagedRunnerUnavailable
-
-        raise ManagedRunnerUnavailable(
-            ManagedRunnerReason.DISABLED,
-            "Pi Dash Agent is not enabled on this instance",
-        )
+    if value == AgentExecutorKind.MANAGED_RUNNER:
+        # Legacy value (design ``built_engine_as_runner`` §6): the built-in
+        # engine is a runner like any other, picked through the issue's
+        # ``assigned_runner`` or a pod, so new runs are ``local_runner``.
+        # Migration ``runner.0035`` rewrote stored rows; this covers anything
+        # that slipped past it.
+        return AgentExecutorKind.LOCAL_RUNNER
     return value
 
 

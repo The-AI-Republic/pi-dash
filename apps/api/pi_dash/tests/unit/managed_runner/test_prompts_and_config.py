@@ -140,13 +140,14 @@ def test_kill_switch_reads_setting():
 
 
 @override_settings(DEFAULT_AGENT_EXECUTOR="managed_runner", MANAGED_RUNNER_ENABLED=False)
-def test_check_rejects_managed_default_without_the_switch():
-    """An instance that defaults to an executor it can never admit would fail
-    every run at creation; fail at boot instead."""
+def test_check_warns_that_a_non_runner_default_is_ignored():
+    """Runner is the only executor for new projects (built_engine_as_runner
+    §6): another configured default is ignored, and the instance still boots."""
     from pi_dash.managed_runner.checks import managed_runner_configuration_check
 
-    ids = [e.id for e in managed_runner_configuration_check(None)]
-    assert "managed.E001" in ids
+    results = managed_runner_configuration_check(None)
+    assert [e.id for e in results] == ["managed.W001"]
+    assert not any(e.is_serious() for e in results)
 
 
 @override_settings(DEFAULT_AGENT_EXECUTOR="local_runner", **MANAGED_SETTINGS)

@@ -294,6 +294,9 @@ class AgentRunListEndpoint(APIView):
         from pi_dash.cloud_agent.creation import dispatch_after_commit, execution_fields
         from pi_dash.db.models.issue import Issue
 
+        bound_issue = (
+            Issue.objects.filter(pk=ctx.work_item_id).first() if ctx.work_item_id is not None else None
+        )
         try:
             with transaction.atomic():
                 execution = execution_fields(
@@ -305,18 +308,17 @@ class AgentRunListEndpoint(APIView):
                     # Honor the work item's execution-target override when this
                     # direct run is bound to one; free-form runs inherit the
                     # project default.
-                    requested=(
-                        Issue.objects.filter(pk=ctx.work_item_id)
-                        .values_list("agent_executor", flat=True)
-                        .first()
-                        if ctx.work_item_id is not None
-                        else None
-                    ),
+                    requested=bound_issue.agent_executor if bound_issue is not None else None,
+                    # A direct run is started by a person; an issue with an
+                    # assigned runner pins it strictly or refuses it.
+                    issue=bound_issue,
                 )
                 run = AgentRun.objects.create(
                     workspace_id=ctx.workspace_id,
                     created_by=ctx.created_by,
-                    pod=ctx.pod,
+                    # A strict pin is dispatched in its runner's pod (the
+                    # assigned-runner invariant), whatever pod was asked for.
+                    pod=execution["pinned_runner"].pod if execution.get("pin_strict") else ctx.pod,
                     prompt="",
                     prompt_manifest=None,
                     run_config=request.data.get("run_config") or {},
@@ -407,12 +409,29 @@ class AgentRunListEndpoint(APIView):
             queued = self._human_run_clock(issue, actor=request.user, trigger=scheduling.TRIGGER_RUN_AI)
             if queued is not None:
                 return queued
-            run = scheduling.dispatch_run_ai_run(issue, actor=request.user)
+            run, reason = scheduling.dispatch_run_ai_run_with_reason(issue, actor=request.user)
             if run is None:
                 # Undo the clock re-time too: the human's click produced no
                 # run, so the ticker must look exactly as it did before.
                 transaction.set_rollback(True)
         if run is None:
+            from pi_dash.runner.services.dispatch_rules import (
+                ASSIGNED_RUNNER_NOT_OWNER,
+                ASSIGNED_RUNNER_OFFLINE,
+            )
+
+            if reason in (ASSIGNED_RUNNER_NOT_OWNER, ASSIGNED_RUNNER_OFFLINE):
+                # The issue names a runner that cannot take this person's run
+                # (design built_engine_as_runner §7, §9). The client offers
+                # "Run on my engine instead" / the issue's other runners.
+                return Response(
+                    {
+                        "error": scheduling.assigned_runner_refusal_detail(issue, reason),
+                        "code": reason,
+                        "assigned_runner": str(issue.assigned_runner_id) if issue.assigned_runner_id else None,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
             return Response(
                 {"error": ("could not dispatch — issue may already have an active run, or no pod is available")},
                 status=status.HTTP_409_CONFLICT,
@@ -717,6 +736,17 @@ class AgentRunReleasePinEndpoint(APIView):
             if locked.pinned_runner_id is None:
                 return Response(
                     {"error": "run not pinned"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            # A strict pin comes from the issue's assigned runner and is never
+            # released to the pod; change the issue's assignment instead,
+            # which re-pins its queued runs (built_engine_as_runner §7).
+            if locked.pin_strict:
+                return Response(
+                    {
+                        "error": "run is pinned to the issue's assigned runner; change the issue's runner instead",
+                        "code": "pin_strict",
+                    },
                     status=status.HTTP_409_CONFLICT,
                 )
             locked.pinned_runner = None

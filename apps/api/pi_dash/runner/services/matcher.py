@@ -24,8 +24,6 @@ from django.utils import timezone
 
 from pi_dash.core.agent_execution import (
     MACHINE_EXECUTORS,
-    AgentExecutorKind,
-    effective_executor_for_issue,
 )
 
 from pi_dash.runner.models import (
@@ -93,16 +91,16 @@ def select_runner_in_pod(pod: Pod) -> Optional[Runner]:
     row-level lock (``SELECT … FOR UPDATE SKIP LOCKED``) so concurrent drains
     can't both pick the same runner.
     """
-    from pi_dash.runner.models import RunnerProvisioning
+    from pi_dash.runner.models import RunnerPodDispatch
 
     return (
         Runner.objects.select_for_update(skip_locked=True)
         .assignable()
         .filter(pod=pod)
-        # Desktop-bundled runners serve only work pinned to them. Handing them
-        # unpinned pod work would make one person's laptop the team's build
-        # server, and it would vanish when they close the lid.
-        .exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
+        # Only pod members take unpinned pod work. Engines start
+        # ``pinned_only`` (their work spends the owner's wallet) until the
+        # owner adds them to the pod; then they rank equally (PO-4).
+        .exclude(pod_dispatch=RunnerPodDispatch.PINNED_ONLY)
         .exclude(agent_runs__status__in=BUSY_STATUSES)
         # An active chat no longer excludes a runner from issue assignment:
         # chat and issue runs are concurrent (design §3.4). BUSY_STATUSES still
@@ -149,27 +147,48 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
     ``FOR UPDATE SKIP LOCKED`` so concurrent drains don't double-assign.
 
     Must be called inside a ``transaction.atomic()`` block.
+
+    What a runner may take (``built_engine_as_runner`` design §7):
+
+    - every runner takes runs strictly pinned to it (an issue's
+      ``assigned_runner``), whatever its ``pod_dispatch``;
+    - an own-agent runner also takes its non-strict pins and, as a
+      ``pod_member``, the unpinned pod queue (today's behaviour);
+    - an engine takes non-strict pins to itself and the unpinned pod queue
+      only while it is a ``pod_member`` and its machine's engine is not
+      paused.
+
+    All of it must also pass the usage rule
+    (:func:`~pi_dash.runner.services.permissions.filter_runs_usable_by_runner`).
+    Legacy ``managed_runner`` runs still queued are served to the runner they
+    are pinned to, like any other machine run.
     """
+    from pi_dash.runner.models import RunnerPodDispatch
+    from pi_dash.runner.services.dispatch_rules import engine_takes_pod_work
+
+    takes_pod_work = runner.pod_dispatch == RunnerPodDispatch.POD_MEMBER
+    if runner.is_engine:
+        takes_pod_work = engine_takes_pod_work(runner)
+        takes_own_nonstrict = takes_pod_work
+    else:
+        takes_own_nonstrict = True
+    eligible = Q(pinned_runner=runner, pin_strict=True)
+    if takes_own_nonstrict:
+        eligible |= Q(pinned_runner=runner)
+    if takes_pod_work:
+        eligible |= Q(pinned_runner__isnull=True)
     qs = (
         AgentRun.objects.select_for_update(skip_locked=True)
         .filter(
             pod=runner.pod,
             status=AgentRunStatus.QUEUED,
             # Both machine executors run through this daemon path; a
-            # managed run is a local run whose install Pi Dash owns.
+            # legacy managed run is a local run whose install Pi Dash owns.
             executor_kind__in=MACHINE_EXECUTORS,
         )
-        .filter(
-            Q(pinned_runner=runner) | Q(pinned_runner__isnull=True),
-        )
+        .filter(eligible)
     )
     qs = filter_runs_usable_by_runner(qs, runner)
-    from pi_dash.runner.models import RunnerProvisioning
-
-    if runner.provisioning == RunnerProvisioning.DESKTOP_BUNDLED:
-        qs = qs.filter(executor_kind=AgentExecutorKind.MANAGED_RUNNER, pinned_runner=runner)
-    else:
-        qs = qs.filter(executor_kind=AgentExecutorKind.LOCAL_RUNNER)
     return (
         qs
         # Pinned-to-me sorts before unpinned via an integer rank: 0 for the
@@ -355,7 +374,7 @@ def can_register_another(user_id, workspace_id) -> bool:
     return count_active(user_id, workspace_id) < Runner.MAX_PER_USER
 
 
-def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
+def pod_has_runner_for_issue_principal(pod, issue, run_creator_id, *, human: bool = True) -> bool:
     """Does ``pod`` contain any registered runner whose owner could serve a
     run on ``issue`` triggered by ``run_creator_id``?
 
@@ -387,48 +406,59 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
     serve this" case, not transient unavailability. See
     ``.ai_design/issue_runner/design.md`` §6.6.
 
-    For ``managed_runner`` issues the eligibility set is narrower: a managed
-    run is pinned to its creator's own desktop, so only a desktop-bundled
-    runner owned by the run creator could ever serve it. Transient status is
-    ignored here for the same reason as above — a closed laptop is not a
-    structural failure, and the creation path (§8.5) decides whether to wait.
+    Built-in engines (``built_engine_as_runner`` design §8, §9):
+
+    - an issue with ``assigned_runner`` is served by that runner alone, so it
+      is the only one counted, whatever its ``pod_dispatch`` (an assigned
+      ``pinned_only`` engine is eligible). For an automatic run (``human`` is
+      False) the usage rule must admit it, or the issue is bounced. A
+      person's run is not checked here: run creation refuses it with
+      ``assigned_runner_not_owner`` instead of bouncing the issue;
+    - otherwise an engine counts only as a ``pod_member``, and only for its
+      owner's own work: runs its owner starts, automatic runs on the owner's
+      issues, or anyone's run when the owner opted in to teammates' runs.
+      ``pinned_only`` runners of either kind never take unpinned work and are
+      not counted.
+
+    ``human`` defaults to True (the stricter engine rule) for callers that do
+    not know the trigger.
     """
     from pi_dash.db.models.issue import IssueAssignee
-    from pi_dash.runner.models import RunnerProvisioning
+    from pi_dash.runner.models import RunnerPodDispatch, RunnerProvisioning
+    from pi_dash.runner.services.dispatch_rules import live_assigned_runner, runner_may_take
 
-    if effective_executor_for_issue(issue) == AgentExecutorKind.MANAGED_RUNNER:
-        if run_creator_id is None:
-            return False
-        return (
-            Runner.objects.filter(
-                pod=pod,
-                owner_id=run_creator_id,
-                provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
-            )
-            .exclude(status=RunnerStatus.REVOKED)
-            .exists()
-        )
+    if getattr(issue, "assigned_runner_id", None) is not None:
+        assigned = live_assigned_runner(issue)
+        if assigned is not None:
+            if assigned.pod_id != pod.id:
+                return False
+            if human:
+                return True
+            return runner_may_take(assigned, created_by_id=run_creator_id, human=False, issue=issue)
 
-    eligible_owner_ids: set = set()
+    issue_people: set = set()
+    if issue.created_by_id is not None:
+        issue_people.add(issue.created_by_id)
+    issue_people.update(IssueAssignee.objects.filter(issue=issue).values_list("assignee_id", flat=True))
+    issue_people.discard(None)
+    eligible_owner_ids = set(issue_people)
     if run_creator_id is not None:
         eligible_owner_ids.add(run_creator_id)
-    if issue.created_by_id is not None:
-        eligible_owner_ids.add(issue.created_by_id)
-    eligible_owner_ids.update(
-        IssueAssignee.objects.filter(issue=issue).values_list("assignee_id", flat=True)
-    )
-    eligible_owner_ids.discard(None)
     if not eligible_owner_ids:
         return False
-    return (
-        Runner.objects.filter(
-            pod=pod,
-            owner_id__in=eligible_owner_ids,
-        )
+    candidates = (
+        Runner.objects.filter(pod=pod, owner_id__in=eligible_owner_ids)
         .exclude(status=RunnerStatus.REVOKED)
-        .exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
-        .exists()
+        .exclude(pod_dispatch=RunnerPodDispatch.PINNED_ONLY)
     )
+    if candidates.exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED).exists():
+        return True
+    # Engines: owner-only work unless the owner opted in (PO-3).
+    engine_owner_q = Q(owner_id=run_creator_id) if run_creator_id is not None else Q(pk__isnull=True)
+    if not human:
+        engine_owner_q |= Q(owner_id__in=issue_people)
+    engine_owner_q |= Q(dev_machine__engine_team_runs=True)
+    return candidates.filter(provisioning=RunnerProvisioning.DESKTOP_BUNDLED).filter(engine_owner_q).exists()
 
 
 def count_active(user_id, workspace_id) -> int:

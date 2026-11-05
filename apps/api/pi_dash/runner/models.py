@@ -204,6 +204,38 @@ class RunnerProvisioning(models.TextChoices):
     DESKTOP_BUNDLED = "desktop_bundled", "Provisioned by Pi Dash Desktop"
 
 
+class RunnerPodDispatch(models.TextChoices):
+    """Whether a runner takes unpinned work from its pod.
+
+    ``POD_MEMBER`` is the behaviour every own-agent runner has always had: it
+    takes runs pinned to it and the pod's unpinned queue. ``PINNED_ONLY``
+    takes only runs strictly pinned to it (an issue's ``assigned_runner``).
+    Built-in engine runners start ``PINNED_ONLY`` because pod work spends the
+    owner's wallet; the owner turns pod membership on per project
+    (``.ai_design/built_engine_as_runner/design.md`` §7).
+    """
+
+    PINNED_ONLY = "pinned_only", "Pinned work only"
+    POD_MEMBER = "pod_member", "Takes pod work"
+
+
+class EngineAutoPauseReason(models.TextChoices):
+    """Why the server paused a machine's built-in engine on its own.
+
+    Stored on ``DevMachine`` (not copied onto runner rows) so engine runners
+    created later are paused too. Empty means not auto-paused. Separate from
+    the owner's own switch, so clearing one never undoes the other
+    (design §8).
+    """
+
+    NONE = "", "Not paused"
+    ENGINE_SIGN_IN_REQUIRED = "engine_sign_in_required", "Engine sign-in required"
+    GATEWAY_SESSION_REVOKED = "gateway_session_revoked", "Gateway session revoked"
+    WALLET_EMPTY = "wallet_empty", "Wallet empty"
+    PROFILE_UNAVAILABLE = "profile_unavailable", "Model profile unavailable"
+    ENGINE_DISABLED = "engine_disabled", "Engine disabled on this instance"
+
+
 class AgentRunStatus(models.TextChoices):
     QUEUED = "queued", "Queued"
     ASSIGNED = "assigned", "Assigned"
@@ -360,6 +392,22 @@ class DevMachine(models.Model):
         default=RunnerProvisioning.MANUAL,
         db_index=True,
     )
+    # Built-in engine controls (design §8). They apply to every engine runner
+    # on this machine, including ones created later, which is why they live
+    # here rather than on each ``Runner`` row.
+    #
+    # The owner's "Pause the built-in engine" switch.
+    engine_paused_by_owner = models.BooleanField(default=False)
+    # Server-set automatic pause; empty when the engine is not auto-paused.
+    engine_auto_pause_reason = models.CharField(
+        max_length=32,
+        choices=EngineAutoPauseReason.choices,
+        blank=True,
+        default=EngineAutoPauseReason.NONE,
+    )
+    # "Teammates can start runs on my issues": when on, this machine's engine
+    # runners follow the ordinary-runner usage rule instead of owner-only.
+    engine_team_runs = models.BooleanField(default=False)
     last_seen_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -380,6 +428,15 @@ class DevMachine(models.Model):
     def __str__(self) -> str:
         return self.label or self.host_label or str(self.id)
 
+    @property
+    def display_name(self) -> str:
+        return self.label or self.host_label or "This computer"
+
+    @property
+    def engine_paused(self) -> bool:
+        """True when this machine's built-in engine takes no new work."""
+        return bool(self.engine_paused_by_owner or self.engine_auto_pause_reason)
+
 
 class RunnerQuerySet(models.QuerySet):
     def assignable(self):
@@ -396,7 +453,30 @@ class RunnerQuerySet(models.QuerySet):
             status=RunnerStatus.ONLINE,
             last_heartbeat_at__gte=timezone.now() - HEARTBEAT_GRACE,
             paused_at__isnull=True,
-        )
+        ).exclude(engine_paused_q())
+
+
+def engine_paused_q(prefix: str = "") -> models.Q:
+    """Engine runners whose machine's built-in engine is paused.
+
+    Either the owner's switch or a server-set automatic reason pauses every
+    engine runner on the machine; a paused engine is treated as offline for
+    matching (design §8, §9). Own-agent runners are never matched.
+
+    The machine test is an ``IN (subquery)`` rather than a join on purpose:
+    callers combine this with ``select_for_update()``, and Postgres refuses
+    ``FOR UPDATE`` on the nullable side of the outer join an excluded
+    ``dev_machine__…`` lookup would add.
+    """
+    paused_machines = DevMachine.objects.filter(
+        models.Q(engine_paused_by_owner=True) | models.Q(engine_auto_pause_reason__gt="")
+    ).values("pk")
+    return models.Q(
+        **{
+            f"{prefix}provisioning": RunnerProvisioning.DESKTOP_BUNDLED,
+            f"{prefix}dev_machine_id__in": paused_machines,
+        }
+    )
 
 
 class Runner(models.Model):
@@ -442,13 +522,21 @@ class Runner(models.Model):
     # Free-form host hint reported at enrollment time; surfaced in the UI.
     host_label = models.CharField(max_length=255, blank=True, default="")
     # Derived server-side from the enrolling DevMachine; immutable thereafter.
-    # ``desktop_bundled`` runners are excluded from unpinned matching, from
-    # "a local runner is available", and from ``MAX_PER_USER``.
+    # ``desktop_bundled`` means "built-in engine runner"; such runners are
+    # excluded from ``MAX_PER_USER`` and follow the engine usage rule.
     provisioning = models.CharField(
         max_length=24,
         choices=RunnerProvisioning.choices,
         default=RunnerProvisioning.MANUAL,
         db_index=True,
+    )
+    # Whether this runner takes unpinned pod work (design §7). New engine
+    # runners start ``pinned_only`` (see ``save``); own-agent runners keep
+    # today's ``pod_member`` behaviour.
+    pod_dispatch = models.CharField(
+        max_length=16,
+        choices=RunnerPodDispatch.choices,
+        default=RunnerPodDispatch.POD_MEMBER,
     )
     visibility = models.PositiveSmallIntegerField(
         choices=Visibility.choices,
@@ -525,6 +613,13 @@ class Runner(models.Model):
             ),
         ]
 
+    def __init__(self, *args, **kwargs):
+        # Remember whether the caller chose ``pod_dispatch`` so ``save`` only
+        # applies the engine default when nobody did.
+        explicit = "pod_dispatch" in kwargs
+        super().__init__(*args, **kwargs)
+        self._explicit_pod_dispatch = explicit
+
     def __str__(self) -> str:
         return f"{self.name} ({self.owner_id})"
 
@@ -544,7 +639,32 @@ class Runner(models.Model):
                 default = Pod.default_for_project_id(project_ids[0])
                 if default is not None:
                     self.pod = default
+        # An engine spends its owner's wallet, so it takes no pod work until
+        # the owner turns that on (design §7, §8). Applied at creation only:
+        # a later ``pod_dispatch`` change is the owner's explicit choice.
+        if self._state.adding and self.provisioning == RunnerProvisioning.DESKTOP_BUNDLED:
+            if not getattr(self, "_explicit_pod_dispatch", False):
+                self.pod_dispatch = RunnerPodDispatch.PINNED_ONLY
         super().save(*args, **kwargs)
+
+    @property
+    def is_engine(self) -> bool:
+        """True for a built-in engine runner (``provisioning = desktop_bundled``)."""
+        return self.provisioning == RunnerProvisioning.DESKTOP_BUNDLED
+
+    @property
+    def engine_paused(self) -> bool:
+        """True when this is an engine runner and its machine's engine is paused."""
+        if not self.is_engine or self.dev_machine_id is None:
+            return False
+        return self.dev_machine.engine_paused
+
+    @property
+    def machine_display_name(self) -> str:
+        """The machine name users see for this runner ("<machine> is offline")."""
+        if self.dev_machine_id is not None and self.dev_machine is not None:
+            return self.dev_machine.display_name
+        return self.host_label or self.name
 
     @property
     def project(self):
@@ -675,6 +795,16 @@ class Runner(models.Model):
                 affected_run_ids = [pk for pk, _ in active_runs]
                 affected_pod_ids = {pid for _, pid in active_runs if pid is not None}
 
+            # (3a) Strict pins are the run's target, never a preference: fail
+            # them rather than letting them drift to another runner, and make
+            # the runner's assigned issues pod-level (design
+            # ``built_engine_as_runner`` §7). Runs before the unpin below so
+            # ``SET_NULL`` on a later hard delete has nothing strict left.
+            from pi_dash.runner.services.dispatch_rules import detach_removed_runner
+
+            detach_removed_runner(self)
+
+            # (3b) Non-strict (repo-locality) pins go back to the pod queue.
             pinned_pod_ids = list(
                 AgentRun.objects.filter(pinned_runner=self, status=AgentRunStatus.QUEUED).values_list(
                     "pod_id", flat=True
@@ -953,6 +1083,11 @@ class AgentRun(models.Model):
         blank=True,
         related_name="pinned_agent_runs",
     )
+    # A strict pin is the run's execution target, not a locality preference:
+    # it comes from the issue's ``assigned_runner`` and is never released to
+    # the pod (offline sweep, busy rejection, release-pin, pause). Revoking
+    # the runner fails the run instead (design §7).
+    pin_strict = models.BooleanField(default=False)
     work_item = models.ForeignKey(
         "db.Issue",
         on_delete=models.SET_NULL,
