@@ -343,6 +343,7 @@ surface_snapshot! {
     db::SettingsOverlay,
     db::TABLE,
     db::Transaction,
+    db::TxConn,
     db::active_run_for,
     db::admin_get_by_instance_user_sql,
     db::client_from_settings,

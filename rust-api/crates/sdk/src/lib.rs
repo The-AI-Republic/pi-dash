@@ -828,6 +828,9 @@ pub mod db {
     pub use pidash_db::orchestration::querysets::fetch_is_workspace_member;
     pub use pidash_db::orchestration::runs::active_run_for;
     pub use pidash_db::orchestration::runs::latest_prior_run;
+    // NEWPIDASH-37: the SeaORM-over-sqlx bridge; the overlay's
+    // transaction-held calls need it after the Batch 3 ORM migration.
+    pub use pidash_db::orm_tx::TxConn;
     pub use pidash_db::pool::Pools; // also imported by the overlay as `pidash_db::Pools`.
     pub use pidash_db::redis::client_from_settings; // canonical settings client (PIDASHCONV-1593).
     pub use pidash_db::redis::RedisHandle;
