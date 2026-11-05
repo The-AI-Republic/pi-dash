@@ -79,6 +79,10 @@ pub struct Bridge {
     /// The currently-spawned one-shot subprocess, if a `run` is in flight (or
     /// just finished). `None` before the first `run`.
     proc: Option<MuseProcess>,
+    /// Earlier turns' processes whose groups may still have members (a dev
+    /// server the agent started). Kept owned until the bridge is finished, so
+    /// they live as long as the runtime, not just the turn.
+    retired: Vec<MuseProcess>,
     /// Events pulled off stdout while waiting synchronously for the first
     /// frame. Drained by `next_events` before touching the mpsc so no frame is
     /// lost.
@@ -109,6 +113,7 @@ impl Bridge {
             exit_rx,
             stderr_ring,
             proc: None,
+            retired: Vec::new(),
             pending: VecDeque::new(),
         })
     }
@@ -180,7 +185,11 @@ impl Bridge {
             self.stderr_ring.clone(),
         )
         .await?;
-        self.proc = Some(proc);
+        if let Some(old) = self.proc.replace(proc) {
+            self.retired.push(old);
+        }
+        // Dropping a retired process whose group is gone finishes it at once.
+        self.retired.retain(|p| !p.is_gone());
         let thread_id = self.wait_for_init(run_id).await?;
         Ok(BridgeCursor::new(run_id, thread_id, self.model.clone()))
     }
@@ -312,12 +321,11 @@ impl Bridge {
         }
     }
 
-    pub async fn shutdown(self, grace: Duration) -> Result<()> {
-        if let Some(proc) = self.proc {
-            proc.shutdown(grace, self.exit_rx.clone()).await
-        } else {
-            Ok(())
-        }
+    /// Finish the current turn's process and every retired one, in parallel.
+    pub async fn finish(self, grace: Duration) -> Result<()> {
+        let all = self.proc.into_iter().chain(self.retired);
+        futures_util::future::join_all(all.map(|p| p.finish(grace))).await;
+        Ok(())
     }
 
     pub fn process_handle(&self) -> AgentProcessHandle {

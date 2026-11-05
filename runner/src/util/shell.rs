@@ -264,7 +264,32 @@ pub fn login_shell_command_with_env(
     apply_run_env(&mut cmd);
     cmd.arg("-ilc").arg(SHELL_SCRIPT).arg("bash").arg(program);
     cmd.args(args);
+    new_session(&mut cmd);
     cmd
+}
+
+/// Start the child as the leader of a new session and process group
+/// (`setsid`), so everything the agent starts can be cleaned up as one group
+/// (`util::proctree`). Not `process_group(0)`: an interactive `bash -i` in a
+/// background group of a terminal-attached session stops itself with SIGTTIN
+/// before reaching `exec`. With `setsid` there is no controlling terminal and
+/// bash prints the two lines [`is_benign_login_shell_warning`] filters.
+/// Interrupts are unaffected: they target the leader pid, which is the agent
+/// itself because of `exec`. Design: `.ai_design/runner_cleanup` §4.1.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub fn new_session(cmd: &mut Command) {
+    // SAFETY: the closure runs between fork and exec, where only
+    // async-signal-safe work is allowed. It makes one syscall (`setsid`) and
+    // converts errno into an `io::Error` (`from_raw_os_error` does not
+    // allocate); no allocation, logging or locks.
+    unsafe {
+        cmd.pre_exec(|| {
+            nix::unistd::setsid()
+                .map(drop)
+                .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+        });
+    }
 }
 
 /// Read `binary --version` through the same wrapper a real spawn uses.
@@ -324,6 +349,96 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::path::PathBuf;
+
+    /// Runs only when re-executed by `spawn_from_a_pty_attached_parent_reaches_exec`
+    /// inside a pty session: spawn through the helper and expect the agent to
+    /// reach `exec`. Without `setsid` an interactive bash in a background
+    /// group of a terminal-attached session stops itself with SIGTTIN.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pty_inner_spawn_reaches_exec() {
+        if std::env::var_os("PIDASH_PTY_INNER").is_none() {
+            return;
+        }
+        let mut cmd = login_shell_command("sh", &["-c", "echo reached-exec"], None);
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let out = tokio::time::timeout(std::time::Duration::from_secs(20), cmd.output())
+            .await
+            .expect("agent never reached exec (SIGTTIN hang?)")
+            .expect("spawn failed");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "reached-exec");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(unsafe_code)]
+    fn spawn_from_a_pty_attached_parent_reaches_exec() {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let pty = nix::pty::openpty(None, None).expect("openpty");
+        let slave = std::fs::File::from(pty.slave);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "util::shell::tests::pty_inner_spawn_reaches_exec",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("PIDASH_PTY_INNER", "1")
+            .stdin(slave.try_clone().unwrap())
+            .stdout(slave.try_clone().unwrap())
+            .stderr(slave.try_clone().unwrap());
+        // SAFETY: setsid and ioctl are async-signal-safe; nothing allocates.
+        unsafe {
+            child.pre_exec(|| {
+                nix::unistd::setsid().map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+                // Make the pty our controlling terminal, like a real terminal
+                // running `pidash __run` in the foreground.
+                if libc::ioctl(0, libc::TIOCSCTTY as _, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let spawned = child.spawn().expect("spawn pty child");
+        // The Command still holds the slave fds; drop it so the master sees
+        // EOF once the child exits.
+        drop(child);
+        drop(slave);
+        let mut child = spawned;
+        // Drain the master so the child never blocks on output.
+        let mut master = std::fs::File::from(pty.master);
+        let _fd = master.as_raw_fd();
+        let reader = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = master.read_to_end(&mut buf);
+            String::from_utf8_lossy(&buf).into_owned()
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let status = loop {
+            if let Some(st) = child.try_wait().unwrap() {
+                break Some(st);
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let output = reader.join().unwrap_or_default();
+        let status = status.unwrap_or_else(|| panic!("pty child hung; output:\n{output}"));
+        assert!(status.success(), "pty child failed; output:\n{output}");
+        assert!(
+            output.contains("1 passed"),
+            "inner test did not run; output:\n{output}"
+        );
+    }
 
     fn argv(cmd: &Command) -> Vec<OsString> {
         cmd.as_std().get_args().map(|a| a.to_os_string()).collect()

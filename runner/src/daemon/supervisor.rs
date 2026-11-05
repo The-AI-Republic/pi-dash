@@ -80,6 +80,13 @@ impl Supervisor {
             state,
             approvals: _supervisor_approvals,
         } = self;
+        // Process ownership (runner cleanup §4.1): take the exclusive
+        // instance lock, list this instance's stale proc records *before* any
+        // runner can spawn, and recover them in the background. Held until
+        // the daemon exits.
+        let (_proc_ownership, recovery_handle) =
+            crate::daemon::proc_cleanup::startup(&paths.data_dir);
+
         // Daemon-level state has no single runner_id any more — runners
         // come and go under one connection. Per-instance state still
         // holds its own runner_id (set in RunnerInstance::new).
@@ -273,6 +280,22 @@ impl Supervisor {
         if let Some(h) = replay_retry_handle {
             h.abort();
             let _ = h.await;
+        }
+        if let Some(h) = recovery_handle {
+            h.abort();
+        }
+
+        // Finish every agent process tree before anything is published:
+        // stop accepting new spawns, snapshot the live trees and finish them
+        // in parallel (≤ 10 s), so the drain below reports runs whose
+        // processes are already gone. Total stays inside launchd's 20 s
+        // `ExitTimeOut` (finish ≤ 10 s, drain ≤ 5 s).
+        let unresolved = crate::util::proctree::shutdown_all(Duration::from_secs(10)).await;
+        if unresolved > 0 {
+            tracing::warn!(
+                unresolved,
+                "some agent process groups could not be confirmed gone; their records are kept for the next start"
+            );
         }
 
         // Drain in-flight runs before tearing down: send RunFailed with
@@ -1335,8 +1358,24 @@ impl RunnerLoop {
             command_rx: rx,
             active_tx,
         };
+        // One process scope per chat runtime: its agent trees are finished
+        // when the runtime ends (Release, idle timeout, Close, Shutdown), not
+        // per turn (runner cleanup §4.2).
+        let proc_scope = crate::util::proctree::ProcScope {
+            kind: crate::util::proctree::ScopeKind::Chat,
+            id: chat_session_id.to_string(),
+            runner_id: Some(self.runner_config.runner_id.to_string()),
+        };
         tokio::spawn(async move {
-            worker.run(chat_session_id).await;
+            crate::util::proctree::PROC_SCOPE
+                .scope(proc_scope, worker.run(chat_session_id))
+                .await;
+            // Safety net for a bridge dropped without being finished.
+            crate::util::proctree::finish_scope(
+                crate::util::proctree::ScopeKind::Chat,
+                &chat_session_id.to_string(),
+            )
+            .await;
             let _ = done_tx.send(());
         });
         tx
@@ -1553,24 +1592,37 @@ impl RunnerLoop {
                             approvals,
                             out,
                             cancel,
+                            terminal: None,
                         };
-                        if let Err(e) = worker
+                        let result = worker
                             .run(run_id, prompt, repo_url, expected_codex_model)
-                            .await
-                        {
+                            .await;
+                        // Safety net: whichever path ended the run (including
+                        // a bridge dropped mid-startup), no process tree of it
+                        // outlives the worker.
+                        crate::util::proctree::finish_scope(
+                            crate::util::proctree::ScopeKind::Run,
+                            &run_id.to_string(),
+                        )
+                        .await;
+                        if let Err(e) = result {
                             tracing::error!("run {run_id} failed: {e:#}");
-                            let _ = worker
-                                .out
-                                .send(ClientMsg::RunFailed {
-                                    run_id,
-                                    reason: FailureReason::Internal,
-                                    detail: Some(format!("{e:#}")),
-                                    ended_at: Utc::now(),
-                                    tokens: None,
-                                    model: None,
-                                })
-                                .await;
-                            worker.state.set_current_run(None).await;
+                            // During daemon shutdown the drain reports the run
+                            // as `DaemonRestart`; do not race it.
+                            if !crate::util::proctree::shutting_down() {
+                                let _ = worker
+                                    .out
+                                    .send(ClientMsg::RunFailed {
+                                        run_id,
+                                        reason: FailureReason::Internal,
+                                        detail: Some(format!("{e:#}")),
+                                        ended_at: Utc::now(),
+                                        tokens: None,
+                                        model: None,
+                                    })
+                                    .await;
+                                worker.state.set_current_run(None).await;
+                            }
                         }
                         let _ = done_tx.send(());
                     });
@@ -2160,7 +2212,7 @@ impl ChatWorker {
                             })
                             .await;
                         if let Some(bridge) = bridge.take() {
-                            bridge.shutdown(Duration::from_secs(5)).await.ok();
+                            bridge.finish(Duration::from_secs(5)).await.ok();
                         }
                         workspace_path.take();
                         started_sent = false;
@@ -2192,7 +2244,7 @@ impl ChatWorker {
                                 })
                                 .await;
                             if let Some(bridge) = bridge.take() {
-                                bridge.shutdown(Duration::from_secs(5)).await.ok();
+                                bridge.finish(Duration::from_secs(5)).await.ok();
                             }
                             started_sent = false;
                             false
@@ -2239,7 +2291,7 @@ impl ChatWorker {
             }
         }
         if let Some(bridge) = bridge.take() {
-            bridge.shutdown(Duration::from_secs(5)).await.ok();
+            bridge.finish(Duration::from_secs(5)).await.ok();
         }
         let _ = self.active_tx.send(false);
         self.state.set_chat_active(false).await;
@@ -2322,7 +2374,7 @@ impl ChatWorker {
 
         if bridge.as_ref().is_some_and(bridge_has_exited) {
             if let Some(bridge) = bridge.take() {
-                bridge.shutdown(Duration::from_secs(1)).await.ok();
+                bridge.finish(Duration::from_secs(1)).await.ok();
             }
             *started_sent = false;
         }
@@ -2442,7 +2494,7 @@ impl ChatWorker {
 
         if bridge_slot.as_ref().is_some_and(bridge_has_exited) {
             if let Some(bridge) = bridge_slot.take() {
-                bridge.shutdown(Duration::from_secs(1)).await.ok();
+                bridge.finish(Duration::from_secs(1)).await.ok();
             }
             *started_sent = false;
         }
@@ -2533,7 +2585,7 @@ impl ChatWorker {
                 let close_after_turn = matches!(command, Some(ChatCommand::Close { .. }));
                 tracing::info!(?command, %chat_session_id, "chat turn interrupted during engine startup");
                 if let Some(bridge) = bridge_slot.take() {
-                    bridge.shutdown(Duration::from_secs(5)).await.ok();
+                    bridge.finish(Duration::from_secs(5)).await.ok();
                 }
                 *started_sent = false;
                 self.out
@@ -3121,6 +3173,10 @@ struct AssignWorker {
     approvals: ApprovalRouter,
     out: RunnerOut,
     cancel: tokio_util::sync::CancellationToken,
+    /// The run's terminal message (`RunCompleted` / `RunFailed`), held until
+    /// the agent's process tree is finished so completion is never published
+    /// while the run's processes are still alive (runner cleanup §4.1).
+    terminal: Option<ClientMsg>,
 }
 
 struct RunMetadata {
@@ -3179,10 +3235,21 @@ impl AssignWorker {
         // Scope the run id over everything this run does so every agent
         // subprocess the bridges spawn (and re-spawn per turn) inherits
         // `PIDASH_RUN_ID` — see `util::shell::RUN_ENV`.
-        crate::util::shell::RUN_ENV
+        //
+        // The process scope tags every agent process tree of this run
+        // (`PIDASH_PROC_TAG`, proc records) — see `util::proctree`.
+        let proc_scope = crate::util::proctree::ProcScope {
+            kind: crate::util::proctree::ScopeKind::Run,
+            id: run_id.to_string(),
+            runner_id: Some(self.runner_config.runner_id.to_string()),
+        };
+        crate::util::proctree::PROC_SCOPE
             .scope(
-                crate::util::shell::RunEnv { run_id },
-                self.handle_assign_inner(run_id, prompt, repo_url, expected_codex_model),
+                proc_scope,
+                crate::util::shell::RUN_ENV.scope(
+                    crate::util::shell::RunEnv { run_id },
+                    self.handle_assign_inner(run_id, prompt, repo_url, expected_codex_model),
+                ),
             )
             .await
     }
@@ -3295,6 +3362,13 @@ impl AssignWorker {
         {
             Ok(b) => b,
             Err(e) => {
+                // A bridge that failed mid-startup was dropped; make sure its
+                // process tree is gone before the failure is published.
+                crate::util::proctree::finish_scope(
+                    crate::util::proctree::ScopeKind::Run,
+                    &run_id.to_string(),
+                )
+                .await;
                 hist.append(&HistoryEntry::Footer {
                     ts: Utc::now(),
                     final_status: "failed".to_string(),
@@ -3304,16 +3378,19 @@ impl AssignWorker {
                 .await
                 .ok();
                 let reason = self.crash_reason();
-                self.send(ClientMsg::RunFailed {
+                self.terminal = Some(ClientMsg::RunFailed {
                     run_id,
                     reason,
                     detail: Some(format!("{e:#}")),
                     ended_at: Utc::now(),
                     tokens: None,
                     model: None,
-                })
-                .await;
-                self.state.set_current_run(None).await;
+                });
+                // Spawning is refused once daemon shutdown began; the drain
+                // owns that run's report.
+                if self.publish_terminal().await {
+                    self.state.set_current_run(None).await;
+                }
                 return Ok(());
             }
         };
@@ -3349,7 +3426,7 @@ impl AssignWorker {
             // The handshake was abandoned mid-flight, so the bridge is
             // discarded. On shutdown the daemon's drain reports the run as
             // `DaemonRestart`; only an explicit cancel is reported here.
-            bridge.shutdown(Duration::from_secs(5)).await.ok();
+            bridge.finish(Duration::from_secs(5)).await.ok();
             let cancelled = self.cancel.is_cancelled();
             hist.append(&HistoryEntry::Footer {
                 ts: Utc::now(),
@@ -3383,17 +3460,19 @@ impl AssignWorker {
                 })
                 .await
                 .ok();
-                self.send(ClientMsg::RunFailed {
+                // Clean up before completion is published.
+                bridge.finish(Duration::from_secs(5)).await.ok();
+                self.terminal = Some(ClientMsg::RunFailed {
                     run_id,
                     reason: self.crash_reason(),
                     detail: Some(detail),
                     ended_at: Utc::now(),
                     tokens: None,
                     model: None,
-                })
-                .await;
-                bridge.shutdown(Duration::from_secs(5)).await.ok();
-                self.state.set_current_run(None).await;
+                });
+                if self.publish_terminal().await {
+                    self.state.set_current_run(None).await;
+                }
                 return Ok(());
             }
         };
@@ -3420,12 +3499,15 @@ impl AssignWorker {
         })
         .await?;
 
-        // Pump events until terminal.
-        let outcome = self
+        // Pump events until terminal. The terminal message is held in
+        // `self.terminal` and published only after the process tree is
+        // finished — on every path, including the error return.
+        let pumped = self
             .pump_events(&mut bridge, &mut cursor, &mut hist, &workspace_path)
-            .await?;
-
-        bridge.shutdown(Duration::from_secs(5)).await.ok();
+            .await;
+        bridge.finish(Duration::from_secs(5)).await.ok();
+        let published = self.publish_terminal().await;
+        let outcome = pumped?;
 
         let summary = RunSummary {
             run_id,
@@ -3452,8 +3534,29 @@ impl AssignWorker {
             return Ok(());
         }
 
-        self.state.set_current_run(None).await;
+        if published {
+            self.state.set_current_run(None).await;
+        }
         Ok(())
+    }
+
+    /// Publish the held terminal message. Returns `false` when daemon
+    /// shutdown has begun: the shutdown drain then reports the run as
+    /// `DaemonRestart` (it needs the run still marked in flight), and a
+    /// crash report from agents the shutdown itself killed would race it.
+    async fn publish_terminal(&mut self) -> bool {
+        if crate::util::proctree::shutting_down() {
+            if self.terminal.take().is_some() {
+                tracing::info!(
+                    "daemon shutting down; leaving the run's terminal report to the drain"
+                );
+            }
+            return false;
+        }
+        if let Some(msg) = self.terminal.take() {
+            self.send(msg).await;
+        }
+        true
     }
 
     async fn pump_events(
@@ -3543,14 +3646,14 @@ impl AssignWorker {
                             .await;
                         run_events.flush_before_lifecycle(&self.out).await;
                         let metadata = self.run_metadata().await;
-                        self.send(ClientMsg::RunFailed {
+                        self.terminal = Some(ClientMsg::RunFailed {
                             run_id: cursor.run_id(),
                             reason,
                             detail: Some(detail.clone()),
                             ended_at: Utc::now(),
                             tokens: metadata.tokens,
                             model: metadata.model,
-                        }).await;
+                        });
                         hist.append(&HistoryEntry::Footer {
                             ts: Utc::now(),
                             final_status: "failed".into(),
@@ -3595,14 +3698,14 @@ impl AssignWorker {
                     let detail = self.build_failure_detail(&base, bridge).await;
                     run_events.flush_before_lifecycle(&self.out).await;
                     let metadata = self.run_metadata().await;
-                    self.send(ClientMsg::RunFailed {
+                    self.terminal = Some(ClientMsg::RunFailed {
                         run_id: cursor.run_id(),
                         reason: FailureReason::Timeout,
                         detail: Some(detail.clone()),
                         ended_at: Utc::now(),
                         tokens: metadata.tokens,
                         model: metadata.model,
-                    }).await;
+                    });
                     hist.append(&HistoryEntry::Footer {
                         ts: Utc::now(),
                         final_status: "failed".into(),
@@ -3972,14 +4075,13 @@ impl AssignWorker {
             } => {
                 run_events.flush_before_lifecycle(&self.out).await;
                 let metadata = self.run_metadata().await;
-                self.send(ClientMsg::RunCompleted {
+                self.terminal = Some(ClientMsg::RunCompleted {
                     run_id,
                     done_payload: done_payload.clone(),
                     ended_at: Utc::now(),
                     tokens: metadata.tokens,
                     model: metadata.model,
-                })
-                .await;
+                });
                 hist.append(&HistoryEntry::Footer {
                     ts: Utc::now(),
                     final_status: "completed".into(),
@@ -4011,15 +4113,14 @@ impl AssignWorker {
                 let enriched = self.build_failure_detail(&base, bridge).await;
                 run_events.flush_before_lifecycle(&self.out).await;
                 let metadata = self.run_metadata().await;
-                self.send(ClientMsg::RunFailed {
+                self.terminal = Some(ClientMsg::RunFailed {
                     run_id,
                     reason,
                     detail: Some(enriched.clone()),
                     ended_at: Utc::now(),
                     tokens: metadata.tokens,
                     model: metadata.model,
-                })
-                .await;
+                });
                 hist.append(&HistoryEntry::Footer {
                     ts: Utc::now(),
                     final_status: "failed".into(),
@@ -4291,6 +4392,7 @@ mod tests {
                 approvals: ApprovalRouter::new(),
                 out: RunnerOut::new(config.runner_id, tx),
                 cancel: tokio_util::sync::CancellationToken::new(),
+                terminal: None,
             };
             worker
                 .run(
@@ -4321,6 +4423,259 @@ mod tests {
             );
             assert!(!wd.join(".git").exists());
         }
+    }
+
+    /// Fake `claude` for the ordering tests: writes the pid of a `sleep`
+    /// child to `$PIDFILE`, then runs `body`. The child's stdio is detached so
+    /// only the leader holds the agent's stdout.
+    #[cfg(unix)]
+    fn ordering_fixture(body: &str) -> (tempfile::TempDir, AssignWorker, mpsc::Receiver<crate::cloud::protocol::Envelope<ClientMsg>>, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        paths.ensure().unwrap();
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir_all(&wd).unwrap();
+        let pidfile = tmp.path().join("child.pid");
+        let fake = tmp.path().join("fake-claude");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nsleep 300 </dev/null >/dev/null 2>&1 &\necho $! > '{}'\n{body}\n",
+                pidfile.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut config = runner_config("ordering", "TEST", wd);
+        config.project_slug = None;
+        config.agent.kind = AgentKind::ClaudeCode;
+        config.claude_code.binary = fake.to_string_lossy().into_owned();
+        let runner_paths = paths.for_runner(config.runner_id);
+        runner_paths.ensure().unwrap();
+        let (tx, rx) = mpsc::channel(64);
+        let worker = AssignWorker {
+            runner_paths,
+            daemon_paths: paths,
+            runner_config: config.clone(),
+            state: StateHandle::new(Config {
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![config.clone()],
+                cli: None,
+            }),
+            approvals: ApprovalRouter::new(),
+            out: RunnerOut::new(config.runner_id, tx),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            terminal: None,
+        };
+        (tmp, worker, rx, pidfile)
+    }
+
+    #[cfg(unix)]
+    const INIT: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess_order"}'"#;
+    #[cfg(unix)]
+    const RESULT: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess_order","result":"done","usage":{"input_tokens":1,"output_tokens":1}}'"#;
+
+    /// Run the worker and return the terminal message, asserting the agent's
+    /// child was already gone when it was received.
+    #[cfg(unix)]
+    async fn terminal_after_cleanup(
+        mut worker: AssignWorker,
+        mut rx: mpsc::Receiver<crate::cloud::protocol::Envelope<ClientMsg>>,
+        pidfile: &std::path::Path,
+        cancel_after_start: bool,
+    ) -> ClientMsg {
+        let cancel = worker.cancel.clone();
+        let run = tokio::spawn(async move {
+            worker
+                .run(uuid::Uuid::new_v4(), "hi".into(), None, None)
+                .await
+                .unwrap();
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let msg = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .expect("worker produced a terminal message")
+                .expect("channel open")
+                .body;
+            match msg {
+                ClientMsg::RunStarted { .. } if cancel_after_start => cancel.cancel(),
+                ClientMsg::RunCompleted { .. }
+                | ClientMsg::RunFailed { .. }
+                | ClientMsg::RunCancelled { .. } => {
+                    let pid: i32 = std::fs::read_to_string(pidfile)
+                        .expect("fake agent started its child")
+                        .trim()
+                        .parse()
+                        .unwrap();
+                    assert!(
+                        !crate::agent::tracked::tests::alive(pid),
+                        "terminal message published while the agent's child {pid} was alive"
+                    );
+                    run.await.unwrap();
+                    return msg;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completion_is_published_only_after_the_tree_is_gone() {
+        let (_tmp, worker, rx, pidfile) =
+            ordering_fixture(&format!("read -r _\n{INIT}\n{RESULT}\ncat >/dev/null"));
+        let msg = terminal_after_cleanup(worker, rx, &pidfile, false).await;
+        assert!(matches!(msg, ClientMsg::RunCompleted { .. }), "{msg:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failure_is_published_only_after_the_tree_is_gone() {
+        // The agent dies without a result (stdout closes) and leaves a child.
+        let (_tmp, worker, rx, pidfile) = ordering_fixture(&format!("read -r _\n{INIT}\nexit 3"));
+        let msg = terminal_after_cleanup(worker, rx, &pidfile, false).await;
+        assert!(matches!(msg, ClientMsg::RunFailed { .. }), "{msg:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_failure_is_published_only_after_the_tree_is_gone() {
+        // No init frame: the handshake fails.
+        let (_tmp, worker, rx, pidfile) = ordering_fixture("exit 1");
+        let msg = terminal_after_cleanup(worker, rx, &pidfile, false).await;
+        assert!(matches!(msg, ClientMsg::RunFailed { .. }), "{msg:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancel_is_acknowledged_only_after_the_tree_is_gone() {
+        let (_tmp, worker, rx, pidfile) =
+            ordering_fixture(&format!("read -r _\n{INIT}\nwhile :; do sleep 1; done"));
+        let msg = terminal_after_cleanup(worker, rx, &pidfile, true).await;
+        assert!(matches!(msg, ClientMsg::RunCancelled { .. }), "{msg:?}");
+    }
+
+    /// How a chat runtime ends in [`chat_tree_lives_for_the_runtime`].
+    #[cfg(unix)]
+    enum ChatEnd {
+        Release,
+        Close,
+        /// The command channel closes: the same exit as the idle timeout.
+        Idle,
+    }
+
+    /// A chat runtime driving a fake multi-turn `claude` that starts a
+    /// `sleep` child on its first turn. The child must survive between turns
+    /// and be gone once the runtime has ended.
+    #[cfg(unix)]
+    async fn chat_tree_lives_for_the_runtime(end: ChatEnd) {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir_all(&wd).unwrap();
+        let pidfile = tmp.path().join("child.pid");
+        let fake = tmp.path().join("fake-claude");
+        let init = r#"{"type":"system","subtype":"init","session_id":"sess_chat"}"#;
+        let result = r#"{"type":"result","subtype":"success","session_id":"sess_chat","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nsleep 300 </dev/null >/dev/null 2>&1 &\necho $! > '{pf}'\n\
+                 while IFS= read -r _; do printf '%s\\n' '{init}'; printf '%s\\n' '{result}'; done\n",
+                pf = pidfile.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut config = runner_config("chat", "WEB", wd);
+        config.project_slug = None;
+        config.agent.kind = AgentKind::ClaudeCode;
+        config.claude_code.binary = fake.to_string_lossy().into_owned();
+        let (tx, mut rx) = mpsc::channel::<Envelope<ClientMsg>>(64);
+        let (cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (active_tx, _active_rx) = watch::channel(false);
+        let mut chat = ChatWorker {
+            runner_config: config.clone(),
+            state: StateHandle::new(Config {
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![config.clone()],
+                cli: None,
+            }),
+            approvals: ApprovalRouter::new(),
+            out: RunnerOut::new(config.runner_id, tx),
+            command_rx: cmd_rx,
+            active_tx,
+        };
+        let session = uuid::Uuid::new_v4();
+        let worker = tokio::spawn(async move { chat.run(session).await });
+        let turn = |content: &str| {
+            ChatCommand::Message(ChatTurn {
+                message_id: uuid::Uuid::new_v4(),
+                content: content.into(),
+                cwd: None,
+                model: None,
+                local_thread_id: None,
+                local_session_id: None,
+            })
+        };
+        async fn turn_done(rx: &mut mpsc::Receiver<Envelope<ClientMsg>>) {
+            loop {
+                let msg = tokio::time::timeout(Duration::from_secs(60), rx.recv())
+                    .await
+                    .expect("chat turn finished")
+                    .expect("channel open")
+                    .body;
+                match msg {
+                    ClientMsg::ChatMessageCompleted { .. } => return,
+                    ClientMsg::ChatFailed { detail, .. } => panic!("chat turn failed: {detail:?}"),
+                    _ => {}
+                }
+            }
+        }
+        cmd_tx.send(turn("one")).await.unwrap();
+        turn_done(&mut rx).await;
+        let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        cmd_tx.send(turn("two")).await.unwrap();
+        turn_done(&mut rx).await;
+        assert!(
+            crate::agent::tracked::tests::alive(pid),
+            "the agent's child survives between turns of a live runtime"
+        );
+        match end {
+            ChatEnd::Release => cmd_tx.send(ChatCommand::Release).await.unwrap(),
+            ChatEnd::Close => cmd_tx.send(ChatCommand::Close { reason: None }).await.unwrap(),
+            ChatEnd::Idle => drop(cmd_tx),
+        }
+        tokio::time::timeout(Duration::from_secs(30), worker)
+            .await
+            .expect("chat runtime ended")
+            .unwrap();
+        assert!(
+            !crate::agent::tracked::tests::alive(pid),
+            "the agent's child is gone once the runtime ended"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chat_tree_is_finished_on_release() {
+        chat_tree_lives_for_the_runtime(ChatEnd::Release).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chat_tree_is_finished_on_close() {
+        chat_tree_lives_for_the_runtime(ChatEnd::Close).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chat_tree_is_finished_when_the_runtime_idles_out() {
+        chat_tree_lives_for_the_runtime(ChatEnd::Idle).await;
     }
 
     #[tokio::test]

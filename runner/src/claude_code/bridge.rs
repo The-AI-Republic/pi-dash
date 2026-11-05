@@ -202,8 +202,8 @@ impl Bridge {
         self.proc.interrupt().await
     }
 
-    pub async fn shutdown(self, grace: Duration) -> Result<()> {
-        self.proc.shutdown(grace).await
+    pub async fn finish(self, grace: Duration) -> Result<()> {
+        self.proc.finish(grace).await
     }
 
     pub fn process_handle(&self) -> crate::agent::AgentProcessHandle {

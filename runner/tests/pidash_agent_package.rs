@@ -274,7 +274,7 @@ while read -r rest; do :; done
     })
     .await
     .unwrap();
-    bridge.shutdown(Duration::from_secs(1)).await.unwrap();
+    bridge.finish(Duration::from_secs(1)).await.unwrap();
     assert!(cwd.join("package-started").exists());
     assert_eq!(
         std::fs::read_to_string(cwd.join("notes.txt")).unwrap(),

@@ -4,6 +4,7 @@
 //! not have to know which underlying CLI is driving a run.
 
 pub mod package;
+pub mod tracked;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -293,7 +294,6 @@ pub struct RunPayload {
     pub prompt: String,
     pub model: Option<String>,
 }
-
 
 /// Build the Pi Dash-controlled environment for this runner's agent.
 ///
@@ -586,14 +586,14 @@ impl AgentBridge {
         }
     }
 
-    pub async fn shutdown(self, grace: Duration) -> Result<()> {
+    pub async fn finish(self, grace: Duration) -> Result<()> {
         match self {
-            AgentBridge::Codex(b) => b.server.shutdown(grace).await,
-            AgentBridge::ClaudeCode(b) => b.shutdown(grace).await,
-            AgentBridge::CursorAgent(b) => b.shutdown(grace).await,
-            AgentBridge::OpenClaw(b) => b.shutdown(grace).await,
-            AgentBridge::Grok(b) => b.shutdown(grace).await,
-            AgentBridge::MuseCode(b) => b.shutdown(grace).await,
+            AgentBridge::Codex(b) => b.server.finish(grace).await,
+            AgentBridge::ClaudeCode(b) => b.finish(grace).await,
+            AgentBridge::CursorAgent(b) => b.finish(grace).await,
+            AgentBridge::OpenClaw(b) => b.finish(grace).await,
+            AgentBridge::Grok(b) => b.finish(grace).await,
+            AgentBridge::MuseCode(b) => b.finish(grace).await,
         }
     }
 

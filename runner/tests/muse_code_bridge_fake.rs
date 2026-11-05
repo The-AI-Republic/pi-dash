@@ -362,7 +362,7 @@ async fn shutdown_returns_promptly_after_the_process_exits() {
 
     let started = tokio::time::Instant::now();
     bridge
-        .shutdown(Duration::from_secs(30))
+        .finish(Duration::from_secs(30))
         .await
         .expect("shutdown");
     assert!(
