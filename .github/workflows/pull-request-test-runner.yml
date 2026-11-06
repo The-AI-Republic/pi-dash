@@ -98,6 +98,17 @@ jobs:
           Expand-Archive -LiteralPath $archive -DestinationPath $destination
           $destination | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
+      # `include` in dist-workspace.toml copies runner/dist-engine/engine into
+      # every archive, stub ones included, so it has to exist. The release
+      # workflow stages the real engine (runner/scripts/stage_engine.py); this
+      # job only exercises the installers, so an empty placeholder is enough.
+      - name: Stage a placeholder built-in engine
+        shell: pwsh
+        run: |
+          $stage = 'runner/dist-engine/engine'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Set-Content -Path (Join-Path $stage 'README.txt') -Value 'placeholder for cargo dist build --artifacts=lies'
+
       - name: Generate cargo-dist installer with stub artifacts
         shell: pwsh
         run: cargo dist build --artifacts=lies

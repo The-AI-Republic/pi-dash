@@ -319,6 +319,13 @@ impl EngineManager {
 
     /// Machine-level engine state at `now`.
     pub fn status_at(&self, now: DateTime<Utc>) -> EngineStatusInfo {
+        // A background install can resolve the pinned binary after this
+        // manager was constructed. Keep an existing startup path stable,
+        // but pick up the first successful install without a daemon restart.
+        let binary = self
+            .binary
+            .as_deref()
+            .or_else(|| super::locate::resolved().map(|engine| engine.binary.as_path()));
         let credential = self.tokens.engine_credential();
         let st = self.state();
         let local = match &credential {
@@ -360,7 +367,7 @@ impl EngineManager {
                 p.reason_code.clone()
             }
         });
-        let (state, reason_code) = if self.binary.is_none() {
+        let (state, reason_code) = if binary.is_none() {
             (
                 EngineState::Unavailable,
                 Some(reason::ENGINE_NOT_INSTALLED.to_string()),
@@ -394,7 +401,7 @@ impl EngineManager {
                 .as_ref()
                 .filter(|p| p.available && !p.model.is_empty())
                 .map(|p| p.model.clone()),
-            binary: self.binary.as_ref().map(|b| b.display().to_string()),
+            binary: binary.map(|b| b.display().to_string()),
             profile_fetched_at: st.profile_fetched_at,
         }
     }
@@ -749,5 +756,48 @@ mod tests {
             st.reason_code.as_deref(),
             Some(reason::ENGINE_NOT_INSTALLED)
         );
+    }
+
+    #[test]
+    fn a_binary_installed_after_startup_makes_the_engine_available() {
+        // Resolution is process-wide and immutable once successful. Run in
+        // a child so this test does not change other tests' engine lookup.
+        const CHILD: &str = "PIDASH_TEST_LATE_ENGINE_INSTALL";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "engine::manager::tests::a_binary_installed_after_startup_makes_the_engine_available"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let m = EngineManager::new(
+            None,
+            paths(tmp.path()),
+            WorkspaceTokens::from_cli(Some(&cli(chrono::Duration::days(10)))),
+            None,
+        );
+        m.apply_profile(serde_json::from_str(&profile_json(true, "")).unwrap());
+        assert_eq!(
+            m.status().reason_code.as_deref(),
+            Some(reason::ENGINE_NOT_INSTALLED)
+        );
+        let installed = tmp.path().join("pidash-agent-engine");
+        std::fs::write(&installed, "fake engine").unwrap();
+        super::super::locate::init_at_daemon_start(&crate::config::schema::EngineSection {
+            binary: Some(installed.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        let status = m.status();
+        assert_eq!(status.state, EngineState::Available);
+        assert_eq!(status.binary, Some(installed.display().to_string()));
+        assert_eq!(status.reason_code, None);
     }
 }

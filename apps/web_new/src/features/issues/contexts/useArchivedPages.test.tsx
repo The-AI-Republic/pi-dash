@@ -197,6 +197,40 @@ describe("useArchivedPages grouped list", () => {
     expect(result.current.sectionMore(result.current.sections[0]!)).toBe(false);
   });
 
+  it("orders state sections by the explicit workflow order, not the envelope's (NEWPIDASH-46)", async () => {
+    // States created out of workflow order: Done before Backlog.
+    const done = "823e4567-e89b-12d3-a456-426614174007";
+    const backlog = "a23e4567-e89b-12d3-a456-426614174009";
+    const wrapper = mount(() =>
+      grouped(
+        {
+          [done]: { results: [row(ID_A, "Done one", 1)], total_results: 1 },
+          [backlog]: { results: [row(ID_B, "Backlog one", 2)], total_results: 1 },
+        },
+        2
+      )
+    );
+    const { result } = renderHook(
+      () =>
+        useArchivedPages(
+          SLUG,
+          PROJECT,
+          {},
+          "state",
+          "sort_order",
+          new Map([
+            [done, "Done"],
+            [backlog, "Backlog"],
+          ]),
+          true,
+          [backlog, done]
+        ),
+      { wrapper }
+    );
+    await waitFor(() => expect(result.current.sections).toHaveLength(2));
+    expect(result.current.sections.map((section) => section.key)).toEqual([backlog, done]);
+  });
+
   it("ignores a section paging request with nothing left", async () => {
     const wrapper = mount(() => grouped({ [STATE_A]: { results: [row(ID_A, "First", 1)], total_results: 1 } }, 1));
     const { result } = renderHook(() => usePages({}, "state", "sort_order"), { wrapper });

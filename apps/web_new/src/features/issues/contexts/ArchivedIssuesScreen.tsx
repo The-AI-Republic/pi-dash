@@ -91,6 +91,9 @@ export function ArchivedIssuesScreen({
   const expression = React.useMemo(() => serializeRichExpression(parts.conditions), [parts.conditions]);
   const refs = useListReferences({ workspaceSlug, projectId, dimension: display.groupBy });
   const labels = refs.labels[display.groupBy ?? ""] ?? new Map<string, string>();
+  // Explicit section order (states in workflow order, NEWPIDASH-46);
+  // dimensions without one keep the envelope's key order.
+  const groupOrder = display.groupBy === null ? [] : (refs.orders[display.groupBy] ?? []);
   const pages = useArchivedPages(
     workspaceSlug,
     projectId,
@@ -98,7 +101,8 @@ export function ArchivedIssuesScreen({
     display.groupBy,
     display.orderBy,
     labels,
-    display.showEmptyGroups
+    display.showEmptyGroups,
+    groupOrder
   );
 
   // Persist both halves together, preserving unknown members. The writer

@@ -571,7 +571,13 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
         // no row — there may be none (the no-ticker outcome).
         if outcome.write != ClockWrite::None {
             let ticker = ticker.as_ref().expect("clock write has a post-lock row");
-            apply_clock_write(&mut **tx.inner(), &outcome.write, ticker, now).await?;
+            apply_clock_write(
+                &pidash_db::orm_tx::TxConn::new(tx.inner()),
+                &outcome.write,
+                ticker,
+                now,
+            )
+            .await?;
         }
     }
     tx.commit().await?;
