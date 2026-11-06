@@ -243,7 +243,6 @@ def build_dispatch_wait(run, *, viewer=None):
     else ``null``.
     """
     from pi_dash.runner.models import AgentRunStatus, PinKind
-    from pi_dash.runner.services.permissions import can_use_runner
 
     if run is None or run.status != AgentRunStatus.QUEUED or run.pinned_runner_id is None:
         return None
@@ -285,7 +284,11 @@ def build_dispatch_wait(run, *, viewer=None):
 
     if run.pin_kind == PinKind.DEDICATED:
         releasable = False
-        expires_at = run.created_at + timedelta(seconds=settings.DEDICATED_RUN_QUEUED_MAX_AGE_SECS) if run.created_at else None
+        expires_at = (
+            run.created_at + timedelta(seconds=settings.DEDICATED_RUN_QUEUED_MAX_AGE_SECS)
+            if run.created_at
+            else None
+        )
     else:
         # Locality pin: follows the release endpoint's permission check
         # (issue creator / assignees or runner owner, mirroring
@@ -519,7 +522,9 @@ def apply_execution_target(issue, *, new_runner, actor, decided_by, project=None
 
     decided_at = decided_by or dj_timezone.now()
     issue.assigned_runner = new_runner
-    issue.save(update_fields=["assigned_runner", "updated_at"])
+    if new_runner is not None:
+        issue.assigned_pod = new_runner.pod
+    issue.save(update_fields=["assigned_runner", "assigned_pod", "updated_at"])
     queued = (
         AgentRun.objects.select_for_update()
         .filter(work_item=issue, status=AgentRunStatus.QUEUED)
@@ -568,7 +573,7 @@ def dedicated_run_refusal(issue, *, human, user):
         return None, None  # E4 already failed at assignment; nothing to refuse here
     pause = runner_paused_reason(runner)
     if pause is not None:
-        return pause, "dedicated runner is paused"
+        return "assigned_runner_paused", "dedicated runner is paused"
     if runner_is_offline(runner):
         return "assigned_runner_offline", "dedicated runner is offline"
     return None, None
@@ -691,5 +696,7 @@ def apply_lost_runner_policy(issue, *, reason):
                 "error": refusal_detail("dedicated_runner_unavailable", new_runner=runner),
             },
         )
-    clear_dedicated_runner(issue, reason="runner lost — run failed, issue moved to backlog", actor=None, decided_by=None)
+    clear_dedicated_runner(
+        issue, reason="runner lost — run failed, issue moved to backlog", actor=None, decided_by=None
+    )
 

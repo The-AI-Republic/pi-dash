@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import pytest
 from django.utils import timezone
-from rest_framework import status
 
 from pi_dash.app.serializers.issue import IssueCreateSerializer
 from pi_dash.api.serializers.issue import IssueSerializer as V1IssueSerializer
@@ -30,7 +29,6 @@ from pi_dash.runner.models import (
 )
 from pi_dash.runner.services.issue_assignment import (
     resolve_run_pin,
-    validate_execution_target,
 )
 
 
@@ -251,6 +249,20 @@ def test_resolver_stale_self_heal(db, workspace, project, create_user, pod, stat
     issue.refresh_from_db()
     assert issue.assigned_runner_id is None
     assert IssueComment.objects.filter(issue=issue).count() >= 1
+
+
+@pytest.mark.unit
+def test_apply_execution_target_moves_pod_to_runner_pod(db, workspace, project, create_user, pod, state):
+    """The pod follows the runner (§6.2): saving a runner re-points the pod."""
+    other = Pod.objects.create(project=project, name=f"{project.identifier}_other", created_by=create_user)
+    issue = _make_issue(workspace, project, state, create_user, pod=pod)
+    runner = _make_runner(create_user, workspace, other, name="gpu-other")
+    s = _app_serializer(issue, {"assigned_runner_id": str(runner.id)}, create_user, project)
+    assert s.is_valid(), s.errors
+    s.save()
+    issue.refresh_from_db()
+    assert issue.assigned_runner_id == runner.id
+    assert issue.assigned_pod_id == other.id
 
 
 @pytest.mark.unit

@@ -524,7 +524,20 @@ def track_archive_at(
             )
 
 
-def _track_named_target(requested_data, current_instance, issue_id, project_id, workspace_id, actor_id, issue_activities, epoch, *, field, comment, pod=False):
+def _track_named_target(
+    requested_data,
+    current_instance,
+    issue_id,
+    project_id,
+    workspace_id,
+    actor_id,
+    issue_activities,
+    epoch,
+    *,
+    field,
+    comment,
+    pod=False,
+):
     """Shared pod/runner activity tracker (design §14.7).
 
     Old and new values are display names, identifiers the UUIDs.

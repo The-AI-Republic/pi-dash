@@ -34,7 +34,6 @@ from pi_dash.runner.services.issue_assignment import (
 )
 from pi_dash.runner.services.matcher import (
     _last_served_dedicated,
-    drain_pod,
     next_for_runner,
     pod_has_runner_for_issue_principal,
 )
@@ -152,7 +151,7 @@ def test_engine_pinned_only_takes_dedicated(db, workspace, project, create_user,
         work_item=issue, status=AgentRunStatus.QUEUED,
         pinned_runner=engine, pin_kind=PinKind.DEDICATED,
     )
-    shared = AgentRun.objects.create(
+    AgentRun.objects.create(
         workspace=workspace, created_by=create_user, pod=pod,
         work_item=issue2, status=AgentRunStatus.QUEUED,
         pinned_runner=None, pin_kind=PinKind.LOCALITY,
@@ -219,6 +218,32 @@ def test_dedicated_excluded_from_released_sweep(db, workspace, project, create_u
 
 
 @pytest.mark.unit
+def test_release_locality_pins_spares_dedicated(db, workspace, project, create_user, pod, state):
+    """Engine pause releases locality pins only; dedicated pins wait (§12.1)."""
+    from pi_dash.runner.services.dispatch_rules import release_locality_pins
+
+    runner = _make_runner(create_user, workspace, pod)
+    issue = _make_issue(workspace, project, state, create_user, runner=runner, pod=pod)
+    issue2 = _make_issue(workspace, project, state, create_user, runner=runner, pod=pod)
+    dedicated = AgentRun.objects.create(
+        workspace=workspace, created_by=create_user, pod=pod,
+        work_item=issue, status=AgentRunStatus.QUEUED,
+        pinned_runner=runner, pin_kind=PinKind.DEDICATED,
+    )
+    locality = AgentRun.objects.create(
+        workspace=workspace, created_by=create_user, pod=pod,
+        work_item=issue2, status=AgentRunStatus.QUEUED,
+        pinned_runner=runner, pin_kind=PinKind.LOCALITY,
+    )
+    assert release_locality_pins([runner.id]) == 1
+    dedicated.refresh_from_db()
+    locality.refresh_from_db()
+    assert dedicated.pinned_runner_id == runner.id
+    assert dedicated.pin_kind == PinKind.DEDICATED
+    assert locality.pinned_runner_id is None
+
+
+@pytest.mark.unit
 def test_preflight_dedicated_branch(db, workspace, project, create_user, pod, state):
     """Only the dedicated runner registered: preflight passes (§18)."""
     runner = _make_runner(create_user, workspace, pod)
@@ -245,12 +270,12 @@ def test_h11_refusal_person_vs_automatic(db, workspace, project, create_user, po
     runner.paused_at = timezone.now()
     runner.save(update_fields=["status", "paused_at"])
     code, _ = dedicated_run_refusal(issue, human=True, user=create_user)
-    assert code == "dispatch_paused"
+    assert code == "assigned_runner_paused"
 
     runner.paused_at = None
     runner.last_heartbeat_at = timezone.now()
     runner.save(update_fields=["paused_at", "last_heartbeat_at"])
-    busy = AgentRun.objects.create(
+    AgentRun.objects.create(
         workspace=workspace, created_by=create_user, pod=pod,
         work_item=issue, status=AgentRunStatus.RUNNING,
         runner=runner, pin_kind=PinKind.DEDICATED,

@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 from django.db import transaction
-from django.utils import timezone
 
 from pi_dash.core.agent_execution import AgentExecutorKind
 from pi_dash.db.models.issue import Issue, IssueComment
@@ -33,16 +32,13 @@ from pi_dash.prompting.composer import build_first_turn
 from pi_dash.prompting.recipes import RecipeNotFound
 from pi_dash.prompting.registry import PromptRegistryError
 from pi_dash.prompting.renderer import PromptRenderError
-from pi_dash.runner.services.dispatch_rules import locality_pin_allowed, runner_may_take
 from pi_dash.runner.models import (
     AgentRun,
     AgentRunStatus,
     AUTOMATIC_ISSUE_TRIGGERS,
     AgentRunTrigger,
-    HUMAN_TRIGGERS,
     Pod,
     Runner,
-    RunnerStatus,
 )
 
 logger = logging.getLogger(__name__)

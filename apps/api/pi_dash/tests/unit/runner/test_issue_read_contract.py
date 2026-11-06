@@ -24,7 +24,6 @@ from pi_dash.db.models.state import State
 from pi_dash.runner.models import AgentRun, AgentRunStatus, PinKind, Pod, Runner, RunnerStatus
 from pi_dash.runner.services.issue_assignment import (
     assignable_for_runner,
-    assigned_runner_detail,
     build_dispatch_wait,
 )
 
@@ -257,7 +256,6 @@ def test_activity_trackers_names(db, workspace, project, create_user, pod, state
 
     runner = _make_runner(create_user, workspace, pod)
     issue = _make_issue(workspace, project, state, create_user, runner=runner, pod=pod)
-    from django.utils import timezone as tz
 
     activities = []
     track_assigned_runner(

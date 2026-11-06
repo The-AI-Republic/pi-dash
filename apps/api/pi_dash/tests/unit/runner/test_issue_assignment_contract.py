@@ -22,7 +22,7 @@ from rest_framework import status
 from pi_dash.db.models import ProjectMember
 from pi_dash.db.models.issue import Issue
 from pi_dash.db.models.state import State
-from pi_dash.runner.models import AgentRunStatus, Pod, Runner, RunnerStatus
+from pi_dash.runner.models import Pod, Runner, RunnerStatus
 
 
 @pytest.fixture(autouse=True)
@@ -131,7 +131,9 @@ def test_web_run_ai_refuses_offline_dedicated(db, session_client, workspace, pro
     runner.save(update_fields=["status", "last_heartbeat_at"])
     issue = _make_issue(workspace, project, state, create_user, runner=runner, pod=pod)
 
-    resp = session_client.post("/api/runners/runs/", {"work_item": str(issue.id), "triggered_by": "run_ai"}, format="json")
+    resp = session_client.post(
+        "/api/runners/runs/", {"work_item": str(issue.id), "triggered_by": "run_ai"}, format="json"
+    )
     assert resp.status_code == status.HTTP_409_CONFLICT
     assert resp.data["code"] == "assigned_runner_offline"
     assert AgentRun.objects.filter(work_item=issue).count() == 0
