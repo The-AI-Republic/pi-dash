@@ -135,9 +135,12 @@ pub async fn activate_or_restart(paths: &Paths, name: &str) -> ReloadOutcome {
         ActivateOutcome::Failed(why) => ReloadOutcome {
             ok: false,
             summary: format!("the running daemon did not activate runner {name}"),
-            detail: Some(format!(
-                "{why}\nThe runner block was written; `pidash restart` loads it."
-            )),
+            detail: Some(match outdated_daemon_warning(paths).await {
+                Some(warning) => format!(
+                    "{why}\n{warning}\nThe runner block was written; `pidash restart` loads it."
+                ),
+                None => format!("{why}\nThe runner block was written; `pidash restart` loads it."),
+            }),
             service_state: "active".into(),
             warnings: None,
         },
@@ -155,11 +158,45 @@ pub async fn notify_credentials_changed(paths: &Paths) {
         return;
     };
     match tokio::time::timeout(ACTIVATE_TIMEOUT, client.call(Request::CredentialsReload)).await {
-        Ok(Ok(Response::Ack)) => tracing::debug!("daemon reloaded workspace credentials"),
+        Ok(Ok(Response::Ack)) => {
+            tracing::debug!("daemon reloaded workspace credentials");
+            return;
+        }
         Ok(Ok(other)) => tracing::debug!("daemon did not reload credentials: {other:?}"),
         Ok(Err(e)) => tracing::debug!("credentials reload over IPC failed: {e:#}"),
         Err(_) => tracing::debug!("credentials reload over IPC timed out"),
     }
+    // An older daemon still running after `pidash update` (no `--restart`)
+    // neither picks up the new tokens nor keeps `[[cli.workspaces]]` when
+    // it rewrites `config.toml`, so say so.
+    if let Some(warning) = outdated_daemon_warning(paths).await {
+        eprintln!("warning: {warning}");
+    }
+}
+
+/// `Some(message)` when the daemon answering on this host's socket is not
+/// the same version as this `pidash` (typically: the binary was updated
+/// but the service not restarted). `None` when it matches or no daemon
+/// answers.
+pub async fn outdated_daemon_warning(paths: &Paths) -> Option<String> {
+    use crate::ipc::client::Client;
+    use crate::ipc::protocol::{Request, Response};
+    let mut client = Client::connect(paths.ipc_socket_path()).await.ok()?;
+    let running = match tokio::time::timeout(ACTIVATE_TIMEOUT, client.call(Request::Hello)).await {
+        Ok(Ok(Response::Hello(hello))) if hello.daemon_version == crate::RUNNER_VERSION => {
+            return None;
+        }
+        Ok(Ok(Response::Hello(hello))) => format!("version {}", hello.daemon_version),
+        // A daemon from before `Hello` answers with an error frame.
+        Ok(Ok(Response::Error(_))) => "an older version".to_string(),
+        _ => return None,
+    };
+    Some(format!(
+        "the running Pi Dash daemon is {running}, but this pidash is {}. \
+         Restart it with `pidash restart` so it uses this version; until then it may \
+         ignore this change or overwrite other workspaces' sign-ins in config.toml.",
+        crate::RUNNER_VERSION
+    ))
 }
 
 /// Write-then-restart flow. Starts the service if inactive, restarts if

@@ -318,16 +318,10 @@ impl MachineControl {
             return Ok((existing.runner_id, existing.name));
         }
         if is_engine {
-            // Same checks as `EngineRunnerAdd`, before the server is called.
             crate::engine::provision::ensure_engine_can_run(&self.spawn_ctx.engine.status())?;
         }
-        let cfg = crate::config::file::load_config(&self.spawn_ctx.paths)?;
-        if cfg.runners.len() >= crate::config::schema::MAX_RUNNERS_PER_DAEMON {
-            anyhow::bail!(
-                "this computer already hosts {} runners, the most one daemon runs",
-                crate::config::schema::MAX_RUNNERS_PER_DAEMON
-            );
-        }
+        // Fail before registering anything in the cloud.
+        ensure_below_runner_cap(&self.spawn_ctx.paths)?;
         let host_label = hostname().unwrap_or_else(|| "unknown-host".to_string());
 
         // The command names its workspace; answer it with that workspace's
@@ -522,9 +516,75 @@ fn hostname() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Refuse a new runner when this daemon already has
+/// [`MAX_RUNNERS_PER_DAEMON`] configured. Local and cheap, so it runs
+/// before any network call.
+fn ensure_below_runner_cap(paths: &crate::util::paths::Paths) -> Result<()> {
+    let existing = if paths.config_path().exists() {
+        crate::config::file::load_config(paths)?.runners.len()
+    } else {
+        0
+    };
+    if existing >= crate::config::schema::MAX_RUNNERS_PER_DAEMON {
+        anyhow::bail!(
+            "this computer already has the maximum of {} runners; remove one first",
+            crate::config::schema::MAX_RUNNERS_PER_DAEMON
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Design §5 / PIDESKAPP-118: the cloud-driven add fails on the
+    /// 50-runner limit before anything is registered on the server.
+    #[test]
+    fn runner_cap_is_checked_before_registration() {
+        use crate::config::schema::*;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = crate::util::paths::Paths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            runtime_dir: tmp.path().join("runtime"),
+            machine_context_dir: tmp.path().join("config"),
+        };
+        paths.ensure().unwrap();
+        ensure_below_runner_cap(&paths).expect("no config yet");
+        let runner = |i: usize| RunnerConfig {
+            name: format!("r{i}"),
+            runner_id: Uuid::new_v4(),
+            workspace_slug: Some("acme".into()),
+            project_slug: Some("WEB".into()),
+            pod_id: None,
+            workspace: WorkspaceSection {
+                working_dir: tmp.path().join(format!("w{i}")),
+            },
+            agent: AgentSection::default(),
+            codex: CodexSection::default(),
+            claude_code: ClaudeCodeSection::default(),
+            cursor_agent: CursorAgentSection::default(),
+            openclaw: OpenClawSection::default(),
+            grok: GrokSection::default(),
+            muse_code: MuseCodeSection::default(),
+            approval_policy: ApprovalPolicySection::default(),
+        };
+        let mut cfg = Config {
+            version: 2,
+            daemon: Default::default(),
+            runners: (0..MAX_RUNNERS_PER_DAEMON - 1).map(runner).collect(),
+            cli: None,
+            engine: Default::default(),
+            auth: Default::default(),
+        };
+        crate::config::file::write_config(&paths, &cfg).unwrap();
+        ensure_below_runner_cap(&paths).expect("one slot left");
+        cfg.runners.push(runner(MAX_RUNNERS_PER_DAEMON));
+        crate::config::file::write_config(&paths, &cfg).unwrap();
+        let err = ensure_below_runner_cap(&paths).unwrap_err().to_string();
+        assert!(err.contains("maximum of 50 runners"), "{err}");
+    }
 
     #[test]
     fn parses_kebab_case_agent_kinds() {

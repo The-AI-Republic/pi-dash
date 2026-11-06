@@ -38,6 +38,15 @@ pub const DEFAULT_RELEASE_DOWNLOAD_URL: &str =
 /// tests).
 pub const RELEASE_DOWNLOAD_URL_ENV: &str = "PIDASH_RELEASE_DOWNLOAD_URL";
 
+/// Base of the raw-file URLs used to read a release's pinned engine version
+/// before downloading anything: `<base>/pidash-v<version>/runner/ENGINE_VERSION`.
+pub const DEFAULT_RELEASE_SOURCE_URL: &str =
+    "https://raw.githubusercontent.com/The-AI-Republic/pi-dash";
+
+/// Overrides [`DEFAULT_RELEASE_SOURCE_URL`] (a mirror, or a local server in
+/// tests).
+pub const RELEASE_SOURCE_URL_ENV: &str = "PIDASH_RELEASE_SOURCE_URL";
+
 /// Target triple this binary was built for (`build.rs`).
 pub const BUILD_TARGET: &str = env!("PIDASH_BUILD_TARGET");
 
@@ -60,11 +69,39 @@ pub fn release_archive_url(base: &str, cli_version: &str, target: &str) -> Strin
     )
 }
 
+/// URL of the `runner/ENGINE_VERSION` file at a CLI release's tag.
+pub fn release_engine_version_url(base: &str, cli_version: &str) -> String {
+    format!(
+        "{}/pidash-v{}/runner/ENGINE_VERSION",
+        base.trim_end_matches('/'),
+        cli_version.trim_start_matches('v')
+    )
+}
+
+/// `std::fs::canonicalize` returns `\\?\C:\...` verbatim paths on Windows,
+/// which some programs (notably `tar.exe -C`) do not accept. Turn a verbatim
+/// drive path back into an ordinary one; leave anything else (UNC verbatim
+/// paths, non-Windows paths) as it is.
+pub fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let Some(s) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        let b = rest.as_bytes();
+        if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
 /// The engine root for the running executable: where a fresh install goes.
 pub fn install_root_for_current_exe() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("locating the pidash executable")?;
     // Follow a symlinked `pidash` to the install it belongs to.
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let exe = std::fs::canonicalize(&exe)
+        .map(|p| strip_verbatim_prefix(&p))
+        .unwrap_or(exe);
     let dir = exe
         .parent()
         .context("pidash executable has no parent directory")?;
@@ -79,38 +116,121 @@ pub struct InstallOutcome {
     pub already_present: Vec<String>,
 }
 
-/// Download the release archive of `cli_version` for this build's target and
-/// install its engine version directories under `root`.
-pub async fn install_release(cli_version: &str, root: &Path) -> Result<InstallOutcome> {
-    let base = std::env::var(RELEASE_DOWNLOAD_URL_ENV)
+fn env_or(var: &str, default: &str) -> String {
+    std::env::var(var)
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_RELEASE_DOWNLOAD_URL.to_string());
-    install_release_from(&base, cli_version, BUILD_TARGET, root, cfg!(windows)).await
+        .unwrap_or_else(|| default.to_string())
+}
+
+/// Whether `root/<version>/` already holds an engine binary.
+pub fn is_installed(root: &Path, version: &str, windows: bool) -> bool {
+    root.join(version)
+        .join(super::binary_name(windows))
+        .is_file()
+}
+
+/// Download the release archive of `cli_version` for this build's target and
+/// install its engine version directories under `root`.
+///
+/// The archive (~95 MB) is skipped when the release's pinned engine version,
+/// read from its tag's `runner/ENGINE_VERSION` (a few bytes), is already
+/// installed: most CLI releases keep the engine they had, and `pidash update`
+/// would otherwise download the whole archive twice for nothing. If that
+/// small file cannot be read (offline mirror, older tag), the archive is
+/// downloaded as before.
+pub async fn install_release(cli_version: &str, root: &Path) -> Result<InstallOutcome> {
+    let downloads = env_or(RELEASE_DOWNLOAD_URL_ENV, DEFAULT_RELEASE_DOWNLOAD_URL);
+    let sources = env_or(RELEASE_SOURCE_URL_ENV, DEFAULT_RELEASE_SOURCE_URL);
+    install_release_from(
+        &downloads,
+        &sources,
+        cli_version,
+        BUILD_TARGET,
+        root,
+        cfg!(windows),
+    )
+    .await
+}
+
+/// The engine version a CLI release pins, from its tag's
+/// `runner/ENGINE_VERSION`. `None` when it can't be read or parsed.
+async fn release_engine_version(source_base: &str, cli_version: &str) -> Option<String> {
+    let url = release_engine_version_url(source_base, cli_version);
+    let client = http_client().ok()?;
+    let body = client
+        .get(&url)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+    let version = super::version_from_tag(body.trim()).to_string();
+    super::parse_version(&version).map(|_| version)
 }
 
 async fn install_release_from(
     base: &str,
+    source_base: &str,
     cli_version: &str,
     target: &str,
     root: &Path,
     windows: bool,
 ) -> Result<InstallOutcome> {
+    if let Some(version) = release_engine_version(source_base, cli_version).await
+        && is_installed(root, &version, windows)
+    {
+        return Ok(InstallOutcome {
+            installed: Vec::new(),
+            already_present: vec![version],
+        });
+    }
+
     let url = release_archive_url(base, cli_version, target);
 
-    std::fs::create_dir_all(root)
-        .with_context(|| format!("creating engine directory {}", root.display()))?;
-    let staging = Staging::create(root)?;
+    // The filesystem work runs off the async runtime: the daemon calls this
+    // from a tokio worker, and removing a ~95 MB staging tree or moving the
+    // engine into place can block for a while on a slow disk.
+    let staging = {
+        let root = root.to_path_buf();
+        blocking(move || {
+            std::fs::create_dir_all(&root)
+                .with_context(|| format!("creating engine directory {}", root.display()))?;
+            Staging::create(&root)
+        })
+        .await?
+    };
 
-    let archive = staging.path().join(archive_name(target));
-    download_verified(&url, &archive).await?;
+    let result = async {
+        let archive = staging.path().join(archive_name(target));
+        download_verified(&url, &archive).await?;
 
-    let extracted = staging.path().join("x");
-    std::fs::create_dir_all(&extracted)?;
-    extract(&archive, &extracted).await?;
+        let extracted = staging.path().join("x");
+        tokio::fs::create_dir_all(&extracted).await?;
+        extract(&archive, &extracted).await?;
 
-    install_from_extracted(&extracted, root, windows)
-        .with_context(|| format!("installing the engine from {url}"))
+        let root = root.to_path_buf();
+        blocking(move || install_from_extracted(&extracted, &root, windows))
+            .await
+            .with_context(|| format!("installing the engine from {url}"))
+    }
+    .await;
+    // Dropping the staging directory removes it; do that off the runtime too.
+    let _ = tokio::task::spawn_blocking(move || drop(staging)).await;
+    result
+}
+
+async fn blocking<T, F>(f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .context("engine install task panicked")?
 }
 
 /// Move every `engine/<version>/` found in an extracted release archive into
@@ -155,6 +275,12 @@ pub fn install_from_extracted(
     versions.sort();
 
     std::fs::create_dir_all(root)?;
+    // Serialize the check-remove-rename below across installers. Without it,
+    // one installer can see `dest` without its binary, another completes the
+    // install, and the first then removes that complete install (or, on
+    // Windows, leaves a directory with no binary). Staging and download stay
+    // outside the lock; only this short move step is serialized.
+    let _lock = lock_install_root(root)?;
     for (name, src) in versions {
         let dest = root.join(&name);
         if dest.join(binary_name).is_file() {
@@ -175,11 +301,52 @@ pub fn install_from_extracted(
                 std::fs::Permissions::from_mode(0o755),
             )?;
         }
-        std::fs::rename(&src, &dest)
-            .with_context(|| format!("moving engine {name} into {}", dest.display()))?;
-        outcome.installed.push(name);
+        if move_into_place(&src, &dest, binary_name)
+            .with_context(|| format!("moving engine {name} into {}", dest.display()))?
+        {
+            outcome.installed.push(name);
+        } else {
+            outcome.already_present.push(name);
+        }
     }
     Ok(outcome)
+}
+
+/// Name of the lock file in the engine root. A file, and not a version name,
+/// so the locator and the old-version cleanup never treat it as an engine.
+pub const INSTALL_LOCK_FILE: &str = ".install.lock";
+
+/// Hold an exclusive lock on `root/.install.lock` until the returned file is
+/// dropped. Blocking: call from a blocking context.
+fn lock_install_root(root: &Path) -> Result<std::fs::File> {
+    use fs2::FileExt;
+    let path = root.join(INSTALL_LOCK_FILE);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("opening engine install lock {}", path.display()))?;
+    file.lock_exclusive()
+        .with_context(|| format!("locking engine install lock {}", path.display()))?;
+    Ok(file)
+}
+
+/// Rename a staged version directory to `dest`. `Ok(true)` when this call
+/// installed it, `Ok(false)` when a concurrent installer got there first.
+///
+/// Nothing serializes `pidash engine install`, `pidash update` and the
+/// daemon's own install, and each stages in its own directory. When two race,
+/// the second rename fails (ENOTEMPTY / EEXIST, or access denied on Windows)
+/// because the first already put the same version in place. A complete
+/// install at `dest` is exactly what the caller wanted, so that is success.
+fn move_into_place(src: &Path, dest: &Path, binary_name: &str) -> std::io::Result<bool> {
+    match std::fs::rename(src, dest) {
+        Ok(()) => Ok(true),
+        Err(_) if dest.join(binary_name).is_file() => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 fn find_engine_dir(extracted: &Path) -> Result<PathBuf> {
@@ -442,6 +609,43 @@ mod tests {
     }
 
     #[test]
+    fn losing_a_rename_race_to_a_complete_install_is_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let binary = crate::engine::binary_name(false);
+        let src = stage_archive_tree(&tmp.path().join("x"), "0.153.4", false);
+        // Another installer's rename landed after our pre-check.
+        let dest = tmp.path().join("root").join("0.153.4");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join(binary), b"winner").unwrap();
+
+        assert!(!move_into_place(&src, &dest, binary).unwrap());
+        assert_eq!(fs::read(dest.join(binary)).unwrap(), b"winner");
+    }
+
+    #[test]
+    fn a_failed_rename_onto_an_incomplete_dir_is_still_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let binary = crate::engine::binary_name(false);
+        let src = stage_archive_tree(&tmp.path().join("x"), "0.153.4", false);
+        let dest = tmp.path().join("root").join("0.153.4");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("partial"), b"x").unwrap();
+
+        assert!(move_into_place(&src, &dest, binary).is_err());
+    }
+
+    #[test]
+    fn a_rename_into_an_empty_slot_installs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let binary = crate::engine::binary_name(false);
+        let src = stage_archive_tree(&tmp.path().join("x"), "0.153.4", false);
+        let root = tmp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        assert!(move_into_place(&src, &root.join("0.153.4"), binary).unwrap());
+        assert!(root.join("0.153.4").join(binary).is_file());
+    }
+
+    #[test]
     fn an_incomplete_version_dir_is_replaced() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("engine");
@@ -452,6 +656,59 @@ mod tests {
 
         let outcome = install_from_extracted(&extracted, &root, false).unwrap();
         assert_eq!(outcome.installed, vec!["0.153.4".to_string()]);
+        assert!(root.join("0.153.4/pidash-agent-engine").is_file());
+    }
+
+    #[test]
+    fn the_move_step_waits_for_another_installer_holding_the_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("engine");
+        fs::create_dir_all(root.join("0.153.4")).unwrap();
+        fs::write(root.join("0.153.4/LICENSE"), b"partial").unwrap();
+        let extracted = root.join(".staging-a/x");
+        stage_archive_tree(&extracted, "0.153.4", false);
+
+        // Another installer is mid-move: it holds the lock and is about to
+        // complete 0.153.4.
+        let held = lock_install_root(&root).unwrap();
+        let (r, e) = (root.clone(), extracted.clone());
+        let waiter = std::thread::spawn(move || install_from_extracted(&e, &r, false));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            fs::read(root.join("0.153.4/LICENSE")).unwrap(),
+            b"partial",
+            "the waiting installer must not touch the version dir while the lock is held"
+        );
+        fs::write(root.join("0.153.4/pidash-agent-engine"), b"winner").unwrap();
+        drop(held);
+
+        let outcome = waiter.join().unwrap().unwrap();
+        assert_eq!(outcome.already_present, vec!["0.153.4".to_string()]);
+        assert_eq!(
+            fs::read(root.join("0.153.4/pidash-agent-engine")).unwrap(),
+            b"winner"
+        );
+    }
+
+    #[test]
+    fn racing_installers_over_an_incomplete_dir_all_succeed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("engine");
+        fs::create_dir_all(root.join("0.153.4")).unwrap();
+        fs::write(root.join("0.153.4/LICENSE"), b"partial").unwrap();
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let extracted = root.join(format!(".staging-{i}/x"));
+                stage_archive_tree(&extracted, "0.153.4", false);
+                let root = root.clone();
+                std::thread::spawn(move || install_from_extracted(&extracted, &root, false))
+            })
+            .collect();
+        let mut installed = 0;
+        for h in handles {
+            installed += h.join().unwrap().unwrap().installed.len();
+        }
+        assert_eq!(installed, 1, "exactly one installer moves the version in");
         assert!(root.join("0.153.4/pidash-agent-engine").is_file());
     }
 
@@ -588,17 +845,22 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("lib/pidash/engine");
-        let outcome = install_release_from(&base, "0.1.30", target, &root, false)
+        let outcome = install_release_from(&base, &base, "0.1.30", target, &root, false)
             .await
             .unwrap();
         assert_eq!(outcome.installed, vec!["0.153.4".to_string()]);
         assert!(root.join("0.153.4/pidash-agent-engine").is_file());
-        // Staging is cleaned up; only the version directory remains.
-        let names: Vec<_> = fs::read_dir(&root)
+        // Staging is cleaned up; only the version directory (and the
+        // install lock file) remain.
+        let mut names: Vec<_> = fs::read_dir(&root)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
-        assert_eq!(names, vec!["0.153.4".to_string()]);
+        names.sort();
+        assert_eq!(
+            names,
+            vec![INSTALL_LOCK_FILE.to_string(), "0.153.4".to_string()]
+        );
     }
 
     #[cfg(unix)]
@@ -615,10 +877,87 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("engine");
-        let err = install_release_from(&base, "0.1.30", target, &root, false)
+        let err = install_release_from(&base, &base, "0.1.30", target, &root, false)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("checksum mismatch"), "{err:#}");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn install_release_skips_the_archive_when_its_engine_is_installed() {
+        let target = "x86_64-unknown-linux-gnu";
+        // Only ENGINE_VERSION is served: a download attempt would 404 and fail.
+        let base = serve(vec![(
+            "/pidash-v0.1.31/runner/ENGINE_VERSION".to_string(),
+            b"rust-v0.153.4\n".to_vec(),
+        )])
+        .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("engine");
+        fs::create_dir_all(root.join("0.153.4")).unwrap();
+        fs::write(root.join("0.153.4/pidash-agent-engine"), b"running").unwrap();
+
+        let outcome = install_release_from(&base, &base, "0.1.31", target, &root, false)
+            .await
+            .unwrap();
+        assert_eq!(outcome.already_present, vec!["0.153.4".to_string()]);
+        assert!(outcome.installed.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn install_release_downloads_when_the_release_pins_a_new_engine() {
+        let target = "x86_64-unknown-linux-gnu";
+        let body = tarball(target, "0.154.0");
+        let digest = format!("{:x}", Sha256::digest(&body));
+        let asset = format!("/pidash-v0.1.31/{}", archive_name(target));
+        let base = serve(vec![
+            (
+                "/pidash-v0.1.31/runner/ENGINE_VERSION".to_string(),
+                b"rust-v0.154.0\n".to_vec(),
+            ),
+            (asset.clone(), body),
+            (
+                format!("{asset}.sha256"),
+                format!("{digest} *x\n").into_bytes(),
+            ),
+        ])
+        .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("engine");
+        fs::create_dir_all(root.join("0.153.4")).unwrap();
+        fs::write(root.join("0.153.4/pidash-agent-engine"), b"old").unwrap();
+
+        let outcome = install_release_from(&base, &base, "0.1.31", target, &root, false)
+            .await
+            .unwrap();
+        assert_eq!(outcome.installed, vec!["0.154.0".to_string()]);
+    }
+
+    #[test]
+    fn engine_version_url_is_the_release_tag() {
+        assert_eq!(
+            release_engine_version_url(DEFAULT_RELEASE_SOURCE_URL, "v0.1.30"),
+            "https://raw.githubusercontent.com/The-AI-Republic/pi-dash/pidash-v0.1.30/runner/ENGINE_VERSION"
+        );
+    }
+
+    #[test]
+    fn verbatim_drive_paths_are_made_ordinary() {
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\C:\Users\me\.local\bin\engine")),
+            PathBuf::from(r"C:\Users\me\.local\bin\engine")
+        );
+        // UNC verbatim paths have no ordinary drive form; keep them.
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\UNC\server\share")),
+            PathBuf::from(r"\\?\UNC\server\share")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new("/home/me/.local/lib")),
+            PathBuf::from("/home/me/.local/lib")
+        );
     }
 }
