@@ -3059,7 +3059,10 @@ export interface ParityDriver {
   schedulerProjectRows(): Promise<SchedulerProjectRow[]>;
   /** Whether the install list shows its empty-state row. */
   schedulerProjectEmptyVisible(): Promise<boolean>;
-  /** Whether the list header offers the New Scheduler control. */
+  /**
+   * Whether the page offers the New Scheduler control anywhere: the section
+   * tab row on the project schedulers pages, the header on the settings variant.
+   */
   schedulerProjectNewVisible(): Promise<boolean>;
   /** Open an install's detail by clicking its list row; waits for the detail. */
   schedulerProjectRowOpen(handle: string): Promise<void>;
@@ -3292,6 +3295,13 @@ export interface ParityDriver {
   schedulerOpenProjectSection(workspaceSlug: string, projectId: string): Promise<void>;
   /** Section tabs with their highlight state, in display order. */
   schedulerSectionTabs(): Promise<{ label: string; active: boolean }[]>;
+  /**
+   * Where New Scheduler sits in the project schedulers section (PDASHOSS01-348):
+   * whether the List | Calendar tab row carries it, and how many visible
+   * New Scheduler buttons the page shows in total (1 means no second copy
+   * in the tab body).
+   */
+  schedulerSectionNewPlacement(): Promise<{ inTabRow: boolean; total: number }>;
   /** Follow one section tab; waits for its content to settle. */
   schedulerSectionOpenTab(tab: "List" | "Calendar"): Promise<void>;
   /** Open the project-settings schedulers variant. */

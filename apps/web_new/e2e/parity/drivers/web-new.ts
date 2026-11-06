@@ -16635,6 +16635,16 @@ export class WebNewDriver implements ParityDriver {
     return tabs;
   }
 
+  async schedulerSectionNewPlacement(): Promise<{ inTabRow: boolean; total: number }> {
+    // The tab row is the element holding the "Scheduler views" navigation.
+    const row = this.schedulerTabs().locator("xpath=..");
+    const control = { name: "New Scheduler", exact: true } as const;
+    return {
+      inTabRow: await this.isShown(row.getByRole("button", control)),
+      total: await this.page.getByRole("button", control).count(),
+    };
+  }
+
   async schedulerSectionOpenTab(tab: "List" | "Calendar"): Promise<void> {
     await this.schedulerTabs().getByRole("link", { name: tab, exact: true }).click();
     if (tab === "List") {

@@ -17502,6 +17502,16 @@ export class WebDriver implements ParityDriver {
     return out;
   }
 
+  async schedulerSectionNewPlacement(): Promise<{ inTabRow: boolean; total: number }> {
+    // The List tab link sits directly in the tab row, so its parent is the row.
+    const row = this.page.getByRole("link", { name: "List", exact: true }).locator("xpath=..");
+    const control = { name: "New Scheduler", exact: true } as const;
+    return {
+      inTabRow: await this.isShown(row.getByRole("button", control)),
+      total: await this.page.getByRole("button", control).count(),
+    };
+  }
+
   async schedulerSectionOpenTab(tab: "List" | "Calendar"): Promise<void> {
     await this.page.getByRole("link", { name: tab, exact: true }).click();
     if (tab === "List") {
