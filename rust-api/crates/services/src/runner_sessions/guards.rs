@@ -140,8 +140,9 @@ pub const BUSY_STATUSES: [AgentRunStatus; 6] = [
 /// `runner` columns in Django `_meta` order — the `SELECT` projection
 /// of [`SELECT_RUNNER_FOR_RUN_SQL`], pinned against FX-RSES-01 by the
 /// tests below. The `09738d222` operator-pause pair trails the list
-/// (migration `0031_runner_paused`).
-pub const RUNNER_COLUMNS: [&str; 31] = [
+/// (migration `0031_runner_paused`); `pod_dispatch` follows
+/// `provisioning` (migration `0034_engine_dispatch_fields`, #2903).
+pub const RUNNER_COLUMNS: [&str; 32] = [
     "id",
     "owner_id",
     "workspace_id",
@@ -150,6 +151,7 @@ pub const RUNNER_COLUMNS: [&str; 31] = [
     "name",
     "host_label",
     "provisioning",
+    "pod_dispatch",
     "visibility",
     "refresh_token_hash",
     "refresh_token_fingerprint",
@@ -184,7 +186,9 @@ pub const RUNNER_COLUMNS: [&str; 31] = [
 /// `$1` is the [`alive_threshold`], `$2` the run owner's id
 /// (`owner=run.owner`), `$3` the run's workspace id. `status` is the
 /// `'online'` literal; the `paused_at IS NULL` arm is the `09738d222`
-/// `assignable()` pause rule; the `NOT EXISTS` arm is the
+/// `assignable()` pause rule; the `NOT (…)` arm is the `assignable()`
+/// engine-pause exclusion (`engine_paused_q`, #2903): runners on a
+/// machine whose engine is paused. The `NOT EXISTS` arm is the
 /// `.exclude(agent_runs__status__in=BUSY_STATUSES)` reverse join
 /// (`agent_run.runner_id`, alias `U1`, values in [`BUSY_STATUSES`]
 /// order). The explicit `-last_heartbeat_at` order replaces
@@ -194,7 +198,7 @@ pub const RUNNER_COLUMNS: [&str; 31] = [
 ///
 /// There is deliberately no `provisioning` term — see the
 /// ported-bugs note.
-pub const SELECT_RUNNER_FOR_RUN_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE (\"runner\".\"last_heartbeat_at\" >= $1 AND \"runner\".\"paused_at\" IS NULL AND \"runner\".\"owner_id\" = $2 AND \"runner\".\"status\" = 'online' AND \"runner\".\"workspace_id\" = $3 AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1))) ORDER BY \"runner\".\"last_heartbeat_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED";
+pub const SELECT_RUNNER_FOR_RUN_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"pod_dispatch\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE (\"runner\".\"last_heartbeat_at\" >= $1 AND \"runner\".\"paused_at\" IS NULL AND \"runner\".\"status\" = 'online' AND NOT (\"runner\".\"dev_machine_id\" IN (SELECT U0.\"id\" FROM \"dev_machine\" U0 WHERE (U0.\"engine_paused_by_owner\" OR U0.\"engine_auto_pause_reason\" > '')) AND \"runner\".\"dev_machine_id\" IS NOT NULL AND \"runner\".\"provisioning\" = 'desktop_bundled') AND \"runner\".\"owner_id\" = $2 AND \"runner\".\"workspace_id\" = $3 AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1))) ORDER BY \"runner\".\"last_heartbeat_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED";
 
 // ---------------------------------------------------------------------------
 // Cap pair (`matcher.py:363-372`, `:451-460`)
@@ -396,7 +400,7 @@ mod tests {
             .map(|f| f["column"].as_str().expect("column"))
             .collect();
         assert_eq!(RUNNER_COLUMNS.to_vec(), expected);
-        assert_eq!(RUNNER_COLUMNS.len(), 31);
+        assert_eq!(RUNNER_COLUMNS.len(), 32);
     }
 
     #[test]
@@ -424,17 +428,23 @@ mod tests {
     #[test]
     fn legacy_select_sql_matches_django() {
         let v = fx07();
-        let django = v["select_runner_for_run_legacy"]["sql"][0]
-            .as_str()
-            .expect("sql");
+        let django = v["select_runner_for_run_legacy"]["sql"]
+            .as_array()
+            .expect("sql array")
+            .iter()
+            .find_map(|entry| {
+                let text = entry.as_str().expect("sql");
+                text.contains("FROM \"runner\"").then_some(text)
+            })
+            .expect("runner SELECT");
         let normalized = django
-            .replace("'2026-10-03 00:32:05.032439+00:00'::timestamptz", "$1")
-            .replace("'ce755a5b0c644e838f276218e639df62'::uuid", "$2")
-            .replace("'af244c9a30a74b4a99b23a5c5ac09847'::uuid", "$3");
+            .replace("'2026-11-06 07:44:35.588615+00:00'::timestamptz", "$1")
+            .replace("'8a4219aa7cfa475b92a28fcc6029008a'::uuid", "$2")
+            .replace("'97d516f092f947b09df63e9aade3f22c'::uuid", "$3");
         assert_eq!(normalized, SELECT_RUNNER_FOR_RUN_SQL);
-        // Captured WHERE term order: threshold, pause, owner, status,
-        // workspace (`09738d222`: `assignable()` sorts its kwargs, so the
-        // pause arm lands between the threshold and the status).
+        // Captured WHERE term order: threshold, pause, status, engine
+        // pause, owner, workspace (`assignable()` sorts its kwargs, so
+        // the pause arms land between the threshold and the status).
         let where_clause = SELECT_RUNNER_FOR_RUN_SQL
             .split_once(" WHERE (")
             .expect("WHERE")
@@ -443,8 +453,9 @@ mod tests {
         let terms = [
             "\"runner\".\"last_heartbeat_at\" >= $1",
             "\"runner\".\"paused_at\" IS NULL",
-            "\"runner\".\"owner_id\" = $2",
             status_term.as_str(),
+            "\"runner\".\"dev_machine_id\" IN (SELECT U0.\"id\" FROM \"dev_machine\" U0",
+            "\"runner\".\"owner_id\" = $2",
             "\"runner\".\"workspace_id\" = $3",
         ];
         let mut cursor = 0;
@@ -454,10 +465,16 @@ mod tests {
                 .unwrap_or_else(|| panic!("term present: {term}"));
             cursor += pos + term.len();
         }
-        // No provisioning term in the legacy WHERE (ported as written;
-        // the projection still carries the column).
+        // The only `provisioning` reference is the engine-pause
+        // arm's desktop test (ported as written); there is no legacy
+        // provisioning exclusion term.
         let where_only = where_clause.split_once(" ORDER BY ").expect("ORDER BY").0;
-        assert!(!where_only.contains("provisioning"));
+        assert_eq!(
+            where_only.matches("provisioning").count(),
+            1,
+            "only the engine-pause desktop test mentions provisioning"
+        );
+        assert!(!where_only.contains("NOT (\"runner\".\"provisioning\""));
         assert!(SELECT_RUNNER_FOR_RUN_SQL.ends_with(
             "ORDER BY \"runner\".\"last_heartbeat_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED"
         ));
@@ -498,14 +515,14 @@ mod tests {
 
     #[test]
     fn can_register_another_enforces_cap() {
-        // Fixture: count 8 over the cap of 5 refuses; 7 after the
+        // Fixture: count 5 at the cap of 5 refuses; 4 after the
         // revoke still refuses.
-        assert_eq!(fx07()["count_active"]["count"].as_i64(), Some(8));
+        assert_eq!(fx07()["count_active"]["count"].as_i64(), Some(5));
         assert_eq!(
             fx07()["count_active"]["can_register_another"].as_bool(),
             Some(false)
         );
-        assert_eq!(fx07()["count_active"]["after_revoke"].as_i64(), Some(7));
+        assert_eq!(fx07()["count_active"]["after_revoke"].as_i64(), Some(4));
         assert!(!can_register_another(8));
         assert!(!can_register_another(7));
         assert!(!can_register_another(5));

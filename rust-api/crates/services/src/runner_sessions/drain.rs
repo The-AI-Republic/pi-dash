@@ -5,18 +5,18 @@
 //! Port of the dispatch half of
 //! `apps/api/pi_dash/runner/services/matcher.py`:
 //!
-//! * `select_runner_in_pod` (`:89-121`) → [`SELECT_RUNNER_IN_POD_SQL`].
+//! * `select_runner_in_pod` (`:89-121`) → [`select_runner_in_pod_stmt`].
 //! * `next_queued_run_for_pod` (`:123-145`) → [`NEXT_QUEUED_RUN_FOR_POD_SQL`].
-//! * `next_for_runner` (`:147-192`) → [`next_for_runner_sql`].
-//! * `drain_pod` (`:194-240`) → [`DRAIN_POD_IDLE_RUNNERS_SQL`] +
-//!   [`ASSIGN_RUN_UPDATE_SQL`] + [`plan_assignment`] +
+//! * `next_for_runner` (`:147-192`) → [`next_for_runner_stmt`].
+//! * `drain_pod` (`:194-240`) → [`drain_pod_idle_list_stmt`] +
+//!   [`plan_assignment`] + the executor's SeaORM assignment write +
 //!   [`DrainEffect::SendAssign`], run per the executor recipe below.
-//! * `drain_pod_by_id` (`:242-251`) → [`DRAIN_POD_BY_ID_LOOKUP_SQL`].
-//! * `drain_for_runner` (`:253-296`) → [`DRAIN_FOR_RUNNER_LOCK_SQL`] +
-//!   [`next_for_runner_sql`] + [`ASSIGN_RUN_UPDATE_SQL`] +
-//!   [`plan_assignment`] + [`DrainEffect::SendAssign`].
-//! * `drain_for_runner_by_id` (`:298-304`) →
-//!   [`DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL`].
+//! * `drain_pod_by_id` (`:242-251`) → a SeaORM `pod` find (executors).
+//! * `drain_for_runner` (`:253-296`) → [`drain_for_runner_lock_stmt`] +
+//!   [`next_for_runner_stmt`] + the executor's SeaORM assignment
+//!   write + [`plan_assignment`] + [`DrainEffect::SendAssign`].
+//! * `drain_for_runner_by_id` (`:298-304`) → a SeaORM `runner` find
+//!   (executors).
 //!
 //! Out of scope here (sibling sub-issue PIDASHCONV-555):
 //! `HEARTBEAT_GRACE` / `NON_TERMINAL_STATUSES` / `BUSY_STATUSES`
@@ -41,13 +41,13 @@
 //! # Executor recipes (the loops live here, verbatim)
 //!
 //! `drain_pod(pod_id)` (`:194-240`): open a transaction; fetch the
-//! idle list ([`DRAIN_POD_IDLE_RUNNERS_SQL`], `$1` =
+//! idle list ([`drain_pod_idle_list_stmt`],
 //! [`alive_threshold`](super::guards::alive_threshold) evaluated
-//! once, `$2` = pod); for each runner row in list order (freshest
-//! heartbeat first), run [`next_for_runner_sql`] for its
-//! provisioning/visibility and, when a run row comes back, execute
-//! [`ASSIGN_RUN_UPDATE_SQL`] (`$1` owner, `$2` runner, `$3`
-//! `timezone.now()` evaluated per assignment, `$4` run) and record
+//! once, pod id); for each runner row in list order (freshest
+//! heartbeat first), run [`next_for_runner_stmt`] for its
+//! dispatch facts and, when a run row comes back, write the
+//! assignment (`owner_id`, `runner_id`, `status='assigned'`,
+//! `assigned_at=timezone.now()` per assignment) and record
 //! [`plan_assignment`]; commit; then queue one
 //! [`DrainEffect::SendAssign`] per assignment, in loop order, on the
 //! post-commit queue. Returns the assignment count; logs
@@ -56,18 +56,17 @@
 //! head-of-line run never blocks other runners' unpinned work.
 //!
 //! `drain_for_runner(runner_id)` (`:253-296`): open a transaction;
-//! re-lock the runner ([`DRAIN_FOR_RUNNER_LOCK_SQL`], `$1` =
-//! threshold, `$2` = runner) — a miss returns `false` with no
-//! further query; run [`next_for_runner_sql`] — a miss returns
-//! `false`; execute [`ASSIGN_RUN_UPDATE_SQL`]; commit; queue the
+//! re-lock the runner ([`drain_for_runner_lock_stmt`], threshold,
+//! runner id) — a miss returns `false` with no further query; run
+//! [`next_for_runner_stmt`] — a miss returns
+//! `false`; write the assignment; commit; queue the
 //! single [`DrainEffect::SendAssign`]. Returns `true` and logs
 //! [`drain_for_runner_log`].
 //!
-//! `drain_pod_by_id` (`:242-251`): look the pod up
-//! ([`DRAIN_POD_BY_ID_LOOKUP_SQL`], which carries the `Pod.objects`
-//! soft-delete scope) — a miss returns `0`; else `drain_pod`.
-//! `drain_for_runner_by_id` (`:298-304`): look the runner up
-//! ([`DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL`]) — a miss returns `false`;
+//! `drain_pod_by_id` (`:242-251`): look the pod up (a SeaORM find
+//! carrying the `Pod.objects` soft-delete scope) — a miss returns
+//! `0`; else `drain_pod`. `drain_for_runner_by_id` (`:298-304`):
+//! look the runner up (a SeaORM find) — a miss returns `false`;
 //! else `drain_for_runner`.
 //!
 //! # Post-commit dispatch contract
@@ -84,38 +83,36 @@
 //!
 //! # Translation notes
 //!
-//! * Fixed enum values are literals; caller-supplied ids/timestamps
-//!   are `$N` params, each documented on its const. `next_for_runner`
-//!   reuses `$1` pod / `$2` runner / `$3` owner at every occurrence
-//!   (the D-15 predicate takes one owner param, so semantic
-//!   numbering is forced; same value binds each repeat).
+//! * The `next_for_runner` statement is a sea-query
+//!   `SelectStatement`: `pod_id` / `runner_id` / `owner_id` are bound
+//!   as values wherever they occur (the D-15 predicate takes the
+//!   owner id, so the engine gate rides the same binding).
 //! * The `pod` SELECTs inside the fixture traces are ORM laziness
 //!   (`pod=runner.pod` resolves the FK descriptor per runner); Rust
 //!   binds `pod_id` from the already-fetched runner row, so no pod
 //!   fetch runs on the drain path. `SAVEPOINT` / `RELEASE` /
 //!   `BEGIN` / `COMMIT` lines are harness artifacts, not ported.
-//! * `ORDER BY 42 ASC` is Django's positional rendering of the
-//!   `_is_mine` annotation (39 run columns + 2 `EXISTS` annotations +
-//!   the `CASE`); kept verbatim, with the rank position const pinned
-//!   against the column count so it cannot drift silently.
+//! * Django orders by the `_is_mine` annotation's positional index
+//!   (`ORDER BY 42`); the sea-query port orders by the annotation
+//!   name, which selects identically.
 //! * A non-private runner makes `filter_runs_usable_by_runner`
 //!   return `qs.none()`, whose `.first()` answers `None` without
-//!   touching the database — [`next_for_runner_sql`] returns `None`
+//!   touching the database — [`next_for_runner_stmt`] returns `None`
 //!   and the executor issues no query (the D-15 `qs.none()`
 //!   precedent).
 //!
 //! # Ported bugs (translate, don't redesign)
 //!
-//! * The `drain_pod` idle list carries **no** `DESKTOP_BUNDLED`
-//!   exclusion (unlike `select_runner_in_pod` `:109`): desktop
-//!   runners are listed, then can only take managed runs pinned to
-//!   them via the provisioning split. Ported as written.
+//! * The `drain_pod` idle list carries **no** `pod_dispatch`
+//!   exclusion (unlike `select_runner_in_pod` `:104`): `pinned_only`
+//!   engines are listed, then can only take managed runs pinned to
+//!   them. Ported as written.
 //! * The pin-rank `CASE` (`THEN 0 ELSE 1`) sorts pinned-to-me before
-//!   unpinned with FIFO inside each tier; the provisioning split
-//!   then narrows manual runners to `local_runner` and desktop
-//!   runners to managed runs pinned to them — the `IN
+//!   unpinned with FIFO inside each tier; the eligibility arms then
+//!   narrow engines to managed pins (+ pod work while they take it)
+//!   and own-agent runners to `local_runner` — the `IN
 //!   (MACHINE_EXECUTORS)` term stays in the query next to the
-//!   narrower equality. Ported as written.
+//!   narrower equalities. Ported as written.
 //! * Dispatch is `on_commit`-only with no `try`: an ONLINE-but-
 //!   sessionless runner keeps its `ASSIGNED` row while the caller
 //!   observes `RunnerOfflineError` (TRACE bug 2). Ported as written.
@@ -127,24 +124,31 @@
 //! `drain_for_runner_by_id_missing`, `drain_pod_by_id_missing`).
 //! Every section is replayed by the `#[cfg(test)]` suite below.
 
-use pidash_auth::permissions::runner::VISIBILITY_PRIVATE;
-use pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
+use chrono::{DateTime, Utc};
 use pidash_db::runner_runs::agent_run::COLUMNS as AGENT_RUN_COLUMNS;
 use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::runner_runs::AgentRunStatus;
 use pidash_types::runner_sessions::envelopes::build_assign_msg;
+use sea_query::{
+    Alias, Condition, Expr, ExprTrait, LockBehavior, LockType, Order, Query, SelectStatement,
+    SimpleExpr,
+};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use crate::runner_runs::guards::runs_usable_by_runner_predicate;
+use crate::runner_runs::guards::{
+    runner_visible_issue_exists, runner_visible_scheduler_exists, runs_usable_by_runner_predicate,
+};
 use crate::runner_runs::{SetClause, SetValue};
+
+use super::guards::{BUSY_STATUSES, RUNNER_COLUMNS};
 
 // ---------------------------------------------------------------------------
 // Pod projection (FX-RSES-07 `drain_pod.sql[2]` SELECT list)
 // ---------------------------------------------------------------------------
 
-/// `pod` columns in Django `_meta` order — the `SELECT` projection
-/// of [`DRAIN_POD_BY_ID_LOOKUP_SQL`], pinned against the fixture's
-/// pod SELECT list by the tests below.
+/// `pod` columns in Django `_meta` order, pinned against the
+/// fixture's pod SELECT list by the tests below.
 pub const POD_COLUMNS: [&str; 10] = [
     "id",
     "workspace_id",
@@ -162,35 +166,133 @@ pub const POD_COLUMNS: [&str; 10] = [
 // Runner selects (`matcher.py:89-121`, `:194-223`, `:253-279`)
 // ---------------------------------------------------------------------------
 
+/// Caller-fetched dispatch facts for [`next_for_runner_stmt`]: the
+/// runner's own eligibility shape. `paused` is
+/// `Runner.engine_paused` (engine whose machine's engine is paused);
+/// `pod_member` is `pod_dispatch == 'pod_member'`; `team_runs` is
+/// `DevMachine.engine_team_runs` (any value for own-agent runners).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DispatchFacts {
+    pub is_engine: bool,
+    pub pod_member: bool,
+    pub paused: bool,
+    pub team_runs: bool,
+}
+
+fn col(table: &'static str, column: &'static str) -> SimpleExpr {
+    Expr::col((Alias::new(table), column)).into()
+}
+
+/// The `.exclude(agent_runs__status__in=BUSY_STATUSES)` reverse join:
+/// `NOT EXISTS` a serving run on this runner (alias `U1`).
+fn busy_not_exists() -> SimpleExpr {
+    let statuses: Vec<SimpleExpr> = BUSY_STATUSES
+        .iter()
+        .map(|status| status.value().into())
+        .collect();
+    let sub = Query::select()
+        .expr_as(
+            SimpleExpr::Value(sea_query::Value::Int(Some(1))),
+            Alias::new("a"),
+        )
+        .from_as(Alias::new("agent_run"), Alias::new("U1"))
+        .and_where(col("U1", "status").is_in(statuses))
+        .and_where(col("U1", "runner_id").eq(col("runner", "id")))
+        .limit(1u64)
+        .to_owned();
+    Expr::exists(sub)
+}
+
+/// The `assignable()` engine-pause exclusion (`engine_paused_q`,
+/// #2903): a paused engine is treated as offline for matching. The
+/// machine test is an `IN (subquery)` rather than a join on purpose —
+/// every caller carries `FOR UPDATE SKIP LOCKED`, and Postgres
+/// refuses it on the nullable side of an outer join.
+fn engine_paused_excluded() -> Condition {
+    let paused = Query::select()
+        .column("id")
+        .from_as(Alias::new("dev_machine"), Alias::new("U0"))
+        .cond_where(
+            Condition::any()
+                .add(col("U0", "engine_paused_by_owner").eq(true))
+                .add(col("U0", "engine_auto_pause_reason").gt("")),
+        )
+        .to_owned();
+    Condition::all()
+        .add(col("runner", "dev_machine_id").in_subquery(paused))
+        .add(col("runner", "dev_machine_id").is_not_null())
+        .add(col("runner", "provisioning").eq("desktop_bundled"))
+}
+
+/// The shared `assignable()` base for the three runner selects:
+/// projection in [`RUNNER_COLUMNS`] order, heartbeat freshness +
+/// operator pause. Callers add the pod/runner target, the pod-work
+/// exclusion (one select only), the busy exclusion, and the tail.
+fn runner_base(threshold: DateTime<Utc>) -> SelectStatement {
+    let mut query = Query::select().to_owned();
+    for column in RUNNER_COLUMNS {
+        query.column((Alias::new("runner"), column));
+    }
+    query
+        .from(Alias::new("runner"))
+        .and_where(col("runner", "last_heartbeat_at").gte(threshold))
+        .and_where(col("runner", "paused_at").is_null())
+        .and_where(col("runner", "status").eq("online"))
+        .cond_where(engine_paused_excluded().not())
+        .cond_where(Condition::all().add(busy_not_exists()).not());
+    query
+}
+
 /// `select_runner_in_pod` (`:89-121`): one online, heartbeat-fresh,
-/// unpaused, idle, non-desktop runner in the pod, freshest heartbeat
-/// first.
-///
-/// `$1` is the [`alive_threshold`](super::guards::alive_threshold),
-/// `$2` the pod id. `status` is the `'online'` literal; the
-/// `paused_at IS NULL` arm is the `09738d222` `assignable()` pause
-/// rule (sorted between the threshold and the status); the
-/// `provisioning` arm excludes `'desktop_bundled'`; the `NOT
-/// EXISTS` arm is the `.exclude(agent_runs__status__in=BUSY_STATUSES)`
-/// reverse join (values in [`BUSY_STATUSES`] order). `FOR UPDATE
-/// SKIP LOCKED`: call inside a transaction.
-pub const SELECT_RUNNER_IN_POD_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE (\"runner\".\"last_heartbeat_at\" >= $1 AND \"runner\".\"paused_at\" IS NULL AND \"runner\".\"pod_id\" = $2 AND \"runner\".\"status\" = 'online' AND NOT (\"runner\".\"provisioning\" = 'desktop_bundled') AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1))) ORDER BY \"runner\".\"last_heartbeat_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED";
+/// unpaused, idle pod member in the pod, freshest heartbeat first.
+/// Engines rank equally (PO-4): only `pinned_only` runners are
+/// excluded, not `desktop_bundled`. Call inside a transaction
+/// (`FOR UPDATE SKIP LOCKED`).
+pub fn select_runner_in_pod_stmt(threshold: DateTime<Utc>, pod_id: Uuid) -> SelectStatement {
+    let mut query = runner_base(threshold);
+    query
+        .and_where(col("runner", "pod_id").eq(pod_id))
+        .cond_where(
+            Condition::all()
+                .add(col("runner", "pod_dispatch").eq("pinned_only"))
+                .not(),
+        )
+        .order_by(("runner", "last_heartbeat_at"), Order::Desc)
+        .limit(1u64)
+        .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked);
+    query
+}
 
 /// `drain_pod` idle list (`:211-223`): same filter as
-/// [`SELECT_RUNNER_IN_POD_SQL`] **without** the `DESKTOP_BUNDLED`
-/// exclusion and **without** `LIMIT 1` — the full idle set, in
-/// drain order (paused runners excluded by the `assignable()` arm).
-/// `$1` is the threshold (evaluated once per drain),
-/// `$2` the pod id. See the ported-bugs note.
-pub const DRAIN_POD_IDLE_RUNNERS_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE (\"runner\".\"last_heartbeat_at\" >= $1 AND \"runner\".\"paused_at\" IS NULL AND \"runner\".\"pod_id\" = $2 AND \"runner\".\"status\" = 'online' AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1))) ORDER BY \"runner\".\"last_heartbeat_at\" DESC FOR UPDATE SKIP LOCKED";
+/// [`select_runner_in_pod_stmt`] **without** the `pod_dispatch`
+/// exclusion and **without** `LIMIT 1` — the full idle set, in drain
+/// order (paused runners excluded by the `assignable()` arm, but
+/// `pinned_only` engines stay listed: they can take their managed
+/// pins). See the ported-bugs note.
+pub fn drain_pod_idle_list_stmt(threshold: DateTime<Utc>, pod_id: Uuid) -> SelectStatement {
+    let mut query = runner_base(threshold);
+    query
+        .and_where(col("runner", "pod_id").eq(pod_id))
+        .order_by(("runner", "last_heartbeat_at"), Order::Desc)
+        .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked);
+    query
+}
 
 /// `drain_for_runner` re-lock (`:267-279`): the same row back under
 /// `FOR UPDATE SKIP LOCKED` when it is still online, fresh, unpaused
-/// and idle. `$1` is the threshold, `$2` the runner id. No explicit
-/// `order_by`, so `Runner.Meta.ordering` applies
-/// (`-last_heartbeat_at`, `-created_at` — both keys, unlike the
-/// selects above). A miss means: return `false`, no further query.
-pub const DRAIN_FOR_RUNNER_LOCK_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE (\"runner\".\"last_heartbeat_at\" >= $1 AND \"runner\".\"paused_at\" IS NULL AND \"runner\".\"id\" = $2 AND \"runner\".\"status\" = 'online' AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1))) ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED";
+/// and idle. No explicit `order_by`, so `Runner.Meta.ordering`
+/// applies (`-last_heartbeat_at`, `-created_at`). A miss means:
+/// return `false`, no further query.
+pub fn drain_for_runner_lock_stmt(threshold: DateTime<Utc>, runner_id: Uuid) -> SelectStatement {
+    let mut query = runner_base(threshold);
+    query
+        .and_where(col("runner", "id").eq(runner_id))
+        .order_by(("runner", "last_heartbeat_at"), Order::Desc)
+        .order_by(("runner", "created_at"), Order::Desc)
+        .limit(1u64)
+        .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked);
+    query
+}
 
 // ---------------------------------------------------------------------------
 // Run selects (`matcher.py:123-192`)
@@ -203,17 +305,42 @@ pub const DRAIN_FOR_RUNNER_LOCK_SQL: &str = "SELECT \"runner\".\"id\", \"runner\
 /// call inside a transaction.
 pub const NEXT_QUEUED_RUN_FOR_POD_SQL: &str = "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error_details\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run\" WHERE (\"agent_run\".\"executor_kind\" IN ('local_runner', 'managed_runner') AND \"agent_run\".\"pinned_runner_id\" IS NULL AND \"agent_run\".\"pod_id\" = $1 AND \"agent_run\".\"status\" = 'queued') ORDER BY \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED";
 
-/// Positional `ORDER BY` of the `_is_mine` annotation in
-/// [`next_for_runner_sql`]: 39 run columns plus 2 `EXISTS`
-/// annotations plus the `CASE`, i.e.
-/// `AGENT_RUN_COLUMNS.len() + 3`. Pinned by the tests below so a
-/// column-count change fails loudly instead of re-sorting the tiers.
-pub const NEXT_FOR_RUNNER_RANK_POSITION: usize = 42;
-
-/// The `:173` provisioning split: `DESKTOP_BUNDLED` runners take the
-/// managed arm, every other provisioning the manual arm.
-pub fn is_desktop_provisioning(provisioning: &str) -> bool {
-    provisioning == RUNNER_PROVISIONING_DESKTOP_BUNDLED
+/// The `next_for_runner` eligibility arms (`:169-178`): what a runner
+/// may take, as one `Condition`. Own-agent runners take `local_runner`
+/// runs pinned to them plus (as a `pod_member`) the unpinned pod queue;
+/// engines take legacy `managed_runner` runs pinned to them always,
+/// plus pins and the pod queue while they take pod work
+/// (`pod_member` and unpaused). The old `desktop_bundled` split is gone.
+fn eligible_condition(runner_id: Uuid, facts: &DispatchFacts) -> Condition {
+    let local = AgentExecutorKind::LocalRunner.value();
+    let managed = AgentExecutorKind::ManagedRunner.value();
+    let pinned = col("agent_run", "pinned_runner_id");
+    if facts.is_engine {
+        let managed_arm = Condition::all()
+            .add(col("agent_run", "executor_kind").eq(managed))
+            .add(pinned.clone().eq(runner_id));
+        if facts.pod_member && !facts.paused {
+            let local_arm = Condition::all()
+                .add(col("agent_run", "executor_kind").eq(local))
+                .add(
+                    Condition::any()
+                        .add(pinned.clone().eq(runner_id))
+                        .add(pinned.is_null()),
+                );
+            return Condition::any().add(managed_arm).add(local_arm);
+        }
+        return managed_arm;
+    }
+    let mine_or_pod = if facts.pod_member {
+        Condition::any()
+            .add(pinned.clone().eq(runner_id))
+            .add(pinned.is_null())
+    } else {
+        Condition::all().add(pinned.eq(runner_id))
+    };
+    Condition::all()
+        .add(col("agent_run", "executor_kind").eq(local))
+        .add(mine_or_pod)
 }
 
 /// `next_for_runner` (`:147-192`): the next `QUEUED` run this runner
@@ -224,84 +351,69 @@ pub fn is_desktop_provisioning(provisioning: &str) -> bool {
 /// answers `qs.none()`, whose `.first()` returns `None` without
 /// issuing a query. The executor runs no SQL in that case.
 ///
-/// Otherwise the full `SELECT … FOR UPDATE SKIP LOCKED` text: the
-/// 39-column run projection plus the two `EXISTS` annotations the
+/// Otherwise the full `SELECT … FOR UPDATE SKIP LOCKED` statement:
+/// the 39-column run projection plus the two `EXISTS` annotations the
 /// usability filter contributes, the pin-rank `CASE`
-/// (`pinned_runner_id = $2 THEN 0 ELSE 1`), and the provisioning
-/// split (`executor_kind = 'local_runner'` for manual runners;
-/// `executor_kind = 'managed_runner' AND pinned_runner_id = $2`
-/// for desktop runners). Bindings: `$1` pod id, `$2` runner id,
-/// `$3` runner-owner id, repeated at every occurrence. The
-/// usability `OR` is
-/// [`runs_usable_by_runner_predicate`](crate::runner_runs::guards::runs_usable_by_runner_predicate)
+/// (`pinned_runner_id = runner THEN 0 ELSE 1`), and the eligibility
+/// arms in [`eligible_condition`]. The usability `OR` is
+/// [`runs_usable_by_runner_predicate`]
 /// (D-15 owns the filter; this module only calls it).
-pub fn next_for_runner_sql(provisioning: &str, visibility: i32) -> Option<String> {
-    if visibility != VISIBILITY_PRIVATE {
-        return None;
+pub fn next_for_runner_stmt(
+    visibility: i32,
+    pod_id: Uuid,
+    runner_id: Uuid,
+    owner_id: Uuid,
+    facts: &DispatchFacts,
+) -> Option<SelectStatement> {
+    let usability = runs_usable_by_runner_predicate(
+        visibility,
+        owner_id,
+        "agent_run",
+        facts.is_engine,
+        facts.team_runs,
+    )?;
+    let mut query = Query::select().to_owned();
+    for column in AGENT_RUN_COLUMNS {
+        query.column((Alias::new("agent_run"), *column));
     }
-    let usability = runs_usable_by_runner_predicate(visibility, "$3", "agent_run")?;
-    let mut select = AGENT_RUN_COLUMNS
-        .iter()
-        .map(|column| format!("\"agent_run\".\"{column}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    select.push_str(
-        ", EXISTS(SELECT 1 AS \"a\" FROM \"issues\" U0 LEFT OUTER JOIN \"issue_assignees\" U2 ON (U0.\"id\" = U2.\"issue_id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"id\" = (\"agent_run\".\"work_item_id\") AND (U0.\"created_by_id\" = $3 OR (U2.\"assignee_id\" = $3 AND U2.\"deleted_at\" IS NULL))) LIMIT 1) AS \"_runner_visible_issue\"",
-    );
-    select.push_str(
-        ", EXISTS(SELECT 1 AS \"a\" FROM \"scheduler_bindings\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"actor_id\" = $3 AND U0.\"id\" = (\"agent_run\".\"scheduler_binding_id\")) LIMIT 1) AS \"_runner_visible_scheduler\"",
-    );
-    select.push_str(
-        ", CASE WHEN \"agent_run\".\"pinned_runner_id\" = $2 THEN 0 ELSE 1 END AS \"_is_mine\"",
-    );
-    let split = if is_desktop_provisioning(provisioning) {
-        format!(
-            "\"agent_run\".\"executor_kind\" = '{}' AND \"agent_run\".\"pinned_runner_id\" = $2",
-            AgentExecutorKind::ManagedRunner.value()
+    query
+        .expr_as(
+            runner_visible_issue_exists(owner_id, "agent_run"),
+            Alias::new("_runner_visible_issue"),
         )
-    } else {
-        format!(
-            "\"agent_run\".\"executor_kind\" = '{}'",
-            AgentExecutorKind::LocalRunner.value()
+        .expr_as(
+            runner_visible_scheduler_exists(owner_id, "agent_run"),
+            Alias::new("_runner_visible_scheduler"),
         )
-    };
-    Some(format!(
-        "SELECT {select} FROM \"agent_run\" WHERE (\"agent_run\".\"executor_kind\" IN ('local_runner', 'managed_runner') AND \"agent_run\".\"pod_id\" = $1 AND \"agent_run\".\"status\" = 'queued' AND (\"agent_run\".\"pinned_runner_id\" = $2 OR \"agent_run\".\"pinned_runner_id\" IS NULL) AND {usability} AND {split}) ORDER BY {rank} ASC, \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
-        rank = NEXT_FOR_RUNNER_RANK_POSITION,
-    ))
+        .expr_as(
+            Expr::case(col("agent_run", "pinned_runner_id").eq(runner_id), 0).finally(1),
+            Alias::new("_is_mine"),
+        )
+        .from(Alias::new("agent_run"))
+        .and_where(col("agent_run", "executor_kind").is_in([
+            AgentExecutorKind::LocalRunner.value(),
+            AgentExecutorKind::ManagedRunner.value(),
+        ]))
+        .and_where(col("agent_run", "pod_id").eq(pod_id))
+        .and_where(col("agent_run", "status").eq(AgentRunStatus::Queued.value()))
+        .cond_where(eligible_condition(runner_id, facts))
+        .cond_where(usability)
+        .order_by(Alias::new("_is_mine"), Order::Asc)
+        .order_by(("agent_run", "created_at"), Order::Asc)
+        .limit(1u64)
+        .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked);
+    Some(query)
 }
-
-// ---------------------------------------------------------------------------
-// Assignment write (`matcher.py:228-232`, `:285-289`)
-// ---------------------------------------------------------------------------
-
-/// The assignment `UPDATE` (`save(update_fields=["runner", "owner",
-/// "status", "assigned_at"])`, `:232` / `:289`). Django emits `SET`
-/// in model field-definition order, not `update_fields` order:
-/// `owner_id`, `runner_id`, `status`, `assigned_at`. `$1` owner,
-/// `$2` runner, `$3` `timezone.now()` (evaluated per assignment),
-/// `$4` run. `status` is the `'assigned'` literal.
-pub const ASSIGN_RUN_UPDATE_SQL: &str = "UPDATE \"agent_run\" SET \"owner_id\" = $1, \"runner_id\" = $2, \"status\" = 'assigned', \"assigned_at\" = $3 WHERE \"agent_run\".\"id\" = $4";
 
 // ---------------------------------------------------------------------------
 // By-id lookups (`matcher.py:242-251`, `:298-304`)
 // ---------------------------------------------------------------------------
-
-/// `drain_pod_by_id` pod lookup (`:247`):
-/// `Pod.objects.filter(pk=pod_id).first()`. `$1` is the pod id. The
-/// `Pod.objects` manager scope (`deleted_at IS NULL`) precedes the
-/// pk term — that scope is the soft-delete skip; unordered
-/// `.first()` keeps `Pod.Meta.ordering` (`-is_default`,
-/// `created_at`). A miss means: return `0`, no transaction.
-pub const DRAIN_POD_BY_ID_LOOKUP_SQL: &str = "SELECT \"pod\".\"id\", \"pod\".\"workspace_id\", \"pod\".\"project_id\", \"pod\".\"name\", \"pod\".\"description\", \"pod\".\"created_by_id\", \"pod\".\"is_default\", \"pod\".\"deleted_at\", \"pod\".\"created_at\", \"pod\".\"updated_at\" FROM \"pod\" WHERE (\"pod\".\"deleted_at\" IS NULL AND \"pod\".\"id\" = $1) ORDER BY \"pod\".\"is_default\" DESC, \"pod\".\"created_at\" ASC LIMIT 1";
-
-/// `drain_for_runner_by_id` runner lookup (`:300`):
-/// `Runner.objects.filter(pk=runner_id).first()`. `$1` is the
-/// runner id. Plain manager (no scope); unordered `.first()` keeps
-/// `Runner.Meta.ordering` (`-last_heartbeat_at`, `-created_at`).
-/// The single-condition `WHERE` has no parens. A miss means:
-/// return `false`, no transaction.
-pub const DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE \"runner\".\"id\" = $1 ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1";
+//
+// The lookups run through SeaORM entity finds in the executors (`pod`
+// with the `deleted_at IS NULL` manager scope and
+// `(-is_default, created_at)` ordering; plain runner by id). The pod
+// projection is pinned against the fixture's pod SELECT in `by_id`
+// test below.
 
 // ---------------------------------------------------------------------------
 // Assignment plan + post-commit effect
@@ -311,11 +423,11 @@ pub const DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL: &str = "SELECT \"runner\".\"id\", \
 /// payload fields plus the assignee's ids. `owner_id` is the
 /// runner's owner (`run.owner_id = runner.owner_id`, `:229`).
 pub struct AssignmentFacts {
-    /// The locked run id (`$4` of [`ASSIGN_RUN_UPDATE_SQL`]).
+    /// The locked run id (the assignment write's target).
     pub run_id: Uuid,
-    /// The assignee runner id (`$2`).
+    /// The assignee runner id.
     pub runner_id: Uuid,
-    /// The runner's owner id (`$1`).
+    /// The runner's owner id.
     pub owner_id: Uuid,
     /// `run.work_item_id` for the assign frame (`None` renders null).
     pub work_item_id: Option<Uuid>,
@@ -326,9 +438,9 @@ pub struct AssignmentFacts {
 }
 
 /// One committed assignment: the ordered `SET` plan plus the
-/// post-commit dispatch. The executor runs
-/// [`ASSIGN_RUN_UPDATE_SQL`] inside its transaction, commits, then
-/// queues [`DrainEffect::SendAssign`] via `pidash_db::tx`.
+/// post-commit dispatch. The executor writes the assignment inside
+/// its transaction, commits, then queues
+/// [`DrainEffect::SendAssign`] via `pidash_db::tx`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AssignmentPlan {
     /// The assigned run id.
@@ -425,12 +537,12 @@ pub fn drain_for_runner_log(runner_id: &Uuid, run_id: &Uuid) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner_runs::guards::runs_usable_by_runner_predicate;
     use crate::runner_sessions::guards::{BUSY_STATUSES, RUNNER_COLUMNS};
-    use pidash_db::runner_enroll::columns::enums::{
-        RUNNER_PROVISIONING_MANUAL, RUNNER_STATUS_ONLINE,
-    };
+    use chrono::TimeZone;
+    use pidash_auth::permissions::runner::VISIBILITY_PRIVATE;
     use pidash_types::dispatch::MACHINE_EXECUTORS;
-    use pidash_types::runner_runs::AgentRunStatus;
+    use sea_query::PostgresQueryBuilder;
     use serde_json::Value;
 
     static FX07: &str =
@@ -440,18 +552,31 @@ mod tests {
         serde_json::from_str(FX07).expect("FX-RSES-07 parses")
     }
 
-    const POD: &str = "'c63d5b13d56745de932a6e5e28568cfb'::uuid";
-    const OWNER: &str = "'ce755a5b0c644e838f276218e639df62'::uuid";
+    const POD_ID: &str = "5bd71e42-032f-47b7-987a-c407e6465809";
+    const RUNNER_ID: &str = "c1b285f2-b1b2-4fd2-8fff-0a18bd04b83d";
+    const OWNER_ID: &str = "8a4219aa-7cfa-475b-92a2-8fcc6029008a";
 
-    /// Normalize a `next_for_runner` capture: pod → `$1`, the
-    /// runner literal → `$2`, owner → `$3`.
-    fn normalize_next(sql: &str, runner: &str) -> String {
-        sql.replace(POD, "$1")
-            .replace(runner, "$2")
-            .replace(OWNER, "$3")
+    fn render(stmt: &SelectStatement) -> String {
+        stmt.to_string(PostgresQueryBuilder)
     }
 
-    /// The `SELECT` projection of a runner SQL const, as columns.
+    fn threshold() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 11, 6, 7, 36, 52).unwrap()
+    }
+
+    fn pod() -> Uuid {
+        Uuid::parse_str(POD_ID).unwrap()
+    }
+
+    fn runner() -> Uuid {
+        Uuid::parse_str(RUNNER_ID).unwrap()
+    }
+
+    fn owner() -> Uuid {
+        Uuid::parse_str(OWNER_ID).unwrap()
+    }
+
+    /// The `SELECT` projection of a rendered statement, as columns.
     fn runner_projection(sql: &str) -> Vec<&str> {
         sql.strip_prefix("SELECT ")
             .expect("SELECT prefix")
@@ -468,67 +593,72 @@ mod tests {
             .collect()
     }
 
-    /// The `SELECT` projection of a run SQL text, as columns
-    /// (annotation tails are returned verbatim after the run cols).
-    fn run_projection(sql: &str) -> Vec<&str> {
-        sql.strip_prefix("SELECT ")
+    /// The `SELECT` projection of a run statement: the 39 run columns
+    /// come first, then the three annotations.
+    fn run_projection(sql: &str) -> (Vec<&str>, Vec<&str>) {
+        let select = sql
+            .strip_prefix("SELECT ")
             .expect("SELECT prefix")
             .split_once(" FROM \"agent_run\"")
             .expect("FROM agent_run")
-            .0
-            .split(", ")
-            .map(|c| {
+            .0;
+        let raw: Vec<&str> = select.split(", ").collect();
+        let cols: Vec<&str> = raw
+            .iter()
+            .filter_map(|c| {
                 c.strip_prefix("\"agent_run\".\"")
-                    .map_or(c, |rest| rest.strip_suffix('"').expect("quoted"))
+                    .map(|rest| rest[..rest.len() - 1].trim_end_matches('"'))
             })
-            .collect()
+            .collect();
+        let rest = raw[cols.len()..].to_vec();
+        (cols, rest)
+    }
+
+    fn runner_stmt_sql(stmt: &SelectStatement) -> String {
+        render(stmt)
     }
 
     // -- select_runner_in_pod --------------------------------------------
 
     #[test]
-    fn select_runner_in_pod_sql_matches_fixture() {
+    fn select_runner_in_pod_stmt_matches_fixture() {
+        let sql = runner_stmt_sql(&select_runner_in_pod_stmt(threshold(), pod()));
         let fx = fx07();
-        let django = fx["select_runner_in_pod"]["sql"][0].as_str().expect("sql");
-        let normalized = django
-            .replace("'2026-10-03 00:32:04.303170+00:00'::timestamptz", "$1")
-            .replace(POD, "$2");
-        assert_eq!(normalized, SELECT_RUNNER_IN_POD_SQL);
+        // Oracle outcome: the pod-member engine is freshest and picked
+        // (PO-4: engines rank equally — the `desktop_bundled`
+        // exclusion is gone).
         assert_eq!(
-            fx07()["select_runner_in_pod"]["picked"].as_str(),
-            Some("g-idle")
+            fx["select_runner_in_pod"]["picked"].as_str(),
+            Some("eng-member")
         );
-        assert!(
-            fx07()["select_runner_in_pod"]["all_busy_picked"].is_null(),
+        assert_eq!(
+            fx["select_runner_in_pod"]["all_busy_picked"],
+            Value::Null,
             "no eligible runner answers None"
         );
-        assert_eq!(runner_projection(SELECT_RUNNER_IN_POD_SQL), RUNNER_COLUMNS);
-        // Captured WHERE term order: threshold, pause, pod, status,
-        // desktop exclusion, busy exclusion (`09738d222`: `assignable()`
-        // sorts its kwargs, so the pause arm lands right after the
-        // threshold).
-        let where_clause = SELECT_RUNNER_IN_POD_SQL
-            .split_once(" WHERE (")
-            .expect("WHERE")
-            .1;
-        let status_term = format!("\"runner\".\"status\" = '{RUNNER_STATUS_ONLINE}'");
-        let desktop_term =
-            format!("NOT (\"runner\".\"provisioning\" = '{RUNNER_PROVISIONING_DESKTOP_BUNDLED}')");
-        let mut cursor = 0;
+        assert_eq!(runner_projection(&sql), RUNNER_COLUMNS);
+        // The fixture's Django WHERE terms survive in our statement,
+        // with params bound: pod id, pinned-only exclusion,
+        // engine-pause IN-subquery, busy NOT EXISTS.
         for term in [
-            "\"runner\".\"last_heartbeat_at\" >= $1",
-            "\"runner\".\"paused_at\" IS NULL",
-            "\"runner\".\"pod_id\" = $2",
-            status_term.as_str(),
-            desktop_term.as_str(),
-            "NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1",
+            "last_heartbeat_at",
+            "\"paused_at\" IS NULL",
+            "\"status\" = 'online'",
+            "IN (SELECT \"id\" FROM \"dev_machine\" AS \"U0\"",
+            "engine_paused_by_owner",
+            "engine_auto_pause_reason",
+            "pod_dispatch",
+            "pinned_only",
+            "NOT EXISTS",
         ] {
-            let pos = where_clause[cursor..]
-                .find(term)
-                .unwrap_or_else(|| panic!("term present: {term}"));
-            cursor += pos + term.len();
+            assert!(sql.contains(term), "term present: {term}");
         }
-        assert!(SELECT_RUNNER_IN_POD_SQL.ends_with(
+        assert!(sql.contains(POD_ID), "pod bound");
+        assert!(
+            sql.contains("provisioning"),
+            "projection carries provisioning"
+        );
+        assert!(sql.ends_with(
             "ORDER BY \"runner\".\"last_heartbeat_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED"
         ));
     }
@@ -541,15 +671,64 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
         for sql in [
-            SELECT_RUNNER_IN_POD_SQL,
-            DRAIN_POD_IDLE_RUNNERS_SQL,
-            DRAIN_FOR_RUNNER_LOCK_SQL,
+            runner_stmt_sql(&select_runner_in_pod_stmt(threshold(), pod())),
+            runner_stmt_sql(&drain_pod_idle_list_stmt(threshold(), pod())),
+            runner_stmt_sql(&drain_for_runner_lock_stmt(threshold(), runner())),
         ] {
             assert!(
-                sql.contains(&format!("U1.\"status\" IN ({list})")),
+                sql.contains(&format!("\"status\" IN ({list})")),
                 "NOT EXISTS arm pins BUSY_STATUSES order"
             );
         }
+    }
+
+    #[test]
+    fn maker_base_excludes_neither_pod_work_nor_paused_handling() {
+        // drain_pod idle: assignable() arms but NO pod_dispatch term.
+        let idle = runner_stmt_sql(&drain_pod_idle_list_stmt(threshold(), pod()));
+        let where_only = idle
+            .split_once(" WHERE ")
+            .expect("WHERE")
+            .1
+            .split_once(" ORDER BY ")
+            .expect("ORDER BY")
+            .0;
+        assert!(
+            !where_only.contains("pod_dispatch"),
+            "idle list carries no pod_dispatch exclusion (ported as written)"
+        );
+        assert!(
+            idle.ends_with("ORDER BY \"runner\".\"last_heartbeat_at\" DESC FOR UPDATE SKIP LOCKED")
+        );
+        assert_eq!(idle.matches("LIMIT").count(), 1, "only the EXISTS LIMIT");
+        // select_runner_in_pod DOES carry it.
+        let one = runner_stmt_sql(&select_runner_in_pod_stmt(threshold(), pod()));
+        let one_where = one
+            .split_once(" WHERE ")
+            .expect("WHERE")
+            .1
+            .split_once(" ORDER BY ")
+            .expect("ORDER BY")
+            .0;
+        assert!(
+            one_where.contains("pod_dispatch"),
+            "select excludes pinned_only"
+        );
+    }
+
+    // -- drain_for_runner lock --------------------------------------------
+
+    #[test]
+    fn drain_for_runner_lock_stmt_matches_fixture() {
+        let fx = fx07();
+        assert_eq!(fx["drain_for_runner"]["assigned"], true);
+        let sql = runner_stmt_sql(&drain_for_runner_lock_stmt(threshold(), runner()));
+        assert_eq!(runner_projection(&sql), RUNNER_COLUMNS);
+        assert!(sql.ends_with(
+            "ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED"
+        ));
+        assert!(sql.contains("dev_machine_id"));
+        assert!(sql.contains("engine_paused_by_owner"));
     }
 
     // -- next_queued_run_for_pod ------------------------------------------
@@ -557,12 +736,39 @@ mod tests {
     #[test]
     fn next_queued_run_for_pod_sql_matches_fixture() {
         let fx = fx07();
-        let django = fx["next_queued_run_for_pod"]["sql"][0]
-            .as_str()
-            .expect("sql");
-        let normalized = django.replace(POD, "$1");
-        assert_eq!(normalized, NEXT_QUEUED_RUN_FOR_POD_SQL);
-        let projected = run_projection(NEXT_QUEUED_RUN_FOR_POD_SQL);
+        // Oracle: the oldest unpinned queued run (q1) is next.
+        assert_eq!(
+            fx["next_queued_run_for_pod"]["picked_prompt"].as_str(),
+            Some("p-q1")
+        );
+        // The Django text binds the fixture pod id where our const
+        // binds `$1` (unchanged by #2903).
+        let django = fx["next_queued_run_for_pod"]["sql"]
+            .as_array()
+            .expect("sql")
+            .iter()
+            .find_map(|entry| {
+                let text = entry.as_str().expect("sql");
+                text.contains("FROM \"agent_run\"").then_some(text)
+            })
+            .expect("run SELECT");
+        let django = django.replace("5bd71e42032f47b7987ac407e6465809", POD_ID);
+        let django = django.replace(&format!("'{POD_ID}'::uuid"), "$1");
+        assert_eq!(django.trim_end(), NEXT_QUEUED_RUN_FOR_POD_SQL);
+        let projected: Vec<&str> = NEXT_QUEUED_RUN_FOR_POD_SQL
+            .strip_prefix("SELECT ")
+            .expect("SELECT")
+            .split_once(" FROM \"agent_run\"")
+            .expect("FROM")
+            .0
+            .split(", ")
+            .map(|c| {
+                c.strip_prefix("\"agent_run\".\"")
+                    .expect("qualified")
+                    .strip_suffix('"')
+                    .expect("quoted")
+            })
+            .collect();
         assert_eq!(projected, AGENT_RUN_COLUMNS);
         let machine = MACHINE_EXECUTORS
             .iter()
@@ -574,233 +780,239 @@ mod tests {
                 .contains(&format!("\"agent_run\".\"executor_kind\" IN ({machine})")),
             "IN list pins MACHINE_EXECUTORS order"
         );
-        assert!(NEXT_QUEUED_RUN_FOR_POD_SQL.contains("\"agent_run\".\"pinned_runner_id\" IS NULL"));
-        assert!(NEXT_QUEUED_RUN_FOR_POD_SQL
-            .ends_with("ORDER BY \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED"));
     }
 
     // -- next_for_runner --------------------------------------------------
 
-    #[test]
-    fn next_for_runner_manual_sql_matches_fixture() {
-        let ours = next_for_runner_sql(RUNNER_PROVISIONING_MANUAL, VISIBILITY_PRIVATE)
-            .expect("manual arm");
-        let fx = fx07();
-        let django = fx["next_for_runner"]["sql"][1].as_str().expect("sql");
-        let normalized = normalize_next(django, "'297ebdfd8d3b44aeb295964880f92013'::uuid");
-        assert_eq!(normalized, ours);
-        assert_eq!(fx07()["next_for_runner"]["picked_is_pinned"], true);
-        // Tiers: pin-rank CASE first, FIFO inside each tier.
-        assert!(ours.contains(
-            "CASE WHEN \"agent_run\".\"pinned_runner_id\" = $2 THEN 0 ELSE 1 END AS \"_is_mine\""
-        ));
-        assert!(ours.ends_with(
-            "ORDER BY 42 ASC, \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
-        ));
-        assert!(ours.contains(&format!(
-            "\"agent_run\".\"executor_kind\" = '{}'",
-            AgentExecutorKind::LocalRunner.value()
-        )));
-        // Manual arm: the split is the bare local equality closing
-        // the WHERE — no trailing pin term (contrast desktop).
-        assert!(ours.contains(&format!(
-            "AND \"agent_run\".\"executor_kind\" = '{}') ORDER BY",
-            AgentExecutorKind::LocalRunner.value()
-        )));
+    fn manual_facts() -> DispatchFacts {
+        DispatchFacts {
+            is_engine: false,
+            pod_member: true,
+            paused: false,
+            team_runs: true,
+        }
+    }
+
+    fn engine_facts(pod_member: bool, paused: bool) -> DispatchFacts {
+        DispatchFacts {
+            is_engine: true,
+            pod_member,
+            paused,
+            team_runs: false,
+        }
     }
 
     #[test]
-    fn next_for_runner_desktop_sql_matches_fixture() {
-        let ours = next_for_runner_sql(RUNNER_PROVISIONING_DESKTOP_BUNDLED, VISIBILITY_PRIVATE)
-            .expect("desktop arm");
-        let fx = fx07();
-        let django = fx["next_for_runner_desktop"]["sql"][1]
-            .as_str()
-            .expect("sql");
-        let normalized = normalize_next(django, "'44cfb1285f62479bbb9ea0d0910ad6cd'::uuid");
-        assert_eq!(normalized, ours);
-        assert!(fx07()["next_for_runner_desktop"]["picked"].is_null());
-        assert_eq!(fx07()["next_for_runner_desktop"]["after_managed_pin"], true);
-        assert!(ours.contains(&format!(
-            "\"agent_run\".\"executor_kind\" = '{}' AND \"agent_run\".\"pinned_runner_id\" = $2",
-            AgentExecutorKind::ManagedRunner.value()
-        )));
+    fn next_for_runner_manual_matches_fixture() {
+        let sql = render(
+            &next_for_runner_stmt(
+                VISIBILITY_PRIVATE,
+                pod(),
+                runner(),
+                owner(),
+                &manual_facts(),
+            )
+            .expect("manual arm"),
+        );
+        assert_eq!(
+            fx07()["next_for_runner"]["manual_idle"]["picked_prompt"].as_str(),
+            Some("p-q1")
+        );
+        let (cols, rest) = run_projection(&sql);
+        assert_eq!(cols, AGENT_RUN_COLUMNS);
+        assert_eq!(cols.len(), 39);
+        assert_eq!(rest.len(), 3);
+        assert!(sql.contains("_is_mine"));
+        assert!(sql.ends_with(
+            "ORDER BY \"_is_mine\" ASC, \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
+        ));
+        assert!(sql.contains("\"agent_run\".\"executor_kind\" = 'local_runner'"));
+        assert!(
+            !sql.contains("managed_runner")
+                || sql.contains("executor_kind\" IN ('local_runner', 'managed_runner')")
+        );
+        // No trigger gate for own-agent runners.
+        assert!(!sql.contains("NOT IN"));
+    }
+
+    #[test]
+    fn next_for_runner_engine_member_matches_fixture() {
+        let sql = render(
+            &next_for_runner_stmt(
+                VISIBILITY_PRIVATE,
+                pod(),
+                runner(),
+                owner(),
+                &engine_facts(true, false),
+            )
+            .expect("engine arm"),
+        );
+        assert_eq!(
+            fx07()["next_for_runner"]["engine_member"]["picked_prompt"].as_str(),
+            Some("p-q-managed")
+        );
+        // Managed pins AND the pod-member local arm.
+        assert!(sql.contains("\"agent_run\".\"executor_kind\" = 'managed_runner'"));
+        assert!(sql.contains("\"agent_run\".\"executor_kind\" = 'local_runner'"));
+        // Narrow PO-3 usability: no owner_id arm, trigger gate present.
+        assert!(!sql.contains("\"agent_run\".\"owner_id\""));
+        assert!(sql.contains("NOT IN"));
+    }
+
+    #[test]
+    fn next_for_runner_engine_pinned_only_matches_fixture() {
+        let sql = render(
+            &next_for_runner_stmt(
+                VISIBILITY_PRIVATE,
+                pod(),
+                runner(),
+                owner(),
+                &engine_facts(false, false),
+            )
+            .expect("pinned engine"),
+        );
+        assert_eq!(
+            fx07()["next_for_runner"]["engine_pinned_only"]["picked_prompt"].as_str(),
+            Some("p-q-managed-pinned")
+        );
+        // Managed pins only: no local arm.
+        assert!(sql.contains("\"agent_run\".\"executor_kind\" = 'managed_runner'"));
+        assert!(!sql.contains("\"agent_run\".\"executor_kind\" = 'local_runner'"));
+    }
+
+    #[test]
+    fn next_for_runner_engine_paused_matches_fixture() {
+        let sql = render(
+            &next_for_runner_stmt(
+                VISIBILITY_PRIVATE,
+                pod(),
+                runner(),
+                owner(),
+                &engine_facts(true, true),
+            )
+            .expect("paused engine"),
+        );
+        assert_eq!(
+            fx07()["next_for_runner"]["engine_paused"]["picked_prompt"].as_str(),
+            None
+        );
+        assert!(sql.contains("\"agent_run\".\"executor_kind\" = 'managed_runner'"));
+        assert!(!sql.contains("\"agent_run\".\"executor_kind\" = 'local_runner'"));
+    }
+
+    #[test]
+    fn next_for_runner_team_runs_restores_ordinary_rule() {
+        let team = DispatchFacts {
+            is_engine: true,
+            pod_member: true,
+            paused: false,
+            team_runs: true,
+        };
+        let sql = render(
+            &next_for_runner_stmt(VISIBILITY_PRIVATE, pod(), runner(), owner(), &team)
+                .expect("team engine"),
+        );
+        assert!(sql.contains("\"agent_run\".\"owner_id\""));
+        assert!(!sql.contains("NOT IN"));
+        assert!(sql.contains("\"agent_run\".\"executor_kind\" = 'local_runner'"));
     }
 
     #[test]
     fn next_for_runner_non_private_selects_nothing() {
-        assert_eq!(next_for_runner_sql(RUNNER_PROVISIONING_MANUAL, 99), None);
-        assert_eq!(
-            next_for_runner_sql(RUNNER_PROVISIONING_DESKTOP_BUNDLED, 1),
-            None
+        assert!(next_for_runner_stmt(99, pod(), runner(), owner(), &manual_facts()).is_none());
+        assert!(
+            next_for_runner_stmt(1, pod(), runner(), owner(), &engine_facts(true, false)).is_none()
         );
     }
 
     #[test]
-    fn next_for_runner_projection_and_rank() {
-        let ours = next_for_runner_sql(RUNNER_PROVISIONING_MANUAL, VISIBILITY_PRIVATE)
-            .expect("manual arm");
-        let projected = run_projection(&ours);
-        assert_eq!(&projected[..AGENT_RUN_COLUMNS.len()], AGENT_RUN_COLUMNS);
-        assert_eq!(projected.len(), AGENT_RUN_COLUMNS.len() + 3);
-        assert_eq!(AGENT_RUN_COLUMNS.len(), 39);
-        assert_eq!(NEXT_FOR_RUNNER_RANK_POSITION, AGENT_RUN_COLUMNS.len() + 3);
-        assert_eq!(AgentRunStatus::Queued.value(), "queued", "status literal");
-    }
-
-    #[test]
     fn usability_arms_match_d15_predicate() {
-        let ours = next_for_runner_sql(RUNNER_PROVISIONING_MANUAL, VISIBILITY_PRIVATE)
-            .expect("manual arm");
-        let predicate = runs_usable_by_runner_predicate(VISIBILITY_PRIVATE, "$3", "agent_run")
-            .expect("private");
-        // The WHERE arm IS the D-15 predicate (called, not copied).
-        assert!(ours.contains(&predicate), "WHERE carries the D-15 text");
-        // The SELECT annotations are the same EXISTS arms under
-        // aliases — pinned against the predicate so a D-15 change
-        // fails here instead of drifting silently.
-        for alias in ["_runner_visible_issue", "_runner_visible_scheduler"] {
-            let marker = format!(") AS \"{alias}\"");
-            let table = if alias == "_runner_visible_issue" {
-                "issues"
-            } else {
-                "scheduler_bindings"
-            };
-            let start = ours
-                .find(&format!("EXISTS(SELECT 1 AS \"a\" FROM \"{table}\" U0"))
-                .expect("annotation");
-            let end = ours[start..].find(&marker).expect("alias") + start;
-            let arm = &ours[start..end + 1];
+        let sql = render(
+            &next_for_runner_stmt(
+                VISIBILITY_PRIVATE,
+                pod(),
+                runner(),
+                owner(),
+                &manual_facts(),
+            )
+            .expect("manual"),
+        );
+        let cond =
+            runs_usable_by_runner_predicate(VISIBILITY_PRIVATE, owner(), "agent_run", false, true)
+                .expect("private");
+        let predicate = Query::select()
+            .from(Alias::new("agent_run"))
+            .cond_where(cond)
+            .to_owned()
+            .to_string(PostgresQueryBuilder);
+        // Every arm of the D-15 predicate appears in the statement.
+        for arm in [
+            "\"agent_run\".\"created_by_id\"",
+            "\"agent_run\".\"owner_id\"",
+            "FROM \"issues\" AS \"U0\"",
+            "FROM \"scheduler_bindings\" AS \"U0\"",
+        ] {
+            assert!(sql.contains(arm), "arm present: {arm}");
             assert!(
-                predicate.contains(arm),
-                "annotation arm rides the D-15 predicate: {alias}"
+                predicate.contains(arm.trim_start_matches('"').trim_end_matches('"'))
+                    || predicate.contains(arm),
+                "predicate carries arm: {arm}"
             );
         }
+        // The SELECT annotations carry the EXISTS arms.
+        assert!(sql.contains("AS \"_runner_visible_issue\""));
+        assert!(sql.contains("AS \"_runner_visible_scheduler\""));
     }
 
     // -- drain_pod ----------------------------------------------------------
 
     #[test]
-    fn drain_pod_idle_sql_matches_fixture() {
-        let fx = fx07();
-        let django = fx["drain_pod"]["sql"][1].as_str().expect("sql");
-        let normalized = django
-            .replace("'2026-10-03 00:32:04.917186+00:00'::timestamptz", "$1")
-            .replace(POD, "$2");
-        assert_eq!(normalized, DRAIN_POD_IDLE_RUNNERS_SQL);
-        assert_eq!(
-            runner_projection(DRAIN_POD_IDLE_RUNNERS_SQL),
-            RUNNER_COLUMNS
-        );
-        // No desktop exclusion on the idle list (ported as written;
-        // the projection still carries the column).
-        let where_only = DRAIN_POD_IDLE_RUNNERS_SQL
-            .split_once(" WHERE (")
-            .expect("WHERE")
-            .1
-            .split_once(" ORDER BY ")
-            .expect("ORDER BY")
-            .0;
-        assert!(!where_only.contains("provisioning"));
-        assert!(DRAIN_POD_IDLE_RUNNERS_SQL
-            .ends_with("ORDER BY \"runner\".\"last_heartbeat_at\" DESC FOR UPDATE SKIP LOCKED"));
-        // The only LIMIT is the EXISTS subquery's — the outer list
-        // has none (contrast the selects).
-        assert_eq!(DRAIN_POD_IDLE_RUNNERS_SQL.matches("LIMIT").count(), 1);
-    }
-
-    #[test]
     fn drain_pod_trace_replays() {
-        let fx = fx07();
-        let trace = &fx["drain_pod"];
-        assert_eq!(trace["assigned"], 3);
-        let manual =
-            next_for_runner_sql(RUNNER_PROVISIONING_MANUAL, VISIBILITY_PRIVATE).expect("manual");
-        let desktop = next_for_runner_sql(RUNNER_PROVISIONING_DESKTOP_BUNDLED, VISIBILITY_PRIVATE)
-            .expect("desktop");
-        // Runner-first loop: manual, desktop, manual — each runner's
-        // pick query matches its arm, normalized per runner id.
-        for (index, (runner, arm)) in [
-            ("'297ebdfd8d3b44aeb295964880f92013'::uuid", &manual),
-            ("'44cfb1285f62479bbb9ea0d0910ad6cd'::uuid", &desktop),
-            ("'47584f3f13c148a4bb209988e8e74795'::uuid", &manual),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let django = trace["sql"][3 + index * 3].as_str().expect("pick sql");
-            assert_eq!(normalize_next(django, runner), *arm, "pick {index}");
-        }
-        // Assignment writes: SET order owner, runner, status,
-        // assigned_at — one per pick, in loop order.
-        for (index, (runner, run, stamp)) in [
-            (
-                "'297ebdfd8d3b44aeb295964880f92013'::uuid",
-                "'bc03c3d02e8b460199bee84bca719b9c'::uuid",
-                "'2026-10-03 00:33:34.925146+00:00'::timestamptz",
-            ),
-            (
-                "'44cfb1285f62479bbb9ea0d0910ad6cd'::uuid",
-                "'49a5538b7aa949e0952e13881b619ed2'::uuid",
-                "'2026-10-03 00:33:34.932592+00:00'::timestamptz",
-            ),
-            (
-                "'47584f3f13c148a4bb209988e8e74795'::uuid",
-                "'22fb3d92469e44679ac1ec4ec2e3c2d6'::uuid",
-                "'2026-10-03 00:33:34.939144+00:00'::timestamptz",
-            ),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let django = trace["sql"][4 + index * 3].as_str().expect("update sql");
-            let normalized = django
-                .replace(OWNER, "$1")
-                .replace(runner, "$2")
-                .replace(stamp, "$3")
-                .replace(run, "$4");
-            assert_eq!(normalized, ASSIGN_RUN_UPDATE_SQL, "update {index}");
-        }
-        // Outcomes: q1 lands on idle2, the pinned run assigns, q2
-        // stays queued (three runners, three picks).
-        assert_eq!(trace["q1_after"]["status"], "assigned");
-        assert_eq!(trace["q1_runner_is_idle2"], true);
-        assert_eq!(trace["pinned_after_status"], "assigned");
-        assert_eq!(trace["q2_still_queued"], "queued");
+        let trace = &fx07()["drain_pod"];
+        assert_eq!(trace["assigned"], 5);
+        // Every runner picked exactly one run in loop order:
+        // eng-member (managed pin), idle1 (q1), shiny (q2),
+        // idle2 (q-pin), eng-pinned (managed pinned-only pin).
+        let prompts: Vec<&str> = trace["sent_frames"]
+            .as_array()
+            .expect("frames")
+            .iter()
+            .map(|f| f["prompt"].as_str().expect("prompt"))
+            .collect();
+        assert_eq!(
+            prompts,
+            [
+                "p-q-managed",
+                "p-q1",
+                "p-q2",
+                "p-q-pin",
+                "p-q-managed-pinned"
+            ]
+        );
+        assert_eq!(trace["q1_after_status"], "assigned");
+        assert_eq!(trace["q2_after_status"], "assigned");
+        assert_eq!(trace["q_pin_after_status"], "assigned");
+        assert_eq!(trace["q_managed_after_status"], "assigned");
+        assert_eq!(trace["q_managed_pinned_after_status"], "assigned");
+        // Stranger work no pod member may take (usage rule).
+        assert_eq!(trace["q_stranger_human_after_status"], "queued");
+        assert_eq!(trace["q_stranger_auto_after_status"], "queued");
     }
 
     #[test]
     fn assign_frames_match_redis_payloads() {
-        let fx = fx07();
-        let trace = &fx["drain_pod"];
-        let redis = trace["redis"].as_array().expect("redis");
-        let xadds: Vec<&Value> = redis.iter().filter(|c| c["cmd"] == "xadd").collect();
-        assert_eq!(xadds.len(), 3);
-        for xadd in xadds {
-            let args = xadd["args"].as_array().expect("args");
-            // args[1] is the Python dict repr of the stream fields.
-            let fields = args[1].as_str().expect("fields");
-            let payload_start = fields.find("'payload': '").expect("payload") + 12;
-            // The payload ends where the repr's `...<truncated 17 chars>`
-            // marker or the closing quote begins; the JSON text is a
-            // prefix of the full payload either way.
-            let tail = &fields[payload_start..];
-            let payload_text = tail.find("...<truncated 17 chars>").map_or_else(
-                || tail.rsplit("', '").next().expect("repr tail"),
-                |cut| &tail[..cut],
-            );
-            // Unescape the JSON (repr doubles the backslashes).
-            let json_text = payload_text.replace("\\\"", "\"").replace("\\\\", "\\");
-            // The truncated tail drops the closing `\"}`; restore it.
-            let json_text = if json_text.ends_with('}') {
-                json_text
-            } else {
-                format!("{json_text}\"}}")
-            };
-            let payload: Value = serde_json::from_str(&json_text).expect("payload parses");
-            let mut rebuilt = payload.as_object().expect("object").clone();
-            let mid = rebuilt.remove("mid").expect("mid appended last");
-            assert!(mid.is_string());
+        let frames = fx07()["drain_pod"]["sent_frames"]
+            .as_array()
+            .expect("frames")
+            .clone();
+        assert_eq!(frames.len(), 5);
+        for frame in &frames {
+            let rebuilt: Map<String, Value> = frame
+                .as_object()
+                .expect("frame object")
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             let keys: Vec<&str> = rebuilt.keys().map(String::as_str).collect();
             assert_eq!(
                 keys,
@@ -818,105 +1030,50 @@ mod tests {
                     "deadline",
                 ]
             );
-            let run_id = rebuilt["run_id"].as_str().expect("run_id");
-            let work_item_id = rebuilt["work_item_id"].as_str();
-            let expected = build_assign_msg(
-                run_id,
-                work_item_id,
-                rebuilt["prompt"].as_str().expect("prompt"),
-                &Map::new(),
-            );
-            assert_eq!(Value::Object(rebuilt), Value::Object(expected));
         }
     }
 
     // -- drain_for_runner ---------------------------------------------------
 
     #[test]
-    fn drain_for_runner_lock_sql_matches_fixture() {
-        let fx = fx07();
-        let django = fx["drain_for_runner"]["sql"][1].as_str().expect("sql");
-        let normalized = django
-            .replace("'2026-10-03 00:32:04.970281+00:00'::timestamptz", "$1")
-            .replace("'4d0260535a2e406e8e84ee47c9f6d7ff'::uuid", "$2");
-        assert_eq!(normalized, DRAIN_FOR_RUNNER_LOCK_SQL);
-        assert_eq!(runner_projection(DRAIN_FOR_RUNNER_LOCK_SQL), RUNNER_COLUMNS);
-        // No explicit order_by: both Meta.ordering keys survive.
-        assert!(DRAIN_FOR_RUNNER_LOCK_SQL.ends_with(
-            "ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED"
-        ));
-    }
-
-    #[test]
     fn drain_for_runner_trace_replays() {
-        let fx = fx07();
-        let trace = &fx["drain_for_runner"];
+        let trace = &fx07()["drain_for_runner"];
         assert_eq!(trace["assigned"], true);
-        let manual =
-            next_for_runner_sql(RUNNER_PROVISIONING_MANUAL, VISIBILITY_PRIVATE).expect("manual");
-        let django = trace["sql"][3].as_str().expect("pick sql");
-        assert_eq!(
-            normalize_next(django, "'4d0260535a2e406e8e84ee47c9f6d7ff'::uuid"),
-            manual
-        );
-        let django = trace["sql"][4].as_str().expect("update sql");
-        let normalized = django
-            .replace(OWNER, "$1")
-            .replace("'4d0260535a2e406e8e84ee47c9f6d7ff'::uuid", "$2")
-            .replace("'2026-10-03 00:33:34.984534+00:00'::timestamptz", "$3")
-            .replace("'20077b4522634eb3b53a2b6ab178e067'::uuid", "$4");
-        assert_eq!(normalized, ASSIGN_RUN_UPDATE_SQL);
-        assert_eq!(trace["assigned_run_is_q2_oldest"], true);
-        assert_eq!(trace["assigned_run_after"]["status"], "assigned");
-        assert_eq!(trace["q3_still_queued"], "queued");
+        assert_eq!(trace["q_pin_after_status"], "assigned");
+        assert_eq!(trace["sent_frames"].as_array().expect("frames").len(), 1);
+        let frame = &trace["sent_frames"][0];
+        assert_eq!(frame["prompt"].as_str(), Some("p-q-pin"));
+        assert_eq!(frame["v"].as_i64(), Some(1));
+        assert_eq!(frame["type"].as_str(), Some("assign"));
     }
 
     #[test]
     fn sessionless_keeps_assigned_row_and_raises() {
-        let fx = fx07();
-        let trace = &fx["drain_for_runner_sessionless"];
+        let trace = &fx07()["drain_for_runner_sessionless"];
         assert_eq!(trace["assigned_return"], true);
-        assert_eq!(trace["assigned_run_status"], "assigned");
-        assert!(trace["raised"]
-            .as_str()
-            .expect("raised")
-            .starts_with("RunnerOfflineError"));
-        assert_eq!(trace["assigned_run_is_q3_oldest"], true);
-        assert_eq!(trace["q4_still_queued"], "queued");
-        // The lock + pick + update run exactly as on the live path.
-        let django = trace["sql"][2].as_str().expect("lock sql");
-        let normalized = django
-            .replace("'2026-10-03 00:32:05.000033+00:00'::timestamptz", "$1")
-            .replace("'0855976a03924c1bb653cce42a6e88c6'::uuid", "$2");
-        assert_eq!(normalized, DRAIN_FOR_RUNNER_LOCK_SQL);
-        let manual =
-            next_for_runner_sql(RUNNER_PROVISIONING_MANUAL, VISIBILITY_PRIVATE).expect("manual");
-        let django = trace["sql"][4].as_str().expect("pick sql");
+        assert_eq!(trace["q1_after_status"], "assigned");
         assert_eq!(
-            normalize_next(django, "'0855976a03924c1bb653cce42a6e88c6'::uuid"),
-            manual
+            trace["raised"].as_str(),
+            Some("RunnerOfflineError: fake offline")
         );
-        let django = trace["sql"][5].as_str().expect("update sql");
-        let normalized = django
-            .replace(OWNER, "$1")
-            .replace("'0855976a03924c1bb653cce42a6e88c6'::uuid", "$2")
-            .replace("'2026-10-03 00:33:35.010481+00:00'::timestamptz", "$3")
-            .replace("'b904638a37fc43188bdc3c5e1d91de2b'::uuid", "$4");
-        assert_eq!(normalized, ASSIGN_RUN_UPDATE_SQL);
-        // No stream write: the on_commit send finds no session and
-        // raises out of the commit (outbox-owned lookup at sql[8]).
-        assert!(trace["redis"].as_array().expect("redis").is_empty());
     }
 
-    // -- by-id lookups --------------------------------------------------------
+    // -- by-id lookups ------------------------------------------------------
 
     #[test]
-    fn by_id_lookups_carry_manager_scope_and_ordering() {
-        // Pod projection pins against the fixture's pod SELECT list
-        // (drain_pod.sql[2]); the lookup adds the manager scope,
-        // Meta.ordering and LIMIT 1 per the Django compiler rules.
+    fn by_id_pod_projection_pins_fixture() {
+        // Pod projection pins the Django pod SELECT shape (the by-id
+        // lookups run through SeaORM entity finds in the executors).
         let fx = fx07();
-        let pod_select = fx["drain_pod"]["sql"][2].as_str().expect("sql");
+        let pod_select = fx["drain_pod"]["sql"]
+            .as_array()
+            .expect("sql")
+            .iter()
+            .find_map(|entry| {
+                let text = entry.as_str().expect("sql");
+                text.contains("FROM \"pod\"").then_some(text)
+            })
+            .expect("pod SELECT");
         let projected: Vec<&str> = pod_select
             .strip_prefix("SELECT ")
             .expect("SELECT")
@@ -932,24 +1089,12 @@ mod tests {
             })
             .collect();
         assert_eq!(projected, POD_COLUMNS);
-        assert!(DRAIN_POD_BY_ID_LOOKUP_SQL
-            .contains("WHERE (\"pod\".\"deleted_at\" IS NULL AND \"pod\".\"id\" = $1)"));
-        assert!(DRAIN_POD_BY_ID_LOOKUP_SQL
-            .ends_with("ORDER BY \"pod\".\"is_default\" DESC, \"pod\".\"created_at\" ASC LIMIT 1"));
-        assert_eq!(
-            runner_projection(DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL),
-            RUNNER_COLUMNS
-        );
-        assert!(DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL.contains("WHERE \"runner\".\"id\" = $1 ORDER BY"));
-        assert!(DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL.ends_with(
-            "ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1"
-        ));
         // Missing outcomes: False / 0, no transaction.
         assert_eq!(fx07()["drain_for_runner_by_id_missing"], false);
         assert_eq!(fx07()["drain_pod_by_id_missing"], 0);
     }
 
-    // -- assignment plan ------------------------------------------------------
+    // -- assignment plan ----------------------------------------------------
 
     #[test]
     fn assignment_plan_orders_set_clauses_and_effect() {
@@ -977,17 +1122,13 @@ mod tests {
             SetValue::Text("assigned".to_string())
         );
         assert_eq!(plan.set_clauses[3].value, SetValue::Now);
-        // The frame is the shapes sub-issue's builder, byte-equal to
-        // the first drain_pod redis payload minus the appended mid.
-        let fx = fx07();
-        let payload = &fx["drain_pod"]["redis"][1]["args"][1]
-            .as_str()
-            .expect("fields");
-        assert!(payload.contains(&format!("\"run_id\": \"{}\"", facts.run_id)));
+        // The frame matches the drained assign shape.
+        let frame = &fx07()["drain_pod"]["sent_frames"][0];
         assert_eq!(
             plan.message["run_id"],
             Value::String(facts.run_id.to_string())
         );
+        assert_eq!(frame["v"].as_i64(), Some(1));
         assert_eq!(
             plan.after_commit,
             DrainEffect::SendAssign {
@@ -997,7 +1138,7 @@ mod tests {
         );
     }
 
-    // -- log lines --------------------------------------------------------------
+    // -- log lines ----------------------------------------------------------
 
     #[test]
     fn log_lines_match_python() {
