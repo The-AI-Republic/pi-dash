@@ -442,8 +442,26 @@ impl SessionHandle {
         self.inner.lock().expect("session handle lock")
     }
 
-    /// Clone the session out for the response rules.
+    /// Clone the session out for reading. Like every `SessionBase`
+    /// getter (`django/contrib/sessions/backends/base.py`
+    /// `_get_session` sets `accessed = True` on any `_session`
+    /// access), taking a snapshot is a session read: the live
+    /// session is marked `accessed` before the clone, so
+    /// `process_response` patches `Vary: Cookie` exactly as Django
+    /// does when a handler reads `_auth_user_id` or any other key.
+    /// Handlers also call `get` on the clone; marking twice is
+    /// harmless.
     pub fn snapshot(&self) -> RequestSession {
+        let mut guard = self.lock();
+        guard.accessed = true;
+        guard.clone()
+    }
+
+    /// Non-marking clone for the layer's own post-handler read.
+    /// The layer must inspect `accessed`/`modified` without
+    /// flipping them itself, or every response would vary on
+    /// `Cookie` even when the handler never touched the session.
+    pub fn peek(&self) -> RequestSession {
         self.lock().clone()
     }
 }
@@ -595,8 +613,9 @@ impl RequestSession {
     }
 
     /// The full session dict as JSON. The save path serializes this;
-    /// the desktop gate reads its marker from a snapshot's copy (marking
-    /// nothing — the snapshot is already detached from the live session).
+    /// the desktop gate reads its marker from a snapshot's copy
+    /// (the `snapshot()` read already marked the live session
+    /// accessed; `to_json` itself marks nothing).
     /// `auth_rejected` hides the trio from readers only: Django's
     /// non-flush anonymous cases never drop keys, so a later save
     /// persists them.
@@ -855,7 +874,7 @@ where
             {
                 return Ok(response);
             }
-            let session = handle.snapshot();
+            let session = handle.peek();
             match apply_response_rules(
                 &config,
                 &store,
@@ -1223,6 +1242,25 @@ mod tests {
             .get::<SessionHandle>()
             .and_then(|h| h.lock().get("_auth_user_id").cloned())
             .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(user))
+            .expect("inner")
+    }
+
+    /// Handler pattern every ported actor helper uses today:
+    /// `snapshot()` then `get("_auth_user_id")` on the clone.
+    async fn snapshot_actor(req: Request<Body>) -> Response<Body> {
+        let user = req
+            .extensions()
+            .get::<SessionHandle>()
+            .and_then(|h| {
+                let mut session = h.snapshot();
+                session
+                    .get("_auth_user_id")
+                    .and_then(|v| v.as_str().map(str::to_owned))
+            })
             .unwrap_or_default();
         Response::builder()
             .status(StatusCode::OK)
@@ -2334,5 +2372,34 @@ mod tests {
             .execute(&pool)
             .await
             .expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn snapshot_actor_marks_live_session_and_varies_on_cookie() {
+        let store = MemorySessionStore::new();
+        seed_session(&store, "snapactorkey1", "user-snap").await;
+        let inner = axum::Router::new().route("/api/x/", axum::routing::any(snapshot_actor));
+        let response = SessionLayer::new(config(Some(store)))
+            .layer(inner)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/x/")
+                    .header(header::COOKIE, "session-id=snapactorkey1")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            has_vary_cookie(&response),
+            "snapshot() read must mark live session accessed (NEWPIDASH-56)"
+        );
+        assert!(set_cookies(&response).is_empty());
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("collect")
+            .to_bytes();
+        assert_eq!(&body[..], b"user-snap");
     }
 }
