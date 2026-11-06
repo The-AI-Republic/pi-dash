@@ -352,14 +352,14 @@ pub async fn engine_model_token(
         } else {
             ENGINE_OFF_DETAIL.to_owned()
         };
-        if apply_model_token_outcome(&sea, credential.dev_machine_id, &pause_reason, now)
+        if apply_model_token_outcome(&sea, credential.dev_machine_id, pause_reason, now)
             .await
             .is_err()
         {
             return server_error();
         }
         tracing::warn!(reason = %pause_reason, "engine.model_token_error");
-        return model_token_reason_body(&pause_reason, &detail);
+        return model_token_reason_body(pause_reason, &detail);
     }
 
     match state
@@ -463,7 +463,7 @@ pub async fn engine_profile(State(state): State<AppState>, headers: HeaderMap) -
     let (available, pause_reason) =
         engine_profile_for_user(state.settings().managed_runner.enabled, &profile);
     if !is_legacy_desktop(&machine.provisioning)
-        && apply_profile_outcome(&sea, machine_id, &pause_reason, now)
+        && apply_profile_outcome(&sea, machine_id, pause_reason, now)
             .await
             .is_err()
     {
