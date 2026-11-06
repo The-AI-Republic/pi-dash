@@ -36,12 +36,9 @@ Proxied pairs need no entry: the check verifies them live against
 EXCLUDED = {}
 
 MISSING_FIX = {
-    # NEWPIDASH-50: engine runner write pairs not yet owned in Rust
-    ("/api/runners/dev-machines/{}/engine-sign-out/", "POST"): "NEWPIDASH-50: engine sign-out endpoint pending",
-    ("/api/v1/runner/dev-machines/{}/", "PATCH"): "NEWPIDASH-50: dev-machine identity patch pending",
-    ("/api/v1/runner/dev-machines/{}/merge-into/", "POST"): "NEWPIDASH-50: dev-machine merge pending",
-    ("/api/v1/runner/engine/credential/revoke/", "POST"): "NEWPIDASH-50: engine credential revoke pending",
-    ("/api/v1/runner/engine/model-token/", "POST"): "NEWPIDASH-50: engine model-token pending",
+    # NEWPIDASH-52: dev-machine identity write pairs not yet owned in Rust
+    ("/api/v1/runner/dev-machines/{}/", "PATCH"): "NEWPIDASH-52: dev-machine identity patch pending",
+    ("/api/v1/runner/dev-machines/{}/merge-into/", "POST"): "NEWPIDASH-52: dev-machine merge pending",
 }
 
 OWNED_UNCOVERED = {

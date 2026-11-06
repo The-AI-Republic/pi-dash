@@ -1,13 +1,13 @@
 # Replay corpus coverage (PIDASHCONV-823)
 
-Write `(route, method)` pairs: **593** total, **496** covered by the corpus.
+Write `(route, method)` pairs: **621** total, **496** covered by the corpus.
 
 | bucket                   | pairs |
 | ------------------------ | ----- |
 | covered                  | 496   |
 | proxied by design        | 95    |
-| debug toolbar (dev-only) | 0     |
-| missing with fix issue   | 0     |
+| debug toolbar (dev-only) | 28    |
+| missing with fix issue   | 2     |
 | excluded with reason     | 0     |
 | owned, no session yet    | 0     |
 
@@ -127,11 +127,11 @@ Write `(route, method)` pairs: **593** total, **496** covered by the corpus.
 - `PATCH /api/v1/assets/user-assets/{}/` (api_v1) — v1_assets_lifecycle, v1_assets_lifecycle, v1_assets_lifecycle (owned)
 - `DELETE /api/v1/assets/user-assets/{}/server/` (api_v1) — v1_assets_lifecycle (owned)
 - `PATCH /api/v1/assets/user-assets/{}/server/` (api_v1) — v1_assets_lifecycle (owned)
-- `POST /api/v1/auth/device/approve/` (api_v1) — auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle (owned)
-- `POST /api/v1/auth/device/start/` (api_v1) — auth_device_lifecycle, auth_device_lifecycle (owned)
-- `POST /api/v1/auth/device/token/` (api_v1) — auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle (owned)
-- `POST /api/v1/auth/machine-token/` (api_v1) — auth_device_lifecycle, auth_device_lifecycle (owned)
-- `POST /api/v1/auth/revoke/` (api_v1) — auth_device_lifecycle (owned)
+- `POST /api/v1/auth/device/approve/` (api_v1) — auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_engine_grant, auth_engine_grant (owned)
+- `POST /api/v1/auth/device/start/` (api_v1) — auth_device_lifecycle, auth_device_lifecycle, auth_engine_grant, auth_engine_grant, auth_engine_grant (owned)
+- `POST /api/v1/auth/device/token/` (api_v1) — auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_engine_grant, auth_engine_grant (owned)
+- `POST /api/v1/auth/machine-token/` (api_v1) — auth_device_lifecycle, auth_device_lifecycle, auth_engine_grant (owned)
+- `POST /api/v1/auth/revoke/` (api_v1) — auth_device_lifecycle, auth_engine_grant (owned)
 - `POST /api/v1/runner/chat/sessions/{}/approvals/` (runner) — runner_daemon_lifecycle, runner_daemon_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/v1/runner/chat/sessions/{}/closed/` (runner) — runner_daemon_lifecycle (owned)
 - `POST /api/v1/runner/chat/sessions/{}/events/` (runner) — runner_daemon_lifecycle, runner_daemon_lifecycle (owned)
@@ -610,11 +610,39 @@ Write `(route, method)` pairs: **593** total, **496** covered by the corpus.
 
 ## Debug toolbar
 
-(none)
+- `DELETE /__debug__/history_refresh/` (web)
+- `PATCH /__debug__/history_refresh/` (web)
+- `POST /__debug__/history_refresh/` (web)
+- `PUT /__debug__/history_refresh/` (web)
+- `DELETE /__debug__/history_sidebar/` (web)
+- `PATCH /__debug__/history_sidebar/` (web)
+- `POST /__debug__/history_sidebar/` (web)
+- `PUT /__debug__/history_sidebar/` (web)
+- `DELETE /__debug__/render_panel/` (web)
+- `PATCH /__debug__/render_panel/` (web)
+- `POST /__debug__/render_panel/` (web)
+- `PUT /__debug__/render_panel/` (web)
+- `DELETE /__debug__/sql_explain/` (web)
+- `PATCH /__debug__/sql_explain/` (web)
+- `POST /__debug__/sql_explain/` (web)
+- `PUT /__debug__/sql_explain/` (web)
+- `DELETE /__debug__/sql_profile/` (web)
+- `PATCH /__debug__/sql_profile/` (web)
+- `POST /__debug__/sql_profile/` (web)
+- `PUT /__debug__/sql_profile/` (web)
+- `DELETE /__debug__/sql_select/` (web)
+- `PATCH /__debug__/sql_select/` (web)
+- `POST /__debug__/sql_select/` (web)
+- `PUT /__debug__/sql_select/` (web)
+- `DELETE /__debug__/template_source/` (web)
+- `PATCH /__debug__/template_source/` (web)
+- `POST /__debug__/template_source/` (web)
+- `PUT /__debug__/template_source/` (web)
 
 ## Missing with fix issue
 
-(none)
+- `PATCH /api/v1/runner/dev-machines/{}/` (runner) — NEWPIDASH-52: dev-machine identity patch pending
+- `POST /api/v1/runner/dev-machines/{}/merge-into/` (runner) — NEWPIDASH-52: dev-machine merge pending
 
 ## Excluded
 
