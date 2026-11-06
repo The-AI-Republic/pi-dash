@@ -1284,7 +1284,7 @@ async fn get_or_create_workspace_integration(
     // integration reads back), so the bound `now()` for both stamps is
     // interchangeable with the two `now()` calls the inline text used.
     pidash_services::domain::tokens::insert_github_shim_token(
-        &mut *connection,
+        &pidash_db::orm_tx::TxConn::new(&mut *connection),
         &pidash_services::domain::tokens::NewGithubShimToken {
             id: token_id,
             label: format!("github-integration-{workspace_id}"),

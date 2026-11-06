@@ -144,6 +144,21 @@ describe("useListReferences", () => {
     );
     expect(result.current.isLoading).toBe(true);
     expect(result.current.stateRows).toEqual([]);
+    expect(result.current.orders.state).toEqual([]);
+  });
+
+  it("orders state sections by workflow group, then sequence (NEWPIDASH-39)", () => {
+    mocks.states.mockReturnValue(
+      resolved([
+        { ...state(ME, "Done"), group: "completed", sequence: 1 },
+        { ...state(OTHER, "Todo"), group: "unstarted", sequence: 9 },
+        { ...state(PROJECT, "Backlog"), group: "backlog", sequence: 50 },
+      ])
+    );
+    const { result } = renderHook(() =>
+      useListReferences({ workspaceSlug: "acme", projectId: PROJECT, dimension: "state" })
+    );
+    expect(result.current.orders.state).toEqual([PROJECT, OTHER, ME]);
   });
 
   it("reads every strip reference even when the grouping does not need it", () => {

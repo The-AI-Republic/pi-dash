@@ -316,10 +316,18 @@
     "patch"
   ],
   "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/": [
-    "get"
+    "get",
+    "post"
   ],
   "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/": [
     "get"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/binding/": [
+    "delete",
+    "patch"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/run-now/": [
+    "post"
   ],
   "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/runs/": [
     "get"
@@ -422,7 +430,12 @@
     "post"
   ],
   "/api/v1/workspaces/{slug}/schedulers/": [
-    "get"
+    "get",
+    "post"
+  ],
+  "/api/v1/workspaces/{slug}/schedulers/{scheduler_id}/": [
+    "delete",
+    "patch"
   ],
   "/api/v1/workspaces/{slug}/stickies/": [
     "get",
