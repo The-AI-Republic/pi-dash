@@ -796,6 +796,7 @@ const IS_WORKPAD: usize = 30;
 const IS_CREATED_VIA: usize = 31;
 const IS_AGENT_EXECUTOR: usize = 32;
 const IS_COMPLEXITY_SCORE: usize = 33;
+const IS_ASSIGNED_RUNNER: usize = 34;
 
 /// One `intake_issues` row.
 #[derive(Debug, Clone)]
@@ -856,6 +857,7 @@ struct IssueRow {
     estimate_point_id: Option<Uuid>,
     type_id: Option<Uuid>,
     assigned_pod_id: Option<Uuid>,
+    assigned_runner_id: Option<Uuid>,
     workpad: String,
 }
 
@@ -952,6 +954,7 @@ impl IssueRow {
             deleted_at: cell(row, base + IS_DELETED_AT)?,
             git_work_branch: cell(row, base + IS_GIT_WORK_BRANCH)?,
             assigned_pod_id: cell(row, base + IS_ASSIGNED_POD)?,
+            assigned_runner_id: cell(row, base + IS_ASSIGNED_RUNNER)?,
             workpad: cell(row, base + IS_WORKPAD)?,
             created_via: cell(row, base + IS_CREATED_VIA)?,
             agent_executor: cell(row, base + IS_AGENT_EXECUTOR)?,
@@ -998,6 +1001,7 @@ impl IssueRow {
             workpad: self.workpad.clone(),
             created_via: self.created_via.clone(),
             assigned_pod_id: self.assigned_pod_id,
+            assigned_runner_id: self.assigned_runner_id,
             agent_executor: self.agent_executor.clone(),
         }
     }
@@ -1040,6 +1044,7 @@ impl IssueRow {
             estimate_point_id: fields.estimate_point_id,
             type_id: fields.type_id,
             assigned_pod_id: fields.assigned_pod_id,
+            assigned_runner_id: fields.assigned_runner_id,
             workpad: fields.workpad,
         }
     }
@@ -1089,7 +1094,7 @@ const ISSUE_COLS: &str = "created_at, updated_at, id, name, description_json, pr
      updated_by_id, workspace_id, description_html, description_stripped, completed_at, \
      sort_order, point, archived_at, is_draft, external_id, external_source, description_binary, \
      estimate_point_id, type_id, deleted_at, git_work_branch, assigned_pod_id, workpad, \
-     created_via, agent_executor, complexity_score";
+     created_via, agent_executor, complexity_score, assigned_runner_id";
 
 /// [`ISSUE_COLS`] with every column qualified by the `issues` table — for
 /// reads that join another table (e.g. `workspaces`), where the bare column
@@ -4250,6 +4255,7 @@ async fn insert_issue(
         workpad: String::new(),
         created_via: None,
         assigned_pod_id: None,
+        assigned_runner_id: None,
         agent_executor: None,
     };
     let fire = fire_spec(&ctx.user_id, cycle_mod::micros_now());

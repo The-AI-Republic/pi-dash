@@ -1245,6 +1245,9 @@ async fn op_create_project_issue(
         workpad: String::new(),
         created_via: Some("cloud_agent".to_owned()),
         assigned_pod_id: None,
+        // The tool create path accepts no dedicated runner (design §7: the
+        // web app and v1 surfaces own the write path); always NULL here.
+        assigned_runner_id: None,
         agent_executor: None,
     };
     // Inert: the fire is skipped (the caller drives it post-commit).

@@ -3273,6 +3273,9 @@ pub async fn create(
         workpad: String::new(),
         created_via: parsed.created_via.clone().flatten(),
         assigned_pod_id: parsed.assigned_pod.flatten(),
+        // The tool create path accepts no dedicated runner (design §7: the
+        // web app and v1 surfaces own the write path); always NULL here.
+        assigned_runner_id: None,
         agent_executor: parsed.agent_executor.clone().flatten(),
     };
     // The raw-data overrides resolve pre-save (pure), but their failures

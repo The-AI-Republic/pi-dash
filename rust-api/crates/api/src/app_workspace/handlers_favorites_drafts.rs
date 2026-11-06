@@ -6310,6 +6310,7 @@ fn assemble_new_issue(
         workpad: String::new(),
         created_via: opt_text(values, "created_via"),
         assigned_pod_id: pod,
+        assigned_runner_id: None,
         agent_executor: opt_text(values, "agent_executor"),
     };
     Ok((

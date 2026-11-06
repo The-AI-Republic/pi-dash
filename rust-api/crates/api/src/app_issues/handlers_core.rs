@@ -4016,6 +4016,9 @@ fn assemble_new_issue(
             Some(Validated::Pod(pod)) => Some(pod.id),
             _ => None,
         },
+        // Slice 5b wires the `assigned_runner_id` create field + E2/E7/E8
+        // validation (design §7.1); the assembly stays NULL until then.
+        assigned_runner_id: None,
         // The normalized write (#2903): deprecated choices land local.
         agent_executor: filtered.agent_executor.clone().flatten(),
     };
