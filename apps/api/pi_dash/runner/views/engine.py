@@ -21,13 +21,15 @@ import hashlib
 import logging
 import uuid as _uuid
 
+from django.db import transaction
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.throttling import SimpleRateThrottle
 from rest_framework.views import APIView
 
 from pi_dash.runner.authentication import MachineTokenAuthentication
-from pi_dash.runner.models import EngineAutoPauseReason, EngineCredentialRevokeReason
+from pi_dash.runner.models import DevMachine, EngineAutoPauseReason, EngineCredential, EngineCredentialRevokeReason
 from pi_dash.runner.services.engine_credentials import (
     EngineCredentialError,
     authenticate_engine_credential,
@@ -162,7 +164,15 @@ class EngineModelTokenEndpoint(APIView):
             credential = authenticate_engine_credential(_bearer(request))
         except EngineCredentialError as exc:
             if exc.credential is not None and exc.code == R.ENGINE_SIGN_IN_REQUIRED:
-                apply_model_token_outcome(exc.credential.dev_machine, R.ENGINE_SIGN_IN_REQUIRED)
+                # An old request may arrive after a renewal. Reject its token
+                # without pausing the replacement credential's healthy engine.
+                # Serialize this check with credential issuance/revocation.
+                with transaction.atomic():
+                    machine = DevMachine.objects.select_for_update().get(pk=exc.credential.dev_machine_id)
+                    if not EngineCredential.objects.filter(
+                        dev_machine=machine, revoked_at__isnull=True, expires_at__gt=timezone.now()
+                    ).exists():
+                        apply_model_token_outcome(machine, R.ENGINE_SIGN_IN_REQUIRED)
             logger.info(
                 "engine.model_token_refused request_id=%s user=%s dev_machine=%s reason=%s",
                 request_id,
