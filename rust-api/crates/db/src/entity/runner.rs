@@ -40,6 +40,7 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub dev_metadata: Json,
     pub provisioning: String,
+    pub pod_dispatch: String,
     pub paused_at: Option<DateTimeWithTimeZone>,
     pub paused_by_id: Option<Uuid>,
 }

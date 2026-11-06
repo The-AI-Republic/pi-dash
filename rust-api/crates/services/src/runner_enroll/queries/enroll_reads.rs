@@ -926,6 +926,13 @@ pub async fn insert_runner(db: &impl ConnectionTrait, new: &NewRunner<'_>) -> Re
         name: Set(new.name.to_owned()),
         host_label: Set(new.host_label.to_owned()),
         provisioning: Set(new.provisioning.to_owned()),
+        pod_dispatch: Set(
+            if new.provisioning == "desktop_bundled" {
+                "pinned_only".to_owned()
+            } else {
+                "pod_member".to_owned()
+            },
+        ),
         visibility: Set(0),
         refresh_token_hash: Set(String::new()),
         refresh_token_fingerprint: Set(String::new()),

@@ -4248,7 +4248,6 @@ mod move_tests {
             },
             managed: ManagedRunnerSettings {
                 enabled: false,
-                max_per_user_project: 0,
                 queued_max_age_secs: 0,
                 graceful_stop_secs: 0,
                 sweep_interval_secs: 0,

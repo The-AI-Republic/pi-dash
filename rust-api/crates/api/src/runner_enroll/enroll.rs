@@ -1465,17 +1465,13 @@ struct CreateAttempt<'a> {
     secret_key: &'a str,
     has_machine_token: bool,
     auth_token: &'a str,
-    managed_max: i64,
 }
 
 /// One create-attempt result: done (commit), a name collision (roll
-/// back + retry/`runner_name_taken`), the managed cap (COMMIT +
-/// 409 — the return-inside-`atomic()` quirk), an ownership 404, or a
-/// 500.
+/// back + retry/`runner_name_taken`), an ownership 404, or a 500.
 enum Attempt {
     Done(AttemptDone),
     Collision,
-    Cap,
     Ownership,
     Server,
 }
@@ -1529,14 +1525,6 @@ async fn create_attempt(tx: &mut Transaction<'_, Postgres>, params: &CreateAttem
                     });
                 }
                 Ok(None) => {}
-                Err(_) => return Attempt::Server,
-            }
-            match managed_cap_count(tx, params.user_id, params.pod_id, params.workspace_id).await {
-                Ok(count) => {
-                    if count >= params.managed_max {
-                        return Attempt::Cap;
-                    }
-                }
                 Err(_) => return Attempt::Server,
             }
         }
@@ -1804,7 +1792,6 @@ async fn create_runner_inner(
                 secret_key: &secret,
                 has_machine_token: auth.machine_token.is_some(),
                 auth_token: &auth.auth_token,
-                managed_max: state.settings().managed_runner.max_per_user_project,
             },
         )
         .await;
@@ -1821,20 +1808,6 @@ async fn create_runner_inner(
                 if !body_name.is_empty() {
                     return json_response(StatusCode::CONFLICT, error_body("runner_name_taken"));
                 }
-            }
-            Attempt::Cap => {
-                // The 409 returns from inside the attempt `atomic()`
-                // block: the dev-machine side effects COMMIT.
-                if tx.commit().await.is_err() {
-                    return server_error();
-                }
-                return json_response(
-                    StatusCode::CONFLICT,
-                    error_desc_body(
-                        "managed_runner_limit",
-                        "This project already has a Pi Dash Agent registered for you on a machine.",
-                    ),
-                );
             }
             Attempt::Ownership => {
                 return json_response(StatusCode::NOT_FOUND, error_body("dev_machine_not_found"));
