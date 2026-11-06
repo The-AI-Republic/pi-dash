@@ -73,7 +73,7 @@ use crate::assistant::common::{
     Failure, ParsedBody,
 };
 use crate::state::AppState;
-use sea_orm::{PaginatorTrait, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
 
 /// `api/urls/auth.py:43-46`, under the `api/v1/` include.
 pub const WORKSPACES_PATH: &str = "/api/v1/auth/workspaces/";
@@ -206,10 +206,6 @@ fn has_presented_credential(headers: &HeaderMap) -> bool {
         .is_some_and(|raw| !matches!(raw.to_str(), Ok(value) if value.is_empty()))
 }
 
-/// One `api_tokens` row for the lookup: `(id, user_id, is_active,
-/// expired_at)`.
-type ApiTokenLookupRow = (Uuid, Uuid, bool, Option<DateTime<Utc>>);
-
 /// `validate_api_token` (`api_authentication.py:30-43`): exact token
 /// match, `is_active`, unexpired (`expired_at__gt=now` or null) — then
 /// stamp `last_used`. The `deleted_at IS NULL` conjunct is the
@@ -218,13 +214,25 @@ type ApiTokenLookupRow = (Uuid, Uuid, bool, Option<DateTime<Utc>>);
 #[allow(clippy::result_large_err)]
 async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Caller, Response> {
     let now = Utc::now();
-    let row: Option<ApiTokenLookupRow> = sqlx::query_as(
-        r#"SELECT id, user_id, is_active, expired_at FROM api_tokens WHERE token = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(presented)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Failure::server_error().into_response())?;
+    let row = {
+        use pidash_db::entity::api_tokens;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let found = api_tokens::Entity::find()
+            .filter(api_tokens::Column::Token.eq(presented))
+            .filter(api_tokens::Column::DeletedAt.is_null())
+            .one(&db)
+            .await
+            .map_err(|_| Failure::server_error().into_response())?;
+        found.map(|m| {
+            (
+                m.id,
+                m.user_id,
+                m.is_active,
+                m.expired_at
+                    .map(|dt: sea_orm::prelude::DateTimeWithTimeZone| dt.with_timezone(&Utc)),
+            )
+        })
+    };
     let Some((id, user_id, is_active, expired_at)) = row else {
         return Err(invalid_token());
     };
@@ -253,19 +261,6 @@ async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Caller
     })
 }
 
-/// One `machine_token` row for the lookup, with the linked dev-machine
-/// revocation flag: `(id, user_id, workspace_id, revoked_at,
-/// dev_machine_id, dev_machine_revoked, dev_machine_found)`.
-type MachineTokenLookupRow = (
-    Uuid,
-    Uuid,
-    Uuid,
-    Option<DateTime<Utc>>,
-    Option<Uuid>,
-    Option<DateTime<Utc>>,
-    Option<Uuid>,
-);
-
 /// `validate_machine_token` (`api_authentication.py:45-63`): match on
 /// `token_hash`, unrevoked, dev-machine unrevoked, workspace member (a
 /// non-member's token is revoked, then rejected) — then stamp
@@ -278,33 +273,46 @@ async fn authenticate_machine(
 ) -> Result<Caller, Response> {
     let now = Utc::now();
     let token_hash = token_kernel::hash_token(presented, secret_key);
-    let row: Option<MachineTokenLookupRow> = sqlx::query_as(
-        r#"SELECT mt.id, mt.user_id, mt.workspace_id, mt.revoked_at,
-                  mt.dev_machine_id, dm.revoked_at, dm.id
-           FROM machine_token mt
-           LEFT JOIN dev_machine dm ON dm.id = mt.dev_machine_id
-           WHERE mt.token_hash = $1"#,
-    )
-    .bind(&token_hash)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Failure::server_error().into_response())?;
-    let Some((id, user_id, workspace_id, revoked_at, dev_machine_id, dm_revoked, dm_found)) = row
-    else {
-        return Err(invalid_token());
-    };
-    if revoked_at.is_some() {
-        return Err(invalid_token());
-    }
-    // `machine_token.dev_machine_id is not None and
-    // machine_token.dev_machine.revoked_at is not None`. A set id with no
-    // row is the `select_related` 500 (unreachable without FK surgery).
-    if let Some(machine_id) = dev_machine_id {
-        if dm_found != Some(machine_id) {
-            return Err(Failure::server_error().into_response());
-        }
-        if dm_revoked.is_some() {
+    let (id, user_id, workspace_id, dev_machine_id) = {
+        use pidash_db::entity::machine_token;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let found = machine_token::Entity::find()
+            .filter(machine_token::Column::TokenHash.eq(&token_hash))
+            .one(&db)
+            .await
+            .map_err(|_| Failure::server_error().into_response())?;
+        let Some(m) = found else {
             return Err(invalid_token());
+        };
+        (m.id, m.user_id, m.workspace_id, m.dev_machine_id)
+    };
+    // revoked check via fresh fetch (avoids join raw SQL; same semantics)
+    {
+        use pidash_db::entity::machine_token;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let row = machine_token::Entity::find_by_id(id)
+            .one(&db)
+            .await
+            .unwrap_or(None);
+        match row {
+            Some(m) if m.revoked_at.is_some() => return Err(invalid_token()),
+            Some(_) => {}
+            None => return Err(invalid_token()),
+        }
+        if let Some(mid) = dev_machine_id {
+            use pidash_db::entity::dev_machine;
+            let machine = dev_machine::Entity::find_by_id(mid)
+                .one(&db)
+                .await
+                .unwrap_or(None);
+            match machine {
+                Some(dm) => {
+                    if dm.revoked_at.is_some() {
+                        return Err(invalid_token());
+                    }
+                }
+                None => return Err(Failure::server_error().into_response()),
+            }
         }
     }
     if !is_member(pool, workspace_id, user_id).await? {
@@ -345,16 +353,17 @@ async fn is_member(
     workspace_id: Uuid,
     user_id: Uuid,
 ) -> Result<bool, Response> {
-    let exists: Option<bool> = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM workspace_members
-           WHERE workspace_id = $1 AND member_id = $2 AND is_active AND deleted_at IS NULL)"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Failure::server_error().into_response())?;
-    Ok(exists.unwrap_or(false))
+    use pidash_db::entity::workspace_members;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let count = workspace_members::Entity::find()
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .count(&db)
+        .await
+        .map_err(|_| Failure::server_error().into_response())?;
+    Ok(count > 0)
 }
 
 fn not_found(error: &str) -> Failure {
@@ -473,18 +482,33 @@ async fn get_workspaces(State(state): State<AppState>, headers: HeaderMap) -> Re
     };
     // `WorkspaceMember.objects.filter(member=user,
     // is_active=True).select_related("workspace").order_by("created_at")`.
-    let rows: Vec<(Option<String>, Option<String>)> = match sqlx::query_as(
-        r#"SELECT w.slug, w.name FROM workspace_members m
-           LEFT JOIN workspaces w ON w.id = m.workspace_id
-           WHERE m.member_id = $1 AND m.is_active AND m.deleted_at IS NULL
-           ORDER BY m.created_at"#,
-    )
-    .bind(user_id)
-    .fetch_all(&pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(_) => return Failure::server_error().into_response(),
+    let rows = {
+        use pidash_db::entity::{workspace_members, workspaces};
+        use sea_orm::{EntityTrait as _, QueryOrder as _};
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let members = match workspace_members::Entity::find()
+            .filter(workspace_members::Column::MemberId.eq(user_id))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .order_by_asc(workspace_members::Column::CreatedAt)
+            .all(&db)
+            .await
+        {
+            Ok(m) => m,
+            Err(_) => return Failure::server_error().into_response(),
+        };
+        let mut out = Vec::new();
+        for m in members {
+            let ws = workspaces::Entity::find_by_id(m.workspace_id)
+                .one(&db)
+                .await
+                .unwrap_or(None);
+            match ws {
+                Some(w) => out.push((Some(w.slug), Some(w.name))),
+                None => out.push((None, None)),
+            }
+        }
+        out
     };
     let mut list = Vec::new();
     for (slug, name) in rows {
@@ -623,20 +647,25 @@ async fn post_machine_token(
         Err(failure) => return failure.into_response(),
     };
     // `Workspace.objects.filter(slug=...).first()` + membership, else
-    // 404 (`device.py:446-451`).
-    let workspace: Option<(Uuid, String)> = match sqlx::query_as(
-        r#"SELECT id, slug FROM workspaces WHERE slug = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(&params.workspace_slug)
-    .fetch_optional(&pool)
-    .await
-    {
-        Ok(row) => row,
-        Err(_) => return Failure::server_error().into_response(),
+    // 404 (`device.py:446-451`) — via SeaORM.
+    let workspace = {
+        use pidash_db::entity::workspaces;
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let row = workspaces::Entity::find()
+            .filter(workspaces::Column::Slug.eq(&params.workspace_slug))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .one(&db)
+            .await;
+        let Ok(Some(row)) = row else {
+            return match row {
+                Err(_) => Failure::server_error().into_response(),
+                Ok(None) => not_found("workspace_not_found").into_response(),
+                _ => unreachable!(),
+            };
+        };
+        (row.id, row.slug)
     };
-    let Some((workspace_id, workspace_slug)) = workspace else {
-        return not_found("workspace_not_found").into_response();
-    };
+    let (workspace_id, workspace_slug) = workspace;
     let user_id = match &caller {
         Caller::Api { user_id, .. } | Caller::Machine { user_id, .. } => *user_id,
     };
@@ -897,25 +926,35 @@ async fn exchange_in_transaction(
         .unwrap_or_else(|| "never".to_owned())
     };
     if matches!(caller, Caller::Api { .. }) {
-        // Find the grant via api_token.token = bridge raw.
+        // Find the grant via api_token.token = bridge raw (SeaORM fetch).
         let bridge_raw = match caller {
             Caller::Api { raw, .. } => raw.clone(),
             Caller::Machine { .. } => unreachable!(),
         };
-        // raw-sql: join across cli_device_codes and api_tokens on the bridge token
-        let grant: Option<(bool, Option<uuid::Uuid>, bool)> = sqlx::query_as(
-            r#"SELECT c.interactive_approval, c.dev_machine_id, c.scope = 'engine'
-               FROM cli_device_codes c
-               JOIN api_tokens t ON t.id = c.api_token_id
-               WHERE t.token = $1 AND c.deleted_at IS NULL AND t.deleted_at IS NULL
-               ORDER BY c.created_at DESC LIMIT 1"#,
-        )
-        .bind(&bridge_raw)
-        .fetch_optional(&mut **tx)
-        .await
-        .unwrap_or(None);
-        // grant is (interactive_approval, dev_machine_id, is_engine_scope)
-        if let Some((interactive_approval, _grant_machine_id, _is_engine)) = grant {
+        let grant = {
+            use pidash_db::entity::{api_tokens, cli_device_codes};
+            use sea_orm::{EntityTrait as _, QueryOrder as _};
+            let tx_conn = pidash_db::orm_tx::TxConn::new(tx);
+            let api_tok = api_tokens::Entity::find()
+                .filter(api_tokens::Column::Token.eq(&bridge_raw))
+                .filter(api_tokens::Column::DeletedAt.is_null())
+                .one(&tx_conn as &_)
+                .await
+                .unwrap_or(None);
+            match api_tok {
+                Some(tok) => cli_device_codes::Entity::find()
+                    .filter(cli_device_codes::Column::ApiTokenId.eq(tok.id))
+                    .filter(cli_device_codes::Column::DeletedAt.is_null())
+                    .order_by_desc(cli_device_codes::Column::CreatedAt)
+                    .one(&tx_conn as &_)
+                    .await
+                    .unwrap_or(None)
+                    .map(|c| (c.interactive_approval, c.dev_machine_id)),
+                None => None,
+            }
+        };
+        // grant is (interactive_approval, dev_machine_id)
+        if let Some((interactive_approval, _grant_machine_id)) = grant {
             // Check machine revoked.
             let machine_revoked = {
                 use sea_orm::EntityTrait;
@@ -1038,35 +1077,52 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
     };
     match caller {
         Caller::Machine { token_id, .. } => {
-            // `machine_token.revoke()` + engine sign-out on last token.
+            // `machine_token.revoke()` + engine sign-out on last token,
+            // in one transaction with the machine row locked so the
+            // "last live token" check is exact (device.py:485-511,
+            // "Serializes concurrent revocations ...").
             let now = Utc::now();
-            let db = pidash_db::pool::sea_orm_connection(&pool);
-            let machine_id_opt: Option<uuid::Uuid> = {
+            let mut tx = match pool.begin().await {
+                Ok(tx) => tx,
+                Err(_) => return Failure::server_error().into_response(),
+            };
+            let machine_id_opt: Option<Uuid> = {
                 use sea_orm::EntityTrait;
+                let tx_conn = pidash_db::orm_tx::TxConn::new(&mut tx);
                 let tok = pidash_db::entity::machine_token::Entity::find_by_id(token_id)
-                    .one(&db)
+                    .one(&tx_conn as &_)
                     .await
                     .unwrap_or(None);
                 tok.and_then(|t| t.dev_machine_id)
             };
-            // Lock the machine row for update via a best-effort FOR UPDATE
-            // (skipped for simplicity; the revoke below is the correctness point).
-            let _ = machine_id_opt;
-            // Revoke the token itself.
+            if let Some(mid) = machine_id_opt {
+                // raw-sql: FOR UPDATE lock has no SeaORM equivalent.
+                let lock: Option<(Uuid,)> =
+                    sqlx::query_as(r#"SELECT id FROM dev_machine WHERE id = $1 FOR UPDATE"#)
+                        .bind(mid)
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .unwrap_or(None);
+                // Missing row (concurrent delete) is non-fatal: the revoke
+                // below still lands; Django's .first() yields None similarly.
+                let _ = lock;
+            }
             if pidash_services::domain::tokens::revoke_machine_token_by_id_if_active(
-                &db, token_id, now,
+                &pidash_db::orm_tx::TxConn::new(&mut tx),
+                token_id,
+                now,
             )
             .await
             .is_err()
             {
                 return Failure::server_error().into_response();
             }
-            // Check if machine has live tokens; if not, revoke engine.
             if let Some(mid) = machine_id_opt {
                 // _machine_has_live_token: revoked_at IS NULL AND (expires_at IS NULL OR > now)
                 let has_live = {
                     use sea_orm::ColumnTrait;
                     use sea_orm::EntityTrait;
+                    let tx_conn = pidash_db::orm_tx::TxConn::new(&mut tx);
                     let count = pidash_db::entity::machine_token::Entity::find()
                         .filter(pidash_db::entity::machine_token::Column::DevMachineId.eq(mid))
                         .filter(pidash_db::entity::machine_token::Column::RevokedAt.is_null())
@@ -1078,20 +1134,23 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
                                         .gt(now.fixed_offset()),
                                 ),
                         )
-                        .count(&db)
+                        .count(&tx_conn as &_)
                         .await
                         .unwrap_or(1);
                     count > 0
                 };
                 if !has_live {
                     let _ = pidash_services::domain::engine_credential::revoke_engine_credential(
-                        &db,
+                        &pidash_db::orm_tx::TxConn::new(&mut tx),
                         mid,
                         pidash_services::domain::engine_credential::revoke_reason::SIGNED_OUT,
                         now,
                     )
                     .await;
                 }
+            }
+            if tx.commit().await.is_err() {
+                return Failure::server_error().into_response();
             }
         }
         Caller::Api { raw, .. } => {
@@ -1102,15 +1161,19 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
             // scope (`db/mixins.py:56-66`): Python re-reads via
             // `APIToken.objects.get`, which never sees soft-deleted rows
             // (`device.py:504`).
-            let row: Option<(Uuid, bool)> = match sqlx::query_as(
-                r#"SELECT id, is_active FROM api_tokens WHERE token = $1 AND deleted_at IS NULL"#,
-            )
-            .bind(&raw)
-            .fetch_optional(&pool)
-            .await
-            {
-                Ok(row) => row,
-                Err(_) => return Failure::server_error().into_response(),
+            let row = {
+                use pidash_db::entity::api_tokens;
+                let db = pidash_db::pool::sea_orm_connection(&pool);
+                let found = api_tokens::Entity::find()
+                    .filter(api_tokens::Column::Token.eq(&raw))
+                    .filter(api_tokens::Column::DeletedAt.is_null())
+                    .one(&db)
+                    .await;
+                match found {
+                    Ok(Some(m)) => Some((m.id, m.is_active)),
+                    Ok(None) => None,
+                    Err(_) => return Failure::server_error().into_response(),
+                }
             };
             if let Some((id, true)) = row {
                 if pidash_services::domain::tokens::deactivate_api_token_by_id(

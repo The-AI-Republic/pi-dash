@@ -78,7 +78,7 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_db::auth_oauth::models::{api_token_device_flow, cli_device_code};
 use pidash_services::auth_session::guards::{allow_request, throttle_denied_json, throttle_wait};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
 
 use super::guards::{
     device_start_cache_key, device_start_throttle_rate, verification_uri,
@@ -722,15 +722,19 @@ async fn post_approve(
         _ => None,
     };
 
-    // The approver's email for the 200 shape.
-    let email: Option<(Option<String>,)> =
-        sqlx::query_as(r#"SELECT email FROM users WHERE id = $1 AND is_active"#)
-            .bind(actor_id)
-            .fetch_optional(&pool)
+    // The approver's email for the 200 shape (SeaORM fetch).
+    let email = {
+        use pidash_db::entity::users::Entity as UserEntity;
+        let db_mail = pidash_db::pool::sea_orm_connection(&pool);
+        let user = UserEntity::find_by_id(actor_id)
+            .filter(pidash_db::entity::users::Column::IsActive.eq(true))
+            .one(&db_mail)
             .await
             .unwrap_or(None);
-    let Some((email,)) = email else {
-        return Denial::UnauthorizedDetail.into_response();
+        match user {
+            Some(u) => u.email,
+            None => return Denial::UnauthorizedDetail.into_response(),
+        }
     };
 
     let db = pidash_db::pool::sea_orm_connection(&pool);
@@ -789,49 +793,57 @@ async fn post_approve(
         .into_response();
     }
 
-    // Workspace: explicit slug vs most-recent.
+    // Workspace: explicit slug vs most-recent (SeaORM lookups).
     let (workspace_id, workspace_slug) = if !workspace_slug_raw.is_empty() {
-        // raw-sql: workspace lookup is a simple SELECT but via SeaORM would need
-        // the entity (kept as sqlx for the pre-txn engine path; counted as raw).
-        let ws: Option<(uuid::Uuid, String)> = sqlx::query_as(
-            r#"SELECT id, slug FROM workspaces WHERE slug = $1 AND deleted_at IS NULL"#,
-        )
-        .bind(&workspace_slug_raw)
-        .fetch_optional(&mut *tx)
-        .await
-        .unwrap_or(None);
-        let Some((ws_id, ws_slug)) = ws else {
+        use pidash_db::entity::{workspace_members, workspaces};
+        let tx_conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let ws = workspaces::Entity::find()
+            .filter(workspaces::Column::Slug.eq(&workspace_slug_raw))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .one(&tx_conn as &_)
+            .await
+            .unwrap_or(None);
+        let Some(ws_row) = ws else {
             return Denial::error(StatusCode::NOT_FOUND, "workspace_not_found").into_response();
         };
-        // Membership check.
-        let is_member: bool = sqlx::query_scalar::<_, bool>(
-            r#"SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND member_id = $2 AND is_active AND deleted_at IS NULL)"#,
-        )
-        .bind(ws_id)
-        .bind(actor_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .unwrap_or(Some(false))
-        .unwrap_or(false);
+        let ws_id = ws_row.id;
+        let ws_slug = ws_row.slug;
+        let is_member = workspace_members::Entity::find()
+            .filter(workspace_members::Column::WorkspaceId.eq(ws_id))
+            .filter(workspace_members::Column::MemberId.eq(actor_id))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .count(&tx_conn as &_)
+            .await
+            .unwrap_or(0)
+            > 0;
         if !is_member {
             return Denial::error(StatusCode::NOT_FOUND, "workspace_not_found").into_response();
         }
         (Some(ws_id), Some(ws_slug))
     } else {
-        let membership: Option<(uuid::Uuid, String)> = sqlx::query_as(
-            r#"SELECT wm.workspace_id, w.slug
-               FROM workspace_members wm
-               JOIN workspaces w ON w.id = wm.workspace_id
-               WHERE wm.member_id = $1 AND wm.is_active AND wm.deleted_at IS NULL
-               ORDER BY wm.created_at DESC
-               LIMIT 1"#,
-        )
-        .bind(actor_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .unwrap_or(None);
-        match membership {
-            Some((id, slug)) => (Some(id), Some(slug)),
+        use pidash_db::entity::{workspace_members, workspaces};
+        use sea_orm::{EntityTrait as _, QueryOrder as _};
+        let tx_conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let member = workspace_members::Entity::find()
+            .filter(workspace_members::Column::MemberId.eq(actor_id))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .order_by_desc(workspace_members::Column::CreatedAt)
+            .one(&tx_conn as &_)
+            .await
+            .unwrap_or(None);
+        match member {
+            Some(m) => {
+                let ws = workspaces::Entity::find_by_id(m.workspace_id)
+                    .one(&tx_conn as &_)
+                    .await
+                    .unwrap_or(None);
+                match ws {
+                    Some(w) => (Some(w.id), Some(w.slug)),
+                    None => (None, None),
+                }
+            }
             None => (None, None),
         }
     };
@@ -915,19 +927,34 @@ async fn post_approve(
 
     let new_interactive = row_interactive || interactive;
     // Save user, workspace, approved, interactive_approval, dev_machine_id.
-    let update = sqlx::query(
-        r#"UPDATE cli_device_codes
-           SET user_id = $1, workspace_id = $2, approved = true, interactive_approval = $3, dev_machine_id = $4, updated_at = $5
-           WHERE id = $6"#,
-    )
-    .bind(actor_id)
-    .bind(workspace_id)
-    .bind(new_interactive)
-    .bind(resolved_machine_id)
-    .bind(now)
-    .bind(row_id)
-    .execute(&mut *tx)
-    .await;
+    let update = {
+        use pidash_db::entity::cli_device_codes;
+        use sea_orm::sea_query::Expr;
+        let tx_conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let now_tz = now.fixed_offset();
+        cli_device_codes::Entity::update_many()
+            .col_expr(
+                cli_device_codes::Column::UserId,
+                Expr::value(Some(actor_id)),
+            )
+            .col_expr(
+                cli_device_codes::Column::WorkspaceId,
+                Expr::value(workspace_id),
+            )
+            .col_expr(cli_device_codes::Column::Approved, Expr::value(true))
+            .col_expr(
+                cli_device_codes::Column::InteractiveApproval,
+                Expr::value(new_interactive),
+            )
+            .col_expr(
+                cli_device_codes::Column::DevMachineId,
+                Expr::value(resolved_machine_id),
+            )
+            .col_expr(cli_device_codes::Column::UpdatedAt, Expr::value(now_tz))
+            .filter(cli_device_codes::Column::Id.eq(row_id))
+            .exec(&tx_conn as &_)
+            .await
+    };
     if update.is_err() {
         return Denial::ServerError.into_response();
     }
@@ -1085,16 +1112,21 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
     }
 
     if !approved || row_user_id.is_none() {
-        let touched = sqlx::query(
-            r#"UPDATE cli_device_codes
-               SET last_polled_at = $1, updated_at = $2
-               WHERE id = $3"#,
-        )
-        .bind(now)
-        .bind(now)
-        .bind(row_id)
-        .execute(&mut *tx)
-        .await;
+        let touched = {
+            use pidash_db::entity::cli_device_codes;
+            use sea_orm::sea_query::Expr;
+            let tx_conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            let now_tz = now.fixed_offset();
+            cli_device_codes::Entity::update_many()
+                .col_expr(
+                    cli_device_codes::Column::LastPolledAt,
+                    Expr::value(Some(now_tz)),
+                )
+                .col_expr(cli_device_codes::Column::UpdatedAt, Expr::value(now_tz))
+                .filter(cli_device_codes::Column::Id.eq(row_id))
+                .exec(&tx_conn as &_)
+                .await
+        };
         if touched.is_err() || tx.commit().await.is_err() {
             return Denial::ServerError.into_response();
         }
@@ -1264,17 +1296,26 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
             Err(_) => return Denial::ServerError.into_response(),
         };
         // Mark consumed and store dev_machine_id.
-        let consumed = sqlx::query(
-            r#"UPDATE cli_device_codes
-               SET consumed = true, last_polled_at = $1, dev_machine_id = $2, updated_at = $3
-               WHERE id = $4"#,
-        )
-        .bind(now)
-        .bind(machine_id)
-        .bind(now)
-        .bind(row_id)
-        .execute(&mut *tx)
-        .await;
+        let consumed = {
+            use pidash_db::entity::cli_device_codes;
+            use sea_orm::sea_query::Expr;
+            let tx_conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            let now_tz = now.fixed_offset();
+            cli_device_codes::Entity::update_many()
+                .col_expr(cli_device_codes::Column::Consumed, Expr::value(true))
+                .col_expr(
+                    cli_device_codes::Column::LastPolledAt,
+                    Expr::value(Some(now_tz)),
+                )
+                .col_expr(
+                    cli_device_codes::Column::DevMachineId,
+                    Expr::value(Some(machine_id)),
+                )
+                .col_expr(cli_device_codes::Column::UpdatedAt, Expr::value(now_tz))
+                .filter(cli_device_codes::Column::Id.eq(row_id))
+                .exec(&tx_conn as &_)
+                .await
+        };
         if consumed.is_err() || tx.commit().await.is_err() {
             return Denial::ServerError.into_response();
         }
@@ -1332,17 +1373,26 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
     if minted.is_err() {
         return Denial::ServerError.into_response();
     }
-    let consumed = sqlx::query(
-        r#"UPDATE cli_device_codes
-           SET consumed = true, last_polled_at = $1, api_token_id = $2, updated_at = $3
-           WHERE id = $4"#,
-    )
-    .bind(now)
-    .bind(api_token_id)
-    .bind(now)
-    .bind(row_id)
-    .execute(&mut *tx)
-    .await;
+    let consumed = {
+        use pidash_db::entity::cli_device_codes;
+        use sea_orm::sea_query::Expr;
+        let tx_conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let now_tz = now.fixed_offset();
+        cli_device_codes::Entity::update_many()
+            .col_expr(cli_device_codes::Column::Consumed, Expr::value(true))
+            .col_expr(
+                cli_device_codes::Column::LastPolledAt,
+                Expr::value(Some(now_tz)),
+            )
+            .col_expr(
+                cli_device_codes::Column::ApiTokenId,
+                Expr::value(Some(api_token_id)),
+            )
+            .col_expr(cli_device_codes::Column::UpdatedAt, Expr::value(now_tz))
+            .filter(cli_device_codes::Column::Id.eq(row_id))
+            .exec(&tx_conn as &_)
+            .await
+    };
     if consumed.is_err() || tx.commit().await.is_err() {
         return Denial::ServerError.into_response();
     }
@@ -1350,26 +1400,29 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
     // Response identity (`device.py:355-362`): the grant user's email and
     // workspace slug, each null when the FK is null. A dangling FK would
     // raise in Django, hence `ServerError` here.
-    let user_email: Option<(Option<String>,)> =
-        sqlx::query_as(r#"SELECT email FROM users WHERE id = $1"#)
-            .bind(user_id)
-            .fetch_optional(&pool)
+    let user_email = {
+        use pidash_db::entity::users::Entity as UserEntity;
+        let db_e = pidash_db::pool::sea_orm_connection(&pool);
+        let user = UserEntity::find_by_id(user_id)
+            .one(&db_e)
             .await
             .unwrap_or(None);
-    let Some((user_email,)) = user_email else {
-        return Denial::ServerError.into_response();
+        let Some(u) = user else {
+            return Denial::ServerError.into_response();
+        };
+        u.email
     };
     let workspace_slug: Option<String> = match row_workspace_id {
         None => None,
         Some(workspace_id) => {
-            let slug: Option<(String,)> =
-                sqlx::query_as(r#"SELECT slug FROM workspaces WHERE id = $1"#)
-                    .bind(workspace_id)
-                    .fetch_optional(&pool)
-                    .await
-                    .unwrap_or(None);
-            match slug {
-                Some((slug,)) => Some(slug),
+            use pidash_db::entity::workspaces::Entity as WsEntity;
+            let db_w = pidash_db::pool::sea_orm_connection(&pool);
+            let ws = WsEntity::find_by_id(workspace_id)
+                .one(&db_w)
+                .await
+                .unwrap_or(None);
+            match ws {
+                Some(w) => Some(w.slug),
                 None => return Denial::ServerError.into_response(),
             }
         }
@@ -1392,17 +1445,26 @@ fn poll_gap() -> chrono::Duration {
     chrono::Duration::seconds(DEVICE_CODE_MIN_POLL_GAP_SECS as i64)
 }
 
-/// `_bearer_machine_token(request)` (`device.py:393-406`): require
-/// `Authorization: Bearer <machine token>`.
+/// `_bearer_machine_token(request)` (`device.py:203-209`): Rust mirror
+/// of Python `header.split()` (any whitespace, empty discarded), exactly
+/// two parts, scheme `bearer` (case-insensitive), token must start with
+/// `mt_`; else 401 `machine_token_required`.
 fn bearer_machine_token(headers: &HeaderMap) -> Result<String, Denial> {
     let auth = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let mut parts = auth.splitn(2, ' ');
+    // Python: parts = header.split() — whitespace-split, empty tokens dropped.
+    // Rust split_whitespace() matches (splits on the same Unicode White_Space).
+    let mut parts = auth.split_whitespace();
     let scheme = parts.next().unwrap_or("");
     let token = parts.next().unwrap_or("");
-    if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() {
+    let extra = parts.next();
+    if extra.is_some()
+        || !scheme.eq_ignore_ascii_case("bearer")
+        || token.is_empty()
+        || !token.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX)
+    {
         return Err(Denial::Error(
             StatusCode::UNAUTHORIZED,
             serde_json::json!({
@@ -1415,10 +1477,15 @@ fn bearer_machine_token(headers: &HeaderMap) -> Result<String, Denial> {
     Ok(token.to_owned())
 }
 
-/// `resolve_machine_token(raw, touch=True)` (`runner/authentication.py:60-127`)
+/// `resolve_machine_token(raw, touch=True)` (`runner/authentication.py:97-121`)
 /// for the engine redemption path. Returns
 /// `(token_id, user_id, dev_machine_id)` on success, else a 401 with
 /// `invalid_client` and the resolver code as `error_description`.
+/// Resolver codes are byte-identical to Django: `machine_token_invalid`,
+/// `machine_token_revoked`, `machine_token_expired`, `dev_machine_revoked`,
+/// `membership_revoked`. An unbound token (`dev_machine_id = NULL`) is NOT
+/// refused here — redemption answers 403 `dev_machine_required` (see
+/// `post_token`). Membership lapse revokes the token before answering.
 async fn resolve_machine_token_for_engine(
     pool: &sqlx::PgPool,
     secret_key: &[u8],
@@ -1426,15 +1493,15 @@ async fn resolve_machine_token_for_engine(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(uuid::Uuid, uuid::Uuid, Option<uuid::Uuid>), Denial> {
     use sea_orm::EntityTrait;
-    if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
-        return Err(Denial::Error(
+    fn invalid_client(code: &str) -> Denial {
+        Denial::Error(
             StatusCode::UNAUTHORIZED,
             serde_json::json!({
                 "error": "invalid_client",
-                "error_description": "unusable",
+                "error_description": code,
             })
             .to_string(),
-        ));
+        )
     }
     let token_hash = pidash_auth::token::hash_token(raw, secret_key);
     let db = pidash_db::pool::sea_orm_connection(pool);
@@ -1444,100 +1511,53 @@ async fn resolve_machine_token_for_engine(
         .await
         .map_err(|_| Denial::ServerError)?;
     let Some(token_row) = row else {
-        return Err(Denial::Error(
-            StatusCode::UNAUTHORIZED,
-            serde_json::json!({
-                "error": "invalid_client",
-                "error_description": "unusable",
-            })
-            .to_string(),
-        ));
+        return Err(invalid_client("machine_token_invalid"));
     };
     if token_row.revoked_at.is_some() {
-        return Err(Denial::Error(
-            StatusCode::UNAUTHORIZED,
-            serde_json::json!({
-                "error": "invalid_client",
-                "error_description": "revoked",
-            })
-            .to_string(),
-        ));
+        return Err(invalid_client("machine_token_revoked"));
     }
     if let Some(exp) = token_row.expires_at {
         if exp.with_timezone(&chrono::Utc) <= now {
-            return Err(Denial::Error(
-                StatusCode::UNAUTHORIZED,
-                serde_json::json!({
-                    "error": "invalid_client",
-                    "error_description": "expired",
-                })
-                .to_string(),
-            ));
+            return Err(invalid_client("machine_token_expired"));
         }
     }
-    // User must be active.
-    let user = pidash_db::entity::users::Entity::find_by_id(token_row.user_id)
-        .one(&db)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let Some(user) = user else {
-        return Err(Denial::Error(
-            StatusCode::UNAUTHORIZED,
-            serde_json::json!({
-                "error": "invalid_client",
-                "error_description": "user_inactive",
-            })
-            .to_string(),
-        ));
-    };
-    if !user.is_active {
-        return Err(Denial::Error(
-            StatusCode::UNAUTHORIZED,
-            serde_json::json!({
-                "error": "invalid_client",
-                "error_description": "user_inactive",
-            })
-            .to_string(),
-        ));
-    }
-    if token_row.dev_machine_id.is_none() {
-        return Err(Denial::Error(
-            StatusCode::UNAUTHORIZED,
-            serde_json::json!({
-                "error": "invalid_client",
-                "error_description": "unbound",
-            })
-            .to_string(),
-        ));
-    }
-    // Machine must exist and not be revoked.
+    // Revoked (or missing) dev machine -> dev_machine_revoked. Unbound
+    // (NULL) skips this gate; redemption 403s below (device.py:258-262).
     if let Some(mid) = token_row.dev_machine_id {
         let machine = pidash_db::entity::dev_machine::Entity::find_by_id(mid)
             .one(&db)
             .await
             .map_err(|_| Denial::ServerError)?;
         let Some(machine) = machine else {
-            return Err(Denial::Error(
-                StatusCode::UNAUTHORIZED,
-                serde_json::json!({
-                    "error": "invalid_client",
-                    "error_description": "machine_revoked",
-                })
-                .to_string(),
-            ));
+            return Err(invalid_client("dev_machine_revoked"));
         };
         if machine.revoked_at.is_some() {
-            return Err(Denial::Error(
-                StatusCode::UNAUTHORIZED,
-                serde_json::json!({
-                    "error": "invalid_client",
-                    "error_description": "machine_revoked",
-                })
-                .to_string(),
-            ));
+            return Err(invalid_client("dev_machine_revoked"));
         }
     }
-    // Touch last_used_at.
+    // Workspace membership (`is_workspace_member`): a lapsed token is
+    // revoked as a side effect before refusing.
+    {
+        use sea_orm::EntityTrait;
+        let is_member = pidash_db::entity::workspace_members::Entity::find()
+            .filter(
+                pidash_db::entity::workspace_members::Column::WorkspaceId
+                    .eq(token_row.workspace_id),
+            )
+            .filter(pidash_db::entity::workspace_members::Column::MemberId.eq(token_row.user_id))
+            .filter(pidash_db::entity::workspace_members::Column::IsActive.eq(true))
+            .filter(pidash_db::entity::workspace_members::Column::DeletedAt.is_null())
+            .count(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        if is_member == 0 {
+            let _ =
+                pidash_services::domain::tokens::revoke_machine_token_by_id(&db, token_row.id, now)
+                    .await;
+            return Err(invalid_client("membership_revoked"));
+        }
+    }
+    // Touch: last_used_at + 60-day idle-expiry renewal.
     let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_id(
         &db,
         token_row.id,

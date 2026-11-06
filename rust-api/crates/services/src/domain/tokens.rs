@@ -490,56 +490,73 @@ fn by_id(id: Uuid) -> sea_orm::Condition {
     sea_orm::Condition::all().add(machine_token::Column::Id.eq(id))
 }
 
+/// `touch_machine_token` (`runner/authentication.py:81-94`): stamp
+/// `last_used_at = now` and renew the 60-day idle expiry
+/// `expires_at = now + 60d`. Both stamps land together; every touch
+/// renews the expiry so use keeps the credential alive.
+async fn touch_machine_tokens(
+    db: &impl ConnectionTrait,
+    last_used: sea_orm::sea_query::SimpleExpr,
+    expires: sea_orm::sea_query::SimpleExpr,
+    filter: sea_orm::Condition,
+) -> Result<(), sqlx::Error> {
+    machine_token::Entity::update_many()
+        .col_expr(machine_token::Column::LastUsedAt, last_used)
+        .col_expr(machine_token::Column::ExpiresAt, expires)
+        .filter(filter)
+        .exec(db)
+        .await
+        .map(|_| ())
+        .map_err(into_sqlx)
+}
+
 /// Middleware stamp (`api_authentication.py:60-64`):
-/// `MachineToken.objects.filter(pk).update(last_used_at=now)`, by
-/// presented hash, DB clock. Best-effort at the middleware call sites;
+/// `MachineToken.objects.filter(pk).update(last_used_at=now)` plus the
+/// idle-expiry renewal (`runner/authentication.py:81-94`), by presented
+/// hash, DB clock. Best-effort at the middleware call sites;
 /// the by-id twins are [`touch_machine_token_last_used_by_id`] (bound
 /// clock) and [`touch_machine_token_last_used_by_id_now`] (DB clock).
 pub async fn touch_machine_token_last_used_by_hash(
     db: &impl ConnectionTrait,
     token_hash: &str,
 ) -> Result<(), sqlx::Error> {
-    stamp_machine_tokens(
+    // raw-sql: SeaORM cannot express INTERVAL '60 days' on the DB clock.
+    let expires = Expr::cust("CURRENT_TIMESTAMP + INTERVAL '60 days'");
+    touch_machine_tokens(
         db,
-        machine_token::Column::LastUsedAt,
         Expr::current_timestamp().into(),
+        expires,
         by_hash(token_hash),
     )
     .await
-    .map(|_| ())
 }
 
 /// Touch `last_used_at` by id with the DB clock (validators that resolve
-/// the id first and stamp `now()`).
+/// the id first and stamp `now()`), renewing the idle expiry.
 pub async fn touch_machine_token_last_used_by_id_now(
     db: &impl ConnectionTrait,
     id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    stamp_machine_tokens(
-        db,
-        machine_token::Column::LastUsedAt,
-        Expr::current_timestamp().into(),
-        by_id(id),
-    )
-    .await
-    .map(|_| ())
+    // raw-sql: SeaORM cannot express INTERVAL '60 days' on the DB clock.
+    let expires = Expr::cust("CURRENT_TIMESTAMP + INTERVAL '60 days'");
+    touch_machine_tokens(db, Expr::current_timestamp().into(), expires, by_id(id)).await
 }
 
 /// Touch `last_used_at` by id with the caller's clock (device, CLI,
-/// enroll and runner validators stamp their frozen `now`).
+/// enroll and runner validators stamp their frozen `now`), renewing the
+/// 60-day idle expiry (`expires_at = now + 60d`).
 pub async fn touch_machine_token_last_used_by_id(
     db: &impl ConnectionTrait,
     id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    stamp_machine_tokens(
+    touch_machine_tokens(
         db,
-        machine_token::Column::LastUsedAt,
         Expr::value(now),
+        Expr::value(at(now + chrono::Duration::days(60))),
         by_id(id),
     )
     .await
-    .map(|_| ())
 }
 
 /// Middleware revoke-then-deny (`api_authentication.py:54-58`):
@@ -771,6 +788,7 @@ pub struct NewMachineToken {
 /// The minted `machine_token` row: every column, `last_used_at` and
 /// `revoked_at` NULL.
 fn machine_token_row(params: &NewMachineToken) -> machine_token::ActiveModel {
+    let expires_at = params.created_at + chrono::Duration::days(60);
     machine_token::ActiveModel {
         id: Set(params.id),
         user_id: Set(params.user_id),
@@ -784,7 +802,7 @@ fn machine_token_row(params: &NewMachineToken) -> machine_token::ActiveModel {
         created_at: Set(at(params.created_at)),
         last_used_at: Set(None),
         revoked_at: Set(None),
-        expires_at: Set(None),
+        expires_at: Set(Some(at(expires_at))),
     }
 }
 

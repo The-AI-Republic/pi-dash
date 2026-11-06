@@ -16,12 +16,10 @@
 //! ownership after the proxy pass, so until then every name here still
 //! routes to `PythonOwned` (see [`crate::worker::route_for`]).
 
-pub mod engine_pause;
 pub mod offline_recovery;
 pub mod sweeps_chat;
 pub mod sweeps_runs;
 
-pub use engine_pause::{register_pause_task, PAUSE_TASK};
 pub use offline_recovery::{register_offline_recovery_tasks, FAIL_RUNS_TASK, RELEASE_PINS_TASK};
 pub use sweeps_chat::{
     emit_terminal_effects, register_runner_runs_tasks, RECONCILE_STALLED_RUNS_TASK,
@@ -35,7 +33,7 @@ pub use sweeps_runs::{
 
 /// Every Celery task name this domain owns (L6a + L6b + the `70d684af`
 /// offline-recovery pair, in `tasks.py` order).
-pub const TASK_NAMES: [&str; 14] = [
+pub const TASK_NAMES: [&str; 13] = [
     EXPIRE_TASK,
     MARK_OFFLINE_TASK,
     RELEASE_PINS_TASK,
@@ -49,7 +47,6 @@ pub const TASK_NAMES: [&str; 14] = [
     RECONCILE_STALLED_RUNS_TASK,
     TERMINAL_EFFECTS_TASK,
     RECONCILE_TERMINAL_EFFECTS_TASK,
-    PAUSE_TASK,
 ];
 
 /// True for the task names in [`TASK_NAMES`]. The worker forwards them to

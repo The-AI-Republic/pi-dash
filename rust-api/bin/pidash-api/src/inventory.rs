@@ -1420,9 +1420,6 @@ pub const TASKS: &[TaskRow] = &[
     TaskRow {
         name: "runner.sweep_stale_runners",
     },
-    TaskRow {
-        name: "runner.pause_engines_with_expired_credentials",
-    },
 ];
 
 /// The `routes --json` document.
@@ -1960,9 +1957,8 @@ mod tests {
         pidash_jobs::runner_runs::register_offline_recovery_tasks(
             &mut registry,
             pool.clone(),
-            runner_seams.clone(),
+            runner_seams,
         );
-        pidash_jobs::runner_runs::register_pause_task(&mut registry, pool.clone());
         // D-11 execution tasks (PIDASHCONV-832 + PIDASHCONV-866):
         // the same calls the worker builder makes — real register over the
         // lazy pool, no forward override (handlers never run here).
