@@ -513,6 +513,15 @@ pub async fn insert_dev_machine(
         revoked_at: Set(None),
         created_at: Set(now.into()),
         updated_at: Set(now.into()),
+        engine_paused_by_owner: Set(false),
+        engine_auto_pause_reason: Set(String::new()),
+        engine_team_runs: Set(false),
+        engine_sign_in_state: Set("never".to_owned()),
+        engine_credential_expires_at: Set(None),
+        engine_state: Set(serde_json::json!({})),
+        engine_state_reported_at: Set(None),
+        merged_into_id: Set(None),
+        merge_result: Set(serde_json::json!({})),
     })
     .exec_without_returning(db)
     .await

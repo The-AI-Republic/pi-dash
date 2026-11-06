@@ -42,6 +42,7 @@ pub struct Model {
     pub provisioning: String,
     pub paused_at: Option<DateTimeWithTimeZone>,
     pub paused_by_id: Option<Uuid>,
+    pub pod_dispatch: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

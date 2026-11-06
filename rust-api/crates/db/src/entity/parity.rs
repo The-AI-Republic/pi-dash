@@ -430,6 +430,7 @@ parity_tests!(
     draft_issue_modules,
     draft_issues,
     email_notification_logs,
+    engine_credential,
     estimate_points,
     estimates,
     exporters,
