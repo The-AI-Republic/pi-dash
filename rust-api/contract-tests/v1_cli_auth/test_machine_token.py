@@ -65,12 +65,9 @@ def test_machine_token_shape(api, seed, tenant_a, secret, db):
     )
     assert r.status_code == 201, r.text
     body = r.json()
-    assert set(body) == {
-        "machine_token",
-        "workspace_slug",
-        "dev_machine_id",
-        "host_label",
-    }
+    # engine_sign_in_state always present; engine_credential optional
+    assert {"machine_token", "workspace_slug", "dev_machine_id", "host_label", "engine_sign_in_state"} <= set(body)
+    assert body["engine_sign_in_state"] in ("never", "active", "expiring", "expired", "signed_out", "revoked")
     assert body["machine_token"].startswith("mt_")
     assert body["workspace_slug"] == tenant_a["workspace"]["slug"]
     assert body["dev_machine_id"] == dev_machine_id

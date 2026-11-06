@@ -422,6 +422,7 @@ parity_tests!(
     description_versions,
     descriptions,
     dev_machine,
+    engine_credential,
     device_sessions,
     devices,
     draft_issue_assignees,
