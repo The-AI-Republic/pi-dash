@@ -1525,15 +1525,17 @@ fn render_app_issue_create(
     Ok(serde_json::Value::Object(map))
 }
 
-/// App `IssueSerializer` snapshot (`app/serializers/issue.py:1039-1093`)
+/// App `IssueSerializer` snapshot (`app/serializers/issue.py:1039-1112`)
 /// for the update activity's `current_instance`: `Meta.fields` order with
 /// the unannotated fields skipped (no `cycle_id`/`module_ids`/`label_ids`/
 /// `assignee_ids`/counts on a plain instance — DRF drops read-only fields
-/// whose attribute is missing).
+/// whose attribute is missing). `type_id` is a concrete FK read-out and
+/// `is_epic` a `SerializerMethodField`, so both are always present.
 fn render_issue_snapshot(
     detail: &Detail,
     timezone: chrono_tz::Tz,
     is_synced: bool,
+    is_epic: bool,
 ) -> serde_json::Value {
     let issue = &detail.issue;
     let mut map = serde_json::Map::with_capacity(24);
@@ -1585,6 +1587,8 @@ fn render_issue_snapshot(
     );
     map.insert("project_id".to_string(), uuid_string(&issue.project_id));
     map.insert("parent_id".to_string(), opt_uuid(&issue.parent_id));
+    map.insert("type_id".to_string(), opt_uuid(&issue.type_id));
+    map.insert("is_epic".to_string(), serde_json::Value::Bool(is_epic));
     map.insert(
         "assigned_pod_id".to_string(),
         opt_uuid(&issue.assigned_pod_id),
@@ -1644,6 +1648,22 @@ async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, sqlx::Error>
             .await?
             .flatten();
     Ok(github.is_some())
+}
+
+/// `get_is_epic` (`app/serializers/issue.py:1109-1112`): false when the
+/// row is untyped, without a query; otherwise the type row's flag. A
+/// missing row is Django's `DoesNotExist` → the generic 500 (unreachable
+/// — the FK holds). No soft-delete guard: `IssueType` rides the plain
+/// manager. Shares `app_issues::access::issue_type_is_epic` (no new raw
+/// SQL per the raw-sql ratchet).
+async fn fetch_is_epic(pool: &PgPool, type_id: Option<Uuid>) -> Result<bool, Denial> {
+    let Some(id) = type_id else {
+        return Ok(false);
+    };
+    crate::app_issues::access::issue_type_is_epic(&pidash_db::pool::sea_orm_connection(pool), id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)
 }
 
 // ---------------------------------------------------------------------------
@@ -2542,8 +2562,16 @@ async fn detail_partial_update(
         Ok(detail) => detail,
         Err(_) => return Denial::ServerError.into_response(),
     };
-    let current_instance =
-        super::python_dumps(&render_issue_snapshot(&pre_save, actor.timezone, synced));
+    let is_epic = match fetch_is_epic(pool, pre_save.issue.type_id).await {
+        Ok(is_epic) => is_epic,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let current_instance = super::python_dumps(&render_issue_snapshot(
+        &pre_save,
+        actor.timezone,
+        synced,
+        is_epic,
+    ));
     let mut subset = serde_json::Map::with_capacity(3);
     subset.insert("name".to_string(), serde_json::Value::String(name.clone()));
     subset.insert(
@@ -2751,6 +2779,90 @@ mod tests {
         assert_eq!(coerce_name(&Value::Null), None);
         assert_eq!(coerce_name(&Value::Array(vec![])), None);
         assert_eq!(coerce_name(&Value::Object(serde_json::Map::new())), None);
+    }
+
+    #[test]
+    fn issue_snapshot_carries_type_id_and_is_epic() {
+        // App `IssueSerializer` (`app/serializers/issue.py:1039-1112`):
+        // `type_id` is a concrete FK read-out and `is_epic` a method
+        // field, so both are present on the plain-instance snapshot
+        // the intake PATCH enqueues as `current_instance`
+        // (NEWPIDASH-47).
+        let type_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let detail = Detail {
+            issue: IssueRow {
+                id: Uuid::nil(),
+                created_at: DateTime::<Utc>::MIN_UTC,
+                updated_at: DateTime::<Utc>::MIN_UTC,
+                created_by_id: None,
+                updated_by_id: None,
+                deleted_at: None,
+                project_id: Uuid::nil(),
+                workspace_id: Uuid::nil(),
+                parent_id: None,
+                state_id: None,
+                point: None,
+                estimate_point_id: None,
+                name: "n".to_owned(),
+                description_json: serde_json::Value::Object(Default::default()),
+                description_html: String::new(),
+                description_stripped: None,
+                description_binary: None,
+                priority: "none".to_owned(),
+                complexity_score: 0,
+                start_date: None,
+                target_date: None,
+                sequence_id: 1,
+                sort_order: 65535.0,
+                completed_at: None,
+                archived_at: None,
+                is_draft: false,
+                external_source: None,
+                external_id: None,
+                type_id: Some(type_id),
+                git_work_branch: String::new(),
+                created_via: None,
+                assigned_pod_id: None,
+                agent_executor: None,
+                workpad: String::new(),
+            },
+            state: None,
+            project: ProjectRow {
+                id: Uuid::nil(),
+                identifier: String::new(),
+                name: String::new(),
+                cover_image: None,
+                cover_image_asset_id: None,
+                logo_props: serde_json::Value::Object(Default::default()),
+                description: String::new(),
+                is_default: false,
+            },
+            cover_url: None,
+            label_ids: Vec::new(),
+            labels: Vec::new(),
+            assignee_ids: Vec::new(),
+            assignees: Vec::new(),
+            bridges: Vec::new(),
+        };
+        let snapshot = render_issue_snapshot(&detail, chrono_tz::UTC, false, true);
+        let map = snapshot.as_object().expect("object");
+        assert_eq!(
+            map.get("type_id"),
+            Some(&serde_json::Value::String(type_id.to_string()))
+        );
+        assert_eq!(map.get("is_epic"), Some(&serde_json::Value::Bool(true)));
+        // The unannotated skips stay skipped.
+        for key in [
+            "cycle_id",
+            "module_ids",
+            "label_ids",
+            "assignee_ids",
+            "sub_issues_count",
+            "attachment_count",
+            "link_count",
+        ] {
+            assert!(!map.contains_key(key), "unexpected {key}");
+        }
     }
 
     #[test]

@@ -992,10 +992,15 @@ async fn op_add_current_issue_comment(
         labels: &empty_list,
         edited_at: None,
     };
-    comment_domain::insert_comment_row(&mut **tx.inner(), &rows).await?;
-    comment_domain::insert_description_row(&mut **tx.inner(), &rows).await?;
-    comment_domain::link_comment_description(&mut **tx.inner(), rows.id, rows.description_id)
+    comment_domain::insert_comment_row(&pidash_db::orm_tx::TxConn::new(tx.inner()), &rows).await?;
+    comment_domain::insert_description_row(&pidash_db::orm_tx::TxConn::new(tx.inner()), &rows)
         .await?;
+    comment_domain::link_comment_description(
+        &pidash_db::orm_tx::TxConn::new(tx.inner()),
+        rows.id,
+        rows.description_id,
+    )
+    .await?;
     let comment_id = rows.id;
     let created = plan::comment_created(&comment_id.to_string());
     serde_json::to_value(created)
@@ -1076,7 +1081,7 @@ async fn op_update_current_issue_workpad(
             });
         };
         let _ = domain_issues::update_workpad(
-            &mut **tx.inner(),
+            &pidash_db::orm_tx::TxConn::new(tx.inner()),
             work_item_id,
             issue.project_id,
             body,
@@ -1664,9 +1669,14 @@ where
     ) -> Result<(), CreationError> {
         // `updated_at` is now-at-write: Python's `save()` stamps
         // `auto_now` at write time (the pre-consolidation bind).
-        apply_clock_write(self.pool, &write, row, Utc::now())
-            .await
-            .map_err(Self::db)
+        apply_clock_write(
+            &pidash_db::pool::sea_orm_connection(self.pool),
+            &write,
+            row,
+            Utc::now(),
+        )
+        .await
+        .map_err(Self::db)
     }
 
     fn set_rollback(&mut self) {
@@ -2050,7 +2060,7 @@ async fn op_transition_current_issue<'a>(
     // today. Inside the audit transaction, under the row lock above (a
     // separate domain transaction would deadlock against it).
     if let Err(error) = domain_issues::update_issue_state(
-        &mut **tx.inner(),
+        &pidash_db::orm_tx::TxConn::new(tx.inner()),
         issue_id,
         target_id,
         now,
@@ -2498,7 +2508,8 @@ async fn relate_insert_tx(
         related_issue_id: row.related_issue_id,
         relation_type: row.relation_type.as_str(),
     };
-    let inserted = relation_domain::relate_row(&mut **tx.inner(), &value).await;
+    let inserted =
+        relation_domain::relate_row(&pidash_db::orm_tx::TxConn::new(tx.inner()), &value).await;
     match inserted {
         Ok(_) => {
             sqlx::query("RELEASE SAVEPOINT relate_target")
@@ -2559,7 +2570,7 @@ async fn op_unrelate_issues(
         for row in matching {
             let now = Utc::now();
             relation_domain::soft_delete_relation_row(
-                &mut **tx.inner(),
+                &pidash_db::orm_tx::TxConn::new(tx.inner()),
                 row.id,
                 scope.creator_id,
                 now,

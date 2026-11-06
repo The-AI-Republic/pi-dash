@@ -62,6 +62,8 @@ pub enum TransportError {
     MembershipRevoked,
     #[error("auth: machine_token_revoked")]
     MachineTokenRevoked,
+    #[error("auth: machine_token_expired")]
+    MachineTokenExpired,
     #[error("auth: dev_machine_revoked")]
     DevMachineRevoked,
     #[error("auth: runner_revoked")]
@@ -124,6 +126,7 @@ impl TransportError {
             TransportError::RefreshTokenReplayed
                 | TransportError::MembershipRevoked
                 | TransportError::MachineTokenRevoked
+                | TransportError::MachineTokenExpired
                 | TransportError::DevMachineRevoked
                 | TransportError::RunnerRevoked
                 | TransportError::RunnerIdMismatch
@@ -393,6 +396,7 @@ impl TransportErrorCode {
             "auth: refresh_token_replayed" => TransportError::RefreshTokenReplayed,
             "auth: membership_revoked" => TransportError::MembershipRevoked,
             "auth: machine_token_revoked" => TransportError::MachineTokenRevoked,
+            "auth: machine_token_expired" => TransportError::MachineTokenExpired,
             "auth: dev_machine_revoked" => TransportError::DevMachineRevoked,
             "auth: runner_revoked" => TransportError::RunnerRevoked,
             "auth: runner_gone" => TransportError::RunnerGone,
@@ -2119,6 +2123,9 @@ fn map_auth_error(status: StatusCode, body: &str) -> TransportError {
         if body.contains("machine_token_revoked") {
             return TransportError::MachineTokenRevoked;
         }
+        if json_error_code(body).as_deref() == Some("machine_token_expired") {
+            return TransportError::MachineTokenExpired;
+        }
         if body.contains("dev_machine_revoked") {
             return TransportError::DevMachineRevoked;
         }
@@ -2717,6 +2724,22 @@ mod tests {
         assert!(matches!(err, TransportError::DevMachineRevoked));
         let err = map_auth_error(StatusCode::FORBIDDEN, "{\"error\":\"runner_id_mismatch\"}");
         assert!(matches!(err, TransportError::RunnerIdMismatch));
+    }
+
+    #[test]
+    fn expired_machine_token_is_fatal_and_keeps_its_code() {
+        for body in [
+            r#"{"detail":"machine_token_expired"}"#,
+            r#"{"error":"machine_token_expired"}"#,
+        ] {
+            let err = map_auth_error(StatusCode::UNAUTHORIZED, body);
+            assert!(matches!(err, TransportError::MachineTokenExpired));
+            assert!(err.is_fatal_for_runner());
+            assert!(matches!(
+                TransportErrorCode::from(&err).into_err(),
+                TransportError::MachineTokenExpired
+            ));
+        }
     }
 
     #[test]

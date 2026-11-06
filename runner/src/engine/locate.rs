@@ -187,36 +187,41 @@ pub fn resolve(config: &EngineSection) -> Result<ResolvedEngine, LocateError> {
     )
 }
 
-static RESOLVED: OnceLock<Option<ResolvedEngine>> = OnceLock::new();
+static RESOLVED: OnceLock<ResolvedEngine> = OnceLock::new();
 
-/// Resolve the engine once for this daemon process and keep the result.
-/// A missing engine is logged, not fatal: nothing dispatches to the engine
-/// yet, and runners driving the user's own agent must keep working.
-/// Later calls return the first result unchanged.
-pub fn init_at_daemon_start(config: &EngineSection) -> Option<&'static ResolvedEngine> {
-    RESOLVED
-        .get_or_init(|| match resolve(config) {
-            Ok(engine) => {
-                tracing::info!(
-                    binary = %engine.binary.display(),
-                    version = engine.version.as_deref().unwrap_or("override"),
-                    source = ?engine.source,
-                    "built-in engine resolved"
-                );
-                Some(engine)
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "built-in engine unavailable");
-                None
-            }
-        })
-        .as_ref()
+/// Resolve the engine for this daemon process and keep the result.
+/// A missing engine is logged, not fatal: runners driving the user's own
+/// agent must keep working. Once an engine has been resolved, later calls
+/// return it unchanged, so a running daemon is never handed a different
+/// binary. A failed resolve is not remembered: after the daemon installs a
+/// missing engine (`super::auto_install`) it calls this again.
+pub fn init_at_daemon_start(
+    config: &EngineSection,
+) -> Result<&'static ResolvedEngine, LocateError> {
+    if let Some(engine) = RESOLVED.get() {
+        return Ok(engine);
+    }
+    match resolve(config) {
+        Ok(engine) => {
+            tracing::info!(
+                binary = %engine.binary.display(),
+                version = engine.version.as_deref().unwrap_or("override"),
+                source = ?engine.source,
+                "built-in engine resolved"
+            );
+            Ok(RESOLVED.get_or_init(|| engine))
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "built-in engine unavailable");
+            Err(err)
+        }
+    }
 }
 
-/// The engine resolved at daemon start, if any. `None` before
-/// [`init_at_daemon_start`] has run or when no engine was found.
+/// The engine resolved for this daemon, if any. `None` before
+/// [`init_at_daemon_start`] has succeeded.
 pub fn resolved() -> Option<&'static ResolvedEngine> {
-    RESOLVED.get().and_then(Option::as_ref)
+    RESOLVED.get()
 }
 
 #[cfg(test)]

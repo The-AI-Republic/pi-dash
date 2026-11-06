@@ -32,8 +32,9 @@
 //! `super::routes` via [`routes`]); `HEAD` rides axum's `get` handling
 //! on the GET-owned paths like Django's GET-backed `HEAD`.
 //!
-//! Reuse (call, don't copy): the 649 version SQL builders
-//! (`super::queries_engage`), pilot-2's `v2_page` cursor math
+//! Reuse (call, don't copy): the shared SeaORM gates (`super::access`),
+//! the version reads as SeaORM selects (batch 2c; the 649 key order in
+//! `super::queries_engage`), pilot-2's `v2_page` cursor math
 //! (`super::render`), the 640 version detail rendering
 //! (`serializers_assoc`), the 639 base-shape rendering
 //! (`serializers_detail`), the move domain service
@@ -47,7 +48,7 @@
 //!   gate) is an empty 200 page (`filter`, never `get`).
 //! * `IssueDescriptionVersion` declares no `Meta.ordering`, so the detail
 //!   `.get()` carries no `ORDER BY` (unlike its version sibling) — the
-//!   649 SQL preserves the asymmetry.
+//!   SeaORM detail select preserves the asymmetry.
 //! * `PaginateCursor`'s offset part is parsed but never read (`start_index`
 //!   derives from `current_page` alone) — inherited from pilot-2's
 //!   `v2_page`, reused, not re-ported.
@@ -78,8 +79,14 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
+use pidash_db::entity::{issue_description_versions, issue_versions, issues, users, workspaces};
+use sea_orm::prelude::DateTimeWithTimeZone;
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, FromQueryResult, JoinType,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait, Select,
+};
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::edge;
@@ -87,9 +94,10 @@ use pidash_services::app_issues::serializers_assoc::{
     issue_description_version_detail_to_representation, issue_version_detail_to_representation,
     IssueDescriptionVersionDetailRow, IssueVersionDetailRow,
 };
+use pidash_services::app_issues::serializers_engage::{git_issue_synced, github_issue_synced};
 use pidash_services::app_issues::{
     issue_detail_base_to_representation, issue_is_actively_synced, IssueDetailBaseRow,
-    SourceIssueRow, GITHUB_ISSUE_SYNC_PROBE_SQL, GIT_ISSUE_SYNC_PROBE_SQL,
+    SourceIssueRow,
 };
 use pidash_services::domain;
 use pidash_services::domain::activity::TaskEnqueueHook;
@@ -100,12 +108,10 @@ use pidash_services::domain::issues::{
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{WriteActor, WriteCtx, WriteScope};
 
-use super::queries_engage::{
-    description_count_sql, description_detail_sql, description_list_sql, version_count_sql,
-    version_detail_sql, version_list_sql, VERSION_PAGE_KEYS,
-};
+use super::access;
+use super::queries_engage::VERSION_PAGE_KEYS;
 use super::render::{v2_page, V2Page};
-use super::{query_last, Binder, QueryMap};
+use super::{query_last, QueryMap};
 use crate::domain_hooks::{AppMoveAdmissionCache, AppMovePostCommitHook, AppTaskEnqueueHook};
 use crate::issue_transition::AppTransitionHook;
 use crate::middleware::body_limit::read_request_bytes;
@@ -286,9 +292,12 @@ async fn actor_user_id(
         .and_then(|value| value.as_str().to_owned())
         .ok_or(Denial::Unauthorized)?;
     let id = raw.parse::<Uuid>().map_err(|_| Denial::Unauthorized)?;
-    let exists: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM users WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
+    let exists: Option<Uuid> = users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Id.eq(id))
+        .into_tuple()
+        .one(&orm(pool))
         .await
         .map_err(|_| Denial::ServerError)?;
     if exists.is_none() {
@@ -305,16 +314,10 @@ async fn resolve_project_id(pool: &PgPool, slug: &str, raw: &str) -> Result<Uuid
         return Ok(id);
     }
     let upper = raw.trim().to_uppercase();
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    access::project_id_by_identifier(&orm(pool), slug, &upper)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ProjectNotFound)
 }
 
 /// Parse a `<uuid:>` path segment the way Django's `UUIDConverter` does:
@@ -338,64 +341,27 @@ fn path_uuid(raw: &str) -> Result<Uuid, ()> {
     raw.parse::<Uuid>().map_err(|_| ())
 }
 
-/// Membership facts for one `(user, slug, project)` over the same rows
-/// the decorator reads: active project and workspace memberships scoped
-/// by slug/project, soft-deleted rows excluded (`SoftDeletionManager`).
-struct Membership {
-    project_role: Option<i16>,
-    workspace_role: Option<i16>,
-}
-
-async fn fetch_membership(
+/// `allow_permission(allowed_roles)` at `PROJECT` level
+/// (`app/permissions/base.py:19-86`) through the shared
+/// [`access::allows`] gate: an allowed active project role, or any active
+/// project membership plus an active workspace ADMIN membership
+/// (soft-deleted rows excluded, `SoftDeletionManager`). Denies with the
+/// decorator `error` body.
+async fn check_allow(
     pool: &PgPool,
     slug: &str,
     project_id: &Uuid,
     user_id: &Uuid,
-) -> Result<Membership, Denial> {
-    let project_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let workspace_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(Membership {
-        project_role: project_role.map(|row| row.0),
-        workspace_role: workspace_role.map(|row| row.0),
-    })
-}
-
-/// `allow_permission(allowed_roles)` at `PROJECT` level
-/// (`app/permissions/base.py:19-86`): an allowed project role, or any
-/// active project membership plus an active workspace ADMIN membership.
-/// Denies with the decorator `error` body.
-fn check_allow(membership: &Membership, allowed: &[i16]) -> Result<(), Denial> {
-    if membership
-        .project_role
-        .is_some_and(|role| allowed.contains(&role))
-    {
-        return Ok(());
+    allowed: &[i32],
+) -> Result<(), Denial> {
+    let allowed = access::allows(&orm(pool), slug, *project_id, *user_id, allowed)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(Denial::Forbidden)
     }
-    if membership.project_role.is_some() && membership.workspace_role == Some(20) {
-        return Ok(());
-    }
-    Err(Denial::Forbidden)
 }
 
 /// View-body tenant facts: the actor's render timezone
@@ -407,15 +373,11 @@ struct Tenant {
 }
 
 async fn fetch_tenant(pool: &PgPool, user_id: &Uuid) -> Result<Tenant, Denial> {
-    let timezone_name: Option<(String,)> =
-        sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    let timezone_name = access::user_timezone(&orm(pool), *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let timezone: Tz = timezone_name
         .ok_or(Denial::ServerError)?
-        .0
         .parse()
         .map_err(|_| Denial::ServerError)?;
     Ok(Tenant { timezone })
@@ -428,6 +390,11 @@ fn pool_of(state: &AppState) -> Result<PgPool, Denial> {
         .pools()
         .map(|pools| pools.primary().clone())
         .ok_or(Denial::ServerError)
+}
+
+/// A SeaORM connection over the request pool (no I/O).
+fn orm(pool: &PgPool) -> DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
 }
 
 // ---------------------------------------------------------------------------
@@ -487,19 +454,14 @@ async fn version_list(
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(&pool, extension).await?;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
-    let membership = fetch_membership(&pool, &slug, &project_id, &user_id).await?;
-    check_allow(&membership, &[20, 15, 5])?;
+    check_allow(&pool, &slug, &project_id, &user_id, &[20, 15, 5]).await?;
     let tenant = fetch_tenant(&pool, &user_id).await?;
     let total = version_count(&pool, &slug, &project_id, &issue_id).await?;
     let cursor = query_last(&query, "cursor");
     let page = v2_page(cursor.as_deref(), total).map_err(|_| Denial::ServerError)?;
-    let mut binder = Binder::default();
-    let sql = version_list_sql(&mut binder, &slug, project_id, issue_id, &page);
-    let rows = sqlx::query(&sql)
-        .bind(issue_id)
-        .bind(project_id)
-        .bind(&slug)
-        .fetch_all(&pool)
+    let rows = version_page_query(&slug, project_id, issue_id, &page)?
+        .into_model::<VersionPageRow>()
+        .all(&orm(&pool))
         .await
         .map_err(|_| Denial::ServerError)?;
     let mut results = Vec::with_capacity(rows.len());
@@ -527,17 +489,10 @@ async fn version_detail(
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(&pool, extension).await?;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
-    let membership = fetch_membership(&pool, &slug, &project_id, &user_id).await?;
-    check_allow(&membership, &[20, 15, 5])?;
+    check_allow(&pool, &slug, &project_id, &user_id, &[20, 15, 5]).await?;
     let tenant = fetch_tenant(&pool, &user_id).await?;
-    let mut binder = Binder::default();
-    let sql = version_detail_sql(&mut binder, &slug, project_id, issue_id, version_id);
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(issue_id)
-        .bind(version_id)
-        .bind(project_id)
-        .bind(&slug)
-        .fetch_optional(&pool)
+    let row = version_detail_query(&slug, project_id, issue_id, version_id)
+        .one(&orm(&pool))
         .await
         .map_err(|_| Denial::ServerError)?;
     let Some(row) = row else {
@@ -554,16 +509,170 @@ async fn version_count(
     project_id: &Uuid,
     issue_id: &Uuid,
 ) -> Result<i64, Denial> {
-    let mut binder = Binder::default();
-    let sql = version_count_sql(&mut binder, slug, *project_id, *issue_id);
-    let row: Option<(i64,)> = sqlx::query_as(&sql)
-        .bind(issue_id)
-        .bind(project_id)
-        .bind(slug)
-        .fetch_optional(pool)
+    let total = version_scope(slug, *project_id, *issue_id)
+        .count(&orm(pool))
         .await
         .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ServerError)
+    i64::try_from(total).map_err(|_| Denial::ServerError)
+}
+
+/// The issue-version list scope (`version.py:61-74`): live rows of this
+/// issue + project under the workspace slug (`INNER JOIN workspaces`).
+fn version_scope(slug: &str, project_id: Uuid, issue_id: Uuid) -> Select<issue_versions::Entity> {
+    issue_versions::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            issue_versions::Relation::Workspaces.def(),
+        )
+        .filter(issue_versions::Column::DeletedAt.is_null())
+        .filter(issue_versions::Column::IssueId.eq(issue_id))
+        .filter(issue_versions::Column::ProjectId.eq(project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+}
+
+/// The issue-version page (`version.py:61-74`): the 10
+/// `required_fields` over the model's `-created_at` ordering (no explicit
+/// `order_by`), sliced per [`V2Page`].
+fn version_page_query(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    page: &V2Page,
+) -> Result<Select<issue_versions::Entity>, Denial> {
+    paged(
+        version_scope(slug, project_id, issue_id)
+            .select_only()
+            .columns(VERSION_PAGE_COLUMNS)
+            .order_by_desc(issue_versions::Column::CreatedAt),
+        page,
+    )
+}
+
+/// The description-version page (`version.py:133-144`): the same 10
+/// columns over the endpoint's explicit `.order_by("-created_at")` (the
+/// model has no default ordering, so the call is load-bearing).
+fn desc_version_page_query(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    page: &V2Page,
+) -> Result<Select<issue_description_versions::Entity>, Denial> {
+    paged(
+        desc_version_scope(slug, project_id, issue_id)
+            .select_only()
+            .columns(DESC_VERSION_PAGE_COLUMNS)
+            .order_by_desc(issue_description_versions::Column::CreatedAt),
+        page,
+    )
+}
+
+/// The issue-version detail (`version.py:38-44`): the full row under the
+/// list scope plus the pk, model `-created_at` ordering. `.one()` reads
+/// `LIMIT 1`, matching Django's `.get()` on a unique pk.
+fn version_detail_query(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    version_id: Uuid,
+) -> Select<issue_versions::Entity> {
+    version_scope(slug, project_id, issue_id)
+        .filter(issue_versions::Column::Id.eq(version_id))
+        .order_by_desc(issue_versions::Column::CreatedAt)
+}
+
+/// The description-version scope (`version.py:133-144`), same predicates
+/// as [`version_scope`] over `issue_description_versions`.
+fn desc_version_scope(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+) -> Select<issue_description_versions::Entity> {
+    issue_description_versions::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            issue_description_versions::Relation::Workspaces.def(),
+        )
+        .filter(issue_description_versions::Column::DeletedAt.is_null())
+        .filter(issue_description_versions::Column::IssueId.eq(issue_id))
+        .filter(issue_description_versions::Column::ProjectId.eq(project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+}
+
+/// The description-version detail (`version.py:107-116`).
+/// `IssueDescriptionVersion` declares no `Meta.ordering`, so there is no
+/// `ORDER BY` (unlike its version sibling) — the asymmetry is ported.
+fn desc_version_detail_query(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    version_id: Uuid,
+) -> Select<issue_description_versions::Entity> {
+    desc_version_scope(slug, project_id, issue_id)
+        .filter(issue_description_versions::Column::Id.eq(version_id))
+}
+
+/// The [`VERSION_PAGE_KEYS`] columns with FK attnames, in call order —
+/// both version lists select the same `required_fields`.
+const VERSION_PAGE_COLUMNS: [issue_versions::Column; 10] = [
+    issue_versions::Column::Id,
+    issue_versions::Column::WorkspaceId,
+    issue_versions::Column::ProjectId,
+    issue_versions::Column::IssueId,
+    issue_versions::Column::LastSavedAt,
+    issue_versions::Column::OwnedById,
+    issue_versions::Column::CreatedAt,
+    issue_versions::Column::UpdatedAt,
+    issue_versions::Column::CreatedById,
+    issue_versions::Column::UpdatedById,
+];
+
+/// [`VERSION_PAGE_COLUMNS`] over `issue_description_versions`.
+const DESC_VERSION_PAGE_COLUMNS: [issue_description_versions::Column; 10] = [
+    issue_description_versions::Column::Id,
+    issue_description_versions::Column::WorkspaceId,
+    issue_description_versions::Column::ProjectId,
+    issue_description_versions::Column::IssueId,
+    issue_description_versions::Column::LastSavedAt,
+    issue_description_versions::Column::OwnedById,
+    issue_description_versions::Column::CreatedAt,
+    issue_description_versions::Column::UpdatedAt,
+    issue_description_versions::Column::CreatedById,
+    issue_description_versions::Column::UpdatedById,
+];
+
+/// The `paginate` slice for a [`V2Page`]: `LIMIT end - start`, plus
+/// `OFFSET start` past the first row. A negative length (a negative
+/// cursor page size) is the generic 500, as Postgres rejecting
+/// `LIMIT -n` was.
+fn paged<E: EntityTrait>(select: Select<E>, page: &V2Page) -> Result<Select<E>, Denial> {
+    let length = u64::try_from(page.end - page.start).map_err(|_| Denial::ServerError)?;
+    let start = u64::try_from(page.start).map_err(|_| Denial::ServerError)?;
+    let select = select.limit(length);
+    Ok(if start == 0 {
+        select
+    } else {
+        select.offset(start)
+    })
+}
+
+/// One `.values(*required_fields)` version row, decoded by name. Every
+/// value reads DRF-nullable.
+#[derive(Debug, Clone, Copy, FromQueryResult)]
+struct VersionPageRow {
+    id: Option<Uuid>,
+    workspace_id: Option<Uuid>,
+    project_id: Option<Uuid>,
+    issue_id: Option<Uuid>,
+    last_saved_at: Option<DateTimeWithTimeZone>,
+    owned_by_id: Option<Uuid>,
+    created_at: Option<DateTimeWithTimeZone>,
+    updated_at: Option<DateTimeWithTimeZone>,
+    created_by_id: Option<Uuid>,
+    updated_by_id: Option<Uuid>,
+}
+
+fn utc(at: DateTimeWithTimeZone) -> DateTime<Utc> {
+    at.with_timezone(&Utc)
 }
 
 /// One `.values(*required_fields)` row in [`VERSION_PAGE_KEYS`] order.
@@ -571,29 +680,24 @@ async fn version_count(
 /// `created_at`/`updated_at` shift to the actor's zone (the explicit
 /// `user_timezone_converter` pass), `last_saved_at` renders as stored
 /// (the JSON-encoder path converts nothing).
-fn version_page_row(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<Value, Denial> {
-    let id: Option<Uuid> = row.try_get("id").map_err(|_| Denial::ServerError)?;
-    let workspace_id: Option<Uuid> = row
-        .try_get("workspace_id")
-        .map_err(|_| Denial::ServerError)?;
-    let project_id: Option<Uuid> = row.try_get("project_id").map_err(|_| Denial::ServerError)?;
-    let issue_id: Option<Uuid> = row.try_get("issue_id").map_err(|_| Denial::ServerError)?;
-    let last_saved_at: Option<DateTime<Utc>> = row
-        .try_get("last_saved_at")
-        .map_err(|_| Denial::ServerError)?;
-    let owned_by_id: Option<Uuid> = row
-        .try_get("owned_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let created_at: Option<DateTime<Utc>> =
-        row.try_get("created_at").map_err(|_| Denial::ServerError)?;
-    let updated_at: Option<DateTime<Utc>> =
-        row.try_get("updated_at").map_err(|_| Denial::ServerError)?;
-    let created_by_id: Option<Uuid> = row
-        .try_get("created_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let updated_by_id: Option<Uuid> = row
-        .try_get("updated_by_id")
-        .map_err(|_| Denial::ServerError)?;
+fn version_page_row(row: &VersionPageRow, tz: &Tz) -> Result<Value, Denial> {
+    let VersionPageRow {
+        id,
+        workspace_id,
+        project_id,
+        issue_id,
+        last_saved_at,
+        owned_by_id,
+        created_at,
+        updated_at,
+        created_by_id,
+        updated_by_id,
+    } = *row;
+    let (last_saved_at, created_at, updated_at) = (
+        last_saved_at.map(utc),
+        created_at.map(utc),
+        updated_at.map(utc),
+    );
     let last_saved_at = last_saved_at
         .as_ref()
         .map(render_dt_utc)
@@ -670,90 +774,40 @@ fn version_envelope(page: &V2Page, total_results: i64, results: Vec<Value>) -> S
 /// The full version row through the 640 detail rendering. All datetimes
 /// render in the request's zone (DRF `DateTimeField`); dates render
 /// bare; the UUID arrays render hyphenated strings.
-fn render_version_detail(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<String, Denial> {
-    let id: Uuid = row.try_get("id").map_err(|_| Denial::ServerError)?;
-    let workspace_id: Uuid = row
-        .try_get("workspace_id")
-        .map_err(|_| Denial::ServerError)?;
-    let project_id: Uuid = row.try_get("project_id").map_err(|_| Denial::ServerError)?;
-    let issue_id: Uuid = row.try_get("issue_id").map_err(|_| Denial::ServerError)?;
-    let id = uuid_string(&id);
-    let workspace = uuid_string(&workspace_id);
-    let project = uuid_string(&project_id);
-    let issue = uuid_string(&issue_id);
-    let parent: Option<Uuid> = row.try_get("parent").map_err(|_| Denial::ServerError)?;
-    let state: Option<Uuid> = row.try_get("state").map_err(|_| Denial::ServerError)?;
-    let estimate_point: Option<Uuid> = row
-        .try_get("estimate_point")
-        .map_err(|_| Denial::ServerError)?;
-    let parent = parent.map(|id| uuid_string(&id));
-    let state = state.map(|id| uuid_string(&id));
-    let estimate_point = estimate_point.map(|id| uuid_string(&id));
-    let name: String = row.try_get("name").map_err(|_| Denial::ServerError)?;
-    let priority: String = row.try_get("priority").map_err(|_| Denial::ServerError)?;
-    let start_date: Option<chrono::NaiveDate> =
-        row.try_get("start_date").map_err(|_| Denial::ServerError)?;
-    let target_date: Option<chrono::NaiveDate> = row
-        .try_get("target_date")
-        .map_err(|_| Denial::ServerError)?;
-    let start_date = start_date.as_ref().map(render_date);
-    let target_date = target_date.as_ref().map(render_date);
-    let assignees: Vec<Uuid> = row.try_get("assignees").map_err(|_| Denial::ServerError)?;
-    let labels: Vec<Uuid> = row.try_get("labels").map_err(|_| Denial::ServerError)?;
-    let modules: Vec<Uuid> = row.try_get("modules").map_err(|_| Denial::ServerError)?;
-    let assignees: Vec<String> = assignees.iter().map(uuid_string).collect();
-    let labels: Vec<String> = labels.iter().map(uuid_string).collect();
-    let modules: Vec<String> = modules.iter().map(uuid_string).collect();
+fn render_version_detail(row: &issue_versions::Model, tz: &Tz) -> Result<String, Denial> {
+    let id = uuid_string(&row.id);
+    let workspace = uuid_string(&row.workspace_id);
+    let project = uuid_string(&row.project_id);
+    let issue = uuid_string(&row.issue_id);
+    let parent = row.parent.map(|id| uuid_string(&id));
+    let state = row.state.map(|id| uuid_string(&id));
+    let estimate_point = row.estimate_point.map(|id| uuid_string(&id));
+    let name = &row.name;
+    let priority = &row.priority;
+    let start_date = row.start_date.as_ref().map(render_date);
+    let target_date = row.target_date.as_ref().map(render_date);
+    let assignees: Vec<String> = row.assignees.iter().map(uuid_string).collect();
+    let labels: Vec<String> = row.labels.iter().map(uuid_string).collect();
+    let modules: Vec<String> = row.modules.iter().map(uuid_string).collect();
     let assignees_ref: Vec<&str> = assignees.iter().map(String::as_str).collect();
     let labels_ref: Vec<&str> = labels.iter().map(String::as_str).collect();
     let modules_ref: Vec<&str> = modules.iter().map(String::as_str).collect();
-    let sequence_id: i32 = row
-        .try_get("sequence_id")
-        .map_err(|_| Denial::ServerError)?;
-    let sort_order: f64 = row.try_get("sort_order").map_err(|_| Denial::ServerError)?;
-    let sort_order = render_sort_order(sort_order)?;
-    let completed_at: Option<DateTime<Utc>> = row
-        .try_get("completed_at")
-        .map_err(|_| Denial::ServerError)?;
-    let archived_at: Option<chrono::NaiveDate> = row
-        .try_get("archived_at")
-        .map_err(|_| Denial::ServerError)?;
-    let completed_at = render_dt_opt(completed_at, tz);
-    let archived_at = archived_at.as_ref().map(render_date);
-    let is_draft: bool = row.try_get("is_draft").map_err(|_| Denial::ServerError)?;
-    let external_source: Option<String> = row
-        .try_get("external_source")
-        .map_err(|_| Denial::ServerError)?;
-    let external_id: Option<String> = row
-        .try_get("external_id")
-        .map_err(|_| Denial::ServerError)?;
-    let r#type: Option<Uuid> = row.try_get("type").map_err(|_| Denial::ServerError)?;
-    let cycle: Option<Uuid> = row.try_get("cycle").map_err(|_| Denial::ServerError)?;
-    let r#type = r#type.map(|id| uuid_string(&id));
-    let cycle = cycle.map(|id| uuid_string(&id));
-    let meta: Value = row.try_get("meta").map_err(|_| Denial::ServerError)?;
-    let last_saved_at: DateTime<Utc> = row
-        .try_get("last_saved_at")
-        .map_err(|_| Denial::ServerError)?;
-    let last_saved_at = render_dt(&last_saved_at, tz);
-    let owned_by_id: Uuid = row
-        .try_get("owned_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let owned_by = uuid_string(&owned_by_id);
-    let created_at: Option<DateTime<Utc>> =
-        row.try_get("created_at").map_err(|_| Denial::ServerError)?;
-    let updated_at: Option<DateTime<Utc>> =
-        row.try_get("updated_at").map_err(|_| Denial::ServerError)?;
-    let created_at = render_dt_opt(created_at, tz);
-    let updated_at = render_dt_opt(updated_at, tz);
-    let created_by_id: Option<Uuid> = row
-        .try_get("created_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let updated_by_id: Option<Uuid> = row
-        .try_get("updated_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let created_by = created_by_id.map(|id| uuid_string(&id));
-    let updated_by = updated_by_id.map(|id| uuid_string(&id));
+    let sequence_id = row.sequence_id;
+    let sort_order = render_sort_order(row.sort_order)?;
+    let completed_at = render_dt_opt(row.completed_at.map(utc), tz);
+    let archived_at = row.archived_at.as_ref().map(render_date);
+    let is_draft = row.is_draft;
+    let external_source = row.external_source.clone();
+    let external_id = row.external_id.clone();
+    let r#type = row.r#type.map(|id| uuid_string(&id));
+    let cycle = row.cycle.map(|id| uuid_string(&id));
+    let meta = &row.meta;
+    let last_saved_at = render_dt(&utc(row.last_saved_at), tz);
+    let owned_by = uuid_string(&row.owned_by_id);
+    let created_at = render_dt_opt(Some(utc(row.created_at)), tz);
+    let updated_at = render_dt_opt(Some(utc(row.updated_at)), tz);
+    let created_by = row.created_by_id.map(|id| uuid_string(&id));
+    let updated_by = row.updated_by_id.map(|id| uuid_string(&id));
     let row = IssueVersionDetailRow {
         id: &id,
         workspace: &workspace,
@@ -762,8 +816,8 @@ fn render_version_detail(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<String,
         parent: parent.as_deref(),
         state: state.as_deref(),
         estimate_point: estimate_point.as_deref(),
-        name: &name,
-        priority: &priority,
+        name,
+        priority,
         start_date: start_date.as_deref(),
         target_date: target_date.as_deref(),
         assignees: &assignees_ref,
@@ -778,7 +832,7 @@ fn render_version_detail(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<String,
         r#type: r#type.as_deref(),
         cycle: cycle.as_deref(),
         modules: &modules_ref,
-        meta: &meta,
+        meta,
         last_saved_at: &last_saved_at,
         owned_by: &owned_by,
         created_at: created_at.as_deref(),
@@ -810,20 +864,15 @@ async fn desc_version_list(
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(&pool, extension).await?;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
-    let membership = fetch_membership(&pool, &slug, &project_id, &user_id).await?;
-    check_allow(&membership, &[20, 15, 5])?;
+    check_allow(&pool, &slug, &project_id, &user_id, &[20, 15, 5]).await?;
     let tenant = fetch_tenant(&pool, &user_id).await?;
     desc_version_parents(&pool, &slug, &project_id, &work_item_id, &user_id).await?;
     let total = desc_version_count(&pool, &slug, &project_id, &work_item_id).await?;
     let cursor = query_last(&query, "cursor");
     let page = v2_page(cursor.as_deref(), total).map_err(|_| Denial::ServerError)?;
-    let mut binder = Binder::default();
-    let sql = description_list_sql(&mut binder, &slug, project_id, work_item_id, &page);
-    let rows = sqlx::query(&sql)
-        .bind(work_item_id)
-        .bind(project_id)
-        .bind(&slug)
-        .fetch_all(&pool)
+    let rows = desc_version_page_query(&slug, project_id, work_item_id, &page)?
+        .into_model::<VersionPageRow>()
+        .all(&orm(&pool))
         .await
         .map_err(|_| Denial::ServerError)?;
     let mut results = Vec::with_capacity(rows.len());
@@ -850,18 +899,11 @@ async fn desc_version_detail(
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(&pool, extension).await?;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
-    let membership = fetch_membership(&pool, &slug, &project_id, &user_id).await?;
-    check_allow(&membership, &[20, 15, 5])?;
+    check_allow(&pool, &slug, &project_id, &user_id, &[20, 15, 5]).await?;
     let tenant = fetch_tenant(&pool, &user_id).await?;
     desc_version_parents(&pool, &slug, &project_id, &work_item_id, &user_id).await?;
-    let mut binder = Binder::default();
-    let sql = description_detail_sql(&mut binder, &slug, project_id, work_item_id, version_id);
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(work_item_id)
-        .bind(version_id)
-        .bind(project_id)
-        .bind(&slug)
-        .fetch_optional(&pool)
+    let row = desc_version_detail_query(&slug, project_id, work_item_id, version_id)
+        .one(&orm(&pool))
         .await
         .map_err(|_| Denial::ServerError)?;
     let Some(row) = row else {
@@ -884,46 +926,49 @@ async fn desc_version_parents(
     work_item_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<(), Denial> {
-    let project: Option<(bool,)> = sqlx::query_as(
-        "SELECT guest_view_all_features FROM projects WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((guest_view_all,)) = project else {
+    let db = orm(pool);
+    let Some((_, guest_view_all)) = access::project_tenant(&db, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    else {
         return Err(Denial::NotFound);
     };
-    let issue: Option<(Option<Uuid>,)> = sqlx::query_as(
-        r#"SELECT i.created_by_id FROM issues i
-           JOIN workspaces w ON w.id = i.workspace_id
-           WHERE i.deleted_at IS NULL AND w.slug = $1 AND i.project_id = $2 AND i.id = $3"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(work_item_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((issue_created_by,)) = issue else {
+    let Some(issue_created_by) = desc_version_issue_creator(&db, slug, *project_id, *work_item_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    else {
         return Err(Denial::NotFound);
     };
-    let is_guest: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.role = 5 AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if is_guest.is_some() && !guest_view_all && issue_created_by != Some(*user_id) {
+    let is_guest = access::project_role(&db, slug, *project_id, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        == Some(5);
+    if is_guest && !guest_view_all && issue_created_by != Some(*user_id) {
         return Err(Denial::GuestView);
     }
     Ok(())
+}
+
+/// `Issue.objects.get(workspace__slug, project_id, pk)` for the
+/// description-version preamble: the live issue's `created_by_id`
+/// (outer `None` is the miss; triage/archived/draft rows stay visible).
+async fn desc_version_issue_creator(
+    db: &impl ConnectionTrait,
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+) -> Result<Option<Option<Uuid>>, sea_orm::DbErr> {
+    issues::Entity::find()
+        .select_only()
+        .column(issues::Column::CreatedById)
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issues::Column::ProjectId.eq(project_id))
+        .filter(issues::Column::Id.eq(issue_id))
+        .into_tuple()
+        .one(db)
+        .await
 }
 
 /// `paginate`'s `base_queryset.count()` for description versions.
@@ -933,74 +978,38 @@ async fn desc_version_count(
     project_id: &Uuid,
     work_item_id: &Uuid,
 ) -> Result<i64, Denial> {
-    let mut binder = Binder::default();
-    let sql = description_count_sql(&mut binder, slug, *project_id, *work_item_id);
-    let row: Option<(i64,)> = sqlx::query_as(&sql)
-        .bind(work_item_id)
-        .bind(project_id)
-        .bind(slug)
-        .fetch_optional(pool)
+    let total = desc_version_scope(slug, *project_id, *work_item_id)
+        .count(&orm(pool))
         .await
         .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ServerError)
+    i64::try_from(total).map_err(|_| Denial::ServerError)
 }
 
 /// The full description-version row through the 640 rendering
 /// (`description_binary` re-encodes base64 inside the port).
-fn render_desc_version_detail(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<String, Denial> {
-    let id: Uuid = row.try_get("id").map_err(|_| Denial::ServerError)?;
-    let workspace_id: Uuid = row
-        .try_get("workspace_id")
-        .map_err(|_| Denial::ServerError)?;
-    let project_id: Uuid = row.try_get("project_id").map_err(|_| Denial::ServerError)?;
-    let issue_id: Uuid = row.try_get("issue_id").map_err(|_| Denial::ServerError)?;
-    let id = uuid_string(&id);
-    let workspace = uuid_string(&workspace_id);
-    let project = uuid_string(&project_id);
-    let issue = uuid_string(&issue_id);
-    let description_binary: Option<Vec<u8>> = row
-        .try_get("description_binary")
-        .map_err(|_| Denial::ServerError)?;
-    let description_html: String = row
-        .try_get("description_html")
-        .map_err(|_| Denial::ServerError)?;
-    let description_stripped: Option<String> = row
-        .try_get("description_stripped")
-        .map_err(|_| Denial::ServerError)?;
-    let description_json: Value = row
-        .try_get("description_json")
-        .map_err(|_| Denial::ServerError)?;
-    let last_saved_at: DateTime<Utc> = row
-        .try_get("last_saved_at")
-        .map_err(|_| Denial::ServerError)?;
-    let last_saved_at = render_dt(&last_saved_at, tz);
-    let owned_by_id: Uuid = row
-        .try_get("owned_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let owned_by = uuid_string(&owned_by_id);
-    let created_at: Option<DateTime<Utc>> =
-        row.try_get("created_at").map_err(|_| Denial::ServerError)?;
-    let updated_at: Option<DateTime<Utc>> =
-        row.try_get("updated_at").map_err(|_| Denial::ServerError)?;
-    let created_at = render_dt_opt(created_at, tz);
-    let updated_at = render_dt_opt(updated_at, tz);
-    let created_by_id: Option<Uuid> = row
-        .try_get("created_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let updated_by_id: Option<Uuid> = row
-        .try_get("updated_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let created_by = created_by_id.map(|id| uuid_string(&id));
-    let updated_by = updated_by_id.map(|id| uuid_string(&id));
+fn render_desc_version_detail(
+    row: &issue_description_versions::Model,
+    tz: &Tz,
+) -> Result<String, Denial> {
+    let id = uuid_string(&row.id);
+    let workspace = uuid_string(&row.workspace_id);
+    let project = uuid_string(&row.project_id);
+    let issue = uuid_string(&row.issue_id);
+    let last_saved_at = render_dt(&utc(row.last_saved_at), tz);
+    let owned_by = uuid_string(&row.owned_by_id);
+    let created_at = render_dt_opt(Some(utc(row.created_at)), tz);
+    let updated_at = render_dt_opt(Some(utc(row.updated_at)), tz);
+    let created_by = row.created_by_id.map(|id| uuid_string(&id));
+    let updated_by = row.updated_by_id.map(|id| uuid_string(&id));
     let row = IssueDescriptionVersionDetailRow {
         id: &id,
         workspace: &workspace,
         project: &project,
         issue: &issue,
-        description_binary: description_binary.as_deref(),
-        description_html: &description_html,
-        description_stripped: description_stripped.as_deref(),
-        description_json: &description_json,
+        description_binary: row.description_binary.as_deref(),
+        description_html: &row.description_html,
+        description_stripped: row.description_stripped.as_deref(),
+        description_json: &row.description_json,
         last_saved_at: &last_saved_at,
         owned_by: &owned_by,
         created_at: created_at.as_deref(),
@@ -1043,8 +1052,7 @@ async fn move_issue(
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(&pool, extension).await?;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
-    let membership = fetch_membership(&pool, &slug, &project_id, &user_id).await?;
-    check_allow(&membership, &[20, 15])?;
+    check_allow(&pool, &slug, &project_id, &user_id, &[20, 15]).await?;
     let tenant = fetch_tenant(&pool, &user_id).await?;
     let target_ref = read_move_target(req).await?;
     let origin = move_origin(&state)?;
@@ -1309,12 +1317,10 @@ async fn moved_is_epic(pool: &PgPool, type_id: Option<&str>) -> Result<bool, Den
         return Ok(false);
     };
     let id = raw.parse::<Uuid>().map_err(|_| Denial::ServerError)?;
-    let row: Option<(bool,)> = sqlx::query_as("SELECT is_epic FROM issue_types WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
+    access::issue_type_is_epic(&orm(pool), id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    row.map(|flag| flag.0).ok_or(Denial::ServerError)
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)
 }
 
 /// The move's `is_synced` (`serializers/issue.py:297-323`): the bare
@@ -1333,12 +1339,11 @@ async fn moved_is_synced(pool: &PgPool, issue: &SourceIssueRow) -> Result<bool, 
             || false,
         ));
     }
-    let git_hit: Option<(i32,)> = sqlx::query_as(GIT_ISSUE_SYNC_PROBE_SQL)
-        .bind(issue.id)
-        .fetch_optional(pool)
+    let db = orm(pool);
+    let git_hit = git_issue_synced(&db, issue.id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    if git_hit.is_some() {
+    if git_hit {
         return Ok(issue_is_actively_synced(
             issue.external_source.as_deref(),
             None,
@@ -1346,16 +1351,14 @@ async fn moved_is_synced(pool: &PgPool, issue: &SourceIssueRow) -> Result<bool, 
             || false,
         ));
     }
-    let github_hit: Option<(i32,)> = sqlx::query_as(GITHUB_ISSUE_SYNC_PROBE_SQL)
-        .bind(issue.id)
-        .fetch_optional(pool)
+    let github_hit = github_issue_synced(&db, issue.id)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(issue_is_actively_synced(
         issue.external_source.as_deref(),
         None,
         || false,
-        || github_hit.is_some(),
+        || github_hit,
     ))
 }
 
@@ -1536,23 +1539,6 @@ mod tests {
     }
 
     #[test]
-    fn allow_matrix() {
-        let member = |project_role, workspace_role| Membership {
-            project_role,
-            workspace_role,
-        };
-        assert!(check_allow(&member(Some(20), None), &[20, 15]).is_ok());
-        assert!(check_allow(&member(Some(15), None), &[20, 15]).is_ok());
-        assert!(check_allow(&member(Some(5), None), &[20, 15, 5]).is_ok());
-        assert!(check_allow(&member(Some(5), None), &[20, 15]).is_err());
-        assert!(check_allow(&member(Some(5), Some(20)), &[20, 15]).is_ok());
-        assert!(check_allow(&member(Some(10), Some(20)), &[20, 15, 5]).is_ok());
-        assert!(check_allow(&member(Some(10), Some(15)), &[20, 15, 5]).is_err());
-        assert!(check_allow(&member(None, Some(20)), &[20, 15, 5]).is_err());
-        assert!(check_allow(&member(None, None), &[20, 15, 5]).is_err());
-    }
-
-    #[test]
     fn move_error_mapping() {
         let denial = map_move_rejection(MoveRejection::SourceNotFound);
         assert!(matches!(denial, Denial::NotFound));
@@ -1619,6 +1605,317 @@ mod tests {
         assert_eq!(render_dt_opt(None, &utc), None);
         let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 4).expect("date");
         assert_eq!(render_date(&date), "2026-10-04");
+    }
+
+    const SLUG: &str = "acme";
+    const PROJECT: Uuid = Uuid::from_u128(0x10);
+    const ISSUE: Uuid = Uuid::from_u128(0x20);
+    const VERSION: Uuid = Uuid::from_u128(0x30);
+
+    fn pg(select: impl sea_orm::QueryTrait) -> String {
+        select.build(sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    /// The version reads keep the old statements' scope, joins, ordering
+    /// and slicing: `INNER JOIN workspaces`, the soft-delete guard, the
+    /// model `-created_at` order, `LIMIT` alone on the first page.
+    #[test]
+    fn version_statement_shapes() {
+        let first = v2_page(None, 2500).expect("page");
+        let sql = pg(version_page_query(SLUG, PROJECT, ISSUE, &first).expect("query"));
+        assert!(sql.starts_with(
+            r#"SELECT "issue_versions"."id", "issue_versions"."workspace_id", "issue_versions"."project_id", "issue_versions"."issue_id", "issue_versions"."last_saved_at", "issue_versions"."owned_by_id", "issue_versions"."created_at", "issue_versions"."updated_at", "issue_versions"."created_by_id", "issue_versions"."updated_by_id" FROM "issue_versions" INNER JOIN "workspaces" ON "issue_versions"."workspace_id" = "workspaces"."id""#
+        ), "{sql}");
+        assert!(sql.contains(r#""issue_versions"."deleted_at" IS NULL"#));
+        assert!(sql.contains(r#""workspaces"."slug" = 'acme'"#));
+        assert!(
+            sql.ends_with(r#"ORDER BY "issue_versions"."created_at" DESC LIMIT 1000"#),
+            "{sql}"
+        );
+        let later = v2_page(Some("10:2:0"), 100).expect("page");
+        let sql = pg(version_page_query(SLUG, PROJECT, ISSUE, &later).expect("query"));
+        assert!(sql.ends_with("DESC LIMIT 10 OFFSET 20"), "{sql}");
+
+        let detail = pg(version_detail_query(SLUG, PROJECT, ISSUE, VERSION));
+        assert!(detail.starts_with(r#"SELECT "issue_versions"."created_at""#));
+        assert!(detail.contains(r#""issue_versions"."meta""#));
+        assert!(detail.contains(&format!(r#""issue_versions"."id" = '{VERSION}'"#)));
+        assert!(
+            detail.ends_with(r#"ORDER BY "issue_versions"."created_at" DESC"#),
+            "{detail}"
+        );
+    }
+
+    /// `IssueDescriptionVersion` has no `Meta.ordering`: the detail
+    /// carries no `ORDER BY`, the list orders explicitly.
+    #[test]
+    fn description_version_ordering_differs_from_issue_version() {
+        let detail = pg(desc_version_detail_query(SLUG, PROJECT, ISSUE, VERSION));
+        assert!(!detail.contains("ORDER BY"), "{detail}");
+        assert!(detail.contains(
+            r#"INNER JOIN "workspaces" ON "issue_description_versions"."workspace_id" = "workspaces"."id""#
+        ));
+        assert!(detail.contains(r#""issue_description_versions"."deleted_at" IS NULL"#));
+        let page = v2_page(None, 5).expect("page");
+        let sql = pg(desc_version_page_query(SLUG, PROJECT, ISSUE, &page).expect("query"));
+        assert!(
+            sql.ends_with(r#"ORDER BY "issue_description_versions"."created_at" DESC LIMIT 5"#),
+            "{sql}"
+        );
+    }
+
+    /// A negative cursor page size made `LIMIT -n`, which Postgres
+    /// rejected into the generic 500; the builder refuses it the same way.
+    #[test]
+    fn negative_page_length_is_server_error() {
+        let page = v2_page(Some("-5:0:0"), 10).expect("page");
+        assert!(matches!(
+            version_page_query(SLUG, PROJECT, ISSUE, &page),
+            Err(Denial::ServerError)
+        ));
+    }
+
+    /// The versions/move reads against constraint-free temp tables on a
+    /// one-connection pool.
+    #[tokio::test]
+    async fn live_version_reads() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "users",
+            "workspaces",
+            "projects",
+            "project_members",
+            "workspace_members",
+            "issues",
+            "issue_versions",
+            "issue_description_versions",
+            "issue_types",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let id = Uuid::new_v4;
+        let (ws, project, issue, actor, guest, admin) = (id(), id(), id(), id(), id(), id());
+        let (v_old, v_new, v_gone, d_one, d_two, epic) = (id(), id(), id(), id(), id(), id());
+        let version = |vid: Uuid, age: i32, deleted: bool| {
+            format!(
+                "INSERT INTO issue_versions (id, created_at, updated_at, deleted_at, name, priority, \
+                 sequence_id, sort_order, is_draft, last_saved_at, owned_by_id, assignees, labels, \
+                 modules, properties, meta, issue_id, project_id, workspace_id, created_by_id) \
+                 VALUES ('{vid}', now() - interval '{age} min', now(), {}, 'n', 'none', 1, 65535, \
+                 false, now(), '{actor}', '{{{actor}}}', '{{}}', '{{}}', '{{}}', '{{\"k\": 1}}', \
+                 '{issue}', '{project}', '{ws}', '{actor}')",
+                if deleted { "now()" } else { "NULL" }
+            )
+        };
+        let desc = |did: Uuid, age: i32| {
+            format!(
+                "INSERT INTO issue_description_versions (id, created_at, updated_at, deleted_at, \
+                 description_html, description_json, last_saved_at, owned_by_id, issue_id, \
+                 project_id, workspace_id) VALUES ('{did}', now() - interval '{age} min', now(), \
+                 NULL, '<p/>', '{{}}', now(), '{actor}', '{issue}', '{project}', '{ws}')"
+            )
+        };
+        for sql in [
+            format!(
+                "INSERT INTO users (id, user_timezone) VALUES ('{actor}', 'Asia/Kolkata'), \
+                 ('{guest}', 'UTC'), ('{admin}', 'UTC')"
+            ),
+            format!("INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme')"),
+            format!(
+                "INSERT INTO projects (id, workspace_id, identifier, guest_view_all_features, \
+                 deleted_at) VALUES ('{project}', '{ws}', 'ENG', false, NULL)"
+            ),
+            format!(
+                "INSERT INTO project_members (id, member_id, project_id, workspace_id, role, \
+                 is_active, deleted_at) VALUES ('{}', '{actor}', '{project}', '{ws}', 15, true, NULL), \
+                 ('{}', '{guest}', '{project}', '{ws}', 5, true, NULL), \
+                 ('{}', '{admin}', '{project}', '{ws}', 10, true, NULL)",
+                id(),
+                id(),
+                id()
+            ),
+            format!(
+                "INSERT INTO workspace_members (id, member_id, workspace_id, role, is_active, \
+                 deleted_at) VALUES ('{}', '{admin}', '{ws}', 20, true, NULL)",
+                id()
+            ),
+            format!(
+                "INSERT INTO issues (id, workspace_id, project_id, created_by_id, deleted_at) \
+                 VALUES ('{issue}', '{ws}', '{project}', '{actor}', NULL)"
+            ),
+            version(v_old, 2, false),
+            version(v_new, 1, false),
+            version(v_gone, 0, true),
+            desc(d_one, 2),
+            desc(d_two, 1),
+            format!("INSERT INTO issue_types (id, is_epic) VALUES ('{epic}', true)"),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+
+        // Tenant and gates.
+        assert_eq!(
+            resolve_project_id(&pool, "acme", " eng ")
+                .await
+                .expect("identifier"),
+            project
+        );
+        assert!(matches!(
+            resolve_project_id(&pool, "other", "ENG").await,
+            Err(Denial::ProjectNotFound)
+        ));
+        assert_eq!(
+            resolve_project_id(&pool, "x", &project.to_string())
+                .await
+                .expect("uuid"),
+            project
+        );
+        check_allow(&pool, "acme", &project, &actor, &[20, 15])
+            .await
+            .expect("member");
+        assert!(matches!(
+            check_allow(&pool, "acme", &project, &guest, &[20, 15]).await,
+            Err(Denial::Forbidden)
+        ));
+        check_allow(&pool, "acme", &project, &guest, &[20, 15, 5])
+            .await
+            .expect("guest");
+        // A non-listed project role passes through the workspace-admin fallback.
+        check_allow(&pool, "acme", &project, &admin, &[20, 15])
+            .await
+            .expect("admin");
+        let tenant = fetch_tenant(&pool, &actor).await.expect("tenant");
+        assert_eq!(tenant.timezone.name(), "Asia/Kolkata");
+        assert!(matches!(
+            fetch_tenant(&pool, &Uuid::new_v4()).await,
+            Err(Denial::ServerError)
+        ));
+
+        // Issue versions: the soft-deleted row is out, newest first.
+        let db = orm(&pool);
+        assert_eq!(
+            version_count(&pool, "acme", &project, &issue)
+                .await
+                .expect("count"),
+            2
+        );
+        assert_eq!(
+            version_count(&pool, "other", &project, &issue)
+                .await
+                .expect("count"),
+            0
+        );
+        let page = v2_page(None, 2).expect("page");
+        let rows = version_page_query("acme", project, issue, &page)
+            .expect("query")
+            .into_model::<VersionPageRow>()
+            .all(&db)
+            .await
+            .expect("page rows");
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![Some(v_new), Some(v_old)]
+        );
+        let value = version_page_row(&rows[0], &tenant.timezone).expect("row");
+        assert_eq!(value["workspace"], Value::String(ws.to_string()));
+        assert_eq!(value["created_by"], Value::String(actor.to_string()));
+        let second = v2_page(Some("1:1:0"), 2).expect("page");
+        let rows = version_page_query("acme", project, issue, &second)
+            .expect("query")
+            .into_model::<VersionPageRow>()
+            .all(&db)
+            .await
+            .expect("second page");
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![Some(v_old)]
+        );
+        let row = version_detail_query("acme", project, issue, v_new)
+            .one(&db)
+            .await
+            .expect("detail")
+            .expect("hit");
+        let body: Value =
+            serde_json::from_str(&render_version_detail(&row, &tenant.timezone).expect("render"))
+                .expect("json");
+        assert_eq!(body["id"], Value::String(v_new.to_string()));
+        assert_eq!(body["assignees"], serde_json::json!([actor.to_string()]));
+        assert_eq!(body["meta"], serde_json::json!({"k": 1}));
+        assert!(version_detail_query("acme", project, issue, v_gone)
+            .one(&db)
+            .await
+            .expect("detail")
+            .is_none());
+
+        // Description versions: parents, guest gate, list, detail.
+        desc_version_parents(&pool, "acme", &project, &issue, &actor)
+            .await
+            .expect("creator");
+        assert!(matches!(
+            desc_version_parents(&pool, "acme", &project, &issue, &guest).await,
+            Err(Denial::GuestView)
+        ));
+        desc_version_parents(&pool, "acme", &project, &issue, &admin)
+            .await
+            .expect("non-guest");
+        assert!(matches!(
+            desc_version_parents(&pool, "acme", &project, &Uuid::new_v4(), &actor).await,
+            Err(Denial::NotFound)
+        ));
+        assert!(matches!(
+            desc_version_parents(&pool, "acme", &Uuid::new_v4(), &issue, &actor).await,
+            Err(Denial::NotFound)
+        ));
+        assert_eq!(
+            desc_version_count(&pool, "acme", &project, &issue)
+                .await
+                .expect("count"),
+            2
+        );
+        let rows = desc_version_page_query("acme", project, issue, &page)
+            .expect("query")
+            .into_model::<VersionPageRow>()
+            .all(&db)
+            .await
+            .expect("desc rows");
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![Some(d_two), Some(d_one)]
+        );
+        let row = desc_version_detail_query("acme", project, issue, d_one)
+            .one(&db)
+            .await
+            .expect("detail")
+            .expect("hit");
+        let body: Value = serde_json::from_str(
+            &render_desc_version_detail(&row, &tenant.timezone).expect("render"),
+        )
+        .expect("json");
+        assert_eq!(body["description_html"], Value::String("<p/>".to_owned()));
+        assert_eq!(body["description_binary"], Value::Null);
+
+        // Move response: the epic flag.
+        assert!(moved_is_epic(&pool, Some(&epic.to_string()))
+            .await
+            .expect("epic"));
+        assert!(!moved_is_epic(&pool, None).await.expect("untyped"));
+        assert!(matches!(
+            moved_is_epic(&pool, Some(&Uuid::new_v4().to_string())).await,
+            Err(Denial::ServerError)
+        ));
     }
 
     fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {

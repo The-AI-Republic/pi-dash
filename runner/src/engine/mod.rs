@@ -16,6 +16,9 @@
 //!   `[engine] binary` config override) once, at daemon start.
 //! - [`install`] places a release's engine directory, for `pidash engine
 //!   install` and for `pidash update` before it replaces `pidash`.
+//! - [`auto_install`] installs a missing engine at daemon start on an
+//!   updater-managed install, for installs updated in place from a `pidash`
+//!   that predates the engine (its `pidash update` had no engine step).
 //! - [`cleanup`] removes engine versions older than the running one.
 //!
 //! Running it (PIDESKAPP-121, design §4.3 and §5):
@@ -37,6 +40,7 @@
 
 pub mod agent;
 pub mod api;
+pub mod auto_install;
 pub mod cleanup;
 pub mod codex_config;
 pub mod install;

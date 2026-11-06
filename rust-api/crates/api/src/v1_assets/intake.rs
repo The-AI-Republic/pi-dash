@@ -498,9 +498,13 @@ async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Uuid, 
             return Err(Denial::InvalidToken);
         }
     }
-    pidash_services::domain::tokens::touch_api_token_last_used_by_id(pool, id, now)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    pidash_services::domain::tokens::touch_api_token_last_used_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        id,
+        now,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
     crate::middleware::publish_logger_user_id(&user_id.to_string());
@@ -572,14 +576,22 @@ async fn authenticate_machine(
         .await
         .map_err(|_| Denial::ServerError)?;
     if !member.unwrap_or(false) {
-        pidash_services::domain::tokens::revoke_machine_token_by_id(pool, id, now)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        return Err(Denial::InvalidToken);
-    }
-    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(pool, id, now)
+        pidash_services::domain::tokens::revoke_machine_token_by_id(
+            &pidash_db::pool::sea_orm_connection(pool),
+            id,
+            now,
+        )
         .await
         .map_err(|_| Denial::ServerError)?;
+        return Err(Denial::InvalidToken);
+    }
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        id,
+        now,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
     crate::middleware::publish_logger_user_id(&user_id.to_string());

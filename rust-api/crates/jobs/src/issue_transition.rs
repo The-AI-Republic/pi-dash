@@ -592,9 +592,14 @@ where
     ) -> Result<(), CreationError> {
         // `updated_at` is now-at-write: Python's `save()` stamps
         // `auto_now` at write time (the pre-consolidation bind).
-        apply_clock_write(self.pool, &write, row, chrono::Utc::now())
-            .await
-            .map_err(Self::db)
+        apply_clock_write(
+            &pidash_db::pool::sea_orm_connection(self.pool),
+            &write,
+            row,
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(Self::db)
     }
 
     fn set_rollback(&mut self) {

@@ -356,7 +356,7 @@ pub async fn create(
         labels: &labels,
         edited_at: None,
     };
-    comment_domain::insert_comment_row(&mut *tx, &rows)
+    comment_domain::insert_comment_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows)
         .await
         .map_err(|error| {
             // No issue lookup precedes the create: a bogus `issue_id`
@@ -369,12 +369,16 @@ pub async fn create(
                 db_error(error, "comment-post-insert")
             }
         })?;
-    comment_domain::insert_description_row(&mut *tx, &rows)
+    comment_domain::insert_description_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows)
         .await
         .map_err(|error| db_error(error, "comment-post-desc"))?;
-    comment_domain::link_comment_description(&mut *tx, rows.id, rows.description_id)
-        .await
-        .map_err(|error| db_error(error, "comment-post-desc-link"))?;
+    comment_domain::link_comment_description(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        rows.id,
+        rows.description_id,
+    )
+    .await
+    .map_err(|error| db_error(error, "comment-post-desc-link"))?;
     let description_id = rows.description_id;
     tx.commit().await.map_err(|error| {
         // Every FK here is `DEFERRABLE INITIALLY DEFERRED`, so the bogus
@@ -393,8 +397,13 @@ pub async fn create(
     // `update_fields=["created_at","created_by"]`.
     let (db_created_at, response_created_at) = resolve_created_at(map.get("created_at"))?;
     let created_by = override_user_id(map.get("created_by"), &actor_id)?;
-    if let Err(error) =
-        comment_domain::restamp_comment_created(pool, comment_id, db_created_at, created_by).await
+    if let Err(error) = comment_domain::restamp_comment_created(
+        &pidash_db::pool::sea_orm_connection(pool),
+        comment_id,
+        db_created_at,
+        created_by,
+    )
+    .await
     {
         if is_fk_violation(&error) {
             return Err(Error::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned()));
@@ -641,7 +650,7 @@ pub async fn update(
         .await
         .map_err(|error| db_error(error, "comment-patch-tx"))?;
     comment_domain::save_v1_comment_update(
-        &mut *tx,
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         &comment_domain::V1CommentUpdate {
             id: *pk,
             json: &new_json,
@@ -682,7 +691,7 @@ pub async fn update(
     if let Some(description_id) = stored_description_id {
         if html_changed || json_changed || stripped_changed {
             comment_domain::sync_v1_description_subset(
-                &mut *tx,
+                &pidash_db::orm_tx::TxConn::new(&mut tx),
                 &comment_domain::V1DescriptionSync {
                     id: description_id,
                     html: html_changed.then_some(new_html.as_str()),
@@ -715,12 +724,16 @@ pub async fn update(
             html: &new_html,
             stripped: desc_stripped.as_deref(),
         };
-        comment_domain::insert_description_values(&mut *tx, &desc)
+        comment_domain::insert_description_values(&pidash_db::orm_tx::TxConn::new(&mut tx), &desc)
             .await
             .map_err(|error| db_error(error, "comment-patch-desc-mint"))?;
-        comment_domain::link_comment_description(&mut *tx, *pk, desc.id)
-            .await
-            .map_err(|error| db_error(error, "comment-patch-desc-link"))?;
+        comment_domain::link_comment_description(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            *pk,
+            desc.id,
+        )
+        .await
+        .map_err(|error| db_error(error, "comment-patch-desc-link"))?;
     }
     tx.commit()
         .await

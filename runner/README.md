@@ -282,10 +282,13 @@ would use.
 
 The daemon resolves the engine once at start and keeps that path.
 `pidash update` installs the new release's engine version directory beside the
-old one before replacing `pidash`, so runs in flight keep their binary. After
-it starts, the daemon removes engine versions older than the one it runs, once
-no run or chat turn is in flight (and, on Linux, no process still executes a
-binary from them); it retries every 10 minutes until it has.
+old one before replacing `pidash`, so runs in flight keep their binary. It
+skips the download when the new release pins an engine version already
+installed. If an installer-managed daemon starts without an engine, it
+installs it in the background, retrying with backoff until it succeeds.
+The daemon removes older engine versions once no run or chat turn is in
+flight (and, on Linux, no process still executes a binary from them),
+retrying cleanup every 10 minutes.
 
 For development, point the daemon at another build in `config.toml`:
 

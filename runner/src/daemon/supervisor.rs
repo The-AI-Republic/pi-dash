@@ -1129,7 +1129,9 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
                 local_state.set_connected(false).await;
                 if matches!(
                     e,
-                    TransportError::MachineTokenRevoked | TransportError::MembershipRevoked
+                    TransportError::MachineTokenRevoked
+                        | TransportError::MachineTokenExpired
+                        | TransportError::MembershipRevoked
                 ) && let Some(token) = machine_token.as_deref()
                 {
                     // Only this workspace is signed out: its other runners

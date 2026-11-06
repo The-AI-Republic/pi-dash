@@ -188,6 +188,23 @@ pub const PROJECT_SELECT_SQL: &str = "SELECT id, workspace_id, identifier, name,
 /// the state id.
 pub const STATE_SELECT_SQL: &str = "SELECT id, name, \"group\" FROM states WHERE id = $1";
 
+/// SeaORM form of [`STATE_SELECT_SQL`]: a state's `(name, group)` through
+/// the plain manager (no soft-delete guard).
+pub async fn state_name_group(
+    db: &impl sea_orm::ConnectionTrait,
+    state_id: Uuid,
+) -> Result<Option<(String, String)>, sea_orm::DbErr> {
+    use pidash_db::entity::states;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    states::Entity::find()
+        .select_only()
+        .columns([states::Column::Name, states::Column::Group])
+        .filter(states::Column::Id.eq(state_id))
+        .into_tuple()
+        .one(db)
+        .await
+}
+
 /// The consumed `agent_run` projection for creation reads. Django
 /// selects the full 39-column row; the L2 `READ_COLUMNS` projection
 /// lacks `parent_run_id` / `run_config` / `phase_kind` /

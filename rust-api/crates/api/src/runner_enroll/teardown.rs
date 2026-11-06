@@ -102,17 +102,17 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Utc};
 use http_body_util::BodyExt as _;
+use pidash_db::entity::{dev_machine, pod, runner};
+use pidash_db::orm_tx::TxConn;
+use sea_orm::{EntityTrait, QueryOrder, QuerySelect};
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_auth::permissions::membership;
 use pidash_auth::permissions::runner as runner_perm;
 use pidash_auth::scope::TenantScope;
 use pidash_db::redis::client_from_settings;
-use pidash_db::runner_enroll::columns::{
-    dev_machine as dm_cols, pod as pod_cols, runner as r_cols,
-};
 use pidash_services::runner_enroll::queries::{catalog_reads, enroll_reads, manage_reads};
 use pidash_services::runner_enroll::revoke as revoke_kernel;
 use pidash_services::runner_enroll::serializers::shapes;
@@ -223,111 +223,6 @@ fn unix_now_secs() -> i64 {
         .map(|elapsed| elapsed.as_secs() as i64)
         .unwrap_or(0)
 }
-
-// ---------------------------------------------------------------------------
-// Handler-owned SQL (Django-probed, repo-pinned Django 4.2.30 — no merged
-// builder covers these five shapes, and the services layer is read-only
-// from here, so the text lives with the handlers like `manage.rs`
-// `workspace_role_in`)
-// ---------------------------------------------------------------------------
-
-/// `"table"."col", …` projection (the services-builders `qualified`
-/// shape, restated).
-fn qualified(table: &str, columns: &[&str]) -> String {
-    columns
-        .iter()
-        .map(|column| format!("\"{table}\".\"{column}\""))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Locked runner read (`runners.py:476`).
-///
-/// `Runner.objects.select_for_update().filter(pk).first()` inside
-/// `transaction.atomic()`: full row (plain `Manager` — no scope),
-/// `Meta.ordering` kept, `LIMIT 1 FOR UPDATE`. `$1` = runner id.
-///
-/// Probe: `/tmp/592_probe.py` P2 (column order + `ORDER BY` + `LIMIT 1`;
-/// the `FOR UPDATE` tail is the E3/M6 merged-builder shape).
-fn runner_locked_read_sql() -> String {
-    format!(
-        "SELECT {} FROM \"runner\" WHERE \"runner\".\"id\" = $1 \
-         ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC \
-         LIMIT 1 FOR UPDATE",
-        qualified(r_cols::TABLE, r_cols::COLUMNS),
-    )
-}
-
-/// Workspace-membership probe (`core/permissions.py:28-34`, via the
-/// refresh view `:441`).
-///
-/// `WorkspaceMember.objects.filter(workspace_id, member,
-/// is_active=True).exists()`: `SELECT 1 AS "a" … LIMIT 1`, Q-sorted
-/// (manager scope, bare `is_active`, member, workspace). `$1` = member
-/// (user) id, `$2` = workspace id.
-///
-/// Probe: `/tmp/592_probe5.py` (literal `1`, conjunct order).
-const MEMBERSHIP_EXISTS_SQL: &str = "SELECT 1 AS \"a\" FROM \"workspace_members\" \
-     WHERE (\"workspace_members\".\"deleted_at\" IS NULL \
-     AND \"workspace_members\".\"is_active\" \
-     AND \"workspace_members\".\"member_id\" = $1 \
-     AND \"workspace_members\".\"workspace_id\" = $2) LIMIT 1";
-
-/// Post-revoke re-read (`runners.py:491`).
-///
-/// `runner.refresh_from_db()`: the `.get()` single-row shape (full row,
-/// no scope, no ordering) with `LIMIT 1` (the queries-A `LIMIT 21`-probe
-/// omission). `$1` = runner id.
-///
-/// Probe: `/tmp/592_probe.py` P3 (column order, no `ORDER BY`).
-fn runner_refresh_sql() -> String {
-    format!(
-        "SELECT {} FROM \"runner\" WHERE \"runner\".\"id\" = $1 LIMIT 1",
-        qualified(r_cols::TABLE, r_cols::COLUMNS),
-    )
-}
-
-/// Lazy `runner.pod` load for the revoke response (`serializers.py`
-/// `pod_detail`).
-///
-/// The serializer reads `runner.pod` as a forward-FK attribute, so Django
-/// resolves it through `Pod._base_manager` (a plain `models.Manager`), NOT
-/// through `PodManager`: a tombstoned pod still renders. No scope, no
-/// ordering, `LIMIT 1`. `$1` = pod id.
-///
-/// Probe: `/tmp/592_probe.py` P4a.
-fn pod_lazy_sql() -> String {
-    format!(
-        "SELECT {} FROM \"pod\" WHERE \"pod\".\"id\" = $1 LIMIT 1",
-        qualified(pod_cols::TABLE, pod_cols::COLUMNS),
-    )
-}
-
-/// Lazy `runner.dev_machine` load for the revoke response
-/// (`dev_machine_detail`).
-///
-/// `DevMachine.objects.get(pk)`: plain manager (no scope), no ordering,
-/// `LIMIT 1`. `$1` = machine id. Runs only when `dev_machine_id` is set.
-///
-/// Probe: `/tmp/592_probe.py` P4b.
-fn machine_lazy_sql() -> String {
-    format!(
-        "SELECT {} FROM \"dev_machine\" WHERE \"dev_machine\".\"id\" = $1 LIMIT 1",
-        qualified(dm_cols::TABLE, dm_cols::COLUMNS),
-    )
-}
-
-/// The reverse one-to-one `runner.live_state` read (the `manage.rs`
-/// `fetch_live_state` text, restated — that module's helper is private).
-///
-/// `RunnerLiveState` columns in `_meta` order over `runner_id`, `LIMIT 1`.
-/// `$1` = runner id.
-const LIVE_STATE_SQL: &str =
-    "SELECT \"runner_id\", \"observed_run_id\", \"last_event_at\", \"last_event_kind\", \
-     \"last_event_summary\", \"agent_pid\", \"agent_subprocess_alive\", \
-     \"approvals_pending\", \"usage\", \"llm_model\", \"turn_count\", \
-     \"agent_health\", \"agent_last_activity_at\", \"updated_at\" \
-     FROM \"runner_live_state\" WHERE \"runner_live_state\".\"runner_id\" = $1 LIMIT 1";
 
 // ---------------------------------------------------------------------------
 // Preamble (the `manage.rs` web / `machine.rs` daemon positions, restated)
@@ -510,33 +405,6 @@ fn body_workspace(data: &JVal) -> Result<Option<String>, Response> {
 // `POST /api/v1/runner/runners/<rid>/refresh/` (`enrollment.py:380-476`)
 // ---------------------------------------------------------------------------
 
-/// The E3 row facts the refresh view reads (runner block at 0; the
-/// joined workspace row is never read past the join itself; position 0
-/// is the URL id already in hand).
-struct RefreshRunner {
-    owner_id: Uuid,
-    workspace_id: Uuid,
-    dev_machine_id: Option<Uuid>,
-    refresh_token_hash: String,
-    refresh_token_generation: i32,
-    previous_refresh_token_hash: String,
-    revoked_at: Option<DateTime<Utc>>,
-}
-
-/// Decode the E3 row positionally (`r_cols::COLUMNS` order — indices
-/// pinned by `e3_decode_indices_follow_columns`).
-fn decode_refresh_runner(row: &sqlx::postgres::PgRow) -> Result<RefreshRunner, Response> {
-    Ok(RefreshRunner {
-        owner_id: row.try_get(1).map_err(|_| server_error())?,
-        workspace_id: row.try_get(2).map_err(|_| server_error())?,
-        dev_machine_id: row.try_get(3).map_err(|_| server_error())?,
-        refresh_token_hash: row.try_get(9).map_err(|_| server_error())?,
-        refresh_token_generation: row.try_get(11).map_err(|_| server_error())?,
-        previous_refresh_token_hash: row.try_get(12).map_err(|_| server_error())?,
-        revoked_at: row.try_get(27).map_err(|_| server_error())?,
-    })
-}
-
 /// `access.expires_at.isoformat()` (`:473`): whole-seconds UTC renders
 /// `+00:00` with no fraction (the `machine.rs` `django_isoformat`
 /// position — `expires_at` is always whole seconds).
@@ -595,37 +463,25 @@ pub async fn runner_refresh(
         Err(_) => return server_error(),
     };
     // E3 — locked runner + workspace (`:403-404`).
-    let row: Option<sqlx::postgres::PgRow> =
-        match sqlx::query(&enroll_reads::refresh_locked_read_sql())
-            .bind(runner_id)
-            .fetch_optional(&mut *tx)
-            .await
-        {
-            Ok(row) => row,
-            Err(_) => return server_error(),
-        };
-    let Some(row) = row else {
-        return unauthorized(INVALID_REFRESH_TOKEN_BODY);
+    let runner = match enroll_reads::refresh_locked_runner(&TxConn::new(&mut tx), runner_id).await {
+        Ok(row) => row,
+        Err(_) => return server_error(),
     };
-    let runner = match decode_refresh_runner(&row) {
-        Ok(runner) => runner,
-        Err(response) => return response,
+    let Some(runner) = runner else {
+        return unauthorized(INVALID_REFRESH_TOKEN_BODY);
     };
     if runner.revoked_at.is_some() {
         return unauthorized(RUNNER_REVOKED_BODY);
     }
     // E4 — dev-machine revoked probe, only when linked (`:415-425`).
     if let Some(dev_machine_id) = runner.dev_machine_id {
-        let hit: Option<i32> =
-            match sqlx::query_scalar(&enroll_reads::dev_machine_revoked_probe_sql())
-                .bind(dev_machine_id)
-                .fetch_optional(&mut *tx)
-                .await
-            {
-                Ok(hit) => hit,
-                Err(_) => return server_error(),
-            };
-        if hit.is_some() {
+        let hit = match enroll_reads::dev_machine_is_revoked(&TxConn::new(&mut tx), dev_machine_id)
+            .await
+        {
+            Ok(hit) => hit,
+            Err(_) => return server_error(),
+        };
+        if hit {
             return unauthorized(DEV_MACHINE_REVOKED_BODY);
         }
     }
@@ -666,16 +522,17 @@ pub async fn runner_refresh(
     }
 
     // Live membership re-check (`:441-446`).
-    let member: Option<i32> = match sqlx::query_scalar(MEMBERSHIP_EXISTS_SQL)
-        .bind(runner.owner_id)
-        .bind(runner.workspace_id)
-        .fetch_optional(&mut *tx)
-        .await
+    let member = match enroll_reads::is_active_member(
+        &TxConn::new(&mut tx),
+        runner.workspace_id,
+        runner.owner_id,
+    )
+    .await
     {
         Ok(member) => member,
         Err(_) => return server_error(),
     };
-    if member.is_none() {
+    if !member {
         let now = now_micros();
         let bundle = match revoke_runner_on_tx(
             &mut tx,
@@ -709,15 +566,16 @@ pub async fn runner_refresh(
     // runner.
     let new_refresh = enroll_tokens::mint_refresh_token(&secret);
     let new_generation = runner.refresh_token_generation + 1;
-    if sqlx::query(&enroll_reads::refresh_rotate_sql())
-        .bind(&new_refresh.hashed)
-        .bind(&new_refresh.fingerprint)
-        .bind(new_generation)
-        .bind(&runner.refresh_token_hash)
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
-        .is_err()
+    if enroll_reads::rotate_refresh_token(
+        &TxConn::new(&mut tx),
+        runner_id,
+        &new_refresh.hashed,
+        &new_refresh.fingerprint,
+        new_generation,
+        &runner.refresh_token_hash,
+    )
+    .await
+    .is_err()
     {
         return server_error();
     }
@@ -741,9 +599,7 @@ pub async fn runner_refresh(
         Err(_) => return server_error(),
     };
     // Force-refresh clear, still inside the tx (`:467`).
-    if sqlx::query(&enroll_reads::force_refresh_clear_sql())
-        .bind(runner_id)
-        .execute(&mut *tx)
+    if enroll_reads::clear_force_refresh(&TxConn::new(&mut tx), runner_id)
         .await
         .is_err()
     {
@@ -883,33 +739,7 @@ pub async fn runner_self_revoke(
 /// The M6 locked row facts the revoke/rotate views read, plus the
 /// render fields for the QUIRK-m5-fallback path (the unannotated
 /// in-memory instance).
-struct LockedMachine {
-    id: Uuid,
-    owner_id: Uuid,
-    host_label: String,
-    label: String,
-    visibility: i16,
-    last_seen_at: Option<DateTime<Utc>>,
-    revoked_at: Option<DateTime<Utc>>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-/// Decode the M6 row positionally (`dm_cols::COLUMNS` order — indices
-/// pinned by `m6_decode_indices_follow_columns`).
-fn decode_locked_machine(row: &sqlx::postgres::PgRow) -> Result<LockedMachine, Response> {
-    Ok(LockedMachine {
-        id: row.try_get(0).map_err(|_| server_error())?,
-        owner_id: row.try_get(1).map_err(|_| server_error())?,
-        host_label: row.try_get(2).map_err(|_| server_error())?,
-        label: row.try_get(3).map_err(|_| server_error())?,
-        visibility: row.try_get(4).map_err(|_| server_error())?,
-        last_seen_at: row.try_get(6).map_err(|_| server_error())?,
-        revoked_at: row.try_get(7).map_err(|_| server_error())?,
-        created_at: row.try_get(8).map_err(|_| server_error())?,
-        updated_at: row.try_get(9).map_err(|_| server_error())?,
-    })
-}
+use manage_reads::LockedMachineRow as LockedMachine;
 
 /// `_machine_is_in_workspace_scope` (`runners.py:132-147`): the kernel
 /// view check plus the M4a/M4b `EXISTS` probes (runner-or-token link).
@@ -930,29 +760,16 @@ async fn machine_in_workspace_scope(
     if !can_view {
         return Ok(false);
     }
-    let visibility: i16 = runner_perm::VISIBILITY_PRIVATE as i16;
-    let runner_hit: Option<i32> =
-        sqlx::query_scalar(&manage_reads::machine_scope_runner_probe_sql())
-            .bind(1i32)
-            .bind(machine.id)
-            .bind(user_id)
-            .bind(visibility)
-            .bind(workspace_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|_| server_error())?;
-    if runner_hit.is_some() {
+    let conn = TxConn::new(tx);
+    if manage_reads::machine_scope_runner_exists(&conn, machine.id, user_id, workspace_id)
+        .await
+        .map_err(|_| server_error())?
+    {
         return Ok(true);
     }
-    let token_hit: Option<i32> = sqlx::query_scalar(&manage_reads::machine_scope_token_probe_sql())
-        .bind(1i32)
-        .bind(machine.id)
-        .bind(user_id)
-        .bind(workspace_id)
-        .fetch_optional(&mut **tx)
+    manage_reads::machine_scope_token_exists(&conn, machine.id, user_id, workspace_id)
         .await
-        .map_err(|_| server_error())?;
-    Ok(token_hit.is_some())
+        .map_err(|_| server_error())
 }
 
 /// Resolve the `workspace` gate shared by the machine endpoints
@@ -1011,21 +828,12 @@ pub async fn dev_machine_revoke(
         Err(_) => return server_error(),
     };
     // M6 — locked machine read (`:190`).
-    let row: Option<sqlx::postgres::PgRow> =
-        match sqlx::query(&manage_reads::machine_locked_read_sql())
-            .bind(machine_id)
-            .fetch_optional(&mut *tx)
-            .await
-        {
-            Ok(row) => row,
-            Err(_) => return server_error(),
-        };
-    let Some(row) = row else {
-        return not_found();
-    };
-    let machine = match decode_locked_machine(&row) {
+    let machine = match manage_reads::lock_machine(&TxConn::new(&mut tx), machine_id).await {
         Ok(machine) => machine,
-        Err(response) => return response,
+        Err(_) => return server_error(),
+    };
+    let Some(machine) = machine else {
+        return not_found();
     };
     match machine_in_workspace_scope(&mut tx, &machine, user_id, workspace_id).await {
         Ok(true) => {}
@@ -1040,11 +848,7 @@ pub async fn dev_machine_revoke(
     let mut stamped: Option<(DateTime<Utc>, DateTime<Utc>)> = None;
     if machine.revoked_at.is_none() {
         let auto_now = now_micros();
-        if sqlx::query(&manage_reads::machine_revoke_sql())
-            .bind(now)
-            .bind(auto_now)
-            .bind(machine_id)
-            .execute(&mut *tx)
+        if manage_reads::revoke_machine(&TxConn::new(&mut tx), machine_id, now, auto_now)
             .await
             .is_err()
         {
@@ -1053,39 +857,24 @@ pub async fn dev_machine_revoke(
         stamped = Some((now, auto_now));
     }
     // Token revoke-all (`:198`).
-    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(&mut *tx, machine_id, now)
-        .await
-        .is_err()
+    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        machine_id,
+        now,
+    )
+    .await
+    .is_err()
     {
         return server_error();
     }
     // Locked active-runner list (`:199`).
-    let runner_rows: Vec<sqlx::postgres::PgRow> =
-        match sqlx::query(&manage_reads::machine_runners_locked_list_sql())
-            .bind(machine_id)
-            .fetch_all(&mut *tx)
-            .await
-        {
+    let runner_rows =
+        match manage_reads::lock_live_machine_runners(&TxConn::new(&mut tx), machine_id).await {
             Ok(rows) => rows,
             Err(_) => return server_error(),
         };
-    let mut runner_ids = Vec::with_capacity(runner_rows.len());
-    let mut runner_revoked: Vec<Option<DateTime<Utc>>> = Vec::with_capacity(runner_rows.len());
-    for row in &runner_rows {
-        let id: Uuid = match row.try_get(0) {
-            Ok(id) => id,
-            Err(_) => return server_error(),
-        };
-        let revoked_at: Option<DateTime<Utc>> = match row.try_get(27) {
-            Ok(revoked_at) => revoked_at,
-            Err(_) => return server_error(),
-        };
-        runner_ids.push(id);
-        runner_revoked.push(revoked_at);
-    }
-
-    // Frames for every runner BEFORE any revoke (`:201-203` — the
-    // enqueue-vs-evict rationale, same as `delete_runner`).
+    let (runner_ids, runner_revoked): (Vec<Uuid>, Vec<Option<DateTime<Utc>>>) =
+        runner_rows.into_iter().unzip();
     {
         let pubsub = TxPubsub::new(&mut tx, &state);
         for runner_id in &runner_ids {
@@ -1184,21 +973,12 @@ pub async fn dev_machine_rotate(
         Err(_) => return server_error(),
     };
     // M6 — locked machine read (`:228`).
-    let row: Option<sqlx::postgres::PgRow> =
-        match sqlx::query(&manage_reads::machine_locked_read_sql())
-            .bind(machine_id)
-            .fetch_optional(&mut *tx)
-            .await
-        {
-            Ok(row) => row,
-            Err(_) => return server_error(),
-        };
-    let Some(row) = row else {
-        return not_found();
-    };
-    let machine = match decode_locked_machine(&row) {
+    let machine = match manage_reads::lock_machine(&TxConn::new(&mut tx), machine_id).await {
         Ok(machine) => machine,
-        Err(response) => return response,
+        Err(_) => return server_error(),
+    };
+    let Some(machine) = machine else {
+        return not_found();
     };
     match machine_in_workspace_scope(&mut tx, &machine, user_id, workspace_id).await {
         Ok(true) => {}
@@ -1212,21 +992,22 @@ pub async fn dev_machine_rotate(
 
     // Token revoke-all (`:238`).
     let now = now_micros();
-    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(&mut *tx, machine_id, now)
-        .await
-        .is_err()
+    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        machine_id,
+        now,
+    )
+    .await
+    .is_err()
     {
         return server_error();
     }
     // Active-runner ids (`:239-241`).
-    let runner_ids: Vec<Uuid> = match sqlx::query_scalar(&manage_reads::machine_runner_ids_sql())
-        .bind(machine_id)
-        .fetch_all(&mut *tx)
-        .await
-    {
-        Ok(ids) => ids,
-        Err(_) => return server_error(),
-    };
+    let runner_ids =
+        match manage_reads::live_machine_runner_ids(&TxConn::new(&mut tx), machine_id).await {
+            Ok(ids) => ids,
+            Err(_) => return server_error(),
+        };
     // Per id: revoke frame + session close (`:242-244`). No row writes.
     {
         let pubsub = TxPubsub::new(&mut tx, &state);
@@ -1285,20 +1066,12 @@ pub async fn runner_revoke(
         Ok(tx) => tx,
         Err(_) => return server_error(),
     };
-    let row: Option<sqlx::postgres::PgRow> = match sqlx::query(&runner_locked_read_sql())
-        .bind(runner_id)
-        .fetch_optional(&mut *tx)
-        .await
-    {
-        Ok(row) => row,
-        Err(_) => return server_error(),
-    };
-    let Some(row) = row else {
-        return not_found();
-    };
-    let runner = match decode_full_runner(&row) {
+    let runner = match lock_runner(&mut tx, runner_id).await {
         Ok(runner) => runner,
         Err(response) => return response,
+    };
+    let Some(runner) = runner else {
+        return not_found();
     };
     // View gate → 404 (`:479-480`).
     let can_view = runner_perm::can_view_runner(&runner_perm::RunnerFacts {
@@ -1453,24 +1226,16 @@ async fn serialize_machine(
     let visibility: i16 = runner_perm::VISIBILITY_PRIVATE as i16;
     let cutoff =
         now_micros() - chrono::Duration::seconds(manage_reads::CONTROL_PRESENCE_WINDOW_SECS);
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&manage_reads::machine_serialize_sql())
-        .bind(user_id)
-        .bind(visibility)
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(visibility)
-        .bind(workspace_id)
-        .bind("online")
-        .bind("busy")
-        .bind(user_id)
-        .bind(visibility)
-        .bind(workspace_id)
-        .bind(1i32)
-        .bind(cutoff)
-        .bind(machine.id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| server_error())?;
+    let row = manage_reads::machine_serialize(
+        &pidash_db::pool::sea_orm_connection(pool),
+        machine.id,
+        user_id,
+        workspace_id,
+        visibility,
+        cutoff,
+    )
+    .await
+    .map_err(|_| server_error())?;
     let Some(row) = row else {
         // QUIRK-m5-fallback: counts omitted, `control_online` false,
         // model fields from the in-memory instance (stamped when the
@@ -1498,30 +1263,29 @@ async fn serialize_machine(
         }
         .to_json();
     };
-    let last_seen_at: Option<DateTime<Utc>> = row.try_get(6).map_err(|_| server_error())?;
-    let revoked_at: Option<DateTime<Utc>> = row.try_get(7).map_err(|_| server_error())?;
-    let created_at: DateTime<Utc> = row.try_get(8).map_err(|_| server_error())?;
-    let updated_at: DateTime<Utc> = row.try_get(9).map_err(|_| server_error())?;
-    let last_heartbeat_at: Option<DateTime<Utc>> = row.try_get(12).map_err(|_| server_error())?;
     MachineRender {
         id: machine.id.to_string(),
-        host_label: row.try_get(2).map_err(|_| server_error())?,
-        label: row.try_get(3).map_err(|_| server_error())?,
+        host_label: row.host_label,
+        label: row.label,
         visibility: i64::from(machine.visibility),
-        runner_count: Some(row.try_get(10).map_err(|_| server_error())?),
-        online_runner_count: Some(row.try_get(11).map_err(|_| server_error())?),
-        control_online: Some(row.try_get(13).map_err(|_| server_error())?),
-        last_seen_at: last_seen_at
+        runner_count: Some(row.runner_count),
+        online_runner_count: Some(row.online_runner_count),
+        control_online: Some(row.control_online),
+        last_seen_at: row
+            .last_seen_at
             .as_ref()
             .map(crate::serializer::render_datetime),
         last_heartbeat_at: Some(
-            last_heartbeat_at
+            row.last_heartbeat_at
                 .as_ref()
                 .map(crate::serializer::render_datetime),
         ),
-        revoked_at: revoked_at.as_ref().map(crate::serializer::render_datetime),
-        created_at: crate::serializer::render_datetime(&created_at),
-        updated_at: crate::serializer::render_datetime(&updated_at),
+        revoked_at: row
+            .revoked_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        created_at: crate::serializer::render_datetime(&row.created_at),
+        updated_at: crate::serializer::render_datetime(&row.updated_at),
     }
     .to_json()
 }
@@ -1555,35 +1319,54 @@ struct FullRunner {
     paused_by_id: Option<Uuid>,
 }
 
-/// Decode a full runner row positionally (`r_cols::COLUMNS` order —
-/// indices pinned by `runner_decode_indices_follow_columns`).
-fn decode_full_runner(row: &sqlx::postgres::PgRow) -> Result<FullRunner, Response> {
-    Ok(FullRunner {
-        id: row.try_get(0).map_err(|_| server_error())?,
-        owner_id: row.try_get(1).map_err(|_| server_error())?,
-        workspace_id: row.try_get(2).map_err(|_| server_error())?,
-        dev_machine_id: row.try_get(3).map_err(|_| server_error())?,
-        pod_id: row.try_get(4).map_err(|_| server_error())?,
-        name: row.try_get(5).map_err(|_| server_error())?,
-        host_label: row.try_get(6).map_err(|_| server_error())?,
-        provisioning: row.try_get(7).map_err(|_| server_error())?,
-        visibility: row.try_get(8).map_err(|_| server_error())?,
-        enrolled_at: row.try_get(16).map_err(|_| server_error())?,
-        capabilities: row.try_get(17).map_err(|_| server_error())?,
-        status: row.try_get(18).map_err(|_| server_error())?,
-        os: row.try_get(19).map_err(|_| server_error())?,
-        arch: row.try_get(20).map_err(|_| server_error())?,
-        runner_version: row.try_get(21).map_err(|_| server_error())?,
-        dev_metadata: row.try_get(22).map_err(|_| server_error())?,
-        protocol_version: row.try_get(23).map_err(|_| server_error())?,
-        last_heartbeat_at: row.try_get(24).map_err(|_| server_error())?,
-        created_at: row.try_get(25).map_err(|_| server_error())?,
-        updated_at: row.try_get(26).map_err(|_| server_error())?,
-        revoked_at: row.try_get(27).map_err(|_| server_error())?,
-        revoked_reason: row.try_get(28).map_err(|_| server_error())?,
-        paused_at: row.try_get(29).map_err(|_| server_error())?,
-        paused_by_id: row.try_get(30).map_err(|_| server_error())?,
-    })
+impl From<runner::Model> for FullRunner {
+    fn from(row: runner::Model) -> Self {
+        let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&Utc);
+        Self {
+            id: row.id,
+            owner_id: row.owner_id,
+            workspace_id: row.workspace_id,
+            dev_machine_id: row.dev_machine_id,
+            pod_id: row.pod_id,
+            name: row.name,
+            host_label: row.host_label,
+            provisioning: row.provisioning,
+            visibility: row.visibility,
+            enrolled_at: row.enrolled_at.map(at),
+            capabilities: row.capabilities,
+            status: row.status,
+            os: row.os,
+            arch: row.arch,
+            runner_version: row.runner_version,
+            dev_metadata: row.dev_metadata,
+            protocol_version: row.protocol_version,
+            last_heartbeat_at: row.last_heartbeat_at.map(at),
+            created_at: at(row.created_at),
+            updated_at: at(row.updated_at),
+            revoked_at: row.revoked_at.map(at),
+            revoked_reason: row.revoked_reason,
+            paused_at: row.paused_at.map(at),
+            paused_by_id: row.paused_by_id,
+        }
+    }
+}
+
+/// Locked runner read (`runners.py:476`):
+/// `Runner.objects.select_for_update().filter(pk).first()` inside
+/// `transaction.atomic()`: full row (plain `Manager`, no scope),
+/// `Meta.ordering`, first, `FOR UPDATE`.
+async fn lock_runner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    runner_id: Uuid,
+) -> Result<Option<FullRunner>, Response> {
+    let row = runner::Entity::find_by_id(runner_id)
+        .order_by_desc(runner::Column::LastHeartbeatAt)
+        .order_by_desc(runner::Column::CreatedAt)
+        .lock_exclusive()
+        .one(&TxConn::new(tx))
+        .await
+        .map_err(|_| server_error())?;
+    Ok(row.map(FullRunner::from))
 }
 
 /// Owned pod mini (`serializers.py:133-142`).
@@ -1624,40 +1407,30 @@ async fn fetch_live_state(
     pool: &PgPool,
     runner_id: Uuid,
 ) -> Result<Option<LiveStateOwned>, Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(LIVE_STATE_SQL)
-        .bind(runner_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| server_error())?;
+    let row =
+        manage_reads::runner_live_state(&pidash_db::pool::sea_orm_connection(pool), runner_id)
+            .await
+            .map_err(|_| server_error())?;
     let Some(row) = row else {
         return Ok(None);
     };
-    let observed: Option<Uuid> = row.try_get(1).map_err(|_| server_error())?;
-    let last_event_at: Option<DateTime<Utc>> = row.try_get(2).map_err(|_| server_error())?;
-    let agent_last_activity_at: Option<DateTime<Utc>> =
-        row.try_get(12).map_err(|_| server_error())?;
-    let updated_at: DateTime<Utc> = row.try_get(13).map_err(|_| server_error())?;
-    let agent_pid: Option<i32> = row.try_get(5).map_err(|_| server_error())?;
-    let approvals_pending: Option<i32> = row.try_get(7).map_err(|_| server_error())?;
-    let turn_count: Option<i32> = row.try_get(10).map_err(|_| server_error())?;
+    let render = |at: &sea_orm::prelude::DateTimeWithTimeZone| {
+        crate::serializer::render_datetime(&at.with_timezone(&Utc))
+    };
     Ok(Some(LiveStateOwned {
-        observed_run_id: observed.map(|id| id.to_string()),
-        last_event_at: last_event_at
-            .as_ref()
-            .map(crate::serializer::render_datetime),
-        last_event_kind: row.try_get(3).map_err(|_| server_error())?,
-        last_event_summary: row.try_get(4).map_err(|_| server_error())?,
-        agent_pid: agent_pid.map(i64::from),
-        agent_subprocess_alive: row.try_get(6).map_err(|_| server_error())?,
-        approvals_pending: approvals_pending.map(i64::from),
-        usage: row.try_get(8).map_err(|_| server_error())?,
-        llm_model: row.try_get(9).map_err(|_| server_error())?,
-        turn_count: turn_count.map(i64::from),
-        agent_health: row.try_get(11).map_err(|_| server_error())?,
-        agent_last_activity_at: agent_last_activity_at
-            .as_ref()
-            .map(crate::serializer::render_datetime),
-        updated_at: crate::serializer::render_datetime(&updated_at),
+        observed_run_id: row.observed_run_id.map(|id| id.to_string()),
+        last_event_at: row.last_event_at.as_ref().map(render),
+        last_event_kind: row.last_event_kind,
+        last_event_summary: row.last_event_summary,
+        agent_pid: row.agent_pid.map(i64::from),
+        agent_subprocess_alive: row.agent_subprocess_alive,
+        approvals_pending: row.approvals_pending.map(i64::from),
+        usage: row.usage,
+        llm_model: row.llm_model,
+        turn_count: row.turn_count.map(i64::from),
+        agent_health: row.agent_health,
+        agent_last_activity_at: row.agent_last_activity_at.as_ref().map(render),
+        updated_at: render(&row.updated_at),
     }))
 }
 
@@ -1765,67 +1538,48 @@ impl RunnerRender {
 /// the query shape, never the bytes. A vanished row is the source's
 /// `DoesNotExist` → 500.
 async fn render_toggled_runner(pool: &PgPool, runner_id: Uuid) -> Result<String, Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&runner_refresh_sql())
-        .bind(runner_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    // `runner.refresh_from_db()`: the plain-manager row by pk.
+    let runner = runner::Entity::find_by_id(runner_id)
+        .one(&db)
         .await
-        .map_err(|_| server_error())?;
-    let Some(row) = row else {
-        return Err(server_error());
-    };
-    let runner = decode_full_runner(&row)?;
-    // Lazy `runner.pod` (`Pod.objects.get` — vanished row 500s).
-    let pod_row: Option<sqlx::postgres::PgRow> = sqlx::query(&pod_lazy_sql())
-        .bind(runner.pod_id)
-        .fetch_optional(pool)
+        .map_err(|_| server_error())?
+        .map(FullRunner::from)
+        .ok_or_else(server_error)?;
+    // Lazy `runner.pod`: a forward-FK read through `Pod._base_manager`, so
+    // a tombstoned pod still renders (vanished row 500s).
+    let pod_row = pod::Entity::find_by_id(runner.pod_id)
+        .one(&db)
         .await
-        .map_err(|_| server_error())?;
-    let Some(pod_row) = pod_row else {
-        return Err(server_error());
-    };
-    let pod_id: Uuid = pod_row.try_get(0).map_err(|_| server_error())?;
-    let project_id: Uuid = pod_row.try_get(2).map_err(|_| server_error())?;
+        .map_err(|_| server_error())?
+        .ok_or_else(server_error)?;
+    let project_id = pod_row.project_id;
     let pod = PodMiniOwned {
-        id: pod_id.to_string(),
-        name: pod_row.try_get(3).map_err(|_| server_error())?,
-        is_default: pod_row.try_get(6).map_err(|_| server_error())?,
+        id: pod_row.id.to_string(),
+        name: pod_row.name,
+        is_default: pod_row.is_default,
         project_id,
     };
     // Lazy `runner.dev_machine` (only when linked; vanished row 500s).
     let mut dev_machine_detail = None;
     if let Some(dev_machine_id) = runner.dev_machine_id {
-        let machine_row: Option<sqlx::postgres::PgRow> = sqlx::query(&machine_lazy_sql())
-            .bind(dev_machine_id)
-            .fetch_optional(pool)
+        let machine = dev_machine::Entity::find_by_id(dev_machine_id)
+            .one(&db)
             .await
-            .map_err(|_| server_error())?;
-        let Some(machine_row) = machine_row else {
-            return Err(server_error());
-        };
-        let mini_id: Uuid = machine_row.try_get(0).map_err(|_| server_error())?;
+            .map_err(|_| server_error())?
+            .ok_or_else(server_error)?;
         dev_machine_detail = Some(DevMachineMiniOwned {
-            id: mini_id.to_string(),
-            host_label: machine_row.try_get(2).map_err(|_| server_error())?,
-            label: machine_row.try_get(3).map_err(|_| server_error())?,
+            id: machine.id.to_string(),
+            host_label: machine.host_label,
+            label: machine.label,
         });
     }
-    // Lazy `pod.project.identifier` (the `catalog_reads` full-row read —
-    // the builder's `ORDER BY` is unobservable on a PK lookup). This is a
-    // forward-FK attribute read, so Django uses `Project._base_manager`
-    // (`SoftDeletionManager` does not apply) and a tombstoned project still
-    // renders its identifier: the base variant drops the `deleted_at` scope.
-    let project_row: Option<sqlx::postgres::PgRow> =
-        sqlx::query(&catalog_reads::project_by_id_base_sql())
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
-    let Some(project_row) = project_row else {
-        return Err(server_error());
-    };
-    let pod_identifier: String = project_row
-        .try_get("identifier")
-        .map_err(|_| server_error())?;
+    // Lazy `pod.project.identifier`: a forward-FK read through
+    // `Project._base_manager`, so a tombstoned project still renders.
+    let (_, pod_identifier) = catalog_reads::project_facts(&db, project_id, false)
+        .await
+        .map_err(|_| server_error())?
+        .ok_or_else(server_error)?;
     let live_state = fetch_live_state(pool, runner_id).await?;
     RunnerRender {
         id: runner.id.to_string(),
@@ -1910,15 +1664,9 @@ async fn lock_manageable_runner(
     runner_id: Uuid,
     user_id: Uuid,
 ) -> Result<FullRunner, Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&runner_locked_read_sql())
-        .bind(runner_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|_| server_error())?;
-    let Some(row) = row else {
+    let Some(runner) = lock_runner(tx, runner_id).await? else {
         return Err(not_found());
     };
-    let runner = decode_full_runner(&row)?;
     // View gate → 404 (`:499-500`).
     let can_view = runner_perm::can_view_runner(&runner_perm::RunnerFacts {
         workspace: WorkspaceId::from(runner.workspace_id.to_string()),
@@ -2299,7 +2047,7 @@ impl PubsubStore for PoolPubsubStore<'_, '_> {
         reason: &str,
     ) -> Result<(), SessionOutboxError> {
         pidash_services::domain::tokens::revoke_runner_session(
-            self.pool,
+            &pidash_db::pool::sea_orm_connection(self.pool),
             session_id,
             now_micros(),
             reason,
@@ -2416,7 +2164,7 @@ impl PubsubStore for TxPubsub<'_, '_, '_> {
         let mut guard = self.tx.lock().await;
         let tx: &mut sqlx::Transaction<'_, sqlx::Postgres> = &mut guard;
         pidash_services::domain::tokens::revoke_runner_session(
-            &mut **tx,
+            &pidash_db::orm_tx::TxConn::new(tx),
             session_id,
             now_micros(),
             reason,
@@ -2569,94 +2317,69 @@ async fn fire_bundle(
 /// pool left partial deletes committed when a later one failed.
 async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), ()> {
     let mut tx = pool.begin().await.map_err(|_| ())?;
-    let root: Option<sqlx::postgres::PgRow> = sqlx::query(delete_kernel::COLLECT_RUNNER_BY_ID_SQL)
-        .bind(runner_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    if root.is_none() {
-        return Ok(());
-    }
-    let chat_ids: Vec<Uuid> = sqlx::query_scalar(&delete_kernel::collect_chat_ids_sql(1))
-        .bind(runner_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    let mut message_ids: Vec<Uuid> = Vec::new();
-    if !chat_ids.is_empty() {
-        let fetch_sql = delete_kernel::collect_message_ids_sql(chat_ids.len());
-        let mut fetched = sqlx::query_scalar(&fetch_sql);
-        for chat_id in &chat_ids {
-            fetched = fetched.bind(*chat_id);
+    let runners = [runner_id];
+    {
+        let conn = TxConn::new(&mut tx);
+        if !delete_kernel::runner_exists(&conn, runner_id)
+            .await
+            .map_err(|_| ())?
+        {
+            return Ok(());
         }
-        message_ids = fetched.fetch_all(&mut *tx).await.map_err(|_| ())?;
-        let events_sql = delete_kernel::delete_chat_events_sql(chat_ids.len());
-        let approvals_sql = delete_kernel::delete_chat_approvals_sql(chat_ids.len());
-        let dedupes_sql = delete_kernel::delete_chat_dedupes_sql(chat_ids.len());
-        let mut events = sqlx::query(&events_sql);
-        let mut approvals = sqlx::query(&approvals_sql);
-        let mut dedupes = sqlx::query(&dedupes_sql);
-        for chat_id in &chat_ids {
-            events = events.bind(*chat_id);
-            approvals = approvals.bind(*chat_id);
-            dedupes = dedupes.bind(*chat_id);
+        let chat_ids = delete_kernel::chat_ids_for_runners(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        let mut message_ids: Vec<Uuid> = Vec::new();
+        if !chat_ids.is_empty() {
+            message_ids = delete_kernel::message_ids_for_chats(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
+            delete_kernel::delete_chat_events(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
+            delete_kernel::delete_chat_approvals(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
+            delete_kernel::delete_chat_dedupes(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
         }
-        events.execute(&mut *tx).await.map_err(|_| ())?;
-        approvals.execute(&mut *tx).await.map_err(|_| ())?;
-        dedupes.execute(&mut *tx).await.map_err(|_| ())?;
-    }
-    pidash_services::domain::tokens::delete_runner_sessions_for_runners(&mut *tx, &[runner_id])
+        pidash_services::domain::tokens::delete_runner_sessions_for_runners(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            &runners,
+        )
         .await
         .map_err(|_| ())?;
-    sqlx::query(&delete_kernel::delete_force_refresh_sql(1))
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    sqlx::query(&delete_kernel::delete_live_state_sql(1))
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    sqlx::query(&delete_kernel::null_run_runners_sql(1))
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    sqlx::query(&delete_kernel::null_run_pins_sql(1))
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    if !message_ids.is_empty() {
-        let null_sql = delete_kernel::null_event_messages_sql(message_ids.len());
-        let mut nulls = sqlx::query(&null_sql);
-        for message_id in &message_ids {
-            nulls = nulls.bind(*message_id);
+        let conn = TxConn::new(&mut tx);
+        delete_kernel::delete_force_refresh(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        delete_kernel::delete_live_state(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        delete_kernel::null_run_runners(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        delete_kernel::null_run_pins(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        if !message_ids.is_empty() {
+            delete_kernel::null_event_messages(&conn, &message_ids)
+                .await
+                .map_err(|_| ())?;
+            delete_kernel::delete_chat_messages(&conn, &message_ids)
+                .await
+                .map_err(|_| ())?;
         }
-        nulls.execute(&mut *tx).await.map_err(|_| ())?;
-    }
-    if !message_ids.is_empty() {
-        let deletes_sql = delete_kernel::delete_chat_messages_sql(message_ids.len());
-        let mut deletes = sqlx::query(&deletes_sql);
-        for message_id in &message_ids {
-            deletes = deletes.bind(*message_id);
+        if !chat_ids.is_empty() {
+            delete_kernel::delete_chat_sessions(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
         }
-        deletes.execute(&mut *tx).await.map_err(|_| ())?;
+        delete_kernel::delete_runner_rows(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
     }
-    if !chat_ids.is_empty() {
-        let deletes_sql = delete_kernel::delete_chat_sessions_sql(chat_ids.len());
-        let mut deletes = sqlx::query(&deletes_sql);
-        for chat_id in &chat_ids {
-            deletes = deletes.bind(*chat_id);
-        }
-        deletes.execute(&mut *tx).await.map_err(|_| ())?;
-    }
-    sqlx::query(&delete_kernel::delete_runner_rows_sql(1))
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
     if tx.commit().await.is_err() {
         return Err(());
     }
@@ -2807,8 +2530,6 @@ mod tests {
         include_str!("../../../../fixtures/runner_enroll/external/wire_pins.json");
     const FIXTURE_ENROLL_REFRESH_SQL: &str =
         include_str!("../../../../fixtures/runner_enroll/queries/enroll_refresh.sql");
-    const FIXTURE_MACHINES_RUNNERS_SQL: &str =
-        include_str!("../../../../fixtures/runner_enroll/queries/machines_runners.sql");
 
     fn daemon_fixture(key: &str) -> serde_json::Value {
         let fixture: serde_json::Value = serde_json::from_str(FIXTURE_ENDPOINTS).unwrap();
@@ -3113,57 +2834,6 @@ mod tests {
                 r#"DELETE FROM "runner_force_refresh" WHERE "runner_force_refresh"."runner_id" = $1"#
             ),
             "{clear}"
-        );
-    }
-
-    #[test]
-    fn f5_handler_owned_builders() {
-        // R4 row-locked read core (fixture abbreviates `SELECT *`;
-        // the builder emits the probe-verified Django column list).
-        let locked = normalize_sql(&runner_locked_read_sql());
-        assert!(
-            locked.contains(r#"FROM "runner" WHERE "runner"."id" = $1"#),
-            "{locked}"
-        );
-        assert!(locked.contains("LIMIT 1 FOR UPDATE"), "{locked}");
-        assert!(
-            normalize_sql(FIXTURE_MACHINES_RUNNERS_SQL)
-                .contains(r#"SELECT * FROM "runner" WHERE "id" = $1 LIMIT 1 FOR UPDATE"#),
-            "R4 fixture drifted"
-        );
-        // Membership probe: literal 1, conjunct order pinned.
-        assert_eq!(
-            normalize_sql(MEMBERSHIP_EXISTS_SQL),
-            normalize_sql(
-                r#"SELECT 1 AS "a" FROM "workspace_members"
-                WHERE ("workspace_members"."deleted_at" IS NULL
-                AND "workspace_members"."is_active"
-                AND "workspace_members"."member_id" = $1
-                AND "workspace_members"."workspace_id" = $2) LIMIT 1"#
-            )
-        );
-        // Re-read: full row, no scope, no ordering, LIMIT 1.
-        let reread = normalize_sql(&runner_refresh_sql());
-        assert!(
-            reread.contains(r#"FROM "runner" WHERE "runner"."id" = $1 LIMIT 1"#),
-            "{reread}"
-        );
-        assert!(!reread.contains("ORDER BY"), "{reread}");
-        // Lazy loads: the pod load is a forward-FK dereference, so it
-        // resolves through `_base_manager` and carries NO soft-delete
-        // scope (a tombstoned pod still renders — PIDASHCONV-1210); the
-        // machine load is on a plain (unscoped) manager either way.
-        assert!(
-            !normalize_sql(&pod_lazy_sql()).contains(r#""deleted_at" IS NULL"#),
-            "pod lazy load must not filter tombstones"
-        );
-        assert!(
-            normalize_sql(&pod_lazy_sql()).contains(r#"FROM "pod" WHERE "pod"."id" = $1 LIMIT 1"#),
-            "pod lazy load shape"
-        );
-        assert!(
-            normalize_sql(&machine_lazy_sql()).contains(r#"FROM "dev_machine""#),
-            "machine lazy load"
         );
     }
 

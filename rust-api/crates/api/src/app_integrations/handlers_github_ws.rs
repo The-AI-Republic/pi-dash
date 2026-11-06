@@ -1231,7 +1231,7 @@ async fn ensure_workspace_integration(
     let api_token = format!("pi_dash_api_{}", uuid::Uuid::new_v4().simple());
     let label = format!("github-integration-{workspace_id}");
     pidash_services::domain::tokens::insert_github_shim_token(
-        &mut *ex,
+        &pidash_db::orm_tx::TxConn::new(&mut *ex),
         &pidash_services::domain::tokens::NewGithubShimToken {
             id: token_id,
             label,

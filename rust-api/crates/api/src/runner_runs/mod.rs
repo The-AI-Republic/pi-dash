@@ -793,8 +793,12 @@ async fn authenticate_machine_token(
     if !member {
         // `token.revoke()` then deny (`authentication.py:130-132`).
         let now = chrono::Utc::now();
-        let _ =
-            pidash_services::domain::tokens::revoke_machine_token_by_id(pool, token.id, now).await;
+        let _ = pidash_services::domain::tokens::revoke_machine_token_by_id(
+            &pidash_db::pool::sea_orm_connection(pool),
+            token.id,
+            now,
+        )
+        .await;
         return Err(auth_failed("membership_revoked"));
     }
     let Some(runner_raw) = request_runner_id(headers) else {
@@ -832,9 +836,12 @@ async fn authenticate_machine_token(
     // `last_used_at` bump (`authentication.py:153`): `QuerySet.update`
     // touches no `updated_at`.
     let now = chrono::Utc::now();
-    let _ =
-        pidash_services::domain::tokens::touch_machine_token_last_used_by_id(pool, token.id, now)
-            .await;
+    let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        token.id,
+        now,
+    )
+    .await;
     Ok(Some(DaemonRunner::from(&row)))
 }
 

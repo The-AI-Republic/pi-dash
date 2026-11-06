@@ -577,7 +577,7 @@ impl PubsubStore for SessionPubsub<'_, '_> {
         reason: &str,
     ) -> Result<(), OutboxError> {
         pidash_services::domain::tokens::revoke_runner_session(
-            self.pool,
+            &pidash_db::pool::sea_orm_connection(self.pool),
             session_id,
             Utc::now(),
             reason,
@@ -1323,7 +1323,7 @@ async fn open_transaction(
         let prior = runner_session_from_row(&row).map_err(TxnFail::from)?;
         old_session_id = Some(prior.id.to_string());
         pidash_services::domain::tokens::revoke_runner_session(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             prior.id,
             Utc::now(),
             REASON_EVICTED_BY_NEW_SESSION,
@@ -1335,7 +1335,7 @@ async fn open_transaction(
     // first, then `auto_now_add` stamps `created_at` — the domain
     // driver keeps that order.
     pidash_services::domain::tokens::open_runner_session(
-        &mut *tx,
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         new_sid,
         runner.id,
         runner_session::DEFAULT_PROTOCOL_VERSION,
@@ -1856,7 +1856,7 @@ async fn runner_session_delete_inner(
         return StatusCode::NO_CONTENT.into_response();
     }
     if pidash_services::domain::tokens::revoke_runner_session(
-        &pool,
+        &pidash_db::pool::sea_orm_connection(&pool),
         sid,
         Utc::now(),
         REASON_CLEAN_SHUTDOWN,

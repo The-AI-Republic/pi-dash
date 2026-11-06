@@ -140,9 +140,14 @@ where
         // `updated_at` is now-at-write: reconcile leaves the locked
         // row's stamp untouched, and Python's `save()` stamps
         // `auto_now` at write time (the pre-consolidation bind).
-        apply_clock_write(&mut **self.dispatch_tx().inner(), &write, row, Utc::now())
-            .await
-            .map_err(db)
+        apply_clock_write(
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
+            &write,
+            row,
+            Utc::now(),
+        )
+        .await
+        .map_err(db)
     }
 
     fn set_rollback(&mut self) {
