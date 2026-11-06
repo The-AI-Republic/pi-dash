@@ -100,11 +100,12 @@ use crate::tasks_cleanup::versions::chunk_ranges;
 /// `assignee_ids` first and `label_ids` second (`:187-190`). The write-only
 /// pair is absent from `super().to_representation` — the echo keys sit at
 /// the END, not in declared position.
-pub const ISSUE_CREATE_FIELDS: [&str; 41] = [
+pub const ISSUE_CREATE_FIELDS: [&str; 42] = [
     "id",
     "state_id",
     "parent_id",
     "assigned_pod_id",
+    "assigned_runner_id",
     "project_id",
     "workspace_id",
     "created_at",
@@ -157,6 +158,7 @@ pub struct IssueCreateRow<'a> {
     pub state_id: Option<&'a str>,
     pub parent_id: Option<&'a str>,
     pub assigned_pod_id: Option<&'a str>,
+    pub assigned_runner_id: Option<&'a str>,
     pub project_id: &'a str,
     pub workspace_id: &'a str,
     pub created_at: &'a str,
@@ -206,6 +208,7 @@ pub struct IssueCreateView {
     pub state_id: Option<String>,
     pub parent_id: Option<String>,
     pub assigned_pod_id: Option<String>,
+    pub assigned_runner_id: Option<String>,
     pub project_id: String,
     pub workspace_id: String,
     pub created_at: String,
@@ -285,6 +288,7 @@ pub fn issue_create_to_representation(
         state_id: row.state_id.map(str::to_owned),
         parent_id: row.parent_id.map(str::to_owned),
         assigned_pod_id: row.assigned_pod_id.map(str::to_owned),
+        assigned_runner_id: row.assigned_runner_id.map(str::to_owned),
         project_id: row.project_id.to_owned(),
         workspace_id: row.workspace_id.to_owned(),
         created_at: row.created_at.to_owned(),
@@ -2535,8 +2539,8 @@ mod tests {
         let sent = serde_json::json!(["a", "b"]);
         assert_eq!(echo_initial_ids(Some(&sent)), sent);
 
-        // 41 wire keys with the echo pair appended last (:187-190).
-        assert_eq!(ISSUE_CREATE_FIELDS.len(), 41);
+        // 42 wire keys with the echo pair appended last (:187-190).
+        assert_eq!(ISSUE_CREATE_FIELDS.len(), 42);
         assert_eq!(ISSUE_CREATE_FIELDS[0], "id");
         assert_eq!(
             &ISSUE_CREATE_FIELDS[ISSUE_CREATE_FIELDS.len() - 2..],
@@ -2552,6 +2556,7 @@ mod tests {
             state_id: Some("22222222-2222-2222-2222-222222222222"),
             parent_id: None,
             assigned_pod_id: None,
+            assigned_runner_id: None,
             project_id: "33333333-3333-3333-3333-333333333333",
             workspace_id: "44444444-4444-4444-4444-444444444444",
             created_at: "2026-10-03T00:00:00Z",

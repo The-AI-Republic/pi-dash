@@ -162,6 +162,40 @@ fn iso(value: Option<chrono::DateTime<chrono::FixedOffset>>) -> Option<String> {
     value.map(|v| v.to_rfc3339())
 }
 
+/// The flat inputs of the `assigned_runner_detail` object (design §14.1).
+/// Split from the fetch so sqlx-only render paths (the api crate's
+/// `render_detail_map`) can fill it with one row + counts and share the
+/// exact JSON shape.
+#[derive(Clone, Debug)]
+pub struct RunnerDetailRow {
+    pub id: Uuid,
+    pub name: String,
+    pub status: String,
+    pub pod_id: Uuid,
+    pub owner_id: Uuid,
+    pub owner_display_name: String,
+    pub host_label: String,
+    pub last_heartbeat_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    pub is_busy: bool,
+    pub queue_depth: u64,
+}
+
+/// The `assigned_runner_detail` object (design §14.1) from flat inputs.
+pub fn runner_detail_value(row: &RunnerDetailRow) -> Value {
+    json!({
+        "id": row.id.to_string(),
+        "name": row.name,
+        "status": row.status,
+        "pod": row.pod_id.to_string(),
+        "owner": row.owner_id.to_string(),
+        "owner_display_name": row.owner_display_name,
+        "host_label": row.host_label,
+        "last_heartbeat_at": iso(row.last_heartbeat_at),
+        "is_busy": row.is_busy,
+        "queue_depth": row.queue_depth,
+    })
+}
+
 /// The `assigned_runner_detail` object (design §14.1) or `Null`.
 ///
 /// Shown to everyone who can see the issue (H-6), even though the runner
@@ -174,17 +208,17 @@ pub async fn assigned_runner_detail(
         Some(owner) => owner.display_name,
         None => String::new(),
     };
-    Ok(json!({
-        "id": runner.id.to_string(),
-        "name": runner.name,
-        "status": runner.status,
-        "pod": runner.pod_id.to_string(),
-        "owner": runner.owner_id.to_string(),
-        "owner_display_name": owner_display_name,
-        "host_label": runner.host_label,
-        "last_heartbeat_at": iso(runner.last_heartbeat_at),
-        "is_busy": is_busy(db, runner.id).await?,
-        "queue_depth": queue_depth(db, runner.id).await?,
+    Ok(runner_detail_value(&RunnerDetailRow {
+        id: runner.id,
+        name: runner.name.clone(),
+        status: runner.status.clone(),
+        pod_id: runner.pod_id,
+        owner_id: runner.owner_id,
+        owner_display_name,
+        host_label: runner.host_label.clone(),
+        last_heartbeat_at: runner.last_heartbeat_at,
+        is_busy: is_busy(db, runner.id).await?,
+        queue_depth: queue_depth(db, runner.id).await?,
     }))
 }
 
