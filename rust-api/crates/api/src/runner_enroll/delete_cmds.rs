@@ -527,6 +527,38 @@ async fn scope_machine(
     Ok(machine)
 }
 
+/// The PATCH workspace-scope read (`_machine_is_in_workspace_scope`,
+/// `runners.py` #2903): the unlocked machine plus the runner/token
+/// probes, WITHOUT the `can_view` (private-owned) kernel — the owner
+/// gate is the 403 inside [`update_machine_controls`], so a same-
+/// workspace teammate correctly reads 403, not 404.
+async fn scope_machine_workspace_only(
+    pool: &PgPool,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    machine_id: Uuid,
+) -> Result<MachineGate, Response> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let machine = manage_reads::machine_gate(&db, machine_id)
+        .await
+        .map_err(|_| server_error())?;
+    let Some(machine) = machine else {
+        return Err(not_found());
+    };
+    let runner_hit =
+        manage_reads::machine_scope_runner_exists(&db, machine_id, user_id, workspace_id)
+            .await
+            .map_err(|_| server_error())?;
+    let token_hit =
+        manage_reads::machine_scope_token_exists(&db, machine_id, user_id, workspace_id)
+            .await
+            .map_err(|_| server_error())?;
+    if !runner_hit && !token_hit {
+        return Err(not_found());
+    }
+    Ok(machine)
+}
+
 /// `_scoped_machine` (`machine_commands.py:63-73`) in full: the scope
 /// read above, plus the 409 `dev_machine_revoked` arm the
 /// machine-command endpoints carry.
@@ -1169,9 +1201,12 @@ pub async fn machine_patch(
             _ => return bad_request(&engine_control_bool_body(field)),
         }
     }
-    // Scope 404 (unlocked read + probes); owner/revoked gates inside the
-    // locked service (Django `SELECT ... FOR UPDATE` + gates).
-    if let Err(response) = scope_machine(&pool, user_id, workspace_id, machine_id).await {
+    // Scope 404 (workspace-scope read + probes, no `can_view`); the
+    // owner/revoked gates run inside the locked service (Django
+    // `SELECT ... FOR UPDATE` + gates).
+    if let Err(response) =
+        scope_machine_workspace_only(&pool, user_id, workspace_id, machine_id).await
+    {
         return response;
     }
     let mut tx = match pool.begin().await {
