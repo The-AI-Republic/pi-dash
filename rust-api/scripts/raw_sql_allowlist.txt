@@ -119,7 +119,7 @@ crates/api/src/v1_projects/handlers_state_estimate.rs 20
 crates/api/src/v1_schedulers/handlers.rs 7
 crates/api/src/v1_schedulers/mod.rs 7
 crates/api/src/v1_schedulers/writes.rs 12
-crates/api/src/v1_work_items/handlers_actions.rs 24
+crates/api/src/v1_work_items/handlers_actions.rs 19
 crates/api/src/v1_work_items/handlers_activity.rs 29
 crates/api/src/v1_work_items/handlers_core.rs 17
 crates/api/src/v1_work_items/handlers_labels_pages.rs 47
@@ -174,9 +174,9 @@ crates/jobs/src/loop/fire.rs 4
 crates/jobs/src/loop/scan.rs 7
 crates/jobs/src/orchestration/creation_jobs.rs 49
 crates/jobs/src/orchestration/fire_tick_live.rs 2
-crates/jobs/src/orchestration/fire_tick_seam.rs 19
+crates/jobs/src/orchestration/fire_tick_seam.rs 18
 crates/jobs/src/orchestration/handoff.rs 50
-crates/jobs/src/orchestration/live_inputs.rs 9
+crates/jobs/src/orchestration/live_inputs.rs 4
 crates/jobs/src/orchestration/runner_seams.rs 9
 crates/jobs/src/orchestration/scheduler_dispatch.rs 10
 crates/jobs/src/oss_worker/execute_seams.rs 6

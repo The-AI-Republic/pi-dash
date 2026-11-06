@@ -854,8 +854,17 @@ mod tests {
         // Managed pins AND the pod-member local arm.
         assert!(sql.contains("\"agent_run\".\"executor_kind\" = 'managed_runner'"));
         assert!(sql.contains("\"agent_run\".\"executor_kind\" = 'local_runner'"));
-        // Narrow PO-3 usability: no owner_id arm, trigger gate present.
-        assert!(!sql.contains("\"agent_run\".\"owner_id\""));
+        // Narrow PO-3 usability: no owner_id arm in the WHERE (the
+        // SELECT projection legitimately carries the column), trigger
+        // gate present.
+        let where_only = sql
+            .split_once(" WHERE ")
+            .expect("WHERE")
+            .1
+            .split_once(" ORDER BY ")
+            .expect("ORDER BY")
+            .0;
+        assert!(!where_only.contains("\"agent_run\".\"owner_id\""));
         assert!(sql.contains("NOT IN"));
     }
 
@@ -912,7 +921,15 @@ mod tests {
             &next_for_runner_stmt(VISIBILITY_PRIVATE, pod(), runner(), owner(), &team)
                 .expect("team engine"),
         );
-        assert!(sql.contains("\"agent_run\".\"owner_id\""));
+        // The ordinary rule carries the owner_id arm in the WHERE.
+        let where_only = sql
+            .split_once(" WHERE ")
+            .expect("WHERE")
+            .1
+            .split_once(" ORDER BY ")
+            .expect("ORDER BY")
+            .0;
+        assert!(where_only.contains("\"agent_run\".\"owner_id\""));
         assert!(!sql.contains("NOT IN"));
         assert!(sql.contains("\"agent_run\".\"executor_kind\" = 'local_runner'"));
     }

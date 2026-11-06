@@ -60,6 +60,7 @@ pub mod drain;
 pub mod guards;
 pub mod live_drains;
 pub mod offline_recovery;
+pub mod pod_match;
 pub mod pubsub;
 pub mod session_service;
 pub mod usage;
@@ -77,6 +78,7 @@ pub use offline_recovery::{
     sweep_cancel_barrier_stamped_sql, sweep_stale_cancel_ids_sql, sweep_stale_cancel_pods_sql,
     sweep_stale_pairs_sql,
 };
+pub use pod_match::{pod_has_runner_for_issue_principal, SeaOrmPodMatcher};
 pub use pubsub::{
     close_runner_session, send_connection_revoke, send_runner_remove, send_runner_revoke,
     send_to_machine, send_to_runner, PubsubStore, SendOutcome, CLOSE_ACTIVE_SESSIONS_SQL,

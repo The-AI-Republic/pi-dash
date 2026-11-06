@@ -790,7 +790,7 @@ pub async fn agent_system_user_id(pool: &sqlx::PgPool) -> Result<Uuid, GetAgentU
 
 /// How the stamps write `display_name`: bound (gitlab/github resolve
 /// the backfill in Rust) or the atomic backfill `CASE` (gitea/google).
-/// `None` on the whole field omits the column (magic/admin).
+/// `None` on the whole field omits the column (admin).
 pub enum DisplayNameUpdate<'a> {
     Bound(&'a str),
     BackfillCase,
@@ -798,7 +798,7 @@ pub enum DisplayNameUpdate<'a> {
 
 /// How the stamps write `is_staff`: a bound `is_staff || is_superuser`
 /// (gitlab/github) or the atomic `OR` expression (gitea/google).
-/// `None` omits the column (magic/admin).
+/// `None` omits the column (admin).
 pub enum StaffSync {
     Value(bool),
     OrSuperuser,
@@ -2747,14 +2747,21 @@ mod tests {
     fn stamps_sql_magic_shape() {
         let stamps = LoginStamps {
             medium: Some("magic-code"),
+            display_name: Some(DisplayNameUpdate::BackfillCase),
+            is_staff: Some(StaffSync::OrSuperuser),
             touch_updated_at: true,
             ..stamps_fixture()
         };
+        // NEWPIDASH-41: the full `user.save()` effects (backfill, staff
+        // sync, `auto_now`) ride along, like email/gitea/google.
         assert_eq!(
             login_stamps_sql(&stamps),
             "UPDATE \"users\" SET \"last_login_medium\" = $1, \"last_active\" = $2, \
              \"last_login_time\" = $3, \"last_login_ip\" = $4, \"last_login_uagent\" = $5, \
              \"token_updated_at\" = $6, \"token\" = $7, \"is_active\" = TRUE, \
+             \"display_name\" = CASE WHEN \"display_name\" = '' \
+             THEN split_part(\"email\", '@', 1) ELSE \"display_name\" END, \
+             \"is_staff\" = \"is_staff\" OR \"is_superuser\", \
              \"updated_at\" = $8 WHERE \"id\" = $9"
         );
     }
