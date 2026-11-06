@@ -85,11 +85,12 @@ def test_wave_20plus_runs_across_tenants(db, broker, seeder):
 
     Tenants 0/1 are slow (3s per provider response); the rest are
     instant. Tenant 7's second run is tool-heavy (two search calls).
-    Asserts per-run history/usage/output separation, per-tenant key
-    isolation from the recorded requests, and that instant tenants
-    finish before the slow ones (one tenant's slow provider does not
-    stall another's run). Worker concurrency on both legs is defined
-    by the stack, never by this test.
+    Asserts per-run history/usage/output separation and per-tenant
+    key isolation from the recorded requests. The no-stall ordering
+    proof (instant before slow) is pinned separately in
+    ``test_slow_provider_does_not_stall_independent_tenant`` because
+    it needs genuinely concurrent claims — the stack's worker
+    concurrency, never this test, defines whether it runs.
     """
     tag = uuid.uuid4().hex[:8]
     keys = [f"wave-key-{tag}-{i}" for i in range(WAVE_TENANTS)]
@@ -196,20 +197,61 @@ def test_wave_20plus_runs_across_tenants(db, broker, seeder):
                 if a != i:
                     for text in bodies:
                         assert marker not in text
-        instant_times = [
-            at for (i, _j), at in terminal_at.items() if i not in SLOW_TENANTS
-        ]
-        slow_times = [
-            at for (i, _j), at in terminal_at.items() if i in SLOW_TENANTS
-        ]
-        assert max(instant_times) < min(slow_times), (
-            "an instant tenant finished after a slow one (stall)",
-            max(instant_times),
-            min(slow_times),
-        )
     finally:
         for stub in stubs:
             stub.stop()
+
+
+def test_slow_provider_does_not_stall_independent_tenant(db, broker, seeder):
+    """Item 3: one tenant's slow provider does not stall another's run.
+
+    The slow tenant's stub sleeps 3s per response (under the 5s model
+    timeout, so it stalls without failing). Publish the slow run
+    first, then an instant tenant's run: the instant run COMPLETES
+    while the slow one is still RUNNING. Needs genuinely concurrent
+    claims (stack worker concurrency 24 on both legs) — never
+    approximated with concurrency=1.
+    """
+    tag = uuid.uuid4().hex[:8]
+    key_slow, key_fast = f"slow-{tag}", f"fast-{tag}"
+    stub_slow = _MarkerStub(
+        {f"SLOW{tag}": [final_response(summary="slow done")]}, delay=3
+    )
+    stub_fast = _MarkerStub({f"INSTANT{tag}": [final_response(summary="fast done")]})
+    base_slow = stub_slow.start()
+    base_fast = stub_fast.start()
+    try:
+        world_slow = create_member_world(seeder)
+        seed_llm_config(seeder, world_slow["owner"]["id"], base_slow, key_slow)
+        run_slow = create_agent_run(
+            seeder,
+            world_slow["workspace"]["id"],
+            world_slow["pod"]["id"],
+            world_slow["owner"]["id"],
+            prompt=f"SLOW{tag}",
+        )
+        world_fast = create_member_world(seeder)
+        seed_llm_config(seeder, world_fast["owner"]["id"], base_fast, key_fast)
+        run_fast = create_agent_run(
+            seeder,
+            world_fast["workspace"]["id"],
+            world_fast["pod"]["id"],
+            world_fast["owner"]["id"],
+            prompt=f"INSTANT{tag}",
+        )
+        publish_run(broker, run_slow["id"])
+        publish_run(broker, run_fast["id"])
+        fast = wait_for_run(db, run_fast["id"], status=COMPLETED, timeout=60)
+        assert fast["done_payload"]["summary"] == "fast done"
+        slow_now = get_run(db, run_slow["id"])
+        assert slow_now["status"] in (QUEUED, RUNNING), slow_now["status"]
+        slow = wait_for_run(db, run_slow["id"], status=COMPLETED, timeout=60)
+        assert slow["done_payload"]["summary"] == "slow done"
+        assert stub_slow.authorization_headers() == [f"Bearer {key_slow}"]
+        assert stub_fast.authorization_headers() == [f"Bearer {key_fast}"]
+    finally:
+        stub_slow.stop()
+        stub_fast.stop()
 
 
 class _StatusStub:
