@@ -2306,8 +2306,8 @@ where
 /// effects as the password writes above. The `email` re-normalization is
 /// a no-op (the address never changes here), so it stays out. One
 /// canonical statement serves the app, space and license admin sign-outs.
-/// The bind values stay per caller: the app path binds `None` when no IP
-/// is present, the admin path `""`. `$4` is a fresh token.
+/// Both callers bind `None` when no IP is present (NEWPIDASH-42 brought
+/// the admin path in line; it used to bind `""`). `$4` is a fresh token.
 const STAMP_LOGOUT_SQL: &str = "UPDATE \"users\" SET \"last_logout_ip\" = $1, \
     \"last_logout_time\" = $2, \"updated_at\" = $2, \
     \"token\" = CASE WHEN \"token_updated_at\" IS NOT NULL THEN $4 ELSE \"token\" END, \

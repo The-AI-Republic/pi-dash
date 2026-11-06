@@ -1238,7 +1238,9 @@ impl ToolStore for PgToolStore {
             related_issue_id: *related_id,
             relation_type: stored_type,
         };
-        let outcome = relation_domain::relate_row(&self.pool, &row).await;
+        let outcome =
+            relation_domain::relate_row(&pidash_db::pool::sea_orm_connection(&self.pool), &row)
+                .await;
         match outcome {
             Ok(_) => Ok(true),
             Err(error)
@@ -1264,8 +1266,14 @@ impl ToolStore for PgToolStore {
         // plus the related-objects sweep enqueue. Best-effort by repo
         // precedent (unlike `.delay()`, which propagates a broker
         // failure): a queue failure must not fail the op.
-        relation_domain::soft_delete_relation_row(&self.pool, *row_id, *actor_id, *now, *now)
-            .await?;
+        relation_domain::soft_delete_relation_row(
+            &pidash_db::pool::sea_orm_connection(&self.pool),
+            *row_id,
+            *actor_id,
+            *now,
+            *now,
+        )
+        .await?;
         let mut kwargs = serde_json::Map::with_capacity(1);
         kwargs.insert("using".to_owned(), Value::Null);
         enqueue_best_effort(
@@ -1510,7 +1518,7 @@ impl ToolStore for PgToolStore {
         };
         let issue_id = Uuid::new_v4();
         issue_domain::insert_tool_issue(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             &issue_domain::ToolIssueInsert {
                 issue_id,
                 now: *now,
@@ -1532,7 +1540,7 @@ impl ToolStore for PgToolStore {
         )
         .await?;
         issue_domain::insert_tool_issue_sequence(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             &issue_domain::ToolIssueSequence {
                 project_id: input.project_id,
                 workspace_id: input.workspace_id,
@@ -1634,7 +1642,7 @@ impl ToolStore for PgToolStore {
         // exactly the tool's columns (the write itself lives in
         // `domain::issues`, on this same fused transaction).
         issue_domain::update_tool_issue(
-            &mut **tx.inner(),
+            &pidash_db::orm_tx::TxConn::new(tx.inner()),
             &issue_domain::ToolIssueUpdate {
                 issue_id: *issue_id,
                 name: patch.name.as_deref(),
@@ -2327,9 +2335,15 @@ impl ToolStore for PgToolStore {
             edited_at: None,
         };
         let mut tx = self.pool.begin().await?;
-        comment_domain::insert_comment_row(&mut *tx, &rows).await?;
-        comment_domain::insert_description_row(&mut *tx, &rows).await?;
-        comment_domain::link_comment_description(&mut *tx, rows.id, rows.description_id).await?;
+        comment_domain::insert_comment_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows).await?;
+        comment_domain::insert_description_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows)
+            .await?;
+        comment_domain::link_comment_description(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            rows.id,
+            rows.description_id,
+        )
+        .await?;
         tx.commit().await?;
         Ok(comment_id)
     }
@@ -2381,7 +2395,7 @@ impl ToolStore for PgToolStore {
             .await?;
             message_seq = max.unwrap_or(0) + 1;
             pidash_services::domain::assistant::create_message_row(
-                &mut *tx,
+                &pidash_db::orm_tx::TxConn::new(&mut tx),
                 &pidash_services::domain::assistant::NewMessage {
                     id: message_id,
                     thread_id: deps.thread_id,
@@ -2438,7 +2452,7 @@ impl ToolStore for PgToolStore {
             .await?;
             event_seq = max.unwrap_or(0) + 1;
             pidash_services::domain::assistant::append_event(
-                &mut *tx,
+                &pidash_db::orm_tx::TxConn::new(&mut tx),
                 &pidash_services::domain::assistant::NewEvent {
                     thread_id: deps.thread_id,
                     turn_id: turn,

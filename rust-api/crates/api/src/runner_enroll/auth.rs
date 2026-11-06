@@ -80,6 +80,15 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use pidash_auth::jwt::KeyRing;
 pub use pidash_compat::response::server_error;
+use pidash_db::entity::{
+    api_tokens, dev_machine, machine_token, runner, runner_force_refresh, workspace_members,
+    workspaces,
+};
+use sea_orm::sea_query::{Expr, SimpleExpr};
+use sea_orm::{
+    ColumnTrait, DbErr, EntityTrait, FromQueryResult, JoinType, QueryFilter, QuerySelect,
+    RelationTrait,
+};
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -312,7 +321,7 @@ fn request_runner_id(
 /// loads (`authentication.py:92,138`). The related rows are never read past
 /// their revocation bits on the auth paths, so only the bit is joined.
 /// Column order follows F1 (`models/columns.json`, `runner`).
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, FromQueryResult)]
 pub struct RunnerAuthRow {
     pub id: Uuid,
     pub owner_id: Uuid,
@@ -354,7 +363,7 @@ pub struct RunnerAuthRow {
 /// (`authentication.py:123,220`, `api_authentication.py:50`) and the
 /// `auth_machine_token.workspace.slug` read (`enrollment.py:598,603`).
 /// Column order follows F1 (`models/columns.json`, `machine_token`).
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, FromQueryResult)]
 pub struct MachineTokenAuthRow {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -508,21 +517,31 @@ pub fn runner_bound_to_token(
 async fn fetch_machine_token(
     pool: &PgPool,
     token_hash: &str,
-) -> Result<Option<MachineTokenAuthRow>, sqlx::Error> {
-    sqlx::query_as::<_, MachineTokenAuthRow>(
-        r#"SELECT mt."id", mt."user_id", mt."dev_machine_id", mt."workspace_id",
-                  mt."host_label", mt."token_hash", mt."token_fingerprint", mt."label",
-                  mt."is_service", mt."created_at", mt."last_used_at", mt."revoked_at",
-                  w."slug" AS "workspace_slug",
-                  dm."revoked_at" IS NOT NULL AS "dev_machine_revoked"
-           FROM "machine_token" mt
-           LEFT OUTER JOIN "workspaces" w ON w."id" = mt."workspace_id"
-           LEFT OUTER JOIN "dev_machine" dm ON dm."id" = mt."dev_machine_id"
-           WHERE mt."token_hash" = $1"#,
-    )
-    .bind(token_hash)
-    .fetch_optional(pool)
-    .await
+) -> Result<Option<MachineTokenAuthRow>, DbErr> {
+    machine_token::Entity::find()
+        .column_as(workspaces::Column::Slug, "workspace_slug")
+        .column_as(dev_machine_revoked(), "dev_machine_revoked")
+        .join(
+            JoinType::LeftJoin,
+            machine_token::Relation::Workspaces.def(),
+        )
+        .join(
+            JoinType::LeftJoin,
+            machine_token::Entity::belongs_to(dev_machine::Entity)
+                .from(machine_token::Column::DevMachineId)
+                .to(dev_machine::Column::Id)
+                .into(),
+        )
+        .filter(machine_token::Column::TokenHash.eq(token_hash))
+        .into_model::<MachineTokenAuthRow>()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+}
+
+/// `dm.revoked_at IS NOT NULL` over the joined `dev_machine` (false when
+/// there is no machine, which the callers check first).
+fn dev_machine_revoked() -> SimpleExpr {
+    Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)).is_not_null()
 }
 
 /// `Runner.objects.select_related("workspace", "pod",
@@ -531,26 +550,51 @@ async fn fetch_machine_token(
 async fn fetch_runner_for_auth(
     pool: &PgPool,
     runner_id: Uuid,
-) -> Result<Option<RunnerAuthRow>, sqlx::Error> {
-    sqlx::query_as::<_, RunnerAuthRow>(
-        r#"SELECT r."id", r."owner_id", r."workspace_id", r."dev_machine_id", r."pod_id",
-                  r."name", r."host_label", r."provisioning", r."visibility",
-                  r."refresh_token_hash", r."refresh_token_fingerprint",
-                  r."refresh_token_generation", r."previous_refresh_token_hash",
-                  r."access_token_signing_key_version",
-                  r."enrollment_token_hash", r."enrollment_token_fingerprint",
-                  r."enrolled_at", r."capabilities", r."status", r."os", r."arch",
-                  r."runner_version", r."dev_metadata", r."protocol_version",
-                  r."last_heartbeat_at",
-                  r."created_at", r."updated_at", r."revoked_at", r."revoked_reason",
-                  dm."revoked_at" IS NOT NULL AS "dev_machine_revoked"
-           FROM "runner" r
-           LEFT OUTER JOIN "dev_machine" dm ON dm."id" = r."dev_machine_id"
-           WHERE r."id" = $1"#,
-    )
-    .bind(runner_id)
-    .fetch_optional(pool)
-    .await
+) -> Result<Option<RunnerAuthRow>, DbErr> {
+    runner::Entity::find()
+        .column_as(dev_machine_revoked(), "dev_machine_revoked")
+        .join(
+            JoinType::LeftJoin,
+            runner::Entity::belongs_to(dev_machine::Entity)
+                .from(runner::Column::DevMachineId)
+                .to(dev_machine::Column::Id)
+                .into(),
+        )
+        .filter(runner::Column::Id.eq(runner_id))
+        .into_model::<RunnerAuthRow>()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+}
+
+/// `RunnerForceRefresh.objects.filter(runner=runner).first()`
+/// (`authentication.py:108`): PK lookup, at most one row.
+async fn force_refresh_min_rtg(pool: &PgPool, runner_id: Uuid) -> Result<Option<i32>, DbErr> {
+    runner_force_refresh::Entity::find()
+        .select_only()
+        .column(runner_force_refresh::Column::MinRtg)
+        .filter(runner_force_refresh::Column::RunnerId.eq(runner_id))
+        .into_tuple()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+}
+
+/// The live `APIToken` row with this exact token (`deleted_at IS NULL`,
+/// the manager scope); `is_active` / `expired_at` are judged by the kernel.
+async fn live_api_token(pool: &PgPool, presented: &str) -> Result<Option<ApiTokenLookup>, DbErr> {
+    api_tokens::Entity::find()
+        .select_only()
+        .columns([
+            api_tokens::Column::Id,
+            api_tokens::Column::Token,
+            api_tokens::Column::IsActive,
+            api_tokens::Column::ExpiredAt,
+            api_tokens::Column::UserId,
+        ])
+        .filter(api_tokens::Column::Token.eq(presented))
+        .filter(api_tokens::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
 }
 
 /// `is_workspace_member(user, workspace_id)` (`core/permissions.py:28-34`):
@@ -561,19 +605,17 @@ async fn workspace_member_role(
     pool: &PgPool,
     workspace_id: Uuid,
     user_id: Uuid,
-) -> Result<Option<i32>, sqlx::Error> {
-    // `role` is `smallint`: decode as `i16` (sqlx does not widen), then
-    // widen for the kernel-shaped return.
-    let role: Option<i16> = sqlx::query_scalar(
-        r#"SELECT "role" FROM "workspace_members"
-           WHERE "workspace_id" = $1 AND "member_id" = $2
-             AND "is_active" AND "deleted_at" IS NULL
-           LIMIT 1"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
+) -> Result<Option<i32>, DbErr> {
+    let role: Option<i16> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await?;
     Ok(role.map(i32::from))
 }
 
@@ -582,15 +624,19 @@ async fn workspace_member_role(
 /// rows (revoked is denied earlier), so the `is not None` early return never
 /// fires here.
 async fn revoke_machine_token(pool: &PgPool, token_id: Uuid) -> Result<(), sqlx::Error> {
-    pidash_services::domain::tokens::revoke_machine_token_by_id(pool, token_id, chrono::Utc::now())
-        .await
+    pidash_services::domain::tokens::revoke_machine_token_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        token_id,
+        chrono::Utc::now(),
+    )
+    .await
 }
 
 /// `MachineToken.objects.filter(pk=...).update(last_used_at=...)`: no
 /// `updated_at` touch (`QuerySet.update` writes only the named column).
 async fn bump_machine_token_last_used(pool: &PgPool, token_id: Uuid) -> Result<(), sqlx::Error> {
     pidash_services::domain::tokens::touch_machine_token_last_used_by_id(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         token_id,
         chrono::Utc::now(),
     )
@@ -701,13 +747,9 @@ async fn authenticate_access_jwt(
     }
     // `RunnerForceRefresh.objects.filter(runner=runner).first()` (`:108`):
     // PK lookup, at most one row, so no ordering/limit is needed.
-    let min_rtg: Option<i32> = sqlx::query_scalar(
-        r#"SELECT "min_rtg" FROM "runner_force_refresh" WHERE "runner_id" = $1"#,
-    )
-    .bind(row.id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
+    let min_rtg = force_refresh_min_rtg(pool, row.id)
+        .await
+        .map_err(|_| server_error())?;
     if !force_refresh_ok(payload.rtg, min_rtg) {
         return Err(bearer_failure_response(CODE_FORCE_REFRESH_REQUIRED, allow));
     }
@@ -987,14 +1029,9 @@ async fn authenticate_api_key_token(
     pool: &PgPool,
     presented: &str,
 ) -> Result<ApiKeyOutcome, Response> {
-    let row: Option<ApiTokenLookup> = sqlx::query_as(
-        r#"SELECT "id", "token", "is_active", "expired_at", "user_id"
-               FROM "api_tokens" WHERE "token" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(presented)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
+    let row = live_api_token(pool, presented)
+        .await
+        .map_err(|_| server_error())?;
     let Some((id, token, is_active, expired_at, user_id)) = row else {
         return Ok(ApiKeyOutcome::Invalid);
     };
@@ -1012,9 +1049,13 @@ async fn authenticate_api_key_token(
     {
         return Ok(ApiKeyOutcome::Invalid);
     }
-    pidash_services::domain::tokens::touch_api_token_last_used_by_id(pool, id, chrono::Utc::now())
-        .await
-        .map_err(|_| server_error())?;
+    pidash_services::domain::tokens::touch_api_token_last_used_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        id,
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(|_| server_error())?;
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
     crate::middleware::publish_logger_user_id(&user_id.to_string());
@@ -1477,5 +1518,146 @@ mod tests {
                 .expect("missing"),
             ApiKeyOutcome::Missing
         ));
+    }
+
+    /// The auth lookups against session-local copies of their tables (no
+    /// constraints, so no parent rows), on a one-connection pool so the
+    /// SeaORM reads see the temp tables.
+    #[tokio::test]
+    async fn live_auth_lookups() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        let migrated: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.machine_token')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("probe");
+        if migrated.is_none() {
+            eprintln!("skipping live-db test: the database is not migrated");
+            return;
+        }
+        for table in [
+            "machine_token",
+            "dev_machine",
+            "workspaces",
+            "runner",
+            "runner_force_refresh",
+            "workspace_members",
+            "api_tokens",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (user, workspace, machine, runner_id) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug) VALUES ('{workspace}', 'ws-auth')"),
+            format!("INSERT INTO dev_machine (id, revoked_at) VALUES ('{machine}', now())"),
+            format!(
+                "INSERT INTO machine_token (id, user_id, dev_machine_id, workspace_id, host_label, \
+                 token_hash, token_fingerprint, label, is_service, created_at) VALUES \
+                 (gen_random_uuid(), '{user}', '{machine}', '{workspace}', 'h', 'hash-dm', 'f', \
+                 'l', true, now()), (gen_random_uuid(), '{user}', NULL, '{workspace}', 'h', \
+                 'hash-plain', 'f', 'l', false, now())"
+            ),
+            format!(
+                "INSERT INTO runner (id, owner_id, workspace_id, dev_machine_id, pod_id, name, \
+                 host_label, provisioning, visibility, refresh_token_hash, \
+                 refresh_token_fingerprint, refresh_token_generation, \
+                 previous_refresh_token_hash, access_token_signing_key_version, \
+                 enrollment_token_hash, enrollment_token_fingerprint, capabilities, status, os, \
+                 arch, runner_version, dev_metadata, protocol_version, created_at, updated_at, \
+                 revoked_reason) VALUES ('{runner_id}', '{user}', '{workspace}', '{machine}', \
+                 gen_random_uuid(), 'r', 'h', 'desktop_bundled', 0, '', '', 3, '', 1, '', '', \
+                 '[]', 'online', '', '', '', '{{}}', 1, now(), now(), '')"
+            ),
+            format!(
+                "INSERT INTO runner_force_refresh (runner_id, min_rtg) VALUES ('{runner_id}', 4)"
+            ),
+            format!(
+                "INSERT INTO workspace_members (id, workspace_id, member_id, role, is_active) \
+                 VALUES (gen_random_uuid(), '{workspace}', '{user}', 15, true)"
+            ),
+            format!(
+                "INSERT INTO api_tokens (id, token, is_active, expired_at, user_id, deleted_at) \
+                 VALUES (gen_random_uuid(), 'pa_live', true, NULL, '{user}', NULL), \
+                 (gen_random_uuid(), 'pa_gone', true, NULL, '{user}', now())"
+            ),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+
+        let with_machine = fetch_machine_token(&pool, "hash-dm")
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(with_machine.workspace_slug.as_deref(), Some("ws-auth"));
+        assert_eq!(with_machine.dev_machine_id, Some(machine));
+        assert!(with_machine.dev_machine_revoked);
+        let plain = fetch_machine_token(&pool, "hash-plain")
+            .await
+            .expect("read")
+            .expect("row");
+        assert!(!plain.dev_machine_revoked);
+        assert!(!plain.is_service);
+        assert!(fetch_machine_token(&pool, "nope")
+            .await
+            .expect("read")
+            .is_none());
+
+        let runner = fetch_runner_for_auth(&pool, runner_id)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(
+            (runner.owner_id, runner.refresh_token_generation),
+            (user, 3)
+        );
+        assert!(runner.dev_machine_revoked);
+        assert_eq!(
+            force_refresh_min_rtg(&pool, runner_id).await.expect("rtg"),
+            Some(4)
+        );
+        assert_eq!(force_refresh_min_rtg(&pool, user).await.expect("rtg"), None);
+
+        assert_eq!(
+            workspace_member_role(&pool, workspace, user)
+                .await
+                .expect("role"),
+            Some(15)
+        );
+        assert_eq!(
+            workspace_member_role(&pool, workspace, Uuid::new_v4())
+                .await
+                .expect("role"),
+            None
+        );
+        let token = live_api_token(&pool, "pa_live")
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(
+            (token.1.as_str(), token.2, token.3, token.4),
+            ("pa_live", true, None, user)
+        );
+        assert!(live_api_token(&pool, "pa_gone")
+            .await
+            .expect("read")
+            .is_none());
     }
 }

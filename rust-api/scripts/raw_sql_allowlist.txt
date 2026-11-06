@@ -26,16 +26,7 @@ crates/api/src/app_integrations/handlers_github_app.rs 31
 crates/api/src/app_integrations/handlers_github_proj.rs 34
 crates/api/src/app_integrations/handlers_github_ws.rs 17
 crates/api/src/app_integrations/mod.rs 1
-crates/api/src/app_issues/handlers_archive.rs 18
-crates/api/src/app_issues/handlers_bulk.rs 17
-crates/api/src/app_issues/handlers_core.rs 41
-crates/api/src/app_issues/handlers_engage.rs 37
-crates/api/src/app_issues/handlers_issue_types.rs 7
-crates/api/src/app_issues/handlers_labels_attachments.rs 34
-crates/api/src/app_issues/handlers_reads.rs 11
-crates/api/src/app_issues/handlers_relations.rs 53
-crates/api/src/app_issues/handlers_versions_move.rs 17
-crates/api/src/app_issues/mod.rs 16
+crates/api/src/app_issues/mod.rs 2
 crates/api/src/app_modules/handlers_archive.rs 5
 crates/api/src/app_modules/handlers_module_issues.rs 10
 crates/api/src/app_modules/handlers_module_links.rs 16
@@ -94,13 +85,8 @@ crates/api/src/loop/user.rs 2
 crates/api/src/middleware/session.rs 5
 crates/api/src/orchestration.rs 5
 crates/api/src/prompting/mod.rs 35
-crates/api/src/runner_enroll/auth.rs 5
-crates/api/src/runner_enroll/delete_cmds.rs 17
-crates/api/src/runner_enroll/desktop.rs 9
-crates/api/src/runner_enroll/enroll.rs 47
-crates/api/src/runner_enroll/manage.rs 49
-crates/api/src/runner_enroll/projects.rs 9
-crates/api/src/runner_enroll/teardown.rs 116
+crates/api/src/runner_enroll/delete_cmds.rs 1
+crates/api/src/runner_enroll/teardown.rs 10
 crates/api/src/runner_runs/approvals.rs 1
 crates/api/src/runner_runs/chat.rs 84
 crates/api/src/runner_runs/dispatch.rs 17
@@ -197,7 +183,7 @@ crates/jobs/src/oss_worker/execute_seams.rs 6
 crates/jobs/src/oss_worker/model_runtime/invoke.rs 1
 crates/jobs/src/oss_worker/model_runtime/tools_exec.rs 57
 crates/jobs/src/queue.rs 11
-crates/jobs/src/runner_enroll.rs 32
+crates/jobs/src/runner_enroll.rs 5
 crates/jobs/src/runner_runs/offline_recovery.rs 15
 crates/jobs/src/runner_runs/sweeps_chat.rs 43
 crates/jobs/src/runner_runs/sweeps_runs.rs 12
@@ -227,36 +213,27 @@ crates/jobs/src/tasks_webhooks/webhook_send.rs 6
 crates/services/src/assistant/config.rs 1
 crates/services/src/assistant/mcp.rs 1
 crates/services/src/dispatch/execution.rs 7
-crates/services/src/domain/assistant.rs 21
-crates/services/src/domain/clock.rs 2
-crates/services/src/domain/comments.rs 24
 crates/services/src/domain/identity.rs 43
-crates/services/src/domain/issues.rs 35
 crates/services/src/domain/issues_move.rs 3
 crates/services/src/domain/issues_move_creation.rs 4
 crates/services/src/domain/projects.rs 66
-crates/services/src/domain/relations.rs 4
-crates/services/src/domain/tokens.rs 36
-crates/services/src/domain/transition.rs 1
-crates/services/src/domain/txn.rs 2
 crates/services/src/domain/workspaces.rs 27
 crates/services/src/integrations/github_client.rs 9
 crates/services/src/operations/comments.rs 3
 crates/services/src/operations/issues.rs 18
 crates/services/src/operations/pull_requests.rs 1
 crates/services/src/operations/relations.rs 6
-crates/services/src/operations/workpad.rs 1
 crates/services/src/ops/boot.rs 1
 crates/services/src/read/comment.rs 5
 crates/services/src/read/identity.rs 3
-crates/services/src/read/issues.rs 9
+crates/services/src/read/issues.rs 7
 crates/services/src/read/pr_links.rs 3
 crates/services/src/read/projects.rs 2
 crates/services/src/read/relations.rs 1
 crates/services/src/read/search.rs 1
 crates/services/src/read/work_items.rs 20
 crates/services/src/read/workspace.rs 3
-crates/services/src/runner_enroll/revoke.rs 3
+crates/services/src/runner_enroll/revoke.rs 1
 crates/services/src/runner_runs/chat.rs 2
 crates/services/src/runner_runs/finalization.rs 1
 crates/services/src/runner_sessions/live_drains.rs 9
@@ -265,7 +242,6 @@ crates/services/src/scheduler/builtins.rs 5
 [dup]
 # SELECTs with two output columns of one name (fix, don't add).
 crates/api/src/app_intake/issues.rs | 03711dfaa7dd
-crates/api/src/app_issues/handlers_engage.rs | 818baedb1c81
 crates/api/src/auth_oauth/device_session.rs | e6dc5d83f1e3
 crates/api/src/prompting/mod.rs | 5eb6f5df0734
 crates/api/src/prompting/mod.rs | ca7bbdefd9fe

@@ -455,9 +455,12 @@ async fn authenticate_api_token(pool: &sqlx::PgPool, raw: &str) -> Result<Identi
         .map_err(|_| HandlerError::InvalidToken)?;
     // `api_token.save(update_fields=["last_used"])`: operational failures 500
     // through the generic branch, like Python.
-    pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, raw)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+    pidash_services::domain::tokens::touch_api_token_last_used_by_token(
+        &pidash_db::pool::sea_orm_connection(pool),
+        raw,
+    )
+    .await
+    .map_err(|_| HandlerError::ServerError)?;
     load_identity(pool, user_id).await
 }
 
@@ -513,14 +516,20 @@ async fn authenticate_machine_token(
     .await
     .map_err(|_| HandlerError::ServerError)?;
     if member.is_none() {
-        pidash_services::domain::tokens::revoke_machine_token_by_hash(pool, &presented_hash)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
-        return Err(HandlerError::InvalidToken);
-    }
-    pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(pool, &presented_hash)
+        pidash_services::domain::tokens::revoke_machine_token_by_hash(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &presented_hash,
+        )
         .await
         .map_err(|_| HandlerError::ServerError)?;
+        return Err(HandlerError::InvalidToken);
+    }
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &presented_hash,
+    )
+    .await
+    .map_err(|_| HandlerError::ServerError)?;
     load_identity(pool, user_id).await
 }
 

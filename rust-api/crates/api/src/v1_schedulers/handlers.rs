@@ -619,28 +619,47 @@ async fn ws_scheduler_list_inner(
     // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
     // runs after permissions; an unknown zone 400s only for survivors).
     let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
+    // Unreachable when `None`: an unknown slug already denied above. The
+    // workspace id moves here so the shared core takes plain ids.
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    ws_scheduler_list_core(
+        &pre.pool,
+        &pre.actor.id,
+        &workspace_id,
+        slug,
+        &timezone,
+        query,
+    )
+    .await
+}
+
+/// The list body past auth, the gate, the flag and the zone: fetch the
+/// page, its visible bindings, select and envelope it. Shared by the v1
+/// handler above and the [`super::service`] entry (same statements, so
+/// the two surfaces cannot drift).
+pub(crate) async fn ws_scheduler_list_core(
+    pool: &sqlx::PgPool,
+    actor_id: &uuid::Uuid,
+    workspace_id: &uuid::Uuid,
+    slug: &str,
+    timezone: &Tz,
+    query: &QueryMap,
+) -> Result<Response, Denial> {
     let (per_page, cursor) = parse_pagination(query, 1000, 1000)?;
-    let rows = fetch_schedulers(&pre.pool, WORKSPACE_SCHEDULERS_SQL, slug, None).await?;
+    let rows = fetch_schedulers(pool, WORKSPACE_SCHEDULERS_SQL, slug, None).await?;
     let total_count = rows.len() as i64;
     let (page_rows, has_more) = window_page(&rows, per_page, &cursor)?;
     let scheduler_ids: Vec<uuid::Uuid> = page_rows.iter().map(|r| r.id).collect();
     let grouped = group_bindings(
-        fetch_bindings(
-            &pre.pool,
-            WORKSPACE_BINDINGS_SQL,
-            &scheduler_ids,
-            &pre.actor.id,
-        )
-        .await?,
+        fetch_bindings(pool, WORKSPACE_BINDINGS_SQL, &scheduler_ids, actor_id).await?,
     );
     let fields = fields_param(query, "fields");
     let expand = fields_param(query, "expand");
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
-    let workspace_lite = expand_workspace_lite(&pre.pool, &workspace_id).await?;
+    let workspace_lite = expand_workspace_lite(pool, workspace_id).await?;
     let mut rendered: Vec<Value> = Vec::with_capacity(page_rows.len());
     for row in page_rows {
         let bindings = grouped.get(&row.id).map(Vec::as_slice).unwrap_or(&[]);
-        let shaped = render_scheduler(row, bindings, &timezone);
+        let shaped = render_scheduler(row, bindings, timezone);
         let selected = apply_fields_expand(
             shaped,
             fields.as_deref(),
@@ -691,22 +710,45 @@ async fn project_scheduler_list_inner(
     .await?;
     ensure_feature_enabled(state.settings())?;
     let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
+    // Unreachable when `None`: an unknown slug already denied above.
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    project_scheduler_list_core(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &project_id,
+        &timezone,
+        query,
+    )
+    .await
+}
+
+/// The project-list body past auth, the rewrite, the gate, the flag and
+/// the zone. Shared by the v1 handler above and the [`super::service`]
+/// entry (same statements, so the two surfaces cannot drift).
+pub(crate) async fn project_scheduler_list_core(
+    pool: &sqlx::PgPool,
+    workspace_id: &uuid::Uuid,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    timezone: &Tz,
+    query: &QueryMap,
+) -> Result<Response, Denial> {
     let (per_page, cursor) = parse_pagination(query, 1000, 1000)?;
-    let rows = fetch_schedulers(&pre.pool, PROJECT_SCHEDULERS_SQL, slug, Some(&project_id)).await?;
+    let rows = fetch_schedulers(pool, PROJECT_SCHEDULERS_SQL, slug, Some(project_id)).await?;
     let total_count = rows.len() as i64;
     let (page_rows, has_more) = window_page(&rows, per_page, &cursor)?;
     let scheduler_ids: Vec<uuid::Uuid> = page_rows.iter().map(|r| r.id).collect();
     let grouped = group_bindings(
-        fetch_bindings(&pre.pool, PROJECT_BINDINGS_SQL, &scheduler_ids, &project_id).await?,
+        fetch_bindings(pool, PROJECT_BINDINGS_SQL, &scheduler_ids, project_id).await?,
     );
     let fields = fields_param(query, "fields");
     let expand = fields_param(query, "expand");
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
-    let workspace_lite = expand_workspace_lite(&pre.pool, &workspace_id).await?;
+    let workspace_lite = expand_workspace_lite(pool, workspace_id).await?;
     let mut rendered: Vec<Value> = Vec::with_capacity(page_rows.len());
     for row in page_rows {
         let bindings = grouped.get(&row.id).map(Vec::as_slice).unwrap_or(&[]);
-        let shaped = render_scheduler(row, bindings, &timezone);
+        let shaped = render_scheduler(row, bindings, timezone);
         let selected = apply_fields_expand(
             shaped,
             fields.as_deref(),
@@ -772,18 +814,31 @@ async fn project_scheduler_detail_inner(
     .await?;
     ensure_feature_enabled(state.settings())?;
     let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
+    project_scheduler_detail_core(&pre.pool, slug, &project_id, scheduler_id, &timezone).await
+}
+
+/// The detail body past auth, the rewrite, the gate, the flag and the
+/// zone. Shared by the v1 handler above and the [`super::service`] entry
+/// (same statements, so the two surfaces cannot drift).
+pub(crate) async fn project_scheduler_detail_core(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    scheduler_id: &uuid::Uuid,
+    timezone: &Tz,
+) -> Result<Response, Denial> {
     let row: Option<SchedulerRow> = sqlx::query_as::<_, SchedulerRow>(SCHEDULER_DETAIL_SQL)
         .bind(slug)
         .bind(scheduler_id)
-        .bind(project_id)
-        .fetch_optional(&pre.pool)
+        .bind(*project_id)
+        .fetch_optional(pool)
         .await
         .map_err(|error| db_error(error, "scheduler-detail"))?;
     let Some(row) = row else {
         return Err(Denial::SchedulerNotFound);
     };
-    let bindings = fetch_bindings(&pre.pool, PROJECT_BINDINGS_SQL, &[row.id], &project_id).await?;
-    let shaped = render_scheduler(&row, &bindings, &timezone);
+    let bindings = fetch_bindings(pool, PROJECT_BINDINGS_SQL, &[row.id], project_id).await?;
+    let shaped = render_scheduler(&row, &bindings, timezone);
     Ok(super::ok_json(Value::Object(shaped)))
 }
 
@@ -837,13 +892,37 @@ async fn project_scheduler_runs_inner(
     .await?;
     ensure_feature_enabled(state.settings())?;
     let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
+    project_scheduler_runs_core(
+        &pre.pool,
+        &pre.actor.id,
+        slug,
+        &project_id,
+        scheduler_id,
+        &timezone,
+        query,
+    )
+    .await
+}
+
+/// The runs body past auth, the rewrite, the gate, the flag and the
+/// zone. Shared by the v1 handler above and the [`super::service`] entry
+/// (same statements, so the two surfaces cannot drift).
+pub(crate) async fn project_scheduler_runs_core(
+    pool: &sqlx::PgPool,
+    actor_id: &uuid::Uuid,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    scheduler_id: &uuid::Uuid,
+    timezone: &Tz,
+    query: &QueryMap,
+) -> Result<Response, Denial> {
     // 404 (not an empty page) for a scheduler that isn't installed on
     // this project, matching the detail endpoint.
     let installed: bool = sqlx::query_scalar(RUNS_GUARD_SQL)
         .bind(scheduler_id)
-        .bind(project_id)
+        .bind(*project_id)
         .bind(slug)
-        .fetch_optional(&pre.pool)
+        .fetch_optional(pool)
         .await
         .map_err(|error| db_error(error, "runs-guard"))?
         .unwrap_or(false);
@@ -851,15 +930,15 @@ async fn project_scheduler_runs_inner(
         return Err(Denial::BindingNotFound);
     }
     let (per_page, cursor) = parse_pagination(query, 30, 100)?;
-    let rows = fetch_runs(&pre.pool, slug, scheduler_id, &project_id).await?;
+    let rows = fetch_runs(pool, slug, scheduler_id, project_id).await?;
     let total_count = rows.len() as i64;
     let (page_rows, has_more) = window_page(&rows, per_page, &cursor)?;
     let run_ids: Vec<uuid::Uuid> = page_rows.iter().map(|r| r.id).collect();
-    let issues_by_run = fetch_issues_by_run(&pre.pool, &run_ids, &pre.actor.id).await?;
+    let issues_by_run = fetch_issues_by_run(pool, &run_ids, actor_id).await?;
     let mut rendered: Vec<Value> = Vec::with_capacity(page_rows.len());
     for row in page_rows {
         let issues = issues_by_run.get(&row.id).map(Vec::as_slice).unwrap_or(&[]);
-        rendered.push(render_run(row, issues, &timezone));
+        rendered.push(render_run(row, issues, timezone));
     }
     let next = crate::paginator::next_cursor(per_page, cursor.offset, has_more);
     let prev = crate::paginator::prev_cursor(per_page, cursor.offset);

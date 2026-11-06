@@ -45,6 +45,20 @@ impl DbError {
         Self { site, source }
     }
 
+    /// Attach the query-site tag to a SeaORM failure: the wrapped driver
+    /// error when there is one, else the SeaORM error text as a protocol
+    /// error (the handler's `db_error` only logs and maps to 500).
+    pub fn from_orm(site: &'static str, error: sea_orm::DbErr) -> Self {
+        use sea_orm::{DbErr, RuntimeErr};
+        let source = match error {
+            DbErr::Exec(RuntimeErr::SqlxError(inner))
+            | DbErr::Query(RuntimeErr::SqlxError(inner))
+            | DbErr::Conn(RuntimeErr::SqlxError(inner)) => inner,
+            other => sqlx::Error::Protocol(other.to_string()),
+        };
+        Self { site, source }
+    }
+
     /// The log tag the owning handler passes to its `db_error`.
     pub fn site(&self) -> &'static str {
         self.site

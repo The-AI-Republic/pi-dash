@@ -199,9 +199,13 @@ async fn authenticate_api(pool: &PgPool, presented: &str) -> Result<Caller, Resp
         }
     }
     // `api_token.last_used = now; save(update_fields=["last_used"])`.
-    pidash_services::domain::tokens::touch_api_token_last_used_by_id(pool, id, now)
-        .await
-        .map_err(|_| server_error())?;
+    pidash_services::domain::tokens::touch_api_token_last_used_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        id,
+        now,
+    )
+    .await
+    .map_err(|_| server_error())?;
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
     crate::middleware::publish_logger_user_id(&user_id.to_string());
@@ -265,15 +269,23 @@ async fn authenticate_machine(
     if !is_member(pool, workspace_id, user_id).await? {
         // `machine_token.revoke()` on the way out (`revoked_at` is `None`
         // here, so the guard is a no-op and the write always lands).
-        pidash_services::domain::tokens::revoke_machine_token_by_id(pool, id, now)
-            .await
-            .map_err(|_| server_error())?;
+        pidash_services::domain::tokens::revoke_machine_token_by_id(
+            &pidash_db::pool::sea_orm_connection(pool),
+            id,
+            now,
+        )
+        .await
+        .map_err(|_| server_error())?;
         return Err(invalid_token());
     }
     // `MachineToken.objects.filter(pk=...).update(last_used_at=now)`.
-    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(pool, id, now)
-        .await
-        .map_err(|_| server_error())?;
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        id,
+        now,
+    )
+    .await
+    .map_err(|_| server_error())?;
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
     crate::middleware::publish_logger_user_id(&user_id.to_string());
