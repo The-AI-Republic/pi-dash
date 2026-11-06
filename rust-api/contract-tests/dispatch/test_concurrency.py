@@ -46,6 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from .conftest import (
+    _MarkerStub,
     CANCELLED,
     COMPLETED,
     FAILED,
@@ -77,96 +78,6 @@ WAVE_RUNS_PER_TENANT = 2
 HEAVY_TENANT = 7
 SLOW_TENANTS = (0, 1)
 SLOW_RESPONSE_SECONDS = 3
-
-
-class _MarkerStub:
-    """Recording stub that routes answers by a marker in the request body.
-
-    ``script`` maps each marker to a list of response payloads (the last
-    entry repeats per marker, like ``ScriptedProvider``). Several runs
-    of one tenant hit the same stub, so per-index scripts would be
-    order-dependent; markers keep routing deterministic under any
-    interleaving. ``delay`` sleeps before each response is written
-    (recorded first, so slow-vs-instant is airtight).
-    """
-
-    def __init__(self, script, *, delay=0):
-        self.script = {k: list(v) for k, v in script.items()}
-        self._pos = {k: 0 for k in script}
-        self.delay = delay
-        self.requests: list[dict] = []
-        self._server = None
-        self._thread = None
-
-    def start(self):
-        stub = self
-
-        class Handler(BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.0"
-
-            def log_message(self, *args):
-                pass
-
-            def do_POST(self):
-                length = int(self.headers.get("Content-Length", 0))
-                raw = self.rfile.read(length) if length else b""
-                try:
-                    payload = json.loads(raw or b"{}")
-                except ValueError:
-                    payload = {}
-                body_text = raw.decode("utf-8", "replace")
-                marker = next((k for k in stub.script if k in body_text), None)
-                stub.requests.append(
-                    {
-                        "path": self.path,
-                        "headers": {
-                            k.lower(): v for k, v in self.headers.items()
-                        },
-                        "body": payload,
-                        "marker": marker,
-                    }
-                )
-                if marker is None:
-                    content = json.dumps(
-                        final_response(summary="unmarked request")
-                    ).encode()
-                else:
-                    pos = stub._pos[marker]
-                    script = stub.script[marker]
-                    content = json.dumps(script[min(pos, len(script) - 1)]).encode()
-                    stub._pos[marker] = pos + 1
-                if stub.delay:
-                    time.sleep(stub.delay)
-                try:
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(content)))
-                    self.end_headers()
-                    self.wfile.write(content)
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
-
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self._server.daemon_threads = True
-        port = self._server.server_address[1]
-        self._thread = threading.Thread(
-            target=self._server.serve_forever, daemon=True
-        )
-        self._thread.start()
-        return f"http://127.0.0.1:{port}/v1"
-
-    def stop(self):
-        if self._server is not None:
-            self._server.shutdown()
-            self._server.server_close()
-            self._server = None
-
-    def authorization_headers(self):
-        return [req["headers"].get("authorization") for req in self.requests]
-
-    def assert_key_never_appears(self, key_fragment):
-        for req in self.requests:
-            assert key_fragment not in json.dumps(req), key_fragment
 
 
 def test_wave_20plus_runs_across_tenants(db, broker, seeder):
