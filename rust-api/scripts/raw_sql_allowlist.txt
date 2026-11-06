@@ -16,7 +16,7 @@ crates/api/src/app_cycles/handlers_favorites.rs 5
 crates/api/src/app_cycles/handlers_misc.rs 21
 crates/api/src/app_cycles/handlers_progress.rs 6
 crates/api/src/app_intake/intakes.rs 7
-crates/api/src/app_intake/issues.rs 73
+crates/api/src/app_intake/issues.rs 71
 crates/api/src/app_intake/mod.rs 9
 crates/api/src/app_intake/versions.rs 4
 crates/api/src/app_integrations/handlers_external.rs 6
