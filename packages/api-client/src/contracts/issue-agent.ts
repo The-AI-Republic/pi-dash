@@ -104,6 +104,8 @@ export const AgentRunSummary = z.object({
   assigned_at: nullableDateTime(),
   started_at: nullableDateTime(),
   ended_at: nullableDateTime(),
+  cancel_requested_at: z.optional(nullableDateTime()),
+  cancel_reason: z.optional(z.string()),
   done_payload: z.unknown(),
   error: z.string(),
   error_code: z.string(),

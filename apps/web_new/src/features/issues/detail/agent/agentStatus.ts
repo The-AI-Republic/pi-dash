@@ -62,10 +62,19 @@ export function agentPanelVisible(issue: Pick<Issue, "agent_status" | "agent_tic
   return selectDisplayRun(issue.agent_status) !== null || selectAgentTicker(issue) !== null;
 }
 
+function isRunCancelling(run: AgentRunSummary): boolean {
+  // Cloud runs stay RUNNING while a cancel is pending (the worker holds
+  // capacity until it finalizes), so they are already stopping when the
+  // stamp is present even though the status has not yet moved.
+  if (run.status === "cancel_requested") return true;
+  if (run.status === "running" && run.cancel_requested_at != null) return true;
+  return false;
+}
+
 /** The run an abort would stop: live, and not already stopping. */
 export function selectAbortableRun(status: AgentStatus | null | undefined): AgentRunSummary | null {
   const run = status?.active_run ?? null;
-  if (run === null || !isActiveRunStatus(run.status) || run.status === "cancel_requested") return null;
+  if (run === null || !isActiveRunStatus(run.status) || isRunCancelling(run)) return null;
   return run;
 }
 
@@ -175,6 +184,19 @@ export function runStatusView(
   runCount: number,
   nowMs: number
 ): AgentStatusView {
+  // Cloud RUNNING with a cancel stamp is already stopping (the worker
+  // holds RUNNING to keep capacity until it finalizes).
+  if (run.status === "running" && run.cancel_requested_at != null) {
+    const live = liveDetail(run, nowMs);
+    const runner = run.runner_name === null ? null : `Runner ${run.runner_name}`;
+    return {
+      title: "Stopping the agent run",
+      detail: runner ?? live ?? "The runner is confirming the stop.",
+      badge: "Stopping",
+      tone: "warning",
+      icon: "spinner",
+    };
+  }
   const live = liveDetail(run, nowMs);
   const runner = run.runner_name === null ? null : `Runner ${run.runner_name}`;
   const armed = ticker !== null && ticker.enabled;

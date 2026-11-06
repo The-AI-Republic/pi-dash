@@ -462,8 +462,9 @@ pub fn agent_live_state_to_representation<'a>(
 }
 
 /// `_serialize_agent_run` wire keys (`issue.py:1352-1371`), in dict order:
-/// 18.
-pub const AGENT_RUN_FIELDS: [&str; 18] = [
+/// 20 (PDASHOSS01-351 adds `cancel_requested_at` / `cancel_reason` so the
+/// issue card can show Stopping for cloud RUNNING).
+pub const AGENT_RUN_FIELDS: [&str; 20] = [
     "id",
     "status",
     "executor_kind",
@@ -473,6 +474,8 @@ pub const AGENT_RUN_FIELDS: [&str; 18] = [
     "assigned_at",
     "started_at",
     "ended_at",
+    "cancel_requested_at",
+    "cancel_reason",
     "done_payload",
     "error",
     "error_code",
@@ -489,7 +492,8 @@ pub const AGENT_RUN_FIELDS: [&str; 18] = [
 /// `id` / `status` / `executor_kind` (non-null, defaulted),
 /// `runner_id` + the joined
 /// `runner.name`, `created_at` (non-null) + the three nullable stamps,
-/// `done_payload` (nullable JSON), `error` / `error_code` / `llm_model`
+/// `cancel_requested_at` (nullable) + `cancel_reason` (non-null, default
+/// `""`), `done_payload` (nullable JSON), `error` / `error_code` / `llm_model`
 /// (non-null, default `""`), the three generated nullable token bigints —
 /// plus the joined live-state row. Datetimes are pre-rendered `isoformat`
 /// strings.
@@ -504,6 +508,8 @@ pub struct AgentRunDetailRow<'a> {
     pub assigned_at: Option<&'a str>,
     pub started_at: Option<&'a str>,
     pub ended_at: Option<&'a str>,
+    pub cancel_requested_at: Option<&'a str>,
+    pub cancel_reason: &'a str,
     pub done_payload: Option<&'a serde_json::Value>,
     pub error: &'a str,
     pub error_code: &'a str,
@@ -527,6 +533,8 @@ pub struct AgentRunView<'a> {
     pub assigned_at: Option<&'a str>,
     pub started_at: Option<&'a str>,
     pub ended_at: Option<&'a str>,
+    pub cancel_requested_at: Option<&'a str>,
+    pub cancel_reason: &'a str,
     pub done_payload: Option<&'a serde_json::Value>,
     pub error: &'a str,
     pub error_code: &'a str,
@@ -572,6 +580,8 @@ pub fn agent_run_to_representation<'a>(
         assigned_at: run.assigned_at,
         started_at: run.started_at,
         ended_at: run.ended_at,
+        cancel_requested_at: run.cancel_requested_at,
+        cancel_reason: run.cancel_reason,
         done_payload: run.done_payload,
         error: run.error,
         error_code: run.error_code,
@@ -1256,6 +1266,8 @@ mod tests {
             assigned_at: Some("2026-10-03T10:00:01+00:00"),
             started_at: Some("2026-10-03T10:00:02+00:00"),
             ended_at: None,
+            cancel_requested_at: None,
+            cancel_reason: "",
             done_payload: None,
             error: "",
             error_code: "",
@@ -1490,6 +1502,7 @@ mod tests {
              \"created_at\":\"2026-10-03T10:00:00+00:00\",\
              \"assigned_at\":\"2026-10-03T10:00:01+00:00\",\
              \"started_at\":\"2026-10-03T10:00:02+00:00\",\"ended_at\":null,\
+             \"cancel_requested_at\":null,\"cancel_reason\":\"\",\
              \"done_payload\":{\"signal\":\"done\"},\"error\":\"boom\\nsecond line\",\
              \"error_code\":\"E1\",\"error_diagnostic\":{\"source\":\"unknown\",\
              \"source_label\":\"Unknown\",\"kind\":\"unknown\",\"summary\":\"boom\",\
