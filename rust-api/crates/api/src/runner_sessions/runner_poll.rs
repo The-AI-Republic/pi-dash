@@ -1045,7 +1045,7 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
         reason: &str,
     ) -> Result<(), SessionOutboxError> {
         pidash_services::domain::tokens::revoke_runner_session(
-            self.pool,
+            &pidash_db::pool::sea_orm_connection(self.pool),
             session_id,
             now_micros(),
             reason,
@@ -1476,9 +1476,13 @@ pub async fn runner_session_poll(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    if pidash_services::domain::tokens::touch_runner_session(&pool, sid, now_micros())
-        .await
-        .is_err()
+    if pidash_services::domain::tokens::touch_runner_session(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        sid,
+        now_micros(),
+    )
+    .await
+    .is_err()
     {
         return server_error();
     }

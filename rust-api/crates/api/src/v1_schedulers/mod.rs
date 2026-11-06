@@ -61,6 +61,7 @@
 
 pub mod handlers;
 pub mod perms;
+pub mod service;
 pub mod writes;
 
 use axum::body::Bytes;
@@ -145,7 +146,7 @@ pub enum Denial {
 }
 
 impl Denial {
-    fn status_and_body(&self) -> (StatusCode, String) {
+    pub(crate) fn status_and_body(&self) -> (StatusCode, String) {
         match self {
             Denial::Unauthorized => (StatusCode::UNAUTHORIZED, UNAUTHENTICATED_BODY.to_owned()),
             Denial::InvalidToken => (StatusCode::FORBIDDEN, INVALID_TOKEN_BODY.to_owned()),
@@ -264,8 +265,11 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
     // `api_tokens.last_used` is stamped on every validated call
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
-        let _ =
-            pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, raw).await;
+        let _ = pidash_services::domain::tokens::touch_api_token_last_used_by_token(
+            &pidash_db::pool::sea_orm_connection(pool),
+            raw,
+        )
+        .await;
     }
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
@@ -362,13 +366,15 @@ async fn resolve_machine_token(
     .map_err(|error| db_error(error, "machine-token-member"))?
     .unwrap_or(false);
     if !member {
-        let _ =
-            pidash_services::domain::tokens::revoke_machine_token_by_hash(pool, &presented_hash)
-                .await;
+        let _ = pidash_services::domain::tokens::revoke_machine_token_by_hash(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &presented_hash,
+        )
+        .await;
         return Err(Denial::InvalidToken);
     }
     let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &presented_hash,
     )
     .await;
@@ -442,18 +448,29 @@ pub async fn preamble(
     }
     let pool = pool_of(state)?;
     let actor = actor(&pool, headers, state.settings().secret_key.as_bytes()).await?;
-    let workspace_id: Option<uuid::Uuid> =
-        sqlx::query_scalar(r#"SELECT "id" FROM "workspaces" WHERE "slug" = $1"#)
-            .bind(slug)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?
-            .flatten();
+    let workspace_id = workspace_id_by_slug(&pool, slug).await?;
     Ok(Preamble {
         pool,
         actor,
         workspace_id,
     })
+}
+
+/// The workspace id for a slug: `None` when unknown. Shared by the v1
+/// [`preamble`] and the [`service`](crate::v1_schedulers::service)
+/// entries, so the unknown-slug 403 trap has one implementation.
+pub(crate) async fn workspace_id_by_slug(
+    pool: &PgPool,
+    slug: &str,
+) -> Result<Option<uuid::Uuid>, Denial> {
+    let id: Option<uuid::Uuid> =
+        sqlx::query_scalar(r#"SELECT "id" FROM "workspaces" WHERE "slug" = $1"#)
+            .bind(slug)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?
+            .flatten();
+    Ok(id)
 }
 
 /// `_rewrite_project_kwarg` (`api/views/base.py:51-98`): a slug-or-UUID

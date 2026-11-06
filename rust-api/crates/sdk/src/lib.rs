@@ -459,6 +459,9 @@ pub mod operations {
     pub use pidash_services::operations::relations;
     pub use pidash_services::operations::requested_data_text;
     pub use pidash_services::operations::requested_data_value;
+    // NEWPIDASH-37: api-backed (the scheduler cores live in `pidash_api`),
+    // same contract as the services-backed submodules.
+    pub use pidash_api::v1_schedulers::service as schedulers;
     pub use pidash_services::operations::workpad;
     pub use pidash_services::operations::Deps;
     pub use pidash_services::operations::Error;
@@ -825,6 +828,9 @@ pub mod db {
     pub use pidash_db::orchestration::querysets::fetch_is_workspace_member;
     pub use pidash_db::orchestration::runs::active_run_for;
     pub use pidash_db::orchestration::runs::latest_prior_run;
+    // NEWPIDASH-37: the SeaORM-over-sqlx bridge; the overlay's
+    // transaction-held calls need it after the Batch 3 ORM migration.
+    pub use pidash_db::orm_tx::TxConn;
     pub use pidash_db::pool::Pools; // also imported by the overlay as `pidash_db::Pools`.
     pub use pidash_db::redis::client_from_settings; // canonical settings client (PIDASHCONV-1593).
     pub use pidash_db::redis::RedisHandle;
@@ -956,5 +962,32 @@ mod tests {
         let _ = std::mem::size_of_val(&crate::read::render_comment_value);
         let _ = std::mem::size_of::<crate::read::DecodedComment>();
         let _ = std::mem::size_of::<crate::read::SocialRenderError>();
+    }
+
+    /// NEWPIDASH-37: the scheduler service entries resolve through the
+    /// SDK facade. Behaviour is pinned by `pidash_api`'s cores (the
+    /// entries call the same functions the v1 handlers call) and by the
+    /// v1_schedulers contract suite; this only locks the paths.
+    #[test]
+    fn operations_schedulers_is_exported() {
+        use crate::operations::schedulers;
+        let _ = std::mem::size_of_val(&schedulers::list_definitions);
+        let _ = std::mem::size_of_val(&schedulers::list_project_schedulers);
+        let _ = std::mem::size_of_val(&schedulers::get_scheduler);
+        let _ = std::mem::size_of_val(&schedulers::list_runs);
+        let _ = std::mem::size_of_val(&schedulers::patch_binding);
+        let _ = std::mem::size_of_val(&schedulers::run_now);
+        let _ = std::mem::size_of_val(&schedulers::install_binding);
+        let _ = std::mem::size_of_val(&schedulers::uninstall_binding);
+        let _ = std::mem::size_of_val(&schedulers::create_definition);
+        let _ = std::mem::size_of_val(&schedulers::patch_definition);
+        let _ = std::mem::size_of_val(&schedulers::delete_definition);
+        let _ = std::mem::size_of_val(&schedulers::denial_parts);
+        let _ = std::mem::size_of::<schedulers::ServiceCtx>();
+        let _ = std::mem::size_of::<schedulers::ListParams>();
+        let _ = std::mem::size_of::<schedulers::Outcome>();
+        let _ = std::mem::size_of::<schedulers::Denial>();
+        let params = schedulers::ListParams::empty();
+        assert!(params.per_page.is_none());
     }
 }

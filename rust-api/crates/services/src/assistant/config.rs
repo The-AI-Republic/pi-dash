@@ -219,7 +219,7 @@ pub async fn put_config(
         .unwrap_or_else(|| user_llm_config::DEFAULT_PROVIDER_KIND.as_str().to_owned());
     let model_name = validated.model_name.or(stored_model).unwrap_or_default();
     domain::save_llm_config(
-        deps.pool,
+        &pidash_db::pool::sea_orm_connection(deps.pool),
         &domain::LlmConfigSave {
             user_id,
             provider_kind: &provider_kind,
@@ -242,5 +242,5 @@ pub async fn put_config(
 
 /// `DELETE users/me/ai-assistant/config/` (`llm_config.py:76-78`).
 pub async fn delete_config(pool: &PgPool, user_id: Uuid) -> Result<(), sqlx::Error> {
-    domain::delete_llm_config(pool, user_id).await
+    domain::delete_llm_config(&pidash_db::pool::sea_orm_connection(pool), user_id).await
 }

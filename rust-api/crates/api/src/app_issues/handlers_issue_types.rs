@@ -55,15 +55,19 @@ use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
+use pidash_db::entity::{issue_types, project_issue_types, project_members, projects, workspaces};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, Condition, EntityTrait, JoinType, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait, Set,
+};
 use serde::Serialize;
 use serde_json::{Map, Value};
-use sqlx::Row;
 use uuid::Uuid;
 
 use super::handlers_labels_attachments::{
     data_has_file, drf_bool_of_value, drf_float_of_value, drf_str_of_value, gate_decorator,
-    is_integrity_violation, json_bad_request, json_not_found, object_or_errors, FieldErrors,
-    RequestData,
+    json_bad_request, json_not_found, object_or_errors, FieldErrors, RequestData,
 };
 use super::Denial;
 use crate::middleware::SessionHandle;
@@ -130,19 +134,10 @@ async fn gate_entity_safe(
     project_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<(), Response> {
-    let member: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE w.slug = $1 AND pm.member_id = $2 AND pm.project_id = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError.into_response())?;
-    if member.is_some() {
+    let member = live_project_member(pool, slug, project_id, user_id, None)
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?;
+    if member {
         Ok(())
     } else {
         Err(DefaultPermissionDenied.into_response())
@@ -159,19 +154,10 @@ async fn gate_entity_post(
     project_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<(), Response> {
-    let member: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE w.slug = $1 AND pm.member_id = $2 AND pm.project_id = $3
-           AND pm.role IN (20, 15) AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError.into_response())?;
-    if member.is_some() {
+    let member = live_project_member(pool, slug, project_id, user_id, Some(&[20, 15]))
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?;
+    if member {
         Ok(())
     } else {
         Err(DefaultPermissionDenied.into_response())
@@ -187,18 +173,49 @@ async fn project_workspace_id(
     slug: &str,
     project_id: &Uuid,
 ) -> Result<Uuid, Response> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT p.workspace_id FROM projects p
-           JOIN workspaces w ON w.id = p.workspace_id
-           WHERE p.id = $1 AND w.slug = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError.into_response())?;
-    row.map(|row| row.0)
-        .ok_or_else(|| json_not_found(TYPE_PROJECT_NOT_FOUND_BODY))
+    let workspace_id: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?;
+    workspace_id.ok_or_else(|| json_not_found(TYPE_PROJECT_NOT_FOUND_BODY))
+}
+
+/// A live, active project membership in this workspace slug, optionally
+/// restricted to `roles` (`ProjectEntityPermission`).
+async fn live_project_member(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &Uuid,
+    user_id: &Uuid,
+    roles: Option<&[i16]>,
+) -> Result<bool, sea_orm::DbErr> {
+    let mut query = project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null());
+    if let Some(roles) = roles {
+        query = query.filter(project_members::Column::Role.is_in(roles.iter().copied()));
+    }
+    let hit: Option<Uuid> = query
+        .into_tuple()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await?;
+    Ok(hit.is_some())
 }
 
 // ---- request bodies ---------------------------------------------------------
@@ -402,7 +419,7 @@ fn validate_type_fields(
 // ---- read shape -------------------------------------------------------------
 
 /// The 8 `IssueTypeSerializer` columns in wire order.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sea_orm::FromQueryResult)]
 struct TypeRow {
     id: Uuid,
     name: String,
@@ -448,19 +465,46 @@ fn render_type_row(row: &TypeRow) -> Result<String, Denial> {
     serde_json::to_string(&view).map_err(|_| Denial::ServerError)
 }
 
-fn type_row_of(row: &sqlx::postgres::PgRow) -> Result<TypeRow, Denial> {
-    Ok(TypeRow {
-        id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-        name: row.try_get("name").map_err(|_| Denial::ServerError)?,
-        description: row
-            .try_get("description")
-            .map_err(|_| Denial::ServerError)?,
-        logo_props: row.try_get("logo_props").map_err(|_| Denial::ServerError)?,
-        is_epic: row.try_get("is_epic").map_err(|_| Denial::ServerError)?,
-        is_default: row.try_get("is_default").map_err(|_| Denial::ServerError)?,
-        is_active: row.try_get("is_active").map_err(|_| Denial::ServerError)?,
-        level: row.try_get("level").map_err(|_| Denial::ServerError)?,
-    })
+/// The project's live linked types, by link level then name. `SELECT
+/// DISTINCT` carries the link level (the ordering column must be selected);
+/// the live-link unique constraint keeps one row per type.
+async fn linked_types(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: Uuid,
+) -> Result<Vec<TypeRow>, sea_orm::DbErr> {
+    issue_types::Entity::find()
+        .select_only()
+        .columns([
+            issue_types::Column::Id,
+            issue_types::Column::Name,
+            issue_types::Column::Description,
+            issue_types::Column::LogoProps,
+            issue_types::Column::IsEpic,
+            issue_types::Column::IsDefault,
+            issue_types::Column::IsActive,
+            issue_types::Column::Level,
+        ])
+        .column_as(project_issue_types::Column::Level, "link_level")
+        .distinct()
+        .join(
+            JoinType::InnerJoin,
+            issue_types::Relation::ProjectIssueTypes
+                .def()
+                .on_condition(move |_, right| {
+                    Condition::all()
+                        .add(
+                            Expr::col((right.clone(), project_issue_types::Column::ProjectId))
+                                .eq(project_id),
+                        )
+                        .add(Expr::col((right, project_issue_types::Column::DeletedAt)).is_null())
+                }),
+        )
+        .filter(issue_types::Column::DeletedAt.is_null())
+        .order_by_asc(Expr::col(sea_orm::sea_query::Alias::new("link_level")))
+        .order_by_asc(issue_types::Column::Name)
+        .into_model::<TypeRow>()
+        .all(db)
+        .await
 }
 
 // ---- handlers ---------------------------------------------------------------
@@ -485,25 +529,15 @@ pub async fn issue_type_list(
     if let Err(response) = project_workspace_id(&pool, &slug, &project_id).await {
         return Ok(response);
     }
-    let rows = sqlx::query(
-        r#"SELECT DISTINCT t.id, t.name, t.description, t.logo_props, t.is_epic,
-               t.is_default, t.is_active, t.level, pit.level AS link_level
-           FROM issue_types t
-           JOIN project_issue_types pit ON pit.issue_type_id = t.id
-               AND pit.project_id = $1 AND pit.deleted_at IS NULL
-           WHERE t.deleted_at IS NULL
-           ORDER BY link_level, t.name"#,
-    )
-    .bind(project_id)
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let rows = linked_types(&pidash_db::pool::sea_orm_connection(&pool), project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let mut out = String::from("[");
     for (index, row) in rows.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
-        out.push_str(&render_type_row(&type_row_of(row)?)?);
+        out.push_str(&render_type_row(row)?);
     }
     out.push(']');
     Ok(json_ok(out))
@@ -557,53 +591,59 @@ pub async fn issue_type_create(
     };
     let is_epic = write.is_epic.unwrap_or(false);
     let level = write.level.unwrap_or(0.0);
-    let inserted = sqlx::query(
-        r#"INSERT INTO issue_types (id, created_at, updated_at, created_by_id, updated_by_id,
-               deleted_at, workspace_id, name, description, logo_props, is_epic, is_default,
-               is_active, level, external_source, external_id)
-           VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, $9, FALSE, TRUE, $10, NULL, NULL)"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(now)
-    .bind(user_id)
-    .bind(workspace_id)
-    .bind(&name)
-    .bind(&description)
-    .bind(&logo_bind)
-    .bind(is_epic)
-    .bind(level)
-    .execute(&pool)
+    // `logo_props` is NOT NULL: an explicit `null` fails the insert's
+    // constraint, Django's IntegrityError → the 400 below.
+    let Some(logo) = logo_bind.clone() else {
+        return Ok(json_bad_request(PAYLOAD_NOT_VALID_BODY));
+    };
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let inserted = issue_types::Entity::insert(issue_types::ActiveModel {
+        id: Set(id),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+        created_by_id: Set(Some(user_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        workspace_id: Set(workspace_id),
+        name: Set(name.clone()),
+        description: Set(description.clone()),
+        logo_props: Set(logo),
+        is_epic: Set(is_epic),
+        is_default: Set(false),
+        is_active: Set(true),
+        level: Set(level),
+        external_source: Set(None),
+        external_id: Set(None),
+    })
+    .exec_without_returning(&db)
     .await;
     match inserted {
-        Ok(row) => row,
-        Err(error) if is_integrity_violation(&error) => {
+        Ok(_) => {}
+        Err(error) if pidash_db::orm_tx::is_integrity_violation(&error) => {
             return Ok(json_bad_request(PAYLOAD_NOT_VALID_BODY));
         }
         Err(_) => return Err(Denial::ServerError),
     };
-    let live: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM project_issue_types WHERE project_id = $1 AND deleted_at IS NULL",
-    )
-    .bind(project_id)
-    .fetch_one(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let link = sqlx::query(
-        r#"INSERT INTO project_issue_types (id, created_at, updated_at, created_by_id,
-               updated_by_id, deleted_at, project_id, workspace_id, issue_type_id, level,
-               is_default)
-           VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, FALSE)"#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(now)
-    .bind(now)
-    .bind(user_id)
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(id)
-    .bind(live.0 as i32)
-    .execute(&pool)
+    let live = project_issue_types::Entity::find()
+        .filter(project_issue_types::Column::ProjectId.eq(project_id))
+        .filter(project_issue_types::Column::DeletedAt.is_null())
+        .count(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let link = project_issue_types::Entity::insert(project_issue_types::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+        created_by_id: Set(Some(user_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        project_id: Set(project_id),
+        workspace_id: Set(workspace_id),
+        issue_type_id: Set(id),
+        level: Set(live as i32),
+        is_default: Set(false),
+    })
+    .exec_without_returning(&db)
     .await;
     match link {
         Ok(_) => {
@@ -622,7 +662,7 @@ pub async fn issue_type_create(
             };
             render_type_row(&created).map(json_created)
         }
-        Err(error) if is_integrity_violation(&error) => {
+        Err(error) if pidash_db::orm_tx::is_integrity_violation(&error) => {
             Ok(json_bad_request(PAYLOAD_NOT_VALID_BODY))
         }
         Err(_) => Err(Denial::ServerError),
@@ -882,5 +922,63 @@ mod tests {
         assert!(is_py_blank("  \t\r\n\u{1c}\u{1f}  "));
         assert!(!is_py_blank("  x  "));
         assert!(!is_py_blank("\0"));
+    }
+
+    /// The linked-types read against constraint-free temp tables on a
+    /// one-connection pool: live links only, level then name order.
+    #[tokio::test]
+    async fn live_linked_types() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in ["issue_types", "project_issue_types"] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (project, a, b, c, gone) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for sql in [
+            format!(
+                "INSERT INTO issue_types (id, name, description, logo_props, is_epic, is_default, is_active, level, deleted_at) VALUES \
+                 ('{a}', 'Bug', '', '{{}}', false, false, true, 0, NULL), \
+                 ('{b}', 'Alpha', '', '{{}}', false, false, true, 0, NULL), \
+                 ('{c}', 'Epic', '', '{{}}', true, false, true, 0, NULL), \
+                 ('{gone}', 'Gone', '', '{{}}', false, false, true, 0, now())"
+            ),
+            format!(
+                "INSERT INTO project_issue_types (id, project_id, issue_type_id, level, deleted_at) VALUES \
+                 (gen_random_uuid(), '{project}', '{a}', 1, NULL), \
+                 (gen_random_uuid(), '{project}', '{b}', 1, NULL), \
+                 (gen_random_uuid(), '{project}', '{c}', 0, NULL), \
+                 (gen_random_uuid(), '{project}', '{gone}', 0, NULL), \
+                 (gen_random_uuid(), '{project}', '{a}', 0, now()), \
+                 (gen_random_uuid(), '{}', '{a}', 0, NULL)",
+                Uuid::new_v4()
+            ),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        let rows = linked_types(&pidash_db::pool::sea_orm_connection(&pool), project)
+            .await
+            .expect("read");
+        assert_eq!(
+            rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+            vec!["Epic", "Alpha", "Bug"]
+        );
     }
 }

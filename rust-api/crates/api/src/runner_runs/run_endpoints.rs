@@ -542,9 +542,14 @@ pub async fn insert_comment(
         labels: &empty_list,
         edited_at: None,
     };
-    comment_domain::insert_comment_row(&mut **tx, &rows).await?;
-    comment_domain::insert_description_row(&mut **tx, &rows).await?;
-    comment_domain::link_comment_description(&mut **tx, rows.id, rows.description_id).await?;
+    comment_domain::insert_comment_row(&pidash_db::orm_tx::TxConn::new(tx), &rows).await?;
+    comment_domain::insert_description_row(&pidash_db::orm_tx::TxConn::new(tx), &rows).await?;
+    comment_domain::link_comment_description(
+        &pidash_db::orm_tx::TxConn::new(tx),
+        rows.id,
+        rows.description_id,
+    )
+    .await?;
     Ok(())
 }
 

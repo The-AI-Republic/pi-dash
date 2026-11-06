@@ -234,7 +234,7 @@ export const Route = createFileRoute("/$ws/_gated")({
             // someone picks a server hit, and the route module is eager
             // (NEWFRONT-871, size gate).
             void import("./searchTarget.js").then((module) => {
-              void navigate(module.resolveSearchTarget(hit, params.ws));
+              void navigate(module.resolveSearchTarget(hit, params.ws, lastParam(matches, "projectId")));
             });
           }}
           onNavigateHref={(href: string) => navigate({ href })}
