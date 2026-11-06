@@ -684,6 +684,25 @@ fn machine_display_name(label: &str, host_label: &str) -> String {
     } else {
         "This computer".to_owned()
     }
+}
+
+/// The dev-machine mini of an R1/R2 row, or `None` when the `LEFT JOIN`
+/// missed (legacy `pidash connect` enrollments with no `dev_machine` FK).
+/// The stored sign-in state is carried raw; rendering derives it.
+fn machine_mini_of(row: &RunnerJoinRow) -> Option<DevMachineMiniOwned> {
+    let id = row.dm_id?;
+    Some(DevMachineMiniOwned {
+        id: id.to_string(),
+        host_label: row.dm_host_label.clone().unwrap_or_default(),
+        label: row.dm_label.clone().unwrap_or_default(),
+        engine_paused_by_owner: row.dm_engine_paused_by_owner.unwrap_or(false),
+        engine_auto_pause_reason: row.dm_engine_auto_pause_reason.clone().unwrap_or_default(),
+        engine_team_runs: row.dm_engine_team_runs.unwrap_or(false),
+        engine_sign_in_state: row
+            .dm_engine_sign_in_state
+            .clone()
+            .unwrap_or_else(|| "never".to_owned()),
+        engine_credential_expires_at: row.dm_engine_credential_expires_at,
     })
 }
 

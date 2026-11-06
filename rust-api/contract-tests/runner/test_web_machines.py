@@ -248,14 +248,15 @@ def test_web_machine_token_ticket_denies_foreign_workspace(user_client, seeder):
 def test_web_machine_patch_owner_only_engine_fields(user_client, daemon_world, machine_flow, seeder):
     machine_id = _machine_id(user_client, daemon_world, machine_flow)
     ws = daemon_world["workspace"]["id"]
-    # Unknown key 400 with the exact #2903 message.
+    # Unknown key 400 with the exact merged-main message (#2903 + #2910
+    # label, owned by NEWPIDASH-52; Django main's FIELDS).
     unknown = web_patch(user_client, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "bogus": 1})
     assert unknown.status_code == 400
-    assert unknown.json() == {"error": "only engine controls can be changed here: engine_paused_by_owner, engine_team_runs"}
+    assert unknown.json() == {"error": "only these fields can be changed here: engine_paused_by_owner, engine_team_runs, label"}
     # Server-set field refused as unknown key.
     server_set = web_patch(user_client, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "engine_auto_pause_reason": ""})
     assert server_set.status_code == 400
-    assert server_set.json() == {"error": "only engine controls can be changed here: engine_paused_by_owner, engine_team_runs"}
+    assert server_set.json() == {"error": "only these fields can be changed here: engine_paused_by_owner, engine_team_runs, label"}
     # Non-bool 400.
     non_bool = web_patch(user_client, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "engine_paused_by_owner": "yes"})
     assert non_bool.status_code == 400

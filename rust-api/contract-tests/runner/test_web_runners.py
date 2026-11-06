@@ -233,8 +233,16 @@ def test_web_runner_list_and_detail_carry_engine_fields(user_client, daemon_worl
     assert listing.status_code == 200
     runner = listing.json()[0]
     assert "pod_dispatch" in runner
-    assert set(runner["dev_machine_detail"]) == {"id", "host_label", "label", "engine_paused_by_owner", "engine_auto_pause_reason", "engine_team_runs"}
+    assert list(runner["dev_machine_detail"].keys()) == [
+        "id", "host_label", "label", "engine_paused_by_owner",
+        "engine_auto_pause_reason", "engine_team_runs",
+        "engine_sign_in_state", "engine_credential_expires_at",
+    ]
     detail = user_client.get(f"{WEB}/{machine_flow['runner_id']}/")
     assert detail.status_code == 200
     assert "pod_dispatch" in detail.json()
-    assert set(detail.json()["dev_machine_detail"]) == {"id", "host_label", "label", "engine_paused_by_owner", "engine_auto_pause_reason", "engine_team_runs"}
+    assert list(detail.json()["dev_machine_detail"].keys()) == [
+        "id", "host_label", "label", "engine_paused_by_owner",
+        "engine_auto_pause_reason", "engine_team_runs",
+        "engine_sign_in_state", "engine_credential_expires_at",
+    ]
