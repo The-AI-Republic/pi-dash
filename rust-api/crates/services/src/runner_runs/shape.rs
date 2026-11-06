@@ -1297,6 +1297,9 @@ mod tests {
             id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             host_label: "h",
             label: "l",
+            engine_paused_by_owner: false,
+            engine_auto_pause_reason: "",
+            engine_team_runs: false,
         };
         let runner = RunnerRow {
             id: "e39ef475-5212-4de8-a5d0-e5fe8fd01f7b",
@@ -1304,6 +1307,7 @@ mod tests {
             status: "online",
             host_label: "h",
             provisioning: "manual",
+            pod_dispatch: "pod_member",
             os: "linux",
             arch: "arm64",
             runner_version: "1.0",

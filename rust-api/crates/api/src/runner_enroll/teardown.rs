@@ -1180,6 +1180,9 @@ struct MachineRender {
     runner_count: Option<i64>,
     online_runner_count: Option<i64>,
     control_online: Option<bool>,
+    engine_paused_by_owner: bool,
+    engine_auto_pause_reason: String,
+    engine_team_runs: bool,
     last_seen_at: Option<String>,
     last_heartbeat_at: Option<Option<String>>,
     revoked_at: Option<String>,
@@ -1197,6 +1200,9 @@ impl MachineRender {
             runner_count: self.runner_count,
             online_runner_count: self.online_runner_count,
             control_online: self.control_online,
+            engine_paused_by_owner: self.engine_paused_by_owner,
+            engine_auto_pause_reason: &self.engine_auto_pause_reason,
+            engine_team_runs: self.engine_team_runs,
             last_seen_at: self.last_seen_at.as_deref(),
             last_heartbeat_at: self
                 .last_heartbeat_at
@@ -1216,7 +1222,7 @@ impl MachineRender {
 /// unannotated in-memory instance when the row vanished
 /// (QUIRK-m5-fallback — `stamped` carries the revoke write's
 /// `(revoked_at, updated_at)` when it ran).
-async fn serialize_machine(
+pub(crate) async fn serialize_machine(
     pool: &PgPool,
     machine: &LockedMachine,
     user_id: Uuid,
@@ -1252,6 +1258,9 @@ async fn serialize_machine(
             runner_count: None,
             online_runner_count: None,
             control_online: None,
+            engine_paused_by_owner: machine.engine_paused_by_owner,
+            engine_auto_pause_reason: machine.engine_auto_pause_reason.clone(),
+            engine_team_runs: machine.engine_team_runs,
             last_seen_at: machine
                 .last_seen_at
                 .as_ref()
@@ -1271,6 +1280,9 @@ async fn serialize_machine(
         runner_count: Some(row.runner_count),
         online_runner_count: Some(row.online_runner_count),
         control_online: Some(row.control_online),
+        engine_paused_by_owner: row.engine_paused_by_owner,
+        engine_auto_pause_reason: row.engine_auto_pause_reason,
+        engine_team_runs: row.engine_team_runs,
         last_seen_at: row
             .last_seen_at
             .as_ref()
@@ -1301,6 +1313,7 @@ struct FullRunner {
     name: String,
     host_label: String,
     provisioning: String,
+    pod_dispatch: String,
     visibility: i16,
     enrolled_at: Option<DateTime<Utc>>,
     capabilities: Value,
@@ -1331,6 +1344,7 @@ impl From<runner::Model> for FullRunner {
             name: row.name,
             host_label: row.host_label,
             provisioning: row.provisioning,
+            pod_dispatch: row.pod_dispatch,
             visibility: row.visibility,
             enrolled_at: row.enrolled_at.map(at),
             capabilities: row.capabilities,
@@ -1382,6 +1396,9 @@ struct DevMachineMiniOwned {
     id: String,
     host_label: String,
     label: String,
+    engine_paused_by_owner: bool,
+    engine_auto_pause_reason: String,
+    engine_team_runs: bool,
 }
 
 /// Owned live-state snapshot (`RunnerLiveState`, `models.py:1504-1558`).
@@ -1441,6 +1458,7 @@ struct RunnerRender {
     status: String,
     host_label: String,
     provisioning: String,
+    pod_dispatch: String,
     os: String,
     arch: String,
     runner_version: String,
@@ -1482,6 +1500,9 @@ impl RunnerRender {
                     id: &detail.id,
                     host_label: &detail.host_label,
                     label: &detail.label,
+                    engine_paused_by_owner: detail.engine_paused_by_owner,
+                    engine_auto_pause_reason: &detail.engine_auto_pause_reason,
+                    engine_team_runs: detail.engine_team_runs,
                 });
         let live_state = self.live_state.as_ref().map(|live| shapes::LiveStateRow {
             observed_run_id: live.observed_run_id.as_deref(),
@@ -1504,6 +1525,7 @@ impl RunnerRender {
             status: &self.status,
             host_label: &self.host_label,
             provisioning: &self.provisioning,
+            pod_dispatch: &self.pod_dispatch,
             os: &self.os,
             arch: &self.arch,
             runner_version: &self.runner_version,
@@ -1572,6 +1594,9 @@ async fn render_toggled_runner(pool: &PgPool, runner_id: Uuid) -> Result<String,
             id: machine.id.to_string(),
             host_label: machine.host_label,
             label: machine.label,
+            engine_paused_by_owner: machine.engine_paused_by_owner,
+            engine_auto_pause_reason: machine.engine_auto_pause_reason,
+            engine_team_runs: machine.engine_team_runs,
         });
     }
     // Lazy `pod.project.identifier`: a forward-FK read through
@@ -1587,6 +1612,7 @@ async fn render_toggled_runner(pool: &PgPool, runner_id: Uuid) -> Result<String,
         status: runner.status.clone(),
         host_label: runner.host_label.clone(),
         provisioning: runner.provisioning.clone(),
+        pod_dispatch: runner.pod_dispatch.clone(),
         os: runner.os.clone(),
         arch: runner.arch.clone(),
         runner_version: runner.runner_version.clone(),

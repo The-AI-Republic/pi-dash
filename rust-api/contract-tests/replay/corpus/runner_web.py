@@ -652,6 +652,37 @@ SESSIONS = (
                 auth="admin", expect_status=404,
                 **_csrf("w0"),
             ),
+            # -- owner engine controls (#2903, NEWPIDASH-49): PATCH
+            # pod_dispatch + machine PATCH (the moff machine hosts roff,
+            # an own-agent runner; pause/team flips are no-op pins here).
+            Request(
+                "PATCH", f"{WEB}/{{rdel_id}}/",
+                route=f"{WEB}/{{runner_id}}/",
+                json={"pod_dispatch": "sometimes"},
+                auth="admin", expect_status=400,
+                **_csrf("w0"),
+            ),
+            Request(
+                "PATCH", f"{WEB}/dev-machines/{{mspare}}/",
+                route=f"{WEB}/dev-machines/{{machine_id}}/",
+                json={"workspace": "{ws_id}", "bogus": 1},
+                auth="admin", expect_status=400,
+                **_csrf("w0"),
+            ),
+            Request(
+                "PATCH", f"{WEB}/dev-machines/{{mspare}}/",
+                route=f"{WEB}/dev-machines/{{machine_id}}/",
+                json={"workspace": "{ws_id}", "engine_paused_by_owner": "yes"},
+                auth="admin", expect_status=400,
+                **_csrf("w0"),
+            ),
+            Request(
+                "PATCH", f"{WEB}/dev-machines/{{mspare}}/",
+                route=f"{WEB}/dev-machines/{{machine_id}}/",
+                json={"workspace": "{ws_id}", "engine_team_runs": True},
+                auth="admin", expect_status=200,
+                **_csrf("w0"),
+            ),
             Request(
                 "DELETE", f"{WEB}/dev-machines/{{mspare}}/",
                 route=f"{WEB}/dev-machines/{{machine_id}}/",

@@ -148,6 +148,11 @@ pub const POD_MISSING_BODY: &str = r#"{"error":"pod does not exist or has been d
 pub const POD_OTHER_WORKSPACE_BODY: &str = r#"{"error":"pod is in a different workspace"}"#;
 /// Runner busy guard — 409 (`runners.py:414-417`).
 pub const RUNNER_BUSY_BODY: &str = r#"{"error":"runner has an in-flight or queued run; wait for it to finish or cancel it first","code":"runner_busy"}"#;
+/// `pod_dispatch` validation — 400 (`runners.py` #2903).
+pub const POD_DISPATCH_INVALID_BODY: &str =
+    r#"{"error":"pod_dispatch must be one of: pinned_only, pod_member"}"#;
+/// Engine pod-move restriction — 400 (`runners.py` #2903).
+pub const ENGINE_PROJECT_FIXED_BODY: &str = r#"{"error":"a built-in engine runner can only move between pods of its project","code":"engine_runner_project_fixed"}"#;
 /// Pod delete guard 1 — 409 (`pods.py:230-234`).
 pub const POD_HAS_RUNNERS_BODY: &str =
     r#"{"error":"pod has runners; move or revoke them first","code":"pod_has_runners"}"#;
@@ -428,6 +433,59 @@ fn body_uuid(value: &JVal) -> Result<Uuid, Response> {
     }
 }
 
+/// The runner-PATCH `pod_dispatch` member (`runners.py` #2903): the raw
+/// value must be one of the two choices; anything else (including
+/// non-strings) is the 400. Returns the value when valid.
+fn pod_dispatch_value(value: Option<&JVal>) -> Option<String> {
+    match value {
+        Some(JVal::Str(text)) => {
+            let raw = text.to_lossy_string().to_owned();
+            if raw == "pinned_only" || raw == "pod_member" {
+                Some(raw)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether a runner is a built-in engine runner (`provisioning` check,
+/// `Runner.is_engine`, `models.py` #2903).
+fn is_engine_runner(executor: &RunnerOwned) -> bool {
+    executor.provisioning == "desktop_bundled"
+}
+
+/// Drain a runner after commit (the `_apply_pod_dispatch_change` pod-member
+/// arm, `drain_for_runner_by_id` on commit).
+async fn drain_runner_after_commit(pool: &PgPool, state: &AppState, runner_id: Uuid) {
+    let redis = pidash_db::redis::client_from_settings(state.settings());
+    let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
+        runner_id,
+    )
+    .await;
+}
+
+/// Drain pods after commit (the `release_locality_pins` pod drains).
+async fn drain_pods_after_commit(pool: &PgPool, state: &AppState, pods: &[Uuid]) {
+    if pods.is_empty() {
+        return;
+    }
+    let redis = pidash_db::redis::client_from_settings(state.settings());
+    for pod in pods {
+        let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+            pool,
+            redis.as_ref(),
+            &state.settings().runner,
+            *pod,
+        )
+        .await;
+    }
+}
+
 /// The runner-PATCH `pod` member (`QUIRK-pod-null`): explicit `null`
 /// reads as missing (`filter(pk=None)` matches nothing → the 400 arm),
 /// strings parse, everything else 500s.
@@ -481,6 +539,9 @@ struct DevMachineOwned {
     host_label: String,
     label: String,
     visibility: i16,
+    engine_paused_by_owner: bool,
+    engine_auto_pause_reason: String,
+    engine_team_runs: bool,
     last_seen_at: Option<DateTime<Utc>>,
     revoked_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
@@ -498,6 +559,9 @@ impl From<manage_reads::MachineListRow> for DevMachineOwned {
             host_label: row.host_label,
             label: row.label,
             visibility: row.visibility,
+            engine_paused_by_owner: row.engine_paused_by_owner,
+            engine_auto_pause_reason: row.engine_auto_pause_reason,
+            engine_team_runs: row.engine_team_runs,
             last_seen_at: row.last_seen_at,
             revoked_at: row.revoked_at,
             created_at: row.created_at,
@@ -521,6 +585,7 @@ struct RunnerOwned {
     name: String,
     host_label: String,
     provisioning: String,
+    pod_dispatch: String,
     visibility: i16,
     enrolled_at: Option<DateTime<Utc>>,
     capabilities: Value,
@@ -550,6 +615,7 @@ fn runner_of(row: &RunnerJoinRow) -> RunnerOwned {
         name: row.name.clone(),
         host_label: row.host_label.clone(),
         provisioning: row.provisioning.clone(),
+        pod_dispatch: row.pod_dispatch.clone(),
         visibility: row.visibility,
         enrolled_at: row.enrolled_at,
         capabilities: row.capabilities.clone(),
@@ -589,6 +655,9 @@ struct DevMachineMiniOwned {
     id: String,
     host_label: String,
     label: String,
+    engine_paused_by_owner: bool,
+    engine_auto_pause_reason: String,
+    engine_team_runs: bool,
 }
 
 /// The dev-machine mini of an R1/R2 row, or `None` when the `LEFT JOIN`
@@ -599,6 +668,9 @@ fn machine_mini_of(row: &RunnerJoinRow) -> Option<DevMachineMiniOwned> {
         id: id.to_string(),
         host_label: row.dm_host_label.clone().unwrap_or_default(),
         label: row.dm_label.clone().unwrap_or_default(),
+        engine_paused_by_owner: row.dm_engine_paused_by_owner.unwrap_or(false),
+        engine_auto_pause_reason: row.dm_engine_auto_pause_reason.clone().unwrap_or_default(),
+        engine_team_runs: row.dm_engine_team_runs.unwrap_or(false),
     })
 }
 
@@ -805,6 +877,9 @@ struct DevMachineRender {
     runner_count: i64,
     online_runner_count: i64,
     control_online: bool,
+    engine_paused_by_owner: bool,
+    engine_auto_pause_reason: String,
+    engine_team_runs: bool,
     last_seen_at: Option<String>,
     last_heartbeat_at: Option<String>,
     revoked_at: Option<String>,
@@ -822,6 +897,9 @@ impl DevMachineRender {
             runner_count: Some(self.runner_count),
             online_runner_count: Some(self.online_runner_count),
             control_online: Some(self.control_online),
+            engine_paused_by_owner: self.engine_paused_by_owner,
+            engine_auto_pause_reason: &self.engine_auto_pause_reason,
+            engine_team_runs: self.engine_team_runs,
             last_seen_at: self.last_seen_at.as_deref(),
             last_heartbeat_at: Some(self.last_heartbeat_at.as_deref()),
             revoked_at: self.revoked_at.as_deref(),
@@ -842,6 +920,9 @@ fn render_machine(machine: &DevMachineOwned) -> Result<String, Response> {
         runner_count: machine.runner_count,
         online_runner_count: machine.online_runner_count,
         control_online: machine.control_online,
+        engine_paused_by_owner: machine.engine_paused_by_owner,
+        engine_auto_pause_reason: machine.engine_auto_pause_reason.clone(),
+        engine_team_runs: machine.engine_team_runs,
         last_seen_at: machine
             .last_seen_at
             .as_ref()
@@ -867,6 +948,7 @@ struct RunnerRender {
     status: String,
     host_label: String,
     provisioning: String,
+    pod_dispatch: String,
     os: String,
     arch: String,
     runner_version: String,
@@ -915,6 +997,9 @@ impl RunnerRender {
                     id: &detail.id,
                     host_label: &detail.host_label,
                     label: &detail.label,
+                    engine_paused_by_owner: detail.engine_paused_by_owner,
+                    engine_auto_pause_reason: &detail.engine_auto_pause_reason,
+                    engine_team_runs: detail.engine_team_runs,
                 });
         let live_state = self.live_state.as_ref().map(|live| shapes::LiveStateRow {
             observed_run_id: live.observed_run_id.as_deref(),
@@ -937,6 +1022,7 @@ impl RunnerRender {
             status: &self.status,
             host_label: &self.host_label,
             provisioning: &self.provisioning,
+            pod_dispatch: &self.pod_dispatch,
             os: &self.os,
             arch: &self.arch,
             runner_version: &self.runner_version,
@@ -978,6 +1064,7 @@ fn runner_render(
         status: runner.status.clone(),
         host_label: runner.host_label.clone(),
         provisioning: runner.provisioning.clone(),
+        pod_dispatch: runner.pod_dispatch.clone(),
         os: runner.os.clone(),
         arch: runner.arch.clone(),
         runner_version: runner.runner_version.clone(),
@@ -1320,6 +1407,26 @@ pub async fn runner_patch(
         Ok(false) => {}
         Err(response) => return response,
     }
+    // `pod_dispatch` validation (`runners.py` #2903): when the key is
+    // present the value must be one of the two choices.
+    let mut new_dispatch: Option<String> = None;
+    match data_has(&data, "pod_dispatch") {
+        Ok(true) => {
+            let raw = match data_get(&data, "pod_dispatch") {
+                Ok(raw) => raw,
+                Err(response) => return response,
+            };
+            match pod_dispatch_value(raw) {
+                Some(value) => new_dispatch = Some(value),
+                None => return bad_request(POD_DISPATCH_INVALID_BODY),
+            }
+        }
+        Ok(false) => {}
+        Err(response) => return response,
+    }
+    let dispatch_changed = new_dispatch
+        .as_deref()
+        .is_some_and(|value| value != runner.pod_dispatch);
     let mut new_pod: Option<PodOwned> = None;
     let want_pod = match data_has(&data, "pod") {
         Ok(want_pod) => want_pod,
@@ -1357,6 +1464,12 @@ pub async fn runner_patch(
         if target.workspace_id != runner.workspace_id {
             return bad_request(POD_OTHER_WORKSPACE_BODY);
         }
+        // Engine pod-move restriction (`runners.py` #2903): an engine
+        // runner that already has a pod may only move within its project.
+        // This runs after the workspace check and before the busy guard.
+        if is_engine_runner(&runner) && target.project_id != hit.row.pod_project_id {
+            return bad_request(ENGINE_PROJECT_FIXED_BODY);
+        }
         if manage_reads::is_real_move(&target.id, &runner.pod_id) {
             let busy = match manage_reads::runner_is_busy(&TxConn::new(&mut tx), runner.id).await {
                 Ok(busy) => busy,
@@ -1374,12 +1487,31 @@ pub async fn runner_patch(
             runner.id,
             Some(target.id),
             new_name.as_deref(),
+            new_dispatch.as_deref(),
             now,
         )
         .await
         .is_err()
         {
             return server_error();
+        }
+        // Side effects in the same transaction (`_apply_pod_dispatch_change`).
+        let mut drain_runner = false;
+        let mut drain_pods: Vec<Uuid> = Vec::new();
+        if dispatch_changed {
+            if new_dispatch.as_deref() == Some("pinned_only") && is_engine_runner(&runner) {
+                match pidash_services::runner_enroll::dispatch_rules::release_locality_pins(
+                    &TxConn::new(&mut tx),
+                    &[runner.id],
+                )
+                .await
+                {
+                    Ok((_, pods)) => drain_pods = pods,
+                    Err(_) => return server_error(),
+                }
+            } else if new_dispatch.as_deref() == Some("pod_member") {
+                drain_runner = true;
+            }
         }
         if tx.commit().await.is_err() {
             return server_error();
@@ -1389,24 +1521,90 @@ pub async fn runner_patch(
         if let Some(name) = new_name.clone() {
             runner.name = name;
         }
-        new_pod = Some(target);
-    } else if let Some(name) = new_name.clone() {
-        // Rename-only: a standalone autocommit save, no transaction.
-        let now = now_micros();
-        if manage_reads::patch_runner(
-            &pidash_db::pool::sea_orm_connection(&pool),
-            runner.id,
-            None,
-            Some(&name),
-            now,
-        )
-        .await
-        .is_err()
-        {
-            return server_error();
+        if let Some(dispatch) = new_dispatch.clone() {
+            runner.pod_dispatch = dispatch;
         }
-        runner.name = name;
-        runner.updated_at = now;
+        new_pod = Some(target);
+        if drain_runner {
+            drain_runner_after_commit(&pool, &state, runner.id).await;
+        } else if !drain_pods.is_empty() {
+            drain_pods_after_commit(&pool, &state, &drain_pods).await;
+        }
+    } else if new_dispatch.is_some() || new_name.is_some() {
+        if dispatch_changed {
+            // Non-pod path is wrapped in `transaction.atomic` (#2903).
+            let mut tx = match pool.begin().await {
+                Ok(tx) => tx,
+                Err(_) => return server_error(),
+            };
+            let now = now_micros();
+            if manage_reads::patch_runner(
+                &TxConn::new(&mut tx),
+                runner.id,
+                None,
+                new_name.as_deref(),
+                new_dispatch.as_deref(),
+                now,
+            )
+            .await
+            .is_err()
+            {
+                return server_error();
+            }
+            let mut drain_runner = false;
+            let mut drain_pods: Vec<Uuid> = Vec::new();
+            if new_dispatch.as_deref() == Some("pinned_only") && is_engine_runner(&runner) {
+                match pidash_services::runner_enroll::dispatch_rules::release_locality_pins(
+                    &TxConn::new(&mut tx),
+                    &[runner.id],
+                )
+                .await
+                {
+                    Ok((_, pods)) => drain_pods = pods,
+                    Err(_) => return server_error(),
+                }
+            } else if new_dispatch.as_deref() == Some("pod_member") {
+                drain_runner = true;
+            }
+            if tx.commit().await.is_err() {
+                return server_error();
+            }
+            runner.updated_at = now;
+            if let Some(name) = new_name.clone() {
+                runner.name = name;
+            }
+            if let Some(dispatch) = new_dispatch.clone() {
+                runner.pod_dispatch = dispatch;
+            }
+            if drain_runner {
+                drain_runner_after_commit(&pool, &state, runner.id).await;
+            } else if !drain_pods.is_empty() {
+                drain_pods_after_commit(&pool, &state, &drain_pods).await;
+            }
+        } else {
+            // Rename-only: a standalone autocommit save, no transaction.
+            let now = now_micros();
+            if manage_reads::patch_runner(
+                &pidash_db::pool::sea_orm_connection(&pool),
+                runner.id,
+                None,
+                new_name.as_deref(),
+                new_dispatch.as_deref(),
+                now,
+            )
+            .await
+            .is_err()
+            {
+                return server_error();
+            }
+            runner.updated_at = now;
+            if let Some(name) = new_name.clone() {
+                runner.name = name;
+            }
+            if let Some(dispatch) = new_dispatch.clone() {
+                runner.pod_dispatch = dispatch;
+            }
+        }
     }
     // Serialize the in-memory row: the pod mini comes from the moved-to
     // pod (whose project slug re-reads — the lock-read instance never
@@ -2429,6 +2627,9 @@ mod tests {
             host_label: "mac-mini".to_owned(),
             label: String::new(),
             visibility: 0,
+            engine_paused_by_owner: false,
+            engine_auto_pause_reason: String::new(),
+            engine_team_runs: false,
             last_seen_at: None,
             revoked_at: None,
             created_at: moment("2026-10-01T12:34:56.789012+00:00"),
@@ -2440,7 +2641,7 @@ mod tests {
         };
         assert_eq!(
             render_machine(&machine).unwrap(),
-            r#"{"id":"55555555-5555-5555-5555-555555555555","host_label":"mac-mini","label":"","visibility":0,"runner_count":1,"online_runner_count":0,"control_online":false,"last_seen_at":null,"last_heartbeat_at":null,"revoked_at":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
+            r#"{"id":"55555555-5555-5555-5555-555555555555","host_label":"mac-mini","label":"","visibility":0,"runner_count":1,"online_runner_count":0,"control_online":false,"engine_paused_by_owner":false,"engine_auto_pause_reason":"","engine_team_runs":false,"last_seen_at":null,"last_heartbeat_at":null,"revoked_at":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
         );
     }
 
@@ -2455,6 +2656,7 @@ mod tests {
             name: "r1".to_owned(),
             host_label: "h".to_owned(),
             provisioning: "manual".to_owned(),
+            pod_dispatch: "pod_member".to_owned(),
             visibility: 0,
             enrolled_at: None,
             capabilities: serde_json::json!([]),
@@ -2492,7 +2694,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             body,
-            r#"{"id":"66666666-6666-6666-6666-666666666666","name":"r1","status":"offline","host_label":"h","provisioning":"manual","os":"","arch":"","runner_version":"","dev_metadata":{},"protocol_version":4,"capabilities":[],"last_heartbeat_at":null,"owner":"44444444-4444-4444-4444-444444444444","dev_machine":null,"dev_machine_detail":null,"visibility":0,"pod":"11111111-1111-1111-1111-111111111111","pod_detail":{"id":"11111111-1111-1111-1111-111111111111","name":"WEB_beefy","is_default":false,"project":"33333333-3333-3333-3333-333333333333","project_identifier":"WEB"},"live_state":{"observed_run_id":null,"last_event_at":"2026-10-02T01:02:03Z","last_event_kind":null,"last_event_summary":null,"agent_pid":null,"agent_subprocess_alive":true,"approvals_pending":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"usage":{},"llm_model":"m","turn_count":3,"agent_health":"healthy","agent_last_activity_at":"2026-10-02T01:02:01Z","updated_at":"2026-10-02T01:02:03Z"},"enrolled_at":null,"revoked_at":null,"revoked_reason":"","paused_at":null,"paused_by":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
+            r#"{"id":"66666666-6666-6666-6666-666666666666","name":"r1","status":"offline","host_label":"h","provisioning":"manual","pod_dispatch":"pod_member","os":"","arch":"","runner_version":"","dev_metadata":{},"protocol_version":4,"capabilities":[],"last_heartbeat_at":null,"owner":"44444444-4444-4444-4444-444444444444","dev_machine":null,"dev_machine_detail":null,"visibility":0,"pod":"11111111-1111-1111-1111-111111111111","pod_detail":{"id":"11111111-1111-1111-1111-111111111111","name":"WEB_beefy","is_default":false,"project":"33333333-3333-3333-3333-333333333333","project_identifier":"WEB"},"live_state":{"observed_run_id":null,"last_event_at":"2026-10-02T01:02:03Z","last_event_kind":null,"last_event_summary":null,"agent_pid":null,"agent_subprocess_alive":true,"approvals_pending":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"usage":{},"llm_model":"m","turn_count":3,"agent_health":"healthy","agent_last_activity_at":"2026-10-02T01:02:01Z","updated_at":"2026-10-02T01:02:03Z"},"enrolled_at":null,"revoked_at":null,"revoked_reason":"","paused_at":null,"paused_by":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
         );
     }
 }

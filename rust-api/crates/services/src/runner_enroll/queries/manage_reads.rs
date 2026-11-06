@@ -591,6 +591,9 @@ pub struct MachineListRow {
     pub host_label: String,
     pub label: String,
     pub visibility: i16,
+    pub engine_paused_by_owner: bool,
+    pub engine_auto_pause_reason: String,
+    pub engine_team_runs: bool,
     pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -708,6 +711,9 @@ fn annotated_machines(
             dev_machine::Column::HostLabel,
             dev_machine::Column::Label,
             dev_machine::Column::Visibility,
+            dev_machine::Column::EnginePausedByOwner,
+            dev_machine::Column::EngineAutoPauseReason,
+            dev_machine::Column::EngineTeamRuns,
             dev_machine::Column::LastSeenAt,
             dev_machine::Column::RevokedAt,
             dev_machine::Column::CreatedAt,
@@ -759,6 +765,7 @@ pub struct RunnerJoinRow {
     pub name: String,
     pub host_label: String,
     pub provisioning: String,
+    pub pod_dispatch: String,
     pub visibility: i16,
     pub enrolled_at: Option<chrono::DateTime<chrono::Utc>>,
     pub capabilities: serde_json::Value,
@@ -778,6 +785,9 @@ pub struct RunnerJoinRow {
     pub dm_id: Option<Uuid>,
     pub dm_host_label: Option<String>,
     pub dm_label: Option<String>,
+    pub dm_engine_paused_by_owner: Option<bool>,
+    pub dm_engine_auto_pause_reason: Option<String>,
+    pub dm_engine_team_runs: Option<bool>,
     pub pod_workspace_id: Uuid,
     pub pod_project_id: Uuid,
     pub pod_name: String,
@@ -811,6 +821,7 @@ fn runner_join_query() -> Select<runner::Entity> {
             runner::Column::Name,
             runner::Column::HostLabel,
             runner::Column::Provisioning,
+            runner::Column::PodDispatch,
             runner::Column::Visibility,
             runner::Column::EnrolledAt,
             runner::Column::Capabilities,
@@ -831,6 +842,15 @@ fn runner_join_query() -> Select<runner::Entity> {
         .column_as(dev_machine::Column::Id, "dm_id")
         .column_as(dev_machine::Column::HostLabel, "dm_host_label")
         .column_as(dev_machine::Column::Label, "dm_label")
+        .column_as(
+            dev_machine::Column::EnginePausedByOwner,
+            "dm_engine_paused_by_owner",
+        )
+        .column_as(
+            dev_machine::Column::EngineAutoPauseReason,
+            "dm_engine_auto_pause_reason",
+        )
+        .column_as(dev_machine::Column::EngineTeamRuns, "dm_engine_team_runs")
         .column_as(pod::Column::WorkspaceId, "pod_workspace_id")
         .column_as(pod::Column::ProjectId, "pod_project_id")
         .column_as(pod::Column::Name, "pod_name")
@@ -928,13 +948,14 @@ pub async fn runner_is_busy(db: &impl ConnectionTrait, runner_id: Uuid) -> Resul
 }
 
 /// R3 write (`runners.py:422, 424`, [`runner_patch_sql`]):
-/// `runner.save(update_fields=...)` for the changed pod / name plus
-/// `updated_at`.
+/// `runner.save(update_fields=...)` for the changed pod / name /
+/// `pod_dispatch` plus `updated_at`.
 pub async fn patch_runner(
     db: &impl ConnectionTrait,
     runner_id: Uuid,
     pod_id: Option<Uuid>,
     name: Option<&str>,
+    pod_dispatch: Option<&str>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), DbErr> {
     let mut update = runner::Entity::update_many();
@@ -943,6 +964,9 @@ pub async fn patch_runner(
     }
     if let Some(name) = name {
         update = update.col_expr(runner::Column::Name, Expr::value(name));
+    }
+    if let Some(pod_dispatch) = pod_dispatch {
+        update = update.col_expr(runner::Column::PodDispatch, Expr::value(pod_dispatch));
     }
     update
         .col_expr(runner::Column::UpdatedAt, Expr::value(now))
@@ -970,6 +994,9 @@ pub struct LockedMachineRow {
     pub host_label: String,
     pub label: String,
     pub visibility: i16,
+    pub engine_paused_by_owner: bool,
+    pub engine_auto_pause_reason: String,
+    pub engine_team_runs: bool,
     pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -990,6 +1017,9 @@ pub async fn lock_machine(
             dev_machine::Column::HostLabel,
             dev_machine::Column::Label,
             dev_machine::Column::Visibility,
+            dev_machine::Column::EnginePausedByOwner,
+            dev_machine::Column::EngineAutoPauseReason,
+            dev_machine::Column::EngineTeamRuns,
             dev_machine::Column::LastSeenAt,
             dev_machine::Column::RevokedAt,
             dev_machine::Column::CreatedAt,
@@ -1139,6 +1169,9 @@ mod tests {
         "label",
         "visibility",
         "provisioning",
+        "engine_paused_by_owner",
+        "engine_auto_pause_reason",
+        "engine_team_runs",
         "last_seen_at",
         "revoked_at",
         "created_at",
@@ -1153,6 +1186,7 @@ mod tests {
         "name",
         "host_label",
         "provisioning",
+        "pod_dispatch",
         "visibility",
         "refresh_token_hash",
         "refresh_token_fingerprint",
@@ -1674,7 +1708,7 @@ mod tests {
         .await
         .expect("seed");
         assert!(runner_is_busy(&conn, r1).await.expect("busy"));
-        patch_runner(&conn, r2, None, Some("renamed"), chrono::Utc::now())
+        patch_runner(&conn, r2, None, Some("renamed"), None, chrono::Utc::now())
             .await
             .expect("patch");
         assert_eq!(

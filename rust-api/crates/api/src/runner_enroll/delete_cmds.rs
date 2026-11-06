@@ -111,6 +111,7 @@ use uuid::Uuid;
 use pidash_auth::permissions::membership;
 use pidash_auth::permissions::runner as runner_perm;
 use pidash_auth::scope::TenantScope;
+use pidash_db::orm_tx::TxConn;
 use pidash_db::redis::client_from_settings;
 use pidash_db::runner_sessions::machine_outbox;
 use pidash_db::runner_sessions::machine_outbox::MachineOutboxError;
@@ -167,6 +168,12 @@ pub const DEV_MACHINE_REVOKED_BODY: &str = r#"{"error":"dev_machine_revoked"}"#;
 pub const UNKNOWN_REQUEST_BODY: &str = r#"{"error":"unknown_request"}"#;
 /// `{"error": "invalid_status"}` — 400 (`machine_commands.py:246`).
 pub const INVALID_STATUS_BODY: &str = r#"{"error":"invalid_status"}"#;
+/// Owner machine PATCH unknown keys — 400 (`runners.py` #2903).
+pub const ENGINE_CONTROLS_UNKNOWN_BODY: &str = r#"{"error":"only engine controls can be changed here: engine_paused_by_owner, engine_team_runs"}"#;
+/// Owner machine PATCH non-bool values — 400 (`runners.py` #2903).
+pub fn engine_control_bool_body(field: &str) -> String {
+    format!("{{\"error\":\"{field} must be a boolean\"}}")
+}
 
 /// `{"error": "invalid_runner_name", "error_description": ...}` — 400
 /// (`machine_commands.py:113-122`; the description kernel is
@@ -1092,6 +1099,144 @@ pub async fn machine_delete(
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// `PATCH /api/runners/dev-machines/<machine_id>/` (`runners.py` #2903,
+/// `DevMachineDeleteEndpoint.patch`, session auth): owner-only engine
+/// controls. Checks in Django order — workspace 400, member 403,
+/// unknown-key/non-bool 400s, scope 404, owner 403, revoked 409 —
+/// then `update_machine_controls` (locked) in one transaction and the
+/// 200 `_serialize_dev_machine` body (the list row).
+pub async fn machine_patch(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(raw_id): Path<String>,
+    Query(params): Query<crate::license::QueryMap>,
+    req: Request,
+) -> Response {
+    let Some(machine_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let (pool, user_id) = match web_actor(&state, extension).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
+    let data = match read_request_data(&state, req).await {
+        Ok(data) => data,
+        Err(response) => return response,
+    };
+    let workspace_id = match web_workspace(&pool, user_id, &data, &params).await {
+        Ok(workspace_id) => workspace_id,
+        Err(response) => return response,
+    };
+    // Body-key validation before the scope read (`runners.py` #2903).
+    let keys: Vec<String> = if let JVal::Object(map) = &data {
+        map.iter()
+            .map(|(key, _)| key.to_lossy_string().to_owned())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for key in &keys {
+        if !matches!(
+            key.as_str(),
+            "engine_paused_by_owner" | "engine_team_runs" | "workspace"
+        ) {
+            return bad_request(ENGINE_CONTROLS_UNKNOWN_BODY);
+        }
+    }
+    let mut controls = pidash_services::runner_enroll::machine_controls::MachineControls::default();
+    for field in ["engine_paused_by_owner", "engine_team_runs"] {
+        let present = if let JVal::Object(map) = &data {
+            map.contains_key(field)
+        } else {
+            false
+        };
+        if !present {
+            continue;
+        }
+        let raw = match data_get(&data, field) {
+            Ok(raw) => raw,
+            Err(response) => return response,
+        };
+        match raw {
+            Some(JVal::Bool(value)) => {
+                let value = *value;
+                if field == "engine_paused_by_owner" {
+                    controls.engine_paused_by_owner = Some(value);
+                } else {
+                    controls.engine_team_runs = Some(value);
+                }
+            }
+            _ => return bad_request(&engine_control_bool_body(field)),
+        }
+    }
+    // Scope 404 (unlocked read + probes); owner/revoked gates inside the
+    // locked service (Django `SELECT ... FOR UPDATE` + gates).
+    if let Err(response) = scope_machine(&pool, user_id, workspace_id, machine_id).await {
+        return response;
+    }
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
+    };
+    let updated = match pidash_services::runner_enroll::machine_controls::update_machine_controls(
+        &TxConn::new(&mut tx),
+        machine_id,
+        user_id,
+        &controls,
+        now_micros(),
+    )
+    .await
+    {
+        Ok(updated) => updated,
+        Err(pidash_services::runner_enroll::machine_controls::UpdateError::Failure(
+            pidash_services::runner_enroll::machine_controls::MachineControlFailure::NotFound,
+        )) => return not_found(),
+        Err(pidash_services::runner_enroll::machine_controls::UpdateError::Failure(
+            pidash_services::runner_enroll::machine_controls::MachineControlFailure::Forbidden,
+        )) => return forbidden(),
+        Err(pidash_services::runner_enroll::machine_controls::UpdateError::Failure(
+            pidash_services::runner_enroll::machine_controls::MachineControlFailure::Revoked,
+        )) => return conflict(DEV_MACHINE_REVOKED_BODY),
+        Err(_) => return server_error(),
+    };
+    if tx.commit().await.is_err() {
+        return server_error();
+    }
+    // Post-commit drains: pausing released pins (drain pods), resuming
+    // drains each engine.
+    let redis = pidash_db::redis::client_from_settings(state.settings());
+    for pod in &updated.effects.drain_pod_ids {
+        let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+            &pool,
+            redis.as_ref(),
+            &state.settings().runner,
+            *pod,
+        )
+        .await;
+    }
+    for runner in &updated.effects.drain_runner_ids {
+        let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+            &pool,
+            redis.as_ref(),
+            &state.settings().runner,
+            *runner,
+        )
+        .await;
+    }
+    // 200 `_serialize_dev_machine` — the list row (teardown serializer
+    // over the locked machine, re-read post-commit).
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let locked = match manage_reads::lock_machine(&db, machine_id).await {
+        Ok(Some(machine)) => machine,
+        Ok(None) => return not_found(),
+        Err(_) => return server_error(),
+    };
+    match super::teardown::serialize_machine(&pool, &locked, user_id, workspace_id, None).await {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(response) => response,
+    }
+}
+
 /// `POST /api/runners/dev-machines/<machine_id>/create-runner/`
 /// (`machine_commands.py:76-186`): workspace gate, scope check,
 /// project/agent/name validation, pending marker, `send_to_machine`
@@ -1473,13 +1618,16 @@ fn owned(
 /// on the doubly-defined DELETE).
 pub fn web_routes() -> Router<AppState> {
     use axum::routing::{delete, get, post};
-    const DELETE_ONLY: &[&str] = &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"];
+    const DELETE_PATCH_ONLY: &[&str] = &["GET", "POST", "PUT", "HEAD", "OPTIONS"];
     const POST_ONLY: &[&str] = &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
     const GET_ONLY: &[&str] = &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
     Router::new()
         .route(
             "/api/runners/dev-machines/{machine_id}/",
-            owned(delete(machine_delete), DELETE_ONLY),
+            owned(
+                delete(machine_delete).patch(machine_patch),
+                DELETE_PATCH_ONLY,
+            ),
         )
         .route(
             "/api/runners/dev-machines/{machine_id}/create-runner/",

@@ -108,9 +108,9 @@ pub const LIVE_STATE_WIRE_FIELDS: [&str; 16] = [
     "updated_at",
 ];
 
-/// `DevMachineSerializer.Meta.fields` (`serializers.py:114-127`), wire
-/// order.
-pub const DEV_MACHINE_WIRE_FIELDS: [&str; 12] = [
+/// `DevMachineSerializer.Meta.fields` (`serializers.py:114-127` plus the
+/// engine trio, #2903), wire order.
+pub const DEV_MACHINE_WIRE_FIELDS: [&str; 15] = [
     "id",
     "host_label",
     "label",
@@ -118,6 +118,9 @@ pub const DEV_MACHINE_WIRE_FIELDS: [&str; 12] = [
     "runner_count",
     "online_runner_count",
     "control_online",
+    "engine_paused_by_owner",
+    "engine_auto_pause_reason",
+    "engine_team_runs",
     "last_seen_at",
     "last_heartbeat_at",
     "revoked_at",
@@ -129,17 +132,26 @@ pub const DEV_MACHINE_WIRE_FIELDS: [&str; 12] = [
 pub const POD_MINI_WIRE_FIELDS: [&str; 5] =
     ["id", "name", "is_default", "project", "project_identifier"];
 
-/// `DevMachineMiniSerializer.Meta.fields` (`serializers.py:151`), wire
-/// order.
-pub const DEV_MACHINE_MINI_WIRE_FIELDS: [&str; 3] = ["id", "host_label", "label"];
+/// `DevMachineMiniSerializer.Meta.fields` (`serializers.py:151` plus the
+/// engine trio, #2903), wire order.
+pub const DEV_MACHINE_MINI_WIRE_FIELDS: [&str; 6] = [
+    "id",
+    "host_label",
+    "label",
+    "engine_paused_by_owner",
+    "engine_auto_pause_reason",
+    "engine_team_runs",
+];
 
-/// `RunnerSerializer.Meta.fields` (`serializers.py:165-190`), wire order.
-pub const RUNNER_WIRE_FIELDS: [&str; 26] = [
+/// `RunnerSerializer.Meta.fields` (`serializers.py:165-190` plus
+/// `pod_dispatch` after `provisioning`, #2903), wire order.
+pub const RUNNER_WIRE_FIELDS: [&str; 27] = [
     "id",
     "name",
     "status",
     "host_label",
     "provisioning",
+    "pod_dispatch",
     "os",
     "arch",
     "runner_version",
@@ -268,12 +280,16 @@ pub fn pod_mini_to_representation<'a>(row: &'a PodMiniRow<'a>) -> PodMiniView<'a
 // Dev-machine shapes
 // ---------------------------------------------------------------------------
 
-/// A `DevMachine` row for mini rendering (`serializers.py:145-153`).
+/// A `DevMachine` row for mini rendering (`serializers.py:145-153` plus
+/// the engine trio, #2903).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DevMachineMiniRow<'a> {
     pub id: &'a str,
     pub host_label: &'a str,
     pub label: &'a str,
+    pub engine_paused_by_owner: bool,
+    pub engine_auto_pause_reason: &'a str,
+    pub engine_team_runs: bool,
 }
 
 /// `DevMachineMiniSerializer.to_representation` output, in wire order.
@@ -282,9 +298,13 @@ pub struct DevMachineMiniView<'a> {
     pub id: &'a str,
     pub host_label: &'a str,
     pub label: &'a str,
+    pub engine_paused_by_owner: bool,
+    pub engine_auto_pause_reason: &'a str,
+    pub engine_team_runs: bool,
 }
 
-/// Port of `DevMachineMiniSerializer` (`serializers.py:145-153`).
+/// Port of `DevMachineMiniSerializer` (`serializers.py:145-153` plus
+/// the engine trio, #2903).
 pub fn dev_machine_mini_to_representation<'a>(
     row: &'a DevMachineMiniRow<'a>,
 ) -> DevMachineMiniView<'a> {
@@ -292,6 +312,9 @@ pub fn dev_machine_mini_to_representation<'a>(
         id: row.id,
         host_label: row.host_label,
         label: row.label,
+        engine_paused_by_owner: row.engine_paused_by_owner,
+        engine_auto_pause_reason: row.engine_auto_pause_reason,
+        engine_team_runs: row.engine_team_runs,
     }
 }
 
@@ -312,6 +335,9 @@ pub struct DevMachineRow<'a> {
     pub runner_count: Option<i64>,
     pub online_runner_count: Option<i64>,
     pub control_online: Option<bool>,
+    pub engine_paused_by_owner: bool,
+    pub engine_auto_pause_reason: &'a str,
+    pub engine_team_runs: bool,
     pub last_seen_at: Option<&'a str>,
     pub last_heartbeat_at: Option<Option<&'a str>>,
     pub revoked_at: Option<&'a str>,
@@ -331,6 +357,9 @@ pub struct DevMachineView<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub online_runner_count: Option<i64>,
     pub control_online: bool,
+    pub engine_paused_by_owner: bool,
+    pub engine_auto_pause_reason: &'a str,
+    pub engine_team_runs: bool,
     pub last_seen_at: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_heartbeat_at: Option<Option<&'a str>>,
@@ -349,6 +378,9 @@ pub fn dev_machine_to_representation<'a>(row: &'a DevMachineRow<'a>) -> DevMachi
         runner_count: row.runner_count,
         online_runner_count: row.online_runner_count,
         control_online: row.control_online.unwrap_or(false),
+        engine_paused_by_owner: row.engine_paused_by_owner,
+        engine_auto_pause_reason: row.engine_auto_pause_reason,
+        engine_team_runs: row.engine_team_runs,
         last_seen_at: row.last_seen_at,
         last_heartbeat_at: row.last_heartbeat_at,
         revoked_at: row.revoked_at,
@@ -439,6 +471,7 @@ pub struct RunnerRow<'a> {
     pub status: &'a str,
     pub host_label: &'a str,
     pub provisioning: &'a str,
+    pub pod_dispatch: &'a str,
     pub os: &'a str,
     pub arch: &'a str,
     pub runner_version: &'a str,
@@ -472,6 +505,7 @@ pub struct RunnerView<'a> {
     pub status: &'a str,
     pub host_label: &'a str,
     pub provisioning: &'a str,
+    pub pod_dispatch: &'a str,
     pub os: &'a str,
     pub arch: &'a str,
     pub runner_version: &'a str,
@@ -503,6 +537,7 @@ pub fn runner_to_representation<'a>(row: &'a RunnerRow<'a>) -> RunnerView<'a> {
         status: row.status,
         host_label: row.host_label,
         provisioning: row.provisioning,
+        pod_dispatch: row.pod_dispatch,
         os: row.os,
         arch: row.arch,
         runner_version: row.runner_version,
@@ -1219,6 +1254,9 @@ mod tests {
             id: "44444444-4444-4444-8444-444444444444",
             host_label: "mac-mini",
             label: "Iain's Mac",
+            engine_paused_by_owner: false,
+            engine_auto_pause_reason: "",
+            engine_team_runs: false,
         };
         let body = serde_json::to_value(dev_machine_mini_to_representation(&row)).unwrap();
         assert_eq!(keys(&body), DEV_MACHINE_MINI_WIRE_FIELDS);
@@ -1226,7 +1264,9 @@ mod tests {
             body.to_string(),
             concat!(
                 "{\"id\":\"44444444-4444-4444-8444-444444444444\",",
-                "\"host_label\":\"mac-mini\",\"label\":\"Iain's Mac\"}",
+                "\"host_label\":\"mac-mini\",\"label\":\"Iain's Mac\",",
+                "\"engine_paused_by_owner\":false,\"engine_auto_pause_reason\":\"\",",
+                "\"engine_team_runs\":false}",
             )
         );
     }
@@ -1241,6 +1281,9 @@ mod tests {
             runner_count: Some(2),
             online_runner_count: Some(1),
             control_online: Some(true),
+            engine_paused_by_owner: false,
+            engine_auto_pause_reason: "",
+            engine_team_runs: false,
             last_seen_at: Some("2026-10-02T01:02:03+00:00"),
             last_heartbeat_at: Some(Some("2026-10-02T01:02:04+00:00")),
             revoked_at: None,
@@ -1265,6 +1308,9 @@ mod tests {
             runner_count: None,
             online_runner_count: None,
             control_online: None,
+            engine_paused_by_owner: false,
+            engine_auto_pause_reason: "",
+            engine_team_runs: false,
             last_seen_at: None,
             last_heartbeat_at: None,
             revoked_at: None,
@@ -1280,6 +1326,9 @@ mod tests {
                 "label",
                 "visibility",
                 "control_online",
+                "engine_paused_by_owner",
+                "engine_auto_pause_reason",
+                "engine_team_runs",
                 "last_seen_at",
                 "revoked_at",
                 "created_at",
@@ -1300,6 +1349,9 @@ mod tests {
             runner_count: Some(0),
             online_runner_count: Some(0),
             control_online: Some(false),
+            engine_paused_by_owner: false,
+            engine_auto_pause_reason: "",
+            engine_team_runs: false,
             last_seen_at: None,
             // Annotated but `Max()` over zero rows: key present, null.
             last_heartbeat_at: Some(None),
@@ -1394,6 +1446,7 @@ mod tests {
             status: "online",
             host_label: "mac-mini",
             provisioning: "manual",
+            pod_dispatch: "pod_member",
             os: "darwin",
             arch: "arm64",
             runner_version: "1.2.3",
@@ -1407,6 +1460,9 @@ mod tests {
                 id: "44444444-4444-4444-8444-444444444444",
                 host_label: "mac-mini",
                 label: "",
+                engine_paused_by_owner: false,
+                engine_auto_pause_reason: "",
+                engine_team_runs: false,
             }),
             visibility: 0,
             pod: "11111111-1111-4111-8111-111111111111",

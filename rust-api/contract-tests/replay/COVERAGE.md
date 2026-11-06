@@ -1,15 +1,15 @@
 # Replay corpus coverage (PIDASHCONV-823)
 
-Write `(route, method)` pairs: **586** total, **493** covered by the corpus.
+Write ``(route, method)`` pairs: **593** total, **494** covered by the corpus.
 
-| bucket                   | pairs |
-| ------------------------ | ----- |
-| covered                  | 493   |
-| proxied by design        | 93    |
-| debug toolbar (dev-only) | 0     |
-| missing with fix issue   | 0     |
-| excluded with reason     | 0     |
-| owned, no session yet    | 0     |
+| bucket | pairs |
+| --- | --- |
+| covered | 494 |
+| proxied by design | 94 |
+| debug toolbar (dev-only) | 0 |
+| missing with fix issue | 0 |
+| excluded with reason | 0 |
+| owned, no session yet | 0 |
 
 ## Covered
 
@@ -69,6 +69,7 @@ Write `(route, method)` pairs: **586** total, **493** covered by the corpus.
 - `POST /api/runners/chat/sessions/{}/messages/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/chat/sessions/{}/warm/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
 - `DELETE /api/runners/dev-machines/{}/` (runner_web) — runner_web_lifecycle (owned)
+- `PATCH /api/runners/dev-machines/{}/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/dev-machines/{}/create-runner/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/dev-machines/{}/revoke/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/dev-machines/{}/rotate/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
@@ -82,9 +83,9 @@ Write `(route, method)` pairs: **586** total, **493** covered by the corpus.
 - `POST /api/runners/runs/{}/cancel/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/runs/{}/release-pin/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
 - `DELETE /api/runners/{}/` (runner_web) — runner_web_lifecycle (owned)
-- `PATCH /api/runners/{}/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
-- `POST /api/runners/{}/pause/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (missing)
-- `POST /api/runners/{}/resume/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (missing)
+- `PATCH /api/runners/{}/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
+- `POST /api/runners/{}/pause/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
+- `POST /api/runners/{}/resume/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/{}/revive/` (runner_web) — runner_web_lifecycle (owned)
 - `POST /api/runners/{}/revoke/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/users/api-tokens/` (app) — app_misc_lifecycle, app_misc_lifecycle, app_misc_lifecycle (owned)
@@ -220,9 +221,9 @@ Write `(route, method)` pairs: **586** total, **493** covered by the corpus.
 - `DELETE /api/v1/workspaces/{}/projects/{}/project-members/{}/` (api_v1) — v1_projects_lifecycle (owned)
 - `PATCH /api/v1/workspaces/{}/projects/{}/project-members/{}/` (api_v1) — v1_projects_lifecycle (owned)
 - `POST /api/v1/workspaces/{}/projects/{}/schedulers/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle (owned)
-- `DELETE /api/v1/workspaces/{}/projects/{}/schedulers/{}/binding/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle (missing)
-- `PATCH /api/v1/workspaces/{}/projects/{}/schedulers/{}/binding/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle (missing)
-- `POST /api/v1/workspaces/{}/projects/{}/schedulers/{}/run-now/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle (missing)
+- `DELETE /api/v1/workspaces/{}/projects/{}/schedulers/{}/binding/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle (owned)
+- `PATCH /api/v1/workspaces/{}/projects/{}/schedulers/{}/binding/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle (owned)
+- `POST /api/v1/workspaces/{}/projects/{}/schedulers/{}/run-now/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle (owned)
 - `POST /api/v1/workspaces/{}/projects/{}/states/` (api_v1) — v1_projects_lifecycle, v1_projects_lifecycle, v1_projects_lifecycle (owned)
 - `DELETE /api/v1/workspaces/{}/projects/{}/states/{}/` (api_v1) — v1_projects_lifecycle, v1_projects_lifecycle (owned)
 - `PATCH /api/v1/workspaces/{}/projects/{}/states/{}/` (api_v1) — v1_projects_lifecycle (owned)
@@ -251,8 +252,8 @@ Write `(route, method)` pairs: **586** total, **493** covered by the corpus.
 - `POST /api/v1/workspaces/{}/projects/{}/work-items/{}/wait/` (api_v1) — v1_work_items_lifecycle (owned)
 - `PATCH /api/v1/workspaces/{}/projects/{}/work-items/{}/workpad/` (api_v1) — v1_work_items_lifecycle (owned)
 - `POST /api/v1/workspaces/{}/schedulers/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle (owned)
-- `DELETE /api/v1/workspaces/{}/schedulers/{}/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle (missing)
-- `PATCH /api/v1/workspaces/{}/schedulers/{}/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle (missing)
+- `DELETE /api/v1/workspaces/{}/schedulers/{}/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle (owned)
+- `PATCH /api/v1/workspaces/{}/schedulers/{}/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle (owned)
 - `POST /api/v1/workspaces/{}/stickies/` (api_v1) — v1_assets_lifecycle (owned)
 - `DELETE /api/v1/workspaces/{}/stickies/{}/` (api_v1) — v1_assets_lifecycle, v1_assets_lifecycle, v1_assets_lifecycle (owned)
 - `PATCH /api/v1/workspaces/{}/stickies/{}/` (api_v1) — v1_assets_lifecycle, v1_assets_lifecycle, v1_assets_lifecycle (owned)
@@ -305,8 +306,8 @@ Write `(route, method)` pairs: **586** total, **493** covered by the corpus.
 - `POST /api/workspaces/{}/projects/{}/bulk-archive-issues/` (app) — app_issues_followup, app_issues_followup, app_issues_followup (owned)
 - `POST /api/workspaces/{}/projects/{}/bulk-create-labels/` (app) — app_issues_followup (owned)
 - `DELETE /api/workspaces/{}/projects/{}/bulk-delete-issues/` (app) — app_issues_followup, app_issues_followup, app_issues_followup (owned)
-- `POST /api/workspaces/{}/projects/{}/bulk-operation-issues/` (app) — app_issues_drift, app_issues_drift (missing)
-- `POST /api/workspaces/{}/projects/{}/bulk-subscribe-issues/` (app) — app_issues_drift, app_issues_drift (missing)
+- `POST /api/workspaces/{}/projects/{}/bulk-operation-issues/` (app) — app_issues_drift, app_issues_drift (owned)
+- `POST /api/workspaces/{}/projects/{}/bulk-subscribe-issues/` (app) — app_issues_drift, app_issues_drift (owned)
 - `POST /api/workspaces/{}/projects/{}/comments/{}/reactions/` (app) — app_issues_lifecycle (owned)
 - `DELETE /api/workspaces/{}/projects/{}/comments/{}/reactions/{}/` (app) — app_issues_lifecycle (owned)
 - `POST /api/workspaces/{}/projects/{}/cycles/` (app) — app_cycles_lifecycle, app_cycles_lifecycle, app_cycles_lifecycle, app_cycles_lifecycle, app_cycles_lifecycle, app_cycles_lifecycle, app_cycles_lifecycle, app_cycles_lifecycle (owned)
@@ -322,10 +323,10 @@ Write `(route, method)` pairs: **586** total, **493** covered by the corpus.
 - `PUT /api/workspaces/{}/projects/{}/cycles/{}/cycle-issues/{}/` (app) — app_cycles_lifecycle (proxied)
 - `POST /api/workspaces/{}/projects/{}/cycles/{}/transfer-issues/` (app) — app_cycles_lifecycle, app_cycles_lifecycle, app_cycles_lifecycle (owned)
 - `PATCH /api/workspaces/{}/projects/{}/cycles/{}/user-properties/` (app) — app_cycles_lifecycle (owned)
-- `POST /api/workspaces/{}/projects/{}/epics/` (app) — app_issues_drift (missing)
-- `DELETE /api/workspaces/{}/projects/{}/epics/{}/` (app) — app_issues_drift (missing)
-- `PATCH /api/workspaces/{}/projects/{}/epics/{}/` (app) — app_issues_drift (missing)
-- `POST /api/workspaces/{}/projects/{}/epics/{}/issues/` (app) — app_issues_drift (missing)
+- `POST /api/workspaces/{}/projects/{}/epics/` (app) — app_issues_drift (owned)
+- `DELETE /api/workspaces/{}/projects/{}/epics/{}/` (app) — app_issues_drift (owned)
+- `PATCH /api/workspaces/{}/projects/{}/epics/{}/` (app) — app_issues_drift (owned)
+- `POST /api/workspaces/{}/projects/{}/epics/{}/issues/` (app) — app_issues_drift (owned)
 - `POST /api/workspaces/{}/projects/{}/estimates/` (app) — app_project_lifecycle, app_project_followup (owned)
 - `DELETE /api/workspaces/{}/projects/{}/estimates/{}/` (app) — app_project_lifecycle, app_project_followup (owned)
 - `PATCH /api/workspaces/{}/projects/{}/estimates/{}/` (app) — app_project_lifecycle (owned)
@@ -356,7 +357,7 @@ Write `(route, method)` pairs: **586** total, **493** covered by the corpus.
 - `DELETE /api/workspaces/{}/projects/{}/issue-labels/{}/` (app) — app_issues_followup, app_issues_followup, app_issues_followup (owned)
 - `PATCH /api/workspaces/{}/projects/{}/issue-labels/{}/` (app) — app_issues_followup, app_issues_followup (owned)
 - `PUT /api/workspaces/{}/projects/{}/issue-labels/{}/` (app) — app_issues_followup (owned)
-- `POST /api/workspaces/{}/projects/{}/issue-types/` (app) — app_issues_drift, app_issues_drift (missing)
+- `POST /api/workspaces/{}/projects/{}/issue-types/` (app) — app_issues_drift, app_issues_drift (owned)
 - `POST /api/workspaces/{}/projects/{}/issues/` (app) — app_cycles_lifecycle, app_issues_lifecycle, app_issues_lifecycle, app_issues_followup, app_issues_followup, app_issues_followup, app_issues_followup, app_issues_followup, app_issues_followup, app_issues_drift, app_issues_drift, app_issues_drift, app_issues_drift, app_modules_lifecycle, app_modules_lifecycle (owned)
 - `DELETE /api/workspaces/{}/projects/{}/issues/{}/` (app) — app_cycles_lifecycle, app_issues_lifecycle, app_issues_lifecycle, app_issues_followup, app_issues_followup, app_issues_followup, app_issues_followup, app_modules_lifecycle, app_modules_lifecycle (owned)
 - `PATCH /api/workspaces/{}/projects/{}/issues/{}/` (app) — app_issues_lifecycle, app_issues_lifecycle, app_issues_followup, app_issues_followup (owned)
@@ -387,9 +388,9 @@ Write `(route, method)` pairs: **586** total, **493** covered by the corpus.
 - `POST /api/workspaces/{}/projects/{}/issues/{}/sub-issues/` (app) — app_issues_lifecycle (owned)
 - `DELETE /api/workspaces/{}/projects/{}/issues/{}/subscribe/` (app) — app_issues_lifecycle (owned)
 - `POST /api/workspaces/{}/projects/{}/issues/{}/subscribe/` (app) — app_issues_lifecycle (owned)
-- `POST /api/workspaces/{}/projects/{}/issues/{}/worklogs/` (app) — app_issues_drift (missing)
-- `DELETE /api/workspaces/{}/projects/{}/issues/{}/worklogs/{}/` (app) — app_issues_drift (missing)
-- `PATCH /api/workspaces/{}/projects/{}/issues/{}/worklogs/{}/` (app) — app_issues_drift (missing)
+- `POST /api/workspaces/{}/projects/{}/issues/{}/worklogs/` (app) — app_issues_drift (owned)
+- `DELETE /api/workspaces/{}/projects/{}/issues/{}/worklogs/{}/` (app) — app_issues_drift (owned)
+- `PATCH /api/workspaces/{}/projects/{}/issues/{}/worklogs/{}/` (app) — app_issues_drift (owned)
 - `POST /api/workspaces/{}/projects/{}/join/{}/` (app) — app_project_followup, app_project_followup, app_project_followup (owned)
 - `POST /api/workspaces/{}/projects/{}/members/` (app) — app_project_lifecycle (owned)
 - `POST /api/workspaces/{}/projects/{}/members/leave/` (app) — app_project_lifecycle (owned)
@@ -548,6 +549,7 @@ Write `(route, method)` pairs: **586** total, **493** covered by the corpus.
 - `DELETE /api/v1/runner/dev-machines/{}/sessions/{}/poll` (runner)
 - `PATCH /api/v1/runner/dev-machines/{}/sessions/{}/poll` (runner)
 - `PUT /api/v1/runner/dev-machines/{}/sessions/{}/poll` (runner)
+- `POST /api/v1/runner/runners/{}/` (runner)
 - `DELETE /api/v1/runner/runners/{}/sessions/{}/poll` (runner)
 - `PATCH /api/v1/runner/runners/{}/sessions/{}/poll` (runner)
 - `PUT /api/v1/runner/runners/{}/sessions/{}/poll` (runner)

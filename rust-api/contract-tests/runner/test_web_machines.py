@@ -21,7 +21,8 @@ pytestmark = pytest.mark.contract
 
 MACHINE_KEYS = {
     "id", "host_label", "label", "visibility", "runner_count",
-    "online_runner_count", "control_online", "last_seen_at",
+    "online_runner_count", "control_online", "engine_paused_by_owner",
+    "engine_auto_pause_reason", "engine_team_runs", "last_seen_at",
     "last_heartbeat_at", "revoked_at", "created_at", "updated_at",
 }
 
@@ -239,3 +240,96 @@ def test_web_machine_token_ticket_denies_foreign_workspace(user_client, seeder):
     assert response.status_code == 404
     assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json() == {"error": "workspace not found"}
+
+
+def test_web_machine_patch_owner_only_engine_fields(user_client, daemon_world, machine_flow, seeder):
+    machine_id = _machine_id(user_client, daemon_world, machine_flow)
+    ws = daemon_world["workspace"]["id"]
+    # Unknown key 400 with the exact #2903 message.
+    unknown = web_patch(user_client, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "bogus": 1})
+    assert unknown.status_code == 400
+    assert unknown.json() == {"error": "only engine controls can be changed here: engine_paused_by_owner, engine_team_runs"}
+    # Server-set field refused as unknown key.
+    server_set = web_patch(user_client, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "engine_auto_pause_reason": ""})
+    assert server_set.status_code == 400
+    assert server_set.json() == {"error": "only engine controls can be changed here: engine_paused_by_owner, engine_team_runs"}
+    # Non-bool 400.
+    non_bool = web_patch(user_client, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "engine_paused_by_owner": "yes"})
+    assert non_bool.status_code == 400
+    assert non_bool.json() == {"error": "engine_paused_by_owner must be a boolean"}
+    # Missing workspace 400.
+    missing = web_patch(user_client, f"{WEB}/dev-machines/{machine_id}/", {"engine_team_runs": True})
+    assert missing.status_code == 400
+    assert missing.json() == {"error": "workspace is required"}
+    # Happy path: pause + team runs, 200 body equals the list row.
+    ok = web_patch(user_client, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "engine_paused_by_owner": True, "engine_team_runs": True})
+    assert ok.status_code == 200, ok.text
+    body = ok.json()
+    assert body["engine_paused_by_owner"] is True
+    assert body["engine_team_runs"] is True
+    assert body["engine_auto_pause_reason"] == ""
+    listing = user_client.get(f"{WEB}/dev-machines/", params={"workspace": ws})
+    assert listing.status_code == 200
+    row = [m for m in listing.json() if m["id"] == machine_id][0]
+    assert body == row
+    # Teammate (member, not owner) gets 403.
+    teammate = seeder.create_user()
+    seeder.create_member(ws, teammate["id"])
+    from _harness.auth import login_session
+    from _harness.http import api_client
+    with api_client(user_client.base_url) as other:
+        login_session(other, email=teammate["email"], password=teammate["password"])
+        denied = web_patch(other, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "engine_paused_by_owner": False})
+    assert denied.status_code == 403
+    assert denied.json() == {"error": "forbidden"}
+
+
+def test_web_machine_patch_other_workspace_is_404(user_client, seeder, daemon_world, machine_flow):
+    machine_id = _machine_id(user_client, daemon_world, machine_flow)
+    other_owner = seeder.create_user()
+    other_ws = seeder.create_workspace(other_owner["id"])
+    seeder.create_member(other_ws["id"], other_owner["id"])
+    # Caller's workspace is daemon_world; the machine is out of scope there
+    # only when probed from the foreign workspace — use a foreign machine.
+    foreign = seeder.create_dev_machine(other_owner["id"])
+    response = web_patch(user_client, f"{WEB}/dev-machines/{foreign['id']}/", {"workspace": daemon_world["workspace"]["id"], "engine_team_runs": True})
+    assert response.status_code == 404
+    assert response.json() == {"error": "not found"}
+    assert machine_id
+
+
+def test_web_machine_patch_revoked_is_409(user_client, daemon_world, machine_flow):
+    machine_id = _machine_id(user_client, daemon_world, machine_flow)
+    ws = daemon_world["workspace"]["id"]
+    assert web_patch(user_client, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "engine_team_runs": True}).status_code == 200
+    revoked = web_post(user_client, f"{WEB}/dev-machines/{machine_id}/revoke/", {"workspace": ws})
+    assert revoked.status_code == 200
+    response = web_patch(user_client, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "engine_team_runs": False})
+    assert response.status_code == 409
+    assert response.json() == {"error": "dev_machine_revoked"}
+
+
+def test_web_machine_pause_releases_pinned_run(user_client, daemon_world, machine_flow, seeder):
+    """Pausing releases a queued locality pin (pin cleared, pod unchanged)."""
+    machine_id = _machine_id(user_client, daemon_world, machine_flow)
+    ws = daemon_world["workspace"]["id"]
+    runner_id = machine_flow["runner_id"]
+    # Promote the flow runner to an engine (desktop_bundled) and pin a run.
+    seeder.db.execute("UPDATE runner SET provisioning='desktop_bundled', pod_dispatch='pinned_only' WHERE id = %s", (runner_id,))
+    owner = daemon_world["owner"]["id"]
+    pod = daemon_world["pod"]["id"]
+    run_id = str(__import__("uuid").uuid4())
+    seeder.db.execute(
+        "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, pod_id, pinned_runner_id, status, prompt, trigger, executor_kind, run_config, required_capabilities, thread_id, agent_metadata, tool_plan, usage, dispatch_attempts, error_details, llm_model, cancel_reason, phase_kind, created_at) VALUES (%s,%s,%s,%s,%s,%s,'queued','','direct','local_runner','{}','[]','{}','{}','{}','{}',0,'{}','','','',now())",
+        (run_id, ws, owner, owner, pod, runner_id),
+    )
+    seeder.track("agent_run", "id", run_id)
+    ok = web_patch(user_client, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "engine_paused_by_owner": True})
+    assert ok.status_code == 200, ok.text
+    pinned = seeder.db.fetchval("SELECT pinned_runner_id FROM agent_run WHERE id = %s", (run_id,))
+    assert pinned is None
+    assert seeder.db.fetchval("SELECT pod_id FROM agent_run WHERE id = %s", (run_id,)) == pod
+    # Resuming lets the engine take work again (200).
+    resume = web_patch(user_client, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "engine_paused_by_owner": False})
+    assert resume.status_code == 200
+    assert resume.json()["engine_paused_by_owner"] is False

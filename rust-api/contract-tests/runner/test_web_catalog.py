@@ -220,3 +220,31 @@ def test_web_projects_isolates_tenants(user_client, seeder, daemon_world):
         f"{WEB}/projects/", params={"workspace": daemon_world["workspace"]["id"]}
     )
     assert [p["id"] for p in own.json()] == [daemon_world["project"]["id"]]
+
+
+def test_web_catalog_runner_payloads_carry_engine_fields(user_client, daemon_world, machine_flow):
+    """Catalog path (#2903 payloads): list + detail carry pod_dispatch and
+    the machine-mini engine trio in Django order."""
+    listing = user_client.get(f"{WEB}/", params={"workspace": daemon_world["workspace"]["id"]})
+    assert listing.status_code == 200, listing.text
+    runner = [r for r in listing.json() if r["id"] == machine_flow["runner_id"]][0]
+    assert runner["pod_dispatch"] in ("pinned_only", "pod_member")
+    assert list(runner["dev_machine_detail"].keys()) == [
+        "id", "host_label", "label", "engine_paused_by_owner",
+        "engine_auto_pause_reason", "engine_team_runs",
+    ]
+    detail = user_client.get(f"{WEB}/{machine_flow['runner_id']}/")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["pod_dispatch"] == runner["pod_dispatch"]
+    assert list(detail.json()["dev_machine_detail"].keys()) == [
+        "id", "host_label", "label", "engine_paused_by_owner",
+        "engine_auto_pause_reason", "engine_team_runs",
+    ]
+    machines = user_client.get(f"{WEB}/dev-machines/", params={"workspace": daemon_world["workspace"]["id"]})
+    assert machines.status_code == 200, machines.text
+    row = machines.json()[0]
+    assert list(row.keys())[:10] == [
+        "id", "host_label", "label", "visibility", "runner_count",
+        "online_runner_count", "control_online", "engine_paused_by_owner",
+        "engine_auto_pause_reason", "engine_team_runs",
+    ]

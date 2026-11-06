@@ -771,7 +771,7 @@ pub const ROUTES: &[RouteRow] = &[
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/",
-        owned: &["DELETE"], proxied: &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
+        owned: &["PATCH", "DELETE"], proxied: &["GET", "POST", "PUT", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/create-runner/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/create-runner/{request_id}/",
