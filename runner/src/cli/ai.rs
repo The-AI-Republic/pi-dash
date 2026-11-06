@@ -260,10 +260,8 @@ fn stream_progress(msg: &Value, printed: &mut HashSet<i64>) {
                 eprintln!("  · {content}");
             }
         }
-        "error" => {
-            if printed.insert(seq) && !content.is_empty() {
-                eprintln!("  ✗ {content}");
-            }
+        "error" if printed.insert(seq) && !content.is_empty() => {
+            eprintln!("  ✗ {content}");
         }
         _ => {}
     }
