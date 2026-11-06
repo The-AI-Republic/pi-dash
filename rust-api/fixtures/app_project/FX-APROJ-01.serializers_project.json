@@ -412,17 +412,20 @@
         {
           "kind": "cloud_agent",
           "available": false,
-          "reason_code": "cloud_agent_unavailable"
+          "reason_code": "cloud_agent_unavailable",
+          "deprecated": true
         },
         {
           "kind": "local_runner",
           "available": false,
-          "reason_code": "no_local_runner"
+          "reason_code": "no_local_runner",
+          "deprecated": false
         },
         {
           "kind": "managed_runner",
           "available": false,
-          "reason_code": "managed_runner_disabled"
+          "reason_code": "managed_runner_disabled",
+          "deprecated": true
         }
       ],
       "created_at": "2026-10-02T22:13:27.197846Z",
@@ -489,17 +492,20 @@
         {
           "kind": "cloud_agent",
           "available": false,
-          "reason_code": "cloud_agent_unavailable"
+          "reason_code": "cloud_agent_unavailable",
+          "deprecated": true
         },
         {
           "kind": "local_runner",
           "available": false,
-          "reason_code": "no_local_runner"
+          "reason_code": "no_local_runner",
+          "deprecated": false
         },
         {
           "kind": "managed_runner",
           "available": false,
-          "reason_code": "managed_runner_disabled"
+          "reason_code": "managed_runner_disabled",
+          "deprecated": true
         }
       ],
       "created_at": "2026-10-02T22:12:41.558592Z",
@@ -616,51 +622,60 @@
       {
         "kind": "cloud_agent",
         "available": false,
-        "reason_code": "cloud_agent_unavailable"
+        "reason_code": "cloud_agent_unavailable",
+        "deprecated": true
       },
       {
         "kind": "local_runner",
         "available": false,
-        "reason_code": "no_local_runner"
+        "reason_code": "no_local_runner",
+        "deprecated": false
       },
       {
         "kind": "managed_runner",
         "available": false,
-        "reason_code": "managed_runner_disabled"
+        "reason_code": "managed_runner_disabled",
+        "deprecated": true
       }
     ],
     "agent_options_authenticated": [
       {
         "kind": "cloud_agent",
         "available": false,
-        "reason_code": "cloud_agent_unavailable"
+        "reason_code": "cloud_agent_unavailable",
+        "deprecated": true
       },
       {
         "kind": "local_runner",
         "available": false,
-        "reason_code": "no_local_runner"
+        "reason_code": "no_local_runner",
+        "deprecated": false
       },
       {
         "kind": "managed_runner",
         "available": false,
-        "reason_code": "managed_runner_disabled"
+        "reason_code": "managed_runner_disabled",
+        "deprecated": true
       }
     ],
     "agent_options_no_request": [
       {
         "kind": "cloud_agent",
         "available": false,
-        "reason_code": "cloud_agent_unavailable"
+        "reason_code": "cloud_agent_unavailable",
+        "deprecated": true
       },
       {
         "kind": "local_runner",
         "available": false,
-        "reason_code": "no_local_runner"
+        "reason_code": "no_local_runner",
+        "deprecated": false
       },
       {
         "kind": "managed_runner",
         "available": false,
-        "reason_code": "managed_runner_disabled"
+        "reason_code": "managed_runner_disabled",
+        "deprecated": true
       }
     ]
   },
@@ -699,17 +714,20 @@
         {
           "kind": "cloud_agent",
           "available": false,
-          "reason_code": "cloud_agent_unavailable"
+          "reason_code": "cloud_agent_unavailable",
+          "deprecated": true
         },
         {
           "kind": "local_runner",
           "available": false,
-          "reason_code": "no_local_runner"
+          "reason_code": "no_local_runner",
+          "deprecated": false
         },
         {
           "kind": "managed_runner",
           "available": false,
-          "reason_code": "managed_runner_disabled"
+          "reason_code": "managed_runner_disabled",
+          "deprecated": true
         }
       ],
       "created_at": "2026-10-02T22:12:41.558592Z",
