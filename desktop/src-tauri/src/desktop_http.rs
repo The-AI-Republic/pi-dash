@@ -713,7 +713,10 @@ mod tests {
             bundle_root: Some(crate::bundle_root_for(None)),
             web_base: Url::parse("https://pidash.example.com").unwrap(),
         };
-        let page = Url::parse(crate::BUNDLE_ORIGIN).unwrap().join("/acme/").unwrap();
+        let page = Url::parse(crate::BUNDLE_ORIGIN)
+            .unwrap()
+            .join("/acme/")
+            .unwrap();
         assert!(from_app_ui("main", &page, &config));
         let dev = Url::parse("http://127.0.0.1:1430/").unwrap();
         assert!(!from_app_ui("main", &dev, &config));

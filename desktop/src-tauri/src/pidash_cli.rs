@@ -217,7 +217,6 @@ fn kill_child(child: &mut Child) -> std::io::Result<()> {
     child.kill()
 }
 
-
 // ---------------------------------------------------------------------------
 // Installing from the bundle
 // ---------------------------------------------------------------------------
@@ -251,18 +250,26 @@ pub(crate) fn already_on_path(path_var: &str, dir: &Path) -> bool {
     path_var.split(':').any(|entry| entry == target)
 }
 
-/// The `pidash` the app ships, inside its own bundle. This is the same program
-/// the standalone installer downloads — the app runs it as its managed daemon
-/// (`pidash __run`) — so a machine with the desktop app already has the CLI's
-/// bytes on disk; what it lacks is a copy on PATH that the user owns.
-fn bundled_cli<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    let name = if cfg!(windows) { "pidash.exe" } else { "pidash" };
-    let path = tauri::Manager::path(app).resource_dir().ok()?.join("bin").join(name);
+/// The `pidash` the app ships, inside its own bundle: the same program the
+/// standalone installer downloads, carried so the app can set Pi Dash up on
+/// this computer offline (design §4.5, §4.7). The app never runs it from the
+/// bundle; set-up installs it into the official location first.
+pub(crate) fn bundled_cli<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    let name = if cfg!(windows) {
+        "pidash.exe"
+    } else {
+        "pidash"
+    };
+    let path = tauri::Manager::path(app)
+        .resource_dir()
+        .ok()?
+        .join("bin")
+        .join(name);
     path.is_file().then_some(path)
 }
 
 /// Copy the bundled CLI to `dest_dir`, atomically, and make it executable.
-fn copy_bundled_cli(bundled: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+pub(crate) fn copy_bundled_cli(bundled: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dest_dir)
         .map_err(|e| format!("creating {}: {e}", dest_dir.display()))?;
     let name = bundled.file_name().ok_or("bundled CLI has no file name")?;
@@ -278,11 +285,42 @@ fn copy_bundled_cli(bundled: &Path, dest_dir: &Path) -> Result<PathBuf, String> 
         std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| format!("making {} executable: {e}", staging.display()))?;
     }
+    // Windows refuses to replace an exe that is running (the service's
+    // `pidash.exe`), but lets it be renamed: move it aside first, and put it
+    // back if the new copy cannot take its place. The old copy is removed
+    // on the next update, once nothing runs it.
+    let aside = set_running_binary_aside(&dest)?;
     std::fs::rename(&staging, &dest).map_err(|e| {
         let _ = std::fs::remove_file(&staging);
+        if let Some(aside) = &aside {
+            let _ = std::fs::rename(aside, &dest);
+        }
         format!("installing {}: {e}", dest.display())
     })?;
     Ok(dest)
+}
+
+/// Where a replaced binary is moved aside: `pidash.exe` → `pidash.exe.old`.
+fn aside_path(dest: &Path) -> PathBuf {
+    let mut name = dest.file_name().unwrap_or_default().to_os_string();
+    name.push(".old");
+    dest.with_file_name(name)
+}
+
+/// On Windows, rename an existing `dest` to [`aside_path`] so the new copy
+/// can be renamed into place while the old one is still running. Returns
+/// the aside path when something was moved. A no-op elsewhere: a rename
+/// over a running binary works on Unix.
+fn set_running_binary_aside(dest: &Path) -> Result<Option<PathBuf>, String> {
+    if !cfg!(windows) || !dest.exists() {
+        return Ok(None);
+    }
+    let aside = aside_path(dest);
+    // Left by an earlier update; still locked if that copy is still running.
+    let _ = std::fs::remove_file(&aside);
+    std::fs::rename(dest, &aside)
+        .map_err(|e| format!("moving the running {} aside: {e}", dest.display()))?;
+    Ok(Some(aside))
 }
 
 /// Put `dir` on the user's PATH for future shells, if it isn't already.
@@ -318,7 +356,11 @@ fn ensure_on_path(dir: &Path, home: &Path) -> Vec<String> {
                 if let Err(e) = file.write_all(snippet.as_bytes()) {
                     notes.push(format!("could not update {}: {e}", path.display()));
                 } else {
-                    notes.push(format!("added {} to PATH in {}", dir.display(), path.display()));
+                    notes.push(format!(
+                        "added {} to PATH in {}",
+                        dir.display(),
+                        path.display()
+                    ));
                 }
             }
             Err(e) => notes.push(format!("could not open {}: {e}", path.display())),
@@ -342,6 +384,9 @@ fn ensure_on_path(_dir: &Path, _home: &Path) -> Vec<String> {
 /// bundled binary to install from and the caller should fall back to the
 /// network installer.
 fn install_from_bundle<R: Runtime>(app: &AppHandle<R>) -> Result<Option<PathBuf>, String> {
+    if cfg!(windows) {
+        return Ok(None);
+    }
     let Some(bundled) = bundled_cli(app) else {
         return Ok(None);
     };
@@ -353,13 +398,15 @@ fn install_from_bundle<R: Runtime>(app: &AppHandle<R>) -> Result<Option<PathBuf>
     let log = |line: String| {
         let _ = app.emit("pidash-install-log", serde_json::json!({ "line": line }));
     };
-    log(format!("Installing the bundled pidash CLI into {}", dest_dir.display()));
+    log(format!(
+        "Installing the bundled pidash CLI into {}",
+        dest_dir.display()
+    ));
     let installed = copy_bundled_cli(&bundled, &dest_dir)?;
     log(format!("Installed {}", installed.display()));
     for note in ensure_on_path(&dest_dir, &home) {
         log(note);
     }
-    log("Run `pidash auth login`, then `pidash runner add`, to connect your own agent.".to_string());
     Ok(Some(installed))
 }
 
@@ -381,15 +428,19 @@ pub async fn pidash_cli_login<R: Runtime>(
     device_code: String,
     cloud_url: String,
     workspace: Option<String>,
+    force: Option<bool>,
 ) -> Result<(), String> {
     let status = detect_pidash_cli().await;
     let Some(cli) = status.path else {
         return Err("The pidash CLI is not installed yet.".to_string());
     };
-    let (args, stdin) = login_invocation(device_code, cloud_url, workspace);
+    // PO-13 natively, not only in the UI: the daemon may have been signed
+    // in as someone else since the consent screen.
+    crate::daemon::check_login_allowed(force.unwrap_or(false)).await?;
+    let (args, stdin) = login_invocation(device_code, cloud_url, workspace, force.unwrap_or(false));
     let app_clone = app.clone();
     match tauri::async_runtime::spawn_blocking(move || {
-        run_installer(&app_clone, &cli, &args, stdin.as_deref())
+        run_streaming(&app_clone, &cli, &args, stdin.as_deref(), None)
     })
     .await
     {
@@ -407,6 +458,7 @@ fn login_invocation(
     device_code: String,
     cloud_url: String,
     workspace: Option<String>,
+    force: bool,
 ) -> (Vec<String>, Option<String>) {
     let mut args = vec![
         "auth".to_string(),
@@ -419,6 +471,11 @@ fn login_invocation(
     if let Some(slug) = workspace.filter(|s| !s.is_empty()) {
         args.push("--workspace".to_string());
         args.push(slug);
+    }
+    // Only for "Sign Pi Dash on this computer in as me" (design §4.6), after
+    // the user chose to rebind a daemon bound to another cloud.
+    if force {
+        args.push("--force".to_string());
     }
     (args, Some(device_code))
 }
@@ -453,7 +510,7 @@ fn which_pidash() -> Option<PathBuf> {
 /// Synchronous implementation of detection. Wrapped by the async Tauri
 /// command so blocking subprocess calls don't stall the IPC dispatch
 /// thread.
-fn detect_pidash_cli_sync() -> PidashStatus {
+pub(crate) fn detect_pidash_cli_sync() -> PidashStatus {
     for candidate in known_install_paths() {
         if is_executable(&candidate) {
             let version = probe_version(&candidate);
@@ -505,10 +562,8 @@ pub async fn detect_pidash_cli() -> PidashStatus {
 /// instead of shipping a mismatched pair.
 #[cfg(test)]
 const INSTALLER_RELEASE_TAG: &str = "pidash-v0.1.15";
-const INSTALLER_URL_SH: &str =
-    "https://github.com/The-AI-Republic/pi-dash/releases/download/pidash-v0.1.15/pidash-installer.sh";
-const INSTALLER_URL_PS1: &str =
-    "https://github.com/The-AI-Republic/pi-dash/releases/download/pidash-v0.1.15/pidash-installer.ps1";
+const INSTALLER_URL_SH: &str = "https://github.com/The-AI-Republic/pi-dash/releases/download/pidash-v0.1.15/pidash-installer.sh";
+const INSTALLER_URL_PS1: &str = "https://github.com/The-AI-Republic/pi-dash/releases/download/pidash-v0.1.15/pidash-installer.ps1";
 const INSTALLER_SHA256_SH: &str =
     "c1303efd44d180675ceee445ef0091a71264f326447fb32dadda8ec02c39868e";
 const INSTALLER_SHA256_PS1: &str =
@@ -591,12 +646,11 @@ pub async fn install_pidash_cli<R: Runtime>(app: AppHandle<R>) -> Result<(), Str
         return Err(INSTALL_BUSY_MESSAGE.to_string());
     };
 
-    // The app already ships this exact program — it runs it as the managed
-    // daemon — so install from the bundle rather than downloading a second
-    // copy. Offline, instant, and the bytes are the ones this app was tested
-    // with. Falls through to the network installer when there is no bundle to
-    // copy from (a dev build, or Windows, whose PATH the official installer
-    // owns).
+    // The app already ships this exact program, so install from the bundle
+    // rather than downloading a second copy. Offline, instant, and the bytes
+    // are the ones this app was tested with. Falls through to the network
+    // installer when there is no bundle to copy from (a dev build), and always
+    // on Windows, whose PATH the official installer owns (design §4.5).
     let bundle_app = app.clone();
     match tauri::async_runtime::spawn_blocking(move || install_from_bundle(&bundle_app)).await {
         Ok(Ok(Some(_))) => return Ok(()),
@@ -616,10 +670,9 @@ pub async fn install_pidash_cli<R: Runtime>(app: AppHandle<R>) -> Result<(), Str
     // (simpler than tokio::process for line-buffered I/O) without blocking
     // the tauri async runtime.
     let app_clone = app.clone();
-    let join =
-        tauri::async_runtime::spawn_blocking(move || {
-            run_installer(&app_clone, &program, &args, None)
-        });
+    let join = tauri::async_runtime::spawn_blocking(move || {
+        run_streaming(&app_clone, &program, &args, None, None)
+    });
     match join.await {
         Ok(result) => result,
         Err(e) => Err(format!("install task panicked: {e}")),
@@ -731,10 +784,34 @@ fn windows_installer_script() -> String {
 
 /// Spawn `program` with stdout/stderr piped. `stdin`, when given, is written
 /// to the child followed by EOF; otherwise the child gets a null stdin.
-fn spawn_piped(program: &PathBuf, args: &[String], stdin: Option<&str>) -> Result<Child, String> {
+///
+/// The child always targets the computer's standard Pi Dash install: any
+/// `PIDASH_CONFIG_DIR` / `PIDASH_DATA_DIR` the app itself inherited is
+/// removed, so no command the app runs can reach a re-rooted tree. `path`,
+/// when given, replaces the child's `PATH` (the user's login-shell `PATH` for
+/// `pidash install`, design §4.7).
+pub(crate) fn spawn_piped(
+    program: &Path,
+    args: &[String],
+    stdin: Option<&str>,
+    path: Option<&str>,
+) -> Result<Child, String> {
     use std::io::Write;
 
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
+        .env_remove("PIDASH_CONFIG_DIR")
+        .env_remove("PIDASH_DATA_DIR");
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command
         .args(args)
         .stdin(if stdin.is_some() {
             Stdio::piped()
@@ -758,15 +835,19 @@ fn spawn_piped(program: &PathBuf, args: &[String], stdin: Option<&str>) -> Resul
     Ok(child)
 }
 
-fn run_installer<R: Runtime>(
+/// Run `program` and stream its output to the webview as
+/// `pidash-install-log` events. Used for the installer and for every `pidash`
+/// command the set-up runs.
+pub(crate) fn run_streaming<R: Runtime>(
     app: &AppHandle<R>,
-    program: &PathBuf,
+    program: &Path,
     args: &[String],
     stdin: Option<&str>,
+    path: Option<&str>,
 ) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
 
-    let mut child = spawn_piped(program, args, stdin)?;
+    let mut child = spawn_piped(program, args, stdin, path)?;
 
     // Take stdout/stderr before wait() so we can stream them in parallel.
     let stdout = child.stdout.take().ok_or("missing stdout pipe")?;
@@ -822,7 +903,11 @@ fn run_installer<R: Runtime>(
 
     if !status.success() {
         return Err(format!(
-            "installer exited with status {} — see the install log for details",
+            "{} exited with status {} — see the log for details",
+            program
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             status
                 .code()
                 .map(|c| c.to_string())
@@ -831,7 +916,6 @@ fn run_installer<R: Runtime>(
     }
     Ok(())
 }
-
 
 #[cfg(test)]
 mod login_tests {
@@ -844,6 +928,7 @@ mod login_tests {
             CODE.to_string(),
             "https://pidash.example.com".to_string(),
             Some("acme".to_string()),
+            false,
         )
     }
 
@@ -870,6 +955,8 @@ mod login_tests {
                 "acme"
             ]
         );
+        let (forced, _) = login_invocation(CODE.into(), "https://x".into(), None, true);
+        assert_eq!(forced.last().map(String::as_str), Some("--force"));
     }
 
     /// End to end against a stand-in `pidash` that records what it was given.
@@ -890,7 +977,7 @@ mod login_tests {
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let (args, stdin) = invocation();
-        let mut child = spawn_piped(&fake, &args, stdin.as_deref()).unwrap();
+        let mut child = spawn_piped(&fake, &args, stdin.as_deref(), None).unwrap();
         assert!(child.wait().unwrap().success());
 
         let cmdline = std::fs::read_to_string(tmp.path().join("cmdline")).unwrap();
@@ -923,7 +1010,10 @@ mod bundle_install_tests {
                 lad.join("Programs").join("pidash")
             );
         } else {
-            assert_eq!(cli_install_dir(&home, None), home.join(".local").join("bin"));
+            assert_eq!(
+                cli_install_dir(&home, None),
+                home.join(".local").join("bin")
+            );
         }
     }
 
@@ -968,7 +1058,10 @@ mod bundle_install_tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|name| name.starts_with('.'))
             .collect();
-        assert!(leftovers.is_empty(), "staging file left behind: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "staging file left behind: {leftovers:?}"
+        );
     }
 
     #[test]
@@ -987,6 +1080,14 @@ mod bundle_install_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_replaced_binary_is_moved_aside_next_to_it() {
+        assert_eq!(
+            aside_path(Path::new("/x/bin/pidash.exe")),
+            PathBuf::from("/x/bin/pidash.exe.old")
+        );
+    }
 
     #[test]
     fn shared_seq_counter_is_unique_and_contiguous_across_threads() {

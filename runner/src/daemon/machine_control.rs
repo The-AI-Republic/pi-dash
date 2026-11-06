@@ -318,9 +318,12 @@ impl MachineControl {
             return Ok((existing.runner_id, existing.name));
         }
         if is_engine {
+            // Same checks as `EngineRunnerAdd`, before the server is called.
             crate::engine::provision::ensure_engine_can_run(&self.spawn_ctx.engine.status())?;
         }
-        // Fail before registering anything in the cloud.
+        // The per-computer runner limit fails before anything is registered
+        // (design §5): a cloud row created first and rolled back on the
+        // local `validate()` failure is left behind if the rollback fails.
         ensure_below_runner_cap(&self.spawn_ctx.paths)?;
         let host_label = hostname().unwrap_or_else(|| "unknown-host".to_string());
 
@@ -987,46 +990,40 @@ mod tests {
             reasoning_effort: String::new(),
         };
 
-        // A folder left by an earlier, removed engine runner (removal keeps
-        // the folder) makes the new runner take the next free name.
+        // A folder already in use under the task root is not taken over:
+        // the new runner gets the next free one (design §10).
         let root = paths.data_dir.join("engine/workdirs/acme");
         std::fs::create_dir_all(root.join("WEB")).unwrap();
-        std::fs::write(root.join("WEB/notes.md"), b"x").unwrap();
+        std::fs::write(root.join("WEB/notes.txt"), "someone else's").unwrap();
+
         let (first, _) = control
             .create_runner_inner(&session, cmd("ignored-name"))
             .await
             .unwrap();
-        // Design §5: at most one engine runner per machine and project. A
-        // second create for the same project answers with the existing one.
-        let (again, _) = control
+        // One engine runner per machine and project (design §5): a second
+        // command for the same project answers with the first runner and
+        // registers nothing.
+        let (second, _) = control
             .create_runner_inner(&session, cmd(""))
             .await
             .unwrap();
-        assert_eq!(again, first, "a second create reuses the engine runner");
-        assert_eq!(
-            crate::config::file::load_config(&paths)
-                .unwrap()
-                .runners
-                .iter()
-                .filter(|r| r.agent.kind == AgentKind::Engine)
-                .count(),
-            1,
-            "no second engine block is written"
-        );
+        assert_eq!(second, first);
 
         let cfg = crate::config::file::load_config(&paths).unwrap();
-        let dir = cfg
-            .runners
-            .iter()
-            .find(|r| r.runner_id == first)
-            .unwrap()
-            .workspace
-            .working_dir
-            .clone();
-        assert_eq!(dir, root.join("WEB-2"));
-        assert!(root.join("WEB-2").is_dir());
+        let dir_of = |id: Uuid| {
+            cfg.runners
+                .iter()
+                .find(|r| r.runner_id == id)
+                .unwrap()
+                .workspace
+                .working_dir
+                .clone()
+        };
         assert_eq!(cfg.runners.len(), 1);
+        assert_eq!(dir_of(first), root.join("WEB-2"));
+        assert!(root.join("WEB-2").is_dir());
         let sent = server.requests_to("/api/v1/runner/runners/");
+        assert_eq!(sent.len(), 1, "the reused runner is not registered again");
         assert_eq!(sent[0].json()["agent_kind"], "engine");
         assert!(
             sent[0].json().get("name").is_none(),

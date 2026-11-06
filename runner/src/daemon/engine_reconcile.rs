@@ -250,7 +250,8 @@ impl RunnerSpawnCtx {
             protocol_version: crate::cloud::protocol::WIRE_VERSION,
             machine_token: None,
             machine_token_minted: false,
-            created: None,
+            // The server row already exists: nothing here created it.
+            created: Some(false),
         };
         let applied = apply_enroll_response(
             &self.paths,
