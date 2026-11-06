@@ -445,18 +445,21 @@ pub mod machine_session {
     /// the `IS NULL` term (captured order). Machine open runs no
     /// `_bound_txn_waits` and maps no timeout to 503 — the
     /// runner-only asymmetry noted in the parent module docs.
-    pub const OPEN_PRIOR_SQL: &str = "SELECT \"machine_session\".\"id\", \"machine_session\".\"dev_machine_id\", \"machine_session\".\"protocol_version\", \"machine_session\".\"created_at\", \"machine_session\".\"last_seen_at\", \"machine_session\".\"revoked_at\", \"machine_session\".\"revoked_reason\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = $1 AND \"machine_session\".\"revoked_at\" IS NULL) ORDER BY \"machine_session\".\"created_at\" DESC LIMIT 1 FOR UPDATE";
+    pub const OPEN_PRIOR_SQL: &str = "SELECT \"machine_session\".\"id\", \"machine_session\".\"dev_machine_id\", \"machine_session\".\"protocol_version\", \"machine_session\".\"created_at\", \"machine_session\".\"last_seen_at\", \"machine_session\".\"revoked_at\", \"machine_session\".\"revoked_reason\", \"machine_session\".\"machine_token_id\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = $1 AND \"machine_session\".\"revoked_at\" IS NULL) ORDER BY \"machine_session\".\"created_at\" DESC LIMIT 1 FOR UPDATE";
     /// Session-open insert (`views/machine_sessions.py:100-105`):
     /// `create(id=new_sid, dev_machine=machine,
-    /// protocol_version=RUNNER_PROTOCOL_VERSION,
-    /// last_seen_at=now)`. Params in column order: `$1` id (fresh
-    /// `uuid4`, caller-supplied), `$2` machine id, `$3` protocol
-    /// version, `$4` `created_at` (`auto_now_add`, Python-side
-    /// `now`), `$5` `last_seen_at`, `$6` `revoked_at` (`NULL`: no
-    /// default, nullable), `$7` `revoked_reason` (`""` default). No
-    /// `RETURNING`: the PK is supplied, so Django fetches nothing
-    /// back.
-    pub const OPEN_INSERT_SQL: &str = "INSERT INTO \"machine_session\" (\"id\", \"dev_machine_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\") VALUES ($1, $2, $3, $4, $5, $6, $7)";
+    /// machine_token=auth_token,
+    /// protocol_version=RUNNER_PROTOCOL_VERSION, last_seen_at=now)`.
+    /// Params in column order: `$1` id (fresh `uuid4`,
+    /// caller-supplied), `$2` machine id, `$3` protocol version, `$4`
+    /// `created_at` (`auto_now_add`, Python-side `now`), `$5`
+    /// `last_seen_at`, `$6` `revoked_at` (`NULL`: no default,
+    /// nullable), `$7` `revoked_reason` (`""` default), `$8` the
+    /// authenticating token id — any workspace's token of the machine
+    /// may open the one session (#2910 §4.9; the poll evicts when this
+    /// token dies). No `RETURNING`: the PK is supplied, so Django
+    /// fetches nothing back.
+    pub const OPEN_INSERT_SQL: &str = "INSERT INTO \"machine_session\" (\"id\", \"dev_machine_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\", \"machine_token_id\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
     /// Session revoke (`views/machine_sessions.py:96-98`
     /// open-eviction with reason `"evicted_by_new_session"`,
     /// `:155-157` delete with `"clean_shutdown"`):
@@ -469,13 +472,13 @@ pub mod machine_session {
     /// returns 204 (`:152-154`). `$1` machine id, `$2` session id
     /// (captured term order). `.get()` clears `Meta.ordering` and
     /// caps at `LIMIT 21`.
-    pub const DELETE_GET_SQL: &str = "SELECT \"machine_session\".\"id\", \"machine_session\".\"dev_machine_id\", \"machine_session\".\"protocol_version\", \"machine_session\".\"created_at\", \"machine_session\".\"last_seen_at\", \"machine_session\".\"revoked_at\", \"machine_session\".\"revoked_reason\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = $1 AND \"machine_session\".\"id\" = $2 AND \"machine_session\".\"revoked_at\" IS NULL) LIMIT 21";
+    pub const DELETE_GET_SQL: &str = "SELECT \"machine_session\".\"id\", \"machine_session\".\"dev_machine_id\", \"machine_session\".\"protocol_version\", \"machine_session\".\"created_at\", \"machine_session\".\"last_seen_at\", \"machine_session\".\"revoked_at\", \"machine_session\".\"revoked_reason\", \"machine_session\".\"machine_token_id\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = $1 AND \"machine_session\".\"id\" = $2 AND \"machine_session\".\"revoked_at\" IS NULL) LIMIT 21";
     /// Poll-bookkeeping lookup (`views/machine_sessions.py:181`):
     /// `get(id=sid, dev_machine=machine)` — note: no `revoked_at`
     /// filter; a revoked row is fetched and rejected with its reason
     /// (`:187-194`). `$1` machine id, `$2` session id. Ordering
     /// cleared, `LIMIT 21`, like every `.get()`.
-    pub const POLL_GET_SQL: &str = "SELECT \"machine_session\".\"id\", \"machine_session\".\"dev_machine_id\", \"machine_session\".\"protocol_version\", \"machine_session\".\"created_at\", \"machine_session\".\"last_seen_at\", \"machine_session\".\"revoked_at\", \"machine_session\".\"revoked_reason\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = $1 AND \"machine_session\".\"id\" = $2) LIMIT 21";
+    pub const POLL_GET_SQL: &str = "SELECT \"machine_session\".\"id\", \"machine_session\".\"dev_machine_id\", \"machine_session\".\"protocol_version\", \"machine_session\".\"created_at\", \"machine_session\".\"last_seen_at\", \"machine_session\".\"revoked_at\", \"machine_session\".\"revoked_reason\", \"machine_session\".\"machine_token_id\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = $1 AND \"machine_session\".\"id\" = $2) LIMIT 21";
     /// Poll-bookkeeping touch (`views/machine_sessions.py:199-200`):
     /// `save(update_fields=["last_seen_at"])`. `$1` last_seen_at,
     /// `$2` session id. (The sibling `DevMachine.last_seen_at`
@@ -681,8 +684,8 @@ pub mod machine_session {
             assert_terms_in_order(
                 sql,
                 &[
-                    "INSERT INTO \"machine_session\" (\"id\", \"dev_machine_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\")",
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    "INSERT INTO \"machine_session\" (\"id\", \"dev_machine_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\", \"machine_token_id\")",
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 ],
             );
             assert!(

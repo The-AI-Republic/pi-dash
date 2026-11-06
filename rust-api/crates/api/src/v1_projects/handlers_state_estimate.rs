@@ -107,11 +107,13 @@ use pidash_compat::db::is_unique_violation;
 use pidash_compat::response::json_ok;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 
-/// One `machine_token` auth lookup row: user, workspace, dev-machine, revocation.
+/// One `machine_token` auth lookup row: user, workspace, dev-machine,
+/// revocation, idle expiry (#2910).
 type MachineTokenLookup = Option<(
     Uuid,
     Uuid,
     Option<Uuid>,
+    Option<chrono::DateTime<chrono::Utc>>,
     Option<chrono::DateTime<chrono::Utc>>,
 )>;
 /// One project lite row for `expand=project` (direct columns + cover asset FK).
@@ -474,14 +476,14 @@ async fn authenticate_machine_token(
     let secret = state.settings().secret_key.clone();
     let presented_hash = token_kernel::hash_token(raw, secret.as_bytes());
     let row: MachineTokenLookup = sqlx::query_as(
-        r#"SELECT mt.user_id, mt.workspace_id, mt.dev_machine_id, mt.revoked_at
+        r#"SELECT mt.user_id, mt.workspace_id, mt.dev_machine_id, mt.revoked_at, mt.expires_at
            FROM machine_token mt WHERE mt.token_hash = $1"#,
     )
     .bind(&presented_hash)
     .fetch_optional(pool)
     .await
     .map_err(|_| HandlerError::ServerError)?;
-    let Some((user_id, workspace_id, dev_machine_id, revoked_at)) = row else {
+    let Some((user_id, workspace_id, dev_machine_id, revoked_at, expires_at)) = row else {
         return Err(HandlerError::InvalidToken);
     };
     let dev_revoked = match dev_machine_id {
@@ -501,9 +503,14 @@ async fn authenticate_machine_token(
         token_hash: presented_hash.clone(),
         revoked_at_unix: revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: dev_revoked,
+        expires_at_unix: expires_at.map(|dt| dt.timestamp()),
     };
-    token_kernel::validate_machine_token_static(Some(&kernel_row), &presented_hash)
-        .map_err(|_| HandlerError::InvalidToken)?;
+    token_kernel::validate_machine_token_static(
+        Some(&kernel_row),
+        &presented_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| HandlerError::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)`: any active membership row.
     // A non-member is revoked first, then denied (`core/permissions.py:28-36`).
     let member: Option<(i32,)> = sqlx::query_as(

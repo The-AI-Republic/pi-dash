@@ -268,12 +268,13 @@ async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Caller
 }
 
 /// One `machine_token` row for the lookup, with the linked dev-machine
-/// revocation flag: `(id, user_id, workspace_id, revoked_at,
+/// revocation flag: `(id, user_id, workspace_id, revoked_at, expires_at,
 /// dev_machine_id, dev_machine_revoked, dev_machine_found)`.
 type MachineTokenLookupRow = (
     Uuid,
     Uuid,
     Uuid,
+    Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
     Option<Uuid>,
     Option<DateTime<Utc>>,
@@ -281,9 +282,9 @@ type MachineTokenLookupRow = (
 );
 
 /// `validate_machine_token` (`api_authentication.py:45-63`): match on
-/// `token_hash`, unrevoked, dev-machine unrevoked, workspace member (a
-/// non-member's token is revoked, then rejected) — then stamp
-/// `last_used_at`.
+/// `token_hash`, unrevoked, not past its 60-day idle expiry, dev-machine
+/// unrevoked, workspace member (a non-member's token is revoked, then
+/// rejected) — then stamp `last_used_at`.
 #[allow(clippy::result_large_err)]
 async fn authenticate_machine(
     pool: &sqlx::PgPool,
@@ -293,7 +294,7 @@ async fn authenticate_machine(
     let now = Utc::now();
     let token_hash = token_kernel::hash_token(presented, secret_key);
     let row: Option<MachineTokenLookupRow> = sqlx::query_as(
-        r#"SELECT mt.id, mt.user_id, mt.workspace_id, mt.revoked_at,
+        r#"SELECT mt.id, mt.user_id, mt.workspace_id, mt.revoked_at, mt.expires_at,
                   mt.dev_machine_id, dm.revoked_at, dm.id
            FROM machine_token mt
            LEFT JOIN dev_machine dm ON dm.id = mt.dev_machine_id
@@ -303,11 +304,25 @@ async fn authenticate_machine(
     .fetch_optional(pool)
     .await
     .map_err(|_| Failure::server_error().into_response())?;
-    let Some((id, user_id, workspace_id, revoked_at, dev_machine_id, dm_revoked, dm_found)) = row
+    let Some((
+        id,
+        user_id,
+        workspace_id,
+        revoked_at,
+        expires_at,
+        dev_machine_id,
+        dm_revoked,
+        dm_found,
+    )) = row
     else {
         return Err(invalid_token());
     };
     if revoked_at.is_some() {
+        return Err(invalid_token());
+    }
+    // `MachineToken.is_expired()`: at-or-past expiry refuses (the same
+    // opaque denial as every other `mt_` arm here).
+    if expires_at.is_some_and(|expires| expires <= now) {
         return Err(invalid_token());
     }
     // `machine_token.dev_machine_id is not None and

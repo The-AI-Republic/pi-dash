@@ -439,7 +439,7 @@ async fn authenticate_machine_token(
 ) -> Result<Uuid, Denial> {
     let token_hash = auth_token::hash_token(presented, secret_key);
     let row: Option<MachineTokenLookup> = sqlx::query_as(
-        r#"SELECT mt.id, mt.user_id, mt.workspace_id, mt.revoked_at,
+        r#"SELECT mt.id, mt.user_id, mt.workspace_id, mt.revoked_at, mt.expires_at,
                   mt.dev_machine_id, dm.revoked_at AS dev_revoked_at
            FROM machine_token mt
            LEFT JOIN dev_machine dm ON dm.id = mt.dev_machine_id
@@ -456,9 +456,14 @@ async fn authenticate_machine_token(
         token_hash: token_hash.clone(),
         revoked_at_unix: row.revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: row.dev_machine_id.is_some() && row.dev_revoked_at.is_some(),
+        expires_at_unix: row.expires_at.map(|dt| dt.timestamp()),
     };
-    auth_token::validate_machine_token_static(Some(&kernel_row), &token_hash)
-        .map_err(|_| Denial::InvalidToken)?;
+    auth_token::validate_machine_token_static(
+        Some(&kernel_row),
+        &token_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)`: a non-member is revoked
     // first, then denied — exactly like Python.
     let member: bool = sqlx::query_scalar(
@@ -495,6 +500,7 @@ struct MachineTokenLookup {
     user_id: Uuid,
     workspace_id: Uuid,
     revoked_at: Option<DateTime<Utc>>,
+    expires_at: Option<DateTime<Utc>>,
     dev_machine_id: Option<Uuid>,
     dev_revoked_at: Option<DateTime<Utc>>,
 }

@@ -587,6 +587,7 @@ struct MachineTokenRow {
     dev_machine_id: Option<uuid::Uuid>,
     host_label: String,
     revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
     dev_revoked: Option<bool>,
 }
 
@@ -615,7 +616,7 @@ async fn fetch_machine_token(
 ) -> Result<Option<MachineTokenRow>, sqlx::Error> {
     sqlx::query_as::<_, MachineTokenRow>(
         r#"SELECT mt."id", mt."user_id", mt."workspace_id", mt."dev_machine_id",
-                  mt."host_label", mt."revoked_at",
+                  mt."host_label", mt."revoked_at", mt."expires_at",
                   dm."revoked_at" IS NOT NULL AS "dev_revoked"
            FROM "machine_token" mt
            LEFT OUTER JOIN "dev_machine" dm ON dm."id" = mt."dev_machine_id"
@@ -767,7 +768,9 @@ async fn authenticate_legacy_jwt(
     Ok(Some(DaemonRunner::from(&row)))
 }
 
-/// Shared MachineToken path (`authentication.py:120-162`).
+/// Shared MachineToken path (`authentication.py:120-162`): hash → row →
+/// revoked → expired → machine-revoked → membership-or-revoke →
+/// runner-id required → runner load → binding → touch.
 async fn authenticate_machine_token(
     pool: &PgPool,
     secret_key: &[u8],
@@ -783,6 +786,13 @@ async fn authenticate_machine_token(
     };
     if token.revoked_at.is_some() {
         return Err(auth_failed("machine_token_revoked"));
+    }
+    // `MachineToken.is_expired()`: at-or-past expiry refuses (`:129`).
+    if token
+        .expires_at
+        .is_some_and(|expires| expires <= chrono::Utc::now())
+    {
+        return Err(auth_failed("machine_token_expired"));
     }
     if token.dev_machine_id.is_some() && token.dev_revoked.unwrap_or(false) {
         return Err(auth_failed("dev_machine_revoked"));

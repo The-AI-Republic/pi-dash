@@ -414,6 +414,7 @@ type MachineTokenLookup = (
     uuid::Uuid,
     Option<chrono::DateTime<chrono::Utc>>,
     Option<bool>,
+    Option<chrono::DateTime<chrono::Utc>>,
 );
 
 /// The authenticated actor: user id plus the stored time zone name, loaded
@@ -503,7 +504,7 @@ async fn resolve_machine_token(
 ) -> Result<uuid::Uuid, Denial> {
     let presented_hash = pidash_auth::token::hash_token(presented, secret_key);
     let row: Option<MachineTokenLookup> = sqlx::query_as(
-        r#"SELECT mt."token_hash", mt."user_id", mt."dev_machine_id", mt."workspace_id", mt."revoked_at",
+        r#"SELECT mt."token_hash", mt."user_id", mt."dev_machine_id", mt."workspace_id", mt."revoked_at", mt."expires_at",
                   dm."revoked_at" IS NOT NULL AS "dev_revoked"
            FROM "machine_token" mt LEFT OUTER JOIN "dev_machine" dm ON dm."id" = mt."dev_machine_id"
            WHERE mt."token_hash" = $1"#,
@@ -512,7 +513,15 @@ async fn resolve_machine_token(
     .fetch_optional(pool)
     .await
     .map_err(|error| db_error(error, "machine-token-lookup"))?;
-    let Some((token_hash, user_id, _dev_machine_id, workspace_id, revoked_at, dev_revoked)) = row
+    let Some((
+        token_hash,
+        user_id,
+        _dev_machine_id,
+        workspace_id,
+        revoked_at,
+        dev_revoked,
+        expires_at,
+    )) = row
     else {
         return Err(Denial::InvalidToken);
     };
@@ -520,11 +529,16 @@ async fn resolve_machine_token(
         token_hash,
         revoked_at_unix: revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: dev_revoked.unwrap_or(false),
+        expires_at_unix: expires_at.map(|dt| dt.timestamp()),
     };
     // Hash match is implied by the lookup; the kernel still checks the
-    // revocation arms.
-    pidash_auth::token::validate_machine_token_static(Some(&static_row), &presented_hash)
-        .map_err(|_| Denial::InvalidToken)?;
+    // revocation and expiry arms.
+    pidash_auth::token::validate_machine_token_static(
+        Some(&static_row),
+        &presented_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`);
     // a `false` revokes the token, then denies.
     let member: bool = sqlx::query_scalar(
