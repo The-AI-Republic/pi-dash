@@ -85,11 +85,20 @@ use pidash_auth::permissions::project::StateMutationFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
 use pidash_db::app_project::models::project::{classify_lookup, ProjectLookup};
 use pidash_db::app_project::models::state as state_model;
+use pidash_db::entity::{
+    estimate_points as ep_entity, estimates as est_entity, issues as issue_entity,
+    project_members as pm_entity, projects as proj_entity, states as st_entity,
+    workspaces as ws_entity,
+};
 use pidash_services::app_project::ser_workflow as ser;
 use pidash_services::app_project::tasks as t;
 use pidash_services::read::{self, state_row_from, StateRow, StateRowTuple};
 use pidash_types::{ProjectId, WorkspaceId};
 use rand::Rng;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait,
+};
 
 use crate::license::{resolve_actor, Actor};
 use crate::middleware::SessionHandle;
@@ -318,6 +327,17 @@ fn db_denial(error: sqlx::Error) -> Denial {
     Denial::ServerError
 }
 
+/// The shared SeaORM connection over an sqlx pool (no I/O — it wraps the
+/// pool).
+fn sea_conn(pool: &sqlx::PgPool) -> sea_orm::DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
+/// Map a SeaORM failure like [`db_denial`].
+fn orm_denial(error: sea_orm::DbErr) -> Denial {
+    db_denial(pidash_db::orm_tx::into_sqlx(error))
+}
+
 fn json_ok(body: String) -> Response {
     json_response(StatusCode::OK, body)
 }
@@ -369,16 +389,11 @@ async fn resolve_project_id(
     match classify_lookup(raw) {
         ProjectLookup::Pk(id) => Ok(id),
         ProjectLookup::Identifier(name) => {
-            let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-                r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-                   WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-            )
-            .bind(slug)
-            .bind(name)
-            .fetch_optional(pool)
-            .await
-            .map_err(db_denial)?;
-            row.map(|row| row.0).ok_or(Denial::ResolveNotFound)
+            let row =
+                crate::app_issues::access::project_id_by_identifier(&sea_conn(pool), slug, &name)
+                    .await
+                    .map_err(orm_denial)?;
+            row.ok_or(Denial::ResolveNotFound)
         }
     }
 }
@@ -432,31 +447,16 @@ async fn membership(
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<Membership, Denial> {
-    let workspace_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_denial)?;
-    let row: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE w.slug = $1 AND pm.project_id = $2 AND pm.member_id = $3
-             AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_denial)?;
+    let db = sea_conn(pool);
+    let workspace_role = crate::app_issues::access::workspace_role(&db, slug, *user_id)
+        .await
+        .map_err(orm_denial)?;
+    let project_role = crate::app_issues::access::project_role(&db, slug, *project_id, *user_id)
+        .await
+        .map_err(orm_denial)?;
     Ok(Membership {
-        workspace_role: workspace_role.map(|row| row.0),
-        project_role: row.map(|row| row.0),
+        workspace_role,
+        project_role,
     })
 }
 
@@ -470,31 +470,28 @@ async fn state_mutation_facts(
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<StateMutationFacts, Denial> {
-    let row: Option<(i16, bool)> = sqlx::query_as(
-        r#"SELECT pm.role, p.members_can_edit_states FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           JOIN projects p ON p.id = pm.project_id
-           WHERE w.slug = $1 AND pm.project_id = $2 AND pm.member_id = $3
-             AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_denial)?;
-    let admin: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.role = $3
-             AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .bind(ROLE_ADMIN)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_denial)?;
+    let db = sea_conn(pool);
+    let row = pm_entity::Entity::find()
+        .select_only()
+        .column(pm_entity::Column::Role)
+        .column_as(
+            proj_entity::Column::MembersCanEditStates,
+            "members_can_edit_states",
+        )
+        .join(JoinType::InnerJoin, pm_entity::Relation::Workspaces.def())
+        .join(JoinType::InnerJoin, pm_entity::Relation::Projects.def())
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(pm_entity::Column::ProjectId.eq(*project_id))
+        .filter(pm_entity::Column::MemberId.eq(*user_id))
+        .filter(pm_entity::Column::IsActive.eq(true))
+        .filter(pm_entity::Column::DeletedAt.is_null())
+        .into_tuple::<(i16, bool)>()
+        .one(&db)
+        .await
+        .map_err(orm_denial)?;
+    let admin = crate::app_issues::access::is_workspace_admin(&db, slug, *user_id)
+        .await
+        .map_err(orm_denial)?;
     // A missing membership row denies before the admin override is
     // reached (the kernel rule); the flag is unread then.
     let (project_role, members_can_edit_states) = match row {
@@ -505,7 +502,7 @@ async fn state_mutation_facts(
         authenticated: true,
         project_role,
         members_can_edit_states,
-        is_workspace_admin: admin.is_some(),
+        is_workspace_admin: admin,
     })
 }
 
@@ -970,6 +967,58 @@ fn render_state(row: &StateRow) -> Value {
     read::render_state(row)
 }
 
+/// The state read shape (the nine `StateRowTuple` columns).
+#[derive(Debug, FromQueryResult)]
+struct StateMaxSequence {
+    max_sequence: Option<f64>,
+}
+
+fn state_tuple_select() -> sea_orm::Select<st_entity::Entity> {
+    st_entity::Entity::find().select_only().columns([
+        st_entity::Column::Id,
+        st_entity::Column::ProjectId,
+        st_entity::Column::WorkspaceId,
+        st_entity::Column::Name,
+        st_entity::Column::Color,
+        st_entity::Column::Group,
+        st_entity::Column::Default,
+        st_entity::Column::Description,
+        st_entity::Column::Sequence,
+    ])
+}
+
+/// One state row by pk, unscoped (the post-write re-read precedent).
+async fn state_row_by_id(pool: &sqlx::PgPool, id: uuid::Uuid) -> Result<StateRowTuple, Denial> {
+    state_tuple_select()
+        .filter(st_entity::Column::Id.eq(id))
+        .into_tuple::<StateRowTuple>()
+        .one(&sea_conn(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)
+}
+
+/// The live, non-triage state row for `(pk)` in `(slug, project_id)`.
+async fn scoped_state_row(
+    pool: &sqlx::PgPool,
+    pk: uuid::Uuid,
+    project_id: uuid::Uuid,
+    slug: &str,
+) -> Result<StateRowTuple, Denial> {
+    state_tuple_select()
+        .join(JoinType::InnerJoin, st_entity::Relation::Workspaces.def())
+        .filter(st_entity::Column::DeletedAt.is_null())
+        .filter(st_entity::Column::Group.ne("triage"))
+        .filter(st_entity::Column::Id.eq(pk))
+        .filter(st_entity::Column::ProjectId.eq(project_id))
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .into_tuple::<StateRowTuple>()
+        .one(&sea_conn(pool))
+        .await
+        .map_err(orm_denial)?
+        .ok_or(Denial::ObjectNotFound)
+}
+
 /// `StateViewSet.list` (`state/base.py:84-109`): the scoped queryset
 /// (live, non-triage, this slug+project, caller an active project
 /// member, project unarchived, `is_triage=False`, `DISTINCT`, sequence
@@ -994,25 +1043,42 @@ async fn state_list(
     )?;
     // The member join carries no soft-delete guard (L6 ported bug 9);
     // `DISTINCT` collapses the fan-out (`state/base.py:31-46`).
-    let rows: Vec<StateRowTuple> = sqlx::query_as(
-        r#"SELECT DISTINCT s.id, s.project_id, s.workspace_id, s.name, s.color,
-                  s."group", s."default", s.description, s.sequence
-           FROM states s
-           JOIN projects p ON p.id = s.project_id
-           JOIN workspaces w ON w.id = s.workspace_id
-           JOIN project_members pm ON pm.project_id = p.id
-           WHERE s.deleted_at IS NULL AND NOT (s."group" = 'triage')
-             AND w.slug = $1 AND s.project_id = $2
-             AND pm.member_id = $3 AND pm.is_active
-             AND p.archived_at IS NULL AND NOT s.is_triage
-           ORDER BY s.sequence ASC"#,
-    )
-    .bind(&slug)
-    .bind(project_id)
-    .bind(actor.id)
-    .fetch_all(&pool)
-    .await
-    .map_err(db_denial)?;
+    let rows: Vec<StateRowTuple> = st_entity::Entity::find()
+        .select_only()
+        .columns([
+            st_entity::Column::Id,
+            st_entity::Column::ProjectId,
+            st_entity::Column::WorkspaceId,
+            st_entity::Column::Name,
+            st_entity::Column::Color,
+            st_entity::Column::Group,
+            st_entity::Column::Default,
+            st_entity::Column::Description,
+            st_entity::Column::Sequence,
+        ])
+        .distinct()
+        .join(JoinType::InnerJoin, st_entity::Relation::Projects.def())
+        .join(JoinType::InnerJoin, st_entity::Relation::Workspaces.def())
+        .join(
+            JoinType::InnerJoin,
+            proj_entity::Entity::belongs_to(pm_entity::Entity)
+                .from(proj_entity::Column::Id)
+                .to(pm_entity::Column::ProjectId)
+                .into(),
+        )
+        .filter(st_entity::Column::DeletedAt.is_null())
+        .filter(st_entity::Column::Group.ne("triage"))
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(st_entity::Column::ProjectId.eq(project_id))
+        .filter(pm_entity::Column::MemberId.eq(actor.id))
+        .filter(pm_entity::Column::IsActive.eq(true))
+        .filter(proj_entity::Column::ArchivedAt.is_null())
+        .filter(st_entity::Column::IsTriage.eq(false))
+        .order_by_asc(st_entity::Column::Sequence)
+        .into_tuple::<StateRowTuple>()
+        .all(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
     let mut states: Vec<Value> = rows
         .iter()
         .map(|tuple| render_state(&state_row_from(tuple.clone())))
@@ -1100,25 +1166,30 @@ async fn state_retrieve(
         member.project_role,
     )?;
     let pk = parse_uuid_or_invalid(&pk_raw)?;
-    let row: Option<StateRowTuple> = sqlx::query_as(
-        r#"SELECT DISTINCT s.id, s.project_id, s.workspace_id, s.name, s.color,
-                  s."group", s."default", s.description, s.sequence
-           FROM states s
-           JOIN projects p ON p.id = s.project_id
-           JOIN workspaces w ON w.id = s.workspace_id
-           JOIN project_members pm ON pm.project_id = p.id
-           WHERE s.deleted_at IS NULL AND NOT (s."group" = 'triage')
-             AND w.slug = $1 AND s.project_id = $2 AND s.id = $3
-             AND pm.member_id = $4 AND pm.is_active
-             AND p.archived_at IS NULL AND NOT s.is_triage"#,
-    )
-    .bind(&slug)
-    .bind(project_id)
-    .bind(pk)
-    .bind(actor.id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(db_denial)?;
+    let row = state_tuple_select()
+        .distinct()
+        .join(JoinType::InnerJoin, st_entity::Relation::Projects.def())
+        .join(JoinType::InnerJoin, st_entity::Relation::Workspaces.def())
+        .join(
+            JoinType::InnerJoin,
+            proj_entity::Entity::belongs_to(pm_entity::Entity)
+                .from(proj_entity::Column::Id)
+                .to(pm_entity::Column::ProjectId)
+                .into(),
+        )
+        .filter(st_entity::Column::DeletedAt.is_null())
+        .filter(st_entity::Column::Group.ne("triage"))
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(st_entity::Column::ProjectId.eq(project_id))
+        .filter(st_entity::Column::Id.eq(pk))
+        .filter(pm_entity::Column::MemberId.eq(actor.id))
+        .filter(pm_entity::Column::IsActive.eq(true))
+        .filter(proj_entity::Column::ArchivedAt.is_null())
+        .filter(st_entity::Column::IsTriage.eq(false))
+        .into_tuple::<StateRowTuple>()
+        .one(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
     let row = row.ok_or_else(|| {
         Denial::Raw(
             StatusCode::NOT_FOUND,
@@ -1273,25 +1344,32 @@ async fn state_create(
     // `ProjectBaseModel.save` derives the workspace from the project
     // (plain FK traversal, no liveness filter); a missing project row
     // raises `DoesNotExist` → 404 (unreachable past the gates).
-    let workspace: Option<(uuid::Uuid,)> =
-        sqlx::query_as(r#"SELECT p.workspace_id FROM projects p WHERE p.id = $1"#)
-            .bind(project_id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(db_denial)?;
-    let (workspace_id,) = workspace.ok_or(Denial::ObjectNotFound)?;
+    let db = sea_conn(&pool);
+    let workspace = proj_entity::Entity::find_by_id(project_id)
+        .select_only()
+        .column(proj_entity::Column::WorkspaceId)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(orm_denial)?;
+    let workspace_id = workspace.ok_or(Denial::ObjectNotFound)?;
     // `State.save`: `sequence = max(sibling) + 15000` over the default
     // (triage-excluding) manager; an explicit sequence is overwritten
     // when siblings exist.
-    let largest: Option<(Option<f64>,)> = sqlx::query_as(
-        r#"SELECT MAX(s.sequence) FROM states s
-           WHERE s.project_id = $1 AND s.deleted_at IS NULL AND NOT (s."group" = 'triage')"#,
-    )
-    .bind(project_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(db_denial)?;
-    let max_sibling = largest.and_then(|(max,)| max);
+    let max_sibling = st_entity::Entity::find()
+        .select_only()
+        .column_as(
+            sea_orm::sea_query::Expr::col(st_entity::Column::Sequence).max(),
+            "max_sequence",
+        )
+        .filter(st_entity::Column::ProjectId.eq(project_id))
+        .filter(st_entity::Column::DeletedAt.is_null())
+        .filter(st_entity::Column::Group.ne("triage"))
+        .into_model::<StateMaxSequence>()
+        .one(&db)
+        .await
+        .map_err(orm_denial)?
+        .and_then(|row| row.max_sequence);
     let sequence = state_model::sequence_on_add(max_sibling)
         .or(input.sequence)
         .unwrap_or(state_model::DEFAULT_SEQUENCE);
@@ -1337,16 +1415,7 @@ async fn state_create(
     };
     // `serializer.data` renders the saved instance; re-read unscoped by
     // pk (the post-write re-read precedent).
-    let row: Option<StateRowTuple> = sqlx::query_as(
-        r#"SELECT s.id, s.project_id, s.workspace_id, s.name, s.color,
-                  s."group", s."default", s.description, s.sequence
-           FROM states s WHERE s.id = $1"#,
-    )
-    .bind(id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let row = row.ok_or(Denial::ServerError)?;
+    let row = state_row_by_id(&pool, id).await?;
     Ok(json_ok(render_state(&state_row_from(row)).to_string()))
 }
 
@@ -1375,20 +1444,7 @@ async fn state_partial_update(
     let mutation = state_mutation_facts(&pool, &slug, &project_id, &actor.id).await?;
     check_state_mutation(&mutation)?;
     let pk = parse_uuid_or_invalid(&pk_raw)?;
-    let current: Option<StateRowTuple> = sqlx::query_as(
-        r#"SELECT s.id, s.project_id, s.workspace_id, s.name, s.color,
-                  s."group", s."default", s.description, s.sequence
-           FROM states s JOIN workspaces w ON w.id = s.workspace_id
-           WHERE s.deleted_at IS NULL AND NOT (s."group" = 'triage')
-             AND s.id = $1 AND s.project_id = $2 AND w.slug = $3"#,
-    )
-    .bind(pk)
-    .bind(project_id)
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    .map_err(db_denial)?;
-    let current = state_row_from(current.ok_or(Denial::ObjectNotFound)?);
+    let current = state_row_from(scoped_state_row(&pool, pk, project_id, &slug).await?);
     let data = body
         .0
         .as_object()
@@ -1438,16 +1494,7 @@ async fn state_partial_update(
         }
         return Err(Denial::ServerError);
     }
-    let row: Option<StateRowTuple> = sqlx::query_as(
-        r#"SELECT s.id, s.project_id, s.workspace_id, s.name, s.color,
-                  s."group", s."default", s.description, s.sequence
-           FROM states s WHERE s.id = $1"#,
-    )
-    .bind(pk)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let row = row.ok_or(Denial::ServerError)?;
+    let row = state_row_by_id(&pool, pk).await?;
     Ok(json_ok(
         render_patched_state(&state_row_from(row), input.order).to_string(),
     ))
@@ -1527,18 +1574,21 @@ async fn state_destroy(
     let mutation = state_mutation_facts(&pool, &slug, &project_id, &actor.id).await?;
     check_state_mutation(&mutation)?;
     let pk = parse_uuid_or_invalid(&pk_raw)?;
-    let row: Option<(bool,)> = sqlx::query_as(
-        r#"SELECT s."default" FROM states s JOIN workspaces w ON w.id = s.workspace_id
-           WHERE s.deleted_at IS NULL AND NOT (s."group" = 'triage') AND NOT s.is_triage
-             AND s.id = $1 AND s.project_id = $2 AND w.slug = $3"#,
-    )
-    .bind(pk)
-    .bind(project_id)
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    .map_err(db_denial)?;
-    let (is_default,) = row.ok_or(Denial::ObjectNotFound)?;
+    let row = st_entity::Entity::find()
+        .select_only()
+        .column(st_entity::Column::Default)
+        .join(JoinType::InnerJoin, st_entity::Relation::Workspaces.def())
+        .filter(st_entity::Column::DeletedAt.is_null())
+        .filter(st_entity::Column::Group.ne("triage"))
+        .filter(st_entity::Column::IsTriage.eq(false))
+        .filter(st_entity::Column::Id.eq(pk))
+        .filter(st_entity::Column::ProjectId.eq(project_id))
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .into_tuple::<bool>()
+        .one(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
+    let is_default = row.ok_or(Denial::ObjectNotFound)?;
     if is_default {
         return Ok(json_response(
             StatusCode::BAD_REQUEST,
@@ -1547,13 +1597,15 @@ async fn state_destroy(
     }
     // `Issue.objects` (live-only) with this state, unscoped by project
     // (state PKs are globally unique) — `:135`.
-    let blocked: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM issues i WHERE i.state_id = $1 AND i.deleted_at IS NULL LIMIT 1"#,
-    )
-    .bind(pk)
-    .fetch_optional(&pool)
-    .await
-    .map_err(db_denial)?;
+    let blocked = issue_entity::Entity::find()
+        .select_only()
+        .column(issue_entity::Column::Id)
+        .filter(issue_entity::Column::StateId.eq(pk))
+        .filter(issue_entity::Column::DeletedAt.is_null())
+        .into_tuple::<uuid::Uuid>()
+        .one(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
     if blocked.is_some() {
         return Ok(json_response(
             StatusCode::BAD_REQUEST,
@@ -1592,19 +1644,17 @@ async fn intake_state_get(
     )?;
     // `State.triage_objects` (live + `group = triage`), `.first()` in
     // `Meta.ordering` (sequence).
-    let row: Option<StateRowTuple> = sqlx::query_as(
-        r#"SELECT s.id, s.project_id, s.workspace_id, s.name, s.color,
-                  s."group", s."default", s.description, s.sequence
-           FROM states s JOIN workspaces w ON w.id = s.workspace_id
-           WHERE s.deleted_at IS NULL AND s."group" = 'triage'
-             AND w.slug = $1 AND s.project_id = $2
-           ORDER BY s.sequence ASC LIMIT 1"#,
-    )
-    .bind(&slug)
-    .bind(project_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(db_denial)?;
+    let row = state_tuple_select()
+        .join(JoinType::InnerJoin, st_entity::Relation::Workspaces.def())
+        .filter(st_entity::Column::DeletedAt.is_null())
+        .filter(st_entity::Column::Group.eq("triage"))
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(st_entity::Column::ProjectId.eq(project_id))
+        .order_by_asc(st_entity::Column::Sequence)
+        .into_tuple::<StateRowTuple>()
+        .one(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
     let row =
         row.ok_or_else(|| Denial::Raw(StatusCode::NOT_FOUND, TRIAGE_MISSING_BODY.to_owned()))?;
     Ok(json_ok(render_state(&state_row_from(row)).to_string()))
@@ -1719,6 +1769,139 @@ fn estimate_point_row_from(tuple: EstimatePointRowTuple) -> EstimatePointRow {
         workspace: tuple.10,
         estimate: tuple.11,
     }
+}
+
+type OrmDt = sea_orm::prelude::DateTimeWithTimeZone;
+
+type EstimateRowTupleOrm = (
+    uuid::Uuid,
+    OrmDt,
+    OrmDt,
+    Option<OrmDt>,
+    String,
+    String,
+    String,
+    bool,
+    Option<uuid::Uuid>,
+    Option<uuid::Uuid>,
+    uuid::Uuid,
+    uuid::Uuid,
+);
+
+type EstimatePointRowTupleOrm = (
+    uuid::Uuid,
+    OrmDt,
+    OrmDt,
+    Option<OrmDt>,
+    i32,
+    String,
+    String,
+    Option<uuid::Uuid>,
+    Option<uuid::Uuid>,
+    uuid::Uuid,
+    uuid::Uuid,
+    uuid::Uuid,
+);
+
+fn estimate_tuple(tuple: EstimateRowTupleOrm) -> EstimateRowTuple {
+    (
+        tuple.0,
+        tuple.1.with_timezone(&Utc),
+        tuple.2.with_timezone(&Utc),
+        tuple.3.map(|dt| dt.with_timezone(&Utc)),
+        tuple.4,
+        tuple.5,
+        tuple.6,
+        tuple.7,
+        tuple.8,
+        tuple.9,
+        tuple.10,
+        tuple.11,
+    )
+}
+
+fn estimate_point_tuple(tuple: EstimatePointRowTupleOrm) -> EstimatePointRowTuple {
+    (
+        tuple.0,
+        tuple.1.with_timezone(&Utc),
+        tuple.2.with_timezone(&Utc),
+        tuple.3.map(|dt| dt.with_timezone(&Utc)),
+        tuple.4,
+        tuple.5,
+        tuple.6,
+        tuple.7,
+        tuple.8,
+        tuple.9,
+        tuple.10,
+        tuple.11,
+    )
+}
+
+fn estimate_tuple_select() -> sea_orm::Select<est_entity::Entity> {
+    est_entity::Entity::find().select_only().columns([
+        est_entity::Column::Id,
+        est_entity::Column::CreatedAt,
+        est_entity::Column::UpdatedAt,
+        est_entity::Column::DeletedAt,
+        est_entity::Column::Name,
+        est_entity::Column::Description,
+        est_entity::Column::Type,
+        est_entity::Column::LastUsed,
+        est_entity::Column::CreatedById,
+        est_entity::Column::UpdatedById,
+        est_entity::Column::ProjectId,
+        est_entity::Column::WorkspaceId,
+    ])
+}
+
+fn estimate_point_tuple_select() -> sea_orm::Select<ep_entity::Entity> {
+    ep_entity::Entity::find().select_only().columns([
+        ep_entity::Column::Id,
+        ep_entity::Column::CreatedAt,
+        ep_entity::Column::UpdatedAt,
+        ep_entity::Column::DeletedAt,
+        ep_entity::Column::Key,
+        ep_entity::Column::Description,
+        ep_entity::Column::Value,
+        ep_entity::Column::CreatedById,
+        ep_entity::Column::UpdatedById,
+        ep_entity::Column::ProjectId,
+        ep_entity::Column::WorkspaceId,
+        ep_entity::Column::EstimateId,
+    ])
+}
+
+/// Live estimate points in value order for one `(estimate)` — empty when
+/// `ids` is empty (the prefetch shape).
+async fn fetch_points_for(
+    pool: &sqlx::PgPool,
+    ids: &[uuid::Uuid],
+) -> Result<Vec<EstimatePointRowTuple>, Denial> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = estimate_point_tuple_select()
+        .filter(ep_entity::Column::DeletedAt.is_null())
+        .filter(ep_entity::Column::EstimateId.is_in(ids.to_vec()))
+        .order_by_asc(ep_entity::Column::Value)
+        .into_tuple::<(
+            uuid::Uuid,
+            OrmDt,
+            OrmDt,
+            Option<OrmDt>,
+            i32,
+            String,
+            String,
+            Option<uuid::Uuid>,
+            Option<uuid::Uuid>,
+            uuid::Uuid,
+            uuid::Uuid,
+            uuid::Uuid,
+        )>()
+        .all(&sea_conn(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(rows.into_iter().map(estimate_point_tuple).collect())
 }
 
 /// Render one point through the L3 read shape, datetimes in the
@@ -1849,36 +2032,46 @@ async fn project_estimates_get(
         member.project_role,
     )?;
     // `Project.objects.get` (live-only) in this slug.
-    let project: Option<(Option<uuid::Uuid>,)> = sqlx::query_as(
-        r#"SELECT p.estimate_id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE p.id = $1 AND w.slug = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    .map_err(db_denial)?;
-    let (estimate_id,) = project.ok_or(Denial::ObjectNotFound)?;
-    let Some(estimate_id) = estimate_id else {
+    let project = proj_entity::Entity::find_by_id(project_id)
+        .select_only()
+        .column(proj_entity::Column::EstimateId)
+        .join(JoinType::InnerJoin, proj_entity::Relation::Workspaces.def())
+        .filter(ws_entity::Column::Slug.eq(slug.clone()))
+        .filter(proj_entity::Column::DeletedAt.is_null())
+        .into_tuple::<Option<uuid::Uuid>>()
+        .one(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
+    let Some(estimate_id) = project.ok_or(Denial::ObjectNotFound)? else {
         return Ok(json_ok("[]".to_owned()));
     };
     // Live points of the estimate, `Meta.ordering = ("value",)` — the
     // *string* column, so `"10"` sorts before `"2"`.
-    let rows: Vec<EstimatePointRowTuple> = sqlx::query_as(
-        r#"SELECT ep.id, ep.created_at, ep.updated_at, ep.deleted_at, ep.key,
-                  ep.description, ep.value, ep.created_by_id, ep.updated_by_id,
-                  ep.project_id, ep.workspace_id, ep.estimate_id
-           FROM estimate_points ep JOIN workspaces w ON w.id = ep.workspace_id
-           WHERE ep.deleted_at IS NULL AND ep.estimate_id = $1
-             AND ep.project_id = $2 AND w.slug = $3
-           ORDER BY ep.value ASC"#,
-    )
-    .bind(estimate_id)
-    .bind(project_id)
-    .bind(&slug)
-    .fetch_all(&pool)
-    .await
-    .map_err(db_denial)?;
+    let rows = estimate_point_tuple_select()
+        .join(JoinType::InnerJoin, ep_entity::Relation::Workspaces.def())
+        .filter(ep_entity::Column::DeletedAt.is_null())
+        .filter(ep_entity::Column::EstimateId.eq(estimate_id))
+        .filter(ep_entity::Column::ProjectId.eq(project_id))
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .order_by_asc(ep_entity::Column::Value)
+        .into_tuple::<(
+            uuid::Uuid,
+            OrmDt,
+            OrmDt,
+            Option<OrmDt>,
+            i32,
+            String,
+            String,
+            Option<uuid::Uuid>,
+            Option<uuid::Uuid>,
+            uuid::Uuid,
+            uuid::Uuid,
+            uuid::Uuid,
+        )>()
+        .all(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
+    let rows: Vec<EstimatePointRowTuple> = rows.into_iter().map(estimate_point_tuple).collect();
     let points: Vec<Value> = rows
         .iter()
         .map(|tuple| render_point(&estimate_point_row_from(tuple.clone()), actor.timezone))
@@ -1899,36 +2092,34 @@ async fn bulk_list(
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
     let member = membership(&pool, &slug, &project_id, &actor.id).await?;
     check_project_entity_gate("GET", &slug, &project_id, &member)?;
-    let rows: Vec<EstimateRowTuple> = sqlx::query_as(
-        r#"SELECT e.id, e.created_at, e.updated_at, e.deleted_at, e.name, e.description,
-                  e.type, e.last_used, e.created_by_id, e.updated_by_id,
-                  e.project_id, e.workspace_id
-           FROM estimates e JOIN workspaces w ON w.id = e.workspace_id
-           WHERE e.deleted_at IS NULL AND e.project_id = $1 AND w.slug = $2
-           ORDER BY e.name ASC"#,
-    )
-    .bind(project_id)
-    .bind(&slug)
-    .fetch_all(&pool)
-    .await
-    .map_err(db_denial)?;
-    let ids: Vec<uuid::Uuid> = rows.iter().map(|row| row.0).collect();
-    let point_rows: Vec<EstimatePointRowTuple> = if ids.is_empty() {
-        Vec::new()
-    } else {
-        sqlx::query_as(
-            r#"SELECT ep.id, ep.created_at, ep.updated_at, ep.deleted_at, ep.key,
-                      ep.description, ep.value, ep.created_by_id, ep.updated_by_id,
-                      ep.project_id, ep.workspace_id, ep.estimate_id
-               FROM estimate_points ep
-               WHERE ep.deleted_at IS NULL AND ep.estimate_id = ANY($1)
-               ORDER BY ep.value ASC"#,
-        )
-        .bind(&ids)
-        .fetch_all(&pool)
+    let rows: Vec<EstimateRowTuple> = estimate_tuple_select()
+        .join(JoinType::InnerJoin, est_entity::Relation::Workspaces.def())
+        .filter(est_entity::Column::DeletedAt.is_null())
+        .filter(est_entity::Column::ProjectId.eq(project_id))
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .order_by_asc(est_entity::Column::Name)
+        .into_tuple::<(
+            uuid::Uuid,
+            OrmDt,
+            OrmDt,
+            Option<OrmDt>,
+            String,
+            String,
+            String,
+            bool,
+            Option<uuid::Uuid>,
+            Option<uuid::Uuid>,
+            uuid::Uuid,
+            uuid::Uuid,
+        )>()
+        .all(&sea_conn(&pool))
         .await
-        .map_err(db_denial)?
-    };
+        .map_err(orm_denial)?
+        .into_iter()
+        .map(estimate_tuple)
+        .collect();
+    let ids: Vec<uuid::Uuid> = rows.iter().map(|row| row.0).collect();
+    let point_rows: Vec<EstimatePointRowTuple> = fetch_points_for(&pool, &ids).await?;
     let mut by_estimate: HashMap<uuid::Uuid, Vec<EstimatePointRow>> = HashMap::new();
     for tuple in &point_rows {
         let point = estimate_point_row_from(tuple.clone());
@@ -2115,33 +2306,36 @@ async fn bulk_create(
         },
         Some(Value::Array(_) | Value::Object(_)) => return Err(Denial::BadValidation),
     };
-    let workspace: Option<(uuid::Uuid,)> =
-        sqlx::query_as(r#"SELECT p.workspace_id FROM projects p WHERE p.id = $1"#)
-            .bind(project_id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(db_denial)?;
-    let (workspace_id,) = workspace.ok_or(Denial::ObjectNotFound)?;
+    let db = sea_conn(&pool);
+    let workspace = proj_entity::Entity::find_by_id(project_id)
+        .select_only()
+        .column(proj_entity::Column::WorkspaceId)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(orm_denial)?;
+    let workspace_id = workspace.ok_or(Denial::ObjectNotFound)?;
     let estimate_id = uuid::Uuid::new_v4();
     let now = utc_now_micros();
     // The row persists BEFORE points validation (pinned bug).
-    sqlx::query(
-        r#"INSERT INTO estimates
-           (id, project_id, workspace_id, name, description, type, last_used,
-            created_at, updated_at, created_by_id, updated_by_id, deleted_at)
-           VALUES ($1, $2, $3, $4, '', $5, $6, $7, $7, $8, NULL, NULL)"#,
-    )
-    .bind(estimate_id)
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(&name)
-    .bind(&estimate_type)
-    .bind(last_used)
-    .bind(now)
-    .bind(actor.id)
-    .execute(&pool)
+    use sea_orm::ActiveValue::Set;
+    est_entity::ActiveModel {
+        id: Set(estimate_id),
+        project_id: Set(project_id),
+        workspace_id: Set(workspace_id),
+        name: Set(name),
+        description: Set(String::new()),
+        r#type: Set(estimate_type),
+        last_used: Set(last_used),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+        created_by_id: Set(Some(actor.id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+    }
+    .insert(&db)
     .await
-    .map_err(db_denial)?;
+    .map_err(orm_denial)?;
     // Points validation (`many=True`): `:78` passes
     // `request.data.get("estimate_points")` (no default) — the estimate
     // row above already persists whatever the gate below answers.
@@ -2198,37 +2392,30 @@ async fn bulk_create(
     // on the table, so this is a plain multi-row insert (audit columns
     // explicit, since `bulk_create` bypasses `save()`).
     for chunk in validated.chunks(10) {
-        let mut ids = Vec::with_capacity(chunk.len());
-        let mut keys = Vec::with_capacity(chunk.len());
-        let mut values = Vec::with_capacity(chunk.len());
-        let mut descriptions = Vec::with_capacity(chunk.len());
+        let mut models: Vec<ep_entity::ActiveModel> = Vec::with_capacity(chunk.len());
         for input in chunk {
-            ids.push(uuid::Uuid::new_v4());
-            keys.push(input.key);
-            values.push(input.value.clone());
-            descriptions.push(input.description.clone());
+            // `key` is validated to `i64`; the `int4` column rejects the
+            // out-of-range tail exactly like Django's `DataError` 500.
+            let key = i32::try_from(input.key).map_err(|_| Denial::ServerError)?;
+            models.push(ep_entity::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                estimate_id: Set(estimate_id),
+                project_id: Set(project_id),
+                workspace_id: Set(workspace_id),
+                key: Set(key),
+                value: Set(input.value.clone()),
+                description: Set(input.description.clone()),
+                created_at: Set(now.into()),
+                updated_at: Set(now.into()),
+                created_by_id: Set(Some(actor.id)),
+                updated_by_id: Set(Some(actor.id)),
+                deleted_at: Set(None),
+            });
         }
-        sqlx::query(
-            r#"INSERT INTO estimate_points
-               (id, estimate_id, project_id, workspace_id, "key", value, description,
-                created_at, updated_at, created_by_id, updated_by_id, deleted_at)
-               SELECT id, $2, $3, $4, "key", value, description,
-                      $5, $5, $6, $6, NULL
-               FROM UNNEST($1::uuid[], $7::bigint[], $8::text[], $9::text[])
-                    AS t(id, "key", value, description)"#,
-        )
-        .bind(&ids)
-        .bind(estimate_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(now)
-        .bind(actor.id)
-        .bind(&keys)
-        .bind(&values)
-        .bind(&descriptions)
-        .execute(&pool)
-        .await
-        .map_err(db_denial)?;
+        ep_entity::Entity::insert_many(models)
+            .exec(&db)
+            .await
+            .map_err(orm_denial)?;
     }
     Ok(json_ok(
         render_created_estimate(&pool, estimate_id, actor.timezone).await?,
@@ -2242,29 +2429,28 @@ async fn render_created_estimate(
     estimate_id: uuid::Uuid,
     timezone: Tz,
 ) -> Result<String, Denial> {
-    let row: Option<EstimateRowTuple> = sqlx::query_as(
-        r#"SELECT e.id, e.created_at, e.updated_at, e.deleted_at, e.name, e.description,
-                  e.type, e.last_used, e.created_by_id, e.updated_by_id,
-                  e.project_id, e.workspace_id
-           FROM estimates e WHERE e.id = $1"#,
-    )
-    .bind(estimate_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let row = estimate_row_from(row.ok_or(Denial::ServerError)?);
-    let point_rows: Vec<EstimatePointRowTuple> = sqlx::query_as(
-        r#"SELECT ep.id, ep.created_at, ep.updated_at, ep.deleted_at, ep.key,
-                  ep.description, ep.value, ep.created_by_id, ep.updated_by_id,
-                  ep.project_id, ep.workspace_id, ep.estimate_id
-           FROM estimate_points ep
-           WHERE ep.deleted_at IS NULL AND ep.estimate_id = $1
-           ORDER BY ep.value ASC"#,
-    )
-    .bind(estimate_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row = estimate_tuple_select()
+        .filter(est_entity::Column::Id.eq(estimate_id))
+        .into_tuple::<(
+            uuid::Uuid,
+            OrmDt,
+            OrmDt,
+            Option<OrmDt>,
+            String,
+            String,
+            String,
+            bool,
+            Option<uuid::Uuid>,
+            Option<uuid::Uuid>,
+            uuid::Uuid,
+            uuid::Uuid,
+        )>()
+        .one(&sea_conn(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
+    let row = estimate_row_from(estimate_tuple(row));
+    let point_rows = fetch_points_for(pool, &[estimate_id]).await?;
     let points: Vec<EstimatePointRow> = point_rows
         .iter()
         .map(|tuple| estimate_point_row_from(tuple.clone()))
@@ -2285,32 +2471,31 @@ async fn bulk_retrieve(
     let member = membership(&pool, &slug, &project_id, &actor.id).await?;
     check_project_entity_gate("GET", &slug, &project_id, &member)?;
     let estimate_id = parse_uuid_or_invalid(&estimate_raw)?;
-    let row: Option<EstimateRowTuple> = sqlx::query_as(
-        r#"SELECT e.id, e.created_at, e.updated_at, e.deleted_at, e.name, e.description,
-                  e.type, e.last_used, e.created_by_id, e.updated_by_id,
-                  e.project_id, e.workspace_id
-           FROM estimates e JOIN workspaces w ON w.id = e.workspace_id
-           WHERE e.deleted_at IS NULL AND e.id = $1 AND w.slug = $2 AND e.project_id = $3"#,
-    )
-    .bind(estimate_id)
-    .bind(&slug)
-    .bind(project_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(db_denial)?;
-    let row = estimate_row_from(row.ok_or(Denial::ObjectNotFound)?);
-    let point_rows: Vec<EstimatePointRowTuple> = sqlx::query_as(
-        r#"SELECT ep.id, ep.created_at, ep.updated_at, ep.deleted_at, ep.key,
-                  ep.description, ep.value, ep.created_by_id, ep.updated_by_id,
-                  ep.project_id, ep.workspace_id, ep.estimate_id
-           FROM estimate_points ep
-           WHERE ep.deleted_at IS NULL AND ep.estimate_id = $1
-           ORDER BY ep.value ASC"#,
-    )
-    .bind(estimate_id)
-    .fetch_all(&pool)
-    .await
-    .map_err(db_denial)?;
+    let row = estimate_tuple_select()
+        .join(JoinType::InnerJoin, est_entity::Relation::Workspaces.def())
+        .filter(est_entity::Column::DeletedAt.is_null())
+        .filter(est_entity::Column::Id.eq(estimate_id))
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(est_entity::Column::ProjectId.eq(project_id))
+        .into_tuple::<(
+            uuid::Uuid,
+            OrmDt,
+            OrmDt,
+            Option<OrmDt>,
+            String,
+            String,
+            String,
+            bool,
+            Option<uuid::Uuid>,
+            Option<uuid::Uuid>,
+            uuid::Uuid,
+            uuid::Uuid,
+        )>()
+        .one(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
+    let row = estimate_row_from(estimate_tuple(row.ok_or(Denial::ObjectNotFound)?));
+    let point_rows = fetch_points_for(&pool, &[estimate_id]).await?;
     let points: Vec<EstimatePointRow> = point_rows
         .iter()
         .map(|tuple| estimate_point_row_from(tuple.clone()))
@@ -2383,16 +2568,14 @@ async fn bulk_partial_update(
     };
     let estimate_id = parse_uuid_or_invalid(&estimate_raw)?;
     // Unscoped lookup (pinned bug): live-only, any project.
-    let row: Option<EstimateRowTuple> = sqlx::query_as(
-        r#"SELECT e.id, e.created_at, e.updated_at, e.deleted_at, e.name, e.description,
-                  e.type, e.last_used, e.created_by_id, e.updated_by_id,
-                  e.project_id, e.workspace_id
-           FROM estimates e WHERE e.deleted_at IS NULL AND e.id = $1"#,
-    )
-    .bind(estimate_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(db_denial)?;
+    let row = est_entity::Entity::find_by_id(estimate_id)
+        .select_only()
+        .column(est_entity::Column::Id)
+        .filter(est_entity::Column::DeletedAt.is_null())
+        .into_tuple::<uuid::Uuid>()
+        .one(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
     row.ok_or(Denial::ObjectNotFound)?;
     // `if request.data.get("estimate"):` — falsy values skip; a truthy
     // non-dict raises `AttributeError` → 500.
@@ -2416,18 +2599,34 @@ async fn bulk_partial_update(
         // `estimate.save()`: stamps `updated_at`/`updated_by` even when
         // the values are unchanged.
         let now = utc_now_micros();
-        sqlx::query(
-            r#"UPDATE estimates SET name = COALESCE($1, name), type = COALESCE($2, type),
-                      updated_at = $3, updated_by_id = $4 WHERE id = $5"#,
-        )
-        .bind(name.as_deref())
-        .bind(estimate_type.as_deref())
-        .bind(now)
-        .bind(actor.id)
-        .bind(estimate_id)
-        .execute(&pool)
-        .await
-        .map_err(db_denial)?;
+        // `COALESCE($x, name)`: `None` keeps the stored value.
+        let mut update = est_entity::Entity::update_many();
+        if let Some(name) = name {
+            update = update.col_expr(
+                est_entity::Column::Name,
+                sea_orm::sea_query::Expr::value(name),
+            );
+        }
+        if let Some(estimate_type) = estimate_type {
+            update = update.col_expr(
+                est_entity::Column::Type,
+                sea_orm::sea_query::Expr::value(estimate_type),
+            );
+        }
+        update = update
+            .col_expr(
+                est_entity::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .col_expr(
+                est_entity::Column::UpdatedById,
+                sea_orm::sea_query::Expr::value(actor.id),
+            );
+        update
+            .filter(est_entity::Column::Id.eq(estimate_id))
+            .exec(&sea_conn(&pool))
+            .await
+            .map_err(orm_denial)?;
     }
     // The points-filter comprehension (`:125-130`): the header `save()`
     // above already landed. Iterating a non-empty dict/string yields
@@ -2462,21 +2661,33 @@ async fn bulk_partial_update(
     let matched: Vec<EstimatePointRowTuple> = if ids.is_empty() {
         Vec::new()
     } else {
-        sqlx::query_as(
-            r#"SELECT ep.id, ep.created_at, ep.updated_at, ep.deleted_at, ep.key,
-                      ep.description, ep.value, ep.created_by_id, ep.updated_by_id,
-                      ep.project_id, ep.workspace_id, ep.estimate_id
-               FROM estimate_points ep JOIN workspaces w ON w.id = ep.workspace_id
-               WHERE ep.deleted_at IS NULL AND ep.id = ANY($1)
-                 AND w.slug = $2 AND ep.project_id = $3 AND ep.estimate_id = $4"#,
-        )
-        .bind(&ids)
-        .bind(&slug)
-        .bind(project_id)
-        .bind(estimate_id)
-        .fetch_all(&pool)
-        .await
-        .map_err(db_denial)?
+        estimate_point_tuple_select()
+            .join(JoinType::InnerJoin, ep_entity::Relation::Workspaces.def())
+            .filter(ep_entity::Column::DeletedAt.is_null())
+            .filter(ep_entity::Column::Id.is_in(ids.clone()))
+            .filter(ws_entity::Column::Slug.eq(slug))
+            .filter(ep_entity::Column::ProjectId.eq(project_id))
+            .filter(ep_entity::Column::EstimateId.eq(estimate_id))
+            .into_tuple::<(
+                uuid::Uuid,
+                OrmDt,
+                OrmDt,
+                Option<OrmDt>,
+                i32,
+                String,
+                String,
+                Option<uuid::Uuid>,
+                Option<uuid::Uuid>,
+                uuid::Uuid,
+                uuid::Uuid,
+                uuid::Uuid,
+            )>()
+            .all(&sea_conn(&pool))
+            .await
+            .map_err(orm_denial)?
+            .into_iter()
+            .map(estimate_point_tuple)
+            .collect()
     };
     // Match payload entries by `str(point.id)` (first wins); update
     // `value`/`key` from the raw payload (`bulk_update(["key",
@@ -2504,16 +2715,23 @@ async fn bulk_partial_update(
         if value.is_none() && point_key.is_none() {
             continue;
         }
-        sqlx::query(
-            r#"UPDATE estimate_points SET value = COALESCE($1, value),
-                      "key" = COALESCE($2, "key") WHERE id = $3"#,
-        )
-        .bind(value.as_deref())
-        .bind(point_key)
-        .bind(point.id)
-        .execute(&pool)
-        .await
-        .map_err(db_denial)?;
+        // `COALESCE($x, column)`: `None` keeps the stored value.
+        let mut update = ep_entity::Entity::update_many();
+        if let Some(value) = value {
+            update = update.col_expr(
+                ep_entity::Column::Value,
+                sea_orm::sea_query::Expr::value(value),
+            );
+        }
+        if let Some(point_key) = point_key {
+            let key = i32::try_from(point_key).map_err(|_| Denial::ServerError)?;
+            update = update.col_expr(ep_entity::Column::Key, sea_orm::sea_query::Expr::value(key));
+        }
+        update
+            .filter(ep_entity::Column::Id.eq(point.id))
+            .exec(&sea_conn(&pool))
+            .await
+            .map_err(orm_denial)?;
     }
     Ok(json_ok(
         render_created_estimate(&pool, estimate_id, actor.timezone).await?,
@@ -2575,28 +2793,36 @@ async fn bulk_destroy(
     // after the permission check (`InvalidationOrder::AfterPermissionCheck`)
     // — cited, not executed.
     let estimate_id = parse_uuid_or_invalid(&estimate_raw)?;
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT e.id FROM estimates e JOIN workspaces w ON w.id = e.workspace_id
-           WHERE e.deleted_at IS NULL AND e.id = $1 AND w.slug = $2 AND e.project_id = $3"#,
-    )
-    .bind(estimate_id)
-    .bind(&slug)
-    .bind(project_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(db_denial)?;
+    let row = est_entity::Entity::find_by_id(estimate_id)
+        .select_only()
+        .column(est_entity::Column::Id)
+        .join(JoinType::InnerJoin, est_entity::Relation::Workspaces.def())
+        .filter(est_entity::Column::DeletedAt.is_null())
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(est_entity::Column::ProjectId.eq(project_id))
+        .into_tuple::<uuid::Uuid>()
+        .one(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
     row.ok_or(Denial::ObjectNotFound)?;
     let now = utc_now_micros();
-    sqlx::query(
-        r#"UPDATE estimates SET deleted_at = $1, updated_at = $1, updated_by_id = $2
-           WHERE id = $3"#,
-    )
-    .bind(now)
-    .bind(actor.id)
-    .bind(estimate_id)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
+    est_entity::Entity::update_many()
+        .col_expr(
+            est_entity::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .col_expr(
+            est_entity::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .col_expr(
+            est_entity::Column::UpdatedById,
+            sea_orm::sea_query::Expr::value(actor.id),
+        )
+        .filter(est_entity::Column::Id.eq(estimate_id))
+        .exec(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
     enqueue_soft_delete(&pool, "estimate", &estimate_id).await;
     Ok(no_content())
 }
@@ -2641,43 +2867,59 @@ async fn point_create(
         Some(raw) => python_str(raw),
         None => String::new(),
     };
-    let workspace: Option<(uuid::Uuid,)> =
-        sqlx::query_as(r#"SELECT p.workspace_id FROM projects p WHERE p.id = $1"#)
-            .bind(project_id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(db_denial)?;
-    let (workspace_id,) = workspace.ok_or(Denial::ObjectNotFound)?;
+    let db = sea_conn(&pool);
+    let workspace = proj_entity::Entity::find_by_id(project_id)
+        .select_only()
+        .column(proj_entity::Column::WorkspaceId)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(orm_denial)?;
+    let workspace_id = workspace.ok_or(Denial::ObjectNotFound)?;
     let id = uuid::Uuid::new_v4();
     let now = utc_now_micros();
-    sqlx::query(
-        r#"INSERT INTO estimate_points
-           (id, estimate_id, project_id, workspace_id, "key", value, description,
-            created_at, updated_at, created_by_id, updated_by_id, deleted_at)
-           VALUES ($1, $2, $3, $4, $5, $6, '', $7, $7, $8, NULL, NULL)"#,
-    )
-    .bind(id)
-    .bind(estimate_id)
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(key)
-    .bind(&value)
-    .bind(now)
-    .bind(actor.id)
-    .execute(&pool)
+    use sea_orm::ActiveValue::Set;
+    // `key` was validated to `i64`; the `int4` column rejects the
+    // out-of-range tail exactly like Django's `DataError` 500.
+    let key = i32::try_from(key).map_err(|_| Denial::ServerError)?;
+    ep_entity::ActiveModel {
+        id: Set(id),
+        estimate_id: Set(estimate_id),
+        project_id: Set(project_id),
+        workspace_id: Set(workspace_id),
+        key: Set(key),
+        value: Set(value),
+        description: Set(String::new()),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+        created_by_id: Set(Some(actor.id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+    }
+    .insert(&db)
     .await
-    .map_err(db_denial)?;
-    let row: Option<EstimatePointRowTuple> = sqlx::query_as(
-        r#"SELECT ep.id, ep.created_at, ep.updated_at, ep.deleted_at, ep.key,
-                  ep.description, ep.value, ep.created_by_id, ep.updated_by_id,
-                  ep.project_id, ep.workspace_id, ep.estimate_id
-           FROM estimate_points ep WHERE ep.id = $1"#,
-    )
-    .bind(id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let row = estimate_point_row_from(row.ok_or(Denial::ServerError)?);
+    .map_err(orm_denial)?;
+    let row = estimate_point_tuple_select()
+        .filter(ep_entity::Column::Id.eq(id))
+        .into_tuple::<(
+            uuid::Uuid,
+            OrmDt,
+            OrmDt,
+            Option<OrmDt>,
+            i32,
+            String,
+            String,
+            Option<uuid::Uuid>,
+            Option<uuid::Uuid>,
+            uuid::Uuid,
+            uuid::Uuid,
+            uuid::Uuid,
+        )>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
+    let row = estimate_point_row_from(estimate_point_tuple(row));
     Ok(json_ok(render_point(&row, actor.timezone).to_string()))
 }
 
@@ -2752,22 +2994,31 @@ async fn point_partial_update(
     // `.get(pk=…)` raises `ValidationError` on garbage → the
     // invalid-detail 400 (exact parity, not the `<uuid:…>` precedent).
     let point_id = parse_uuid_or_invalid(&point_raw)?;
-    let row: Option<EstimatePointRowTuple> = sqlx::query_as(
-        r#"SELECT ep.id, ep.created_at, ep.updated_at, ep.deleted_at, ep.key,
-                  ep.description, ep.value, ep.created_by_id, ep.updated_by_id,
-                  ep.project_id, ep.workspace_id, ep.estimate_id
-           FROM estimate_points ep JOIN workspaces w ON w.id = ep.workspace_id
-           WHERE ep.deleted_at IS NULL AND ep.id = $1 AND ep.estimate_id = $2
-             AND ep.project_id = $3 AND w.slug = $4"#,
-    )
-    .bind(point_id)
-    .bind(estimate_id)
-    .bind(project_id)
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    .map_err(db_denial)?;
-    let current = estimate_point_row_from(row.ok_or(Denial::ObjectNotFound)?);
+    let row = estimate_point_tuple_select()
+        .join(JoinType::InnerJoin, ep_entity::Relation::Workspaces.def())
+        .filter(ep_entity::Column::DeletedAt.is_null())
+        .filter(ep_entity::Column::Id.eq(point_id))
+        .filter(ep_entity::Column::EstimateId.eq(estimate_id))
+        .filter(ep_entity::Column::ProjectId.eq(project_id))
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .into_tuple::<(
+            uuid::Uuid,
+            OrmDt,
+            OrmDt,
+            Option<OrmDt>,
+            i32,
+            String,
+            String,
+            Option<uuid::Uuid>,
+            Option<uuid::Uuid>,
+            uuid::Uuid,
+            uuid::Uuid,
+            uuid::Uuid,
+        )>()
+        .one(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
+    let current = estimate_point_row_from(estimate_point_tuple(row.ok_or(Denial::ObjectNotFound)?));
     let data = body
         .0
         .as_object()
@@ -2791,31 +3042,59 @@ async fn point_partial_update(
         return Err(Denial::ServerError);
     }
     let now = utc_now_micros();
-    sqlx::query(
-        r#"UPDATE estimate_points SET "key" = COALESCE($1, "key"),
-                  value = COALESCE($2, value), description = COALESCE($3, description),
-                  updated_at = $4, updated_by_id = $5 WHERE id = $6"#,
-    )
-    .bind(patch.key)
-    .bind(patch.value.as_deref())
-    .bind(patch.description.as_deref())
-    .bind(now)
-    .bind(actor.id)
-    .bind(point_id)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
-    let row: Option<EstimatePointRowTuple> = sqlx::query_as(
-        r#"SELECT ep.id, ep.created_at, ep.updated_at, ep.deleted_at, ep.key,
-                  ep.description, ep.value, ep.created_by_id, ep.updated_by_id,
-                  ep.project_id, ep.workspace_id, ep.estimate_id
-           FROM estimate_points ep WHERE ep.id = $1"#,
-    )
-    .bind(point_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let row = estimate_point_row_from(row.ok_or(Denial::ServerError)?);
+    // `COALESCE($x, column)`: `None` keeps the stored value.
+    let mut update = ep_entity::Entity::update_many();
+    if let Some(key) = patch.key {
+        let key = i32::try_from(key).map_err(|_| Denial::ServerError)?;
+        update = update.col_expr(ep_entity::Column::Key, sea_orm::sea_query::Expr::value(key));
+    }
+    if let Some(value) = patch.value {
+        update = update.col_expr(
+            ep_entity::Column::Value,
+            sea_orm::sea_query::Expr::value(value),
+        );
+    }
+    if let Some(description) = patch.description {
+        update = update.col_expr(
+            ep_entity::Column::Description,
+            sea_orm::sea_query::Expr::value(description),
+        );
+    }
+    update = update
+        .col_expr(
+            ep_entity::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .col_expr(
+            ep_entity::Column::UpdatedById,
+            sea_orm::sea_query::Expr::value(actor.id),
+        );
+    update
+        .filter(ep_entity::Column::Id.eq(point_id))
+        .exec(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
+    let row = estimate_point_tuple_select()
+        .filter(ep_entity::Column::Id.eq(point_id))
+        .into_tuple::<(
+            uuid::Uuid,
+            OrmDt,
+            OrmDt,
+            Option<OrmDt>,
+            i32,
+            String,
+            String,
+            Option<uuid::Uuid>,
+            Option<uuid::Uuid>,
+            uuid::Uuid,
+            uuid::Uuid,
+            uuid::Uuid,
+        )>()
+        .one(&sea_conn(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
+    let row = estimate_point_row_from(estimate_point_tuple(row));
     // Sanity: the patch wrote what validation promised.
     debug_assert_eq!(row.id, current.id);
     Ok(json_ok(render_point(&row, actor.timezone).to_string()))
@@ -2867,19 +3146,25 @@ async fn point_destroy(
         };
     // `Issue.objects` (live-only) on this point, `Meta.ordering`
     // (`-created_at`) — the loop order the emits follow.
-    let issues: Vec<(uuid::Uuid, Option<uuid::Uuid>)> = sqlx::query_as(
-        r#"SELECT i.id, i.estimate_point_id FROM issues i
-           JOIN workspaces w ON w.id = i.workspace_id
-           WHERE i.deleted_at IS NULL AND i.project_id = $1 AND w.slug = $2
-             AND i.estimate_point_id = $3
-           ORDER BY i.created_at DESC"#,
-    )
-    .bind(project_id)
-    .bind(&slug)
-    .bind(point_id)
-    .fetch_all(&pool)
-    .await
-    .map_err(db_denial)?;
+    let issues = issue_entity::Entity::find()
+        .select_only()
+        .columns([
+            issue_entity::Column::Id,
+            issue_entity::Column::EstimatePointId,
+        ])
+        .join(
+            JoinType::InnerJoin,
+            issue_entity::Relation::Workspaces.def(),
+        )
+        .filter(issue_entity::Column::DeletedAt.is_null())
+        .filter(issue_entity::Column::ProjectId.eq(project_id))
+        .filter(ws_entity::Column::Slug.eq(slug.clone()))
+        .filter(issue_entity::Column::EstimatePointId.eq(point_id))
+        .order_by_desc(issue_entity::Column::CreatedAt)
+        .into_tuple::<(uuid::Uuid, Option<uuid::Uuid>)>()
+        .all(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
     // The activity loop, literally (`:192-228`): per issue, enqueue the
     // emit, then — new-id branch only — run the queryset update. The
     // first emit precedes the update that would reject a garbage id.
@@ -2919,75 +3204,100 @@ async fn point_destroy(
         }
     }
     // `old_estimate_point` (live-only, unscoped): missing → the 500.
-    let old: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT ep.key FROM estimate_points ep
-           WHERE ep.deleted_at IS NULL AND ep.id = $1"#,
-    )
-    .bind(point_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(db_denial)?;
-    let (old_key,) = old.ok_or(Denial::ServerError)?;
+    let old = ep_entity::Entity::find_by_id(point_id)
+        .select_only()
+        .column(ep_entity::Column::Key)
+        .filter(ep_entity::Column::DeletedAt.is_null())
+        .into_tuple::<i32>()
+        .one(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
+    let old_key = old.ok_or(Denial::ServerError)?;
     // The decremented set (`:234-240`, `bulk_update(["key"])` — no
     // `updated_at` touch): exactly the rows with `key > old_key`,
     // captured by id BEFORE the decrement — a non-deleted row sharing
     // the old key (no unique constraint; bulk PATCH sets raw keys) is
     // excluded from the response. The deleted row itself (key == old
     // key) is never in the set.
-    let moved_rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT ep.id FROM estimate_points ep JOIN workspaces w ON w.id = ep.workspace_id
-           WHERE ep.deleted_at IS NULL AND ep.estimate_id = $1
-             AND ep.project_id = $2 AND w.slug = $3 AND ep."key" > $4"#,
-    )
-    .bind(estimate_id)
-    .bind(project_id)
-    .bind(&slug)
-    .bind(old_key)
-    .fetch_all(&pool)
-    .await
-    .map_err(db_denial)?;
-    let moved_ids: Vec<uuid::Uuid> = moved_rows.into_iter().map(|row| row.0).collect();
-    sqlx::query(
-        r#"UPDATE estimate_points ep SET "key" = ep."key" - 1
-           FROM workspaces w
-           WHERE ep.workspace_id = w.id AND ep.deleted_at IS NULL
-             AND ep.estimate_id = $1 AND ep.project_id = $2 AND w.slug = $3
-             AND ep."key" > $4"#,
-    )
-    .bind(estimate_id)
-    .bind(project_id)
-    .bind(&slug)
-    .bind(old_key)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
+    let moved_ids = ep_entity::Entity::find()
+        .select_only()
+        .column(ep_entity::Column::Id)
+        .join(JoinType::InnerJoin, ep_entity::Relation::Workspaces.def())
+        .filter(ep_entity::Column::DeletedAt.is_null())
+        .filter(ep_entity::Column::EstimateId.eq(estimate_id))
+        .filter(ep_entity::Column::ProjectId.eq(project_id))
+        .filter(ws_entity::Column::Slug.eq(slug.clone()))
+        .filter(ep_entity::Column::Key.gt(old_key))
+        .into_tuple::<uuid::Uuid>()
+        .all(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
+    let workspace_ids = ws_entity::Entity::find()
+        .select_only()
+        .column(ws_entity::Column::Id)
+        .filter(ws_entity::Column::Slug.eq(slug.clone()))
+        .into_tuple::<uuid::Uuid>()
+        .all(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
+    ep_entity::Entity::update_many()
+        .col_expr(
+            ep_entity::Column::Key,
+            sea_orm::sea_query::Expr::col(ep_entity::Column::Key).sub(1),
+        )
+        .filter(ep_entity::Column::DeletedAt.is_null())
+        .filter(ep_entity::Column::EstimateId.eq(estimate_id))
+        .filter(ep_entity::Column::ProjectId.eq(project_id))
+        .filter(ep_entity::Column::WorkspaceId.is_in(workspace_ids))
+        .filter(ep_entity::Column::Key.gt(old_key))
+        .exec(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
     let decremented: Vec<EstimatePointRowTuple> = if moved_ids.is_empty() {
         Vec::new()
     } else {
-        sqlx::query_as(
-            r#"SELECT ep.id, ep.created_at, ep.updated_at, ep.deleted_at, ep.key,
-                      ep.description, ep.value, ep.created_by_id, ep.updated_by_id,
-                      ep.project_id, ep.workspace_id, ep.estimate_id
-               FROM estimate_points ep
-               WHERE ep.id = ANY($1)
-               ORDER BY ep.value ASC"#,
-        )
-        .bind(&moved_ids)
-        .fetch_all(&pool)
-        .await
-        .map_err(db_denial)?
+        estimate_point_tuple_select()
+            .filter(ep_entity::Column::Id.is_in(moved_ids.clone()))
+            .order_by_asc(ep_entity::Column::Value)
+            .into_tuple::<(
+                uuid::Uuid,
+                OrmDt,
+                OrmDt,
+                Option<OrmDt>,
+                i32,
+                String,
+                String,
+                Option<uuid::Uuid>,
+                Option<uuid::Uuid>,
+                uuid::Uuid,
+                uuid::Uuid,
+                uuid::Uuid,
+            )>()
+            .all(&sea_conn(&pool))
+            .await
+            .map_err(orm_denial)?
+            .into_iter()
+            .map(estimate_point_tuple)
+            .collect()
     };
     let now = utc_now_micros();
-    sqlx::query(
-        r#"UPDATE estimate_points SET deleted_at = $1, updated_at = $1, updated_by_id = $2
-           WHERE id = $3"#,
-    )
-    .bind(now)
-    .bind(actor.id)
-    .bind(point_id)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
+    ep_entity::Entity::update_many()
+        .col_expr(
+            ep_entity::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .col_expr(
+            ep_entity::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .col_expr(
+            ep_entity::Column::UpdatedById,
+            sea_orm::sea_query::Expr::value(actor.id),
+        )
+        .filter(ep_entity::Column::Id.eq(point_id))
+        .exec(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
     enqueue_soft_delete(&pool, "estimatepoint", &point_id).await;
     // The captured set, in `Meta.ordering` (value) order — the deleted
     // row was never a member (its key equals, not exceeds, the old key).
