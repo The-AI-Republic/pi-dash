@@ -150,6 +150,11 @@ class IssueSerializer(BaseSerializer):
         ),
     )
 
+    # Dedicated runner detail (design §14.2, H-6): shown to everyone who
+    # can see the issue. The bare ``assigned_runner`` FK rides the model
+    # field via ``Meta.exclude`` below, mirroring ``assigned_pod``.
+    assigned_runner_detail = serializers.SerializerMethodField()
+
     class Meta:
         model = Issue
         read_only_fields = ["id", "workspace", "project", "updated_by", "updated_at"]
@@ -439,6 +444,16 @@ class IssueSerializer(BaseSerializer):
             obj.project.identifier if obj.project_id else None,
             obj.sequence_id,
         )
+
+    def get_assigned_runner_detail(self, obj):
+        from pi_dash.runner.services.issue_assignment import assigned_runner_detail
+
+        runner = getattr(obj, "assigned_runner", None)
+        if runner is None and getattr(obj, "assigned_runner_id", None):
+            from pi_dash.runner.models import Runner
+
+            runner = Runner.objects.filter(pk=obj.assigned_runner_id).first()
+        return assigned_runner_detail(runner)
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

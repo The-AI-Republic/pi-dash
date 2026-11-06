@@ -153,6 +153,13 @@ class IssueCreateSerializer(BaseSerializer):
     assigned_pod_id = serializers.PrimaryKeyRelatedField(
         source="assigned_pod", queryset=Pod.all_objects.all(), required=False, allow_null=True
     )
+    # Dedicated runner (design §14.1). Read-only until the write path
+    # (``validate_execution_target``) lands with dispatch on this branch
+    # (H-5): declaring it writable now would persist a choice dispatch
+    # ignores. The write validator flips this to writable in Part 3.
+    assigned_runner_id = serializers.PrimaryKeyRelatedField(
+        source="assigned_runner", read_only=True
+    )
     label_ids = serializers.ListField(
         child=serializers.PrimaryKeyRelatedField(queryset=Label.objects.all()),
         write_only=True,
@@ -170,9 +177,9 @@ class IssueCreateSerializer(BaseSerializer):
         model = Issue
         # Exclude the agent workpad — it's read/written via the dedicated
         # workpad endpoint and would bloat every web-tier issue payload if
-        # included here. ``assigned_pod`` is excluded too because it's surfaced
-        # explicitly as ``assigned_pod_id`` above (the *_id FK convention).
-        exclude = ["workpad", "assigned_pod"]
+        # included here. ``assigned_pod`` / ``assigned_runner`` are excluded
+        # too because they are surfaced explicitly as ``*_id`` above.
+        exclude = ["workpad", "assigned_pod", "assigned_runner"]
         read_only_fields = [
             "workspace",
             "project",
@@ -1003,6 +1010,9 @@ class IssueSerializer(DynamicBaseSerializer):
     # round-trip the issue's current pod. Reassignment while a run is active is
     # rejected server-side in IssueCreateSerializer.validate.
     assigned_pod_id = serializers.PrimaryKeyRelatedField(source="assigned_pod", read_only=True)
+    # Dedicated runner id (design §14.1): list/board/spreadsheet render it
+    # alongside the pod.
+    assigned_runner_id = serializers.PrimaryKeyRelatedField(source="assigned_runner", read_only=True)
     module_ids = serializers.ListField(child=serializers.UUIDField(), required=False)
 
     # Many to many
@@ -1043,6 +1053,7 @@ class IssueSerializer(DynamicBaseSerializer):
             "type_id",
             "is_epic",
             "assigned_pod_id",
+            "assigned_runner_id",
             "agent_executor",
             "module_ids",
             "label_ids",
@@ -1203,6 +1214,9 @@ class IssueDetailSerializer(IssueSerializer):
     agent_status = serializers.SerializerMethodField()
     relations_summary = serializers.SerializerMethodField()
     has_open_blockers = serializers.SerializerMethodField()
+    # Dedicated runner detail (design §14.1, H-6): shown to everyone who
+    # can see the issue, even though the runner list is owner-only.
+    assigned_runner_detail = serializers.SerializerMethodField()
 
     class Meta(IssueSerializer.Meta):
         fields = IssueSerializer.Meta.fields + [
@@ -1213,8 +1227,21 @@ class IssueDetailSerializer(IssueSerializer):
             "agent_status",
             "relations_summary",
             "has_open_blockers",
+            "assigned_runner_detail",
         ]
         read_only_fields = fields
+
+    def get_assigned_runner_detail(self, obj):
+        from pi_dash.runner.services.issue_assignment import assigned_runner_detail
+
+        # ``assigned_runner`` may be stale on list-optimized querysets; fall
+        # back to the FK id so detail reads never raise.
+        runner = getattr(obj, "assigned_runner", None)
+        if runner is None and getattr(obj, "assigned_runner_id", None):
+            from pi_dash.runner.models import Runner
+
+            runner = Runner.objects.filter(pk=obj.assigned_runner_id).first()
+        return assigned_runner_detail(runner)
 
     def _serialize_datetime(self, value):
         return value.isoformat() if value else None
@@ -1322,12 +1349,36 @@ class IssueDetailSerializer(IssueSerializer):
                 and str(live_state.observed_run_id) != str(run.id)
             ):
                 live_state = None
+        # Pin + waiting state (design §14.3). ``pinned_runner`` /
+        # ``pinned_runner_name`` / ``pin_kind`` ride on every run;
+        # ``dispatch_wait`` is computed only for QUEUED pinned runs.
+        pinned_name = None
+        pinned_id = getattr(run, "pinned_runner_id", None)
+        if pinned_id:
+            pinned_runner = getattr(run, "pinned_runner", None)
+            if pinned_runner is not None:
+                pinned_name = pinned_runner.name
+            else:
+                from pi_dash.runner.models import Runner
+
+                row = Runner.objects.filter(pk=pinned_id).first()
+                pinned_name = row.name if row else None
+        viewer = None
+        request = self.context.get("request") if isinstance(self.context, dict) else None
+        if request is not None:
+            viewer = getattr(request, "user", None)
+        from pi_dash.runner.services.issue_assignment import build_dispatch_wait
+
         return {
             "id": str(run.id),
             "status": run.status,
             "executor_kind": run.executor_kind,
             "runner": str(run.runner_id) if run.runner_id else None,
             "runner_name": run.runner.name if run.runner_id and run.runner else None,
+            "pinned_runner": str(pinned_id) if pinned_id else None,
+            "pinned_runner_name": pinned_name,
+            "pin_kind": getattr(run, "pin_kind", "locality"),
+            "dispatch_wait": build_dispatch_wait(run, viewer=viewer),
             "created_at": self._serialize_datetime(run.created_at),
             "assigned_at": self._serialize_datetime(run.assigned_at),
             "started_at": self._serialize_datetime(run.started_at),

@@ -345,6 +345,10 @@ class RunnerListEndpoint(APIView):
     optional ``?project=<uuid>`` narrows to every pod owned by that project
     (a project may own several pods), which is how the project-scoped AI
     Workers panel filters this list.
+
+    Optional ``?assignable_for=<issue-id | "new">`` (design §7.4) adds the
+    per-row eligibility read: ``assignable``, ``not_assignable_code``,
+    ``is_busy`` and ``queue_depth``.
     """
 
     authentication_classes = [BaseSessionAuthentication]
@@ -375,7 +379,19 @@ class RunnerListEndpoint(APIView):
         project_id = request.query_params.get("project")
         if project_id:
             qs = qs.filter(pod__project_id=project_id)
-        return Response(RunnerSerializer(qs, many=True).data)
+        context = {"request": request}
+        assignable_for = request.query_params.get("assignable_for")
+        if assignable_for is not None:
+            from pi_dash.db.models.issue import Issue
+
+            try:
+                issue = None if assignable_for == "new" else Issue.objects.filter(pk=assignable_for).first()
+            except (ValueError, TypeError):
+                issue = None
+                assignable_for = "new"
+            context["assignable_issue"] = issue
+            context["user"] = request.user
+        return Response(RunnerSerializer(qs, many=True, context=context).data)
 
 
 class RunnerDetailEndpoint(APIView):

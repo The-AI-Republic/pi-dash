@@ -540,6 +540,10 @@ MANAGED_RUNNER_ENABLED = get_config("MANAGED_RUNNER_ENABLED", "false").lower() i
 # How long an automatic run may wait for a closed desktop before it is failed
 # with ``desktop_not_connected`` instead of queueing forever (§8.5).
 MANAGED_RUNNER_QUEUED_MAX_AGE_SECS = int(get_config("MANAGED_RUNNER_QUEUED_MAX_AGE_SECS", 43200))
+# How long a dedicated runner's queued run may wait while the runner is
+# unavailable before it fails with ``dedicated_runner_unavailable`` (design
+# §11.3). Same default as the managed-runner bound.
+DEDICATED_RUN_QUEUED_MAX_AGE_SECS = int(get_config("DEDICATED_RUN_QUEUED_MAX_AGE_SECS", 43200))
 # Advisory, read by the desktop app: how long it waits for an in-flight run to
 # finish before stopping the bundled daemon (§9.5).
 MANAGED_RUNNER_GRACEFUL_STOP_SECS = int(get_config("MANAGED_RUNNER_GRACEFUL_STOP_SECS", 30))
