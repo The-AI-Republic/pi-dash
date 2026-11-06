@@ -574,6 +574,7 @@ impl StateHandle {
             next_retry_at: if connected { None } else { retry.next_retry_at },
             disconnect_reason: if connected { None } else { retry.reason },
             cloud_deleted_confirmations: retry.cloud_deleted_confirmations,
+            workspace_signed_out: false,
             observability,
         }
     }
@@ -660,6 +661,7 @@ mod tests {
     fn empty_state() -> StateHandle {
         StateHandle::new(Config {
             engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: Default::default(),
             runners: vec![],
@@ -719,7 +721,10 @@ mod tests {
             .await;
         let snap = state.runner_snapshot().await;
         assert_eq!(snap.next_retry_at, Some(at));
-        assert_eq!(snap.disconnect_reason.as_deref(), Some("server unreachable"));
+        assert_eq!(
+            snap.disconnect_reason.as_deref(),
+            Some("server unreachable")
+        );
 
         state
             .note_retry_scheduled(at, "deleted in cloud; confirming 4/10".into(), 4)
@@ -831,6 +836,7 @@ mod tests {
         daemon.agent_watchdog.kill_after_hours = 72;
         let state = StateHandle::new(Config {
             engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon,
             runners: vec![],

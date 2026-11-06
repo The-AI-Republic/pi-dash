@@ -62,6 +62,8 @@ pub enum TransportError {
     MembershipRevoked,
     #[error("auth: machine_token_revoked")]
     MachineTokenRevoked,
+    #[error("auth: machine_token_expired")]
+    MachineTokenExpired,
     #[error("auth: dev_machine_revoked")]
     DevMachineRevoked,
     #[error("auth: runner_revoked")]
@@ -124,6 +126,7 @@ impl TransportError {
             TransportError::RefreshTokenReplayed
                 | TransportError::MembershipRevoked
                 | TransportError::MachineTokenRevoked
+                | TransportError::MachineTokenExpired
                 | TransportError::DevMachineRevoked
                 | TransportError::RunnerRevoked
                 | TransportError::RunnerIdMismatch
@@ -393,6 +396,7 @@ impl TransportErrorCode {
             "auth: refresh_token_replayed" => TransportError::RefreshTokenReplayed,
             "auth: membership_revoked" => TransportError::MembershipRevoked,
             "auth: machine_token_revoked" => TransportError::MachineTokenRevoked,
+            "auth: machine_token_expired" => TransportError::MachineTokenExpired,
             "auth: dev_machine_revoked" => TransportError::DevMachineRevoked,
             "auth: runner_revoked" => TransportError::RunnerRevoked,
             "auth: runner_gone" => TransportError::RunnerGone,
@@ -1889,7 +1893,10 @@ impl HttpLoop {
                     if let Some(state) = &self.state {
                         state.set_connected(false).await;
                     }
-                    match self.wait_after_failure(&TransportError::RunnerGone, 0).await {
+                    match self
+                        .wait_after_failure(&TransportError::RunnerGone, 0)
+                        .await
+                    {
                         Ok(()) => {}
                         Err(err) if is_bootstrap_shutdown(&err) => break,
                         Err(err) => return Err(err),
@@ -2116,6 +2123,9 @@ fn map_auth_error(status: StatusCode, body: &str) -> TransportError {
         if body.contains("machine_token_revoked") {
             return TransportError::MachineTokenRevoked;
         }
+        if json_error_code(body).as_deref() == Some("machine_token_expired") {
+            return TransportError::MachineTokenExpired;
+        }
         if body.contains("dev_machine_revoked") {
             return TransportError::DevMachineRevoked;
         }
@@ -2156,6 +2166,10 @@ pub struct CreateRunnerRequest<'a> {
     pub host_label: &'a str,
     pub name: Option<&'a str>,
     pub pod: Option<&'a str>,
+    /// `Some("engine")` creates a built-in engine runner (design §5); the
+    /// server then assigns the name and requires a live engine credential.
+    /// `None` keeps the request byte-identical to before.
+    pub agent_kind: Option<&'a str>,
 }
 
 /// Public helper to create a runner with the user-scoped CLI `APIToken`.
@@ -2182,6 +2196,9 @@ pub async fn create_runner(
     }
     if let Some(p) = req.pod {
         body["pod"] = Json::String(p.to_string());
+    }
+    if let Some(kind) = req.agent_kind {
+        body["agent_kind"] = Json::String(kind.to_string());
     }
     let resp = transport
         .http()
@@ -2323,6 +2340,25 @@ impl MachineClient {
         ack: Vec<String>,
         long_poll_interval_secs: u64,
     ) -> Result<PollResponse, TransportError> {
+        self.poll_with(
+            session_id,
+            crate::cloud::protocol::MachinePollBody {
+                ack,
+                engine_state: None,
+            },
+            long_poll_interval_secs,
+        )
+        .await
+    }
+
+    /// [`Self::poll`] with the whole heartbeat body, including the
+    /// machine's `engine_state`.
+    pub async fn poll_with(
+        &self,
+        session_id: &Uuid,
+        body: crate::cloud::protocol::MachinePollBody,
+        long_poll_interval_secs: u64,
+    ) -> Result<PollResponse, TransportError> {
         let url = format!("{}/sessions/{}/poll", self.base(), session_id);
         let request_timeout = Duration::from_secs(long_poll_interval_secs.saturating_add(5));
         let resp = self
@@ -2330,7 +2366,7 @@ impl MachineClient {
             .http()
             .post(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.machine_token))
-            .json(&serde_json::json!({ "ack": ack }))
+            .json(&body)
             .timeout(request_timeout)
             .send()
             .await
@@ -2489,6 +2525,12 @@ pub struct EnrollResponse {
     pub machine_token: Option<String>,
     #[serde(default)]
     pub machine_token_minted: bool,
+    /// Whether the server created this runner in this call. `Some(false)`
+    /// when it answered with a runner it already had (a repeated engine
+    /// add for the same machine and project). Servers that predate the
+    /// field leave it out; they never return an existing runner.
+    #[serde(default)]
+    pub created: Option<bool>,
 }
 
 #[cfg(test)]
@@ -2685,6 +2727,22 @@ mod tests {
     }
 
     #[test]
+    fn expired_machine_token_is_fatal_and_keeps_its_code() {
+        for body in [
+            r#"{"detail":"machine_token_expired"}"#,
+            r#"{"error":"machine_token_expired"}"#,
+        ] {
+            let err = map_auth_error(StatusCode::UNAUTHORIZED, body);
+            assert!(matches!(err, TransportError::MachineTokenExpired));
+            assert!(err.is_fatal_for_runner());
+            assert!(matches!(
+                TransportErrorCode::from(&err).into_err(),
+                TransportError::MachineTokenExpired
+            ));
+        }
+    }
+
+    #[test]
     fn runner_gone_requires_exact_401_with_json_code() {
         let err = map_auth_error(StatusCode::UNAUTHORIZED, "{\"detail\":\"runner_gone\"}");
         assert!(matches!(err, TransportError::RunnerGone));
@@ -2700,9 +2758,18 @@ mod tests {
             (StatusCode::BAD_GATEWAY, "{\"detail\":\"runner_gone\"}"),
             (StatusCode::UNAUTHORIZED, "<html>runner_gone</html>"),
             (StatusCode::UNAUTHORIZED, "runner_gone"),
-            (StatusCode::UNAUTHORIZED, "{\"detail\":\"runner_gone_soon\"}"),
-            (StatusCode::UNAUTHORIZED, "{\"detail\":\"runner_not_found\"}"),
-            (StatusCode::UNAUTHORIZED, "{\"detail\":\"machine_token_invalid\"}"),
+            (
+                StatusCode::UNAUTHORIZED,
+                "{\"detail\":\"runner_gone_soon\"}",
+            ),
+            (
+                StatusCode::UNAUTHORIZED,
+                "{\"detail\":\"runner_not_found\"}",
+            ),
+            (
+                StatusCode::UNAUTHORIZED,
+                "{\"detail\":\"machine_token_invalid\"}",
+            ),
             (StatusCode::UNAUTHORIZED, ""),
         ];
         for (status, body) in not_gone {
@@ -2727,9 +2794,7 @@ mod tests {
     fn runner_gone_is_neither_fatal_nor_recoverable_until_confirmed() {
         assert!(!TransportError::RunnerGone.is_fatal_for_runner());
         assert!(!TransportError::RunnerGone.is_recoverable());
-        assert!(
-            TransportError::RunnerDeletedInCloud { confirmations: 10 }.is_fatal_for_runner()
-        );
+        assert!(TransportError::RunnerDeletedInCloud { confirmations: 10 }.is_fatal_for_runner());
         let code = TransportErrorCode::from(&TransportError::RunnerGone);
         assert!(matches!(code.into_err(), TransportError::RunnerGone));
     }
@@ -3136,6 +3201,7 @@ mod reconnect_loop_tests {
     fn empty_state() -> StateHandle {
         StateHandle::new(crate::config::schema::Config {
             engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: Default::default(),
             runners: vec![],
@@ -3215,18 +3281,24 @@ mod reconnect_loop_tests {
     }
 
     fn fast_policy() -> ReconnectPolicy {
-        ReconnectPolicy::new(Backoff::new(Duration::from_millis(1), Duration::from_millis(2)))
-            .with_gone_timing(GoneTiming {
-                confirmations: 10,
-                min_span: Duration::from_millis(100),
-                retry_interval: Duration::from_millis(2),
-            })
+        ReconnectPolicy::new(Backoff::new(
+            Duration::from_millis(1),
+            Duration::from_millis(2),
+        ))
+        .with_gone_timing(GoneTiming {
+            confirmations: 10,
+            min_span: Duration::from_millis(100),
+            retry_interval: Duration::from_millis(2),
+        })
     }
 
     async fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while !cond() {
-            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
@@ -3260,8 +3332,12 @@ mod reconnect_loop_tests {
             format!("http://{}", l.local_addr().unwrap())
         };
         let (timeout_url, _) = stub_server(Arc::new(|_, _| None)).await;
-        let (unavailable_url, _) =
-            stub_server(fixed(503, "application/json", "{\"detail\":\"unavailable\"}")).await;
+        let (unavailable_url, _) = stub_server(fixed(
+            503,
+            "application/json",
+            "{\"detail\":\"unavailable\"}",
+        ))
+        .await;
         let (proxy_url, _) = stub_server(fixed(
             502,
             "text/html",
@@ -3305,9 +3381,15 @@ mod reconnect_loop_tests {
         let task = tokio::spawn(h.http_loop.run());
         wait_until("first attempt", || hits.load(Ordering::SeqCst) == 1).await;
         let snap = h.state.runner_snapshot().await;
-        assert_eq!(snap.disconnect_reason.as_deref(), Some("server unreachable: HTTP 503"));
+        assert_eq!(
+            snap.disconnect_reason.as_deref(),
+            Some("server unreachable: HTTP 503")
+        );
         let wait = snap.next_retry_at.expect("next retry recorded") - Utc::now();
-        assert!(wait.num_seconds() >= 20 && wait.num_seconds() <= 36, "{wait}");
+        assert!(
+            wait.num_seconds() >= 20 && wait.num_seconds() <= 36,
+            "{wait}"
+        );
 
         h.remove_tx.send(true).unwrap();
         let err = tokio::time::timeout(Duration::from_secs(1), task)
@@ -3364,7 +3446,11 @@ mod reconnect_loop_tests {
             if n == 0 {
                 Some((201, "application/json", session.clone()))
             } else {
-                Some((401, "application/json", "{\"detail\":\"runner_gone\"}".into()))
+                Some((
+                    401,
+                    "application/json",
+                    "{\"detail\":\"runner_gone\"}".into(),
+                ))
             }
         }))
         .await;
@@ -3390,7 +3476,11 @@ mod reconnect_loop_tests {
         .to_string();
         let (url, hits) = stub_server(Arc::new(move |n, _| match n {
             0 => Some((201, "application/json", session.clone())),
-            1 => Some((503, "text/html", "<html>503 Service Unavailable</html>".into())),
+            1 => Some((
+                503,
+                "text/html",
+                "<html>503 Service Unavailable</html>".into(),
+            )),
             _ => Some((200, "application/json", "{\"messages\":[]}".into())),
         }))
         .await;
@@ -3407,8 +3497,14 @@ mod reconnect_loop_tests {
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         };
-        assert!(!snap.connected, "a failed poll must mark the runner disconnected");
-        assert_eq!(snap.disconnect_reason.as_deref(), Some("server unreachable: HTTP 503"));
+        assert!(
+            !snap.connected,
+            "a failed poll must mark the runner disconnected"
+        );
+        assert_eq!(
+            snap.disconnect_reason.as_deref(),
+            Some("server unreachable: HTTP 503")
+        );
         assert!(snap.next_retry_at.is_some(), "next retry recorded");
         assert_eq!(snap.cloud_deleted_confirmations, 0);
 
@@ -3435,7 +3531,11 @@ mod reconnect_loop_tests {
             if n == 9 {
                 Some((503, "text/html", "<html>down</html>".into()))
             } else {
-                Some((401, "application/json", "{\"detail\":\"runner_gone\"}".into()))
+                Some((
+                    401,
+                    "application/json",
+                    "{\"detail\":\"runner_gone\"}".into(),
+                ))
             }
         }))
         .await;

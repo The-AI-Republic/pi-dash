@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use uuid::Uuid;
 
+pub use pidash_ipc::protocol::EngineSignInState;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub version: u32,
@@ -22,6 +24,10 @@ pub struct Config {
     /// a developer overrides the engine binary.
     #[serde(default, skip_serializing_if = "EngineSection::is_default")]
     pub engine: EngineSection,
+    /// `[auth]`: where the daemon and engine credentials are stored
+    /// (`config::secrets`). Not written while it holds only defaults.
+    #[serde(default, skip_serializing_if = "AuthSection::is_default")]
+    pub auth: AuthSection,
 }
 
 /// Top-level `[engine]` table (`src/engine/locate.rs`).
@@ -33,6 +39,96 @@ pub struct EngineSection {
     /// A leading `~/` is expanded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary: Option<PathBuf>,
+    /// Parent of the per-project folders new engine runners work in
+    /// (design §10). Unset means the default,
+    /// `<daemon data>/engine/workdirs`. Changing it moves nothing: runners
+    /// already set up keep their folder. Validated by
+    /// `engine::workdir::validate_task_root`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_root: Option<PathBuf>,
+}
+
+/// `[auth] credentials_store`: where the daemon credentials (the `mt_`
+/// tokens) and the engine credential live (design §4.3). Per-runner
+/// refresh tokens always stay in their 0600 files.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialsStoreMode {
+    /// The OS keychain when it answers, else `config.toml` (0600).
+    /// Plaintext tokens move into the keychain at the next sign-in.
+    #[default]
+    Auto,
+    /// The OS keychain only; refuse to fall back to a file.
+    Keyring,
+    /// `config.toml` (0600), as builds before the keychain did.
+    File,
+}
+
+impl CredentialsStoreMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Keyring => "keyring",
+            Self::File => "file",
+        }
+    }
+}
+
+/// Top-level `[auth]` table.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthSection {
+    #[serde(default)]
+    pub credentials_store: CredentialsStoreMode,
+    /// Written by the daemon, not the user: `"keyring"` when the tokens
+    /// of `[cli]` are held in the OS keychain (the file then carries their
+    /// workspaces and expiry dates but no secret).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets_in: Option<String>,
+    /// Written by the daemon: the keychain items it holds, so items of a
+    /// signed-out workspace can be deleted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keyring_items: Vec<String>,
+    /// In memory only: the keychain items that [`crate::config::secrets::hydrate`]
+    /// could not read when this config was loaded. While it is not empty
+    /// the config is missing secrets that are still in the keychain, so
+    /// writing it is refused (it would drop or delete them).
+    #[serde(skip)]
+    pub unread_keyring_items: Vec<String>,
+    /// In memory only: the part of `unread_keyring_items` the keychain can
+    /// never return as it is (duplicate items, a value that is not text).
+    /// Writes stay refused for them too, except from `pidash auth login`
+    /// and `pidash auth logout`, which forget and replace them
+    /// ([`crate::config::secrets::forget_unreadable`]).
+    #[serde(skip)]
+    pub broken_keyring_items: Vec<String>,
+}
+
+impl AuthSection {
+    pub fn is_default(&self) -> bool {
+        self.credentials_store == CredentialsStoreMode::default()
+            && self.secrets_in.is_none()
+            && self.keyring_items.is_empty()
+    }
+
+    /// Whether the `[cli]` secrets are in the keychain rather than this file.
+    pub fn secrets_in_keyring(&self) -> bool {
+        self.secrets_in.as_deref() == Some(SECRETS_IN_KEYRING)
+    }
+}
+
+/// Value of `[auth] secrets_in` when the secrets are in the keychain.
+pub const SECRETS_IN_KEYRING: &str = "keyring";
+
+/// The engine credential (`ec_…`, design §4.3): one per machine, 14 days
+/// from issue. Its only use is `POST /api/v1/runner/engine/model-token/`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineCredential {
+    /// The raw `ec_` value. Empty in the file when the secret is in the
+    /// keychain.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 impl EngineSection {
@@ -41,30 +137,43 @@ impl EngineSection {
     }
 }
 
-/// Top-level `[cli]` table. Holds the auth token the `pidash` CRUD
-/// subcommands present to the cloud. The CLI also reads `cloud_url`
-/// from `[daemon]` and `workspace_slug` from the primary `[[runner]]`
-/// — there's deliberately no duplication of those values here.
+/// Top-level `[cli]` table. Holds the daemon credentials (one dev-machine
+/// `mt_` token per workspace) and the CLI's defaults. The CLI also reads
+/// `cloud_url` from `[daemon]`.
 ///
-/// For v1 the token is populated manually by the operator (or by a
-/// future `pidash login` flow). A per-run, per-issue scoped token
-/// minted by the cloud is the next step; see
-/// `.ai_design/agent_cli_auth/` (TBD).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// # Workspaces and their tokens (PIDESKAPP-122, design §4.9)
+///
+/// One daemon serves every workspace the user signs in to on this
+/// computer. The credentials are stored as:
+///
+/// ```toml
+/// [cli]
+/// token = "mt_…"            # the default workspace's token
+/// workspace_slug = "acme"   # the default workspace
+///
+/// [[cli.workspaces]]        # every further workspace, one table each
+/// slug = "beta"
+/// token = "mt_…"
+/// ```
+///
+/// `token` + `workspace_slug` is exactly the single-workspace format older
+/// builds write, so an existing config loads unchanged and behaves as one
+/// workspace. `pidash auth login --workspace <slug>` appends a
+/// `[[cli.workspaces]]` entry instead of replacing the default; a login
+/// without `--workspace` refreshes the default. The CRUD subcommands
+/// (`pidash issue …`) keep presenting the default token.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CliSection {
-    /// Auth token presented to the cloud as `Authorization: Bearer …`
-    /// by the CRUD subcommands. Optional so a partial config (URL +
-    /// workspace, no token) still parses; the CLI errors with a clear
-    /// "no token" message when it's missing at command time.
+    /// Auth token of the default workspace, presented to the cloud by the
+    /// CRUD subcommands. Optional so a partial config (URL + workspace, no
+    /// token) still parses; the CLI errors with a clear "no token" message
+    /// when it's missing at command time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 
-    /// Workspace this host is bound to. The Pi Dash CLI on a dev host
-    /// is single-workspace-per-install in v1: `pidash auth login`
-    /// resolves it (auto-picks if the user belongs to one workspace,
-    /// prompts if they belong to several) and persists it here.
-    /// `pidash runner add` reads this as the default for `--workspace`
-    /// when the caller doesn't pass one explicitly.
+    /// The default workspace: the one `token` belongs to. `pidash runner
+    /// add` reads this as the default for `--workspace` when the caller
+    /// doesn't pass one explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_slug: Option<String>,
 
@@ -73,6 +182,155 @@ pub struct CliSection {
     /// context files still take precedence for agent workflows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_project: Option<String>,
+
+    /// Email of the account the daemon is signed in as, recorded by
+    /// `pidash auth login`. Informational (reported by the IPC `Hello`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_email: Option<String>,
+
+    /// Cloud user id of the signed-in account, when login could read it.
+    /// Informational (reported by the IPC `Hello`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_user_id: Option<String>,
+
+    /// Daemon credentials of every workspace other than the default one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspaces: Vec<WorkspaceCredential>,
+
+    /// The machine's engine credential (design §4.3), issued by `pidash
+    /// auth login` or `pidash login --engine`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_credential: Option<EngineCredential>,
+
+    /// Local mirror of the server's engine sign-in state for this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_sign_in_state: Option<EngineSignInState>,
+}
+
+/// One `[[cli.workspaces]]` entry: a workspace and its dev-machine token.
+/// `token` is empty in the file when the secret is in the keychain.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceCredential {
+    pub slug: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub token: String,
+}
+
+impl CliSection {
+    /// Token for `workspace`, the slug of a runner block or of a
+    /// machine-control command.
+    ///
+    /// - `None` (a runner block written before blocks carried a slug)
+    ///   answers the default token, as older builds did.
+    /// - A slug answers the default token when it is the default
+    ///   workspace, else its `[[cli.workspaces]]` entry.
+    /// - A config that has a token but never recorded which workspace it
+    ///   belongs to (very old installs) answers that token for every
+    ///   slug, which is how those installs behaved.
+    pub fn token_for_workspace(&self, workspace: Option<&str>) -> Option<&str> {
+        let default = self.token.as_deref().filter(|t| !t.is_empty());
+        let Some(slug) = workspace.filter(|s| !s.is_empty()) else {
+            return default;
+        };
+        if self.workspace_slug.as_deref() == Some(slug) {
+            return default;
+        }
+        if let Some(entry) = self
+            .workspaces
+            .iter()
+            .find(|w| w.slug == slug && !w.token.is_empty())
+        {
+            return Some(entry.token.as_str());
+        }
+        if self.workspace_slug.is_none() {
+            return default;
+        }
+        None
+    }
+
+    /// Every `(workspace, token)` pair held, default first. The default
+    /// pair's workspace is `None` when the config never recorded it.
+    pub fn workspace_tokens(&self) -> Vec<(Option<String>, String)> {
+        let mut out: Vec<(Option<String>, String)> = Vec::new();
+        if let Some(token) = self.token.as_deref().filter(|t| !t.is_empty()) {
+            out.push((self.workspace_slug.clone(), token.to_string()));
+        }
+        for entry in &self.workspaces {
+            if entry.token.is_empty() || entry.slug.is_empty() {
+                continue;
+            }
+            if out
+                .iter()
+                .any(|(slug, _)| slug.as_deref() == Some(entry.slug.as_str()))
+            {
+                continue;
+            }
+            out.push((Some(entry.slug.clone()), entry.token.clone()));
+        }
+        out
+    }
+
+    /// Slugs of every workspace this install holds a token for.
+    pub fn workspace_slugs(&self) -> Vec<String> {
+        self.workspace_tokens()
+            .into_iter()
+            .filter_map(|(slug, _)| slug)
+            .collect()
+    }
+
+    /// Store `token` for `slug`.
+    ///
+    /// `as_default = true` (a login without `--workspace`) makes `slug`
+    /// the default workspace, replacing the default pair as older builds
+    /// did. `as_default = false` (`pidash auth login --workspace <slug>`)
+    /// adds the workspace: it replaces the default pair only when there is
+    /// none yet or `slug` already is the default, and otherwise upserts a
+    /// `[[cli.workspaces]]` entry, leaving the default untouched. Either
+    /// way no workspace is listed twice.
+    pub fn set_workspace_token(&mut self, slug: &str, token: &str, as_default: bool) {
+        let no_default = self.token.as_deref().is_none_or(str::is_empty)
+            || self.workspace_slug.as_deref().is_none_or(str::is_empty);
+        if as_default || no_default || self.workspace_slug.as_deref() == Some(slug) {
+            self.token = Some(token.to_string());
+            self.workspace_slug = Some(slug.to_string());
+            self.workspaces.retain(|w| w.slug != slug);
+            return;
+        }
+        match self.workspaces.iter_mut().find(|w| w.slug == slug) {
+            Some(entry) => entry.token = token.to_string(),
+            None => self.workspaces.push(WorkspaceCredential {
+                slug: slug.to_string(),
+                token: token.to_string(),
+            }),
+        }
+    }
+
+    /// Forget `slug`'s token. Removing the default workspace promotes the
+    /// first `[[cli.workspaces]]` entry, so the CRUD subcommands keep a
+    /// token while any workspace is signed in. Returns whether anything
+    /// was removed.
+    pub fn remove_workspace_token(&mut self, slug: &str) -> bool {
+        let before = self.workspaces.len();
+        self.workspaces.retain(|w| w.slug != slug);
+        let mut removed = self.workspaces.len() != before;
+        if self.workspace_slug.as_deref() == Some(slug) && self.token.is_some() {
+            self.token = None;
+            removed = true;
+            if !self.workspaces.is_empty() {
+                let next = self.workspaces.remove(0);
+                self.token = Some(next.token);
+                self.workspace_slug = Some(next.slug);
+            }
+        }
+        removed
+    }
+
+    /// Forget every workspace token (`pidash auth logout`). The default
+    /// workspace binding is kept as the hint for the next login.
+    pub fn clear_all_tokens(&mut self) {
+        self.token = None;
+        self.workspaces.clear();
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,6 +603,11 @@ pub enum AgentKind {
     /// (`muse exec --json --prompt-file <PATH>`), whose JSONL event stream the
     /// runner drives one turn per subprocess.
     MuseCode,
+    /// The built-in engine (`pidash-agent-engine`, the open-source Codex
+    /// shipped with the CLI; design §5). Driven by the Codex driver; the
+    /// daemon supplies the binary, a private `CODEX_HOME` and the model
+    /// token itself, so the block holds no paths.
+    Engine,
 }
 
 impl AgentKind {
@@ -358,6 +621,7 @@ impl AgentKind {
             AgentKind::OpenClaw => "OpenClaw",
             AgentKind::Grok => "Grok",
             AgentKind::MuseCode => "Muse Code",
+            AgentKind::Engine => "Built-in engine",
         }
     }
 
@@ -378,6 +642,7 @@ impl AgentKind {
             AgentKind::Grok => "grok",
             // Muse Code ships as the `muse` CLI; the runner drives `muse exec`.
             AgentKind::MuseCode => "muse",
+            AgentKind::Engine => crate::engine::ENGINE_BINARY_NAME,
         }
     }
 
@@ -392,6 +657,7 @@ impl AgentKind {
             AgentKind::OpenClaw => "https://github.com/openclaw/acpx",
             AgentKind::Grok => "https://x.ai/cli",
             AgentKind::MuseCode => "https://developer.meta.com/ai/products/muse-code/",
+            AgentKind::Engine => "https://github.com/The-AI-Republic/pi-dash",
         }
     }
 
@@ -436,6 +702,9 @@ impl AgentKind {
             // open-install-page fallback for these agents rather than guess a
             // command. Add a row here once a vendor script is confirmed.
             AgentKind::OpenClaw | AgentKind::Grok | AgentKind::MuseCode => None,
+            // Ships with pidash (`pidash engine install`), never fetched
+            // from a vendor.
+            AgentKind::Engine => None,
         }
     }
 
@@ -452,6 +721,7 @@ impl AgentKind {
             AgentKind::OpenClaw => None,
             AgentKind::Grok => Some("set XAI_API_KEY  (or run `grok` and log in)"),
             AgentKind::MuseCode => Some("set META_API_KEY"),
+            AgentKind::Engine => Some("pidash login --engine"),
         }
     }
 }
@@ -808,7 +1078,6 @@ impl Config {
 
         Ok(())
     }
-
 }
 
 /// User-facing config validation errors. Each variant's `Display` is the
@@ -965,6 +1234,7 @@ mod tests {
     fn config_with(runners: Vec<RunnerConfig>) -> Config {
         Config {
             engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -1207,7 +1477,10 @@ mod tests {
             AgentKind::OpenClaw.default_binary(),
             OpenClawSection::default().binary
         );
-        assert_eq!(AgentKind::Grok.default_binary(), GrokSection::default().binary);
+        assert_eq!(
+            AgentKind::Grok.default_binary(),
+            GrokSection::default().binary
+        );
         assert_eq!(
             AgentKind::MuseCode.default_binary(),
             MuseCodeSection::default().binary
@@ -1378,7 +1651,11 @@ mod tests {
 
     #[test]
     fn validate_accepts_complete_managed_codex_set() {
-        assert!(config_with(vec![managed_runner("desktop-host")]).validate().is_ok());
+        assert!(
+            config_with(vec![managed_runner("desktop-host")])
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1432,7 +1709,10 @@ mod tests {
         let text = toml::to_string(&cfg).expect("serialise");
         let back: Config = toml::from_str(&text).expect("deserialise");
         let codex = &back.runners[0].codex;
-        assert_eq!(codex.codex_home.as_deref(), Some(Path::new("/app/managed/codex-home")));
+        assert_eq!(
+            codex.codex_home.as_deref(),
+            Some(Path::new("/app/managed/codex-home"))
+        );
         assert_eq!(codex.path_prepend.as_deref(), Some(Path::new("/app/bin")));
         assert_eq!(
             codex.model_token_file.as_deref(),
@@ -1449,6 +1729,144 @@ mod tests {
         let text = toml::to_string(&cfg).expect("serialise");
         assert!(!text.contains("codex_home"), "unexpected key in:\n{text}");
         assert!(!text.contains("path_prepend"), "unexpected key in:\n{text}");
-        assert!(!text.contains("model_token_file"), "unexpected key in:\n{text}");
+        assert!(
+            !text.contains("model_token_file"),
+            "unexpected key in:\n{text}"
+        );
+    }
+
+    // ---- Workspaces and their tokens (PIDESKAPP-122) -------------------
+
+    const LEGACY_SINGLE_TOKEN_CONFIG: &str = r#"
+version = 2
+
+[daemon]
+cloud_url = "https://cloud.example"
+dev_machine_id = "1e6a7a56-0000-0000-0000-000000000001"
+
+[[runner]]
+name = "main"
+runner_id = "1e6a7a56-0000-0000-0000-0000000000aa"
+workspace_slug = "acme"
+project_slug = "WEB"
+
+[runner.workspace]
+working_dir = "/tmp/pidash-legacy-main"
+
+[cli]
+token = "mt_legacy"
+workspace_slug = "acme"
+default_project = "WEB"
+"#;
+
+    #[test]
+    fn legacy_single_token_config_loads_unchanged_as_one_workspace() {
+        let cfg: Config = toml::from_str(LEGACY_SINGLE_TOKEN_CONFIG).unwrap();
+        cfg.validate().unwrap();
+        let cli = cfg.cli.as_ref().unwrap();
+        assert!(cli.workspaces.is_empty());
+        assert_eq!(cli.workspace_slugs(), vec!["acme"]);
+        assert_eq!(cli.token_for_workspace(Some("acme")), Some("mt_legacy"));
+        assert_eq!(
+            cli.token_for_workspace(cfg.runners[0].workspace_slug.as_deref()),
+            Some("mt_legacy"),
+            "the runner of the one workspace gets the one token"
+        );
+        assert_eq!(cli.token_for_workspace(None), Some("mt_legacy"));
+        assert_eq!(cli.token_for_workspace(Some("other")), None);
+
+        // Writing it back adds no new keys, so older builds still read it.
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(!text.contains("workspaces"), "unexpected key in:\n{text}");
+        assert!(!text.contains("account_"), "unexpected key in:\n{text}");
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.cli, cfg.cli);
+    }
+
+    #[test]
+    fn token_without_a_recorded_workspace_serves_every_workspace() {
+        let cli = CliSection {
+            token: Some("mt_unbound".into()),
+            ..Default::default()
+        };
+        assert_eq!(cli.token_for_workspace(Some("acme")), Some("mt_unbound"));
+        assert_eq!(cli.token_for_workspace(None), Some("mt_unbound"));
+        assert_eq!(
+            cli.workspace_tokens(),
+            vec![(None, "mt_unbound".to_string())]
+        );
+    }
+
+    #[test]
+    fn per_workspace_credentials_round_trip_through_toml() {
+        let text = format!(
+            "{LEGACY_SINGLE_TOKEN_CONFIG}\n[[cli.workspaces]]\nslug = \"beta\"\ntoken = \"mt_beta\"\n"
+        );
+        let cfg: Config = toml::from_str(&text).unwrap();
+        let cli = cfg.cli.as_ref().unwrap();
+        assert_eq!(cli.token_for_workspace(Some("acme")), Some("mt_legacy"));
+        assert_eq!(cli.token_for_workspace(Some("beta")), Some("mt_beta"));
+        assert_eq!(cli.workspace_slugs(), vec!["acme", "beta"]);
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.cli, cfg.cli);
+    }
+
+    #[test]
+    fn login_with_workspace_adds_instead_of_replacing() {
+        let mut cli = CliSection {
+            token: Some("mt_acme".into()),
+            workspace_slug: Some("acme".into()),
+            ..Default::default()
+        };
+        cli.set_workspace_token("beta", "mt_beta", false);
+        assert_eq!(cli.token.as_deref(), Some("mt_acme"), "default kept");
+        assert_eq!(cli.workspace_slug.as_deref(), Some("acme"));
+        assert_eq!(cli.token_for_workspace(Some("beta")), Some("mt_beta"));
+
+        // Re-login of an added workspace updates its entry in place.
+        cli.set_workspace_token("beta", "mt_beta_2", false);
+        assert_eq!(cli.workspaces.len(), 1);
+        assert_eq!(cli.token_for_workspace(Some("beta")), Some("mt_beta_2"));
+
+        // `--workspace <default>` refreshes the default pair.
+        cli.set_workspace_token("acme", "mt_acme_2", false);
+        assert_eq!(cli.token.as_deref(), Some("mt_acme_2"));
+        assert_eq!(cli.workspaces.len(), 1);
+
+        // A login without --workspace rebinds the default, never listing
+        // a workspace twice.
+        cli.set_workspace_token("beta", "mt_beta_3", true);
+        assert_eq!(cli.workspace_slug.as_deref(), Some("beta"));
+        assert_eq!(cli.token.as_deref(), Some("mt_beta_3"));
+        assert!(cli.workspaces.is_empty());
+    }
+
+    #[test]
+    fn first_login_with_workspace_becomes_the_default() {
+        let mut cli = CliSection::default();
+        cli.set_workspace_token("acme", "mt_acme", false);
+        assert_eq!(cli.workspace_slug.as_deref(), Some("acme"));
+        assert_eq!(cli.token.as_deref(), Some("mt_acme"));
+        assert!(cli.workspaces.is_empty());
+    }
+
+    #[test]
+    fn removing_the_default_workspace_promotes_the_next() {
+        let mut cli = CliSection {
+            token: Some("mt_acme".into()),
+            workspace_slug: Some("acme".into()),
+            workspaces: vec![WorkspaceCredential {
+                slug: "beta".into(),
+                token: "mt_beta".into(),
+            }],
+            ..Default::default()
+        };
+        assert!(cli.remove_workspace_token("acme"));
+        assert_eq!(cli.workspace_slug.as_deref(), Some("beta"));
+        assert_eq!(cli.token.as_deref(), Some("mt_beta"));
+        assert!(cli.workspaces.is_empty());
+        assert!(!cli.remove_workspace_token("gamma"));
+        cli.clear_all_tokens();
+        assert!(cli.workspace_tokens().is_empty());
     }
 }

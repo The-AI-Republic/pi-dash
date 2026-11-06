@@ -39,6 +39,11 @@ interface ApprovalCapableTransport {
   setApprovalMode?: (sessionId: string, mode: TApprovalMode) => void;
   getApprovalMode?: (sessionId: string) => TApprovalMode;
   decideChatApproval?: (sessionId: string, localApprovalId: string, decision: TApprovalDecision) => Promise<void>;
+  /**
+   * A transport that serves only some runners locally (the desktop's routing
+   * transport) says which. Absent means every chat it serves has the verbs.
+   */
+  supportsLocalApprovals?: (runnerId?: string | null) => boolean;
 }
 
 const DEFAULT_APPROVAL_MODE: TApprovalMode = "full_access";
@@ -260,10 +265,11 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   const transport = useMemo(() => getChatTransport(), []);
   // Approvals + mode are a built-in-engine (local transport) capability; the
   // cloud transport lacks these verbs and keeps its separate /approvals page.
-  const approvalsSupported = useMemo(
-    () => typeof (transport as ApprovalCapableTransport).decideChatApproval === "function",
-    [transport]
-  );
+  const approvalsSupported = useMemo(() => {
+    const capable = transport as ApprovalCapableTransport;
+    if (typeof capable.decideChatApproval !== "function") return false;
+    return capable.supportsLocalApprovals ? capable.supportsLocalApprovals(runnerId) : true;
+  }, [transport, runnerId]);
   const [approvalMode, setApprovalModeState] = useState<TApprovalMode>(() =>
     approvalsSupported ? readStoredApprovalMode(runnerId) : DEFAULT_APPROVAL_MODE
   );

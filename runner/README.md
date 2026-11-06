@@ -139,10 +139,54 @@ Useful follow-ups:
 
 ```bash
 pidash auth status               # who am I logged in as; runner list
-pidash auth logout               # revoke the CLI token server-side
-pidash runner add --project X    # add another runner
+pidash auth logout               # revoke every workspace token server-side
+pidash runner add --project X    # add another runner (no daemon restart)
 pidash runner list / remove      # manage runners
+pidash runner set-working-dir <runner> <path>   # move one runner, no restart
 ```
+
+### Several workspaces on one computer
+
+One daemon serves every workspace you sign in to on the computer. Each
+workspace has its own dev-machine token; each runner authenticates with the
+token of its block's `workspace_slug`, and the machine's control session is
+opened with any signed-in workspace's token.
+
+```bash
+pidash auth login                    # signs in (or refreshes) the default workspace
+pidash auth login --workspace beta   # adds workspace `beta`; the others stay signed in
+pidash runner add --workspace beta --project API
+pidash auth logout --workspace beta  # signs out only `beta`
+```
+
+The tokens live in `config.toml` (mode 0600):
+
+```toml
+[cli]
+token = "mt_…"            # the default workspace's token
+workspace_slug = "acme"   # the default workspace
+
+[[cli.workspaces]]        # one table per further workspace
+slug = "beta"
+token = "mt_…"
+```
+
+A config written by an older `pidash` (just `[cli] token` + `workspace_slug`)
+loads unchanged and is one workspace. When a workspace's token is revoked or
+signed out, only that workspace's runners stop, and `pidash status` shows them
+as `workspace_signed_out`; the other workspaces keep running. `pidash auth
+login --workspace <slug>` signs it back in without a daemon restart.
+
+### Runner changes without a restart
+
+`pidash runner add` (and the TUI's add-runner form) writes the new
+`[[runner]]` block and asks the running daemon to start that runner
+in-process; the service is only (re)started when no daemon is running.
+`pidash runner remove` tears the runner down in the daemon and waits until it
+is gone, so it disappears from `pidash status` at once and the same id can be
+added again. `pidash runner set-working-dir <runner> <path>` stops just that
+runner, rewrites its block under the config lock, validates it and starts it
+again; it is refused while the runner is mid-run. No other runner is touched.
 
 ### Agent CLI auto-install
 
@@ -238,13 +282,13 @@ would use.
 
 The daemon resolves the engine once at start and keeps that path.
 `pidash update` installs the new release's engine version directory beside the
-old one before replacing `pidash`, so runs in flight keep their binary; older
-versions are left for the daemon to remove once no run uses them. It skips the
-archive download when the new release pins an engine version that is already
-installed (it reads the release tag's `runner/ENGINE_VERSION` first). A
-`pidash` from before the engine shipped has no such step, so when the daemon
-starts on an installer-managed install and finds no engine, it installs it in
-the background (retried at each start until it succeeds).
+old one before replacing `pidash`, so runs in flight keep their binary. It
+skips the download when the new release pins an engine version already
+installed. If an installer-managed daemon starts without an engine, it
+installs it in the background, retrying with backoff until it succeeds.
+The daemon removes older engine versions once no run or chat turn is in
+flight (and, on Linux, no process still executes a binary from them),
+retrying cleanup every 10 minutes.
 
 For development, point the daemon at another build in `config.toml`:
 
@@ -252,6 +296,73 @@ For development, point the daemon at another build in `config.toml`:
 [engine]
 binary = "~/src/codex/codex-rs/target/debug/codex"
 ```
+
+### Using the engine
+
+```bash
+pidash auth login                      # signs in the daemon and the engine
+pidash runner add --agent engine --project WEB [--working-dir <dir>]
+pidash engine status                   # available / signed out / expiring / unavailable (reason)
+pidash engine pause                    # this computer's engine takes no new work …
+pidash engine resume                   # … until resumed
+pidash login --engine                  # renew the engine's 14-day credential alone
+pidash auth logout --engine            # sign the engine out; the daemon stays signed in
+pidash auth status                     # both credentials, expiry, engine sign-in state
+pidash config set engine-task-root ~/pidash-tasks   # or `default`
+```
+
+- **Two credentials.** `pidash auth login` stores the daemon credential
+  (one `mt_` token per workspace) and, when the server can serve the engine,
+  the engine credential (`ec_`, 14 days from issue, one per computer). The
+  engine credential can only fetch short-lived model tokens; the daemon holds
+  those **in memory only**, refreshes them when under 60 s remain, and hands
+  them to the engine through its auth helper `pidash __engine model-token`
+  (over the local socket). Nothing short-lived is written to disk.
+- **An engine runner** is `[runner.agent] kind = "engine"` with no paths: the
+  daemon supplies the engine binary, a private `CODEX_HOME` at
+  `<data dir>/engine/<account>/codex-home` (never `~/.codex`) and the Codex
+  config it writes there from the server's model profile (fetched at start,
+  on every sign-in and every 15 minutes). The server names engine runners.
+- **Folders.** Each project gets `<task root>/<workspace>/<project>/`, with a
+  numeric suffix when that folder is taken or not empty — whether the engine
+  is turned on from the CLI, the app (`EngineRunnerAdd`) or the web ("Add
+  runner", machine control's `create_runner`). The task root defaults to
+  `<data dir>/engine/workdirs`; changing it moves nothing.
+- **Reconcile.** At start and every 10 minutes the daemon reads its dev
+  machine from the server: engine blocks whose runner row was revoked
+  ("Remove from project") are removed (their folders are kept), and live
+  engine runner rows of this machine with no block are re-added with a newly
+  allocated folder.
+- **`pidash status`** and the IPC `Hello` / `EngineStatus` report the
+  machine-level engine state, including whether the owner paused it and the
+  server's automatic pause reason (cached from the machine session's welcome,
+  the reconcile and `pidash engine pause` / `resume`, which go through the
+  daemon when it runs). The daemon also reports its state to the server in the
+  machine session's heartbeat (`engine_state`).
+- **Local chat** (the app's "This computer" contact) runs on the daemon's own
+  engine profile: a `Chat*` IPC request with no `runner` selector and an
+  absolute `cwd` uses the engine binary, the account's `CODEX_HOME` and the
+  engine credential, with no project runner and no busy flag shared with runs.
+  It works with zero or many runners, and a folder inside any runner's working
+  dir is refused. With a `runner` selector, chat runs on that runner as before.
+
+### Where credentials are stored
+
+```toml
+[auth]
+credentials_store = "auto"   # "auto" (default) | "keyring" | "file"
+```
+
+- `auto`: the OS keychain (macOS Keychain, Windows Credential Manager, the
+  Secret Service on Linux) when it answers, else `config.toml` (0600).
+  Plaintext tokens move into the keychain at the next `pidash auth login`.
+- `keyring`: the keychain only; a write fails rather than falling back.
+- `file`: `config.toml` (0600), as before.
+
+This covers the daemon and engine credentials, not the per-runner refresh
+tokens. `pidash doctor` reports which store is in use. `PIDASH_KEYRING=off`
+makes the keychain count as unavailable (containers, CI). On a headless Linux
+server with no Secret Service, `auto` keeps the 0600 file.
 
 ## Auto-update
 

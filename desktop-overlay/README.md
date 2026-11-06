@@ -72,9 +72,26 @@ desktop/src-tauri/dist/
   desktop bundle. Desktop-only routes go here.
 - `apps/web/react-router.config.ts` — `ssr: false`, no prerendering.
 - `apps/web/core/services/agent-runtime.ts`, `core/components/agent-runtime.tsx`
-  — the real implementations of the `apps/web` agent-runtime stubs: enroll
-  this machine, write the engine config and model credential, supervise the
-  bundled daemon.
+  — the real implementations of the `apps/web` agent-runtime stubs, as a
+  client of this computer's Pi Dash daemon: find it, turn the built-in engine
+  on for a project when it is used, keep the engine signed in (silently only
+  when `expiring` / `expired`), and sign out only the app.
+- `apps/web/core/services/desktop-daemon.ts` — what the app knows about the
+  daemon (`Hello`, classified by the host) and the engine sign-in rules;
+  `pidash-cli.ts` — "Set up Pi Dash on this computer" and its consent prompt;
+  `desktop-migration.ts` — moving older builds' private daemon trees to the
+  shared daemon.
+- `apps/web/core/services/local-chat-transport.ts` — the routing chat
+  transport: "This computer" to the daemon, every other runner to the cloud.
+- `apps/web/core/components/runners/this-computer.ts`,
+  `local-chat-contacts.ts` — the desktop sides of the runner seams: this
+  computer preselected in Add runner (folder picker, built-in engine), its
+  engine runners shown once, as the "This computer" contact.
+- `apps/web/core/components/desktop-computer-button.tsx`,
+  `desktop-engine-settings.tsx`, `desktop-daemon-setup-dialog.tsx` — the
+  "This computer" corner button and the Built-in engine settings (task root
+  with a folder picker, per-project folders, engine state, pause, sign in and
+  out), and the set-up consent screen.
 - `apps/web/core/components/desktop-update-button.tsx` — the corner button
   beside the sidebar's user menu while an app update is waiting (found by
   the daily check, or deferred at launch); clicking it installs and restarts.

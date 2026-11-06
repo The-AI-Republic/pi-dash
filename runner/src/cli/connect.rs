@@ -223,6 +223,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         }
         None => Config {
             engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: args.url.clone(),
@@ -637,8 +638,8 @@ fn read_line() -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::schema::{
-        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CursorAgentSection, CodexSection, RunnerConfig,
-        WorkspaceSection,
+        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, CursorAgentSection,
+        RunnerConfig, WorkspaceSection,
     };
     use std::path::PathBuf;
 

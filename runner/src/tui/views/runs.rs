@@ -12,9 +12,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, StatefulWidget};
 
 use super::super::app::AppData;
-use super::super::view::focus::{border_style, is_focused, FocusNode, FocusPath};
-use super::super::view::tab::{Tab, TabCtx, TabKind};
 use super::super::view::KeyHandled;
+use super::super::view::focus::{FocusNode, FocusPath, border_style, is_focused};
+use super::super::view::tab::{Tab, TabCtx, TabKind};
 use super::super::widgets::SelectableList;
 use uuid::Uuid;
 

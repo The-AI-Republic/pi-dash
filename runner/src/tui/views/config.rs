@@ -316,15 +316,12 @@ pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
             AgentKind::OpenClaw => "open-claw".into(),
             AgentKind::Grok => "grok".into(),
             AgentKind::MuseCode => "muse-code".into(),
+            AgentKind::Engine => "engine".into(),
         },
         FieldId::CodexBinary => runner.codex.binary.clone(),
         FieldId::CodexModelDefault => runner.codex.model_default.clone().unwrap_or_default(),
         FieldId::ClaudeBinary => runner.claude_code.binary.clone(),
-        FieldId::ClaudeModelDefault => runner
-            .claude_code
-            .model_default
-            .clone()
-            .unwrap_or_default(),
+        FieldId::ClaudeModelDefault => runner.claude_code.model_default.clone().unwrap_or_default(),
         FieldId::CursorBinary => runner.cursor_agent.binary.clone(),
         FieldId::CursorModelDefault => runner
             .cursor_agent
@@ -332,15 +329,11 @@ pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
             .clone()
             .unwrap_or_default(),
         FieldId::OpenClawBinary => runner.openclaw.binary.clone(),
-        FieldId::OpenClawModelDefault => {
-            runner.openclaw.model_default.clone().unwrap_or_default()
-        }
+        FieldId::OpenClawModelDefault => runner.openclaw.model_default.clone().unwrap_or_default(),
         FieldId::GrokBinary => runner.grok.binary.clone(),
         FieldId::GrokModelDefault => runner.grok.model_default.clone().unwrap_or_default(),
         FieldId::MuseCodeBinary => runner.muse_code.binary.clone(),
-        FieldId::MuseCodeModelDefault => {
-            runner.muse_code.model_default.clone().unwrap_or_default()
-        }
+        FieldId::MuseCodeModelDefault => runner.muse_code.model_default.clone().unwrap_or_default(),
         FieldId::ApprovalAutoReadonly => runner
             .approval_policy
             .auto_approve_readonly_shell
@@ -505,6 +498,9 @@ pub fn cycle_enum(cfg: &mut Config, id: FieldId, runner_idx: usize) {
                 AgentKind::OpenClaw => AgentKind::Grok,
                 AgentKind::Grok => AgentKind::MuseCode,
                 AgentKind::MuseCode => AgentKind::Codex,
+                // An engine runner is enrolled as one (`pidash runner add
+                // --agent engine`); its agent is not switchable here.
+                AgentKind::Engine => AgentKind::Engine,
             };
         }
         FieldId::LogLevel => {
@@ -539,14 +535,14 @@ pub fn differs(a: &Config, b: &Config) -> bool {
 
 pub fn runner_picker_bar(data: &AppData) -> Paragraph<'static> {
     let Some(working) = data.config_working.as_ref() else {
-        return Paragraph::new(Line::raw("")).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Runners "),
-        );
+        return Paragraph::new(Line::raw(""))
+            .block(Block::default().borders(Borders::ALL).title(" Runners "));
     };
     let total = working.runners.len();
-    let picked = data.picker_runner_index().unwrap_or(0).min(total.saturating_sub(1));
+    let picked = data
+        .picker_runner_index()
+        .unwrap_or(0)
+        .min(total.saturating_sub(1));
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (i, r) in working.runners.iter().enumerate() {
         let label = format!(" {}. {} ", i + 1, r.name);
@@ -901,9 +897,7 @@ fn index_of(id: FieldId) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::{
-        Config, DaemonConfig, RunnerConfig, WorkspaceSection,
-    };
+    use crate::config::schema::{Config, DaemonConfig, RunnerConfig, WorkspaceSection};
     use std::path::PathBuf;
     use uuid::Uuid;
 
@@ -929,6 +923,7 @@ mod tests {
         runner.agent.kind = kind;
         Config {
             engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://pidash.example".into(),
