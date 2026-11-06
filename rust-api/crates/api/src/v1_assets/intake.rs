@@ -618,7 +618,7 @@ async fn rewrite_project_id(
         return Ok(id);
     }
     let scope = QueryScope::new(slug, actor_id);
-    queries_projmem::fetch_project_id(pool, &scope, raw)
+    queries_projmem::fetch_project_id(&pidash_db::pool::sea_orm_connection(pool), &scope, raw)
         .await
         .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::ProjectNotFound)
