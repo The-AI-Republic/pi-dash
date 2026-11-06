@@ -138,6 +138,29 @@ impl WorkspaceTokens {
         self.read().cli.workspace_slugs()
     }
 
+    /// The machine's engine credential, when one with a token is held.
+    pub(crate) fn engine_credential(&self) -> Option<crate::config::schema::EngineCredential> {
+        self.read()
+            .cli
+            .engine_credential
+            .clone()
+            .filter(|c| !c.token.is_empty())
+    }
+
+    /// The engine sign-in state recorded in `config.toml`.
+    pub(crate) fn engine_sign_in_state(&self) -> Option<crate::config::schema::EngineSignInState> {
+        self.read().cli.engine_sign_in_state
+    }
+
+    /// Record `state` as the engine sign-in state in memory, after it was
+    /// (or while it is being) mirrored into `config.toml`.
+    pub(crate) fn set_engine_sign_in_state(
+        &self,
+        state: Option<crate::config::schema::EngineSignInState>,
+    ) {
+        self.write().cli.engine_sign_in_state = state;
+    }
+
     /// The signed-in account recorded by `pidash auth login`.
     pub(crate) fn account(&self) -> (Option<String>, Option<String>) {
         let inner = self.read();

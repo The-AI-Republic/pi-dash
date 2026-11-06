@@ -316,6 +316,7 @@ pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
             AgentKind::OpenClaw => "open-claw".into(),
             AgentKind::Grok => "grok".into(),
             AgentKind::MuseCode => "muse-code".into(),
+            AgentKind::Engine => "engine".into(),
         },
         FieldId::CodexBinary => runner.codex.binary.clone(),
         FieldId::CodexModelDefault => runner.codex.model_default.clone().unwrap_or_default(),
@@ -497,6 +498,9 @@ pub fn cycle_enum(cfg: &mut Config, id: FieldId, runner_idx: usize) {
                 AgentKind::OpenClaw => AgentKind::Grok,
                 AgentKind::Grok => AgentKind::MuseCode,
                 AgentKind::MuseCode => AgentKind::Codex,
+                // An engine runner is enrolled as one (`pidash runner add
+                // --agent engine`); its agent is not switchable here.
+                AgentKind::Engine => AgentKind::Engine,
             };
         }
         FieldId::LogLevel => {
@@ -918,6 +922,8 @@ mod tests {
         };
         runner.agent.kind = kind;
         Config {
+            engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://pidash.example".into(),

@@ -255,6 +255,31 @@ jobs:
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
+      # Hand-added (cargo-dist doesn't know about this): stage the built-in
+      # engine (the pinned OpenAI Codex release in runner/ENGINE_VERSION,
+      # SHA-256-checked against the upstream release metadata and renamed
+      # pidash-agent-engine) so `include` in dist-workspace.toml puts
+      # engine/<version>/ into this target's archive, and runner/wix/main.wxs
+      # can put it into the MSI. See design
+      # .ai_design/built_engine_as_runner §4.5.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Stage built-in engine
+        shell: bash
+        env:
+          TARGETS: ${{ join(matrix.targets, ' ') }}
+        run: |
+          set -euo pipefail
+          read -r -a targets <<< "$TARGETS"
+          # One engine per archive: stage_engine.py replaces the staging
+          # directory, so a job building several targets would ship the last
+          # target's engine in all of them. Fail instead of doing that.
+          if [ "${#targets[@]}" -ne 1 ]; then
+            echo "::error::expected one target per build-local-artifacts job, got: $TARGETS"
+            exit 1
+          fi
+          python runner/scripts/stage_engine.py --target "${targets[0]}"
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot

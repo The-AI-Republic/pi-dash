@@ -120,6 +120,9 @@ impl MachineControl {
                 Ok(resp) => {
                     open_backoff.reset();
                     poll_backoff.reset();
+                    // The welcome may carry the machine's engine pause
+                    // state (design §8); cache it for Hello / status.
+                    self.note_welcome(&resp.welcome);
                     tracing::info!(
                         session_id = %resp.session_id,
                         workspace = %workspace_label,
@@ -163,7 +166,14 @@ impl MachineControl {
                         client.close_session(&session_id).await;
                         return;
                     }
-                    r = client.poll(&session_id, std::mem::take(&mut acks), DEFAULT_LONG_POLL_SECS) => r,
+                    r = client.poll_with(
+                        &session_id,
+                        crate::cloud::protocol::MachinePollBody {
+                            ack: std::mem::take(&mut acks),
+                            engine_state: Some((&self.spawn_ctx.engine.status()).into()),
+                        },
+                        DEFAULT_LONG_POLL_SECS,
+                    ) => r,
                 };
                 match polled {
                     Ok(resp) => {
@@ -214,7 +224,19 @@ impl MachineControl {
         }
     }
 
+    /// Cache the engine pause fields a welcome frame carries, if any.
+    fn note_welcome(&self, welcome: &serde_json::Value) {
+        if let Ok(payload) =
+            serde_json::from_value::<crate::engine::api::MachinePayload>(welcome.clone())
+        {
+            self.spawn_ctx.engine.note_machine_payload(&payload);
+        }
+    }
+
     async fn handle_message(&self, client: &MachineClient, msg: PollMessage) {
+        if msg.kind == "welcome" {
+            self.note_welcome(&msg.body);
+        }
         match serde_json::from_value::<MachineMsg>(msg.body) {
             Ok(MachineMsg::CreateRunner(cmd)) => self.handle_create_runner(client, cmd).await,
             Ok(MachineMsg::Welcome { .. }) | Ok(MachineMsg::Ping {}) => {}
@@ -267,6 +289,38 @@ impl MachineControl {
             anyhow::bail!("create_runner command missing project");
         }
         let agent_kind = parse_agent_kind(&cmd.agent)?;
+        let is_engine = agent_kind == AgentKind::Engine;
+        // Held to the end: the engine reconcile must not see this row
+        // before its block is written.
+        let _engine_ops = if is_engine {
+            Some(self.spawn_ctx.engine_ops_lock.lock().await)
+        } else {
+            None
+        };
+        // One engine runner per machine and project (design §5): when this
+        // computer already runs the engine for the project, the command is
+        // already satisfied. Answer with that runner instead of creating
+        // (and possibly rolling back) another.
+        if agent_kind == AgentKind::Engine
+            && !cmd.workspace_slug.is_empty()
+            && let Some(existing) =
+                existing_engine_runner(&self.spawn_ctx.paths, &cmd.workspace_slug, &cmd.project)?
+        {
+            tracing::info!(
+                runner_id = %existing.runner_id,
+                project = %cmd.project,
+                "create_runner: the engine is already on for this project; reusing it"
+            );
+            self.spawn_ctx
+                .add_runner(existing.clone())
+                .await
+                .context("bringing up the existing engine runner")?;
+            return Ok((existing.runner_id, existing.name));
+        }
+        if is_engine {
+            // Same checks as `EngineRunnerAdd`, before the server is called.
+            crate::engine::provision::ensure_engine_can_run(&self.spawn_ctx.engine.status())?;
+        }
         // The per-computer runner limit fails before anything is registered
         // (design §5): a cloud row created first and rolled back on the
         // local `validate()` failure is left behind if the rollback fails.
@@ -280,6 +334,7 @@ impl MachineControl {
 
         // 1. Cloud registration — same X-Api-Key surface as
         //    `pidash runner add`.
+        let before = crate::cli::runner_ops::runner_ids_before_create(&self.spawn_ctx.paths);
         let resp = create_runner(
             &self.transport,
             CreateRunnerRequest {
@@ -289,30 +344,52 @@ impl MachineControl {
                     .then_some(cmd.workspace_slug.as_str()),
                 project: &cmd.project,
                 host_label: &host_label,
-                name: (!cmd.name.is_empty()).then_some(cmd.name.as_str()),
+                // The server names engine runners (design §5 "Naming").
+                name: (!is_engine && !cmd.name.is_empty()).then_some(cmd.name.as_str()),
                 pod: (!cmd.pod.is_empty()).then_some(cmd.pod.as_str()),
+                agent_kind: is_engine.then_some(crate::engine::api::ENGINE_AGENT_KIND),
             },
         )
         .await
         .map_err(|e| anyhow::anyhow!("cloud registration failed: {e}"))?;
 
         // 2. Persist the `[[runner]]` block. The runner gets one exclusive
-        //    working directory: the caller's `working_dir` when supplied,
-        //    otherwise an auto-created path under the data dir. `add_runner`
-        //    below brings it up on hot-add — no restart required.
-        let options = ApplyEnrollOptions {
-            working_dir: (!cmd.working_dir.is_empty()).then(|| PathBuf::from(&cmd.working_dir)),
-            agent_kind,
-            model: (!cmd.model.is_empty()).then_some(cmd.model.as_str()),
-            reasoning_effort: (!cmd.reasoning_effort.is_empty())
-                .then_some(cmd.reasoning_effort.as_str()),
-        };
+        //    working directory: the caller's `working_dir` when supplied;
+        //    otherwise, for an engine runner, a folder allocated under
+        //    `[engine] task_root` (design §10), and for any other agent an
+        //    auto-created path under the data dir. `add_runner` below brings
+        //    it up on hot-add — no restart required.
         let cloud_url = self.spawn_ctx.cloud_url();
-        let applied = match apply_enroll_response(&self.spawn_ctx.paths, &resp, &cloud_url, options)
-            .await
-            .context("persisting [[runner]] block")
-        {
+        let persisted = async {
+            // The server returned a runner this computer already has: it is
+            // the answer as it is, so no folder is allocated for it.
+            let cfg = crate::config::file::load_config(&self.spawn_ctx.paths)?;
+            if let Some(existing) = cfg.runners.iter().find(|r| r.runner_id == resp.runner_id) {
+                return Ok(crate::cli::runner_ops::AppliedRunner {
+                    runner: existing.clone(),
+                    is_first_runner: false,
+                    already_present: true,
+                });
+            }
+            let working_dir = create_working_dir(&self.spawn_ctx.paths, &cmd, &resp, agent_kind)?;
+            let options = ApplyEnrollOptions {
+                working_dir,
+                agent_kind,
+                model: (!is_engine && !cmd.model.is_empty()).then_some(cmd.model.as_str()),
+                reasoning_effort: (!is_engine && !cmd.reasoning_effort.is_empty())
+                    .then_some(cmd.reasoning_effort.as_str()),
+            };
+            apply_enroll_response(&self.spawn_ctx.paths, &resp, &cloud_url, options).await
+        };
+        let applied = match persisted.await.context("persisting [[runner]] block") {
             Ok(applied) => applied,
+            // The runner was already on this computer, or the server
+            // returned one it already had: never roll back a working one.
+            Err(persist_err)
+                if !crate::cli::runner_ops::may_roll_back_create(&persist_err, &resp, &before) =>
+            {
+                return Err(persist_err);
+            }
             Err(persist_err) => {
                 // Roll the cloud-side row back so a failed local write
                 // doesn't leave an orphan runner (mirrors `pidash
@@ -342,6 +419,54 @@ impl MachineControl {
 
         Ok((resp.runner_id, resp.runner_name))
     }
+}
+
+/// The working dir of a runner created by machine control: the command's,
+/// else (engine) `<task_root>/<workspace-slug>/<project-identifier>/` with a
+/// numeric suffix on a clash (design §10), else `None` — the generic
+/// default under the data dir.
+fn create_working_dir(
+    paths: &crate::util::paths::Paths,
+    cmd: &CreateRunnerCmd,
+    resp: &crate::cloud::http::EnrollResponse,
+    agent_kind: AgentKind,
+) -> Result<Option<PathBuf>> {
+    if !cmd.working_dir.is_empty() {
+        return Ok(Some(PathBuf::from(&cmd.working_dir)));
+    }
+    if agent_kind != AgentKind::Engine {
+        return Ok(None);
+    }
+    let workspace = if resp.workspace_slug.is_empty() {
+        cmd.workspace_slug.as_str()
+    } else {
+        resp.workspace_slug.as_str()
+    };
+    let project = if resp.project_identifier.is_empty() {
+        cmd.project.as_str()
+    } else {
+        resp.project_identifier.as_str()
+    };
+    crate::engine::workdir::allocate_engine_folder(paths, workspace, project).map(Some)
+}
+
+/// The engine runner this computer already has for `workspace`/`project`.
+fn existing_engine_runner(
+    paths: &crate::util::paths::Paths,
+    workspace: &str,
+    project: &str,
+) -> Result<Option<crate::config::schema::RunnerConfig>> {
+    if !paths.config_path().exists() {
+        return Ok(None);
+    }
+    let cfg = crate::config::file::load_config(paths)?;
+    Ok(cfg.runners.into_iter().find(|r| {
+        r.agent.kind == AgentKind::Engine
+            && r.workspace_slug.as_deref() == Some(workspace)
+            && r.project_slug
+                .as_deref()
+                .is_some_and(|p| p.eq_ignore_ascii_case(project))
+    }))
 }
 
 /// Kebab-case wire value → AgentKind, via the same clap ValueEnum
@@ -455,6 +580,8 @@ mod tests {
             daemon: Default::default(),
             runners: (0..MAX_RUNNERS_PER_DAEMON - 1).map(runner).collect(),
             cli: None,
+            engine: Default::default(),
+            auth: Default::default(),
         };
         crate::config::file::write_config(&paths, &cfg).unwrap();
         ensure_below_runner_cap(&paths).expect("one slot left");
@@ -665,6 +792,8 @@ mod tests {
         let transport = SharedHttpTransport::new(url).unwrap();
         let ctx = RunnerSpawnCtx::for_tests(Some(transport.clone()), tokens.clone(), &paths, &[]);
         let daemon_state = StateHandle::new(crate::config::schema::Config {
+            engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: Default::default(),
             runners: vec![],
@@ -723,6 +852,8 @@ mod tests {
         let transport = SharedHttpTransport::new(url).unwrap();
         let ctx = RunnerSpawnCtx::for_tests(Some(transport.clone()), tokens.clone(), &paths, &[]);
         let daemon_state = StateHandle::new(crate::config::schema::Config {
+            engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: Default::default(),
             runners: vec![],
@@ -768,6 +899,179 @@ mod tests {
             .unwrap();
     }
 
+    /// Design §10 for machine control: an engine runner created from the
+    /// web gets `<task_root>/<workspace>/<project>/` (numeric suffix on a
+    /// clash), not the generic data-dir default, and is named by the server.
+    #[tokio::test]
+    async fn engine_runners_created_by_machine_control_get_a_task_root_folder() {
+        use crate::config::schema::{Config, DaemonConfig, EngineCredential};
+        use crate::engine::test_server::{self, Handler};
+        let handler: Handler = Arc::new(|req| {
+            if req.path == "/api/v1/runner/runners/" {
+                let body = req.json();
+                let project = body["project"].as_str().unwrap().to_string();
+                let id = Uuid::new_v4();
+                let resp = serde_json::json!({
+                    "runner_id": id,
+                    "runner_name": format!("builtin-h-acme-{}-{}", project.to_lowercase(), &id.to_string()[..4]),
+                    "refresh_token": "", "access_token": "", "access_token_expires_at": "",
+                    "refresh_token_generation": 0, "workspace_slug": "acme",
+                    "project_identifier": project, "long_poll_interval_secs": 25,
+                    "protocol_version": 4
+                });
+                (201, resp.to_string())
+            } else {
+                (404, String::new())
+            }
+        });
+        let server = test_server::start(handler).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = crate::util::paths::Paths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            runtime_dir: tmp.path().join("runtime"),
+            machine_context_dir: tmp.path().join("config"),
+        };
+        paths.ensure().unwrap();
+        let cli = CliSection {
+            token: Some("mt_acme".into()),
+            workspace_slug: Some("acme".into()),
+            engine_credential: Some(EngineCredential {
+                token: "ec_live".into(),
+                expires_at: None,
+            }),
+            ..Default::default()
+        };
+        let machine_id = Uuid::new_v4();
+        let daemon = DaemonConfig {
+            cloud_url: server.url.clone(),
+            dev_machine_id: Some(machine_id),
+            ..DaemonConfig::default()
+        };
+        crate::config::file::write_config(
+            &paths,
+            &Config {
+                version: 2,
+                daemon: daemon.clone(),
+                runners: vec![],
+                cli: Some(cli.clone()),
+                engine: Default::default(),
+                auth: Default::default(),
+            },
+        )
+        .unwrap();
+        let tokens = WorkspaceTokens::from_cli(Some(&cli));
+        // Runners come up offline: only the mock is contacted.
+        let mut ctx =
+            RunnerSpawnCtx::for_tests_with_daemon(None, tokens.clone(), &paths, daemon, &[]);
+        ctx.engine = crate::engine::manager::EngineManager::new(
+            Some(&server.url),
+            paths.clone(),
+            tokens,
+            Some(tmp.path().join("engine/0.153.4/pidash-agent-engine")),
+        );
+        let transport = SharedHttpTransport::new(server.url.clone()).unwrap();
+        let control = MachineControl::new(
+            transport.clone(),
+            machine_id,
+            ctx,
+            StateHandle::new(crate::config::file::load_config(&paths).unwrap()),
+        );
+        let session = MachineClient::new(transport, machine_id, "mt_acme".into());
+        let cmd = |name: &str| CreateRunnerCmd {
+            request_id: String::new(),
+            workspace_slug: "acme".into(),
+            project: "WEB".into(),
+            pod: String::new(),
+            name: name.into(),
+            working_dir: String::new(),
+            agent: "engine".into(),
+            model: String::new(),
+            reasoning_effort: String::new(),
+        };
+
+        // A folder already in use under the task root is not taken over:
+        // the new runner gets the next free one (design §10).
+        let root = paths.data_dir.join("engine/workdirs/acme");
+        std::fs::create_dir_all(root.join("WEB")).unwrap();
+        std::fs::write(root.join("WEB/notes.txt"), "someone else's").unwrap();
+
+        let (first, _) = control
+            .create_runner_inner(&session, cmd("ignored-name"))
+            .await
+            .unwrap();
+        // One engine runner per machine and project (design §5): a second
+        // command for the same project answers with the first runner and
+        // registers nothing.
+        let (second, _) = control
+            .create_runner_inner(&session, cmd(""))
+            .await
+            .unwrap();
+        assert_eq!(second, first);
+
+        let cfg = crate::config::file::load_config(&paths).unwrap();
+        let dir_of = |id: Uuid| {
+            cfg.runners
+                .iter()
+                .find(|r| r.runner_id == id)
+                .unwrap()
+                .workspace
+                .working_dir
+                .clone()
+        };
+        assert_eq!(cfg.runners.len(), 1);
+        assert_eq!(dir_of(first), root.join("WEB-2"));
+        assert!(root.join("WEB-2").is_dir());
+        let sent = server.requests_to("/api/v1/runner/runners/");
+        assert_eq!(sent.len(), 1, "the reused runner is not registered again");
+        assert_eq!(sent[0].json()["agent_kind"], "engine");
+        assert!(
+            sent[0].json().get("name").is_none(),
+            "the server names engine runners"
+        );
+    }
+
+    #[test]
+    fn non_engine_runners_keep_the_generic_default_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = crate::util::paths::Paths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            runtime_dir: tmp.path().join("runtime"),
+            machine_context_dir: tmp.path().join("config"),
+        };
+        let cmd = CreateRunnerCmd {
+            request_id: String::new(),
+            workspace_slug: "acme".into(),
+            project: "WEB".into(),
+            pod: String::new(),
+            name: String::new(),
+            working_dir: String::new(),
+            agent: "claude-code".into(),
+            model: String::new(),
+            reasoning_effort: String::new(),
+        };
+        let resp: crate::cloud::http::EnrollResponse = serde_json::from_value(serde_json::json!({
+            "runner_id": Uuid::new_v4(), "runner_name": "r", "refresh_token": "",
+            "access_token": "", "access_token_expires_at": "", "refresh_token_generation": 0,
+            "workspace_slug": "acme", "project_identifier": "WEB",
+            "long_poll_interval_secs": 25, "protocol_version": 4
+        }))
+        .unwrap();
+        assert_eq!(
+            create_working_dir(&paths, &cmd, &resp, AgentKind::ClaudeCode).unwrap(),
+            None
+        );
+        let explicit = CreateRunnerCmd {
+            working_dir: "/srv/web".into(),
+            ..cmd
+        };
+        assert_eq!(
+            create_working_dir(&paths, &explicit, &resp, AgentKind::Engine).unwrap(),
+            Some(PathBuf::from("/srv/web"))
+        );
+    }
+
     #[test]
     fn commands_use_the_token_of_the_workspace_they_name() {
         let tokens = WorkspaceTokens::from_cli(Some(&CliSection {
@@ -788,5 +1092,64 @@ mod tests {
         assert_eq!(command_token(&tokens, &session, "acme").unwrap(), "mt_acme");
         assert_eq!(command_token(&tokens, &session, "").unwrap(), "mt_acme");
         assert!(command_token(&tokens, &session, "gamma").is_err());
+    }
+
+    #[tokio::test]
+    async fn an_engine_already_on_for_the_project_is_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = crate::util::paths::Paths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            runtime_dir: tmp.path().join("runtime"),
+            machine_context_dir: tmp.path().join("config"),
+        };
+        assert!(
+            existing_engine_runner(&paths, "acme", "WEB")
+                .unwrap()
+                .is_none()
+        );
+        let resp = crate::cloud::http::EnrollResponse {
+            runner_id: Uuid::new_v4(),
+            runner_name: "builtin-acme-web".into(),
+            refresh_token: "rt".into(),
+            access_token: String::new(),
+            access_token_expires_at: String::new(),
+            refresh_token_generation: 1,
+            workspace_slug: "acme".into(),
+            pod_slug: String::new(),
+            project_identifier: "WEB".into(),
+            long_poll_interval_secs: 25,
+            protocol_version: 4,
+            machine_token: None,
+            machine_token_minted: false,
+            created: None,
+        };
+        apply_enroll_response(
+            &paths,
+            &resp,
+            "https://example.com",
+            ApplyEnrollOptions {
+                working_dir: Some(tmp.path().join("wd")),
+                agent_kind: AgentKind::Engine,
+                model: None,
+                reasoning_effort: None,
+            },
+        )
+        .await
+        .unwrap();
+        let found = existing_engine_runner(&paths, "acme", "web")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.runner_id, resp.runner_id);
+        assert!(
+            existing_engine_runner(&paths, "beta", "WEB")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            existing_engine_runner(&paths, "acme", "API")
+                .unwrap()
+                .is_none()
+        );
     }
 }

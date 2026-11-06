@@ -939,6 +939,8 @@ pub async fn submit_register(
         approval_policy: Default::default(),
     };
     let cfg = crate::config::schema::Config {
+        engine: Default::default(),
+        auth: Default::default(),
         version: 2,
         daemon: crate::config::schema::DaemonConfig {
             cloud_url: cloud_url.clone(),

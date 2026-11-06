@@ -2166,6 +2166,10 @@ pub struct CreateRunnerRequest<'a> {
     pub host_label: &'a str,
     pub name: Option<&'a str>,
     pub pod: Option<&'a str>,
+    /// `Some("engine")` creates a built-in engine runner (design §5); the
+    /// server then assigns the name and requires a live engine credential.
+    /// `None` keeps the request byte-identical to before.
+    pub agent_kind: Option<&'a str>,
 }
 
 /// Public helper to create a runner with the user-scoped CLI `APIToken`.
@@ -2192,6 +2196,9 @@ pub async fn create_runner(
     }
     if let Some(p) = req.pod {
         body["pod"] = Json::String(p.to_string());
+    }
+    if let Some(kind) = req.agent_kind {
+        body["agent_kind"] = Json::String(kind.to_string());
     }
     let resp = transport
         .http()
@@ -2333,6 +2340,25 @@ impl MachineClient {
         ack: Vec<String>,
         long_poll_interval_secs: u64,
     ) -> Result<PollResponse, TransportError> {
+        self.poll_with(
+            session_id,
+            crate::cloud::protocol::MachinePollBody {
+                ack,
+                engine_state: None,
+            },
+            long_poll_interval_secs,
+        )
+        .await
+    }
+
+    /// [`Self::poll`] with the whole heartbeat body, including the
+    /// machine's `engine_state`.
+    pub async fn poll_with(
+        &self,
+        session_id: &Uuid,
+        body: crate::cloud::protocol::MachinePollBody,
+        long_poll_interval_secs: u64,
+    ) -> Result<PollResponse, TransportError> {
         let url = format!("{}/sessions/{}/poll", self.base(), session_id);
         let request_timeout = Duration::from_secs(long_poll_interval_secs.saturating_add(5));
         let resp = self
@@ -2340,7 +2366,7 @@ impl MachineClient {
             .http()
             .post(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.machine_token))
-            .json(&serde_json::json!({ "ack": ack }))
+            .json(&body)
             .timeout(request_timeout)
             .send()
             .await
@@ -2499,6 +2525,12 @@ pub struct EnrollResponse {
     pub machine_token: Option<String>,
     #[serde(default)]
     pub machine_token_minted: bool,
+    /// Whether the server created this runner in this call. `Some(false)`
+    /// when it answered with a runner it already had (a repeated engine
+    /// add for the same machine and project). Servers that predate the
+    /// field leave it out; they never return an existing runner.
+    #[serde(default)]
+    pub created: Option<bool>,
 }
 
 #[cfg(test)]
@@ -3168,6 +3200,8 @@ mod reconnect_loop_tests {
 
     fn empty_state() -> StateHandle {
         StateHandle::new(crate::config::schema::Config {
+            engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: Default::default(),
             runners: vec![],

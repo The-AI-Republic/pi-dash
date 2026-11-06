@@ -237,6 +237,9 @@ pub async fn run(args: RunnerArgs, paths: &Paths) -> Result<()> {
 /// the cloud to create a runner under this host. Older configs with a
 /// user-scoped API token are upgraded when the cloud returns a machine token.
 pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
+    if args.agent == AgentKind::Engine {
+        return add_engine(&args, paths).await;
+    }
     let runner_name = args
         .name
         .as_deref()
@@ -295,6 +298,7 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         .workspace
         .clone()
         .or(runner_ops::load_cli_workspace(paths)?);
+    let before = runner_ops::runner_ids_before_create(paths);
     let resp = create_runner(
         &transport,
         CreateRunnerRequest {
@@ -305,6 +309,7 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             host_label: &host_label,
             name: runner_name,
             pod: args.pod.as_deref(),
+            agent_kind: None,
         },
     )
     .await
@@ -330,6 +335,11 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     .await
     {
         Ok(applied) => applied,
+        // The runner was already on this computer, or the server returned
+        // one it already had: leave it as it is.
+        Err(persist_err) if !runner_ops::may_roll_back_create(&persist_err, &resp, &before) => {
+            return Err(persist_err.context("persisting new runner to config.toml"));
+        }
         Err(persist_err) => {
             // Best-effort local cleanup before unwinding the cloud row.
             // `apply_enroll_response` may have written either nothing
@@ -438,6 +448,103 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     Ok(applied.runner)
 }
 
+/// `pidash runner add --agent engine --project <p> [--working-dir <d>]`:
+/// turn the built-in engine on for a project (design §5). Through the
+/// running daemon (`EngineRunnerAdd`, no restart) when one answers;
+/// otherwise enrolled here and loaded when the service starts.
+async fn add_engine(args: &AddArgs, paths: &Paths) -> Result<RunnerConfig> {
+    use crate::ipc::protocol::{Request, Response};
+    if args.name.is_some() {
+        eprintln!("note: --name is ignored for the built-in engine; Pi Dash names engine runners");
+    }
+    if args.model.is_some() || args.reasoning_effort.is_some() {
+        eprintln!(
+            "note: --model / --reasoning-effort are ignored for the built-in engine; its model comes from Pi Dash"
+        );
+    }
+    if args.pod.is_some() {
+        eprintln!(
+            "note: --pod is ignored; an engine runner starts in the project's default pod and takes only work pinned to it until you add it to a pod"
+        );
+    }
+    let workspace = match args.workspace.clone() {
+        Some(w) => w,
+        None => runner_ops::load_cli_workspace(paths)?.ok_or_else(|| {
+            anyhow::anyhow!("no default workspace on this computer; pass --workspace <slug>")
+        })?,
+    };
+    // Sign the workspace in first when needed, as `runner add` does.
+    ensure_cli_token(paths, args.url.as_deref(), Some(&workspace)).await?;
+    let working_dir = match &args.working_dir {
+        Some(d) if d.is_absolute() => Some(d.clone()),
+        Some(d) => Some(
+            std::env::current_dir()
+                .context("reading the current directory")?
+                .join(d),
+        ),
+        None => None,
+    };
+
+    let info = match crate::ipc::client::Client::connect(paths.ipc_socket_path()).await {
+        Ok(mut client) => {
+            let resp = tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                client.call(Request::EngineRunnerAdd {
+                    workspace: workspace.clone(),
+                    project: args.project.clone(),
+                    working_dir: working_dir.clone(),
+                }),
+            )
+            .await
+            .context("timed out waiting for the daemon to turn the engine on")??;
+            match resp {
+                Response::EngineRunnerAdded(info) => {
+                    println!("Runner is live in the running daemon (no restart).");
+                    info
+                }
+                Response::Error(e) => anyhow::bail!("{}", e.message),
+                other => anyhow::bail!("unexpected daemon response: {other:?}"),
+            }
+        }
+        Err(_) => {
+            let status = crate::engine::provision::status_without_daemon(paths).await?;
+            let req = crate::engine::provision::AddEngineRunner {
+                workspace: workspace.clone(),
+                project: args.project.clone(),
+                working_dir,
+            };
+            let (_, info) =
+                crate::engine::provision::add_engine_runner(paths, &req, &status).await?;
+            let first = file::load_config(paths)?.runners.len() == 1;
+            if first {
+                println!("Installing the service so the daemon starts automatically.");
+                let svc = crate::service::detect();
+                svc.write_unit(paths).await?;
+                svc.enable_and_start().await?;
+            } else {
+                let outcome = crate::service::reload::restart_and_verify(paths).await;
+                if !outcome.ok {
+                    println!(
+                        "(Service start did not complete cleanly: {})",
+                        outcome.summary
+                    );
+                }
+            }
+            info
+        }
+    };
+    println!(
+        "Built-in engine is on for {} in {} (runner {}).",
+        info.project, info.workspace, info.runner
+    );
+    println!("Working directory: {}", info.working_dir.display());
+    file::load_config(paths)?
+        .runners
+        .into_iter()
+        .find(|r| r.runner_id == info.runner_id)
+        .ok_or_else(|| anyhow::anyhow!("runner {} is not in config.toml", info.runner))
+}
+
 async fn ensure_cli_token(
     paths: &Paths,
     cloud_url: Option<&str>,
@@ -462,6 +569,7 @@ async fn ensure_cli_token(
             workspace: workspace.map(str::to_string),
             force: false,
             device_code_stdin: false,
+            engine: false,
         },
         paths,
     )
@@ -503,13 +611,22 @@ pub fn list(paths: &Paths) -> Result<()> {
         println!("No runners configured. Add one with `pidash runner add --name … --project …`.");
         return Ok(());
     }
-    println!("{:<24} {:<36} {:<24}", "NAME", "RUNNER_ID", "PROJECT");
+    println!(
+        "{:<24} {:<36} {:<24} {:<16} WORKING_DIR",
+        "NAME", "RUNNER_ID", "PROJECT", "AGENT"
+    );
     for r in &cfg.runners {
+        let agent = serde_json::to_value(r.agent.kind)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
         println!(
-            "{:<24} {:<36} {:<24}",
+            "{:<24} {:<36} {:<24} {:<16} {}",
             r.name,
             r.runner_id,
             r.project_slug.as_deref().unwrap_or("?"),
+            agent,
+            r.workspace.working_dir.display(),
         );
     }
     Ok(())
@@ -655,6 +772,17 @@ pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
     // only once its teardown is done, so re-adding the same id right after
     // is safe. The direct mutation below is the belt-and-suspenders "what
     // if the daemon isn't running on this host" path.
+    // The server row of a local-only or offline removal stays live; record
+    // it before the block goes so the engine reconcile loop doesn't re-add
+    // the runner (it would otherwise see a live engine row with no block).
+    if !matches!(mode, RemoveMode::Cascade) && cfg.runners[idx].agent.kind == AgentKind::Engine {
+        crate::engine::tombstones::add(
+            paths,
+            runner_id,
+            cfg.runners[idx].workspace_slug.as_deref(),
+        )
+        .context("recording the locally removed engine runner")?;
+    }
     let _ = try_ipc_remove_local(paths, &args.name).await;
 
     // Local cleanup: strip the [[runner]] block under the host-wide

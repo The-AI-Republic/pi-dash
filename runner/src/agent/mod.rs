@@ -440,6 +440,26 @@ impl AgentBridge {
                 .await?;
                 Ok(AgentBridge::Codex(b))
             }
+            AgentKind::Engine => {
+                // The built-in engine is Codex: the daemon supplies its
+                // binary, CODEX_HOME and auth helper (`engine::agent`).
+                let prepared = crate::engine::agent::prepare(runner)?;
+                let engine_settings = mode
+                    .map(crate::approval::engine_thread_settings)
+                    .unwrap_or_default();
+                let b = crate::codex::bridge::Bridge::spawn_with_env(
+                    &prepared.codex.binary,
+                    cwd,
+                    // The model is the profile's (CODEX_HOME/config.toml); a
+                    // per-run override could name one the gateway lacks.
+                    None,
+                    None,
+                    engine_settings,
+                    &agent_env_for_config(&prepared),
+                )
+                .await?;
+                Ok(AgentBridge::Codex(b))
+            }
             AgentKind::ClaudeCode => {
                 let b = crate::claude_code::bridge::Bridge::spawn_with_resume(
                     &runner.claude_code.binary,

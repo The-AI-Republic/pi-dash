@@ -17,7 +17,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "clock",
     "serde",
 ] }
-tokio = { version = "1", features = ["io-util", "net"] }
+tokio = { version = "1", features = ["io-util", "net", "time"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = [

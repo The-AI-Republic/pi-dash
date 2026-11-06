@@ -42,6 +42,18 @@ pub fn load_config(paths: &Paths) -> Result<Config> {
                 .with_context(|| format!("migrating legacy worktree-pool config at {path:?}"));
         }
     }
+    // Credentials held in the OS keychain (`[auth] secrets_in`, design
+    // §4.3) are filled in here, so every reader sees the same `[cli]` it
+    // would with `credentials_store = "file"`.
+    if let Err(e) = super::secrets::hydrate(paths, &mut cfg) {
+        // The unread items are recorded on `cfg.auth`, so a later write of
+        // this config is refused instead of dropping them.
+        tracing::warn!(
+            "the OS keychain holding the Pi Dash credentials is not answering ({e}); \
+             continuing without those credentials, and config writes are refused \
+             until it answers"
+        );
+    }
     Ok(cfg)
 }
 
@@ -74,9 +86,50 @@ pub fn load_all(paths: &Paths) -> Result<(Config, Credentials)> {
 }
 
 pub fn write_config(paths: &Paths, config: &Config) -> Result<()> {
+    write_config_with(paths, config, false).map(|_| ())
+}
+
+/// Write `config`, storing its credentials where `[auth]
+/// credentials_store` says (`config::secrets`). `migrate` is a sign-in's
+/// write: under `auto` it moves plaintext tokens into the keychain. Returns
+/// the `[auth]` table as written.
+fn write_config_with(
+    paths: &Paths,
+    config: &Config,
+    migrate: bool,
+) -> Result<super::schema::AuthSection> {
     paths.ensure()?;
-    let s = toml::to_string_pretty(config)?;
-    write_private(&paths.config_path(), s.as_bytes())
+    let on_disk = on_disk_auth(paths);
+    let plan = super::secrets::plan_write(paths, config, &on_disk, migrate)?;
+    let s = toml::to_string_pretty(&plan.config)?;
+    write_private(&paths.config_path(), s.as_bytes())?;
+    super::secrets::finish_write(paths, &plan);
+    Ok(plan.config.auth)
+}
+
+/// The `[auth]` table of the `config.toml` on disk (default when there is
+/// none, or it does not parse).
+fn on_disk_auth(paths: &Paths) -> super::schema::AuthSection {
+    #[derive(serde::Deserialize)]
+    struct OnlyAuth {
+        #[serde(default)]
+        auth: super::schema::AuthSection,
+    }
+    fs::read_to_string(paths.config_path())
+        .ok()
+        .and_then(|text| toml::from_str::<OnlyAuth>(&text).ok())
+        .map(|a| a.auth)
+        .unwrap_or_default()
+}
+
+/// Rewrite `config.toml` as a sign-in does: under `credentials_store =
+/// "auto"`, credentials still in the file move into the OS keychain when it
+/// answers (design §4.3 "migrate on next login"). Returns the config and
+/// where its credentials are now (`"keychain"` / `"file"`).
+pub fn migrate_credentials_store(paths: &Paths) -> Result<(Config, &'static str)> {
+    let cfg = mutate_config_inner(paths, || None, |_| Ok(()), true)?;
+    let location = super::secrets::location(&cfg);
+    Ok((cfg, location))
 }
 
 /// Path to the host-wide `config.toml` mutation lock. Held by
@@ -126,6 +179,14 @@ where
     I: FnOnce() -> Option<Config>,
     M: FnOnce(&mut Config) -> Result<()>,
 {
+    mutate_config_inner(paths, init, mutate, false)
+}
+
+fn mutate_config_inner<I, M>(paths: &Paths, init: I, mutate: M, migrate: bool) -> Result<Config>
+where
+    I: FnOnce() -> Option<Config>,
+    M: FnOnce(&mut Config) -> Result<()>,
+{
     paths.ensure()?;
     let lock_path = config_lock_path(paths);
     let mut lock_options = fs::OpenOptions::new();
@@ -170,7 +231,7 @@ where
     mutate(&mut cfg)?;
     cfg.validate()
         .with_context(|| "config invalid after mutate_config closure")?;
-    write_config(paths, &cfg)?;
+    cfg.auth = write_config_with(paths, &cfg, migrate)?;
     Ok(cfg)
 }
 
@@ -278,6 +339,8 @@ mod tests {
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         let cfg = Config {
+            engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -507,6 +570,8 @@ model_default = "o4-mini"
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         let cfg = Config {
+            engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -556,6 +621,8 @@ model_default = "o4-mini"
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         let cfg = Config {
+            engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -593,6 +660,8 @@ model_default = "o4-mini"
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         let cfg = Config {
+            engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -633,6 +702,8 @@ model_default = "o4-mini"
         let tmp = tempdir().unwrap();
         let paths = Arc::new(paths_for(tmp.path()));
         let cfg = Config {
+            engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),

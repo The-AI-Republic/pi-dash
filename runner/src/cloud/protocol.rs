@@ -447,6 +447,46 @@ pub struct CreateRunnerCmd {
     pub reasoning_effort: String,
 }
 
+/// Body of the machine session's poll, `POST /api/v1/runner/dev-machines/
+/// <mid>/sessions/<sid>/poll` — the machine session's heartbeat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachinePollBody {
+    /// Stream ids of the messages handled since the last poll.
+    pub ack: Vec<String>,
+    /// The machine's built-in engine state (PIDESKAPP-121, design §8): the
+    /// server sets `DevMachine.engine_auto_pause_reason` from it. Absent
+    /// from daemons before the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_state: Option<EngineStateReport>,
+}
+
+/// `engine_state` in [`MachinePollBody`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineStateReport {
+    /// `available` / `signed_out` / `expiring` / `unavailable`.
+    pub state: pidash_ipc::protocol::EngineState,
+    /// Why it is not available (`engine_sign_in_required`,
+    /// `gateway_session_revoked`, `wallet_empty`, `profile_unavailable`,
+    /// `engine_disabled`, or a local `engine_not_installed` /
+    /// `profile_pending`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    pub sign_in_state: pidash_ipc::protocol::EngineSignInState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_expires_at: Option<DateTime<Utc>>,
+}
+
+impl From<&pidash_ipc::protocol::EngineStatusInfo> for EngineStateReport {
+    fn from(s: &pidash_ipc::protocol::EngineStatusInfo) -> Self {
+        Self {
+            state: s.state,
+            reason_code: s.reason_code.clone(),
+            sign_in_state: s.sign_in_state,
+            credential_expires_at: s.credential_expires_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceState {
     pub branch: Option<String>,
@@ -682,5 +722,37 @@ mod tests {
             ClientMsg::Hello { runner_id, .. } => assert_eq!(runner_id, body_id),
             other => panic!("expected Hello, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn machine_poll_body_carries_the_engine_state() {
+        let body = MachinePollBody {
+            ack: vec!["1-0".into()],
+            engine_state: Some(EngineStateReport {
+                state: pidash_ipc::protocol::EngineState::SignedOut,
+                reason_code: Some("engine_sign_in_required".into()),
+                sign_in_state: pidash_ipc::protocol::EngineSignInState::Expired,
+                credential_expires_at: None,
+            }),
+        };
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "ack": ["1-0"],
+                "engine_state": {
+                    "state": "signed_out",
+                    "reason_code": "engine_sign_in_required",
+                    "sign_in_state": "expired"
+                }
+            })
+        );
+        let legacy = MachinePollBody {
+            ack: vec![],
+            engine_state: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap(),
+            serde_json::json!({"ack": []})
+        );
     }
 }

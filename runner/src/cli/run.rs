@@ -125,6 +125,8 @@ mod tests {
 
     fn config_with_cli_token(token: Option<&str>) -> Config {
         Config {
+            engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://example.com".into(),
