@@ -81,9 +81,12 @@ fn aliased_columns(alias: &str, columns: &[&str]) -> String {
 // ---------------------------------------------------------------------------
 
 /// Stuck-pin candidate ids: QUEUED `local_runner` runs with a pin,
-/// created before the cutoff, whose pinned runner is silent past the
-/// cutoff, never heartbeated, or operator-paused (`_pinned_runner_gone_q`,
-/// `09738d222`). Binds: `$1` cutoff (`created_at`),
+/// created before the cutoff, whose pinned runner is gone
+/// (`_pinned_runner_gone_q`, `09738d222` + #2903): silent past the
+/// cutoff, never heartbeated, operator-paused, engine-paused (the
+/// machine's engine is paused — the `IN (subquery)` keeps the
+/// `FOR UPDATE` of the lock query valid), or an engine with pod
+/// work off (`pinned_only`). Binds: `$1` cutoff (`created_at`),
 /// `$2` `local_runner`, `$3` `queued`, `$4` cutoff (heartbeat).
 pub fn stuck_queued_run_ids_select() -> String {
     "SELECT \"agent_run\".\"id\" FROM \"agent_run\" INNER JOIN \"runner\" ON \
@@ -91,7 +94,11 @@ pub fn stuck_queued_run_ids_select() -> String {
      (\"agent_run\".\"created_at\" < $1 AND \"agent_run\".\"executor_kind\" = $2 AND \
      \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \"agent_run\".\"status\" = $3 AND \
      (\"runner\".\"last_heartbeat_at\" < $4 OR \"runner\".\"last_heartbeat_at\" IS NULL OR \
-     \"runner\".\"paused_at\" IS NOT NULL)) \
+     \"runner\".\"paused_at\" IS NOT NULL OR \
+     (\"runner\".\"dev_machine_id\" IN (SELECT \"id\" FROM \"dev_machine\" AS \"U0\" WHERE \
+     (\"U0\".\"engine_paused_by_owner\" OR \"U0\".\"engine_auto_pause_reason\" > '')) AND \
+     \"runner\".\"provisioning\" = 'desktop_bundled') OR \
+     (\"runner\".\"pod_dispatch\" = 'pinned_only' AND \"runner\".\"provisioning\" = 'desktop_bundled'))) \
      ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 500"
         .to_owned()
 }
@@ -99,7 +106,10 @@ pub fn stuck_queued_run_ids_select() -> String {
 /// Per-run re-check lock: the candidate back under `FOR UPDATE OF
 /// "agent_run"` with the gone predicate re-applied (the runner may
 /// have come back or been resumed), plus the parent row via
-/// `select_related`. Binds: `$1` run id, `$2` `queued`, `$3` cutoff.
+/// `select_related`. The engine arms ride along (the paused-machines
+/// `IN (subquery)` is what keeps the `FOR UPDATE` valid — an
+/// excluded `dev_machine` join would refuse the lock). Binds: `$1`
+/// run id, `$2` `queued`, `$3` cutoff.
 pub fn release_pin_lock_select() -> String {
     format!(
         "SELECT {}, {} FROM \"agent_run\" INNER JOIN \"runner\" ON \
@@ -107,7 +117,11 @@ pub fn release_pin_lock_select() -> String {
          LEFT OUTER JOIN \"agent_run\" T3 ON (\"agent_run\".\"parent_run_id\" = T3.\"id\") \
          WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \
          \"agent_run\".\"status\" = $2 AND (\"runner\".\"last_heartbeat_at\" < $3 OR \
-         \"runner\".\"last_heartbeat_at\" IS NULL OR \"runner\".\"paused_at\" IS NOT NULL)) \
+         \"runner\".\"last_heartbeat_at\" IS NULL OR \"runner\".\"paused_at\" IS NOT NULL OR \
+         (\"runner\".\"dev_machine_id\" IN (SELECT \"id\" FROM \"dev_machine\" AS \"U0\" WHERE \
+         (\"U0\".\"engine_paused_by_owner\" OR \"U0\".\"engine_auto_pause_reason\" > '')) AND \
+         \"runner\".\"provisioning\" = 'desktop_bundled') OR \
+         (\"runner\".\"pod_dispatch\" = 'pinned_only' AND \"runner\".\"provisioning\" = 'desktop_bundled'))) \
          ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1 FOR UPDATE OF \"agent_run\"",
         qualified_columns("agent_run", agent_run::COLUMNS),
         aliased_columns("T3", agent_run::COLUMNS),
@@ -295,9 +309,32 @@ mod tests {
              (\"agent_run\".\"created_at\" < $1 AND \"agent_run\".\"executor_kind\" = $2 AND \
              \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \"agent_run\".\"status\" = $3 AND \
              (\"runner\".\"last_heartbeat_at\" < $4 OR \"runner\".\"last_heartbeat_at\" IS NULL OR \
-             \"runner\".\"paused_at\" IS NOT NULL)) \
+             \"runner\".\"paused_at\" IS NOT NULL OR \
+             (\"runner\".\"dev_machine_id\" IN (SELECT \"id\" FROM \"dev_machine\" AS \"U0\" WHERE \
+             (\"U0\".\"engine_paused_by_owner\" OR \"U0\".\"engine_auto_pause_reason\" > '')) AND \
+             \"runner\".\"provisioning\" = 'desktop_bundled') OR \
+             (\"runner\".\"pod_dispatch\" = 'pinned_only' AND \"runner\".\"provisioning\" = 'desktop_bundled'))) \
              ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 500",
         );
+    }
+
+    #[test]
+    fn stuck_list_carries_engine_arms() {
+        // #2903 `_pinned_runner_gone_q` additions, in source order:
+        // paused-machine engines, then pinned_only engines.
+        let sql = stuck_queued_run_ids_select();
+        let paused_arm = sql
+            .find("engine_paused_by_owner")
+            .expect("paused-machine arm");
+        let pinned_only_arm = sql.find("pod_dispatch").expect("pod_dispatch arm");
+        let heartbeat = sql
+            .find("\"runner\".\"last_heartbeat_at\" < $4")
+            .expect("heartbeat arm");
+        assert!(heartbeat < paused_arm && paused_arm < pinned_only_arm);
+        // The paused-machines test is an IN (subquery), never a join —
+        // the lock query's FOR UPDATE would refuse the join form.
+        assert!(sql.contains("IN (SELECT"));
+        assert!(!sql.contains("JOIN \"dev_machine\""));
     }
 
     #[test]
@@ -329,7 +366,11 @@ mod tests {
         assert!(sql.contains(
             "WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \
              \"agent_run\".\"status\" = $2 AND (\"runner\".\"last_heartbeat_at\" < $3 OR \
-             \"runner\".\"last_heartbeat_at\" IS NULL OR \"runner\".\"paused_at\" IS NOT NULL)) \
+             \"runner\".\"last_heartbeat_at\" IS NULL OR \"runner\".\"paused_at\" IS NOT NULL OR \
+             (\"runner\".\"dev_machine_id\" IN (SELECT \"id\" FROM \"dev_machine\" AS \"U0\" WHERE \
+             (\"U0\".\"engine_paused_by_owner\" OR \"U0\".\"engine_auto_pause_reason\" > '')) AND \
+             \"runner\".\"provisioning\" = 'desktop_bundled') OR \
+             (\"runner\".\"pod_dispatch\" = 'pinned_only' AND \"runner\".\"provisioning\" = 'desktop_bundled'))) \
              ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1 FOR UPDATE OF \"agent_run\""
         ));
         // The parent alias is bare T3 (Django's join counter), not T1 —
