@@ -3106,6 +3106,7 @@ dependencies = [
  "redis",
  "sea-orm",
  "sea-query",
+ "sea-query-binder",
  "serde",
  "serde_json",
  "sha2 0.11.0",

@@ -37,6 +37,17 @@ use crate::serializer::{
     EXPANSION_FIELDS_FILTER, EXPANSION_FIELDS_REPR,
 };
 
+use pidash_db::entity::{
+    file_assets, intake_issues, issue_assignees, issue_labels, issue_links, issue_reactions,
+    issue_relations, issues, labels, states, users, workspaces,
+};
+use sea_orm::sea_query::{Order, Query, SelectStatement};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    QueryTrait, Select,
+};
+
+use super::list_engine::{a, col, fetch_rows};
 use super::Denial;
 
 /// Mapper names whose nested serializer is not yet ported. `issue_cycle`
@@ -336,17 +347,30 @@ fn req_i32(row: &Map<String, Value>, key: &str) -> Result<i32, Denial> {
         .ok_or(Denial::ServerError)
 }
 
-async fn single_row(
-    pool: &PgPool,
-    sql: &str,
-    values: Vec<sea_query::Value>,
-) -> Result<Map<String, Value>, Denial> {
-    let mut rows = super::fetch_json_rows(pool, sql, values).await?;
-    rows.pop().ok_or(Denial::ServerError)
+/// Typed rows of a SeaORM select, decoded by name.
+async fn typed<E, T>(pool: &PgPool, select: Select<E>) -> Result<Vec<T>, Denial>
+where
+    E: EntityTrait,
+    T: FromQueryResult,
+{
+    select
+        .into_model::<T>()
+        .all(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
-fn uuid_value(id: Uuid) -> sea_query::Value {
-    sea_query::Value::Uuid(Some(Box::new(id)))
+/// The one row a by-pk lookup must find (a miss is the generic 500).
+async fn single<E, T>(pool: &PgPool, select: Select<E>) -> Result<T, Denial>
+where
+    E: EntityTrait,
+    T: FromQueryResult,
+{
+    typed(pool, select)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or(Denial::ServerError)
 }
 
 async fn render_user_lite(pool: &PgPool, user_id: Uuid) -> Result<Value, Denial> {
@@ -370,37 +394,90 @@ fn user_lite_initial() -> Value {
     Value::Object(initial)
 }
 
+#[derive(Debug, FromQueryResult)]
+struct StateLite {
+    id: Uuid,
+    name: String,
+    color: String,
+    group: String,
+}
+
+/// `state` by pk — no soft-delete guard (Django's forward FK descriptor
+/// reads the base manager).
+pub(super) fn state_lite_select(state_id: Uuid) -> Select<states::Entity> {
+    states::Entity::find()
+        .select_only()
+        .columns([
+            states::Column::Id,
+            states::Column::Name,
+            states::Column::Color,
+            states::Column::Group,
+        ])
+        .filter(states::Column::Id.eq(state_id))
+}
+
 async fn render_state_lite(pool: &PgPool, state_id: Uuid) -> Result<Value, Denial> {
-    let row = single_row(
-        pool,
-        "SELECT id, name, color, \"group\" FROM states WHERE id = $1",
-        vec![uuid_value(state_id)],
-    )
-    .await?;
+    let row: StateLite = single(pool, state_lite_select(state_id)).await?;
     use pidash_services::app_issues::{state_lite_to_representation, StateLiteRow};
     let input = StateLiteRow {
-        id: &req_str(&row, "id")?,
-        name: &req_str(&row, "name")?,
-        color: &req_str(&row, "color")?,
-        group: &req_str(&row, "group")?,
+        id: &row.id.to_string(),
+        name: &row.name,
+        color: &row.color,
+        group: &row.group,
     };
     serde_json::to_value(state_lite_to_representation(&input)).map_err(|_| Denial::ServerError)
 }
 
+#[derive(Debug, FromQueryResult)]
+struct IssueLite {
+    id: Uuid,
+    sequence_id: i32,
+    project_id: Uuid,
+}
+
+/// `parent` by pk — no soft-delete guard (base manager).
+pub(super) fn issue_lite_select(issue_id: Uuid) -> Select<issues::Entity> {
+    issues::Entity::find()
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::SequenceId,
+            issues::Column::ProjectId,
+        ])
+        .filter(issues::Column::Id.eq(issue_id))
+}
+
 async fn render_issue_lite(pool: &PgPool, issue_id: Uuid) -> Result<Value, Denial> {
-    let row = single_row(
-        pool,
-        "SELECT id, sequence_id, project_id FROM issues WHERE id = $1",
-        vec![uuid_value(issue_id)],
-    )
-    .await?;
+    let row: IssueLite = single(pool, issue_lite_select(issue_id)).await?;
     use pidash_services::app_issues::{issue_lite_to_representation, IssueLiteRow};
     let input = IssueLiteRow {
-        id: &req_str(&row, "id")?,
-        sequence_id: req_i32(&row, "sequence_id")?,
-        project_id: &req_str(&row, "project_id")?,
+        id: &row.id.to_string(),
+        sequence_id: row.sequence_id,
+        project_id: &row.project_id.to_string(),
     };
     serde_json::to_value(issue_lite_to_representation(&input)).map_err(|_| Denial::ServerError)
+}
+
+#[derive(Debug, FromQueryResult)]
+struct IdRow {
+    id: Uuid,
+}
+
+/// The assignee user ids, `User.Meta.ordering` (`-created_at`), through
+/// every link row (soft-deleted ones included).
+pub(super) fn assignees_select(issue_id: Uuid) -> Select<users::Entity> {
+    users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            users::Entity::belongs_to(issue_assignees::Entity)
+                .from(users::Column::Id)
+                .to(issue_assignees::Column::AssigneeId)
+                .into(),
+        )
+        .filter(issue_assignees::Column::IssueId.eq(issue_id))
+        .order_by_desc(users::Column::CreatedAt)
 }
 
 /// `issue.assignees` — the user lite fleet. Django builds this from the
@@ -410,19 +487,10 @@ async fn render_issue_lite(pool: &PgPool, issue_id: Uuid) -> Result<Value, Denia
 /// is not filtered at all — a removed assignee (soft-deleted link row) still
 /// renders.
 async fn render_assignees(pool: &PgPool, issue_id: Uuid) -> Result<Value, Denial> {
-    let rows = super::fetch_json_rows(
-        pool,
-        "SELECT u.id FROM issue_assignees ia JOIN users u ON u.id = ia.assignee_id \
-         WHERE ia.issue_id = $1 \
-         ORDER BY u.created_at DESC",
-        vec![uuid_value(issue_id)],
-    )
-    .await?;
+    let rows: Vec<IdRow> = typed(pool, assignees_select(issue_id)).await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        let id = req_str(row, "id")?;
-        let user_id = id.parse::<Uuid>().map_err(|_| Denial::ServerError)?;
-        out.push(render_user_lite(pool, user_id).await?);
+        out.push(render_user_lite(pool, row.id).await?);
     }
     Ok(Value::Array(out))
 }
@@ -431,33 +499,57 @@ async fn render_assignees(pool: &PgPool, issue_id: Uuid) -> Result<Value, Denial
 /// forward `ManyToManyField(through=IssueLabel)` manager filters the *target*
 /// model only (`labels.deleted_at`), never the link row, so a removed label
 /// (soft-deleted `issue_labels` row) still renders.
+#[derive(Debug, FromQueryResult)]
+struct LabelRow {
+    parent_id: Option<Uuid>,
+    name: String,
+    color: String,
+    id: Uuid,
+    project_id: Option<Uuid>,
+    workspace_id: Uuid,
+    sort_order: f64,
+}
+
+/// Live labels through every link row (`-created_at`).
+pub(super) fn labels_select(issue_id: Uuid) -> Select<labels::Entity> {
+    labels::Entity::find()
+        .select_only()
+        .columns([
+            labels::Column::ParentId,
+            labels::Column::Name,
+            labels::Column::Color,
+            labels::Column::Id,
+            labels::Column::ProjectId,
+            labels::Column::WorkspaceId,
+            labels::Column::SortOrder,
+        ])
+        .join(
+            JoinType::InnerJoin,
+            labels::Entity::belongs_to(issue_labels::Entity)
+                .from(labels::Column::Id)
+                .to(issue_labels::Column::LabelId)
+                .into(),
+        )
+        .filter(issue_labels::Column::IssueId.eq(issue_id))
+        .filter(labels::Column::DeletedAt.is_null())
+        .order_by_desc(labels::Column::CreatedAt)
+}
+
 async fn render_labels(pool: &PgPool, issue_id: Uuid) -> Result<Value, Denial> {
-    let rows = super::fetch_json_rows(
-        pool,
-        "SELECT l.parent_id, l.name, l.color, l.id, l.project_id, l.workspace_id, l.sort_order \
-         FROM labels l JOIN issue_labels il ON il.label_id = l.id \
-         WHERE il.issue_id = $1 AND l.deleted_at IS NULL \
-         ORDER BY l.created_at DESC",
-        vec![uuid_value(issue_id)],
-    )
-    .await?;
+    let rows: Vec<LabelRow> = typed(pool, labels_select(issue_id)).await?;
     use pidash_services::app_issues::{app_label_to_representation, AppLabelRow};
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        let sort_order = row
-            .get("sort_order")
-            .and_then(Value::as_f64)
-            .ok_or(Denial::ServerError)?;
-        let parent = opt_str(row, "parent_id");
-        let project_id = opt_str(row, "project_id");
+        let parent = row.parent_id.map(|id| id.to_string());
+        let project_id = row.project_id.map(|id| id.to_string());
         let input = AppLabelRow {
             parent: parent.as_deref(),
-            name: &req_str(row, "name")?,
-            color: &req_str(row, "color")?,
-            id: &req_str(row, "id")?,
+            name: &row.name,
+            color: &row.color,
+            id: &row.id.to_string(),
             project_id: project_id.as_deref(),
-            workspace_id: &req_str(row, "workspace_id")?,
-            sort_order,
+            workspace_id: &row.workspace_id.to_string(),
+            sort_order: row.sort_order,
         };
         out.push(
             serde_json::to_value(app_label_to_representation(&input))
@@ -467,8 +559,70 @@ async fn render_labels(pool: &PgPool, issue_id: Uuid) -> Result<Value, Denial> {
     Ok(Value::Array(out))
 }
 
+/// Whose audit columns a relation row carries: the relation row's
+/// (`IssueRelationSerializer`) or the counterpart issue's (the
+/// `IssueListDetailSerializer` inline dicts).
 #[derive(Clone, Copy)]
-enum RelationSide {
+pub(super) enum RelationAudit {
+    Relation,
+    Counterpart,
+}
+
+/// Relation rows joined to the counterpart issue's lite columns, newest
+/// relation first. `side` picks the link column (this issue) and the
+/// counterpart column; no soft-delete guard on the counterpart issue.
+pub(super) fn relations_select(
+    issue_id: Uuid,
+    side: RelationSide,
+    audit: RelationAudit,
+) -> SelectStatement {
+    let (side_col, other_col) = match side {
+        RelationSide::Outgoing => (
+            issue_relations::Column::IssueId,
+            issue_relations::Column::RelatedIssueId,
+        ),
+        RelationSide::Incoming => (
+            issue_relations::Column::RelatedIssueId,
+            issue_relations::Column::IssueId,
+        ),
+    };
+    let mut stmt = Query::select();
+    stmt.column((a("o"), issues::Column::Id))
+        .column((a("o"), issues::Column::ProjectId))
+        .column((a("o"), issues::Column::SequenceId))
+        .column((a("o"), issues::Column::Name))
+        .column((a("r"), issue_relations::Column::RelationType))
+        .column((a("o"), issues::Column::StateId))
+        .column((a("o"), issues::Column::Priority));
+    match audit {
+        RelationAudit::Relation => {
+            stmt.column((a("r"), issue_relations::Column::CreatedById))
+                .column((a("r"), issue_relations::Column::CreatedAt))
+                .column((a("r"), issue_relations::Column::UpdatedAt))
+                .column((a("r"), issue_relations::Column::UpdatedById));
+        }
+        RelationAudit::Counterpart => {
+            stmt.column((a("o"), issues::Column::CreatedById))
+                .column((a("o"), issues::Column::CreatedAt))
+                .column((a("o"), issues::Column::UpdatedAt))
+                .column((a("o"), issues::Column::UpdatedById));
+        }
+    }
+    stmt.from_as(issue_relations::Entity, a("r"))
+        .join_as(
+            JoinType::InnerJoin,
+            issues::Entity,
+            a("o"),
+            col("o", issues::Column::Id).equals((a("r"), other_col)),
+        )
+        .and_where(col("r", side_col).eq(issue_id))
+        .and_where(col("r", issue_relations::Column::DeletedAt).is_null())
+        .order_by((a("r"), issue_relations::Column::CreatedAt), Order::Desc);
+    stmt
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum RelationSide {
     /// `issue.issue_relation` — rows whose `issue` is this issue.
     Outgoing,
     /// `issue.issue_related` — rows whose `related_issue` is this issue.
@@ -486,19 +640,11 @@ async fn render_relations(
     side: RelationSide,
     timezone: &Tz,
 ) -> Result<Value, Denial> {
-    // `side_col` is the link column; `other_col` the counterpart issue.
-    let (side_col, other_col) = match side {
-        RelationSide::Outgoing => ("r.issue_id", "r.related_issue_id"),
-        RelationSide::Incoming => ("r.related_issue_id", "r.issue_id"),
-    };
-    let sql = format!(
-        "SELECT o.id, o.project_id, o.sequence_id, o.name, r.relation_type, o.state_id, \
-                o.priority, r.created_by_id, r.created_at, r.updated_at, r.updated_by_id \
-         FROM issue_relations r JOIN issues o ON o.id = {other_col} \
-         WHERE {side_col} = $1 AND r.deleted_at IS NULL \
-         ORDER BY r.created_at DESC"
-    );
-    let rows = super::fetch_json_rows(pool, &sql, vec![uuid_value(issue_id)]).await?;
+    let rows = fetch_rows(
+        pool,
+        relations_select(issue_id, side, RelationAudit::Relation),
+    )
+    .await?;
     use pidash_services::app_issues::{
         issue_relation_expand_to_representation, related_issue_expand_to_representation,
         IssueRelationExpandRow,
@@ -536,19 +682,30 @@ async fn render_relations(
     Ok(Value::Array(out))
 }
 
+/// The live intake rows of one issue, newest first.
+pub(super) fn intake_lites_select(issue_id: Uuid) -> SelectStatement {
+    intake_issues::Entity::find()
+        .select_only()
+        .columns([
+            intake_issues::Column::Id,
+            intake_issues::Column::Status,
+            intake_issues::Column::DuplicateToId,
+            intake_issues::Column::SnoozedTill,
+            intake_issues::Column::Source,
+        ])
+        .filter(intake_issues::Column::IssueId.eq(issue_id))
+        .filter(intake_issues::Column::DeletedAt.is_null())
+        .order_by_desc(intake_issues::Column::CreatedAt)
+        .into_query()
+}
+
 /// `issue.issue_intake` — app `IntakeIssueLiteSerializer` rows (`-created_at`).
 async fn render_intake_lites(
     pool: &PgPool,
     issue_id: Uuid,
     timezone: &Tz,
 ) -> Result<Value, Denial> {
-    let rows = super::fetch_json_rows(
-        pool,
-        "SELECT id, status, duplicate_to_id, snoozed_till, source FROM intake_issues \
-         WHERE issue_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC",
-        vec![uuid_value(issue_id)],
-    )
-    .await?;
+    let rows = fetch_rows(pool, intake_lites_select(issue_id)).await?;
     use pidash_services::app_issues::{intake_issue_lite_to_representation, IntakeIssueLiteRow};
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
@@ -573,27 +730,51 @@ async fn render_intake_lites(
 
 /// `issue.issue_reactions` — `IssueReactionLiteSerializer` rows with the
 /// actor's `display_name`.
+#[derive(Debug, FromQueryResult)]
+struct ReactionRow {
+    id: Uuid,
+    actor_id: Uuid,
+    issue_id: Uuid,
+    reaction: String,
+    display_name: String,
+}
+
+/// Live reactions with the actor's `display_name`, newest first.
+pub(super) fn reactions_select(issue_id: Uuid) -> Select<issue_reactions::Entity> {
+    issue_reactions::Entity::find()
+        .select_only()
+        .columns([
+            issue_reactions::Column::Id,
+            issue_reactions::Column::ActorId,
+            issue_reactions::Column::IssueId,
+            issue_reactions::Column::Reaction,
+        ])
+        .column_as(users::Column::DisplayName, "display_name")
+        .join(
+            JoinType::InnerJoin,
+            issue_reactions::Entity::belongs_to(users::Entity)
+                .from(issue_reactions::Column::ActorId)
+                .to(users::Column::Id)
+                .into(),
+        )
+        .filter(issue_reactions::Column::IssueId.eq(issue_id))
+        .filter(issue_reactions::Column::DeletedAt.is_null())
+        .order_by_desc(issue_reactions::Column::CreatedAt)
+}
+
 async fn render_reactions(pool: &PgPool, issue_id: Uuid) -> Result<Value, Denial> {
-    let rows = super::fetch_json_rows(
-        pool,
-        "SELECT r.id, r.actor_id, r.issue_id, r.reaction, u.display_name AS display_name \
-         FROM issue_reactions r JOIN users u ON u.id = r.actor_id \
-         WHERE r.issue_id = $1 AND r.deleted_at IS NULL \
-         ORDER BY r.created_at DESC",
-        vec![uuid_value(issue_id)],
-    )
-    .await?;
+    let rows: Vec<ReactionRow> = typed(pool, reactions_select(issue_id)).await?;
     use pidash_services::app_issues::{
         issue_reaction_lite_to_representation, IssueReactionLiteRow,
     };
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         let input = IssueReactionLiteRow {
-            id: &req_str(row, "id")?,
-            actor: &req_str(row, "actor_id")?,
-            issue: &req_str(row, "issue_id")?,
-            reaction: &req_str(row, "reaction")?,
-            display_name: &req_str(row, "display_name")?,
+            id: &row.id.to_string(),
+            actor: &row.actor_id.to_string(),
+            issue: &row.issue_id.to_string(),
+            reaction: &row.reaction,
+            display_name: &row.display_name,
         };
         out.push(
             serde_json::to_value(issue_reaction_lite_to_representation(&input))
@@ -603,15 +784,28 @@ async fn render_reactions(pool: &PgPool, issue_id: Uuid) -> Result<Value, Denial
     Ok(Value::Array(out))
 }
 
+/// The live links of one issue, newest first.
+pub(super) fn links_select(issue_id: Uuid) -> SelectStatement {
+    issue_links::Entity::find()
+        .select_only()
+        .columns([
+            issue_links::Column::Id,
+            issue_links::Column::IssueId,
+            issue_links::Column::Title,
+            issue_links::Column::Url,
+            issue_links::Column::Metadata,
+            issue_links::Column::CreatedById,
+            issue_links::Column::CreatedAt,
+        ])
+        .filter(issue_links::Column::IssueId.eq(issue_id))
+        .filter(issue_links::Column::DeletedAt.is_null())
+        .order_by_desc(issue_links::Column::CreatedAt)
+        .into_query()
+}
+
 /// `issue.issue_link` — `IssueLinkLiteSerializer` rows (`-created_at`).
 async fn render_links(pool: &PgPool, issue_id: Uuid, timezone: &Tz) -> Result<Value, Denial> {
-    let rows = super::fetch_json_rows(
-        pool,
-        "SELECT l.id, l.issue_id, l.title, l.url, l.metadata, l.created_by_id, l.created_at \
-         FROM issue_links l WHERE l.issue_id = $1 AND l.deleted_at IS NULL ORDER BY l.created_at DESC",
-        vec![uuid_value(issue_id)],
-    )
-    .await?;
+    let rows = fetch_rows(pool, links_select(issue_id)).await?;
     use pidash_services::app_issues::{issue_link_lite_to_representation, IssueLinkLiteRow};
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
@@ -636,6 +830,39 @@ async fn render_links(pool: &PgPool, issue_id: Uuid, timezone: &Tz) -> Result<Va
     Ok(Value::Array(out))
 }
 
+/// The live `ISSUE_ATTACHMENT` assets of one issue with their workspace
+/// slug, newest first.
+pub(super) fn attachments_select(issue_id: Uuid) -> SelectStatement {
+    file_assets::Entity::find()
+        .select_only()
+        .columns([
+            file_assets::Column::Id,
+            file_assets::Column::Asset,
+            file_assets::Column::Attributes,
+        ])
+        .column_as(file_assets::Column::CreatedById, "created_by")
+        .column(file_assets::Column::UpdatedAt)
+        .column_as(file_assets::Column::UpdatedById, "updated_by")
+        .columns([
+            file_assets::Column::EntityType,
+            file_assets::Column::ProjectId,
+            file_assets::Column::IssueId,
+        ])
+        .column_as(workspaces::Column::Slug, "workspace_slug")
+        .join(
+            JoinType::InnerJoin,
+            file_assets::Entity::belongs_to(workspaces::Entity)
+                .from(file_assets::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(file_assets::Column::IssueId.eq(issue_id))
+        .filter(file_assets::Column::EntityType.eq("ISSUE_ATTACHMENT"))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .order_by_desc(file_assets::Column::CreatedAt)
+        .into_query()
+}
+
 /// `issue_attachments` — `FileAsset.objects.filter(issue_id,
 /// entity_type=ISSUE_ATTACHMENT)` (`base.py:177-195`), `-created_at`.
 async fn render_issue_attachments(
@@ -643,17 +870,7 @@ async fn render_issue_attachments(
     anchor: &ExpandAnchor,
     timezone: &Tz,
 ) -> Result<Value, Denial> {
-    let rows = super::fetch_json_rows(
-        pool,
-        "SELECT fa.id, fa.asset, fa.attributes, fa.created_by_id AS created_by, \
-                fa.updated_at, fa.updated_by_id AS updated_by, fa.entity_type, \
-                fa.project_id, fa.issue_id, w.slug AS workspace_slug \
-         FROM file_assets fa JOIN workspaces w ON w.id = fa.workspace_id \
-         WHERE fa.issue_id = $1 AND fa.entity_type = 'ISSUE_ATTACHMENT' AND fa.deleted_at IS NULL \
-         ORDER BY fa.created_at DESC",
-        vec![uuid_value(anchor.issue_id)],
-    )
-    .await?;
+    let rows = fetch_rows(pool, attachments_select(anchor.issue_id)).await?;
     use pidash_services::app_issues::{
         issue_attachment_lite_to_representation, IssueAttachmentLiteRow,
     };
@@ -733,18 +950,11 @@ async fn render_detail_list_relations(
     issue_id: Uuid,
     side: RelationSide,
 ) -> Result<Value, Denial> {
-    let (side_col, other_col) = match side {
-        RelationSide::Outgoing => ("r.issue_id", "r.related_issue_id"),
-        RelationSide::Incoming => ("r.related_issue_id", "r.issue_id"),
-    };
-    let sql = format!(
-        "SELECT o.id, o.project_id, o.sequence_id, o.name, r.relation_type, o.state_id, \
-                o.priority, o.created_by_id, o.created_at, o.updated_at, o.updated_by_id \
-         FROM issue_relations r JOIN issues o ON o.id = {other_col} \
-         WHERE {side_col} = $1 AND r.deleted_at IS NULL \
-         ORDER BY r.created_at DESC"
-    );
-    let rows = super::fetch_json_rows(pool, &sql, vec![uuid_value(issue_id)]).await?;
+    let rows = fetch_rows(
+        pool,
+        relations_select(issue_id, side, RelationAudit::Counterpart),
+    )
+    .await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         let mut map = Map::new();

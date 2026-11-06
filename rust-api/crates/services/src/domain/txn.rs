@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr, ExecResult,
-    QueryResult, Statement, StatementBuilder, TransactionTrait, Value,
+    QueryResult, Statement, StatementBuilder, TransactionTrait,
 };
 
 use super::error::DomainError;
@@ -131,8 +131,8 @@ impl HookRegistry {
 /// `django/db/backends/base/base.py`) — but the [`CommitQueue`] cannot
 /// observe a savepoint rollback, so steps queued inside one would wrongly
 /// survive it. Until a `WriteTxn` savepoint API with queue scoping exists,
-/// savepoints stay out: `SAVEPOINT`/`RELEASE`/`ROLLBACK TO` SQL through
-/// [`WriteTxn::exec_raw`] is likewise forbidden.
+/// savepoints stay out: `SAVEPOINT`/`RELEASE`/`ROLLBACK TO` SQL on the
+/// connection is likewise forbidden.
 ///
 /// `Copy`: the handle is a shared borrow, so sub-seams (the move's
 /// handoff-creation seam) can hold it alongside the owning store.
@@ -152,6 +152,7 @@ impl ConnectionTrait for TxnConn<'_> {
     }
 
     async fn execute_unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
+        // raw-sql: `ConnectionTrait` passthrough to the SeaORM transaction; no SQL is written here.
         self.inner.execute_unprepared(sql).await
     }
 
@@ -162,6 +163,14 @@ impl ConnectionTrait for TxnConn<'_> {
     async fn query_all(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
         self.inner.query_all(stmt).await
     }
+}
+
+/// `SELECT pg_advisory_xact_lock(<key>)`.
+fn advisory_xact_lock_stmt(key: i64) -> sea_orm::sea_query::SelectStatement {
+    use sea_orm::sea_query::{Alias, Func, Query};
+    Query::select()
+        .expr(Func::cust(Alias::new("pg_advisory_xact_lock")).arg(key))
+        .to_owned()
 }
 
 /// A SeaORM transaction plus its after-commit queue and hook registry.
@@ -224,23 +233,12 @@ impl WriteTxn {
         self.connection().execute(statement).await
     }
 
-    /// Run raw SQL with bound values on the transaction (design D5):
-    /// advisory locks, `SELECT … FOR UPDATE`, surviving SQL constants.
-    pub async fn exec_raw<T>(&self, sql: &str, values: T) -> Result<ExecResult, DbErr>
-    where
-        T: IntoIterator<Item = Value>,
-    {
-        let statement = Statement::from_sql_and_values(DbBackend::Postgres, sql, values);
-        self.connection().execute(statement).await
-    }
-
     /// `SELECT pg_advisory_xact_lock($1)`: the transaction-scoped
     /// cooperative lock the create paths take (the sqlx
     /// `SELECT pg_advisory_xact_lock($1)` precedent in the api handlers),
     /// released automatically at commit or rollback.
     pub async fn advisory_xact_lock(&self, key: i64) -> Result<(), DbErr> {
-        self.exec_raw("SELECT pg_advisory_xact_lock($1)", [Value::from(key)])
-            .await?;
+        self.exec_builder(&advisory_xact_lock_stmt(key)).await?;
         Ok(())
     }
 
@@ -264,7 +262,16 @@ impl WriteTxn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::Value;
     use std::sync::Mutex;
+
+    #[test]
+    fn advisory_lock_statement() {
+        let (sql, values) =
+            advisory_xact_lock_stmt(42).build(sea_orm::sea_query::PostgresQueryBuilder);
+        assert_eq!(sql, "SELECT pg_advisory_xact_lock($1)");
+        assert_eq!(values.0, vec![Value::from(42_i64)]);
+    }
 
     #[tokio::test]
     async fn queued_steps_drain_in_order_exactly_once() {
@@ -404,12 +411,14 @@ mod tests {
         let ran = Arc::clone(&log);
         crate::domain::run(&ctx, &db, |txn| {
             Box::pin(async move {
-                txn.exec_raw(
-                    "INSERT INTO domain_writetxn_probe (id, note) VALUES ($1, $2)",
-                    [Value::from(id), Value::from("committed")],
-                )
-                .await
-                .map_err(DomainError::Db)?;
+                txn.connection()
+                    .execute(Statement::from_sql_and_values(
+                        DbBackend::Postgres,
+                        "INSERT INTO domain_writetxn_probe (id, note) VALUES ($1, $2)",
+                        [Value::from(id), Value::from("committed")],
+                    ))
+                    .await
+                    .map_err(DomainError::Db)?;
                 txn.on_commit(move || async move {
                     failed.lock().expect("lock").push("failed-effect");
                 });

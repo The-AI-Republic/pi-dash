@@ -1381,44 +1381,8 @@ pub const PROJECT_STATES_SQL: &str = "SELECT id, name, states.group FROM states 
      WHERE project_id = $1 AND deleted_at IS NULL AND NOT (states.group = 'triage') \
      ORDER BY sequence ASC";
 
-/// `pidash_search_project_issues` (`tools.py:227-241`):
-/// `Issue.objects.filter(project_id).filter(Q(name__icontains=query) |
-/// Q(description_stripped__icontains=query)).select_related("project",
-/// "state").distinct()[:limit]`. Plain `Issue.objects` (soft-delete
-/// only — the triage/archived/draft excludes live on `issue_objects`,
-/// which this path does not use). Django compiles `icontains` to
-/// `UPPER(col::text) LIKE UPPER(pattern)` — no `ILIKE`, no `ESCAPE`
-/// clause (verified with the query compiler; a stable construct). `$1`
-/// project id, `$2` the `escape_icontains` output (assistant
-/// `tools_issues.rs`, same backslash escaping; `LIKE`'s default escape
-/// applies), `$3` the [`clamp_search_limit`] value. `ORDER BY
-/// issues.created_at DESC` from `Issue.Meta.ordering = ("-created_at",)`
-/// (`db/models/issue.py:253`): Python slices newest-first, so the limit
-/// keeps the newest matches. `issues.created_at` rides in the `SELECT`
-/// list only to satisfy `DISTINCT`'s order-by rule (every `ORDER BY`
-/// expression must appear in the select list); the caller ignores it —
-/// `_issue_data` consumes the other nine columns. `DISTINCT` never
-/// collapses rows (the PK is selected), as in Django's select-all.
-pub const SEARCH_ISSUES_SQL: &str =
-    "SELECT DISTINCT issues.id, issues.project_id, issues.state_id, \
-     issues.sequence_id, issues.name, issues.priority, states.name, states.group, \
-     projects.identifier, issues.created_at FROM issues \
-     INNER JOIN projects ON projects.id = issues.project_id \
-     LEFT OUTER JOIN states ON states.id = issues.state_id \
-     WHERE issues.project_id = $1 AND issues.deleted_at IS NULL \
-     AND (UPPER(issues.name::text) LIKE UPPER('%' || $2 || '%') \
-     OR UPPER(issues.description_stripped::text) LIKE UPPER('%' || $2 || '%')) \
-     ORDER BY issues.created_at DESC LIMIT $3";
-
-/// `pidash_get_project_issue` (`tools.py:243-251`):
-/// `Issue.objects.select_related("project", "state").get(pk=issue_id,
-/// project_id=project_id)`. `$1` issue id, `$2` project id.
-pub const GET_PROJECT_ISSUE_SQL: &str = "SELECT issues.id, issues.project_id, issues.state_id, \
-     issues.sequence_id, issues.name, issues.priority, issues.description_stripped, \
-     issues.workpad, states.name, states.group, projects.identifier FROM issues \
-     INNER JOIN projects ON projects.id = issues.project_id \
-     LEFT OUTER JOIN states ON states.id = issues.state_id \
-     WHERE issues.id = $1 AND issues.project_id = $2 AND issues.deleted_at IS NULL LIMIT 1";
+// `pidash_search_project_issues` and `pidash_get_project_issue` read through
+// SeaORM in `super::tool_issues` (every joined column under its own alias).
 
 /// `pidash_list_linked_code_reviews` (`tools.py:253-272`):
 /// `GitCodeReviewLink.objects.filter(issue_id,
@@ -3024,15 +2988,6 @@ mod tests {
         assert!(CURRENT_ISSUE_COMMENTS_SQL.contains("ORDER BY created_at DESC LIMIT 50"));
         assert!(PROJECT_STATES_SQL.contains("ORDER BY sequence ASC"));
         assert!(PROJECT_STATES_SQL.contains("NOT (states.group = 'triage')"));
-        assert!(SEARCH_ISSUES_SQL.contains("SELECT DISTINCT"));
-        assert!(SEARCH_ISSUES_SQL.contains("UPPER(issues.name::text) LIKE UPPER('%' || $2 || '%')"));
-        assert!(SEARCH_ISSUES_SQL
-            .contains("UPPER(issues.description_stripped::text) LIKE UPPER('%' || $2 || '%')"));
-        assert!(!SEARCH_ISSUES_SQL.contains("ILIKE"));
-        assert!(SEARCH_ISSUES_SQL.contains("LIMIT $3"));
-        assert!(SEARCH_ISSUES_SQL.contains("ORDER BY issues.created_at DESC LIMIT $3"));
-        assert!(SEARCH_ISSUES_SQL.contains("projects.identifier, issues.created_at FROM issues"));
-        assert!(GET_PROJECT_ISSUE_SQL.contains("issues.id = $1 AND issues.project_id = $2"));
         assert!(LINKED_REVIEWS_SQL.contains("ORDER BY created_at DESC LIMIT 20"));
         assert!(TRANSITION_STATE_GET_SQL.contains("FROM states"));
         assert!(TRANSITION_ISSUE_LOCK_SQL.contains("FOR UPDATE OF issues"));

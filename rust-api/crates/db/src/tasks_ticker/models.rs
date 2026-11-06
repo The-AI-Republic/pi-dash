@@ -448,6 +448,50 @@ pub mod issue_agent_ticker {
         pub resume_parent_run_id: Option<uuid::Uuid>,
     }
 
+    impl From<crate::entity::issue_agent_ticker::Model> for IssueAgentTicker {
+        fn from(row: crate::entity::issue_agent_ticker::Model) -> Self {
+            let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+            Self {
+                id: row.id,
+                created_at: at(row.created_at),
+                updated_at: at(row.updated_at),
+                created_by_id: row.created_by_id,
+                updated_by_id: row.updated_by_id,
+                deleted_at: row.deleted_at.map(at),
+                issue_id: row.issue_id,
+                used: row.used,
+                granted: row.granted,
+                waited: row.waited,
+                user_disabled: row.user_disabled,
+                next_run_at: row.next_run_at.map(at),
+                last_tick_at: row.last_tick_at.map(at),
+                enabled: row.enabled,
+                disarm_reason: row.disarm_reason,
+                pending_entry: row.pending_entry,
+                pending_entry_free: row.pending_entry_free,
+                pending_entry_actor_id: row.pending_entry_actor_id,
+                pending_entry_trigger: row.pending_entry_trigger,
+                resume_parent_run_id: row.resume_parent_run_id,
+            }
+        }
+    }
+
+    /// `issue.agent_ticker` through `_base_manager` (no soft-delete
+    /// guard): every row for the issue, so callers can 500 on duplicates
+    /// as Django's `MultipleObjectsReturned` does.
+    pub async fn tickers_for_issue(
+        db: &impl sea_orm::ConnectionTrait,
+        issue_id: uuid::Uuid,
+    ) -> Result<Vec<IssueAgentTicker>, sea_orm::DbErr> {
+        use crate::entity::issue_agent_ticker;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let rows = issue_agent_ticker::Entity::find()
+            .filter(issue_agent_ticker::Column::IssueId.eq(issue_id))
+            .all(db)
+            .await?;
+        Ok(rows.into_iter().map(IssueAgentTicker::from).collect())
+    }
+
     impl IssueAgentTicker {
         /// Cap = project pool + `granted` + `waited`; `-1` is infinite
         /// (`issue_agent_ticker.py:205-214`). `pool` is
