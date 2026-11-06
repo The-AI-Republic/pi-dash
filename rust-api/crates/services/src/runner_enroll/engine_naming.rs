@@ -23,7 +23,10 @@ static SLUG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-z0-9]+").unw
 
 /// `_slug` (`:64-65`): lowercase, every non-alphanumeric run to `-`, strip `-`.
 pub fn slug(value: &str) -> String {
-    SLUG_RE.replace_all(&value.to_lowercase(), "-").trim_matches('-').to_string()
+    SLUG_RE
+        .replace_all(&value.to_lowercase(), "-")
+        .trim_matches('-')
+        .to_string()
 }
 
 /// `machine_slug` (`:68-70`): `slug(host_label)`, else `slug(label)`, else
@@ -37,7 +40,12 @@ pub fn machine_slug(machine_id: uuid::Uuid, host_label: &str, label: &str) -> St
     if !from_label.is_empty() {
         return from_label;
     }
-    machine_id.to_string().split('-').next().unwrap_or("").to_string()
+    machine_id
+        .to_string()
+        .split('-')
+        .next()
+        .unwrap_or("")
+        .to_string()
 }
 
 fn hex_of(hash: &[u8]) -> String {

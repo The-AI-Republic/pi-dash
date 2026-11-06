@@ -110,9 +110,9 @@ pub async fn revoke_engine_credential(
 ) -> Result<bool, sqlx::Error> {
     let state = match reason {
         revoke_reason::SIGNED_OUT | revoke_reason::USER_SIGNED_OUT => engine_state::SIGNED_OUT,
-        revoke_reason::MACHINE_REMOVED
-        | revoke_reason::MACHINE_MERGED
-        | revoke_reason::ADMIN => engine_state::REVOKED,
+        revoke_reason::MACHINE_REMOVED | revoke_reason::MACHINE_MERGED | revoke_reason::ADMIN => {
+            engine_state::REVOKED
+        }
         _ => return Err(sqlx::Error::Protocol("unknown revoke reason".to_owned())),
     };
     let Some(machine) = dev_machine::Entity::find_by_id(dev_machine_id)
@@ -125,7 +125,10 @@ pub async fn revoke_engine_credential(
     let now_tz = at(now);
     let revoked = engine_credential::Entity::update_many()
         .col_expr(engine_credential::Column::RevokedAt, Expr::value(now_tz))
-        .col_expr(engine_credential::Column::RevokedReason, Expr::value(reason))
+        .col_expr(
+            engine_credential::Column::RevokedReason,
+            Expr::value(reason),
+        )
         .filter(engine_credential::Column::DevMachineId.eq(dev_machine_id))
         .filter(engine_credential::Column::RevokedAt.is_null())
         .exec(db)

@@ -31,11 +31,12 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use pidash_db::entity::{
-    agent_run, dev_machine, machine_session, machine_token, pod as pod_entity, projects as project_entity,
-    runner as runner_entity, runner_session, workspaces as workspace_entity,
+    agent_run, dev_machine, machine_session, pod as pod_entity, projects as project_entity,
+    runner as runner_entity, workspaces as workspace_entity,
 };
 
 use crate::domain::engine_credential::{self, revoke_reason};
+use crate::domain::tokens;
 use crate::runner_enroll::engine_naming;
 use crate::runner_enroll::queries::enroll_reads;
 
@@ -176,7 +177,9 @@ impl MergeError {
         match self {
             Self::CannotMergeIntoSelf => 400,
             Self::NotFound => 404,
-            Self::AlreadyMerged | Self::SourceRevoked | Self::TargetNotLive | Self::LiveSession => 409,
+            Self::AlreadyMerged | Self::SourceRevoked | Self::TargetNotLive | Self::LiveSession => {
+                409
+            }
             Self::Db(_) => 500,
         }
     }
@@ -207,9 +210,7 @@ async fn finalize_cancel_queued(
     run_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<(), DbErr> {
-    let run = agent_run::Entity::find_by_id(run_id)
-        .one(db)
-        .await?;
+    let run = agent_run::Entity::find_by_id(run_id).one(db).await?;
     let Some(run) = run else {
         return Ok(());
     };
@@ -220,7 +221,10 @@ async fn finalize_cancel_queued(
         Value::Object(map) => map,
         _ => Map::new(),
     };
-    bag.insert("error".to_owned(), Value::String("runner revoked".to_owned()));
+    bag.insert(
+        "error".to_owned(),
+        Value::String("runner revoked".to_owned()),
+    );
     bag.insert(
         "error_code".to_owned(),
         Value::String("runner_revoked".to_owned()),
@@ -228,7 +232,10 @@ async fn finalize_cancel_queued(
     agent_run::Entity::update_many()
         .col_expr(agent_run::Column::Status, Expr::value("cancelled"))
         .col_expr(agent_run::Column::EndedAt, Expr::value(now))
-        .col_expr(agent_run::Column::ErrorDetails, Expr::value(Value::Object(bag)))
+        .col_expr(
+            agent_run::Column::ErrorDetails,
+            Expr::value(Value::Object(bag)),
+        )
         .filter(agent_run::Column::Id.eq(run_id))
         .filter(agent_run::Column::Status.eq("queued"))
         .exec(db)
@@ -257,7 +264,10 @@ async fn hand_over_to_survivor(
         if run.pod_id == survivor.pod_id {
             // Re-pin to the survivor (same pod).
             agent_run::Entity::update_many()
-                .col_expr(agent_run::Column::PinnedRunnerId, Expr::value(Some(survivor.id)))
+                .col_expr(
+                    agent_run::Column::PinnedRunnerId,
+                    Expr::value(Some(survivor.id)),
+                )
                 .filter(agent_run::Column::Id.eq(run.id))
                 .filter(agent_run::Column::Status.eq("queued"))
                 .exec(db)
@@ -304,18 +314,10 @@ async fn revoke_loser(
         .exec(db)
         .await
         .map(drop)?;
-    // S2: revoke sessions.
-    runner_session::Entity::update_many()
-        .col_expr(runner_session::Column::RevokedAt, Expr::value(now))
-        .col_expr(
-            runner_session::Column::RevokedReason,
-            Expr::value("dev_machine_merged"),
-        )
-        .filter(runner_session::Column::RunnerId.eq(loser_id))
-        .filter(runner_session::Column::RevokedAt.is_null())
-        .exec(db)
+    // S2: revoke sessions (domain writer).
+    tokens::revoke_runner_sessions_for_runner(db, loser_id, now, "dev_machine_merged")
         .await
-        .map(drop)?;
+        .map_err(|err| DbErr::RecordNotFound(err.to_string()))?;
     // S3: cancel non-terminal runs (assigned/running/queued leftovers).
     let active = agent_run::Entity::find()
         .filter(agent_run::Column::RunnerId.eq(loser_id))
@@ -328,7 +330,10 @@ async fn revoke_loser(
             Value::Object(map) => map,
             _ => Map::new(),
         };
-        bag.insert("error".to_owned(), Value::String("runner revoked".to_owned()));
+        bag.insert(
+            "error".to_owned(),
+            Value::String("runner revoked".to_owned()),
+        );
         bag.insert(
             "error_code".to_owned(),
             Value::String("runner_revoked".to_owned()),
@@ -336,7 +341,10 @@ async fn revoke_loser(
         agent_run::Entity::update_many()
             .col_expr(agent_run::Column::Status, Expr::value("cancelled"))
             .col_expr(agent_run::Column::EndedAt, Expr::value(now))
-            .col_expr(agent_run::Column::ErrorDetails, Expr::value(Value::Object(bag)))
+            .col_expr(
+                agent_run::Column::ErrorDetails,
+                Expr::value(Value::Object(bag)),
+            )
             .filter(agent_run::Column::Id.eq(run.id))
             .exec(db)
             .await
@@ -422,9 +430,7 @@ pub async fn merge_dev_machine(
         .await?;
     let mut survivors: HashMap<Uuid, runner_entity::Model> = HashMap::new();
     for row in survivor_rows {
-        let pod = pod_entity::Entity::find_by_id(row.pod_id)
-            .one(db)
-            .await?;
+        let pod = pod_entity::Entity::find_by_id(row.pod_id).one(db).await?;
         if let Some(pod) = pod {
             survivors.entry(pod.project_id).or_insert(row);
         }
@@ -483,24 +489,19 @@ pub async fn merge_dev_machine(
             let taken = enroll_reads::taken_names(db, target.id, pod.id, Some(runner.id)).await?;
             enroll_reads::unique_runner_name(&runner.name, &taken)
         };
-        runner_session::Entity::update_many()
-            .col_expr(runner_session::Column::RevokedAt, Expr::value(now))
-            .col_expr(
-                runner_session::Column::RevokedReason,
-                Expr::value("dev_machine_merged"),
-            )
-            .filter(runner_session::Column::RunnerId.eq(runner.id))
-            .filter(runner_session::Column::RevokedAt.is_null())
-            .exec(db)
+        tokens::revoke_runner_sessions_for_runner(db, runner.id, now, "dev_machine_merged")
             .await
-            .map(drop)?;
+            .map_err(|err| MergeError::Db(err.to_string()))?;
         let host_label = if !target.host_label.is_empty() {
             target.host_label.clone()
         } else {
             runner.host_label.clone()
         };
         runner_entity::Entity::update_many()
-            .col_expr(runner_entity::Column::DevMachineId, Expr::value(Some(target.id)))
+            .col_expr(
+                runner_entity::Column::DevMachineId,
+                Expr::value(Some(target.id)),
+            )
             .col_expr(runner_entity::Column::HostLabel, Expr::value(host_label))
             .col_expr(runner_entity::Column::Name, Expr::value(name))
             .col_expr(runner_entity::Column::Status, Expr::value("offline"))
@@ -520,13 +521,9 @@ pub async fn merge_dev_machine(
         moved.push(runner.id.to_string());
     }
 
-    machine_token::Entity::update_many()
-        .col_expr(machine_token::Column::RevokedAt, Expr::value(now))
-        .filter(machine_token::Column::DevMachineId.eq(Some(source.id)))
-        .filter(machine_token::Column::RevokedAt.is_null())
-        .exec(db)
+    tokens::revoke_tokens_for_dev_machine(db, source.id, now)
         .await
-        .map(drop)?;
+        .map_err(|err| MergeError::Db(err.to_string()))?;
     machine_session::Entity::update_many()
         .col_expr(machine_session::Column::RevokedAt, Expr::value(now))
         .col_expr(
@@ -554,20 +551,18 @@ pub async fn merge_dev_machine(
             dev_machine::Column::MergedIntoId,
             Expr::value(Some(target.id)),
         )
-        .col_expr(dev_machine::Column::MergeResult, Expr::value(result.clone()))
+        .col_expr(
+            dev_machine::Column::MergeResult,
+            Expr::value(result.clone()),
+        )
         .col_expr(dev_machine::Column::UpdatedAt, Expr::value(now))
         .filter(dev_machine::Column::Id.eq(source.id))
         .exec(db)
         .await
         .map(drop)?;
-    engine_credential::revoke_engine_credential(
-        db,
-        source.id,
-        revoke_reason::MACHINE_MERGED,
-        now,
-    )
-    .await
-    .map_err(|err| MergeError::Db(err.to_string()))?;
+    engine_credential::revoke_engine_credential(db, source.id, revoke_reason::MACHINE_MERGED, now)
+        .await
+        .map_err(|err| MergeError::Db(err.to_string()))?;
     let mut drain_pod_ids: Vec<Uuid> = drain_pods.into_iter().collect();
     drain_pod_ids.sort();
     Ok(MergeOutcome {

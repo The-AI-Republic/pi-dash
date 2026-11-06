@@ -1262,11 +1262,12 @@ async fn serialize_machine(
             Some((revoked_at, updated_at)) => (Some(revoked_at), updated_at),
             None => (machine.revoked_at, machine.updated_at),
         };
-        let fallback_state = pidash_services::domain::engine_credential::current_engine_sign_in_state(
-            &machine.engine_sign_in_state,
-            machine.engine_credential_expires_at,
-            Utc::now(),
-        );
+        let fallback_state =
+            pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                &machine.engine_sign_in_state,
+                machine.engine_credential_expires_at,
+                Utc::now(),
+            );
         return MachineRender {
             id: machine.id.to_string(),
             host_label: machine.host_label.clone(),

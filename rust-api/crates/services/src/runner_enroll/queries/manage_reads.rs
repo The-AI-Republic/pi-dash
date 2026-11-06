@@ -857,11 +857,23 @@ fn runner_join_query() -> Select<runner::Entity> {
         .column_as(dev_machine::Column::Id, "dm_id")
         .column_as(dev_machine::Column::HostLabel, "dm_host_label")
         .column_as(dev_machine::Column::Label, "dm_label")
-        .column_as(dev_machine::Column::EnginePausedByOwner, "dm_engine_paused_by_owner")
-        .column_as(dev_machine::Column::EngineAutoPauseReason, "dm_engine_auto_pause_reason")
+        .column_as(
+            dev_machine::Column::EnginePausedByOwner,
+            "dm_engine_paused_by_owner",
+        )
+        .column_as(
+            dev_machine::Column::EngineAutoPauseReason,
+            "dm_engine_auto_pause_reason",
+        )
         .column_as(dev_machine::Column::EngineTeamRuns, "dm_engine_team_runs")
-        .column_as(dev_machine::Column::EngineSignInState, "dm_engine_sign_in_state")
-        .column_as(dev_machine::Column::EngineCredentialExpiresAt, "dm_engine_credential_expires_at")
+        .column_as(
+            dev_machine::Column::EngineSignInState,
+            "dm_engine_sign_in_state",
+        )
+        .column_as(
+            dev_machine::Column::EngineCredentialExpiresAt,
+            "dm_engine_credential_expires_at",
+        )
         .column_as(pod::Column::WorkspaceId, "pod_workspace_id")
         .column_as(pod::Column::ProjectId, "pod_project_id")
         .column_as(pod::Column::Name, "pod_name")

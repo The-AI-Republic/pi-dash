@@ -49,14 +49,13 @@ async fn daemon_payload(
 ) -> Result<String, Response> {
     let db = pidash_db::pool::sea_orm_connection(pool);
     let now = Utc::now();
-    let sign_in_state =
-        pidash_services::domain::engine_credential::current_engine_sign_in_state(
-            &machine.engine_sign_in_state,
-            machine
-                .engine_credential_expires_at
-                .map(|at| at.with_timezone(&Utc)),
-            now,
-        );
+    let sign_in_state = pidash_services::domain::engine_credential::current_engine_sign_in_state(
+        &machine.engine_sign_in_state,
+        machine
+            .engine_credential_expires_at
+            .map(|at| at.with_timezone(&Utc)),
+        now,
+    );
     let engine_state = machine.engine_state.clone();
     let id_owned = machine.id.to_string();
     let expires_rendered = machine
@@ -191,23 +190,32 @@ pub async fn daemon_machine_get(
     headers: axum::http::HeaderMap,
 ) -> Response {
     let Some(dev_machine_id) = strict_uuid(&raw_id) else {
-        return json_response(StatusCode::NOT_FOUND, r#"{"detail":"Not found."}"#.to_owned());
+        return json_response(
+            StatusCode::NOT_FOUND,
+            r#"{"detail":"Not found."}"#.to_owned(),
+        );
     };
     let pool = match pool_of(&state) {
         Ok(pool) => pool.clone(),
         Err(response) => return response,
     };
     let secret = state.settings().secret_key.clone();
-    let auth =
-        match authenticate_machine_token(&pool, secret.as_bytes(), &headers, ALLOW_GET).await {
-            Ok(auth) => auth,
-            Err(response) => return response,
-        };
+    let auth = match authenticate_machine_token(&pool, secret.as_bytes(), &headers, ALLOW_GET).await
+    {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
     let Some(auth) = auth else {
-        return json_response(StatusCode::FORBIDDEN, r#"{"error":"dev_machine_mismatch"}"#.to_owned());
+        return json_response(
+            StatusCode::FORBIDDEN,
+            r#"{"error":"dev_machine_mismatch"}"#.to_owned(),
+        );
     };
     if !own_machine_token(&auth, dev_machine_id) {
-        return json_response(StatusCode::FORBIDDEN, r#"{"error":"dev_machine_mismatch"}"#.to_owned());
+        return json_response(
+            StatusCode::FORBIDDEN,
+            r#"{"error":"dev_machine_mismatch"}"#.to_owned(),
+        );
     }
     let db = pidash_db::pool::sea_orm_connection(&pool);
     let machine = dev_machine::Entity::find_by_id(dev_machine_id)
@@ -216,7 +224,9 @@ pub async fn daemon_machine_get(
         .await;
     let machine = match machine {
         Ok(Some(machine)) => machine,
-        Ok(None) => return json_response(StatusCode::NOT_FOUND, r#"{"error":"not found"}"#.to_owned()),
+        Ok(None) => {
+            return json_response(StatusCode::NOT_FOUND, r#"{"error":"not found"}"#.to_owned())
+        }
         Err(_) => return server_error(),
     };
     match daemon_payload(&pool, &machine, auth.token.workspace_id).await {
@@ -232,23 +242,32 @@ pub async fn daemon_machine_patch(
     req: axum::http::Request<axum::body::Body>,
 ) -> Response {
     let Some(dev_machine_id) = strict_uuid(&raw_id) else {
-        return json_response(StatusCode::NOT_FOUND, r#"{"detail":"Not found."}"#.to_owned());
+        return json_response(
+            StatusCode::NOT_FOUND,
+            r#"{"detail":"Not found."}"#.to_owned(),
+        );
     };
     let pool = match pool_of(&state) {
         Ok(pool) => pool.clone(),
         Err(response) => return response,
     };
     let secret = state.settings().secret_key.clone();
-    let auth =
-        match authenticate_machine_token(&pool, secret.as_bytes(), &headers, ALLOW_GET).await {
-            Ok(auth) => auth,
-            Err(response) => return response,
-        };
+    let auth = match authenticate_machine_token(&pool, secret.as_bytes(), &headers, ALLOW_GET).await
+    {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
     let Some(auth) = auth else {
-        return json_response(StatusCode::FORBIDDEN, r#"{"error":"dev_machine_mismatch"}"#.to_owned());
+        return json_response(
+            StatusCode::FORBIDDEN,
+            r#"{"error":"dev_machine_mismatch"}"#.to_owned(),
+        );
     };
     if !own_machine_token(&auth, dev_machine_id) {
-        return json_response(StatusCode::FORBIDDEN, r#"{"error":"dev_machine_mismatch"}"#.to_owned());
+        return json_response(
+            StatusCode::FORBIDDEN,
+            r#"{"error":"dev_machine_mismatch"}"#.to_owned(),
+        );
     }
     let data = match read_request_data(&state, req).await {
         Ok(data) => data,
@@ -273,8 +292,14 @@ pub async fn daemon_machine_patch(
     };
     let updated = {
         let conn = TxConn::new(&mut tx);
-        machine_controls::update_machine_controls(&conn, dev_machine_id, auth.user_id, &values, now_micros())
-            .await
+        machine_controls::update_machine_controls(
+            &conn,
+            dev_machine_id,
+            auth.user_id,
+            &values,
+            now_micros(),
+        )
+        .await
     };
     match updated {
         Ok(updated) => {
@@ -295,9 +320,10 @@ pub async fn daemon_machine_patch(
                 machine_controls::MachineControlFailure::Forbidden => {
                     json_response(StatusCode::FORBIDDEN, r#"{"error":"forbidden"}"#.to_owned())
                 }
-                machine_controls::MachineControlFailure::Revoked => {
-                    json_response(StatusCode::CONFLICT, r#"{"error":"dev_machine_revoked"}"#.to_owned())
-                }
+                machine_controls::MachineControlFailure::Revoked => json_response(
+                    StatusCode::CONFLICT,
+                    r#"{"error":"dev_machine_revoked"}"#.to_owned(),
+                ),
             }
         }
         Err(machine_controls::UpdateError::Db(_)) => server_error(),
@@ -314,7 +340,12 @@ async fn dual_caller(
     let has_mt = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .map(|value| value.strip_prefix("Bearer ").unwrap_or(value).starts_with("mt_"))
+        .map(|value| {
+            value
+                .strip_prefix("Bearer ")
+                .unwrap_or(value)
+                .starts_with("mt_")
+        })
         .unwrap_or(false);
     if has_mt {
         let auth = authenticate_machine_token(&pool, secret.as_bytes(), headers, ALLOW_GET)
@@ -349,7 +380,10 @@ pub async fn replace_candidates_get(
     headers: axum::http::HeaderMap,
 ) -> Response {
     let Some(dev_machine_id) = strict_uuid(&raw_id) else {
-        return json_response(StatusCode::NOT_FOUND, r#"{"detail":"Not found."}"#.to_owned());
+        return json_response(
+            StatusCode::NOT_FOUND,
+            r#"{"detail":"Not found."}"#.to_owned(),
+        );
     };
     let (pool, user_id, machine_auth) = match dual_caller(&state, &headers, extension).await {
         Ok(caller) => caller,
@@ -357,7 +391,10 @@ pub async fn replace_candidates_get(
     };
     if let Some(auth) = machine_auth.as_ref() {
         if auth.token.dev_machine_id != Some(dev_machine_id) {
-            return json_response(StatusCode::FORBIDDEN, r#"{"error":"dev_machine_mismatch"}"#.to_owned());
+            return json_response(
+                StatusCode::FORBIDDEN,
+                r#"{"error":"dev_machine_mismatch"}"#.to_owned(),
+            );
         }
     }
     let db = pidash_db::pool::sea_orm_connection(&pool);
@@ -367,7 +404,9 @@ pub async fn replace_candidates_get(
         .await;
     let machine = match machine {
         Ok(Some(machine)) => machine,
-        Ok(None) => return json_response(StatusCode::NOT_FOUND, r#"{"error":"not found"}"#.to_owned()),
+        Ok(None) => {
+            return json_response(StatusCode::NOT_FOUND, r#"{"error":"not found"}"#.to_owned())
+        }
         Err(_) => return server_error(),
     };
     let candidates = machine_merge::replace_candidates(&db, &machine, now_micros()).await;
@@ -446,7 +485,9 @@ fn target_string(data: &JVal, key: &str) -> Result<String, Response> {
     }
     match value {
         JVal::Str(text) => Ok(pidash_compat::py::py_strip(&text.to_lossy_string()).to_owned()),
-        JVal::Null | JVal::Bool(_) | JVal::Num(_) | JVal::Array(_) | JVal::Object(_) => Err(server_error()),
+        JVal::Null | JVal::Bool(_) | JVal::Num(_) | JVal::Array(_) | JVal::Object(_) => {
+            Err(server_error())
+        }
     }
 }
 
@@ -458,7 +499,10 @@ pub async fn merge_into_post(
     req: axum::http::Request<axum::body::Body>,
 ) -> Response {
     let Some(source_id) = strict_uuid(&raw_id) else {
-        return json_response(StatusCode::NOT_FOUND, r#"{"detail":"Not found."}"#.to_owned());
+        return json_response(
+            StatusCode::NOT_FOUND,
+            r#"{"detail":"Not found."}"#.to_owned(),
+        );
     };
     let data = match read_request_data(&state, req).await {
         Ok(data) => data,
@@ -500,7 +544,10 @@ pub async fn merge_into_post(
     };
     if let Some(auth) = machine_auth.as_ref() {
         if auth.token.dev_machine_id != Some(target_id) {
-            return json_response(StatusCode::FORBIDDEN, r#"{"error":"dev_machine_mismatch"}"#.to_owned());
+            return json_response(
+                StatusCode::FORBIDDEN,
+                r#"{"error":"dev_machine_mismatch"}"#.to_owned(),
+            );
         }
         let allowed = match token_may_merge(&pool, user_id, source_id, target_id).await {
             Ok(allowed) => allowed,
@@ -548,5 +595,8 @@ pub async fn merge_into_post(
         )
         .await;
     }
-    json_response(StatusCode::OK, serde_json::to_string(&outcome.result).expect("renders"))
+    json_response(
+        StatusCode::OK,
+        serde_json::to_string(&outcome.result).expect("renders"),
+    )
 }

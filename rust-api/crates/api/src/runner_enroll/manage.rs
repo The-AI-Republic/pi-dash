@@ -638,10 +638,7 @@ fn machine_mini_of(row: &RunnerJoinRow) -> Option<DevMachineMiniOwned> {
         host_label: row.dm_host_label.clone().unwrap_or_default(),
         label: row.dm_label.clone().unwrap_or_default(),
         engine_paused_by_owner: row.dm_engine_paused_by_owner.unwrap_or(false),
-        engine_auto_pause_reason: row
-            .dm_engine_auto_pause_reason
-            .clone()
-            .unwrap_or_default(),
+        engine_auto_pause_reason: row.dm_engine_auto_pause_reason.clone().unwrap_or_default(),
         engine_team_runs: row.dm_engine_team_runs.unwrap_or(false),
         engine_sign_in_state: row
             .dm_engine_sign_in_state
@@ -890,10 +887,7 @@ impl DevMachineRender {
             engine_state_reported_at: self.engine_state_reported_at.as_deref(),
             merged_into: self.merged_into.as_deref(),
             last_seen_at: self.last_seen_at.as_deref(),
-            last_heartbeat_at: self
-                .last_heartbeat_at
-                .as_ref()
-                .map(|opt| opt.as_deref()),
+            last_heartbeat_at: self.last_heartbeat_at.as_ref().map(|opt| opt.as_deref()),
             revoked_at: self.revoked_at.as_deref(),
             created_at: &self.created_at,
             updated_at: &self.updated_at,
@@ -1206,7 +1200,9 @@ pub const DEV_MACHINE_REVOKED_BODY: &str = r#"{"error":"dev_machine_revoked"}"#;
 
 /// `{"error": <message>}` for a machine-controls parse failure.
 fn machine_control_denial(message: &str) -> Response {
-    bad_request(&serde_json::to_string(&serde_json::json!({"error": message})).expect("error body renders"))
+    bad_request(
+        &serde_json::to_string(&serde_json::json!({"error": message})).expect("error body renders"),
+    )
 }
 
 /// `GET /api/runners/dev-machines/` (`runners.py:62-125`): workspace
@@ -1372,14 +1368,13 @@ pub async fn dev_machine_patch(
         return server_error();
     };
     let map = crate::v1_cycles_modules::json::to_serde_publish_map(object);
-    let values =
-        match pidash_services::runner_enroll::machine_controls::parse_machine_controls(
-            &map,
-            &pidash_services::runner_enroll::machine_controls::WEB_FIELDS,
-        ) {
-            Ok(values) => values,
-            Err(message) => return machine_control_denial(&message),
-        };
+    let values = match pidash_services::runner_enroll::machine_controls::parse_machine_controls(
+        &map,
+        &pidash_services::runner_enroll::machine_controls::WEB_FIELDS,
+    ) {
+        Ok(values) => values,
+        Err(message) => return machine_control_denial(&message),
+    };
     match scope_machine_patch(&pool, user_id, workspace_id, machine_id).await {
         Ok(true) => {}
         Ok(false) => return not_found(),
@@ -1407,9 +1402,7 @@ pub async fn dev_machine_patch(
             }
             updated
         }
-        Err(
-            pidash_services::runner_enroll::machine_controls::UpdateError::Failure(failure),
-        ) => {
+        Err(pidash_services::runner_enroll::machine_controls::UpdateError::Failure(failure)) => {
             let _ = tx.rollback().await;
             return match failure {
                 pidash_services::runner_enroll::machine_controls::MachineControlFailure::NotFound => {
@@ -1499,8 +1492,12 @@ pub async fn dev_machine_patch(
                     .revoked_at
                     .as_ref()
                     .map(|at| crate::serializer::render_datetime(&at.with_timezone(&Utc))),
-                created_at: crate::serializer::render_datetime(&updated.model.created_at.with_timezone(&Utc)),
-                updated_at: crate::serializer::render_datetime(&updated.model.updated_at.with_timezone(&Utc)),
+                created_at: crate::serializer::render_datetime(
+                    &updated.model.created_at.with_timezone(&Utc),
+                ),
+                updated_at: crate::serializer::render_datetime(
+                    &updated.model.updated_at.with_timezone(&Utc),
+                ),
             };
             match render.to_json() {
                 Ok(body) => json_response(StatusCode::OK, body),
@@ -2829,6 +2826,15 @@ mod tests {
             host_label: "mac-mini".to_owned(),
             label: String::new(),
             visibility: 0,
+            provisioning: "manual".to_owned(),
+            engine_paused_by_owner: false,
+            engine_auto_pause_reason: String::new(),
+            engine_team_runs: false,
+            engine_sign_in_state: "never".to_owned(),
+            engine_credential_expires_at: None,
+            engine_state: serde_json::json!({}),
+            engine_state_reported_at: None,
+            merged_into_id: None,
             last_seen_at: None,
             revoked_at: None,
             created_at: moment("2026-10-01T12:34:56.789012+00:00"),
@@ -2840,7 +2846,7 @@ mod tests {
         };
         assert_eq!(
             render_machine(&machine).unwrap(),
-            r#"{"id":"55555555-5555-5555-5555-555555555555","host_label":"mac-mini","label":"","visibility":0,"runner_count":1,"online_runner_count":0,"control_online":false,"last_seen_at":null,"last_heartbeat_at":null,"revoked_at":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
+            r#"{"id":"55555555-5555-5555-5555-555555555555","host_label":"mac-mini","label":"","visibility":0,"provisioning":"manual","runner_count":1,"online_runner_count":0,"control_online":false,"engine_paused_by_owner":false,"engine_auto_pause_reason":"","engine_paused":false,"engine_team_runs":false,"engine_sign_in_state":"never","engine_credential_expires_at":null,"engine_state":{},"engine_state_reported_at":null,"merged_into":null,"last_seen_at":null,"last_heartbeat_at":null,"revoked_at":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
         );
     }
 
@@ -2855,6 +2861,7 @@ mod tests {
             name: "r1".to_owned(),
             host_label: "h".to_owned(),
             provisioning: "manual".to_owned(),
+            pod_dispatch: "pod_member".to_owned(),
             visibility: 0,
             enrolled_at: None,
             capabilities: serde_json::json!([]),
@@ -2892,7 +2899,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             body,
-            r#"{"id":"66666666-6666-6666-6666-666666666666","name":"r1","status":"offline","host_label":"h","provisioning":"manual","os":"","arch":"","runner_version":"","dev_metadata":{},"protocol_version":4,"capabilities":[],"last_heartbeat_at":null,"owner":"44444444-4444-4444-4444-444444444444","dev_machine":null,"dev_machine_detail":null,"visibility":0,"pod":"11111111-1111-1111-1111-111111111111","pod_detail":{"id":"11111111-1111-1111-1111-111111111111","name":"WEB_beefy","is_default":false,"project":"33333333-3333-3333-3333-333333333333","project_identifier":"WEB"},"live_state":{"observed_run_id":null,"last_event_at":"2026-10-02T01:02:03Z","last_event_kind":null,"last_event_summary":null,"agent_pid":null,"agent_subprocess_alive":true,"approvals_pending":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"usage":{},"llm_model":"m","turn_count":3,"agent_health":"healthy","agent_last_activity_at":"2026-10-02T01:02:01Z","updated_at":"2026-10-02T01:02:03Z"},"enrolled_at":null,"revoked_at":null,"revoked_reason":"","paused_at":null,"paused_by":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
+            r#"{"id":"66666666-6666-6666-6666-666666666666","name":"r1","status":"offline","host_label":"h","is_engine":false,"engine_paused":false,"dispatch_paused":false,"machine_display_name":"h","provisioning":"manual","pod_dispatch":"pod_member","os":"","arch":"","runner_version":"","dev_metadata":{},"protocol_version":4,"capabilities":[],"last_heartbeat_at":null,"owner":"44444444-4444-4444-4444-444444444444","dev_machine":null,"dev_machine_detail":null,"visibility":0,"pod":"11111111-1111-1111-1111-111111111111","pod_detail":{"id":"11111111-1111-1111-1111-111111111111","name":"WEB_beefy","is_default":false,"project":"33333333-3333-3333-3333-333333333333","project_identifier":"WEB"},"live_state":{"observed_run_id":null,"last_event_at":"2026-10-02T01:02:03Z","last_event_kind":null,"last_event_summary":null,"agent_pid":null,"agent_subprocess_alive":true,"approvals_pending":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"usage":{},"llm_model":"m","turn_count":3,"agent_health":"healthy","agent_last_activity_at":"2026-10-02T01:02:01Z","updated_at":"2026-10-02T01:02:03Z"},"enrolled_at":null,"revoked_at":null,"revoked_reason":"","paused_at":null,"paused_by":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
         );
     }
 }

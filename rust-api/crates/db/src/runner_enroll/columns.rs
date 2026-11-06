@@ -763,8 +763,14 @@ pub mod enums {
     /// `EngineSignInState.REVOKED` ("Revoked", #2910).
     pub const ENGINE_SIGN_IN_STATE_REVOKED: &str = "revoked";
     /// `EngineSignInState` values in declaration order.
-    pub const ENGINE_SIGN_IN_STATE_CHOICES: &[&str] =
-        &["never", "active", "expiring", "expired", "signed_out", "revoked"];
+    pub const ENGINE_SIGN_IN_STATE_CHOICES: &[&str] = &[
+        "never",
+        "active",
+        "expiring",
+        "expired",
+        "signed_out",
+        "revoked",
+    ];
     /// `EngineSignInState.choices`: `(value, label)` pairs.
     pub const ENGINE_SIGN_IN_STATE_LABELS: &[(&str, &str)] = &[
         ("never", "Never signed in"),
@@ -1181,10 +1187,7 @@ mod tests {
             ("SIGNED_OUT", enums::ENGINE_SIGN_IN_STATE_SIGNED_OUT),
             ("REVOKED", enums::ENGINE_SIGN_IN_STATE_REVOKED),
         ] {
-            assert_eq!(
-                enums["EngineSignInState"][member].as_str().unwrap(),
-                value
-            );
+            assert_eq!(enums["EngineSignInState"][member].as_str().unwrap(), value);
         }
         assert_eq!(enums["Visibility"]["PRIVATE"].as_i64().unwrap(), 0);
         assert_eq!(enums::VISIBILITY_PRIVATE, 0);

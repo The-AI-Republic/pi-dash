@@ -1557,9 +1557,14 @@ async fn create_attempt(
     let legacy_machine = dev_machine
         .as_ref()
         .is_some_and(|dev| dev.provisioning == enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED);
-    let wants_engine = params.agent_kind == "engine" || (params.agent_kind.is_empty() && legacy_machine);
+    let wants_engine =
+        params.agent_kind == "engine" || (params.agent_kind.is_empty() && legacy_machine);
     let (provisioning, name, engine_named) = if !wants_engine {
-        (enums::RUNNER_PROVISIONING_MANUAL.to_owned(), None::<String>, false)
+        (
+            enums::RUNNER_PROVISIONING_MANUAL.to_owned(),
+            None::<String>,
+            false,
+        )
     } else {
         if dev_machine_id.is_none() {
             return Attempt::Refusal(json_response(
@@ -1582,7 +1587,9 @@ async fn create_attempt(
                 };
                 let state = engine_cred::current_engine_sign_in_state(
                     &stored.engine_sign_in_state,
-                    stored.engine_credential_expires_at.map(|t| t.with_timezone(&chrono::Utc)),
+                    stored
+                        .engine_credential_expires_at
+                        .map(|t| t.with_timezone(&chrono::Utc)),
                     Utc::now(),
                 );
                 return Attempt::Refusal(json_response(
@@ -1598,7 +1605,13 @@ async fn create_attempt(
             }
         }
         // At most one live engine runner per (machine, project).
-        match enroll_sql::live_engine_runner_for(&pidash_db::orm_tx::TxConn::new(&mut *tx), machine_id, params.project_id).await {
+        match enroll_sql::live_engine_runner_for(
+            &pidash_db::orm_tx::TxConn::new(&mut *tx),
+            machine_id,
+            params.project_id,
+        )
+        .await
+        {
             Ok(Some(hit)) => {
                 let mut runner_name = hit.name.clone();
                 if !legacy_machine && !runner_name.starts_with("builtin-") {
@@ -1606,16 +1619,36 @@ async fn create_attempt(
                     let Some(machine) = fetch_dev_machine_full(tx, machine_id).await else {
                         return Attempt::Server;
                     };
-                    let taken = match enroll_sql::taken_names(&pidash_db::orm_tx::TxConn::new(&mut *tx), machine_id, hit.pod_id, Some(hit.id)).await {
+                    let taken = match enroll_sql::taken_names(
+                        &pidash_db::orm_tx::TxConn::new(&mut *tx),
+                        machine_id,
+                        hit.pod_id,
+                        Some(hit.id),
+                    )
+                    .await
+                    {
                         Ok(taken) => taken,
                         Err(_) => return Attempt::Server,
                     };
-                    let base = engine_naming::engine_runner_base_name(machine_id, &machine.host_label, &machine.label, params.workspace_slug, params.project_id, params.project_identifier);
+                    let base = engine_naming::engine_runner_base_name(
+                        machine_id,
+                        &machine.host_label,
+                        &machine.label,
+                        params.workspace_slug,
+                        params.project_id,
+                        params.project_identifier,
+                    );
                     runner_name = enroll_sql::engine_runner_name_from_base(&base, &taken);
                     if runner_name != hit.name {
                         if pidash_db::entity::runner::Entity::update_many()
-                            .col_expr(pidash_db::entity::runner::Column::Name, sea_orm::sea_query::Expr::value(runner_name.clone()))
-                            .col_expr(pidash_db::entity::runner::Column::UpdatedAt, sea_orm::sea_query::Expr::value(Utc::now()))
+                            .col_expr(
+                                pidash_db::entity::runner::Column::Name,
+                                sea_orm::sea_query::Expr::value(runner_name.clone()),
+                            )
+                            .col_expr(
+                                pidash_db::entity::runner::Column::UpdatedAt,
+                                sea_orm::sea_query::Expr::value(Utc::now()),
+                            )
                             .filter(pidash_db::entity::runner::Column::Id.eq(hit.id))
                             .exec(&pidash_db::orm_tx::TxConn::new(&mut *tx))
                             .await
@@ -1648,17 +1681,39 @@ async fn create_attempt(
             Err(_) => return Attempt::Server,
         }
         if legacy_machine {
-            (enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED.to_owned(), None::<String>, false)
+            (
+                enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED.to_owned(),
+                None::<String>,
+                false,
+            )
         } else {
             let Some(machine) = fetch_dev_machine_full(tx, machine_id).await else {
                 return Attempt::Server;
             };
-            let base = engine_naming::engine_runner_base_name(machine_id, &machine.host_label, &machine.label, params.workspace_slug, params.project_id, params.project_identifier);
-            let taken = match enroll_sql::taken_names(&pidash_db::orm_tx::TxConn::new(&mut *tx), machine_id, params.pod_id, None).await {
+            let base = engine_naming::engine_runner_base_name(
+                machine_id,
+                &machine.host_label,
+                &machine.label,
+                params.workspace_slug,
+                params.project_id,
+                params.project_identifier,
+            );
+            let taken = match enroll_sql::taken_names(
+                &pidash_db::orm_tx::TxConn::new(&mut *tx),
+                machine_id,
+                params.pod_id,
+                None,
+            )
+            .await
+            {
                 Ok(taken) => taken,
                 Err(_) => return Attempt::Server,
             };
-            (enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED.to_owned(), Some(enroll_sql::engine_runner_name_from_base(&base, &taken)), true)
+            (
+                enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED.to_owned(),
+                Some(enroll_sql::engine_runner_name_from_base(&base, &taken)),
+                true,
+            )
         }
     };
     let name = if let Some(engine_name) = name {
@@ -1666,7 +1721,12 @@ async fn create_attempt(
     } else if !params.body_name.is_empty() {
         params.body_name.to_owned()
     } else {
-        match enroll_sql::count_pod_runners(&pidash_db::orm_tx::TxConn::new(&mut *tx), params.pod_id).await {
+        match enroll_sql::count_pod_runners(
+            &pidash_db::orm_tx::TxConn::new(&mut *tx),
+            params.pod_id,
+        )
+        .await
+        {
             Ok(count) => next_auto_runner_name(count as i64),
             Err(_) => return Attempt::Server,
         }
@@ -1758,13 +1818,19 @@ async fn fetch_runner_pod_dispatch(tx: &mut Transaction<'_, Postgres>, id: Uuid)
         .flatten()
 }
 
-async fn has_live_credential(tx: &mut Transaction<'_, Postgres>, machine_id: Uuid, _settings: &pidash_db::config::Settings) -> bool {
+async fn has_live_credential(
+    tx: &mut Transaction<'_, Postgres>,
+    machine_id: Uuid,
+    _settings: &pidash_db::config::Settings,
+) -> bool {
     let Some(machine) = fetch_dev_machine_full(tx, machine_id).await else {
         return false;
     };
     engine_cred::has_live_engine_credential(
         &machine.engine_sign_in_state,
-        machine.engine_credential_expires_at.map(|t| t.with_timezone(&chrono::Utc)),
+        machine
+            .engine_credential_expires_at
+            .map(|t| t.with_timezone(&chrono::Utc)),
         Utc::now(),
     )
 }
@@ -2426,7 +2492,10 @@ pub fn daemon_routes() -> Router<AppState> {
         )
         .route(
             "/api/v1/runner/dev-machines/{dev_machine_id}/replace-candidates/",
-            owned(get(super::machine_identity::replace_candidates_get), GET_ONLY),
+            owned(
+                get(super::machine_identity::replace_candidates_get),
+                GET_ONLY,
+            ),
         )
         .route(
             "/api/v1/runner/dev-machines/{dev_machine_id}/merge-into/",

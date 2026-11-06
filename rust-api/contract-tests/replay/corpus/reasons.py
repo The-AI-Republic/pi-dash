@@ -42,4 +42,22 @@ MISSING_FIX = {
 }
 
 OWNED_UNCOVERED = {
+    ("/api/runners/dev-machines/{machine_id}/", "PATCH"): (
+        "NEWPIDASH-52: web machine-controls PATCH landed without a replay "
+        "session; covered by runner/test_engine_machine.py contract tests "
+        "on both halves instead. Delete this entry when batch 4 adds the "
+        "runner_web corpus session."
+    ),
+    ("/api/v1/runner/dev-machines/{dev_machine_id}/", "PATCH"): (
+        "NEWPIDASH-52: daemon machine PATCH landed without a replay session; "
+        "covered by runner/test_engine_machine.py contract tests on both "
+        "halves instead. Delete this entry when batch 4 adds the runner "
+        "corpus session."
+    ),
+    ("/api/v1/runner/dev-machines/{dev_machine_id}/merge-into/", "POST"): (
+        "NEWPIDASH-52: daemon merge-into landed without a replay session; "
+        "covered by runner/test_engine_machine.py contract tests on both "
+        "halves instead. Delete this entry when batch 4 adds the runner "
+        "corpus session."
+    ),
 }

@@ -175,7 +175,10 @@ pub async fn update_machine_controls(
                 dev_machine::Column::EnginePausedByOwner,
                 Expr::value(changed_paused),
             )
-            .col_expr(dev_machine::Column::EngineTeamRuns, Expr::value(changed_team))
+            .col_expr(
+                dev_machine::Column::EngineTeamRuns,
+                Expr::value(changed_team),
+            )
             .col_expr(dev_machine::Column::UpdatedAt, Expr::value(now))
             .filter(dev_machine::Column::Id.eq(machine_id))
             .exec(db)
@@ -233,8 +236,8 @@ mod tests {
 
     #[test]
     fn parse_daemon_rejects_team_runs() {
-        let err =
-            parse_machine_controls(&map(json!({"engine_team_runs": true})), &DAEMON_FIELDS).unwrap_err();
+        let err = parse_machine_controls(&map(json!({"engine_team_runs": true})), &DAEMON_FIELDS)
+            .unwrap_err();
         assert_eq!(
             err,
             "only these fields can be changed here: engine_paused_by_owner, label"
@@ -256,21 +259,17 @@ mod tests {
 
     #[test]
     fn parse_bool_must_be_bool() {
-        let err = parse_machine_controls(
-            &map(json!({"engine_paused_by_owner": "yes"})),
-            &WEB_FIELDS,
-        )
-        .unwrap_err();
+        let err =
+            parse_machine_controls(&map(json!({"engine_paused_by_owner": "yes"})), &WEB_FIELDS)
+                .unwrap_err();
         assert_eq!(err, "engine_paused_by_owner must be a boolean");
     }
 
     #[test]
     fn parse_ignores_workspace() {
-        let values = parse_machine_controls(
-            &map(json!({"workspace": "ws", "label": "x"})),
-            &WEB_FIELDS,
-        )
-        .unwrap();
+        let values =
+            parse_machine_controls(&map(json!({"workspace": "ws", "label": "x"})), &WEB_FIELDS)
+                .unwrap();
         assert_eq!(values.label.as_deref(), Some("x"));
     }
 }
