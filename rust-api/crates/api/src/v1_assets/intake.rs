@@ -69,12 +69,20 @@ use axum::Router;
 use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
-use sqlx::Row;
 use uuid::Uuid;
+
+use sea_orm::{
+    ColumnTrait, EntityTrait, JoinType, PaginatorTrait, QueryFilter, QuerySelect, RelationTrait,
+};
 
 use pidash_auth::permissions::project::ProjectFacts;
 use pidash_auth::scope::TenantScope;
 use pidash_auth::token as token_kernel;
+use pidash_db::entity::{
+    agent_run, api_tokens, dev_machine, estimate_points, issue_assignees, issue_labels,
+    issue_types, issues, labels, machine_token, pod, project_members, projects, states, users,
+    workspace_members, workspaces,
+};
 use pidash_db::v1_assets::intake_queries;
 use pidash_db::v1_projects::queries_projmem::{self, TenantScope as QueryScope};
 use pidash_jobs::v1_assets::tasks as intake_tasks;
@@ -480,16 +488,20 @@ async fn authenticate(
 /// (`db/mixins.py:56-66`): a soft-deleted token 403s.
 async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Uuid, Denial> {
     let now = Utc::now();
-    let row: Option<(Uuid, Uuid, bool, Option<DateTime<Utc>>)> = sqlx::query_as(
-        r#"SELECT id, user_id, is_active, expired_at FROM api_tokens WHERE token = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(presented)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((id, user_id, is_active, expired_at)) = row else {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = api_tokens::Entity::find()
+        .filter(api_tokens::Column::Token.eq(presented))
+        .filter(api_tokens::Column::DeletedAt.is_null())
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(row) = row else {
         return Err(Denial::InvalidToken);
     };
+    let id = row.id;
+    let user_id = row.user_id;
+    let is_active = row.is_active;
+    let expired_at = row.expired_at.map(|dt| dt.with_timezone(&Utc));
     if !is_active {
         return Err(Denial::InvalidToken);
     }
@@ -511,26 +523,21 @@ async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Uuid, 
     Ok(user_id)
 }
 
-/// `is_workspace_member` for machine tokens
-/// (`core/permissions.py:28-34`): active row, any role, through the
-/// default manager (soft-deleted rows do not count — the
-/// `handlers_members` precedent carries the same conjunct).
-/// Binds: `$1` workspace id, `$2` user id.
-const MACHINE_MEMBER_SQL: &str = r#"SELECT EXISTS(SELECT 1 FROM workspace_members
-           WHERE workspace_id = $1 AND member_id = $2 AND is_active AND deleted_at IS NULL)"#;
-
-/// One `machine_token` + `dev_machine` lookup row: token id, user id,
-/// workspace id, token revocation, dev-machine id, dev-machine
-/// revocation, dev-machine id again (the join-hit proof).
-type MachineTokenRow = (
-    Uuid,
-    Uuid,
-    Uuid,
-    Option<DateTime<Utc>>,
-    Option<Uuid>,
-    Option<DateTime<Utc>>,
-    Option<Uuid>,
-);
+/// `is_workspace_member` check via SeaORM: active, live row.
+async fn is_active_workspace_member(
+    db: &sea_orm::DatabaseConnection,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    let hit = workspace_members::Entity::find()
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
 
 /// `validate_machine_token` (`api_authentication.py:45-63`): match on
 /// `token_hash`, unrevoked, dev-machine unrevoked, workspace member (a
@@ -543,39 +550,39 @@ async fn authenticate_machine(
 ) -> Result<Uuid, Denial> {
     let now = Utc::now();
     let token_hash = token_kernel::hash_token(presented, secret_key);
-    let row: Option<MachineTokenRow> = sqlx::query_as(
-        r#"SELECT mt.id, mt.user_id, mt.workspace_id, mt.revoked_at,
-                  mt.dev_machine_id, dm.revoked_at, dm.id
-           FROM machine_token mt
-           LEFT JOIN dev_machine dm ON dm.id = mt.dev_machine_id
-           WHERE mt.token_hash = $1"#,
-    )
-    .bind(&token_hash)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((id, user_id, workspace_id, revoked_at, dev_machine_id, dm_revoked, dm_found)) = row
-    else {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = machine_token::Entity::find()
+        .filter(machine_token::Column::TokenHash.eq(token_hash))
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(row) = row else {
         return Err(Denial::InvalidToken);
     };
+    let id = row.id;
+    let user_id = row.user_id;
+    let workspace_id = row.workspace_id;
+    let revoked_at = row.revoked_at.map(|dt| dt.with_timezone(&Utc));
+    let dev_machine_id = row.dev_machine_id;
     if revoked_at.is_some() {
         return Err(Denial::InvalidToken);
     }
     if let Some(machine_id) = dev_machine_id {
-        if dm_found != Some(machine_id) {
+        let dev = dev_machine::Entity::find_by_id(machine_id)
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        let Some(dev) = dev else {
             return Err(Denial::ServerError);
-        }
-        if dm_revoked.is_some() {
+        };
+        if dev.revoked_at.is_some() {
             return Err(Denial::InvalidToken);
         }
     }
-    let member: Option<bool> = sqlx::query_scalar(MACHINE_MEMBER_SQL)
-        .bind(workspace_id)
-        .bind(user_id)
-        .fetch_optional(pool)
+    let member = is_active_workspace_member(&db, workspace_id, user_id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    if !member.unwrap_or(false) {
+    if !member {
         pidash_services::domain::tokens::revoke_machine_token_by_id(
             &pidash_db::pool::sea_orm_connection(pool),
             id,
@@ -635,18 +642,26 @@ async fn require_project_member(
     project_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<(), Denial> {
-    let role: Option<i16> = sqlx::query_scalar(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE w.slug = $1 AND pm.member_id = $2 AND pm.project_id = $3
-           AND pm.is_active AND pm.deleted_at IS NULL LIMIT 1"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let ws = workspaces::Entity::find()
+        .filter(workspaces::Column::Slug.eq(slug))
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let role = if let Some(ws) = ws {
+        let hit = project_members::Entity::find()
+            .filter(project_members::Column::WorkspaceId.eq(ws.id))
+            .filter(project_members::Column::MemberId.eq(*user_id))
+            .filter(project_members::Column::ProjectId.eq(*project_id))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        hit.map(|m| m.role)
+    } else {
+        None
+    };
     let facts = ProjectFacts {
         workspace: WorkspaceId::from(slug.to_owned()),
         project_id: ProjectId::from(project_id.to_string()),
@@ -678,12 +693,15 @@ async fn require_project_member(
 /// `ZoneInfo('')` raises `ValueError` (not `KeyError`), which falls
 /// through to the generic 500 (`api/views/base.py:166-171`).
 async fn request_timezone(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Tz, Denial> {
-    let zone: Option<String> =
-        sqlx::query_scalar(r#"SELECT user_timezone FROM users WHERE id = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = users::Entity::find_by_id(*user_id)
+        .select_only()
+        .column(users::Column::UserTimezone)
+        .into_tuple::<Option<String>>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let zone: Option<String> = row.flatten();
     match zone.as_deref() {
         None => Err(Denial::ServerError),
         Some("") => Err(Denial::ServerError),
@@ -733,69 +751,6 @@ async fn context(
 // ---------------------------------------------------------------------------
 // Row reads
 // ---------------------------------------------------------------------------
-
-/// Physical positions inside `SELECT "intake_issues".*` (from
-/// `information_schema`, `pidash_426`): `*` expands in physical
-/// (migration) order, NOT `_meta` order. Existing positions are stable
-/// under migrations (`ADD COLUMN` appends; `DROP COLUMN` leaves its
-/// `attnum` gap), and any skew fails loudly in the contract suite.
-const II_CREATED_AT: usize = 0;
-const II_UPDATED_AT: usize = 1;
-const II_ID: usize = 2;
-const II_STATUS: usize = 3;
-const II_SNOOZED_TILL: usize = 4;
-const II_SOURCE: usize = 5;
-const II_CREATED_BY: usize = 6;
-const II_DUPLICATE_TO: usize = 7;
-const II_INTAKE: usize = 8;
-const II_ISSUE: usize = 9;
-const II_PROJECT: usize = 10;
-const II_UPDATED_BY: usize = 11;
-const II_WORKSPACE: usize = 12;
-const II_EXTERNAL_ID: usize = 13;
-const II_EXTERNAL_SOURCE: usize = 14;
-const II_DELETED_AT: usize = 15;
-const II_EXTRA: usize = 16;
-const II_SOURCE_EMAIL: usize = 17;
-/// Column count of `intake_issues.*`: the `issues.*` block starts here in
-/// the joined list/detail rows.
-const II_WIDTH: usize = 18;
-
-/// Physical positions inside `SELECT "issues".*` (same source).
-const IS_CREATED_AT: usize = 0;
-const IS_UPDATED_AT: usize = 1;
-const IS_ID: usize = 2;
-const IS_NAME: usize = 3;
-const IS_DESCRIPTION_JSON: usize = 4;
-const IS_PRIORITY: usize = 5;
-const IS_START_DATE: usize = 6;
-const IS_TARGET_DATE: usize = 7;
-const IS_SEQUENCE_ID: usize = 8;
-const IS_CREATED_BY: usize = 9;
-const IS_PARENT: usize = 10;
-const IS_PROJECT: usize = 11;
-const IS_STATE: usize = 12;
-const IS_UPDATED_BY: usize = 13;
-const IS_WORKSPACE: usize = 14;
-const IS_DESCRIPTION_HTML: usize = 15;
-const IS_DESCRIPTION_STRIPPED: usize = 16;
-const IS_COMPLETED_AT: usize = 17;
-const IS_SORT_ORDER: usize = 18;
-const IS_POINT: usize = 19;
-const IS_ARCHIVED_AT: usize = 20;
-const IS_IS_DRAFT: usize = 21;
-const IS_EXTERNAL_ID: usize = 22;
-const IS_EXTERNAL_SOURCE: usize = 23;
-const IS_DESCRIPTION_BINARY: usize = 24;
-const IS_ESTIMATE_POINT: usize = 25;
-const IS_TYPE: usize = 26;
-const IS_DELETED_AT: usize = 27;
-const IS_GIT_WORK_BRANCH: usize = 28;
-const IS_ASSIGNED_POD: usize = 29;
-const IS_WORKPAD: usize = 30;
-const IS_CREATED_VIA: usize = 31;
-const IS_AGENT_EXECUTOR: usize = 32;
-const IS_COMPLEXITY_SCORE: usize = 33;
 
 /// One `intake_issues` row.
 #[derive(Debug, Clone)]
@@ -859,106 +814,9 @@ struct IssueRow {
     workpad: String,
 }
 
-fn cell<T>(row: &sqlx::postgres::PgRow, index: usize) -> Result<T, Denial>
-where
-    T: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-{
-    row.try_get(index).map_err(|_| Denial::ServerError)
-}
-
-impl IntakeIssueRow {
-    /// Decode the leading `intake_issues.*` block of a joined row.
-    /// Name-based decoding is impossible here: sqlx resolves duplicate
-    /// column names to the LAST table, so `"id"` would read
-    /// `projects.id` (verified in sqlx-postgres 0.8.6
-    /// `connection/describe.rs`: later `insert`s overwrite).
-    fn from_joined(row: &sqlx::postgres::PgRow) -> Result<Self, Denial> {
-        Ok(Self {
-            created_at: cell(row, II_CREATED_AT)?,
-            updated_at: cell(row, II_UPDATED_AT)?,
-            id: cell(row, II_ID)?,
-            status: cell(row, II_STATUS)?,
-            snoozed_till: cell(row, II_SNOOZED_TILL)?,
-            source: cell(row, II_SOURCE)?,
-            created_by_id: cell(row, II_CREATED_BY)?,
-            duplicate_to_id: cell(row, II_DUPLICATE_TO)?,
-            intake_id: cell(row, II_INTAKE)?,
-            issue_id: cell(row, II_ISSUE)?,
-            project_id: cell(row, II_PROJECT)?,
-            updated_by_id: cell(row, II_UPDATED_BY)?,
-            workspace_id: cell(row, II_WORKSPACE)?,
-            external_id: cell(row, II_EXTERNAL_ID)?,
-            external_source: cell(row, II_EXTERNAL_SOURCE)?,
-            deleted_at: cell(row, II_DELETED_AT)?,
-            extra: cell(row, II_EXTRA)?,
-            source_email: cell(row, II_SOURCE_EMAIL)?,
-        })
-    }
-
-    /// Decode a standalone `intake_issues` row selected with the
-    /// explicit [`INTAKE_ISSUE_COLS`] list (same field order as the
-    /// physical block above, so one decoder serves both).
-    fn from_row(row: &sqlx::postgres::PgRow) -> Result<Self, Denial> {
-        Self::from_joined(row)
-    }
-}
-
-/// Explicit column list in physical-block order for standalone
-/// `intake_issues` reads (avoids `SELECT *` while keeping one decoder).
-const INTAKE_ISSUE_COLS: &str = "ii.created_at, ii.updated_at, ii.id, ii.status, ii.snoozed_till, ii.source, \
-     ii.created_by_id, ii.duplicate_to_id, ii.intake_id, ii.issue_id, ii.project_id, ii.updated_by_id, \
-     ii.workspace_id, ii.external_id, ii.external_source, ii.deleted_at, ii.extra, ii.source_email";
+impl IntakeIssueRow {}
 
 impl IssueRow {
-    /// Decode the `issues.*` block of a joined row (offset [`II_WIDTH`]).
-    fn from_joined(row: &sqlx::postgres::PgRow) -> Result<Self, Denial> {
-        Self::from_block(row, II_WIDTH)
-    }
-
-    /// Decode a standalone `issues` row selected with [`ISSUE_COLS`].
-    fn from_row(row: &sqlx::postgres::PgRow) -> Result<Self, Denial> {
-        Self::from_block(row, 0)
-    }
-
-    fn from_block(row: &sqlx::postgres::PgRow, base: usize) -> Result<Self, Denial> {
-        Ok(Self {
-            created_at: cell(row, base + IS_CREATED_AT)?,
-            updated_at: cell(row, base + IS_UPDATED_AT)?,
-            id: cell(row, base + IS_ID)?,
-            name: cell(row, base + IS_NAME)?,
-            description_json: cell(row, base + IS_DESCRIPTION_JSON)?,
-            priority: cell(row, base + IS_PRIORITY)?,
-            start_date: cell(row, base + IS_START_DATE)?,
-            target_date: cell(row, base + IS_TARGET_DATE)?,
-            sequence_id: cell(row, base + IS_SEQUENCE_ID)?,
-            created_by_id: cell(row, base + IS_CREATED_BY)?,
-            parent_id: cell(row, base + IS_PARENT)?,
-            project_id: cell(row, base + IS_PROJECT)?,
-            state_id: cell(row, base + IS_STATE)?,
-            updated_by_id: cell(row, base + IS_UPDATED_BY)?,
-            workspace_id: cell(row, base + IS_WORKSPACE)?,
-            description_html: cell(row, base + IS_DESCRIPTION_HTML)?,
-            description_stripped: cell(row, base + IS_DESCRIPTION_STRIPPED)?,
-            completed_at: cell(row, base + IS_COMPLETED_AT)?,
-            sort_order: cell(row, base + IS_SORT_ORDER)?,
-            point: cell(row, base + IS_POINT)?,
-            archived_at: cell(row, base + IS_ARCHIVED_AT)?,
-            is_draft: cell(row, base + IS_IS_DRAFT)?,
-            external_id: cell(row, base + IS_EXTERNAL_ID)?,
-            external_source: cell(row, base + IS_EXTERNAL_SOURCE)?,
-            description_binary: cell(row, base + IS_DESCRIPTION_BINARY)?,
-            estimate_point_id: cell(row, base + IS_ESTIMATE_POINT)?,
-            type_id: cell(row, base + IS_TYPE)?,
-            deleted_at: cell(row, base + IS_DELETED_AT)?,
-            git_work_branch: cell(row, base + IS_GIT_WORK_BRANCH)?,
-            assigned_pod_id: cell(row, base + IS_ASSIGNED_POD)?,
-            workpad: cell(row, base + IS_WORKPAD)?,
-            created_via: cell(row, base + IS_CREATED_VIA)?,
-            agent_executor: cell(row, base + IS_AGENT_EXECUTOR)?,
-            complexity_score: cell(row, base + IS_COMPLEXITY_SCORE)?,
-        })
-    }
-
     /// The full-save field set: every column, for the domain write the
     /// update/delete drivers run after overlaying their validated input.
     /// `priority`/`complexity_score` fall back exactly like the old
@@ -1082,26 +940,6 @@ impl IssueRow {
     }
 }
 
-/// Explicit column list in physical-block order for standalone `issues`
-/// reads (the render subset; `workpad` excluded — never rendered here).
-const ISSUE_COLS: &str = "created_at, updated_at, id, name, description_json, priority, \
-     start_date, target_date, sequence_id, created_by_id, parent_id, project_id, state_id, \
-     updated_by_id, workspace_id, description_html, description_stripped, completed_at, \
-     sort_order, point, archived_at, is_draft, external_id, external_source, description_binary, \
-     estimate_point_id, type_id, deleted_at, git_work_branch, assigned_pod_id, workpad, \
-     created_via, agent_executor, complexity_score";
-
-/// [`ISSUE_COLS`] with every column qualified by the `issues` table — for
-/// reads that join another table (e.g. `workspaces`), where the bare column
-/// names are ambiguous.
-fn issue_cols_qualified() -> String {
-    ISSUE_COLS
-        .split(", ")
-        .map(|col| format!("issues.{col}"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 // ---------------------------------------------------------------------------
 // Renders (`IntakeIssueSerializer` + `IssueExpandSerializer` read shapes)
 // ---------------------------------------------------------------------------
@@ -1152,23 +990,35 @@ fn fix_nonfinite_sort(rendered: &str, sort_order: f64) -> String {
 /// ("-created_at",)` on both through tables; soft-deleted links
 /// excluded by the default managers).
 async fn issue_label_ids(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<Vec<Uuid>, Denial> {
-    sqlx::query_scalar(
-        r#"SELECT label_id FROM issue_labels WHERE issue_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC"#,
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
+    use sea_orm::QueryOrder;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = issue_labels::Entity::find()
+        .filter(issue_labels::Column::IssueId.eq(*issue_id))
+        .filter(issue_labels::Column::DeletedAt.is_null())
+        .order_by_desc(issue_labels::Column::CreatedAt)
+        .select_only()
+        .column(issue_labels::Column::LabelId)
+        .into_tuple::<Uuid>()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(rows)
 }
 
 async fn issue_assignee_ids(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<Vec<Uuid>, Denial> {
-    sqlx::query_scalar(
-        r#"SELECT assignee_id FROM issue_assignees WHERE issue_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC"#,
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
+    use sea_orm::QueryOrder;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = issue_assignees::Entity::find()
+        .filter(issue_assignees::Column::IssueId.eq(*issue_id))
+        .filter(issue_assignees::Column::DeletedAt.is_null())
+        .order_by_desc(issue_assignees::Column::CreatedAt)
+        .select_only()
+        .column(issue_assignees::Column::AssigneeId)
+        .into_tuple::<Uuid>()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(rows)
 }
 
 /// Nested `StateLiteSerializer` (`id`, `name`, `color`, `group`): a null
@@ -1178,19 +1028,18 @@ async fn render_state_lite(pool: &sqlx::PgPool, state_id: &Option<Uuid>) -> Resu
     let Some(id) = state_id else {
         return Ok(Value::Null);
     };
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query(r#"SELECT "id", "name", "color", "group" FROM "states" WHERE "id" = $1"#)
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = states::Entity::find_by_id(*id)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let Some(row) = row else {
         return Ok(Value::Null);
     };
-    let id: Uuid = row.try_get("id").map_err(|_| Denial::ServerError)?;
-    let name: String = row.try_get("name").map_err(|_| Denial::ServerError)?;
-    let color: String = row.try_get("color").map_err(|_| Denial::ServerError)?;
-    let group: String = row.try_get("group").map_err(|_| Denial::ServerError)?;
+    let id: Uuid = row.id;
+    let name: String = row.name;
+    let color: String = row.color;
+    let group: String = row.group;
     let mut map = Map::with_capacity(4);
     map.insert("id".to_owned(), Value::String(id.to_string()));
     map.insert("name".to_owned(), Value::String(name));
@@ -1351,12 +1200,15 @@ async fn render_issue_full(
     let assignees = issue_assignee_ids(pool, &issue.id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let identifier: Option<String> =
-        sqlx::query_scalar(r#"SELECT "identifier" FROM "projects" WHERE "id" = $1"#)
-            .bind(issue.project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let proj = projects::Entity::find_by_id(issue.project_id)
+        .select_only()
+        .column(projects::Column::Identifier)
+        .into_tuple::<String>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let identifier: Option<String> = proj;
     // `get_url` dereferences `obj.project` unguarded: a dangling
     // `project_id` is the 500 Python's `DoesNotExist`-outside-`getattr`
     // shape becomes. (`workspace_id`/`sequence_id` cannot dangle the
@@ -2637,34 +2489,52 @@ impl ErrorBag {
 
 /// `users`: Django's stock manager — bare row existence.
 async fn user_exists(pool: &sqlx::PgPool, id: &Uuid) -> Result<bool, Denial> {
-    sqlx::query_scalar(r#"SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)"#)
-        .bind(id)
-        .fetch_one(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let hit = users::Entity::find_by_id(*id)
+        .one(&db)
         .await
-        .map_err(|_| Denial::ServerError)
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
 }
 
 /// Soft-deletion managers (`labels`, `estimate_points`, `issue_types`):
-/// live rows only.
+/// live rows only. Generic table name dispatches to the right entity.
 async fn live_exists(pool: &sqlx::PgPool, table: &str, id: &Uuid) -> Result<bool, Denial> {
-    let sql =
-        format!(r#"SELECT EXISTS(SELECT 1 FROM "{table}" WHERE id = $1 AND deleted_at IS NULL)"#);
-    sqlx::query_scalar(&sql)
-        .bind(id)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| Denial::ServerError)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let exists = match table {
+        "labels" => labels::Entity::find_by_id(*id)
+            .filter(labels::Column::DeletedAt.is_null())
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?
+            .is_some(),
+        "estimate_points" => estimate_points::Entity::find_by_id(*id)
+            .filter(estimate_points::Column::DeletedAt.is_null())
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?
+            .is_some(),
+        "issue_types" => issue_types::Entity::find_by_id(*id)
+            .filter(issue_types::Column::DeletedAt.is_null())
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?
+            .is_some(),
+        _ => return Err(Denial::ServerError),
+    };
+    Ok(exists)
 }
 
 /// `StateManager`: live rows outside the triage group.
 async fn state_choice_exists(pool: &sqlx::PgPool, id: &Uuid) -> Result<bool, Denial> {
-    sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM states WHERE id = $1 AND deleted_at IS NULL AND "group" != 'triage')"#,
-    )
-    .bind(id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let hit = states::Entity::find_by_id(*id)
+        .filter(states::Column::DeletedAt.is_null())
+        .filter(states::Column::Group.ne("triage"))
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
 }
 
 /// `IssueManager` (`db/models/issue.py:30-41`): live, non-archived,
@@ -2673,51 +2543,75 @@ async fn state_choice_exists(pool: &sqlx::PgPool, id: &Uuid) -> Result<bool, Den
 /// primary keys. (The `NULL`-group shape mirrors Django's
 /// `NOT (group = 'triage' AND group IS NOT NULL)` exactly.)
 async fn issue_choice_exists(pool: &sqlx::PgPool, id: &Uuid) -> Result<bool, Denial> {
-    sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM issues i
-           JOIN projects p ON p.id = i.project_id
-           LEFT JOIN states s ON s.id = i.state_id
-           WHERE i.id = $1 AND i.deleted_at IS NULL AND i.archived_at IS NULL
-           AND i.is_draft = FALSE AND p.archived_at IS NULL
-           AND (s."group" IS NULL OR s."group" != 'triage'))"#,
-    )
-    .bind(id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
+    use sea_orm::{JoinType, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    // Issues filtered, then join projects to check archived_at, and LEFT JOIN states for group.
+    let row = issues::Entity::find_by_id(*id)
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(issues::Column::ArchivedAt.is_null())
+        .filter(issues::Column::IsDraft.eq(false))
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(
+            JoinType::LeftJoin,
+            issues::Entity::belongs_to(states::Entity)
+                .from(issues::Column::StateId)
+                .to(states::Column::Id)
+                .into(),
+        )
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(
+            sea_orm::Condition::any()
+                .add(states::Column::Group.is_null())
+                .add(states::Column::Group.ne("triage")),
+        )
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.is_some())
 }
 
 /// `PodManager`: live pods.
 async fn pod_exists(pool: &sqlx::PgPool, id: &Uuid) -> Result<bool, Denial> {
-    sqlx::query_scalar(r#"SELECT EXISTS(SELECT 1 FROM pod WHERE id = $1 AND deleted_at IS NULL)"#)
-        .bind(id)
-        .fetch_one(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let hit = pod::Entity::find_by_id(*id)
+        .filter(pod::Column::DeletedAt.is_null())
+        .one(&db)
         .await
-        .map_err(|_| Denial::ServerError)
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
 }
 
 /// `type_id`'s explicit `IssueType.objects.all()`: soft-deleted rows
 /// count (unlike the auto `type` field, which uses the manager).
 async fn issue_type_any_exists(pool: &sqlx::PgPool, id: &Uuid) -> Result<bool, Denial> {
-    sqlx::query_scalar(r#"SELECT EXISTS(SELECT 1 FROM issue_types WHERE id = $1)"#)
-        .bind(id)
-        .fetch_one(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let hit = issue_types::Entity::find_by_id(*id)
+        .one(&db)
         .await
-        .map_err(|_| Denial::ServerError)
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
 }
 
 /// `Issue.has_active_run` (`db/models/issue.py:275-282`): an `agent_run`
 /// on this issue in a non-terminal status.
 async fn issue_has_active_run(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<bool, Denial> {
-    sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM agent_run WHERE work_item_id = $1 AND status IN
-           ('queued', 'assigned', 'waiting_for_worktree', 'running', 'cancel_requested',
-            'awaiting_approval', 'awaiting_reauth', 'paused_awaiting_input'))"#,
-    )
-    .bind(issue_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let hit = agent_run::Entity::find()
+        .filter(agent_run::Column::WorkItemId.eq(*issue_id))
+        .filter(agent_run::Column::Status.is_in([
+            "queued",
+            "assigned",
+            "waiting_for_worktree",
+            "running",
+            "cancel_requested",
+            "awaiting_approval",
+            "awaiting_reauth",
+            "paused_awaiting_input",
+        ]))
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
 }
 
 /// Validate one primary-key input: format first (curly/incorrect
@@ -3274,14 +3168,16 @@ async fn validate_issue_input(
     // change — assign, reassign or clear — with null counted as a value.
     if let Some(new_pod) = patch.assigned_pod {
         if let Some(pod_id) = new_pod {
-            let pod_project: Option<Uuid> = sqlx::query_scalar(
-                r#"SELECT project_id FROM pod WHERE id = $1 AND deleted_at IS NULL"#,
-            )
-            .bind(pod_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            let pod_project = pod_project.ok_or(Denial::ServerError)?;
+            let db = pidash_db::pool::sea_orm_connection(pool);
+            let pod_row = pod::Entity::find_by_id(pod_id)
+                .filter(pod::Column::DeletedAt.is_null())
+                .select_only()
+                .column(pod::Column::ProjectId)
+                .into_tuple::<Uuid>()
+                .one(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            let pod_project = pod_row.ok_or(Denial::ServerError)?;
             if pod_project != instance.project_id {
                 return Err(Denial::FieldErrors(single_field(
                     "assigned_pod",
@@ -3479,29 +3375,30 @@ async fn validate_intake_input(
     // `DoesNotExist` out of `issue.state` → the 404 branch, not a 400)
     // plus the default-state lookup.
     if patch.status == Some(1) {
+        let db = pidash_db::pool::sea_orm_connection(pool);
         let group = match issue.state_id {
             None => None,
             Some(state_id) => {
-                let group: Option<String> =
-                    sqlx::query_scalar(r#"SELECT "group" FROM states WHERE id = $1"#)
-                        .bind(state_id)
-                        .fetch_optional(pool)
-                        .await
-                        .map_err(|_| Denial::ServerError)?;
-                Some(group.ok_or(Denial::ResourceMissing)?)
+                let g = states::Entity::find_by_id(state_id)
+                    .select_only()
+                    .column(states::Column::Group)
+                    .into_tuple::<String>()
+                    .one(&db)
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
+                Some(g.ok_or(Denial::ResourceMissing)?)
             }
         };
-        let default_exists: bool = sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM states
-               WHERE workspace_id = $1 AND project_id = $2 AND "default" = TRUE
-               AND deleted_at IS NULL AND "group" != 'triage')"#,
-        )
-        .bind(intake_issue.workspace_id)
-        .bind(intake_issue.project_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?
-        .unwrap_or(false);
+        let hit = states::Entity::find()
+            .filter(states::Column::WorkspaceId.eq(intake_issue.workspace_id))
+            .filter(states::Column::ProjectId.eq(intake_issue.project_id))
+            .filter(states::Column::Default.eq(true))
+            .filter(states::Column::DeletedAt.is_null())
+            .filter(states::Column::Group.ne("triage"))
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        let default_exists = hit.is_some();
         if let Err(message) =
             intake_types::validate_accept(Some(1), group.as_deref(), default_exists)
         {
@@ -3619,22 +3516,18 @@ struct ProjectRow {
 /// is the `ObjectDoesNotExist` 404 (raised outside `get_object`, so the
 /// `handle_exception` branch renders it — NOT the DRF `Http404` body).
 async fn fetch_project(pool: &sqlx::PgPool, id: &Uuid) -> Result<ProjectRow, Denial> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "id", "workspace_id", "intake_view" FROM "projects" WHERE "id" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use pidash_db::entity::projects;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = projects::Entity::find_by_id(*id)
+        .filter(projects::Column::DeletedAt.is_null())
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let row = row.ok_or(Denial::ResourceMissing)?;
     Ok(ProjectRow {
-        id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-        workspace_id: row
-            .try_get("workspace_id")
-            .map_err(|_| Denial::ServerError)?,
-        intake_view: row
-            .try_get("intake_view")
-            .map_err(|_| Denial::ServerError)?,
+        id: row.id,
+        workspace_id: row.workspace_id,
+        intake_view: row.intake_view,
     })
 }
 
@@ -3644,17 +3537,20 @@ async fn fetch_intake_id(
     slug: &str,
     project_id: &Uuid,
 ) -> Result<Option<Uuid>, Denial> {
-    // The pinned lookup selects `*` (Django `.first()` returns the full
-    // object), so decode the row and read `id` by name — `query_scalar`
-    // cannot decode a multi-column row.
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&intake_queries::intake_lookup_sql())
-        .bind(slug)
-        .bind(project_id)
-        .fetch_optional(pool)
+    use pidash_db::entity::{intakes, workspaces};
+    use sea_orm::{JoinType, QueryOrder};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    // INNER JOIN workspaces for slug, with deleted_at scope and ordering by name ASC (Meta.ordering).
+    let row = intakes::Entity::find()
+        .join(JoinType::InnerJoin, intakes::Relation::Workspaces.def())
+        .filter(intakes::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(intakes::Column::ProjectId.eq(*project_id))
+        .order_by_asc(intakes::Column::Name)
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.try_get("id").map_err(|_| Denial::ServerError))
-        .transpose()
+    Ok(row.map(|r| r.id))
 }
 
 /// `IntakeIssue.objects.get(issue_id, workspace__slug, project_id,
@@ -3668,22 +3564,47 @@ async fn get_intake_issue(
     project_id: &Uuid,
     intake_id: &Uuid,
 ) -> Result<IntakeIssueRow, Denial> {
-    let sql = format!(
-        "SELECT {INTAKE_ISSUE_COLS} FROM intake_issues ii JOIN workspaces w ON w.id = ii.workspace_id \
-         WHERE ii.issue_id = $1 AND w.slug = $2 AND ii.project_id = $3 AND ii.intake_id = $4 \
-         AND ii.deleted_at IS NULL"
-    );
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(issue_id)
-        .bind(slug)
-        .bind(project_id)
-        .bind(intake_id)
-        .fetch_all(pool)
+    use pidash_db::entity::{intake_issues, workspaces};
+    use sea_orm::{JoinType, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = intake_issues::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            intake_issues::Relation::Workspaces.def(),
+        )
+        .filter(intake_issues::Column::IssueId.eq(*issue_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(intake_issues::Column::ProjectId.eq(*project_id))
+        .filter(intake_issues::Column::IntakeId.eq(*intake_id))
+        .filter(intake_issues::Column::DeletedAt.is_null())
+        .all(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     match rows.len() {
         0 => Err(Denial::ResourceMissing),
-        1 => IntakeIssueRow::from_row(&rows[0]),
+        1 => {
+            let m = &rows[0];
+            Ok(IntakeIssueRow {
+                id: m.id,
+                created_at: m.created_at.with_timezone(&Utc),
+                updated_at: m.updated_at.with_timezone(&Utc),
+                created_by_id: m.created_by_id,
+                updated_by_id: m.updated_by_id,
+                deleted_at: m.deleted_at.map(|dt| dt.with_timezone(&Utc)),
+                project_id: m.project_id,
+                workspace_id: m.workspace_id,
+                intake_id: m.intake_id,
+                issue_id: m.issue_id,
+                status: m.status,
+                snoozed_till: m.snoozed_till.map(|dt| dt.with_timezone(&Utc)),
+                duplicate_to_id: m.duplicate_to_id,
+                source: m.source.clone(),
+                source_email: m.source_email.clone(),
+                external_source: m.external_source.clone(),
+                external_id: m.external_id.clone(),
+                extra: m.extra.clone(),
+            })
+        }
         _ => Err(Denial::ServerError),
     }
 }
@@ -3696,18 +3617,25 @@ async fn get_member_role(
     project_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<i16, Denial> {
-    let rows: Vec<i16> = sqlx::query_scalar(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE w.slug = $1 AND pm.member_id = $2 AND pm.project_id = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use pidash_db::entity::{project_members, workspaces};
+    use sea_orm::{JoinType, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = project_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .select_only()
+        .column(project_members::Column::Role)
+        .into_tuple::<i16>()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     match rows.len() {
         0 => Err(Denial::ResourceMissing),
         1 => Ok(rows[0]),
@@ -3717,23 +3645,32 @@ async fn get_member_role(
 
 /// The patch issue fetch (`views/intake.py:366-372`): the annotated
 /// live-issue `.get()` (the label/assignee annotations ride along for
-/// SQL parity but no read path consumes them).
+/// SQL parity but no read path consumes them). Simplified to a plain
+/// issue fetch via SeaORM.
 async fn get_patch_issue(
     pool: &sqlx::PgPool,
     issue_id: &Uuid,
     slug: &str,
     project_id: &Uuid,
 ) -> Result<IssueRow, Denial> {
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&intake_queries::patch_issue_lookup_sql())
-        .bind(issue_id)
-        .bind(slug)
-        .bind(project_id)
-        .fetch_all(pool)
+    use pidash_db::entity::{issues, workspaces};
+    use sea_orm::{JoinType, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = issues::Entity::find()
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .filter(issues::Column::Id.eq(*issue_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issues::Column::ProjectId.eq(*project_id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .all(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     match rows.len() {
         0 => Err(Denial::ResourceMissing),
-        1 => IssueRow::from_block(&rows[0], 0),
+        1 => {
+            let m = &rows[0];
+            Ok(IssueRow::from_model(m))
+        }
         _ => Err(Denial::ServerError),
     }
 }
@@ -3742,14 +3679,14 @@ async fn get_patch_issue(
 /// (plain, unfiltered) fetch — soft-deleted rows resolve, only a truly
 /// missing row 404s.
 async fn fetch_companion_issue(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<IssueRow, Denial> {
-    let sql = format!("SELECT {ISSUE_COLS} FROM issues WHERE id = $1");
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(issue_id)
-        .fetch_optional(pool)
+    use pidash_db::entity::issues;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = issues::Entity::find_by_id(*issue_id)
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     let row = row.ok_or(Denial::ResourceMissing)?;
-    IssueRow::from_row(&row)
+    Ok(IssueRow::from_model(&row))
 }
 
 /// The accept default (`State.objects.filter(workspace, project,
@@ -3760,16 +3697,19 @@ async fn fetch_default_state(
     workspace_id: &Uuid,
     project_id: &Uuid,
 ) -> Result<Option<Uuid>, Denial> {
-    sqlx::query_scalar(
-        r#"SELECT "id" FROM "states" WHERE "workspace_id" = $1 AND "project_id" = $2
-           AND "default" = TRUE AND "deleted_at" IS NULL AND "group" != 'triage'
-           ORDER BY "sequence" LIMIT 1"#,
-    )
-    .bind(workspace_id)
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
+    use sea_orm::QueryOrder;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = states::Entity::find()
+        .filter(states::Column::WorkspaceId.eq(*workspace_id))
+        .filter(states::Column::ProjectId.eq(*project_id))
+        .filter(states::Column::Default.eq(true))
+        .filter(states::Column::DeletedAt.is_null())
+        .filter(states::Column::Group.ne("triage"))
+        .order_by_asc(states::Column::Sequence)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(|r| r.id))
 }
 
 // ---------------------------------------------------------------------------
@@ -3930,45 +3870,40 @@ async fn save_intake_patch(
     patch: &IntakePatch,
     user_id: &Uuid,
 ) -> Result<IntakeIssueRow, Denial> {
+    use pidash_db::entity::intake_issues;
+    use sea_orm::{ActiveModelTrait, Set};
     let now = cycle_mod::micros_now();
-    sqlx::query(
-        r#"UPDATE "intake_issues" SET "status" = $1, "snoozed_till" = $2, "duplicate_to_id" = $3,
-           "source" = $4, "source_email" = $5, "updated_at" = $6, "updated_by_id" = $7
-           WHERE "id" = $8"#,
-    )
-    .bind(patch.status.unwrap_or(row.status))
-    .bind(patch.snoozed_till.unwrap_or(row.snoozed_till))
-    .bind(patch.duplicate_to.unwrap_or(row.duplicate_to_id))
-    .bind(patch.source.clone().unwrap_or_else(|| row.source.clone()))
-    .bind(
-        patch
-            .source_email
-            .clone()
-            .unwrap_or_else(|| row.source_email.clone()),
-    )
-    .bind(now)
-    .bind(user_id)
-    .bind(row.id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let status = patch.status.unwrap_or(row.status);
+    let snoozed = patch.snoozed_till.unwrap_or(row.snoozed_till);
+    let dup = patch.duplicate_to.unwrap_or(row.duplicate_to_id);
+    let source = patch.source.clone().unwrap_or_else(|| row.source.clone());
+    let email = patch
+        .source_email
+        .clone()
+        .unwrap_or_else(|| row.source_email.clone());
+    let am = intake_issues::ActiveModel {
+        id: Set(row.id),
+        status: Set(status),
+        snoozed_till: Set(
+            snoozed.map(|dt| dt.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap()))
+        ),
+        duplicate_to_id: Set(dup),
+        source: Set(source.clone()),
+        source_email: Set(email.clone()),
+        updated_at: Set(now.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap())),
+        updated_by_id: Set(Some(*user_id)),
+        ..Default::default()
+    };
+    // Use update_many via ActiveModel update
+    am.update(&db).await.map_err(|_| Denial::ServerError)?;
 
     let mut saved = row.clone();
-    if let Some(status) = patch.status {
-        saved.status = status;
-    }
-    if let Some(snoozed) = patch.snoozed_till {
-        saved.snoozed_till = snoozed;
-    }
-    if let Some(duplicate) = patch.duplicate_to {
-        saved.duplicate_to_id = duplicate;
-    }
-    if let Some(source) = &patch.source {
-        saved.source = source.clone();
-    }
-    if let Some(email) = &patch.source_email {
-        saved.source_email = email.clone();
-    }
+    saved.status = status;
+    saved.snoozed_till = snoozed;
+    saved.duplicate_to_id = dup;
+    saved.source = source;
+    saved.source_email = email;
     saved.updated_at = now;
     saved.updated_by_id = Some(*user_id);
     Ok(saved)
@@ -4037,7 +3972,7 @@ async fn apply_triage_transition(
 
 /// Instance soft delete (`db/mixins.py:72-78`): `deleted_at` stamp,
 /// `save()` (audit moves), then the sweep fan-out (best-effort, like
-/// every `.delay()` on these endpoints).
+/// every `.delay()` on these endpoints). Uses SeaORM Entity (avoids raw SQL).
 async fn soft_delete_row(
     pool: &sqlx::PgPool,
     table: &str,
@@ -4045,21 +3980,28 @@ async fn soft_delete_row(
     id: &Uuid,
     user_id: &Uuid,
 ) -> Result<(), Denial> {
-    // `delete()` stamps `deleted_at`, then `save()`'s `auto_now`
-    // moves `updated_at` — two clock reads.
     let deleted_at = cycle_mod::micros_now();
     let updated_at = cycle_mod::micros_now();
-    let sql = format!(
-        "UPDATE \"{table}\" SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4"
-    );
-    sqlx::query(&sql)
-        .bind(deleted_at)
-        .bind(updated_at)
-        .bind(user_id)
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    match table {
+        "intake_issues" => {
+            use pidash_db::entity::intake_issues;
+            use sea_orm::{ActiveModelTrait, Set};
+            let am = intake_issues::ActiveModel {
+                id: Set(*id),
+                deleted_at: Set(Some(
+                    deleted_at.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap()),
+                )),
+                updated_at: Set(
+                    updated_at.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap())
+                ),
+                updated_by_id: Set(Some(*user_id)),
+                ..Default::default()
+            };
+            am.update(&db).await.map_err(|_| Denial::ServerError)?;
+        }
+        _ => return Err(Denial::ServerError),
+    }
     cycle_mod::enqueue_soft_delete(pool, model, id).await;
     Ok(())
 }
@@ -4146,25 +4088,40 @@ async fn ensure_triage(
     project: &ProjectRow,
     user_id: &Uuid,
 ) -> Result<Uuid, Denial> {
-    // The pinned lookup selects `*`; read `id` by name off the row
-    // (`query_scalar` cannot decode a multi-column row).
-    let existing: Option<Uuid> = sqlx::query(&intake_queries::triage_lookup_sql())
-        .bind(project.id)
-        .bind(slug)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?
-        .map(|row: sqlx::postgres::PgRow| row.try_get("id"))
-        .transpose()
-        .map_err(|_| Denial::ServerError)?;
+    use sea_orm::{JoinType, QueryOrder, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    // Triage lookup: states where group='triage', deleted_at IS NULL, project_id, workspace slug join, order by sequence ASC.
+    let existing = {
+        let row = states::Entity::find()
+            .join(JoinType::InnerJoin, states::Relation::Workspaces.def())
+            .filter(states::Column::Group.eq("triage"))
+            .filter(states::Column::DeletedAt.is_null())
+            .filter(states::Column::ProjectId.eq(project.id))
+            .filter(workspaces::Column::Slug.eq(slug))
+            .order_by_asc(states::Column::Sequence)
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        row.map(|r| r.id)
+    };
     if let Some(id) = existing {
         return Ok(id);
     }
-    let max_sequence: Option<f64> = sqlx::query_scalar(&intake_queries::triage_max_sequence_sql())
-        .bind(project.id)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    let max_sequence: Option<f64> = {
+        let row = states::Entity::find()
+            .filter(states::Column::ProjectId.eq(project.id))
+            .filter(states::Column::Group.ne("triage"))
+            .filter(states::Column::DeletedAt.is_null())
+            .select_only()
+            .column(states::Column::Sequence)
+            .order_by_desc(states::Column::Sequence)
+            .limit(1)
+            .into_tuple::<f64>()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        row
+    };
     let sequence = max_sequence
         .map(|max| max + 15000.0)
         .unwrap_or(intake_queries::TRIAGE_SEQUENCE_FALLBACK);
@@ -4310,28 +4267,33 @@ async fn insert_intake_issue(
     issue_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<IntakeIssueRow, Denial> {
+    use pidash_db::entity::intake_issues;
+    use sea_orm::{ActiveModelTrait, Set};
     let id = Uuid::new_v4();
     let created_at = cycle_mod::micros_now();
     let updated_at = cycle_mod::micros_now();
-    sqlx::query(
-        r#"INSERT INTO "intake_issues" ("id", "created_at", "updated_at", "created_by_id",
-           "updated_by_id", "deleted_at", "project_id", "workspace_id", "intake_id", "issue_id",
-           "status", "snoozed_till", "duplicate_to_id", "source", "source_email",
-           "external_source", "external_id", "extra")
-           VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, -2, NULL, NULL, 'IN_APP',
-           NULL, NULL, NULL, '{}')"#,
-    )
-    .bind(id)
-    .bind(created_at)
-    .bind(updated_at)
-    .bind(user_id)
-    .bind(project.id)
-    .bind(project.workspace_id)
-    .bind(intake_id)
-    .bind(issue_id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let am = intake_issues::ActiveModel {
+        id: Set(id),
+        created_at: Set(created_at.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap())),
+        updated_at: Set(updated_at.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap())),
+        created_by_id: Set(Some(*user_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        project_id: Set(project.id),
+        workspace_id: Set(project.workspace_id),
+        intake_id: Set(*intake_id),
+        issue_id: Set(*issue_id),
+        status: Set(-2),
+        snoozed_till: Set(None),
+        duplicate_to_id: Set(None),
+        source: Set(Some("IN_APP".to_owned())),
+        source_email: Set(None),
+        external_source: Set(None),
+        external_id: Set(None),
+        extra: Set(serde_json::json!({})),
+    };
+    am.insert(&db).await.map_err(|_| Denial::ServerError)?;
 
     Ok(IntakeIssueRow {
         id,
@@ -4367,20 +4329,6 @@ fn app_origin(state: &AppState) -> Result<String, Denial> {
     Err(Denial::ServerError)
 }
 
-/// The list `COUNT(*)` over the fixture scope: same joins + predicates
-/// as [`intake_issue_list_sql`], order stripped (Django's `.count()` —
-/// plain `COUNT(*)`, no `DISTINCT`).
-fn intake_issue_count_sql(list_sql: &str) -> String {
-    let from = list_sql
-        .find(" FROM \"intake_issues\"")
-        .expect("list sql carries the intake_issues from clause");
-    let mut count = format!("SELECT COUNT(*){}", &list_sql[from..]);
-    if let Some(order) = count.find(" ORDER BY ") {
-        count.truncate(order);
-    }
-    count
-}
-
 // ---------------------------------------------------------------------------
 // Unit 1 — list (`views/intake.py:106-119`)
 // ---------------------------------------------------------------------------
@@ -4394,6 +4342,8 @@ async fn intake_list(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> HandlerResult {
+    use pidash_db::entity::{intake_issues, workspaces};
+    use sea_orm::{JoinType, QueryOrder, QuerySelect};
     let ctx = context(&state, &headers, &slug, &raw_project_id).await?;
     let project = fetch_project(&ctx.pool, &ctx.project_id).await?;
     let intake_id = fetch_intake_id(&ctx.pool, &slug, &ctx.project_id).await?;
@@ -4411,44 +4361,107 @@ async fn intake_list(
 
     // The OR-`.none()` (`:72-74`): intake missing OR view disabled.
     let empty = intake_id.is_none() || !project.intake_view;
-    let mut list_sql = intake_queries::intake_issue_list_sql(None);
-    list_sql.push_str(&format!(
-        " LIMIT {} OFFSET {}",
-        window.stop - window.offset,
-        window.offset
-    ));
-    let count_sql = intake_issue_count_sql(&intake_queries::intake_issue_list_sql(None));
     let now = cycle_mod::micros_now();
-    let (rows, total_count) = if empty {
+    let (decoded, total_count) = if empty {
         (Vec::new(), 0)
     } else {
-        let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&list_sql)
-            .bind(now)
-            .bind(intake_id)
-            .bind(ctx.project_id)
-            .bind(&slug)
-            .fetch_all(&ctx.pool)
+        let intake_id = intake_id.unwrap();
+        let db = pidash_db::pool::sea_orm_connection(&ctx.pool);
+        // Resolve slug to workspace_id for join filtering (avoid JOIN in WHERE via subquery semantics of join).
+        // We do two-step: first fetch list via intake_issues with INNER JOINs for slug filtering.
+        let fetch_limit = (window.stop - window.offset) as u64;
+        let fetch_offset = window.offset as u64;
+        let base = intake_issues::Entity::find()
+            .join(JoinType::InnerJoin, intake_issues::Relation::Issues1.def())
+            .join(
+                JoinType::InnerJoin,
+                intake_issues::Relation::Workspaces.def(),
+            )
+            .join(JoinType::InnerJoin, intake_issues::Relation::Projects.def())
+            .filter(intake_issues::Column::DeletedAt.is_null())
+            .filter(intake_issues::Column::IntakeId.eq(intake_id))
+            .filter(intake_issues::Column::ProjectId.eq(ctx.project_id))
+            .filter(workspaces::Column::Slug.eq(slug.clone()))
+            .filter(
+                sea_orm::Condition::any()
+                    .add(
+                        intake_issues::Column::SnoozedTill
+                            .gte(now.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap())),
+                    )
+                    .add(intake_issues::Column::SnoozedTill.is_null()),
+            )
+            .order_by_desc(intake_issues::Column::CreatedAt)
+            .limit(fetch_limit)
+            .offset(fetch_offset);
+        let intake_rows = base
+            .clone()
+            .all(&db)
             .await
             .map_err(|_| Denial::ServerError)?;
-        let total_count: i64 = sqlx::query_scalar(&count_sql)
-            .bind(now)
-            .bind(intake_id)
-            .bind(ctx.project_id)
-            .bind(&slug)
-            .fetch_optional(&ctx.pool)
+        let total = intake_issues::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                intake_issues::Relation::Workspaces.def(),
+            )
+            .filter(intake_issues::Column::DeletedAt.is_null())
+            .filter(intake_issues::Column::IntakeId.eq(intake_id))
+            .filter(intake_issues::Column::ProjectId.eq(ctx.project_id))
+            .filter(workspaces::Column::Slug.eq(slug.clone()))
+            .filter(
+                sea_orm::Condition::any()
+                    .add(
+                        intake_issues::Column::SnoozedTill
+                            .gte(now.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap())),
+                    )
+                    .add(intake_issues::Column::SnoozedTill.is_null()),
+            )
+            .count(&db)
             .await
-            .map_err(|_| Denial::ServerError)?
-            .unwrap_or(0);
-        (rows, total_count)
+            .map_err(|_| Denial::ServerError)? as i64;
+        // Fetch companion issues in one query.
+        if intake_rows.is_empty() {
+            (Vec::new(), total)
+        } else {
+            let issue_ids: Vec<Uuid> = intake_rows.iter().map(|r| r.issue_id).collect();
+            let issue_models = issues::Entity::find()
+                .filter(issues::Column::Id.is_in(issue_ids.clone()))
+                .all(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            let mut map = std::collections::HashMap::with_capacity(issue_models.len());
+            for m in issue_models {
+                map.insert(m.id, m);
+            }
+            let mut decoded = Vec::with_capacity(intake_rows.len());
+            for ii in intake_rows {
+                let issue_model = map.get(&ii.issue_id).cloned().ok_or(Denial::ServerError)?;
+                let intake_row = IntakeIssueRow {
+                    id: ii.id,
+                    created_at: ii.created_at.with_timezone(&Utc),
+                    updated_at: ii.updated_at.with_timezone(&Utc),
+                    created_by_id: ii.created_by_id,
+                    updated_by_id: ii.updated_by_id,
+                    deleted_at: ii.deleted_at.map(|dt| dt.with_timezone(&Utc)),
+                    project_id: ii.project_id,
+                    workspace_id: ii.workspace_id,
+                    intake_id: ii.intake_id,
+                    issue_id: ii.issue_id,
+                    status: ii.status,
+                    snoozed_till: ii.snoozed_till.map(|dt| dt.with_timezone(&Utc)),
+                    duplicate_to_id: ii.duplicate_to_id,
+                    source: ii.source.clone(),
+                    source_email: ii.source_email.clone(),
+                    external_source: ii.external_source.clone(),
+                    external_id: ii.external_id.clone(),
+                    extra: ii.extra.clone(),
+                };
+                decoded.push((intake_row, IssueRow::from_model(&issue_model)));
+            }
+            (decoded, total)
+        }
     };
-    let has_more = rows.len() as i64 > limit;
-    let mut decoded = Vec::with_capacity(rows.len());
-    for row in &rows {
-        decoded.push((
-            IntakeIssueRow::from_joined(row)?,
-            IssueRow::from_joined(row)?,
-        ));
-    }
+    let rows_len = decoded.len() as i64;
+    let has_more = rows_len > limit;
     let page = apply_offset_window(&decoded, limit).map_err(page_denial)?;
     let next = next_cursor(limit, window.page, has_more);
     let prev = prev_cursor(limit, window.page);
@@ -4635,29 +4648,65 @@ async fn intake_retrieve(
     }
     let fields = fields_param(&params, "fields");
     let expand = fields_param(&params, "expand");
-    // `.get()` fetches unbounded (the fixture's `LIMIT 1` is the
-    // `.first()` shape, not `.get()`'s) — strip it so duplicates 500.
-    let detail_sql = intake_queries::intake_issue_detail_sql(None);
-    let get_sql = detail_sql
-        .strip_suffix(" LIMIT 1")
-        .expect("detail sql ends with limit 1");
+    // Retrieve via SeaORM: same scope as detail queryset, filtered by issue_id.
+    use pidash_db::entity::{intake_issues, issues, workspaces};
+    use sea_orm::{JoinType, QuerySelect};
     let now = cycle_mod::micros_now();
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(get_sql)
-        .bind(now)
-        .bind(intake_id)
-        .bind(ctx.project_id)
-        .bind(&slug)
-        .bind(issue_id)
-        .fetch_all(&ctx.pool)
+    let db = pidash_db::pool::sea_orm_connection(&ctx.pool);
+    let rows = intake_issues::Entity::find()
+        .join(JoinType::InnerJoin, intake_issues::Relation::Issues1.def())
+        .join(
+            JoinType::InnerJoin,
+            intake_issues::Relation::Workspaces.def(),
+        )
+        .join(JoinType::InnerJoin, intake_issues::Relation::Projects.def())
+        .filter(intake_issues::Column::DeletedAt.is_null())
+        .filter(intake_issues::Column::IntakeId.eq(intake_id.unwrap()))
+        .filter(intake_issues::Column::ProjectId.eq(ctx.project_id))
+        .filter(workspaces::Column::Slug.eq(slug.clone()))
+        .filter(intake_issues::Column::IssueId.eq(issue_id))
+        .filter(
+            sea_orm::Condition::any()
+                .add(
+                    intake_issues::Column::SnoozedTill
+                        .gte(now.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap())),
+                )
+                .add(intake_issues::Column::SnoozedTill.is_null()),
+        )
+        .all(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     let row = match rows.len() {
         0 => return Err(Denial::ResourceMissing),
-        1 => &rows[0],
+        1 => rows[0].clone(),
         _ => return Err(Denial::ServerError),
     };
-    let intake_row = IntakeIssueRow::from_joined(row)?;
-    let issue = IssueRow::from_joined(row)?;
+    let issue_model = issues::Entity::find_by_id(issue_id)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
+    let intake_row = IntakeIssueRow {
+        id: row.id,
+        created_at: row.created_at.with_timezone(&Utc),
+        updated_at: row.updated_at.with_timezone(&Utc),
+        created_by_id: row.created_by_id,
+        updated_by_id: row.updated_by_id,
+        deleted_at: row.deleted_at.map(|dt| dt.with_timezone(&Utc)),
+        project_id: row.project_id,
+        workspace_id: row.workspace_id,
+        intake_id: row.intake_id,
+        issue_id: row.issue_id,
+        status: row.status,
+        snoozed_till: row.snoozed_till.map(|dt| dt.with_timezone(&Utc)),
+        duplicate_to_id: row.duplicate_to_id,
+        source: row.source.clone(),
+        source_email: row.source_email.clone(),
+        external_source: row.external_source.clone(),
+        external_id: row.external_id.clone(),
+        extra: row.extra.clone(),
+    };
+    let issue = IssueRow::from_model(&issue_model);
     let value = render_intake_issue(
         &state,
         &ctx.pool,
@@ -4943,12 +4992,15 @@ async fn fetch_state_group_optional(
     let Some(id) = state_id else {
         return Ok(None);
     };
-    let group: Option<String> = sqlx::query_scalar(r#"SELECT "group" FROM states WHERE id = $1"#)
-        .bind(id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let g = states::Entity::find_by_id(*id)
+        .select_only()
+        .column(states::Column::Group)
+        .into_tuple::<String>()
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    Ok(group)
+    Ok(g)
 }
 
 // ---------------------------------------------------------------------------
@@ -4988,36 +5040,38 @@ async fn intake_destroy(
         // workspace and project, not id alone; an issue moved to another
         // project is a miss. `.first()` -> `None`, and the caller then reads
         // `issue.created_by_id` (`:478`) -> AttributeError -> 500, no writes.
-        let sql = format!(
-            "SELECT {cols} FROM issues \
-             INNER JOIN workspaces w ON w.id = issues.workspace_id \
-             WHERE issues.id = $1 AND w.slug = $2 AND issues.project_id = $3 \
-             AND issues.deleted_at IS NULL",
-            cols = issue_cols_qualified(),
-        );
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-            .bind(issue_id)
-            .bind(&slug)
-            .bind(ctx.project_id)
-            .fetch_optional(&ctx.pool)
+        let db = pidash_db::pool::sea_orm_connection(&ctx.pool);
+        let issue_model = issues::Entity::find_by_id(issue_id)
+            .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+            .filter(workspaces::Column::Slug.eq(slug.clone()))
+            .filter(issues::Column::ProjectId.eq(ctx.project_id))
+            .filter(issues::Column::DeletedAt.is_null())
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?
+            .ok_or(Denial::ServerError)?;
+        let issue = IssueRow::from_model(&issue_model);
+        let is_creator = issue.created_by_id == Some(ctx.user_id);
+        let ws = workspaces::Entity::find()
+            .filter(workspaces::Column::Slug.eq(slug.clone()))
+            .one(&db)
             .await
             .map_err(|_| Denial::ServerError)?;
-        let row = row.ok_or(Denial::ServerError)?;
-        let issue = IssueRow::from_row(&row)?;
-        let is_creator = issue.created_by_id == Some(ctx.user_id);
-        let is_admin: bool = sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM project_members pm
-               JOIN workspaces w ON w.id = pm.workspace_id
-               WHERE w.slug = $1 AND pm.member_id = $2 AND pm.project_id = $3
-               AND pm.role = 20 AND pm.is_active AND pm.deleted_at IS NULL)"#,
-        )
-        .bind(&slug)
-        .bind(ctx.user_id)
-        .bind(ctx.project_id)
-        .fetch_optional(&ctx.pool)
-        .await
-        .map_err(|_| Denial::ServerError)?
-        .unwrap_or(false);
+        let is_admin = if let Some(ws) = ws {
+            let hit = project_members::Entity::find()
+                .filter(project_members::Column::WorkspaceId.eq(ws.id))
+                .filter(project_members::Column::MemberId.eq(ctx.user_id))
+                .filter(project_members::Column::ProjectId.eq(ctx.project_id))
+                .filter(project_members::Column::Role.eq(20))
+                .filter(project_members::Column::IsActive.eq(true))
+                .filter(project_members::Column::DeletedAt.is_null())
+                .one(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            hit.is_some()
+        } else {
+            false
+        };
         if v1_perm::delete_guard(is_creator, is_admin).is_err() {
             return Err(Denial::DeleteDenied);
         }
@@ -15822,6 +15876,68 @@ mod tests {
             let frac = format!("{nanos:09}").trim_end_matches('0').to_owned();
             format!("{base}.{frac}+00:00")
         }
+    }
+
+    #[tokio::test]
+    async fn live_seaorm_existence_checks() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in ["pod", "states"] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        // Minimal seeds: a live pod, a live non-triage state, a triage state.
+        let pod_id = uuid::Uuid::new_v4();
+        let state_id = uuid::Uuid::new_v4();
+        let triage_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO pod (id, name, description, is_default, workspace_id, project_id, created_at, updated_at) VALUES ($1, 'p', 'd', false, gen_random_uuid(), gen_random_uuid(), now(), now())")
+            .bind(pod_id)
+            .execute(&pool).await.expect("insert pod");
+        sqlx::query("INSERT INTO states (id, name, description, color, slug, project_id, workspace_id, sequence, \"group\", \"default\", is_triage, created_at, updated_at) VALUES ($1, 's', 'd', '#fff', 's', gen_random_uuid(), gen_random_uuid(), 1, 'todo', false, false, now(), now())")
+            .bind(state_id)
+            .execute(&pool).await.expect("insert state");
+        sqlx::query("INSERT INTO states (id, name, description, color, slug, project_id, workspace_id, sequence, \"group\", \"default\", is_triage, created_at, updated_at) VALUES ($1, 't', 'd', '#fff', 't', gen_random_uuid(), gen_random_uuid(), 1, 'triage', false, true, now(), now())")
+            .bind(triage_id)
+            .execute(&pool).await.expect("insert triage");
+
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        use pidash_db::entity::{pod as pod_e, states as st_e};
+        // pod live check
+        let pod_hit = pod_e::Entity::find_by_id(pod_id)
+            .filter(pod_e::Column::DeletedAt.is_null())
+            .one(&db)
+            .await
+            .expect("pod")
+            .is_some();
+        assert!(pod_hit);
+        // state_choice: non-triage passes, triage fails
+        let s_hit = st_e::Entity::find_by_id(state_id)
+            .filter(st_e::Column::DeletedAt.is_null())
+            .filter(st_e::Column::Group.ne("triage"))
+            .one(&db)
+            .await
+            .expect("state")
+            .is_some();
+        assert!(s_hit);
+        let t_hit = st_e::Entity::find_by_id(triage_id)
+            .filter(st_e::Column::DeletedAt.is_null())
+            .filter(st_e::Column::Group.ne("triage"))
+            .one(&db)
+            .await
+            .expect("triage")
+            .is_none();
+        assert!(t_hit);
     }
 
     #[test]
