@@ -1836,7 +1836,11 @@ pub async fn runner_patch(
             runner.id,
             Some(target.id),
             new_name.as_deref(),
-            new_dispatch.as_deref(),
+            if dispatch_changed {
+                new_dispatch.as_deref()
+            } else {
+                None
+            },
             now,
         )
         .await
@@ -1870,8 +1874,10 @@ pub async fn runner_patch(
         if let Some(name) = new_name.clone() {
             runner.name = name;
         }
-        if let Some(dispatch) = new_dispatch.clone() {
-            runner.pod_dispatch = dispatch;
+        if dispatch_changed {
+            if let Some(dispatch) = new_dispatch.clone() {
+                runner.pod_dispatch = dispatch;
+            }
         }
         new_pod = Some(target);
         if drain_runner {
@@ -1879,7 +1885,7 @@ pub async fn runner_patch(
         } else if !drain_pods.is_empty() {
             drain_pods_after_commit(&pool, &state, &drain_pods).await;
         }
-    } else if new_dispatch.is_some() || new_name.is_some() {
+    } else if new_name.is_some() || dispatch_changed {
         if dispatch_changed {
             // Non-pod path is wrapped in `transaction.atomic` (#2903).
             let mut tx = match pool.begin().await {
@@ -1938,7 +1944,7 @@ pub async fn runner_patch(
                 runner.id,
                 None,
                 new_name.as_deref(),
-                new_dispatch.as_deref(),
+                None,
                 now,
             )
             .await
@@ -1949,9 +1955,6 @@ pub async fn runner_patch(
             runner.updated_at = now;
             if let Some(name) = new_name.clone() {
                 runner.name = name;
-            }
-            if let Some(dispatch) = new_dispatch.clone() {
-                runner.pod_dispatch = dispatch;
             }
         }
     }
