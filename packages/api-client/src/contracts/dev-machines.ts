@@ -61,6 +61,8 @@ export const DevMachine = z.object({
   host_label: z.string(),
   label: z.string(),
   visibility: z.number(),
+  /** `desktop_bundled` marks a legacy machine using desktop-session auth. */
+  provisioning: z.optional(z.string()),
   runner_count: z.number(),
   online_runner_count: z.number(),
   control_online: z.boolean(),

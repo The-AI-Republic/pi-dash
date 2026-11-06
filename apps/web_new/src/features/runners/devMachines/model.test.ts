@@ -138,6 +138,18 @@ describe("engineState", () => {
     expect(engineState(machine({ engine_sign_in_state: "signed_out" }), engine)?.label).toBe("Engine signed out");
   });
 
+  it("uses connection and pause state for legacy desktops without engine credentials", () => {
+    const legacy = { provisioning: "desktop_bundled", engine_sign_in_state: "never" };
+    expect(engineState(machine({ ...legacy, ...online }), engine)?.label).toBe("Engine available");
+    expect(engineState(machine(legacy), engine)?.label).toBe("Engine unavailable");
+    expect(engineState(machine({ ...legacy, ...online, engine_paused_by_owner: true }), engine)?.label).toBe(
+      "Engine paused by you"
+    );
+    expect(
+      engineState(machine({ ...legacy, ...online, engine_auto_pause_reason: "wallet_empty" }), engine)?.label
+    ).toBe("Engine paused: wallet is empty");
+  });
+
   it("reads the sign-in state with its expiry", () => {
     const at = { ...online, engine_credential_expires_at: "2026-11-07T00:00:00Z" };
     expect(engineState(machine({ ...at, engine_sign_in_state: "expiring" }), engine, fmt)?.label).toBe(

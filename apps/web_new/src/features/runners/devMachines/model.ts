@@ -137,6 +137,7 @@ export function engineState(
   machine: Pick<
     DevMachine,
     | "revoked_at"
+    | "provisioning"
     | "control_online"
     | "online_runner_count"
     | "engine_paused_by_owner"
@@ -153,7 +154,10 @@ export function engineState(
   if (reason !== "") {
     return { label: `Engine paused: ${ENGINE_AUTO_PAUSE_TEXT[reason] ?? reason}`, tone: "warning" };
   }
-  switch (machine.engine_sign_in_state) {
+  // Legacy desktops use the app's session, not an engine credential. Their
+  // migrated sign-in state is `never` even while the engine is working.
+  const signInState = machine.provisioning === "desktop_bundled" ? undefined : machine.engine_sign_in_state;
+  switch (signInState) {
     case "never":
       return { label: "Engine not signed in", tone: "neutral" };
     case "signed_out":
@@ -168,7 +172,7 @@ export function engineState(
   if (!(machine.control_online || machine.online_runner_count > 0)) {
     return { label: "Engine unavailable", tone: "neutral" };
   }
-  if (machine.engine_sign_in_state === "expiring") {
+  if (signInState === "expiring") {
     const at = machine.engine_credential_expires_at ?? null;
     return {
       label: at === null ? "Engine sign-in expiring" : `Engine expiring on ${formatDate(at)}`,
