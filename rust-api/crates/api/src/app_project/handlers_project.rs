@@ -1602,27 +1602,20 @@ async fn executor_options(
         ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL, HEARTBEAT_GRACE_SECS,
         ONLINE_MANAGED_RUNNER_SQL,
     };
-    use pidash_services::dispatch::policy::{
-        LOCAL_RUNNER_AVAILABLE_EXISTS_SQL, LOCAL_RUNNER_EXISTS_SQL,
-    };
+    use pidash_services::dispatch::policy::{local_runner_available_exists, local_runner_exists};
     // `agent_execution.py:112-121`: the unpaused leg always runs; the
     // online-incl-paused leg runs only when nothing is available (the
-    // `elif` distinguishes "paused" from "none").
-    let local_available: Option<(i32,)> = sqlx::query_as(LOCAL_RUNNER_AVAILABLE_EXISTS_SQL)
-        .bind(project_id)
-        .bind(workspace_id)
-        .fetch_optional(pool)
+    // `elif` distinguishes "paused" from "none"). SeaORM (no raw SQL).
+    let sea_db = pidash_db::pool::sea_orm_connection(pool);
+    let local_available = local_runner_available_exists(&sea_db, *project_id, *workspace_id)
         .await
-        .map_err(db_denial)?;
-    let local: Option<(i32,)> = if local_available.is_some() {
-        local_available
+        .map_err(|_| Denial::ServerError)?;
+    let local = if local_available {
+        true
     } else {
-        sqlx::query_as(LOCAL_RUNNER_EXISTS_SQL)
-            .bind(project_id)
-            .bind(workspace_id)
-            .fetch_optional(pool)
+        local_runner_exists(&sea_db, *project_id, *workspace_id)
             .await
-            .map_err(db_denial)?
+            .map_err(|_| Denial::ServerError)?
     };
     let settings = state.settings();
     // The seam is async but the services closures below are sync `FnOnce`,
@@ -1722,8 +1715,8 @@ async fn executor_options(
             flags.copied(),
             flags.is_some(),
             || llm_usable,
-            local_available.is_some(),
-            local.is_some(),
+            local_available,
+            local,
             managed,
         ),
     )
@@ -4005,28 +3998,20 @@ async fn validate_identifier_unique(
 /// branch (truthy → `str()` → clean → writeback, or the invalid 400).
 /// Returns the status + body, or a DB `Denial`.
 fn run_serializer_validate(
-    state: &AppState,
+    _state: &AppState,
     validated: &mut Validated,
     instance: Option<&ProjectRow>,
 ) -> Result<(), Result<(StatusCode, String), Denial>> {
     use pidash_services::app_project::ser_project::{
-        check_description_html, check_executor_gate, check_is_default_unset,
-        cloud_unavailable_body, ExecutorGate, HtmlVerdict,
+        check_description_html, check_is_default_unset, HtmlVerdict,
     };
-    // Executor gate over the validated executor (`data.get(...)` misses
-    // when absent, and `None != "cloud_agent"` passes).
-    let configured =
-        pidash_services::dispatch::policy::cloud_agent_is_configured(&state.settings().cloud_agent);
-    if matches!(
-        check_executor_gate(validated.default_agent_executor.as_deref(), configured),
-        ExecutorGate::CloudUnavailable
-    ) {
-        let body = cloud_unavailable_body();
-        let rendered = match serde_json::to_string(&body) {
-            Ok(rendered) => rendered,
-            Err(_) => return Err(Err(Denial::ServerError)),
-        };
-        return Err(Ok((StatusCode::CONFLICT, rendered)));
+    // #2903: `default_agent_executor`, when present, is normalized
+    // (deprecated choices become local_runner) — no gate remains.
+    // Unknown values pass through to the choice validation (400).
+    if let Some(inner) = &validated.default_agent_executor {
+        if let Some(normalized) = pidash_types::dispatch::normalize_executor_write(inner) {
+            validated.default_agent_executor = Some(normalized.value().to_owned());
+        }
     }
     // `is_default` guard (`instance.is_default and validated is False`).
     if let Err(error) = check_is_default_unset(

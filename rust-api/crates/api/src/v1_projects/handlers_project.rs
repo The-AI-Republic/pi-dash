@@ -2684,12 +2684,17 @@ pub async fn create_project_inner(
         .or(ws_tz)
         .unwrap_or_else(|| "UTC".to_owned());
     let default_executor = {
-        let candidate = field_str(&data, "default_agent_executor")
-            .unwrap_or_else(|| state.settings().default_agent_executor.clone());
-        if ["local_runner", "cloud_agent", "managed_runner"].contains(&candidate.as_str()) {
-            candidate
-        } else {
-            "local_runner".to_owned()
+        // #2903: `default_agent_executor`, when present, is normalized
+        // (deprecated choices become local_runner). An absent key falls
+        // back to the instance default (always local_runner since #2903).
+        match field_str(&data, "default_agent_executor") {
+            Some(written) => match pidash_types::dispatch::normalize_executor_write(&written) {
+                Some(kind) => kind.value().to_owned(),
+                None => "local_runner".to_owned(),
+            },
+            None => pidash_types::dispatch::get_default_agent_executor()
+                .value()
+                .to_owned(),
         }
     };
     // `save()` auto-default (`db/models/project.py:261-270`): the first
@@ -3322,7 +3327,12 @@ pub async fn apply_project_update(
         push_str(&mut sets, &mut binds, "base_branch", v);
     }
     if let Some(v) = field_str(data, "default_agent_executor") {
-        push_str(&mut sets, &mut binds, "default_agent_executor", v);
+        // #2903: deprecated choices translate to local_runner on write.
+        let stored = match pidash_types::dispatch::normalize_executor_write(&v) {
+            Some(kind) => kind.value().to_owned(),
+            None => v,
+        };
+        push_str(&mut sets, &mut binds, "default_agent_executor", stored);
     }
     // New `is_default` value (or the stored one when untouched).
     let new_default: bool = field_bool(data, "is_default").unwrap_or(was_default);
@@ -3887,9 +3897,10 @@ mod tests {
             ser_denial(E::NameForbidden),
             Denial::FieldErrors(_)
         ));
+        // #2903: retired refusal; the variant now maps to 400.
         assert!(matches!(
             ser_denial(E::CloudAgentUnavailable),
-            Denial::Conflict(_)
+            Denial::FieldErrors(_)
         ));
         // `update()`-tail failures: estimate-scope and unset-default
         // collapse into the identifier 409 (probed against live Django);

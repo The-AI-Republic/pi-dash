@@ -198,17 +198,11 @@ fn db_error(error: sqlx::Error) -> String {
     error.to_string()
 }
 
-/// `get_default_agent_executor` (`core/agent_execution.py:26`):
-/// `DEFAULT_AGENT_EXECUTOR` when it names a known executor,
-/// `local_runner` otherwise.
+/// `get_default_agent_executor` (`core/agent_execution.py:48-55`, #2903):
+/// always `local_runner`; the setting is ignored (reported by the
+/// `managed.W001` system check, not refused).
 fn default_agent_executor() -> String {
-    let candidate =
-        std::env::var("DEFAULT_AGENT_EXECUTOR").unwrap_or_else(|_| "local_runner".to_owned());
-    if ["local_runner", "cloud_agent", "managed_runner"].contains(&candidate.as_str()) {
-        candidate
-    } else {
-        "local_runner".to_owned()
-    }
+    "local_runner".to_owned()
 }
 
 /// Postgres executor for the dummy-data task.
@@ -1233,11 +1227,13 @@ mod tests {
 
     #[test]
     fn default_executor_follows_validated_env() {
+        // #2903: DEFAULT_AGENT_EXECUTOR is ignored; the default is
+        // always local_runner.
         let saved = std::env::var("DEFAULT_AGENT_EXECUTOR").ok();
         std::env::remove_var("DEFAULT_AGENT_EXECUTOR");
         assert_eq!(default_agent_executor(), "local_runner");
         std::env::set_var("DEFAULT_AGENT_EXECUTOR", "cloud_agent");
-        assert_eq!(default_agent_executor(), "cloud_agent");
+        assert_eq!(default_agent_executor(), "local_runner");
         std::env::set_var("DEFAULT_AGENT_EXECUTOR", "bogus");
         assert_eq!(default_agent_executor(), "local_runner");
         match saved {

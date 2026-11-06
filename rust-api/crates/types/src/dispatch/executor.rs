@@ -5,7 +5,9 @@
 //!
 //! * `AgentExecutorKind` (`:7-16`) → [`AgentExecutorKind`].
 //! * `MACHINE_EXECUTORS` (`:23`) → [`MACHINE_EXECUTORS`].
-//! * `get_default_agent_executor` (`:26-31`) → [`get_default_agent_executor`].
+//! * `DEPRECATED_EXECUTORS` (`:36`) → [`DEPRECATED_EXECUTORS`].
+//! * `normalize_executor_write` (`:39-45`) → [`normalize_executor_write`].
+//! * `get_default_agent_executor` (`:48-55`) → [`get_default_agent_executor`].
 //!
 //! Only this slice is ported here; the rest of `agent_execution.py`
 //! (`cloud_agent_is_configured`, `managed_runner_is_enabled`,
@@ -19,10 +21,10 @@
 //!   `Display` renders the value, as `str(member)` does in Django. Serde
 //!   reads/writes the value; unknown values are rejected, as Django choice
 //!   validation would.
-//! * Python reads `settings.DEFAULT_AGENT_EXECUTOR` with a `getattr` default
-//!   (`agent_execution.py:28`); this crate performs no I/O, so the caller
-//!   passes the configured value in and the membership check + fallback live
-//!   here (license-port callback precedent).
+//! * `get_default_agent_executor` (#2903) ignores the
+//!   `DEFAULT_AGENT_EXECUTOR` setting entirely — there is no setting read
+//!   left to port; any other value is reported by the `managed.W001`
+//!   system check and ignored here.
 //!
 //! Fixture: `rust-api/fixtures/dispatch/fx-disp-01-types.golden.json`
 //! (`agent_executor_kind`, `get_default_agent_executor`).
@@ -92,16 +94,36 @@ pub const MACHINE_EXECUTORS: [AgentExecutorKind; 2] = [
     AgentExecutorKind::ManagedRunner,
 ];
 
-/// Validated instance default for newly-created projects
-/// (`agent_execution.py:26-31`).
+/// Executor values no longer offered for issues and projects
+/// (`agent_execution.py:36`), in tuple order. Still accepted on write
+/// from older clients and translated to `local_runner`.
+pub const DEPRECATED_EXECUTORS: [AgentExecutorKind; 2] = [
+    AgentExecutorKind::CloudAgent,
+    AgentExecutorKind::ManagedRunner,
+];
+
+/// The stored value for an executor written by a client
+/// (`agent_execution.py:39-45`): deprecated choices become
+/// `local_runner`.
 ///
-/// `configured` is the `DEFAULT_AGENT_EXECUTOR` setting (`None` = unset):
-/// a known value passes through, anything else (unset or invalid) falls
-/// back to [`AgentExecutorKind::LocalRunner`].
-pub fn get_default_agent_executor(configured: Option<&str>) -> AgentExecutorKind {
-    configured
-        .and_then(AgentExecutorKind::from_value)
-        .unwrap_or(AgentExecutorKind::LocalRunner)
+/// `value` is the non-null write payload (`None` inherit/clear and
+/// unknown values are the caller's own validation — a `None` return
+/// here means unknown, for the caller's `unknown agent executor`
+/// refusal).
+pub fn normalize_executor_write(value: &str) -> Option<AgentExecutorKind> {
+    let kind = AgentExecutorKind::from_value(value)?;
+    if DEPRECATED_EXECUTORS.contains(&kind) {
+        Some(AgentExecutorKind::LocalRunner)
+    } else {
+        Some(kind)
+    }
+}
+
+/// Instance default for newly-created projects (`agent_execution.py:48-55`):
+/// always `local_runner`. `DEFAULT_AGENT_EXECUTOR` is ignored (any other
+/// value is reported by the `managed.W001` system check, not refused).
+pub fn get_default_agent_executor() -> AgentExecutorKind {
+    AgentExecutorKind::LocalRunner
 }
 
 #[cfg(test)]
@@ -175,39 +197,34 @@ mod tests {
 
     #[test]
     fn default_resolution_matches_fixture() {
-        let golden = &fixture()["get_default_agent_executor"];
-        // Valid settings pass through.
+        // #2903: the setting is ignored; the default is always local.
+        assert_eq!(get_default_agent_executor().value(), "local_runner");
+        assert_eq!(get_default_agent_executor(), AgentExecutorKind::LocalRunner);
+    }
+
+    #[test]
+    fn normalize_executor_write_translates_deprecated() {
+        // Deprecated choices become local_runner (deep-link fix case).
         assert_eq!(
-            get_default_agent_executor(Some("local_runner")).value(),
-            golden["valid_setting_passthrough"]
-                .as_str()
-                .expect("golden")
+            normalize_executor_write("cloud_agent"),
+            Some(AgentExecutorKind::LocalRunner)
         );
         assert_eq!(
-            get_default_agent_executor(Some("cloud_agent")).value(),
-            golden["cloud_setting_passthrough"]
-                .as_str()
-                .expect("golden")
+            normalize_executor_write("managed_runner"),
+            Some(AgentExecutorKind::LocalRunner)
         );
+        // Local passes through; unknown is the caller's 400.
         assert_eq!(
-            get_default_agent_executor(Some("managed_runner")),
-            AgentExecutorKind::ManagedRunner
+            normalize_executor_write("local_runner"),
+            Some(AgentExecutorKind::LocalRunner)
         );
-        // Invalid settings fall back to local_runner ...
+        assert_eq!(normalize_executor_write("bogus"), None);
         assert_eq!(
-            get_default_agent_executor(Some("bogus")).value(),
-            golden["invalid_setting_falls_back_to_local_runner"]
-                .as_str()
-                .expect("golden")
-        );
-        assert_eq!(
-            get_default_agent_executor(Some("bogus")),
-            AgentExecutorKind::LocalRunner
-        );
-        // ... as does an unset setting (the getattr default).
-        assert_eq!(
-            get_default_agent_executor(None),
-            AgentExecutorKind::LocalRunner
+            DEPRECATED_EXECUTORS,
+            [
+                AgentExecutorKind::CloudAgent,
+                AgentExecutorKind::ManagedRunner
+            ]
         );
     }
 }

@@ -547,7 +547,6 @@ where
             managed,
             has_usable_llm_config,
             toolsets,
-            llm_profile,
             now_unix_secs,
             deferred,
             ..
@@ -567,7 +566,6 @@ where
         };
         let has_llm = has_usable_llm_config.clone();
         let toolsets = toolsets.clone();
-        let profile = llm_profile.clone();
         let mut collect = |consume: DeferredConsume| deferred.push(consume);
         let fields = resolve_execution_fields(
             &mut short,
@@ -579,7 +577,6 @@ where
             ExecutionSeams {
                 has_usable_llm_config: move || actor_id.is_some_and(&has_llm),
                 toolsets,
-                llm_profile: move || profile(actor_id),
             },
         )
         .await;

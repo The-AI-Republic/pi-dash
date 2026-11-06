@@ -66,14 +66,9 @@ use pidash_db::tasks_ticker::IssueAgentTicker;
 use pidash_services::app_intake::permissions as guards;
 use pidash_services::app_intake::tasks as intake_tasks;
 use pidash_services::app_issues::agent_runs::{self, RenderedAgentRun};
-use pidash_services::app_issues::serializers_create::managed_unavailable_detail;
 use pidash_services::app_issues::serializers_create::HAS_ACTIVE_RUN_SQL;
 use pidash_services::app_issues::serializers_detail::{
     agent_status_to_representation, agent_ticker_to_representation, AgentTickerView,
-};
-use pidash_services::dispatch::admission::{managed_runner_availability, LlmProfile};
-use pidash_services::dispatch::policy::{
-    cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
 };
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
@@ -81,12 +76,9 @@ use pidash_services::domain::issues::IssueFieldSet;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
-use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
+use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::orchestration::StateRef;
 
-use crate::app_issues::handlers_core::{
-    assistant_has_api_key, enrolled_runner, online_runner, paused_runner,
-};
 use crate::app_issues::resolve_gate;
 use crate::domain_hooks::AppTaskEnqueueHook;
 use crate::issue_transition::AppTransitionHook;
@@ -910,6 +902,19 @@ fn estimate_point_live_sql() -> &'static str {
     r#"SELECT id FROM estimate_points WHERE id = $1 AND deleted_at IS NULL"#
 }
 
+/// The normalized executor value this attempt wants stored, if any.
+pub struct ObjectExecutor {
+    /// `Some(stored)` = normalized value to write (`None` = explicit clear).
+    pub stored: Option<Option<String>>,
+}
+
+impl ObjectExecutor {
+    /// Whether this attempt pushed an `agent_executor` error.
+    pub fn has_error(errors: &FieldErrors, field: &str) -> bool {
+        errors.contains_key(field)
+    }
+}
+
 fn issue_type_live_sql() -> &'static str {
     r#"SELECT id FROM issue_types WHERE id = $1 AND deleted_at IS NULL"#
 }
@@ -1353,6 +1358,8 @@ pub struct IssueObjectValidation {
     pub assignee_ids: Option<Vec<Uuid>>,
     pub label_ids: Option<Vec<Uuid>>,
     pub description_html: Option<String>,
+    /// Normalized executor to store (#2903: deprecated → local_runner).
+    pub agent_executor: Option<Option<String>>,
 }
 
 /// Whether the stored issue is actively synced (`_issue_is_actively_synced`,
@@ -1415,10 +1422,10 @@ pub async fn has_active_run(pool: &PgPool, issue_id: &Uuid) -> Result<bool, Deni
 #[allow(clippy::too_many_arguments)]
 pub async fn validate_issue_object(
     pool: &PgPool,
-    settings: &pidash_db::config::Settings,
+    _settings: &pidash_db::config::Settings,
     project_id: &Uuid,
-    workspace_id: &Uuid,
-    viewer_id: &Uuid,
+    _workspace_id: &Uuid,
+    _viewer_id: &Uuid,
     issue: &IssueRow,
     validated: &ValidatedIssue,
     input: &serde_json::Map<String, serde_json::Value>,
@@ -1431,6 +1438,7 @@ pub async fn validate_issue_object(
         assignee_ids: None,
         label_ids: None,
         description_html: None,
+        agent_executor: None,
     };
     // Read-only lock for actively-synced issues: only changed values
     // block (`serializers/issue.py:210-229`).
@@ -1486,21 +1494,16 @@ pub async fn validate_issue_object(
         }
     }
 
+    let mut translated_executor: Option<Option<String>> = None;
     if let Some(executor) = validated.agent_executor.as_ref() {
-        if validate_executor(
-            pool,
-            settings,
-            project_id,
-            workspace_id,
-            viewer_id,
-            issue,
-            executor.clone(),
-            errors,
-            non_field,
-        )
-        .await?
+        if let Some(translated) =
+            validate_executor(pool, issue, Some(executor.clone()), errors).await?
         {
-            return Ok(empty());
+            if ExecutorTranslation::has_error(errors, "agent_executor") {
+                return Ok(empty());
+            }
+            // Store the normalized value (`attrs["agent_executor"]`).
+            translated_executor = translated.stored;
         }
     }
 
@@ -1615,6 +1618,7 @@ pub async fn validate_issue_object(
         assignee_ids,
         label_ids,
         description_html: sanitized_html,
+        agent_executor: translated_executor,
     })
 }
 
@@ -1665,139 +1669,62 @@ async fn validate_pod(
     Ok(false)
 }
 
-/// Executor checks (`serializers/issue.py:275-321`): the
-/// settings-backed cloud/managed gates with Django's messages
-/// (mirroring `app_issues` step 4), and the mid-flight rule for
-/// explicit null too (`:314-321` sits outside
-/// `if executor is not None`). First error wins, like the sequential
-/// `raise`s; returns whether an error was pushed.
+/// Executor checks (`issue_assignment.py:28-51`, #2903): unknown is a
+/// 400, deprecated writes translate to `local_runner` (the normalized
+/// value is stored — the caller writes `translated.stored`), and a
+/// translation CHANGED the value while the instance has an active run
+/// is the mid-flight 400. Returns whether an error was pushed.
+pub struct ExecutorTranslation {
+    /// `Some(v)` = stored value (`Some(None)` = explicit clear).
+    pub stored: Option<Option<String>>,
+}
+
+impl ExecutorTranslation {
+    /// Whether this attempt pushed an `agent_executor` error.
+    pub fn has_error(errors: &FieldErrors, field: &str) -> bool {
+        errors.contains_key(field)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn validate_executor(
     pool: &PgPool,
-    settings: &pidash_db::config::Settings,
-    project_id: &Uuid,
-    workspace_id: &Uuid,
-    viewer_id: &Uuid,
     issue: &IssueRow,
-    executor: Option<String>,
+    executor: Option<Option<String>>,
     errors: &mut FieldErrors,
-    _non_field: &mut Vec<String>,
-) -> Result<bool, Denial> {
-    if let Some(executor) = executor.as_deref() {
-        // Field level (`AGENT_EXECUTORS`) already rejected unknown
-        // values with the `ChoiceField` message, so only the three
-        // kinds arrive (`:280-281` is unreachable past the field).
-        match AgentExecutorKind::from_value(executor) {
-            Some(AgentExecutorKind::CloudAgent)
-                if !cloud_agent_is_configured(&settings.cloud_agent) =>
-            {
-                push_error(
-                    errors,
-                    "agent_executor",
-                    "Pi Dash Cloud Agent is not available on this instance".to_owned(),
-                );
-                return Ok(true);
-            }
-            Some(AgentExecutorKind::ManagedRunner) => {
-                // `self.instance.project` (`:295`): always resolved on
-                // update — the tenant project is the issue's project.
-                let mut llm_profile = LlmProfile {
-                    available: false,
-                    reason_code: ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned(),
-                };
-                let mut enrolled_exists = false;
-                let mut online_exists = false;
-                let mut paused_exists = false;
-                // `managed_runner_availability` gates in fixed order;
-                // each probe runs only when reached (mirrors
-                // `app_issues::handlers_core`).
-                let mut viewer: Option<UserFlags> = None;
-                if managed_runner_is_enabled(&settings.managed_runner) {
-                    let flags: Option<(bool, bool)> =
-                        sqlx::query_as(r#"SELECT is_active, is_bot FROM users WHERE id = $1"#)
-                            .bind(viewer_id)
-                            .fetch_optional(pool)
-                            .await
-                            .map_err(|_| Denial::ServerError)?;
-                    viewer = flags.map(|(is_active, is_bot)| UserFlags { is_active, is_bot });
-                    if viewer.is_some_and(|flags| flags.is_active && !flags.is_bot) {
-                        // `managed_llm_profile` seam: CE has no usable
-                        // desktop profile; a BYOK key reads as
-                        // BYOK-unsupported, else LLM-config-missing
-                        // (same transcription as `app_issues`).
-                        let keyed = assistant_has_api_key(pool, viewer_id)
-                            .await
-                            .map_err(|_| Denial::ServerError)?;
-                        llm_profile = LlmProfile {
-                            available: false,
-                            reason_code: if keyed {
-                                ManagedRunnerReason::BYOK_UNSUPPORTED.to_owned()
-                            } else {
-                                ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned()
-                            },
-                        };
-                        if llm_profile.available {
-                            enrolled_exists =
-                                enrolled_runner(pool, viewer_id, project_id, workspace_id)
-                                    .await
-                                    .map_err(|_| Denial::ServerError)?;
-                            if enrolled_exists {
-                                online_exists =
-                                    online_runner(pool, viewer_id, project_id, workspace_id)
-                                        .await
-                                        .map_err(|_| Denial::ServerError)?;
-                                // `09738d222`: the paused
-                                // tiebreaker runs only when
-                                // nothing is online (mirrors
-                                // `app_issues::handlers_core`).
-                                if !online_exists {
-                                    paused_exists =
-                                        paused_runner(pool, viewer_id, project_id, workspace_id)
-                                            .await
-                                            .map_err(|_| Denial::ServerError)?;
-                                }
-                            }
-                        }
-                    }
-                }
-                let verdict = managed_runner_availability(
-                    &settings.managed_runner,
-                    viewer.as_ref(),
-                    || llm_profile.clone(),
-                    enrolled_exists,
-                    online_exists,
-                    paused_exists,
-                );
-                // `NO_RUNNER_FOR_PROJECT` accepts the pin (the desktop
-                // enrolls on open and resolves the race, `:304-307`).
-                if !verdict.available
-                    && verdict.reason_code != ManagedRunnerReason::NO_RUNNER_FOR_PROJECT
-                {
-                    push_error(
-                        errors,
-                        "agent_executor",
-                        managed_unavailable_detail(&verdict.reason_code).into_owned(),
-                    );
-                    return Ok(true);
-                }
-            }
-            _ => {}
-        }
+) -> Result<Option<ExecutorTranslation>, Denial> {
+    let Some(value) = executor else {
+        return Ok(None);
+    };
+    let Some(value) = value else {
+        return Ok(Some(ExecutorTranslation { stored: None }));
+    };
+    // Field level (`AGENT_EXECUTORS`) already rejected unknown values
+    // with the `ChoiceField` message; the kernel still answers 400 for
+    // anything past it.
+    if AgentExecutorKind::from_value(&value).is_none() {
+        push_error(
+            errors,
+            "agent_executor",
+            "unknown agent executor".to_owned(),
+        );
+        return Ok(Some(ExecutorTranslation { stored: None }));
     }
-    // The mid-flight rule runs for explicit null too (`None` clears
-    // the override); `None == None` is unchanged, like Django's
-    // `str(None) == str(None)`.
-    if executor.as_deref() != issue.agent_executor.as_deref()
-        && has_active_run(pool, &issue.id).await?
-    {
+    let normalized = pidash_types::dispatch::normalize_executor_write(&value)
+        .expect("known value parses")
+        .value()
+        .to_owned();
+    if normalized != value && has_active_run(pool, &issue.id).await? {
         push_error(
             errors,
             "agent_executor",
             "cannot change the execution target while the issue has an active run".to_owned(),
         );
-        return Ok(true);
+        return Ok(Some(ExecutorTranslation { stored: None }));
     }
-    Ok(false)
+    Ok(Some(ExecutorTranslation {
+        stored: Some(Some(normalized)),
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1914,10 +1841,10 @@ pub async fn apply_issue_update(
         .unwrap_or(issue.estimate_point_id);
     fields.type_id = validated.type_id.unwrap_or(issue.type_id);
     fields.assigned_pod_id = validated.assigned_pod_id.unwrap_or(issue.assigned_pod_id);
-    fields.agent_executor = validated
-        .agent_executor
-        .clone()
-        .unwrap_or_else(|| issue.agent_executor.clone());
+    fields.agent_executor = match validated.agent_executor.clone() {
+        Some(inner) => object.agent_executor.clone().unwrap_or(inner),
+        None => issue.agent_executor.clone(),
+    };
     fields.git_work_branch = validated
         .git_work_branch
         .clone()
@@ -5107,7 +5034,13 @@ async fn validate_issue_create(
         Some(serde_json::Value::String(executor))
             if ["local_runner", "cloud_agent", "managed_runner"].contains(&executor.as_str()) =>
         {
-            Some(executor.clone())
+            // #2903: deprecated writes translate to local_runner.
+            Some(
+                pidash_types::dispatch::normalize_executor_write(executor)
+                    .expect("choice passes")
+                    .value()
+                    .to_owned(),
+            )
         }
         Some(serde_json::Value::String(executor)) => {
             field_errors.insert(

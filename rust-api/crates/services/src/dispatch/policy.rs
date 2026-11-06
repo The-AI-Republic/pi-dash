@@ -64,7 +64,8 @@
 //! contents, plan key order).
 
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
-use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason, ManagedRunnerUnavailable};
+use pidash_db::entity::{dev_machine, pod, runner};
+use pidash_types::dispatch::AgentExecutorKind;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
 use uuid::Uuid;
@@ -255,7 +256,7 @@ impl std::fmt::Display for RequiredToolUnavailable {
 
 impl std::error::Error for RequiredToolUnavailable {}
 
-/// The three `resolve_executor_kind` failure modes (`policy.py:57-72`).
+/// The two `resolve_executor_kind` failure modes (`policy.py:57-72`, #2903).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveExecutorError {
     /// `ValueError("unknown agent executor")` (`policy.py:60`); a bare `ValueError`
@@ -263,8 +264,6 @@ pub enum ResolveExecutorError {
     UnknownExecutor,
     /// `CloudAgentUnavailable` (`policy.py:61-62`).
     CloudAgent(CloudAgentUnavailable),
-    /// `ManagedRunnerUnavailable(DISABLED, ...)` (`policy.py:63-71`).
-    ManagedRunner(ManagedRunnerUnavailable),
 }
 
 impl std::fmt::Display for ResolveExecutorError {
@@ -272,7 +271,6 @@ impl std::fmt::Display for ResolveExecutorError {
         match self {
             ResolveExecutorError::UnknownExecutor => write!(f, "unknown agent executor"),
             ResolveExecutorError::CloudAgent(err) => write!(f, "{err}"),
-            ResolveExecutorError::ManagedRunner(err) => write!(f, "{err}"),
         }
     }
 }
@@ -282,20 +280,21 @@ impl std::error::Error for ResolveExecutorError {
         match self {
             ResolveExecutorError::UnknownExecutor => None,
             ResolveExecutorError::CloudAgent(err) => Some(err),
-            ResolveExecutorError::ManagedRunner(err) => Some(err),
         }
     }
 }
 
-/// Routing matrix, verbatim (`policy.py:57-72`).
+/// Routing matrix (`policy.py:57-72`, #2903).
 ///
 /// `requested` is `None` when no override was given; `Some("")` falls through to
-/// the default exactly like `None` (`requested or ...`, `policy.py:58`).
+/// the default exactly like `None` (`requested or ...`, `policy.py:58`). A
+/// legacy `managed_runner` value resolves to `local_runner` (the built-in
+/// engine is a runner; new runs are pod-level) — the instance kill switch no
+/// longer turns it away.
 pub fn resolve_executor_kind(
     requested: Option<&str>,
     project_default: &str,
     cloud: &CloudAgentSettings,
-    managed: &ManagedRunnerSettings,
 ) -> Result<AgentExecutorKind, ResolveExecutorError> {
     let value = requested
         .filter(|r| !r.is_empty())
@@ -306,15 +305,8 @@ pub fn resolve_executor_kind(
             CloudAgentUnavailable::new("Pi Dash Cloud Agent is not currently available"),
         ));
     }
-    if kind == AgentExecutorKind::ManagedRunner && !managed_runner_is_enabled(managed) {
-        // Instance-level only. Whether *this* viewer's desktop can take the run
-        // is a per-viewer question answered in `execution_fields` (L6).
-        return Err(ResolveExecutorError::ManagedRunner(
-            ManagedRunnerUnavailable::new(
-                ManagedRunnerReason::DISABLED,
-                "Pi Dash Agent is not enabled on this instance",
-            ),
-        ));
+    if kind == AgentExecutorKind::ManagedRunner {
+        return Ok(AgentExecutorKind::LocalRunner);
     }
     Ok(kind)
 }
@@ -379,12 +371,14 @@ pub const NO_LOCAL_RUNNER_REASON: &str = "no_local_runner";
 pub const LOCAL_RUNNER_PAUSED_REASON: &str = "local_runner_paused";
 
 /// One `agent_executor_options` row (`agent_execution.py:112-128`), fields in dict
-/// order (`kind`, `available`, `reason_code`).
+/// order (`kind`, `available`, `reason_code`, `deprecated`). `deprecated` is
+/// true for the two legacy values older clients still write (`#2903`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutorOption {
     pub kind: AgentExecutorKind,
     pub available: bool,
     pub reason_code: String,
+    pub deprecated: bool,
 }
 
 /// The `(available, reason_code)` verdict of L4's `managed_runner_availability`
@@ -443,36 +437,105 @@ where
             kind: AgentExecutorKind::CloudAgent,
             available: cloud_available,
             reason_code: cloud_reason,
+            deprecated: true,
         },
         ExecutorOption {
             kind: AgentExecutorKind::LocalRunner,
             available: local_runner_available,
             reason_code: local_reason,
+            deprecated: false,
         },
         ExecutorOption {
             kind: AgentExecutorKind::ManagedRunner,
             available: managed.available,
             reason_code: managed.reason_code,
+            deprecated: true,
         },
     ]
 }
 
-/// The local-runner leg of `agent_executor_options` (`agent_execution.py:102-110`):
-/// an ONLINE runner on the project's pod, desktop-bundled runners excluded (they
-/// serve only runs pinned to them, so counting one would advertise availability for
-/// work it never accepts).
-///
-/// Django renders the `.exclude()` as `NOT (provisioning = ...)`; `<>` is identical
-/// because `provisioning` is `NOT NULL`. No `deleted_at` scope: `runner` has no such
-/// column, and Django never filters joined tables (`pod`) by their managers.
-/// Params: `$1` project id (uuid), `$2` workspace id (uuid).
-pub const LOCAL_RUNNER_EXISTS_SQL: &str = "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE pod.project_id = $1 AND runner.workspace_id = $2 AND runner.status = 'online' AND runner.provisioning <> 'desktop_bundled' LIMIT 1";
+/// The local-runner legs of `agent_executor_options`
+/// (`agent_execution.py:102-110`, #2903): runners that take pod work
+/// only — ONLINE, in the project's pods, `pod_dispatch <> 'pinned_only'`
+/// (pinned-only runners take no new issue work) and `revoked_at IS NULL`.
+/// The *available* verdict adds unpaused (`paused_at IS NULL`) and not
+/// engine-paused (a paused engine takes nothing); the *exists* verdict is
+/// the online set alone. SeaORM (no raw SQL): the runner/pod reads are
+/// small by construction (one project's pods).
+async fn online_pod_work_runners(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: Uuid,
+    workspace_id: Uuid,
+) -> Result<Vec<runner::Model>, sea_orm::DbErr> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let pods = pod::Entity::find()
+        .filter(pod::Column::ProjectId.eq(project_id))
+        .all(db)
+        .await?;
+    let pod_ids: Vec<Uuid> = pods.into_iter().map(|row| row.id).collect();
+    if pod_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    runner::Entity::find()
+        .filter(runner::Column::PodId.is_in(pod_ids))
+        .filter(runner::Column::WorkspaceId.eq(workspace_id))
+        .filter(runner::Column::Status.eq("online"))
+        .filter(runner::Column::PodDispatch.ne("pinned_only"))
+        .filter(runner::Column::RevokedAt.is_null())
+        .all(db)
+        .await
+}
 
-/// The available leg of `agent_executor_options` (`agent_execution.py:112`,
-/// `09738d222`): [`LOCAL_RUNNER_EXISTS_SQL`] plus the unpaused arm — an
-/// ONLINE runner on the project's pod that is not operator-paused.
-/// Params: `$1` project id (uuid), `$2` workspace id (uuid).
-pub const LOCAL_RUNNER_AVAILABLE_EXISTS_SQL: &str = "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE pod.project_id = $1 AND runner.workspace_id = $2 AND runner.status = 'online' AND runner.provisioning <> 'desktop_bundled' AND runner.paused_at IS NULL LIMIT 1";
+/// The *exists* verdict (`agent_execution.py:102-110`): any ONLINE
+/// unterminated pod-member runner on the project's pods.
+pub async fn local_runner_exists(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: Uuid,
+    workspace_id: Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    Ok(!online_pod_work_runners(db, project_id, workspace_id)
+        .await?
+        .is_empty())
+}
+
+/// The *available* verdict (`agent_execution.py:112`, `09738d222` +
+/// #2903): a pod-work runner that is unpaused (`paused_at IS NULL`)
+/// and not engine-paused. An engine's machine pause needs the
+/// `dev_machine` rows for the candidate engines only.
+pub async fn local_runner_available_exists(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: Uuid,
+    workspace_id: Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let candidates = online_pod_work_runners(db, project_id, workspace_id).await?;
+    let machine_ids: Vec<Uuid> = candidates
+        .iter()
+        .filter(|row| row.provisioning == "desktop_bundled")
+        .filter_map(|row| row.dev_machine_id)
+        .collect();
+    let paused_machines: HashSet<Uuid> = if machine_ids.is_empty() {
+        HashSet::new()
+    } else {
+        dev_machine::Entity::find()
+            .filter(dev_machine::Column::Id.is_in(machine_ids))
+            .all(db)
+            .await?
+            .into_iter()
+            .filter(|machine| {
+                machine.engine_paused_by_owner || !machine.engine_auto_pause_reason.is_empty()
+            })
+            .map(|machine| machine.id)
+            .collect()
+    };
+    Ok(candidates.iter().any(|row| {
+        row.paused_at.is_none()
+            && !(row.provisioning == "desktop_bundled"
+                && row
+                    .dev_machine_id
+                    .is_some_and(|id| paused_machines.contains(&id)))
+    }))
+}
 
 // ---------------------------------------------------------------------------
 // GitHub availability (`policy.py:75-94`)
@@ -967,57 +1030,37 @@ mod tests {
             ..django_cloud_settings()
         };
         let cloud_off = django_cloud_settings();
-        let managed_off = django_managed_settings();
-        let managed_on = ManagedRunnerSettings {
-            enabled: true,
-            ..django_managed_settings()
-        };
-        // requested=null inherits the default.
-        assert_eq!(
-            resolve_executor_kind(None, "local_runner", &cloud_on, &managed_off),
-            Ok(AgentExecutorKind::LocalRunner)
-        );
-        // Explicit cloud request passes when configured.
-        assert_eq!(
-            resolve_executor_kind(Some("cloud_agent"), "local_runner", &cloud_on, &managed_off),
-            Ok(AgentExecutorKind::CloudAgent)
-        );
-        // Managed on a disabled instance raises with the DISABLED code.
-        let err = resolve_executor_kind(
-            Some("managed_runner"),
-            "local_runner",
-            &cloud_on,
-            &managed_off,
-        )
-        .expect_err("managed on disabled instance raises");
-        assert_eq!(
-            err,
-            ResolveExecutorError::ManagedRunner(ManagedRunnerUnavailable::new(
-                ManagedRunnerReason::DISABLED,
-                "Pi Dash Agent is not enabled on this instance",
-            ))
-        );
         let matrix = fixture()["resolve_executor_kind_matrix"]
             .as_array()
             .expect("matrix")
             .clone();
-        assert_eq!(matrix[2]["raises"], "ManagedRunnerUnavailable");
-        assert_eq!(matrix[2]["code"], ManagedRunnerReason::DISABLED);
+        // requested=null inherits the default.
+        assert_eq!(
+            resolve_executor_kind(None, "local_runner", &cloud_on),
+            Ok(AgentExecutorKind::LocalRunner)
+        );
+        // Explicit cloud request passes when configured.
+        assert_eq!(
+            resolve_executor_kind(Some("cloud_agent"), "local_runner", &cloud_on),
+            Ok(AgentExecutorKind::CloudAgent)
+        );
+        // #2903: a legacy managed value resolves to local (the kill
+        // switch no longer turns it away).
+        assert_eq!(
+            resolve_executor_kind(Some("managed_runner"), "local_runner", &cloud_on),
+            Ok(AgentExecutorKind::LocalRunner)
+        );
+        assert_eq!(matrix[2]["result"], "local_runner");
         // Unknown values raise the bare ValueError message (no code).
-        let err = resolve_executor_kind(Some("bogus"), "local_runner", &cloud_on, &managed_off)
+        let err = resolve_executor_kind(Some("bogus"), "local_runner", &cloud_on)
             .expect_err("unknown executor raises");
         assert_eq!(err, ResolveExecutorError::UnknownExecutor);
         assert_eq!(err.to_string(), "unknown agent executor");
         assert_eq!(matrix[3]["raises"], "ValueError");
         assert_eq!(matrix[3]["message"], "unknown agent executor");
         // Cloud on an unconfigured instance raises with its code.
-        let err = resolve_executor_kind(
-            Some("cloud_agent"),
-            "local_runner",
-            &cloud_off,
-            &managed_off,
-        )
-        .expect_err("unconfigured cloud raises");
+        let err = resolve_executor_kind(Some("cloud_agent"), "local_runner", &cloud_off)
+            .expect_err("unconfigured cloud raises");
         assert_eq!(
             err,
             ResolveExecutorError::CloudAgent(CloudAgentUnavailable::new(
@@ -1026,23 +1069,9 @@ mod tests {
         );
         assert_eq!(matrix[4]["raises"], "CloudAgentUnavailable");
         assert_eq!(matrix[4]["code"], CloudAgentUnavailable::CODE);
-        // The enabled sides pass through (matrix gaps, asserted directly).
+        // Local pass-through over a cloud default resolves local.
         assert_eq!(
-            resolve_executor_kind(
-                Some("managed_runner"),
-                "local_runner",
-                &cloud_on,
-                &managed_on
-            ),
-            Ok(AgentExecutorKind::ManagedRunner)
-        );
-        assert_eq!(
-            resolve_executor_kind(
-                Some("local_runner"),
-                "cloud_agent",
-                &cloud_off,
-                &managed_off
-            ),
+            resolve_executor_kind(Some("local_runner"), "cloud_agent", &cloud_off),
             Ok(AgentExecutorKind::LocalRunner)
         );
     }
@@ -1053,15 +1082,14 @@ mod tests {
             enabled: true,
             ..django_cloud_settings()
         };
-        let managed_off = django_managed_settings();
         // `requested or default`: "" behaves as None (oracle-verified).
         assert_eq!(
-            resolve_executor_kind(Some(""), "local_runner", &cloud_on, &managed_off),
+            resolve_executor_kind(Some(""), "local_runner", &cloud_on),
             Ok(AgentExecutorKind::LocalRunner)
         );
         // An invalid project default fails the same membership check.
         assert_eq!(
-            resolve_executor_kind(None, "bogus", &cloud_on, &managed_off),
+            resolve_executor_kind(None, "bogus", &cloud_on),
             Err(ResolveExecutorError::UnknownExecutor)
         );
         // Error taxonomy: codes, messages, std::error::Error impls.
@@ -1094,7 +1122,7 @@ mod tests {
         );
         assert_eq!(
             shape["row_keys"],
-            json!(["kind", "available", "reason_code"])
+            json!(["kind", "available", "reason_code", "deprecated"])
         );
 
         let cloud_on = CloudAgentSettings {
@@ -1113,12 +1141,14 @@ mod tests {
             rows.iter().map(|r| r.kind.value()).collect::<Vec<_>>(),
             ["cloud_agent", "local_runner", "managed_runner"]
         );
-        // Row keys in order (`kind`, `available`, `reason_code`): struct
-        // serialization always follows field order.
+        // Row keys in order (`kind`, `available`, `reason_code`,
+        // `deprecated`): struct serialization always follows field order.
+        // `deprecated` is true for the two legacy values (#2903).
+        assert!(rows[0].deprecated && rows[2].deprecated && !rows[1].deprecated);
         let text = serde_json::to_string(&rows[0]).expect("serializes");
         assert_eq!(
             text,
-            r#"{"kind":"cloud_agent","available":true,"reason_code":""}"#
+            r#"{"kind":"cloud_agent","available":true,"reason_code":"","deprecated":true}"#
         );
     }
 
@@ -1236,31 +1266,15 @@ mod tests {
     }
 
     #[test]
-    fn local_runner_sql_excludes_desktop_bundled() {
-        assert_eq!(
-            LOCAL_RUNNER_EXISTS_SQL,
-            "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE pod.project_id = $1 AND runner.workspace_id = $2 AND runner.status = 'online' AND runner.provisioning <> 'desktop_bundled' LIMIT 1"
-        );
-        // Fixture pins the exclusion behaviorally (bundled-only ⇒ unavailable).
-        assert!(
-            fixture()["agent_executor_options_shape"]["local_excludes_desktop_bundled"]
-                .as_str()
-                .expect("golden")
-                .contains("DESKTOP_BUNDLED")
-        );
-    }
-
-    #[test]
-    fn local_runner_available_sql_adds_pause_arm() {
-        // The available leg is the exists leg plus the unpaused arm
-        // (`09738d222`); params keep their positions.
-        assert_eq!(
-            LOCAL_RUNNER_AVAILABLE_EXISTS_SQL,
-            "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE pod.project_id = $1 AND runner.workspace_id = $2 AND runner.status = 'online' AND runner.provisioning <> 'desktop_bundled' AND runner.paused_at IS NULL LIMIT 1"
-        );
-        assert!(LOCAL_RUNNER_AVAILABLE_EXISTS_SQL.starts_with(
-            &LOCAL_RUNNER_EXISTS_SQL[..LOCAL_RUNNER_EXISTS_SQL.len() - " LIMIT 1".len()]
-        ));
+    fn local_runner_legs_count_pod_work() {
+        // #2903: the local legs count ONLINE pod-member runners with
+        // revoked_at NULL; the available leg adds paused_at NULL +
+        // not engine-paused. Both are SeaORM now (no raw SQL consts).
+        let shape = &fixture()["agent_executor_options_shape"];
+        assert!(shape["local_excludes_desktop_bundled"]
+            .as_str()
+            .expect("golden")
+            .contains("DESKTOP_BUNDLED"));
     }
 
     // -- build_tool_plan goldens ---------------------------------------------

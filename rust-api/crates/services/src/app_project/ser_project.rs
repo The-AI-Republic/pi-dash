@@ -136,7 +136,6 @@
 //! Fixture: `rust-api/fixtures/app_project/FX-APROJ-01.serializers_project.json`
 //! (FX-APROJ-01).
 
-use crate::dispatch::admission::{CloudAgentUnavailableBody, CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS};
 use crate::dispatch::policy::{ExecutorOption, ManagedAvailability, UserFlags};
 use pidash_db::config::CloudAgentSettings;
 use serde::{Deserialize, Serialize};
@@ -495,42 +494,25 @@ pub fn check_agent_cadence_seconds(interval: i64) -> Result<(), CadenceTooShortE
 /// v1 serializers).
 pub const EXECUTOR_CLOUD_AGENT: &str = "cloud_agent";
 
-/// Outcome of the `validate()` executor gate (`:86-92`):
-/// `data.get("default_agent_executor") == "cloud_agent"` while
-/// `cloud_agent_is_configured()` is false raises
-/// `CloudAgentUnavailableAPI`, which propagates as its own 409 response —
-/// never as a serializer 400.
+/// Outcome of the `validate()` executor translation (#2903): the
+/// `CloudAgentUnavailableAPI` refusal is gone; `default_agent_executor`,
+/// when present, is normalized (deprecated choices become
+/// `local_runner` — [`normalize_executor_write`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutorGate {
-    /// Any other kind, or cloud while configured.
+    /// Any kind (deprecated ones translate to `local_runner`).
     Ok,
-    /// `cloud_agent` while unconfigured: the handler answers 409 with
-    /// [`CloudAgentUnavailableBody`] ([`CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS`]).
+    /// Kept for shape parity; #2903 removes the cloud refusal.
     CloudUnavailable,
 }
 
-/// Ports the executor gate: `executor` is the raw
-/// `default_agent_executor` input (`None` when absent — `data.get(...)`
-/// misses, and `None != "cloud_agent"` passes), `cloud_configured` is the
-/// D-11 [`cloud_agent_is_configured`](crate::dispatch::policy::cloud_agent_is_configured)
-/// verdict. Exact string equality, like Python's `==`.
-pub fn check_executor_gate(executor: Option<&str>, cloud_configured: bool) -> ExecutorGate {
-    match executor {
-        Some(e) if e == EXECUTOR_CLOUD_AGENT && !cloud_configured => ExecutorGate::CloudUnavailable,
-        _ => ExecutorGate::Ok,
-    }
+/// Ports the translation: `executor` is the raw
+/// `default_agent_executor` input (`None` when absent). Deprecated
+/// values translate to `local_runner` — never a refusal.
+pub fn check_executor_gate(executor: Option<&str>, _cloud_configured: bool) -> ExecutorGate {
+    let _ = executor;
+    ExecutorGate::Ok
 }
-
-/// The 409 body for [`ExecutorGate::CloudUnavailable`], consumed from D-11
-/// (L4) rather than redefined: `{"error": "Pi Dash Cloud Agent is not
-/// currently available", "code": "cloud_agent_unavailable"}`.
-pub fn cloud_unavailable_body() -> CloudAgentUnavailableBody {
-    CloudAgentUnavailableBody::new()
-}
-
-/// The 409 status for [`ExecutorGate::CloudUnavailable`], consumed from
-/// D-11 (L4).
-pub const CLOUD_UNAVAILABLE_STATUS: u16 = CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS;
 
 /// `validate()` is-default-unset detail (`:93-96`): raised as a bare
 /// string, so DRF wraps it as `non_field_errors` (unlike the model
@@ -743,13 +725,14 @@ pub fn resolve_options_user(user: Option<UserFlags>, is_authenticated: bool) -> 
 /// D-11's [`agent_executor_options`](crate::dispatch::policy::agent_executor_options):
 /// the cloud verdict consults the `has_usable_llm_config` EE seam only for
 /// authenticated users on configured instances (see D-11 docs);
-/// `local_runner_available` is the queries-layer
-/// `LOCAL_RUNNER_AVAILABLE_EXISTS_SQL` verdict, `local_runner_exists`
-/// the `LOCAL_RUNNER_EXISTS_SQL` verdict (online incl. paused —
+/// `local_runner_available` / `local_runner_exists` are the SeaORM
+/// pod-work verdicts (`local_runner_available_exists` /
+/// `local_runner_exists`, online incl. paused for the exists leg —
 /// evaluated only when unavailable, as Python's `elif`), and
 /// `managed` the L4 `managed_runner_availability` verdict, all passed
 /// through verbatim. Rows are always
-/// `[cloud_agent, local_runner, managed_runner]`.
+/// `[cloud_agent, local_runner, managed_runner]`, each carrying
+/// `deprecated` (#2903: true for cloud/managed).
 pub fn project_executor_options<F>(
     cloud: &CloudAgentSettings,
     user: Option<UserFlags>,
@@ -2277,48 +2260,12 @@ mod tests {
 
     #[test]
     fn executor_gate_vectors_match_fixture() {
-        let fx = fixture();
-        let validate = fx.get("validate").expect("validate");
-        // cloud_agent while unconfigured → CloudAgentUnavailableAPI shape.
-        assert!(!fx
-            .get("validate_cloud_setting")
-            .expect("setting")
-            .as_bool()
-            .expect("bool"));
+        // #2903: the cloud refusal is gone; deprecated values translate
+        // (normalize_executor_write) and never refuse.
         assert_eq!(
             check_executor_gate(Some("cloud_agent"), false),
-            ExecutorGate::CloudUnavailable
+            ExecutorGate::Ok
         );
-        let cloud = validate
-            .get("cloud_agent_unconfigured")
-            .expect("cloud node");
-        assert_eq!(cloud.get("exc").expect("exc"), "CloudAgentUnavailableAPI");
-        assert_eq!(CLOUD_UNAVAILABLE_STATUS, 409);
-        assert_eq!(
-            CLOUD_UNAVAILABLE_STATUS,
-            cloud
-                .get("status_code")
-                .expect("status")
-                .as_u64()
-                .expect("u64") as u16
-        );
-        let body = serde_json::to_string(&cloud_unavailable_body()).expect("serializes");
-        assert_eq!(
-            canonical(&serde_json::from_str(&body).expect("json")),
-            canonical(cloud.get("detail").expect("detail"))
-        );
-        assert_eq!(
-            body,
-            "{\"error\":\"Pi Dash Cloud Agent is not currently available\",\"code\":\"cloud_agent_unavailable\"}"
-        );
-        // The fixture's standalone exception node agrees.
-        let exc = fx.get("cloud_exception").expect("cloud_exception");
-        assert_eq!(exc.get("status_code").expect("s"), 409);
-        assert_eq!(
-            canonical(&serde_json::from_str(&body).expect("json")),
-            canonical(exc.get("detail").expect("detail"))
-        );
-        // Ungated kinds and absent input pass.
         assert_eq!(
             check_executor_gate(Some("local_runner"), false),
             ExecutorGate::Ok
@@ -2328,20 +2275,14 @@ mod tests {
             check_executor_gate(Some("cloud_agent"), true),
             ExecutorGate::Ok
         );
-        assert!(validate
-            .get("local_runner_ok")
-            .expect("lr")
-            .get("ok")
-            .expect("ok")
-            .as_bool()
-            .expect("b"));
-        assert!(validate
-            .get("no_executor_ok")
-            .expect("ne")
-            .get("ok")
-            .expect("ok")
-            .as_bool()
-            .expect("b"));
+        assert_eq!(
+            pidash_types::dispatch::normalize_executor_write("cloud_agent"),
+            Some(pidash_types::dispatch::AgentExecutorKind::LocalRunner)
+        );
+        assert_eq!(
+            pidash_types::dispatch::normalize_executor_write("managed_runner"),
+            Some(pidash_types::dispatch::AgentExecutorKind::LocalRunner)
+        );
     }
 
     #[test]
@@ -2650,7 +2591,7 @@ mod tests {
         let bytes = serde_json::to_string(&rows).expect("serializes");
         assert_eq!(
             bytes,
-            "[{\"kind\":\"cloud_agent\",\"available\":false,\"reason_code\":\"cloud_agent_unavailable\"},{\"kind\":\"local_runner\",\"available\":false,\"reason_code\":\"no_local_runner\"},{\"kind\":\"managed_runner\",\"available\":false,\"reason_code\":\"managed_runner_disabled\"}]"
+            "[{\"kind\":\"cloud_agent\",\"available\":false,\"reason_code\":\"cloud_agent_unavailable\",\"deprecated\":true},{\"kind\":\"local_runner\",\"available\":false,\"reason_code\":\"no_local_runner\",\"deprecated\":false},{\"kind\":\"managed_runner\",\"available\":false,\"reason_code\":\"managed_runner_disabled\",\"deprecated\":true}]"
         );
     }
 
@@ -2769,7 +2710,7 @@ mod tests {
                 ("workspace_detail", vec!["name", "slug", "id", "logo_url"]),
                 (
                     "agent_executor_options",
-                    vec!["kind", "available", "reason_code"],
+                    vec!["kind", "available", "reason_code", "deprecated"],
                 ),
             ],
         );
@@ -2803,7 +2744,7 @@ mod tests {
             &str_list(node.get("key_order").expect("ko")),
             &[(
                 "agent_executor_options",
-                vec!["kind", "available", "reason_code"],
+                vec!["kind", "available", "reason_code", "deprecated"],
             )],
         );
         // Fresh instances (create-201) omit the four annotations.
@@ -2861,7 +2802,7 @@ mod tests {
             &str_list(node.get("key_order").expect("ko")),
             &[(
                 "agent_executor_options",
-                vec!["kind", "available", "reason_code"],
+                vec!["kind", "available", "reason_code", "deprecated"],
             )],
         );
     }
