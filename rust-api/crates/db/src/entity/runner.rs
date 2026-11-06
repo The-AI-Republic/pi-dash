@@ -42,6 +42,8 @@ pub struct Model {
     pub provisioning: String,
     pub paused_at: Option<DateTimeWithTimeZone>,
     pub paused_by_id: Option<Uuid>,
+    #[sea_orm(default_value = "pod_member")]
+    pub pod_dispatch: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -130,7 +130,11 @@ pub fn engine_profile_for_user_available(
     if !settings.managed_runner.enabled {
         return (false, auto_pause::ENGINE_DISABLED);
     }
-    (true, auto_pause::NONE)
+    // CE (open source) never has a gateway lane the desktop can use (CE
+    // BYOK is explicitly unsupported in model_provider); the cloud overlay
+    // provides the OpenHub lane via a different build. In OSS, profile is
+    // therefore unavailable, matching Django CE agent_model_profile_for_user.
+    (false, auto_pause::PROFILE_UNAVAILABLE)
 }
 
 pub fn instance_can_serve_engine(settings: &pidash_db::config::Settings) -> bool {

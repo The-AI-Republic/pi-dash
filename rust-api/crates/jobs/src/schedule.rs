@@ -323,6 +323,11 @@ pub fn literal_schedule() -> Vec<BeatEntry> {
             task: "pi_dash.bgtasks.loop.scan_due_targets",
             cadence: Cadence::Crontab(Crontab::parse("*", "*", "*", "*", "*").expect("valid")),
         },
+        BeatEntry {
+            name: "runner-pause-engines-with-expired-credentials",
+            task: "runner.pause_engines_with_expired_credentials",
+            cadence: Cadence::Crontab(Crontab::parse("*/5", "*", "*", "*", "*").expect("valid")),
+        },
     ]
 }
 

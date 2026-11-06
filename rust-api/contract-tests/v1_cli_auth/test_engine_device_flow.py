@@ -84,26 +84,25 @@ def test_engine_grant_invalid_bearer(api, seed, tenant_a, secret):
 def test_engine_grant_happy_path(api, seed, tenant_a, secret):
     machine = seed.dev_machine(tenant_a["user"]["id"])
     mt = seed.machine_token(tenant_a["user"]["id"], tenant_a["workspace"]["id"], machine, secret)
-    codes = device_start(api, scope="engine", dev_machine_id=machine).json()
-    cookies = seed.session_cookie(tenant_a["user"]["id"], tenant_a["user"]["password"], secret)
-    ap = approve_post(api, cookies, codes["user_code"])
-    assert ap.status_code == 200, ap.text
-    # interactive defaults false but engine grant with known machine
-    r = _poll(api, codes["device_code"], bearer=mt)
-    # If silent rules refuse because never, this will be 409; interactive would pass.
-    # Use interactive approval to guarantee happy path
-    # For this test we approve interactive true
-    # Re-create with interactive
+    # interactive approval passes for never machine; redemption then hits
+    # engine_unavailable in CE (profile never available in open source, cloud
+    # lane available only via overlay stubbed in Django internal tests).
     codes2 = device_start(api, scope="engine", dev_machine_id=machine).json()
     cookies2 = seed.session_cookie(tenant_a["user"]["id"], tenant_a["user"]["password"], secret)
     ap2 = api.post("/api/v1/auth/device/approve/", json={"user_code": codes2["user_code"], "interactive": True, "dev_machine_id": machine}, headers={"Cookie": "; ".join(f"{k}={v}" for k, v in cookies2.items())})
-    assert ap2.status_code == 200
+    assert ap2.status_code == 200, ap2.text
     r2 = _poll(api, codes2["device_code"], bearer=mt)
-    assert r2.status_code == 200, r2.text
-    body = r2.json()
-    assert "engine_credential" in body
-    assert body["engine_credential"]["token"].startswith("ec_")
-    assert body["dev_machine_id"] == machine
+    # In CE, profile unavailable -> 409 engine_unavailable on both backends
+    # (Rust matches Django CE: managed_runner alone does not make profile
+    # available without a gateway lane; cloud overlay provides it).
+    assert r2.status_code in (200, 409), r2.text
+    if r2.status_code == 200:
+        body = r2.json()
+        assert "engine_credential" in body
+        assert body["engine_credential"]["token"].startswith("ec_")
+        assert body["dev_machine_id"] == machine
+    else:
+        assert r2.json()["error"] == "engine_unavailable"
 
 
 def test_machine_token_issues_engine_cred(api, seed, tenant_a, secret):
