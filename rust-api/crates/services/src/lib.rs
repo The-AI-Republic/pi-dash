@@ -35,6 +35,7 @@ pub mod ops;
 pub mod orchestration;
 pub mod prompting;
 pub mod read;
+pub mod runner_admin;
 pub mod runner_enroll;
 pub mod runner_runs;
 pub mod runner_sessions;
