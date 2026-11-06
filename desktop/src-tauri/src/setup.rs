@@ -22,6 +22,7 @@
 //! service is required, PO-12). Nothing here runs on its own.
 
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -32,15 +33,19 @@ use crate::pidash_cli;
 
 /// How long `pidash start` may take before the daemon answers `Hello`.
 const START_WAIT: Duration = Duration::from_secs(30);
+#[cfg(unix)]
 /// Cap on the login shell printing its `PATH` (a slow rc file must not hang
 /// the set-up).
 const SHELL_PATH_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[cfg(unix)]
 /// Brackets around the `PATH` the login shell prints, so rc-file banners
 /// (with or without a trailing newline) are never taken for it.
 const PATH_BEGIN: &str = "__PIDASH_PATH_BEGIN__";
+#[cfg(unix)]
 const PATH_END: &str = "__PIDASH_PATH_END__";
 
+#[cfg(unix)]
 /// The `PATH` a login shell of `shell` sets up: `$SHELL -lc 'printf … "$PATH"'`,
 /// read between [`PATH_BEGIN`] and [`PATH_END`]. `None` when the shell cannot
 /// be run, takes no `-lc` (tcsh/csh, nushell), or prints nothing in time.
@@ -71,6 +76,7 @@ pub fn login_shell_path_with(shell: &Path) -> Option<String> {
     parse_marked_path(&String::from_utf8_lossy(&out.stdout))
 }
 
+#[cfg(unix)]
 /// The `PATH` between the last [`PATH_BEGIN`] and the [`PATH_END`] after it.
 fn parse_marked_path(text: &str) -> Option<String> {
     let start = text.rfind(PATH_BEGIN)? + PATH_BEGIN.len();
@@ -392,6 +398,7 @@ mod tests {
         assert_eq!(login_shell_path_with(&tmp.path().join("missing")), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_path_is_read_between_the_markers() {
         assert_eq!(
