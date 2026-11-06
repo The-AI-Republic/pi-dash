@@ -143,9 +143,6 @@ crates/db/src/ops/instance.rs 5
 crates/db/src/ops/prompting.rs 5
 crates/db/src/ops/repair.rs 7
 crates/db/src/ops/users.rs 12
-crates/db/src/orchestration/querysets.rs 8
-crates/db/src/orchestration/runs.rs 4
-crates/db/src/orchestration/workpad.rs 1
 crates/db/src/runner_runs/pod.rs 3
 crates/db/src/runner_sessions/machine_outbox.rs 1
 crates/db/src/runner_sessions/outbox.rs 1
