@@ -874,8 +874,10 @@ CI lanes:
   `.github/workflows/rust-api-contract-tests.yml` runs `dispatch/`
   (minus `test_create_project_issue_transition.py` — pre-existing
   failure on main, `found:` on NEWPIDASH-1) plus
-  `assistant/test_turn_isolation.py`; the stall ordering test is
-  deselected there (the solo worker serialises claims).
+  `assistant/test_turn_isolation.py`; the three ordering proofs that
+  need concurrent claims (the stall test, the per-tenant failure
+  isolation, and the hanging tool) are deselected there (the solo
+  worker serialises claims) and run on the Rust lane instead.
 - Rust half: `.github/workflows/rust-api-contract-tests-dispatch-rust.yml`
   boots `pidash-api worker --concurrency 24` and runs the
   backend-branched dispatch modules plus `test_turn_isolation.py`;
