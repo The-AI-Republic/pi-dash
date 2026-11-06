@@ -156,6 +156,7 @@ def _release_pins(candidates, still_stuck_q: Q) -> int:
                 AgentRun.objects.select_for_update(of=("self",))
                 .select_related("parent_run")
                 .filter(id=run_id, status=AgentRunStatus.QUEUED, pinned_runner__isnull=False)
+                .exclude(pin_kind="dedicated")  # §12.1: locality filter in the re-check too
                 .filter(still_stuck_q)
                 .first()
             )

@@ -128,15 +128,16 @@ def assigned_runner_detail(runner):
     }
 
 
-def _check_assignment_code(runner, *, user, issue, pod=None):
+def _check_assignment_code(runner, *, user, issue, pod=None, project_id=None):
     """Shared E1-E8 (sans E6) evaluation for one dedicated choice (design §7.1).
 
     Returns ``(code, detail)`` — ``code`` is ``""`` when the choice is
     assignable, else the first failing E-code in E1-E8 order, with the
-    human-readable ``detail`` for the refusal. ``issue=None`` means "new"
-    (project membership of the caller owns E2; the requester is the future
-    creator so E7 is satisfied by construction). ``pod`` is the requested
-    execution pod, or ``None`` when the request names no pod.
+    human-readable ``detail`` for the refusal. ``issue=None`` means "new":
+    E7 is satisfied by construction (the requester is the future creator)
+    and E2 reads ``project_id`` (the create surface passes the context
+    project). ``pod`` is the requested execution pod, or ``None`` when the
+    request names no pod.
     """
     from pi_dash.runner.models import AgentRunStatus, RunnerStatus
     from pi_dash.runner.services.permissions import can_use_runner
@@ -147,6 +148,9 @@ def _check_assignment_code(runner, *, user, issue, pod=None):
     # E2: the runner's pod is in the issue's project.
     if issue is not None:
         if runner.pod_id is None or str(runner.pod.project_id) != str(issue.project_id):
+            return "runner_wrong_project", "runner is in a different project"
+    elif project_id is not None:
+        if runner.pod_id is None or str(runner.pod.project_id) != str(project_id):
             return "runner_wrong_project", "runner is in a different project"
     elif pod is not None:
         if str(runner.pod.project_id) != str(pod.project_id):
@@ -319,16 +323,49 @@ def build_dispatch_wait(run, *, viewer=None):
 
 
 def AgentRunCountAhead(run) -> int:
-    """Older QUEUED runs pinned to the same runner (read-side runs_ahead)."""
-    from pi_dash.runner.models import AgentRun, AgentRunStatus
+    """Older QUEUED runs pinned to the same runner (read-side runs_ahead).
+
+    Under the §10.2 alternation a dedicated run may also wait behind one
+    shared run (rank 1 beats rank 2 when the last run was dedicated) and
+    behind newer locality pins (rank 0 always); those count too.
+    """
+    from pi_dash.runner.models import AgentRun, AgentRunStatus, PinKind
 
     if run.created_at is None or run.pinned_runner_id is None:
         return 0
-    return AgentRun.objects.filter(
-        pinned_runner_id=run.pinned_runner_id,
-        status=AgentRunStatus.QUEUED,
-        created_at__lt=run.created_at,
-    ).exclude(pk=run.pk).count()
+    ahead = (
+        AgentRun.objects.filter(
+            pinned_runner_id=run.pinned_runner_id,
+            status=AgentRunStatus.QUEUED,
+            created_at__lt=run.created_at,
+        )
+        .exclude(pk=run.pk)
+        .count()
+    )
+    if run.pin_kind == PinKind.DEDICATED:
+        from pi_dash.runner.services.matcher import _last_served_dedicated
+
+        runner = run.pinned_runner
+        if runner is not None and _last_served_dedicated(runner):
+            # Locality pins outrank a dedicated run whatever their age.
+            ahead += (
+                AgentRun.objects.filter(
+                    pinned_runner=run.pinned_runner,
+                    status=AgentRunStatus.QUEUED,
+                    pin_kind=PinKind.LOCALITY,
+                    created_at__gte=run.created_at,
+                )
+                .exclude(pk=run.pk)
+                .count()
+            )
+            # One shared run is served before the next dedicated (§10.2).
+            if AgentRun.objects.filter(
+                pod=run.pod,
+                status=AgentRunStatus.QUEUED,
+                pinned_runner__isnull=True,
+            ).exists():
+                ahead += 1
+    return ahead
 
 
 # ---------------------------------------------------------------------------
@@ -374,24 +411,29 @@ def clear_dedicated_runner(issue, *, reason, actor, decided_by):
     """Clear ``Issue.assigned_runner`` and record why (design §13).
 
     Always clears; raises only when the issue row or activity write fails.
-    Every clear writes an issue with ``actor`` (the system actor for
-    system-initiated clears) and a comment: *the system decided the issue
-    had been unpinned, and the reason*.
+    Every clear writes an activity entry naming the runner and one system
+    comment naming the runner and the reason (§13.1/§14.7), attributed to
+    ``actor`` (the system actor for system-initiated clears).
+    ``assigned_pod`` is left alone.
 
     ``decided_by`` is the moment the dedicated assignment was bypassed
     deliberately (H-12); ``None`` for system-initiated clears.
     """
     from django.utils.html import format_html
 
-    from pi_dash.db.models.issue import IssueComment
+    from pi_dash.db.models.issue import IssueActivity, IssueComment
     from pi_dash.orchestration.workpad import get_agent_system_user
 
+    runner = getattr(issue, "assigned_runner", None)
+    runner_name = runner.name if runner is not None else "the dedicated runner"
+    runner_id = str(runner.id) if runner is not None else None
     issue.assigned_runner = None
     issue.save(update_fields=["assigned_runner", "updated_at"])
     if actor is None:
         actor = get_agent_system_user()
     body = format_html(
-        "<p>The dedicated runner assignment was cleared: <strong>{}</strong>.</p>",
+        "<p>The dedicated runner assignment to <strong>{}</strong> was cleared: <strong>{}</strong>.</p>",
+        runner_name,
         reason,
     )
     IssueComment.objects.create(
@@ -401,6 +443,20 @@ def clear_dedicated_runner(issue, *, reason, actor, decided_by):
         actor=actor,
         comment_html=body,
         speaker_type=IssueComment.SpeakerType.SYSTEM,
+    )
+    IssueActivity.objects.create(
+        issue=issue,
+        actor=actor,
+        verb="updated",
+        old_value=runner_name,
+        new_value="",
+        field="assigned_runner",
+        project_id=issue.project_id,
+        workspace_id=issue.workspace_id,
+        comment=f"cleared the dedicated runner {runner_name}: {reason}",
+        old_identifier=runner_id,
+        new_identifier=None,
+        epoch=1,
     )
 
 
@@ -442,16 +498,17 @@ def resolve_run_pin(issue, *, parent, pod, fresh_session, creator, trigger, pod_
 # ---------------------------------------------------------------------------
 
 
-def validate_execution_target(attrs, *, issue=None, project=None, user=None):
+def validate_execution_target(attrs, *, issue=None, project_id=None, user=None):
     """Validate the requested execution target in place (design §7.1).
 
     ``attrs`` is the serializer's validated data. When ``assigned_runner``
     (or the ``_id`` spelling) is present, E1-E8 are evaluated and the first
     failure raises ``serializers.ValidationError`` keyed on the field the
     caller posted, carrying the E-code as the error ``code``. Skips runner
-    checks when the request names no runner. A non-``None`` runner on a
-    create/update without a resolvable pod is refused by E1 (a runner that
-    cannot be addressed is not found).
+    checks when the request names no runner — except E8: clearing the
+    runner under an ASSIGNED/RUNNING run is refused with
+    ``active_run_in_progress`` (§13.2). ``project_id`` carries E2 on create
+    (when there is no issue yet).
     """
     if user is None:
         from crum import get_current_user
@@ -464,13 +521,38 @@ def validate_execution_target(attrs, *, issue=None, project=None, user=None):
         return
     runner = attrs.get(runner_key)
     if runner is None:
+        # A clear is a runner change: E8 applies (§13.2). The no-op case
+        # (already unassigned) passes by construction.
+        if issue is not None and getattr(issue, "pk", None) is not None:
+            from pi_dash.runner.models import AgentRun, AgentRunStatus
+            from pi_dash.runner.services.matcher import NON_TERMINAL_STATUSES
+
+            blocking = [
+                s for s in NON_TERMINAL_STATUSES
+                if s not in (AgentRunStatus.QUEUED, AgentRunStatus.PAUSED_AWAITING_INPUT)
+            ]
+            if AgentRun.objects.filter(work_item=issue, status__in=blocking).exists():
+                raise serializers.ValidationError(
+                    {
+                        runner_key: serializers.ErrorDetail(
+                            "the issue has an active run; changes take effect on the next run",
+                            code="active_run_in_progress",
+                        )
+                    }
+                )
         return
+    # No-op resend (§7.2): re-sending the current runner is never rejected,
+    # even after eligibility drifted. Read-side evaluation
+    # (assignable_for) is unaffected — this is the write path only.
+    if issue is not None and getattr(issue, "assigned_runner_id", None) is not None:
+        if str(runner.pk) == str(issue.assigned_runner_id):
+            return
     pod = attrs.get("assigned_pod") or attrs.get("assigned_pod_id")
     if pod is not None and not hasattr(pod, "project_id"):
         from pi_dash.runner.models import Pod
 
         pod = Pod.objects.filter(pk=pod).first()
-    code, detail = _check_assignment_code(runner, user=user, issue=issue, pod=pod)
+    code, detail = _check_assignment_code(runner, user=user, issue=issue, pod=pod, project_id=project_id)
     if code:
         raise serializers.ValidationError({runner_key: serializers.ErrorDetail(detail, code=code)})
 
@@ -490,6 +572,24 @@ def _repoint_queued_run(run, *, new_runner, actor, decided_by):
     run.pinned_runner = new_runner
     run.pin_kind = PinKind.DEDICATED if new_runner is not None else PinKind.LOCALITY
     run.save(update_fields=["pinned_runner", "pin_kind"])
+    # §13.2: a re-pointed run starts a fresh session on its new target —
+    # the parent's thread id is stale. Drain the run's pod on commit so
+    # the new pin is served promptly.
+    parent = getattr(run, "parent_run", None)
+    if parent is not None and parent.thread_id:
+        parent.thread_id = ""
+        parent.save(update_fields=["thread_id"])
+    if run.pod_id is not None:
+        from django.db import transaction
+
+        pod_id = run.pod_id
+
+        def _drain(pod_id=pod_id):
+            from pi_dash.runner.services.matcher import drain_pod_by_id
+
+            drain_pod_by_id(pod_id)
+
+        transaction.on_commit(_drain)
     body = format_html(
         "<p>Your run was re-pointed from <strong>{}</strong> to <strong>{}</strong>.</p>",
         old_name,
@@ -514,41 +614,50 @@ def apply_execution_target(issue, *, new_runner, actor, decided_by, project=None
     and writes an activity row. Call only after
     ``validate_execution_target`` has passed. ``decided_by`` is the moment
     the choice was made; the caller stamps it.
+
+    One transaction: the issue row is locked first, then the run row (the
+    issue -> run order ``complete_project_move_handoff`` uses). If the run
+    was assigned between the serializer's read and the lock, the row lock
+    serialization makes the QUEUED re-check fail-closed: no re-point.
     """
+    from django.db import transaction
     from django.utils import timezone as dj_timezone
 
-    from pi_dash.db.models.issue import IssueActivity
+    from pi_dash.db.models.issue import Issue, IssueActivity
     from pi_dash.runner.models import AgentRun, AgentRunStatus
 
     decided_at = decided_by or dj_timezone.now()
-    issue.assigned_runner = new_runner
-    if new_runner is not None:
-        issue.assigned_pod = new_runner.pod
-    issue.save(update_fields=["assigned_runner", "assigned_pod", "updated_at"])
-    queued = (
-        AgentRun.objects.select_for_update()
-        .filter(work_item=issue, status=AgentRunStatus.QUEUED)
-        .order_by("created_at")
-        .first()
-    )
-    if queued is not None:
-        _repoint_queued_run(queued, new_runner=new_runner, actor=actor, decided_by=decided_at)
-    old_name = ""
-    new_name = new_runner.name if new_runner is not None else ""
-    IssueActivity.objects.create(
-        issue=issue,
-        actor=actor,
-        verb="updated",
-        old_value=old_name,
-        new_value=new_name,
-        field="assigned_runner",
-        project_id=issue.project_id,
-        workspace_id=issue.workspace_id,
-        comment="updated the dedicated runner to",
-        old_identifier=None,
-        new_identifier=str(new_runner.id) if new_runner is not None else None,
-        epoch=1,
-    )
+    with transaction.atomic():
+        # Lock the issue row first (issue -> run order, §13.2).
+        Issue.objects.select_for_update(of=("self",)).filter(pk=issue.pk).first()
+        issue.assigned_runner = new_runner
+        if new_runner is not None:
+            issue.assigned_pod = new_runner.pod
+        issue.save(update_fields=["assigned_runner", "assigned_pod", "updated_at"])
+        queued = (
+            AgentRun.objects.select_for_update()
+            .filter(work_item=issue, status=AgentRunStatus.QUEUED)
+            .order_by("created_at")
+            .first()
+        )
+        if queued is not None:
+            _repoint_queued_run(queued, new_runner=new_runner, actor=actor, decided_by=decided_at)
+        old_name = ""
+        new_name = new_runner.name if new_runner is not None else ""
+        IssueActivity.objects.create(
+            issue=issue,
+            actor=actor,
+            verb="updated",
+            old_value=old_name,
+            new_value=new_name,
+            field="assigned_runner",
+            project_id=issue.project_id,
+            workspace_id=issue.workspace_id,
+            comment="updated the dedicated runner to",
+            old_identifier=None,
+            new_identifier=str(new_runner.id) if new_runner is not None else None,
+            epoch=1,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -793,19 +902,42 @@ def fail_dedicated_runs() -> int:
     return failed
 
 
-def apply_lost_runner_policy(issue, *, reason):
-    """Apply the project's lost-runner handling to one issue (§12.3).
+def _lost_runner_revoke_error(runner_name) -> str:
+    """Run ``error`` text for a queued dedicated run lost with its runner."""
+    return (
+        f"Runner {runner_name} was revoked or deleted, so this run cannot start. "
+        "The issue is back in the pod's routing; choose a new runner or keep the pod."
+    )
 
-    ``fail_to_backlog`` (default) cancels the dedicated QUEUED runs with
-    ``dedicated_runner_unavailable`` and clears the assignment.
-    ``fall_back`` clears the assignment and downstream run kinds, making
-    the run a pod run. Called inside the revoking transaction.
+
+def apply_lost_runner_policy(issue, *, reason):
+    """Apply the project's lost-runner handling to one issue (§13.1).
+
+    Called inside the revoking transaction, after the assignment has been
+    read; clears the assignment itself. Applies whether or not the issue
+    has a queued dedicated run.
+
+    ``fail_to_backlog`` (default): the queued dedicated runs fail with
+    ``dedicated_runner_revoked``; the assignment is cleared; a ticking
+    issue moves to Backlog through ``_bounce_issue_no_eligible_runner``
+    (reason ``dedicated-runner-revoked``). An issue in another state only
+    gets the cleared assignment and comments.
+
+    ``fall_back``: routed to a squad — its own pod when that pod has a
+    runner that could serve the issue, else the project's default pod
+    (``assigned_pod`` set in the same transaction; the queued run is
+    cancelled and on commit recreated in the default pod), else the
+    existing no-eligible-runner bounce. The replacement's check and the
+    bounce share ``pod_has_runner_for_issue_principal``'s pod branch, so
+    steps 2 and 3 cannot disagree.
     """
+    from pi_dash.orchestration.agent_phases import is_ticking_state
     from pi_dash.runner.models import AgentRun, AgentRunStatus, PinKind
     from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
 
     issue.refresh_from_db(fields=["assigned_runner"])
     runner = issue.assigned_runner
+    runner_name = runner.name if runner is not None else "the dedicated runner"
     queued = list(
         AgentRun.objects.select_for_update().filter(
             work_item=issue, pin_kind=PinKind.DEDICATED, status=AgentRunStatus.QUEUED
@@ -813,26 +945,165 @@ def apply_lost_runner_policy(issue, *, reason):
     )
     policy = getattr(issue.project, "dedicated_runner_lost_action", "fail_to_backlog")
     if policy == "fall_back":
-        for run in queued:
-            run.pin_kind = PinKind.LOCALITY
-            run.save(update_fields=["pin_kind"])
-        queued_ids = [r.pk for r in queued]
-        # Release the pins into the pod queue in the same loop below.
-        for run_id in queued_ids:
-            AgentRun.objects.filter(pk=run_id).update(pinned_runner=None)
-        clear_dedicated_runner(issue, reason="runner lost — fell back to the pod", actor=None, decided_by=None)
+        _apply_fall_back(issue, queued, runner_name=runner_name)
         return
     for run in queued:
         finalize_agent_run(
             run.pk,
-            AgentRunStatus.CANCELLED,
+            AgentRunStatus.FAILED,
             expected_status=AgentRunStatus.QUEUED,
             updates={
-                "error_code": "dedicated_runner_unavailable",
-                "error": refusal_detail("dedicated_runner_unavailable", new_runner=runner),
+                "error_code": "dedicated_runner_revoked",
+                "error": _lost_runner_revoke_error(runner_name),
             },
         )
     clear_dedicated_runner(
         issue, reason="runner lost — run failed, issue moved to backlog", actor=None, decided_by=None
+    )
+    if is_ticking_state(issue.state if issue.state_id else None):
+        from pi_dash.orchestration.scheduling import _bounce_issue_no_eligible_runner
+
+        issue.refresh_from_db(fields=["state", "assigned_runner"])
+        _bounce_issue_no_eligible_runner(
+            issue,
+            triggered_by=reason,
+            reason="dedicated-runner-revoked",
+            reason_name=runner_name,
+        )
+
+
+def _apply_fall_back(issue, queued, *, runner_name):
+    """``fall_back`` arm of :func:`apply_lost_runner_policy` (§13.1).
+
+    At most one non-terminal run exists per issue, so the queued run (if
+    any) stands in for the could-serve check; with no queued run the
+    check runs with ``run_creator_id=None, human=False`` as §13.1 says.
+    """
+    from django.db import transaction
+
+    from pi_dash.runner.models import AgentRunStatus, PinKind
+    from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+    from pi_dash.runner.services.matcher import pod_has_runner_for_issue_principal
+
+    from pi_dash.runner.models import HUMAN_TRIGGERS, Pod
+
+    run = queued[0] if queued else None
+
+    def _could_serve(pod):
+        # "A runner that could serve the issue": the pod branch.
+        # pod_once=True forces that branch even though the assignment is
+        # still set at this point.
+        if pod is None:
+            return False
+        if run is not None:
+            creator = run.created_by_id
+            human = run.trigger in HUMAN_TRIGGERS if run.trigger else True
+        else:
+            creator = None
+            human = False
+        return pod_has_runner_for_issue_principal(pod, issue, creator, human=human, pod_once=True)
+
+    own_pod = issue.assigned_pod
+    if own_pod is not None and _could_serve(own_pod):
+        # Step 1: own pod has a runner that could serve the issue.
+        for r in queued:
+            r.pinned_runner = None
+            r.pin_kind = PinKind.LOCALITY
+            r.save(update_fields=["pinned_runner", "pin_kind"])
+        clear_dedicated_runner(issue, reason="runner lost — fell back to the pod", actor=None, decided_by=None)
+        _post_fall_back_comment(issue, runner_name=runner_name, pod=own_pod)
+        return
+
+    default_pod = Pod.default_for_project(issue.project)
+    other_pod = default_pod is not None and str(default_pod.pk) != str(own_pod.pk if own_pod else "")
+    if other_pod and _could_serve(default_pod):
+        # Step 2: the project's default pod has one. assigned_pod moves in
+        # the same transaction; the queued run (AgentRun.pod is immutable)
+        # is cancelled and on commit recreated in the default pod.
+        issue.assigned_pod = default_pod
+        issue.save(update_fields=["assigned_pod", "updated_at"])
+        for r in queued:
+            if finalize_agent_run(
+                r.pk,
+                AgentRunStatus.CANCELLED,
+                expected_status=AgentRunStatus.QUEUED,
+                updates={"error": "runner revoked; replaced in the default pod", "error_code": "runner_revoked"},
+            ):
+                issue_id, parent_id = issue.id, r.id
+                trigger = r.trigger
+
+                def _recreate(issue_id=issue_id, parent_id=parent_id, trigger=trigger, pod_id=default_pod.pk):
+                    from pi_dash.db.models.issue import Issue as _Issue
+                    from pi_dash.orchestration.service import _create_and_dispatch_run
+                    from pi_dash.runner.models import AgentRun as _Run
+                    from pi_dash.runner.models import Pod as _Pod
+
+                    _issue = _Issue.objects.filter(pk=issue_id).first()
+                    _parent = _Run.objects.filter(pk=parent_id).first()
+                    _pod = _Pod.objects.filter(pk=pod_id).first()
+                    if _issue is None or _parent is None or _pod is None:
+                        return
+                    _creator = _parent.created_by
+                    if _creator is None:
+                        return
+                    _create_and_dispatch_run(
+                        issue=_issue,
+                        parent=_parent,
+                        creator=_creator,
+                        pod=_pod,
+                        fresh_session=False,
+                        trigger=trigger,
+                        pod_once=False,
+                    )
+
+                transaction.on_commit(_recreate)
+        clear_dedicated_runner(issue, reason="runner lost — fell back to the default pod", actor=None, decided_by=None)
+        _post_fall_back_comment(issue, runner_name=runner_name, pod=default_pod)
+        return
+
+    # Step 3: no squad can serve the issue — the existing bounce applies.
+    # The runner is gone for good, so waiting cannot help (§13.1): the
+    # queued run fails with dedicated_runner_revoked, as in fail_to_backlog.
+    for r in queued:
+        finalize_agent_run(
+            r.pk,
+            AgentRunStatus.FAILED,
+            expected_status=AgentRunStatus.QUEUED,
+            updates={
+                "error_code": "dedicated_runner_revoked",
+                "error": _lost_runner_revoke_error(runner_name),
+            },
+        )
+    clear_dedicated_runner(issue, reason="runner lost — no runner left in the pod", actor=None, decided_by=None)
+    from pi_dash.orchestration.agent_phases import is_ticking_state
+    from pi_dash.orchestration.scheduling import _bounce_issue_no_eligible_runner
+
+    if is_ticking_state(issue.state if issue.state_id else None):
+        issue.refresh_from_db(fields=["state"])
+        _bounce_issue_no_eligible_runner(
+            issue,
+            triggered_by="runner_revoked",
+            reason="no-eligible-runner",
+        )
+
+
+def _post_fall_back_comment(issue, *, runner_name, pod):
+    """System comment for ``fall_back`` naming runner, reason and pod (§13.1)."""
+    from django.utils.html import format_html
+
+    from pi_dash.db.models.issue import IssueComment
+    from pi_dash.orchestration.workpad import get_agent_system_user
+
+    IssueComment.objects.create(
+        issue=issue,
+        project=issue.project,
+        workspace=issue.workspace,
+        actor=get_agent_system_user(),
+        comment_html=format_html(
+            "<p>Runner <strong>{}</strong> is gone. The issue now uses pod <strong>{}</strong>.</p>",
+            runner_name,
+            pod.name if pod is not None else "the pod",
+        ),
+        speaker_type=IssueComment.SpeakerType.SYSTEM,
     )
 

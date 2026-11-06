@@ -278,3 +278,84 @@ def test_resolver_pod_once_bypasses(db, workspace, project, create_user, pod, st
     assert got is None and kind == PinKind.LOCALITY
     issue.refresh_from_db()
     assert issue.assigned_runner_id == runner.id  # untouched
+
+
+@pytest.mark.unit
+def test_noop_resend_never_rejected_after_drift(db, workspace, project, create_user, pod, state):
+    """Re-sending the current runner is a no-op, never rejected (§7.2)."""
+    runner = _make_runner(create_user, workspace, pod)
+    issue = _make_issue(workspace, project, state, create_user, runner=runner, pod=pod)
+    # Eligibility drift: the owner is no longer on the issue (E7 would fail).
+    from pi_dash.db.models.issue import IssueAssignee
+
+    IssueAssignee.objects.filter(issue=issue, assignee_id=create_user.id).delete()
+    s = _app_serializer(issue, {"assigned_runner_id": str(runner.id)}, create_user, project)
+    assert s.is_valid(), s.errors
+
+
+@pytest.mark.unit
+def test_clear_refused_under_assigned_run(db, workspace, project, create_user, pod, state):
+    """Clearing under an ASSIGNED run is refused (§13.2)."""
+    runner = _make_runner(create_user, workspace, pod)
+    issue = _make_issue(workspace, project, state, create_user, runner=runner, pod=pod)
+    AgentRun.objects.create(
+        workspace=workspace, created_by=create_user, pod=pod,
+        work_item=issue, status=AgentRunStatus.ASSIGNED, runner=runner,
+    )
+    s = _app_serializer(issue, {"assigned_runner_id": None}, create_user, project)
+    assert not s.is_valid()
+    assert s.errors["assigned_runner"][0].code == "active_run_in_progress"
+
+
+@pytest.mark.unit
+def test_clear_allowed_under_queued_run_repoints(db, workspace, project, create_user, pod, state):
+    """Clearing with only a QUEUED run re-points it to the pod (§13.2)."""
+    runner = _make_runner(create_user, workspace, pod)
+    issue = _make_issue(workspace, project, state, create_user, runner=runner, pod=pod)
+    run = AgentRun.objects.create(
+        workspace=workspace, created_by=create_user, pod=pod,
+        work_item=issue, status=AgentRunStatus.QUEUED,
+        pinned_runner=runner, pin_kind=PinKind.DEDICATED,
+    )
+    s = _app_serializer(issue, {"assigned_runner_id": None}, create_user, project)
+    assert s.is_valid(), s.errors
+    s.save()
+    issue.refresh_from_db()
+    assert issue.assigned_runner_id is None
+    run.refresh_from_db()
+    assert run.pinned_runner_id is None
+    assert run.pin_kind == PinKind.LOCALITY
+
+
+@pytest.mark.unit
+def test_pod_change_without_runner_clears(db, workspace, project, create_user, pod, state):
+    """A pod-only change clears the dedicated assignment (§13.1)."""
+    other = Pod.objects.create(project=project, name=f"{project.identifier}_other", created_by=create_user)
+    runner = _make_runner(create_user, workspace, pod)
+    issue = _make_issue(workspace, project, state, create_user, runner=runner, pod=pod)
+    s = _app_serializer(issue, {"assigned_pod_id": str(other.id)}, create_user, project)
+    assert s.is_valid(), s.errors
+    s.save()
+    issue.refresh_from_db()
+    assert issue.assigned_pod_id == other.id
+    assert issue.assigned_runner_id is None
+
+
+@pytest.mark.unit
+def test_create_rejects_wrong_project_runner(db, workspace, project, create_user, pod, state):
+    """E2 on create reads the context project."""
+    other_project = type(project)(name="Other", workspace=project.workspace, created_by=create_user)
+    other_project.save()
+    other_pod = Pod.objects.create(project=other_project, name="otherpod", created_by=create_user)
+    runner = _make_runner(create_user, workspace, other_pod)
+    s = IssueCreateSerializer(
+        None,
+        data={"name": "N", "assigned_runner_id": str(runner.id)},
+        context={
+            "project_id": str(project.id),
+            "workspace_id": str(project.workspace_id),
+            "user": create_user,
+        },
+    )
+    assert not s.is_valid()
+    assert s.errors["assigned_runner"][0].code == "runner_wrong_project"

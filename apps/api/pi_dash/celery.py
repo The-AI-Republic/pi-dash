@@ -105,7 +105,7 @@ app.conf.beat_schedule = {
     # pins untouched by the released sweeps.
     "runner-fail-dedicated-runs": {
         "task": "runner.fail_dedicated_runs",
-        "schedule": crontab(minute="*/5"),
+        "schedule": crontab(minute="*/1"),
     },
     "runner-sweep-stranded-dedicated-runs": {
         "task": "runner.sweep_stranded_dedicated_runs",

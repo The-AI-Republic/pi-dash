@@ -902,10 +902,16 @@ class Runner(models.Model):
 
             # (3) Unpin QUEUED follow-ups so they flow back into the pod
             # queue (locality only). Dedicated pins are owned by the issue:
-            # per issue from the QUEUED dedicated pins, apply the project's
-            # lost-runner handling (cancel+clear or fall back), then clear
-            # the assignment — the revoking transaction itself (§12.3).
+            # per issue dedicated to this runner — whether or not it has a
+            # queued dedicated run (§13.1) — apply the project's
+            # lost-runner handling, which clears the assignment. The
+            # revoking transaction itself (§13.1).
+            from pi_dash.db.models.issue import Issue
+
             dedicated_issue_ids = list(
+                Issue.objects.filter(assigned_runner=self).values_list("pk", flat=True)
+            )
+            dedicated_issue_ids.extend(
                 AgentRun.objects.filter(
                     pinned_runner=self,
                     status=AgentRunStatus.QUEUED,
@@ -932,8 +938,6 @@ class Runner(models.Model):
                 )
 
                 for issue_id in dict.fromkeys(i for i in dedicated_issue_ids if i is not None):
-                    from pi_dash.db.models.issue import Issue
-
                     issue = Issue.objects.filter(pk=issue_id).first()
                     if issue is not None:
                         apply_lost_runner_policy(issue, reason=reason)

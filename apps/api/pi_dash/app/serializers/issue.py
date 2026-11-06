@@ -293,7 +293,9 @@ class IssueCreateSerializer(BaseSerializer):
             user = getattr(self.context["request"], "user", None)
         if user is None:
             user = getattr(self.instance, "created_by", None) if self.instance else None
-        validate_execution_target(attrs, issue=self.instance, user=user)
+        # E2 on create reads the context project (no issue yet).
+        project_id = self.instance.project_id if self.instance is not None else self.context.get("project_id")
+        validate_execution_target(attrs, issue=self.instance, user=user, project_id=project_id)
         normalize_issue_executor(attrs, instance=self.instance)
 
         # Validate description content for security
@@ -523,6 +525,19 @@ class IssueCreateSerializer(BaseSerializer):
                 actor=actor or result.created_by,
                 decided_by=dj_timezone.now(),
             )
+        elif "assigned_pod" in validated_data:
+            # §13.1: the issue's pod changed with no runner in the request —
+            # the dedicated assignment clears (the old pod's runner can no
+            # longer serve it).
+            if result.assigned_runner_id is not None:
+                from pi_dash.runner.services.issue_assignment import clear_dedicated_runner
+
+                clear_dedicated_runner(
+                    result,
+                    reason="pod changed",
+                    actor=self.context.get("user") or result.created_by,
+                    decided_by=None,
+                )
         return result
 
 

@@ -878,9 +878,18 @@ class AgentRunReleasePinEndpoint(APIView):
             # only the assignment save or revoke can move it (§12.2). After
             # the permission and still-QUEUED checks, before unpinning.
             if locked.pin_kind == "dedicated":
+                # §12.2: the exact refusal names runner and pod so the
+                # person can act (change the runner, or cancel and use
+                # pod_once). The {"error", "code"} shape is kept.
+                runner_name = locked.pinned_runner.name if locked.pinned_runner_id else "the dedicated runner"
+                pod_name = locked.pod.name if locked.pod_id else "the pod"
                 return Response(
                     {
-                        "error": "dedicated pins are not releasable",
+                        "error": (
+                            f"This run is dedicated to runner {runner_name} and cannot be released. "
+                            f"Change the issue's runner, or cancel the run and use Run on any "
+                            f"runner in {pod_name} once."
+                        ),
                         "code": "dedicated_pin_not_releasable",
                     },
                     status=status.HTTP_409_CONFLICT,

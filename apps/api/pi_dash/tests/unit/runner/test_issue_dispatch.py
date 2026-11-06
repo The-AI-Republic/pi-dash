@@ -327,7 +327,12 @@ def test_12h_bound_leaves_person_run(db, workspace, project, create_user, pod, s
 
 @pytest.mark.unit
 def test_revoke_fail_to_backlog(db, workspace, project, create_user, pod, state):
-    """Revoked runner + fail_to_backlog: cancel + clear + comment (§18)."""
+    """Revoked runner + fail_to_backlog: fail + clear + bounce comment (§13.1).
+
+    The queue run fails with ``dedicated_runner_revoked`` (§13.1), the
+    assignment clears, and a ticking issue moves to Backlog with the
+    dedicated-runner-revoked bounce message naming the runner.
+    """
     from pi_dash.db.models.issue import IssueComment
 
     runner = _make_runner(create_user, workspace, pod)
@@ -339,20 +344,66 @@ def test_revoke_fail_to_backlog(db, workspace, project, create_user, pod, state)
     )
     runner.revoke(reason="manual_revoke")
     run.refresh_from_db()
-    assert run.status == AgentRunStatus.CANCELLED
-    assert run.error_code == "dedicated_runner_unavailable"
+    assert run.status == AgentRunStatus.FAILED
+    assert run.error_code == "dedicated_runner_revoked"
     issue.refresh_from_db()
     assert issue.assigned_runner_id is None
     assert IssueComment.objects.filter(issue=issue).count() >= 1
+    # This issue is already in Backlog (non-ticking): no bounce, the run
+    # failure comment carries the revoked-runner message (§13.1). The
+    # ticking case is covered by test_revoke_fail_to_backlog_ticking_bounces.
+
+
+@pytest.mark.unit
+def test_revoke_fail_to_backlog_ticking_bounces(db, workspace, project, create_user, pod):
+    """A ticking issue moves to Backlog under fail_to_backlog (§13.1)."""
+    from pi_dash.db.models.state import State
+
+    ticking = State.objects.create(
+        name="In Progress", group="started", workspace=workspace, project=project,
+        sequence=2.0, default=True,
+    )
+    backlog = State.objects.create(
+        name="Backlog", group="backlog", workspace=workspace, project=project,
+        sequence=1.0, default=True,
+    )
+    runner = _make_runner(create_user, workspace, pod)
+    # Creating the issue in a ticking state starts its first run (the
+    # state-entry path), already pinned dedicated via the resolver.
+    issue = _make_issue(workspace, project, ticking, create_user, runner=runner, pod=pod)
+    run = AgentRun.objects.get(work_item=issue)
+    assert run.status == AgentRunStatus.QUEUED and run.pin_kind == PinKind.DEDICATED
+    runner.revoke(reason="manual_revoke")
+    run.refresh_from_db()
+    assert run.status == AgentRunStatus.FAILED
+    assert run.error_code == "dedicated_runner_revoked"
+    issue.refresh_from_db()
+    assert issue.assigned_runner_id is None
+    assert issue.state_id == backlog.id
+    from pi_dash.db.models.issue import IssueComment
+
+    # The bounce comment names the revoked runner (§13.1).
+    assert IssueComment.objects.filter(issue=issue, comment_html__contains="Dedicated runner lost").exists()
+
+
+@pytest.mark.unit
+def test_revoke_without_queued_run_clears(db, workspace, project, create_user, pod, state):
+    """Revoking clears issues with no queued run too (§13.1)."""
+    runner = _make_runner(create_user, workspace, pod)
+    issue = _make_issue(workspace, project, state, create_user, runner=runner, pod=pod)
+    runner.revoke(reason="manual_revoke")
+    issue.refresh_from_db()
+    assert issue.assigned_runner_id is None
 
 
 @pytest.mark.unit
 def test_revoke_fall_back(db, workspace, project, create_user, pod, state):
-    """Revoked runner + fall_back: pod run again (§18)."""
-    runner = _make_runner(create_user, workspace, pod)
-    issue = _make_issue(workspace, project, state, create_user, runner=runner, pod=pod)
+    """Revoked runner + fall_back step 1: own pod has a runner (§13.1)."""
     project.dedicated_runner_lost_action = "fall_back"
     project.save(update_fields=["dedicated_runner_lost_action"])
+    runner = _make_runner(create_user, workspace, pod)
+    _make_runner(create_user, workspace, pod, name="spare")
+    issue = _make_issue(workspace, project, state, create_user, runner=runner, pod=pod)
     run = AgentRun.objects.create(
         workspace=workspace, created_by=create_user, pod=pod,
         work_item=issue, status=AgentRunStatus.QUEUED,
@@ -363,6 +414,29 @@ def test_revoke_fall_back(db, workspace, project, create_user, pod, state):
     assert run.status == AgentRunStatus.QUEUED
     assert run.pin_kind == PinKind.LOCALITY
     assert run.pinned_runner_id is None
+    issue.refresh_from_db()
+    assert issue.assigned_runner_id is None
+    assert issue.assigned_pod_id == pod.id
+
+
+@pytest.mark.unit
+def test_revoke_fall_back_no_eligible_bounces(db, workspace, project, create_user, pod, state):
+    """fall_back step 3: no squad can serve, issue bounces (§13.1)."""
+    project.dedicated_runner_lost_action = "fall_back"
+    project.save(update_fields=["dedicated_runner_lost_action"])
+    runner = _make_runner(create_user, workspace, pod)
+    issue = _make_issue(workspace, project, state, create_user, runner=runner, pod=pod)
+    run = AgentRun.objects.create(
+        workspace=workspace, created_by=create_user, pod=pod,
+        work_item=issue, status=AgentRunStatus.QUEUED,
+        pinned_runner=runner, pin_kind=PinKind.DEDICATED,
+    )
+    runner.revoke(reason="manual_revoke")
+    run.refresh_from_db()
+    # No other runner in either pod: the run fails with the runner gone
+    # (never stranded in the shared queue), the issue clears and bounces.
+    assert run.status == AgentRunStatus.FAILED
+    assert run.error_code == "dedicated_runner_revoked"
     issue.refresh_from_db()
     assert issue.assigned_runner_id is None
 

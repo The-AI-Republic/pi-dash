@@ -1118,7 +1118,9 @@ def _post_dedicated_waiting_comment(issue: Issue, *, run, runner) -> None:
     )
 
 
-def _bounce_issue_no_eligible_runner(issue: Issue, *, triggered_by: str, reason: str = "no-eligible-runner") -> None:
+def _bounce_issue_no_eligible_runner(
+    issue: Issue, *, triggered_by: str, reason: str = "no-eligible-runner", reason_name: str = ""
+) -> None:
     """Move ``issue`` back to Backlog and post the no-eligible-runner notice.
 
     State move fires ``fire_state_transition`` which disarms the ticker as
@@ -1168,6 +1170,14 @@ def _bounce_issue_no_eligible_runner(issue: Issue, *, triggered_by: str, reason:
             "excludes the run's creator or trigger. Reassign the issue to a "
             "runner that can serve it, or return it to the pod.</p>",
             assigned_name,
+        )
+    elif reason == "dedicated-runner-revoked":
+        body = format_html(
+            "<p><strong>Dedicated runner lost.</strong></p>"
+            "<p>Runner <strong>{}</strong> was revoked or deleted, so this issue "
+            "is no longer assigned to a dedicated runner. Choose a new runner "
+            "or return the issue to the pod.</p>",
+            reason_name,
         )
     else:
         body = format_html(
