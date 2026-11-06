@@ -1332,6 +1332,8 @@ class IssueDetailSerializer(IssueSerializer):
             "assigned_at": self._serialize_datetime(run.assigned_at),
             "started_at": self._serialize_datetime(run.started_at),
             "ended_at": self._serialize_datetime(run.ended_at),
+            "cancel_requested_at": self._serialize_datetime(getattr(run, "cancel_requested_at", None)),
+            "cancel_reason": getattr(run, "cancel_reason", ""),
             "done_payload": run.done_payload,
             "error": run.error,
             "error_code": run.error_code,
