@@ -197,7 +197,7 @@ impl IpcServer {
                 // Newest-first across the union, then trim to the cap so
                 // a 100-row request returns the freshest 100 globally —
                 // not 100 per runner.
-                all.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                all.sort_by_key(|run| std::cmp::Reverse(run.started_at));
                 all.truncate(cap);
                 Ok(Response::Runs(all))
             }
