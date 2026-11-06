@@ -125,6 +125,25 @@ def test_issue_create_invalid(api, world):
     }
 
 
+def test_issue_patch_executor_translates(api, world, db_conn):
+    # #2903: a cloud_agent write through the v1 serializer is stored as
+    # local_runner (normalize_issue_executor parity).
+    response = api.patch(
+        issue_url(world, world["issue"]["id"]),
+        json={"agent_executor": "cloud_agent"},
+    )
+    assert response.status_code == 200, response.text
+    from _harness.db import fetchone, get_database_url
+
+    db_conn.commit()
+    row = fetchone(
+        get_database_url(),
+        "SELECT agent_executor FROM issues WHERE id=%s",
+        (world["issue"]["id"],),
+    )
+    assert row["agent_executor"] == "local_runner"
+
+
 def test_issue_patch_bad_state(api, world):
     """F18-11 ``patch_bad_state``: unknown state id, exact body."""
     response = api.patch(

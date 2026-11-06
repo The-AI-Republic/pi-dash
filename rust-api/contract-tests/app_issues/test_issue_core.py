@@ -111,6 +111,28 @@ def test_create_minimal(clients, seed):
     assert admin.delete(f"{_base(ws, pid)}/issues/{issue_id}/").status_code == 204
 
 
+def test_create_managed_executor_stores_local(clients, seed, db_conn):
+    # #2903: a managed_runner write is translated to local_runner; no
+    # managed refusal remains for new work.
+    from _harness.db import fetchone, get_database_url
+
+    admin = clients["admin"]
+    ws, pid = seed["ws_slug"], seed["project"]
+    resp = admin.post(
+        f"{_base(ws, pid)}/issues/",
+        json={"name": "Executor probe", "agent_executor": "managed_runner"},
+    )
+    assert resp.status_code == 201, resp.text
+    issue_id = resp.json()["id"]
+    row = fetchone(
+        get_database_url(),
+        "SELECT agent_executor FROM issues WHERE id=%s",
+        (issue_id,),
+    )
+    assert row["agent_executor"] == "local_runner"
+    assert admin.delete(f"{_base(ws, pid)}/issues/{issue_id}/").status_code == 204
+
+
 def test_create_invalid_complexity(clients, seed):
     admin = clients["admin"]
     ws, pid = seed["ws_slug"], seed["project"]
