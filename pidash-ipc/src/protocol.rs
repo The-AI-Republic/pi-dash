@@ -1636,9 +1636,10 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(auto.paused(), Some(true));
-        let req: Request =
-            serde_json::from_value(serde_json::json!({"method": "engine_set_paused", "params": {"paused": true}}))
-                .unwrap();
+        let req: Request = serde_json::from_value(
+            serde_json::json!({"method": "engine_set_paused", "params": {"paused": true}}),
+        )
+        .unwrap();
         assert!(matches!(req, Request::EngineSetPaused { paused: true }));
     }
 }

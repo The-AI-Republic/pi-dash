@@ -162,10 +162,7 @@ pub async fn add_engine_runner(
         }
         let working_dir = match &req.working_dir {
             Some(dir) => dir.clone(),
-            None => {
-                let root = super::workdir::task_root(paths, &cfg);
-                super::workdir::allocate_working_dir(&root, &ws, &project_id, &cfg)?
-            }
+            None => super::workdir::allocate_engine_folder(paths, &ws, &project_id)?,
         };
 
         std::fs::create_dir_all(&working_dir)

@@ -736,6 +736,8 @@ pub async fn apply_enroll_response(
         }
         Err(e) => return Err(e.context("persisting [[runner]] block under config lock")),
     };
+    // A runner added again is no longer one the user removed locally.
+    crate::engine::tombstones::forget(paths, runner_id);
     let new_runner = cfg_after
         .runners
         .iter()

@@ -361,6 +361,16 @@ impl MachineControl {
         //    it up on hot-add — no restart required.
         let cloud_url = self.spawn_ctx.cloud_url();
         let persisted = async {
+            // The server returned a runner this computer already has: it is
+            // the answer as it is, so no folder is allocated for it.
+            let cfg = crate::config::file::load_config(&self.spawn_ctx.paths)?;
+            if let Some(existing) = cfg.runners.iter().find(|r| r.runner_id == resp.runner_id) {
+                return Ok(crate::cli::runner_ops::AppliedRunner {
+                    runner: existing.clone(),
+                    is_first_runner: false,
+                    already_present: true,
+                });
+            }
             let working_dir = create_working_dir(&self.spawn_ctx.paths, &cmd, &resp, agent_kind)?;
             let options = ApplyEnrollOptions {
                 working_dir,
