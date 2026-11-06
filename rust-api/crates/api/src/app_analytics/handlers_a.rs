@@ -496,6 +496,7 @@ fn day_comparison(name: &str, timezone: &chrono_tz::Tz) -> Option<(String, &'sta
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
         "created_at__date" => trunc_date_column("\"issues\".\"created_at\"", timezone),
+        "updated_at__date" => trunc_date_column("\"issues\".\"updated_at\"", timezone),
         "completed_at__date" => trunc_date_column("\"issues\".\"completed_at\"", timezone),
         "start_date" => "\"issues\".\"start_date\"".to_owned(),
         "target_date" => "\"issues\".\"target_date\"".to_owned(),
@@ -633,6 +634,7 @@ fn filter_text_sql(
     };
     let column = match term {
         "created_at__date" => trunc_date_column("\"issues\".\"created_at\"", timezone),
+        "updated_at__date" => trunc_date_column("\"issues\".\"updated_at\"", timezone),
         "completed_at__date" => trunc_date_column("\"issues\".\"completed_at\"", timezone),
         "start_date" => "\"issues\".\"start_date\"".to_owned(),
         "target_date" => "\"issues\".\"target_date\"".to_owned(),
