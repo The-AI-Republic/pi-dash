@@ -1936,12 +1936,12 @@ mod tests {
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO runner (id, created_at, updated_at, owner_id, workspace_id, pod_id, \
-             name, host_label, provisioning, visibility, refresh_token_hash, \
+             name, host_label, provisioning, pod_dispatch, visibility, refresh_token_hash, \
              refresh_token_fingerprint, refresh_token_generation, \
              previous_refresh_token_hash, access_token_signing_key_version, \
              enrollment_token_hash, enrollment_token_fingerprint, capabilities, status, \
              os, arch, runner_version, dev_metadata, protocol_version, revoked_reason) \
-             VALUES ($1, $2, $2, $3, $4, $5, $6, '', 'desktop_bundled', 0, '', '', 0, '', \
+             VALUES ($1, $2, $2, $3, $4, $5, $6, '', 'desktop_bundled', 'pinned_only', 0, '', '', 0, '', \
              1, '', '', '[]', $7, '', '', '', '{}', 1, '')",
         )
         .bind(id)

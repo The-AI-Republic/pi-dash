@@ -5967,10 +5967,10 @@ mod tests {
                 "INSERT INTO pod (id, project_id, deleted_at) VALUES ('{the_pod}', '{project}', now())"
             ),
             format!(
-                "INSERT INTO runner (id, owner_id, workspace_id, pod_id, provisioning, status, \
+                "INSERT INTO runner (id, owner_id, workspace_id, pod_id, provisioning, pod_dispatch, status, \
                  last_heartbeat_at, revoked_at, paused_at) VALUES \
-                 (gen_random_uuid(), '{member}', '{ws}', '{the_pod}', 'desktop_bundled', 'online', now(), NULL, NULL), \
-                 (gen_random_uuid(), '{admin}', '{ws}', '{the_pod}', 'desktop_bundled', 'online', now() - interval '1 hour', NULL, now())"
+                 (gen_random_uuid(), '{member}', '{ws}', '{the_pod}', 'desktop_bundled', 'pinned_only', 'online', now(), NULL, NULL), \
+                 (gen_random_uuid(), '{admin}', '{ws}', '{the_pod}', 'desktop_bundled', 'pinned_only', 'online', now() - interval '1 hour', NULL, now())"
             ),
             format!(
                 "INSERT INTO agent_run (id, work_item_id, status) VALUES \

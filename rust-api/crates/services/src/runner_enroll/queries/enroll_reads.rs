@@ -137,7 +137,7 @@ use pidash_db::entity::{
     workspace_members, workspaces,
 };
 use pidash_db::runner_enroll::columns::{
-    dev_machine as dm_cols, runner as r_cols, runner_force_refresh as ffr_cols,
+    dev_machine as dm_cols, enums, runner as r_cols, runner_force_refresh as ffr_cols,
 };
 use sea_orm::sea_query::Expr;
 use sea_orm::{
@@ -916,7 +916,16 @@ pub struct NewRunner<'a> {
 /// model defaults (visibility 0, generation 0, key version 1, empty
 /// hashes, `[]` capabilities, `{}` metadata, protocol 1) and
 /// `enrolled_at = created_at = updated_at = now`.
+///
+/// `pod_dispatch` is always set explicitly: the DB default is
+/// `pod_member`, so engines must be pinned-only (Django `Runner.save`
+/// creation default, #2903) and own-agent runners keep `pod_member`.
 pub async fn insert_runner(db: &impl ConnectionTrait, new: &NewRunner<'_>) -> Result<(), DbErr> {
+    let pod_dispatch = if new.provisioning == enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED {
+        enums::RUNNER_POD_DISPATCH_PINNED_ONLY
+    } else {
+        enums::RUNNER_POD_DISPATCH_POD_MEMBER
+    };
     runner::Entity::insert(runner::ActiveModel {
         id: Set(new.id),
         owner_id: Set(new.owner_id),
@@ -926,6 +935,7 @@ pub async fn insert_runner(db: &impl ConnectionTrait, new: &NewRunner<'_>) -> Re
         name: Set(new.name.to_owned()),
         host_label: Set(new.host_label.to_owned()),
         provisioning: Set(new.provisioning.to_owned()),
+        pod_dispatch: Set(pod_dispatch.to_owned()),
         visibility: Set(0),
         refresh_token_hash: Set(String::new()),
         refresh_token_fingerprint: Set(String::new()),
@@ -1148,6 +1158,7 @@ mod tests {
         "name",
         "host_label",
         "provisioning",
+        "pod_dispatch",
         "visibility",
         "refresh_token_hash",
         "refresh_token_fingerprint",
@@ -1191,6 +1202,9 @@ mod tests {
         "label",
         "visibility",
         "provisioning",
+        "engine_paused_by_owner",
+        "engine_auto_pause_reason",
+        "engine_team_runs",
         "last_seen_at",
         "revoked_at",
         "created_at",

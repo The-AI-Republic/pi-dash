@@ -16,6 +16,9 @@ pub struct Model {
     pub updated_at: DateTimeWithTimeZone,
     pub owner_id: Uuid,
     pub provisioning: String,
+    pub engine_paused_by_owner: bool,
+    pub engine_auto_pause_reason: String,
+    pub engine_team_runs: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

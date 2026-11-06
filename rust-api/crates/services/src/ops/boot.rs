@@ -62,11 +62,11 @@ pub const LEAF_MIGRATIONS: &[(&str, &str)] = &[
     ("assistant", "0004_usersttconfig"),
     ("auth", "0012_alter_user_first_name_max_length"),
     ("contenttypes", "0002_remove_content_type_name"),
-    ("db", "0170_issueview_anchor"),
+    ("db", "0172_clidevicecode_engine_scope"),
     ("django_celery_beat", "0018_improve_crontab_helptext"),
     ("license", "0006_instance_is_current_version_deprecated"),
     ("prompting", "0007_reseed_directional_relations"),
-    ("runner", "0033_agent_run_error_details"),
+    ("runner", "0038_rename_engine_runners"),
     ("sessions", "0001_initial"),
 ];
 
@@ -305,11 +305,11 @@ mod tests {
                 ("assistant", "0004_usersttconfig"),
                 ("auth", "0012_alter_user_first_name_max_length"),
                 ("contenttypes", "0002_remove_content_type_name"),
-                ("db", "0170_issueview_anchor"),
+                ("db", "0172_clidevicecode_engine_scope"),
                 ("django_celery_beat", "0018_improve_crontab_helptext"),
                 ("license", "0006_instance_is_current_version_deprecated"),
                 ("prompting", "0007_reseed_directional_relations"),
-                ("runner", "0033_agent_run_error_details"),
+                ("runner", "0038_rename_engine_runners"),
                 ("sessions", "0001_initial"),
             ]
         );
