@@ -122,7 +122,7 @@ def test_v1_run_ai_refuses_offline_dedicated(db, api_key_client, workspace, proj
 
 @pytest.mark.unit
 def test_web_run_ai_refuses_offline_dedicated(db, session_client, workspace, project, create_user, pod, state):
-    """web run_ai: dedicated offline → 409 code, no run (§23.3)."""
+    """web run_ai: dedicated offline → 409 full refusal body, no run (§23.3, §11.2)."""
     from pi_dash.runner.models import AgentRun
 
     runner = _make_runner(create_user, workspace, pod)
@@ -135,5 +135,9 @@ def test_web_run_ai_refuses_offline_dedicated(db, session_client, workspace, pro
         "/api/runners/runs/", {"work_item": str(issue.id), "triggered_by": "run_ai"}, format="json"
     )
     assert resp.status_code == status.HTTP_409_CONFLICT
-    assert resp.data["code"] == "assigned_runner_offline"
+    assert resp.data["reason"] == "assigned_runner_offline"
+    assert resp.data["runner"] == str(runner.id)
+    assert resp.data["runner_name"] == runner.name
+    assert resp.data["pod"] == str(pod.id)
+    assert resp.data["options"] == ["pod_once", "change_runner"]
     assert AgentRun.objects.filter(work_item=issue).count() == 0

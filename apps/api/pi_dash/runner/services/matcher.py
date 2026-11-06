@@ -410,7 +410,9 @@ def can_register_another(user_id, workspace_id) -> bool:
     return count_active(user_id, workspace_id) < Runner.MAX_PER_USER
 
 
-def pod_has_runner_for_issue_principal(pod, issue, run_creator_id, *, human: bool = True) -> bool:
+def pod_has_runner_for_issue_principal(
+    pod, issue, run_creator_id, *, human: bool = True, pod_once: bool = False
+) -> bool:
     """Does ``pod`` contain any registered runner whose owner could serve a
     run on ``issue`` triggered by ``run_creator_id``?
 
@@ -456,16 +458,18 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id, *, human: boo
     not know the trigger.
 
     A dedicated issue (§9.4) is served only by its assigned runner, so the
-    check reduces to that runner: registered (not revoked), its owner in
-    the eligible list, and — for an engine only — a ``pod_member`` whose
-    machine's engine is not paused on the runner's pod. A dedicated pin is
-    served whatever ``pod_dispatch`` (§23.1), so the dispatch mode is not
-    checked here; an offline dedicated runner still returns True (the
-    issue waits, as an offline runner does today).
+    check reduces to that runner: not revoked, in the run's pod, and
+    ``runner_may_take`` for the run's creator/trigger — the Python form of
+    the usage rule, which covers own-agent runners and engines alike and
+    cannot disagree with the dispatch gate it shadows. ``pod_dispatch`` is
+    ignored in this branch: a ``pinned_only`` runner takes the runs
+    dedicated to it (§23.1). Offline and paused are transient and still
+    count (the run waits or is refused at creation, §11); only the usage
+    rule is structural here.
     """
     from pi_dash.db.models.issue import IssueAssignee
     from pi_dash.runner.models import RunnerPodDispatch, RunnerProvisioning
-    from pi_dash.runner.services.dispatch_rules import engine_takes_pod_work
+    from pi_dash.runner.services.dispatch_rules import runner_may_take
 
     issue_people: set = set()
     if issue.created_by_id is not None:
@@ -478,7 +482,9 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id, *, human: boo
     if not eligible_owner_ids:
         return False
     assigned_id = getattr(issue, "assigned_runner_id", None)
-    if assigned_id is not None:
+    # pod_once (§23.3) runs in the pod's shared queue, so the pod branch
+    # applies even on a dedicated issue.
+    if assigned_id is not None and not pod_once:
         assigned = (
             Runner.objects.select_related("dev_machine")
             .filter(pk=assigned_id, pod=pod, owner_id__in=eligible_owner_ids)
@@ -487,9 +493,10 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id, *, human: boo
         )
         if assigned is None:
             return False
-        if assigned.is_engine and not engine_takes_pod_work(assigned):
-            return False
-        return True
+        # Dedicated branch (§9.4): the usage rule, not pod work. A paused
+        # pinned_only engine still counts here (its runs wait / are refused
+        # at creation); only a usage-rule exclusion bounces.
+        return runner_may_take(assigned, created_by_id=run_creator_id, human=human, issue=issue)
     candidates = (
         Runner.objects.filter(pod=pod, owner_id__in=eligible_owner_ids)
         .exclude(status=RunnerStatus.REVOKED)

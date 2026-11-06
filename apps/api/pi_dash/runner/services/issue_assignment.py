@@ -556,27 +556,130 @@ def apply_execution_target(issue, *, new_runner, actor, decided_by, project=None
 # ---------------------------------------------------------------------------
 
 
-def dedicated_run_refusal(issue, *, human, user):
-    """Pre-creation refusal for a person's run (§11).
+def dedicated_run_refusal(issue, *, human, user, pod_once=False):
+    """Pre-creation refusal for a person's run (§11, §23.3).
 
-    Returns ``(code, detail)`` — ``assigned_runner_offline`` or
-    ``assigned_runner_paused`` — or ``(None, None)`` when the run may
-    proceed. Only a person's run is refused; an automatic run is created
-    and waits (§11.3). Busy is never a refusal.
+    Returns ``(code, detail)`` — ``assigned_runner_not_owner``,
+    ``assigned_runner_offline`` or ``assigned_runner_paused`` — or
+    ``(None, None)`` when the run may proceed. Only a person's run is
+    refused; an automatic run is created and waits (§11.3). Busy is never
+    a refusal. Skipped entirely on a ``pod_once`` request (§23.3): the
+    run goes to the pod instead.
+
+    Order (§11.2): the H-10 usage-rule check first, so a teammate
+    excluded by an engine's usage rule gets ``assigned_runner_not_owner``
+    whatever the engine's state; the availability check second.
     """
     if not human:
+        return None, None
+    if pod_once:
         return None, None
     runner = getattr(issue, "assigned_runner", None)
     if runner is None:
         return None, None
     if runner.revoked_at is not None:
         return None, None  # E4 already failed at assignment; nothing to refuse here
+    # H-10 first: the engine usage rule (and, via runner_may_take, the
+    # own-agent rule) is checked before availability so an excluded
+    # teammate is refused with assigned_runner_not_owner even when the
+    # runner is also offline/paused (§23.3).
+    from pi_dash.runner.services.dispatch_rules import runner_may_take
+
+    user_id = getattr(user, "id", None) if user is not None else None
+    if not runner_may_take(runner, created_by_id=user_id, human=True, issue=issue):
+        return "assigned_runner_not_owner", "the dedicated runner's usage rule excludes this run"
     pause = runner_paused_reason(runner)
     if pause is not None:
-        return "assigned_runner_paused", "dedicated runner is paused"
+        return "assigned_runner_paused", pause
     if runner_is_offline(runner):
         return "assigned_runner_offline", "dedicated runner is offline"
     return None, None
+
+
+def refusal_pause_phrase(pause_reason) -> str:
+    """Plain-words pause phrase for refusal ``error`` text (§11.2)."""
+    if pause_reason == "dispatch_paused":
+        return "is paused by its owner"
+    if pause_reason == "owner_paused":
+        return "is paused by its owner"
+    if pause_reason == "wallet_empty":
+        return "is paused: the wallet is empty"
+    if pause_reason == "engine_sign_in_required":
+        return "is paused: the engine's sign-in expired"
+    if pause_reason == "gateway_session_revoked":
+        return "is paused: the gateway session was revoked"
+    if pause_reason == "profile_unavailable":
+        return "is paused: the engine profile is unavailable"
+    if pause_reason == "engine_disabled":
+        return "is paused: the engine is disabled"
+    return "is paused"
+
+
+def dedicated_refusal_body(issue, *, code):
+    """The full §11.2 refusal body for ``code`` on ``issue``.
+
+    Shape: ``{error, reason, pause_reason, runner, runner_name,
+    runner_last_seen_at, pod, pod_name, options}``. ``options`` is
+    ``["pod_once", "change_runner"]`` for availability refusals and
+    ``["run_on_my_runner", "pod_once"]`` for ``assigned_runner_not_owner``.
+    """
+    runner = getattr(issue, "assigned_runner", None)
+    pod = getattr(issue, "assigned_pod", None)
+    pause_reason = None
+    if runner is not None and code == "assigned_runner_paused":
+        pause_reason = runner_paused_reason(runner) or "dispatch_paused"
+    if code == "assigned_runner_not_owner":
+        options = ["run_on_my_runner", "pod_once"]
+    else:
+        options = ["pod_once", "change_runner"]
+    if runner is None:
+        error = "the dedicated runner is unavailable"
+    elif code == "assigned_runner_not_owner":
+        error = f"{runner.name} cannot take this run (not the runner's owner)"
+    elif code == "assigned_runner_paused":
+        error = f"{runner.name} {refusal_pause_phrase(pause_reason)}"
+    elif code == "assigned_runner_offline":
+        seen = runner.last_heartbeat_at.isoformat() if runner.last_heartbeat_at else "unknown"
+        error = f"{runner.name} is offline (last seen {seen})"
+    else:
+        error = "the dedicated runner is unavailable"
+    return {
+        "error": error,
+        "reason": code,
+        "pause_reason": pause_reason,
+        "runner": str(runner.id) if runner is not None else None,
+        "runner_name": runner.name if runner is not None else None,
+        "runner_last_seen_at": runner.last_heartbeat_at.isoformat()
+        if runner is not None and runner.last_heartbeat_at
+        else None,
+        "pod": str(pod.id) if pod is not None else None,
+        "pod_name": pod.name if pod is not None else None,
+        "options": options,
+    }
+
+
+def pod_once_auth_code(issue, *, user):
+    """The ``pod_once`` authorization refusal for ``user`` on ``issue`` (§23.3).
+
+    Returns ``pod_once_not_applicable`` when the issue has no dedicated
+    runner, ``pod_once_not_allowed`` when the user is neither the issue's
+    creator nor a current assignee, else ``None``. ``no_eligible_runner_in_pod``
+    is a preflight outcome, not an auth code, and is returned by the
+    dispatch paths after the pod-branch preflight.
+    """
+    runner = getattr(issue, "assigned_runner", None)
+    if runner is None:
+        return "pod_once_not_applicable"
+    user_id = getattr(user, "id", None) if user is not None else None
+    if user_id is None:
+        return "pod_once_not_allowed"
+    if issue.created_by_id is not None and issue.created_by_id == user_id:
+        return None
+    from pi_dash.db.models.issue import IssueAssignee
+
+    if IssueAssignee.objects.filter(issue=issue, assignee_id=user_id).exists():
+        return None
+    return "pod_once_not_allowed"
 
 
 def refusal_detail(short_code, new_runner=None):
@@ -608,19 +711,40 @@ def stranded_queued(run, issue):
     )
 
 
+def dedicated_unavailable_error(runner, *, pod_name="the pod") -> str:
+    """The §11.3 failure text for a dedicated 12h bound expiry."""
+    pause = runner_paused_reason(runner)
+    if pause is not None:
+        detail = f"it {refusal_pause_phrase(pause)}"
+    else:
+        seen = runner.last_heartbeat_at.isoformat() if runner.last_heartbeat_at else "unknown"
+        detail = f"it is offline (last seen {seen})"
+    return (
+        f"Runner {runner.name} did not take this run within 12 hours: {detail}. "
+        f"Automatic runs on this issue are stopped. "
+        f"The issue stays assigned to {runner.name}. "
+        "When the runner is back, use Run or Re-tick. "
+        f"To run it elsewhere, use Run on any runner in {pod_name} once, "
+        "or change the issue's runner."
+    )
+
+
 def fail_dedicated_runs() -> int:
     """Fail dedicated runs whose runner is still unavailable after 12h (§11.3).
 
-    Automatic runs wait for their dedicated runner; once older than
-    ``DEDICATED_RUN_QUEUED_MAX_AGE_SECS`` and the runner is still offline
-    or paused, the run fails with ``dedicated_runner_unavailable`` and no
-    re-queue. Person-initiated runs are never failed here — they were
-    refused at creation, so a runner that came back and went offline
-    again cannot strand them.
+    Every dedicated QUEUED run older than
+    ``DEDICATED_RUN_QUEUED_MAX_AGE_SECS`` whose pinned runner is
+    unavailable now (§11.1) fails with ``dedicated_runner_unavailable``
+    and ``done_payload.stop_ticking`` so the clock stops (§11.3). The
+    unavailability is re-checked under the row lock (as
+    ``runner.tasks._release_pins`` does) so a runner that came back in
+    the meantime keeps its run. A run behind a busy online runner is not
+    failed: it is moving.
     """
     from datetime import timedelta as td
 
     from django.conf import settings as dj_settings
+    from django.db import transaction
 
     from pi_dash.runner.models import AgentRun, AgentRunStatus, PinKind
     from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
@@ -636,24 +760,36 @@ def fail_dedicated_runs() -> int:
     )
     failed = 0
     for run_id in stale:
-        run = AgentRun.objects.select_related("pinned_runner").filter(pk=run_id).first()
-        if run is None:
-            continue
-        runner = run.pinned_runner
-        if runner is None:
-            continue
-        if runner_paused_reason(runner) is None and not runner_is_offline(runner):
-            continue  # runner back online: the run drains normally
-        if finalize_agent_run(
-            run_id,
-            AgentRunStatus.FAILED,
-            expected_status=AgentRunStatus.QUEUED,
-            updates={
-                "error_code": "dedicated_runner_unavailable",
-                "error": refusal_detail("dedicated_runner_unavailable", new_runner=runner),
-            },
-        ):
-            failed += 1
+        with transaction.atomic():
+            run = (
+                AgentRun.objects.select_for_update(of=("self",))
+                .select_related("pinned_runner", "pod", "work_item")
+                .filter(pk=run_id, status=AgentRunStatus.QUEUED, pin_kind=PinKind.DEDICATED)
+                .first()
+            )
+            if run is None:
+                continue
+            runner = run.pinned_runner
+            if runner is None:
+                continue
+            # Locked re-check: a runner that came back keeps its run.
+            runner.refresh_from_db(fields=["status", "paused_at", "last_heartbeat_at"])
+            if runner_paused_reason(runner) is None and not runner_is_offline(runner):
+                continue
+            pod_name = run.pod.name if run.pod_id is not None and run.pod else "the pod"
+            # finalize re-uses the row lock we hold; expected_status keeps
+            # it first-writer-wins if the candidate moved since the list.
+            if finalize_agent_run(
+                run_id,
+                AgentRunStatus.FAILED,
+                expected_status=AgentRunStatus.QUEUED,
+                updates={
+                    "error_code": "dedicated_runner_unavailable",
+                    "error": dedicated_unavailable_error(runner, pod_name=pod_name),
+                    "done_payload": {"stop_ticking": True},
+                },
+            ):
+                failed += 1
     return failed
 
 

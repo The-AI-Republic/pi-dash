@@ -1171,6 +1171,10 @@ _RUN_AI_REASON_MESSAGES = {
     "no_eligible_runner": "no eligible runner or execution principal is available for this work item",
     "assigned_runner_offline": "the dedicated runner is offline; bring it online or run on the pod",
     "assigned_runner_paused": "the dedicated runner is paused; resume it or run on the pod",
+    "assigned_runner_not_owner": "the dedicated runner cannot take this run; use pod_once or change the runner",
+    "pod_once_not_allowed": "only the issue's creator and assignees may use pod_once",
+    "pod_once_not_applicable": "pod_once requires a dedicated runner on the issue",
+    "no_eligible_runner_in_pod": "no eligible runner in the pod",
 }
 
 
@@ -1235,8 +1239,37 @@ class IssueRunAiAPIEndpoint(BaseAPIView):
         if refused is not None:
             return refused
 
-        run, reason = scheduling.run_ai_for_human(issue, actor=request.user)
+        pod_once = (request.data.get("pin") or "").strip() == "pod_once" if request.data else False
+        run, reason = scheduling.run_ai_for_human(issue, actor=request.user, pod_once=pod_once)
         if run is None:
+            # Dedicated refusals carry the full §11.2 body on v1 too.
+            if reason in (
+                scheduling.RUN_AI_DEDICATED_RUNNER_OFFLINE,
+                scheduling.RUN_AI_DEDICATED_RUNNER_PAUSED,
+                scheduling.RUN_AI_DEDICATED_NOT_OWNER,
+            ):
+                from pi_dash.runner.services.issue_assignment import dedicated_refusal_body
+
+                return Response(
+                    dedicated_refusal_body(issue, code=reason),
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if reason == scheduling.RUN_AI_POD_ONCE_NOT_ALLOWED:
+                return Response(
+                    {
+                        "error": _RUN_AI_REASON_MESSAGES.get(reason, "could not dispatch a run"),
+                        "reason": reason,
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            if reason == scheduling.RUN_AI_POD_ONCE_NOT_APPLICABLE:
+                return Response(
+                    {
+                        "error": _RUN_AI_REASON_MESSAGES.get(reason, "could not dispatch a run"),
+                        "reason": reason,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             return Response(
                 {
                     "error": _RUN_AI_REASON_MESSAGES.get(reason, "could not dispatch a run"),

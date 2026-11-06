@@ -238,6 +238,24 @@ def handle_issue_state_transition(
             want_run=dispatch_immediate,
             actor=actor,
         )
+    # Refusal before reconcile (§11.2, §23.3): a person's state move into a
+    # ticking state on an unavailable or usage-excluded dedicated runner is
+    # refused with nothing queued and the clock untouched. The state change
+    # itself stands (the caller already saved it); no run is created and no
+    # bounce happens. An agent move (moved_by_run set) is automatic.
+    if moved_by_run is None:
+        from pi_dash.runner.services.issue_assignment import dedicated_run_refusal
+
+        _refusal_creator = actor or _resolve_fallback_creator(issue)
+        refusal, _detail = dedicated_run_refusal(issue, human=True, user=_refusal_creator)
+        if refusal is not None:
+            logger.info(
+                "orchestration: skip run creation for issue %s — %s",
+                issue.id,
+                refusal,
+            )
+            scheduling._post_dedicated_refusal_comment(issue, code=refusal, actor=_refusal_creator)
+            return TransitionOutcome(reason=refusal)
     decision = scheduling.reconcile(issue, event)
 
     if not dispatch_immediate:
@@ -281,22 +299,6 @@ def handle_issue_state_transition(
         )
         return TransitionOutcome(reason="no-pod-available")
 
-    # H-11 refusal, before preflight-bounce and before any run is
-    # persisted: a person's state move (``moved_by_run`` not set) on an
-    # offline or paused dedicated runner is refused with the specific
-    # code — no run, no bounce. An agent move is automatic and waits.
-    if moved_by_run is None:
-        from pi_dash.runner.services.issue_assignment import dedicated_run_refusal
-
-        refusal, _detail = dedicated_run_refusal(issue, human=True, user=creator)
-        if refusal is not None:
-            logger.info(
-                "orchestration: skip run creation for issue %s — %s",
-                issue.id,
-                refusal,
-            )
-            return TransitionOutcome(reason=refusal)
-
     if not scheduling.preflight_eligibility_or_bounce(
         issue,
         run_creator=creator,
@@ -305,10 +307,8 @@ def handle_issue_state_transition(
     ):
         return TransitionOutcome(reason="no-eligible-runner")
 
-    # A person's state move deliberately bypasses the dedicated runner
-    # for this one run (§23.3). An agent move (``moved_by_run`` set) is
-    # automatic and keeps the dedicated pin.
-    human_move = moved_by_run is None
+    # A state move takes the dedicated pin (§9.2); pod_once is an explicit
+    # Run AI option after a refusal (§23.3), never the state-move default.
     return _create_and_dispatch_run(
         issue=issue,
         parent=parent,
@@ -316,7 +316,7 @@ def handle_issue_state_transition(
         pod=pod,
         fresh_session=fresh_session,
         trigger=AgentRunTrigger.STATE_TRANSITION,
-        pod_once=human_move,
+        pod_once=False,
     )
 
 
@@ -431,6 +431,15 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
     # leaves the clock exactly as it was.
     from pi_dash.orchestration import scheduling
 
+    # Refusal before reconcile (§11.2): the comment is saved; the clock is
+    # never armed and one system comment explains why no run started.
+    from pi_dash.runner.services.issue_assignment import dedicated_run_refusal
+
+    refusal, _detail = dedicated_run_refusal(issue, human=True, user=comment.actor)
+    if refusal is not None:
+        scheduling._post_dedicated_refusal_comment(issue, code=refusal, actor=comment.actor)
+        return ContinuationOutcome(reason=refusal)
+
     with transaction.atomic():
         if is_ticking_state(issue.state):
             decision = scheduling.reconcile(
@@ -454,8 +463,9 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
             creator=comment.actor,
             pod=pod,
             trigger=AgentRunTrigger.COMMENT_AND_RUN,
-            # Comment & Run always runs once on the pod (§23.3).
-            pod_once=True,
+            # Comment & Run takes the dedicated pin (§9.2); pod_once is an
+            # explicit request option (§23.3), never the default.
+            pod_once=False,
         )
         if outcome.created_run is None:
             transaction.set_rollback(True)
@@ -473,12 +483,17 @@ def _create_continuation_run(
     See ``.ai_design/ticking_optimization/design.md``.
 
     ``pod_once`` (§23.3) deliberately bypasses the issue's dedicated
-    runner for this one run. Set only by the human paths (state move,
-    Comment & Run, Run AI); the tick never passes it.
+    runner for this one run. Set only on an explicit ``pin: "pod_once"``
+    request; the tick never passes it.
     """
     from pi_dash.cloud_agent.creation import dispatch_after_commit, execution_fields, lock_cloud_creation_capacity
     from pi_dash.runner.services.issue_assignment import resolve_run_pin
 
+    # §23.3: a pod_once run starts a fresh session — the parent's thread
+    # is cleared so whichever runner takes it has no resume hint.
+    if pod_once and parent is not None and parent.thread_id:
+        parent.thread_id = ""
+        parent.save(update_fields=["thread_id"])
     pinned_runner, pin_kind = resolve_run_pin(
         issue, parent=parent, pod=pod, fresh_session=False,
         creator=creator, trigger=trigger, pod_once=pod_once,
@@ -553,6 +568,23 @@ def _create_continuation_run(
             )
             return ContinuationOutcome(created_run=run, reason="render-failed")
         run.save(update_fields=["prompt", "prompt_manifest"])
+        # §9.4: a run created for an offline/paused dedicated runner posts
+        # one waiting comment. Human immediate runs never reach here while
+        # unavailable (refused at creation); this covers ticks and held
+        # entries (§11.2), which create and wait as automatic runs do.
+        from pi_dash.runner.services.issue_assignment import (
+            runner_is_offline,
+            runner_paused_reason,
+        )
+
+        if (
+            pin_kind == "dedicated"
+            and pinned_runner is not None
+            and (runner_paused_reason(pinned_runner) is not None or runner_is_offline(pinned_runner))
+        ):
+            from pi_dash.orchestration import scheduling as _scheduling
+
+            _scheduling._post_dedicated_waiting_comment(issue, run=run, runner=pinned_runner)
         dispatch_after_commit(run.id)
 
     return ContinuationOutcome(created_run=run, reason="created")
@@ -778,8 +810,8 @@ def _create_and_dispatch_run(
     fresh session (§9.2); only the locality pin is dropped with it.
 
     ``pod_once`` (§23.3) deliberately bypasses the issue's dedicated
-    runner for this one run. Set only by the human paths; the tick
-    never passes it.
+    runner for this one run. Set only on an explicit ``pin: "pod_once"``
+    request; the tick never passes it.
     """
     from pi_dash.cloud_agent.creation import dispatch_after_commit, execution_fields, lock_cloud_creation_capacity
     from pi_dash.runner.services.issue_assignment import resolve_run_pin
@@ -860,7 +892,26 @@ def _create_and_dispatch_run(
             logger.exception("orchestration: prompt render failed for issue %s", issue.id)
             return TransitionOutcome(created_run=run, reason="render-failed")
 
+        # §23.3: pod_once starts a fresh session — clear the parent thread.
+        if pod_once and effective_parent is not None and effective_parent.thread_id:
+            effective_parent.thread_id = ""
+            effective_parent.save(update_fields=["thread_id"])
         run.save(update_fields=["prompt", "prompt_manifest"])
+        # §9.4: a run created for an offline/paused dedicated runner posts
+        # one waiting comment (see _create_continuation_run note).
+        from pi_dash.runner.services.issue_assignment import (
+            runner_is_offline,
+            runner_paused_reason,
+        )
+
+        if (
+            pin_kind == "dedicated"
+            and pinned_runner is not None
+            and (runner_paused_reason(pinned_runner) is not None or runner_is_offline(pinned_runner))
+        ):
+            from pi_dash.orchestration import scheduling as _scheduling
+
+            _scheduling._post_dedicated_waiting_comment(issue, run=run, runner=pinned_runner)
         # Drain the pod's queue after the run row has landed. drain_pod is
         # idempotent and uses select_for_update(skip_locked=True), so it's
         # safe to run unconditionally.

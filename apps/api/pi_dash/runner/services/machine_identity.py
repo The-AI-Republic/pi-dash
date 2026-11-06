@@ -253,23 +253,146 @@ def _hand_over_to_survivor(loser: Runner, survivor: Runner) -> set:
     - In another pod, a locality pin is released to its own pod, and a
       legacy ``managed_runner`` run is cancelled with ``runner_revoked``: the
       matcher serves such a run only to the engine it is pinned to.
-      Dedicated pins elsewhere fall to the revoking path's lost-runner
-      handling (§12.3), which runs on the revoke that follows.
+    - Dedicated assignment (§23.4): each issue dedicated to ``loser``
+      moves to ``survivor`` (lifecycle re-assignment; E7 not re-checked,
+      only E2/E4). QUEUED same-pod re-points; QUEUED other-pod cancels and
+      recreates in the survivor's pod; PAUSED other-pod cancels with the
+      retired-machine comment; ASSIGNED/RUNNING runs end via the revoke
+      that follows and the next run is dedicated to the survivor. Nothing
+      is then dedicated to ``loser``, so the lost-runner rule does not
+      fire for it.
 
     Runs ``loser`` still holds (assigned, running) are cancelled by
     ``Runner.revoke`` right after, as for any revoke. Returns the pods to
     drain.
     """
     from pi_dash.core.agent_execution import AgentExecutorKind
+    from pi_dash.runner.models import PinKind, RunnerStatus
     from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
 
+    # Dedicated assignment move first (§23.4), before the bulk re-pin below
+    # and before the revoke that follows.
+    from pi_dash.db.models.issue import Issue
+
+    survivor_pod_id = survivor.pod_id
+    survivor_project_id = survivor.pod.project_id if survivor.pod_id is not None else None
+    survivor_revoked = survivor.status == RunnerStatus.REVOKED or survivor.revoked_at is not None
+    dedicated_issues = list(
+        Issue.all_objects.select_for_update(of=("self",))
+        .filter(assigned_runner=loser)
+        .select_related("project")
+    )
+    for issue in dedicated_issues:
+        if survivor_revoked or str(survivor_project_id) != str(issue.project_id):
+            from pi_dash.runner.services.issue_assignment import apply_lost_runner_policy
+
+            apply_lost_runner_policy(issue, reason="dev_machine_merged")
+            continue
+        issue.assigned_runner = survivor
+        issue.assigned_pod = survivor.pod
+        issue.save(update_fields=["assigned_runner", "assigned_pod", "updated_at"])
+        # Per-issue runs (§23.4 table). At most one non-terminal run is
+        # expected (one-active-run invariant); iterate for safety.
+        from pi_dash.runner.services.matcher import NON_TERMINAL_STATUSES
+
+        runs = list(
+            AgentRun.objects.select_for_update(of=("self",))
+            .select_related("parent_run")
+            .filter(work_item=issue, status__in=NON_TERMINAL_STATUSES)
+            .order_by("created_at")
+        )
+        for run in runs:
+            if run.status == AgentRunStatus.QUEUED:
+                if str(run.pod_id) == str(survivor_pod_id):
+                    # Re-pointed (§13.2): the bulk update below re-pins the
+                    # same row; here clear the parent thread for the
+                    # dedicated pin.
+                    run.pinned_runner = survivor
+                    run.pin_kind = PinKind.DEDICATED
+                    run.save(update_fields=["pinned_runner", "pin_kind"])
+                    if run.parent_run is not None and run.parent_run.thread_id:
+                        run.parent_run.thread_id = ""
+                        run.parent_run.save(update_fields=["thread_id"])
+                else:
+                    # Cancel + recreate in the survivor's pod on commit.
+                    if finalize_agent_run(
+                        run.id,
+                        AgentRunStatus.CANCELLED,
+                        expected_status=AgentRunStatus.QUEUED,
+                        updates={"error": "runner retired on machine merge", "error_code": "runner_revoked"},
+                    ):
+                        issue_id, parent_id = issue.id, run.id
+                        trigger = run.trigger
+
+                        def _recreate(issue_id=issue_id, parent_id=parent_id, trigger=trigger, survivor_pk=survivor.pk):
+                            from pi_dash.db.models.issue import Issue as _Issue
+                            from pi_dash.orchestration.service import _create_and_dispatch_run
+                            from pi_dash.runner.models import AgentRun as _Run, Runner as _Runner
+
+                            _issue = _Issue.objects.filter(pk=issue_id).first()
+                            _parent = _Run.objects.filter(pk=parent_id).first()
+                            _survivor = _Runner.objects.filter(pk=survivor_pk).select_related("pod").first()
+                            if _issue is None or _parent is None or _survivor is None:
+                                return
+                            _creator = _parent.created_by
+                            if _creator is None:
+                                return
+                            _create_and_dispatch_run(
+                                issue=_issue,
+                                parent=_parent,
+                                creator=_creator,
+                                pod=_survivor.pod,
+                                fresh_session=False,
+                                trigger=trigger,
+                                pod_once=False,
+                            )
+
+                        transaction.on_commit(_recreate)
+            elif run.status == AgentRunStatus.PAUSED_AWAITING_INPUT:
+                if str(run.pod_id) == str(survivor_pod_id):
+                    continue  # not touched; the reply runs on the survivor
+                if finalize_agent_run(
+                    run.id,
+                    AgentRunStatus.CANCELLED,
+                    expected_status=AgentRunStatus.PAUSED_AWAITING_INPUT,
+                    updates={"error": "runner retired on machine merge", "error_code": "runner_revoked"},
+                ):
+                    from django.utils.html import format_html
+
+                    from pi_dash.db.models.issue import IssueComment
+                    from pi_dash.orchestration.workpad import get_agent_system_user
+
+                    IssueComment.objects.create(
+                        issue=issue,
+                        project=issue.project,
+                        workspace=issue.workspace,
+                        actor=get_agent_system_user(),
+                        comment_html=format_html(
+                            "<p>The waiting run was waiting for input on the retired "
+                            "machine. A reply now starts a run on <strong>{}</strong>.</p>",
+                            survivor.name,
+                        ),
+                        speaker_type=IssueComment.SpeakerType.SYSTEM,
+                    )
+            # ASSIGNED / RUNNING / CANCEL_REQUESTED / AWAITING_*: the run
+            # ends via Runner.revoke's cancelled-active path; the next run
+            # is dedicated to the survivor (assignment already moved).
     queued = AgentRun.objects.select_for_update().filter(pinned_runner=loser, status=AgentRunStatus.QUEUED)
     queued.filter(pod_id=survivor.pod_id).update(pinned_runner=survivor)
-    elsewhere = queued.exclude(pod_id=survivor.pod_id)
-    loose = elsewhere.filter(executor_kind=AgentExecutorKind.LOCAL_RUNNER).exclude(pin_kind="dedicated")
+    loose = (
+        AgentRun.objects.filter(pinned_runner=loser, status=AgentRunStatus.QUEUED)
+        .exclude(pod_id=survivor.pod_id)
+        .filter(executor_kind=AgentExecutorKind.LOCAL_RUNNER)
+        .exclude(pin_kind="dedicated")
+    )
     loose_pods = set(loose.values_list("pod_id", flat=True))
     loose.update(pinned_runner=None)
-    for run_id in list(elsewhere.filter(executor_kind=AgentExecutorKind.MANAGED_RUNNER).values_list("pk", flat=True)):
+    for run_id in list(
+        AgentRun.objects.filter(pinned_runner=loser, status=AgentRunStatus.QUEUED)
+        .exclude(pod_id=survivor.pod_id)
+        .filter(executor_kind=AgentExecutorKind.MANAGED_RUNNER)
+        .values_list("pk", flat=True)
+    ):
         finalize_agent_run(
             run_id,
             AgentRunStatus.CANCELLED,
