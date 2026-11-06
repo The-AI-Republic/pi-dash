@@ -3753,6 +3753,12 @@ async fn render_detail_map(
     let type_id = save.type_id.map(|value| value.to_string());
     let is_epic = fetch_is_epic(pool, save.type_id).await?;
     let assigned_pod_id = save.assigned_pod_id.map(|value| value.to_string());
+    let assigned_runner_id = save.assigned_runner_id.map(|value| value.to_string());
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    let assigned_runner_detail =
+        super::access::fetch_assigned_runner_detail(&orm, save.assigned_runner_id)
+            .await
+            .map_err(|_| Denial::ServerError)?;
     let module_ids: Vec<String> = row.module_ids.iter().map(ToString::to_string).collect();
     let label_ids: Vec<String> = row.label_ids.iter().map(ToString::to_string).collect();
     let assignee_ids: Vec<String> = row.assignee_ids.iter().map(ToString::to_string).collect();
@@ -3791,6 +3797,7 @@ async fn render_detail_map(
         type_id: type_id.as_deref(),
         is_epic,
         assigned_pod_id: assigned_pod_id.as_deref(),
+        assigned_runner_id: assigned_runner_id.as_deref(),
         agent_executor: save.agent_executor.as_deref(),
         module_ids: Some(module_refs),
         label_ids: Some(label_refs),
@@ -3823,6 +3830,7 @@ async fn render_detail_map(
         active_run: active_row,
         run_count,
         blockers: &blockers,
+        assigned_runner_detail,
     };
     let view = issue_detail_to_representation(&detail);
     let value = serde_json::to_value(&view).map_err(|_| Denial::ServerError)?;
@@ -4301,6 +4309,7 @@ async fn render_put_body(
     let estimate_point = row.estimate_point_id.map(|value| value.to_string());
     let issue_type = row.type_id.map(|value| value.to_string());
     let assigned_pod_id = row.assigned_pod_id.map(|value| value.to_string());
+    let assigned_runner_id = row.assigned_runner_id.map(|value| value.to_string());
     // `DateTimeField` output like the detail body: request-user zone.
     let created_at = render_datetime_in(&row.created_at, timezone);
     let updated_at = render_datetime_in(&row.updated_at, timezone);
@@ -4332,6 +4341,7 @@ async fn render_put_body(
         parent_id: parent_id.as_deref(),
         issue_type: issue_type.as_deref(),
         assigned_pod_id: assigned_pod_id.as_deref(),
+        assigned_runner_id: assigned_runner_id.as_deref(),
         assignees: &assignee_refs,
         labels: &label_refs,
         name: row.name.as_str(),

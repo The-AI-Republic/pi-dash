@@ -619,6 +619,7 @@ fn map_source_row(row: &QueryResult) -> Result<SourceIssueRow, StoreError> {
         parent_id: get(row, "parent_id")?,
         estimate_point_id: get(row, "estimate_point_id")?,
         assigned_pod_id: get(row, "assigned_pod_id")?,
+        assigned_runner_id: get(row, "assigned_runner_id")?,
         type_id: type_id.map(|id| id.to_string()),
         created_at: get(row, "created_at")?,
         updated_at: get(row, "updated_at")?,
