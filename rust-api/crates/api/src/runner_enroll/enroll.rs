@@ -2401,6 +2401,7 @@ pub fn daemon_routes() -> Router<AppState> {
     use axum::routing::{get, post};
     const POST_ONLY: &[&str] = &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"];
     const GET_ONLY: &[&str] = &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+    const GET_PATCH_ONLY: &[&str] = &["POST", "PUT", "DELETE", "HEAD", "OPTIONS"];
     Router::new()
         .route("/api/v1/runner/health/", owned(get(health), GET_ONLY))
         .route(
@@ -2414,6 +2415,22 @@ pub fn daemon_routes() -> Router<AppState> {
         .route(
             "/api/v1/runner/machine-tokens/",
             owned(post(machine_token_redeem), POST_ONLY),
+        )
+        .route(
+            "/api/v1/runner/dev-machines/{dev_machine_id}/",
+            owned(
+                get(super::machine_identity::daemon_machine_get)
+                    .patch(super::machine_identity::daemon_machine_patch),
+                GET_PATCH_ONLY,
+            ),
+        )
+        .route(
+            "/api/v1/runner/dev-machines/{dev_machine_id}/replace-candidates/",
+            owned(get(super::machine_identity::replace_candidates_get), GET_ONLY),
+        )
+        .route(
+            "/api/v1/runner/dev-machines/{dev_machine_id}/merge-into/",
+            owned(post(super::machine_identity::merge_into_post), POST_ONLY),
         )
 }
 
