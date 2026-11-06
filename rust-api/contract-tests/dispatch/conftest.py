@@ -266,8 +266,8 @@ STUB_MODEL = "oracle-stub"
 _channel = None
 
 
-def publish_run(broker, run_id):
-    """Publish one run through the live worker's channel (detected once).
+def _live_channel():
+    """The live worker's delivery channel, detected once per process.
 
     A Django worker answers Celery inspect and consumes the redis wire;
     otherwise the Rust worker claims ``rust_job_queue`` rows. Exactly one
@@ -284,10 +284,22 @@ def publish_run(broker, run_id):
         _channel = "celery" if live else "rust_queue"
         if _channel == "rust_queue":
             rust_queue.ensure_schema()
-    if _channel == "celery":
-        broker.publish(RUN_TASK, [run_id])
+    return _channel
+
+
+def publish_task(broker, task, args=()):
+    """Publish an arbitrary task through the live worker's channel."""
+    if _live_channel() == "celery":
+        broker.publish(task, list(args))
     else:
-        rust_queue.publish(RUN_TASK, [run_id])
+        from _harness import rust_queue
+
+        rust_queue.publish(task, list(args))
+
+
+def publish_run(broker, run_id):
+    """Publish one run through the live worker's channel (detected once)."""
+    publish_task(broker, RUN_TASK, [run_id])
 
 
 def create_member_world(seeder, *, role=20):
