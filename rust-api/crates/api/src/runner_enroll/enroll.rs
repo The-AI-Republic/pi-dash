@@ -602,11 +602,12 @@ pub struct ProjectHit {
     pub identifier: String,
 }
 
-/// A reused desktop runner row (E7 probe): id + name + generation.
+/// A reused desktop runner row (E7 probe): id + name + generation + pod dispatch.
 pub struct ReuseHit {
     pub id: Uuid,
     pub name: String,
     pub refresh_token_generation: i32,
+    pub pod_dispatch: String,
 }
 
 /// The transaction's connection as a SeaORM connection.
@@ -1069,11 +1070,14 @@ pub async fn desktop_reuse_probe(
     )
     .await
     .map_err(|_| server_error())?;
-    Ok(row.map(|(id, name, refresh_token_generation)| ReuseHit {
-        id,
-        name,
-        refresh_token_generation,
-    }))
+    Ok(row.map(
+        |(id, name, refresh_token_generation, pod_dispatch)| ReuseHit {
+            id,
+            name,
+            refresh_token_generation,
+            pod_dispatch,
+        },
+    ))
 }
 
 /// E7 cap count (`_managed_cap_error`, `:237-246`): non-revoked bundled
@@ -1155,7 +1159,9 @@ pub const INVITE_GONE_BODY: &str = r#"{"error":"legacy_enrollment_disabled","err
 /// `POST /api/runners/<rid>/revive/` 410 (`:491-500`).
 pub const REVIVE_GONE_BODY: &str = r#"{"error":"legacy_enrollment_disabled","error_description":"Delete this runner and run `pidash runner add` from the authenticated target machine."}"#;
 
-/// Enroll/create 201 shared envelope fields (`:361-374,771-784`).
+/// Enroll/create 201 shared envelope fields (`:361-374,771-787`).
+/// The create 201 adds `provisioning` / `pod_dispatch` / `created`
+/// (NEWPIDASH-58 Drift from PIDESKAPP-206); enroll carries none of them.
 pub struct EnrollmentBody<'a> {
     pub runner_id: &'a str,
     pub runner_name: &'a str,
@@ -1167,12 +1173,17 @@ pub struct EnrollmentBody<'a> {
     pub pod_slug: &'a str,
     pub project_identifier: &'a str,
     pub machine_token: Option<&'a str>,
+    pub provisioning: Option<&'a str>,
+    pub pod_dispatch: Option<&'a str>,
+    pub created: Option<bool>,
 }
 
-/// The enroll 201 (`:361-377`) and create 201 (`:771-787`): identical
-/// key order; `machine_token` present ONLY when minted (appended last).
+/// The enroll 201 (`:361-377`) and create 201 (`:771-787`): shared key
+/// order; the create 201 inserts `provisioning` / `pod_dispatch` /
+/// `created` after `machine_token_minted`; `machine_token` is present
+/// ONLY when minted (appended last).
 pub fn enrollment_body(fields: &EnrollmentBody<'_>) -> String {
-    let mut body = Map::with_capacity(13);
+    let mut body = Map::with_capacity(16);
     body.insert(
         "runner_id".to_owned(),
         Value::String(fields.runner_id.to_owned()),
@@ -1221,6 +1232,20 @@ pub fn enrollment_body(fields: &EnrollmentBody<'_>) -> String {
         "machine_token_minted".to_owned(),
         Value::Bool(fields.machine_token.is_some()),
     );
+    if let Some(provisioning) = fields.provisioning {
+        body.insert(
+            "provisioning".to_owned(),
+            Value::String(provisioning.to_owned()),
+        );
+        body.insert(
+            "pod_dispatch".to_owned(),
+            Value::String(fields.pod_dispatch.unwrap_or("pod_member").to_owned()),
+        );
+        body.insert(
+            "created".to_owned(),
+            Value::Bool(fields.created.unwrap_or(true)),
+        );
+    }
     if let Some(token) = fields.machine_token {
         body.insert("machine_token".to_owned(), Value::String(token.to_owned()));
     }
@@ -1446,6 +1471,9 @@ async fn enroll_runner_inner(
             pod_slug: &runner.pod_name,
             project_identifier: &runner.project_identifier,
             machine_token: machine_minted.as_ref().map(|minted| minted.raw.as_str()),
+            provisioning: None,
+            pod_dispatch: None,
+            created: None,
         }),
     )
 }
@@ -1481,11 +1509,17 @@ enum Attempt {
 }
 
 /// A finished attempt: the row identity + an optional rotated token.
+/// `provisioning` / `pod_dispatch` / `created` are the create-201
+/// envelope additions (NEWPIDASH-58): `created` is false on the
+/// desktop-reuse return.
 struct AttemptDone {
     runner_id: Uuid,
     runner_name: String,
     generation: i32,
     minted: Option<enroll_tokens::MintedToken>,
+    provisioning: String,
+    pod_dispatch: String,
+    created: bool,
 }
 
 /// One attempt of the create retry loop (`:691-744`): dev-machine
@@ -1526,6 +1560,9 @@ async fn create_attempt(tx: &mut Transaction<'_, Postgres>, params: &CreateAttem
                         runner_name: hit.name,
                         generation: hit.refresh_token_generation,
                         minted: None,
+                        provisioning: provisioning.clone(),
+                        pod_dispatch: hit.pod_dispatch,
+                        created: false,
                     });
                 }
                 Ok(None) => {}
@@ -1590,6 +1627,9 @@ async fn create_attempt(tx: &mut Transaction<'_, Postgres>, params: &CreateAttem
         runner_name: params.name.to_owned(),
         generation: 0,
         minted,
+        provisioning: provisioning.clone(),
+        pod_dispatch: "pod_member".to_owned(),
+        created: true,
     })
 }
 
@@ -1867,6 +1907,9 @@ async fn create_runner_inner(
             pod_slug: &pod.name,
             project_identifier: &project.identifier,
             machine_token: done.minted.as_ref().map(|minted| minted.raw.as_str()),
+            provisioning: Some(&done.provisioning),
+            pod_dispatch: Some(&done.pod_dispatch),
+            created: Some(done.created),
         }),
     )
 }
@@ -2314,6 +2357,9 @@ mod tests {
             pod_slug: "pod",
             project_identifier: "PRJ",
             machine_token: None,
+            provisioning: None,
+            pod_dispatch: None,
+            created: None,
         });
         assert_eq!(
             without_token,
@@ -2321,6 +2367,9 @@ mod tests {
         );
         let with_token = enrollment_body(&EnrollmentBody {
             machine_token: Some("mt_x"),
+            provisioning: Some("manual"),
+            pod_dispatch: Some("pod_member"),
+            created: Some(true),
             ..EnrollmentBody {
                 runner_id: "r",
                 runner_name: "n",
@@ -2332,10 +2381,15 @@ mod tests {
                 pod_slug: "pod",
                 project_identifier: "PRJ",
                 machine_token: None,
+                provisioning: None,
+                pod_dispatch: None,
+                created: None,
             }
         });
         assert!(with_token.ends_with(r#","machine_token":"mt_x"}"#));
         assert!(with_token.contains(r#""machine_token_minted":true"#));
+        assert!(with_token
+            .contains(r#""provisioning":"manual","pod_dispatch":"pod_member","created":true"#));
     }
 
     #[test]

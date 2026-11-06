@@ -378,13 +378,14 @@ pub const NO_LOCAL_RUNNER_REASON: &str = "no_local_runner";
 /// to add one.
 pub const LOCAL_RUNNER_PAUSED_REASON: &str = "local_runner_paused";
 
-/// One `agent_executor_options` row (`agent_execution.py:112-128`), fields in dict
-/// order (`kind`, `available`, `reason_code`).
+/// One `agent_executor_options` row (`agent_execution.py:112-134`), fields in dict
+/// order (`kind`, `available`, `reason_code`, `deprecated`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutorOption {
     pub kind: AgentExecutorKind,
     pub available: bool,
     pub reason_code: String,
+    pub deprecated: bool,
 }
 
 /// The `(available, reason_code)` verdict of L4's `managed_runner_availability`
@@ -396,17 +397,20 @@ pub struct ManagedAvailability {
     pub reason_code: String,
 }
 
-/// Availability as explicit API data (`agent_execution.py:83-128`).
+/// Availability as explicit API data (`agent_execution.py:83-134`).
 ///
 /// Rows are always `[cloud_agent, local_runner, managed_runner]`. The cloud row also
 /// reflects the viewer's LLM config when `user` is given; without a user only the
 /// instance switch is reported. `local_runner_available` is the
-/// [`LOCAL_RUNNER_AVAILABLE_EXISTS_SQL`] verdict (online, non-bundled,
-/// unpaused); `local_runner_exists` is the [`LOCAL_RUNNER_EXISTS_SQL`]
-/// verdict (online, non-bundled, paused or not) — consulted only when
-/// the runner is unavailable, exactly as Python's `elif` runs the
-/// second `exists()` only then. `managed` is L4's
+/// [`LOCAL_RUNNER_AVAILABLE_EXISTS_SQL`] verdict (online pod member,
+/// unpaused, engine unpaused); `local_runner_exists` is the
+/// [`LOCAL_RUNNER_EXISTS_SQL`] verdict (online pod member, paused or
+/// not) — consulted only when the runner is unavailable, exactly as
+/// Python's `elif` runs the second `exists()` only then. `managed` is L4's
 /// `managed_runner_availability` verdict, passed through verbatim.
+/// `deprecated` marks the two legacy executors: only `local_runner` is
+/// selectable (design §6); availability is still computed for older
+/// clients (NEWPIDASH-58).
 pub fn agent_executor_options<F>(
     cloud: &CloudAgentSettings,
     user: Option<UserFlags>,
@@ -443,36 +447,44 @@ where
             kind: AgentExecutorKind::CloudAgent,
             available: cloud_available,
             reason_code: cloud_reason,
+            deprecated: true,
         },
         ExecutorOption {
             kind: AgentExecutorKind::LocalRunner,
             available: local_runner_available,
             reason_code: local_reason,
+            deprecated: false,
         },
         ExecutorOption {
             kind: AgentExecutorKind::ManagedRunner,
             available: managed.available,
             reason_code: managed.reason_code,
+            deprecated: true,
         },
     ]
 }
 
-/// The local-runner leg of `agent_executor_options` (`agent_execution.py:102-110`):
-/// an ONLINE runner on the project's pod, desktop-bundled runners excluded (they
-/// serve only runs pinned to them, so counting one would advertise availability for
-/// work it never accepts).
+/// The local-runner leg of `agent_executor_options`
+/// (`agent_execution.py:121-131`, NEWPIDASH-58): an ONLINE pod member on
+/// the project's pod. `pinned_only` runners take no new issue work and
+/// revoked rows are gone, so both are excluded; a `desktop_bundled`
+/// runner with pod work on DOES count.
 ///
-/// Django renders the `.exclude()` as `NOT (provisioning = ...)`; `<>` is identical
-/// because `provisioning` is `NOT NULL`. No `deleted_at` scope: `runner` has no such
-/// column, and Django never filters joined tables (`pod`) by their managers.
-/// Params: `$1` project id (uuid), `$2` workspace id (uuid).
-pub const LOCAL_RUNNER_EXISTS_SQL: &str = "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE pod.project_id = $1 AND runner.workspace_id = $2 AND runner.status = 'online' AND runner.provisioning <> 'desktop_bundled' LIMIT 1";
+/// Django renders the excludes as `NOT (pod_dispatch = ...)` /
+/// `revoked_at IS NOT NULL`; `<>` / `IS NULL` are identical because
+/// `pod_dispatch` is `NOT NULL`. No `deleted_at` scope: `runner` has no
+/// such column, and Django never filters joined tables (`pod`) by their
+/// managers. Params: `$1` project id (uuid), `$2` workspace id (uuid).
+pub const LOCAL_RUNNER_EXISTS_SQL: &str = "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE pod.project_id = $1 AND runner.workspace_id = $2 AND runner.status = 'online' AND runner.pod_dispatch <> 'pinned_only' AND runner.revoked_at IS NULL LIMIT 1";
 
-/// The available leg of `agent_executor_options` (`agent_execution.py:112`,
-/// `09738d222`): [`LOCAL_RUNNER_EXISTS_SQL`] plus the unpaused arm — an
-/// ONLINE runner on the project's pod that is not operator-paused.
+/// The available leg of `agent_executor_options` (`agent_execution.py:132`,
+/// `09738d222`): [`LOCAL_RUNNER_EXISTS_SQL`] plus the unpaused arms — an
+/// ONLINE runner on the project's pod that is not operator-paused and
+/// whose built-in engine is not paused (`runner/models.py:548-562`
+/// `engine_paused_q`: `provisioning = 'desktop_bundled'` AND the
+/// machine is owner-paused or auto-paused).
 /// Params: `$1` project id (uuid), `$2` workspace id (uuid).
-pub const LOCAL_RUNNER_AVAILABLE_EXISTS_SQL: &str = "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE pod.project_id = $1 AND runner.workspace_id = $2 AND runner.status = 'online' AND runner.provisioning <> 'desktop_bundled' AND runner.paused_at IS NULL LIMIT 1";
+pub const LOCAL_RUNNER_AVAILABLE_EXISTS_SQL: &str = "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE pod.project_id = $1 AND runner.workspace_id = $2 AND runner.status = 'online' AND runner.pod_dispatch <> 'pinned_only' AND runner.revoked_at IS NULL AND runner.paused_at IS NULL AND NOT (runner.provisioning = 'desktop_bundled' AND runner.dev_machine_id IN (SELECT dev_machine.id FROM dev_machine WHERE dev_machine.engine_paused_by_owner OR dev_machine.engine_auto_pause_reason <> '')) LIMIT 1";
 
 // ---------------------------------------------------------------------------
 // GitHub availability (`policy.py:75-94`)
@@ -1094,7 +1106,7 @@ mod tests {
         );
         assert_eq!(
             shape["row_keys"],
-            json!(["kind", "available", "reason_code"])
+            json!(["kind", "available", "reason_code", "deprecated"])
         );
 
         let cloud_on = CloudAgentSettings {
@@ -1113,13 +1125,15 @@ mod tests {
             rows.iter().map(|r| r.kind.value()).collect::<Vec<_>>(),
             ["cloud_agent", "local_runner", "managed_runner"]
         );
-        // Row keys in order (`kind`, `available`, `reason_code`): struct
-        // serialization always follows field order.
+        // Row keys in order (`kind`, `available`, `reason_code`,
+        // `deprecated`): struct serialization always follows field order.
         let text = serde_json::to_string(&rows[0]).expect("serializes");
         assert_eq!(
             text,
-            r#"{"kind":"cloud_agent","available":true,"reason_code":""}"#
+            r#"{"kind":"cloud_agent","available":true,"reason_code":"","deprecated":true}"#
         );
+        assert!(!rows[1].deprecated);
+        assert!(rows[2].deprecated);
     }
 
     #[test]
@@ -1236,27 +1250,26 @@ mod tests {
     }
 
     #[test]
-    fn local_runner_sql_excludes_desktop_bundled() {
+    fn local_runner_sql_excludes_pinned_only_and_revoked() {
         assert_eq!(
             LOCAL_RUNNER_EXISTS_SQL,
-            "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE pod.project_id = $1 AND runner.workspace_id = $2 AND runner.status = 'online' AND runner.provisioning <> 'desktop_bundled' LIMIT 1"
+            "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE pod.project_id = $1 AND runner.workspace_id = $2 AND runner.status = 'online' AND runner.pod_dispatch <> 'pinned_only' AND runner.revoked_at IS NULL LIMIT 1"
         );
-        // Fixture pins the exclusion behaviorally (bundled-only ⇒ unavailable).
-        assert!(
-            fixture()["agent_executor_options_shape"]["local_excludes_desktop_bundled"]
-                .as_str()
-                .expect("golden")
-                .contains("DESKTOP_BUNDLED")
-        );
+        // Fixture pins the exclusion behaviorally.
+        assert!(fixture()["agent_executor_options_shape"]
+            ["local_excludes_pinned_only_and_revoked"]
+            .as_str()
+            .expect("golden")
+            .contains("PINNED_ONLY"));
     }
 
     #[test]
     fn local_runner_available_sql_adds_pause_arm() {
-        // The available leg is the exists leg plus the unpaused arm
-        // (`09738d222`); params keep their positions.
+        // The available leg is the exists leg plus the unpaused and
+        // engine-unpaused arms; params keep their positions.
         assert_eq!(
             LOCAL_RUNNER_AVAILABLE_EXISTS_SQL,
-            "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE pod.project_id = $1 AND runner.workspace_id = $2 AND runner.status = 'online' AND runner.provisioning <> 'desktop_bundled' AND runner.paused_at IS NULL LIMIT 1"
+            "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE pod.project_id = $1 AND runner.workspace_id = $2 AND runner.status = 'online' AND runner.pod_dispatch <> 'pinned_only' AND runner.revoked_at IS NULL AND runner.paused_at IS NULL AND NOT (runner.provisioning = 'desktop_bundled' AND runner.dev_machine_id IN (SELECT dev_machine.id FROM dev_machine WHERE dev_machine.engine_paused_by_owner OR dev_machine.engine_auto_pause_reason <> '')) LIMIT 1"
         );
         assert!(LOCAL_RUNNER_AVAILABLE_EXISTS_SQL.starts_with(
             &LOCAL_RUNNER_EXISTS_SQL[..LOCAL_RUNNER_EXISTS_SQL.len() - " LIMIT 1".len()]

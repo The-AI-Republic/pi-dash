@@ -145,6 +145,9 @@ def test_daemon_runner_create_shape(settings, daemon_world, seeder):
     # APIToken callers rotate into an mt_ token (machine_token_minted=True).
     assert body["machine_token_minted"] is True
     assert body["machine_token"].startswith("mt_")
+    assert body["provisioning"] == "manual"
+    assert body["pod_dispatch"] == "pod_member"
+    assert body["created"] is True
     # Teardown rows the endpoint created (the seeder never saw them).
     seeder.db.execute(
         "DELETE FROM machine_token WHERE user_id = %s AND host_label = %s",
