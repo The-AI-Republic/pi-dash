@@ -293,6 +293,33 @@ class AgentRunListEndpoint(APIView):
 
         from pi_dash.cloud_agent.creation import dispatch_after_commit, execution_fields
         from pi_dash.db.models.issue import Issue
+        from pi_dash.runner.services.issue_assignment import dedicated_run_refusal, resolve_run_pin
+
+        # A direct run bound to a dedicated issue takes the dedicated
+        # pin (§9.2); a person's run is refused first when the dedicated
+        # runner is offline or paused (H-11).
+        direct_issue = (
+            Issue.objects.filter(pk=ctx.work_item_id).first()
+            if ctx.work_item_id is not None
+            else None
+        )
+        pinned_runner, pin_kind = (None, "locality")
+        if direct_issue is not None:
+            refusal, _detail = dedicated_run_refusal(direct_issue, human=True, user=ctx.created_by)
+            if refusal is not None:
+                return Response(
+                    {"error": "dedicated runner is unavailable", "code": refusal},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            pinned_runner, pin_kind = resolve_run_pin(
+                direct_issue,
+                parent=None,
+                pod=ctx.pod,
+                fresh_session=False,
+                creator=ctx.created_by,
+                trigger="direct",
+                pod_once=False,
+            )
 
         try:
             with transaction.atomic():
@@ -322,6 +349,8 @@ class AgentRunListEndpoint(APIView):
                     run_config=request.data.get("run_config") or {},
                     required_capabilities=request.data.get("required_capabilities") or [],
                     work_item_id=ctx.work_item_id,
+                    pinned_runner=pinned_runner,
+                    pin_kind=pin_kind,
                     **execution,
                     # Owner stays NULL until assignment (design §5.3).
                 )
@@ -407,11 +436,18 @@ class AgentRunListEndpoint(APIView):
             queued = self._human_run_clock(issue, actor=request.user, trigger=scheduling.TRIGGER_RUN_AI)
             if queued is not None:
                 return queued
-            run = scheduling.dispatch_run_ai_run(issue, actor=request.user)
+            run, reason = scheduling.dispatch_run_ai_run_with_reason(issue, actor=request.user)
             if run is None:
                 # Undo the clock re-time too: the human's click produced no
                 # run, so the ticker must look exactly as it did before.
                 transaction.set_rollback(True)
+                # H-11 refusal (§23.3): surface the specific code so the
+                # client shows "assigned_runner_offline"/"paused" recovery.
+                if reason in (scheduling.RUN_AI_DEDICATED_RUNNER_OFFLINE, scheduling.RUN_AI_DEDICATED_RUNNER_PAUSED):
+                    return Response(
+                        {"error": "dedicated runner is unavailable", "code": reason},
+                        status=status.HTTP_409_CONFLICT,
+                    )
         if run is None:
             return Response(
                 {"error": ("could not dispatch — issue may already have an active run, or no pod is available")},
@@ -717,6 +753,17 @@ class AgentRunReleasePinEndpoint(APIView):
             if locked.pinned_runner_id is None:
                 return Response(
                     {"error": "run not pinned"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            # H-13: a dedicated pin is owned by the issue, not the queue;
+            # only the assignment save or revoke can move it (§12.2). After
+            # the permission and still-QUEUED checks, before unpinning.
+            if locked.pin_kind == "dedicated":
+                return Response(
+                    {
+                        "error": "dedicated pins are not releasable",
+                        "code": "dedicated_pin_not_releasable",
+                    },
                     status=status.HTTP_409_CONFLICT,
                 )
             locked.pinned_runner = None

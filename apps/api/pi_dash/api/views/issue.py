@@ -1169,6 +1169,8 @@ _RUN_AI_REASON_MESSAGES = {
     "active_run_exists": "the work item already has an active or queued run",
     "no_pod": "no pod is available to run this work item",
     "no_eligible_runner": "no eligible runner or execution principal is available for this work item",
+    "assigned_runner_offline": "the dedicated runner is offline; bring it online or run on the pod",
+    "assigned_runner_paused": "the dedicated runner is paused; resume it or run on the pod",
 }
 
 

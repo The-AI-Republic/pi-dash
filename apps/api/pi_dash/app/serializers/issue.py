@@ -45,7 +45,7 @@ from pi_dash.db.models import (
     ProjectMember,
     EstimatePoint,
 )
-from pi_dash.runner.models import Pod
+from pi_dash.runner.models import Pod, Runner
 from pi_dash.runner.diagnostics import classify_run_error
 from pi_dash.utils.content_validator import (
     validate_html_content,
@@ -153,12 +153,14 @@ class IssueCreateSerializer(BaseSerializer):
     assigned_pod_id = serializers.PrimaryKeyRelatedField(
         source="assigned_pod", queryset=Pod.all_objects.all(), required=False, allow_null=True
     )
-    # Dedicated runner (design §14.1). Read-only until the write path
-    # (``validate_execution_target``) lands with dispatch on this branch
-    # (H-5): declaring it writable now would persist a choice dispatch
-    # ignores. The write validator flips this to writable in Part 3.
+    # Dedicated runner (design §14.1, §7.1): writable with E1-E8
+    # validation in ``validate`` below; ``apply_execution_target``
+    # persists + re-points on successful save (H-5).
     assigned_runner_id = serializers.PrimaryKeyRelatedField(
-        source="assigned_runner", read_only=True
+        source="assigned_runner",
+        queryset=Runner.objects.all(),
+        required=False,
+        allow_null=True,
     )
     label_ids = serializers.ListField(
         child=serializers.PrimaryKeyRelatedField(queryset=Label.objects.all()),
@@ -280,8 +282,18 @@ class IssueCreateSerializer(BaseSerializer):
         # (built_engine_as_runner §6): older clients' ``managed_runner`` /
         # ``cloud_agent`` are stored as ``local_runner``, pod-level, and a
         # change of executor under a live run is refused.
-        from pi_dash.runner.services.issue_assignment import normalize_issue_executor
+        from pi_dash.runner.services.issue_assignment import (
+            normalize_issue_executor,
+            validate_execution_target,
+        )
 
+        # Requester for the E1/E7 checks (design §7.1).
+        user = self.context.get("user")
+        if user is None and self.context.get("request") is not None:
+            user = getattr(self.context["request"], "user", None)
+        if user is None:
+            user = getattr(self.instance, "created_by", None) if self.instance else None
+        validate_execution_target(attrs, issue=self.instance, user=user)
         normalize_issue_executor(attrs, instance=self.instance)
 
         # Validate description content for security
@@ -423,6 +435,23 @@ class IssueCreateSerializer(BaseSerializer):
             except IntegrityError:
                 pass
 
+        # Dedicated assignment accepted: persist + write activity (no
+        # queued run can exist on a just-created issue, so no re-point).
+        if "assigned_runner" in validated_data:
+            from django.utils import timezone as dj_timezone
+
+            from pi_dash.runner.services.issue_assignment import apply_execution_target
+
+            actor = self.context.get("user")
+            if actor is None and self.context.get("request") is not None:
+                actor = getattr(self.context["request"], "user", None)
+            apply_execution_target(
+                issue,
+                new_runner=issue.assigned_runner,
+                actor=actor or issue.created_by,
+                decided_by=dj_timezone.now(),
+            )
+
         return issue
 
     def update(self, instance, validated_data):
@@ -479,7 +508,22 @@ class IssueCreateSerializer(BaseSerializer):
 
         # Time updation occues even when other related models are updated
         instance.updated_at = timezone.now()
-        return super().update(instance, validated_data)
+        result = super().update(instance, validated_data)
+        if "assigned_runner" in validated_data:
+            from django.utils import timezone as dj_timezone
+
+            from pi_dash.runner.services.issue_assignment import apply_execution_target
+
+            actor = self.context.get("user")
+            if actor is None and self.context.get("request") is not None:
+                actor = getattr(self.context["request"], "user", None)
+            apply_execution_target(
+                result,
+                new_runner=result.assigned_runner,
+                actor=actor or result.created_by,
+                decided_by=dj_timezone.now(),
+            )
+        return result
 
 
 class IssueActivitySerializer(BaseSerializer):

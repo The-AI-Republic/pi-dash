@@ -1108,8 +1108,28 @@ def dispatch_continuation_run(
     Returns the created run, or ``None`` when the single-active-run
     guardrail blocks creation, no pod is available, or the eligibility
     preflight bounced the issue (§6.6).
+
+    A person's run on an offline or paused dedicated runner is refused
+    here, before any reconcile or persistence (H-11, §11): no run is
+    created and the issue stays where it is. An automatic run waits.
+    A person's run always bypasses the dedicated runner for one run
+    (§23.3, ``pod_once``); the tick never does.
     """
     from pi_dash.orchestration import service as orchestration_service
+    from pi_dash.runner.models import HUMAN_TRIGGERS
+    from pi_dash.runner.services.issue_assignment import dedicated_run_refusal
+
+    human = triggered_by in HUMAN_TRIGGERS
+    if human:
+        code, _detail = dedicated_run_refusal(issue, human=True, user=actor)
+        if code is not None:
+            logger.info(
+                "agent_ticker: skip dispatch issue=%s reason=%s triggered_by=%s",
+                issue.pk,
+                code,
+                triggered_by,
+            )
+            return None
 
     if orchestration_service._active_run_for(issue) is not None:
         logger.info(
@@ -1169,6 +1189,7 @@ def dispatch_continuation_run(
             pod=pod,
             fresh_session=True,
             trigger=triggered_by,
+            pod_once=human,
         )
     else:
         outcome = orchestration_service._create_continuation_run(
@@ -1177,6 +1198,7 @@ def dispatch_continuation_run(
             creator=creator,
             pod=pod,
             trigger=triggered_by,
+            pod_once=human,
         )
     return outcome.created_run
 
@@ -1188,6 +1210,8 @@ def dispatch_continuation_run(
 RUN_AI_ACTIVE_RUN_EXISTS = "active_run_exists"
 RUN_AI_NO_POD = "no_pod"
 RUN_AI_NO_ELIGIBLE_RUNNER = "no_eligible_runner"
+RUN_AI_DEDICATED_RUNNER_OFFLINE = "assigned_runner_offline"
+RUN_AI_DEDICATED_RUNNER_PAUSED = "assigned_runner_paused"
 
 
 def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
@@ -1219,6 +1243,11 @@ def dispatch_run_ai_run_with_reason(issue: Issue, *, actor) -> tuple[Optional[Ag
       principal / eligible runner can serve the run (no creator, or the
       eligibility preflight bounced the issue).
     - Returns ``(None, RUN_AI_NO_POD)`` when no pod is available.
+    - Returns ``(None, RUN_AI_DEDICATED_RUNNER_OFFLINE/PAUSED)`` when the
+      dedicated runner is offline or paused (H-11, §11): no run is
+      created and the issue stays where it is, leaving client-visible
+      behaviour intact through the same paths and codes. Busy is never
+      a refusal.
     - When a prior run exists, delegates to ``_create_continuation_run``
       so the new run inherits parent linkage and runner pinning (repo
       locality, same as Comment & Run / tick).
@@ -1229,6 +1258,19 @@ def dispatch_run_ai_run_with_reason(issue: Issue, *, actor) -> tuple[Optional[Ag
     On success returns ``(run, None)``.
     """
     from pi_dash.orchestration import service as orchestration_service
+    from pi_dash.runner.services.issue_assignment import dedicated_run_refusal
+
+    # H-11 refusal, before reconcile/persistence: a person's run on an
+    # offline or paused dedicated runner is refused with the specific code.
+    refusal, _detail = dedicated_run_refusal(issue, human=True, user=actor)
+    if refusal is not None:
+        logger.info(
+            "agent_ticker: skip dispatch issue=%s reason=%s triggered_by=%s",
+            issue.pk,
+            refusal,
+            TRIGGER_RUN_AI,
+        )
+        return None, refusal
 
     if orchestration_service._active_run_for(issue) is not None:
         logger.info(
@@ -1272,6 +1314,8 @@ def dispatch_run_ai_run_with_reason(issue: Issue, *, actor) -> tuple[Optional[Ag
             creator=creator,
             pod=pod,
             trigger=TRIGGER_RUN_AI,
+            # Run AI always runs once on the pod (§23.3).
+            pod_once=True,
         )
     else:
         outcome = orchestration_service._create_and_dispatch_run(
@@ -1281,6 +1325,7 @@ def dispatch_run_ai_run_with_reason(issue: Issue, *, actor) -> tuple[Optional[Ag
             pod=pod,
             fresh_session=fresh_session,
             trigger=TRIGGER_RUN_AI,
+            pod_once=True,
         )
     return outcome.created_run, None
 

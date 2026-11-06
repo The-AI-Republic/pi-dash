@@ -248,10 +248,13 @@ def _hand_over_to_survivor(loser: Runner, survivor: Runner) -> set:
     ``survivor`` before ``loser`` is revoked. No run's ``pod`` is rewritten.
 
     - Queued runs pinned to ``loser`` in the survivor's pod are re-pinned to
-      the survivor.
+      the survivor. A dedicated pin keeps its kind (the run belongs to
+      that machine); a locality pin is re-pinned as before.
     - In another pod, a locality pin is released to its own pod, and a
       legacy ``managed_runner`` run is cancelled with ``runner_revoked``: the
       matcher serves such a run only to the engine it is pinned to.
+      Dedicated pins elsewhere fall to the revoking path's lost-runner
+      handling (§12.3), which runs on the revoke that follows.
 
     Runs ``loser`` still holds (assigned, running) are cancelled by
     ``Runner.revoke`` right after, as for any revoke. Returns the pods to
@@ -263,7 +266,7 @@ def _hand_over_to_survivor(loser: Runner, survivor: Runner) -> set:
     queued = AgentRun.objects.select_for_update().filter(pinned_runner=loser, status=AgentRunStatus.QUEUED)
     queued.filter(pod_id=survivor.pod_id).update(pinned_runner=survivor)
     elsewhere = queued.exclude(pod_id=survivor.pod_id)
-    loose = elsewhere.filter(executor_kind=AgentExecutorKind.LOCAL_RUNNER)
+    loose = elsewhere.filter(executor_kind=AgentExecutorKind.LOCAL_RUNNER).exclude(pin_kind="dedicated")
     loose_pods = set(loose.values_list("pod_id", flat=True))
     loose.update(pinned_runner=None)
     for run_id in list(elsewhere.filter(executor_kind=AgentExecutorKind.MANAGED_RUNNER).values_list("pk", flat=True)):

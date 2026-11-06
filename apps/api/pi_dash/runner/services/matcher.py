@@ -139,6 +139,28 @@ def next_queued_run_for_pod(pod: Pod) -> Optional[AgentRun]:
     )
 
 
+def _last_served_dedicated(runner: Runner) -> bool:
+    """True when ``runner``'s most recent assigned run was dedicated (design §10.2).
+
+    Derived, not stored: the latest run by ``assigned_at`` (NULLs excluded)
+    with a ``pinned_runner`` and ``pin_kind = dedicated``. A runner with no
+    assigned runs counts as ``false``. When ``next_for_runner`` runs the
+    runner is idle, so that run is terminal or paused.
+    """
+    from pi_dash.runner.models import PinKind
+
+    last = (
+        AgentRun.objects.filter(runner=runner, assigned_at__isnull=False)
+        .order_by("-assigned_at")
+        .first()
+    )
+    return bool(
+        last is not None
+        and last.pinned_runner_id is not None
+        and last.pin_kind == PinKind.DEDICATED
+    )
+
+
 def next_for_runner(runner: Runner) -> Optional[AgentRun]:
     """Return the next QUEUED run this runner should take.
 
@@ -149,7 +171,7 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
 
     Must be called inside a ``transaction.atomic()`` block.
 
-    What a runner may take (``built_engine_as_runner`` design §7, §13):
+    What a runner may take (``built_engine_as_runner`` design §7, §13, §23.1):
 
     - an own-agent runner takes ``local_runner`` runs pinned to it for repo
       locality and, as a ``pod_member``, the unpinned pod queue (today's
@@ -157,25 +179,39 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
     - an engine takes locality pins to itself and the unpinned pod queue
       only while it is a ``pod_member`` and its machine's engine is not
       paused (it then ranks equally with ordinary runners, PO-4);
+    - an engine, ``pinned_only`` or not, takes ``local_runner`` runs pinned
+      to it with ``pin_kind = dedicated`` whatever its ``pod_dispatch``
+      (§23.1); ``pinned_only`` drops the unpinned tier for every other
+      run, including the shared run it owes and the ``pinned_only`` own-
+      agent runner as well;
     - an engine, ``pinned_only`` or not, still takes the legacy queued
       ``managed_runner`` runs pinned to it. No new run has that kind.
+
+    Tier order follows §10.2: locality pins always first (0); unpinned
+    shared work second (1); dedicated pins first (0) when the runner's
+    last run was not dedicated, demoted to last (2) when it was. Locality
+    pins and ``pod_once`` runs count as shared work.
 
     All of it must also pass the usage rule
     (:func:`~pi_dash.runner.services.permissions.filter_runs_usable_by_runner`).
     """
-    from pi_dash.runner.models import RunnerPodDispatch
+    from pi_dash.runner.models import PinKind, RunnerPodDispatch
     from pi_dash.runner.services.dispatch_rules import engine_takes_pod_work
 
     local = Q(executor_kind=AgentExecutorKind.LOCAL_RUNNER)
+    dedicated_mine = local & Q(pinned_runner=runner, pin_kind=PinKind.DEDICATED)
+    locality_mine = local & Q(pinned_runner=runner, pin_kind=PinKind.LOCALITY)
+    shared = Q(pinned_runner__isnull=True)
     if runner.is_engine:
         eligible = Q(executor_kind=AgentExecutorKind.MANAGED_RUNNER, pinned_runner=runner)
+        # §23.1: a dedicated pin is served whatever pod_dispatch.
+        eligible |= dedicated_mine
         if engine_takes_pod_work(runner):
-            eligible |= local & (Q(pinned_runner=runner) | Q(pinned_runner__isnull=True))
+            eligible |= local & (Q(pinned_runner=runner) | shared)
     else:
-        mine_or_pod = Q(pinned_runner=runner)
+        eligible = dedicated_mine | locality_mine
         if runner.pod_dispatch == RunnerPodDispatch.POD_MEMBER:
-            mine_or_pod |= Q(pinned_runner__isnull=True)
-        eligible = local & mine_or_pod
+            eligible |= local & shared
     qs = (
         AgentRun.objects.select_for_update(skip_locked=True)
         .filter(
@@ -188,21 +224,23 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
         .filter(eligible)
     )
     qs = filter_runs_usable_by_runner(qs, runner)
-    return (
-        qs
-        # Pinned-to-me sorts before unpinned via an integer rank: 0 for the
-        # personal queue, 1 for the pod queue. ``order_by`` on the rank then
-        # ``created_at`` gives FIFO inside each tier.
-        .annotate(
-            _is_mine=models.Case(
-                models.When(pinned_runner=runner, then=models.Value(0)),
-                default=models.Value(1),
-                output_field=models.IntegerField(),
-            )
+    last_dedicated = _last_served_dedicated(runner)
+    if last_dedicated:
+        rank = models.Case(
+            models.When(pinned_runner=runner, pin_kind=PinKind.LOCALITY, then=models.Value(0)),
+            models.When(pinned_runner=runner, pin_kind=PinKind.DEDICATED, then=models.Value(2)),
+            default=models.Value(1),
+            output_field=models.IntegerField(),
         )
-        .order_by("_is_mine", "created_at")
-        .first()
-    )
+    else:
+        # Identical to today's ``_is_mine`` annotation for a pod with no
+        # dedicated issues.
+        rank = models.Case(
+            models.When(pinned_runner=runner, then=models.Value(0)),
+            default=models.Value(1),
+            output_field=models.IntegerField(),
+        )
+    return qs.annotate(_is_mine=rank).order_by("_is_mine", "created_at").first()
 
 
 def drain_pod(pod: Pod) -> int:
@@ -416,9 +454,18 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id, *, human: boo
 
     ``human`` defaults to True (the stricter engine rule) for callers that do
     not know the trigger.
+
+    A dedicated issue (§9.4) is served only by its assigned runner, so the
+    check reduces to that runner: registered (not revoked), its owner in
+    the eligible list, and — for an engine only — a ``pod_member`` whose
+    machine's engine is not paused on the runner's pod. A dedicated pin is
+    served whatever ``pod_dispatch`` (§23.1), so the dispatch mode is not
+    checked here; an offline dedicated runner still returns True (the
+    issue waits, as an offline runner does today).
     """
     from pi_dash.db.models.issue import IssueAssignee
     from pi_dash.runner.models import RunnerPodDispatch, RunnerProvisioning
+    from pi_dash.runner.services.dispatch_rules import engine_takes_pod_work
 
     issue_people: set = set()
     if issue.created_by_id is not None:
@@ -430,6 +477,19 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id, *, human: boo
         eligible_owner_ids.add(run_creator_id)
     if not eligible_owner_ids:
         return False
+    assigned_id = getattr(issue, "assigned_runner_id", None)
+    if assigned_id is not None:
+        assigned = (
+            Runner.objects.select_related("dev_machine")
+            .filter(pk=assigned_id, pod=pod, owner_id__in=eligible_owner_ids)
+            .exclude(status=RunnerStatus.REVOKED)
+            .first()
+        )
+        if assigned is None:
+            return False
+        if assigned.is_engine and not engine_takes_pod_work(assigned):
+            return False
+        return True
     candidates = (
         Runner.objects.filter(pod=pod, owner_id__in=eligible_owner_ids)
         .exclude(status=RunnerStatus.REVOKED)

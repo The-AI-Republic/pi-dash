@@ -900,14 +900,43 @@ class Runner(models.Model):
                 affected_run_ids = [pk for pk, _ in active_runs]
                 affected_pod_ids = {pid for _, pid in active_runs if pid is not None}
 
+            # (3) Unpin QUEUED follow-ups so they flow back into the pod
+            # queue (locality only). Dedicated pins are owned by the issue:
+            # per issue from the QUEUED dedicated pins, apply the project's
+            # lost-runner handling (cancel+clear or fall back), then clear
+            # the assignment — the revoking transaction itself (§12.3).
+            dedicated_issue_ids = list(
+                AgentRun.objects.filter(
+                    pinned_runner=self,
+                    status=AgentRunStatus.QUEUED,
+                    pin_kind="dedicated",
+                ).values_list("work_item_id", flat=True)
+            )
             pinned_pod_ids = list(
-                AgentRun.objects.filter(pinned_runner=self, status=AgentRunStatus.QUEUED).values_list(
+                AgentRun.objects.filter(
+                    pinned_runner=self,
+                    status=AgentRunStatus.QUEUED,
+                    pin_kind__isnull=False,
+                ).exclude(pin_kind="dedicated").values_list(
                     "pod_id", flat=True
                 )
             )
             if pinned_pod_ids:
-                AgentRun.objects.filter(pinned_runner=self, status=AgentRunStatus.QUEUED).update(pinned_runner=None)
+                AgentRun.objects.filter(
+                    pinned_runner=self, status=AgentRunStatus.QUEUED
+                ).exclude(pin_kind="dedicated").update(pinned_runner=None)
                 affected_pod_ids.update(pid for pid in pinned_pod_ids if pid is not None)
+            if dedicated_issue_ids:
+                from pi_dash.runner.services.issue_assignment import (
+                    apply_lost_runner_policy,
+                )
+
+                for issue_id in dict.fromkeys(i for i in dedicated_issue_ids if i is not None):
+                    from pi_dash.db.models.issue import Issue
+
+                    issue = Issue.objects.filter(pk=issue_id).first()
+                    if issue is not None:
+                        apply_lost_runner_policy(issue, reason=reason)
 
         def _complete_project_move_handoffs(run_ids=tuple(affected_run_ids)):
             from pi_dash.orchestration.service import (

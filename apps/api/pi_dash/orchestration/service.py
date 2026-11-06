@@ -285,6 +285,22 @@ def handle_issue_state_transition(
         )
         return TransitionOutcome(reason="no-pod-available")
 
+    # H-11 refusal, before preflight-bounce and before any run is
+    # persisted: a person's state move (``moved_by_run`` not set) on an
+    # offline or paused dedicated runner is refused with the specific
+    # code — no run, no bounce. An agent move is automatic and waits.
+    if moved_by_run is None:
+        from pi_dash.runner.services.issue_assignment import dedicated_run_refusal
+
+        refusal, _detail = dedicated_run_refusal(issue, human=True, user=creator)
+        if refusal is not None:
+            logger.info(
+                "orchestration: skip run creation for issue %s — %s",
+                issue.id,
+                refusal,
+            )
+            return TransitionOutcome(reason=refusal)
+
     if not scheduling.preflight_eligibility_or_bounce(
         issue,
         run_creator=creator,
@@ -293,6 +309,10 @@ def handle_issue_state_transition(
     ):
         return TransitionOutcome(reason="no-eligible-runner")
 
+    # A person's state move deliberately bypasses the dedicated runner
+    # for this one run (§23.3). An agent move (``moved_by_run`` set) is
+    # automatic and keeps the dedicated pin.
+    human_move = moved_by_run is None
     return _create_and_dispatch_run(
         issue=issue,
         parent=parent,
@@ -300,6 +320,7 @@ def handle_issue_state_transition(
         pod=pod,
         fresh_session=fresh_session,
         trigger=AgentRunTrigger.STATE_TRANSITION,
+        pod_once=human_move,
     )
 
 
@@ -437,23 +458,35 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
             creator=comment.actor,
             pod=pod,
             trigger=AgentRunTrigger.COMMENT_AND_RUN,
+            # Comment & Run always runs once on the pod (§23.3).
+            pod_once=True,
         )
         if outcome.created_run is None:
             transaction.set_rollback(True)
         return outcome
 
 
-def _create_continuation_run(*, issue: Issue, parent: AgentRun, creator, pod, trigger: str) -> ContinuationOutcome:
+def _create_continuation_run(
+    *, issue: Issue, parent: AgentRun, creator, pod, trigger: str, pod_once: bool = False
+) -> ContinuationOutcome:
     """Create R_next as a follow-up to ``parent`` with optional pin.
 
     "Continuation" is a historical name. The new run renders a self-sufficient
     full prompt and starts a fresh agent session — it does not resume the
     parent's session. ``parent`` is retained for lineage / pin selection only.
     See ``.ai_design/ticking_optimization/design.md``.
+
+    ``pod_once`` (§23.3) deliberately bypasses the issue's dedicated
+    runner for this one run. Set only by the human paths (state move,
+    Comment & Run, Run AI); the tick never passes it.
     """
     from pi_dash.cloud_agent.creation import dispatch_after_commit, execution_fields, lock_cloud_creation_capacity
+    from pi_dash.runner.services.issue_assignment import resolve_run_pin
 
-    pinned_runner = _pinned_runner_for(parent, pod, creator=creator, trigger=trigger, issue=issue)
+    pinned_runner, pin_kind = resolve_run_pin(
+        issue, parent=parent, pod=pod, fresh_session=False,
+        creator=creator, trigger=trigger, pod_once=pod_once,
+    )
     try:
         execution = execution_fields(
             project=issue.project,
@@ -485,6 +518,7 @@ def _create_continuation_run(*, issue: Issue, parent: AgentRun, creator, pod, tr
             work_item=issue,
             parent_run=parent,
             pinned_runner=pinned_runner,
+            pin_kind=pin_kind,
             status=AgentRunStatus.QUEUED,
             trigger=trigger,
             phase_kind=_phase_kind_for_issue(issue),
@@ -533,49 +567,23 @@ def _pinned_runner_for(
 ) -> Optional[Runner]:
     """Return the runner to pin a follow-up to, or None.
 
-    Prefer the parent's runner when it's still eligible. The motivation is
-    **repo locality**: that runner already has the issue's branch checked
-    out and the workpad context on disk, so the next run avoids re-cloning
-    or re-fetching. Resume is no longer in play
-    (see ``.ai_design/ticking_optimization/design.md``); pinning is best-
-    effort and the run is correct on any runner in the pod.
+    Locality pin only — the parent's runner while it takes pod work now
+    (repo locality: that runner already has the issue's branch checked
+    out). A runner that is offline, heartbeat-stale or paused is not
+    eligible: only the pinned runner may take a pinned run, so pinning to
+    a runner that is gone would park the run in QUEUED. A BUSY runner is
+    alive and stays eligible; the pinned run waits for it. A built-in
+    engine gets a locality pin only while it is a ``pod_member`` and its
+    machine's engine is not paused.
 
-    A runner that is offline or has no fresh heartbeat is not eligible: only
-    the pinned runner may take a pinned run, so pinning to a runner that is
-    gone would park the run in QUEUED and block every later run on the issue.
-    A BUSY runner is alive and stays eligible; the pinned run waits for it.
-    A paused runner is not: it takes no new work until resumed, so a pin to it
-    would park the run exactly like a pin to a gone runner.
-
-    A built-in engine gets a locality pin only while it is a ``pod_member``
-    and its machine's engine is not paused; otherwise the follow-up is
-    created unpinned in the pod (``built_engine_as_runner`` design §7).
+    Dedicated resolution lives in
+    :func:`pi_dash.runner.services.issue_assignment.resolve_run_pin`;
+    this helper is its locality arm, kept under its old name for
+    back-compat (``test_engine_dispatch`` imports it).
     """
-    from pi_dash.runner.services.matcher import HEARTBEAT_GRACE
+    from pi_dash.runner.services.issue_assignment import locality_runner_for
 
-    if parent.runner_id is None:
-        return None
-    runner = parent.runner
-    if runner is None:
-        return None
-    if runner.status in (RunnerStatus.REVOKED, RunnerStatus.OFFLINE):
-        return None
-    if runner.paused_at is not None:
-        return None
-    if runner.last_heartbeat_at is None or runner.last_heartbeat_at < timezone.now() - HEARTBEAT_GRACE:
-        return None
-    if target_pod is not None and runner.pod_id != target_pod.id:
-        return None
-    if not locality_pin_allowed(runner):
-        return None
-    # The next run may have a different principal or trigger from its parent.
-    # A teammate's click must not inherit a pin to an owner-only engine:
-    # the engine would reject it and the pin would block every other runner.
-    if runner.is_engine and not runner_may_take(
-        runner, created_by_id=getattr(creator, "id", None), human=trigger in HUMAN_TRIGGERS, issue=issue
-    ):
-        return None
-    return runner
+    return locality_runner_for(parent, target_pod, creator=creator, trigger=trigger, issue=issue)
 
 
 def _run_config_for_issue(issue: Issue, *, base: Optional[dict] = None) -> dict:
@@ -762,16 +770,23 @@ def _create_and_dispatch_run(
     pod,
     fresh_session: bool = False,
     trigger: str = AgentRunTrigger.STATE_TRANSITION,
+    pod_once: bool = False,
 ) -> TransitionOutcome:
     """Create a fresh ``AgentRun`` and dispatch it.
 
-    ``fresh_session=True`` clears ``parent_run`` and ``pinned_runner``
-    so the new phase's template body lands as the system prompt of a
-    brand-new agent session (rather than as a user-turn message on a
-    resumed prior session). Used by cross-phase entry into a phase
-    whose ``fresh_session_on_entry`` is True.
+    ``fresh_session=True`` clears ``parent_run`` so the new phase's
+    template body lands as the system prompt of a brand-new agent
+    session (rather than as a user-turn message on a resumed prior
+    session). Used by cross-phase entry into a phase whose
+    ``fresh_session_on_entry`` is True. The dedicated pin survives a
+    fresh session (§9.2); only the locality pin is dropped with it.
+
+    ``pod_once`` (§23.3) deliberately bypasses the issue's dedicated
+    runner for this one run. Set only by the human paths; the tick
+    never passes it.
     """
     from pi_dash.cloud_agent.creation import dispatch_after_commit, execution_fields, lock_cloud_creation_capacity
+    from pi_dash.runner.services.issue_assignment import resolve_run_pin
 
     try:
         execution = execution_fields(
@@ -797,12 +812,17 @@ def _create_and_dispatch_run(
             or admission_error
         )
         effective_parent = None if fresh_session else parent
-        # Pin the new run to the parent run's runner when eligible.
-        # Skip pinning for fresh sessions — they intentionally drop
-        # session continuity.
-        pinned_runner = None
-        if not fresh_session and effective_parent is not None:
-            pinned_runner = _pinned_runner_for(effective_parent, pod, creator=creator, trigger=trigger, issue=issue)
+        # Dedicated pin survives a fresh session (§9.2); locality does not.
+        # ``resolve_run_pin`` handles both, including the pod_once bypass.
+        pinned_runner, pin_kind = resolve_run_pin(
+            issue,
+            parent=effective_parent,
+            pod=pod,
+            fresh_session=fresh_session,
+            creator=creator,
+            trigger=trigger,
+            pod_once=pod_once,
+        )
         pinned_runner = execution.pop("pinned_runner", pinned_runner)
         run = AgentRun.objects.create(
             workspace=issue.workspace,
@@ -811,6 +831,7 @@ def _create_and_dispatch_run(
             work_item=issue,
             parent_run=effective_parent,
             pinned_runner=pinned_runner,
+            pin_kind=pin_kind,
             status=AgentRunStatus.QUEUED,
             trigger=trigger,
             phase_kind=_phase_kind_for_issue(issue),

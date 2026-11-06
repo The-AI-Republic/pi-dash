@@ -183,12 +183,15 @@ def _release_pins(candidates, still_stuck_q: Q) -> int:
 
 def _releasable_pins():
     # Managed runs are skipped: their pin is the execution target, and
-    # ``managed_runner.expire_waiting_runs`` owns their timeout.
+    # ``managed_runner.expire_waiting_runs`` owns their timeout. Dedicated
+    # pins are skipped too: the issue owns them, not the queue (§12.1) —
+    # the dedicated-runner sweeps own them. A dedicated pin is therefore
+    # never released by these sweeps, on offline or on pause.
     return AgentRun.objects.filter(
         status=AgentRunStatus.QUEUED,
         executor_kind=AgentExecutorKind.LOCAL_RUNNER,
         pinned_runner__isnull=False,
-    )
+    ).exclude(pin_kind="dedicated")
 
 
 @shared_task(name="runner.pause_engines_with_expired_credentials")
@@ -237,6 +240,90 @@ def release_pins_for_paused_runner(runner_id) -> int:
     if released:
         logger.info("release_pins_for_paused_runner runner=%s unpinned %s run(s)", runner_id, released)
     return released
+
+
+@shared_task(name="runner.fail_dedicated_runs")
+def fail_dedicated_runs() -> int:
+    """Fail dedicated runs whose runner is still unavailable after 12h (§11.3)."""
+    from pi_dash.runner.services.issue_assignment import fail_dedicated_runs as _fail
+
+    failed = _fail()
+    if failed:
+        logger.info("fail_dedicated_runs failed %s dedicated run(s)", failed)
+    return failed
+
+
+@shared_task(name="runner.sweep_stranded_dedicated_runs")
+def sweep_stranded_dedicated_runs() -> int:
+    """Stranded sweep for dedicated pins (§12.1).
+
+    A QUEUED dedicated run whose runner excludes it under the usage
+    rule waits forever untouched by the released sweeps. A stranded
+    automatic run is downgraded to a locality pin and released to the
+    pod queue (it may be served again — dispatch_wait says
+    ``runner_not_permitted``). A stranded person-initiated run, and any
+    other stranded dedicated run, is cancelled with
+    ``dedicated_runner_unavailable``.
+    """
+    from pi_dash.runner.models import PinKind
+    from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+    from pi_dash.runner.services.issue_assignment import (
+        stranded_queued,
+    )
+
+    candidates = list(
+        AgentRun.objects.filter(
+            status=AgentRunStatus.QUEUED,
+            pin_kind=PinKind.DEDICATED,
+            pinned_runner__isnull=False,
+        ).select_related("pinned_runner", "work_item")[:500].values_list("id", flat=True)
+    )
+    handled = 0
+    pod_ids = set()
+    for run_id in candidates:
+        with transaction.atomic():
+            run = (
+                AgentRun.objects.select_for_update(of=("self",))
+                .select_related("pinned_runner", "work_item")
+                .filter(id=run_id, status=AgentRunStatus.QUEUED, pin_kind=PinKind.DEDICATED)
+                .first()
+            )
+            if run is None:
+                continue
+            issue = run.work_item
+            if not stranded_queued(run, issue):
+                continue
+            from pi_dash.runner.models import HUMAN_TRIGGERS as _HUMAN
+
+            automatic = run.trigger not in _HUMAN
+            if automatic:
+                run.pin_kind = PinKind.LOCALITY
+                run.pinned_runner = None
+                run.save(update_fields=["pin_kind", "pinned_runner"])
+                handled += 1
+                if run.pod_id is not None:
+                    pod_ids.add(run.pod_id)
+            else:
+                from pi_dash.runner.services.issue_assignment import refusal_detail
+
+                finalize_agent_run(
+                    run_id,
+                    AgentRunStatus.CANCELLED,
+                    expected_status=AgentRunStatus.QUEUED,
+                    updates={
+                        "error_code": "dedicated_runner_unavailable",
+                        "error": refusal_detail("dedicated_runner_unavailable", new_runner=run.pinned_runner),
+                    },
+                )
+                handled += 1
+    for pod_id in pod_ids:
+        try:
+            matcher.drain_pod_by_id(pod_id)
+        except Exception:
+            logger.exception("sweep_stranded_dedicated_runs: drain failed for pod %s", pod_id)
+    if handled:
+        logger.info("sweep_stranded_dedicated_runs handled %s run(s)", handled)
+    return handled
 
 
 @shared_task(name="runner.fail_runs_on_offline_runners")
