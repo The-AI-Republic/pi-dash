@@ -15,8 +15,9 @@ def cloud_agent_configuration_check(app_configs, **kwargs):
     # The Cloud Agent executes against each run creator's BYOK LLM config
     # (the same per-user config Pi Dash AI uses) — no platform model settings
     # exist to validate. E002/E003/E004/E006 covered those and are retired.
-    if default == AgentExecutorKind.CLOUD_AGENT and not settings.CLOUD_AGENT_ENABLED:
-        errors.append(Error("Cloud default requires CLOUD_AGENT_ENABLED", id="cloud_agent.E002"))
+    # E002 ("cloud default requires CLOUD_AGENT_ENABLED") is retired: the
+    # instance default is always ``local_runner`` now (built_engine_as_runner
+    # §6) and ``managed.W001`` reports any other configured value.
     unknown_tools = sorted(set(settings.CLOUD_AGENT_DISABLED_TOOLS) - set(READ_TOOLS) - set(WRITE_TOOLS))
     if unknown_tools:
         errors.append(

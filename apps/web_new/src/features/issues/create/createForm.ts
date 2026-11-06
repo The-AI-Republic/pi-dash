@@ -11,12 +11,7 @@
 import type { DraftIssueCreateInput, IssueCreateInput, Pod } from "@pidash/api-client";
 
 import { hasStoredDescriptionContent, storedTextContent } from "../../../shared/editor/index.js";
-import {
-  executionSelectionId,
-  executionTargetPatch,
-  isAgentRowKind,
-  type ExecutionSelection,
-} from "../../../shared/pickers/index.js";
+import { executionSelectionId, executionTargetPatch, type ExecutionSelection } from "../../../shared/pickers/index.js";
 import { TITLE_MAX_LENGTH, type CreateProjectOption } from "./createProjects.js";
 
 export { TITLE_MAX_LENGTH } from "./createProjects.js";
@@ -73,23 +68,20 @@ export function emptyCreateForm(projectId: string | null, descriptionHtml = ""):
  * The target a new item starts on: the project's default pod, else its
  * first pod, else nothing. A pod pick also pins the local executor, so
  * the create stores the same execution target the old form wrote and the
- * "Runs on" field names it before the first run. A project that runs on
- * an agent by default (cloud or managed) starts on no pick at all: the
- * old form shows that agent and sends nothing, leaving the item on the
- * project default.
+ * "Runs on" field names it before the first run. Runner is the only
+ * executor (built-in engine design §6), so a project's legacy default
+ * executor never changes the pick.
  */
 export function defaultExecutionSelection(
-  pods: ReadonlyArray<Pick<Pod, "id" | "is_default">>,
-  projectDefaultExecutor: string | null = null
+  pods: ReadonlyArray<Pick<Pod, "id" | "is_default">>
 ): ExecutionSelection | null {
-  if (projectDefaultExecutor !== null && isAgentRowKind(projectDefaultExecutor)) return null;
   const pod = pods.find((row) => row.is_default) ?? pods[0];
   return pod === undefined ? null : { type: "pod", podId: pod.id };
 }
 
 /**
  * Fill an empty target with the default. Any pick already made (another
- * pod, a runner, an agent) stays; only a blank form, a project switch or
+ * pod, a runner) stays; only a blank form, a project switch or
  * a Create more reset leaves the target empty.
  */
 export function withDefaultExecution(form: CreateFormState, fallback: ExecutionSelection | null): CreateFormState {

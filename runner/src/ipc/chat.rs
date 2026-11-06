@@ -30,6 +30,18 @@
 //! observed by the assign path) plus a read of `state.rx_in_flight` (set while
 //! a managed run holds the working copy). [`try_begin_local_turn`] claims the
 //! working copy for a chat turn or refuses when a run holds it.
+//!
+//! ## Two hosts (design §12.1, PO-8)
+//!
+//! A request is served by a [`ChatHost`]:
+//!
+//! - **A project runner** — the request names one (`runner`), or carries no
+//!   absolute `cwd`: the runner's agent, its folder and the AC6 guard above.
+//! - **The daemon's engine profile** ([`super::engine_chat::EngineChatProfile`])
+//!   — no `runner` selector and an absolute `cwd`: the machine-level built-in
+//!   engine, with no project runner and no shared busy flag, so it works with
+//!   zero or many runners and is never blocked by a run. Its folder must not
+//!   be inside any runner's working dir.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -43,6 +55,7 @@ use tokio::io::{AsyncWriteExt, BufStream};
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
+use super::engine_chat::EngineChatProfile;
 use super::protocol::Response;
 use crate::agent::{AgentBridge, BridgeEvent, RunPayload, within_startup_deadline};
 use crate::approval::policy::Policy;
@@ -144,6 +157,104 @@ impl ChatRegistry {
     async fn remove(&self, id: Uuid) -> Option<Arc<ChatSession>> {
         self.sessions.lock().await.remove(&id)
     }
+
+    /// Whether `id` is a live session of this registry.
+    pub(crate) async fn contains(&self, id: Uuid) -> bool {
+        self.sessions.lock().await.contains_key(&id)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Chat hosts.
+// ---------------------------------------------------------------------------
+
+/// What serves a local chat request: a project runner or the daemon's own
+/// engine profile. See the module docs.
+pub(crate) struct ChatHost<'a> {
+    sessions: &'a ChatRegistry,
+    approvals: &'a ApprovalRouter,
+    lane: Lane<'a>,
+}
+
+enum Lane<'a> {
+    Runner(&'a RunnerInstance),
+    Engine {
+        profile: &'a EngineChatProfile,
+        /// `(runner name, working dir)` of every configured runner: a chat
+        /// folder may not be inside one.
+        runner_dirs: Vec<(String, PathBuf)>,
+    },
+}
+
+impl<'a> ChatHost<'a> {
+    pub(crate) fn runner(inst: &'a RunnerInstance) -> Self {
+        Self {
+            sessions: &inst.chat_sessions,
+            approvals: &inst.approvals,
+            lane: Lane::Runner(inst),
+        }
+    }
+
+    pub(crate) fn engine(
+        profile: &'a EngineChatProfile,
+        runner_dirs: Vec<(String, PathBuf)>,
+    ) -> Self {
+        Self {
+            sessions: &profile.sessions,
+            approvals: &profile.approvals,
+            lane: Lane::Engine {
+                profile,
+                runner_dirs,
+            },
+        }
+    }
+
+    fn config(&self) -> &RunnerConfig {
+        match &self.lane {
+            Lane::Runner(inst) => &inst.config,
+            Lane::Engine { profile, .. } => profile.config(),
+        }
+    }
+
+    /// Claim the working copy for one turn. Only a project runner has one
+    /// to share with its runs; the engine profile has no busy flag.
+    fn begin_turn(&self) -> std::result::Result<Option<LocalTurnGuard>, String> {
+        match &self.lane {
+            Lane::Runner(inst) => try_begin_local_turn(inst).map(Some),
+            Lane::Engine { .. } => Ok(None),
+        }
+    }
+
+    fn resolve_workspace(&self, cwd: Option<&str>) -> Result<PathBuf> {
+        match &self.lane {
+            Lane::Runner(inst) => resolve_chat_workspace(&inst.config, cwd),
+            Lane::Engine { runner_dirs, .. } => {
+                super::engine_chat::resolve_engine_chat_folder(cwd, runner_dirs)
+            }
+        }
+    }
+
+    async fn spawn(
+        &self,
+        workspace: &Path,
+        model: Option<String>,
+        resume_id: Option<&str>,
+        mode: ApprovalMode,
+    ) -> Result<AgentBridge> {
+        match &self.lane {
+            Lane::Runner(inst) => {
+                AgentBridge::spawn_from_config_with_resume(
+                    &inst.config,
+                    workspace,
+                    model,
+                    resume_id,
+                    Some(mode),
+                )
+                .await
+            }
+            Lane::Engine { profile, .. } => profile.spawn(workspace, mode).await,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +281,9 @@ impl Drop for LocalTurnGuard {
 /// assign lane's mirror check of `chat_active` (supervisor.rs) closes the
 /// other direction. This is best-effort advisory exclusion, consistent with
 /// the cloud loop's own `current_chat`/`current_run` checks.
-pub(crate) fn try_begin_local_turn(inst: &RunnerInstance) -> std::result::Result<LocalTurnGuard, String> {
+pub(crate) fn try_begin_local_turn(
+    inst: &RunnerInstance,
+) -> std::result::Result<LocalTurnGuard, String> {
     if inst.state.rx_in_flight.borrow().is_some() {
         return Err("a managed issue run is using this runner's working copy".to_string());
     }
@@ -218,11 +331,11 @@ pub(crate) struct SendArgs {
 /// `ChatWarm`: spawn/reuse+warm the engine without submitting a turn. Streams
 /// a `ChatEvent{kind:"chat_warmed"}` (or `"chat_warm_failed"`), then `Ack`.
 pub(crate) async fn handle_warm<S: ChatSink>(
-    inst: &RunnerInstance,
+    host: &ChatHost<'_>,
     args: WarmArgs,
     sink: &mut S,
 ) -> Result<Response> {
-    let session = inst.chat_sessions.get_or_create(args.chat_session_id).await;
+    let session = host.sessions.get_or_create(args.chat_session_id).await;
     let mut rt = session.rt.lock().await;
     let chat_session_id = args.chat_session_id;
 
@@ -231,7 +344,7 @@ pub(crate) async fn handle_warm<S: ChatSink>(
         args.local_thread_id.as_deref(),
     );
     let workspace = match ensure_bridge(
-        inst,
+        host,
         &mut rt,
         args.cwd.as_deref(),
         args.model.clone(),
@@ -310,14 +423,15 @@ pub(crate) async fn handle_warm<S: ChatSink>(
 /// turn's `ChatEvent`/`ChatApprovalRequest` frames, and returns the terminal
 /// `ChatMessageCompleted` (or `ChatFailed`) as the connection's final frame.
 pub(crate) async fn handle_send<S: ChatSink>(
-    inst: &RunnerInstance,
+    host: &ChatHost<'_>,
     args: SendArgs,
     sink: &mut S,
 ) -> Result<Response> {
     let chat_session_id = args.chat_session_id;
 
-    // AC6: claim the working copy, or refuse cleanly.
-    let _guard = match try_begin_local_turn(inst) {
+    // AC6: claim a project runner's working copy, or refuse cleanly. The
+    // engine profile shares no folder with a run, so it claims nothing.
+    let _guard = match host.begin_turn() {
         Ok(g) => g,
         Err(detail) => {
             return Ok(Response::ChatFailed {
@@ -329,7 +443,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
         }
     };
 
-    let session = inst.chat_sessions.get_or_create(chat_session_id).await;
+    let session = host.sessions.get_or_create(chat_session_id).await;
     let mut rt = session.rt.lock().await;
 
     let resume_id = chat_resume_id(
@@ -337,7 +451,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
         args.local_thread_id.as_deref(),
     );
     let workspace = match ensure_bridge(
-        inst,
+        host,
         &mut rt,
         args.cwd.as_deref(),
         args.model.clone(),
@@ -375,9 +489,9 @@ pub(crate) async fn handle_send<S: ChatSink>(
                 content: args.content,
                 model: args.model,
                 mode: approval_mode,
-                runner_id: inst.config.runner_id,
-                config: &inst.config,
-                approvals: &inst.approvals,
+                runner_id: host.config().runner_id,
+                config: host.config(),
+                approvals: host.approvals,
                 workspace: &workspace,
                 cancel: &session.cancel,
             },
@@ -423,8 +537,8 @@ pub(crate) async fn handle_send<S: ChatSink>(
 
 /// `ChatCancel`: interrupt the in-flight turn (if any). Best-effort — trips
 /// the session's cancel signal, which the active turn observes.
-pub(crate) async fn handle_cancel(inst: &RunnerInstance, chat_session_id: Uuid) -> Result<Response> {
-    if let Some(session) = inst.chat_sessions.get(chat_session_id).await {
+pub(crate) async fn handle_cancel(host: &ChatHost<'_>, chat_session_id: Uuid) -> Result<Response> {
+    if let Some(session) = host.sessions.get(chat_session_id).await {
         session.cancel.notify_waiters();
     }
     Ok(Response::Ack)
@@ -433,11 +547,11 @@ pub(crate) async fn handle_cancel(inst: &RunnerInstance, chat_session_id: Uuid) 
 /// `ChatClose`: interrupt any in-flight turn, tear the engine down, drop the
 /// session, and emit a terminal `ChatClosed`.
 pub(crate) async fn handle_close<S: ChatSink>(
-    inst: &RunnerInstance,
+    host: &ChatHost<'_>,
     chat_session_id: Uuid,
     sink: &mut S,
 ) -> Result<Response> {
-    if let Some(session) = inst.chat_sessions.get(chat_session_id).await {
+    if let Some(session) = host.sessions.get(chat_session_id).await {
         // Interrupt a streaming turn so it releases the runtime lock, then
         // acquire it to tear the bridge down.
         session.cancel.notify_waiters();
@@ -447,7 +561,7 @@ pub(crate) async fn handle_close<S: ChatSink>(
         }
         rt.started_sent = false;
     }
-    inst.chat_sessions.remove(chat_session_id).await;
+    host.sessions.remove(chat_session_id).await;
     sink.emit(Response::ChatClosed {
         chat_session_id,
         closed_at: Utc::now(),
@@ -460,11 +574,11 @@ pub(crate) async fn handle_close<S: ChatSink>(
 /// shared approval router as `DecisionSource::Local`, unblocking the turn that
 /// is parked on `approvals.subscribe()`.
 pub(crate) async fn handle_decide(
-    inst: &RunnerInstance,
+    host: &ChatHost<'_>,
     local_approval_id: &str,
     decision: ApprovalDecision,
 ) -> Result<Response> {
-    let resolved = inst
+    let resolved = host
         .approvals
         .decide(local_approval_id, decision, DecisionSource::Local)
         .await;
@@ -483,7 +597,7 @@ pub(crate) async fn handle_decide(
 /// once and respawning if a prior bridge process exited. Returns the resolved
 /// workspace path.
 async fn ensure_bridge(
-    inst: &RunnerInstance,
+    host: &ChatHost<'_>,
     rt: &mut SessionRuntime,
     cwd: Option<&str>,
     model: Option<String>,
@@ -491,7 +605,7 @@ async fn ensure_bridge(
     mode: Option<ApprovalMode>,
 ) -> Result<PathBuf> {
     if rt.workspace.is_none() {
-        rt.workspace = Some(resolve_chat_workspace(&inst.config, cwd)?);
+        rt.workspace = Some(host.resolve_workspace(cwd)?);
     }
     let workspace = rt
         .workspace
@@ -511,14 +625,8 @@ async fn ensure_bridge(
         // fresh session spawns its own bridge.
         rt.approval_mode = mode.unwrap_or_default();
         rt.bridge = Some(
-            AgentBridge::spawn_from_config_with_resume(
-                &inst.config,
-                &workspace,
-                model,
-                resume_id,
-                Some(rt.approval_mode),
-            )
-            .await?,
+            host.spawn(&workspace, model, resume_id, rt.approval_mode)
+                .await?,
         );
     }
     Ok(workspace)

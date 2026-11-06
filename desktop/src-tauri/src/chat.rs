@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 
-//! Desktop → managed-daemon **local chat** transport (PDASHOSS01-159, slice 2).
+//! Desktop → daemon **local chat** transport (PDASHOSS01-159, slice 2).
 //!
 //! This is the desktop-host half of the direct local-chat feature: the webview
 //! talks to the bundled engine through the Tauri host and the daemon's IPC
@@ -39,9 +39,6 @@ use serde::Serialize;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use uuid::Uuid;
-
-use crate::ipc::socket_path;
-use crate::managed_runner::ManagedPaths;
 
 /// Tauri event carrying one streamed `Response::Chat*` frame to the webview.
 /// The payload is the frame serialized with its usual `result`/`data` tagging.
@@ -174,7 +171,7 @@ async fn drive_stream<S: ChatSink>(
             Some(next) => frame = next,
             None => {
                 return Err(
-                    "managed daemon closed the chat stream before it completed".to_string(),
+                    "the Pi Dash daemon closed the chat stream before it completed".to_string(),
                 );
             }
         }
@@ -191,7 +188,7 @@ pub(crate) async fn stream_session<S: ChatSink>(
 ) -> Result<(), String> {
     let mut client = Client::connect(socket)
         .await
-        .map_err(|e| format!("connecting to managed daemon: {e}"))?;
+        .map_err(|e| format!("connecting to the Pi Dash daemon: {e}"))?;
     // `call` sends the request and reads the first response line; for a
     // streaming request that first line is the first `Chat*` frame (or a
     // synchronous `Error`), and the rest arrive via `read_next`.
@@ -208,7 +205,7 @@ pub(crate) async fn stream_session<S: ChatSink>(
 async fn call_once(socket: &Path, req: Request) -> Result<(), String> {
     let mut client = Client::connect(socket)
         .await
-        .map_err(|e| format!("connecting to managed daemon: {e}"))?;
+        .map_err(|e| format!("connecting to the Pi Dash daemon: {e}"))?;
     match client
         .call(req)
         .await
@@ -224,18 +221,11 @@ async fn call_once(socket: &Path, req: Request) -> Result<(), String> {
     }
 }
 
-/// Resolve the managed daemon's control socket for this app.
-/// The managed daemon's control socket **for this workspace**.
-///
-/// The daemon is started per workspace (`managed_start_daemon`) with its data
-/// dir re-rooted under `managed/pidash/<workspace>/data`, and the runner binds
-/// its socket at `<data_dir>/runtime/pidash.sock`. Resolving from the shared
-/// `managed/runtime/` instead — which only holds the model token — is a socket
-/// nothing listens on, and every chat send failed with "connecting to managed
-/// daemon" even though the daemon was up.
-fn resolve_socket<R: Runtime>(app: &AppHandle<R>, workspace: &str) -> Result<PathBuf, String> {
-    let paths = ManagedPaths::for_workspace(app, workspace)?;
-    Ok(socket_path(&paths.daemon_runtime_dir()))
+/// The computer's daemon control socket: the standard one, whatever
+/// workspace the chat is in (design §4.4, §12.1). One daemon serves every
+/// workspace, so there is no per-workspace socket any more.
+fn resolve_socket() -> Result<PathBuf, String> {
+    Ok(crate::daemon::DaemonPaths::standard()?.socket())
 }
 
 /// Spawn the background reader for a streaming request and register its handle
@@ -322,7 +312,6 @@ fn start_stream<S: ChatSink>(
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_warm<R: Runtime>(
     app: AppHandle<R>,
-    workspace: String,
     chat_session_id: Uuid,
     runner: Option<String>,
     cwd: Option<String>,
@@ -331,7 +320,7 @@ pub async fn chat_warm<R: Runtime>(
     local_thread_id: Option<String>,
     local_session_id: Option<String>,
 ) -> Result<(), String> {
-    let socket = resolve_socket(&app, &workspace)?;
+    let socket = resolve_socket()?;
     let req = Request::ChatWarm {
         chat_session_id,
         runner,
@@ -351,7 +340,6 @@ pub async fn chat_warm<R: Runtime>(
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_send<R: Runtime>(
     app: AppHandle<R>,
-    workspace: String,
     chat_session_id: Uuid,
     message_id: Uuid,
     content: String,
@@ -362,7 +350,7 @@ pub async fn chat_send<R: Runtime>(
     local_thread_id: Option<String>,
     local_session_id: Option<String>,
 ) -> Result<(), String> {
-    let socket = resolve_socket(&app, &workspace)?;
+    let socket = resolve_socket()?;
     let req = Request::ChatSend {
         chat_session_id,
         message_id,
@@ -379,14 +367,12 @@ pub async fn chat_send<R: Runtime>(
 
 /// Interrupt the in-flight turn of a local chat session.
 #[tauri::command]
-pub async fn chat_cancel<R: Runtime>(
-    app: AppHandle<R>,
-    workspace: String,
+pub async fn chat_cancel(
     chat_session_id: Uuid,
     runner: Option<String>,
     reason: Option<String>,
 ) -> Result<(), String> {
-    let socket = resolve_socket(&app, &workspace)?;
+    let socket = resolve_socket()?;
     call_once(
         &socket,
         Request::ChatCancel {
@@ -403,12 +389,11 @@ pub async fn chat_cancel<R: Runtime>(
 #[tauri::command]
 pub async fn chat_close<R: Runtime>(
     app: AppHandle<R>,
-    workspace: String,
     chat_session_id: Uuid,
     runner: Option<String>,
     reason: Option<String>,
 ) -> Result<(), String> {
-    let socket = resolve_socket(&app, &workspace)?;
+    let socket = resolve_socket()?;
     let result = call_once(
         &socket,
         Request::ChatClose {
@@ -436,15 +421,13 @@ pub async fn chat_close<R: Runtime>(
 /// Answer a pending chat approval, routed into the runner's shared approval
 /// router as `DecisionSource::Local` by the slice-1b handler.
 #[tauri::command]
-pub async fn chat_decide<R: Runtime>(
-    app: AppHandle<R>,
-    workspace: String,
+pub async fn chat_decide(
     chat_session_id: Uuid,
     local_approval_id: String,
     decision: ApprovalDecision,
     runner: Option<String>,
 ) -> Result<(), String> {
-    let socket = resolve_socket(&app, &workspace)?;
+    let socket = resolve_socket()?;
     call_once(
         &socket,
         Request::ChatDecide {
@@ -464,6 +447,10 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
+
+    fn socket_path(dir: &Path) -> PathBuf {
+        dir.join("pidash.sock")
+    }
 
     /// In-memory sink recording frames and errors for assertions.
     #[derive(Default)]

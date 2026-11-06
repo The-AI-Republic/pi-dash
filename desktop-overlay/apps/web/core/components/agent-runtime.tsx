@@ -4,155 +4,88 @@
  * See the LICENSE file for details.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { observer } from "mobx-react";
-import { useMatches } from "react-router";
 import { useUser } from "@/hooks/store/user";
-import { useProject } from "@/hooks/store/use-project";
+import { DesktopDaemonSetupDialog } from "@/components/desktop-daemon-setup-dialog";
+import { DesktopMigrationNotices } from "@/components/desktop-migration-notices";
+import { DesktopReplaceMachineDialog } from "@/components/desktop-replace-machine-dialog";
 import { DesktopSignOutDialog } from "@/components/desktop-sign-out-dialog";
-import { connectAgentProject, isDesktop, refreshAgentRuntime, resumeAgentRuntime } from "@/services/agent-runtime";
+import { isDesktop, refreshAgentRuntime, resumeAgentRuntime } from "@/services/agent-runtime";
+import { compatibleHello } from "@/services/desktop-daemon";
+import { migrateLegacyTrees } from "@/services/desktop-migration";
+import { offerReplace } from "@/services/desktop-replace";
 import { registerLocalChatTransport } from "@/services/local-chat-transport";
 
+/**
+ * Desktop runtime, mounted on every page (`app/provider.tsx`).
+ *
+ * Opening a project no longer enrols anything: the built-in engine is turned
+ * on for a project when it is used (design §5). What runs here, per signed-in
+ * user: install the per-runner chat routing, find this computer's daemon (on
+ * launch, on focus and every minute — renewing the engine silently only when
+ * its sign-in is `expiring` or `expired`), and move older builds' private
+ * daemon trees to it. The migration is retried on each launch until the
+ * daemon is there and signed in as this account.
+ *
+ * Once the migration is out of the way, it asks — once per launch and machine
+ * — whether the daemon's machine replaces an offline one with the same
+ * hostname (design §4.10), and it shows the migration's one-time notices.
+ */
 export const AgentRuntime = observer(function AgentRuntime() {
   const { data: user } = useUser();
-  const { fetchProjectDetails, workspaceProjectIds, getProjectById } = useProject();
-  // `useParams()` resolves against the route that renders the component, and
-  // this one is mounted on the root route (`app/provider.tsx`, inside
-  // `root.tsx`'s `<AppProvider>`). The root route declares no path params, so
-  // `useParams()` would return `{}` on every page and the project effect below
-  // would never run. `useMatches()` reads the whole matched chain from the
-  // router state instead; the leaf match carries the accumulated params.
-  const matches = useMatches();
-  const {
-    workspaceSlug,
-    projectId: routeProjectId,
-    workItem,
-  } = (matches[matches.length - 1]?.params ?? {}) as {
-    workspaceSlug?: string;
-    projectId?: string;
-    workItem?: string;
-  };
-  // Direct /browse/IDENTIFIER-123 links have no projectId route parameter.
-  // Resolve only within the active workspace: identifiers can repeat elsewhere.
-  const projectId =
-    routeProjectId ??
-    (workItem
-      ? workspaceProjectIds?.find((id) => getProjectById(id)?.identifier === workItem.replace(/-\d+$/, ""))
-      : undefined);
-  const [message, setMessage] = useState("");
 
   useEffect(() => {
     if (!isDesktop() || !user?.id) return;
-    resumeAgentRuntime(user.id);
-    // Point the shared chat UI at the bundled engine (local Tauri IPC) instead
-    // of the cloud chat relay. Idempotent and account-agnostic — the transport
-    // reads the current account per call — so a single registration survives
-    // account switches.
+    resumeAgentRuntime(user.id, user.email);
+    // Local for "This computer", the cloud for every other runner.
     registerLocalChatTransport();
-    const refresh = () => {
-      void refreshAgentRuntime().catch((error: unknown) => {
-        setMessage(String(error instanceof Error ? error.message : error));
+    let active = true;
+    let migrated = false;
+    const askedFor = new Set<string>();
+    const refresh = async () => {
+      await refreshAgentRuntime();
+      if (!active) return;
+      if (!migrated) {
+        const outcome = await migrateLegacyTrees(user.id);
+        // Blocked (no daemon yet, another account): nothing happened, so try
+        // again on the next refresh — set-up may finish meanwhile. A tree that
+        // failed half-way waits for the next launch rather than retrying every
+        // minute.
+        if (outcome.status !== "blocked") migrated = true;
+        if (outcome.status === "done" && outcome.failed.length) {
+          console.warn("Moving to Pi Dash on this computer did not finish for", outcome.failed);
+        }
+      }
+      // "Is this <label>? Replace it": once per launch for each machine the
+      // daemon is signed in as (a fresh sign-in is a new machine id).
+      const machineId = compatibleHello()?.machine_id;
+      if (!active || !migrated || !machineId || askedFor.has(machineId)) return;
+      askedFor.add(machineId);
+      // A failed lookup (offline) is not an answer: ask again next refresh.
+      await offerReplace(user.id).catch(() => {
+        askedFor.delete(machineId);
       });
     };
-    const timer = setInterval(refresh, 60_000);
-    window.addEventListener("focus", refresh);
-    return () => {
-      clearInterval(timer);
-      window.removeEventListener("focus", refresh);
-    };
-  }, [user?.id]);
-
-  useEffect(() => {
-    if (!isDesktop() || !user?.id || !workspaceSlug || !projectId) return;
-    let active = true;
-    let enrolled = false;
-    let refreshing = false;
-    let timer: ReturnType<typeof setInterval> | undefined;
-    const stopPolling = () => {
-      clearInterval(timer);
-      timer = undefined;
-    };
-    const startPolling = () => {
-      if (active && timer === undefined) timer = setInterval(() => void refreshProject(), 5000);
-    };
-    const refreshProject = async () => {
-      if (!active || !enrolled || refreshing) return;
-      refreshing = true;
-      try {
-        // Update the same observable project used by the executor picker.
-        // Enrollment can finish before the daemon's first heartbeat.
-        const project = await fetchProjectDetails(workspaceSlug, projectId);
-        if (!active) return;
-        const available = project.agent_executor_options?.some(
-          (option) => option.kind === "managed_runner" && option.available
-        );
-        // The poll only waits for that first heartbeat. Once the agent is
-        // available there is nothing left to wait for; the focus re-check
-        // below restarts it if the agent has gone away since.
-        if (available) stopPolling();
-        else startPolling();
-        setMessage(
-          available
-            ? "Runs on this computer · Pi Dash uses its own working copy. Keep the app open while the agent runs."
-            : "Waiting for Pi Dash Agent to connect…"
-        );
-      } catch (error) {
-        if (active) setMessage(String(error instanceof Error ? error.message : error));
-        // A failed re-check must not strand the strip on the error.
-        startPolling();
-      } finally {
-        refreshing = false;
-      }
-    };
-    resumeAgentRuntime(user.id);
-    setMessage("Preparing Pi Dash Agent…");
-    void connectAgentProject(workspaceSlug, projectId).then(
-      // Terminal handler: the chain ends here (`void`), and enrollment reports
-      // through setMessage rather than a resolved value.
-      // eslint-disable-next-line promise/always-return
-      async () => {
-        enrolled = true;
-        await refreshProject();
-      },
-      (error: unknown) => {
-        if (active) setMessage(String(error instanceof Error ? error.message : error));
-      }
-    );
-    const reconnect = () => {
-      void connectAgentProject(workspaceSlug, projectId).then(
-        // eslint-disable-next-line promise/always-return -- terminal handler, as above.
-        async () => {
-          enrolled = true;
-          await refreshProject();
-        },
-        (error: unknown) => {
-          if (active) setMessage(String(error instanceof Error ? error.message : error));
-          startPolling();
-        }
-      );
-    };
-    startPolling();
-    window.addEventListener("focus", reconnect);
+    const tick = () => void refresh().catch(() => {});
+    tick();
+    const timer = setInterval(tick, 60_000);
+    window.addEventListener("focus", tick);
     return () => {
       active = false;
-      stopPolling();
-      window.removeEventListener("focus", reconnect);
+      clearInterval(timer);
+      window.removeEventListener("focus", tick);
     };
-  }, [user?.id, workspaceSlug, projectId, fetchProjectDetails]);
+  }, [user?.id, user?.email]);
 
   if (!isDesktop()) return null;
   return (
     <>
-      {/* Mounted on every page: sign-out can be started from any of them. */}
+      {/* Mounted on every page: sign-out and set-up can start from any of them. */}
       <DesktopSignOutDialog />
-      {user?.id && projectId && message && (
-        <div
-          role="status"
-          className="shadow-sm fixed bottom-2 left-1/2 z-20 max-w-xl -translate-x-1/2 rounded-md border border-subtle bg-surface-1 px-3 py-2 text-body-xs-regular"
-        >
-          {message}
-        </div>
-      )}
+      <DesktopDaemonSetupDialog />
+      <DesktopReplaceMachineDialog />
+      {user?.id && <DesktopMigrationNotices account={user.id} />}
     </>
   );
 });

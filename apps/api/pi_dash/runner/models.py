@@ -4,6 +4,7 @@
 
 import logging
 import uuid
+from datetime import timedelta
 from typing import Optional
 
 from django.conf import settings
@@ -33,6 +34,10 @@ KNOWN_REVOKE_REASONS = frozenset(
         "dev_machine_revoked",
         "self_revoked",
         "user_revoke",
+        # The runner's machine was merged into another and this row lost the
+        # collision (built_engine_as_runner §13). Not in the daemon's
+        # local-cleanup set: the source daemon is gone.
+        "dev_machine_merged",
     }
 )
 # Matches RunnerSession / Runner.revoked_reason max_length.
@@ -204,6 +209,67 @@ class RunnerProvisioning(models.TextChoices):
     DESKTOP_BUNDLED = "desktop_bundled", "Provisioned by Pi Dash Desktop"
 
 
+class RunnerPodDispatch(models.TextChoices):
+    """Whether a runner takes issue work from its pod.
+
+    ``POD_MEMBER`` is the behaviour every own-agent runner has always had: it
+    takes runs pinned to it for repo locality and the pod's unpinned queue.
+    Built-in engine runners start ``PINNED_ONLY`` ("Pod work: off") because
+    pod work spends the owner's wallet: such an engine takes no new issue
+    work and serves only the legacy ``managed_runner`` runs already pinned to
+    it. The owner turns pod work on per project
+    (``.ai_design/built_engine_as_runner/design.md`` §7). The value keeps its
+    name because the dedicated-runner design's engine section uses it for an
+    engine that takes only the issues dedicated to it.
+    """
+
+    PINNED_ONLY = "pinned_only", "Pod work off"
+    POD_MEMBER = "pod_member", "Pod work on"
+
+
+class EngineAutoPauseReason(models.TextChoices):
+    """Why the server paused a machine's built-in engine on its own.
+
+    Stored on ``DevMachine`` (not copied onto runner rows) so engine runners
+    created later are paused too. Empty means not auto-paused. Separate from
+    the owner's own switch, so clearing one never undoes the other
+    (design §8).
+    """
+
+    NONE = "", "Not paused"
+    ENGINE_SIGN_IN_REQUIRED = "engine_sign_in_required", "Engine sign-in required"
+    GATEWAY_SESSION_REVOKED = "gateway_session_revoked", "Gateway session revoked"
+    WALLET_EMPTY = "wallet_empty", "Wallet empty"
+    PROFILE_UNAVAILABLE = "profile_unavailable", "Model profile unavailable"
+    ENGINE_DISABLED = "engine_disabled", "Engine disabled on this instance"
+
+
+class EngineSignInState(models.TextChoices):
+    """The built-in engine's sign-in state for one machine (design §4.3).
+
+    ``DevMachine.engine_sign_in_state`` stores ``never`` / ``active`` /
+    ``signed_out`` / ``revoked``. ``expiring`` and ``expired`` are derived
+    from ``engine_credential_expires_at`` at read time (see
+    :meth:`DevMachine.current_engine_sign_in_state`), so a credential that
+    runs out needs no write to change state.
+    """
+
+    NEVER = "never", "Never signed in"
+    ACTIVE = "active", "Signed in"
+    EXPIRING = "expiring", "Expiring soon"
+    EXPIRED = "expired", "Expired"
+    SIGNED_OUT = "signed_out", "Signed out"
+    REVOKED = "revoked", "Revoked"
+
+
+#: A live engine credential within this window of its expiry is ``expiring``.
+ENGINE_CREDENTIAL_EXPIRING_WINDOW = timedelta(days=3)
+#: Fixed engine-credential lifetime from issue, whatever its use (PO-18).
+ENGINE_CREDENTIAL_TTL = timedelta(days=14)
+#: Daemon credential (``MachineToken``) idle lifetime, renewed on each use.
+MACHINE_TOKEN_IDLE_TTL = timedelta(days=60)
+
+
 class AgentRunStatus(models.TextChoices):
     QUEUED = "queued", "Queued"
     ASSIGNED = "assigned", "Assigned"
@@ -360,6 +426,49 @@ class DevMachine(models.Model):
         default=RunnerProvisioning.MANUAL,
         db_index=True,
     )
+    # Built-in engine controls (design §8). They apply to every engine runner
+    # on this machine, including ones created later, which is why they live
+    # here rather than on each ``Runner`` row.
+    #
+    # The owner's "Pause the built-in engine" switch.
+    engine_paused_by_owner = models.BooleanField(default=False)
+    # Server-set automatic pause; empty when the engine is not auto-paused.
+    engine_auto_pause_reason = models.CharField(
+        max_length=32,
+        choices=EngineAutoPauseReason.choices,
+        blank=True,
+        default=EngineAutoPauseReason.NONE,
+    )
+    # "Teammates can start runs on my issues": when on, this machine's engine
+    # runners follow the ordinary-runner usage rule instead of owner-only.
+    engine_team_runs = models.BooleanField(default=False)
+    # Engine sign-in (design §4.3). Stored: never / active / signed_out /
+    # revoked; ``expiring`` / ``expired`` are derived from the live
+    # credential's expiry, mirrored here so lists need no extra query.
+    # Written only by ``services.engine_credentials``, in the same
+    # transaction as the ``EngineCredential`` row it describes.
+    engine_sign_in_state = models.CharField(
+        max_length=16,
+        choices=EngineSignInState.choices,
+        default=EngineSignInState.NEVER,
+    )
+    engine_credential_expires_at = models.DateTimeField(null=True, blank=True)
+    # The engine state the daemon last reported in its machine-session
+    # heartbeat (``{"state": ..., "reason_code": ...}``), for display and
+    # the automatic pause reasons (design §8).
+    engine_state = models.JSONField(default=dict, blank=True)
+    engine_state_reported_at = models.DateTimeField(null=True, blank=True)
+    # Set when this machine was merged into another (design §13): the
+    # source is revoked and points at the machine that took its runners.
+    merged_into = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="merged_from",
+    )
+    # What the merge did, so a retry answers with the same result.
+    merge_result = models.JSONField(default=dict, blank=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -380,6 +489,43 @@ class DevMachine(models.Model):
     def __str__(self) -> str:
         return self.label or self.host_label or str(self.id)
 
+    @property
+    def display_name(self) -> str:
+        return self.label or self.host_label or "This computer"
+
+    @property
+    def engine_paused(self) -> bool:
+        """True when this machine's built-in engine takes no new work."""
+        return bool(self.engine_paused_by_owner or self.engine_auto_pause_reason)
+
+    @property
+    def is_legacy_desktop(self) -> bool:
+        """A per-workspace machine created by a desktop build from before the
+        engine moved into the CLI (design §2, §5). Its engine needs no engine
+        credential and gets model tokens from the desktop-session endpoint."""
+        return self.provisioning == RunnerProvisioning.DESKTOP_BUNDLED
+
+    def current_engine_sign_in_state(self, now=None) -> str:
+        """The engine sign-in state, with ``expiring`` / ``expired`` derived."""
+        stored = self.engine_sign_in_state or EngineSignInState.NEVER
+        if stored != EngineSignInState.ACTIVE:
+            return stored
+        expires_at = self.engine_credential_expires_at
+        if expires_at is None:
+            return EngineSignInState.ACTIVE
+        now = now or timezone.now()
+        if expires_at <= now:
+            return EngineSignInState.EXPIRED
+        if expires_at - now <= ENGINE_CREDENTIAL_EXPIRING_WINDOW:
+            return EngineSignInState.EXPIRING
+        return EngineSignInState.ACTIVE
+
+    def has_live_engine_credential(self, now=None) -> bool:
+        return self.current_engine_sign_in_state(now) in (
+            EngineSignInState.ACTIVE,
+            EngineSignInState.EXPIRING,
+        )
+
 
 class RunnerQuerySet(models.QuerySet):
     def assignable(self):
@@ -396,7 +542,30 @@ class RunnerQuerySet(models.QuerySet):
             status=RunnerStatus.ONLINE,
             last_heartbeat_at__gte=timezone.now() - HEARTBEAT_GRACE,
             paused_at__isnull=True,
-        )
+        ).exclude(engine_paused_q())
+
+
+def engine_paused_q(prefix: str = "") -> models.Q:
+    """Engine runners whose machine's built-in engine is paused.
+
+    Either the owner's switch or a server-set automatic reason pauses every
+    engine runner on the machine; a paused engine is treated as offline for
+    matching (design §8, §9). Own-agent runners are never matched.
+
+    The machine test is an ``IN (subquery)`` rather than a join on purpose:
+    callers combine this with ``select_for_update()``, and Postgres refuses
+    ``FOR UPDATE`` on the nullable side of the outer join an excluded
+    ``dev_machine__…`` lookup would add.
+    """
+    paused_machines = DevMachine.objects.filter(
+        models.Q(engine_paused_by_owner=True) | models.Q(engine_auto_pause_reason__gt="")
+    ).values("pk")
+    return models.Q(
+        **{
+            f"{prefix}provisioning": RunnerProvisioning.DESKTOP_BUNDLED,
+            f"{prefix}dev_machine_id__in": paused_machines,
+        }
+    )
 
 
 class Runner(models.Model):
@@ -442,13 +611,21 @@ class Runner(models.Model):
     # Free-form host hint reported at enrollment time; surfaced in the UI.
     host_label = models.CharField(max_length=255, blank=True, default="")
     # Derived server-side from the enrolling DevMachine; immutable thereafter.
-    # ``desktop_bundled`` runners are excluded from unpinned matching, from
-    # "a local runner is available", and from ``MAX_PER_USER``.
+    # ``desktop_bundled`` means "built-in engine runner"; such runners are
+    # excluded from ``MAX_PER_USER`` and follow the engine usage rule.
     provisioning = models.CharField(
         max_length=24,
         choices=RunnerProvisioning.choices,
         default=RunnerProvisioning.MANUAL,
         db_index=True,
+    )
+    # Whether this runner takes unpinned pod work (design §7). New engine
+    # runners start ``pinned_only`` (see ``save``); own-agent runners keep
+    # today's ``pod_member`` behaviour.
+    pod_dispatch = models.CharField(
+        max_length=16,
+        choices=RunnerPodDispatch.choices,
+        default=RunnerPodDispatch.POD_MEMBER,
     )
     visibility = models.PositiveSmallIntegerField(
         choices=Visibility.choices,
@@ -525,6 +702,13 @@ class Runner(models.Model):
             ),
         ]
 
+    def __init__(self, *args, **kwargs):
+        # Remember whether the caller chose ``pod_dispatch`` so ``save`` only
+        # applies the engine default when nobody did.
+        explicit = "pod_dispatch" in kwargs
+        super().__init__(*args, **kwargs)
+        self._explicit_pod_dispatch = explicit
+
     def __str__(self) -> str:
         return f"{self.name} ({self.owner_id})"
 
@@ -544,7 +728,32 @@ class Runner(models.Model):
                 default = Pod.default_for_project_id(project_ids[0])
                 if default is not None:
                     self.pod = default
+        # An engine spends its owner's wallet, so it takes no pod work until
+        # the owner turns that on (design §7, §8). Applied at creation only:
+        # a later ``pod_dispatch`` change is the owner's explicit choice.
+        if self._state.adding and self.provisioning == RunnerProvisioning.DESKTOP_BUNDLED:
+            if not getattr(self, "_explicit_pod_dispatch", False):
+                self.pod_dispatch = RunnerPodDispatch.PINNED_ONLY
         super().save(*args, **kwargs)
+
+    @property
+    def is_engine(self) -> bool:
+        """True for a built-in engine runner (``provisioning = desktop_bundled``)."""
+        return self.provisioning == RunnerProvisioning.DESKTOP_BUNDLED
+
+    @property
+    def engine_paused(self) -> bool:
+        """True when this is an engine runner and its machine's engine is paused."""
+        if not self.is_engine or self.dev_machine_id is None:
+            return False
+        return self.dev_machine.engine_paused
+
+    @property
+    def machine_display_name(self) -> str:
+        """The machine name users see for this runner ("<machine> is offline")."""
+        if self.dev_machine_id is not None and self.dev_machine is not None:
+            return self.dev_machine.display_name
+        return self.host_label or self.name
 
     @property
     def project(self):
@@ -774,6 +983,16 @@ class MachineSession(models.Model):
     dev_machine = models.ForeignKey(
         "DevMachine", on_delete=models.CASCADE, related_name="sessions"
     )
+    # The token (of any workspace on the machine) the session was opened
+    # with. Revoking or expiring that token ends the session (design §4.9);
+    # polls may present any live token of the same machine.
+    machine_token = models.ForeignKey(
+        "MachineToken",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="machine_sessions",
+    )
     protocol_version = models.PositiveIntegerField(default=4)
     created_at = models.DateTimeField(auto_now_add=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
@@ -874,6 +1093,10 @@ class MachineToken(models.Model):
     is_service = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     last_used_at = models.DateTimeField(null=True, blank=True)
+    # 60 days without use (design §4.3, PO-18); every authenticated use
+    # pushes it out again (``services.tokens.touch_machine_token``). The
+    # database default covers writers that bypass the model (the Rust API).
+    expires_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -896,11 +1119,84 @@ class MachineToken(models.Model):
             models.Index(fields=["dev_machine", "revoked_at"], name="machine_token_dev_rev_idx"),
         ]
 
+    def save(self, *args, **kwargs):
+        if self._state.adding and self.expires_at is None:
+            self.expires_at = timezone.now() + MACHINE_TOKEN_IDLE_TTL
+        super().save(*args, **kwargs)
+
+    def is_expired(self, now=None) -> bool:
+        if self.expires_at is None:
+            return False
+        return self.expires_at <= (now or timezone.now())
+
     def revoke(self) -> None:
         if self.revoked_at is not None:
             return
         self.revoked_at = timezone.now()
         self.save(update_fields=["revoked_at"])
+
+
+class EngineCredentialRevokeReason(models.TextChoices):
+    SUPERSEDED = "superseded", "Replaced by a newer credential"
+    SIGNED_OUT = "signed_out", "Signed out by the user"
+    MACHINE_REMOVED = "machine_removed", "Computer removed"
+    MACHINE_MERGED = "machine_merged", "Computer merged into another"
+    USER_SIGNED_OUT = "user_signed_out", "User signed out of all sessions"
+    ADMIN = "admin", "Revoked by an administrator"
+
+
+class EngineCredential(models.Model):
+    """Per-machine credential whose only use is obtaining model tokens.
+
+    Issued with the daemon credential by ``pidash auth login`` or alone by
+    ``pidash login --engine`` (design §4.3). It cannot authenticate the
+    daemon, its runners or CLI commands. The raw value (``ec_…``) is shown
+    once; only its hash is stored. Fixed 14-day lifetime from issue.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="engine_credentials",
+    )
+    dev_machine = models.ForeignKey(
+        DevMachine,
+        on_delete=models.CASCADE,
+        related_name="engine_credentials",
+    )
+    token_hash = models.CharField(max_length=128, unique=True)
+    fingerprint = models.CharField(max_length=16, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_reason = models.CharField(
+        max_length=32,
+        choices=EngineCredentialRevokeReason.choices,
+        blank=True,
+        default="",
+    )
+
+    class Meta:
+        db_table = "engine_credential"
+        ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["dev_machine"],
+                condition=models.Q(revoked_at__isnull=True),
+                name="engine_credential_one_live_per_machine",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["user", "revoked_at"], name="engine_cred_user_rev_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"engine credential {self.fingerprint} ({self.dev_machine_id})"
+
+    def is_expired(self, now=None) -> bool:
+        return self.expires_at <= (now or timezone.now())
 
 
 class AgentRun(models.Model):

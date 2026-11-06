@@ -21,6 +21,12 @@ def generate_token():
     return "pi_dash_api_" + uuid4().hex
 
 
+#: ``CLIDeviceCode.scope`` values.
+CLI_DEVICE_SCOPE_CLI = "cli"
+CLI_DEVICE_SCOPE_ENGINE = "engine"
+CLI_DEVICE_SCOPES = frozenset({CLI_DEVICE_SCOPE_CLI, CLI_DEVICE_SCOPE_ENGINE})
+
+
 def generate_device_code():
     return secrets.token_urlsafe(32)
 
@@ -83,6 +89,29 @@ class CLIDeviceCode(BaseModel):
     consumed = models.BooleanField(default=False)
     expires_at = models.DateTimeField()
     last_polled_at = models.DateTimeField(null=True, blank=True)
+    # ``cli`` (``pidash auth login``: daemon credential, plus the engine
+    # credential when the instance can serve the engine) or ``engine``
+    # (``pidash login --engine``: the engine credential alone, redeemed with
+    # the machine token). See built_engine_as_runner design §4.3.
+    scope = models.CharField(max_length=16, default=CLI_DEVICE_SCOPE_CLI)
+    # The dev machine an ``engine`` grant is for, when known (named at start
+    # by the CLI or at approval by the app). A plain UUID, not a foreign key:
+    # the ``db`` app does not depend on ``runner``. Redemption binds to the
+    # presenting machine token's machine and checks it against this.
+    dev_machine_id = models.UUIDField(null=True, blank=True)
+    # True when a person approved the grant on the browser device page;
+    # False for the desktop app's silent approval. Only an interactive
+    # approval may sign in an engine that was explicitly signed out.
+    interactive_approval = models.BooleanField(default=False)
+    # The device-flow APIToken this grant was redeemed for, so the machine
+    # token exchange can see how the grant was approved.
+    api_token = models.ForeignKey(
+        "db.APIToken",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="device_codes",
+    )
 
     class Meta:
         verbose_name = "CLI Device Code"

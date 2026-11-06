@@ -2,9 +2,9 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Execution section (PSET-009): the cadence choice list, the label of an
-// unknown stored executor, the inert policy while ticking is off, and the
-// budget/no-cap edits the form receives.
+// Execution section (PSET-009): the cadence choice list, the runs-on note
+// that replaced the executor picker, the inert policy while ticking is off,
+// and the budget/no-cap edits the form receives.
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
@@ -44,7 +44,6 @@ function setup(
       values={{ ...generalFormFrom(stored()), ...form }}
       errors={{}}
       disabled={false}
-      executorOptions={[{ kind: "local_runner", available: true }]}
       onChange={onChange}
       {...rest}
     />
@@ -62,9 +61,11 @@ describe("cadenceChoices", () => {
 });
 
 describe("ExecutionSection", () => {
-  it("shows an unknown stored executor by its stored kind", () => {
-    setup({ form: { executor: "future_runner" } });
-    expect(screen.getByTestId("general-executor")).toHaveTextContent("future_runner");
+  it("explains that work runs on runners instead of offering an executor choice", () => {
+    setup();
+    expect(screen.getByTestId("general-execution-target-note")).toHaveTextContent("default pod");
+    expect(screen.queryByTestId("general-executor-trigger")).not.toBeInTheDocument();
+    expect(screen.queryByText(/cloud agent|desktop agent/i)).not.toBeInTheDocument();
   });
 
   it("leaves the budget and cadence inert while ticking is off without disabling the switch", () => {

@@ -200,12 +200,18 @@ impl TextArea {
             Style::default().fg(Color::White)
         };
         let body = if self.text.is_empty() && !focused {
-            Span::styled(self.placeholder.clone(), Style::default().add_modifier(Modifier::DIM))
+            Span::styled(
+                self.placeholder.clone(),
+                Style::default().add_modifier(Modifier::DIM),
+            )
         } else {
             Span::styled(display.clone(), value_style)
         };
         let cursor_glyph = if focused { "▊" } else { "" };
-        let line = Line::from(vec![body, Span::styled(cursor_glyph.to_string(), value_style)]);
+        let line = Line::from(vec![
+            body,
+            Span::styled(cursor_glyph.to_string(), value_style),
+        ]);
         Paragraph::new(line).render_ref(area, buf);
     }
 }

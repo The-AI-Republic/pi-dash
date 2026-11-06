@@ -112,6 +112,9 @@ gone from the fenced lines below. Only the POST-only export route
 truly 405s HEAD, and that denial is proven like the rest.
 
 NEWPIDASH-31 extends G6 with the three device-session auth routes.
+(PIDESKAPP-206: `machine-token/` and `revoke/` are parked on Django —
+every method proxies — until the built-in engine credential is ported,
+so only `workspaces/` keeps its G6 row; see `device_session::routes`.)
 Their denials are deliberate (PIDASHCONV-1478): the API-key token
 lives in Rust's database, so a proxied verdict would fail Django's
 copy of the auth gate before its own method check — the handlers
@@ -124,8 +127,6 @@ class); only the POST-owned routes truly 405 HEAD.
 
 ```expected-routes
 G6 :: /api/users/me/workspaces/ :: POST:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405
-G6 :: /api/v1/auth/machine-token/ :: GET:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405;HEAD:serves-but-django-405
-G6 :: /api/v1/auth/revoke/ :: GET:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405;HEAD:serves-but-django-405
 G6 :: /api/v1/auth/workspaces/ :: POST:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405
 G6 :: /api/workspace-slug-check/ :: POST:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405
 G6 :: /api/workspaces/ :: PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405

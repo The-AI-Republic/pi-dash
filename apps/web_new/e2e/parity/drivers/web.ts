@@ -56024,26 +56024,11 @@ export class WebDriver implements ParityDriver {
     return ((await line.innerText({ timeout: WebDriver.OPEN_MS })) ?? "").trim();
   }
 
-  private generalExecutorSelect() {
-    return this.generalForm().locator('select[aria-label="Default AI execution target"]');
-  }
-
-  async settingsGeneralExecutorValue(): Promise<string> {
-    const select = this.generalExecutorSelect();
-    await select.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
-    return await select.inputValue({ timeout: WebDriver.OPEN_MS });
-  }
-
-  async settingsGeneralExecutorOptionDisabled(value: string): Promise<boolean> {
-    const option = this.generalExecutorSelect().locator(`option[value="${value}"]`);
-    await option.waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
-    return await option.isDisabled();
-  }
-
-  async settingsGeneralSetExecutor(value: string): Promise<void> {
-    const select = this.generalExecutorSelect();
-    await select.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
-    await select.selectOption(value, { timeout: WebDriver.OPEN_MS });
+  async settingsGeneralExecutorPresent(): Promise<boolean> {
+    // The ticking switch renders with the form, so once it shows, the old
+    // executor select would have rendered too.
+    await this.generalTickingSwitch().waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    return (await this.generalForm().locator('select[aria-label="Default AI execution target"]').count()) > 0;
   }
 
   private generalTickingSwitch() {

@@ -291,7 +291,9 @@ test(
         await expect.poll(() => driver.pickerOpen(), { timeout: 30_000 }).toBe(true);
         const options = await driver.pickerOptionTexts();
         expect(options.some((text) => text.includes("Any runner in"))).toBe(true);
-        expect(options.some((text) => text.includes("Pi Dash Cloud Agent"))).toBe(true);
+        // Runner is the only executor (built-in engine design §6): the
+        // deprecated Cloud Agent row is no longer offered.
+        expect(options.some((text) => text.includes("Pi Dash Cloud Agent"))).toBe(false);
         await driver.pickerPressEscape();
         await driver.pickerClickOutside();
       });

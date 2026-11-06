@@ -45,7 +45,7 @@ from uuid import UUID
 from django.utils import timezone
 from rest_framework import authentication, exceptions
 
-from pi_dash.runner.models import MachineToken, Runner, RunnerForceRefresh
+from pi_dash.runner.models import MACHINE_TOKEN_IDLE_TTL, MachineToken, Runner, RunnerForceRefresh
 from pi_dash.runner.services.permissions import is_workspace_member
 from pi_dash.runner.services.tokens import (
     AccessTokenError,
@@ -76,6 +76,49 @@ def _bearer(request) -> Optional[str]:
     if len(parts) != 2 or parts[0].decode().lower() != "bearer":
         return None
     return parts[1].decode()
+
+
+def touch_machine_token(token: MachineToken) -> None:
+    """Record a use of ``token`` and renew its 60-day idle expiry.
+
+    Best-effort: a failed bump never fails the request it rides on.
+    """
+    now = timezone.now()
+    expires_at = now + MACHINE_TOKEN_IDLE_TTL
+    try:
+        MachineToken.objects.filter(pk=token.pk).update(last_used_at=now, expires_at=expires_at)
+    except Exception:  # pragma: no cover - best-effort
+        logger.debug("failed to bump machine token last_used_at", exc_info=True)
+        return
+    token.last_used_at = now
+    token.expires_at = expires_at
+
+
+def resolve_machine_token(raw: str, *, touch: bool = True) -> MachineToken:
+    """Verify a raw ``mt_`` daemon credential and return its row.
+
+    The one place every MachineToken-authenticated path checks a token:
+    unknown, revoked, expired (60 days without use, design §4.3), a revoked
+    or merged machine, and lapsed workspace membership are all refused with
+    ``AuthenticationFailed`` carrying a stable code. With ``touch`` the use
+    is recorded and the idle expiry renewed.
+    """
+    try:
+        token = MachineToken.objects.select_related("user", "workspace", "dev_machine").get(token_hash=hash_token(raw))
+    except MachineToken.DoesNotExist:
+        raise exceptions.AuthenticationFailed("machine_token_invalid")
+    if token.revoked_at is not None:
+        raise exceptions.AuthenticationFailed("machine_token_revoked")
+    if token.is_expired():
+        raise exceptions.AuthenticationFailed("machine_token_expired")
+    if token.dev_machine_id is not None and token.dev_machine.revoked_at is not None:
+        raise exceptions.AuthenticationFailed("dev_machine_revoked")
+    if not is_workspace_member(token.user, token.workspace_id):
+        token.revoke()
+        raise exceptions.AuthenticationFailed("membership_revoked")
+    if touch:
+        touch_machine_token(token)
+    return token
 
 
 class RunnerAccessTokenAuthentication(authentication.BaseAuthentication):
@@ -147,18 +190,7 @@ class RunnerAccessTokenAuthentication(authentication.BaseAuthentication):
         return (runner.owner, None)
 
     def _authenticate_machine_token(self, request, raw: str) -> Tuple[object, None]:
-        token_hash = hash_token(raw)
-        try:
-            token = MachineToken.objects.select_related("user", "workspace", "dev_machine").get(token_hash=token_hash)
-        except MachineToken.DoesNotExist:
-            raise exceptions.AuthenticationFailed("machine_token_invalid")
-        if token.revoked_at is not None:
-            raise exceptions.AuthenticationFailed("machine_token_revoked")
-        if token.dev_machine_id is not None and token.dev_machine.revoked_at is not None:
-            raise exceptions.AuthenticationFailed("dev_machine_revoked")
-        if not is_workspace_member(token.user, token.workspace_id):
-            token.revoke()
-            raise exceptions.AuthenticationFailed("membership_revoked")
+        token = resolve_machine_token(raw, touch=False)
 
         runner_id = self._request_runner_id(request)
         if runner_id is None:
@@ -184,7 +216,7 @@ class RunnerAccessTokenAuthentication(authentication.BaseAuthentication):
         elif runner.dev_machine_id is not None or runner.host_label != token.host_label:
             raise exceptions.AuthenticationFailed("runner_not_bound_to_machine_token")
 
-        MachineToken.objects.filter(pk=token.pk).update(last_used_at=timezone.now())
+        touch_machine_token(token)
         request.auth_runner = runner
         request.auth_machine_token = token
         request.auth_token_payload = {
@@ -249,24 +281,7 @@ class MachineTokenAuthentication(authentication.BaseAuthentication):
         raw = _bearer(request)
         if not raw or not raw.startswith("mt_"):
             return None
-        token_hash = hash_token(raw)
-        try:
-            token = MachineToken.objects.select_related("user", "workspace", "dev_machine").get(token_hash=token_hash)
-        except MachineToken.DoesNotExist:
-            raise exceptions.AuthenticationFailed("machine_token_invalid")
-        if token.revoked_at is not None:
-            raise exceptions.AuthenticationFailed("machine_token_revoked")
-        if token.dev_machine_id is not None and token.dev_machine.revoked_at is not None:
-            raise exceptions.AuthenticationFailed("dev_machine_revoked")
-        if not is_workspace_member(token.user, token.workspace_id):
-            token.revoke()
-            raise exceptions.AuthenticationFailed("membership_revoked")
-        # Best-effort last_used_at; ignore failures so per-request DB
-        # contention doesn't break the request.
-        try:
-            MachineToken.objects.filter(pk=token.pk).update(last_used_at=timezone.now())
-        except Exception:  # pragma: no cover - best-effort
-            logger.debug("failed to bump last_used_at", exc_info=True)
+        token = resolve_machine_token(raw)
         request.auth_machine_token = token
         return (token.user, None)
 

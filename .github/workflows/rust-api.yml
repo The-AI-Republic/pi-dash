@@ -7,14 +7,12 @@ on:
       - "rust-api/**"
       - ".github/workflows/rust-api.yml"
       - "Cargo.toml"
-      - "Cargo.lock"
   pull_request:
     branches: [main]
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api.yml"
       - "Cargo.toml"
-      - "Cargo.lock"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -42,12 +40,19 @@ jobs:
             exit 0
           fi
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
+            BASE=$(git merge-base "${{ github.event.pull_request.base.sha }}" "$SHA")
           else
             BASE="${{ github.event.before }}"
           fi
           CHANGED=$(git diff --name-only "$BASE" "${{ github.sha }}" || true)
           echo "$CHANGED"
+          # The CLI/desktop use the root Cargo workspace; rust-api has its
+          # own lockfile. Root-only changes do not enter the Rust port's
+          # quarantine (the independent build job still checks this tree).
+          if ! echo "$CHANGED" | grep -q -e '^rust-api/' -e '^Cargo\.toml$'; then
+            echo "No Rust API source or workspace boundary changes."
+            exit 0
+          fi
           BAD=$(echo "$CHANGED" | grep -v -e '^rust-api/' -e '^\.github/workflows/rust-api.*\.yml$' -e '^Cargo\.toml$' -e '^$' || true)
           if [ -n "$BAD" ]; then
             echo "::error::Files outside rust-api/ and the allowlist:"

@@ -1024,11 +1024,19 @@ async fn cmd_attach_review(client: &ApiClient, args: AttachReviewArgs) -> Result
 fn build_search_params(args: &SearchArgs) -> Result<Vec<(&'static str, String)>, CliError> {
     let q = args.query.trim();
     if q.is_empty() {
-        return Err(CliError::new(EXIT_INVALID, "search query must not be empty"));
+        return Err(CliError::new(
+            EXIT_INVALID,
+            "search query must not be empty",
+        ));
     }
 
     let mut params: Vec<(&'static str, String)> = vec![("q", q.to_string())];
-    if let Some(p) = args.project.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(p) = args
+        .project
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         params.push(("project", p.to_string()));
     }
     // Send `status` only when it differs from the server default to keep
@@ -1725,7 +1733,11 @@ mod tests {
     #[test]
     fn run_ai_path_targets_the_work_item_run_ai_route() {
         assert_eq!(
-            run_ai_path("eng", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"),
+            run_ai_path(
+                "eng",
+                "11111111-1111-1111-1111-111111111111",
+                "22222222-2222-2222-2222-222222222222"
+            ),
             "workspaces/eng/projects/11111111-1111-1111-1111-111111111111/work-items/22222222-2222-2222-2222-222222222222/run-ai/"
         );
     }
@@ -1750,7 +1762,11 @@ mod tests {
     #[test]
     fn wait_path_targets_the_work_item_wait_route() {
         assert_eq!(
-            wait_path("eng", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"),
+            wait_path(
+                "eng",
+                "11111111-1111-1111-1111-111111111111",
+                "22222222-2222-2222-2222-222222222222"
+            ),
             "workspaces/eng/projects/11111111-1111-1111-1111-111111111111/work-items/22222222-2222-2222-2222-222222222222/wait/"
         );
     }
@@ -1850,8 +1866,16 @@ mod tests {
     fn build_patch_body_clear_labels_sends_an_empty_array() {
         // `--clear-labels` must emit `[]` (detach all), not omit the key —
         // omitting it would leave the labels untouched server-side.
-        let body = build_patch_body(None, None, None, None, ParentPatch::Unchanged, Some(vec![]), None)
-            .expect("clear-labels is a valid mutation");
+        let body = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            Some(vec![]),
+            None,
+        )
+        .expect("clear-labels is a valid mutation");
         assert_eq!(body.get("labels"), Some(&json!([])));
     }
 

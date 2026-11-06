@@ -819,41 +819,13 @@ describe("WebNewDriver general tab header reads", () => {
 });
 
 describe("WebNewDriver general tab execution", () => {
-  it("maps the executor label back to its kind", async () => {
-    for (const [kind, label] of [
-      ["local_runner", "Local runner"],
-      ["cloud_agent", "Cloud agent"],
-      ["managed_runner", "Desktop agent"],
-    ]) {
-      const stub = generalSettingsPageDouble({ testId: () => new GeneralFakeLocator({ text: ` ${label} ` }) });
-      await expect(new WebNewDriver(stub.page).settingsGeneralExecutorValue()).resolves.toBe(kind);
-    }
-    const unknown = generalSettingsPageDouble({ testId: () => new GeneralFakeLocator({ text: "Pooled" }) });
-    await expect(new WebNewDriver(unknown.page).settingsGeneralExecutorValue()).resolves.toBe("Pooled");
-  });
-
-  it("reads option disablement and closes the picker", async () => {
-    const option = new GeneralFakeLocator({ disabled: true });
-    const listbox = new GeneralFakeLocator({}, { role: () => option });
-    const stub = generalSettingsPageDouble({
-      testId: () => new GeneralFakeLocator(),
-      role: (role) => (role === "listbox" ? listbox : generalAbsent()),
+  it("reports the executor control absent once the form renders", async () => {
+    const absent = generalSettingsPageDouble({
+      testId: (testId) => (testId === "general-ticking" ? new GeneralFakeLocator() : generalAbsent()),
     });
-    await expect(new WebNewDriver(stub.page).settingsGeneralExecutorOptionDisabled("cloud_agent")).resolves.toBe(true);
-    expect(stub.calls.pressed).toEqual(["Escape"]);
-  });
-
-  it("sets the executor through the picker option", async () => {
-    const option = new GeneralFakeLocator();
-    const listbox = new GeneralFakeLocator({}, { role: () => option });
-    const trigger = new GeneralFakeLocator();
-    const stub = generalSettingsPageDouble({
-      testId: (testId) => (testId === "general-executor-trigger" ? trigger : generalAbsent()),
-      role: (role) => (role === "listbox" ? listbox : generalAbsent()),
-    });
-    await new WebNewDriver(stub.page).settingsGeneralSetExecutor("managed_runner");
-    expect(trigger.click).toHaveBeenCalledTimes(1);
-    expect(option.click).toHaveBeenCalledTimes(1);
+    await expect(new WebNewDriver(absent.page).settingsGeneralExecutorPresent()).resolves.toBe(false);
+    const present = generalSettingsPageDouble({ testId: () => new GeneralFakeLocator() });
+    await expect(new WebNewDriver(present.page).settingsGeneralExecutorPresent()).resolves.toBe(true);
   });
 
   it("reads the ticking switch and flips it only when needed", async () => {

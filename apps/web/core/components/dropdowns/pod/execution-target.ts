@@ -30,13 +30,29 @@ export function effectiveExecutor(
   return issue?.agent_executor ?? project?.default_agent_executor ?? "local_runner";
 }
 
-/** Dropdown value for an issue: the sentinel when cloud-bound, else its pod. */
+/**
+ * An executor entry the project still offers for choice. Runner is the only
+ * executor now (built-in engine design §6): the server keeps returning the
+ * Cloud Agent and built-in engine entries for older clients, marked
+ * `deprecated: true`, and this build hides them.
+ */
+function offeredOption(project: IProject | undefined | null, kind: TAgentExecutorKind) {
+  const option = project?.agent_executor_options?.find((o) => o.kind === kind);
+  return option === undefined || option.deprecated === true ? undefined : option;
+}
+
+/**
+ * Dropdown value for an issue: the sentinel when it is bound to an executor
+ * still offered for choice, else its pod. A deprecated executor reads as the
+ * issue's pod, which is where the server now sends its runs.
+ */
 export function executionTargetValue(
   issue: TExecutionTargetIssue | undefined | null,
   project: IProject | undefined | null
 ): string | null | undefined {
   const executor = effectiveExecutor(issue, project);
-  return executor === CLOUD_AGENT_VALUE || executor === MANAGED_AGENT_VALUE ? executor : issue?.assigned_pod_id;
+  const isAgent = executor === CLOUD_AGENT_VALUE || executor === MANAGED_AGENT_VALUE;
+  return isAgent && offeredOption(project, executor) !== undefined ? executor : issue?.assigned_pod_id;
 }
 
 /**
@@ -50,13 +66,16 @@ export function executionTargetPatch(value: string): Partial<TExecutionTargetIss
     : { agent_executor: "local_runner", assigned_pod_id: value };
 }
 
-/** Cloud-agent availability for this project, as the dropdown needs it. */
+/** Cloud-agent row for this project, or undefined when it is not offered. */
 export function cloudAgentOption(project: IProject | undefined | null) {
-  const option = project?.agent_executor_options?.find((o) => o.kind === CLOUD_AGENT_VALUE);
-  return { available: option?.available ?? false, reasonCode: option?.reason_code ?? "" };
+  const option = offeredOption(project, CLOUD_AGENT_VALUE);
+  return option === undefined ? undefined : { available: option.available, reasonCode: option.reason_code };
 }
 
+/** Built-in agent row for this project, or undefined when it is not offered. */
 export function managedAgentOption(project: IProject | undefined | null) {
-  const option = project?.agent_executor_options?.find((o) => o.kind === MANAGED_AGENT_VALUE);
-  return { available: option?.available ?? false, reasonCode: option?.reason_code ?? "desktop_not_connected" };
+  const option = offeredOption(project, MANAGED_AGENT_VALUE);
+  return option === undefined
+    ? undefined
+    : { available: option.available, reasonCode: option.reason_code || "desktop_not_connected" };
 }

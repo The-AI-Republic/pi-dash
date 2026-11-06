@@ -125,6 +125,8 @@ mod tests {
 
     fn config_with_cli_token(token: Option<&str>) -> Config {
         Config {
+            engine: Default::default(),
+            auth: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://example.com".into(),
@@ -134,7 +136,7 @@ mod tests {
             cli: token.map(|token| crate::config::schema::CliSection {
                 token: Some(token.into()),
                 workspace_slug: Some("acme".into()),
-                default_project: None,
+                ..Default::default()
             }),
         }
     }

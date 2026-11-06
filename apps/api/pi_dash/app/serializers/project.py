@@ -119,13 +119,13 @@ class ProjectSerializer(BaseSerializer):
         return _validate_cadence_seconds(interval)
 
     def validate(self, data):
-        if data.get("default_agent_executor") == "cloud_agent":
-            from pi_dash.core.agent_execution import cloud_agent_is_configured
+        # Runner is the only executor (built_engine_as_runner §6). Older
+        # clients still send ``cloud_agent`` / ``managed_runner``; store
+        # ``local_runner`` and let the project's default pod decide who runs.
+        if "default_agent_executor" in data:
+            from pi_dash.core.agent_execution import normalize_executor_write
 
-            if not cloud_agent_is_configured():
-                from pi_dash.cloud_agent.api import CloudAgentUnavailableAPI
-
-                raise CloudAgentUnavailableAPI()
+            data["default_agent_executor"] = normalize_executor_write(data["default_agent_executor"])
         if self.instance and self.instance.is_default and data.get("is_default") is False:
             raise serializers.ValidationError(
                 "Default project cannot be unset without assigning another default project."

@@ -49,6 +49,7 @@ fn non_service_commands_still_present() {
         "run",
         "workspace",
         "update",
+        "engine",
     ] {
         assert!(
             names.contains(&v.to_string()),

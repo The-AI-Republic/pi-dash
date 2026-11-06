@@ -16,6 +16,8 @@ on:
       # Path dependency of desktop/src-tauri (the daemon wire protocol);
       # editing it changes no lockfile under desktop/.
       - "pidash-ipc/**"
+      # Pinned agent-engine release that prepare-agent.sh stages.
+      - "runner/ENGINE_VERSION"
       - ".github/workflows/pull-request-test-desktop.yml"
   # Post-merge validation, same reasoning as the runner workflow: PR checks
   # don't re-run when the base moves.
@@ -28,6 +30,8 @@ on:
     paths:
       - "desktop/**"
       - "pidash-ipc/**"
+      # Pinned agent-engine release that prepare-agent.sh stages.
+      - "runner/ENGINE_VERSION"
       - ".github/workflows/pull-request-test-desktop.yml"
 
 concurrency:

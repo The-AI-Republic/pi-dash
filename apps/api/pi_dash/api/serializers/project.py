@@ -12,7 +12,6 @@ from django.db import transaction
 import re
 
 # Module imports
-from pi_dash.core.agent_execution import AgentExecutorKind
 from pi_dash.db.models import Project, ProjectIdentifier, WorkspaceMember, State, Estimate
 
 from pi_dash.utils.content_validator import (
@@ -22,27 +21,16 @@ from .base import BaseSerializer
 
 
 def _validate_default_agent_executor(data) -> None:
-    """Refuse a project default that could never dispatch on this instance.
+    """Store ``local_runner`` for a project default (built_engine_as_runner §6).
 
-    Project-level policy only: whether a *particular* member can run on their
-    own desktop is a per-viewer question, and a project owner may legitimately
-    set ``managed_runner`` as the default before anyone has installed the app.
+    Runner is the only executor. Older clients still send ``cloud_agent`` /
+    ``managed_runner``; those are translated, and the project's default pod
+    decides who runs the work.
     """
-    executor = data.get("default_agent_executor")
-    if executor == AgentExecutorKind.CLOUD_AGENT:
-        from pi_dash.core.agent_execution import cloud_agent_is_configured
+    if "default_agent_executor" in data:
+        from pi_dash.core.agent_execution import normalize_executor_write
 
-        if not cloud_agent_is_configured():
-            from pi_dash.cloud_agent.api import CloudAgentUnavailableAPI
-
-            raise CloudAgentUnavailableAPI()
-    elif executor == AgentExecutorKind.MANAGED_RUNNER:
-        from pi_dash.core.agent_execution import managed_runner_is_enabled
-
-        if not managed_runner_is_enabled():
-            raise serializers.ValidationError(
-                {"default_agent_executor": "Pi Dash Agent is not enabled on this instance"}
-            )
+        data["default_agent_executor"] = normalize_executor_write(data["default_agent_executor"])
 
 
 
