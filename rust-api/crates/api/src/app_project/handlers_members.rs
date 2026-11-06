@@ -59,9 +59,12 @@
 //!   `fields=("id","member","role")` but `DynamicBaseSerializer` overwrites
 //!   it with `expand`, so the full 6-key role shape renders (via
 //!   [`member_role_fields_alias`]).
-//! * BUG-self-patch (`member.py:216`): the "cannot update your own role"
-//!   400 fires for ANY field, and the `is_workspace_admin` bypass reads the
-//!   *target's* workspace role, not the requester's.
+//! * BUG-self-patch (`member.py:222`): the "cannot update your own role"
+//!   400 fires for ANY field, not just `role`.
+//! * Member PATCH authorization (PDASHOSS01-329): after the role guards,
+//!   any field on someone else's membership needs a project Admin or a
+//!   workspace admin (403), and an own-membership body naming `is_active`
+//!   answers 400. A non-dict body's serializer 400 waits for both.
 //! * QUIRK-destroy-400 (`member.py:290-294`): the in-view higher-role check
 //!   answers 400, not 403 (reachable via the ws-admin gate override).
 //! * QUIRK-no-txn: `bulk_update` and the two `bulk_create`s are three
@@ -2866,9 +2869,9 @@ async fn member_partial_update_inner(
     let pk = pk_raw
         .parse::<uuid::Uuid>()
         .map_err(|_| Denial::ServerError)?;
-    // Target, then the target's workspace role, then the self-role 400
-    // (any field — BUG-self-patch), then the requesting membership
-    // (`member.py:211-227`) — all before the body parses.
+    // Target, then the target's and the requester's workspace roles, then the
+    // self-role 400 (any field — BUG-self-patch), then the requesting
+    // membership (`member.py:211-233`) — all before the body parses.
     let rows = sqlx::query(&format!(
         "{FULL_SELECT} WHERE pm.id = $1 AND pm.project_id = $2 AND w.slug = $3
          AND pm.is_active AND pm.deleted_at IS NULL"
@@ -2887,20 +2890,12 @@ async fn member_partial_update_inner(
         .as_ref()
         .and_then(|id| id.parse::<uuid::Uuid>().ok())
         .ok_or(Denial::NotFound)?;
-    let ws_rows: Vec<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(target_member_id)
-    .bind(slug)
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let (ws_role,) = one(ws_rows)?;
-    let ws_role = i32::from(ws_role);
-    let is_workspace_admin = ws_role == pidash_auth::permissions::ROLE_ADMIN;
-    if target_member_id == user_id && !is_workspace_admin {
+    let ws_role = active_workspace_role(&pool, target_member_id, slug).await?;
+    let is_target_workspace_admin = ws_role == pidash_auth::permissions::ROLE_ADMIN;
+    // Only the requester's workspace role can bypass the guards below.
+    let is_requester_workspace_admin =
+        active_workspace_role(&pool, user_id, slug).await? == pidash_auth::permissions::ROLE_ADMIN;
+    if target_member_id == user_id && !is_requester_workspace_admin {
         return Err(body_error("You cannot update your own role"));
     }
     let requester: Vec<(uuid::Uuid, i16)> = sqlx::query_as(
@@ -2918,12 +2913,16 @@ async fn member_partial_update_inner(
     let (_, requester_role) = one(requester)?;
     let requester_role = i32::from(requester_role);
     // First `request.data` touch: parse (and 415/400) errors land here,
-    // after the lookups (`member.py:229`).
+    // after the lookups (`member.py:235`).
     let data = negotiate_data(headers, body)?;
-    // `"role" in request.data` on non-dict bodies: `in` over lists and
-    // strings, `TypeError` (500) everywhere else.
+    // `"role" in request.data` (and `"is_active"` below) on non-dict
+    // bodies: `in` over lists and strings, `TypeError` (500) everywhere
+    // else. A non-dict body's serializer 400 is deferred until the view's
+    // own guards have run (`member.py:235-293`).
     let role_present;
     let role_value: Option<JVal>;
+    let is_active_present;
+    let mut non_dict: Option<&str> = None;
     match &data.value {
         JVal::Object(object) => {
             // Uploads win the text-then-files merge; `int()` on the
@@ -2935,39 +2934,46 @@ async fn member_partial_update_inner(
             } else {
                 object.get("role").cloned()
             };
+            is_active_present =
+                object.contains_key("is_active") || data.files.contains_key("is_active");
         }
         JVal::Array(items) => {
-            let contains = items
-                .iter()
-                .any(|item| matches!(item, JVal::Str(text) if text.eq_str("role")));
-            if !contains {
-                return Err(non_dict_body("list"));
-            }
+            let contains = |key: &str| {
+                items
+                    .iter()
+                    .any(|item| matches!(item, JVal::Str(text) if text.eq_str(key)))
+            };
             // `"role" in [...]` is true: the 403 matrix runs before the
-            // `.get` AttributeError 500 (`member.py:230-245`), so fall
+            // `.get` AttributeError 500 (`member.py:235-257`), so fall
             // through with a missing value.
-            role_present = true;
+            role_present = contains("role");
             role_value = None;
+            is_active_present = contains("is_active");
+            non_dict = Some("list");
         }
         JVal::Str(text) => {
-            if !text.contains_str("role") {
-                return Err(non_dict_body("str"));
-            }
             // Substring `"role"`: same 403-then-500 order as lists.
-            role_present = true;
+            role_present = text.contains_str("role");
             role_value = None;
+            is_active_present = text.contains_str("is_active");
+            non_dict = Some("str");
         }
         JVal::Num(_) | JVal::Bool(_) | JVal::Null => return Err(Denial::ServerError),
     }
     if role_present {
-        // The 403 matrix (`member.py:230-250`): inline 403s with the
+        // The 403 matrix (`member.py:236-263`): inline 403s with the
         // `{"error": ...}` shape, not the gate's `detail` body.
-        if requester_role < pidash_auth::permissions::ROLE_ADMIN && !is_workspace_admin {
+        if is_target_workspace_admin && target_member_id != user_id {
+            return Err(forbidden_error(
+                "You cannot update the role of a workspace admin",
+            ));
+        }
+        if requester_role < pidash_auth::permissions::ROLE_ADMIN && !is_requester_workspace_admin {
             return Err(forbidden_error(
                 "You do not have permission to update roles",
             ));
         }
-        if i128::from(target.role) >= i128::from(requester_role) && !is_workspace_admin {
+        if i128::from(target.role) >= i128::from(requester_role) && !is_requester_workspace_admin {
             return Err(forbidden_error(
                 "You cannot update the role of a member with a role equal to or higher than your own",
             ));
@@ -2976,7 +2982,7 @@ async fn member_partial_update_inner(
             Some(value) => python_int(value).ok_or(Denial::ServerError)?,
             None => return Err(Denial::ServerError),
         };
-        if new_role >= i128::from(requester_role) && !is_workspace_admin {
+        if new_role >= i128::from(requester_role) && !is_requester_workspace_admin {
             return Err(forbidden_error(
                 "You cannot assign a role equal to or higher than your own",
             ));
@@ -2987,7 +2993,26 @@ async fn member_partial_update_inner(
             ));
         }
     }
-    // The serializer stage (`member.py:252-265`).
+    let is_own_membership = target_member_id == user_id;
+    // Any field on someone else's membership needs a project Admin or a
+    // workspace admin (PDASHOSS01-329).
+    if !is_own_membership
+        && requester_role < pidash_auth::permissions::ROLE_ADMIN
+        && !is_requester_workspace_admin
+    {
+        return Err(forbidden_error(
+            "You do not have permission to update this member",
+        ));
+    }
+    // Nobody changes their own active status here; leaving a project has
+    // its own endpoint.
+    if is_own_membership && is_active_present {
+        return Err(body_error("You cannot update your own membership status"));
+    }
+    if let Some(datatype) = non_dict {
+        return Err(non_dict_body(datatype));
+    }
+    // The serializer stage (`member.py:295-300`).
     let JVal::Object(object) = &data.value else {
         return Err(Denial::ServerError);
     };
@@ -3070,6 +3095,26 @@ fn non_dict_body(datatype: &str) -> Denial {
         ))]),
     );
     Denial::BadJson(Value::Object(errors))
+}
+
+/// `WorkspaceMember.objects.get(workspace__slug=slug, member=member, is_active=True).role`.
+async fn active_workspace_role(
+    pool: &sqlx::PgPool,
+    member_id: uuid::Uuid,
+    slug: &str,
+) -> Result<i32, Denial> {
+    let rows: Vec<(i16,)> = sqlx::query_as(
+        r#"SELECT wm.role FROM workspace_members wm
+           JOIN workspaces w ON w.id = wm.workspace_id
+           WHERE wm.member_id = $1 AND w.slug = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
+    )
+    .bind(member_id)
+    .bind(slug)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    let (role,) = one(rows)?;
+    Ok(i32::from(role))
 }
 
 async fn actor_timezone_name(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<String, Denial> {
