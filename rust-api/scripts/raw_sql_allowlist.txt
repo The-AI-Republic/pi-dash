@@ -16,7 +16,7 @@ crates/api/src/app_cycles/handlers_favorites.rs 5
 crates/api/src/app_cycles/handlers_misc.rs 21
 crates/api/src/app_cycles/handlers_progress.rs 6
 crates/api/src/app_intake/intakes.rs 7
-crates/api/src/app_intake/issues.rs 73
+crates/api/src/app_intake/issues.rs 72
 crates/api/src/app_intake/mod.rs 9
 crates/api/src/app_intake/versions.rs 4
 crates/api/src/app_integrations/handlers_external.rs 6
@@ -37,7 +37,7 @@ crates/api/src/app_pages/handlers_versions.rs 8
 crates/api/src/app_pages/mod.rs 44
 crates/api/src/app_project/handlers_invites.rs 38
 crates/api/src/app_project/handlers_members.rs 27
-crates/api/src/app_project/handlers_project.rs 46
+crates/api/src/app_project/handlers_project.rs 44
 crates/api/src/app_project/handlers_workflow.rs 44
 crates/api/src/app_scheduler/gate.rs 6
 crates/api/src/app_scheduler/handlers_bind.rs 40
@@ -212,7 +212,7 @@ crates/jobs/src/tasks_webhooks/webhook_fanout.rs 1
 crates/jobs/src/tasks_webhooks/webhook_send.rs 6
 crates/services/src/assistant/config.rs 1
 crates/services/src/assistant/mcp.rs 1
-crates/services/src/dispatch/execution.rs 7
+crates/services/src/dispatch/execution.rs 3
 crates/services/src/domain/identity.rs 43
 crates/services/src/domain/issues_move.rs 3
 crates/services/src/domain/issues_move_creation.rs 4

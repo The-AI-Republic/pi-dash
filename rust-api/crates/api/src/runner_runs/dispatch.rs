@@ -47,9 +47,8 @@ use pidash_jobs::dispatch::{
     ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope,
 };
 use pidash_jobs::orchestration::LiveCreationStore;
-use pidash_services::assistant::seams as assistant_seams;
 use pidash_services::dispatch::policy::{resolve_executor_kind, UserFlags};
-use pidash_services::dispatch::{consume_admission_token, DeferredConsume, LlmProfile};
+use pidash_services::dispatch::{consume_admission_token, DeferredConsume};
 use pidash_services::orchestration::clock::{self, ClockIssue, ClockWrite};
 use pidash_services::orchestration::creation::{
     parent_done_payload, tick_value, CreationSeam, PROMPT_UPDATE_SQL,
@@ -442,15 +441,6 @@ fn execution_fields_denial(error: &ExecutionFieldsError) -> Response {
             .to_string();
             json_response(StatusCode::CONFLICT, body)
         }
-        ExecutionFieldsError::Managed(managed) => {
-            let body = serde_json::to_value(&ErrorCode {
-                error: &managed.to_string(),
-                code: managed.code(),
-            })
-            .expect("serializable denial")
-            .to_string();
-            json_response(StatusCode::CONFLICT, body)
-        }
         ExecutionFieldsError::Resolve(resolve) => {
             let (error, code) = match resolve {
                 pidash_services::dispatch::policy::ResolveExecutorError::UnknownExecutor => (
@@ -463,9 +453,6 @@ fn execution_fields_denial(error: &ExecutionFieldsError) -> Response {
                     unavailable.message().to_owned(),
                     unavailable.code().to_owned(),
                 ),
-                pidash_services::dispatch::policy::ResolveExecutorError::ManagedRunner(managed) => {
-                    (managed.to_string(), managed.code().to_owned())
-                }
             };
             let body = serde_json::to_value(&ErrorCode {
                 error: &error,
@@ -1283,7 +1270,6 @@ pub async fn post_direct(
         scope.requested.as_deref(),
         &project.default_agent_executor,
         &cloud,
-        &managed,
     )
     .ok();
     let capabilities: Vec<String> = if pre_resolved == Some(AgentExecutorKind::CloudAgent) {
@@ -1304,11 +1290,6 @@ pub async fn post_direct(
         direct_gate_allows(state, actor_id, scope.has_llm_key).await
     } else {
         false
-    };
-    let profile = assistant_seams::agent_model_profile_for_user(scope.has_llm_key);
-    let llm_profile = LlmProfile {
-        available: profile.available,
-        reason_code: profile.reason_code,
     };
     let inputs = ExecutionInputs {
         project: &project,
@@ -1335,7 +1316,6 @@ pub async fn post_direct(
         ExecutionSeams {
             has_usable_llm_config: move || has_llm,
             toolsets: state.toolsets().clone(),
-            llm_profile: move || llm_profile,
         },
     )
     .await
