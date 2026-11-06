@@ -60,9 +60,10 @@
 //!   → `IntegrityError`); the
 //!   `project` input key is validated and then silently overwritten by the context
 //!   `project_id` (`DraftIssue(project=…, project_id=…)` keeps the latter).
-//! * Draft patch/retrieve creator gates look the draft pk up in the `Issue` table
-//!   (`model=Issue`), so the creator bypass ~never fires and the role check decides
-//!   (`draft.py:159`, `:186`; ported as-is per [`gates::CreatorModel::Issue`]).
+//! * Draft patch/retrieve/destroy creator gates look the draft pk up in the
+//!   `DraftIssue` table (`model=DraftIssue`, `draft.py:158`, `:185`, `:198`), so a
+//!   draft's creator passes at any workspace role (PDASHOSS01-320; patch/retrieve
+//!   used to read `Issue`, which made the bypass dead).
 //! * Draft-to-issue on a missing draft 500s (`AttributeError` on `None`, no 404);
 //!   the cycle activity's `project_id` is the string `"None"` (the route carries no
 //!   `project_id` kwarg); the module activity fires once per `module_ids` entry.
@@ -405,8 +406,8 @@ async fn check_allow_gate(
 
 /// The creator probe behind the draft creator gates
 /// (`app/permissions/base.py:36`): `model.objects.filter(id=pk,
-/// created_by=user).exists()` over `table` (`issues` — the dead branch — or
-/// `draft_issues`), default soft-delete scope.
+/// created_by=user).exists()` over `table` (`draft_issues` for every draft
+/// gate since PDASHOSS01-320), default soft-delete scope.
 async fn creator_exists(
     pool: &sqlx::PgPool,
     table: &str,
@@ -5194,12 +5195,12 @@ async fn draft_patch(
     };
     let user_id = actor_user_id(extension)?;
     let pool = pool_of(&state)?;
-    // The creator bypass looks the draft pk up in the ISSUE table
-    // (`model=Issue`, `draft.py:159`) — ported as-is.
-    let is_creator = creator_exists(&pool, "issues", &draft_pk, &user_id).await?;
+    // The creator bypass looks the draft pk up in the draft table
+    // (`model=DraftIssue`, `draft.py:158`, PDASHOSS01-320).
+    let is_creator = creator_exists(&pool, "draft_issues", &draft_pk, &user_id).await?;
     let gate = gates::Gate::WorkspaceCreator {
         roles: &[ROLE_ADMIN, ROLE_MEMBER],
-        model: gates::CreatorModel::Issue,
+        model: gates::CreatorModel::DraftIssue,
     };
     if let Some(denied) = check_allow_gate(&pool, &gate, &slug, &user_id, is_creator).await? {
         return Ok(denied);
@@ -5616,12 +5617,12 @@ async fn draft_retrieve(
     };
     let user_id = actor_user_id(extension)?;
     let pool = pool_of(&state)?;
-    // The creator bypass looks the draft pk up in the ISSUE table
-    // (`model=Issue`, `draft.py:186`) — ported as-is.
-    let is_creator = creator_exists(&pool, "issues", &draft_pk, &user_id).await?;
+    // The creator bypass looks the draft pk up in the draft table
+    // (`model=DraftIssue`, `draft.py:185`, PDASHOSS01-320).
+    let is_creator = creator_exists(&pool, "draft_issues", &draft_pk, &user_id).await?;
     let gate = gates::Gate::WorkspaceCreator {
         roles: &[ROLE_ADMIN],
-        model: gates::CreatorModel::Issue,
+        model: gates::CreatorModel::DraftIssue,
     };
     if let Some(denied) = check_allow_gate(&pool, &gate, &slug, &user_id, is_creator).await? {
         return Ok(denied);

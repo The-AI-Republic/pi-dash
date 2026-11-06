@@ -822,6 +822,69 @@ def test_drafts_anon(anon_api, space):
     assert res.status_code == 401
 
 
+# --- draft creator bypass reads draft rows (PDASHOSS01-320, DRAFT-025) ---
+# Retrieve / partial_update / destroy allow an admin or the draft's creator
+# at any workspace role. Retrieve and partial_update used to look the draft
+# pk up in the Issue table, so owners below admin were refused 403.
+
+
+@pytest.fixture
+def guest_api(world, space):
+    """other@example.com as a role-5 guest of the space workspace."""
+    from _harness import user_client
+
+    world["db"].make_workspace_member(space["id"], world["other"]["id"], role=5)
+    with user_client(world["other_key"]) as client:
+        yield client
+
+
+def test_draft_creator_guest_patches_and_fetches_own(guest_api, space):
+    base = f"/api/workspaces/{space['slug']}/draft-issues/"
+    created = guest_api.post(base, json={"name": "G1"})
+    assert created.status_code == 201
+    did = created.json()["id"]
+    res = guest_api.patch(f"{base}{did}/", json={"name": "G2"})
+    assert res.status_code == 204
+    res = guest_api.get(f"{base}{did}/")
+    assert res.status_code == 200
+    assert res.json()["name"] == "G2"
+    assert guest_api.delete(f"{base}{did}/").status_code == 204
+
+
+def test_draft_creator_member_fetches_own(member_api, space):
+    base = f"/api/workspaces/{space['slug']}/draft-issues/"
+    did = member_api.post(base, json={"name": "M1"}).json()["id"]
+    res = member_api.get(f"{base}{did}/")
+    assert res.status_code == 200
+    assert res.json()["name"] == "M1"
+
+
+def test_draft_creator_guest_refused_on_others_draft(user_api, guest_api, space):
+    base = f"/api/workspaces/{space['slug']}/draft-issues/"
+    did = user_api.post(base, json={"name": "A1"}).json()["id"]
+    denied = {"error": "You don't have the required permissions."}
+    for res in (
+        guest_api.get(f"{base}{did}/"),
+        guest_api.patch(f"{base}{did}/", json={"name": "X"}),
+        guest_api.delete(f"{base}{did}/"),
+    ):
+        assert res.status_code == 403
+        assert res.json() == denied
+    assert user_api.get(f"{base}{did}/").json()["name"] == "A1"
+
+
+def test_draft_creator_member_refused_on_others_draft(user_api, member_api, space):
+    base = f"/api/workspaces/{space['slug']}/draft-issues/"
+    did = user_api.post(base, json={"name": "A1"}).json()["id"]
+    assert member_api.get(f"{base}{did}/").status_code == 403
+    # Members pass the PATCH role check; the own-drafts lookup then misses.
+    res = member_api.patch(f"{base}{did}/", json={"name": "X"})
+    assert res.status_code == 404
+    assert res.json() == {"error": "Issue not found"}
+    assert member_api.delete(f"{base}{did}/").status_code == 403
+    assert user_api.get(f"{base}{did}/").json()["name"] == "A1"
+
+
 # --- draft date filters follow the actor timezone (PIDASHCONV-1373) ---
 
 # 2026-01-01T20:00:00Z is 2026-01-02 05:00 in Asia/Tokyo: Django's
