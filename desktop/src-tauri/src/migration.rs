@@ -386,7 +386,7 @@ workspace_slug = "{workspace}"
 project_slug = "{project}"
 
 [runner.workspace]
-working_dir = "{workdir}"
+working_dir = '{workdir}'
 
 [runner.codex]
 binary = "/old/bundle/pidash-agent-engine"
