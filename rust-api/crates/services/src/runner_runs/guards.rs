@@ -246,9 +246,48 @@ pub fn can_view_run(facts: &RunViewFacts) -> bool {
     facts.is_workspace_admin
 }
 
-/// Cancellation is permitted for the same set as view (`runs.py:135-137`).
+/// Cancellation is permitted for run creator, runner owner, work-item
+/// creator / live assignees, scheduler-binding project members, or
+/// workspace admins (PDASHOSS01-351: previously delegated to
+/// [`can_view_run`], which gated issue participants on `can_view_runner`
+/// before checking work_item involvement — so the issue-page "Abort run"
+/// 404'd for tick-created bot runs on another participant's PRIVATE
+/// runner even though `agent_status` already exposed the run).
+///
+/// Order for cancel: membership → creator → runner owner → work-item
+/// creator / live assignee → scheduler binding member → private gate
+/// (for free, unattached runs) → workspace admin. The private gate is
+/// retained for remaining callers so unrelated members/admins stay denied
+/// on others' private runners (fixture `assignee×private` → true now,
+/// `admin×private` stays false for uninvolved admins, `member×private`
+/// stays false).
 pub fn can_cancel_run(facts: &RunViewFacts) -> bool {
-    can_view_run(facts)
+    if !facts.is_workspace_member {
+        return false;
+    }
+    if facts.created_by_requester {
+        return true;
+    }
+    if let Some(runner) = &facts.runner {
+        if runner.owned_by_requester {
+            return true;
+        }
+    }
+    if facts.work_item_created_by_requester == Some(true) {
+        return true;
+    }
+    if facts.work_item_created_by_requester.is_some() && facts.live_assignee {
+        return true;
+    }
+    if facts.scheduler_binding_project_member == Some(true) {
+        return true;
+    }
+    if let Some(runner) = &facts.runner {
+        if !runner.visible_to_requester {
+            return false;
+        }
+    }
+    facts.is_workspace_admin
 }
 
 // ---------------------------------------------------------------------------
@@ -507,8 +546,12 @@ mod tests {
 
     #[test]
     fn can_cancel_run_equals_view_everywhere() {
+        // PDASHOSS01-351: cancel diverges from view for issue assignees on
+        // private runners (they can abort via the issue page even though
+        // the generic view hides private runs). The fixture now pins the
+        // divergent matrix; only assignee×private_runner differs.
         let v = fx04();
-        assert_eq!(v["cancel_equals_view_everywhere"].as_bool(), Some(true));
+        assert_eq!(v["cancel_equals_view_everywhere"].as_bool(), Some(false));
         let matrix = v["can_cancel_run"].as_object().expect("map");
         assert_eq!(matrix.len(), 28, "fixture row count pins coverage");
         for (key, want) in matrix {
@@ -519,7 +562,16 @@ mod tests {
                 want.as_bool().expect("bool"),
                 "can_cancel_run {key}"
             );
-            assert_eq!(can_cancel_run(&facts), can_view_run(&facts));
+            // View and cancel agree except for the one divergent row.
+            if *key == "assigneexprivate_runner" {
+                assert_ne!(can_cancel_run(&facts), can_view_run(&facts));
+            } else {
+                assert_eq!(
+                    can_cancel_run(&facts),
+                    can_view_run(&facts),
+                    "view/cancel diverge only for assignee×private"
+                );
+            }
         }
         // Anonymous callers are absent from the cancel map (present in the
         // view map as false); the delegate makes them false here too.
