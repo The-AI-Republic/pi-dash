@@ -180,3 +180,61 @@ def test_web_runner_invites_denies_anonymous(anon_client):
     assert response.status_code == 401
     assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json() == {"detail": "Authentication credentials were not provided."}
+
+
+def test_web_runner_patch_pod_dispatch_unknown_is_400(user_client, machine_flow):
+    response = web_patch(user_client, f"{WEB}/{machine_flow['runner_id']}/", {"pod_dispatch": "sometimes"})
+    assert response.status_code == 400
+    assert response.json() == {"error": "pod_dispatch must be one of: pinned_only, pod_member"}
+
+
+def test_web_runner_patch_pod_dispatch_own_agent_saves(user_client, machine_flow, seeder):
+    # Own-agent runner (manual): pinned_only only saves (no release).
+    response = web_patch(user_client, f"{WEB}/{machine_flow['runner_id']}/", {"pod_dispatch": "pinned_only"})
+    assert response.status_code == 200, response.text
+    assert response.json()["pod_dispatch"] == "pinned_only"
+    back = web_patch(user_client, f"{WEB}/{machine_flow['runner_id']}/", {"pod_dispatch": "pod_member"})
+    assert back.status_code == 200
+    assert back.json()["pod_dispatch"] == "pod_member"
+
+
+def test_web_runner_patch_engine_pinned_only_releases_pins(user_client, daemon_world, machine_flow, seeder):
+    runner_id = machine_flow["runner_id"]
+    seeder.db.execute("UPDATE runner SET provisioning='desktop_bundled', pod_dispatch='pod_member' WHERE id = %s", (runner_id,))
+    ws = daemon_world["workspace"]["id"]
+    owner = daemon_world["owner"]["id"]
+    pod = daemon_world["pod"]["id"]
+    run_id = str(__import__("uuid").uuid4())
+    seeder.db.execute(
+        "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, pod_id, pinned_runner_id, status, prompt, trigger, executor_kind, run_config, required_capabilities, thread_id, agent_metadata, tool_plan, usage, dispatch_attempts, error_details, llm_model, cancel_reason, phase_kind, created_at) VALUES (%s,%s,%s,%s,%s,%s,'queued','','direct','local_runner','{}','[]','{}','{}','{}','{}',0,'{}','','','',now())",
+        (run_id, ws, owner, owner, pod, runner_id),
+    )
+    seeder.track("agent_run", "id", run_id)
+    response = web_patch(user_client, f"{WEB}/{runner_id}/", {"pod_dispatch": "pinned_only"})
+    assert response.status_code == 200, response.text
+    assert response.json()["pod_dispatch"] == "pinned_only"
+    assert seeder.db.fetchval("SELECT pinned_runner_id FROM agent_run WHERE id = %s", (run_id,)) is None
+
+
+def test_web_runner_patch_engine_cross_project_move_is_400(user_client, seeder, daemon_world, machine_flow):
+    runner_id = machine_flow["runner_id"]
+    seeder.db.execute("UPDATE runner SET provisioning='desktop_bundled', pod_dispatch='pinned_only' WHERE id = %s", (runner_id,))
+    other_project = seeder.create_project(daemon_world["workspace"]["id"])
+    other_pod = seeder.create_pod(daemon_world["workspace"]["id"], other_project["id"], name="Other project pod")
+    response = web_patch(user_client, f"{WEB}/{runner_id}/", {"pod": other_pod["id"]})
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"] == "a built-in engine runner can only move between pods of its project"
+    assert body["code"] == "engine_runner_project_fixed"
+
+
+def test_web_runner_list_and_detail_carry_engine_fields(user_client, daemon_world, machine_flow):
+    listing = user_client.get(WEB + "/", params={"workspace": daemon_world["workspace"]["id"]})
+    assert listing.status_code == 200
+    runner = listing.json()[0]
+    assert "pod_dispatch" in runner
+    assert set(runner["dev_machine_detail"]) == {"id", "host_label", "label", "engine_paused_by_owner", "engine_auto_pause_reason", "engine_team_runs"}
+    detail = user_client.get(f"{WEB}/{machine_flow['runner_id']}/")
+    assert detail.status_code == 200
+    assert "pod_dispatch" in detail.json()
+    assert set(detail.json()["dev_machine_detail"]) == {"id", "host_label", "label", "engine_paused_by_owner", "engine_auto_pause_reason", "engine_team_runs"}
