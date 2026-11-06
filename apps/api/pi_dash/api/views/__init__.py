@@ -84,7 +84,7 @@ from .invite import WorkspaceInvitationsViewset
 
 from .sticky import StickyViewSet
 
-from .page import PageListAPIEndpoint, PageDetailAPIEndpoint, PageArchiveAPIEndpoint
+from .page import PageListAPIEndpoint, PageDetailAPIEndpoint, PageArchiveAPIEndpoint, PageMoveAPIEndpoint
 
 from .runner import RunnerDeleteEndpoint
 

@@ -351,21 +351,44 @@ export class ProjectPageStore implements IProjectPageStore {
   };
 
   /**
-   * @description move a page to a new project
+   * @description move a page, with its sub-pages, to another project. On success the page and every
+   * loaded descendant leave this store (their source-project favorites are dropped server-side too).
    * @param {string} workspaceSlug
-   * @param {string} projectId
+   * @param {string} projectId source project
    * @param {string} pageId
-   * @param {string} newProjectId
+   * @param {string} newProjectId target project
    */
   movePage = async (workspaceSlug: string, projectId: string, pageId: string, newProjectId: string) => {
-    try {
-      await this.service.move(workspaceSlug, projectId, pageId, newProjectId);
-      runInAction(() => {
-        unset(this.data, [pageId]);
-      });
-    } catch (error) {
-      console.error("Unable to move page", error);
-      throw error;
+    await this.service.move(workspaceSlug, projectId, pageId, newProjectId);
+    runInAction(() => {
+      for (const movedPageId of this.getSubtreePageIds(pageId)) {
+        unset(this.data, [movedPageId]);
+        if (this.rootStore.favorite.entityMap[movedPageId])
+          this.rootStore.favorite.removeFavoriteFromStore(movedPageId);
+      }
+    });
+  };
+
+  /**
+   * @description the page and all its loaded descendants (by `parent_id`)
+   * @param {string} pageId
+   */
+  private getSubtreePageIds = (pageId: string): string[] => {
+    const childrenByParent = new Map<string, string[]>();
+    for (const page of Object.values(this.data)) {
+      if (!page.id || !page.parent_id) continue;
+      childrenByParent.set(page.parent_id, [...(childrenByParent.get(page.parent_id) ?? []), page.id]);
     }
+    const subtree: string[] = [];
+    const queue = [pageId];
+    const seen = new Set<string>();
+    while (queue.length > 0) {
+      const current = queue.shift() as string;
+      if (seen.has(current)) continue;
+      seen.add(current);
+      subtree.push(current);
+      queue.push(...(childrenByParent.get(current) ?? []));
+    }
+    return subtree;
   };
 }

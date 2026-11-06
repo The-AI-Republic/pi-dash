@@ -1481,6 +1481,122 @@ async fn page_archive_rejects_a_non_uuid_page_id_before_any_request() {
     assert!(fake.recorded.lock().unwrap().is_empty());
 }
 
+const TARGET_ID: &str = "00000000-0000-0000-0000-0000000000b2";
+
+fn move_args(to: &str) -> pidash::cli::page::MoveArgs {
+    pidash::cli::page::MoveArgs {
+        page_id: PAGE_ID.into(),
+        project: "ENG".into(),
+        to: to.into(),
+    }
+}
+
+#[tokio::test]
+async fn page_move_posts_the_target_uuid_to_the_move_route() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PAGE_DETAIL))).await;
+
+    pidash::cli::page::cmd_move(&client_for_run(&fake, "run-9"), move_args(TARGET_ID))
+        .await
+        .expect("page move");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].method, "POST");
+    assert_eq!(
+        recorded[0].path,
+        format!("/api/v1/workspaces/acme/projects/ENG/pages/{PAGE_ID}/move/")
+    );
+    let body: serde_json::Value = serde_json::from_str(&recorded[0].body).unwrap();
+    assert_eq!(body, serde_json::json!({"project_id": TARGET_ID}));
+    assert_eq!(recorded[0].run_id.as_deref(), Some("run-9"));
+}
+
+#[tokio::test]
+async fn page_move_resolves_a_target_identifier_to_its_uuid() {
+    let fake = start_fake(Box::new(|req| {
+        if req.method == "GET" {
+            assert_eq!(req.path, "/api/v1/workspaces/acme/projects/");
+            CannedResponse::ok(format!(
+                r#"{{"results":[{{"id":"00000000-0000-0000-0000-0000000000a1","identifier":"ENG","name":"Eng"}},{{"id":"{TARGET_ID}","identifier":"DOCS","name":"Docs"}}]}}"#
+            ))
+        } else {
+            CannedResponse::ok(PAGE_DETAIL)
+        }
+    }))
+    .await;
+
+    pidash::cli::page::cmd_move(&client(&fake), move_args("docs"))
+        .await
+        .expect("page move");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 2);
+    assert_eq!(recorded[1].method, "POST");
+    let body: serde_json::Value = serde_json::from_str(&recorded[1].body).unwrap();
+    assert_eq!(body, serde_json::json!({"project_id": TARGET_ID}));
+}
+
+#[tokio::test]
+async fn page_move_unknown_target_identifier_is_not_found_without_a_move() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(r#"{"results":[]}"#))).await;
+
+    let err = pidash::cli::page::cmd_move(&client(&fake), move_args("NOPE"))
+        .await
+        .expect_err("unknown project");
+
+    assert_eq!(err.exit_code, EXIT_NOT_FOUND);
+    assert!(
+        fake.recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.method == "GET")
+    );
+}
+
+#[tokio::test]
+async fn page_move_maps_server_refusals_to_exit_codes() {
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 403,
+        status_text: "Forbidden",
+        body: r#"{"error":"Only a project admin can move a page to another project"}"#.into(),
+    }))
+    .await;
+    let err = pidash::cli::page::cmd_move(&client(&fake), move_args(TARGET_ID))
+        .await
+        .expect_err("403 must surface");
+    assert_eq!(err.exit_code, EXIT_AUTH);
+
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 400,
+        status_text: "Bad Request",
+        body: r#"{"error":"Page is locked","error_code":4701,"error_message":"PAGE_LOCKED"}"#.into(),
+    }))
+    .await;
+    let err = pidash::cli::page::cmd_move(&client(&fake), move_args(TARGET_ID))
+        .await
+        .expect_err("400 must surface");
+    assert_eq!(err.exit_code, EXIT_INVALID);
+}
+
+#[tokio::test]
+async fn page_move_rejects_a_non_uuid_page_id_before_any_request() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PAGE_DETAIL))).await;
+
+    let err = pidash::cli::page::cmd_move(
+        &client(&fake),
+        pidash::cli::page::MoveArgs {
+            page_id: "conventions".into(),
+            ..move_args(TARGET_ID)
+        },
+    )
+    .await
+    .expect_err("a slug is not a page id");
+
+    assert_eq!(err.exit_code, EXIT_INVALID);
+    assert!(fake.recorded.lock().unwrap().is_empty());
+}
+
 // The remaining page tests drive the real `pidash` binary, because stdin
 // (`--body-file -`), clap conflicts, and the process exit code are only
 // observable end to end. An empty config dir makes `CliEnv::resolve` fall
