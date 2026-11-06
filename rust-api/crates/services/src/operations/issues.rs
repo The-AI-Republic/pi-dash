@@ -2252,11 +2252,10 @@ fn resolve_task_events(events: &[pulldown_cmark::Event]) -> Vec<MdEvent> {
                 }
             }
             Event::Html(content) => out.push(MdEvent::HtmlBlock(content.to_string())),
-            Event::InlineHtml(content) => {
-                if image_stack.is_empty() {
-                    out.push(MdEvent::HtmlInline(content.to_string()));
-                }
+            Event::InlineHtml(content) if image_stack.is_empty() => {
+                out.push(MdEvent::HtmlInline(content.to_string()));
             }
+            Event::InlineHtml(_) => {}
             Event::SoftBreak => {
                 if let Some(image) = image_stack.last_mut() {
                     image.2.push(' ');
@@ -4248,7 +4247,6 @@ mod move_tests {
             },
             managed: ManagedRunnerSettings {
                 enabled: false,
-                max_per_user_project: 0,
                 queued_max_age_secs: 0,
                 graceful_stop_secs: 0,
                 sweep_interval_secs: 0,

@@ -546,7 +546,10 @@ mod tests {
             assert_eq!(stored, *reason, "reason {reason}");
             assert!(warnings.is_empty(), "reason {reason}");
         }
-        assert_eq!(KNOWN_REVOKE_REASONS.len(), 7);
+        assert_eq!(KNOWN_REVOKE_REASONS.len(), 8);
+        // `dev_machine_merged` (#2910) is known but outside the daemon's
+        // local-cleanup canonical set.
+        assert!(KNOWN_REVOKE_REASONS.contains(&"dev_machine_merged"));
     }
 
     #[test]

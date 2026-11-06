@@ -16,11 +16,12 @@ WEB = "/api/runners"
 pytestmark = pytest.mark.contract
 
 RUNNER_KEYS = {
-    "id", "name", "status", "host_label", "provisioning", "os", "arch",
-    "runner_version", "dev_metadata", "protocol_version", "capabilities",
-    "last_heartbeat_at", "owner", "dev_machine", "dev_machine_detail",
-    "visibility", "pod", "pod_detail", "live_state", "enrolled_at",
-    "revoked_at", "revoked_reason", "paused_at", "paused_by",
+    "id", "name", "status", "host_label", "is_engine", "engine_paused",
+    "dispatch_paused", "machine_display_name", "provisioning", "pod_dispatch",
+    "os", "arch", "runner_version", "dev_metadata", "protocol_version",
+    "capabilities", "last_heartbeat_at", "owner", "dev_machine",
+    "dev_machine_detail", "visibility", "pod", "pod_detail", "live_state",
+    "enrolled_at", "revoked_at", "revoked_reason", "paused_at", "paused_by",
     "created_at", "updated_at",
 }
 

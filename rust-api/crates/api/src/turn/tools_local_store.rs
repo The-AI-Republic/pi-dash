@@ -2858,7 +2858,6 @@ mod tests {
     fn live_managed_settings() -> pidash_db::config::ManagedRunnerSettings {
         pidash_db::config::ManagedRunnerSettings {
             enabled: false,
-            max_per_user_project: 1,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,
             sweep_interval_secs: 300,

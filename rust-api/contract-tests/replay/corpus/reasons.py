@@ -38,11 +38,27 @@ EXCLUDED = {}
 MISSING_FIX = {
     # NEWPIDASH-50: engine runner write pairs not yet owned in Rust
     ("/api/runners/dev-machines/{}/engine-sign-out/", "POST"): "NEWPIDASH-50: engine sign-out endpoint pending",
-    ("/api/v1/runner/dev-machines/{}/", "PATCH"): "NEWPIDASH-50: dev-machine identity patch pending",
-    ("/api/v1/runner/dev-machines/{}/merge-into/", "POST"): "NEWPIDASH-50: dev-machine merge pending",
     ("/api/v1/runner/engine/credential/revoke/", "POST"): "NEWPIDASH-50: engine credential revoke pending",
     ("/api/v1/runner/engine/model-token/", "POST"): "NEWPIDASH-50: engine model-token pending",
 }
 
 OWNED_UNCOVERED = {
+    ("/api/runners/dev-machines/{}/", "PATCH"): (
+        "NEWPIDASH-52: web machine-controls PATCH landed without a replay "
+        "session; covered by runner/test_engine_machine.py contract tests "
+        "on both halves instead. Delete this entry when batch 4 adds the "
+        "runner_web corpus session."
+    ),
+    ("/api/v1/runner/dev-machines/{}/", "PATCH"): (
+        "NEWPIDASH-52: daemon machine PATCH landed without a replay session; "
+        "covered by runner/test_engine_machine.py contract tests on both "
+        "halves instead. Delete this entry when batch 4 adds the runner "
+        "corpus session."
+    ),
+    ("/api/v1/runner/dev-machines/{}/merge-into/", "POST"): (
+        "NEWPIDASH-52: daemon merge-into landed without a replay session; "
+        "covered by runner/test_engine_machine.py contract tests on both "
+        "halves instead. Delete this entry when batch 4 adds the runner "
+        "corpus session."
+    ),
 }
