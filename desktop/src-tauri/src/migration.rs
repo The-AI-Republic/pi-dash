@@ -299,9 +299,73 @@ pub async fn legacy_finish<R: Runtime>(
     .map_err(|e| format!("migration task failed: {e}"))?
 }
 
+/// `folder` comes from the webview: accept only a folder under the app's
+/// legacy task folders (`managed/workdirs/`).
+fn confine_legacy_folder(paths: &AppPaths, folder: &Path) -> Result<PathBuf, String> {
+    let root = paths
+        .legacy_workdirs()
+        .canonicalize()
+        .map_err(|e| format!("legacy task folders: {e}"))?;
+    let dir = folder
+        .canonicalize()
+        .map_err(|e| format!("legacy task folder {}: {e}", folder.display()))?;
+    if dir != root && dir.starts_with(&root) {
+        Ok(dir)
+    } else {
+        Err(format!("{} is not a legacy task folder", folder.display()))
+    }
+}
+
+/// Step 3 for a runner the daemon's reconcile re-added with a fresh folder
+/// after an interrupted migration: give it its legacy task folder back
+/// (design §13 step 3: a migrated runner keeps its folder).
+#[tauri::command]
+pub async fn legacy_restore_folder<R: Runtime>(
+    app: AppHandle<R>,
+    runner: String,
+    working_dir: String,
+) -> Result<(), String> {
+    let paths = AppPaths::resolve(&app)?;
+    match restore_target(&paths, Path::new(&working_dir))? {
+        Some(folder) => crate::daemon::set_runner_working_dir(runner, folder).await,
+        None => Ok(()),
+    }
+}
+
+/// The folder to give back, or `None` when the legacy folder no longer
+/// exists: the runner keeps the fresh folder the reconcile gave it, rather
+/// than the migration failing on every launch.
+fn restore_target(paths: &AppPaths, folder: &Path) -> Result<Option<PathBuf>, String> {
+    if !folder.exists() {
+        return Ok(None);
+    }
+    confine_legacy_folder(paths, folder).map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_legacy_task_folder_can_be_restored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::at(tmp.path().to_path_buf());
+        let task = paths.legacy_workdirs().join("acme/WEB");
+        std::fs::create_dir_all(&task).unwrap();
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        assert!(confine_legacy_folder(&paths, &task).is_ok());
+        assert!(confine_legacy_folder(&paths, &paths.legacy_workdirs()).is_err());
+        assert!(confine_legacy_folder(&paths, &elsewhere).is_err());
+        assert!(confine_legacy_folder(&paths, &task.join("../../../elsewhere")).is_err());
+        // A legacy folder deleted since: nothing to restore, not an error.
+        let gone = paths.legacy_workdirs().join("acme/GONE");
+        assert_eq!(restore_target(&paths, &gone), Ok(None));
+        assert_eq!(
+            restore_target(&paths, &task),
+            Ok(Some(task.canonicalize().unwrap()))
+        );
+    }
 
     const MACHINE: &str = "11111111-2222-3333-4444-555555555555";
 

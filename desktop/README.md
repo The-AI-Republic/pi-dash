@@ -38,7 +38,17 @@ the daemon up when there is none. Builds to `.AppImage` / `.deb` on Linux,
   daemon's, re-adds its engine runners with their folders, moves the
   account's engine home, and deletes the old config and credentials, keeping
   task folders (`src-tauri/src/migration.rs`). Retried on each launch until it
-  can run.
+  can run. Afterwards it shows one-time notices, kept in the app's per-account
+  settings (`src-tauri/src/account_settings.rs`) until dismissed: legacy task
+  folders left unused because the daemon already ran the engine for that
+  project, and projects whose engine became a pod member on upgrade, each with
+  a switch to turn pod work off (§13, PO-11).
+- **Replaced machine.** When the daemon signed in as a new machine (its data
+  was wiped) and the user has an offline machine with the same hostname and
+  no live session, the app asks "Is this <label>, last seen <date>? Replace
+  it". Confirming merges the old machine into this one and re-adds its engine
+  runners to the daemon; declining leaves it, and the app does not ask about
+  it again (§4.10).
 
 AI Republic publishes the official, signed and auto-updating build from this
 source (with its cloud edition's overrides and release configuration, kept

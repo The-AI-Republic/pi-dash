@@ -70,7 +70,6 @@ impl AppPaths {
     /// Legacy: task folders of the private daemon's engine runners
     /// (`managed/workdirs/<workspace>/<project>`). Kept on disk; the migrated
     /// runners keep pointing at them.
-    #[cfg(test)]
     pub(crate) fn legacy_workdirs(&self) -> PathBuf {
         self.root.join("workdirs")
     }

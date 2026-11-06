@@ -14,6 +14,10 @@
 //! - **State**: available / signed out / expiring / unavailable with a
 //!   reason, reported in `Hello`, `pidash status` and the machine session's
 //!   heartbeat (`engine_state`).
+//! - **Pause**: the owner's switch and the server's automatic reason
+//!   (design §8), cached from the server's machine payload (session
+//!   welcome, reconcile, the pause call's answer) and reported with the
+//!   state, so a client can offer Pause or Resume.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -22,7 +26,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use tokio::sync::Notify;
 
-use super::api::{EngineApi, EngineApiError, EngineProfile, reason};
+use super::api::{EngineApi, EngineApiError, EnginePause, EngineProfile, MachinePayload, reason};
 use super::codex_config::{AuthHelper, codex_home, write_engine_config};
 use crate::daemon::workspace_tokens::WorkspaceTokens;
 use crate::ipc::protocol::{EngineSignInState, EngineState, EngineStatusInfo};
@@ -66,6 +70,8 @@ struct State {
     /// Reason code of the last refused model-token request; cleared by the
     /// next success or a credential change.
     token_failure: Option<String>,
+    /// The machine's pause state as the server last reported it, and when.
+    pause: Option<(EnginePause, DateTime<Utc>)>,
     /// Bumped by every credential change. A model-token fetch started
     /// under an older generation (with the old credential) does not store
     /// its result.
@@ -134,6 +140,66 @@ impl EngineManager {
             st.server_sign_in = self.tokens.engine_sign_in_state();
         }
         self.changed.notify_waiters();
+    }
+
+    /// Cache the machine's pause state the server reported.
+    pub fn set_pause(&self, pause: EnginePause) {
+        self.state().pause = Some((pause, Utc::now()));
+    }
+
+    /// Cache the pause state from a machine payload, when it carries one.
+    pub fn note_machine_payload(&self, payload: &MachinePayload) {
+        if let Some(pause) = payload.pause() {
+            self.set_pause(pause);
+        }
+    }
+
+    /// The cached pause state, if the server reported one.
+    pub fn pause(&self) -> Option<EnginePause> {
+        self.state().pause.as_ref().map(|(p, _)| p.clone())
+    }
+
+    /// Set the owner's pause switch on the server with `machine_token` and
+    /// cache the answer.
+    pub async fn set_paused(
+        &self,
+        machine_token: &str,
+        dev_machine_id: uuid::Uuid,
+        paused: bool,
+    ) -> Result<EngineStatusInfo, EngineApiError> {
+        let api = self
+            .api
+            .as_ref()
+            .ok_or_else(|| EngineApiError::Other("the daemon runs offline".into()))?;
+        let payload = api
+            .set_paused(machine_token, dev_machine_id, paused)
+            .await?;
+        let mut pause = payload.pause().unwrap_or_default();
+        // The server answered for the switch we set; a body without the
+        // automatic reason keeps the one we knew.
+        if payload.engine_auto_pause_reason.is_none()
+            && let Some(known) = self.pause()
+        {
+            pause.auto_pause_reason = known.auto_pause_reason;
+        }
+        self.set_pause(pause);
+        Ok(self.status())
+    }
+
+    /// Read the machine from the server with `machine_token` and cache its
+    /// pause state.
+    pub async fn refresh_machine(
+        &self,
+        machine_token: &str,
+        dev_machine_id: uuid::Uuid,
+    ) -> Result<MachinePayload, EngineApiError> {
+        let api = self
+            .api
+            .as_ref()
+            .ok_or_else(|| EngineApiError::Other("the daemon runs offline".into()))?;
+        let payload = api.machine(machine_token, dev_machine_id).await?;
+        self.note_machine_payload(&payload);
+        Ok(payload)
     }
 
     /// The current model token for the engine's auth helper.
@@ -410,6 +476,12 @@ impl EngineManager {
                 .map(|p| p.model.clone()),
             binary: binary.map(|b| b.display().to_string()),
             profile_fetched_at: st.profile_fetched_at,
+            paused_by_owner: st.pause.as_ref().map(|(p, _)| p.paused_by_owner),
+            auto_pause_reason: st
+                .pause
+                .as_ref()
+                .and_then(|(p, _)| p.auto_pause_reason.clone()),
+            pause_checked_at: st.pause.as_ref().map(|(_, at)| *at),
         }
     }
 
@@ -746,6 +818,46 @@ mod tests {
         let err = m.model_token().await.unwrap_err();
         assert_eq!(err.reason_code, reason::ENGINE_SIGN_IN_REQUIRED);
         assert_eq!(m.status().sign_in_state, EngineSignInState::Expired);
+    }
+
+    #[tokio::test]
+    async fn pause_state_is_cached_from_the_server_and_reported() {
+        let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let p = paused.clone();
+        let handler: Handler = Arc::new(move |req| {
+            assert_eq!(req.bearer(), Some("mt_acme"));
+            if req.method == "PATCH" {
+                let on = req.json()["engine_paused_by_owner"].as_bool().unwrap();
+                p.store(on, Ordering::SeqCst);
+                // An older server answers 204 with no body.
+                return (200, String::new());
+            }
+            let body = serde_json::json!({
+                "engine_paused_by_owner": p.load(Ordering::SeqCst),
+                "engine_auto_pause_reason": "wallet_empty",
+                "runners": [],
+            });
+            (200, body.to_string())
+        });
+        let server = test_server::start(handler).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let m = manager(&server.url, tmp.path(), cli(chrono::Duration::days(10)));
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(m.status().paused(), None, "unknown before the server says");
+
+        m.refresh_machine("mt_acme", id).await.unwrap();
+        let st = m.status();
+        assert_eq!(st.paused_by_owner, Some(false));
+        assert_eq!(st.auto_pause_reason.as_deref(), Some("wallet_empty"));
+        assert_eq!(st.paused(), Some(true));
+
+        let st = m.set_paused("mt_acme", id, true).await.unwrap();
+        assert_eq!(st.paused_by_owner, Some(true));
+        // The bodyless answer keeps the automatic reason we knew.
+        assert_eq!(st.auto_pause_reason.as_deref(), Some("wallet_empty"));
+        assert!(st.pause_checked_at.is_some());
+        let sent = &server.requests_to(&super::super::api::dev_machine_path(id));
+        assert_eq!(sent.last().unwrap().json()["engine_paused_by_owner"], true);
     }
 
     #[tokio::test]

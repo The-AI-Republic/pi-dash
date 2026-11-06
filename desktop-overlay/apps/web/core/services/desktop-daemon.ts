@@ -41,6 +41,36 @@ export interface EngineStatusInfo {
   model?: string;
   binary?: string;
   profile_fetched_at?: string;
+  /** The owner's "Pause the built-in engine" switch (design §8). */
+  paused_by_owner?: boolean;
+  /** The server's automatic pause reason, when paused automatically. */
+  auto_pause_reason?: string;
+  /** When the daemon last read the pause state; absent = unknown. */
+  pause_checked_at?: string;
+}
+
+/**
+ * The pause control to show — one, never both: `resume` when the owner paused
+ * the engine, `pause` when they did not, `none` while the daemon has not read
+ * the pause state yet. `autoReason` is set when the server paused it on its
+ * own (which the owner's switch does not lift).
+ */
+export function pauseControl(detail: EngineStatusInfo | undefined): {
+  action: "pause" | "resume" | "none";
+  autoReason?: string;
+} {
+  if (!detail?.pause_checked_at) return { action: "none" };
+  return {
+    action: detail.paused_by_owner ? "resume" : "pause",
+    ...(detail.auto_pause_reason ? { autoReason: detail.auto_pause_reason } : {}),
+  };
+}
+
+/** `EngineSetPaused` on the daemon, then a fresh discovery so the dialog follows. */
+export async function setEnginePaused(paused: boolean): Promise<EngineStatusInfo> {
+  const status = await invoke<EngineStatusInfo>("daemon_engine_set_paused", { paused });
+  await discoverDaemon().catch(() => null);
+  return status;
 }
 
 export interface HelloInfo {
@@ -111,15 +141,29 @@ export function invoke<T>(command: string, args?: Record<string, unknown>): Prom
 class DaemonAPI extends APIService {}
 const daemonAPI = new DaemonAPI(API_BASE_URL);
 
-/** A session-authenticated POST, with the CSRF token the API requires. */
-export async function sessionPost<T>(path: string, body: unknown): Promise<T> {
+/** A session-authenticated write, with the CSRF token the API requires. */
+async function sessionWrite<T>(method: "POST" | "PATCH", path: string, body: unknown): Promise<T> {
   const csrf: { data: { csrf_token: string } } = await daemonAPI.request({ url: CSRF_TOKEN_PATH, method: "GET" });
   const response: { data: T } = await daemonAPI.request({
     url: path,
-    method: "POST",
+    method,
     headers: { "Content-Type": "application/json", "X-CSRFTOKEN": csrf.data.csrf_token },
     data: body,
   });
+  return response.data;
+}
+
+export function sessionPost<T>(path: string, body: unknown): Promise<T> {
+  return sessionWrite<T>("POST", path, body);
+}
+
+export function sessionPatch<T>(path: string, body: unknown): Promise<T> {
+  return sessionWrite<T>("PATCH", path, body);
+}
+
+/** A session-authenticated GET. */
+export async function sessionGet<T>(path: string, params?: Record<string, string>): Promise<T> {
+  const response: { data: T } = await daemonAPI.request({ url: path, method: "GET", params });
   return response.data;
 }
 

@@ -489,6 +489,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             daemon::daemon_discover,
             daemon::daemon_status,
             daemon::daemon_engine_status,
+            daemon::daemon_engine_set_paused,
             daemon::daemon_engine_settings_get,
             daemon::daemon_engine_settings_set,
             daemon::daemon_engine_runner_add,
@@ -503,10 +504,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             setup::daemon_update_cli,
             setup::pidash_cli_engine_login,
             setup::pidash_cli_logout,
-            setup::pidash_engine_set_paused,
             // Moving older builds' private daemon trees to the shared daemon.
             migration::legacy_scan,
             migration::legacy_finish,
+            migration::legacy_restore_folder,
             desktop_clear_web_data,
             updates::desktop_pending_update,
             updates::desktop_install_update,
@@ -527,6 +528,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // sign-out wipes.
             account_settings::chat_approval_modes_save,
             account_settings::chat_approval_modes_load,
+            // One-time notices (migration, PO-11) and declined "Replace it"
+            // prompts, kept with the per-account settings.
+            account_settings::desktop_notices_load,
+            account_settings::desktop_notices_record,
+            account_settings::desktop_notices_dismiss,
         ])
         // Fallback for the navigation policy below: if a server-host page
         // does get through (e.g. a redirect the policy hook didn't see),

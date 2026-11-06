@@ -19,6 +19,8 @@ import {
   engineActionFor,
   engineSignInState,
   invoke,
+  pauseControl,
+  setEnginePaused,
   signInEngineExplicitly,
   signOutEngine,
   signInWorkspace,
@@ -55,6 +57,15 @@ const SIGN_IN_TEXT: Record<string, string> = {
   expired: "Sign-in expired",
   signed_out: "Signed out",
   revoked: "Signed out by an administrator or by removing this computer",
+};
+
+/** `DevMachine.engine_auto_pause_reason`, in the user's words. */
+const AUTO_PAUSE_TEXT: Record<string, string> = {
+  engine_sign_in_required: "the built-in engine needs to be signed in",
+  gateway_session_revoked: "its sign-in was revoked",
+  wallet_empty: "your wallet is empty",
+  profile_unavailable: "its settings could not be loaded",
+  engine_disabled: "the built-in engine is turned off on this server",
 };
 
 /** The daemon section: what is wrong, and what the user can do about it. */
@@ -215,6 +226,7 @@ export const DesktopEngineSettings = observer(function DesktopEngineSettings() {
   const state = engineSignInState(hello);
   const action = engineActionFor(state);
   const detail = hello?.engine_detail;
+  const pause = pauseControl(detail);
 
   return (
     <ModalCore
@@ -261,13 +273,25 @@ export const DesktopEngineSettings = observer(function DesktopEngineSettings() {
                     Sign out the built-in engine
                   </Button>
                 )}
-                <Button variant="secondary" onClick={() => busy(invoke("pidash_engine_set_paused", { paused: true }))}>
-                  Pause
-                </Button>
-                <Button variant="secondary" onClick={() => busy(invoke("pidash_engine_set_paused", { paused: false }))}>
-                  Resume
-                </Button>
+                {pause.action === "pause" && (
+                  <Button variant="secondary" onClick={() => busy(setEnginePaused(true))} disabled={working}>
+                    Pause
+                  </Button>
+                )}
+                {pause.action === "resume" && (
+                  <Button variant="secondary" onClick={() => busy(setEnginePaused(false))} disabled={working}>
+                    Resume
+                  </Button>
+                )}
               </div>
+              {pause.action === "resume" && (
+                <p className="text-13 text-secondary">You paused the built-in engine on this computer.</p>
+              )}
+              {pause.autoReason && (
+                <p className="text-13 text-warning-primary">
+                  Pi Dash paused the built-in engine: {AUTO_PAUSE_TEXT[pause.autoReason] ?? pause.autoReason}.
+                </p>
+              )}
               <p className="text-12 text-tertiary">
                 Pausing stops the built-in engine on this computer from taking new work. Your own agents keep working.
               </p>

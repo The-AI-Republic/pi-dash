@@ -521,6 +521,17 @@ pub async fn daemon_engine_status() -> Result<EngineStatusInfo, String> {
     }
 }
 
+/// The owner's "Pause the built-in engine" switch for this computer
+/// (design §8). The daemon asks the server and answers with the engine
+/// status, pause state included.
+#[tauri::command]
+pub async fn daemon_engine_set_paused(paused: bool) -> Result<EngineStatusInfo, String> {
+    match call(Request::EngineSetPaused { paused }, CALL_TIMEOUT).await? {
+        Response::EngineStatus(s) => Ok(s),
+        other => Err(unexpected(&other)),
+    }
+}
+
 #[tauri::command]
 pub async fn daemon_engine_settings_get() -> Result<EngineSettings, String> {
     match call(Request::EngineSettingsGet, CALL_TIMEOUT).await? {
@@ -671,11 +682,18 @@ pub async fn daemon_engine_runner_rebind(runner: String) -> Result<PathBuf, Stri
         target.project_slug.as_deref().unwrap_or(&target.name),
         &taken,
     );
+    set_runner_working_dir(runner, folder.clone()).await?;
+    Ok(folder)
+}
+
+/// Point `runner` at `folder` (per-runner reconfigure: only that runner
+/// restarts, refused while it is busy). Callers confine `folder`.
+pub(crate) async fn set_runner_working_dir(runner: String, folder: PathBuf) -> Result<(), String> {
     let changes = RunnerChanges {
-        working_dir: Some(folder.clone()),
+        working_dir: Some(folder),
     };
     match call(Request::RunnerReconfigure { runner, changes }, CALL_TIMEOUT).await? {
-        Response::Ack => Ok(folder),
+        Response::Ack => Ok(()),
         other => Err(unexpected(&other)),
     }
 }
@@ -718,6 +736,9 @@ mod tests {
                 model: None,
                 binary: None,
                 profile_fetched_at: None,
+                paused_by_owner: None,
+                auto_pause_reason: None,
+                pause_checked_at: None,
             }),
         }
     }
